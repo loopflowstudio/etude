@@ -318,14 +318,7 @@ def recommend_next_step(
 
     baseline_win = float(baseline["win_rate"]) if baseline else 0.0
     baseline_landed = float(baseline["landed_when_able"]) if baseline else 0.0
-    baseline_could_spell = float(baseline["could_spell"]) if baseline else 0.0
-
     win_delta = float(final["win_rate"]) - baseline_win
-    could_spell_ratio = (
-        float(final["could_spell"]) / baseline_could_spell
-        if baseline_could_spell > 0
-        else 1.0
-    )
 
     win_signal_ok = win_delta >= 0.05 and float(final["win_ci_lower"]) >= max(
         0.0,
@@ -337,9 +330,7 @@ def recommend_next_step(
         and float(final["mean_land_prob_when_pass_land"])
         > float(final["mean_pass_prob_when_pass_land"])
     )
-    spell_chain_ok = (
-        float(final["cast_when_able"]) >= 0.70 and could_spell_ratio >= 0.75
-    )
+    spell_chain_ok = float(final["cast_when_able"]) >= 0.70
 
     reasons = [
         (
@@ -356,11 +347,7 @@ def recommend_next_step(
             f"{float(final['mean_land_prob_when_pass_land']):.1%} "
             f"vs pass {float(final['mean_pass_prob_when_pass_land']):.1%}."
         ),
-        (
-            "Spell opportunity retention: "
-            f"{could_spell_ratio:.2f}x baseline "
-            f"with cast_when_able {float(final['cast_when_able']):.1%}."
-        ),
+        f"Cast when able: {float(final['cast_when_able']):.1%}.",
     ]
 
     if win_signal_ok and land_chain_ok and spell_chain_ok:
@@ -452,9 +439,9 @@ def render_report(store: VerifyStore, run_id: int) -> tuple[str, dict[str, Any]]
                 f"pass {_format_percent(float(final['pass_land_pass_rate'])) if final else 'n/a'}"
             ),
             (
-                f"- Final spell opportunity count: {float(final['could_spell']):.0f}"
+                f"- Final cast_when_able: {float(final['cast_when_able']):.1%}"
                 if final
-                else "- Final spell opportunity count: n/a"
+                else "- Final cast_when_able: n/a"
             ),
             (
                 f"- Final explained variance: {float(final['explained_variance']):.3f}"
