@@ -2,8 +2,10 @@
 
 ## Current reality
 
-Rebased cleanly onto `origin/main`. PR #35 is OPEN and MERGEABLE with no
-reviews; CI checks (Rust Tests, Python Unit Tests) not yet conclusive.
+Rebased cleanly onto `origin/main` (main is an ancestor of HEAD, working
+tree clean). PR #35 is OPEN, `mergeable: MERGEABLE` but `mergeStateStatus:
+BLOCKED` (no review yet + Integration checks pending). Rust Tests and
+Python Unit Tests pass; Integration (macos-latest, ubuntu-latest) pending.
 
 This branch delivers wave goal #4 ("Verification harness — done") plus the
 reward-shaping and periodic-eval plumbing it depends on:
@@ -38,7 +40,8 @@ Tests: `tests/verify/test_first_light.py` passes (3 tests) after the
 
 ## Remaining
 
-- Land PR #35: get CI green (Rust Tests, Python Unit Tests) and merge.
+- Land PR #35: wait for Integration (macos/ubuntu) to go green, obtain
+  review to clear `BLOCKED`, then merge.
 - No code changes expected — this branch is feature-complete for goal #4.
 
 ## Deferred
@@ -51,8 +54,8 @@ Tests: `tests/verify/test_first_light.py` passes (3 tests) after the
 
 ## Risks / blockers
 
-- None blocking merge. CI not yet conclusive at time of writing — verify
-  before landing.
+- No code blockers. Merge gated only by pending Integration checks and an
+  absent review (`mergeStateStatus: BLOCKED`) — re-check before landing.
 
 ## Strategy: ship bias
 
