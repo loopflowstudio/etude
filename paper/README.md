@@ -31,16 +31,18 @@ make watch              # rebuild on save
 
 ## Structure of the current draft
 
-1. Why *Magic* is hard, precisely — one paragraph per property, each stated as a
-   constraint on any solution.
+1. Why *Magic* is hard, precisely, and how manabot differs from prior MTG
+   search, representation, and benchmark work.
 2. The platform — managym (engine, determinization, throughput) and manabot
    (encoder, PPO, search, distillation).
 3. The measurement protocol — seat balance, Wilson intervals, the pass gate,
-   **ladder strength**, the cost axis, pre-registration.
+   estimated and confirmed **ladder strength**, the cost axis, pre-registration.
 4. Reference baselines — the frontier table and figure.
 5. **The five challenge areas** — the core. Each has a statement, current best,
-   entry criterion, and a tractability argument.
-6. Calibration findings — the eight refuted claims, reframed as what the domain
+   entry criterion, and a concrete next experiment.
+6. Scope and limitations — card/rules coverage, opponents, comparison
+   confounds, and the absence of deck construction.
+7. Calibration findings — the eight refuted claims, reframed as what the domain
    will do to an entrant who skips the protocol.
 
 ## The five challenges
@@ -80,6 +82,8 @@ successes/trials and checked to reproduce that bound.
   ladder itself is anchored on a search we concede is weak.
 - Ladder strength is **unmeasured** for the terminal-only, potential-Φ, and
   `bc-fifth` policies. Those matchups are cheap and would sharpen Table 2.
-- Related work is thin on MTG-specific prior art beyond Cowling et al.
+- There is no controlled comparison with the contemporaneous MTG-Causal-RL
+  benchmark; the paper currently positions the two systems from their reported
+  interfaces and scopes.
 - Deck construction — arguably the real game — is not discussed.
 - No description of the GUI (`wave/gui`) or the play-against-the-bot path.
