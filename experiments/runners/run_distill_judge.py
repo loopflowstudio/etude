@@ -1,4 +1,4 @@
-"""Exp-03 (wave/search C4) Task 4: judge the BC policy vs matched-cost PPO.
+"""Exp-03 (wave/intelligence C4) Task 4: judge the BC policy vs matched-cost PPO.
 
 Matchup matrix (seat-balanced, Wilson CIs, per-seat rates; resumable JSON):
     1. bc vs random
@@ -9,9 +9,9 @@ Plus behavioral profiles (cast_when_able / passed_when_able) for the BC and
 PPO policies via the same capture_evaluation instrument used in exp-01.
 
 Usage:
-    python -m manabot.verify.run_distill_judge \
+    uv run experiments/runners/run_distill_judge.py \
         --bc .runs/exp03/bc_policy.pt --ppo .runs/<ppo>/step_N.pt \
-        --games 400 --workers 8 --out reports/data/exp-03-distillation.json
+        --games 400 --workers 8 --out experiments/data/exp-03-distillation.json
 """
 
 from __future__ import annotations
@@ -118,7 +118,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=5000)
     parser.add_argument("--profile-games", type=int, default=400)
     parser.add_argument(
-        "--out", type=str, default="reports/data/exp-03-distillation.json"
+        "--out", type=str, default="experiments/data/exp-03-distillation.json"
     )
     parser.add_argument("--skip-profiles", action="store_true")
     args = parser.parse_args()
@@ -131,7 +131,7 @@ def main() -> None:
         results = json.loads(out_path.read_text())
 
     from manabot.sim.flat_mc import spec_name
-    from manabot.verify.run_flat_mc import run_matchup
+    from run_flat_mc import run_matchup
 
     matchups = build_matchups(args.bc, args.ppo, args.games)
     for index, (hero_spec, villain_spec, games) in enumerate(matchups):

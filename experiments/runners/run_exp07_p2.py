@@ -1,4 +1,4 @@
-"""Exp-07 (wave/search C7) Task 2 measurements: policy rollouts inside search.
+"""Exp-07 (wave/intelligence C7) Task 2 measurements: policy rollouts inside search.
 
 Three phases, resumable via the output JSON:
     A. throughput probe — psearch-N self-play decisions: ms/decision,
@@ -10,8 +10,8 @@ Three phases, resumable via the output JSON:
        (P2, the honest comparison).
 
 Usage:
-    python -m manabot.verify.run_exp07_p2 --student .runs/exp07/student_r0.pt \
-        --sims 16 --games 100 --out reports/data/exp-07-p2.json
+    uv run experiments/runners/run_exp07_p2.py --student .runs/exp07/student_r0.pt \
+        --sims 16 --games 100 --out experiments/data/exp-07-p2.json
 """
 
 from __future__ import annotations
@@ -108,7 +108,7 @@ def main() -> None:
         default=None,
         help="override the N* derived from the probe",
     )
-    parser.add_argument("--out", type=str, default="reports/data/exp-07-p2.json")
+    parser.add_argument("--out", type=str, default="experiments/data/exp-07-p2.json")
     args = parser.parse_args()
 
     os.environ.setdefault("WANDB_MODE", "disabled")
@@ -169,7 +169,7 @@ def main() -> None:
         flush=True,
     )
 
-    from manabot.verify.run_flat_mc import run_matchup
+    from run_flat_mc import run_matchup
 
     # Phase B — equal sims.
     key = f"equal_sims_{args.sims}"

@@ -1,4 +1,4 @@
-"""Exp-07 (wave/search C7): judge a distilled student (standard protocol).
+"""Exp-07 (wave/intelligence C7): judge a distilled student (standard protocol).
 
 Matrix per student:
     1. student vs random — seat-balanced, batched vector driver;
@@ -10,8 +10,8 @@ Policies sample stochastically from masked softmax — the exp-00c/01/02/03
 protocol.
 
 Usage:
-    python -m manabot.verify.run_exp07_judge --student .runs/exp07/student_r0.pt \
-        --name r0 --out reports/data/exp-07-expert-iteration.json
+    uv run experiments/runners/run_exp07_judge.py --student .runs/exp07/student_r0.pt \
+        --name r0 --out experiments/data/exp-07-expert-iteration.json
 """
 
 from __future__ import annotations
@@ -72,7 +72,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=7000)
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument(
-        "--out", type=str, default="reports/data/exp-07-expert-iteration.json"
+        "--out", type=str, default="experiments/data/exp-07-expert-iteration.json"
     )
     args = parser.parse_args()
 
@@ -111,7 +111,7 @@ def main() -> None:
         show("vs random", result["metrics"], result["wall_seconds"])
 
     # 2. Ladder rungs (search villains need engine-side playouts; process pool).
-    from manabot.verify.run_flat_mc import run_matchup
+    from run_flat_mc import run_matchup
 
     student_spec = {
         "kind": "checkpoint",
@@ -138,7 +138,7 @@ def main() -> None:
 
     # 3. Behavioral profile.
     if not args.skip_profile and "profile" not in section:
-        from manabot.verify.run_distill_judge import behavior_profile
+        from run_distill_judge import behavior_profile
 
         print(f"[run ] {args.name} profile: {args.profile_games} games", flush=True)
         section["profile"] = behavior_profile(

@@ -1,4 +1,4 @@
-"""Exp-03 (wave/search C4) Task 2: behavior-clone a fresh Agent on search data.
+"""Exp-03 (wave/intelligence C4) Task 2: behavior-clone a fresh Agent on search data.
 
 Runs a small (lr x epochs) sweep — ALL of it is billed to the BC cost — picks
 the config with the best validation accuracy, saves that policy as a
@@ -6,7 +6,7 @@ trainer-format checkpoint, and writes a JSON log with per-epoch curves and
 exact wall-clock.
 
 Usage:
-    python -m manabot.verify.run_distill_bc --data-dir .runs/exp03/dataset \
+    uv run experiments/runners/run_distill_bc.py --data-dir .runs/exp03/dataset \
         --out .runs/exp03/bc_policy.pt --log .runs/exp03/bc_log.json
 """
 

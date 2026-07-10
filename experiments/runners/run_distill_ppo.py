@@ -1,4 +1,4 @@
-"""Exp-03 (wave/search C4) Task 3: matched-cost PPO baseline.
+"""Exp-03 (wave/intelligence C4) Task 3: matched-cost PPO baseline.
 
 Runs the first_light_shaped_v1 recipe on INTERACTIVE_DECK (the exp-01 deck
 rebind) with total_timesteps sized by the caller so PPO's training wall-clock
@@ -8,7 +8,7 @@ per the exp-00 accounting convention); in-loop periodic eval is disabled so
 every training second is learning.
 
 Usage:
-    python -m manabot.verify.run_distill_ppo --total-timesteps 950272 \
+    uv run experiments/runners/run_distill_ppo.py --total-timesteps 950272 \
         --seed 1 --label exp03-ppo-matched --log .runs/exp03/ppo_log.json
 """
 

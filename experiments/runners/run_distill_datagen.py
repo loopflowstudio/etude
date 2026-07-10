@@ -1,4 +1,4 @@
-"""Exp-03 (wave/search C4) Task 1: search-64 self-play dataset generation.
+"""Exp-03 (wave/intelligence C4) Task 1: search-64 self-play dataset generation.
 
 Plays search-vs-search self-play games in parallel worker processes; each
 worker writes one .npz shard of (observation, search action) decisions plus a
@@ -6,7 +6,7 @@ manifest entry. Wall-clock and per-worker engine seconds are logged — that is
 the teacher cost.
 
 Usage:
-    python -m manabot.verify.run_distill_datagen --games 480 --workers 4 \
+    uv run experiments/runners/run_distill_datagen.py --games 480 --workers 4 \
         --sims 64 --out-dir .runs/exp03/dataset
 """
 
