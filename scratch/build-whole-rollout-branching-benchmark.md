@@ -15,8 +15,8 @@ uv run scripts/bench_branching.py run
 uv run scripts/bench_branching.py verify
 ```
 
-The first command produces an exact current-driver full-clone baseline at the current
-single-worker and saturated worker x actor x rollout shapes. The second
+The first command produces an exact current-driver full-clone baseline at the
+current single-worker and saturated worker x actor x rollout shapes. The second
 recomputes all contract, source, artifact, repeat-checksum, cell, and summary
 checks. The derived report leads with whole-rollout simulations/s,
 transitions/s, root latency, and peak RSS; clone latency is secondary.
@@ -251,18 +251,16 @@ threshold, or claim that clone latency alone justifies a storage design.
 
 ## Verification receipts
 
-- Rebasing onto `origin/main` completed through `lf rebase --manual` after the
-  automatic conflict agent hit an incompatible provider-account schema.
-- The obsolete non-contract ContentPack diagnostic was removed. The generated
-  report describes only the current driver at the recorded source state.
+- Integrated onto `origin/main` at `2863105`, including W2-179's shared
+  `ContentPack` and stable `CardDefId`. Its explicitly non-comparable local
+  diagnostic remains intact; this generated report describes only the current
+  driver at the recorded source state.
 - Rust: 16 unit tests, 2 conformance, 3 ContentPack, 13 engine, 162 rules, 6
   scenario, and 10 search tests pass; clippy is clean with warnings denied.
-- Python: 15 focused contract tests and 130 benchmark/agent/environment/search
-  regression tests pass; Ruff check/format pass.
+- Python: 15 focused contract tests pass; Ruff check/format pass. An optional
+  repository-wide run reached 263 passing tests with no failures before being
+  stopped after seven minutes in a long verification matchup.
 - CPython 3.12 release wheel rebuilt and the worktree native extension imports.
 - Full canonical benchmark generation and artifact/report verification pass;
-  the authoritative self-hash is recorded in those generated files.
-- Four Task provider launches disappeared before PID allocation, so the
-  contract review was completed inline in the existing Task worktree. GitHub
-  reconciliation remains rate-limited; no raw git/worktree/PR mutation was
-  used to bypass Loopflow.
+  artifact SHA-256:
+  `20c403beed10408a84b80428986e7cb6acbcc4f09782260bfededba34c897bf1`.
