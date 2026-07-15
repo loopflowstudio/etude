@@ -20,7 +20,8 @@ fn argument(args: &[String], flag: &str) -> Result<String, String> {
 }
 
 fn run() -> Result<(), String> {
-    let args: Vec<String> = env::args().skip(1).collect();
+    let invoked_argv: Vec<String> = env::args().collect();
+    let args: Vec<String> = invoked_argv.iter().skip(1).cloned().collect();
     if args.iter().any(|value| value == "--manifest") {
         println!(
             "{}",
@@ -57,7 +58,10 @@ fn run() -> Result<(), String> {
         serde_json::from_str(&request_json).map_err(|error| format!("invalid request: {error}"))?;
     let prepared = prepare_worker(request)?;
 
-    println!("{}", json!({"type": "ready", "pid": process::id()}));
+    println!(
+        "{}",
+        json!({"type": "ready", "pid": process::id(), "argv": invoked_argv})
+    );
     io::stdout().flush().map_err(|error| error.to_string())?;
     let mut release = [0_u8; 1];
     io::stdin()

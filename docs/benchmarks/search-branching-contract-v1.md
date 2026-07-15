@@ -2,26 +2,28 @@
 
 Contract ID: `manabot.search-branching.v1`
 
-Owners: W2-182 (harness and current full-clone baseline) and W2-179
-(ContentPack before/after measurement).
+Owner: W2-182 (harness and current full-clone baseline).
 
-This file is the canonical measurement contract for both Tasks. A result that
-changes a fixture, seed, workload dimension, reset rule, timing boundary, RSS
-method, or required schema field is a different contract and must use a new
-contract ID. Raw results carry the SHA-256 of this file.
+This file is the canonical measurement contract for the current driver and
+future branching drivers. Until W2-182 first publishes it, validation and
+evidence fields may tighten as part of the same pre-release review. After that
+publication, a result that changes a fixture, seed, workload dimension, reset
+rule, timing boundary, RSS method, or required schema field is a different
+contract and must use a new contract ID. Raw results carry the SHA-256 of this
+file.
 
 The contract measures search-state implementations. It does not select one.
 Clone latency is diagnostic; total whole-rollout throughput and peak RSS are
 the primary decision evidence.
 
-## Required consumers
+## Evidence boundary
 
-- W2-179 runs `step-v1`, `clone-v1`, and `flat-single-64-v1` before and after
-  definition/state separation. Its report must not compare measurements made
-  under another fixture or seed schedule.
 - W2-182 runs every cell in this contract for
   `full_clone/current_game_v1`, records deterministic equivalence evidence,
   and owns the raw/summary artifact format.
+- W2-182 measures the current post-ContentPack driver only. Its numbers are not
+  a W2-179 before/after comparison, and no non-contract W2-179 number may be
+  combined with them.
 - Future clone-plus-undo and dense-page-COW-plus-undo implementations use this
   unchanged contract through the driver hooks below. They are not implemented
   or selected by W2-182.
@@ -62,10 +64,9 @@ the primary decision evidence.
 Player 0 is named `hero`; player 1 is named `villain`. Deck iteration is the
 engine's `BTreeMap` order.
 
-This is the shared v1 deck because it is the current flat-MC/search benchmark
-deck and is already the W2-179 before/after workload. UR Lessons versus GW
-Allies may become a later fixture version; it must not be mixed into v1
-before/after claims.
+This is the v1 deck because it is the current flat-MC/search benchmark deck.
+UR Lessons versus GW Allies may become a later fixture version; it must not be
+mixed into v1 comparisons.
 
 ## Exact fixtures
 
@@ -142,7 +143,7 @@ flat MC.
 
 Warmup never contributes timing, allocation, checksum, or RSS summary samples.
 
-### `step-v1` (W2-179 and regression evidence)
+### `step-v1` (diagnostic and regression evidence)
 
 - Fixture family: `interactive-midgame-48-v1` deck/configuration.
 - Warmup: 2,000 successful `Env::step` calls.
@@ -257,8 +258,8 @@ facts, not Rust layout or `Debug` output:
 
 Serialize as canonical JSON with fixed struct field order and ordered maps,
 then hash with BLAKE3. Pointer addresses, allocator state, copied definition
-layout, and randomized hash maps are prohibited. This makes W2-179 before and
-after hashes comparable despite definition sharing.
+layout, and randomized hash maps are prohibited. This keeps hashes comparable
+across branching representations despite definition sharing.
 
 ## Branch driver hooks
 
@@ -382,28 +383,42 @@ or different scheduler may be used to improve a driver's score.
 
 Each workload cell and repeat uses a fresh process group.
 
-1. The parent starts the exact worker count.
-2. Every worker constructs its fixture, completes warmup, emits a `ready`
+1. Before starting any worker, the parent records the repeat's UTC start time.
+   The first worker becomes the leader of a new process group and every other
+   worker in that repeat joins it. No process group may be reused by another
+   cell, repeat, or deterministic replay.
+2. The parent starts the exact worker count and retains the exact argv passed
+   to each process. Each worker echoes its actual process argv in its ready
+   receipt; a mismatch invalidates the repeat.
+3. Every worker constructs its fixture, completes warmup, emits a `ready`
    record, and blocks on stdin.
-3. After all workers are ready, the parent samples aggregate worker RSS once as
+4. After all workers are ready, the parent samples aggregate worker RSS once as
    `rss_baseline_bytes`, begins 5 ms polling, and releases one byte to every
    worker as a start barrier.
-4. `rss_peak_bytes` is the maximum sampled sum of worker RSS from barrier
+5. Every polling attempt is retained in order with a contiguous sequence,
+   UTC capture timestamp, monotonic offset, aggregate RSS, and a per-worker
+   PID/state/RSS receipt. An exited worker contributes zero but remains present
+   in every later sample. The final sample records every worker exited.
+6. `rss_peak_bytes` is the maximum sampled sum of worker RSS from barrier
    release until all workers exit. `rss_peak_delta_bytes` is peak minus
    baseline. Parent RSS is recorded separately.
-5. The report states that summed RSS double-counts pages shared across worker
+7. The report states that summed RSS double-counts pages shared across worker
    processes and that 5 ms sampling can miss shorter spikes. The method is
    identical for every driver.
 
-Canonical results require all worker RSS samples. A dead sampler, missed ready
-barrier, worker signal/panic/OOM, or malformed child result invalidates the
-cell. Do not substitute `ru_maxrss` from a previous cell.
+Canonical results require the complete aggregate-worker RSS sample series and
+a completed sampler receipt. A sampler exception or lost live PID, ready or
+start-barrier timeout/failure, worker signal/panic/OOM/nonzero exit, malformed
+child record, incomplete final sample, or worker timeout aborts the run before
+an artifact is written. Do not substitute `ru_maxrss` or a peak retained from
+another cell.
 
 ## Hardware and execution metadata
 
 Raw results require:
 
-- UTC timestamp and local timezone;
+- a UTC `started_at` captured before build, fixture, equivalence, or worker
+  execution begins, a UTC completion time, and the local timezone;
 - OS name/version, kernel, architecture;
 - CPU model, physical cores, logical cores;
 - total physical memory;
@@ -414,7 +429,8 @@ Raw results require:
 - process topology, thread count, oversubscription flag;
 - RSS method and polling interval;
 - contract ID and SHA-256, result schema, source-tree SHA-256, engine/content
-  schema/digest, exact argv, and working-tree/PR provenance supplied by
+  schema/digest, the orchestrator's exact process argv, each worker's exact
+  invoked/acknowledged argv, and working-tree/PR provenance supplied by
   Loopflow receipts.
 
 Missing optional thermal/power data is allowed. Missing contract/source
@@ -435,6 +451,7 @@ Authoritative file:
   },
   "run": {
     "started_at": "...",
+    "completed_at": "...",
     "argv": [],
     "source_sha256": "...",
     "driver": "full_clone/current_game_v1",
@@ -465,12 +482,28 @@ Authoritative file:
       "warmup": {},
       "repeats": [
         {
+          "status": "complete",
+          "started_at": "...",
+          "completed_at": "...",
           "root_seed": 48879,
+          "process_group_id": 1234,
+          "commands": [],
+          "ready": [],
           "workers": [],
+          "barrier_released_at": "...",
           "barrier_wall_seconds": 0.0,
+          "sampler": {
+            "status": "complete",
+            "interval_seconds": 0.005,
+            "sample_count": 2
+          },
           "rss_baseline_bytes": 0,
           "rss_peak_bytes": 0,
           "rss_peak_delta_bytes": 0,
+          "rss_samples": [
+            {"sequence": 0, "phase": "baseline", "workers": []},
+            {"sequence": 1, "phase": "complete", "workers": []}
+          ],
           "result_checksum": "..."
         }
       ],
@@ -481,7 +514,8 @@ Authoritative file:
 }
 ```
 
-Each worker record contains actor/world/rollout dimensions, derived seed roots,
+Each repeat also retains parent RSS and every timestamped aggregate-worker RSS
+sample. Each worker result contains actor/world/rollout dimensions, derived seed roots,
 root action count, simulations, transitions, outcomes, caps, fork/apply/tail/
 hash durations, max simultaneously live states, terminal checksum, and driver
 counters. Raw repeat records are retained; summary-only JSON is invalid.
@@ -489,6 +523,9 @@ counters. Raw repeat records are retained; summary-only JSON is invalid.
 `artifact_sha256` hashes canonical JSON with that field omitted. Writes use a
 temporary file and atomic rename. Verification recomputes the artifact hash,
 contract/source digests, required cell set, summaries, and generated Markdown.
+It also rejects a missing/failed status, pre-execution timestamp, argv receipt,
+fresh process-group receipt, barrier receipt, sampler receipt, raw RSS series,
+worker coverage, or nonzero worker result even if aggregate summaries remain.
 
 ## Summary metrics
 

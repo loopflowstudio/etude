@@ -1,11 +1,10 @@
 # W2-182: whole-rollout branching benchmark harness
 
-Status: implemented and verified against directive v3.
+Status: implemented and verified against directive v5.
 
-The canonical design and cross-Task measurement authority is
-`docs/benchmarks/search-branching-contract-v1.md`. W2-179 was given that
-contract through its Task follow-up observation. This scratch note records the
-Task boundary and receipts without redefining the contract.
+The canonical measurement authority is
+`docs/benchmarks/search-branching-contract-v1.md`. This scratch note records
+the Task boundary and receipts without redefining the contract.
 
 ## User-visible outcome
 
@@ -16,7 +15,7 @@ uv run scripts/bench_branching.py run
 uv run scripts/bench_branching.py verify
 ```
 
-The first command produces an exact full-clone baseline at the current
+The first command produces an exact current-driver full-clone baseline at the current
 single-worker and saturated worker x actor x rollout shapes. The second
 recomputes all contract, source, artifact, repeat-checksum, cell, and summary
 checks. The derived report leads with whole-rollout simulations/s,
@@ -27,8 +26,10 @@ transitions/s, root latency, and peak RSS; clone latency is secondary.
 The release binary reconstructs the exact 48-action midgame and 80-action
 heavy fixtures, validates their drift fields, and passes all four equivalence
 seeds on both fixtures. The `uv` runner launches fresh native worker groups,
-waits for warmup/ready, samples aggregate worker RSS every 5 ms after a start
-barrier, preserves every raw worker record, derives summaries, writes
+waits for warmup/ready, launches a fresh process group per cell/repeat, records
+exact worker argv, samples aggregate worker RSS every 5 ms after a start
+barrier, preserves the complete timestamped sample series and every raw worker
+result, derives summaries, writes
 atomically, and verifies the artifact. Every primary cell repeats its first
 root in a fresh group and must reproduce the ordered result checksum.
 
@@ -55,8 +56,6 @@ The checked-in proof is:
 - Native rules/search state and release benchmark binary
 - Python process/RSS orchestration (always invoked through `uv`)
 - Raw JSON schema and derived experiment report
-- W2-179, which shares the exact deck, fixture recipes, seeds, and diagnostic
-  timing boundaries
 - Future clone-plus-undo and page-COW-plus-undo drivers through the same
   `BranchDriver` hooks
 
@@ -65,8 +64,8 @@ entry points remain unchanged.
 
 ## The branching question this harness is built to answer
 
-The state choices are not mutually exclusive. W2-179 already moved immutable
-definitions into `Arc<ContentPack>` while leaving mutable match facts in dense
+The state choices are not mutually exclusive. Immutable definitions now live
+in `Arc<ContentPack>` while mutable match facts remain in dense
 vectors and structs. The open question is how those dense facts should cross a
 search branch boundary. The likely shape is exact isolated snapshots at the
 outside of search and a transaction-like mark/rollback loop inside each owned
@@ -252,16 +251,18 @@ threshold, or claim that clone latency alone justifies a storage design.
 
 ## Verification receipts
 
-- Rust: 16 unit tests, 2 conformance, 13 engine, 162 rules, 6 scenario, and 10
-  search tests pass; clippy is clean with warnings denied.
-- Python: 4 focused benchmark tests pass; Ruff check/format pass.
-- Artifact SHA-256: `b571f604520f5be371e30f644e1559d2e7eec3153b5f209057fd4c294680999b`.
-- Loopflow Task observation was published with the exact contract before the
-  local Loopflow binary became incompatible with its registry. The final
-  evidence broadcast was dropped with that explicit local-tool blocker; the
-  implementation and verification remained computable inline.
-- `lf commit` created the local Task commit. PR refresh could not complete:
-  the required rebase agent hit a provider-account schema mismatch, and the
-  subsequent GitHub lookup hit the account API rate limit. The worktree is
-  clean/authored according to `lf rebase --plan`; no raw git or worktree
-  operation was used to bypass Loopflow.
+- Rebasing onto `origin/main` completed through `lf rebase --manual` after the
+  automatic conflict agent hit an incompatible provider-account schema.
+- The obsolete non-contract ContentPack diagnostic was removed. The generated
+  report describes only the current driver at the recorded source state.
+- Rust: 16 unit tests, 2 conformance, 3 ContentPack, 13 engine, 162 rules, 6
+  scenario, and 10 search tests pass; clippy is clean with warnings denied.
+- Python: 15 focused contract tests and 130 benchmark/agent/environment/search
+  regression tests pass; Ruff check/format pass.
+- CPython 3.12 release wheel rebuilt and the worktree native extension imports.
+- Full canonical benchmark generation and artifact/report verification pass;
+  the authoritative self-hash is recorded in those generated files.
+- Four Task provider launches disappeared before PID allocation, so the
+  contract review was completed inline in the existing Task worktree. GitHub
+  reconciliation remains rate-limited; no raw git/worktree/PR mutation was
+  used to bypass Loopflow.
