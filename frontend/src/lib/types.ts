@@ -127,10 +127,24 @@ export interface CommandReceipt {
   resulting_frame_hash: string;
 }
 
+// The first protocol slice carries an empty list, but the boundary is explicit
+// so semantic presentation can populate it without changing frame authority.
+export interface PresentationEvent {
+  seq: number;
+  from_revision: number;
+  to_revision: number;
+  caused_by: string | null;
+  group: number;
+  importance: 'ambient' | 'normal' | 'emphasized' | 'critical';
+  suggested_ms: number;
+  sound: string | null;
+  kind: { kind: string; [key: string]: unknown };
+}
+
 export interface FrameUpdate {
   base_revision: number;
   frame: ExperienceFrame;
-  presentation: [];
+  presentation: PresentationEvent[];
   receipt: CommandReceipt | null;
 }
 
@@ -141,7 +155,7 @@ export interface RecoveryEnvelope {
   asset_manifest_hash: string;
   reason: string;
   frame: ExperienceFrame;
-  presentation_tail: [];
+  presentation_tail: PresentationEvent[];
   accepted_commands: CommandReceipt[];
   replay_cursor: number;
   checkpoint: string | null;

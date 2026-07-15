@@ -1,7 +1,19 @@
+import { readFileSync } from 'node:fs';
+
 import { describe, expect, it } from 'vitest';
 
 import { createGameStore } from './game.svelte';
-import type { ExperienceFrame, Observation } from './types';
+import type { Command, Observation, RecoveryEnvelope } from './types';
+
+interface BoltProtocolFixture {
+  recovery: RecoveryEnvelope;
+  command: Command;
+}
+
+const boltProtocolFixture = JSON.parse(readFileSync(
+  new URL('../../../tests/gui/fixtures/protocol_v1_bolt_target.json', import.meta.url),
+  'utf8',
+)) as BoltProtocolFixture;
 
 function makeObservation(): Observation {
   return {
@@ -68,58 +80,35 @@ function makeObservation(): Observation {
 }
 
 describe('GameStore', () => {
-  it('projects a protocol-v1 frame through the existing action table', () => {
+  it('projects the shared protocol-v1 Bolt fixture through the existing action table', () => {
     const store = createGameStore();
-    const frame: ExperienceFrame = {
-      protocol: 1,
-      match_id: 'match-a',
-      revision: 4,
-      frame_hash: 'frame-hash',
-      content_hash: 'content-hash',
-      asset_manifest_hash: 'assets-hash',
-      status: 'ready',
-      prompt: {
-        id: 9,
-        actor: 0,
-        kind: 'priority',
-        title: 'Your priority',
-        instruction: 'Choose an action',
-      },
-      projection: makeObservation(),
-      offers: [{
-        id: 7,
-        actor: 0,
-        verb: 'pass_priority',
-        source: null,
-        label: 'Pass priority',
-        help: null,
-        choices: [],
-        confirm_label: 'Pass priority',
-        action_type: 'PRIORITY_PASS_PRIORITY',
-        focus: [],
-      }],
-      winner: null,
-      action_space: 'PRIORITY',
-      stops: {
-        my: ['main1'],
-        opponent: ['end_step'],
-        stop_on_stack: true,
-        auto_pass: true,
-      },
-    };
+    const frame = boltProtocolFixture.recovery.frame;
 
     store.applyFrame(frame, 'session-a', 'token-a');
 
     expect(store.protocolFrame).toBe(frame);
     expect(store.observation).toBe(frame.projection);
-    expect(store.actions).toEqual([{
-      index: 7,
-      type: 'PRIORITY_PASS_PRIORITY',
-      focus: [],
-      description: 'Pass priority',
-    }]);
-    expect(store.actionSpaceKind).toBe('PRIORITY');
+    expect(store.actions).toEqual([
+      {
+        index: 0,
+        type: 'CHOOSE_TARGET',
+        focus: [0],
+        description: 'Target Hero',
+      },
+      {
+        index: 1,
+        type: 'CHOOSE_TARGET',
+        focus: [1],
+        description: 'Target Villain',
+      },
+    ]);
+    expect(store.actionSpaceKind).toBe('CHOOSE_TARGET');
     expect(store.sessionId).toBe('session-a');
+    expect(boltProtocolFixture.command).toMatchObject({
+      expected_revision: frame.revision,
+      prompt_id: frame.prompt?.id,
+      offer_id: 1,
+    });
   });
 
   it('applies observation payloads as full replacements', () => {

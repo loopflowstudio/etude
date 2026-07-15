@@ -84,8 +84,10 @@
     if (!canPassTurn || gameStore.fastForwarding) {
       return;
     }
+    if (!sendPassTurn()) {
+      return;
+    }
     gameStore.appendHeroAction('Pass turn (F6)');
-    sendPassTurn();
   }
 
   function handleKeydown(event: KeyboardEvent): void {

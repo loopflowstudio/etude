@@ -68,7 +68,7 @@ export function parseServerMessage(raw: string): ServerMessage | null {
   }
 }
 
-class GameSocketController {
+export class GameSocketController {
   private socket: WebSocket | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectAttempts = 0;
@@ -189,9 +189,16 @@ class GameSocketController {
     });
   }
 
-  sendPassTurn(): void {
+  sendPassTurn(): boolean {
     gameStore.beginFastForward();
-    this.send({ type: 'pass_turn' });
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+      gameStore.endFastForward();
+      gameStore.setError('Connection changed. Recovering the latest game state.');
+      this.connect();
+      return false;
+    }
+    this.socket.send(JSON.stringify({ type: 'pass_turn' } satisfies ClientMessage));
+    return true;
   }
 
   private send(message: ClientMessage): void {
@@ -361,6 +368,6 @@ export function sendSetStops(): void {
   controller.sendSetStops();
 }
 
-export function sendPassTurn(): void {
-  controller.sendPassTurn();
+export function sendPassTurn(): boolean {
+  return controller.sendPassTurn();
 }

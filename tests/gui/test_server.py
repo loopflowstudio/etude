@@ -5,6 +5,7 @@ WebSocket integration tests for the GUI backend server.
 
 from datetime import timedelta
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
@@ -12,6 +13,12 @@ from fastapi.testclient import TestClient
 # Local imports
 from gui import server, trace as trace_store
 from gui.server import app
+
+PROTOCOL_V1_BOLT_FIXTURE = json.loads(
+    (Path(__file__).parent / "fixtures" / "protocol_v1_bolt_target.json").read_text(
+        encoding="utf-8"
+    )
+)
 
 
 def _pick_action(actions: list[dict]) -> int:
@@ -71,7 +78,32 @@ def test_protocol_v1_bolt_and_pass_offers_round_trip(monkeypatch, tmp_path):
                 ("PRIORITY_PASS_PRIORITY", "Pass priority"),
             ):
                 offer = _offer(frame, action_type=action_type, label=label)
-                command = _command(frame, offer, f"bolt-{frame['revision']}")
+                command_id = f"bolt-{frame['revision']}"
+                if action_type == "CHOOSE_TARGET":
+                    fixture_frame = PROTOCOL_V1_BOLT_FIXTURE["recovery"]["frame"]
+                    for key in (
+                        "protocol",
+                        "revision",
+                        "status",
+                        "prompt",
+                        "offers",
+                        "action_space",
+                        "stops",
+                    ):
+                        assert frame[key] == fixture_frame[key]
+                    command_id = PROTOCOL_V1_BOLT_FIXTURE["command"]["command_id"]
+
+                command = _command(frame, offer, command_id)
+                if action_type == "CHOOSE_TARGET":
+                    fixture_command = PROTOCOL_V1_BOLT_FIXTURE["command"]
+                    for key in (
+                        "command_id",
+                        "expected_revision",
+                        "prompt_id",
+                        "offer_id",
+                        "answers",
+                    ):
+                        assert command[key] == fixture_command[key]
                 websocket.send_json({"type": "command", "command": command})
                 outcome = websocket.receive_json()
                 assert outcome["status"] == "accepted"
@@ -221,7 +253,8 @@ def test_websocket_can_resume_existing_session(monkeypatch, tmp_path):
             first_action = _pick_action(payload["actions"])
             websocket.send_json({"type": "action", "index": first_action})
             payload = websocket.receive_json()
-            assert payload["type"] in {"observation", "game_over"}
+            assert payload["type"] == "observation"
+            frame_before_reconnect = payload["recovery"]["frame"]
 
         with client.websocket_connect("/ws/play") as resumed:
             resumed.send_json(
@@ -232,10 +265,13 @@ def test_websocket_can_resume_existing_session(monkeypatch, tmp_path):
                 }
             )
             resumed_payload = resumed.receive_json()
-            assert resumed_payload["type"] in {"observation", "game_over"}
-            if resumed_payload["type"] == "observation":
-                assert resumed_payload["session_id"] == session_id
-                assert resumed_payload["resume_token"] == resume_token
+            assert resumed_payload["type"] == "observation"
+            assert resumed_payload["session_id"] == session_id
+            assert resumed_payload["resume_token"] == resume_token
+            assert resumed_payload["recovery"]["reason"] == "reconnect"
+            resumed_frame = resumed_payload["recovery"]["frame"]
+            for key in ("match_id", "revision", "prompt"):
+                assert resumed_frame[key] == frame_before_reconnect[key]
 
 
 def test_websocket_rejects_invalid_resume_credentials(monkeypatch, tmp_path):
