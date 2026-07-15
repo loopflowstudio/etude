@@ -285,6 +285,99 @@ and rollback replaces state. Journal and COW counters are `null` with an
 unsupported reason, never misleading zeroes. Later clone-plus-undo and dense
 page-COW-plus-undo drivers implement the hooks but are outside W2-182.
 
+### Three-strategy comparison endpoint
+
+Contract v1 deliberately keeps the logical state lifecycle separate from its
+physical representation. The planned comparison has three named strategies;
+they are hypotheses, not an exhaustive list or a preselected winner.
+
+| Strategy | Safe outer fork | Repeated inner work | Expected strength | Risk the whole-rollout cells expose |
+|---|---|---|---|---|
+| `full_clone/current_game_v1` | Clone the compact `Game`; immutable definitions remain shared through `Arc<ContentPack>` | Clone again per world and simulation; `mark` is a reference full snapshot | Simple ownership, exact isolation, contiguous mutable facts | Copy bandwidth and allocator traffic as `W * A * L * R` rises |
+| `compact_clone_undo/*` | Clone once at each independently owned worker/actor/world boundary | Reuse one dense scratch state with a journal cursor or checkpoint marker, then roll back after each sequential simulation | Dense access while deleting most inner full-state copies | Journal volume, rollback cost, and writes that escape the journal |
+| `dense_page_cow_undo/*` | Fork refcounted fixed-size mutable pages; copy a page on its first branch-local write | Journal mutations within the private branch and roll back to a cursor | Cheap safe forks plus dense transactional execution, especially for retained pools | Dirty-page amplification, refcount/indirection cost, and paying for both COW and undo |
+
+Here `W` is worker processes, `A` is actors per worker, `L` is legal root
+actions, and `R = worlds * rollouts_per_world` is simulations per action. For
+`S` measured seeds, a flat cell performs exactly `S * W * A * L * R`
+simulations. That formula, rather than an isolated `clone()` loop, is the
+scaling surface that the three drivers must share.
+
+The likely hybrid endpoint is **safe exact forks outside and dense
+transactional execution inside**:
+
+1. `ContentPack` is immutable and shared by every match and branch.
+2. Match roots, worker-owned roots, actors, worlds, and every simultaneously
+   retained slot are isolated by `fork_exact`. The physical fork may be an
+   eager clone or page COW, but no mutation can cross that boundary.
+3. A sequential probe or rollout takes `mark`, applies and advances dense
+   mutable facts, records its outcome, then `rollback`s before the next sibling.
+4. A retained cell cannot replace its simultaneous slots with one rollback
+   buffer without changing the workload. Each live slot still requires a safe
+   exact fork; undo is useful only for nested probes within that slot.
+
+This distinction prevents a misleading benchmark in which the undo driver
+wins by serializing a workload that the clone and COW drivers execute with all
+branches resident.
+
+### Driver-specific lifecycle and counters
+
+For sequential cells, an optimized driver may replace the inner
+`fork_exact(world)` with `mark(scratch)` / run / `rollback(scratch, mark)` only
+if `scratch` is restored to the same canonical world snapshot before every
+action/rollout pair. The journal must restore RNG state, zone order and reverse
+membership, events and observation events, choices, stack and triggers,
+allocation watermarks, arena lengths/free lists, caches, and the legal action
+space. A root action that allocates and later rolls back is part of the gate,
+not an exceptional path.
+
+For retained cells, pool construction and destruction remain inside the root
+timer for every driver. A page-COW implementation may share clean pages among
+slots, but every first write must become branch-private. A compact-clone-plus-
+undo implementation still materializes one independent slot per live branch;
+it may not alias slots or reconstruct them outside timing.
+
+Existing result fields have fixed meanings for later drivers:
+
+- `eager_forks`: full logical-state copies performed by the driver;
+- `checkpoint_copies`: full snapshots taken to implement a mark or reset;
+- `journal_bytes`: peak live undo storage, not cumulative bytes appended;
+- `cow_bytes`: peak branch-private copied page bytes, excluding shared clean
+  pages and the immutable content pack;
+- `allocation_count` / `allocation_bytes`: timed-region allocator totals when
+  supported;
+- `max_live_states`: logical states simultaneously usable, independent of
+  physical sharing.
+
+Unsupported counters remain `null` with a reason. A zero is valid only when
+the driver measures that counter and observed no corresponding work.
+
+An optimized driver is executable under contract v1 when it exposes a stable
+driver ID, implements the same `BranchDriver` operations, passes the unchanged
+equivalence and repeat-checksum gates, and emits the same raw worker/result
+shape. Driver ID and driver counters may differ; fixture hashes, action order,
+seed paths, workload dimensions, cap, timer boundaries, and RSS protocol may
+not. A new representation such as arena deltas or OS-assisted snapshots can
+join the comparison without becoming one of the three named strategies if it
+honors those constraints.
+
+### What decides, and what does not
+
+The comparison is made on matched whole-rollout cells on the same host and
+build profile. It reports simulations/s, transitions/s, root p50/p95/p99,
+absolute peak RSS, peak RSS delta, maximum live states, and the driver counters
+above. Flat cells expose sequential transaction overhead; retained cells expose
+the memory cost of many live alternatives. Results should be read at both the
+single and saturated `W * A * R` shapes so an optimization that only moves a
+bottleneck between cores or actors is visible.
+
+Clone-and-drop latency remains a diagnostic for explaining a result. It cannot
+select a strategy: a faster clone may lose on mutation locality, an undo journal
+may grow with rules activity, and page COW may save retained memory while
+reducing transition throughput. Correctness equivalence is a prerequisite, not
+a weighted metric. No action cap, shallower rollout, altered determinization,
+or different scheduler may be used to improve a driver's score.
+
 ## Peak RSS protocol
 
 Each workload cell and repeat uses a fresh process group.

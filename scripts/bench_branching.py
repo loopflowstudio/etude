@@ -40,6 +40,12 @@ WHOLE_CELLS = {
 }
 ALL_CELLS = {"step-v1", "clone-v1", *WHOLE_CELLS}
 POLL_SECONDS = 0.005
+DRIVER_COUNTER_FIELDS = {
+    "allocation_count",
+    "allocation_bytes",
+    "journal_bytes",
+    "cow_bytes",
+}
 
 
 def canonical_json(value: Any) -> bytes:
@@ -77,6 +83,68 @@ def deterministic_repeat_checksum(
         ],
     }
     return hashlib.sha256(canonical_json(logical)).hexdigest()
+
+
+def expected_worker_simulations(dimensions: dict[str, Any], action_count: int) -> int:
+    """Contract-v1 W * A * L * R count for one worker and root seed."""
+    return (
+        dimensions["actors_per_worker"]
+        * action_count
+        * dimensions["worlds"]
+        * dimensions["rollouts_per_world"]
+    )
+
+
+def verify_worker_contract_shape(
+    cell: dict[str, Any], group: dict[str, Any], driver: str
+) -> None:
+    """Reject results that improved a driver by changing its logical work."""
+    dimensions = cell["dimensions"]
+    workers = group["workers"]
+    expected_indices = set(range(dimensions["workers"]))
+    actual_indices = {worker["seed_path"]["worker_index"] for worker in workers}
+    if actual_indices != expected_indices:
+        raise RuntimeError(f"worker topology mismatch for {cell['id']}")
+
+    for worker in workers:
+        if worker["driver"] != driver:
+            raise RuntimeError(f"driver mismatch for {cell['id']}")
+        if worker["workload_id"] != cell["id"]:
+            raise RuntimeError(f"workload identity mismatch for {cell['id']}")
+        if worker["shape"] != dimensions["shape"]:
+            raise RuntimeError(f"workload shape mismatch for {cell['id']}")
+        if worker["root_seed"] != group["root_seed"]:
+            raise RuntimeError(f"root seed mismatch for {cell['id']}")
+        if worker["fixture"]["id"] != dimensions["fixture"]:
+            raise RuntimeError(f"fixture mismatch for {cell['id']}")
+
+        metrics = worker["metrics"]
+        missing_counters = DRIVER_COUNTER_FIELDS - metrics.keys()
+        if missing_counters:
+            raise RuntimeError(
+                f"missing driver counters for {cell['id']}: {sorted(missing_counters)}"
+            )
+        if (
+            all(metrics[field] is None for field in DRIVER_COUNTER_FIELDS)
+            and not metrics["unsupported_counters_reason"]
+        ):
+            raise RuntimeError(f"unsupported counters need a reason for {cell['id']}")
+
+        if cell["id"] in WHOLE_CELLS:
+            expected = expected_worker_simulations(
+                dimensions, worker["fixture"]["action_count"]
+            )
+            if metrics["simulations"] != expected:
+                raise RuntimeError(
+                    f"W*A*L*R simulation mismatch for {cell['id']}: "
+                    f"{metrics['simulations']} != {expected}"
+                )
+        elif dimensions["shape"] == "step":
+            if metrics["transitions"] != dimensions["measured_count"]:
+                raise RuntimeError(f"step count mismatch for {cell['id']}")
+        elif dimensions["shape"] == "clone_latency":
+            if len(metrics["clone_latency_ns"]) != dimensions["measured_count"]:
+                raise RuntimeError(f"clone sample count mismatch for {cell['id']}")
 
 
 def percentile(values: list[float | int], quantile: float) -> float:
@@ -630,6 +698,7 @@ def verify(payload: dict[str, Any]) -> None:
         if expected != cell["summary"]:
             raise RuntimeError(f"summary mismatch for {cell['id']}")
         for repeat in cell["repeats"]:
+            verify_worker_contract_shape(cell, repeat, payload["run"]["driver"])
             expected_checksum = deterministic_repeat_checksum(
                 cell["id"], repeat["root_seed"], repeat["workers"]
             )
@@ -639,6 +708,7 @@ def verify(payload: dict[str, Any]) -> None:
             replay = cell.get("determinism_replay")
             if not replay or not replay.get("matches_first_repeat"):
                 raise RuntimeError(f"missing deterministic replay for {cell['id']}")
+            verify_worker_contract_shape(cell, replay, payload["run"]["driver"])
             expected_checksum = deterministic_repeat_checksum(
                 cell["id"], replay["root_seed"], replay["workers"]
             )

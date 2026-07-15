@@ -53,3 +53,12 @@ def test_artifact_hash_omits_only_its_own_field() -> None:
 def test_percentile_uses_nearest_rank() -> None:
     assert bench.percentile([4, 1, 3, 2], 0.50) == 2
     assert bench.percentile([4, 1, 3, 2], 0.99) == 4
+
+
+def test_expected_worker_simulations_is_a_times_l_times_r() -> None:
+    dimensions = {
+        "actors_per_worker": 8,
+        "worlds": 16,
+        "rollouts_per_world": 2,
+    }
+    assert bench.expected_worker_simulations(dimensions, action_count=6) == 1_536
