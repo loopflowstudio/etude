@@ -108,8 +108,12 @@ def source_sha256() -> str:
     excluded_parts = {
         ".git",
         ".lf",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
         ".venv",
         "__pycache__",
+        "htmlcov",
         "target",
         "node_modules",
         "scratch",

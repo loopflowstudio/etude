@@ -92,7 +92,7 @@ threshold, or claim that clone latency alone justifies a storage design.
 - Rust: 16 unit tests, 2 conformance, 13 engine, 162 rules, 6 scenario, and 10
   search tests pass; clippy is clean with warnings denied.
 - Python: 4 focused benchmark tests pass; Ruff check/format pass.
-- Artifact SHA-256: `aea588b65d9e3faff3f224bd7123cd3b579bbe98f80979f88b54f4c9ae64ec7f`.
+- Artifact SHA-256: `b571f604520f5be371e30f644e1559d2e7eec3153b5f209057fd4c294680999b`.
 - Loopflow Task observation was published with the exact contract before the
   local Loopflow binary became incompatible with its registry. The final
   evidence broadcast was dropped with that explicit local-tool blocker; the
