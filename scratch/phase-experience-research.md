@@ -1,7 +1,7 @@
 # Phase vs. manabot: full game-experience technical deep dive
 
-Research date: 2026-07-15  
-Phase revision: [`553b97bd5c9f1a28bf7a6ebe80f6cb3a0e296c0d`](https://github.com/phase-rs/phase/tree/553b97bd5c9f1a28bf7a6ebe80f6cb3a0e296c0d)  
+Research date: 2026-07-15
+Phase revision: [`553b97bd5c9f1a28bf7a6ebe80f6cb3a0e296c0d`](https://github.com/phase-rs/phase/tree/553b97bd5c9f1a28bf7a6ebe80f6cb3a0e296c0d)
 manabot revision inspected: `bbb5a0a38f8b90efeb87829b60847fb40c5d55d4` (`rescue-set-seed`)
 
 ## Executive judgment
@@ -439,58 +439,58 @@ The first benchmark should capture Phase as it exists rather than choosing flatt
 
 ### 1. Freeze the experience protocol before expanding visual mechanics
 
-**Observation:** manabot's action index has no revision/prompt identity, while Phase's atomic commit gate solves a closely related class of softlocks.  
-**Cost:** medium; touches Rust/Python serialization, WebSocket messages, traces, store, and tests.  
-**Benefit:** prevents unintended commands and gives every later interaction/animation/reconnect feature a sound foundation.  
+**Observation:** manabot's action index has no revision/prompt identity, while Phase's atomic commit gate solves a closely related class of softlocks.
+**Cost:** medium; touches Rust/Python serialization, WebSocket messages, traces, store, and tests.
+**Benefit:** prevents unintended commands and gives every later interaction/animation/reconnect feature a sound foundation.
 **Verdict:** **do first.** Introduce `ExperienceFrame`, stable offers, command IDs, expected revision, prompt ID, runtime validation, and explicit stale/duplicate responses.
 
 ### 2. Preserve the inspector and make direct manipulation another projection
 
-**Observation:** manabot's focus-linked action list is a differentiator; Phase's broad direct UI often needs many mechanic-specific branches.  
-**Cost:** medium.  
-**Benefit:** combines smooth play with exact legibility, accessibility, and AI analysis.  
+**Observation:** manabot's focus-linked action list is a differentiator; Phase's broad direct UI often needs many mechanic-specific branches.
+**Cost:** medium.
+**Benefit:** combines smooth play with exact legibility, accessibility, and AI analysis.
 **Verdict:** **core product principle.** Never create a board gesture that bypasses or invents semantics outside `InteractionOffer`.
 
 ### 3. Add a semantic presentation stream, not state-diff animation archaeology
 
-**Observation:** Phase's polished effects require a large client event normalizer and DOM capture; manabot currently has no transitions.  
-**Cost:** medium-high across engine/experience boundary and art direction.  
-**Benefit:** authoritative, replayable, skippable animation with a small client vocabulary.  
+**Observation:** Phase's polished effects require a large client event normalizer and DOM capture; manabot currently has no transitions.
+**Cost:** medium-high across engine/experience boundary and art direction.
+**Benefit:** authoritative, replayable, skippable animation with a small client vocabulary.
 **Verdict:** **build after protocol identity.** Start with move/cast/damage/die/tap/reveal/attack-group and composition/importance metadata.
 
 ### 4. Treat selected decks as compiled experience packs
 
-**Observation:** deck/format generality is not a goal; remote art and unbounded prompts undermine reliability.  
-**Cost:** medium build tooling/content work.  
-**Benefit:** exact offline assets, exhaustive prompt coverage, authored visuals/audio/copy, reproducible tests, smaller downloads.  
+**Observation:** deck/format generality is not a goal; remote art and unbounded prompts undermine reliability.
+**Cost:** medium build tooling/content work.
+**Benefit:** exact offline assets, exhaustive prompt coverage, authored visuals/audio/copy, reproducible tests, smaller downloads.
 **Verdict:** **high leverage.** One manifest should generate server selection, client metadata, asset preload, reachability fixtures, and version hashes.
 
 ### 5. Isolate the authority without prematurely forcing WASM
 
-**Observation:** Phase gains local portability from WASM but pays large startup/memory/copy costs; manabot's learned/search agents are naturally process-heavy.  
-**Cost:** medium-high for worker/process lifecycle and packaging.  
-**Benefit:** responsive UI, bounded AI, web/native portability, and an eventual optional WASM transport.  
+**Observation:** Phase gains local portability from WASM but pays large startup/memory/copy costs; manabot's learned/search agents are naturally process-heavy.
+**Cost:** medium-high for worker/process lifecycle and packaging.
+**Benefit:** responsive UI, bounded AI, web/native portability, and an eventual optional WASM transport.
 **Verdict:** **server or native worker first; WASM later if measured/product need justifies it.** Keep one adapter/frame contract.
 
 ### 6. Separate replay, presentation, and research records
 
-**Observation:** manabot's full-snapshot traces are attributable but large and fragile; Phase reconstructs playback from actions.  
-**Cost:** medium.  
-**Benefit:** compact deterministic replay, fast checkpointed seek, schema migration, and richer AI diagnostics without leaking hidden data.  
+**Observation:** manabot's full-snapshot traces are attributable but large and fragile; Phase reconstructs playback from actions.
+**Cost:** medium.
+**Benefit:** compact deterministic replay, fast checkpointed seek, schema migration, and richer AI diagnostics without leaking hidden data.
 **Verdict:** **preserve the data ambition, replace the container.** Initial config + stable commands + checkpoints; presentation log optional; research sidecar access-controlled.
 
 ### 7. Adopt Phase's invisible reliability patterns selectively
 
-**Observation:** full-snapshot reconnect, protocol mismatch errors, fail-loud handler coverage, PWA update deferral, reload circuit breaking, and overflow grouping are proven-by-source investments.  
-**Cost:** incremental but nontrivial.  
-**Benefit:** the “smoothness” users notice mostly when something goes wrong.  
+**Observation:** full-snapshot reconnect, protocol mismatch errors, fail-loud handler coverage, PWA update deferral, reload circuit breaking, and overflow grouping are proven-by-source investments.
+**Cost:** incremental but nontrivial.
+**Benefit:** the “smoothness” users notice mostly when something goes wrong.
 **Verdict:** **steal these patterns.** Implement against manabot's smaller contract; do not copy the surrounding generic product surface.
 
 ### 8. Put today's working experience under CI, then add perceptual gates
 
-**Observation:** local manabot checks pass but CI omits the frontend and GUI; Phase's own weak spot is browser-level proof.  
-**Cost:** low immediately, medium for fixtures/performance stability.  
-**Benefit:** converts polish and reliability from taste claims into release criteria.  
+**Observation:** local manabot checks pass but CI omits the frontend and GUI; Phase's own weak spot is browser-level proof.
+**Cost:** low immediately, medium for fixtures/performance stability.
+**Benefit:** converts polish and reliability from taste claims into release criteria.
 **Verdict:** **immediate.** Add existing build/unit/E2E/GUI tests, then screenshot, accessibility, interruption, offline, and performance budgets.
 
 ## Open questions
