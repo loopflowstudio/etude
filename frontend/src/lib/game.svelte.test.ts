@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { createGameStore } from './game.svelte';
-import type { Observation } from './types';
+import type { ExperienceFrame, Observation } from './types';
 
 function makeObservation(): Observation {
   return {
@@ -68,6 +68,60 @@ function makeObservation(): Observation {
 }
 
 describe('GameStore', () => {
+  it('projects a protocol-v1 frame through the existing action table', () => {
+    const store = createGameStore();
+    const frame: ExperienceFrame = {
+      protocol: 1,
+      match_id: 'match-a',
+      revision: 4,
+      frame_hash: 'frame-hash',
+      content_hash: 'content-hash',
+      asset_manifest_hash: 'assets-hash',
+      status: 'ready',
+      prompt: {
+        id: 9,
+        actor: 0,
+        kind: 'priority',
+        title: 'Your priority',
+        instruction: 'Choose an action',
+      },
+      projection: makeObservation(),
+      offers: [{
+        id: 7,
+        actor: 0,
+        verb: 'pass_priority',
+        source: null,
+        label: 'Pass priority',
+        help: null,
+        choices: [],
+        confirm_label: 'Pass priority',
+        action_type: 'PRIORITY_PASS_PRIORITY',
+        focus: [],
+      }],
+      winner: null,
+      action_space: 'PRIORITY',
+      stops: {
+        my: ['main1'],
+        opponent: ['end_step'],
+        stop_on_stack: true,
+        auto_pass: true,
+      },
+    };
+
+    store.applyFrame(frame, 'session-a', 'token-a');
+
+    expect(store.protocolFrame).toBe(frame);
+    expect(store.observation).toBe(frame.projection);
+    expect(store.actions).toEqual([{
+      index: 7,
+      type: 'PRIORITY_PASS_PRIORITY',
+      focus: [],
+      description: 'Pass priority',
+    }]);
+    expect(store.actionSpaceKind).toBe('PRIORITY');
+    expect(store.sessionId).toBe('session-a');
+  });
+
   it('applies observation payloads as full replacements', () => {
     const store = createGameStore();
     const observation = makeObservation();

@@ -100,11 +100,13 @@
       return;
     }
 
+    if (!sendAction(action.index)) {
+      return;
+    }
     gameStore.appendHeroAction(action.description);
     gameStore.clearSelectedTarget();
     gameStore.clearFocus();
     hoveredTargetId = null;
-    sendAction(action.index);
   }
 
   function handleActionHover(action: ActionOption | null): void {

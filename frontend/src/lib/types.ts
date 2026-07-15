@@ -68,6 +68,93 @@ export interface ActionOption {
   description: string;
 }
 
+export interface PromptView {
+  id: number;
+  actor: number;
+  kind: string;
+  title: string;
+  instruction: string;
+}
+
+// Protocol-v1's first adapter slice wraps one current engine action in each
+// offer. action_type/focus are temporary bridges for the established table.
+export interface InteractionOffer {
+  id: number;
+  actor: number;
+  verb: string;
+  source: null;
+  label: string;
+  help: string | null;
+  choices: [];
+  confirm_label: string;
+  action_type: string;
+  focus: number[];
+}
+
+export interface ExperienceFrame {
+  protocol: 1;
+  match_id: string;
+  revision: number;
+  frame_hash: string;
+  content_hash: string;
+  asset_manifest_hash: string;
+  status: 'ready' | 'game_over';
+  prompt: PromptView | null;
+  projection: Observation;
+  offers: InteractionOffer[];
+  winner: number | null;
+  action_space: string;
+  stops: StopsConfig;
+  deck_names?: DeckNames;
+  log?: string[];
+  auto_passed?: number;
+}
+
+export interface Command {
+  command_id: string;
+  match_id: string;
+  expected_revision: number;
+  prompt_id: number;
+  offer_id: number;
+  answers: [];
+}
+
+export interface CommandReceipt {
+  command_id: string;
+  actor: number;
+  accepted_at: number;
+  resulting_revision: number;
+  resulting_frame_hash: string;
+}
+
+export interface FrameUpdate {
+  base_revision: number;
+  frame: ExperienceFrame;
+  presentation: [];
+  receipt: CommandReceipt | null;
+}
+
+export interface RecoveryEnvelope {
+  protocol: 1;
+  engine_version: string;
+  content_hash: string;
+  asset_manifest_hash: string;
+  reason: string;
+  frame: ExperienceFrame;
+  presentation_tail: [];
+  accepted_commands: CommandReceipt[];
+  replay_cursor: number;
+  checkpoint: string | null;
+}
+
+export interface CommandRejection {
+  command_id: string;
+  code: string;
+  message: string;
+  current_revision: number;
+  current_prompt: number | null;
+}
+
 export interface GameLogEntry {
   id: string;
   actor: 'hero' | 'villain' | 'system';
@@ -160,6 +247,8 @@ export type ServerMessage =
       auto_passed?: number;
       session_id?: string;
       resume_token?: string;
+      frame?: ExperienceFrame;
+      recovery?: RecoveryEnvelope;
     }
   | {
       type: 'game_over';
@@ -169,12 +258,27 @@ export type ServerMessage =
       stops?: StopsConfig;
       deck_names?: DeckNames;
       auto_passed?: number;
+      frame?: ExperienceFrame;
+      recovery?: RecoveryEnvelope;
     }
+  | ({ type: 'command_outcome' } & (
+      | { status: 'accepted'; update: FrameUpdate }
+      | {
+          status: 'duplicate';
+          receipt: CommandReceipt;
+          recovery: RecoveryEnvelope;
+        }
+      | {
+          status: 'rejected';
+          rejection: CommandRejection;
+          recovery?: RecoveryEnvelope;
+        }
+    ))
   | { type: 'error'; message: string };
 
 export type ClientMessage =
   | { type: 'new_game'; config?: Record<string, unknown> }
-  | { type: 'action'; index: number }
+  | { type: 'command'; command: Command }
   | {
       type: 'set_stops';
       stops: { my: string[]; opponent: string[] };

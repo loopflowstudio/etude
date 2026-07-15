@@ -59,6 +59,25 @@ describe('parseServerMessage', () => {
     expect(parseServerMessage('not-json')).toBeNull();
   });
 
+  it('parses protocol command outcomes', () => {
+    const parsed = parseServerMessage(JSON.stringify({
+      type: 'command_outcome',
+      status: 'rejected',
+      rejection: {
+        command_id: 'command-a',
+        code: 'stale_revision',
+        message: 'Stale revision.',
+        current_revision: 2,
+        current_prompt: 3,
+      },
+    }));
+
+    expect(parsed?.type).toBe('command_outcome');
+    if (parsed?.type === 'command_outcome') {
+      expect(parsed.status).toBe('rejected');
+    }
+  });
+
   it('rejects unsupported message types', () => {
     const parsed = parseServerMessage(JSON.stringify({ type: 'ping' }));
     expect(parsed).toBeNull();
