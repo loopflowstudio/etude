@@ -11,13 +11,15 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 import json
 import math
 import os
 from pathlib import Path
 import platform
+import selectors
+import signal
 import subprocess
 import sys
 import tempfile
@@ -40,6 +42,13 @@ WHOLE_CELLS = {
 }
 ALL_CELLS = {"step-v1", "clone-v1", *WHOLE_CELLS}
 POLL_SECONDS = 0.005
+READY_TIMEOUT_SECONDS = 120.0
+WORKER_TIMEOUT_SECONDS = 300.0
+TERMINATE_GRACE_SECONDS = 2.0
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 DRIVER_COUNTER_FIELDS = {
     "allocation_count",
     "allocation_bytes",
