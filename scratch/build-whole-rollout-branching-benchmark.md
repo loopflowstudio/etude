@@ -97,3 +97,8 @@ threshold, or claim that clone latency alone justifies a storage design.
   local Loopflow binary became incompatible with its registry. The final
   evidence broadcast was dropped with that explicit local-tool blocker; the
   implementation and verification remained computable inline.
+- `lf commit` created the local Task commit. PR refresh could not complete:
+  the required rebase agent hit a provider-account schema mismatch, and the
+  subsequent GitHub lookup hit the account API rate limit. The worktree is
+  clean/authored according to `lf rebase --plan`; no raw git or worktree
+  operation was used to bypass Loopflow.
