@@ -75,8 +75,8 @@ ratio of new-card content changes to kernel changes.
 6. Turn conformance gaps into a machine-generated worklist and make regression
    evidence a CI gate.
 
-Reference designs live in `scratch/platform-kernel-research.md` and
-`scratch/research.md`.
+Reference designs live in `docs/research/semantic-kernel.md` and
+`docs/research/manabot-vs-phase.md`.
 
 ## Non-goals
 

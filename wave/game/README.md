@@ -60,8 +60,8 @@ launch verification.
 4. Package one exact curated matchup as the experience proof.
 5. Benchmark process, worker, and only then WASM authority adapters.
 
-Reference designs live in `scratch/phase-experience-research.md` and
-`scratch/experience-protocol-code.md`. The previous instrument-only charter is
+Reference designs live in `docs/research/phase-experience.md` and
+`docs/architecture/experience-protocol-v1.md`. The previous instrument-only charter is
 preserved in `legacy-gui-charter.md`.
 
 ## Non-goals

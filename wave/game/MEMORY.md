@@ -19,8 +19,8 @@
 
 ## Evidence
 
-- `scratch/phase-experience-research.md`
-- `scratch/experience-protocol-code.md`
+- `docs/research/phase-experience.md`
+- `docs/architecture/experience-protocol-v1.md`
 - Legacy implementation notes in `01-play-interface.md` and `05-polish.md`
 - Previous charter in `legacy-gui-charter.md`
 

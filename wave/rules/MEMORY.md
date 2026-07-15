@@ -27,8 +27,8 @@
 
 ## Evidence
 
-- `scratch/platform-kernel-research.md`
-- `scratch/research.md`
+- `docs/research/semantic-kernel.md`
+- `docs/research/manabot-vs-phase.md`
 - Phase comparison pinned to phase-rs commit `553b97bd`
 - Existing capability and card-pool audits under `wave/rules/`
 
