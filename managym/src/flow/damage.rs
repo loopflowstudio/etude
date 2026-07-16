@@ -3,9 +3,10 @@
 
 use crate::{
     flow::{
-        event::{DamageTarget, GameEvent},
+        event::{DamageTarget, EventSubject, GameEvent},
         game::Game,
         proposed_event::{ProposedDamageTarget, ProposedEvent},
+        turn::StepKind,
     },
     state::game_object::{CardId, ObjectRef, PermanentId, PlayerId},
 };
@@ -60,6 +61,9 @@ impl Game {
                 .then(|| self.source_controller(object_ref))
                 .flatten()
         });
+        let combat_source = (self.state.turn.current_step_kind() == StepKind::CombatDamage)
+            .then(|| source.and_then(|object_ref| self.object_event_ref(object_ref)))
+            .flatten();
 
         match target {
             ProposedDamageTarget::Player(player) => {
@@ -75,6 +79,13 @@ impl Game {
                     target: DamageTarget::Player(player),
                     amount: amount as u32,
                 });
+                if let Some(source) = combat_source {
+                    self.emit_observation_event(GameEvent::CombatDamageDealt {
+                        source,
+                        target: EventSubject::Player(player),
+                        amount: amount as u32,
+                    });
+                }
                 self.emit(GameEvent::LifeChanged {
                     player,
                     old: old_life,
@@ -82,6 +93,7 @@ impl Game {
                 });
             }
             ProposedDamageTarget::Object(object_ref) => {
+                let event_target = self.object_event_ref(object_ref);
                 let Ok(permanent_id) = self.lookup_current_permanent(object_ref) else {
                     return false;
                 };
@@ -97,6 +109,13 @@ impl Game {
                     target: DamageTarget::Permanent(permanent_id),
                     amount: amount as u32,
                 });
+                if let (Some(source), Some(target)) = (combat_source, event_target) {
+                    self.emit_observation_event(GameEvent::CombatDamageDealt {
+                        source,
+                        target: EventSubject::Object(target),
+                        amount: amount as u32,
+                    });
+                }
             }
         }
 
