@@ -16,10 +16,7 @@ use serde::Serialize;
 use crate::{
     agent::{action::ActionSpace, observation::Observation},
     flow::{game::PendingChoice, search::mix_seed},
-    state::{
-        card::CardDefId,
-        game_object::{ObjectId, ObjectLki, ObjectRef, PlayerId},
-    },
+    state::game_object::PlayerId,
     Game,
 };
 
@@ -47,106 +44,9 @@ pub struct CanonicalSnapshotV2 {
 pub type EquivalenceSnapshot = CanonicalSnapshotV2;
 
 #[derive(Serialize)]
-struct CanonicalCard {
-    object_id: ObjectId,
-    definition_id: CardDefId,
-    owner: PlayerId,
-}
-
-#[derive(Serialize)]
-struct CanonicalObjectLki {
-    object_ref: ObjectRef,
-    lki: ObjectLki,
-}
-
-#[derive(Serialize)]
-struct CanonicalTurn {
-    active_player: PlayerId,
-    turn_number: u32,
-    lands_played: u32,
-    cards_drawn_this_turn: [u32; 2],
-    ability_resolutions_this_turn: Vec<(usize, usize, u32)>,
-    current_phase: usize,
-    current_step: usize,
-    step_initialized: bool,
-    turn_based_actions_complete: bool,
-}
-
-impl From<&crate::flow::turn::TurnState> for CanonicalTurn {
-    fn from(turn: &crate::flow::turn::TurnState) -> Self {
-        Self {
-            active_player: turn.active_player,
-            turn_number: turn.turn_number,
-            lands_played: turn.lands_played,
-            cards_drawn_this_turn: turn.cards_drawn_this_turn,
-            ability_resolutions_this_turn: turn
-                .ability_resolutions_this_turn
-                .iter()
-                .map(|(&(card, ability), &count)| (card, ability, count))
-                .collect(),
-            current_phase: turn.current_phase,
-            current_step: turn.current_step,
-            step_initialized: turn.step_initialized,
-            turn_based_actions_complete: turn.turn_based_actions_complete,
-        }
-    }
-}
-
-#[derive(Serialize)]
-struct CanonicalCombat {
-    attackers: Vec<crate::state::game_object::PermanentId>,
-    attacker_to_blockers: Vec<(
-        crate::state::game_object::PermanentId,
-        Vec<crate::state::game_object::PermanentId>,
-    )>,
-    attackers_to_declare: Vec<crate::state::game_object::PermanentId>,
-    blockers_to_declare: Vec<crate::state::game_object::PermanentId>,
-}
-
-impl From<&crate::flow::combat::CombatState> for CanonicalCombat {
-    fn from(combat: &crate::flow::combat::CombatState) -> Self {
-        Self {
-            attackers: combat.attackers.clone(),
-            attacker_to_blockers: combat
-                .attacker_to_blockers
-                .iter()
-                .map(|(&attacker, blockers)| (attacker, blockers.clone()))
-                .collect(),
-            attackers_to_declare: combat.attackers_to_declare.clone(),
-            blockers_to_declare: combat.blockers_to_declare.clone(),
-        }
-    }
-}
-
-#[derive(Serialize)]
 struct SemanticSnapshot<'a> {
     schema_version: u32,
-    content_digest: String,
-    cards: Vec<CanonicalCard>,
-    object_incarnations:
-        &'a crate::state::game_object::CardVec<crate::state::game_object::Incarnation>,
-    object_lki: Vec<CanonicalObjectLki>,
-    permanents:
-        &'a crate::state::game_object::PermanentVec<Option<crate::state::permanent::Permanent>>,
-    card_to_permanent:
-        &'a crate::state::game_object::CardVec<Option<crate::state::game_object::PermanentId>>,
-    players: &'a [crate::state::player::Player; 2],
-    zones: &'a crate::state::zone::ZoneManager,
-    turn: CanonicalTurn,
-    priority: &'a crate::flow::priority::PriorityState,
-    stack_objects: &'a [crate::state::stack_object::StackObject],
-    combat: Option<CanonicalCombat>,
-    mana_cache: &'a [Option<crate::state::mana::Mana>; 2],
-    events: &'a [crate::flow::event::GameEvent],
-    pending_events: &'a [crate::flow::event::GameEvent],
-    observation_events: &'a [crate::flow::event::GameEvent],
-    pending_triggers: &'a [crate::flow::trigger::PendingTrigger],
-    pending_trigger_choice: &'a Option<crate::flow::trigger::PendingTrigger>,
-    delayed_triggers: &'a [crate::flow::trigger::DelayedTrigger],
-    exile_links: &'a [crate::flow::trigger::ExileLink],
-    suspended_decision: &'a Option<crate::flow::decision::SuspendedResolution>,
-    trigger_enqueue_counter: u64,
-    allocation_watermark: u32,
+    match_state: serde_json::Value,
     current_action_space: &'a Option<ActionSpace>,
     decision_epoch: u64,
     pending_choice: &'a Option<PendingChoice>,
@@ -163,47 +63,9 @@ pub fn snapshot(game: &Game) -> CanonicalSnapshotV2 {
     for value in &mut rng_probe {
         *value = rng.next_u64();
     }
-    let cards = game
-        .state
-        .cards
-        .iter()
-        .map(|card| CanonicalCard {
-            object_id: card.id,
-            definition_id: card.definition_id,
-            owner: card.owner,
-        })
-        .collect();
-    let object_lki = game
-        .state
-        .object_lki
-        .iter()
-        .map(|(&object_ref, &lki)| CanonicalObjectLki { object_ref, lki })
-        .collect();
     let semantic = SemanticSnapshot {
         schema_version: SNAPSHOT_SCHEMA,
-        content_digest: game.state.content.content_digest(),
-        cards,
-        object_incarnations: &game.state.object_incarnations,
-        object_lki,
-        permanents: &game.state.permanents,
-        card_to_permanent: &game.state.card_to_permanent,
-        players: &game.state.players,
-        zones: &game.state.zones,
-        turn: CanonicalTurn::from(&game.state.turn),
-        priority: &game.state.priority,
-        stack_objects: &game.state.stack_objects,
-        combat: game.state.combat.as_ref().map(CanonicalCombat::from),
-        mana_cache: &game.state.mana_cache,
-        events: &game.state.events,
-        pending_events: &game.state.pending_events,
-        observation_events: &game.state.observation_events,
-        pending_triggers: &game.state.pending_triggers,
-        pending_trigger_choice: &game.state.pending_trigger_choice,
-        delayed_triggers: &game.state.delayed_triggers,
-        exile_links: &game.state.exile_links,
-        suspended_decision: &game.state.suspended_decision,
-        trigger_enqueue_counter: game.state.trigger_enqueue_counter,
-        allocation_watermark: game.state.id_gen.watermark(),
+        match_state: game.state.deterministic_hash_value(),
         current_action_space: &game.current_action_space,
         decision_epoch: game.decision_epoch,
         pending_choice: &game.pending_choice,
