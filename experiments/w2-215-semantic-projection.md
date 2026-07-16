@@ -8,7 +8,7 @@ This is a baseline, not a training result or a performance threshold.
 ## Provenance
 
 - Measurement code revision:
-  `12f9156b9bbb7b7b50813f82bae1a3e3d589b77b`
+  `aef56441c03537fe043783d9447ce2fb22a1800c`
 - CPython: 3.12.12; native extension:
   `_managym.cpython-312-darwin.so`
 - Platform: macOS 26.0.1, arm64, 16 logical CPUs
@@ -27,8 +27,8 @@ Reproduce with:
 ```bash
 uv run scripts/benchmark_semantic_projection.py --seed 215 --states 4096 \
   --batch-sizes 1,32,256 \
-  --revision 12f9156b9bbb7b7b50813f82bae1a3e3d589b77b \
-  --measured-at 2026-07-15T19:04:50-07:00 \
+  --revision aef56441c03537fe043783d9447ce2fb22a1800c \
+  --measured-at 2026-07-15T19:08:20-07:00 \
   --out experiments/data/w2-215-semantic-projection.json
 ```
 
@@ -42,20 +42,20 @@ semantic content is 53 tokens at p50, 95 at p95, and 148 at maximum.
 ## Latency and throughput
 
 Cold schema/IR validation, tokenization, and exact ContentPack binding took
-1.909 ms. Hot viewer projection latency was 7.167 microseconds at p50 and
-11.250 microseconds at p95; the maximum observed sample was 296.291
+3.149 ms. Hot viewer projection latency was 9.875 microseconds at p50 and
+15.416 microseconds at p95; the maximum observed sample was 403.708
 microseconds.
 
 | Batch size | Batch-only observations/s | Encode + batch observations/s | Encode + batch tokens/s |
 |---:|---:|---:|---:|
-| 1 | 96,193 | 46,688 | 114,203,792 |
-| 32 | 399,693 | 74,811 | 182,995,765 |
-| 256 | 456,816 | 76,261 | 186,543,109 |
+| 1 | 68,842 | 36,783 | 89,974,557 |
+| 32 | 360,076 | 59,612 | 145,818,197 |
+| 256 | 364,055 | 55,698 | 136,243,587 |
 
 The largest measured 256-observation ragged object batch occupied 253,602
 bytes and its padded form occupied 334,080 bytes. Python traced peak allocation
-was 1,003,313 bytes. Process RSS increased by 819,200 bytes during the isolated
-memory pass; process peak RSS was 268,550,144 bytes.
+was 1,003,313 bytes. Process RSS increased by 688,128 bytes during the isolated
+memory pass; process peak RSS was 269,451,264 bytes.
 
 ## Correctness boundary
 

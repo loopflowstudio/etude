@@ -1,5 +1,5 @@
 {
-  "command": "uv run scripts/benchmark_semantic_projection.py --seed 215 --states 4096 --batch-sizes 1,32,256 --revision 12f9156b9bbb7b7b50813f82bae1a3e3d589b77b --measured-at 2026-07-15T19:04:50-07:00 --out experiments/data/w2-215-semantic-projection.json",
+  "command": "uv run scripts/benchmark_semantic_projection.py --seed 215 --states 4096 --batch-sizes 1,32,256 --revision aef56441c03537fe043783d9447ce2fb22a1800c --measured-at 2026-07-15T19:08:20-07:00 --out experiments/data/w2-215-semantic-projection.json",
   "correctness": {
     "identity_features_valid_in_semantic_only": 0,
     "projection_failures": 0,
@@ -44,27 +44,27 @@
     "python": "3.12.12"
   },
   "latency": {
-    "cold_bind_ms": 1.909083,
+    "cold_bind_ms": 3.14925,
     "hot_encode_microseconds": {
-      "max": 296.291,
-      "mean": 7.566248046875,
-      "min": 2.958,
-      "p50": 7.167,
-      "p95": 11.25
+      "max": 403.708,
+      "mean": 10.3396416015625,
+      "min": 4.208,
+      "p50": 9.875,
+      "p95": 15.416
     }
   },
-  "measured_at": "2026-07-15T19:04:50-07:00",
-  "measurement_code_revision": "12f9156b9bbb7b7b50813f82bae1a3e3d589b77b",
+  "measured_at": "2026-07-15T19:08:20-07:00",
+  "measurement_code_revision": "aef56441c03537fe043783d9447ce2fb22a1800c",
   "memory": {
     "catalog_bytes": 13116,
     "largest_padded_object_batch_bytes": 334080,
     "largest_ragged_object_batch_bytes": 253602,
     "padded_catalog_bytes": 27384,
-    "process_peak_rss_bytes": 268550144,
+    "process_peak_rss_bytes": 269451264,
     "python_traced_peak_bytes": 1003313,
-    "rss_after_bytes": 265338880,
-    "rss_before_bytes": 264519680,
-    "rss_delta_bytes": 819200
+    "rss_after_bytes": 265928704,
+    "rss_before_bytes": 265240576,
+    "rss_delta_bytes": 688128
   },
   "provenance": {
     "array_layout_version": 1,
@@ -80,7 +80,7 @@
   },
   "schema_version": 1,
   "selected_matchup": {
-    "collection_seconds": 0.1654062500456348,
+    "collection_seconds": 0.21997454098891467,
     "games": 19,
     "gw_deck_hash": "b773828b04e589a9eb8dd71b65bb78975770fd9ccd4a7948df8aa19693380e2e",
     "name": "UR Lessons vs GW Allies",
@@ -92,22 +92,22 @@
   "task": "W2-215",
   "throughput": {
     "1": {
-      "batch_only_observations_per_second": 96193.23266517394,
+      "batch_only_observations_per_second": 68841.78239038635,
       "batches": 4096,
-      "encode_and_batch_observations_per_second": 46687.72850101058,
-      "encode_and_batch_tokens_per_second": 114203791.91211018
+      "encode_and_batch_observations_per_second": 36782.5588169594,
+      "encode_and_batch_tokens_per_second": 89974557.08379684
     },
     "256": {
-      "batch_only_observations_per_second": 456815.69349272957,
+      "batch_only_observations_per_second": 364055.2016475631,
       "batches": 16,
-      "encode_and_batch_observations_per_second": 76260.8131726256,
-      "encode_and_batch_tokens_per_second": 186543109.25463694
+      "encode_and_batch_observations_per_second": 55697.83175656751,
+      "encode_and_batch_tokens_per_second": 136243586.7434646
     },
     "32": {
-      "batch_only_observations_per_second": 399692.61920154176,
+      "batch_only_observations_per_second": 360076.041449183,
       "batches": 128,
-      "encode_and_batch_observations_per_second": 74810.62100413388,
-      "encode_and_batch_tokens_per_second": 182995765.0175016
+      "encode_and_batch_observations_per_second": 59612.03451711443,
+      "encode_and_batch_tokens_per_second": 145818196.85878924
     }
   }
 }
