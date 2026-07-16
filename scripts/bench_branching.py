@@ -30,8 +30,25 @@ import psutil
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_PATH = ROOT / "docs/benchmarks/search-branching-contract-v1.md"
-DEFAULT_RAW = ROOT / "experiments/data/w2-182-search-branching-v1.json"
-DEFAULT_REPORT = ROOT / "experiments/w2-182-search-branching-v1.md"
+FULL_CLONE_DRIVER = "full_clone/current_game_v1"
+CLONE_PLUS_UNDO_DRIVER = "compact_clone_undo/current_game_v1"
+
+# Each candidate lands its own artifact pair. Both pairs are excluded from
+# source_sha256 so that generating one candidate's evidence does not invalidate
+# the other's source digest -- the two must be comparable on one tree.
+ARTIFACTS: dict[str, tuple[Path, Path]] = {
+    FULL_CLONE_DRIVER: (
+        ROOT / "experiments/data/w2-182-search-branching-v1.json",
+        ROOT / "experiments/w2-182-search-branching-v1.md",
+    ),
+    CLONE_PLUS_UNDO_DRIVER: (
+        ROOT / "experiments/data/w2-198-compact-clone-undo-v1.json",
+        ROOT / "experiments/w2-198-compact-clone-undo-v1.md",
+    ),
+}
+
+DEFAULT_RAW = ARTIFACTS[FULL_CLONE_DRIVER][0]
+DEFAULT_REPORT = ARTIFACTS[FULL_CLONE_DRIVER][1]
 BINARY = ROOT / "managym/target/release/branching_bench"
 SCHEMA = "manabot.search-branching.result.v1"
 WHOLE_CELLS = {
@@ -197,7 +214,9 @@ def source_sha256() -> str:
         "node_modules",
         "scratch",
     }
-    excluded_files = {DEFAULT_RAW.resolve(), DEFAULT_REPORT.resolve()}
+    excluded_files = {
+        path.resolve() for pair in ARTIFACTS.values() for path in pair
+    }
     digest = hashlib.sha256()
     files: list[Path] = []
     for directory, names, filenames in os.walk(ROOT):
@@ -424,7 +443,9 @@ def sample_process_rss(
     }
 
 
-def run_group(spec: dict[str, Any], root_seed: int, max_steps: int) -> dict[str, Any]:
+def run_group(
+    spec: dict[str, Any], root_seed: int, max_steps: int, driver: str
+) -> dict[str, Any]:
     repeat_started_at = utc_now()
     processes: list[subprocess.Popen[str]] = []
     process_group_id: int | None = None
@@ -434,7 +455,7 @@ def run_group(spec: dict[str, Any], root_seed: int, max_steps: int) -> dict[str,
         for worker in range(spec["workers"]):
             request = {
                 "schema_version": 1,
-                "driver": "full_clone/current_game_v1",
+                "driver": driver,
                 "workload": spec,
                 "root_seed": root_seed,
                 "worker": worker,
@@ -673,7 +694,7 @@ def summarize_diagnostic(cell: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def run_equivalence(manifest: dict[str, Any]) -> dict[str, Any]:
+def run_equivalence(manifest: dict[str, Any], driver: str) -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
     for fixture in manifest["fixtures"]:
         for seed in manifest["equivalence_seeds"]:
@@ -684,6 +705,8 @@ def run_equivalence(manifest: dict[str, Any]) -> dict[str, Any]:
                 str(seed),
                 "--max-steps",
                 str(manifest["max_steps"]),
+                "--driver",
+                driver,
             ]
             first = native_json(arguments)
             second = native_json(arguments)
@@ -703,12 +726,15 @@ def run_benchmark(
     profile: str,
     oversubscribed: bool,
     *,
+    driver: str,
     started_at: str,
     invoked_argv: list[str],
 ) -> dict[str, Any]:
     initial_source_sha256 = source_sha256()
     build = build_binary()
-    manifest = native_json(["--manifest"])
+    manifest = native_json(["--manifest", "--driver", driver])
+    if manifest["driver"] != driver:
+        raise RuntimeError("native manifest driver does not match the request")
     if manifest["contract_id"] != "manabot.search-branching.v1":
         raise RuntimeError("native manifest does not implement contract v1")
     physical_cores = psutil.cpu_count(logical=False)
@@ -718,7 +744,7 @@ def run_benchmark(
         )
 
     fixtures = [native_json(["--fixture", fixture]) for fixture in manifest["fixtures"]]
-    equivalence = run_equivalence(manifest)
+    equivalence = run_equivalence(manifest, driver)
     if not equivalence["passed"]:
         raise RuntimeError("deterministic equivalence gate failed")
 
@@ -739,10 +765,12 @@ def run_benchmark(
                 "seed": manifest["warmup_seed"] if spec["id"] in WHOLE_CELLS else None,
                 "included_in_measurement": False,
             },
-            "repeats": [run_group(spec, seed, manifest["max_steps"]) for seed in seeds],
+            "repeats": [
+                run_group(spec, seed, manifest["max_steps"], driver) for seed in seeds
+            ],
         }
         if cell["id"] in WHOLE_CELLS:
-            replay = run_group(spec, seeds[0], manifest["max_steps"])
+            replay = run_group(spec, seeds[0], manifest["max_steps"], driver)
             replay["matches_first_repeat"] = (
                 replay["result_checksum"] == cell["repeats"][0]["result_checksum"]
             )
@@ -923,6 +951,7 @@ def validate_repeat_evidence(
     dimensions: dict[str, Any],
     max_steps: int,
     context: str,
+    driver: str,
 ) -> int:
     record = require_keys(
         repeat,
@@ -1009,7 +1038,7 @@ def validate_repeat_evidence(
         )
         if (
             request["schema_version"] != 1
-            or request["driver"] != "full_clone/current_game_v1"
+            or request["driver"] != driver
             or request["workload"] != dimensions
             or request["root_seed"] != record["root_seed"]
             or request["worker"] != worker_index
@@ -1259,6 +1288,7 @@ def validate_required_evidence(payload: Any) -> None:
                 dimensions=dimensions,
                 max_steps=manifest["max_steps"],
                 context=context,
+                driver=run["driver"],
             )
             if process_group_id in process_groups:
                 raise RuntimeError(
@@ -1321,39 +1351,59 @@ def main() -> int:
     run_parser = subparsers.add_parser("run")
     run_parser.add_argument("--profile", choices=("full", "smoke"), default="full")
     run_parser.add_argument("--oversubscribed", action="store_true")
-    run_parser.add_argument("--output", type=Path, default=DEFAULT_RAW)
-    run_parser.add_argument("--report", type=Path, default=DEFAULT_REPORT)
+    run_parser.add_argument(
+        "--driver", choices=tuple(ARTIFACTS), default=FULL_CLONE_DRIVER
+    )
+    run_parser.add_argument("--output", type=Path, default=None)
+    run_parser.add_argument("--report", type=Path, default=None)
     verify_parser = subparsers.add_parser("verify")
-    verify_parser.add_argument("--input", type=Path, default=DEFAULT_RAW)
-    verify_parser.add_argument("--report", type=Path, default=DEFAULT_REPORT)
+    verify_parser.add_argument(
+        "--driver", choices=tuple(ARTIFACTS), default=FULL_CLONE_DRIVER
+    )
+    verify_parser.add_argument("--input", type=Path, default=None)
+    verify_parser.add_argument("--report", type=Path, default=None)
     args = parser.parse_args()
+
+    default_raw, default_report = ARTIFACTS[args.driver]
+    if args.command == "run":
+        output = args.output or default_raw
+        report_path = args.report or default_report
+    else:
+        output = args.input or default_raw
+        report_path = args.report or default_report
 
     if args.command == "run":
         payload = run_benchmark(
             args.profile,
             args.oversubscribed,
+            driver=args.driver,
             started_at=pre_execution_started_at,
             invoked_argv=invoked_argv,
         )
         verify(payload)
-        atomic_write(args.output, canonical_json(payload) + b"\n")
-        atomic_write(args.report, render_report(payload).encode())
+        atomic_write(output, canonical_json(payload) + b"\n")
+        atomic_write(report_path, render_report(payload).encode())
         print(
             json.dumps(
                 {
                     "status": "complete",
                     "profile": args.profile,
-                    "artifact": str(args.output),
-                    "report": str(args.report),
+                    "driver": args.driver,
+                    "artifact": str(output),
+                    "report": str(report_path),
                     "artifact_sha256": payload["artifact_sha256"],
                 }
             )
         )
     else:
-        payload = json.loads(args.input.read_text())
+        payload = json.loads(output.read_text())
+        if payload["run"]["driver"] != args.driver:
+            raise RuntimeError(
+                f"artifact driver {payload['run']['driver']} does not match --driver {args.driver}"
+            )
         verify(payload)
         expected_report = render_report(payload)
-        if args.report.read_text() != expected_report:
+        if report_path.read_text() != expected_report:
             raise RuntimeError("generated report is stale")
         print(
             json.dumps(
