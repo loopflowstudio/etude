@@ -3,21 +3,40 @@
 ## Durable evidence and scheduling
 
 - Runtime foundation evidence resolved 2026-07-15: W2-208/PR #81 proves independently reset environments, exact root/sibling forks, and retained RolloutPool slots share one versioned `Arc<ContentPack>` while mutable branch facts remain isolated; the allocation gate retains 4,096 pack references at 0 allocations/0 bytes and shows immutable-definition bytes do not increase GameState/Game clone allocations. W2-216/PR #89 merged at d8a92aad729adabf82867c19b021510c8d473165 and corrected the receipt to the canonical measured revision f7d5878b6be4b2276ac5f42f50dc5f390a6982ad with passing thresholds. Runtime KRs 1 and 2 hold; KR3 remains open. For revision-bound evidence, verify `measurement_code_revision` after the final rebase and before landing; merged status alone is not proof of freshness.
-- Semantic choice evidence verified 2026-07-15: W2-181 and W2-188 make Semantic KRs 2 and 3 hold; priority, Lightning Bolt targeting, and declare attackers use revision/prompt-bound structured offers and atomic commands without the 32-choice cap, with legacy-adapter legal-outcome and deterministic-trace differential coverage. W2-189/PR #88 merged at dd0032697bcffc0dd03d374910772879e8d923b6 and makes KR4 hold with the structured-decoder benchmark. Semantic KRs 1, 5, and 6 remain open.
-- Semantic learning order established 2026-07-15: W2-215 owns the viewer-safe typed-program projection for KR5. W2-223 owns KR1's complete two-deck offline-compiler admission and no-card-name-dispatch proof and stays dormant while W2-215 is active. W2-214 follows verified W2-215 evidence; W2-213 follows W2-214. Filed Tasks, PR publication, and training activity are not KR evidence.
+- Semantic choice and learning-input evidence verified 2026-07-15: W2-181 and
+  W2-188 make Semantic KRs 2 and 3 hold; W2-189/PR #88 at
+  dd0032697bcffc0dd03d374910772879e8d923b6 makes KR4 hold with the
+  structured-decoder benchmark. W2-215/PR #92 at
+  f567f600b0ff256fda9cdb18b9bda70bc2b569b8 makes KR5 hold with a
+  viewer-safe versioned token graph, exact ContentPack binding, ragged
+  projection and deterministic padding, semantic-only identity ablation,
+  fail-closed artifact provenance, unknown-schema/opcode rejection, and a
+  4,096-state receipt with zero projection failures or unadmitted visible
+  objects. Semantic KRs 1 and 6 remain open.
+- Semantic learning order advanced 2026-07-15: W2-214 is unblocked and owns
+  KR6's reproducible four-arm held-out transfer experiment; W2-213 follows its
+  evidence. W2-223 owns KR1's complete two-deck offline-compiler admission and
+  no-card-name-dispatch proof and remains separate from the learning run.
+  Filed Tasks, PR publication, and training activity are not KR evidence.
 - Metta observation-history research 2026-07-15: tokenization alone did not
   create robustness. Metta needed symbolic feature specs, restore-time runtime
   ID remapping, environment-owned normalization, explicit padding, measured
   token caps, compatibility shims, bundled architecture specs, and
   cross-language packing fixes. It remains robust to changing sets of known
-  facts, not to genuinely novel semantic primitives. This sharpens W2-215:
-  `SemanticInputSpec`, symbolic rebinding, explicit program structure/masks,
-  compiler-proven budgets, unknown-op admission, and Rust/Python parity are
-  part of the projection finish line. W2-214 owns permutation/rebind controls,
-  identity ablation, and overflow/performance receipts within the four-arm
-  transfer experiment; W2-223 owns compiler-side primitive admission.
+  facts, not to genuinely novel semantic primitives. W2-215 implements the
+  versioned schema, symbolic binding, explicit program structure/masks,
+  identity ablation, unknown-op rejection, and uncapped ragged projection.
+  W2-214 owns permutation/rebind controls and overflow/performance receipts
+  within the four-arm transfer experiment; W2-223 owns compiler-side primitive
+  admission.
 - Identity and event evidence verified 2026-07-15: W2-180, W2-190, and W2-191 make all Identity and Event Semantics KRs hold. The admitted slice has incarnation-changing leave/re-enter with stale `ObjectRef` rejection and LKI, typed proposed-event replacement/prevention before commit for damage, life, destruction, counters, and zone movement, and deterministic trigger/SBA fixpoint tests with incarnation-safe public rules boundaries. Treat further breadth as gap-driven follow-up.
-- Search verification state 2026-07-15: Search KR4 holds; KRs 1–3 remain open. W2-200 owns conformance-oracle CI for KR3. W2-197 owns the executable fork/rollback contract and has a queued repair for its failing CI check; do not duplicate the restart. W2-207's runtime regression gate remains sequenced after the branching contract and matched design evidence.
+- Search verification state 2026-07-15: Search KRs 3 and 4 hold. W2-200/PR #94
+  at ac76b782c15649f4d5924e660e15e43d2febf09a adds checked reference-versus-
+  optimized terminal replays, property/metamorphic checks, bounded valid-action
+  fuzzing, a pinned Phase overlap matrix, and blocking semantic-conformance CI.
+  KRs 1 and 2 remain open. W2-197 owns the executable fork/rollback contract
+  and its failing Rust CI repair; W2-207's runtime regression gate remains
+  sequenced after the branching contract and matched design evidence.
 
 ## Decisions
 
