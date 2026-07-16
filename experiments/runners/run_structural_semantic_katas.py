@@ -508,6 +508,10 @@ def run(
 ) -> dict[str, Any]:
     if sys.version_info[:2] != (3, 12):
         raise StructuralKataError("primary run requires CPython 3.12")
+    contract_path = (
+        contract_path if contract_path.is_absolute() else ROOT / contract_path
+    ).resolve()
+    suite_path = (suite_path if suite_path.is_absolute() else ROOT / suite_path).resolve()
     contract, contract_digest = load_contract(contract_path)
     suite, suite_digest = load_suite(suite_path)
     preregistration_revision = _verify_preregistration(
