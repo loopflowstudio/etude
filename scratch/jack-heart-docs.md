@@ -16,7 +16,7 @@ Run `./scripts/play`, open Play and Replay, and see the existing game surfaces r
 
 - Loopflow `VISUAL_DESIGN.md` at commit `1e68ba107` is copied into this repository as `VISUAL_DESIGN.md`.
 - Loopflow's current `DesignSystem.swift` and `BrandColors.swift` supply the canonical fonts and tokens.
-- Kata confirms the same palette and spacing system; its lifted dark-mode burgundy (`#9B4A54` / `#B25A64`) resolves Loopflow's dark contrast gap and is the only deliberate reconciliation.
+- Kata confirms the same palette and spacing system. Its lifted dark-mode burgundy starts the contrast correction; Etude preserves the `#9B4A54` control fill and completes the accessible roles with a `#B05762` hover fill and `#D9949D` display-text tint.
 
 ## Constraints
 

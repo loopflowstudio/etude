@@ -411,6 +411,6 @@ Before merging UI changes:
 Etude Fantasia adopts this contract across Play and Replay. The implementation
 lives in `frontend/src/app.css`; bundled fonts live in `frontend/static/fonts/`.
 Kata uses the same palette and tokens. In dark mode, Etude follows kata's
-contrast correction by lifting the accent to `#9B4A54` and hover state to
-`#B25A64`; Loopflow remains authoritative everywhere else.
-
+contrast correction with a `#9B4A54` control fill, then completes it with a
+contrast-safe `#B05762` hover fill and `#D9949D` display-text tint. Loopflow
+remains authoritative everywhere else.
