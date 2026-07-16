@@ -50,8 +50,13 @@ fn combat_death_and_next_turn_are_one_ordered_committed_tape() {
 
     assert!(matches!(
         semantic[0],
-        GameEvent::CombatAttackersDeclared { player, attackers }
+        GameEvent::CombatAttackersDeclared {
+            player,
+            defender,
+            attackers,
+        }
             if player.0 == 0
+                && defender.0 == 1
                 && attackers.len() == 1
                 && attackers[0].entity == attacker_render_id
     ));
@@ -88,6 +93,9 @@ fn combat_death_and_next_turn_are_one_ordered_committed_tape() {
     ));
     assert!(matches!(
         semantic[5],
-        GameEvent::TurnStarted { player } if player.0 == 1
+        GameEvent::TurnStarted {
+            player,
+            turn_number: 4,
+        } if player.0 == 1
     ));
 }

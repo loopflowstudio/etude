@@ -137,7 +137,10 @@ impl Game {
         self.state.priority.start_round(self.active_player());
         if step == StepKind::Untap {
             let player = self.active_player();
-            let event = GameEvent::TurnStarted { player };
+            let event = GameEvent::TurnStarted {
+                player,
+                turn_number: self.state.turn.turn_number,
+            };
             self.state.events.push(event.clone());
             self.emit_observation_event(event);
         }
@@ -222,6 +225,7 @@ impl Game {
                         if !attackers.is_empty() {
                             self.emit_observation_event(GameEvent::CombatAttackersDeclared {
                                 player: active,
+                                defender: self.non_active_player(),
                                 attackers,
                             });
                         }

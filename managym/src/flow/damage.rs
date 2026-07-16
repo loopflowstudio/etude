@@ -6,7 +6,6 @@ use crate::{
         event::{DamageTarget, EventSubject, GameEvent},
         game::Game,
         proposed_event::{ProposedDamageTarget, ProposedEvent},
-        turn::StepKind,
     },
     state::game_object::{CardId, ObjectRef, PermanentId, PlayerId},
 };
@@ -22,6 +21,7 @@ impl Game {
             source,
             target: ProposedDamageTarget::Player(player),
             amount,
+            combat: false,
         });
     }
 
@@ -38,6 +38,38 @@ impl Game {
             source,
             target: ProposedDamageTarget::Object(target),
             amount,
+            combat: false,
+        });
+    }
+
+    pub(crate) fn apply_combat_player_damage(
+        &mut self,
+        source: Option<ObjectRef>,
+        player: PlayerId,
+        amount: i32,
+    ) {
+        self.apply_proposed_event(ProposedEvent::Damage {
+            source,
+            target: ProposedDamageTarget::Player(player),
+            amount,
+            combat: true,
+        });
+    }
+
+    pub(crate) fn apply_combat_permanent_damage(
+        &mut self,
+        source: Option<ObjectRef>,
+        permanent_id: PermanentId,
+        amount: i32,
+    ) {
+        let Some(target) = self.permanent_object_ref(permanent_id) else {
+            return;
+        };
+        self.apply_proposed_event(ProposedEvent::Damage {
+            source,
+            target: ProposedDamageTarget::Object(target),
+            amount,
+            combat: true,
         });
     }
 
@@ -46,6 +78,7 @@ impl Game {
         source: Option<ObjectRef>,
         target: ProposedDamageTarget,
         amount: i32,
+        combat: bool,
     ) -> bool {
         if amount <= 0 {
             return false;
@@ -61,7 +94,7 @@ impl Game {
                 .then(|| self.source_controller(object_ref))
                 .flatten()
         });
-        let combat_source = (self.state.turn.current_step_kind() == StepKind::CombatDamage)
+        let combat_source = combat
             .then(|| source.and_then(|object_ref| self.object_event_ref(object_ref)))
             .flatten();
 

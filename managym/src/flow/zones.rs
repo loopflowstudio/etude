@@ -167,9 +167,9 @@ impl Game {
     }
 
     /// Publish an additive viewer fact in the committed observation window
-    /// without changing trigger matching, rule-event counts, or benchmark
-    /// state. Presentation projection consumes these facts; policy encoders
-    /// filter their event types.
+    /// without changing trigger matching or the rules-event ledger.
+    /// Presentation projection consumes these facts; policy encoders filter
+    /// their event types.
     pub(crate) fn emit_observation_event(&mut self, event: GameEvent) {
         self.state.observation_events.push(event);
     }

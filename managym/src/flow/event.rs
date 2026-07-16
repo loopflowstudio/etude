@@ -88,6 +88,7 @@ pub enum GameEvent {
     /// Viewer-safe attacker identities captured at declaration completion.
     CombatAttackersDeclared {
         player: PlayerId,
+        defender: PlayerId,
         attackers: Vec<ObjectEventRef>,
     },
     /// Final legal assignments after the complete blocker declaration loop.
@@ -106,6 +107,7 @@ pub enum GameEvent {
     },
     TurnStarted {
         player: PlayerId,
+        turn_number: u32,
     },
     StepStarted {
         step: StepKind,

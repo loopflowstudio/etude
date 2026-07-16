@@ -313,10 +313,7 @@ impl Observation {
             opponent_cards: Vec::new(),
             opponent_permanents: Vec::new(),
             stack_objects: Vec::new(),
-            recent_events: recent_events
-                .iter()
-                .flat_map(|event| Self::event_data(game, event))
-                .collect(),
+            recent_events: recent_events.iter().flat_map(Self::event_data).collect(),
         };
 
         obs.populate_cards(game, agent_player);
@@ -571,7 +568,7 @@ impl Observation {
         }
     }
 
-    fn event_data(game: &Game, event: &GameEvent) -> Vec<EventData> {
+    fn event_data(event: &GameEvent) -> Vec<EventData> {
         use crate::flow::event::DamageTarget;
         match event {
             GameEvent::CardMoved {
@@ -633,16 +630,23 @@ impl Observation {
                 *source_card,
                 *controller,
             )],
-            GameEvent::CombatAttackersDeclared { player, attackers } => attackers
+            GameEvent::CombatAttackersDeclared {
+                player,
+                defender,
+                attackers,
+            } => attackers
                 .iter()
                 .map(|attacker| {
-                    Self::object_event_data(
+                    let mut data = Self::object_event_data(
                         EventType::CombatAttackersDeclared,
                         Some(*attacker),
                         None,
                         0,
                         Some(*player),
-                    )
+                    );
+                    data.target_kind = EventEntityKind::Player as i32;
+                    data.target_id = defender.0 as i32;
+                    data
                 })
                 .collect(),
             GameEvent::BlockersDeclared { assignments } => assignments
@@ -689,14 +693,23 @@ impl Observation {
             GameEvent::PermanentsDied { objects } => objects
                 .iter()
                 .map(|object| {
-                    Self::object_event_data(EventType::PermanentsDied, Some(*object), None, 0, None)
+                    Self::object_event_data(
+                        EventType::PermanentsDied,
+                        Some(*object),
+                        None,
+                        objects.len() as i32,
+                        None,
+                    )
                 })
                 .collect(),
-            GameEvent::TurnStarted { player } => vec![Self::build_event_data(
+            GameEvent::TurnStarted {
+                player,
+                turn_number,
+            } => vec![Self::build_event_data(
                 EventType::TurnStarted,
                 Some(EventEntity::Player(*player)),
                 None,
-                game.state.turn.turn_number as i32,
+                *turn_number as i32,
                 Some(*player),
             )],
             // Internal trigger-plumbing events; the underlying state changes

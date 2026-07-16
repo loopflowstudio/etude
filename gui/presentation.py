@@ -281,7 +281,7 @@ class PresentationProjector:
 
             if event_type == "COMBAT_ATTACKERS_DECLARED":
                 attackers: list[dict[str, int]] = []
-                controller = int(event.controller_id)
+                defender = int(event.target_id)
                 while (
                     index < len(events)
                     and _event_type(events[index]) == "COMBAT_ATTACKERS_DECLARED"
@@ -296,10 +296,7 @@ class PresentationProjector:
                         kind={
                             "kind": "attack_group",
                             "attackers": attackers,
-                            "defender": {
-                                "kind": "player",
-                                "id": (controller + 1) % 2,
-                            },
+                            "defender": {"kind": "player", "id": defender},
                         },
                     )
                 )
@@ -366,9 +363,11 @@ class PresentationProjector:
 
             if event_type == "PERMANENTS_DIED":
                 objects: list[dict[str, int]] = []
+                batch_size = max(1, int(event.amount))
                 while (
                     index < len(events)
                     and _event_type(events[index]) == "PERMANENTS_DIED"
+                    and len(objects) < batch_size
                 ):
                     objects.append(_event_object_id(events[index], source=True))
                     index += 1
