@@ -168,8 +168,10 @@ fn clone_plus_undo_rolls_back_token_allocation_and_the_id_watermark() {
 
     let mark = driver.mark(&mut branch);
     let controller = branch.agent_player();
-    branch.create_token("Wind Drake", controller, false);
-    branch.create_token("Gray Ogre", controller, false);
+    // Ally and Clue are the admitted pack's real token definitions; passing a
+    // nontoken card name trips a debug-only assertion in `create_token`.
+    branch.create_token("Ally", controller, false);
+    branch.create_token("Clue", controller, false);
 
     assert!(
         branch.state.cards.len() > cards_before,
