@@ -1,0 +1,113 @@
+{
+  "command": "uv run scripts/benchmark_semantic_projection.py --seed 215 --states 4096 --batch-sizes 1,32,256 --revision 733c6628248b5d404dc7145616994ea862fa4d5a --measured-at 2026-07-15T18:57:17-07:00 --out experiments/data/w2-215-semantic-projection.json",
+  "correctness": {
+    "identity_features_valid_in_semantic_only": 0,
+    "projection_failures": 0,
+    "unadmitted_visible_objects": 0
+  },
+  "counts": {
+    "catalog_tokens": 2088,
+    "definition_references": 4,
+    "definition_tokens": {
+      "max": 33.0,
+      "mean": 23.806451612903224,
+      "min": 16.0,
+      "p50": 24.0,
+      "p95": 32.5
+    },
+    "definitions": 31,
+    "program_tokens": {
+      "max": 75.0,
+      "mean": 36.486486486486484,
+      "min": 17.0,
+      "p50": 29.0,
+      "p95": 63.79999999999998
+    },
+    "programs": 37,
+    "tokens_per_visible_object": {
+      "max": 148.0,
+      "mean": 56.669653058223325,
+      "min": 24.0,
+      "p50": 53.0,
+      "p95": 95.0
+    },
+    "unadmitted_visible_objects": 0,
+    "visible_objects": 176802
+  },
+  "environment": {
+    "logical_cpus": 16,
+    "managym_extension": "/Users/jack/src/manabot.expose-viewer-safe-semantic-program/managym/_managym.cpython-312-darwin.so",
+    "managym_python_package_version": "0.2.0",
+    "managym_rust_crate_version": "0.1.0",
+    "platform": "macOS-26.0.1-arm64-arm-64bit",
+    "processor": "arm",
+    "python": "3.12.12"
+  },
+  "latency": {
+    "cold_bind_ms": 2.042125,
+    "hot_encode_microseconds": {
+      "max": 344.042,
+      "mean": 8.23755224609375,
+      "min": 3.291,
+      "p50": 7.875,
+      "p95": 12.375
+    }
+  },
+  "measured_at": "2026-07-15T18:57:17-07:00",
+  "measurement_code_revision": "733c6628248b5d404dc7145616994ea862fa4d5a",
+  "memory": {
+    "catalog_bytes": 13116,
+    "largest_padded_object_batch_bytes": 334080,
+    "largest_ragged_object_batch_bytes": 253602,
+    "padded_catalog_bytes": 27384,
+    "process_peak_rss_bytes": 268812288,
+    "python_traced_peak_bytes": 1003313,
+    "rss_after_bytes": 265256960,
+    "rss_before_bytes": 264503296,
+    "rss_delta_bytes": 753664
+  },
+  "provenance": {
+    "array_layout_version": 1,
+    "binding_hash": null,
+    "content_pack_hash": "2444fc15283068d79f74d49f8297bdbe3cc581a62a1eee976b35a8cecd8a0ef4",
+    "content_pack_schema_version": 1,
+    "identity_mode": "semantic_only",
+    "learning_schema_hash": "21afc6287b081332f1f060ca0cc85f075d2fab5e3397c6d89f55bc941aeceb1f",
+    "learning_schema_version": 1,
+    "semantic_ir_hash": "c8bfe15eab35e5953c7a55ba69d83753fa8878b86f9f74e371ec66a233606337",
+    "semantic_ir_schema_version": 1,
+    "semantic_pack_hash": "40edd512095e974d73be81b53707090fd3a2e38cefbb9e83b9abcce42d84e39e"
+  },
+  "schema_version": 1,
+  "selected_matchup": {
+    "collection_seconds": 0.1882239580154419,
+    "games": 19,
+    "gw_deck_hash": "b773828b04e589a9eb8dd71b65bb78975770fd9ccd4a7948df8aa19693380e2e",
+    "name": "UR Lessons vs GW Allies",
+    "seat_balanced_collection": true,
+    "seed": 215,
+    "states": 4096,
+    "ur_deck_hash": "8c9d4808c78d00932788e1bc20698502cb6d2bbc26969c76a9add26f1c5eb86e"
+  },
+  "task": "W2-215",
+  "throughput": {
+    "1": {
+      "batch_only_observations_per_second": 83990.5777171726,
+      "batches": 4096,
+      "encode_and_batch_observations_per_second": 40414.3389324657,
+      "encode_and_batch_tokens_per_second": 98858327.48553833
+    },
+    "256": {
+      "batch_only_observations_per_second": 429749.89835932275,
+      "batches": 16,
+      "encode_and_batch_observations_per_second": 64960.70797021577,
+      "encode_and_batch_tokens_per_second": 158901694.59268716
+    },
+    "32": {
+      "batch_only_observations_per_second": 383721.2265289267,
+      "batches": 128,
+      "encode_and_batch_observations_per_second": 64026.928325464636,
+      "encode_and_batch_tokens_per_second": 156617557.4186412
+    }
+  }
+}
