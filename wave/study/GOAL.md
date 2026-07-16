@@ -2,7 +2,7 @@
 pm:
   provider: linear
   linear_initiative: 1f18f754-dbad-44c0-a90a-4a51941aed88
-  linear_team: 60558c53-2169-49f8-a76a-1f4586705aa9
+  linear_team: feadac43-5d63-412e-b6f6-39424a13f45a
 ---
 
 # Study
