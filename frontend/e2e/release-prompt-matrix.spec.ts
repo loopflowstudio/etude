@@ -285,6 +285,7 @@ async function settleBoardPresentation(page: Page): Promise<void> {
 
   await presentationStage.getByRole('button', { name: 'Finish', exact: true }).click();
   await expect(presentationStage).toBeHidden();
+  await page.getByTestId('action-option').first().focus();
 }
 
 function assertNoRuntimeFailures(scenario: PromptScenario, failures: RuntimeFailures): void {
