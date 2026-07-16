@@ -58,7 +58,7 @@
       <div class="flex flex-wrap gap-2">
         {#if opponent}
           {#each Array(hiddenHandCount) as _, index}
-            <div aria-label={`Hidden card ${index + 1}`}>
+            <div role="img" aria-label={`Hidden card ${index + 1}`}>
               <CardBack />
             </div>
           {/each}
