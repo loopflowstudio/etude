@@ -1,19 +1,19 @@
-# Assumptions
+# Confirmed interpretation and assumptions
 
-- W2-275's "every historical player decision" is interpreted per historical
-  viewer. For the pinned Study handoff that viewer is player 0, so the index
-  contains every deliberate command player 0 made. Opponent-policy activity,
-  priority auto-pass/F6 activity, and rules resolution remain authoritative
-  continuation between those decisions rather than choices shown to player 0.
-  Game can produce the same projection for player 1 when that viewer is
-  authorized; it must never combine both players' private projections into one
-  client artifact.
-- A stable address is stable within an immutable, digest-pinned canonical
-  replay. Regenerating or editing the replay changes its SHA-256 and therefore
-  invalidates old addresses instead of silently resolving them against changed
-  history.
-- Legacy traces that did not persist an authoritative frame, selected offer,
-  command, and presentation cursor are not canonicalizable. The implementation
-  should return an explicit unavailable error for them rather than infer
-  decisions from raw action indices or observation differences.
+- The canonical Game index is one complete, globally chronological index over
+  every deliberate player decision in the pinned match. Human commands and
+  opponent-policy choices are indexed. Configured auto-passes, F6 expansion,
+  and rules resolution are not decisions and remain semantic continuation.
+- Every decision row is scoped to its acting viewer and stores only the exact
+  `ExperienceFrame`, `InteractionOffer`, and `Command` safe for that viewer.
+  The complete mixed-view index is authority-private. Any client or Study
+  artifact is an authorized single-viewer projection and can never combine
+  both players' private frames or presentation tracks.
+- A stable address is stable within an immutable replay ID and exact decision
+  payload. Editing the stored replay or row invalidates its integrity binding
+  instead of silently resolving the address against changed history.
+- Legacy traces that did not persist authoritative frames, offers, commands,
+  viewer identities, revisions, and presentation cursors are not
+  canonicalizable. They remain usable by the legacy replay viewer, but the
+  canonical resolver fails closed instead of inferring missing history.
 
