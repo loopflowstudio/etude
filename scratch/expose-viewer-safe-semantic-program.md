@@ -179,11 +179,12 @@ opaque_identity_valid:    bool[O]
 ```
 
 The pure padding adapter returns deterministic `[B, Omax]` object tensors and
-`object_mask`, plus `[D, Tmax]` catalog token tensors and `token_mask`; reference
-edges receive an equivalent mask. Padding uses `-1` for indices, zero for token
-values, and false masks. Empty observations produce offsets `[0]` and a valid
-zero-width object batch. No program, token, or visible-object truncation is
-allowed; `Omax`/`Tmax` are derived from the batch/catalog being padded.
+`object_mask`, plus `[D, Tdmax]` definition tokens, `[P, Tpmax]` program tokens,
+their masks, definition-to-program rows, and masked reference edges. Padding
+uses `-1` for indices, zero for token values, and false masks. Empty
+observations produce offsets `[0]` and a valid zero-width object batch. No
+program, token, or visible-object truncation is allowed; maxima are derived
+from the batch/catalog being padded.
 
 In `identity` mode, `opaque_identity_ids` contains the bound `CardDefId` and its
 mask is true. In `semantic_only` mode, the same stable arrays contain only `-1`
@@ -289,6 +290,8 @@ uv run scripts/compile_semantic_content.py --check
 uv run pytest tests/semantic tests/env/test_observation.py tests/agent/test_managym.py
 uv run scripts/benchmark_semantic_projection.py --seed 215 --states 4096 \
   --batch-sizes 1,32,256 \
+  --revision <measurement-code-revision> \
+  --measured-at <absolute-ISO-8601-time> \
   --out experiments/data/w2-215-semantic-projection.json
 ```
 
