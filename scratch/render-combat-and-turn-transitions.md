@@ -51,7 +51,8 @@ Rules meaning remains native:
   Rust and Python encoders filter event types above `AbilityTriggered`, keeping
   policy tensors byte-for-byte compatible;
 - PyO3 exposes the additive event fields through the existing observation
-  bridge. No parallel presentation sidecar or ledger exists.
+  bridge. No parallel native presentation sidecar exists; the protocol's
+  bounded presentation ledger remains the recovery envelope's consumer.
 
 `managym/src/experience.rs` remains the protocol type authority. Replace the
 opaque `serde_json::Value` kind with the already shipped cast/target/resolve/
@@ -67,6 +68,10 @@ event dictionaries in `FrameUpdate.presentation`. The same dictionaries are
 attached to the corresponding `TraceEvent.presentation`; trace persistence,
 not a frontend fixture or snapshot comparison, is the recorded authority for
 replay. Old trace events without `presentation` remain an empty sequence.
+Its bounded 256-event recovery ledger stores those same dictionaries. A
+cursor names the first returned event; a cursor outside the retained window
+restarts disposable theater at the oldest retained event while the complete
+frame converges game truth.
 
 Display labels are context, not rules facts. Live presentation builds a label
 registry from both the pre-commit and committed viewer-safe frames so a dead
@@ -98,10 +103,10 @@ by W2-184; they never cause a semantic event to be invented or discarded.
    finished.
 6. Make attacker choices distinct (`Attack with X` / `Do not attack with X`)
    from native action metadata, retain blocker labels (`Block A with B` /
-   `B: do not block`), and add a focused browser scenario that completes the
-   curated tape once by pointer and once by Tab/Enter. Assert prompt kind,
-   focus ring, accessible name, exact current offer submission, and authority
-   revision advance for both prompt families.
+   `B: do not block`), and add a bounded browser authority for interaction
+   only. Assert prompt kind, focus ring, accessible name, exact current offer
+   submission, and authority revision advance for both prompt families by
+   pointer and Tab/Enter.
 7. Record the deterministic curated tape as test data produced by the real
    named decks and engine. Pin the seed, passive/deterministic policy choices,
    action descriptions, deck pack reference, and expected ordered event kinds;
@@ -119,9 +124,9 @@ by W2-184; they never cause a semantic event to be invented or discarded.
 - **Protocol artifacts:** typed `PresentationKind`, regenerated JSON Schema,
   and a non-empty combat conformance fixture. Existing Bolt fixture and
   protocol-v1 recovery/command fields remain valid.
-- **FastAPI session:** W2-184's monotonic presentation sequence state and
-  per-command batch construction. Revision, idempotency, recovery, stops, and
-  hero-view behavior stay authoritative and unchanged.
+- **FastAPI session:** monotonic presentation sequence state, per-command batch
+  construction, and the current main recovery cursor/256-event ledger.
+  Revision, idempotency, stops, and hero-view behavior stay authoritative.
 - **Trace API:** optional/defaulted `TraceEvent.presentation`; normalization
   and redaction must retain viewer-safe events without exposing hidden cards.
 - **Frontend:** existing socket commit gate, presentation player/stage, live
@@ -155,9 +160,9 @@ by W2-184; they never cause a semantic event to be invented or discarded.
   command receipt.
 - Trace redaction must reject any presentation payload that names or follows a
   hidden-zone object not visible to the hero.
-- Duplicate/stale command and full snapshot-plus-event recovery proofs remain
-  owned by the Experience Contract tasks. This PR preserves their interfaces;
-  recovery presentation remains empty rather than inventing an unowned tail.
+- Duplicate/stale command and snapshot-plus-event recovery remain owned by the
+  Experience Contract. This PR preserves their interfaces and proves the new
+  combat dictionaries survive the current cursor-addressed retained tail.
 
 ## End-to-end proof
 
@@ -186,8 +191,10 @@ engine scenario—not the browser route—owns combat semantics.
 
 - One command may batch all native facts produced before the next surfaced
   hero prompt, but presentation order must match native emission order exactly.
-- Maintain W2-184's one monotonic event counter per match; traces retain the
-  complete committed sequence. Recovery tail reconstruction remains excluded.
+- Maintain one monotonic event counter per match. Traces retain the complete
+  committed sequence; recovery retains the latest 256 viewer-safe events and
+  restarts theater from its oldest event when a requested cursor is outside
+  that window.
 - The authoritative frame is applied before the first beat. Presentation must
   never hold the rules loop, WebSocket response, replay frame data, or legal
   prompt hostage to its suggested duration.
