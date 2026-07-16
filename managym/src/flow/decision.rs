@@ -155,6 +155,7 @@ impl Game {
     fn finalize_frame(&mut self, frame: EffectFrame) {
         if let FrameFinalize::Spell { card } = frame.finalize {
             if let Some(index) = self.find_spell_on_stack_index(card) {
+                self.journal_stack();
                 self.state.stack_objects.remove(index);
             }
             let is_permanent = self.state.cards[card].types.is_permanent();

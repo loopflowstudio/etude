@@ -44,6 +44,27 @@ impl Default for ZoneManager {
 }
 
 impl ZoneManager {
+    pub(crate) fn allocated_bytes(&self) -> usize {
+        use std::mem::size_of;
+
+        let ordered = self
+            .library
+            .iter()
+            .chain(self.hand.iter())
+            .chain(self.battlefield.iter())
+            .chain(self.graveyard.iter())
+            .chain(self.stack.iter())
+            .chain(self.exile.iter())
+            .chain(self.command.iter())
+            .map(|cards| cards.capacity().saturating_mul(size_of::<CardId>()))
+            .sum::<usize>();
+        ordered
+            + self
+                .card_zones
+                .capacity()
+                .saturating_mul(size_of::<Option<ZoneType>>())
+    }
+
     fn ensure_slot(&mut self, card: CardId) {
         if self.card_zones.len() <= card.0 {
             self.card_zones.resize(card.0 + 1, None);
