@@ -69,24 +69,17 @@ npm --prefix frontend test
 npm --prefix frontend run test:e2e:release -- release-prompt-matrix.spec.ts
 ```
 
-Full relevant verification:
-
-```bash
-uv run pytest tests/gui
-npm --prefix frontend run check
-npm --prefix frontend test
-npm --prefix frontend run test:e2e:release
-```
-
 The observable finish condition is a terminal accessibility receipt covering
 all nine reachable families, both pinned game results, the named status/focus
 checks, zero accessibility/contrast violations, zero motion violations, zero
-runtime errors, and zero broken or external play assets.
+runtime errors, and zero broken or external play assets. When those focused
+gates pass, Loopflow lands and completes the Task with `lf pr land -c`.
 
 ## Affected surfaces and consumers
 
-- `frontend/src/lib/game.svelte.ts`: complete prompt instructions for all nine
-  matrix families; no authority or wire behavior changes.
+- `frontend/src/lib/prompt-instructions.ts`: complete prompt instructions for
+  all nine matrix families; `game.svelte.ts` remains compatible and no
+  authority or wire behavior changes.
 - `ActionPanel.svelte`: accessible region/description/status relationships,
   exact offer names, and deterministic focus handoff for each new prompt.
 - The play route and `GameBoard.svelte`: live connection/error/result semantics
@@ -142,9 +135,9 @@ runtime errors, and zero broken or external play assets.
 - Reduced-motion play must preserve the exact deterministic command counts and
   terminal outcomes. Presentation may collapse to a short semantic beat, but
   CSS animation/transition must not remain perceptible.
-- Do not publish from this Task while W2-194/PR #75 is open. After focused and
-  full relevant validation, stop and report `ready-to-publish`; do not open,
-  submit, or land this PR under directive v2.
+- W2-194/PR #75 is complete, so no publication hold remains. Run the focused
+  validation listed above; land and complete with `lf pr land -c` only when it
+  passes. If an in-scope defect cannot be fixed, stop with that exact blocker.
 
 ## Exclusions
 
@@ -159,6 +152,6 @@ runtime errors, and zero broken or external play assets.
 ## Pursue target
 
 Implement the semantic/focus/reduced-motion fixes, strengthen the existing
-release matrix in place, run the focused and full relevant commands above, and
-leave the branch stopped with a complete validation receipt and no PR while
-the directive-v2 publication hold remains active.
+release matrix in place, run the focused commands above, fix only in-scope
+defects, and run `lf pr land -c` when the complete accessibility receipt is
+green.
