@@ -50,6 +50,7 @@
 
 :root {
   color-scheme: light dark;
+  accent-color: var(--accent);
 
   /* Loopflow / kata brand */
   --burgundy: #722f37;

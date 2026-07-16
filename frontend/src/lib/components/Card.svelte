@@ -33,11 +33,24 @@
 
   const widthClass = $derived(size === 'normal' ? 'w-40' : 'w-20');
   const imageClass = 'h-full w-full rounded-md object-cover';
+
+  // Tapped, summoning-sick, and damage states are shown by rotation, opacity,
+  // and badge color; the accessible name must carry them too.
+  const stateNotes = $derived(
+    [
+      tapped ? 'tapped' : null,
+      dimmed ? 'summoning sick' : null,
+      damage > 0 ? `${damage} damage` : null,
+    ].filter((note): note is string => note !== null),
+  );
+  const accessibleName = $derived(
+    stateNotes.length > 0 ? `${name} (${stateNotes.join(', ')})` : name,
+  );
 </script>
 
 <button
   type="button"
-  aria-label={name}
+  aria-label={accessibleName}
   aria-disabled={!clickable}
   tabindex={clickable ? 0 : -1}
   class={`group relative aspect-[5/7] ${widthClass} overflow-visible rounded-lg border bg-slate-900 text-left shadow transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300 ${focused ? 'border-blue-400 ring-1 ring-blue-400/70' : 'border-slate-700'} ${clickable ? 'cursor-pointer hover:-translate-y-1 hover:border-amber-300' : 'cursor-default'} ${tapped ? 'rotate-90' : ''} ${dimmed ? 'opacity-70' : ''}`}
@@ -67,7 +80,7 @@
   <div class="pointer-events-none absolute inset-0 rounded-lg ring-1 ring-inset ring-black/20"></div>
 
   {#if power !== null && toughness !== null}
-    <div class="pointer-events-none absolute bottom-1 right-1 rounded bg-slate-950/90 px-1.5 py-0.5 text-[10px] font-semibold text-slate-100">
+    <div class="pointer-events-none absolute bottom-1 right-1 rounded bg-[rgb(10_13_20/0.9)] px-1.5 py-0.5 text-[10px] font-semibold text-[#faf8f5]">
       {power}/{toughness}
     </div>
   {/if}

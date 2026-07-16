@@ -39,10 +39,10 @@
     <div
       class={`pointer-events-auto w-full max-w-xl rounded-xl border px-4 py-3 shadow-2xl backdrop-blur ${
         beat.importance === 'critical'
-          ? 'border-rose-300/70 bg-rose-950/90'
+          ? 'border-rose-500/80 bg-slate-800/95'
           : beat.importance === 'emphasized'
-            ? 'border-amber-300/60 bg-slate-950/90'
-            : 'border-cyan-300/40 bg-slate-950/90'
+            ? 'border-amber-600/60 bg-slate-800/95'
+            : 'border-cyan-400/40 bg-slate-800/95'
       }`}
     >
       <div class="flex items-start justify-between gap-4">
@@ -50,7 +50,7 @@
           <p class="font-mono text-[9px] font-bold uppercase tracking-[0.16em] text-slate-400">
             Beat {player.currentIndex + 1} of {player.events.length}
           </p>
-          <h2 class="mt-1 text-base font-bold text-white">{beat.heading}</h2>
+          <h2 class="mt-1 text-base font-bold text-slate-100">{beat.heading}</h2>
           <p class="mt-1 text-sm text-slate-200">{beat.detail}</p>
         </div>
         <div class="flex shrink-0 gap-2">
@@ -58,7 +58,7 @@
             type="button"
             class={`rounded border px-2.5 py-1.5 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300 ${
               player.speed > 1
-                ? 'border-amber-300 bg-amber-300/20 text-amber-100'
+                ? 'border-amber-600 bg-amber-600/20 text-amber-300'
                 : 'border-slate-600 bg-slate-900 text-slate-200 hover:border-slate-400'
             }`}
             aria-pressed={player.speed > 1}

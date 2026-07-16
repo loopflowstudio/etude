@@ -82,6 +82,25 @@ test('kata contrast correction resolves on the shared dark palette', async ({ pa
   );
 });
 
+test('card name plate stays legible on the light palette', async ({ page }) => {
+  await page.emulateMedia({ colorScheme: 'light' });
+  await page.goto('/');
+  await expect(page.getByTestId('connection-badge')).toHaveText('connected', { timeout: 15_000 });
+  await page.getByTestId('opponent-select').selectOption('random');
+  await page.getByRole('button', { name: 'New Game' }).first().click();
+  await expect(page.getByTestId('game-board')).toBeVisible({ timeout: 15_000 });
+
+  // Card art palettes are fixed dark colors, so the name plate must keep its
+  // literal dark scrim and light text even when the adaptive palette is cream.
+  const treatment = page.locator('[data-testid="card-treatment"]').first();
+  await expect(treatment).toBeVisible();
+  const cardName = await treatment.getAttribute('data-card-name');
+  expect(cardName).toBeTruthy();
+  const name = treatment.getByText(cardName as string, { exact: true }).first();
+  await expect(name).toHaveCSS('color', 'rgb(250, 248, 245)');
+  await expect(name.locator('..')).toHaveCSS('background-image', /rgba?\(10, 13, 20/);
+});
+
 test('touch controls meet the shared 44px target', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/');

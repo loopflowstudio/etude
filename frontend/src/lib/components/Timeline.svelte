@@ -57,6 +57,8 @@
   <input
     class="w-full"
     type="range"
+    aria-label="Replay position"
+    aria-valuetext={`Frame ${totalFrames === 0 ? 0 : currentFrame + 1} of ${totalFrames}`}
     min="0"
     max={Math.max(totalFrames - 1, 0)}
     value={currentFrame}
