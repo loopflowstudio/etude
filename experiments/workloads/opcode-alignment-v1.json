@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "id": "semantic-transfer-v1",
-  "claim": "causal_semantic_program_capability_probe",
-  "claim_boundary": "This probe does not measure gameplay strength, PPO transfer, search strength, or win rate.",
+  "id": "opcode-alignment-v1",
+  "claim": "preliminary_typed_opcode_alignment_probe",
+  "claim_boundary": "This probe measures typed-opcode alignment only. It does not establish semantic compositional transfer, AST understanding, gameplay strength, PPO transfer, search strength, or win rate.",
   "dataset_seed": 21400,
   "model_seeds": [21401, 21402, 21403],
   "held_out_definitions": {
@@ -39,7 +39,7 @@
     "required_rebind_match_rate": 1.0,
     "required_permutation_match_rate": 1.0
   },
-  "positive_transfer_criterion": {
+  "alignment_signal_criterion": {
     "semantic_only_minimum_accuracy": 0.8,
     "minimum_uplift_over_each_identity_control": 0.2
   }

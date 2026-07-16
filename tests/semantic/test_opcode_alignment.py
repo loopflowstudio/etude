@@ -9,28 +9,32 @@ import pytest
 from manabot.semantic.learning import DEFAULT_IR_PATH, BoundSemanticPack
 from manabot.semantic.transfer import (
     ARMS,
+    SEMANTIC_CONTROLS,
     RuntimeTables,
     SemanticTransferSpec,
     SymbolicProgramBinder,
     TransferExperimentError,
+    aggregate_arm,
     build_examples,
     build_records,
     build_spec,
+    holdout_audit,
     load_workload,
+    paired_cluster_contrast,
     permuted_runtime_projection,
     robustness_controls,
     run_arm,
     validate_workload,
 )
 
-WORKLOAD = Path("experiments/workloads/semantic-transfer-v1.json")
+WORKLOAD = Path("experiments/workloads/opcode-alignment-v1.json")
 
 
 def _manifest() -> dict:
     ir = json.loads(DEFAULT_IR_PATH.read_text(encoding="utf-8"))
     return {
         "schema_version": 1,
-        "content_digest": "semantic-transfer-test-pack",
+        "content_digest": "opcode-alignment-test-pack",
         "definitions": [
             {
                 "card_def_id": row,
@@ -93,6 +97,12 @@ def test_spec_is_symbolic_and_holdout_uses_only_seen_operations() -> None:
     assert {row.seat for row in first} == {0, 1}
     assert len({row.candidate_order for row in first}) > 1
 
+    audit = holdout_audit(pack, spec, workload)
+    assert audit["normalized_ast_novel_programs"] == 2
+    assert audit["full_symbolic_primitive_closure_programs"] == 2
+    assert not audit["all_normalized_asts_novel"]
+    assert not audit["full_symbolic_primitive_closure"]
+
 
 def test_rebinding_and_numeric_permutation_are_exact_but_unknowns_fail_closed() -> None:
     pack = BoundSemanticPack.bind(_manifest())
@@ -123,7 +133,7 @@ def test_rebinding_and_numeric_permutation_are_exact_but_unknowns_fail_closed() 
     assert values.shape == pack.catalog.token_value.shape
 
 
-@pytest.mark.parametrize("arm", ARMS)
+@pytest.mark.parametrize("arm", (*ARMS, *SEMANTIC_CONTROLS))
 def test_every_arm_runs_without_changing_the_production_abi(arm: str) -> None:
     pack = BoundSemanticPack.bind(_manifest())
     result = run_arm(pack, _fast_workload(), arm=arm, model_seed=7)
@@ -155,3 +165,45 @@ def test_identity_only_arms_receive_no_semantic_program_input() -> None:
     }
     assert legacy["head"] == "legacy_fixed"
     assert structured["head"] == semantic["head"] == "structured_ragged"
+
+
+def _cluster_run(seed: int, successes: dict[str, bool]) -> dict:
+    rows = []
+    for program, correct in successes.items():
+        for seat in (0, 1):
+            for replicate in range(4):
+                rows.append(
+                    {
+                        "program": program,
+                        "seat": seat,
+                        "replicate": replicate,
+                        "correct": correct,
+                    }
+                )
+    return {"model_seed": seed, "zero_shot_rows": rows}
+
+
+def test_uncertainty_uses_program_by_seed_clusters_not_repeated_rows() -> None:
+    programs = ["a", "b", "c", "d"]
+    runs = [
+        _cluster_run(seed, {program: True for program in programs}) for seed in (1, 2)
+    ]
+    runs.append(_cluster_run(3, {"a": True, "b": True, "c": True, "d": False}))
+
+    summary = aggregate_arm(runs, "zero_shot")
+    assert summary["successes"] == 11
+    assert summary["total"] == summary["cluster_count"] == 12
+    assert summary["accuracy"] == pytest.approx(11 / 12)
+    assert summary["ci95_low"] == pytest.approx(0.646120088858883)
+    assert summary["ci95_high"] == pytest.approx(0.9851349055950829)
+    assert summary["repeated_rows_excluded_from_uncertainty"]
+
+    control = [
+        _cluster_run(seed, {program: False for program in programs})
+        for seed in (1, 2, 3)
+    ]
+    contrast = paired_cluster_contrast(runs, control)
+    assert contrast["wins"] == 11
+    assert contrast["losses"] == 0
+    assert contrast["ties"] == 1
+    assert contrast["two_sided_exact_sign_p"] == pytest.approx(1 / 1024)

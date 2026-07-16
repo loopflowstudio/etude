@@ -1,6 +1,7 @@
-"""Causal semantic-program transfer probe.
+"""Preliminary typed-opcode alignment probe over semantic programs.
 
-This is deliberately a supervised capability probe, not a gameplay policy.
+This is deliberately a supervised alignment probe, not a gameplay policy or
+evidence of semantic compositional transfer.
 It joins the checked semantic-program catalog to the experimental structured
 choice head without changing the production observation or action ABI.
 """
@@ -31,7 +32,12 @@ ARMS = (
     "semantic_card_id_structured",
     "semantic_only_structured",
 )
+SEMANTIC_CONTROLS = (
+    "semantic_only_opcode_masked",
+    "semantic_only_token_shuffled",
+)
 CONTROL_OPS = frozenset({"branch", "for_each_target"})
+MASKED_OPCODE_TOKEN = "control:masked_opcode"
 
 
 class TransferExperimentError(ValueError):
@@ -293,6 +299,7 @@ def build_spec(pack: BoundSemanticPack) -> SemanticTransferSpec:
         )
         if int(kind) != pack.schema.token_kinds["padding"]
     }
+    symbols.add(MASKED_OPCODE_TOKEN)
     return SemanticTransferSpec(
         spec_version=provisional.spec_version,
         semantic_ir_hash=provisional.semantic_ir_hash,
@@ -374,7 +381,11 @@ def build_records(
     pack: BoundSemanticPack,
     spec: SemanticTransferSpec,
     workload: Mapping[str, Any],
+    *,
+    semantic_control: str | None = None,
 ) -> tuple[ProgramRecord, ...]:
+    if semantic_control not in (None, *SEMANTIC_CONTROLS):
+        raise TransferExperimentError(f"unknown semantic control {semantic_control!r}")
     binder = SymbolicProgramBinder(pack, spec)
     heldout_by_key = {
         key: deck
@@ -390,6 +401,16 @@ def build_records(
         definition_key = str(definition["semantic_key"])
         missing.discard(definition_key)
         deck = heldout_by_key.get(definition_key, "training")
+        token_ids = list(binder.encode_program(row))
+        if semantic_control == "semantic_only_opcode_masked":
+            masked = spec.token_vocabulary.index(MASKED_OPCODE_TOKEN)
+            token_ids = [
+                masked if spec.token_vocabulary[token].startswith("opcode:") else token
+                for token in token_ids
+            ]
+        elif semantic_control == "semantic_only_token_shuffled":
+            rng = np.random.default_rng(int(workload["dataset_seed"]) + row)
+            token_ids = [token_ids[index] for index in rng.permutation(len(token_ids))]
         records.append(
             ProgramRecord(
                 program_row=row,
@@ -398,7 +419,7 @@ def build_records(
                 deck=deck,
                 held_out=definition_key in heldout_by_key,
                 identity_slot=identity_slot[definition_key],
-                token_ids=binder.encode_program(row),
+                token_ids=tuple(token_ids),
                 target_opcode=opcode_slot[_walk_primary(program["instructions"])],
             )
         )
@@ -501,11 +522,15 @@ class TransferPolicy(nn.Module):
         hidden_dim: int,
     ) -> None:
         super().__init__()
-        if arm not in ARMS:
+        if arm not in (*ARMS, *SEMANTIC_CONTROLS):
             raise TransferExperimentError(f"unknown arm {arm!r}")
         self.arm = arm
         self.uses_semantics = arm.startswith("semantic_")
-        self.uses_identity = arm != "semantic_only_structured"
+        self.uses_identity = arm in {
+            "card_id_legacy",
+            "card_id_structured",
+            "semantic_card_id_structured",
+        }
         self.structured = arm != "card_id_legacy"
         if self.uses_semantics:
             self.token_embedding = nn.Embedding(token_count, hidden_dim)
@@ -681,6 +706,7 @@ def _checkpoint_rebind_control(
     spec: SemanticTransferSpec,
     workload: Mapping[str, Any],
     heldout: Sequence[ProbeExample],
+    semantic_control: str | None,
 ) -> dict[str, Any]:
     buffer = io.BytesIO()
     torch.save(
@@ -697,7 +723,9 @@ def _checkpoint_rebind_control(
     checkpoint = torch.load(buffer, map_location="cpu", weights_only=True)
     loaded_spec = SemanticTransferSpec.from_dict(checkpoint["semantic_input_spec"])
     reordered = BoundSemanticPack.bind(reordered_manifest(pack))
-    rebound_records = build_records(reordered, loaded_spec, workload)
+    rebound_records = build_records(
+        reordered, loaded_spec, workload, semantic_control=semantic_control
+    )
     rebound_examples = build_examples(rebound_records, workload, held_out=True)
     loaded = TransferPolicy(
         str(checkpoint["arm"]),
@@ -803,6 +831,81 @@ def robustness_controls(
     }
 
 
+def _normalized_ast(value: Any) -> Any:
+    """Erase literal identity/value leaves while retaining typed AST shape."""
+
+    if isinstance(value, Mapping):
+        return {
+            key: _normalized_ast(item)
+            for key, item in sorted(value.items())
+            if key
+            not in {"semantic_key", "program_index", "definition_index", "op_name"}
+        }
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return [_normalized_ast(item) for item in value]
+    return type(value).__name__
+
+
+def holdout_audit(
+    pack: BoundSemanticPack,
+    spec: SemanticTransferSpec,
+    workload: Mapping[str, Any],
+) -> dict[str, Any]:
+    records = build_records(pack, spec, workload)
+    symbols = spec.token_vocabulary
+    training_primitives = {
+        symbols[token]
+        for record in records
+        if not record.held_out
+        for token in record.token_ids
+    }
+    training_fingerprints: dict[str, list[str]] = {}
+    for record in records:
+        if record.held_out:
+            continue
+        fingerprint = _sha256(_normalized_ast(pack.ir.programs[record.program_row]))
+        training_fingerprints.setdefault(fingerprint, []).append(record.program_key)
+
+    rows = []
+    for record in records:
+        if not record.held_out:
+            continue
+        primitives = {symbols[token] for token in record.token_ids}
+        fingerprint = _sha256(_normalized_ast(pack.ir.programs[record.program_row]))
+        duplicates = sorted(training_fingerprints.get(fingerprint, []))
+        gaps = sorted(primitives - training_primitives)
+        rows.append(
+            {
+                "program": record.program_key,
+                "definition": record.definition_key,
+                "deck": record.deck,
+                "normalized_ast_fingerprint": fingerprint,
+                "normalized_ast_training_duplicates": duplicates,
+                "normalized_ast_novel": not duplicates,
+                "symbolic_primitive_gaps": gaps,
+                "full_symbolic_primitive_closure": not gaps,
+            }
+        )
+    return {
+        "normalization": (
+            "mapping keys and list structure retained; semantic/program/definition "
+            "identity and literal scalar values erased"
+        ),
+        "rows": rows,
+        "normalized_ast_novel_programs": sum(
+            row["normalized_ast_novel"] for row in rows
+        ),
+        "full_symbolic_primitive_closure_programs": sum(
+            row["full_symbolic_primitive_closure"] for row in rows
+        ),
+        "programs": len(rows),
+        "all_normalized_asts_novel": all(row["normalized_ast_novel"] for row in rows),
+        "full_symbolic_primitive_closure": all(
+            row["full_symbolic_primitive_closure"] for row in rows
+        ),
+    }
+
+
 def run_arm(
     pack: BoundSemanticPack,
     workload: Mapping[str, Any],
@@ -815,7 +918,8 @@ def run_arm(
     torch.manual_seed(model_seed)
     np.random.seed(model_seed)
     spec = build_spec(pack)
-    records = build_records(pack, spec, workload)
+    semantic_control = arm if arm in SEMANTIC_CONTROLS else None
+    records = build_records(pack, spec, workload, semantic_control=semantic_control)
     training = build_examples(records, workload, held_out=False)
     heldout = build_examples(records, workload, held_out=True)
     support = build_examples(records, workload, held_out=True, support=True)
@@ -869,7 +973,7 @@ def run_arm(
         "limited_retraining_rows": limited_rows,
         "performance": _performance(model, heldout, workload),
         "checkpoint_rebind": _checkpoint_rebind_control(
-            model, pack, spec, workload, heldout
+            model, pack, spec, workload, heldout, semantic_control
         ),
         "semantic_input_spec": spec.to_dict(),
         "semantic_input_spec_digest": spec.digest,
@@ -877,15 +981,91 @@ def run_arm(
 
 
 def aggregate_arm(rows: Sequence[Mapping[str, Any]], phase: str) -> dict[str, Any]:
-    predictions = [item for row in rows for item in row[f"{phase}_rows"]]
-    confidence = 0.95
-    return _wilson(
-        sum(item["correct"] for item in predictions), len(predictions), confidence
+    outcomes = cluster_outcomes(rows, phase)
+    summary = _wilson(sum(outcomes.values()), len(outcomes), 0.95)
+    summary.update(
+        {
+            "independent_unit": "heldout_program_x_model_seed",
+            "cluster_count": len(outcomes),
+            "repeated_rows_excluded_from_uncertainty": True,
+        }
     )
+    return summary
+
+
+def cluster_outcomes(
+    rows: Sequence[Mapping[str, Any]], phase: str
+) -> dict[tuple[int, str], bool]:
+    outcomes: dict[tuple[int, str], set[bool]] = {}
+    for run in rows:
+        seed = int(run["model_seed"])
+        for item in run[f"{phase}_rows"]:
+            key = (seed, str(item["program"]))
+            outcomes.setdefault(key, set()).add(bool(item["correct"]))
+    unstable = [key for key, values in outcomes.items() if len(values) != 1]
+    if unstable:
+        raise TransferExperimentError(
+            "candidate permutation or seat changed a cluster outcome: "
+            f"{sorted(unstable)}"
+        )
+    return {key: next(iter(values)) for key, values in outcomes.items()}
+
+
+def paired_cluster_contrast(
+    left: Sequence[Mapping[str, Any]],
+    right: Sequence[Mapping[str, Any]],
+    *,
+    phase: str = "zero_shot",
+    bootstrap_seed: int = 21_499,
+) -> dict[str, Any]:
+    left_outcomes = cluster_outcomes(left, phase)
+    right_outcomes = cluster_outcomes(right, phase)
+    if set(left_outcomes) != set(right_outcomes):
+        raise TransferExperimentError("paired arms do not share program×seed clusters")
+    differences = np.asarray(
+        [
+            int(left_outcomes[key]) - int(right_outcomes[key])
+            for key in sorted(left_outcomes)
+        ],
+        dtype=np.float64,
+    )
+    wins = int((differences > 0).sum())
+    losses = int((differences < 0).sum())
+    ties = int((differences == 0).sum())
+    discordant = wins + losses
+    if discordant:
+        tail = sum(
+            math.comb(discordant, index) for index in range(min(wins, losses) + 1)
+        ) / (2**discordant)
+        exact_p = min(1.0, 2 * tail)
+    else:
+        exact_p = 1.0
+    rng = np.random.default_rng(bootstrap_seed)
+    bootstrap = np.asarray(
+        [
+            differences[rng.integers(0, len(differences), len(differences))].mean()
+            for _ in range(10_000)
+        ]
+    )
+    return {
+        "left_minus_right_accuracy": float(differences.mean()),
+        "paired_cluster_bootstrap_ci95": [
+            float(np.percentile(bootstrap, 2.5)),
+            float(np.percentile(bootstrap, 97.5)),
+        ],
+        "wins": wins,
+        "losses": losses,
+        "ties": ties,
+        "clusters": len(differences),
+        "discordant_clusters": discordant,
+        "two_sided_exact_sign_p": exact_p,
+        "independent_unit": "heldout_program_x_model_seed",
+    }
 
 
 __all__ = [
     "ARMS",
+    "SEMANTIC_CONTROLS",
     "SemanticTransferSpec",
     "SymbolicProgramBinder",
     "TransferExperimentError",
@@ -894,8 +1074,11 @@ __all__ = [
     "build_examples",
     "build_records",
     "build_spec",
+    "cluster_outcomes",
+    "holdout_audit",
     "load_workload",
     "permuted_runtime_projection",
+    "paired_cluster_contrast",
     "robustness_controls",
     "run_arm",
     "tensorize",
