@@ -279,11 +279,24 @@ async function captureVisualReference(
 
 async function settleBoardPresentation(page: Page): Promise<void> {
   const presentationStage = page.getByTestId('presentation-stage');
-  if (!(await presentationStage.isVisible())) {
+  const finished = await page.evaluate(() => {
+    const stage = document.querySelector<HTMLElement>('[data-testid="presentation-stage"]');
+    if (!stage) {
+      return false;
+    }
+    const finish = [...stage.querySelectorAll('button')].find(
+      (button) => button.textContent?.trim() === 'Finish',
+    );
+    if (!(finish instanceof HTMLButtonElement)) {
+      throw new Error('presentation stage has no Finish control');
+    }
+    finish.click();
+    return true;
+  });
+  if (!finished) {
     return;
   }
 
-  await presentationStage.getByRole('button', { name: 'Finish', exact: true }).click();
   await expect(presentationStage).toBeHidden();
   await page.getByTestId('action-option').first().focus();
 }
