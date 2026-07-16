@@ -174,7 +174,7 @@
       {#if gameStore.deckNames && gameStore.observation}
         <span
           data-testid="deck-names"
-          class="rounded bg-slate-700/60 px-2 py-1 text-xs font-semibold text-slate-200"
+          class="inline-flex items-center gap-1.5 rounded bg-slate-700/60 px-2 py-1 text-xs font-semibold text-slate-200"
         >
           <DeckIdentity name={gameStore.deckNames.hero} /> vs <DeckIdentity
             name={gameStore.deckNames.villain}

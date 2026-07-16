@@ -79,7 +79,8 @@ test('the library-after-dark palette lifts Mountain red for dark mode', async ({
   await page.goto('/');
 
   expect(await palette(page)).toEqual(dark);
-  await expect(page.getByTestId('brand-name')).toHaveCSS('color', 'rgb(195, 165, 104)');
+  // The banner is a fixed rich world in both modes; the brand is literal ivory.
+  await expect(page.getByTestId('brand-name')).toHaveCSS('color', 'rgb(248, 241, 224)');
   await expect(page.getByRole('button', { name: 'New Game' }).first()).toHaveCSS(
     'background-color',
     'rgb(178, 77, 56)',
