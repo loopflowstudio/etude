@@ -1,206 +1,166 @@
-# Loopflow Visual Design System
+# Etude Fantasia Visual Design System — Sepia Etude
 
-The unified design system for loopflow (Swift app) and loopflowstudio (website).
+The design contract for Etude Fantasia's player-facing surfaces (Play,
+Replay, and everything that grows from them). It inherits its token
+architecture from the Loopflow contract; its visual identity is Etude's own.
 
 ---
 
 ## Brand Foundation
 
-### Logo
-The logo uses a four-direction gradient:
-- **Wine**: `#9B1A4A` — deep, vibrant red-violet
-- **Cyan**: `#0AB3CC` — cool, technical
+### Concept
 
-### Design Philosophy
-Loopflow's visual identity evokes **classical instruments, wine, and craftsmanship**—warm and refined, not cold tech blue. The design signals that we value craft *and* throughput, not either/or.
+**An annotated score in an old library.** The interface is sepia ink on aged
+paper — quiet, studied, monochrome — except the active decision, which burns
+Mountain red. The palette is drawn from Magic itself: card-frame parchment,
+and the five mana colors reduced to library volume.
 
 | Visual Choice | Brand Signal |
 |---------------|--------------|
-| Burgundy accent | Warmth, craft, classical instruments |
-| Serif headlines | Editorial quality, intentionality |
-| Cream backgrounds | Clarity, nothing to hide |
-| Tight spacing (980px) | Considered, not bloated |
-| Minimal navigation | Confidence—doesn't need to shout |
+| Parchment grounds | A card's text box; the game as an open book |
+| Sepia-bronze display text | Margin annotations, studied notes |
+| One Mountain-red accent | The live decision is the only urgent thing |
+| Mana-ink status colors | WUBRG as the semantic spine, desaturated |
+| Fixed dark card art | The cards are the illustrations on the page |
+
+### The two metals
+
+- **Bronze** (`--accent-text`) is for reading: headings, the brand mark, the
+  decision-prompt annotation.
+- **Mountain red** (`--accent`) is for acting: buttons, focus rings, links,
+  selected and clickable states.
+
+Errors share the Mountain-red family — urgency has one color here — but the
+decision prompt is bronze, so an error surface is never mistaken for a prompt.
 
 ---
 
 ## Colors
 
-### Primary Accent
-
-| Token | Hex | RGB | Usage |
-|-------|-----|-----|-------|
-| `burgundy` | `#722F37` | 114, 47, 55 | Headings, CTAs, links, focus states |
-| `burgundy-hover` | `#8B3D47` | 139, 61, 71 | Hover and active states |
-
-The burgundy is the logo wine's "indoor voice"—same family, but appropriate for sustained UI use.
-
-### Light Mode (Cream)
+### Brand constants
 
 | Token | Hex | Usage |
 |-------|-----|-------|
-| `background` | `#FAF8F5` | Main page background |
-| `surface` | `#FFFDFB` | Elevated cards, modals |
-| `surface-muted` | `#F3EEE7` | Secondary surfaces, code blocks |
-| `border` | `#E3DDD5` | Borders, dividers |
-| `text` | `#1A1A1A` | Primary text |
-| `text-secondary` | `#6B6B6B` | Secondary text, captions |
+| `mountain-red` | `#973427` | The accent; see adaptive values below |
+| `sepia-bronze` | `#6D5A35` | Display/annotation tone; see below |
+| `ivory` | `#F8F1E0` | Text on accent fills; constant across modes |
 
-### Dark Mode (Slate)
+### Light mode (Parchment)
 
 | Token | Hex | Usage |
 |-------|-----|-------|
-| `background` | `#2B3036` | Main page background |
-| `surface` | `#343B44` | Elevated cards, modals |
-| `surface-muted` | `#3C4550` | Secondary surfaces |
-| `border` | `#46505B` | Borders, dividers |
-| `text` | `#F5F1EA` | Primary text |
-| `text-secondary` | `#C8C1B8` | Secondary text |
+| `bg` | `#EFE6D4` | Main page background |
+| `surface` | `#F7F0E0` | Elevated cards, panels |
+| `muted` | `#E3D7BD` | Secondary surfaces, chips |
+| `border` | `#C9B892` | Borders, dividers |
+| `border-strong` | `#A5926A` | Emphasized borders |
+| `text` | `#3A3122` | Primary text |
+| `text-secondary` | `#665B42` | Secondary text, captions |
+| `accent` | `#973427` | Buttons, focus, links |
+| `accent-hover` | `#AB4634` | Hover states (lighter) |
+| `accent-text` | `#6D5A35` | Headings, annotations |
+| `accent-soft` | `#EAD6C6` | Accent-tinted washes |
 
-### Status Colors
+### Dark mode (The library after dark)
 
 | Token | Hex | Usage |
 |-------|-----|-------|
-| `success` | `#2D6A4F` | Stable, complete, passing |
-| `warning` | `#B0812A` | Early-stage, caution |
-| `error` | `#B45309` | Experimental, failing |
-| `info` | `#0AB3CC` | Informational (logo cyan) |
-| `neutral` | `#8B8B8B` | Idle, inactive, completed |
+| `bg` | `#191510` | Main page background |
+| `surface` | `#221C14` | Elevated cards, panels |
+| `muted` | `#2B241A` | Secondary surfaces, chips |
+| `border` | `#423A2B` | Borders, dividers |
+| `border-strong` | `#625741` | Emphasized borders |
+| `text` | `#ECE4D0` | Primary text |
+| `text-secondary` | `#B3A88E` | Secondary text, captions |
+| `accent` | `#B24D38` | Buttons, focus, links |
+| `accent-hover` | `#A34531` | Hover states (**darker** — see note) |
+| `accent-text` | `#C3A568` | Headings, annotations (lamplight bronze) |
+| `accent-soft` | `#3F2B20` | Accent-tinted washes |
 
-### CSS Variables
+> **Dark hover deepens.** A red lighter than `#B24D38` cannot hold ivory
+> button text at WCAG AA, so the dark-mode hover moves down, not up.
+
+### Status colors — mana inks
+
+The five statuses take the five mana colors, desaturated to sit in a sepia
+room. Base values are shared across modes; each ships a contrast-safe text
+companion (`*-text`) that adapts per mode.
+
+| Token | Mana | Base | Light text | Dark text | Usage |
+|-------|------|------|------------|-----------|-------|
+| `success` | Forest | `#5E7A52` | `#45603C` | `#A6C197` | Connected, your move, hero log |
+| `warning` | Plains | `#97803F` | `#6F5C26` | `#CCB169` | Reconnecting, targeting, villain log |
+| `error` | Mountain | `#973427` | `#7E2A20` | `#DE9181` | Failures, critical beats |
+| `info` | Island | `#5C728C` | `#465D7A` | `#9CB6D4` | Stack, auto-passing, neutral notices |
+| `neutral` | Swamp | `#8A7F68` | — | — | Idle, inactive |
+
+### CSS variables
+
+The implementation lives in `frontend/src/app.css`. Semantic tokens are
+defined on `:root` and overridden wholesale in the
+`prefers-color-scheme: dark` block; the Tailwind `@theme` aliases
+(`slate-*`, `blue-*`, `emerald-*`, …) resolve through them, so components
+never name raw colors.
 
 ```css
 :root {
-  /* Brand */
-  --burgundy: #722F37;
-  --burgundy-hover: #8B3D47;
+  --mountain-red: #973427;
+  --sepia-bronze: #6d5a35;
+  --ivory: #f8f1e0;
 
-  /* Backgrounds */
-  --bg: #FAF8F5;
-  --bg-surface: #FFFDFB;
-  --bg-muted: #F3EEE7;
-  --border: #E3DDD5;
+  --bg: #efe6d4;
+  --bg-surface: #f7f0e0;
+  --bg-muted: #e3d7bd;
+  --border: #c9b892;
+  --text: #3a3122;
+  --text-secondary: #665b42;
+  --accent: var(--mountain-red);
+  --accent-text: var(--sepia-bronze);
 
-  /* Text */
-  --text: #1A1A1A;
-  --text-secondary: #6B6B6B;
-
-  /* Status */
-  --success: #2D6A4F;
-  --warning: #B0812A;
-  --error: #B45309;
-  --info: #0AB3CC;
-  --neutral: #8B8B8B;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #2B3036;
-    --bg-surface: #343B44;
-    --bg-muted: #3C4550;
-    --border: #46505B;
-    --text: #F5F1EA;
-    --text-secondary: #C8C1B8;
-  }
+  --success: #5e7a52;
+  --warning: #97803f;
+  --error: var(--mountain-red);
+  --info: #5c728c;
+  --neutral: #8a7f68;
 }
 ```
 
-### Swift Colors
+### Card art is not themed
 
-```swift
-extension Color {
-    // Brand
-    static let loopflowBurgundy = Color(hex: 0x722F37)
-    static let loopflowBurgundyHover = Color(hex: 0x8B3D47)
-
-    // Light mode
-    static let loopflowCream = Color(hex: 0xFAF8F5)
-    static let loopflowCreamElevated = Color(hex: 0xFFFDFB)
-    static let loopflowCreamMuted = Color(hex: 0xF3EEE7)
-
-    // Dark mode
-    static let loopflowSlate = Color(hex: 0x2B3036)
-    static let loopflowSlateElevated = Color(hex: 0x343B44)
-    static let loopflowSlateMuted = Color(hex: 0x3C4550)
-
-    // Status
-    static let statusSuccess = Color(hex: 0x2D6A4F)
-    static let statusWarning = Color(hex: 0xB0812A)
-    static let statusError = Color(hex: 0xB45309)
-    static let statusInfo = Color(hex: 0x0AB3CC)
-    static let statusNeutral = Color(hex: 0x8B8B8B)
-}
-```
+Curated-pack art palettes are fixed, dark-toned colors. Overlays on art (name
+plates, power/toughness badges) use literal dark scrims with literal light
+text and must never route through adaptive tokens — in light mode an adaptive
+scrim turns parchment and erases the text. `visual-system.spec.ts` pins this.
 
 ---
 
 ## Typography
 
-Three pillars: classical serif for presence, warm humanist sans for readability, monospace for code.
-
-### The System
+Unchanged from the prior contract: three pillars, bundled locally in
+`frontend/static/fonts/`.
 
 | Role | Font | Variable | Usage |
 |------|------|----------|-------|
-| Serif | **Cormorant Garamond** | `--font-serif` | Headlines, taglines, hero text |
-| Sans | **Lato** | `--font-sans` | Body text, buttons, navigation, UI |
-| Mono | **JetBrains Mono** | `--font-mono` | Code, terminal, technical content |
+| Serif | **Cormorant Garamond** | `--font-serif` | Headlines, brand, zone headings |
+| Sans | **Lato** | `--font-sans` | Body text, buttons, UI |
+| Mono | **JetBrains Mono** | `--font-mono` | Turn line, action types, technical |
 
-### Why These Fonts
+Headings render in `--accent-text` (bronze), not the accent red — display
+text reads, it does not shout.
 
-**Cormorant Garamond** — Classical Garamond inspiration with deeply calligraphic italics. The italic **f** has an elongated S-curve reminiscent of a violin f-hole—a subtle nod to the musical/orchestral metaphor.
-
-**Lato** — Warm humanist sans that pairs naturally with Garamonds. Semi-rounded details give warmth without being soft.
-
-**JetBrains Mono** — Developer-focused monospace with clear distinction between similar characters (0/O, 1/l/I).
-
-### CSS
-
-```css
-:root {
-  --font-serif: 'Cormorant Garamond', Georgia, serif;
-  --font-sans: 'Lato', -apple-system, sans-serif;
-  --font-mono: 'JetBrains Mono', monospace;
-}
-
-/* Headings default to burgundy */
-h1, h2, h3 {
-  color: var(--burgundy);
-}
-```
-
-### Swift
-
-```swift
-enum Typography {
-    static let serifFamily = "Cormorant Garamond"
-    static let sansFamily = "Lato"
-    static let monoFamily = "JetBrains Mono"
-}
-```
-
-### Font Weights
+### Font weights
 
 ```
-Cormorant Garamond: 400, 500, 600, 700 (roman + italic)
-Lato: 400, 700, 900
-JetBrains Mono: 400, 500
+Cormorant Garamond: 400, 500, 600 (600–900 alias to SemiBold)
+Lato: 400, 700 (700–900 alias to Bold)
+JetBrains Mono: 400 (400–700 alias to Regular)
 ```
-
-### Italic Serif
-
-Reserved for special moments:
-- Taglines ("Agents that remember. Work that compounds.")
-- Pull quotes
-- Emphasis in headlines
-
-**Not** the default for regular emphasis—use bold or sans-serif instead.
 
 ---
 
 ## Spacing
 
-Based on a 4pt grid. Use semantic names, not arbitrary values.
+4pt grid, unchanged.
 
 | Token | Value | Usage |
 |-------|-------|-------|
@@ -213,181 +173,76 @@ Based on a 4pt grid. Use semantic names, not arbitrary values.
 | `xxl` | 24px | Section margins |
 | `xxxl` | 32px | Hero spacing |
 
-### CSS
-
-```css
-/* Use semantic spacing */
-padding: 16px;        /* lg */
-margin-bottom: 24px;  /* xxl */
-gap: 8px;             /* sm */
-```
-
-### Swift
-
-```swift
-enum Spacing {
-    static let xxs: CGFloat = 2
-    static let xs: CGFloat = 4
-    static let sm: CGFloat = 8
-    static let md: CGFloat = 12
-    static let lg: CGFloat = 16
-    static let xl: CGFloat = 20
-    static let xxl: CGFloat = 24
-    static let xxxl: CGFloat = 32
-}
-
-// Usage
-.padding(.horizontal, Spacing.lg)
-.padding(.vertical, Spacing.md)
-```
-
----
-
 ## Corner Radius
 
 | Token | Value | Usage |
 |-------|-------|-------|
 | `sm` | 4px | Inline code, small badges |
-| `md` | 8px | Buttons, cards, code blocks |
+| `md` | 8px | Buttons, cards, chips |
 | `lg` | 12px | Large cards |
-| `xl` | 16px | Modals, install options |
-| `full` | 9999px | Pills, avatars |
-
-### CSS
-
-```css
-border-radius: 8px;   /* md - buttons, cards */
-border-radius: 16px;  /* xl - modals */
-```
-
-### Swift
-
-```swift
-enum CornerRadius {
-    static let sm: CGFloat = 4
-    static let md: CGFloat = 8
-    static let lg: CGFloat = 12
-    static let xl: CGFloat = 16
-    static let full: CGFloat = 9999
-}
-```
-
----
+| `xl` | 16px | Modals, beat overlays |
+| `full` | 9999px | Pills |
 
 ## Hit Targets
 
-Minimum touch/click targets for accessibility.
-
 | Context | Size |
 |---------|------|
-| Desktop minimum | 24×24px |
-| Comfortable | 32×32px |
-| Touch/mobile | 44×44px |
-
-### Swift
-
-```swift
-enum HitTarget {
-    static let minimum: CGFloat = 24
-    static let comfortable: CGFloat = 32
-    static let touch: CGFloat = 44
-}
-
-// Usage
-Button { } label: { Image(systemName: "trash") }
-    .minHitTarget()
-```
-
----
+| Desktop minimum | 32×32px (enforced on buttons/inputs) |
+| Touch/mobile ≤640px | 44×44px |
 
 ## Z-Index Layering
 
-| Layer | Value | Usage |
-|-------|-------|-------|
-| Base | 0 | Default content |
-| Dropdown | 100 | Menus, popovers |
-| Modal | 200 | Dialogs, sheets |
-| Toast | 300 | Notifications |
-| Tooltip | 400 | Hover hints |
-
----
+| Layer | Value |
+|-------|-------|
+| Base | 0 |
+| Dropdown | 100 |
+| Modal | 200 |
+| Toast | 300 |
+| Tooltip | 400 |
 
 ## Animation
 
-Always respect `reduceMotion` accessibility setting.
-
-### Durations
-
-| Type | Duration |
-|------|----------|
-| Fast | 100ms | Micro-interactions |
-| Standard | 200ms | Most transitions |
-| Slow | 300ms | Page transitions |
-
-### Swift
-
-```swift
-@Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-// Always use helpers that respect accessibility
-withAnimation(DesignAnimation.standard(reduceMotion)) {
-    isExpanded.toggle()
-}
-
-enum DesignAnimation {
-    static func standard(_ reduceMotion: Bool) -> Animation?
-    static func fast(_ reduceMotion: Bool) -> Animation?
-    static func spring(_ reduceMotion: Bool) -> Animation?
-}
-```
-
-### CSS
-
-```css
-@media (prefers-reduced-motion: reduce) {
-    * { transition: none !important; }
-}
-```
+Transitions run 100ms ease-out on interactive elements. All motion collapses
+under `prefers-reduced-motion: reduce`; presentation beats also expose
+`data-reduced-motion` for tests.
 
 ---
 
 ## Accessibility
 
-### Focus States
+### Focus states
 
-All interactive elements must have visible focus indicators:
+Focus is Mountain red everywhere — the global `:focus-visible` outline and
+component-level rings both resolve to `--accent`:
 
 ```css
-:focus {
-    outline: 2px solid var(--burgundy);
-    outline-offset: 2px;
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 ```
 
-### Color Contrast
+### Color contrast
 
-All text meets WCAG AA standards:
+Every pairing below is validated (WCAG AA needs 4.5:1 for text, 3:1 for
+non-text). The full matrix lives in the palette validator used during design.
 
 | Combination | Ratio | Grade |
 |-------------|-------|-------|
-| `#1A1A1A` on `#FAF8F5` | 15.2:1 | AAA |
-| `#6B6B6B` on `#FAF8F5` | 5.1:1 | AA |
-| `#722F37` on `#FAF8F5` | 7.8:1 | AAA |
-| `#F5F1EA` on `#2B3036` | 11.4:1 | AAA |
+| `#3A3122` on `#EFE6D4` (light text/bg) | 10.3:1 | AAA |
+| `#665B42` on `#E3D7BD` (light secondary/muted) | 4.7:1 | AA |
+| `#6D5A35` on `#EFE6D4` (bronze display/bg) | 5.4:1 | AA |
+| `#F8F1E0` on `#973427` (ivory on accent) | 6.6:1 | AA |
+| `#ECE4D0` on `#191510` (dark text/bg) | 14.3:1 | AAA |
+| `#F8F1E0` on `#B24D38` (dark ivory on accent) | 4.7:1 | AA |
+| `#C3A568` on `#191510` (dark bronze/bg) | 7.7:1 | AAA |
 
-### Swift Accessibility
+### Semantics
 
-```swift
-// Icon-only buttons need labels
-Button { delete() } label: { Image(systemName: "trash") }
-    .accessibilityLabel("Delete")
-    .accessibilityHint("Removes this item permanently")
-    .minHitTarget()
-
-// Group related elements
-VStack { Text(title); Text(subtitle) }
-    .accessibilityElement(children: .combine)
-```
+- Icon-only and state-bearing controls carry accessible names; card state
+  (tapped, summoning sick, damage) is in the card's `aria-label`.
+- Status is never color-only: chips carry text, logs carry actor names.
+- Scrollable regions are keyboard-reachable; the replay scrubber is labeled.
 
 ---
 
@@ -395,22 +250,22 @@ VStack { Text(title); Text(subtitle) }
 
 Before merging UI changes:
 
-- [ ] Uses semantic spacing tokens, not arbitrary values
-- [ ] Buttons have minimum hit target (24px desktop, 44px touch)
-- [ ] Focus states are visible
-- [ ] Respects `prefers-reduced-motion` / `reduceMotion`
-- [ ] Icon-only buttons have accessibility labels
-- [ ] Color contrast meets WCAG AA (4.5:1 for text)
-- [ ] Headings use burgundy color
-- [ ] Test with VoiceOver/screen reader enabled
+- [ ] Uses semantic tokens or theme aliases, never raw hex in components
+- [ ] Overlays on card art use literal scrim colors, not adaptive tokens
+- [ ] Buttons meet hit targets (32px desktop, 44px touch)
+- [ ] Focus states visible and Mountain red
+- [ ] Respects `prefers-reduced-motion`
+- [ ] Color contrast meets WCAG AA in **both** modes
+- [ ] Headings bronze (`--accent-text`), actions red (`--accent`)
+- [ ] `visual-system.spec.ts` passes (palette, fonts, hit targets, art plates)
 
 ---
 
-## Etude Fantasia adoption
+## Lineage
 
-Etude Fantasia adopts this contract across Play and Replay. The implementation
-lives in `frontend/src/app.css`; bundled fonts live in `frontend/static/fonts/`.
-Kata uses the same palette and tokens. In dark mode, Etude follows kata's
-contrast correction with a `#9B4A54` control fill, then completes it with a
-contrast-safe `#B05762` hover fill and `#D9949D` display-text tint. Loopflow
-remains authoritative everywhere else.
+Sepia Etude replaced the shared Loopflow/kata cream-and-burgundy palette on
+2026-07-16, chosen from a ten-direction exploration seeded by WUBRG and four
+reference cards (Lotus Cobra ZNR showcase, Growth Spiral, Deathsprout, Time
+Warp Mystical Archive). The token architecture, typography, spacing, and
+accessibility contract carry over from the Loopflow system unchanged;
+`frontend/src/app.css` remains the single source of truth.

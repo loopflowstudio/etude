@@ -52,34 +52,38 @@
   color-scheme: light dark;
   accent-color: var(--accent);
 
-  /* Loopflow / kata brand */
-  --burgundy: #722f37;
-  --burgundy-hover: #8b3d47;
-  --cream: #faf8f5;
+  /* Sepia Etude brand: an annotated score in an old library. Everything is
+     sepia ink on aged paper except the active decision, which burns
+     Mountain red. Display text is set in bronze, like a margin annotation. */
+  --mountain-red: #973427;
+  --sepia-bronze: #6d5a35;
+  --ivory: #f8f1e0;
 
-  /* Adaptive palette: cream */
-  --bg: #faf8f5;
-  --bg-surface: #fffdfb;
-  --bg-muted: #f3eee7;
-  --border: #e3ddd5;
-  --border-strong: #c9c0b6;
-  --text: #1a1a1a;
-  --text-secondary: #6b6b6b;
-  --accent: var(--burgundy);
-  --accent-text: var(--burgundy);
-  --accent-hover: var(--burgundy-hover);
-  --accent-soft: #efe2e3;
+  /* Adaptive palette: parchment */
+  --bg: #efe6d4;
+  --bg-surface: #f7f0e0;
+  --bg-muted: #e3d7bd;
+  --border: #c9b892;
+  --border-strong: #a5926a;
+  --text: #3a3122;
+  --text-secondary: #665b42;
+  --accent: var(--mountain-red);
+  --accent-text: var(--sepia-bronze);
+  --accent-hover: #ab4634;
+  --accent-soft: #ead6c6;
 
-  /* Shared status colors and contrast-safe text companions */
-  --success: #2d6a4f;
-  --success-text: #24543f;
-  --warning: #b0812a;
-  --warning-text: #775615;
-  --error: #b45309;
-  --error-text: #8e4006;
-  --info: #0ab3cc;
-  --info-text: #087b8c;
-  --neutral: #8b8b8b;
+  /* Status colors are mana inks at library volume: Forest success, Plains
+     warning, Island info, Swamp neutral, Mountain error. Each base ships a
+     contrast-safe text companion. */
+  --success: #5e7a52;
+  --success-text: #45603c;
+  --warning: #97803f;
+  --warning-text: #6f5c26;
+  --error: var(--mountain-red);
+  --error-text: #7e2a20;
+  --info: #5c728c;
+  --info-text: #465d7a;
+  --neutral: #8a7f68;
 
   /* 4pt grid, radii, and layering */
   --space-xxs: 2px;
@@ -100,28 +104,30 @@
   --z-toast: 300;
   --z-tooltip: 400;
 
-  --shadow-surface: 0 1px 2px rgb(26 26 26 / 0.05), 0 12px 32px rgb(114 47 55 / 0.04);
+  --shadow-surface: 0 1px 2px rgb(58 49 34 / 0.06), 0 12px 32px rgb(109 90 53 / 0.05);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    /* Kata's lifted burgundy reconciles the shared accent with slate. */
-    --bg: #2b3036;
-    --bg-surface: #343b44;
-    --bg-muted: #3c4550;
-    --border: #46505b;
-    --border-strong: #65717d;
-    --text: #f5f1ea;
-    --text-secondary: #c8c1b8;
-    --accent: #9b4a54;
-    --accent-text: #d9949d;
-    --accent-hover: #b05762;
-    --accent-soft: #49343b;
-    --success-text: #83c3a0;
-    --warning-text: #deb967;
-    --error-text: #e49a61;
-    --info-text: #68d3e3;
-    --shadow-surface: 0 1px 2px rgb(0 0 0 / 0.18), 0 16px 40px rgb(0 0 0 / 0.12);
+    /* The library after dark: umber ink grounds, lamplight bronze display,
+       and a lifted Mountain red. The dark hover deepens instead of
+       lightening — a lighter red cannot hold ivory button text at AA. */
+    --bg: #191510;
+    --bg-surface: #221c14;
+    --bg-muted: #2b241a;
+    --border: #423a2b;
+    --border-strong: #625741;
+    --text: #ece4d0;
+    --text-secondary: #b3a88e;
+    --accent: #b24d38;
+    --accent-text: #c3a568;
+    --accent-hover: #a34531;
+    --accent-soft: #3f2b20;
+    --success-text: #a6c197;
+    --warning-text: #ccb169;
+    --error-text: #de9181;
+    --info-text: #9cb6d4;
+    --shadow-surface: 0 1px 2px rgb(0 0 0 / 0.22), 0 16px 40px rgb(0 0 0 / 0.16);
   }
 }
 
@@ -161,14 +167,16 @@
   --color-rose-500: var(--error);
   --color-rose-200: var(--error-text);
 
-  --color-violet-900: var(--accent);
-  --color-violet-500: var(--accent);
+  /* Decision prompts are margin annotations: bronze, not Mountain red, so
+     error surfaces keep sole claim on the hot color. */
+  --color-violet-900: var(--accent-text);
+  --color-violet-500: var(--accent-text);
   --color-violet-200: var(--text);
   --color-indigo-900: var(--info);
   --color-indigo-500: var(--info);
   --color-indigo-400: var(--info);
   --color-indigo-200: var(--info-text);
-  --color-white: var(--cream);
+  --color-white: var(--ivory);
 }
 
 html {
@@ -181,7 +189,7 @@ body {
   min-height: 100vh;
   margin: 0;
   background:
-    radial-gradient(circle at 8% -18%, color-mix(in srgb, var(--accent) 8%, transparent), transparent 32rem),
+    radial-gradient(circle at 8% -18%, color-mix(in srgb, var(--accent-text) 9%, transparent), transparent 32rem),
     var(--bg);
   color: var(--text);
   font-family: 'Lato', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;

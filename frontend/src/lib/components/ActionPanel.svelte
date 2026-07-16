@@ -123,7 +123,7 @@
           data-action-description={action.description}
           aria-label={action.description}
           aria-describedby={decisionPrompt ? 'decision-prompt' : undefined}
-          class={`w-full rounded border px-3 py-2 text-left text-sm transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300 ${highlightedActionIndexes.has(action.index) ? 'border-amber-300 bg-slate-800' : 'border-slate-600 bg-slate-900 hover:border-blue-400 hover:bg-slate-800'} ${disabled ? 'cursor-not-allowed opacity-60' : ''}`}
+          class={`w-full rounded border px-3 py-2 text-left text-sm transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-400 ${highlightedActionIndexes.has(action.index) ? 'border-amber-300 bg-slate-800' : 'border-slate-600 bg-slate-900 hover:border-blue-400 hover:bg-slate-800'} ${disabled ? 'cursor-not-allowed opacity-60' : ''}`}
           onmouseenter={() => onHoverAction?.(action)}
           onmouseleave={() => onHoverAction?.(null)}
           onfocus={() => onHoverAction?.(action)}
