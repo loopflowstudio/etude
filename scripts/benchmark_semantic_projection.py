@@ -244,7 +244,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "task": "W2-215",
         "measurement_code_revision": args.revision,
         "measured_at": args.measured_at,
-        "command": " ".join(sys.argv),
+        "command": "uv run " + " ".join(sys.argv),
         "selected_matchup": {
             "name": "UR Lessons vs GW Allies",
             "seat_balanced_collection": True,
