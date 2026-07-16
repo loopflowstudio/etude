@@ -10,11 +10,7 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    agent::{
-        action::ActionSpaceKind,
-        env::Env,
-        observation::Observation,
-    },
+    agent::{action::ActionSpaceKind, env::Env, observation::Observation},
     flow::search::mix_seed,
     state::player::PlayerConfig,
     Game,

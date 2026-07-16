@@ -451,6 +451,7 @@ mod tests {
         let mut events = game.clone();
         events.state.events.push(GameEvent::TurnStarted {
             player: PlayerId(0),
+            turn_number: events.state.turn.turn_number,
         });
         assert_semantic_change(&baseline, &events, "event ledger");
 

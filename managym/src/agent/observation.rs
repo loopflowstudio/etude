@@ -264,7 +264,10 @@ impl Observation {
     /// player is deciding, the prompt kind remains public but its candidates
     /// and focus are suppressed.
     pub fn for_player(game: &Game, viewer: PlayerId) -> Self {
-        assert!(viewer.0 < game.state.players.len(), "viewer must name a player");
+        assert!(
+            viewer.0 < game.state.players.len(),
+            "viewer must name a player"
+        );
         let expose_actions = game
             .current_action_space
             .as_ref()
@@ -306,14 +309,12 @@ impl Observation {
                         .map(|action| ActionOption {
                             action_type: action.action_type(),
                             focus: Self::action_focus(game, action)
-                             .into_iter()
-                             .map(|id| id.0 as i32)
-                             .collect(),
+                                .into_iter()
+                                .map(|id| id.0 as i32)
+                                .collect(),
                             declared: match action {
                                 Action::DeclareAttacker { attack, .. } => Some(*attack),
-                                Action::DeclareBlocker { attacker, .. } => {
-                                    Some(attacker.is_some())
-                                }
+                                Action::DeclareBlocker { attacker, .. } => Some(attacker.is_some()),
                                 _ => None,
                             },
                         })
@@ -324,8 +325,8 @@ impl Observation {
                 focus: if expose_actions {
                     space.focus.iter().map(|id| id.0 as i32).collect()
                 } else {
-                     Vec::new()
-                 },
+                    Vec::new()
+                },
             })
             .unwrap_or(ActionSpaceData {
                 action_space_type: ActionSpaceKind::GameOver,
