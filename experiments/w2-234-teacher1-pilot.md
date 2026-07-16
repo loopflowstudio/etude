@@ -131,42 +131,6 @@ authorizes post-hoc target temperature, pruning, capacity, or optimizer tuning.
 
 ## Commands
 
-### Delivery owner and authorization boundary
-
-The sole delivery owner is Linear Task **W2-234**, continuing in Task Session
-`ts_fdbcddcc86054c7bb5e63eca81393f29`. PR #114 is already merged construction
-evidence: GitHub head `67816b57ce713375a272214dc2282821b0a7769d` was settled
-once as commit `4b18eaf06be12b83e34d631e7be278f2565a2223` and must not be
-landed again.
-
-On 2026-07-16 this owner reran the merged non-training readiness boundary. The
-runtime fingerprint command below reproduced the contract-pinned ABI, engine,
-content, matchup, and pilot-source identities. Invoking the recorded
-`--stage teacher-gate` command with the absent control lock then failed closed
-before creating its output directory or performing search, gameplay,
-admission, distillation, or student training. The focused merged construction
-suite remains the proportional CI command for this boundary.
-
-The exact gated next command remains:
-
-```bash
-uv run experiments/runners/run_teacher1_pilot.py \
-  --contract experiments/contracts/w2-234-teacher1-pilot-v1.json \
-  --control-lock experiments/contracts/w2-234-teacher1-control-lock-v1.json \
-  --stage teacher-gate \
-  --out-dir .runs/w2-234-teacher1-pilot-v1
-```
-
-This command is recorded for continuity, not authorized now. W2-234 may execute
-it only after a later controlling directive explicitly permits admission and
-after all of these gates hold: the live 3,000-game Teacher-0 recovery manifest
-is terminal, its exact `policy_value` checkpoint is frozen by SHA-256,
-same-host latency calibration exists, and the separately reviewed control lock
-is checked in. Until then, the generator and all of its artifacts are
-read-only external dependencies; Teacher-1 admission, distillation, and both
-policy-only and joint policy/value student training are forbidden. This
-readiness receipt supplies no Project KR 2-5 evidence.
-
 Inspect the frozen runtime before the control lock exists:
 
 ```bash
