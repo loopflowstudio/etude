@@ -82,5 +82,6 @@ tolerance: the required allocation and byte deltas are exactly zero.
 
 The result passes. It proves that clone allocations do not include or scale
 with the controlled immutable definition bytes at this source revision. The
-executable test remains the current gate; this checked record is a historical
-receipt and must be regenerated if the measurement-code revision is rewritten.
+executable test remains the current gate. Artifact-only descendants preserve
+this receipt; it must be regenerated after any rebase or change that rewrites
+the measured source code.
