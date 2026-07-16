@@ -6,20 +6,25 @@ Completed games currently have two incompatible histories. The live protocol
 publishes a viewer-safe `ExperienceFrame`, exact `InteractionOffer`s, a bound
 `Command`, and ordered `PresentationEvent`s. The persisted trace instead keeps
 pre-action legacy observations, raw action lists, and raw action indices. The
-replay page reconstructs frames from adjacent trace observations, and Study's
-`decision_id` is an unchecked string. There is therefore no durable address
-that means "the exact choice this player saw here," and restoring a guessed
-trace offset can drift in perspective, prompt, offer, presentation position,
-or private information.
+replay page reconstructs frames from adjacent observations, and Study's
+`decision_id` is an unchecked string. There is no durable address that means
+"the exact choice this player saw here," and restoring a guessed trace offset
+can drift in actor perspective, prompt, offer, presentation position, or
+private information.
 
-W2-275 gives Game one canonical, viewer-scoped decision history for the pinned
-UR Lessons versus GW Allies replay. Every deliberate command by the historical
-viewer receives a chronological address bound to the immutable replay, match,
-viewer, revision, prompt, selected offer, command, and presentation cursor.
-Restoration returns the exact stored viewer-safe frame and offer; it never
-reconstructs either from a later engine state. Opponent policy activity,
-configured auto-pass/F6 activity, and rules resolution stay in the ordered
-semantic continuation between player decisions and never become fake choices.
+W2-275 gives Game one complete chronological decision index for the pinned UR
+Lessons versus GW Allies match. Every deliberate choice by either player—the
+human and the opponent policy—gets one global ordinal and one stable address.
+Each row carries the acting viewer and the exact frame, selected offer, command,
+revision, and presentation cursor safe for that viewer. Configured auto-passes,
+F6 expansion, and rules resolution remain ordered semantic continuation and
+never become fake choices.
+
+The complete mixed-view index is authority-private replay truth. Retrieval
+requires an authorized viewer and returns only that viewer's decision rows and
+presentation track, or one authorized row. No HTTP, TypeScript, Study, fixture,
+or other client artifact may combine private perspectives. Study remains a
+filtered historical-viewer consumer of Game's complete index.
 
 This directly advances the Semantic Table and Decision Inspector KR that
 "Direct play, replay, and the decision inspector show the same canonical state
@@ -29,253 +34,376 @@ semantic beats remain ordered and are never inferred from snapshot diffs.
 ## The demo
 
 Run
-`uv run --extra dev python -m gui.replay_index protocol/fixtures/canonical-curated-replay-v1.json --list`,
-copy any emitted `erd1.` address, then run the same command with
-`--restore <address>`. The tool prints the pinned viewer, revision, prompt,
-played offer, frame hash, and semantic continuation; repeating the restore
-returns byte-identical frame and offer JSON, while a changed or missing address
-is rejected.
+`uv run --extra dev python -m gui.replay_index --pinned-match --list-authority`.
+The metadata-only authority view shows one contiguous timeline containing both
+player 0 and player 1 decisions but no frames or private cards. Then run
+the command with `--pinned-match --viewer 0 --list`, restore one emitted
+`erd1.` address with `--viewer 0`, and see the exact frame, offer, command, and
+continuation; the same address with `--viewer 1` is rejected, and no viewer
+output contains the other player's decision frames.
 
 ## Approach
 
-### 1. Define a closed canonical replay artifact
+### 1. Define complete authority truth and safe viewer projections
 
 Add a Rust-owned `canonical-replay-v1` schema beside the experience protocol,
-with matching explicit Python and TypeScript models. The safe artifact is a
-projection for exactly one historical viewer, not an authority snapshot and
-not a container of both players' private views:
+with an explicit Python authority model and a separate TypeScript-safe viewer
+projection. The authority artifact is never a client wire payload:
 
 ```text
-CanonicalReplayV1
+CanonicalReplayV1                         # authority-private
   version: 1
-  replay_id: string
+  replay_id: string                       # immutable, server-assigned
   match_id: MatchId
-  viewer: PlayerId
   content_hash: ContentHash
   asset_manifest_hash: AssetManifestHash
-  presentation_head: PresentationSeq
-  presentation: PresentationEvent[]
-  decisions: ReplayDecision[]
+  decisions: ReplayDecision[]             # global chronological order
+  presentation_tracks: ViewerPresentationTrack[]
 
 ReplayDecision
-  ordinal: u64
+  ordinal: u64                            # contiguous across both players
+  viewer: PlayerId                        # the acting player
+  source: client | policy
   revision: Revision
   prompt_id: PromptId
   offer_id: OfferId
   command_id: CommandId
-  presentation_cursor: PresentationSeq
-  frame: ExperienceFrame
-  offer: InteractionOffer
+  presentation_cursor: PresentationSeq    # cursor in viewer's track
+  frame: ExperienceFrame                  # safe for `viewer`
+  offer: InteractionOffer                 # selected from `frame.offers`
   command: Command
+
+ViewerPresentationTrack
+  viewer: PlayerId
+  head: PresentationSeq
+  events: PresentationEvent[]             # already filtered for viewer
 ```
 
-The canonical document excludes its own digest to avoid circular identity.
-Its identity is `(replay_id, sha256(canonical document bytes))`. Production and
-fixtures use one canonical JSON encoder: UTF-8, sorted object keys, compact
-separators, and no insignificant whitespace. The source digest therefore pins
-semantic bytes rather than a filesystem path or pretty-printing accident.
-
-`ReplayDecisionAddress` adds that source identity to the decision's complete
-binding:
+The globally contiguous `ordinal` answers "which deliberate decision happened
+next?" independently of actor. Each row's `presentation_cursor` addresses the
+acting viewer's semantic track at the instant that choice was offered. A
+filtered viewer projection contains only rows where `row.viewer == viewer` and
+only that viewer's presentation track:
 
 ```text
-version, replay_id, replay_sha256, match_id, viewer, ordinal, revision,
-prompt_id, offer_id, command_id, presentation_cursor
+CanonicalReplayProjectionV1              # client/Study-safe
+  version, replay_id, match_id, content/asset identities
+  viewer: PlayerId
+  decisions: ReplayDecision[]             # global ordinals may have gaps
+  presentation_head: PresentationSeq
+  presentation: PresentationEvent[]
 ```
 
-Its deep-link representation is `erd1.` plus unpadded base64url of a fixed
-JSON array. All `u64` values are decimal strings inside the address payload so
-Rust, Python, and JavaScript round-trip them without crossing JavaScript's safe
-integer boundary. The array order is part of v1 and has cross-language golden
+Projection validation rejects any row whose viewer differs from the envelope
+viewer and any second presentation track. A viewer's semantic continuation for
+one decision is the half-open interval from its cursor to the next decision by
+that same viewer, or to that viewer track's head for the final row. This keeps
+all opponent and rules activity the viewer observed between their choices,
+even though the complete authority index contains intervening rows for the
+other player.
+
+### 2. Give every row a deep-link-ready exact address
+
+`ReplayDecisionAddress` binds the immutable replay and the row's redundant
+identity:
+
+```text
+version, replay_id, match_id, ordinal, viewer, revision, prompt_id, offer_id,
+command_id, presentation_cursor, decision_sha256
+```
+
+`decision_sha256` hashes only the exact viewer-safe row
+`{frame, offer, command, presentation_cursor}`. It is safe to reveal to the
+authorized row viewer and proves that a stored ordinal did not silently change;
+the address never exposes a digest over both private perspectives or an
+authority hidden-state hash. Authority storage may maintain a private whole-
+artifact integrity digest, but that digest is neither serialized in addresses
+nor returned to clients.
+
+The deep-link representation is `erd1.` plus unpadded base64url of a fixed JSON
+array. All `u64` values are decimal strings in the address payload so Rust,
+Python, and JavaScript round-trip them without crossing JavaScript's safe
+integer boundary. Array order is part of v1 and has cross-language golden
 tests. This is a serialization seam, not a URL route or Study UI.
 
-### 2. Capture decisions at the authority boundary
+### 3. Build one authority decision context for humans and policies
 
-Refactor the protocol frame builder so it is pure and cacheable for a published
-revision. Transient compatibility fields such as drained log lines and
-`auto_passed` counts remain on the legacy socket wrapper rather than changing a
-canonical frame on repeated recovery calls. The exact frame sent to the player
-is retained until that prompt is consumed.
+Refactor `_publish_current_prompt()` into a pure
+`_build_decision_context(obs, viewer, revision)` that creates together:
 
-When an explicit player `Command` is accepted, record before stepping the
-engine:
+- the viewer projection of `obs`;
+- one prompt and its complete legal `InteractionOffer`s;
+- the offer-to-engine-action lowering map; and
+- the resulting cacheable `ExperienceFrame`.
 
-- the cached `ExperienceFrame` the player saw;
-- the selected `InteractionOffer` from that frame;
-- the validated command with its match/revision/prompt/offer bindings;
-- the historical viewer;
-- the next authority `PresentationEvent.seq` as `presentation_cursor`; and
-- the next viewer-local chronological ordinal.
+The builder takes the actor explicitly. It no longer hard-codes player 0 in
+prompt/offer actor fields or calls `hero_view()`. The engine observation is
+already oriented to its acting player; the projection layer redacts its
+opponent before hashing or persistence. Rename the Python-only
+`LegacyHeroObservation` model to viewer-oriented terminology without changing
+its wire shape: `projection.agent.player_index == viewer`, and
+`projection.opponent` contains no hidden hand identities. Prompt IDs are
+authority-global and monotonic across both actors. Transient compatibility
+fields such as drained villain log lines and `auto_passed` counts stay on the
+legacy socket wrapper, so repeated reads of a decision frame are
+byte-identical.
 
-Persist this closed decision record on the trace event. The compatibility
-`action` socket path must lower its selected raw index through the current
-published offer and the same internal command application function, using an
-authority-generated stable command ID, so it cannot create a hole. Duplicate
-command retries reuse the prior receipt and never append another decision.
+The human path caches this context as the client-visible published prompt.
+`hero_command()` validates the submitted command against it. The compatibility
+`action` message first maps its positional index back to the cached offer and
+constructs an authority-namespaced command ID, then calls the same internal
+command application function. Duplicate client commands reuse the original
+receipt and never append a row.
 
-Do not create decision records for `auto=True` priority passes, `pass_turn`
-expansion, stop changes, opponent-policy steps in this viewer projection, or
-individual `PresentationEvent`s. Those transitions continue to be stepped and
-traced normally. Old traces without the new records remain loadable in the
-legacy replay viewer, but the canonical index API reports
-`canonical_replay_unavailable`; it never backfills offers from raw action
-positions.
+The current villain path is lowered without inventing a client-visible prompt:
 
-### 3. Preserve one durable semantic ledger
+1. `_auto_play_villain()` calls `_build_decision_context()` against the
+   villain-oriented observation and current revision. The resulting frame,
+   prompt, offers, and lowering map stay local to the authority; they are never
+   assigned to the human's `published_prompt`, sent on the WebSocket, placed in
+   hero recovery, or included in hero logs.
+2. The existing policy still evaluates `(env, obs)` and returns a raw legal
+   action index. The adapter looks up the exact offer whose lowering target is
+   that action. An absent or ambiguous mapping is an authority error, not a
+   guessed offer.
+3. The authority constructs a `Command` with the match, current revision,
+   internal prompt ID, selected offer ID, empty adapter answers, and an
+   authority-generated policy command ID. Production IDs come from an injected
+   collision-free factory; the deterministic fixture injects fixed IDs. The
+   authority namespace cannot collide with client IDs.
+4. `_apply_bound_command(context, command, source="policy")` performs the same
+   match/revision/prompt/offer checks and lowering used for human commands,
+   records the exact villain-safe row, and only then steps the engine.
 
-Build the canonical artifact from the decision records plus the exact
-`TraceEvent.presentation` arrays already emitted by the authority. Flatten the
-arrays in trace order and validate contiguous `seq` values. Persist or derive
-`presentation_head` even when the final decision emitted no semantic event.
+This internal frame is not a fictional UI prompt: it is the authoritative
+legal decision boundary the policy actually consumed, captured for replay.
+Nothing makes it visible to player 0. It becomes retrievable only through an
+authorized player-1 projection or trusted authority tooling.
 
-For decision `i`, its continuation is the half-open cursor interval
-`[decision[i].presentation_cursor, decision[i + 1].presentation_cursor)`, or
-`[cursor, presentation_head)` for the final decision. Equal cursors are valid:
-two genuine decisions may have no semantic beat between them. Cursors may not
-move backward or point outside the ledger. This preserves every automatic
-semantic event between choices while making the decision count independent of
-animation vocabulary and event batching.
+### 4. Advance revisions and semantic tracks at every authority step
 
-The first pinned artifact must be generated from a complete deterministic
-UR Lessons versus GW Allies game with fixed seed, fixed player policy, fixed
-opponent policy, injected match ID/clock, and protocol commands rather than raw
-indices. Generate it twice in the same test and require byte-for-byte equality.
-Every frame in the checked artifact must have an empty opponent hand and must
-pass the existing historical-viewer privacy checks.
+The current adapter increments its protocol revision once after a whole
+human-to-human-surface batch, so intermediate villain decisions have no unique
+frame revision. Change the authority revision to advance after every engine
+action, including unindexed auto-passes. Every deliberate row therefore stores
+the exact pre-command revision; the next decision, regardless of actor, has a
+later revision. Auto-pass revisions remain real state transitions but consume
+no decision ordinal.
 
-### 4. Resolve addresses strictly
+Drain the `PresentationProjector` after every step and project its committed
+facts into each authorized viewer track with exact per-step `from_revision` and
+`to_revision`. Each track has its own contiguous sequence space. Public facts
+may serialize identically in both tracks; a future private reveal belongs only
+in its authorized track. `caused_by` retains a command ID only in the track
+authorized for that command's viewer and is `None` in the other viewer's
+track. The trace persists the same dictionaries returned live. No consumer
+derives semantic meaning from snapshots.
 
-`CanonicalReplayIndex.restore(address)` performs all checks before returning
-data:
+The human client can still receive one batched `FrameUpdate` whose
+`base_revision` is its last surfaced frame and whose final frame revision may
+jump across policy and auto-pass steps. Relax `validatePresentationUpdate()`
+from "every event spans the whole batch" to "events are sequence-contiguous,
+ordered by nondecreasing transition, and each transition lies within
+`(base_revision, final_revision]`." Gaps are valid revisions with no semantic
+event. This preserves live batching while making historical intermediate
+frames canonical.
 
-1. parse the closed `erd1` payload and reject bad versions, padding, field
-   counts, numeric forms, or unknown data;
-2. recompute the canonical replay SHA-256 and match replay/match/viewer
-   identity;
-3. look up the ordinal and compare every redundant address field with the
-   stored decision;
-4. revalidate frame/prompt/offer/command bindings and viewer privacy; and
-5. return a defensive copy of the exact frame, selected offer, played command,
-   cursor, and semantic continuation interval.
+Configured auto-pass/F6 actions use the same bound lowering path so revision
+and event truth remain complete, but are marked `source="automatic"` in the
+private trace transition and are excluded before decision ordinals are
+assigned. Stop changes are configuration, not commands. Rules resolution
+events remain events only.
 
-Construction rejects non-contiguous ordinals, duplicate addresses, duplicate
-command IDs, duplicate `(revision, prompt_id)` identities, absent selected
-offers, missing decision records, cursor gaps, presentation gaps, and any
-frame/offer/command drift. Resolution never falls back from a stale full
-address to "whatever is now at this ordinal."
+### 5. Capture, validate, and restore the complete index
 
-Expose the pure resolver through the Python API/CLI and a TypeScript consumer.
-The trace HTTP surface may return the viewer-0 index and resolve its address,
-but it must not accept `reveal_hidden`, raw trace action lists, or another
-viewer as parameters. A future authenticated viewer-1 projection is a separate
-artifact with a separate digest.
+Immediately before a deliberate bound command steps the engine, record:
 
-### 5. Make Study consume the address without owning replay truth
+- the next global decision ordinal;
+- the acting viewer and source (`client` or `policy`);
+- the exact authority decision context frame and selected offer;
+- the validated command; and
+- the next sequence in that viewer's presentation track.
 
-Keep Study artifact v1's closed `decision_id: string`, but require that string
-to be a canonical `erd1` serialization. Rust, Python, and TypeScript Study
-validators parse it and compare replay ID/digest, match, viewer, frame
-revision, prompt, offer, and command identities with the landmark's existing
-fields. The Study conformance fixture points at the new canonical curated
-replay fixture, and an integration test resolves the address through Game and
-asserts that the returned frame, offer, and played command exactly equal the
-landmark copies.
+Construction validates one complete replay before it is saved:
 
-Study does not choose which addresses are landmarks, rank them, run policy or
-search analysis, infer legality, or own the resolver. It only carries and
-verifies Game's address.
+- global ordinals are exactly `0..N-1`, regardless of actor;
+- both configured players occur when the deterministic match contains their
+  deliberate decisions;
+- every non-auto human or policy trace transition has exactly one row, and no
+  automatic transition has a row;
+- command IDs and `(revision, prompt_id)` pairs are unique;
+- frame prompt, selected offer, command, actor, and revision bindings agree;
+- every frame is safe for its declared viewer;
+- each viewer track is sequence-contiguous, cursors are monotonic within that
+  viewer's filtered rows, and cursors fall within that track; and
+- authority-private storage never crosses the client serialization boundary.
+
+`CanonicalReplayIndex.restore(address, authorized_viewer)` parses the closed
+address, verifies the caller is authorized for `address.viewer`, looks up the
+global ordinal, compares every redundant identity field, recomputes the row's
+viewer-safe `decision_sha256`, and returns a defensive copy of the exact frame,
+offer, command, cursor, and same-viewer continuation. It rejects malformed,
+missing, stale, cross-viewer, duplicate, or drifted addresses and never falls
+back to whatever is currently at an ordinal.
+
+The authority CLI's `--list-authority` mode is metadata-only: ordinal, actor,
+revision, prompt, offer, command ID, and cursor, with no projections or offer
+labels. The HTTP surface has no unrestricted complete-index endpoint. In the
+current local human-vs-bot product it applies a fixed server-side viewer-0
+projection policy and exposes only that projection and row resolver; the caller
+cannot supply `viewer` or `reveal_hidden`. Trusted player-1 inspection uses an
+authority-local API until a real authentication model exists.
+
+Old traces without complete decision records remain loadable in the legacy
+replay viewer, but canonical index construction returns
+`canonical_replay_unavailable`. It never reconstructs frames or offers from
+raw trace positions.
+
+### 6. Preserve one deterministic pinned match and Study handoff
+
+Generate the first authority fixture from a complete deterministic UR Lessons
+versus GW Allies match with fixed seed, fixed human policy, fixed opponent
+policy, injected match ID/clock, and injected command IDs. Generate it twice
+and require byte-identical private authority bytes in the Python authority
+test. Do not check the mixed-private authority artifact into a frontend fixture
+directory.
+
+Check in separate player-0 and player-1 projection fixtures produced by the
+same authority artifact. Each must contain only its declared viewer's rows,
+frames, offers, commands, and presentation track. Cross-language Rust/Python/
+TypeScript tests validate both projections and prove their global ordinals
+interleave into the complete authority metadata timeline without either
+projection containing the other's private frame.
+
+Keep Study artifact v1's closed `decision_id: string`, but require an `erd1`
+serialization. Study's curated artifact consumes a player-0 address and the
+player-0 safe replay projection digest. Rust, Python, and TypeScript Study
+validators parse the address and compare replay, match, viewer, frame revision,
+prompt, offer, command, and cursor identities. An integration test resolves it
+through Game with `authorized_viewer=0` and requires exact equality with the
+landmark copies; resolution as player 1 fails.
+
+Study does not see the complete mixed-view authority index, select or rank
+landmarks, run policy/search analysis, infer legality, or own replay
+restoration. It remains a filtered historical-viewer consumer of Game truth.
 
 ## De-risking
 
 | Question | Finding | Impact on design |
 |----------|---------|-----------------|
-| Can current trace offsets serve as decision addresses? | No. `TraceEvent` stores a legacy pre-action observation, all raw actions, and a positional action index; it stores no authoritative frame, prompt, offer, command, viewer, revision, or decision cursor. The frontend builds replay frames from adjacent observations. | Capture the exact protocol objects before engine mutation. Legacy offsets are never promoted to canonical addresses. |
-| Are repeated protocol frame reads byte-stable today? | No. `_experience_frame()` drains pending villain log lines and auto-pass counts while building a frame, and optional compatibility fields are outside the current frame hash. | Make canonical frame publication pure/cacheable and move transient compatibility data out of the indexed frame. Source digest plus exact storage, not `frame_hash` alone, proves equality. |
-| Are semantic events already authoritative and durable enough to reuse? | Yes. `_commit_presentation()` drains the authority projector, assigns monotonic `seq` values, returns the same dictionaries live, and persists the batch on the transition's final trace step. The in-memory recovery ledger is bounded to 256, but the trace retains all persisted batches. | Flatten persisted event batches; do not infer events from observations or use the bounded reconnect ledger as durable replay truth. |
-| How are automatic actions distinguishable from player decisions? | Priority stops/F6 already mark generated passes with `TraceEvent.auto=True`; opponent activity is separately labelled `actor="villain"`. | A viewer index includes only that viewer's explicit, non-auto commands. All intervening presentation stays in cursor intervals. |
-| Can the existing trace API safely expose raw records as an index? | No. `prepare_trace_payload()` normalizes/redacts observations, but raw `actions` and action descriptions remain separate fields and can encode acting-player choices. | The canonical API emits only captured viewer-safe frames/offers/commands and semantic events, never raw trace rows or a hidden-info toggle. |
-| Does Study already bind a landmark to replay truth? | No. `StudyLandmark.decision_id` is a free string. Validators bind its embedded frame/offer/command to each other but do not resolve the ID against a replay. | Give `decision_id` the closed `erd1` grammar and add cross-artifact resolution/equality tests while leaving landmark selection in Study. |
-| Can `protocol/fixtures/bolt-target.json` become the canonical replay fixture? | No. It is a recovery-plus-next-command conformance bundle, not a chronological match. Its presentation tail spans revision 1 to 2 while the bundled command expects revision 2, so treating the tail as that command's replay continuation would manufacture history. | Add a separate complete canonical replay fixture generated from one deterministic curated match. Keep the bolt fixture for its existing recovery contract. |
-| Will a numeric address round-trip through TypeScript? | Existing protocol `u64`s are TypeScript `number`s and the docs already flag the `Number.MAX_SAFE_INTEGER` limit. | Serialize address counters as canonical decimal strings and reject unsafe values at the current TypeScript runtime boundary; do not silently round. |
-| Are the current cross-language foundations healthy? | The focused experience/study conformance baseline passes: `uv run --extra dev pytest -q tests/gui/test_experience_protocol.py tests/gui/test_study_protocol.py` reports 18 passing tests. | Extend the existing Rust-schema/Python/TypeScript golden-fixture pattern instead of adding a Python-only replay contract. |
+| Can current trace offsets serve as decision addresses? | No. `TraceEvent` stores a legacy pre-action observation, all raw actions, and a positional action index; it stores no authoritative frame, prompt, offer, command, viewer, revision, or decision cursor. The frontend builds replay frames from adjacent observations. | Capture exact protocol objects before mutation. Legacy offsets are never promoted to canonical addresses. |
+| Can current protocol revisions identify villain decisions? | No. `hero_command()` and the compatibility paths call `_advance()` through villain and auto-pass actions, then increment revision once. Intermediate policy choices share no authoritative frame revision. | Advance revision and drain semantic facts per engine action while retaining batched client delivery. |
+| Can the policy path already produce a command? | No. `_auto_play_villain()` calls the policy for a raw action index and passes that directly to `_step_and_record()`. `_publish_current_prompt()` hard-codes hero actor 0. | Build an authority-local villain decision context, map the selected raw index back to exactly one offer, construct an authority policy command, and apply it through the shared binding/lowering path without publishing it to the hero. |
+| Are repeated frame reads byte-stable today? | No. `_experience_frame()` drains pending villain log lines and auto-pass counts, and optional compatibility fields are outside the frame hash. | Make decision frames pure/cacheable and move transient wrapper data outside canonical frames. |
+| Are semantic events authoritative and durable enough to reuse? | Yes. `_commit_presentation()` assigns monotonic sequences, returns the same dictionaries live, and persists them in the trace. Its reconnect ledger is bounded, but trace batches remain durable. | Drain/persist per step into viewer tracks; never infer events from snapshots or use the bounded reconnect ledger as replay truth. |
+| How are automatic actions distinguishable? | Priority stops/F6 already set `TraceEvent.auto=True`; opponent activity is labelled separately. | Human and opponent-policy selections are deliberate indexed decisions. Auto-pass/F6 steps advance revision and events but get no ordinal. |
+| May one client artifact contain every row? | No. A frame can be safe for its acting viewer while revealing facts private to the other viewer. Combining both safe projections creates an omniscient artifact. | Keep the complete index authority-private; expose closed single-viewer projections and authorize every restore. TypeScript models only the safe projection. |
+| Can a whole-index digest appear in an address? | Not safely. A digest over both private projections would be a client-visible comparison oracle over hidden material. | Bind addresses to immutable replay ID and a hash of the authorized row payload only. Keep whole-artifact integrity private. |
+| Can the existing trace API safely expose raw records? | No. `prepare_trace_payload()` redacts observations, but raw action lists and descriptions are separate and can encode acting-player choices. | Projection endpoints emit only captured viewer-safe protocol objects and semantic events, never raw trace rows or a hidden-info toggle. |
+| Does Study bind a landmark to replay truth? | No. `decision_id` is a free string. Validators bind embedded objects to each other but do not resolve the ID against Game. | Give `decision_id` the closed `erd1` grammar and test authorized resolution against the player-0 projection. |
+| Can `bolt-target.json` become the replay fixture? | No. It is recovery-plus-next-command conformance, not a chronological match. Its tail spans revision 1 to 2 while the command expects revision 2. | Generate a separate complete deterministic match and safe per-viewer projection fixtures. |
+| Will address counters round-trip through TypeScript? | Protocol `u64`s are TypeScript `number`s and the docs flag the `Number.MAX_SAFE_INTEGER` limit. | Serialize address counters as canonical decimal strings and reject unsafe runtime values; never round. |
+| Are the current cross-language foundations healthy? | `uv run --extra dev pytest -q tests/gui/test_experience_protocol.py tests/gui/test_study_protocol.py` passes 18 focused tests. | Extend the existing Rust-schema/Python/TypeScript conformance pattern rather than adding a Python-only contract. |
 
 ## Alternatives considered
 
 | Approach | Tradeoff | Why not |
 |----------|----------|---------|
-| Use trace-event or frontend frame indices | Smallest change and naturally chronological. | Counts opponent/auto steps as choices, reconstructs state from legacy observations, has no prompt/offer/command binding, and changes meaning when trace internals change. |
-| Address only by `frame_hash` or a hash of frame plus command | Compact and content-oriented. | Hashes do not enumerate chronology, repeated equivalent frames are possible, the current frame hash omits compatibility fields, and no presentation cursor or source replay identity is recoverable without scanning. |
-| Build the index in the Svelte replay client | Avoids backend/schema work. | Gives the client replay authority, repeats private-data and legality logic, cannot certify the command the authority accepted, and violates Game/Study ownership. |
-| Replay raw engine actions from the seed whenever an address is opened | Stores less frame data. | Engine/content changes can alter history, restoration would depend on private state and current code, and exact viewer-safe equality would become an execution claim rather than an immutable artifact property. |
-| Put both players' indexed frames in one public artifact | Gives one globally contiguous decision list. | Combining separately viewer-safe private projections creates an omniscient artifact and violates the historical-knowledge boundary. Viewer-scoped artifacts preserve chronology without cross-view leakage. |
+| Index only the human viewer | Simplifies privacy and reuses the published hero frame. | Omits genuine opponent-policy decisions and is not the complete Game-owned chronology required by the directive. |
+| Use trace-event or frontend frame indices | Smallest change and naturally chronological. | Counts automatic steps as choices, reconstructs state from legacy observations, and has no frame/offer/command binding. |
+| Address only by `frame_hash` or frame-plus-command hash | Compact and content-oriented. | Does not enumerate chronology, repeated equivalent frames are possible, and no replay/presentation identity is recoverable without scanning. |
+| Build the index in Svelte | Avoids backend/schema work. | Gives the client replay authority, repeats privacy and legality logic, and cannot certify policy commands the authority accepted. |
+| Replay raw engine actions from the seed on restore | Stores less frame data. | Engine/content changes can alter history; exact viewer equality becomes an execution claim rather than immutable evidence. |
+| Publish one artifact containing both acting-viewer frames | Makes the complete index portable to every consumer. | Creates an omniscient client artifact. The complete index belongs inside Game authority; clients receive authorized projections only. |
 
 ## Key decisions
 
-1. **Canonical means captured, not reconstructed.** The indexed frame and offer
-   are the exact objects published before the accepted command.
-2. **Addresses are redundant on purpose.** Replay digest plus chronological
-   ordinal locates the row; match/viewer/revision/prompt/offer/command/cursor
-   fields prevent a stale or corrupted ordinal from resolving to different
-   history.
-3. **Replay identity is immutable content identity.** Any canonical replay
-   byte change invalidates old addresses visibly.
-4. **The index is viewer-scoped.** It is complete for one historical player
-   and can be regenerated separately for another authorized viewer. It never
-   merges private perspectives.
-5. **Automation is continuation, not choice.** Opponent policy activity,
-   configured passes, and rules events remain in the replay timeline but do
-   not inflate the historical viewer's decision index.
-6. **Event ranges are cursor-based, not ownership guesses.** A continuation
-   may include events with `caused_by=None`; chronology, not heuristic cause
-   attribution, determines what plays before the next decision.
-7. **Old traces fail closed for canonical restore.** Supporting legacy viewing
-   does not justify inventing missing authority objects.
-8. **Study stores Game's address string.** Keeping `decision_id` as a string
-   avoids an unnecessary Study schema version break while its now-closed
-   grammar and resolver integration eliminate free-form IDs.
+1. **One global chronology covers both deliberate players.** Global ordinals
+   are contiguous across human and policy choices; automation consumes neither
+   rows nor ordinals.
+2. **Canonical means captured, not reconstructed.** Every row stores the exact
+   actor-safe frame and selected offer before its command mutates authority.
+3. **Policies cross the same command boundary.** Raw policy indices are an
+   internal adapter input lowered through an authority-local prompt/offer map,
+   not replay truth and not a human-visible prompt.
+4. **Complete truth stays inside Game.** Client and Study artifacts contain one
+   authorized viewer's rows and presentation track only.
+5. **Addresses are redundant and viewer-bound.** Replay/row identities plus a
+   viewer-safe row digest prevent stale ordinal fallback without exposing a
+   hidden whole-index hash.
+6. **Revisions advance per authority action.** Intermediate opponent decisions
+   and unindexed automatic transitions receive real state identities while the
+   live client retains batched updates.
+7. **Semantic ranges are per viewer.** A viewer's next indexed row closes the
+   prior continuation, preserving opponent/rules events without showing the
+   opponent's private choice surface.
+8. **Old traces fail closed for canonical restore.** Legacy viewing does not
+   justify inventing missing frames, offers, or commands.
+9. **Study stores Game's address string.** It consumes a filtered projection
+   and never owns the complete index, ranking, legality, search, or replay.
 
-Wild success is that any future replay, inspector, bookmark, or Study artifact
-can carry one short address and land on the exact table, prompt, legal offer,
-and next semantic beat the player experienced, even after client UI changes.
-The player never notices the index; they notice that review links simply cannot
-open the wrong decision.
+Wild success is that Game can answer "what was decision 47?" for the complete
+match, then safely answer "what did player 0 see?" or "what did player 1 see?"
+without ever producing an omniscient client payload. Study can deep-link to an
+exact human decision while trusted diagnostics can prove every policy decision
+is present in the same chronology.
 
-Wild failure would be an index derived after the fact from raw actions, stable
-only until a renderer or engine revision changed, or an artifact that became
-omniscient by combining both players' projections. The strict source digest,
-authority-time capture, viewer scope, and fail-closed legacy behavior are the
-guards against that outcome.
+Wild failure would be two separate per-player timelines that cannot agree on
+order, a villain history reconstructed from raw action positions, or one
+portable artifact that quietly combines both private hands. Global ordinals,
+authority-local policy lowering, per-viewer tracks, and mandatory projection
+authorization prevent those outcomes.
 
 ## Scope
 
-- In scope: a closed canonical replay/index/address contract in Rust, Python,
-  and TypeScript; authority-time capture of exact viewer frames/offers/commands;
-  one complete deterministic curated-match fixture; semantic cursor intervals;
-  strict construction and restore validation; viewer-safe trace API and CLI
-  seams; Study `decision_id` parsing/binding; duplicate, missing, privacy, and
-  replay-equivalence tests.
+- In scope: a complete Game-private chronological index across both deliberate
+  players; Rust/Python authority types and closed viewer projection schema;
+  authority-local policy frame/offer/command lowering; per-action revisions;
+  exact viewer-safe capture; per-viewer semantic tracks and cursor intervals;
+  stable address serialization; strict authorization/restoration; one complete
+  deterministic curated match with separate safe viewer fixtures; Study's
+  filtered `decision_id` handoff; duplicate, missing, privacy, and replay-
+  equivalence tests.
 - Out of scope: landmark ranking or selection; policy/value/search execution;
-  alternate-line simulation; private/hindsight facts; client-side legality;
+  alternate-line simulation; private/hindsight display; client-side legality;
   Study UI; replay-page redesign; share/bookmark routing; legacy-trace
-  reconstruction; generic arbitrary-deck fixtures.
+  reconstruction; generic arbitrary-deck fixtures; a new player-1 HTTP auth
+  product.
 
 ## Done when
 
 - The deterministic pinned UR Lessons versus GW Allies generator produces the
-  same canonical JSON bytes and SHA-256 twice, with contiguous decision
-  ordinals covering every explicit command made by its historical viewer.
-- Restoring every emitted address reproduces byte-identical `ExperienceFrame`,
-  selected `InteractionOffer`, and played `Command`, with the same viewer,
-  revision, prompt, frame hash, and presentation cursor recorded live.
-- Concatenating decision continuation intervals preserves the complete ordered
-  viewer-safe `PresentationEvent` ledger through `presentation_head`; automatic
-  steps add no decision address.
-- Rust, Python, and TypeScript reject duplicate/gapped ordinals, duplicate
-  command or prompt identities, missing addresses, stale replay digests,
-  identity drift, cursor/presentation gaps, and opponent-private facts.
+  same authority artifact twice, and its global ordinals are exactly `0..N-1`
+  over every non-auto human command and every opponent-policy choice.
+- Every deliberate trace transition has exactly one index row with the acting
+  viewer, exact pre-command `ExperienceFrame`, selected `InteractionOffer`,
+  bound `Command`, unique revision/prompt/command identities, and acting-viewer
+  presentation cursor. Auto-pass/F6/rules-only transitions have zero rows.
+- A villain-policy unit/integration test proves its raw action index maps to
+  exactly one internal offer, produces a validated authority command and row,
+  and never changes the human `published_prompt`, hero recovery offers, or
+  WebSocket payload.
+- Restoring every row as its authorized viewer reproduces byte-identical frame,
+  offer, command, cursor, and same-viewer semantic continuation. Restoring the
+  same address as the other viewer is rejected.
+- Player-0 and player-1 projection fixtures contain disjoint decision frames,
+  only their declared viewer's presentation track, and global ordinals whose
+  ordered union equals the complete authority metadata timeline. Neither
+  fixture contains the other player's hand identities, offers, or commands.
+- Concatenating each viewer's continuation intervals preserves that viewer's
+  complete ordered `PresentationEvent` track through its head, including
+  semantic consequences of opponent decisions and automatic rules activity;
+  no semantic event becomes a decision row.
+- Rust/Python authority validation rejects duplicate or gapped global
+  ordinals. Rust, Python, and TypeScript projection validation allows gaps left
+  by the other viewer but rejects duplicate or non-increasing ordinals,
+  duplicate command or prompt identities, missing addresses, row hash drift,
+  identity mismatch, cursor/event gaps, mixed-view projections, unsafe numeric
+  encodings, and cross-viewer restore attempts.
 - The Study curated landmark's `decision_id` parses as `erd1`, resolves through
-  Game's fixture, and equals its embedded frame, offer, and command exactly.
-- Verification is green in the same modes CI uses:
+  Game's player-0 projection, and equals its embedded frame, offer, and command;
+  Study never loads the complete authority artifact.
+- Verification is green in the same debug mode CI uses:
 
   ```bash
   cargo test --locked --manifest-path managym/Cargo.toml
@@ -287,13 +415,14 @@ guards against that outcome.
 
 ## Measure
 
-- **Decision coverage:** `indexed explicit viewer commands / recorded explicit
-  viewer commands = 100%` for the pinned match.
-- **Restore equivalence:** `restored exact frame+offer+command / indexed
-  decisions = 100%` in Rust, Python, and TypeScript fixture tests.
-- **Semantic coverage:** every persisted presentation sequence number appears
-  exactly once in the ordered replay ledger and every event between decisions
-  remains reachable from a cursor interval; no presentation event becomes a
-  decision row.
-- **Privacy:** zero opponent-hand identities and zero raw trace action lists in
-  the canonical viewer artifact and restore responses.
+- **Complete decision coverage:** `(indexed human commands + indexed policy
+  choices) / all recorded non-auto deliberate transitions = 100%` for the
+  pinned match, with one global contiguous ordinal sequence.
+- **Restore equivalence:** `authorized byte-identical frame+offer+command
+  restores / indexed decisions = 100%` across authority tests and each safe
+  cross-language projection fixture.
+- **Semantic coverage:** every event in each viewer presentation track is
+  reachable exactly in order from that viewer's decision continuations; zero
+  presentation events become decision rows.
+- **Privacy:** zero mixed-view decision rows or presentation tracks in client
+  and Study artifacts; cross-viewer resolution rejection is 100%.
