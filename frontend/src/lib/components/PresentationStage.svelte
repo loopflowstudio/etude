@@ -58,7 +58,7 @@
             type="button"
             class={`rounded border px-2.5 py-1.5 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 ${
               player.speed > 1
-                ? 'border-amber-600 bg-amber-600/20 text-amber-300'
+                ? 'border-amber-600 bg-amber-600/20 text-slate-100'
                 : 'border-slate-600 bg-slate-900 text-slate-200 hover:border-slate-400'
             }`}
             aria-pressed={player.speed > 1}

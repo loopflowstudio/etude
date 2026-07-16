@@ -4,6 +4,7 @@ type Palette = {
   bg: string;
   surface: string;
   muted: string;
+  field: string;
   border: string;
   text: string;
   textSecondary: string;
@@ -13,12 +14,13 @@ type Palette = {
 };
 
 const light: Palette = {
-  bg: '#efe6d4',
+  bg: '#ebdfc6',
   surface: '#f7f0e0',
-  muted: '#e3d7bd',
+  muted: '#ded0af',
+  field: '#fcf9ee',
   border: '#c9b892',
   text: '#3a3122',
-  textSecondary: '#665b42',
+  textSecondary: '#5f553d',
   accent: '#973427',
   accentText: '#6d5a35',
   accentHover: '#ab4634',
@@ -28,6 +30,7 @@ const dark: Palette = {
   bg: '#191510',
   surface: '#221c14',
   muted: '#2b241a',
+  field: '#2f2717',
   border: '#423a2b',
   text: '#ece4d0',
   textSecondary: '#b3a88e',
@@ -44,6 +47,7 @@ async function palette(page: Page): Promise<Palette> {
       bg: token('--bg'),
       surface: token('--bg-surface'),
       muted: token('--bg-muted'),
+      field: token('--bg-field'),
       border: token('--border'),
       text: token('--text'),
       textSecondary: token('--text-secondary'),

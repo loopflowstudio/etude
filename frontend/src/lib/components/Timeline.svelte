@@ -69,7 +69,15 @@
     <span>Frame {totalFrames === 0 ? 0 : currentFrame + 1} / {totalFrames}</span>
     <span class="text-right">
       {#if actionDescription}
-        <span class={actor === 'villain' ? 'text-amber-300' : actor === 'hero' ? 'text-emerald-300' : 'text-slate-300'}>
+        <span
+          class={`rounded px-1.5 py-0.5 font-semibold ${
+            actor === 'villain'
+              ? 'bg-amber-600/20'
+              : actor === 'hero'
+                ? 'bg-emerald-600/20'
+                : 'bg-slate-700'
+          }`}
+        >
           {actor === 'villain' ? 'Villain' : actor === 'hero' ? 'Hero' : 'State'}
         </span>
         : {actionDescription}

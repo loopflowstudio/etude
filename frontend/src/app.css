@@ -59,14 +59,17 @@
   --sepia-bronze: #6d5a35;
   --ivory: #f8f1e0;
 
-  /* Adaptive palette: parchment */
-  --bg: #efe6d4;
+  /* Adaptive palette: parchment. Three ground levels — page, panel, and
+     field (the paper-white fill inside bordered controls) — so surfaces
+     separate by value, not just by borders. */
+  --bg: #ebdfc6;
   --bg-surface: #f7f0e0;
-  --bg-muted: #e3d7bd;
+  --bg-muted: #ded0af;
+  --bg-field: #fcf9ee;
   --border: #c9b892;
   --border-strong: #a5926a;
   --text: #3a3122;
-  --text-secondary: #665b42;
+  --text-secondary: #5f553d;
   --accent: var(--mountain-red);
   --accent-text: var(--sepia-bronze);
   --accent-hover: #ab4634;
@@ -118,6 +121,7 @@
     --bg: #191510;
     --bg-surface: #221c14;
     --bg-muted: #2b241a;
+    --bg-field: #2f2717;
     --border: #423a2b;
     --border-strong: #625741;
     --text: #ece4d0;
@@ -141,8 +145,8 @@
   --font-sans: 'Lato', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --font-mono: 'JetBrains Mono', 'SFMono-Regular', Consolas, monospace;
 
-  --color-slate-950: var(--bg);
-  --color-slate-900: var(--bg);
+  --color-slate-950: var(--bg-surface);
+  --color-slate-900: var(--bg-field);
   --color-slate-800: var(--bg-surface);
   --color-slate-700: var(--bg-muted);
   --color-slate-600: var(--border-strong);
@@ -175,7 +179,7 @@
      out loud — so Mountain red stays exclusive to actions and errors. */
   --color-violet-900: var(--info);
   --color-violet-500: var(--info);
-  --color-violet-200: var(--info-text);
+  --color-violet-200: var(--text);
   --color-indigo-900: var(--info);
   --color-indigo-500: var(--info);
   --color-indigo-400: var(--info);

@@ -65,11 +65,11 @@
     <div class="flex items-center gap-2">
       <h2 id="action-panel-heading" class="text-base font-semibold text-accent-text">Actions</h2>
       {#if disabled}
-        <span role="status" aria-live="polite" aria-atomic="true" class="rounded bg-purple-900/20 px-2 py-0.5 text-xs font-semibold text-purple-300">Game over</span>
+        <span role="status" aria-live="polite" aria-atomic="true" class="rounded bg-purple-900/20 px-2 py-0.5 text-xs font-semibold text-slate-300">Game over</span>
       {:else if fastForwarding}
-        <span role="status" aria-live="polite" aria-atomic="true" data-testid="auto-passing" class="animate-pulse rounded bg-sky-600/30 px-2 py-0.5 text-xs font-semibold text-sky-300">Auto-passing…</span>
+        <span role="status" aria-live="polite" aria-atomic="true" data-testid="auto-passing" class="animate-pulse rounded bg-sky-600/20 px-2 py-0.5 text-xs font-semibold text-slate-200">Auto-passing…</span>
       {:else if actions.length > 0}
-        <span role="status" aria-live="polite" aria-atomic="true" class="rounded bg-emerald-600/30 px-2 py-0.5 text-xs font-semibold text-emerald-300">Your move</span>
+        <span role="status" aria-live="polite" aria-atomic="true" class="rounded bg-emerald-600/20 px-2 py-0.5 text-xs font-semibold text-slate-200">Your move</span>
       {/if}
     </div>
     <div class="flex items-center gap-3">
@@ -80,7 +80,7 @@
       {/if}
       <button
         data-testid="pass-turn"
-        class="rounded border border-slate-600 bg-slate-900 px-2 py-1 text-xs font-semibold text-slate-300 transition hover:border-sky-400 hover:text-sky-300 disabled:cursor-not-allowed disabled:opacity-50"
+        class="rounded border border-slate-600 bg-slate-900 px-2 py-1 text-xs font-semibold text-slate-300 transition hover:border-blue-400 hover:text-slate-200 disabled:cursor-not-allowed disabled:opacity-50"
         disabled={!canPassTurn || fastForwarding}
         onclick={() => onPassTurn?.()}
         title="Auto-pass every priority window until the turn ends"

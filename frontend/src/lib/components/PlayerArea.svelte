@@ -54,7 +54,7 @@
 
   <div class="space-y-4">
     <div>
-      <h3 class="mb-2 text-sm font-medium text-sky-400">Hand ({hiddenHandCount})</h3>
+      <h3 class="mb-2 text-sm font-medium text-accent-text">Hand ({hiddenHandCount})</h3>
       <div class="flex flex-wrap gap-2">
         {#if opponent}
           {#each Array(hiddenHandCount) as _, index}
@@ -88,10 +88,10 @@
     </div>
 
     <div>
-      <h3 class="mb-2 text-sm font-medium text-purple-300">Graveyard ({player.graveyard.length})</h3>
+      <h3 class="mb-2 text-sm font-medium text-accent-text">Graveyard ({player.graveyard.length})</h3>
       <div class="flex flex-wrap gap-2">
         {#if player.graveyard.length === 0}
-          <div class="rounded border border-dashed border-slate-700 px-3 py-2 text-xs text-slate-400">Empty graveyard</div>
+          <div class="rounded border border-dashed border-purple-500/40 bg-purple-900/10 px-3 py-2 text-xs text-slate-400">Empty graveyard</div>
         {/if}
         {#each player.graveyard as card}
           <Card
@@ -107,10 +107,10 @@
     </div>
 
     <div>
-      <h3 class="mb-2 text-sm font-medium text-purple-300">Exile ({player.exile.length})</h3>
+      <h3 class="mb-2 text-sm font-medium text-accent-text">Exile ({player.exile.length})</h3>
       <div class="flex flex-wrap gap-2">
         {#if player.exile.length === 0}
-          <div class="rounded border border-dashed border-slate-700 px-3 py-2 text-xs text-slate-400">Empty exile</div>
+          <div class="rounded border border-dashed border-purple-500/40 bg-purple-900/10 px-3 py-2 text-xs text-slate-400">Empty exile</div>
         {/if}
         {#each player.exile as card}
           <Card

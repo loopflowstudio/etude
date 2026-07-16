@@ -8,14 +8,15 @@
 
   let { entries = [], activeEntryId = null }: Props = $props();
 
+  // Actors tint the entry's ground, not its ink: hero Forest, villain Plains.
   function actorClass(actor: GameLogEntry['actor']): string {
     switch (actor) {
       case 'hero':
-        return 'text-emerald-300';
+        return 'border-emerald-600/30 bg-emerald-600/10';
       case 'villain':
-        return 'text-amber-300';
+        return 'border-amber-600/30 bg-amber-600/10';
       default:
-        return 'text-slate-300';
+        return 'border-slate-700 bg-slate-900/60';
     }
   }
 </script>
@@ -36,9 +37,9 @@
       {#each entries as entry}
         <div
           data-testid="log-entry"
-          class={`rounded border px-3 py-2 text-sm ${entry.id === activeEntryId ? 'border-blue-400 bg-slate-900' : 'border-slate-700 bg-slate-900/60'}`}
+          class={`rounded border px-3 py-2 text-sm ${entry.id === activeEntryId ? 'border-blue-400 bg-slate-900' : actorClass(entry.actor)}`}
         >
-          <div class={`font-medium ${actorClass(entry.actor)}`}>{entry.text}</div>
+          <div class="font-medium">{entry.text}</div>
         </div>
       {/each}
     {/if}

@@ -162,9 +162,9 @@
         aria-label={`Connection status: ${gameStore.connection}`}
         class={`rounded px-2 py-1 text-xs font-semibold ${
           gameStore.connection === 'connected'
-            ? 'bg-emerald-600/30 text-emerald-300'
+            ? 'bg-emerald-600/20 text-slate-200'
             : gameStore.connection === 'reconnecting' || gameStore.connection === 'connecting'
-              ? 'bg-amber-600/30 text-amber-300'
+              ? 'bg-amber-600/20 text-slate-200'
               : 'bg-slate-700 text-slate-300'
         }`}
       >

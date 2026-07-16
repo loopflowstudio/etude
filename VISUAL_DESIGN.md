@@ -46,17 +46,26 @@ for a prompt.
 | `sepia-bronze` | `#6D5A35` | Display/annotation tone; see below |
 | `ivory` | `#F8F1E0` | Text on accent fills; constant across modes |
 
+### Grounds: page, panel, field
+
+Every mode has three ground levels so bordered things separate by value, not
+just by outline: the **page** (`bg`), **panels** on it (`surface`), and the
+**field** fill inside bordered controls — selects, inputs, action options,
+life chips (`field`). Zone internals additionally take their register's wash
+(see the color pie below).
+
 ### Light mode (Parchment)
 
 | Token | Hex | Usage |
 |-------|-----|-------|
-| `bg` | `#EFE6D4` | Main page background |
+| `bg` | `#EBDFC6` | Main page background |
 | `surface` | `#F7F0E0` | Elevated cards, panels |
-| `muted` | `#E3D7BD` | Secondary surfaces, chips |
+| `muted` | `#DED0AF` | Secondary surfaces, chips |
+| `field` | `#FCF9EE` | Paper-white fill inside bordered controls |
 | `border` | `#C9B892` | Borders, dividers |
 | `border-strong` | `#A5926A` | Emphasized borders |
 | `text` | `#3A3122` | Primary text |
-| `text-secondary` | `#665B42` | Secondary text, captions |
+| `text-secondary` | `#5F553D` | Secondary text, captions |
 | `accent` | `#973427` | Buttons, focus, links |
 | `accent-hover` | `#AB4634` | Hover states (lighter) |
 | `accent-text` | `#6D5A35` | Headings, annotations |
@@ -69,6 +78,7 @@ for a prompt.
 | `bg` | `#191510` | Main page background |
 | `surface` | `#221C14` | Elevated cards, panels |
 | `muted` | `#2B241A` | Secondary surfaces, chips |
+| `field` | `#2F2717` | Lifted fill inside bordered controls |
 | `border` | `#423A2B` | Borders, dividers |
 | `border-strong` | `#625741` | Emphasized borders |
 | `text` | `#ECE4D0` | Primary text |
@@ -101,6 +111,14 @@ Balance rule: no family should visibly dominate the chrome. Red gets the
 interactive surfaces, so it needs no additional decoration; when adding a
 new colored element, give it to the register it belongs to, not the one
 that looks best.
+
+**Ink discipline.** Text is two inks — `text` and `text-secondary` — plus
+the bronze display tier. The pie speaks through container washes and
+borders (`/10`–`/20` alpha on the family base), never through body text:
+the turn line is ink on a sun wash, log entries are ink on actor-tinted
+grounds, "Hidden" is ink inside a violet frame. The `*-text` companions
+exist for the rare moments a family must speak in text (error banners);
+treat each new use as an exception to justify.
 
 ### CSS variables
 
@@ -237,9 +255,9 @@ non-text). The full matrix lives in the palette validator used during design.
 
 | Combination | Ratio | Grade |
 |-------------|-------|-------|
-| `#3A3122` on `#EFE6D4` (light text/bg) | 10.3:1 | AAA |
-| `#665B42` on `#E3D7BD` (light secondary/muted) | 4.7:1 | AA |
-| `#6D5A35` on `#EFE6D4` (bronze display/bg) | 5.4:1 | AA |
+| `#3A3122` on `#EBDFC6` (light text/bg) | 9.7:1 | AAA |
+| `#5F553D` on `#DED0AF` (light secondary/muted) | 4.8:1 | AA |
+| `#6D5A35` on `#EBDFC6` (bronze display/bg) | 5.0:1 | AA |
 | `#F8F1E0` on `#973427` (ivory on accent) | 6.6:1 | AA |
 | `#ECE4D0` on `#191510` (dark text/bg) | 14.3:1 | AAA |
 | `#F8F1E0` on `#B24D38` (dark ivory on accent) | 4.7:1 | AA |

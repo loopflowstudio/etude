@@ -69,7 +69,7 @@
     <PresentationStage player={presentationPlayer} />
   {/if}
 
-  <div class="rounded border border-amber-600/40 bg-amber-600/10 px-3 py-2 text-center font-mono text-xs font-semibold text-amber-300">
+  <div class="rounded border border-amber-600/40 bg-amber-600/15 px-3 py-2 text-center font-mono text-xs font-semibold text-slate-200">
     Turn {observation.turn.turn_number} · {observation.turn.phase} · {observation.turn.step}
   </div>
 
@@ -84,8 +84,8 @@
     onPreviewCard={setPreview}
   />
 
-  <section class="rounded border border-slate-700 bg-slate-900/60 p-3">
-    <h3 class="mb-3 text-sm font-semibold text-emerald-300">Battlefield</h3>
+  <section class="rounded border border-emerald-600/30 bg-emerald-600/10 p-3">
+    <h3 class="mb-3 text-sm font-semibold text-accent-text">Battlefield</h3>
     <div class="space-y-4">
       <PermanentRow
         label="Opponent"
@@ -120,7 +120,7 @@
 
   {#if stackCards.length > 0}
     <section class="rounded border border-indigo-500/40 bg-indigo-900/20 p-3">
-      <h3 class="mb-2 text-xs uppercase tracking-wide text-indigo-200">Stack</h3>
+      <h3 class="mb-2 text-xs uppercase tracking-wide text-slate-400">Stack</h3>
       <div class="flex flex-wrap gap-2 text-xs text-slate-100">
         {#each stackCards as card}
           <div
