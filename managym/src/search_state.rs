@@ -361,7 +361,9 @@ impl BranchDriver for ClonePlusUndoDriver {
             journal_marks: Some(stats.marks),
             journal_commits: Some(stats.commits),
             journal_rollbacks: Some(stats.rollbacks),
-            unsupported_reason: "system allocator has no counting hook; clone-plus-undo does not implement page COW".to_string(),
+            unsupported_reason:
+                "system allocator has no counting hook; clone-plus-undo does not implement page COW"
+                    .to_string(),
             ..DriverCounters::default()
         }
     }

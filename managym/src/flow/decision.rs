@@ -453,6 +453,8 @@ impl Game {
     /// change (CR 701.26b-style reorder), so no events fire.
     pub(crate) fn put_on_bottom_of_library(&mut self, card: CardId) {
         let owner = self.state.cards[card].owner;
+        // A reorder within one zone, so the zone-move inverse does not apply.
+        self.journal_zones();
         let library = self.state.zones.zone_cards_mut(ZoneType::Library, owner);
         if let Some(index) = library.iter().position(|c| *c == card) {
             library.remove(index);

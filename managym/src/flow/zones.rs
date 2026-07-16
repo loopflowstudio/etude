@@ -289,7 +289,7 @@ impl Game {
             }
         }
 
-        self.journal_zones();
+        self.journal_zone_move(card, owner);
         self.state.zones.move_card(card, owner, to_zone);
 
         if to_zone == ZoneType::Battlefield {

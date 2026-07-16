@@ -25,7 +25,7 @@ use crate::{
         mana::Mana,
         player::Player,
         stack_object::StackObject,
-        zone::ZoneManager,
+        zone::{ZoneManager, ZoneType},
     },
 };
 
@@ -104,32 +104,77 @@ enum EventQueue {
     Observation,
 }
 
+/// The mutable half of a [`Player`]. `deck` and `name` are fixed at setup and
+/// never change during a match, so journaling them would copy a 60-entry vector
+/// and a string on every life, mana, and damage change. Recording only the
+/// mutable scalars keeps the entry allocation-free.
+#[derive(Clone, Debug)]
+struct PlayerVitals {
+    life: i32,
+    drew_when_empty: bool,
+    alive: bool,
+    mana_pool: Mana,
+    combat_mana_pool: Mana,
+}
+
+impl PlayerVitals {
+    fn capture(player: &Player) -> Self {
+        Self {
+            life: player.life,
+            drew_when_empty: player.drew_when_empty,
+            alive: player.alive,
+            mana_pool: player.mana_pool.clone(),
+            combat_mana_pool: player.combat_mana_pool.clone(),
+        }
+    }
+
+    fn restore(self, player: &mut Player) {
+        player.life = self.life;
+        player.drew_when_empty = self.drew_when_empty;
+        player.alive = self.alive;
+        player.mana_pool = self.mana_pool;
+        player.combat_mana_pool = self.combat_mana_pool;
+    }
+}
+
 #[derive(Debug)]
 enum UndoEntry {
-    Player(PlayerId, Player),
+    Player(PlayerId, PlayerVitals),
+    /// Inverse of one card's zone change, including the exact index it held.
+    /// The hot zone path: a whole-`ZoneManager` clone here would copy fifteen
+    /// vectors for every card that moves.
+    ZoneMove {
+        card: CardId,
+        owner: PlayerId,
+        from: Option<(ZoneType, usize)>,
+        card_zones_len: usize,
+    },
     Permanent(PermanentId, Option<crate::state::permanent::Permanent>),
     CardToPermanent(CardId, Option<PermanentId>),
     Incarnation(CardId, Incarnation),
     ObjectLki(ObjectRef, Option<ObjectLki>),
-    Zones(ZoneManager),
-    Turn(TurnState),
+    /// Bulk zone rewrites (reshuffle, reorder, determinize) are rare, so they
+    /// are boxed: inline they would be 360 bytes and, as the largest variant,
+    /// would set that size for every entry in the journal.
+    Zones(Box<ZoneManager>),
+    Turn(Box<TurnState>),
     Priority(PriorityState),
     Stack(Vec<StackObject>),
-    Combat(Option<CombatState>),
+    Combat(Box<Option<CombatState>>),
     ManaCache(usize, Option<Mana>),
     EventQueue(EventQueue, Vec<GameEvent>),
     EventLength(EventQueue, usize),
     PendingTriggers(Vec<PendingTrigger>),
-    PendingTriggerChoice(Option<PendingTrigger>),
+    PendingTriggerChoice(Box<Option<PendingTrigger>>),
     DelayedTriggers(Vec<DelayedTrigger>),
     ExileLinks(Vec<ExileLink>),
-    SuspendedDecision(Option<SuspendedResolution>),
+    SuspendedDecision(Box<Option<SuspendedResolution>>),
     TriggerEnqueueCounter(u64),
-    ActionSpace(Option<ActionSpace>),
+    ActionSpace(Box<Option<ActionSpace>>),
     DecisionEpoch(u64),
-    PendingChoice(Option<PendingChoice>),
+    PendingChoice(Box<Option<PendingChoice>>),
     SkipTrivialCount(usize),
-    Trackers([BehaviorTracker; 2]),
+    Trackers(Box<[BehaviorTracker; 2]>),
 }
 
 fn vec_bytes<T>(values: &Vec<T>) -> usize {
@@ -139,17 +184,15 @@ fn vec_bytes<T>(values: &Vec<T>) -> usize {
 impl UndoEntry {
     fn owned_bytes(&self) -> usize {
         match self {
-            Self::Player(_, player) => {
-                player.name.capacity() + vec_bytes(&player.deck)
-            }
             Self::Zones(zones) => zones.allocated_bytes(),
             Self::Turn(turn) => turn
                 .ability_resolutions_this_turn
                 .len()
                 .saturating_mul(size_of::<((usize, usize), u32)>()),
             Self::Stack(values) => vec_bytes(values),
-            Self::Combat(Some(combat)) => {
-                vec_bytes(&combat.attackers)
+            Self::Combat(combat) => (**combat).as_ref().map_or(0, |combat| {
+                size_of::<CombatState>()
+                    + vec_bytes(&combat.attackers)
                     + vec_bytes(&combat.attackers_to_declare)
                     + vec_bytes(&combat.blockers_to_declare)
                     + combat
@@ -157,42 +200,63 @@ impl UndoEntry {
                         .values()
                         .map(vec_bytes)
                         .sum::<usize>()
-            }
+            }),
             Self::EventQueue(_, values) => vec_bytes(values),
             Self::PendingTriggers(values) => vec_bytes(values),
             Self::DelayedTriggers(values) => vec_bytes(values),
             Self::ExileLinks(values) => vec_bytes(values),
-            Self::ActionSpace(Some(space)) => {
-                vec_bytes(&space.actions) + vec_bytes(&space.focus)
-            }
-            Self::PendingChoice(Some(PendingChoice::ChooseTargets {
-                chosen,
-                chosen_req_indices,
-                legal_targets,
-                ..
-            })) => vec_bytes(chosen) + vec_bytes(chosen_req_indices) + vec_bytes(legal_targets),
-            Self::Permanent(_, _)
+            Self::ActionSpace(space) => (**space).as_ref().map_or(0, |space| {
+                size_of::<ActionSpace>() + vec_bytes(&space.actions) + vec_bytes(&space.focus)
+            }),
+            Self::PendingChoice(choice) => match &**choice {
+                Some(PendingChoice::ChooseTargets {
+                    chosen,
+                    chosen_req_indices,
+                    legal_targets,
+                    ..
+                }) => {
+                    size_of::<PendingChoice>()
+                        + vec_bytes(chosen)
+                        + vec_bytes(chosen_req_indices)
+                        + vec_bytes(legal_targets)
+                }
+                Some(_) => size_of::<PendingChoice>(),
+                None => 0,
+            },
+            Self::PendingTriggerChoice(trigger) => (**trigger)
+                .as_ref()
+                .map_or(0, |_| size_of::<PendingTrigger>()),
+            Self::SuspendedDecision(decision) => (**decision)
+                .as_ref()
+                .map_or(0, |_| size_of::<SuspendedResolution>()),
+            Self::Trackers(_) => size_of::<[BehaviorTracker; 2]>(),
+            Self::Player(_, _)
+            | Self::ZoneMove { .. }
+            | Self::Permanent(_, _)
             | Self::CardToPermanent(_, _)
             | Self::Incarnation(_, _)
             | Self::ObjectLki(_, _)
             | Self::Priority(_)
-            | Self::Combat(None)
             | Self::ManaCache(_, _)
             | Self::EventLength(_, _)
-            | Self::PendingTriggerChoice(_)
-            | Self::SuspendedDecision(_)
             | Self::TriggerEnqueueCounter(_)
-            | Self::ActionSpace(None)
             | Self::DecisionEpoch(_)
-            | Self::PendingChoice(_)
-            | Self::SkipTrivialCount(_)
-            | Self::Trackers(_) => 0,
+            | Self::SkipTrivialCount(_) => 0,
         }
     }
 
     fn restore(self, game: &mut Game) {
         match self {
-            Self::Player(player, old) => game.state.players[player.0] = old,
+            Self::Player(player, old) => old.restore(&mut game.state.players[player.0]),
+            Self::ZoneMove {
+                card,
+                owner,
+                from,
+                card_zones_len,
+            } => game
+                .state
+                .zones
+                .undo_move(card, owner, from, card_zones_len),
             Self::Permanent(permanent, old) => game.state.permanents[permanent] = old,
             Self::CardToPermanent(card, old) => game.state.card_to_permanent[card] = old,
             Self::Incarnation(card, old) => game.state.object_incarnations[card] = old,
@@ -202,11 +266,11 @@ impl UndoEntry {
             Self::ObjectLki(object, None) => {
                 game.state.object_lki.remove(&object);
             }
-            Self::Zones(old) => game.state.zones = old,
-            Self::Turn(old) => game.state.turn = old,
+            Self::Zones(old) => game.state.zones = *old,
+            Self::Turn(old) => game.state.turn = *old,
             Self::Priority(old) => game.state.priority = old,
             Self::Stack(old) => game.state.stack_objects = old,
-            Self::Combat(old) => game.state.combat = old,
+            Self::Combat(old) => game.state.combat = *old,
             Self::ManaCache(player, old) => game.state.mana_cache[player] = old,
             Self::EventQueue(EventQueue::Events, old) => game.state.events = old,
             Self::EventQueue(EventQueue::Pending, old) => game.state.pending_events = old,
@@ -221,16 +285,16 @@ impl UndoEntry {
                 game.state.observation_events.truncate(old);
             }
             Self::PendingTriggers(old) => game.state.pending_triggers = old,
-            Self::PendingTriggerChoice(old) => game.state.pending_trigger_choice = old,
+            Self::PendingTriggerChoice(old) => game.state.pending_trigger_choice = *old,
             Self::DelayedTriggers(old) => game.state.delayed_triggers = old,
             Self::ExileLinks(old) => game.state.exile_links = old,
-            Self::SuspendedDecision(old) => game.state.suspended_decision = old,
+            Self::SuspendedDecision(old) => game.state.suspended_decision = *old,
             Self::TriggerEnqueueCounter(old) => game.state.trigger_enqueue_counter = old,
-            Self::ActionSpace(old) => game.current_action_space = old,
+            Self::ActionSpace(old) => game.current_action_space = *old,
             Self::DecisionEpoch(old) => game.decision_epoch = old,
-            Self::PendingChoice(old) => game.pending_choice = old,
+            Self::PendingChoice(old) => game.pending_choice = *old,
             Self::SkipTrivialCount(old) => game.skip_trivial_count = old,
-            Self::Trackers(old) => game.trackers = old,
+            Self::Trackers(old) => game.trackers = *old,
         }
     }
 }
@@ -339,7 +403,10 @@ impl Game {
 
     pub(crate) fn undo_mark(&mut self) -> ClonePlusUndoMark {
         let journal = self.undo.as_mut().expect("undo driver state is enabled");
-        journal.next_mark_id = journal.next_mark_id.checked_add(1).expect("mark ID exhausted");
+        journal.next_mark_id = journal
+            .next_mark_id
+            .checked_add(1)
+            .expect("mark ID exhausted");
         let mark_id = journal.next_mark_id;
         let depth = journal.active_marks.len();
         journal.active_marks.push(mark_id);
@@ -399,9 +466,20 @@ impl Game {
     }
 
     fn assert_top_mark(journal: &UndoJournal, mark: &ClonePlusUndoMark) {
-        assert_eq!(journal.branch_id, mark.branch_id, "mark belongs to another branch");
-        assert_eq!(journal.active_marks.len(), mark.depth + 1, "mark depth is stale");
-        assert_eq!(journal.active_marks.last(), Some(&mark.mark_id), "marks must be LIFO");
+        assert_eq!(
+            journal.branch_id, mark.branch_id,
+            "mark belongs to another branch"
+        );
+        assert_eq!(
+            journal.active_marks.len(),
+            mark.depth + 1,
+            "mark depth is stale"
+        );
+        assert_eq!(
+            journal.active_marks.last(),
+            Some(&mark.mark_id),
+            "marks must be LIFO"
+        );
         assert!(mark.cursor <= journal.entries.len(), "mark cursor is stale");
     }
 
@@ -411,8 +489,31 @@ impl Game {
         }
     }
 
+    fn journal_active(&self) -> bool {
+        self.undo.as_ref().is_some_and(UndoJournal::active)
+    }
+
     pub(crate) fn journal_player(&mut self, player: PlayerId) {
-        self.record_undo(UndoEntry::Player(player, self.state.players[player.0].clone()));
+        self.record_undo(UndoEntry::Player(
+            player,
+            PlayerVitals::capture(&self.state.players[player.0]),
+        ));
+    }
+
+    /// Journal one card's zone change. Must be called before the move, while
+    /// the card still sits at the index this records.
+    pub(crate) fn journal_zone_move(&mut self, card: CardId, owner: PlayerId) {
+        if !self.journal_active() {
+            return;
+        }
+        let from = self.state.zones.locate(card, owner);
+        let card_zones_len = self.state.zones.card_zones_len();
+        self.record_undo(UndoEntry::ZoneMove {
+            card,
+            owner,
+            from,
+            card_zones_len,
+        });
     }
 
     pub(crate) fn journal_permanent(&mut self, permanent: PermanentId) {
@@ -443,11 +544,11 @@ impl Game {
     }
 
     pub(crate) fn journal_zones(&mut self) {
-        self.record_undo(UndoEntry::Zones(self.state.zones.clone()));
+        self.record_undo(UndoEntry::Zones(Box::new(self.state.zones.clone())));
     }
 
     pub(crate) fn journal_turn(&mut self) {
-        self.record_undo(UndoEntry::Turn(self.state.turn.clone()));
+        self.record_undo(UndoEntry::Turn(Box::new(self.state.turn.clone())));
     }
 
     pub(crate) fn journal_priority(&mut self) {
@@ -459,7 +560,7 @@ impl Game {
     }
 
     pub(crate) fn journal_combat(&mut self) {
-        self.record_undo(UndoEntry::Combat(self.state.combat.clone()));
+        self.record_undo(UndoEntry::Combat(Box::new(self.state.combat.clone())));
     }
 
     pub(crate) fn journal_mana_cache(&mut self, player: PlayerId) {
@@ -470,7 +571,10 @@ impl Game {
     }
 
     pub(crate) fn journal_events(&mut self) {
-        self.record_undo(UndoEntry::EventQueue(EventQueue::Events, self.state.events.clone()));
+        self.record_undo(UndoEntry::EventQueue(
+            EventQueue::Events,
+            self.state.events.clone(),
+        ));
     }
 
     pub(crate) fn journal_event_append(&mut self) {
@@ -529,17 +633,21 @@ impl Game {
     }
 
     pub(crate) fn journal_pending_triggers(&mut self) {
-        self.record_undo(UndoEntry::PendingTriggers(self.state.pending_triggers.clone()));
-    }
-
-    pub(crate) fn journal_pending_trigger_choice(&mut self) {
-        self.record_undo(UndoEntry::PendingTriggerChoice(
-            self.state.pending_trigger_choice.clone(),
+        self.record_undo(UndoEntry::PendingTriggers(
+            self.state.pending_triggers.clone(),
         ));
     }
 
+    pub(crate) fn journal_pending_trigger_choice(&mut self) {
+        self.record_undo(UndoEntry::PendingTriggerChoice(Box::new(
+            self.state.pending_trigger_choice.clone(),
+        )));
+    }
+
     pub(crate) fn journal_delayed_triggers(&mut self) {
-        self.record_undo(UndoEntry::DelayedTriggers(self.state.delayed_triggers.clone()));
+        self.record_undo(UndoEntry::DelayedTriggers(
+            self.state.delayed_triggers.clone(),
+        ));
     }
 
     pub(crate) fn journal_exile_links(&mut self) {
@@ -547,9 +655,9 @@ impl Game {
     }
 
     pub(crate) fn journal_suspended_decision(&mut self) {
-        self.record_undo(UndoEntry::SuspendedDecision(
+        self.record_undo(UndoEntry::SuspendedDecision(Box::new(
             self.state.suspended_decision.clone(),
-        ));
+        )));
     }
 
     pub(crate) fn journal_trigger_enqueue_counter(&mut self) {
@@ -559,7 +667,9 @@ impl Game {
     }
 
     pub(crate) fn journal_action_space(&mut self) {
-        self.record_undo(UndoEntry::ActionSpace(self.current_action_space.clone()));
+        self.record_undo(UndoEntry::ActionSpace(Box::new(
+            self.current_action_space.clone(),
+        )));
     }
 
     pub(crate) fn journal_decision_epoch(&mut self) {
@@ -567,7 +677,9 @@ impl Game {
     }
 
     pub(crate) fn journal_pending_choice(&mut self) {
-        self.record_undo(UndoEntry::PendingChoice(self.pending_choice.clone()));
+        self.record_undo(UndoEntry::PendingChoice(Box::new(
+            self.pending_choice.clone(),
+        )));
     }
 
     pub(crate) fn journal_skip_trivial_count(&mut self) {
@@ -575,6 +687,31 @@ impl Game {
     }
 
     pub(crate) fn journal_trackers(&mut self) {
-        self.record_undo(UndoEntry::Trackers(self.trackers.clone()));
+        self.record_undo(UndoEntry::Trackers(Box::new(self.trackers.clone())));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The journal's whole point is staying small per mutation, and an enum is
+    /// as large as its largest variant. Before boxing the bulk variants an
+    /// entry cost 360 bytes -- the inline size of `ZoneManager` -- so a 20-byte
+    /// player record paid for a whole zone snapshot. Keep the bulk payloads
+    /// behind a box.
+    ///
+    /// 72 bytes is the floor worth reaching: what remains are `Permanent` and
+    /// `ObjectLki`, the two hottest entries. Boxing those would shrink the
+    /// entry but add a heap allocation to every permanent mutation, trading
+    /// the size win for a larger time cost.
+    #[test]
+    fn an_undo_entry_stays_compact() {
+        assert!(
+            size_of::<UndoEntry>() <= 72,
+            "UndoEntry grew to {} bytes; box the variant that widened it",
+            size_of::<UndoEntry>()
+        );
+        assert!(size_of::<PlayerVitals>() <= 24);
     }
 }

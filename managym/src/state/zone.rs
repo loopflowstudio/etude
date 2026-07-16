@@ -65,6 +65,52 @@ impl ZoneManager {
                 .saturating_mul(size_of::<Option<ZoneType>>())
     }
 
+    pub(crate) fn card_zones_len(&self) -> usize {
+        self.card_zones.len()
+    }
+
+    /// Where `card` currently sits, precisely enough to put it back: zone plus
+    /// its index within that zone's order. `None` means it is in no zone.
+    pub(crate) fn locate(&self, card: CardId, owner: PlayerId) -> Option<(ZoneType, usize)> {
+        let zone = self.zone_of(card)?;
+        let index = self
+            .zone_cards(zone, owner)
+            .iter()
+            .position(|held| *held == card)?;
+        Some((zone, index))
+    }
+
+    /// Inverse of a single [`Self::move_card`] or [`Self::remove_card`].
+    ///
+    /// Restores zone order exactly by reinserting at the recorded index rather
+    /// than pushing, and rewinds the `card_zones` reverse index to the length
+    /// it had before the move, undoing any slot the move appended for a token.
+    pub(crate) fn undo_move(
+        &mut self,
+        card: CardId,
+        owner: PlayerId,
+        from: Option<(ZoneType, usize)>,
+        card_zones_len: usize,
+    ) {
+        if let Some(zone) = self.zone_of(card) {
+            self.remove_from_zone(card, owner, zone);
+        }
+        match from {
+            Some((zone, index)) => {
+                let cards = self.zone_cards_mut(zone, owner);
+                let index = index.min(cards.len());
+                cards.insert(index, card);
+                self.card_zones[card.0] = Some(zone);
+            }
+            None => {
+                if let Some(slot) = self.card_zones.get_mut(card.0) {
+                    *slot = None;
+                }
+            }
+        }
+        self.card_zones.truncate(card_zones_len);
+    }
+
     fn ensure_slot(&mut self, card: CardId) {
         if self.card_zones.len() <= card.0 {
             self.card_zones.resize(card.0 + 1, None);

@@ -35,8 +35,11 @@ fn clone_plus_undo_matches_the_full_clone_reference_receipts() {
         for trace_seed in [0x1975eed_u64, 0x5eed, 0xc10e] {
             let (root, _) = build_fixture(fixture).expect("contract fixture");
             let viewer = root.agent_player();
-            let reference = verify_branch_contract(&FullCloneDriver, &root, viewer, trace_seed, 2_000)
-                .unwrap_or_else(|error| panic!("full clone {fixture}/{trace_seed:#x}: {error}"));
+            let reference =
+                verify_branch_contract(&FullCloneDriver, &root, viewer, trace_seed, 2_000)
+                    .unwrap_or_else(|error| {
+                        panic!("full clone {fixture}/{trace_seed:#x}: {error}")
+                    });
             let undo = verify_branch_contract(
                 &ClonePlusUndoDriver::default(),
                 &root,
@@ -168,14 +171,21 @@ fn clone_plus_undo_rolls_back_token_allocation_and_the_id_watermark() {
     branch.create_token("Wind Drake", controller, false);
     branch.create_token("Gray Ogre", controller, false);
 
-    assert!(branch.state.cards.len() > cards_before, "tokens must allocate");
+    assert!(
+        branch.state.cards.len() > cards_before,
+        "tokens must allocate"
+    );
     assert!(branch.state.permanents.len() > permanents_before);
     assert!(branch.state.id_gen.watermark() > watermark_before);
     assert_ne!(driver.witness(&branch), root_witness);
 
     driver.rollback(&mut branch, mark);
 
-    assert_eq!(branch.state.cards.len(), cards_before, "cards must truncate");
+    assert_eq!(
+        branch.state.cards.len(),
+        cards_before,
+        "cards must truncate"
+    );
     assert_eq!(branch.state.permanents.len(), permanents_before);
     assert_eq!(
         branch.state.id_gen.watermark(),
@@ -201,7 +211,10 @@ fn clone_plus_undo_rolls_back_zone_order_and_reverse_indices() {
         .zones
         .zone_cards(ZoneType::Library, player)
         .to_vec();
-    assert!(library_before.len() > 2, "fixture needs a nontrivial library");
+    assert!(
+        library_before.len() > 2,
+        "fixture needs a nontrivial library"
+    );
 
     branch.draw_cards(player, 3);
     let library_after = branch
@@ -209,7 +222,10 @@ fn clone_plus_undo_rolls_back_zone_order_and_reverse_indices() {
         .zones
         .zone_cards(ZoneType::Library, player)
         .to_vec();
-    assert_ne!(library_before, library_after, "drawing must change zone order");
+    assert_ne!(
+        library_before, library_after,
+        "drawing must change zone order"
+    );
     assert_ne!(driver.witness(&branch), root_witness);
 
     driver.rollback(&mut branch, mark);
@@ -238,7 +254,10 @@ fn clone_plus_undo_isolates_siblings_and_restores_the_action_space() {
     let driver = ClonePlusUndoDriver::default();
     let root_witness = driver.witness(&root);
     let action_count = root_witness.legal_surface.action_count;
-    assert!(action_count > 1, "fixture needs sibling-distinguishing actions");
+    assert!(
+        action_count > 1,
+        "fixture needs sibling-distinguishing actions"
+    );
 
     let mut branch = driver.fork_exact(&root);
     let sibling = driver.fork_exact(&root);
