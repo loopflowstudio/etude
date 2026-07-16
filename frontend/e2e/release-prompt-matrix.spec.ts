@@ -53,7 +53,6 @@ interface VisualReferences {
     locale: string;
     timezone: string;
     reduced_motion: 'reduce';
-    font_render_hinting: 'none';
     pixel_threshold: number;
     font: { family: string; package_version: string };
   };
@@ -656,7 +655,7 @@ async function assertExistingReconnectStatus(
     timeout: 5_000,
   });
   await captureVisualReference(
-    page.getByTestId('game-header'),
+    page.getByTestId('connection-summary'),
     'reconnect-disconnected',
     captured,
   );
@@ -669,7 +668,7 @@ async function assertExistingReconnectStatus(
     timeout: 5_000,
   });
   await captureVisualReference(
-    page.getByTestId('game-header'),
+    page.getByTestId('connection-summary'),
     'reconnect-reconnecting',
     captured,
   );
@@ -687,7 +686,7 @@ async function assertExistingReconnectStatus(
   expect(await renderedActions(page)).toEqual(actionsBefore);
   await expect(page.getByTestId('action-option').first()).toBeFocused();
   await captureVisualReference(
-    page.getByTestId('game-header'),
+    page.getByTestId('connection-summary'),
     'reconnect-connected',
     captured,
   );

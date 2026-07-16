@@ -28,9 +28,6 @@ export default defineConfig({
   use: {
     baseURL: `http://127.0.0.1:${frontendPort}`,
     browserName: 'chromium',
-    launchOptions: {
-      args: ['--font-render-hinting=none'],
-    },
     colorScheme: 'dark',
     deviceScaleFactor: 1,
     locale: 'en-US',

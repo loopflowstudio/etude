@@ -72,8 +72,6 @@ matrix metadata:
   uvicorn release stack;
 - viewport 1600 x 1200 CSS pixels, device scale factor 1, dark color scheme,
   `en-US`, UTC, and reduced motion;
-- Chromium font-render hinting disabled so host FreeType hinting does not alter
-  the pinned local glyph rasterization;
 - bundled local Inter faces for weights used by the application, with
   `document.fonts.ready`, a successful local font response, and the active font
   asserted before the first reference; and
@@ -83,7 +81,8 @@ matrix metadata:
 
 Prompt references photograph `data-testid="action-panel"`; board and terminal
 references photograph `data-testid="game-board"`; reconnect references
-photograph the existing game header containing the connection badge. Wait for
+photograph the existing game header's `data-testid="connection-summary"`,
+excluding unrelated native select controls. Wait for
 the authoritative update, the expected semantic trigger, font readiness, and
 the reduced-motion presentation stage to settle before each comparison. Do not
 use arbitrary time sleeps, masks, or dynamic style injection that would make

@@ -145,21 +145,20 @@ failures.
 The named reference profile is `ubuntu-24.04-chromium`: GitHub-hosted Ubuntu
 24.04 x86-64, Node 22, Playwright 1.61.1's Chromium 149.0.7827.55, a 1600 x
 1200 CSS-pixel viewport at device scale factor 1, dark color scheme, `en-US`,
-UTC, reduced motion, and Chromium font-render hinting disabled. Disabling
-host-dependent hinting keeps the same bundled glyphs stable across the named
-runner profile without relaxing comparisons. Inter 5.2.8 weights
-400/500/600/700 are bundled by the release build and loaded from loopback
-before comparison. Screenshot capture disables animation and the caret and
-permits zero pixels beyond Playwright's 0.2 perceptual color threshold on that
-profile, filtering subpixel text rasterization noise without tolerating a
-visible change.
+UTC, and reduced motion. Inter 5.2.8 weights 400/500/600/700 are bundled by the
+release build and loaded from loopback before comparison. Screenshot capture
+disables animation and the caret and permits zero pixels beyond Playwright's
+0.2 perceptual color threshold on that profile, filtering subpixel text
+rasterization noise without tolerating a visible change.
 
 The release browser blocks and records public HTTP and WebSocket requests. It
 also fails on a missing or failed local font, broken rendered images, a card
 treatment outside the pinned pack, any fallback treatment, failed/local-error
-responses, console errors, and page errors. The reconnect screenshots pause
-only the replacement Playwright WebSocket route; the client still reconnects
-to uvicorn and must restore the same authoritative offer.
+responses, console errors, and page errors. The reconnect screenshots isolate
+the existing connection summary in the game header, avoiding unrelated native
+deck/opponent selectors whose glyph rasterization is host-controlled. They
+pause only the replacement Playwright WebSocket route; the client still
+reconnects to uvicorn and must restore the same authoritative offer.
 
 ### Intentional baseline updates
 
