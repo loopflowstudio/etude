@@ -2,17 +2,17 @@
 
 Contract: `manabot.search-branching.v1` (`9c8dfc3cae6bb85642caf61c074bb3ba2c0845f555c3024238f3d2d6fa85708f`)
 Driver: `dense_page_cow_undo/event_pages_4k_v1`
-Run: `2026-07-16T19:35:38.291789Z`; canonical: `true`
+Run: `2026-07-16T19:46:40.592943Z`; canonical: `true`
 Evidence scope: current driver at this source state only; this is not a W2-179 before/after comparison.
 
 ## Primary whole-rollout evidence
 
 | Cell | simulations/s | transitions/s | root p50 / p95 / p99 | peak RSS | peak delta | max live | cap rate |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `flat-single-64-v1` | 209.2 | 27201.9 | 0.393s / 0.649s / 0.649s | 23.6 MiB | 5.8 MiB | 3 | 0.000% |
-| `flat-saturated-64-v1` | 1115.9 | 146882.8 | 0.618s / 0.984s / 0.984s | 197.0 MiB | 21.6 MiB | 3 | 0.000% |
-| `retained-single-8-v1` | 227.0 | 22069.1 | 0.011s / 0.027s / 0.027s | 14.0 MiB | 3.4 MiB | 17 | 0.000% |
-| `retained-saturated-16-v1` | 340.0 | 31791.2 | 0.127s / 0.144s / 0.144s | 37.8 MiB | 2.1 MiB | 264 | 0.000% |
+| `flat-single-64-v1` | 272.7 | 35447.9 | 0.325s / 0.357s / 0.357s | 24.2 MiB | 5.0 MiB | 3 | 0.000% |
+| `flat-saturated-64-v1` | 1686.8 | 222036.7 | 0.410s / 0.535s / 0.535s | 193.2 MiB | 22.0 MiB | 3 | 0.000% |
+| `retained-single-8-v1` | 311.5 | 30291.9 | 0.009s / 0.011s / 0.011s | 13.9 MiB | 3.2 MiB | 17 | 0.000% |
+| `retained-saturated-16-v1` | 331.7 | 31011.0 | 0.126s / 0.203s / 0.203s | 37.7 MiB | 2.1 MiB | 264 | 0.000% |
 
 Peak RSS is the 5 ms sampled sum across worker processes and can double-count shared pages. Clone latency is diagnostic, not a storage decision.
 
@@ -20,9 +20,9 @@ Peak RSS is the 5 ms sampled sum across worker processes and can double-count sh
 
 | Cell | eager forks | checkpoints | fork time | mark time | rollback time | journal peak | COW peak | journal entries | marks / commits / rollbacks |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| `flat-single-64-v1` | 0 | 0 | 0.001s | 0.000s | 0.754s | 4.64 MiB | 0.00 MiB | 34385 | 6144 / 3072 / 3072 |
-| `flat-saturated-64-v1` | 0 | 0 | 0.005s | 0.002s | 6.912s | 30.23 MiB | 0.03 MiB | 263176 | 49152 / 24576 / 24576 |
-| `retained-single-8-v1` | 0 | 0 | 0.002s | 0.000s | 0.000s | 0.11 MiB | 0.07 MiB | 86 | 128 / 128 / 0 |
+| `flat-single-64-v1` | 0 | 0 | 0.000s | 0.000s | 0.475s | 4.64 MiB | 0.00 MiB | 34385 | 6144 / 3072 / 3072 |
+| `flat-saturated-64-v1` | 0 | 0 | 0.006s | 0.001s | 4.727s | 30.23 MiB | 0.03 MiB | 263176 | 49152 / 24576 / 24576 |
+| `retained-single-8-v1` | 0 | 0 | 0.000s | 0.000s | 0.000s | 0.11 MiB | 0.07 MiB | 86 | 128 / 128 / 0 |
 | `retained-saturated-16-v1` | 0 | 0 | 0.003s | 0.000s | 0.000s | 1.66 MiB | 1.01 MiB | 86 | 2048 / 2048 / 0 |
 
 `null` counters are unsupported by this driver, not observed zeros: system allocator has no counting hook; cow_bytes measures branch-private copied 4096-byte event pages.
@@ -31,8 +31,8 @@ Peak RSS is the 5 ms sampled sum across worker processes and can double-count sh
 
 | Cell | samples/s | latency p50 / p95 / p99 | resets | reset time |
 |---|---:|---:|---:|---:|
-| `step-v1` | 97149.8 | 8.9µs / 22.1µs / 29.7µs | 116 | 0.002s |
-| `clone-v1` | 680202.7 | 1.4µs / 1.6µs / 1.8µs | 0 | 0.000s |
+| `step-v1` | 125677.7 | 6.9µs / 17.0µs / 23.1µs | 116 | 0.002s |
+| `clone-v1` | 818472.9 | 1.2µs / 1.3µs / 1.5µs | 0 | 0.000s |
 
 ## Reproduction and evidence
 
@@ -43,9 +43,9 @@ uv run scripts/bench_branching.py verify-matrix
 
 Equivalence: `true` across 8 fixture/seed checks, each replayed twice.
 Each primary cell also repeated its first measured root in a fresh worker group and matched the ordered deterministic result checksum.
-Artifact SHA-256: `207b335bf7857c31f06a98092057d6bc22a32c72505b25aefe331b80150e0a85`.
-Source SHA-256: `3c2ca12e87cbe7f5e739f89e5c394d379024739a107b3ea3f8eb5a421af9931d`.
-Measurement revision: `16ac1a5f75660cad4af17cdf167a48dc790d5db7`.
+Artifact SHA-256: `707d346625a198af57b0b24af9237969b7fc5ea9bb84979ed8e80cc3db33dcd3`.
+Source SHA-256: `4354b41a80706409cdc23b26979ca2679f88b62a8d48516e18fc7b9cd3ab8beb`.
+Measurement revision: `2d804a766757cace5c3e0d41c3a95f36b7e31cc6`.
 Release binary SHA-256: `af197d6d7f8297cdf2cdf72a2b417af328310cac33ef5f78bffaa6e2a5e80a83`.
 Source method: `git-ls-tree-sha256-v1` over 126 tracked paths recorded in the raw receipt.
 
