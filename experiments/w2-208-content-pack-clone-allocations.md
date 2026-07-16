@@ -17,9 +17,9 @@ handles.
 
 ## Measurement record
 
-- Captured: `2026-07-16T01:32:56Z`
+- Captured: `2026-07-16T01:45:48Z`
 - Measurement-code revision:
-  `f7d5878b6be4b2276ac5f42f50dc5f390a6982ad`
+  `2a3ba1e415f0108df5640ee378fc018608154d86`
 - Build profile: Cargo `release`
 - Toolchain: `rustc 1.96.1 (31fca3adb 2026-06-26)`;
   `cargo 1.96.1 (356927216 2026-06-26)`
