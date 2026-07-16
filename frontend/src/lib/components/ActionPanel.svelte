@@ -65,7 +65,7 @@
     <div class="flex items-center gap-2">
       <h2 id="action-panel-heading" class="text-base font-semibold text-accent-text">Actions</h2>
       {#if disabled}
-        <span role="status" aria-live="polite" aria-atomic="true" class="rounded bg-slate-700 px-2 py-0.5 text-xs font-semibold text-slate-300">Game over</span>
+        <span role="status" aria-live="polite" aria-atomic="true" class="rounded bg-purple-900/20 px-2 py-0.5 text-xs font-semibold text-purple-300">Game over</span>
       {:else if fastForwarding}
         <span role="status" aria-live="polite" aria-atomic="true" data-testid="auto-passing" class="animate-pulse rounded bg-sky-600/30 px-2 py-0.5 text-xs font-semibold text-sky-300">Auto-passing…</span>
       {:else if actions.length > 0}

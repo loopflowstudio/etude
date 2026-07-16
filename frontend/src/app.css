@@ -72,18 +72,21 @@
   --accent-hover: #ab4634;
   --accent-soft: #ead6c6;
 
-  /* Status colors are mana inks at library volume: Forest success, Plains
-     warning, Island info, Swamp neutral, Mountain error. Each base ships a
-     contrast-safe text companion. */
-  --success: #5e7a52;
-  --success-text: #45603c;
-  --warning: #97803f;
-  --warning-text: #6f5c26;
+  /* The color pie: WUBRG at splash volume, syntax-highlighting the sepia
+     ground. Each family owns a semantic register — Plains sun the turn
+     structure, Island the knowledge (prompts, stack, hand), Swamp ink the
+     hidden and the spent, Mountain the actions and errors, Forest the
+     living board — and each ships a contrast-safe text companion. */
+  --success: #4c8040;
+  --success-text: #3a6531;
+  --warning: #9f7a1c;
+  --warning-text: #6f5712;
   --error: var(--mountain-red);
   --error-text: #7e2a20;
-  --info: #5c728c;
-  --info-text: #465d7a;
-  --neutral: #8a7f68;
+  --info: #2e6da8;
+  --info-text: #31599a;
+  --neutral: #6a5f86;
+  --neutral-text: #554b6e;
 
   /* 4pt grid, radii, and layering */
   --space-xxs: 2px;
@@ -123,10 +126,11 @@
     --accent-text: #c3a568;
     --accent-hover: #a34531;
     --accent-soft: #3f2b20;
-    --success-text: #a6c197;
-    --warning-text: #ccb169;
+    --success-text: #9ecb8b;
+    --warning-text: #d9bc66;
     --error-text: #de9181;
-    --info-text: #9cb6d4;
+    --info-text: #8ab8e8;
+    --neutral-text: #b4a9d1;
     --shadow-surface: 0 1px 2px rgb(0 0 0 / 0.22), 0 16px 40px rgb(0 0 0 / 0.16);
   }
 }
@@ -167,15 +171,20 @@
   --color-rose-500: var(--error);
   --color-rose-200: var(--error-text);
 
-  /* Decision prompts are margin annotations: bronze, not Mountain red, so
-     error surfaces keep sole claim on the hot color. */
-  --color-violet-900: var(--accent-text);
-  --color-violet-500: var(--accent-text);
-  --color-violet-200: var(--text);
+  /* Decision prompts and the stack are Island blue — the engine thinking
+     out loud — so Mountain red stays exclusive to actions and errors. */
+  --color-violet-900: var(--info);
+  --color-violet-500: var(--info);
+  --color-violet-200: var(--info-text);
   --color-indigo-900: var(--info);
   --color-indigo-500: var(--info);
   --color-indigo-400: var(--info);
   --color-indigo-200: var(--info-text);
+
+  /* Swamp ink: the hidden and the spent (graveyard, exile, hidden hands). */
+  --color-purple-900: var(--neutral);
+  --color-purple-500: var(--neutral);
+  --color-purple-300: var(--neutral-text);
   --color-white: var(--ivory);
 }
 

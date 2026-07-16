@@ -20,7 +20,7 @@ and the five mana colors reduced to library volume.
 | Parchment grounds | A card's text box; the game as an open book |
 | Sepia-bronze display text | Margin annotations, studied notes |
 | One Mountain-red accent | The live decision is the only urgent thing |
-| Mana-ink status colors | WUBRG as the semantic spine, desaturated |
+| WUBRG color pie | The five mana colors syntax-highlight the interface |
 | Fixed dark card art | The cards are the illustrations on the page |
 
 ### The two metals
@@ -30,8 +30,9 @@ and the five mana colors reduced to library volume.
 - **Mountain red** (`--accent`) is for acting: buttons, focus rings, links,
   selected and clickable states.
 
-Errors share the Mountain-red family — urgency has one color here — but the
-decision prompt is bronze, so an error surface is never mistaken for a prompt.
+Errors share the Mountain-red family — urgency has one color here — while
+decision prompts speak Island blue, so an error surface is never mistaken
+for a prompt.
 
 ---
 
@@ -80,19 +81,26 @@ decision prompt is bronze, so an error surface is never mistaken for a prompt.
 > **Dark hover deepens.** A red lighter than `#B24D38` cannot hold ivory
 > button text at WCAG AA, so the dark-mode hover moves down, not up.
 
-### Status colors — mana inks
+### The color pie — WUBRG as syntax highlighting
 
-The five statuses take the five mana colors, desaturated to sit in a sepia
-room. Base values are shared across modes; each ships a contrast-safe text
-companion (`*-text`) that adapts per mode.
+The five mana colors sit on the sepia ground the way a syntax theme sits on
+an editor: each family owns a semantic register, and each carries roughly a
+fifth of the interface's color. Base values are shared across modes; each
+family ships a contrast-safe text companion (`*-text`) that adapts per mode.
+Washes come free from alpha modifiers on the base (`/10`–`/30`).
 
-| Token | Mana | Base | Light text | Dark text | Usage |
-|-------|------|------|------------|-----------|-------|
-| `success` | Forest | `#5E7A52` | `#45603C` | `#A6C197` | Connected, your move, hero log |
-| `warning` | Plains | `#97803F` | `#6F5C26` | `#CCB169` | Reconnecting, targeting, villain log |
-| `error` | Mountain | `#973427` | `#7E2A20` | `#DE9181` | Failures, critical beats |
-| `info` | Island | `#5C728C` | `#465D7A` | `#9CB6D4` | Stack, auto-passing, neutral notices |
-| `neutral` | Swamp | `#8A7F68` | — | — | Idle, inactive |
+| Token | Mana | Base | Light text | Dark text | Register |
+|-------|------|------|------------|-----------|----------|
+| `warning` | Plains | `#9F7A1C` | `#6F5712` | `#D9BC66` | Order & structure: turn/phase line, villain log, reconnecting, targeting |
+| `info` | Island | `#2E6DA8` | `#31599A` | `#8AB8E8` | Knowledge: decision prompts, the stack, hand headings, auto-passing |
+| `neutral` | Swamp | `#6A5F86` | `#554B6E` | `#B4A9D1` | The hidden & the spent: graveyard, exile, hidden cards, game over |
+| `error` | Mountain | `#973427` | `#7E2A20` | `#DE9181` | Action & urgency: shares the accent — buttons, focus, failures, damage |
+| `success` | Forest | `#4C8040` | `#3A6531` | `#9ECB8B` | Presence: battlefield heading, connected, your move, hero log |
+
+Balance rule: no family should visibly dominate the chrome. Red gets the
+interactive surfaces, so it needs no additional decoration; when adding a
+new colored element, give it to the register it belongs to, not the one
+that looks best.
 
 ### CSS variables
 
@@ -117,11 +125,11 @@ never name raw colors.
   --accent: var(--mountain-red);
   --accent-text: var(--sepia-bronze);
 
-  --success: #5e7a52;
-  --warning: #97803f;
+  --success: #4c8040;
+  --warning: #9f7a1c;
   --error: var(--mountain-red);
-  --info: #5c728c;
-  --neutral: #8a7f68;
+  --info: #2e6da8;
+  --neutral: #6a5f86;
 }
 ```
 
