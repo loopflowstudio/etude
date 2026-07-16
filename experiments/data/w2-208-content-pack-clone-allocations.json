@@ -1,0 +1,63 @@
+{
+  "schema": "manabot.content-pack-clone-allocations.v1",
+  "build_profile": "release",
+  "fixture": "interactive-heavy-80-v1",
+  "fixture_cards": 120,
+  "fixture_permanent_slots": 28,
+  "fixture_committed_events": 498,
+  "arc_reference_count": 4096,
+  "warmup_clone_count": 64,
+  "measured_clone_count": 1024,
+  "synthetic_definition_count": 256,
+  "synthetic_text_bytes_each": 16384,
+  "minimum_payload_delta_bytes": 4194304,
+  "actual_payload_delta_bytes": 4364032,
+  "baseline_pack": {
+    "definitions": 58,
+    "content_digest": "2444fc15283068d79f74d49f8297bdbe3cc581a62a1eee976b35a8cecd8a0ef4",
+    "serialized_definition_bytes": 53802
+  },
+  "expanded_pack": {
+    "definitions": 314,
+    "content_digest": "ba36f8ab11b3f6d382858743756e4dd4e2f84208c6b76e8b1f7a3e3d07607a15",
+    "serialized_definition_bytes": 4417834
+  },
+  "arc_reference_clone": {
+    "baseline": {
+      "allocations": 0,
+      "allocated_bytes": 0
+    },
+    "expanded": {
+      "allocations": 0,
+      "allocated_bytes": 0
+    },
+    "delta_allocations": 0,
+    "delta_allocated_bytes": 0
+  },
+  "game_state_clone": {
+    "baseline": {
+      "allocations": 36864,
+      "allocated_bytes": 51653632
+    },
+    "expanded": {
+      "allocations": 36864,
+      "allocated_bytes": 51653632
+    },
+    "delta_allocations": 0,
+    "delta_allocated_bytes": 0
+  },
+  "exact_game_clone": {
+    "baseline": {
+      "allocations": 37888,
+      "allocated_bytes": 51719168
+    },
+    "expanded": {
+      "allocations": 37888,
+      "allocated_bytes": 51719168
+    },
+    "delta_allocations": 0,
+    "delta_allocated_bytes": 0
+  },
+  "threshold": "Arc allocations and bytes must be 0; mutable clone totals must be positive; expanded-minus-baseline clone allocations and bytes must equal 0 exactly",
+  "passed": true
+}
