@@ -18,6 +18,7 @@ import json
 import math
 from pathlib import Path
 import platform
+import subprocess
 import time
 from typing import Any
 
@@ -103,6 +104,7 @@ def _load_contract(path: Path) -> tuple[dict[str, Any], str]:
 
 
 _HOST_IDENTITY_FIELDS = (
+    "chip",
     "machine",
     "operating_system",
     "python",
@@ -111,9 +113,24 @@ _HOST_IDENTITY_FIELDS = (
 )
 
 
+def _cpu_model() -> str | None:
+    try:
+        result = subprocess.run(
+            ["sysctl", "-n", "machdep.cpu.brand_string"],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+    except OSError:
+        result = None
+    cpu_model = result.stdout.strip() if result is not None else ""
+    return cpu_model or platform.processor() or None
+
+
 def _current_host_identity() -> dict[str, Any]:
     macos_version = platform.mac_ver()[0]
     return {
+        "chip": _cpu_model(),
         "machine": platform.machine(),
         "operating_system": f"macOS {macos_version}" if macos_version else "",
         "python": platform.python_version(),
@@ -215,22 +232,33 @@ def _load_control_lock(
             raise ContractError(
                 f"latency calibration does not support Teacher-1 budget {budget}"
             )
-        _finite_nonnegative(
+        teacher_p50 = _finite_nonnegative(
             comparison.get("teacher_p50_decision_ms"),
             field=f"matches.{budget}.teacher_p50_decision_ms",
         )
-        _finite_nonnegative(
+        if teacher_p50 <= 0:
+            raise ContractError(
+                f"latency calibration matches.{budget}.teacher_p50_decision_ms "
+                "must be positive to derive relative_p50_gap"
+            )
+        flat_p50 = _finite_nonnegative(
             comparison.get("flat_p50_decision_ms"),
             field=f"matches.{budget}.flat_p50_decision_ms",
         )
-        relative_gap = _finite_nonnegative(
+        reported_gap = _finite_nonnegative(
             comparison.get("relative_p50_gap"),
             field=f"matches.{budget}.relative_p50_gap",
         )
-        if relative_gap > max_gap:
+        derived_gap = abs(flat_p50 - teacher_p50) / teacher_p50
+        if not math.isclose(reported_gap, derived_gap, rel_tol=1e-9, abs_tol=1e-12):
+            raise ContractError(
+                f"latency calibration matches.{budget}.relative_p50_gap "
+                f"{reported_gap} does not match derived gap {derived_gap}"
+            )
+        if derived_gap > max_gap:
             raise ContractError(
                 f"Teacher-0 control for Teacher-1 budget {budget} exceeds "
-                f"contract max_realized_p50_gap {max_gap}"
+                f"contract max_realized_p50_gap {max_gap}: {derived_gap}"
             )
     return lock, canonical_sha256(lock)
 

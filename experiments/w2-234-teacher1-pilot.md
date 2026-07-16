@@ -53,6 +53,16 @@ runner. No matchup, seed, budget, prediction, quality gate, or continuation
 branch changed, and this amendment supplies no Teacher-1 result or Project KR
 2-5 evidence.
 
+A second pre-run review found that architecture plus software identity was not
+enough to prove the declared Apple M4 Max host, and that the calibration's
+reported relative gap was trusted instead of recomputed. The lock boundary now
+binds `host.chip` to the current `machdep.cpu.brand_string` (with the same
+processor fallback used by the branching benchmark), requires a positive
+Teacher-1 p50 denominator, derives `abs(flat_p50 - teacher_p50) / teacher_p50`,
+rejects any inconsistent reported gap, and applies the contract threshold to
+that derived value. This change also occurred before any control lock or
+Teacher-1 run and does not alter the experiment or authorize training.
+
 ## Frozen contract
 
 The machine-readable source of truth is

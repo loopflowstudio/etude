@@ -137,6 +137,7 @@ def test_control_lock_binds_terminal_recovery_and_latency_calibration(
     assert len(lock_hash) == 64
 
     calibration_payload = json.loads(calibration.read_text())
+    calibration_payload["matches"]["128"]["flat_p50_decision_ms"] = 33.3
     calibration_payload["matches"]["128"]["relative_p50_gap"] = 0.11
     _write_json(calibration, calibration_payload)
     lock["latency_calibration"]["sha256"] = file_sha256(calibration)
@@ -204,6 +205,20 @@ def test_current_runtime_host_must_match_contract(tmp_path: Path) -> None:
         )
 
 
+def test_same_architecture_foreign_chip_must_match_contract(tmp_path: Path) -> None:
+    contract, contract_hash = _load_contract(CONTRACT)
+    lock_path, _, _ = _write_valid_control_lock(tmp_path, contract, contract_hash)
+    foreign_runtime = {**_host_identity(contract), "chip": "Apple M4 Pro"}
+
+    with pytest.raises(ContractError, match="current host identity"):
+        _load_control_lock(
+            lock_path,
+            contract=contract,
+            contract_hash=contract_hash,
+            current_host=foreign_runtime,
+        )
+
+
 @pytest.mark.parametrize(
     "field",
     [
@@ -244,6 +259,7 @@ def test_gap_threshold_comes_from_contract(tmp_path: Path) -> None:
         tmp_path, contract, contract_hash
     )
     calibration_payload = json.loads(calibration.read_text())
+    calibration_payload["matches"]["128"]["flat_p50_decision_ms"] = 34.5
     calibration_payload["matches"]["128"]["relative_p50_gap"] = 0.15
     _write_json(calibration, calibration_payload)
     lock["latency_calibration"]["sha256"] = file_sha256(calibration)
@@ -256,3 +272,44 @@ def test_gap_threshold_comes_from_contract(tmp_path: Path) -> None:
         current_host=_host_identity(contract),
     )
     assert loaded == lock
+
+
+def test_nonpositive_teacher_p50_is_rejected(tmp_path: Path) -> None:
+    contract, contract_hash = _load_contract(CONTRACT)
+    lock_path, lock, calibration = _write_valid_control_lock(
+        tmp_path, contract, contract_hash
+    )
+    calibration_payload = json.loads(calibration.read_text())
+    calibration_payload["matches"]["128"]["teacher_p50_decision_ms"] = 0.0
+    _write_json(calibration, calibration_payload)
+    lock["latency_calibration"]["sha256"] = file_sha256(calibration)
+    _write_json(lock_path, lock)
+
+    with pytest.raises(ContractError, match="must be positive"):
+        _load_control_lock(
+            lock_path,
+            contract=contract,
+            contract_hash=contract_hash,
+            current_host=_host_identity(contract),
+        )
+
+
+def test_reported_gap_must_match_measured_p50_values(tmp_path: Path) -> None:
+    contract, contract_hash = _load_contract(CONTRACT)
+    lock_path, lock, calibration = _write_valid_control_lock(
+        tmp_path, contract, contract_hash
+    )
+    calibration_payload = json.loads(calibration.read_text())
+    calibration_payload["matches"]["128"]["flat_p50_decision_ms"] = 1000.0
+    calibration_payload["matches"]["128"]["relative_p50_gap"] = 0.05
+    _write_json(calibration, calibration_payload)
+    lock["latency_calibration"]["sha256"] = file_sha256(calibration)
+    _write_json(lock_path, lock)
+
+    with pytest.raises(ContractError, match="does not match derived gap"):
+        _load_control_lock(
+            lock_path,
+            contract=contract,
+            contract_hash=contract_hash,
+            current_host=_host_identity(contract),
+        )
