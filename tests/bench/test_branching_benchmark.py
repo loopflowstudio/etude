@@ -350,6 +350,72 @@ def test_matrix_projection_ignores_only_physical_measurements() -> None:
         physical
     )
 
+
+def decision_candidate(
+    *,
+    flat_speed: float,
+    retained_speed: float,
+    flat_rss: int = 100,
+    retained_rss: int = 100,
+    single_delta: int = 100,
+    saturated_delta: int = 100,
+) -> dict:
+    cells = []
+    for cell in bench.WHOLE_CELLS:
+        retained = cell.startswith("retained")
+        cells.append(
+            {
+                "id": cell,
+                "summary": {
+                    "simulations_per_second": retained_speed
+                    if retained
+                    else flat_speed,
+                    "root_latency_seconds_p99": 1.0,
+                    "rss_peak_bytes": retained_rss if retained else flat_rss,
+                    "rss_peak_delta_bytes": saturated_delta
+                    if cell == "retained-saturated-16-v1"
+                    else single_delta,
+                },
+            }
+        )
+    return {"cells": cells}
+
+
+def test_decision_thresholds_select_general_hybrid_or_baseline() -> None:
+    full = decision_candidate(flat_speed=100, retained_speed=100)
+    undo = decision_candidate(flat_speed=121, retained_speed=100)
+    page = decision_candidate(
+        flat_speed=95,
+        retained_speed=95,
+        retained_rss=80,
+        single_delta=70,
+        saturated_delta=50,
+    )
+    payloads = {
+        bench.FULL_CLONE_DRIVER: full,
+        bench.CLONE_PLUS_UNDO_DRIVER: undo,
+        bench.PAGE_COW_DRIVER: page,
+    }
+    assert bench.decision_outcome(payloads)["page_general"] is True
+
+    payloads[bench.PAGE_COW_DRIVER] = decision_candidate(
+        flat_speed=80,
+        retained_speed=95,
+        retained_rss=80,
+        single_delta=70,
+        saturated_delta=50,
+    )
+    assert "hybrid" in bench.decision_outcome(payloads)["selection"]
+
+    payloads[bench.PAGE_COW_DRIVER] = decision_candidate(
+        flat_speed=80, retained_speed=80
+    )
+    payloads[bench.CLONE_PLUS_UNDO_DRIVER] = decision_candidate(
+        flat_speed=100, retained_speed=100
+    )
+    assert bench.decision_outcome(payloads)["selection"].startswith("retain")
+
+
 def test_loopflow_metadata_selects_ambient_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

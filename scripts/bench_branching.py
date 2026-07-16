@@ -1256,8 +1256,8 @@ def render_report(payload: dict[str, Any]) -> str:
             "## Reproduction and evidence",
             "",
             "```bash",
-            f"uv run scripts/bench_branching.py run --driver {payload['run']['driver']}",
-            f"uv run scripts/bench_branching.py verify --driver {payload['run']['driver']}",
+            "uv run scripts/bench_branching.py run-matrix",
+            "uv run scripts/bench_branching.py verify-matrix",
             "```",
             "",
             f"Equivalence: `{str(payload['equivalence']['passed']).lower()}` across {len(payload['equivalence']['checks'])} fixture/seed checks, each replayed twice.",
@@ -1977,6 +1977,52 @@ def render_decision(payloads: dict[str, dict[str, Any]]) -> str:
             f"- Clone-plus-undo sequential bar: `{'pass' if outcome['undo_sequential'] else 'fail'}`.",
             f"- Page-COW retained-memory bar: `{'pass' if outcome['page_retained'] else 'fail'}`.",
             f"- Page-COW general-driver bar: `{'pass' if outcome['page_general'] else 'fail'}`.",
+            "",
+            "Clone plus undo is rejected unless both flat cells reach 1.20x full-clone "
+            "throughput without exceeding 1.10x p99 latency or RSS. Page COW is "
+            "rejected for retained use unless both retained cells preserve at least "
+            "0.90x throughput and meet every registered RSS reduction; general use "
+            "also requires the flat guardrails. The table above makes each failed "
+            "comparison explicit.",
+            "",
+            "## Branch lifecycle diagnostics",
+            "",
+            "| Driver | eager full forks | full checkpoints | max journal peak | max COW peak |",
+            "|---|---:|---:|---:|---:|",
+        ]
+    )
+    for driver in ARTIFACTS:
+        primary = [
+            summary
+            for cell, summary in cell_summaries(payloads[driver]).items()
+            if cell in WHOLE_CELLS
+        ]
+        journal_values = [
+            summary["journal_peak_bytes"]
+            for summary in primary
+            if summary["journal_peak_bytes"] is not None
+        ]
+        cow_values = [
+            summary["cow_bytes"]
+            for summary in primary
+            if summary["cow_bytes"] is not None
+        ]
+        journal_peak = (
+            f"{bytes_mib(max(journal_values)):.2f} MiB" if journal_values else "null"
+        )
+        cow_peak = f"{bytes_mib(max(cow_values)):.2f} MiB" if cow_values else "null"
+        lines.append(
+            f"| {labels[driver]} | {sum(summary['eager_forks'] for summary in primary)} | "
+            f"{sum(summary['checkpoint_copies'] for summary in primary)} | "
+            f"{journal_peak} | {cow_peak} |"
+        )
+    lines.extend(
+        [
+            "",
+            "Full-clone and clone-plus-undo eager counts represent deep outer forks; "
+            "only full clone takes full mark snapshots. Page COW reports zero full "
+            "logical-state forks and checkpoints, with numeric copied-page peaks. "
+            "Unsupported allocator totals remain null in the raw receipts.",
             "",
             "## Provenance",
             "",
