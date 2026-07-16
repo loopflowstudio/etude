@@ -385,9 +385,9 @@ def test_curated_combat_tape_is_identical_live_trace_and_inspector_fixture(
         "turn_started",
     ]
     assert curated_tape == CURATED_COMBAT_FIXTURE["events"]
-    # Presentation-tail recovery is owned by the later recovery slice. The
-    # authoritative frame remains recoverable without inventing theater.
-    assert session.current_recovery("explicit_resync")["presentation_tail"] == []
+    recovery = session.current_recovery("explicit_resync")
+    assert recovery["presentation_cursor"] == live_presentation[0]["seq"]
+    assert recovery["presentation_tail"] == live_presentation
     assert all(beat["caused_by"] for beat in live_presentation)
 
 

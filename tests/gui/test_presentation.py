@@ -124,13 +124,17 @@ def test_recovery_cursor_slices_tail_and_recovers_from_gaps(tmp_path):
     _command(session, "Cast Lightning Bolt", "command-cast")
     target = _command(session, "Target Gray Ogre", "command-target")
     events = target["update"]["presentation"]
+    assert session.presentation_events == events
+    head = session.presentation.next_seq
 
     partial = session.current_recovery("reconnect", presentation_cursor=3)
     assert partial["presentation_cursor"] == 3
-    assert [event["seq"] for event in partial["presentation_tail"]] == [3, 4]
+    assert partial["presentation_tail"] == [
+        event for event in events if event["seq"] >= 3
+    ]
 
-    at_head = session.current_recovery("reconnect", presentation_cursor=5)
-    assert at_head["presentation_cursor"] == 5
+    at_head = session.current_recovery("reconnect", presentation_cursor=head)
+    assert at_head["presentation_cursor"] == head
     assert at_head["presentation_tail"] == []
 
     # A cursor beyond the authority head is a gap. The complete frame remains
