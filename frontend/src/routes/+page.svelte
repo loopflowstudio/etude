@@ -3,6 +3,7 @@
 
   import { buildClickableTargets, filterActionsForTarget, focusIdsForActionIndexes } from '$lib/action-map';
   import ActionPanel from '$lib/components/ActionPanel.svelte';
+  import DeckIdentity from '$lib/components/DeckIdentity.svelte';
   import DeckSelector from '$lib/components/DeckSelector.svelte';
   import GameBoard from '$lib/components/GameBoard.svelte';
   import GameLog from '$lib/components/GameLog.svelte';
@@ -175,7 +176,9 @@
           data-testid="deck-names"
           class="rounded bg-slate-700/60 px-2 py-1 text-xs font-semibold text-slate-200"
         >
-          {gameStore.deckNames.hero} vs {gameStore.deckNames.villain}
+          <DeckIdentity name={gameStore.deckNames.hero} /> vs <DeckIdentity
+            name={gameStore.deckNames.villain}
+          />
         </span>
       {/if}
     </div>

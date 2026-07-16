@@ -11,7 +11,19 @@
 </svelte:head>
 
 <div class="min-h-screen bg-slate-900 text-slate-100">
-  <header class="border-b border-slate-800 bg-slate-950/90 backdrop-blur">
+  <!-- The banner carries the color pie as a W→U→R→B→G weave: each color
+       radiates from its own point, alternating edges, in the manner of the
+       loopflow logo's multi-direction gradient. -->
+  <header
+    class="border-b border-slate-800"
+    style="background:
+        radial-gradient(ellipse 40% 160% at 2% 0%, color-mix(in srgb, var(--warning) 38%, transparent), transparent 70%),
+        radial-gradient(ellipse 40% 160% at 26% 100%, color-mix(in srgb, var(--info) 38%, transparent), transparent 70%),
+        radial-gradient(ellipse 40% 160% at 50% 0%, color-mix(in srgb, var(--accent) 38%, transparent), transparent 70%),
+        radial-gradient(ellipse 40% 160% at 74% 100%, color-mix(in srgb, var(--neutral) 38%, transparent), transparent 70%),
+        radial-gradient(ellipse 40% 160% at 98% 0%, color-mix(in srgb, var(--success) 38%, transparent), transparent 70%),
+      var(--bg-surface)"
+  >
     <div class="mx-auto flex w-full max-w-[1600px] items-center justify-between px-4 py-3">
       <div class="leading-none">
         <div data-testid="brand-name" class="font-serif text-2xl font-semibold tracking-[-0.01em] text-accent-text">Etude Fantasia</div>
