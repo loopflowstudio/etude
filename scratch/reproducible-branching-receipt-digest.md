@@ -18,10 +18,30 @@ any checkout containing the same contract-relevant tracked source. W2-264
 repairs that provenance boundary; it does not complete Search KR2 because the
 page-COW candidate and the representation decision remain owned by W2-199.
 
-## The demo
+## User-visible outcome
 
-At the landed commit, run both verification commands from the canonical main
-checkout and from a second checkout of that exact commit:
+Reviewers, CI, and future branching-candidate implementers can verify both
+landed receipts from canonical main, a linked worktree, or a fresh clone at the
+same selected source state. They see a successful verification result and the
+same source digest regardless of checkout path, nested agent worktrees, or
+generated evidence. A real admitted-source change remains visible as a failed
+verification or a new digest.
+
+## End-to-end proof
+
+Starting from the committed provenance implementation, run the two canonical
+drivers sequentially on one host. Each `run` reads the authoritative selected
+Git tree, builds and executes the unchanged native driver, and atomically
+writes its JSON artifact plus derived Markdown report:
+
+```bash
+uv run scripts/bench_branching.py run --driver full_clone/current_game_v1
+uv run scripts/bench_branching.py run --driver compact_clone_undo/current_game_v1
+```
+
+Commit only the generated artifact/report pairs, land that tree, then run both
+verification commands from canonical main and from a second checkout of the
+exact landing commit:
 
 ```bash
 uv run scripts/bench_branching.py verify
@@ -30,7 +50,76 @@ uv run scripts/bench_branching.py verify --driver compact_clone_undo/current_gam
 
 All four invocations print `"status": "verified"`, and both artifacts expose
 the same `run.source_sha256` in both checkout locations despite canonical
-main's nested `.claude` worktrees and the linked checkout's `.git` file.
+main's nested `.claude` worktrees and the linked checkout's `.git` file. Each
+`verify` invocation crosses every consumer boundary: it reads the persisted
+JSON receipt, checks its method/path declaration and artifact hash, recomputes
+the selected Git-tree digest, validates workload evidence and summaries, then
+regenerates the Markdown view and requires byte equality. The focused Python
+tests and debug Rust search-state contract run before the canonical drivers;
+the exact commands remain in `Done when`.
+
+## Source of truth
+
+The authoritative source identity is the NUL-delimited `git ls-tree` entry
+stream for the exact `SOURCE_PATHS` at `HEAD`. The method identifier and path
+set defined in `scripts/bench_branching.py` are authoritative; receipt fields
+must equal those constants and may not select their own provenance closure.
+
+The canonical JSON files under `experiments/data/` are the persisted
+measurement receipts derived from that source identity and the native run.
+Their `artifact_sha256` binds the complete receipt, including
+`run.source_sha256`, `run.source_digest_method`, and `run.source_paths`. The
+Markdown files under `experiments/` are derived views rendered solely from the
+JSON receipts. `verify` is the consumer that reconnects the persisted receipt
+to the current selected Git tree and rejects a stale or hand-edited report.
+
+## Affected surfaces and consumers
+
+| Surface | Required behavior | Compatibility |
+|---------|-------------------|---------------|
+| `scripts/bench_branching.py run` | Preflight the admitted tree, compute the selected Git digest, capture truthful ambient Loopflow metadata, rerun the unchanged driver, recheck source stability, and atomically write both views. | Existing CLI flags, profiles, drivers, fixtures, seeds, workload dimensions, sampling, and contract ID do not change. |
+| `scripts/bench_branching.py verify` | Require the exact digest method/path set, recompute source identity, validate the JSON receipt, and require the rendered report to match. | Both existing driver commands remain valid; receipts from the broken filesystem-walk scheme are replaced rather than grandfathered. |
+| `experiments/data/w2-182-search-branching-v1.json` and `experiments/data/w2-198-compact-clone-undo-v1.json` | Add self-describing `run.source_digest_method` and `run.source_paths`, use one corrected digest, and retain complete raw measurements. | Schema string remains `manabot.search-branching.result.v1`; `artifact_sha256` is regenerated. |
+| `experiments/w2-182-search-branching-v1.md` and `experiments/w2-198-compact-clone-undo-v1.md` | Explain the selected-tree provenance model and reproduce the JSON evidence exactly. | They remain generated views; manual edits fail verification. |
+| Rust `branching_bench` binary and manifest | Consume the same code, embedded semantic inputs, fixtures, seeds, and workloads as before. | No Rust or workload semantic change is admitted by W2-264. |
+| Loopflow metadata reader | Resolve the ambient Task/session/branch/worktree for a new run after measurement completes. | Missing Loopflow state is recorded explicitly and does not invalidate otherwise complete benchmark evidence. |
+| CI, canonical main, linked worktrees, and fresh clones | Verify the same receipt whenever selected tracked entries match. | `.git` shape, `.claude/**`, generated outputs, and unrelated tracked files are not source identity. |
+
+There is no GUI, network API, wire DTO, database migration, or model checkpoint
+consumer in this Task.
+
+## Absent and error states
+
+| State | Required result |
+|-------|-----------------|
+| Git is unavailable, the repository has no `HEAD`, or a required singleton/directory root is absent from the selected tree | `run` and `verify` fail before accepting a digest; there is no filesystem-walk fallback and no empty closure. |
+| An admitted path is staged, unstaged, untracked, or ignored | Fail closed before build/measurement and report the offending admitted paths. Dirt outside the closure remains allowed. |
+| An admitted path changes during build or measurement | The post-run source check fails and no artifact/report pair is replaced. |
+| A production `include!`, `include_str!`, `include_bytes!`, or Cargo build-script root is new, unresolvable, or outside the declared closure | The closure-inventory test fails until the exact tracked input is admitted and all receipts are regenerated. |
+| Python dependencies, Cargo dependencies, the release build, or a native worker fails | `run` preserves the existing artifact/report pair and exits nonzero; dependency/build failure is never serialized as completed evidence. Existing worker, barrier, sampler, and process-group validation remains unchanged. |
+| The JSON artifact is absent, incomplete, has the wrong method/path list, wrong source/contract/artifact digest, failed status, or mismatched driver | `verify` fails with a specific error and emits no success receipt. |
+| The Markdown report is absent or differs from rendering the verified JSON | `verify` fails with `generated report is stale`; JSON remains the authoritative measurement receipt. |
+| Ambient Loopflow status cannot be read | The benchmark continues after recording null/unavailable control-plane metadata plus a reason; source and measurement validation remain mandatory. |
+| Only `.claude/**`, `.git` representation, generated evidence, or unrelated tracked files differ | Source identity and verification are unchanged. |
+
+## Operational boundary
+
+- Provenance uses local, read-only Git subprocesses only; it performs no
+  network access and writes no Git state.
+- At `09ac3405` the expanded closure contains roughly 122 tree entries. Each
+  status/tree subprocess gets a five-second timeout and must normally finish
+  well below two seconds, before the expensive build or benchmark begins.
+- The preflight and post-run checks use the same method/path constants. A
+  timeout, nonzero exit, malformed output, or source change fails closed.
+- Run the two canonical drivers sequentially from one committed selected tree
+  on the same host. Do not parallelize them or alter the current hardware,
+  sampling, warmup, seed, or workload controls; the existing receipts took
+  about 87 seconds per driver on the recorded host.
+- Loopflow lookup occurs after measured cells and is best effort, so control
+  plane latency cannot contaminate measured throughput or RSS. Artifact/report
+  replacement remains atomic and happens only after full validation.
+- A final rebase or squash that preserves all selected entries preserves the
+  digest. If any selected entry changes, rerun both drivers before settlement.
 
 ## Approach
 
@@ -63,6 +152,12 @@ Define one sorted `SOURCE_PATHS` tuple containing
 - `scripts/bench_branching.py`
 - `tests/bench/test_branching_benchmark.py`
 - `uv.lock`
+
+Before accepting a digest, require every singleton path to appear exactly once
+as a tracked blob and every admitted directory root to emit at least one tracked
+entry. Store the fully expanded, sorted tracked file list in `run.source_paths`;
+the directory shorthands are implementation constants, not ambiguous receipt
+patterns.
 
 The Rust source, its three external compile-time inputs, manifests, and lock
 file determine the native benchmark. The Python harness and its root dependency
@@ -209,7 +304,7 @@ list, production include scanner, parameterized one-byte mutation test,
 pre/post clean gates, temporary-worktree tests, self-describing receipt fields,
 and two-commit regeneration sequence directly guard those failure modes.
 
-## Scope
+## Exclusions
 
 - In scope: Git-tree source digesting, exact external compile-time content
   inputs, an executable closure-completeness guard, admitted-source clean
