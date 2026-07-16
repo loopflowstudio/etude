@@ -259,7 +259,10 @@ CanonicalReplayProjectionV1              # client/Study-safe
 Projection validation rejects any row whose viewer differs from the envelope
 viewer and any second presentation track. A viewer's semantic continuation for
 one decision is the half-open interval from its cursor to the next decision by
-that same viewer, or to that viewer track's head for the final row. This keeps
+that same viewer, or to that viewer track's head for the final row. The first
+row also carries the viewer track's prologue from sequence zero to its cursor,
+so concatenated restorations preserve automatic/opponent semantics that
+happened before that viewer's first choice. This keeps
 all opponent and rules activity the viewer observed between their choices,
 even though the complete authority index contains intervening rows for the
 other player.
