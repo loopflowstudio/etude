@@ -19,6 +19,15 @@ search teacher while preserving the wave's evidence discipline: competency,
 legality, information safety, cost, and uncertainty are gates before
 distillation or strength promotion.
 
+## User-visible outcome
+
+The research operator gets one fail-closed command that turns a terminal,
+identity-locked Teacher-0 recovery into a bounded Teacher-1 admission decision.
+They can observe every budget/control cell by seed block, audit exact MCTS
+targets, inspect latency and competency gates, resume interrupted work, and see
+one terminal outcome: `completed_pass` authorizes the later student comparison;
+`completed_kill` forbids it and names the registered diagnostic branch.
+
 ## The demo
 
 Once the live recovery has a terminal manifest and a separately checked-in
@@ -36,6 +45,29 @@ The runner resumes completed cells, reports three independent 16-game seed
 blocks and their fixed 48-game aggregate for every matchup, exactly replays
 eight predeclared MCTS roots, and ends in `completed_pass` or `completed_kill`.
 Only `completed_pass` authorizes a later three-training-seed student experiment.
+
+## End-to-end proof
+
+For one concrete proof, the checked control lock names a terminal Teacher-0
+recovery manifest, its preselected `policy_value` checkpoint, and same-host
+latency calibration. The command above validates those identities, drives the
+authoritative environment through all predeclared matchup cells, records
+viewer-safe legal offers and chosen commands, writes exact visits/Q/root-value
+targets, reruns the eight sampled roots, runs S1-S5, and atomically finishes
+`.runs/w2-234-teacher1-pilot-v1/manifest.json` as `completed_pass` or
+`completed_kill`.
+
+The proof holds only when
+`--verify .runs/w2-234-teacher1-pilot-v1` reproduces the linked trajectory and
+sampled-search receipts from that terminal manifest, all recorded artifact
+hashes still match, and the console status agrees with the manifest. A report
+may summarize those artifacts, but it cannot substitute for this replay.
+
+```bash
+uv run experiments/runners/run_teacher1_pilot.py \
+  --contract experiments/contracts/w2-234-teacher1-pilot-v1.json \
+  --verify .runs/w2-234-teacher1-pilot-v1
+```
 
 ## Approach
 
@@ -57,6 +89,61 @@ control lock must bind the canonical contract hash to:
 
 The lock is impossible while the live recovery is nonterminal. Missing or
 mismatched lock data fails before the output directory or search work exists.
+
+### Source of truth and derived views
+
+The checked JSON experiment contract is the source of truth for intent: frozen
+identities, budgets, seed blocks, predictions, caps, gates, and result branches.
+The separately checked control lock is the source of truth for the recovered
+Teacher-0 manifest/checkpoint and realized-latency mapping that could not be
+known at pre-registration time.
+
+During execution, the authoritative engine/coordinator alone owns state
+transitions. The run directory's atomic `manifest.json` is the execution ledger;
+it binds the contract and lock hashes and references `trajectory-audit.json`
+and `competencies.json` by digest. Acting-viewer frames and
+`InteractionOffer`/`Command` records are derived from authoritative state at
+each revision. Console output, Markdown reports, tables, and later distillation
+authorization are derived views of the terminal manifest and may never override
+it.
+
+### Affected surfaces and consumers
+
+| Surface or consumer | Required behavior |
+|---|---|
+| Teacher-1 CLI runner | Validate contract, lock, runtime, and existing run identity before work; resume only compatible completed cells. |
+| Contract and control-lock JSON | Remain immutable, reviewable inputs with exact hashes and distinct pre-registration/runtime responsibilities. |
+| Authoritative environment/coordinator | Own all transitions and search roots; expose only the acting viewer's legal surface to learner records. |
+| `InteractionOffer` / `Command` protocol | Remain wire-compatible; this slice records and replays it but changes no ABI. |
+| Run manifest and audit artifacts | Record seed blocks, opponent classes, search targets, calibration, competencies, latency, cost, and exact replay receipts. |
+| Recovery/launch automation | May resume the declared output directory, but may not alter the live Teacher-0 recovery or silently replace locked identities. |
+| Later distillation runner and reviewers | Treat only terminal `completed_pass` plus matching hashes as authorization; consume no partial or pooled result as teacher evidence. |
+
+### Absent and error states
+
+| State | Required result |
+|---|---|
+| Control lock absent, recovery manifest nonterminal, checkpoint/calibration missing, or any digest mismatched | Refuse before creating or mutating the Teacher-1 output directory. |
+| Runtime engine/content/ABI/host identity differs from the contract or lock | Fail closed; do not reuse calibration or prior cells. |
+| Existing run directory binds different contract or control-lock hashes | Refuse resume; never merge results from different worlds or controls. |
+| Process interruption with matching identities | Leave the atomic manifest resumable and reuse only already completed cells. |
+| Wall or artifact cap reached | Finish as `stopped_wall_cap` or `stopped_artifact_cap`; student training remains unauthorized. |
+| Missing sampled root, frame/command divergence, root mutation, or action/visit/Q/value mismatch | Fail the replay/integrity gate and forbid distillation. |
+| Quality, competency, stability, or matched-latency threshold fails | Finish `completed_kill`, preserve all diagnostics, and select the contract's named next branch. |
+
+### Operational boundary
+
+- Run locally through `uv` on the locked Apple M4 Max host; no Python command
+  bypasses the repository environment.
+- Stop within 8 cumulative wall hours, 32 core-hours, and 2 GiB of artifacts.
+- Keep each matchup cell at 48 games split across the three fixed 16-game seed
+  blocks; exact replay adds 1,024 PUCT traversals and no games.
+- Match Teacher-0 controls to each Teacher-1 budget by same-host realized p50
+  latency within 10%; report raw budgets and gaps as well.
+- The admitted teacher must also hold p95 search latency at 500 ms or less and
+  throughput at two labels/s/worker or more. The proven full-clone path is
+  allowed only inside these caps; scaling waits for the Rules branching
+  decision.
 
 ### Viewer-safe audit and exact replay
 
@@ -203,13 +290,24 @@ the contract's named branch applies and no student training starts.
 
 ## Done when
 
+For serial PR #111:
+
 - `uv run pytest tests/sim/test_teacher1_evidence.py tests/sim/test_teacher1_pilot.py tests/sim/test_mcts.py -q` passes.
 - A missing/nonterminal/mismatched control lock fails before search or output.
 - Tampering any sampled root's Q vector causes exact replay failure.
 - Contract inspection shows three 16-game blocks, eight replay roots, three
   exact stability seeds, and future training seeds 197/419/887.
-- PR #110 contains only this instrument/design revision and W2-234 remains open
-  for the `teacher1-evidence` serial continuation.
+- PR #111 contains only the preserved admission-instrument/design hardening;
+  no live Teacher-0 artifact or bounded Teacher-1 result is changed or claimed.
+
+For the subsequent evidence serial PR:
+
+- A checked control lock binds the terminal recovery, checkpoint, calibration,
+  and contract before the run starts.
+- The one-command run reaches a terminal manifest, exact `--verify` replay
+  passes, and the result applies the pre-registered pass/kill branch.
+- W2-234 remains open for three-seed distillation only on `completed_pass`; a
+  kill result redirects it without starting student training.
 
 ## Measure
 
