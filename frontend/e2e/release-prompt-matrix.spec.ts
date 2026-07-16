@@ -746,26 +746,51 @@ async function findTerminalTrace(
   page: Page,
   scenario: PromptScenario,
 ): Promise<{ id: string; payload: TracePayload }> {
-  const summariesResponse = await page.request.get('/api/traces');
-  expect(summariesResponse.ok()).toBe(true);
-  const summaries = (await summariesResponse.json()) as TraceSummary[];
+  let terminalTrace: { id: string; payload: TracePayload } | undefined;
+  let observed: Array<{
+    id: string;
+    seed: number;
+    hero_deck_name: string;
+    villain_deck_name: string;
+  }> = [];
 
-  for (const summary of summaries) {
-    const response = await page.request.get(
-      `/api/traces/${encodeURIComponent(summary.id)}`,
-    );
-    expect(response.ok()).toBe(true);
-    const payload = (await response.json()) as TracePayload;
-    if (
-      payload.config.seed === scenario.seed &&
-      payload.config.hero_deck_name === scenario.hero_deck &&
-      payload.config.villain_deck_name === scenario.villain_deck
-    ) {
-      return { id: summary.id, payload };
-    }
+  await expect
+    .poll(
+      async () => {
+        observed = [];
+        const summariesResponse = await page.request.get('/api/traces');
+        expect(summariesResponse.ok()).toBe(true);
+        const summaries = (await summariesResponse.json()) as TraceSummary[];
+
+        for (const summary of summaries) {
+          const response = await page.request.get(
+            `/api/traces/${encodeURIComponent(summary.id)}`,
+          );
+          expect(response.ok()).toBe(true);
+          const payload = (await response.json()) as TracePayload;
+          observed.push({ id: summary.id, ...payload.config });
+          if (
+            payload.config.seed === scenario.seed &&
+            payload.config.hero_deck_name === scenario.hero_deck &&
+            payload.config.villain_deck_name === scenario.villain_deck
+          ) {
+            terminalTrace = { id: summary.id, payload };
+            return true;
+          }
+        }
+        return false;
+      },
+      {
+        timeout: 10_000,
+        message: `${scenario.id}: terminal trace was not persisted; observed ${JSON.stringify(observed)}`,
+      },
+    )
+    .toBe(true);
+
+  if (terminalTrace === undefined) {
+    throw new Error(`${scenario.id}: terminal trace poll completed without a receipt`);
   }
-
-  throw new Error(`${scenario.id}: terminal trace was not persisted`);
+  return terminalTrace;
 }
 
 async function runScenario(
