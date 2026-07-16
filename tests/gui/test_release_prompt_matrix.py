@@ -121,6 +121,7 @@ def test_release_prompt_matrix_classifies_and_covers_selected_matchup():
         "locale": "en-US",
         "timezone": "UTC",
         "reduced_motion": "reduce",
+        "font_render_hinting": "none",
         "pixel_threshold": 0.2,
         "font": {"family": "Inter", "package_version": "5.2.8"},
     }

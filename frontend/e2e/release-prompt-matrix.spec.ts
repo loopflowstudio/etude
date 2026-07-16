@@ -53,6 +53,7 @@ interface VisualReferences {
     locale: string;
     timezone: string;
     reduced_motion: 'reduce';
+    font_render_hinting: 'none';
     pixel_threshold: number;
     font: { family: string; package_version: string };
   };

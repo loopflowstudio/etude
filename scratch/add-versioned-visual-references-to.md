@@ -72,6 +72,8 @@ matrix metadata:
   uvicorn release stack;
 - viewport 1600 x 1200 CSS pixels, device scale factor 1, dark color scheme,
   `en-US`, UTC, and reduced motion;
+- Chromium font-render hinting disabled so host FreeType hinting does not alter
+  the pinned local glyph rasterization;
 - bundled local Inter faces for weights used by the application, with
   `document.fonts.ready`, a successful local font response, and the active font
   asserted before the first reference; and
