@@ -277,6 +277,16 @@ async function captureVisualReference(
   captured.add(id);
 }
 
+async function settleBoardPresentation(page: Page): Promise<void> {
+  const presentationStage = page.getByTestId('presentation-stage');
+  if (!(await presentationStage.isVisible())) {
+    return;
+  }
+
+  await presentationStage.getByRole('button', { name: 'Finish', exact: true }).click();
+  await expect(presentationStage).toBeHidden();
+}
+
 function assertNoRuntimeFailures(scenario: PromptScenario, failures: RuntimeFailures): void {
   expect(
     failures.console,
@@ -873,6 +883,10 @@ async function runScenario(
         reference.family === family &&
         reference.occurrence === occurrence
       ) {
+        // Presentation beats intentionally advance while a game is idle. Finish
+        // the current batch before pinning a board reference so Playwright sees
+        // one semantic game state instead of racing the optional theater.
+        await settleBoardPresentation(page);
         await captureVisualReference(
           page.getByTestId('game-board'),
           reference.id,
