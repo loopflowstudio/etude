@@ -1,5 +1,18 @@
 {
   "schema": "manabot.content-pack-clone-allocations.v1",
+  "captured_at": "2026-07-16T01:19:56Z",
+  "measurement_code_revision": "4f49ad512f1af93316b82f1a8c3d00e0aa98c1b5",
+  "command": "cargo test --release --manifest-path managym/Cargo.toml --test content_pack_clone_allocations -- --nocapture --test-threads=1",
+  "environment": {
+    "rustc": "rustc 1.96.1 (31fca3adb 2026-06-26)",
+    "cargo": "cargo 1.96.1 (356927216 2026-06-26)",
+    "cpu_model": "Apple M4 Max",
+    "architecture": "arm64",
+    "logical_cpus": 16,
+    "physical_memory_bytes": 137438953472,
+    "os": "macOS 26.0.1",
+    "kernel": "Darwin 25.0.0"
+  },
   "build_profile": "release",
   "fixture": "interactive-heavy-80-v1",
   "fixture_cards": 120,
