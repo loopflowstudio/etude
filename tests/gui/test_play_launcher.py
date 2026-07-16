@@ -13,12 +13,20 @@ from scripts import play
 
 
 def test_gui_wire_enum_mirrors_match_the_native_engine():
-    from gui.enums import ActionEnum, ActionSpaceEnum, PhaseEnum, StepEnum, ZoneEnum
+    from gui.enums import (
+        ActionEnum,
+        ActionSpaceEnum,
+        EventTypeEnum,
+        PhaseEnum,
+        StepEnum,
+        ZoneEnum,
+    )
     import managym
 
     for mirror, native in (
         (ActionEnum, managym.ActionEnum),
         (ActionSpaceEnum, managym.ActionSpaceEnum),
+        (EventTypeEnum, managym.EventTypeEnum),
         (PhaseEnum, managym.PhaseEnum),
         (StepEnum, managym.StepEnum),
         (ZoneEnum, managym.ZoneEnum),

@@ -130,9 +130,16 @@ async function chooseDeterministicAction(page: Page): Promise<void> {
 async function visibleSignature(page: Page): Promise<string> {
   const prompts = page.getByTestId('decision-prompt');
   const prompt = (await prompts.count()) > 0 ? normalize(await prompts.first().textContent()) : '';
+  const board = await page.getByTestId('game-board').evaluate((element) => {
+    const canonical = element.cloneNode(true) as HTMLElement;
+    canonical.querySelector('[data-testid="presentation-stage"]')?.remove();
+    return canonical.textContent;
+  });
   const payload = {
     deckNames: normalize(await page.getByTestId('deck-names').textContent()),
-    board: normalize(await page.getByTestId('game-board').textContent()),
+    // Optional presentation theater is transient; the proof signs the
+    // authoritative board, prompt, and legal-action projection underneath it.
+    board: normalize(board),
     prompt,
     actions: (await page.getByTestId('action-option').allTextContents()).map(normalize),
   };
