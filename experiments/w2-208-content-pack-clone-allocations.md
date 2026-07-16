@@ -17,9 +17,9 @@ handles.
 
 ## Measurement record
 
-- Captured: `2026-07-16T00:51:15Z`
+- Captured: `2026-07-16T01:01:11Z`
 - Measurement-code revision:
-  `3228a45d030eda24b074e21170e244be2f55af26`
+  `ad79e2e84ee3bb0651a0e5bd52a21e66b254a32b`
 - Build profile: Cargo `release`
 - Toolchain: `rustc 1.96.1 (31fca3adb 2026-06-26)`;
   `cargo 1.96.1 (356927216 2026-06-26)`
@@ -77,4 +77,3 @@ The result passes. It proves that clone allocations do not include or scale
 with the controlled immutable definition bytes at this source revision. The
 executable test remains the current gate; this checked record is a historical
 receipt and must be regenerated if the measurement-code revision is rewritten.
-
