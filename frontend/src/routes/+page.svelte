@@ -146,7 +146,10 @@
 </script>
 
 <main class="mx-auto w-full max-w-[1600px] p-4" data-update-seq={gameStore.updateSeq}>
-  <div class="mb-4 flex flex-wrap items-center justify-between gap-3 rounded border border-slate-700 bg-slate-800 px-4 py-3">
+  <div
+    data-testid="game-header"
+    class="mb-4 flex flex-wrap items-center justify-between gap-3 rounded border border-slate-700 bg-slate-800 px-4 py-3"
+  >
     <div class="flex items-center gap-3">
       <span class="text-sm font-medium uppercase tracking-wide text-slate-300">Connection</span>
       <span
