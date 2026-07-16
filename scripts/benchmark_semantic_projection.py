@@ -16,13 +16,17 @@ import time
 import tracemalloc
 from typing import Any, Sequence
 
+import managym._managym as native_managym
 import numpy as np
 import psutil
+import tomllib
 
 from manabot.semantic.compiler import canonical_json
 from manabot.semantic.learning import BoundSemanticPack
 from manabot.verify.util import GW_ALLIES_DECK, UR_LESSONS_DECK
 import managym
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 @dataclass(frozen=True)
@@ -140,6 +144,12 @@ def parse_batch_sizes(value: str) -> list[int]:
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
+    rust_manifest = tomllib.loads(
+        (REPO_ROOT / "managym" / "Cargo.toml").read_text(encoding="utf-8")
+    )
+    python_manifest = tomllib.loads(
+        (REPO_ROOT / "managym" / "pyproject.toml").read_text(encoding="utf-8")
+    )
     collect_start = time.perf_counter()
     engine, states, games = collect_states(args.states, args.seed)
     collect_seconds = time.perf_counter() - collect_start
@@ -280,7 +290,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "platform": platform.platform(),
             "processor": platform.processor(),
             "logical_cpus": os.cpu_count(),
-            "managym_extension": str(Path(managym.__file__).resolve()),
+            "managym_rust_crate_version": rust_manifest["package"]["version"],
+            "managym_python_package_version": python_manifest["project"]["version"],
+            "managym_extension": str(Path(native_managym.__file__).resolve()),
         },
         "correctness": {
             "projection_failures": 0,
