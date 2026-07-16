@@ -54,7 +54,7 @@ def _verify_preregistration(
     contract_path: Path,
     suite_path: Path,
     contract: Mapping[str, Any],
-) -> None:
+) -> str:
     head = _git(["rev-parse", "HEAD"]).decode().strip()
     resolved = _git(["rev-parse", revision]).decode().strip()
     if head != resolved:
@@ -94,6 +94,7 @@ def _verify_preregistration(
             raise StructuralKataError(
                 f"{path.relative_to(ROOT)}: expected {expected}, got {actual}"
             )
+    return resolved
 
 
 def _parameter_breakdown(model: torch.nn.Module) -> dict[str, Any]:
@@ -509,7 +510,7 @@ def run(
         raise StructuralKataError("primary run requires CPython 3.12")
     contract, contract_digest = load_contract(contract_path)
     suite, suite_digest = load_suite(suite_path)
-    _verify_preregistration(
+    preregistration_revision = _verify_preregistration(
         preregistration_revision, contract_path, suite_path, contract
     )
     if contract["authority"]["suite_sha256"] != suite_digest:
