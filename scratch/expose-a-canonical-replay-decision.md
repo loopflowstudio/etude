@@ -31,6 +31,162 @@ This directly advances the Semantic Table and Decision Inspector KR that
 and event sequence for a recorded curated match." It also protects the KR that
 semantic beats remain ordered and are never inferred from snapshot diffs.
 
+## Computable contract
+
+### User-visible outcome
+
+After a completed pinned match, Game can list every deliberate human and bot
+decision in one chronological order. An authorized player can copy an address
+for one of their decisions and restore the exact board, prompt, selected offer,
+played command, and semantic continuation that they saw at that point. The
+other player's private choice surface is never present in that response. Study
+can carry the same address and restore the same player-0 decision without
+defining replay order or legality.
+
+The existing live table and `/replay` route continue to work. Their visible
+behavior changes only in stronger revision identity: a batched live update may
+jump across internal policy/automatic revisions while its semantic beats remain
+ordered. This Task adds the canonical restore seam, not a new Study or replay
+page.
+
+### End-to-end proof
+
+Drive one complete fixed-seed UR Lessons versus GW Allies game through the
+real `GameSession` command path with deterministic human and opponent policies,
+including at least one configured auto-pass. At terminal:
+
+1. the persisted authority record has global ordinals `0..N-1` whose rows
+   cover every non-auto human and policy command and no auto-pass;
+2. the player-0 and player-1 projections contain disjoint rows whose ordered
+   union is the authority timeline, and each contains only its own frames,
+   offers, commands, and presentation track;
+3. every emitted address restores byte-identical frame/offer/command data and
+   the correct semantic interval for its authorized viewer, while the opposite
+   viewer and a missing address receive indistinguishable not-found results;
+4. the player-0 address embedded in the Study fixture resolves to exactly the
+   landmark's frame, offer, and played command in Rust, Python, and TypeScript;
+5. `/api/traces/{id}` remains hero-redacted and contains no authority-private
+   canonical record, while the new viewer-0 decision endpoints return only the
+   safe projection; and
+6. generating the pinned match twice produces byte-identical canonical
+   authority records and safe projection fixtures.
+
+The focused proof commands are:
+
+```bash
+cargo test --locked --manifest-path managym/Cargo.toml --test canonical_replay_tests
+uv run --extra dev pytest -q tests/gui/test_replay_index.py tests/gui/test_study_protocol.py tests/gui/test_trace_api.py
+npm --prefix frontend test -- --run src/lib/replay-index.test.ts src/lib/study-protocol.test.ts src/lib/socket.svelte.test.ts
+```
+
+The CLI demo below is the observable inspection of the same pinned fixture;
+these tests prove it crosses every affected authority and consumer boundary.
+
+### Source of truth
+
+`Trace.canonical_replay: CanonicalReplayV1` is the persisted Game-owned source
+of truth for new traces. `GameSession` appends its globally ordered decision
+rows and per-viewer presentation tracks at authority time, then validates the
+complete record before `save_trace()` writes it. The existing raw
+`TraceEvent.observation/actions/action` fields remain compatibility evidence
+for legacy replay and tests; they are not inputs to canonical indexing or
+restoration.
+
+Direct-play frames and canonical rows are produced from the same immutable
+`DecisionContext`, and live/legacy presentation copies are the exact event
+dictionaries appended to the canonical viewer tracks. Byte-equivalence tests
+guard that transitional duplication. The following are derived views, never
+alternate truth:
+
+- `CanonicalReplayProjectionV1` filtered from the persisted record for one
+  authorized viewer;
+- `ReplayDecisionAddress` and its `erd1.` serialization derived from one row;
+- restore responses derived by strict address lookup in the persisted record;
+- the player-0 HTTP projection and Study fixture; and
+- legacy trace/replay payloads, which explicitly omit `canonical_replay`.
+
+### Affected surfaces and consumers
+
+- **Rust protocol authority:** the canonical replay/address/projection schema,
+  schema exporter and fixture validation; `StudyLandmark.decision_id` parsing
+  and binding. The rules engine and search APIs do not change.
+- **Python Game authority:** `gui.server.GameSession` decision-context and
+  bound-command paths, per-action revision/presentation capture, `gui.trace`
+  persistence/redaction, explicit Pydantic protocol models, and the new pure
+  index/address/project/restore module and CLI.
+- **WebSocket protocol:** existing `ExperienceFrame`, `Command`, receipt,
+  recovery, and `PresentationEvent` DTO shapes remain version 1; revisions can
+  jump within a batched update and presentation validation accepts ordered
+  sub-transitions inside that batch. Hero recovery never contains villain
+  prompts, offers, commands, receipts, or private presentation causes.
+- **HTTP trace API:** `GET /api/traces` and `GET /api/traces/{trace_id}` remain
+  backward-compatible and always strip the authority-private record. Add
+  `GET /api/traces/{trace_id}/decisions` for the fixed server-side player-0
+  projection and
+  `GET /api/traces/{trace_id}/decisions/{erd1_address}` for player-0 restore.
+  Neither endpoint accepts `viewer` or `reveal_hidden`.
+- **TypeScript client library:** closed safe-projection/address models,
+  address parsing and restore-equivalence tests, plus relaxed batched
+  presentation revision validation. No client-side offer construction or
+  legality logic is added.
+- **Existing play and replay apps:** live command submission, reconnect,
+  presentation, trace list, and legacy frame timeline must remain compatible.
+  The replay route is regression-tested but does not gain decision navigation.
+- **Study:** its existing v1 string field carries a validated `erd1` address
+  from the player-0 projection. Study never imports the authority-private
+  index or constructs an address from snapshots.
+- **Fixtures/automation:** deterministic authority generation stays in Python
+  authority tests; checked Rust/Python/TypeScript fixtures are separate
+  single-viewer projections plus the updated Study artifact.
+
+### Absent and error states
+
+- A valid completed canonical replay with no deliberate decisions has an empty
+  projection and no restorable addresses. The pinned fixture is invalid unless
+  both players have at least one row.
+- A legacy trace with no `canonical_replay` remains available through the
+  legacy trace/replay API. Decision listing/restoration returns
+  `canonical_replay_unavailable` (HTTP 409); it never synthesizes rows.
+- Malformed address syntax/version/numeric encoding returns `invalid_address`
+  (HTTP 400). A well-formed unknown ordinal, wrong row identity, stale row
+  digest, or unauthorized viewer returns the same `decision_not_found`
+  (HTTP 404), so existence is not a cross-view oracle.
+- Duplicate/gapped authority ordinals, duplicate command/prompt identities,
+  mixed-view projections, cursor/event gaps, frame/offer/command drift, or
+  private-hand leakage make the canonical record invalid. Finalization and
+  fixture generation fail; no partial projection is served or checked in.
+- A policy raw action with no unique offer mapping is an authority error before
+  `env.step()`. It records neither a command nor a decision row and cannot be
+  guessed or repaired from position.
+- Duplicate client command retry returns the original receipt/recovery and
+  creates no additional revision, transition, or row.
+- Fixture-generation dependency failure produces no updated fixture. Runtime
+  restore does not invoke Python/Rust subprocesses, the engine, search, or the
+  network.
+
+### Operational boundary
+
+Decision capture adds serialization/copying around the engine action already
+being taken; it performs no extra policy evaluation, engine step, search,
+subprocess, or network request. Final validation/serialization is linear in
+the match's decisions plus viewer-safe presentation events. Loading builds an
+ordinal/address map once, and restore is an in-memory indexed lookup plus
+bounded row hashing and copying—never deterministic engine replay.
+
+The scope is the one pinned two-player curated match and its ordinary trace
+size, not an unbounded replay database. Existing `MAX_AUTOPLAY_STEPS`, session
+TTL, presentation batching, 256-event live recovery window, and client
+interaction behavior remain unchanged. The durable canonical tracks are not
+truncated by the live recovery window.
+
+### Exclusions
+
+This Task does not rank or select landmarks, run policy/value/search analysis,
+branch or replay raw engine actions, reveal hindsight/private facts, add
+client-side legality, build Study UI, redesign the replay page, add share/
+bookmark routing, authenticate player-1 HTTP access, migrate legacy traces, or
+generalize fixtures beyond the pinned curated matchup.
+
 ## The demo
 
 Run
@@ -78,6 +234,12 @@ ViewerPresentationTrack
   head: PresentationSeq
   events: PresentationEvent[]             # already filtered for viewer
 ```
+
+Persist this model as the optional `canonical_replay` field on `Trace`; it is
+required for every newly completed protocol-driven match and absent only on
+legacy traces. `prepare_trace_payload()` always removes that field before
+serving the established trace endpoint. Only the dedicated projection and
+restore functions may read it for a client response.
 
 The globally contiguous `ordinal` answers "which deliberate decision happened
 next?" independently of actor. Each row's `presentation_cursor` addresses the
