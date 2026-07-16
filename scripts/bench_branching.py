@@ -648,6 +648,18 @@ def summarize_cell(cell: dict[str, Any]) -> dict[str, Any]:
         for repeat in repeats
     ]
     caps = sum(metric["cap_hits"] for metric in metrics)
+
+    def counter_total(name: str) -> int | None:
+        """Sum a driver counter, or None if the driver does not support it.
+
+        A counter the driver cannot measure stays null with a reason rather
+        than being reported as a zero it did not observe.
+        """
+        values = [metric[name] for metric in metrics]
+        if any(value is None for value in values):
+            return None
+        return sum(values)
+
     return {
         "simulations": simulations,
         "transitions": transitions,
@@ -666,6 +678,28 @@ def summarize_cell(cell: dict[str, Any]) -> dict[str, Any]:
             repeat["rss_peak_delta_bytes"] for repeat in repeats
         ),
         "max_live_states": max(metric["max_live_states"] for metric in metrics),
+        "eager_forks": sum(metric["eager_forks"] for metric in metrics),
+        "checkpoint_copies": sum(metric["checkpoint_copies"] for metric in metrics),
+        "fork_seconds": sum(metric["fork_seconds"] for metric in metrics),
+        "mark_seconds": sum(metric["mark_seconds"] for metric in metrics),
+        "rollback_seconds": sum(metric["rollback_seconds"] for metric in metrics),
+        "journal_peak_bytes": max(
+            (metric["journal_bytes"] for metric in metrics), default=None
+        )
+        if all(metric["journal_bytes"] is not None for metric in metrics)
+        else None,
+        "journal_peak_entries": max(
+            (metric["journal_peak_entries"] for metric in metrics), default=None
+        )
+        if all(metric["journal_peak_entries"] is not None for metric in metrics)
+        else None,
+        "journal_marks": counter_total("journal_marks"),
+        "journal_commits": counter_total("journal_commits"),
+        "journal_rollbacks": counter_total("journal_rollbacks"),
+        "allocation_count": counter_total("allocation_count"),
+        "allocation_bytes": counter_total("allocation_bytes"),
+        "cow_bytes": counter_total("cow_bytes"),
+        "unsupported_counters_reason": metrics[0]["unsupported_counters_reason"],
         "cap_rate": caps / simulations if simulations else 0.0,
         "repeat_checksums": [repeat["result_checksum"] for repeat in repeats],
     }
@@ -787,7 +821,7 @@ def run_benchmark(
         cells.append(cell)
 
     task_status = command_output(
-        ["lf", "task", "status", "W2-182", "--json"], required=False
+        ["lf", "task", "status", "W2-198", "--json"], required=False
     )
     completed_source_sha256 = source_sha256()
     if completed_source_sha256 != initial_source_sha256:
@@ -811,10 +845,10 @@ def run_benchmark(
             "canonical": profile == "full" and not oversubscribed,
             "status": "complete",
             "loopflow": {
-                "task": "W2-182",
+                "task": "W2-198",
                 "task_session": "ts_b39e9de2861c44bc8c4234a32c2f6bcf",
                 "worktree": str(ROOT),
-                "branch": "jack-heart/build-whole-rollout-branching-benchmark",
+                "branch": "jack-heart/implement-compact-clone-plus-undo",
                 "status_snapshot": json.loads(task_status) if task_status else None,
                 "status_unavailable_reason": None
                 if task_status
@@ -849,7 +883,7 @@ def bytes_mib(value: int | float) -> float:
 
 def render_report(payload: dict[str, Any]) -> str:
     lines = [
-        "# W2-182: whole-rollout branching baseline",
+        f"# Whole-rollout branching evidence: `{payload['run']['driver']}`",
         "",
         f"Contract: `{payload['contract']['id']}` (`{payload['contract']['sha256']}`)",
         f"Driver: `{payload['run']['driver']}`",
@@ -878,6 +912,48 @@ def render_report(payload: dict[str, Any]) -> str:
             "",
             "Peak RSS is the 5 ms sampled sum across worker processes and can double-count shared pages. Clone latency is diagnostic, not a storage decision.",
             "",
+            "## Branch lifecycle and journal counters",
+            "",
+            "| Cell | eager forks | checkpoints | fork time | mark time | rollback time | journal peak | journal entries | marks / commits / rollbacks |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for cell in payload["cells"]:
+        if cell["id"] not in WHOLE_CELLS:
+            continue
+        summary = cell["summary"]
+        journal_peak = (
+            f"{bytes_mib(summary['journal_peak_bytes']):.2f} MiB"
+            if summary["journal_peak_bytes"] is not None
+            else "null"
+        )
+        entries = (
+            str(summary["journal_peak_entries"])
+            if summary["journal_peak_entries"] is not None
+            else "null"
+        )
+        counts = " / ".join(
+            str(summary[name]) if summary[name] is not None else "null"
+            for name in ("journal_marks", "journal_commits", "journal_rollbacks")
+        )
+        lines.append(
+            f"| `{cell['id']}` | {summary['eager_forks']} | "
+            f"{summary['checkpoint_copies']} | {summary['fork_seconds']:.3f}s | "
+            f"{summary['mark_seconds']:.3f}s | {summary['rollback_seconds']:.3f}s | "
+            f"{journal_peak} | {entries} | {counts} |"
+        )
+    unsupported = {
+        cell["summary"]["unsupported_counters_reason"]
+        for cell in payload["cells"]
+        if cell["id"] in WHOLE_CELLS
+    }
+    lines.extend(
+        [
+            "",
+            "`null` counters are unsupported by this driver, not observed zeros: "
+            + "; ".join(sorted(reason for reason in unsupported if reason))
+            + ".",
+            "",
             "## Step and clone diagnostics",
             "",
             "| Cell | samples/s | latency p50 / p95 / p99 | resets | reset time |",
@@ -899,8 +975,8 @@ def render_report(payload: dict[str, Any]) -> str:
             "## Reproduction and evidence",
             "",
             "```bash",
-            "uv run scripts/bench_branching.py run",
-            "uv run scripts/bench_branching.py verify",
+            f"uv run scripts/bench_branching.py run --driver {payload['run']['driver']}",
+            f"uv run scripts/bench_branching.py verify --driver {payload['run']['driver']}",
             "```",
             "",
             f"Equivalence: `{str(payload['equivalence']['passed']).lower()}` across {len(payload['equivalence']['checks'])} fixture/seed checks, each replayed twice.",
@@ -908,7 +984,9 @@ def render_report(payload: dict[str, Any]) -> str:
             f"Artifact SHA-256: `{payload['artifact_sha256']}`.",
             f"Source SHA-256: `{payload['run']['source_sha256']}`.",
             "",
-            "The raw artifact contains the pre-execution UTC start, exact orchestrator and worker argv, a fresh process group per cell/repeat, barrier and sampler receipts, the complete timestamped 5 ms aggregate-worker RSS series, hardware, versions, fixture tapes and hashes, all worker results, seeds, timings, outcomes, and deterministic checksums. No undo or page-COW implementation was selected or measured.",
+            "The raw artifact contains the pre-execution UTC start, exact orchestrator and worker argv, a fresh process group per cell/repeat, barrier and sampler receipts, the complete timestamped 5 ms aggregate-worker RSS series, hardware, versions, fixture tapes and hashes, all worker results, seeds, timings, outcomes, and deterministic checksums.",
+            "",
+            "This artifact measures one candidate. Comparing candidates means comparing two artifacts from the same host and source state, matched by their equal per-cell result checksums. No page-COW representation is implemented, measured, or selected here.",
             "",
         ]
     )
