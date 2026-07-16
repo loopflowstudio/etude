@@ -1,7 +1,7 @@
-# Whole-rollout branching evidence: `compact_clone_undo/current_game_v1`
+# Whole-rollout branching evidence: `dense_page_cow_undo/event_pages_4k_v1`
 
 Contract: `manabot.search-branching.v1` (`9c8dfc3cae6bb85642caf61c074bb3ba2c0845f555c3024238f3d2d6fa85708f`)
-Driver: `compact_clone_undo/current_game_v1`
+Driver: `dense_page_cow_undo/event_pages_4k_v1`
 Run: `2026-07-16T19:46:40.592943Z`; canonical: `true`
 Evidence scope: current driver at this source state only; this is not a W2-179 before/after comparison.
 
@@ -9,10 +9,10 @@ Evidence scope: current driver at this source state only; this is not a W2-179 b
 
 | Cell | simulations/s | transitions/s | root p50 / p95 / p99 | peak RSS | peak delta | max live | cap rate |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `flat-single-64-v1` | 278.7 | 36232.6 | 0.312s / 0.335s / 0.335s | 24.6 MiB | 4.9 MiB | 3 | 0.000% |
-| `flat-saturated-64-v1` | 1823.4 | 240013.8 | 0.376s / 0.487s / 0.487s | 193.2 MiB | 22.1 MiB | 3 | 0.000% |
-| `retained-single-8-v1` | 318.3 | 30951.4 | 0.009s / 0.010s / 0.010s | 16.6 MiB | 4.7 MiB | 17 | 0.000% |
-| `retained-saturated-16-v1` | 350.3 | 32756.1 | 0.127s / 0.135s / 0.135s | 84.2 MiB | 30.7 MiB | 264 | 0.000% |
+| `flat-single-64-v1` | 272.7 | 35447.9 | 0.325s / 0.357s / 0.357s | 24.2 MiB | 5.0 MiB | 3 | 0.000% |
+| `flat-saturated-64-v1` | 1686.8 | 222036.7 | 0.410s / 0.535s / 0.535s | 193.2 MiB | 22.0 MiB | 3 | 0.000% |
+| `retained-single-8-v1` | 311.5 | 30291.9 | 0.009s / 0.011s / 0.011s | 13.9 MiB | 3.2 MiB | 17 | 0.000% |
+| `retained-saturated-16-v1` | 331.7 | 31011.0 | 0.126s / 0.203s / 0.203s | 37.7 MiB | 2.1 MiB | 264 | 0.000% |
 
 Peak RSS is the 5 ms sampled sum across worker processes and can double-count shared pages. Clone latency is diagnostic, not a storage decision.
 
@@ -20,19 +20,19 @@ Peak RSS is the 5 ms sampled sum across worker processes and can double-count sh
 
 | Cell | eager forks | checkpoints | fork time | mark time | rollback time | journal peak | COW peak | journal entries | marks / commits / rollbacks |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| `flat-single-64-v1` | 128 | 0 | 0.001s | 0.000s | 0.439s | 4.64 MiB | null | 34385 | 6144 / 3072 / 3072 |
-| `flat-saturated-64-v1` | 1024 | 0 | 0.007s | 0.001s | 4.124s | 30.23 MiB | null | 263176 | 49152 / 24576 / 24576 |
-| `retained-single-8-v1` | 192 | 0 | 0.001s | 0.000s | 0.000s | 0.11 MiB | null | 86 | 128 / 128 / 0 |
-| `retained-saturated-16-v1` | 3072 | 0 | 0.015s | 0.000s | 0.000s | 1.66 MiB | null | 86 | 2048 / 2048 / 0 |
+| `flat-single-64-v1` | 0 | 0 | 0.000s | 0.000s | 0.475s | 4.64 MiB | 0.00 MiB | 34385 | 6144 / 3072 / 3072 |
+| `flat-saturated-64-v1` | 0 | 0 | 0.006s | 0.001s | 4.727s | 30.23 MiB | 0.03 MiB | 263176 | 49152 / 24576 / 24576 |
+| `retained-single-8-v1` | 0 | 0 | 0.000s | 0.000s | 0.000s | 0.11 MiB | 0.07 MiB | 86 | 128 / 128 / 0 |
+| `retained-saturated-16-v1` | 0 | 0 | 0.003s | 0.000s | 0.000s | 1.66 MiB | 1.01 MiB | 86 | 2048 / 2048 / 0 |
 
-`null` counters are unsupported by this driver, not observed zeros: system allocator has no counting hook; clone-plus-undo does not implement page COW.
+`null` counters are unsupported by this driver, not observed zeros: system allocator has no counting hook; cow_bytes measures branch-private copied 4096-byte event pages.
 
 ## Step and clone diagnostics
 
 | Cell | samples/s | latency p50 / p95 / p99 | resets | reset time |
 |---|---:|---:|---:|---:|
-| `step-v1` | 126836.2 | 6.8µs / 16.9µs / 22.8µs | 116 | 0.002s |
-| `clone-v1` | 159974.2 | 6.2µs / 6.5µs / 7.9µs | 0 | 0.000s |
+| `step-v1` | 125677.7 | 6.9µs / 17.0µs / 23.1µs | 116 | 0.002s |
+| `clone-v1` | 818472.9 | 1.2µs / 1.3µs / 1.5µs | 0 | 0.000s |
 
 ## Reproduction and evidence
 
@@ -43,7 +43,7 @@ uv run scripts/bench_branching.py verify-matrix
 
 Equivalence: `true` across 8 fixture/seed checks, each replayed twice.
 Each primary cell also repeated its first measured root in a fresh worker group and matched the ordered deterministic result checksum.
-Artifact SHA-256: `389bd14afcb925489b5a29f7c0dacb34baa388886e8f3eb0cad13aa9fa1bb395`.
+Artifact SHA-256: `707d346625a198af57b0b24af9237969b7fc5ea9bb84979ed8e80cc3db33dcd3`.
 Source SHA-256: `4354b41a80706409cdc23b26979ca2679f88b62a8d48516e18fc7b9cd3ab8beb`.
 Measurement revision: `2d804a766757cace5c3e0d41c3a95f36b7e31cc6`.
 Release binary SHA-256: `af197d6d7f8297cdf2cdf72a2b417af328310cac33ef5f78bffaa6e2a5e80a83`.
