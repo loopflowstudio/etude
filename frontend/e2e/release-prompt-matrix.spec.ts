@@ -293,12 +293,20 @@ async function settleBoardPresentation(page: Page): Promise<void> {
     finish.click();
     return true;
   });
-  if (!finished) {
-    return;
+  if (finished) {
+    await expect(presentationStage).toBeHidden();
   }
 
-  await expect(presentationStage).toBeHidden();
-  await page.getByTestId('action-option').first().focus();
+  // The action can already own DOM focus while its derived board emphasis was
+  // cleared by a prior presentation transition. Re-fire the focus boundary so
+  // board references never depend on that event ordering.
+  const firstAction = page.getByTestId('action-option').first();
+  await firstAction.evaluate((button) => {
+    (button as HTMLButtonElement).blur();
+    (button as HTMLButtonElement).focus();
+  });
+  await expect(firstAction).toBeFocused();
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
 }
 
 function assertNoRuntimeFailures(scenario: PromptScenario, failures: RuntimeFailures): void {
