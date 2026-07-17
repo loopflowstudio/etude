@@ -17,3 +17,7 @@
   canonicalizable. They remain usable by the legacy replay viewer, but the
   canonical resolver fails closed instead of inferring missing history.
 
+- The first fork-and-return slice retains exact engine roots only for the live
+  completed `GameSession`. Durable root persistence or reconstruction is a
+  later Game storage decision; this provider never rebuilds authority from
+  legacy trace actions.

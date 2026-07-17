@@ -80,6 +80,7 @@ describe('canonical replay viewer projection', () => {
       /decision binding drifted/,
     );
   });
+
   it('rejects an empty replay namespace and drifted projection identity', () => {
     const emptyReplayId = structuredClone(playerZero);
     emptyReplayId.replay_id = '';
