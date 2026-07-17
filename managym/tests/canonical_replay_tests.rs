@@ -56,6 +56,39 @@ fn safe_projections_interleave_into_one_complete_authority_timeline() {
 }
 
 #[test]
+fn safe_projection_rejects_empty_replay_id_and_drifted_identity() {
+    let (player_zero, _) = projections();
+
+    let mut empty_replay_id = player_zero.clone();
+    empty_replay_id.replay_id.clear();
+    assert!(empty_replay_id
+        .validate()
+        .unwrap_err()
+        .contains("requires replay_id"));
+
+    let mut drifted_match = player_zero.clone();
+    drifted_match.match_id.0 = "different-match".into();
+    assert!(drifted_match
+        .validate()
+        .unwrap_err()
+        .contains("identity differs"));
+
+    let mut drifted_content = player_zero.clone();
+    drifted_content.content_hash.0 = "0".repeat(64);
+    assert!(drifted_content
+        .validate()
+        .unwrap_err()
+        .contains("identity differs"));
+
+    let mut drifted_assets = player_zero;
+    drifted_assets.asset_manifest_hash.0 = "0".repeat(64);
+    assert!(drifted_assets
+        .validate()
+        .unwrap_err()
+        .contains("identity differs"));
+}
+
+#[test]
 fn combined_authority_rejects_duplicate_and_missing_global_addresses() {
     let (player_zero, player_one) = projections();
     let mut decisions = player_zero.decisions.clone();

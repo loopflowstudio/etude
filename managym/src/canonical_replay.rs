@@ -256,6 +256,9 @@ pub struct CanonicalReplayProjectionV1 {
 
 impl CanonicalReplayProjectionV1 {
     pub fn validate(&self) -> Result<(), String> {
+        if self.replay_id.is_empty() {
+            return Err("canonical projection requires replay_id".into());
+        }
         let mut previous_ordinal = None;
         let mut previous_cursor = 0;
         let mut commands = BTreeSet::new();
@@ -264,6 +267,12 @@ impl CanonicalReplayProjectionV1 {
             row.validate()?;
             if row.viewer != self.viewer {
                 return Err("canonical projection mixes viewer decision rows".into());
+            }
+            if row.frame.match_id.0 != self.match_id.0
+                || row.frame.content_hash.0 != self.content_hash.0
+                || row.frame.asset_manifest_hash.0 != self.asset_manifest_hash.0
+            {
+                return Err("decision identity differs from canonical projection".into());
             }
             if previous_ordinal.is_some_and(|previous| previous >= row.ordinal) {
                 return Err("canonical projection ordinals are not increasing".into());

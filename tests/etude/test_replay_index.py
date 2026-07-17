@@ -151,6 +151,28 @@ def test_projection_contains_only_one_viewer_and_preserves_global_ordinals():
         CanonicalReplayProjectionV1.model_validate(mixed)
 
 
+@pytest.mark.parametrize(
+    ("field", "drifted"),
+    (
+        ("match_id", "different-match"),
+        ("content_hash", "0" * 64),
+        ("asset_manifest_hash", "0" * 64),
+    ),
+)
+def test_projection_rejects_empty_replay_id_and_drifted_identity(field, drifted):
+    projection = project_replay(_replay(), 0).model_dump(mode="json")
+
+    empty_replay_id = deepcopy(projection)
+    empty_replay_id["replay_id"] = ""
+    with pytest.raises(ValidationError, match="requires replay_id"):
+        CanonicalReplayProjectionV1.model_validate(empty_replay_id)
+
+    drifted_projection = deepcopy(projection)
+    drifted_projection[field] = drifted
+    with pytest.raises(ValidationError, match="identity differs"):
+        CanonicalReplayProjectionV1.model_validate(drifted_projection)
+
+
 def test_authority_rejects_duplicate_and_gapped_global_ordinals():
     replay = _replay().model_dump(mode="json")
     duplicate = deepcopy(replay)

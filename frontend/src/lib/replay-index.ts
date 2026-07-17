@@ -204,6 +204,7 @@ export function assertViewerSafeReplayProjection(
   projection: CanonicalReplayProjectionV1,
 ): void {
   if (projection.version !== 1) throw new Error('invalid canonical replay version');
+  if (!projection.replay_id) throw new Error('canonical replay projection requires replay_id');
   safeInteger(projection.viewer, 'viewer');
   safeInteger(projection.presentation_head, 'presentation_head');
   let previousOrdinal = -1;

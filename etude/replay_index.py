@@ -239,6 +239,8 @@ class CanonicalReplayProjectionV1(ProtocolModel):
 
     @model_validator(mode="after")
     def validate_projection(self) -> "CanonicalReplayProjectionV1":
+        if not self.replay_id:
+            raise ValueError("canonical projection requires replay_id")
         previous_ordinal = -1
         command_ids: set[str] = set()
         prompt_ids: set[tuple[int, int]] = set()
@@ -246,6 +248,14 @@ class CanonicalReplayProjectionV1(ProtocolModel):
         for row in self.decisions:
             if row.viewer != self.viewer:
                 raise ValueError("canonical projection mixes viewer decision rows")
+            if (
+                row.frame.match_id != self.match_id
+                or row.frame.content_hash != self.content_hash
+                or row.frame.asset_manifest_hash != self.asset_manifest_hash
+            ):
+                raise ValueError(
+                    "decision identity differs from canonical projection"
+                )
             if row.ordinal <= previous_ordinal:
                 raise ValueError("canonical projection ordinals are not increasing")
             if row.command_id in command_ids:

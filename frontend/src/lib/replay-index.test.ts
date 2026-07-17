@@ -80,4 +80,22 @@ describe('canonical replay viewer projection', () => {
       /decision binding drifted/,
     );
   });
+
+  it('rejects an empty replay namespace and drifted projection identity', () => {
+    const emptyReplayId = structuredClone(playerZero);
+    emptyReplayId.replay_id = '';
+    expect(() => assertViewerSafeReplayProjection(emptyReplayId)).toThrow(
+      /requires replay_id/,
+    );
+
+    for (const field of ['match_id', 'content_hash', 'asset_manifest_hash'] as const) {
+      const drifted = structuredClone(playerZero);
+      drifted[field] = field === 'match_id'
+        ? 'different-match'
+        : '0'.repeat(64);
+      expect(() => assertViewerSafeReplayProjection(drifted)).toThrow(
+        /decision binding drifted/,
+      );
+    }
+  });
 });
