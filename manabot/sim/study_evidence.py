@@ -13,6 +13,8 @@ from typing import Any, Mapping
 
 import numpy as np
 
+from etude.experience_protocol import Command, ExperienceFrame, InteractionOffer
+from etude.replay_index import ReplayDecisionAddress, decision_payload_sha256
 from etude.study_protocol import StudyArtifact
 from manabot.sim.teacher1_evidence import canonical_sha256
 
@@ -174,11 +176,36 @@ def build_study_artifact(
             "checkpoint_sha256": checkpoint_sha256,
         }
     )[:16]
+    source_replay_id = "int-4-trajectory-audit-v1"
+    replay_ordinal = decision_index + sum(
+        len(game["decisions"])
+        for game in sorted(audit["games"], key=lambda item: int(item["game_index"]))
+        if int(game["game_index"]) < game_index
+    )
+    presentation_cursor = 0
+    decision_id = ReplayDecisionAddress(
+        version=1,
+        replay_id=source_replay_id,
+        match_id=str(frame["match_id"]),
+        ordinal=replay_ordinal,
+        viewer=int(decision["actor"]),
+        revision=int(frame["revision"]),
+        prompt_id=int(frame["prompt"]["id"]),
+        offer_id=selected_offer_id,
+        command_id=str(decision["command"]["command_id"]),
+        presentation_cursor=presentation_cursor,
+        decision_sha256=decision_payload_sha256(
+            ExperienceFrame.model_validate(frame),
+            InteractionOffer.model_validate(selected_offer),
+            Command.model_validate(decision["command"]),
+            presentation_cursor,
+        ),
+    ).serialize()
     payload = {
         "version": 1,
         "identity": {
             "artifact_id": f"int-4-study-{artifact_key}",
-            "source_replay_id": "int-4-trajectory-audit-v1",
+            "source_replay_id": source_replay_id,
             "source_replay_sha256": source_replay_sha256,
             "match_id": frame["match_id"],
             "content_pack": {
@@ -203,10 +230,7 @@ def build_study_artifact(
         "landmarks": [
             {
                 "id": f"game-{game_index}-decision-{decision_index}",
-                "decision_id": (
-                    f"{frame['match_id']}:revision-{frame['revision']}:"
-                    f"prompt-{frame['prompt']['id']}"
-                ),
+                "decision_id": decision_id,
                 "match_state_hash": frame["frame_hash"],
                 "viewer": int(decision["actor"]),
                 "prompt_id": int(frame["prompt"]["id"]),

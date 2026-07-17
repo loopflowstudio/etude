@@ -6,13 +6,13 @@
   "status": "completed",
   "verdict": "revise",
   "diagnosis": "engineering_smoke_only_no_admission_claim",
-  "finished_at": "2026-07-17T14:32:00.795826+00:00",
-  "contract_sha256": "964fb9a3f12e0c9c6dcb8c29da37b3bbe8db52a88122aa0d998c7de97a9c8e89",
+  "finished_at": "2026-07-17T14:54:10.675737+00:00",
+  "contract_sha256": "320a050e58bff5644a71cc6b3c1f42efbccb608e7e8af0c55ca66f9bc67a6f02",
   "profile_sha256": "88181734b699253374b9d99c74e278f42c8dff8de5f85ac81fb65ca1fb39a8e4",
   "runtime": {
-    "iteration_source_sha256": "cfbce685f7a1f6dd3e5e6bf10e021a7d30520bf0dcbb36cf9826adc5e67b720b",
-    "engine_source_sha256": "dbbb55308a3abdbb9b18e9955ebcc7fe69c8ae003f68b2e99643475a42c8c294",
-    "engine_extension_sha256": "d9408302ca4faaf60c8e73530166b1fdb718a88a55569c1169788d01bcadce47",
+    "iteration_source_sha256": "14a3c5ff6594ad3c354abd06a9e888a3ad2c2d6e2d741db8954efa4f68c89dea",
+    "engine_source_sha256": "f63409e13d33d35049611560ede05cab9915406b388aa4c913a8084224114a49",
+    "engine_extension_sha256": "890fe39524a32629cf6610c2088607dca66e884abef0ccdece8f556fe9a5466d",
     "observation_abi_sha256": "d7da94347d956dd492039d55a10291bcdc1b2605e59f67dfe7af66d3fbbbaaa5",
     "action_abi_sha256": "9f1290e4db495c9a299df0bbf06f19fd02cf1eabc62b435f8b029ddd5f6257b2",
     "experience_protocol_sha256": "45ee9d0e7e0d7571510fe910ce6ecfa86db42f667efd12c01fea585aec940b3c",
@@ -23,10 +23,10 @@
       "games": 2,
       "decisions": 105,
       "win_rate_vs_random": 1.0,
-      "p50_decision_ms": 3.4055409487336874,
-      "p95_decision_ms": 7.0612336974591,
-      "labels_per_second": 275.7247972237392,
-      "traversals_per_second": 1102.8991888949568,
+      "p50_decision_ms": 1.5759591478854418,
+      "p95_decision_ms": 3.2375167589634657,
+      "labels_per_second": 572.0990040141949,
+      "traversals_per_second": 2288.3960160567794,
       "mean_max_depth": 1.276190476190476,
       "max_depth": 2,
       "cap_hits": 0
@@ -35,10 +35,10 @@
       "games": 2,
       "decisions": 100,
       "win_rate_vs_random": 0.5,
-      "p50_decision_ms": 6.780729396268725,
-      "p95_decision_ms": 15.340037818532435,
-      "labels_per_second": 134.51292211420235,
-      "traversals_per_second": 1076.1033769136188,
+      "p50_decision_ms": 3.366770572029054,
+      "p95_decision_ms": 6.0679035959765315,
+      "labels_per_second": 285.14782987358456,
+      "traversals_per_second": 2281.1826389886764,
       "mean_max_depth": 2.07,
       "max_depth": 3,
       "cap_hits": 0
@@ -73,25 +73,25 @@
         "policy_loss": 0.9039575387765696,
         "policy_kl": 0.9039575387765696,
         "root_value_brier": 0.10551996488828917,
-        "checkpoint_sha256": "bc369cb83b070865efda411c8a70d53a21983b8965fb7c6d8b30c604fdbdec48"
+        "checkpoint_sha256": "1b61facec11f5a435895d0b42f033292a3f56f4162938be81dac803400a347d6"
       },
       "chosen_policy_value": {
         "policy_loss": 0.904521014239337,
         "policy_kl": 0.904521014239337,
         "root_value_brier": 0.09906034211854677,
-        "checkpoint_sha256": "734fdffb0a879c4eca5b1c47ea1f2ce2d5cf2f8b475f5b1739c57bed1bb91a5e"
+        "checkpoint_sha256": "e19ba57cfdb2c06f0ea2c65e0cf1e13a1e17a9c4b536d3692cc49bc062cfd7d9"
       },
       "visit_policy_only": {
         "policy_loss": 0.9063879477011191,
         "policy_kl": 0.14299636703353744,
         "root_value_brier": 0.1054549517932239,
-        "checkpoint_sha256": "d8b726cc85660c774e70699f9da84dc11bc62f8eaea90396a4b7d905898760bc"
+        "checkpoint_sha256": "7691f0a0ce4f5d1caf9622a3a6a559673b5d9cad84d681b9c75db27bd99cdbb7"
       },
       "visit_policy_value": {
         "policy_loss": 0.9065961408185529,
         "policy_kl": 0.14320456015097127,
         "root_value_brier": 0.0990035426509273,
-        "checkpoint_sha256": "09d89c02e770b1a2a99361a8fd44922b3ce2bc208e9d53ea7f618d48adc1e4a6"
+        "checkpoint_sha256": "71ee0adaea7efbafa2cbb173fae45716a9176762d79015087dd99ea7a0f4a493"
       }
     }
   },
@@ -111,21 +111,21 @@
     "interpretable_as_strength": false
   },
   "study": {
-    "artifact_sha256": "78c85d0c0d8e91c1935f0276eb6a18029bfe459d6ab1b8a1247194b069aa2f85",
+    "artifact_sha256": "2c0d3fd3bed94ea349dde3797478f47f5de963dd3a1e4082acd6d2a294ea7f49",
     "python_validation": true,
     "rust_validation": true,
     "opponent_private_material": false
   },
   "stage_wall_seconds": {
-    "teacher": 1.3753324581775814,
-    "dataset": 5.890269082970917,
-    "training": 2.045774416066706,
-    "arena": 16.574374916031957,
-    "study": 0.3133689172100276
+    "teacher": 0.6472521249670535,
+    "dataset": 3.189153332961723,
+    "training": 0.885254749795422,
+    "arena": 8.972617082996294,
+    "study": 0.34723570803180337
   },
   "verification": {
     "verified": true,
-    "verified_at": "2026-07-17T14:32:15.868039+00:00"
+    "verified_at": "2026-07-17T14:54:16.274195+00:00"
   },
   "limitations": [
     "one training seed and two games per arena cell; no strength or method claim",

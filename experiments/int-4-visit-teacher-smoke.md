@@ -17,19 +17,19 @@ pre-registered `iteration` profile remains 256 games, four arms × three seeds,
 uv run experiments/runners/run_visit_teacher_iteration.py \
   --contract experiments/contracts/int-4-visit-teacher-iteration-v1.json \
   --profile smoke \
-  --out-dir .runs/int-4-visit-teacher-smoke-v1
+  --out-dir .runs/int-4-visit-teacher-smoke-rebased-v1
 
 uv run experiments/runners/run_visit_teacher_iteration.py \
   --contract experiments/contracts/int-4-visit-teacher-iteration-v1.json \
   --profile smoke \
-  --out-dir .runs/int-4-visit-teacher-smoke-v1 \
+  --out-dir .runs/int-4-visit-teacher-smoke-rebased-v1 \
   --verify
 ```
 
 Contract SHA-256:
-`964fb9a3f12e0c9c6dcb8c29da37b3bbe8db52a88122aa0d998c7de97a9c8e89`.
+`320a050e58bff5644a71cc6b3c1f42efbccb608e7e8af0c55ca66f9bc67a6f02`.
 Runtime source SHA-256:
-`cfbce685f7a1f6dd3e5e6bf10e021a7d30520bf0dcbb36cf9826adc5e67b720b`.
+`14a3c5ff6594ad3c354abd06a9e888a3ad2c2d6e2d741db8954efa4f68c89dea`.
 The complete checked-in receipt is
 [`data/int-4-visit-teacher-smoke-v1.json`](data/int-4-visit-teacher-smoke-v1.json).
 
@@ -50,7 +50,7 @@ visit/value student, and student-guided PUCT round robin ran without illegal
 actions or caps. The two-game results are deliberately not interpreted.
 
 The selected historical decision produced Study artifact
-`78c85d0c0d8e91c1935f0276eb6a18029bfe459d6ab1b8a1247194b069aa2f85`.
+`2c0d3fd3bed94ea349dde3797478f47f5de963dd3a1e4082acd6d2a294ea7f49`.
 Both `etude.StudyArtifact` and the Rust-owned
 `managym::study::StudyArtifact::validate` accepted it. No deal seed, search
 seed, opponent hand, or sampled hidden state entered the artifact.
@@ -59,8 +59,8 @@ seed, opponent hand, or sampled hidden state entered the artifact.
 
 | Traversals | Decisions | p50 | p95 | Labels/s | Traversals/s | Max depth | Cap hits |
 |---:|---:|---:|---:|---:|---:|---:|---:|
-| 4 | 105 | 3.41 ms | 7.06 ms | 275.7 | 1,102.9 | 2 | 0 |
-| 8 | 100 | 6.78 ms | 15.34 ms | 134.5 | 1,076.1 | 3 | 0 |
+| 4 | 105 | 1.58 ms | 3.24 ms | 572.1 | 2,288.4 | 2 | 0 |
+| 8 | 100 | 3.37 ms | 6.07 ms | 285.1 | 2,281.2 | 3 | 0 |
 
 These same-host numbers are fresh cost evidence, but the host was not quiesced
 and the cells were not isolated child-process RSS measurements. The production

@@ -1,5 +1,6 @@
 """Study export tests for actual replayed Teacher-1 decisions."""
 
+from etude.replay_index import ReplayDecisionAddress
 from manabot.sim.study_evidence import build_study_artifact
 from manabot.sim.teacher1_evidence import (
     record_teacher_trajectories,
@@ -42,6 +43,9 @@ def test_replayed_search_exports_viewer_safe_distinct_evidence() -> None:
     )
 
     landmark = artifact.landmarks[0]
+    address = ReplayDecisionAddress.parse(landmark.decision_id)
+    assert address.replay_id == artifact.identity.source_replay_id
+    assert address.match_id == artifact.identity.match_id
     assert landmark.frame.projection.opponent.hand == []
     assert len(landmark.alternatives) >= 2
     assert sum(row.probability for row in landmark.evidence.policy_mass) == 1.0
