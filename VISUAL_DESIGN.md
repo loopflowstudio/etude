@@ -296,10 +296,10 @@ name.
 **Card art is versioned content, not runtime fetches.**
 `frontend/scripts/fetch-card-art.mjs` pulls each curated-pack identity's
 art crop from Scryfall exactly once per machine (identified User-Agent,
-150ms pacing, cache-first, never at runtime) into `static/card-art/`;
+150ms pacing, cache-first, never at runtime) into `src/lib/card-art/` (bundler-known, so a missing file is a lookup miss, never a request);
 CardImage layers it over the procedural treatment, which remains the
 automatic fallback for anything missing. Images stay untracked; rights sit
-in `static/card-art/NOTICE.md` under the WotC Fan Content Policy, as do
+in `src/lib/card-art/NOTICE.md` under the WotC Fan Content Policy, as do
 the mana symbols in `static/mana/`.
 
 ## The Score — Replay and Study

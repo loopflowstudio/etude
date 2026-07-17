@@ -32,18 +32,25 @@
 
   const treatment = $derived(resolveTreatment(name));
 
-  // Real art layers over the procedural treatment: when the fetched art
-  // crop exists under /card-art it covers; when it is absent the browser
-  // simply paints the treatment beneath. See scripts/fetch-card-art.mjs.
+  // Real art layers over the procedural treatment. The cache is known to
+  // the bundler (import.meta.glob), so a missing file is a lookup miss —
+  // never a 404 request. See scripts/fetch-card-art.mjs.
+  const ART_URLS = import.meta.glob('/src/lib/card-art/*.jpg', {
+    eager: true,
+    query: '?url',
+    import: 'default',
+  }) as Record<string, string>;
   function artSlug(value: string): string {
     return value
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-|-$/g, '');
   }
-  const background = $derived(
-    `url('/card-art/${artSlug(name)}.jpg') center / cover no-repeat, ${treatmentBackground(treatment)}`,
-  );
+  const background = $derived.by(() => {
+    const art = ART_URLS[`/src/lib/card-art/${artSlug(name)}.jpg`];
+    const treatmentLayer = treatmentBackground(treatment);
+    return art ? `url('${art}') center / cover no-repeat, ${treatmentLayer}` : treatmentLayer;
+  });
 </script>
 
 {#if name}

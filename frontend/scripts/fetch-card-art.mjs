@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Fetch card art for every curated-pack identity from Scryfall, once, into
-// static/card-art/. The frontend layers these over the procedural treatments
+// src/lib/card-art/ (bundler-known, so missing files are never requested). The frontend layers these over the procedural treatments
 // (which remain the fallback), so play never depends on Scryfall at runtime
 // and Scryfall is never queried per-session — versioned content, not
 // opportunistic runtime fetches.
@@ -16,7 +16,7 @@ const manifestPath = path.join(
   here,
   '../src/lib/packs/tla-ur-lessons-vs-gw-allies/v1/manifest.json',
 );
-const outDir = path.join(here, '../static/card-art');
+const outDir = path.join(here, '../src/lib/card-art');
 
 const USER_AGENT = 'EtudeFantasia/0.1 (research fan project; github.com/loopflowstudio/etude)';
 const DELAY_MS = 150;
