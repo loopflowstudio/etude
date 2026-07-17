@@ -12,19 +12,50 @@ document is the bug.
 
 ## Brand Foundation
 
-**An annotated score in an old library.** The interface is sepia ink on
-aged paper — quiet, studied — except the active decision, which burns
-Mountain red. The palette is drawn from Magic itself: card-frame
-parchment, the five mana colors as registers, and the cards as printed
-plates tipped into the book.
+**An illuminated score.** The name is the brief: an *étude* is practiced
+discipline, a *fantasia* is free invention, and the product is the study
+of a game that improvises. The interface holds both, the way an
+illuminated manuscript does — two hands on one page:
 
-| Visual choice | Brand signal |
-|---------------|--------------|
-| Parchment grounds, ruled regions | The game as an open book |
-| Bronze display serif | Margin annotations, studied notes |
-| One Mountain-red accent | The live decision is the only urgent thing |
-| WUBRG registers | The five mana colors as the semantic spine |
-| Printed plates with real art | The cards are the illustrations |
+- **The scribe (étude)** — classical, academic, classy. Sepia ink on aged
+  paper: adaptive grounds, ruled regions, three quiet inks, one bronze
+  display serif, one red for urgency. The scribe's world changes with the
+  light (light and dark modes) and never shouts.
+- **The illuminator (fantasia)** — vibrant, creative, chaotic,
+  improvisational. Full-saturation color, real art, gradients, gold: the
+  banner weave, the player bars, the card plates, the mana pips. The
+  illuminator's world is fixed in both modes — pigment doesn't care what
+  time it is.
+
+### The Frame Law
+
+The two hands never touch except at a frame. Everything fantasia is
+**framed and fixed**: bounded by a border, unaffected by color scheme,
+carrying literal ivory text under a whisper of scrim. Everything étude is
+**paper**: adaptive, ruled, never saturated, never inside a frame. An
+unframed vivid element or an adaptive color inside a frame is a defect —
+the one existing tension either pole feels with the other should be the
+scribe *annotating* the illuminations: printer's marks, tallies, and
+hatching are the scribe's hand on the illuminator's work, and that is the
+product's whole gesture — you study the game's improvisation.
+
+### The Echo Rule
+
+Every fantasia color has an étude echo. The vivid pie
+(`--vivid-w/u/b/r/g`) is the illuminator's palette; the five registers
+(`plains/island/swamp/mountain/forest`) are the same hues ground down to
+library volume for the scribe's use — washes, rules, marks. New color
+pairs must keep this rhyme: if the illuminator gains a color, the scribe
+gains its echo, and neither is used in the other's world.
+
+| Visual choice | Hand | Brand signal |
+|---------------|------|--------------|
+| Parchment grounds, ruled regions | Scribe | The game as an open book |
+| Bronze display serif | Scribe | Margin annotations, studied notes |
+| One Mountain-red accent | Scribe | The live decision is the only urgent thing |
+| WUBRG registers | Scribe | The vivid pie, quoted at library volume |
+| Banner weave, player bars | Illuminator | The brand and the players in full color |
+| Printed plates with real art | Illuminator | The cards are the illuminations |
 
 ### The two metals
 
@@ -73,13 +104,20 @@ Dark — The library after dark:
 `ivory` (`#F8F1E0`) is constant across modes: it is the text on accent
 fills and nothing else.
 
-### Two inks
+### Three inks
 
-Text is `ink` and `ink-2`, plus the bronze `display` tier for headings and
-rubrics. The pie speaks through container washes, rules, and marks — never
-through body text. The `-ink` register companions exist for the rare
-moments a register must speak in text (error banners, a hot rubric); treat
-each new use as an exception to justify.
+Text is `ink`, `ink-2`, and `ink-3` — reading, secondary, and whisper
+(placeholders, empties, status words, fine print) — plus the bronze
+`display` tier for headings and rubrics. `ink-3` (light `#6E6247`, dark
+`#9A9077`) holds AA on page and panel but **not on muted grounds**; nothing
+tertiary sits on `panel-muted`. The pie speaks through container washes,
+rules, and marks — never through body text. The `-ink` register companions
+exist for the rare moments a register must speak in text (error banners, a
+hot rubric); treat each new use as an exception to justify.
+
+The vivid pie (`--vivid-w/u/b/r/g`) is the full-saturation Magic palette,
+constant in both modes, reserved for the fixed rich worlds: the banner and
+the player bars.
 
 ### The color pie — five registers
 
@@ -132,17 +170,27 @@ One text style per role, defined once in `app.css`; components never set
 font sizes, families, or tracking inline. This is the discipline that
 separates designed from decorated:
 
-| Voice | Face | Job |
-|-------|------|-----|
-| `type-display` | Cormorant 600 · 20 | Player names, page-scale titles |
-| `type-title` | Cormorant 600 · 16 | Panel headings: Actions, Game Log, Stops, The Score |
-| `type-label` | Lato 600 · 11 | Field labels, button-adjacent labels, chips |
-| `type-caption` | Lato 400 · 12 | Library counts, empties, hints, timestamps |
-| `type-rubric` | Mono 600 · 9 · caps | **Notation only**: staff rubrics, tempo lines, frame counters, actor columns, "life" |
-| `type-annotation` | Cormorant italic · 13.5 | **Prompts and marginalia only** |
+Every voice pins all four axes, and every computed line-height is a
+multiple of 4 — the law that keeps rows on one rhythm:
 
-Body text is the default Lato 14. Mono outside notation, or italic serif
-outside annotation, is a defect.
+| Voice | Face | Size/Leading | Tracking | Job |
+|-------|------|--------------|----------|-----|
+| `type-display` | Cormorant 600 | 20/28 | −0.01em | Player names, page-scale titles |
+| `type-title` | Cormorant 600 | 16/20 | 0 | Panel headings: Actions, Game Log, Stops, The Score |
+| `type-label` | Lato 600 | 11/16 | +0.04em | Field labels, button-adjacent labels, chips |
+| `type-caption` | Lato 400 | 12/16 | 0 | Library counts, empties, hints, timestamps |
+| `type-rubric` | Mono 600 · caps | 10/16 | +0.14em | **Notation only**: staff rubrics, tempo lines, frame counters, actor columns, "life" |
+| `type-annotation` | Cormorant italic | 13.5/20 | 0 | **Prompts and marginalia only** |
+
+Body text is the default Lato 14/20, and the whole page sets
+`font-variant-numeric: tabular-nums` — numbers are identity in a game
+interface and never jitter. Ten pixels is the small floor; nothing renders
+below it. Mono outside notation, or italic serif outside annotation, is a
+defect.
+
+**Do:** give a new label `type-label` and pick its ink.
+**Don't:** write `text-[10px]`, a `tracking-*`, or a `font-*` family class
+in a component — if a voice is missing, add the voice.
 
 ### Buttons
 
@@ -268,6 +316,9 @@ Named in the contract so they land where they belong, not yet shipped:
   motif line. Waits on color identity in the pack manifest.
 - **Held cards, tipped in** — parchment photo corners mounting the hero's
   hand to the page.
+- **The illumination beat** — presentation events (spells resolving,
+  combat) as framed fantasia flashes: the illuminator's hand answering
+  the scribe's quiet beat panels, within the Frame Law.
 
 ---
 
@@ -283,11 +334,23 @@ rubrics, actor labels). Headings read in bronze; they do not shout.
 (≤640px). **Z-layers** — dropdown 100, scrim 190, modal 200, toast 300,
 tooltip 400.
 
+**Elevation** — depth has one mechanism per layer: the sheet rests on the
+desk with `shadow-sheet`; only what floats above the sheet (dialogs, the
+hover preview, presentation beats) casts `shadow-raised`. Nothing else has
+a shadow, and shadows are umber by day, black by lamplight — never gray.
+
+**Spacing** — steps have jobs: 8 between related elements, 12 within
+control clusters, 16–24 panel padding, 24 between staves, 32–48 between
+regions, 48–64 page rhythm (`--space-4xl/5xl`).
+
 **Interaction states** — every interactive element defines rest, hover
-(`action-hover`, or a border turning `action`), focus (the global
+(`action-hover`, or a border turning `action`), **pressed**
+(`accent-pressed`, or a step down to `panel-muted`), focus (the global
 Mountain-red ring), and disabled (reduced ink with borders retained, never
-whole-panel opacity). Transitions run 100ms ease-out; all motion collapses
-under `prefers-reduced-motion`.
+whole-panel opacity). Motion has two speeds: 100ms ease-out for color and
+border (`--motion-fast`); 180ms decelerate (`--motion-move`) for anything
+that moves or appears. All motion collapses under
+`prefers-reduced-motion`.
 
 **Accessibility** — contrast is enforced by tooling, not by a table in
 this file: `npm run validate:contrast` checks every documented pair (37 at
@@ -308,6 +371,21 @@ Before merging UI changes:
 - [ ] New colored elements are assigned by register, not by taste
 - [ ] Dense boards hold: `DENSE_BOARD=1 npx playwright test e2e/dense-board.spec.ts` and read the captures
 - [ ] Both modes checked by eye — parchment and lamplight
+
+---
+
+## Known gaps
+
+Acknowledged debts, distinct from Reserved features:
+
+- Hero visual weight: the contract says battlefield-first but does not yet
+  enforce an Arena-style ~60/40 split or larger hero cards.
+- Score registers are a text heuristic; the engine does not yet annotate
+  its log.
+- The contrast validator does not yet lint the voice laws (leading
+  multiples, no inline font sizes) — they are greppable but unenforced.
+- The experience-proof baseline and release visual references still pin the
+  pre-redesign board and need regeneration on Linux CI.
 
 ---
 

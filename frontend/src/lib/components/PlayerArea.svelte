@@ -43,11 +43,11 @@
   // fixed rich world in both modes: vivid ends, a whisper of scrim, and
   // literal ivory text.
   const VIVID: Record<string, string> = {
-    W: '#f2ad25',
-    U: '#2f74d0',
-    B: '#9550b4',
-    R: '#e04a18',
-    G: '#46a230',
+    W: 'var(--vivid-w)',
+    U: 'var(--vivid-u)',
+    B: 'var(--vivid-b)',
+    R: 'var(--vivid-r)',
+    G: 'var(--vivid-g)',
   };
   const pieColors = $derived.by(() => {
     const match = /^([WUBRG]{1,5}) /.exec(deckName ?? '');
@@ -121,7 +121,7 @@
         {@render rubric(`Hand (${hiddenHandCount})`)}
         <div class="flex flex-wrap items-end gap-2">
           {#if hiddenHandCount === 0}
-            <div class="type-caption px-1 py-3.5 text-ink-2">Empty hand</div>
+            <div class="type-caption px-1 py-3.5 text-ink-3">Empty hand</div>
           {/if}
           {#each Array(hiddenHandCount) as _, index}
             <div role="img" aria-label={`Hidden card ${index + 1}`}>
@@ -157,7 +157,7 @@
         {@render rubric(`Hand (${player.hand.length})`)}
         <div class="flex flex-wrap items-end gap-2">
           {#if player.hand.length === 0}
-            <div class="type-caption px-1 py-3.5 text-ink-2">Empty hand</div>
+            <div class="type-caption px-1 py-3.5 text-ink-3">Empty hand</div>
           {/if}
           {#each player.hand as card}
             <Card
@@ -185,7 +185,7 @@
       {@render rubric(`Graveyard (${player.graveyard.length})`)}
       <div class="flex flex-wrap items-end gap-2">
         {#if player.graveyard.length === 0}
-          <div class="type-caption px-1 py-3.5 text-ink-2">Empty graveyard</div>
+          <div class="type-caption px-1 py-3.5 text-ink-3">Empty graveyard</div>
         {/if}
         {#each player.graveyard as card}
           <Card

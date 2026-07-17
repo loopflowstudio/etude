@@ -40,7 +40,7 @@
     tabindex="0"
   >
     {#if entries.length === 0}
-      <p class="type-caption py-2 text-ink-2">Actions will appear here.</p>
+      <p class="type-caption py-2 text-ink-3">Actions will appear here.</p>
     {:else}
       <ol class="m-0 list-none p-0">
         {#each entries as entry}

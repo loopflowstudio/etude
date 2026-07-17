@@ -31,11 +31,11 @@
     class="border-b border-black/30"
     style="background:
         linear-gradient(180deg, rgb(15 11 6 / 0.34), rgb(15 11 6 / 0.2)),
-        radial-gradient(ellipse 42% 170% at 2% 0%, rgb(242 173 37 / 0.85), transparent 78%),
-        radial-gradient(ellipse 42% 170% at 26% 100%, rgb(47 116 208 / 0.85), transparent 78%),
-        radial-gradient(ellipse 42% 170% at 50% 0%, rgb(224 74 24 / 0.85), transparent 78%),
-        radial-gradient(ellipse 42% 170% at 74% 100%, rgb(149 80 180 / 0.85), transparent 78%),
-        radial-gradient(ellipse 42% 170% at 98% 0%, rgb(70 162 48 / 0.85), transparent 78%),
+        radial-gradient(ellipse 42% 170% at 2% 0%, color-mix(in srgb, var(--vivid-w) 85%, transparent), transparent 78%),
+        radial-gradient(ellipse 42% 170% at 26% 100%, color-mix(in srgb, var(--vivid-u) 85%, transparent), transparent 78%),
+        radial-gradient(ellipse 42% 170% at 50% 0%, color-mix(in srgb, var(--vivid-r) 85%, transparent), transparent 78%),
+        radial-gradient(ellipse 42% 170% at 74% 100%, color-mix(in srgb, var(--vivid-b) 85%, transparent), transparent 78%),
+        radial-gradient(ellipse 42% 170% at 98% 0%, color-mix(in srgb, var(--vivid-g) 85%, transparent), transparent 78%),
       #221a10"
   >
     <div class="mx-auto flex w-full max-w-[1600px] items-center justify-between px-4 py-3">
@@ -84,7 +84,7 @@
           {/each}
         </ul>
       </nav>
-      <p class="text-[11px] leading-relaxed text-ink-2">
+      <p class="text-[11px] leading-relaxed text-ink-3">
         Etude Fantasia is unofficial Fan Content permitted under the
         <a
           class="underline underline-offset-2 hover:text-ink"

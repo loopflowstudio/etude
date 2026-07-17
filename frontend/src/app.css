@@ -59,6 +59,14 @@
   --sepia-bronze: #6d5a35;
   --ivory: #f8f1e0;
 
+  /* The vivid pie: full-saturation Magic colors for the fixed rich worlds
+     (banner, player bars). Constants in both modes, like card art. */
+  --vivid-w: #f2ad25;
+  --vivid-u: #2f74d0;
+  --vivid-b: #9550b4;
+  --vivid-r: #e04a18;
+  --vivid-g: #46a230;
+
   /* Adaptive palette: parchment. Three ground levels — page, panel, and
      field (the paper-white fill inside bordered controls) — so surfaces
      separate by value, not just by borders. */
@@ -70,9 +78,11 @@
   --border-strong: #a5926a;
   --text: #3a3122;
   --text-secondary: #5f553d;
+  --text-tertiary: #6e6247;
   --accent: var(--mountain-red);
   --accent-text: var(--sepia-bronze);
   --accent-hover: #ab4634;
+  --accent-pressed: #822d21;
   --accent-soft: #ead6c6;
 
   /* The color pie: WUBRG at splash volume, syntax-highlighting the sepia
@@ -110,17 +120,28 @@
   --space-xl: 20px;
   --space-xxl: 24px;
   --space-xxxl: 32px;
+  --space-4xl: 48px;
+  --space-5xl: 64px;
   --radius-sm: 4px;
   --radius-md: 8px;
   --radius-lg: 12px;
   --radius-xl: 16px;
   --radius-full: 9999px;
+  --motion-fast: 100ms;
+  --motion-move: 180ms;
+  --motion-move-ease: cubic-bezier(0.2, 0, 0, 1);
   --z-dropdown: 100;
   --z-modal: 200;
   --z-toast: 300;
   --z-tooltip: 400;
 
   --shadow-surface: 0 1px 2px rgb(58 49 34 / 0.06), 0 12px 32px rgb(109 90 53 / 0.05);
+
+  /* Elevation law: the sheet rests on the desk (shadow-sheet); only what
+     floats above the sheet casts shadow-raised. Nothing else has a shadow,
+     and shadows are umber, never black, by day. */
+  --shadow-sheet: 0 1px 2px rgb(58 40 20 / 0.1), 0 22px 56px rgb(58 40 20 / 0.14);
+  --shadow-raised: 0 1px 2px rgb(58 40 20 / 0.08), 0 6px 16px rgb(58 40 20 / 0.12);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -136,9 +157,11 @@
     --border-strong: #625741;
     --text: #ece4d0;
     --text-secondary: #b3a88e;
+    --text-tertiary: #9a9077;
     --accent: #b24d38;
     --accent-text: #c3a568;
     --accent-hover: #a34531;
+    --accent-pressed: #93402d;
     --accent-soft: #3f2b20;
     --success-text: #9ecb8b;
     --warning-text: #d9bc66;
@@ -148,6 +171,8 @@
     /* Washes lift by lamplight: 10% reads on parchment but vanishes on umber. */
     --wash-strength: 26%;
     --shadow-surface: 0 1px 2px rgb(0 0 0 / 0.22), 0 16px 40px rgb(0 0 0 / 0.16);
+    --shadow-sheet: 0 1px 2px rgb(0 0 0 / 0.4), 0 22px 56px rgb(0 0 0 / 0.45);
+    --shadow-raised: 0 1px 2px rgb(0 0 0 / 0.35), 0 6px 16px rgb(0 0 0 / 0.4);
   }
 }
 
@@ -176,6 +201,7 @@
    */
   --color-ink: var(--text);
   --color-ink-2: var(--text-secondary);
+  --color-ink-3: var(--text-tertiary);
   --color-ground: var(--bg);
   --color-panel: var(--bg-surface);
   --color-panel-muted: var(--bg-muted);
@@ -216,33 +242,35 @@
   font-family: var(--font-serif);
   font-size: 20px;
   font-weight: 600;
-  line-height: 1.15;
+  line-height: 28px;
   letter-spacing: -0.01em;
 }
 @utility type-title {
   font-family: var(--font-serif);
   font-size: 16px;
   font-weight: 600;
-  line-height: 1.2;
+  line-height: 20px;
+  letter-spacing: 0;
 }
 @utility type-label {
   font-family: var(--font-sans);
   font-size: 11px;
   font-weight: 600;
-  line-height: 1.2;
-  letter-spacing: 0.01em;
+  line-height: 16px;
+  letter-spacing: 0.04em;
 }
 @utility type-caption {
   font-family: var(--font-sans);
   font-size: 12px;
   font-weight: 400;
-  line-height: 1.4;
+  line-height: 16px;
+  letter-spacing: 0;
 }
 @utility type-rubric {
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 600;
-  line-height: 1.4;
+  line-height: 16px;
   letter-spacing: 0.14em;
   text-transform: uppercase;
 }
@@ -250,12 +278,20 @@
   font-family: var(--font-serif);
   font-style: italic;
   font-size: 13.5px;
-  line-height: 1.5;
+  line-height: 20px;
+  letter-spacing: 0;
 }
 
 /* ————————————————————————————————————————————————
    Buttons: three roles, two sizes, one shape. Nothing else is a button.
    ———————————————————————————————————————————————— */
+@utility shadow-sheet {
+  box-shadow: var(--shadow-sheet);
+}
+@utility shadow-raised {
+  box-shadow: var(--shadow-raised);
+}
+
 @utility btn {
   display: inline-flex;
   align-items: center;
@@ -287,6 +323,9 @@
   &:hover {
     background: var(--accent-hover);
   }
+  &:active {
+    background: var(--accent-pressed);
+  }
   &:disabled {
     cursor: not-allowed;
     opacity: 0.5;
@@ -298,6 +337,9 @@
   color: var(--text);
   &:hover {
     border-color: var(--accent);
+  }
+  &:active {
+    background: var(--bg-muted);
   }
   &:disabled {
     cursor: not-allowed;
@@ -311,6 +353,9 @@
   &:hover {
     background: var(--bg-field);
     color: var(--text);
+  }
+  &:active {
+    background: var(--bg-muted);
   }
 }
 
@@ -329,7 +374,8 @@ body {
   color: var(--text);
   font-family: 'Lato', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   font-size: 14px;
-  line-height: 1.5;
+  line-height: 20px;
+  font-variant-numeric: tabular-nums;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
 }

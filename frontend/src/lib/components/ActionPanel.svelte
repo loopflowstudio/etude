@@ -113,7 +113,7 @@
     aria-describedby={decisionPrompt ? 'decision-prompt' : undefined}
   >
     {#if actions.length === 0}
-      <p class="type-caption text-ink-2">No actions available.</p>
+      <p class="type-caption text-ink-3">No actions available.</p>
     {:else}
       {#each actions as action}
         <button

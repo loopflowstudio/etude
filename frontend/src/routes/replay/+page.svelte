@@ -171,7 +171,7 @@
   {/if}
 
   <!-- The score is the spine; the board is the current page of the book. -->
-  <div class="overflow-hidden rounded-sm border border-line bg-panel shadow-[0_1px_2px_rgb(58_40_20/0.1),0_22px_56px_rgb(58_40_20/0.14)]">
+  <div class="overflow-hidden rounded-sm border border-line bg-panel shadow-sheet">
     <div class="px-10 pb-10 pt-6 max-md:px-5 max-md:pb-6">
       <header class="flex flex-wrap items-baseline justify-between gap-3 border-b border-line pb-4">
         <div class="flex items-baseline gap-3">

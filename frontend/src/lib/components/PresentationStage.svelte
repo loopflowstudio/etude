@@ -37,7 +37,7 @@
     class={`pointer-events-none absolute inset-x-4 top-16 z-10 flex justify-center ${player.reducedMotion ? '' : 'transition duration-200 ease-out'}`}
   >
     <div
-      class={`pointer-events-auto w-full max-w-xl rounded-xl border px-4 py-3 shadow-2xl backdrop-blur ${
+      class={`pointer-events-auto w-full max-w-xl rounded-xl border px-4 py-3 shadow-raised backdrop-blur ${
         beat.importance === 'critical'
           ? 'border-mountain/80 bg-panel/95'
           : beat.importance === 'emphasized'

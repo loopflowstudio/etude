@@ -169,7 +169,7 @@
   {/if}
 
   <!-- The sheet: one continuous leaf. Regions are ruled, never boxed. -->
-  <div class="overflow-hidden rounded-sm border border-line bg-panel shadow-[0_1px_2px_rgb(58_40_20/0.1),0_22px_56px_rgb(58_40_20/0.14)]">
+  <div class="overflow-hidden rounded-sm border border-line bg-panel shadow-sheet">
     <div class="px-10 pb-10 pt-6 max-md:px-5 max-md:pb-6">
   <!-- The masthead, in levels: the matchup names the players, fields show
        only while they matter, one red action, and the connection is a
@@ -226,7 +226,7 @@
             aria-live="polite"
             aria-atomic="true"
             aria-label={`Connection status: ${gameStore.connection}`}
-            class="type-label uppercase text-ink-2"
+            class="type-label uppercase text-ink-3"
           >
             {gameStore.connection}
           </span>

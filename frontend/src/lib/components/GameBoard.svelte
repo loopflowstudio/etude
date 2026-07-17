@@ -176,7 +176,7 @@
         tabindex="-1"
         data-testid="game-result-dialog"
         onkeydown={keepResultFocus}
-        class="z-[200] rounded-lg border border-line bg-panel p-6 text-center shadow-xl"
+        class="z-[200] rounded-lg border border-line bg-panel p-6 text-center shadow-raised"
       >
         <h2 id="game-over-heading" class="type-display mb-2 text-display">Game Over</h2>
         <p id="game-result" data-testid="game-result" class="mb-4 text-ink-2">
