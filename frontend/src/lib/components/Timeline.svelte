@@ -28,22 +28,48 @@
   }: Props = $props();
 </script>
 
-<section class="rounded border border-slate-700 bg-slate-800 p-4">
-  <div class="mb-3 flex flex-wrap items-center gap-2">
-    <button class="rounded border border-slate-600 bg-slate-900 px-3 py-2 text-sm hover:border-blue-400" onclick={() => onPrevious?.()}>
-      Previous
+<section class="min-w-0">
+  <div class="flex flex-wrap items-center gap-2">
+    <button
+      class="grid h-7 w-7 place-items-center rounded border border-line bg-field text-sm text-ink-2 hover:border-ink-2 hover:text-ink"
+      aria-label="Previous frame"
+      onclick={() => onPrevious?.()}
+    >
+      ‹
     </button>
-    <button class="rounded border border-slate-600 bg-slate-900 px-3 py-2 text-sm hover:border-blue-400" onclick={() => onTogglePlaying?.()}>
+    <button
+      class="rounded border border-line bg-field px-3 py-1 text-xs font-semibold text-ink hover:border-action"
+      onclick={() => onTogglePlaying?.()}
+    >
       {playing ? 'Pause' : 'Play'}
     </button>
-    <button class="rounded border border-slate-600 bg-slate-900 px-3 py-2 text-sm hover:border-blue-400" onclick={() => onNext?.()}>
-      Next
+    <button
+      class="grid h-7 w-7 place-items-center rounded border border-line bg-field text-sm text-ink-2 hover:border-ink-2 hover:text-ink"
+      aria-label="Next frame"
+      onclick={() => onNext?.()}
+    >
+      ›
     </button>
 
-    <label class="ml-auto flex items-center gap-2 text-sm text-slate-300">
+    <input
+      class="rail min-w-24 flex-1"
+      type="range"
+      aria-label="Replay position"
+      aria-valuetext={`Frame ${totalFrames === 0 ? 0 : currentFrame + 1} of ${totalFrames}`}
+      min="0"
+      max={Math.max(totalFrames - 1, 0)}
+      value={currentFrame}
+      oninput={(event) => onScrub?.(Number((event.currentTarget as HTMLInputElement).value))}
+    />
+
+    <span class="whitespace-nowrap font-mono text-[10px] tabular-nums text-ink-2">
+      Frame {totalFrames === 0 ? 0 : currentFrame + 1} / {totalFrames}
+    </span>
+
+    <label class="flex items-center gap-1.5 text-xs text-ink-2">
       Speed
       <select
-        class="rounded border border-slate-600 bg-slate-900 px-2 py-1"
+        class="min-h-0 rounded border border-line bg-field px-1.5 py-0.5 text-xs"
         value={speed}
         onchange={(event) => onSpeedChange?.(Number((event.currentTarget as HTMLSelectElement).value))}
       >
@@ -54,36 +80,41 @@
     </label>
   </div>
 
-  <input
-    class="w-full"
-    type="range"
-    aria-label="Replay position"
-    aria-valuetext={`Frame ${totalFrames === 0 ? 0 : currentFrame + 1} of ${totalFrames}`}
-    min="0"
-    max={Math.max(totalFrames - 1, 0)}
-    value={currentFrame}
-    oninput={(event) => onScrub?.(Number((event.currentTarget as HTMLInputElement).value))}
-  />
-
-  <div class="mt-3 flex flex-wrap items-center justify-between gap-3 text-sm text-slate-300">
-    <span>Frame {totalFrames === 0 ? 0 : currentFrame + 1} / {totalFrames}</span>
-    <span class="text-right">
-      {#if actionDescription}
-        <span
-          class={`rounded px-1.5 py-0.5 font-semibold ${
-            actor === 'villain'
-              ? 'bg-amber-600/20'
-              : actor === 'hero'
-                ? 'bg-emerald-600/20'
-                : 'bg-slate-700'
-          }`}
-        >
-          {actor === 'villain' ? 'Villain' : actor === 'hero' ? 'Hero' : 'State'}
-        </span>
-        : {actionDescription}
-      {:else}
-        Initial game state
-      {/if}
-    </span>
+  <div class="mt-2 text-sm text-ink-2">
+    {#if actionDescription}
+      <span class="font-mono text-[9px] font-semibold uppercase tracking-[0.14em]">
+        {actor === 'villain' ? 'Villain' : actor === 'hero' ? 'Hero' : 'State'}
+      </span>
+      <span class="font-serif italic text-ink"> {actionDescription}</span>
+    {:else}
+      <span class="font-serif italic">Initial game state</span>
+    {/if}
   </div>
 </section>
+
+<style>
+  input.rail {
+    appearance: none;
+    -webkit-appearance: none;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--border);
+    cursor: pointer;
+  }
+  input.rail::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 13px;
+    height: 13px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: 2px solid var(--ivory);
+    box-shadow: 0 1px 3px rgb(0 0 0 / 0.3);
+  }
+  input.rail::-moz-range-thumb {
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: 2px solid var(--ivory);
+  }
+</style>

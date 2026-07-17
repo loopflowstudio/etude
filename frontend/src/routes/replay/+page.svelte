@@ -2,12 +2,11 @@
   import { onMount, untrack } from 'svelte';
 
   import GameBoard from '$lib/components/GameBoard.svelte';
-  import GameLog from '$lib/components/GameLog.svelte';
   import Timeline from '$lib/components/Timeline.svelte';
   import { createReplayStore } from '$lib/replay.svelte';
   import { replayLogEntries } from '$lib/replay';
   import { createPresentationPlayer } from '$lib/presentation.svelte';
-  import type { Trace, TraceSummary } from '$lib/types';
+  import type { GameLogEntry, Trace, TraceSummary } from '$lib/types';
 
   const replayStore = createReplayStore();
   const presentationPlayer = createPresentationPlayer();
@@ -80,6 +79,8 @@
       }
       const payload = (await response.json()) as Trace;
       replayStore.loadTrace(payload);
+      notes = loadNotes(traceId);
+      editingNote = null;
     } catch (error) {
       replayStore.setError(error instanceof Error ? error.message : 'Failed to load trace.');
     } finally {
@@ -93,81 +94,361 @@
     }
     return winner === 0 ? 'Hero' : 'Opponent';
   }
+
+  // ——— The score: register marks, turn rubrics ———
+  // A presentation-level heuristic: the engine does not yet annotate log
+  // lines with registers, so the score infers them from game vocabulary.
+  function register(entry: GameLogEntry): string {
+    const text = entry.text.replace(/^(Hero|Villain|State): /, '');
+    if (/^(Attack|Block|Declare)|damage/i.test(text)) return 'R';
+    if (/^Play |^Auto-passed|priority window|^Pass turn/i.test(text)) return 'W';
+    if (/dies|destroy|sacrific|discard|exile/i.test(text)) return 'B';
+    if (/^Cast /.test(text)) return 'U';
+    return 'N';
+  }
+
+  function lineText(entry: GameLogEntry): string {
+    return entry.text.replace(/^(Hero|Villain|State): /, '');
+  }
+
+  function actorLabel(actor: GameLogEntry['actor']): string {
+    return actor === 'hero' ? 'Hero' : actor === 'villain' ? 'Villain' : 'State';
+  }
+
+  // Line i of the score corresponds to frame i+1; the frame carries its turn.
+  function turnOf(index: number): number | null {
+    return replayStore.frames[index + 1]?.observation.turn.turn_number ?? null;
+  }
+
+  // ——— Marginalia: bronze notes, kept per trace ———
+  let notes = $state<Record<string, string>>({});
+  let editingNote = $state<string | null>(null);
+  let draft = $state('');
+
+  function notesKey(traceId: string): string {
+    return `etude.score.notes.${traceId}`;
+  }
+  function loadNotes(traceId: string): Record<string, string> {
+    try {
+      return JSON.parse(localStorage.getItem(notesKey(traceId)) ?? '{}') ?? {};
+    } catch {
+      return {};
+    }
+  }
+  function saveNotes(): void {
+    const traceId = replayStore.trace?.id;
+    if (!traceId) return;
+    try {
+      localStorage.setItem(notesKey(traceId), JSON.stringify(notes));
+    } catch {
+      // Storage full or unavailable: the note simply won't persist.
+    }
+  }
+  function beginNote(entryId: string): void {
+    editingNote = entryId;
+    draft = notes[entryId] ?? '';
+  }
+  function commitNote(): void {
+    if (editingNote === null) return;
+    const text = draft.trim();
+    if (text) {
+      notes[editingNote] = text;
+    } else {
+      delete notes[editingNote];
+    }
+    saveNotes();
+    editingNote = null;
+  }
 </script>
 
-<main class="mx-auto w-full max-w-[1600px] p-4">
-  <div class="grid grid-cols-1 gap-4 xl:grid-cols-[320px_minmax(0,1fr)_320px]">
-    <section class="rounded border border-line bg-panel p-4">
-      <div class="mb-3 flex items-center justify-between gap-3">
-        <h1 class="text-lg font-bold text-display">Replay</h1>
-        <button class="rounded border border-line-strong bg-field px-3 py-2 text-sm hover:border-action" onclick={() => void loadTraces()}>
-          Refresh
-        </button>
-      </div>
+<main class="mx-auto w-full max-w-[1400px] px-4 py-6">
+  <h1 class="sr-only">Replay</h1>
 
-      {#if replayStore.loadingList}
-        <p class="text-sm text-ink-2">Loading traces…</p>
-      {:else if replayStore.summaries.length === 0}
-        <p class="text-sm text-ink-2">No traces yet. Play a game first.</p>
-      {:else}
-        <div class="space-y-2">
-          {#each replayStore.summaries as summary}
-            <button
-              class={`w-full rounded border px-3 py-3 text-left text-sm ${replayStore.trace?.id === summary.id ? 'border-action bg-field' : 'border-line bg-field/60 hover:border-line-strong'}`}
-              onclick={() => void loadTrace(summary.id)}
-            >
-              <div class="font-mono text-xs text-ink">{summary.id}</div>
-              <div class="mt-1 text-xs text-ink-2">{summary.timestamp ?? 'Unknown time'}</div>
-              <div class="mt-1 text-xs text-ink-2">
-                Winner: {winnerLabel(summary.winner)} · Events: {summary.num_events}
-              </div>
-            </button>
-          {/each}
-        </div>
-      {/if}
+  {#if replayStore.errorMessage}
+    <section class="mb-4 rounded border border-mountain/50 bg-mountain/20 px-4 py-3 text-sm text-mountain-ink">
+      {replayStore.errorMessage}
     </section>
+  {/if}
 
-    <div class="space-y-4">
-      {#if replayStore.errorMessage}
-        <section class="rounded border border-mountain/50 bg-mountain/20 px-4 py-3 text-sm text-mountain-ink">
-          {replayStore.errorMessage}
-        </section>
-      {/if}
+  <!-- The score is the spine; the board is the current page of the book. -->
+  <div class="overflow-hidden rounded-sm border border-line bg-panel shadow-[0_1px_2px_rgb(58_40_20/0.1),0_22px_56px_rgb(58_40_20/0.14)]">
+    <div class="px-10 pb-10 pt-6 max-md:px-5 max-md:pb-6">
+      <header class="flex flex-wrap items-baseline justify-between gap-3 border-b border-line pb-4">
+        <div class="flex items-baseline gap-3">
+          <h2 class="font-serif text-lg font-semibold text-display">The Score</h2>
+          {#if replayStore.trace}
+            <span class="font-serif text-sm italic text-ink-2">
+              {winnerLabel(replayStore.trace.winner)} wins · {logEntries.length} decisions
+            </span>
+          {/if}
+        </div>
+        <div class="flex flex-wrap items-center gap-2">
+          {#if replayStore.summaries.length > 0}
+            <label class="flex items-center gap-2 text-xs text-ink-2">
+              Trace
+              <select
+                data-testid="trace-select"
+                class="max-w-64 rounded border border-line bg-field px-2 py-1.5 text-xs"
+                value={replayStore.trace?.id ?? ''}
+                onchange={(event) => {
+                  const id = (event.currentTarget as HTMLSelectElement).value;
+                  if (id) void loadTrace(id);
+                }}
+              >
+                <option value="" disabled>Select a trace…</option>
+                {#each replayStore.summaries as summary}
+                  <option value={summary.id}>
+                    {summary.timestamp ?? summary.id} · {winnerLabel(summary.winner)} · {summary.num_events} events
+                  </option>
+                {/each}
+              </select>
+            </label>
+          {/if}
+          <button
+            class="rounded border border-line bg-field px-3 py-1.5 text-xs font-semibold text-ink-2 hover:border-action hover:text-ink"
+            onclick={() => void loadTraces()}
+          >
+            Refresh
+          </button>
+        </div>
+      </header>
 
-      {#if replayStore.loadingTrace}
-        <section class="rounded border border-line bg-panel p-10 text-center text-ink-2">
-          Loading replay…
-        </section>
+      {#if replayStore.loadingList && replayStore.summaries.length === 0}
+        <p class="py-10 text-center text-sm text-ink-2">Loading traces…</p>
+      {:else if replayStore.summaries.length === 0}
+        <p class="py-10 text-center font-serif text-sm italic text-ink-2">
+          No traces yet. Play a game first.
+        </p>
+      {:else if replayStore.loadingTrace}
+        <p class="py-10 text-center text-sm text-ink-2">Loading replay…</p>
       {:else if currentFrame && replayStore.trace}
-        <div class="space-y-4">
-          <Timeline
-            currentFrame={replayStore.currentFrameIndex}
-            totalFrames={replayStore.frames.length}
-            playing={replayStore.playing}
-            speed={replayStore.speed}
-            actionDescription={currentFrame.actionDescription}
-            actor={currentFrame.actor}
-            onPrevious={() => replayStore.previousFrame()}
-            onNext={() => replayStore.nextFrame()}
-            onTogglePlaying={() => replayStore.togglePlaying()}
-            onScrub={(index) => replayStore.setFrame(index)}
-            onSpeedChange={(speed) => replayStore.setSpeed(speed)}
-          />
+        <div class="grid grid-cols-1 lg:grid-cols-[380px_minmax(0,1fr)]">
+          <!-- The score column -->
+          <section aria-label="Score" class="min-w-0 lg:border-r lg:border-line lg:pr-7">
+            <p class="pb-1 pt-3 text-[10px] uppercase tracking-[0.18em] text-ink-2">
+              Click a line to turn the board to that moment
+            </p>
+            <!-- svelte-ignore a11y_no_noninteractive_tabindex (axe requires keyboard access to scrollable regions) -->
+            <div
+              class="max-h-[70vh] overflow-y-auto pr-1"
+              role="region"
+              aria-label="Score lines"
+              tabindex="0"
+            >
+              <ol class="m-0 list-none p-0">
+                {#each logEntries as entry, index}
+                  {@const turn = turnOf(index)}
+                  {@const previousTurn = index > 0 ? turnOf(index - 1) : null}
+                  {#if turn !== null && turn !== previousTurn}
+                    <li aria-hidden="true" class="rubric pt-3 font-serif text-[12px] font-semibold text-display">
+                      Turn {turn}
+                    </li>
+                  {/if}
+                  <li data-testid="log-entry" class="score-line" data-register={register(entry)}>
+                    <button
+                      type="button"
+                      class={`line-btn ${entry.id === activeLogEntryId ? 'active' : ''}`}
+                      aria-current={entry.id === activeLogEntryId ? 'true' : undefined}
+                      onclick={() => replayStore.setFrame(index + 1)}
+                    >
+                      <span class="who">{actorLabel(entry.actor)}</span>
+                      <span class="what">{lineText(entry)}</span>
+                    </button>
+                    {#if editingNote === entry.id}
+                      <div class="note-edit">
+                        <textarea
+                          aria-label={`Note for line ${index + 1}`}
+                          placeholder="marginalia…"
+                          bind:value={draft}
+                          onkeydown={(event) => {
+                            if (event.key === 'Escape') editingNote = null;
+                            else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) commitNote();
+                          }}
+                        ></textarea>
+                        <div class="flex gap-1.5 pt-1">
+                          <button type="button" class="note-save" onclick={commitNote}>Save</button>
+                          <button type="button" class="note-cancel" onclick={() => (editingNote = null)}>Cancel</button>
+                        </div>
+                      </div>
+                    {:else if notes[entry.id]}
+                      <button
+                        type="button"
+                        class="note-view"
+                        aria-label={`Edit note on line ${index + 1}`}
+                        onclick={() => beginNote(entry.id)}
+                      >
+                        <span aria-hidden="true">❧</span>
+                        {notes[entry.id]}
+                      </button>
+                    {:else}
+                      <button
+                        type="button"
+                        class="note-add"
+                        aria-label={`Add a note to line ${index + 1}`}
+                        onclick={() => beginNote(entry.id)}
+                      >
+                        + note
+                      </button>
+                    {/if}
+                  </li>
+                {/each}
+              </ol>
+            </div>
+          </section>
 
-          <GameBoard
-            observation={currentFrame.observation}
-            focusedIds={new Set()}
-            winner={currentFrame.observation.game_over ? replayStore.trace.winner : undefined}
-            {presentationPlayer}
-          />
+          <!-- The plate: the board at the chosen moment -->
+          <div class="min-w-0 pt-3 max-lg:mt-4 max-lg:border-t max-lg:border-line lg:pl-7">
+            <Timeline
+              currentFrame={replayStore.currentFrameIndex}
+              totalFrames={replayStore.frames.length}
+              playing={replayStore.playing}
+              speed={replayStore.speed}
+              actionDescription={currentFrame.actionDescription}
+              actor={currentFrame.actor}
+              onPrevious={() => replayStore.previousFrame()}
+              onNext={() => replayStore.nextFrame()}
+              onTogglePlaying={() => replayStore.togglePlaying()}
+              onScrub={(index) => replayStore.setFrame(index)}
+              onSpeedChange={(speed) => replayStore.setSpeed(speed)}
+            />
+
+            <div class="mt-3 border-t border-line">
+              <GameBoard
+                observation={currentFrame.observation}
+                focusedIds={new Set()}
+                winner={currentFrame.observation.game_over ? replayStore.trace.winner : undefined}
+                {presentationPlayer}
+              />
+            </div>
+          </div>
         </div>
       {:else}
-        <section class="rounded border border-line bg-panel p-10 text-center text-ink-2">
-          Select a trace to inspect it.
-        </section>
+        <p class="py-10 text-center font-serif text-sm italic text-ink-2">
+          Select a trace to open its score.
+        </p>
       {/if}
     </div>
-
-    <GameLog entries={logEntries} activeEntryId={activeLogEntryId} />
   </div>
 </main>
+
+<style>
+  .rubric::after {
+    content: '';
+    display: block;
+    height: 1px;
+    margin-top: 4px;
+    background: linear-gradient(to right, var(--border), transparent 82%);
+  }
+
+  .score-line {
+    padding: 2px 0;
+  }
+  .line-btn {
+    display: grid;
+    grid-template-columns: 48px minmax(0, 1fr);
+    column-gap: 10px;
+    width: 100%;
+    text-align: left;
+    border: none;
+    border-left: 3px solid var(--reg, transparent);
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--reg, transparent) 10%, transparent);
+    padding: 5px 8px 6px 9px;
+    font: inherit;
+    color: var(--text);
+    cursor: pointer;
+  }
+  .score-line[data-register='R'] { --reg: var(--error); }
+  .score-line[data-register='W'] { --reg: var(--warning); }
+  .score-line[data-register='U'] { --reg: var(--info); }
+  .score-line[data-register='B'] { --reg: var(--neutral); }
+  .score-line[data-register='G'] { --reg: var(--success); }
+  .line-btn:hover {
+    background: color-mix(in srgb, var(--reg, var(--border)) 18%, transparent);
+  }
+  .line-btn.active {
+    background: var(--bg-field);
+    box-shadow: inset 0 0 0 1px var(--accent);
+  }
+  .who {
+    padding-top: 2px;
+    font-family: var(--font-mono);
+    font-size: 8.5px;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+  }
+  .what {
+    font-size: 13px;
+    line-height: 1.45;
+  }
+
+  .note-view {
+    display: block;
+    width: 100%;
+    border: none;
+    background: none;
+    padding: 1px 8px 3px 70px;
+    text-align: left;
+    font-family: var(--font-serif);
+    font-style: italic;
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--accent-text);
+    cursor: pointer;
+    overflow-wrap: break-word;
+  }
+  .note-add {
+    display: block;
+    border: 1px dashed transparent;
+    border-radius: 4px;
+    background: none;
+    margin-left: 67px;
+    padding: 0 5px;
+    font-family: var(--font-serif);
+    font-style: italic;
+    font-size: 10.5px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    opacity: 0.3;
+  }
+  .score-line:hover .note-add,
+  .note-add:focus-visible,
+  .score-line:focus-within .note-add {
+    opacity: 1;
+    border-color: var(--border);
+  }
+  .note-edit {
+    padding: 3px 8px 3px 70px;
+  }
+  .note-edit textarea {
+    width: 100%;
+    min-height: 52px;
+    resize: vertical;
+    background: var(--bg-field);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    color: var(--text);
+    font-family: var(--font-serif);
+    font-style: italic;
+    font-size: 12px;
+    padding: 5px 7px;
+  }
+  .note-save,
+  .note-cancel {
+    font-size: 10.5px;
+    font-weight: 600;
+    border-radius: 5px;
+    padding: 2px 9px;
+    cursor: pointer;
+    border: 1px solid var(--border);
+    background: var(--bg-surface);
+    color: var(--text-secondary);
+  }
+  .note-save {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--ivory);
+  }
+</style>
