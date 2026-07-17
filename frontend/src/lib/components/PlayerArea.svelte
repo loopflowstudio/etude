@@ -67,28 +67,41 @@
   </div>
 {/snippet}
 
-<section class="py-4" aria-label={`${label}${deckName ? ` — ${deckName}` : ''}`}>
-  <div class="flex items-baseline justify-between gap-4">
-    <h2 class="font-serif text-lg font-semibold text-display">
-      {label}{#if deckName}<span class="text-sm font-normal italic text-ink-2"> — {deckName}</span>{/if}
-    </h2>
-    <div
-      class={`flex items-baseline gap-1.5 ${focusedIds.has(player.id) ? 'rounded outline-2 outline-offset-4 outline-action' : ''}`}
-    >
-      <b class="text-2xl font-semibold leading-none tabular-nums">{player.life}</b>
-      <span class="text-[9px] uppercase tracking-[0.2em] text-ink-2">life</span>
+{#snippet playerBar()}
+  <!-- The player bar, in the manner of a chess clock plate: identity at
+       one end, life at the other. The opponent's sits above their side of
+       the table; yours below yours — the players bracket the battlefield. -->
+  <div class="rounded-sm border border-line bg-field/70 px-4 py-2">
+    <div class="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1">
+      <div class="min-w-0">
+        <h2 class="inline font-serif text-lg font-semibold text-display">
+          {label}{#if deckName}<span class="text-sm font-normal italic text-ink-2"> — {deckName}</span>{/if}
+        </h2>
+        {#if pieColors.length > 0}
+          <span class="ml-3 inline-flex h-[2px] w-[64px] gap-[4px] align-middle" aria-hidden="true">
+            {#each pieColors as color}
+              <i class="flex-1" style:background={color}></i>
+            {/each}
+          </span>
+        {/if}
+      </div>
+      <div class="flex items-baseline gap-4">
+        <span class="text-xs italic text-ink-2">Library {player.library_count}</span>
+        <div
+          class={`flex items-baseline gap-1.5 ${focusedIds.has(player.id) ? 'rounded outline-2 outline-offset-4 outline-action' : ''}`}
+        >
+          <b class="text-2xl font-semibold leading-none tabular-nums">{player.life}</b>
+          <span class="text-[9px] uppercase tracking-[0.2em] text-ink-2">life</span>
+        </div>
+      </div>
     </div>
   </div>
-  {#if pieColors.length > 0}
-    <div class="mt-1.5 flex h-[2px] w-[76px] gap-[5px]" aria-hidden="true">
-      {#each pieColors as color}
-        <i class="flex-1" style:background={color}></i>
-      {/each}
-    </div>
+{/snippet}
+
+<section class="py-3" aria-label={`${label}${deckName ? ` — ${deckName}` : ''}`}>
+  {#if opponent}
+    {@render playerBar()}
   {/if}
-  <p class="mb-1 mt-0.5 text-xs italic text-ink-2">
-    Library {player.library_count}
-  </p>
 
   <div class="staves">
     {#if opponent}
@@ -195,6 +208,10 @@
       </div>
     {/if}
   </div>
+
+  {#if !opponent}
+    {@render playerBar()}
+  {/if}
 </section>
 
 <style>

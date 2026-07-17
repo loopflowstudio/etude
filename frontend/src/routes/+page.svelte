@@ -180,13 +180,10 @@
   >
     <div class="min-w-0 self-center">
       {#if gameStore.deckNames && gameStore.observation}
-        <span
-          data-testid="deck-names"
-          class="inline-flex flex-wrap items-baseline gap-x-2 font-serif text-xl text-ink"
-        >
-          <span class="inline-flex items-baseline">You <span class="text-ink-2">(<span class="mx-1 inline-flex"><DeckIdentity name={gameStore.deckNames.hero} /></span>)</span></span>
-          <span class="text-sm italic text-ink-2">vs</span>
-          <span class="inline-flex items-baseline">{opponentLabel} <span class="text-ink-2">(<span class="mx-1 inline-flex"><DeckIdentity name={gameStore.deckNames.villain} /></span>)</span></span>
+        <!-- The players live at their bars; this line is the summary for
+             assistive tech and the proof suite. -->
+        <span data-testid="deck-names" class="sr-only">
+          You ({gameStore.deckNames.hero}) vs {opponentLabel} ({gameStore.deckNames.villain})
         </span>
       {:else}
         <span class="font-serif text-lg italic text-ink-2">No game in progress</span>
@@ -254,6 +251,8 @@
         onHoverTarget={handleBoardTargetHover}
         winner={gameStore.winner}
         deckNames={gameStore.deckNames}
+        heroLabel="You"
+        villainLabel={opponentLabel}
         overlayActionLabel="Play Again"
         onOverlayAction={startNewGame}
         {presentationPlayer}

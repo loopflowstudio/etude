@@ -19,6 +19,8 @@
     onHoverTarget?: (objectId: number | null) => void;
     winner?: number | null;
     deckNames?: { hero: string; villain: string } | null;
+    heroLabel?: string;
+    villainLabel?: string;
     overlayActionLabel?: string | null;
     onOverlayAction?: () => void;
     presentationPlayer?: PresentationPlayer;
@@ -32,6 +34,8 @@
     onHoverTarget = undefined,
     winner = undefined,
     deckNames = null,
+    heroLabel = 'Hero',
+    villainLabel = 'Opponent',
     overlayActionLabel = null,
     onOverlayAction = undefined,
     presentationPlayer = undefined,
@@ -103,7 +107,7 @@
   </div>
 
   <PlayerArea
-    label="Opponent"
+    label={villainLabel}
     player={observation.opponent}
     deckName={deckNames?.villain ?? null}
     opponent={true}
@@ -149,7 +153,7 @@
 
   <div class="border-t border-line">
     <PlayerArea
-      label="Hero"
+      label={heroLabel}
       player={observation.agent}
       deckName={deckNames?.hero ?? null}
       {focusedIds}
