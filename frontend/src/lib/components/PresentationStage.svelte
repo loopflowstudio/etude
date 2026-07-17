@@ -34,7 +34,7 @@
     data-presentation-seq={beat.seq}
     data-presentation-kind={event.kind.kind}
     data-reduced-motion={player.reducedMotion}
-    class={`pointer-events-none absolute inset-x-4 top-16 z-10 flex justify-center ${player.reducedMotion ? '' : 'transition duration-200 ease-out'}`}
+    class={`pointer-events-none absolute inset-x-4 top-16 z-10 flex justify-center ${player.reducedMotion ? '' : 'motion-move'}`}
   >
     <div
       class={`pointer-events-auto w-full max-w-xl rounded-xl border px-4 py-3 shadow-raised backdrop-blur ${
@@ -51,7 +51,7 @@
             Beat {player.currentIndex + 1} of {player.events.length}
           </p>
           <h2 class="type-title mt-1 text-ink">{beat.heading}</h2>
-          <p class="mt-1 text-sm text-ink">{beat.detail}</p>
+          <p class="mt-1 text-ink">{beat.detail}</p>
         </div>
         <div class="flex shrink-0 gap-2">
           <button

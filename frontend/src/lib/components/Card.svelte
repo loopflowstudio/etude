@@ -95,7 +95,7 @@
       alt={name}
       className="h-full w-full"
     >
-      <div class="flex h-full w-full flex-col justify-between bg-panel p-2 text-left text-[11px] text-ink">
+      <div class="flex h-full w-full flex-col justify-between bg-[#10131a] p-2 text-left text-[11px] text-[#faf8f5]">
         <div class="font-semibold leading-tight">{name}</div>
       </div>
     </CardImage>

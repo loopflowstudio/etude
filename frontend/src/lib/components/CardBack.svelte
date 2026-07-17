@@ -20,7 +20,8 @@
 
 <style>
   .back {
-    border: 1px solid color-mix(in srgb, var(--neutral) 62%, var(--border));
+    /* A fixed world keeps a fixed frame: no adaptive tokens inside. */
+    border: 1px solid #4c4260;
     background:
       radial-gradient(circle at 50% 42%, rgb(154 142 190 / 0.22) 0, transparent 46%),
       linear-gradient(152deg, #2a2535 0%, #3d3652 56%, #262130 100%);

@@ -165,7 +165,7 @@
   <h1 class="sr-only">Replay</h1>
 
   {#if replayStore.errorMessage}
-    <section class="mb-4 rounded border border-mountain/50 bg-mountain/20 px-4 py-3 text-sm text-mountain-ink">
+    <section class="mb-4 rounded border border-mountain/50 bg-mountain/20 px-4 py-3 text-mountain-ink">
       {replayStore.errorMessage}
     </section>
   {/if}
@@ -188,7 +188,7 @@
               Trace
               <select
                 data-testid="trace-select"
-                class="max-w-64 rounded border border-line bg-field px-2 py-1.5 text-xs"
+                class="type-caption max-w-64 rounded border border-line bg-field px-2 py-1.5"
                 value={replayStore.trace?.id ?? ''}
                 onchange={(event) => {
                   const id = (event.currentTarget as HTMLSelectElement).value;
@@ -214,13 +214,13 @@
       </header>
 
       {#if replayStore.loadingList && replayStore.summaries.length === 0}
-        <p class="py-10 text-center text-sm text-ink-2">Loading traces…</p>
+        <p class="type-caption py-10 text-center text-ink-2">Loading traces…</p>
       {:else if replayStore.summaries.length === 0}
-        <p class="py-10 text-center font-serif text-sm italic text-ink-2">
+        <p class="type-annotation py-10 text-center text-ink-3">
           No traces yet. Play a game first.
         </p>
       {:else if replayStore.loadingTrace}
-        <p class="py-10 text-center text-sm text-ink-2">Loading replay…</p>
+        <p class="type-caption py-10 text-center text-ink-2">Loading replay…</p>
       {:else if currentFrame && replayStore.trace}
         <div class="grid grid-cols-1 lg:grid-cols-[380px_minmax(0,1fr)]">
           <!-- The score column -->
@@ -240,7 +240,7 @@
                   {@const turn = turnOf(index)}
                   {@const previousTurn = index > 0 ? turnOf(index - 1) : null}
                   {#if turn !== null && turn !== previousTurn}
-                    <li aria-hidden="true" class="rubric pt-3 font-serif text-[12px] font-semibold text-display">
+                    <li aria-hidden="true" class="rubric type-title pt-3 text-display">
                       Turn {turn}
                     </li>
                   {/if}
@@ -323,7 +323,7 @@
           </div>
         </div>
       {:else}
-        <p class="py-10 text-center font-serif text-sm italic text-ink-2">
+        <p class="type-annotation py-10 text-center text-ink-3">
           Select a trace to open its score.
         </p>
       {/if}
@@ -370,18 +370,21 @@
     background: var(--bg-field);
     box-shadow: inset 0 0 0 1px var(--accent);
   }
+  /* Scoped implementations of the voices, value-exact: .who is
+     type-rubric, .what is body. */
   .who {
     padding-top: 2px;
     font-family: var(--font-mono);
-    font-size: 9px;
+    font-size: 10px;
     font-weight: 600;
+    line-height: 16px;
     letter-spacing: 0.14em;
     text-transform: uppercase;
     color: var(--text-secondary);
   }
   .what {
-    font-size: 13px;
-    line-height: 1.45;
+    font-size: 14px;
+    line-height: 20px;
   }
 
   .note-view {
@@ -393,8 +396,8 @@
     text-align: left;
     font-family: var(--font-serif);
     font-style: italic;
-    font-size: 12px;
-    line-height: 1.45;
+    font-size: 13.5px;
+    line-height: 20px;
     color: var(--accent-text);
     cursor: pointer;
     overflow-wrap: break-word;
@@ -408,8 +411,9 @@
     padding: 0 5px;
     font-family: var(--font-serif);
     font-style: italic;
-    font-size: 10.5px;
-    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--text-tertiary);
     cursor: pointer;
     opacity: 0.3;
   }
@@ -432,7 +436,8 @@
     color: var(--text);
     font-family: var(--font-serif);
     font-style: italic;
-    font-size: 12px;
-    padding: 5px 7px;
+    font-size: 13.5px;
+    line-height: 20px;
+    padding: 4px 8px;
   }
 </style>

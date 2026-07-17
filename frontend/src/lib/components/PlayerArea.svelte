@@ -102,7 +102,7 @@
         <div
           class={`flex items-baseline gap-1.5 ${focusedIds.has(player.id) ? `rounded outline-2 outline-offset-4 ${pieColors.length > 0 ? 'outline-[#f8f1e0]' : 'outline-action'}` : ''}`}
         >
-          <b class="text-2xl font-semibold leading-none tabular-nums [text-shadow:0_1px_2px_rgb(0_0_0/0.3)]">{player.life}</b>
+          <b class="type-numeral [text-shadow:0_1px_2px_rgb(0_0_0/0.3)]">{player.life}</b>
           <span class={`type-rubric ${pieColors.length > 0 ? 'text-[#f8f1e0]/70' : 'text-ink-2'}`}>life</span>
         </div>
       </div>
@@ -121,7 +121,7 @@
         {@render rubric(`Hand (${hiddenHandCount})`)}
         <div class="flex flex-wrap items-end gap-2">
           {#if hiddenHandCount === 0}
-            <div class="type-caption px-1 py-3.5 text-ink-3">Empty hand</div>
+            <div class="type-caption px-1 py-3 text-ink-3">Empty hand</div>
           {/if}
           {#each Array(hiddenHandCount) as _, index}
             <div role="img" aria-label={`Hidden card ${index + 1}`}>
@@ -157,7 +157,7 @@
         {@render rubric(`Hand (${player.hand.length})`)}
         <div class="flex flex-wrap items-end gap-2">
           {#if player.hand.length === 0}
-            <div class="type-caption px-1 py-3.5 text-ink-3">Empty hand</div>
+            <div class="type-caption px-1 py-3 text-ink-3">Empty hand</div>
           {/if}
           {#each player.hand as card}
             <Card
@@ -185,7 +185,7 @@
       {@render rubric(`Graveyard (${player.graveyard.length})`)}
       <div class="flex flex-wrap items-end gap-2">
         {#if player.graveyard.length === 0}
-          <div class="type-caption px-1 py-3.5 text-ink-3">Empty graveyard</div>
+          <div class="type-caption px-1 py-3 text-ink-3">Empty graveyard</div>
         {/if}
         {#each player.graveyard as card}
           <Card

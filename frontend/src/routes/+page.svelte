@@ -163,7 +163,7 @@
   <h1 class="sr-only">Play</h1>
 
   {#if gameStore.errorMessage}
-    <section role="alert" aria-atomic="true" class="mb-4 rounded border border-mountain/50 bg-mountain/20 px-4 py-3 text-sm text-mountain-ink">
+    <section role="alert" aria-atomic="true" class="mb-4 rounded border border-mountain/50 bg-mountain/20 px-4 py-3 text-mountain-ink">
       {gameStore.errorMessage}
     </section>
   {/if}
@@ -186,7 +186,7 @@
           You ({gameStore.deckNames.hero}) vs {opponentLabel} ({gameStore.deckNames.villain})
         </span>
       {:else}
-        <span class="font-serif text-lg italic text-ink-2">No game in progress</span>
+        <span class="type-annotation text-ink-2">No game in progress</span>
       {/if}
     </div>
 
@@ -300,7 +300,7 @@
   {:else}
     <div class="mx-auto max-w-xl py-12 text-center">
       <p class="type-annotation mb-1 text-ink-2">The table is set.</p>
-      <p class="mb-5 text-sm text-ink-2">Start a game to begin.</p>
+      <p class="type-caption mb-5 text-ink-2">Start a game to begin.</p>
       <button
         class="btn btn-primary"
         onclick={startNewGame}

@@ -46,7 +46,7 @@
         {#each entries as entry}
           <li
             data-testid="log-entry"
-            class={`entry grid grid-cols-[52px_minmax(0,1fr)] gap-x-2.5 py-1.5 text-sm leading-snug ${entry.id === activeEntryId ? 'active' : ''}`}
+            class={`entry grid grid-cols-[52px_minmax(0,1fr)] gap-x-3 py-1.5 ${entry.id === activeEntryId ? 'active' : ''}`}
           >
             <span class="type-rubric pt-0.5 text-ink-2">
               {actorLabel(entry.actor)}

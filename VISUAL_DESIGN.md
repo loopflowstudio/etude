@@ -181,12 +181,20 @@ multiple of 4 — the law that keeps rows on one rhythm:
 | `type-caption` | Lato 400 | 12/16 | 0 | Library counts, empties, hints, timestamps |
 | `type-rubric` | Mono 600 · caps | 10/16 | +0.14em | **Notation only**: staff rubrics, tempo lines, frame counters, actor columns, "life" |
 | `type-annotation` | Cormorant italic | 13.5/20 | 0 | **Prompts and marginalia only** |
+| `type-numeral` | Lato 600 | 24/28 | −0.01em | Life totals and score-scale numbers |
+| `type-brand` | Cormorant 600 | 30/36 | −0.01em | The banner brand mark only |
 
 Body text is the default Lato 14/20, and the whole page sets
 `font-variant-numeric: tabular-nums` — numbers are identity in a game
 interface and never jitter. Ten pixels is the small floor; nothing renders
 below it. Mono outside notation, or italic serif outside annotation, is a
 defect.
+
+Scoped component CSS may implement a voice only value-exactly, with a
+comment naming the voice it copies. Inside the fixed worlds (plates,
+backs, bars, banner) print objects carry their own literal type — the
+illuminator's hand is exempt from the scribe's voices but not from the
+10px floor's spirit at readable sizes.
 
 **Do:** give a new label `type-label` and pick its ink.
 **Don't:** write `text-[10px]`, a `tracking-*`, or a `font-*` family class
@@ -202,6 +210,12 @@ Three roles, two sizes, one shape — nothing else is a button:
 - `btn btn-ghost` — quiet text that gains a field on hover.
 - `btn-sm` compacts either to 26px for margin-column density; base is
   32px (44px at touch widths).
+
+Two interactive species live outside the button system, deliberately:
+**rows** (action options, score lines — full-width field rows whose border
+answers hover) and **quiet links** (`type-label`, underlined, ink-2 to
+ink). Marginalia affordances ("+ note") are ghost annotations, not
+buttons.
 
 ---
 
@@ -336,12 +350,17 @@ tooltip 400.
 
 **Elevation** — depth has one mechanism per layer: the sheet rests on the
 desk with `shadow-sheet`; only what floats above the sheet (dialogs, the
-hover preview, presentation beats) casts `shadow-raised`. Nothing else has
-a shadow, and shadows are umber by day, black by lamplight — never gray.
+hover preview, presentation beats) casts `shadow-raised`. The one
+exemption is physical: tipped-in plates sit in slight relief (a contact
+shadow, which flattens when tapped), and print objects on them carry
+their own micro-shadows. Nothing else has a shadow, and shadows are umber
+by day, black by lamplight — never gray.
 
 **Spacing** — steps have jobs: 8 between related elements, 12 within
 control clusters, 16–24 panel padding, 24 between staves, 32–48 between
-regions, 48–64 page rhythm (`--space-4xl/5xl`).
+regions, 48–64 page rhythm (`--space-4xl/5xl`). Layout spacing sits on
+the 4-grid; 2px and 6px are permitted only as micro-spacing inside a
+single control.
 
 **Interaction states** — every interactive element defines rest, hover
 (`action-hover`, or a border turning `action`), **pressed**

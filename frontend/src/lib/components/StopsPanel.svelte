@@ -31,7 +31,7 @@
   </summary>
 
   <div class="space-y-3 pt-3">
-    <label class="flex items-center gap-2 text-sm text-ink-2">
+    <label class="flex items-center gap-2 text-ink-2">
       <input
         type="checkbox"
         data-testid="auto-pass-toggle"
@@ -42,10 +42,10 @@
     </label>
 
     <div class={stops.auto_pass ? '' : 'pointer-events-none opacity-50'}>
-      <div class="grid grid-cols-[minmax(0,1fr)_3rem_3rem] items-center gap-y-1 text-sm">
+      <div class="grid grid-cols-[minmax(0,1fr)_3rem_3rem] items-center gap-y-1">
         <span></span>
-        <span class="text-center text-xs font-semibold uppercase text-ink-2">Mine</span>
-        <span class="text-center text-xs font-semibold uppercase text-ink-2">Opp</span>
+        <span class="type-rubric text-center text-ink-2">Mine</span>
+        <span class="type-rubric text-center text-ink-2">Opp</span>
         {#each STOP_STEPS as step}
           <span class="text-ink-2">{step.label}</span>
           {#each sides as side}
@@ -63,7 +63,7 @@
         {/each}
       </div>
 
-      <label class="mt-3 flex items-center gap-2 text-sm text-ink-2">
+      <label class="mt-3 flex items-center gap-2 text-ink-2">
         <input
           type="checkbox"
           data-testid="stop-on-stack"

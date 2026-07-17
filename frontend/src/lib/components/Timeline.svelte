@@ -69,7 +69,7 @@
     <label class="type-label flex items-center gap-1.5 text-ink-2">
       Speed
       <select
-        class="min-h-0 rounded border border-line bg-field px-1.5 py-0.5 text-xs"
+        class="type-caption min-h-0 rounded border border-line bg-field px-2 py-0.5"
         value={speed}
         onchange={(event) => onSpeedChange?.(Number((event.currentTarget as HTMLSelectElement).value))}
       >
@@ -80,7 +80,7 @@
     </label>
   </div>
 
-  <div class="mt-2 text-sm text-ink-2">
+  <div class="mt-2 text-ink-2">
     {#if actionDescription}
       <span class="type-rubric">
         {actor === 'villain' ? 'Villain' : actor === 'hero' ? 'Hero' : 'State'}

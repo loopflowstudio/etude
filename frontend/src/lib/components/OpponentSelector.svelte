@@ -27,7 +27,7 @@
     <span class="type-label text-ink-2">Opponent</span>
     <select
       data-testid="opponent-select"
-      class="rounded border border-line bg-field px-3 py-2 text-sm"
+      class="rounded border border-line bg-field px-3 py-2"
       {value}
       {disabled}
       onchange={(event) =>
@@ -47,7 +47,7 @@
       <span class="type-label text-ink-2">Path</span>
       <input
         type="text"
-        class="w-72 rounded border border-line bg-field px-3 py-2 text-sm"
+        class="w-72 rounded border border-line bg-field px-3 py-2"
         placeholder="/abs/path/to/step_65536.pt"
         value={checkpointPath}
         {disabled}
@@ -55,7 +55,7 @@
           onCheckpointPathChange?.((event.currentTarget as HTMLInputElement).value)}
       />
     </label>
-    <label class="flex items-center gap-2 self-end pb-2 text-sm text-ink-2">
+    <label class="flex items-center gap-2 self-end pb-2 text-ink-2">
       <input
         type="checkbox"
         class="rounded border-line-strong bg-field"

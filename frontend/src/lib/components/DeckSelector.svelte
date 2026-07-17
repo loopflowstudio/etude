@@ -31,7 +31,7 @@
       <DeckIdentity name={labelFor(hero)} symbolsOnly />
       <select
         data-testid="deck-select-hero"
-        class="min-h-0 border-0 bg-transparent pr-2 text-sm"
+        class="min-h-0 border-0 bg-transparent pr-2"
         value={hero}
         {disabled}
         onchange={(event) =>
@@ -50,7 +50,7 @@
       <DeckIdentity name={labelFor(villain)} symbolsOnly />
       <select
         data-testid="deck-select-villain"
-        class="min-h-0 border-0 bg-transparent pr-2 text-sm"
+        class="min-h-0 border-0 bg-transparent pr-2"
         value={villain}
         {disabled}
         onchange={(event) =>

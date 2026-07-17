@@ -274,6 +274,25 @@
   letter-spacing: 0.14em;
   text-transform: uppercase;
 }
+@utility type-numeral {
+  font-family: var(--font-sans);
+  font-size: 24px;
+  font-weight: 600;
+  line-height: 28px;
+  letter-spacing: -0.01em;
+}
+@utility type-brand {
+  font-family: var(--font-serif);
+  font-size: 30px;
+  font-weight: 600;
+  line-height: 36px;
+  letter-spacing: -0.01em;
+}
+@utility motion-move {
+  transition-property: opacity, transform;
+  transition-duration: var(--motion-move);
+  transition-timing-function: var(--motion-move-ease);
+}
 @utility type-annotation {
   font-family: var(--font-serif);
   font-style: italic;
