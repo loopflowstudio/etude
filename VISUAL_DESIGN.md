@@ -105,7 +105,7 @@ Washes come free from alpha modifiers on the base (`/10`–`/30`).
 | `info` | Island | `#2E6DA8` | `#31599A` | `#8AB8E8` | Knowledge: decision prompts, the stack, hand headings, auto-passing |
 | `neutral` | Swamp | `#6A5F86` | `#554B6E` | `#B4A9D1` | The hidden & the spent: graveyard, exile, hidden cards, game over |
 | `error` | Mountain | `#973427` | `#7E2A20` | `#DE9181` | Action & urgency: shares the accent — buttons, focus, failures, damage |
-| `success` | Forest | `#4C8040` | `#3A6531` | `#9ECB8B` | Presence: battlefield heading, connected, your move, hero log |
+| `success` | Forest | `#4C8040` | `#396230` | `#9ECB8B` | Presence: battlefield heading, connected, your move, hero log |
 
 Balance rule: no family should visibly dominate the chrome. Red gets the
 interactive surfaces, so it needs no additional decoration; when adding a
