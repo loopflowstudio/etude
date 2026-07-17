@@ -91,6 +91,16 @@
   --neutral: #6a5f86;
   --neutral-text: #554b6e;
 
+  /* Washes are tokens, not arithmetic: each family's container tint is
+     pre-mixed with the panel ground per mode, so a wash can never silently
+     vanish when the ground changes underneath it. */
+  --wash-strength: 10%;
+  --success-wash: color-mix(in srgb, var(--success) var(--wash-strength), var(--bg-surface));
+  --warning-wash: color-mix(in srgb, var(--warning) var(--wash-strength), var(--bg-surface));
+  --error-wash: color-mix(in srgb, var(--error) var(--wash-strength), var(--bg-surface));
+  --info-wash: color-mix(in srgb, var(--info) var(--wash-strength), var(--bg-surface));
+  --neutral-wash: color-mix(in srgb, var(--neutral) var(--wash-strength), var(--bg-surface));
+
   /* 4pt grid, radii, and layering */
   --space-xxs: 2px;
   --space-xs: 4px;
@@ -135,6 +145,8 @@
     --error-text: #de9181;
     --info-text: #8ab8e8;
     --neutral-text: #b4a9d1;
+    /* Washes lift by lamplight: 10% reads on parchment but vanishes on umber. */
+    --wash-strength: 26%;
     --shadow-surface: 0 1px 2px rgb(0 0 0 / 0.22), 0 16px 40px rgb(0 0 0 / 0.16);
   }
 }
@@ -177,14 +189,19 @@
 
   --color-forest: var(--success);
   --color-forest-ink: var(--success-text);
+  --color-forest-wash: var(--success-wash);
   --color-plains: var(--warning);
   --color-plains-ink: var(--warning-text);
+  --color-plains-wash: var(--warning-wash);
   --color-island: var(--info);
   --color-island-ink: var(--info-text);
+  --color-island-wash: var(--info-wash);
   --color-mountain: var(--error);
   --color-mountain-ink: var(--error-text);
+  --color-mountain-wash: var(--error-wash);
   --color-swamp: var(--neutral);
   --color-swamp-ink: var(--neutral-text);
+  --color-swamp-wash: var(--neutral-wash);
 
   /* Legacy stock-name shim — do not use in new code. */
   --color-slate-950: var(--bg-surface);
