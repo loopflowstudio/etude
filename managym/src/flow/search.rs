@@ -2,14 +2,18 @@
 // Determinized-search primitives on Game: hidden-information resampling and
 // uniformly-random playouts to terminal. Used by flat Monte Carlo search.
 
-use rand::{Rng, SeedableRng};
+use std::collections::{BTreeMap, BTreeSet};
+
+use rand::{seq::SliceRandom, Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 use crate::{
-    agent::action::AgentError,
+    agent::action::{ActionSpace, ActionSpaceKind, AgentError},
     flow::game::Game,
-    state::{game_object::PlayerId, zone::ZoneType},
+    state::{card::CardDefId, game_object::PlayerId, zone::ZoneType},
 };
+
+pub type HiddenPoolSummary = (Vec<(CardDefId, usize)>, usize, usize);
 
 /// SplitMix64-style mix of two u64s into a stream-independent sub-seed.
 pub fn mix_seed(a: u64, b: u64) -> u64 {
@@ -51,20 +55,211 @@ impl Game {
             .zones
             .shuffle_canonical(ZoneType::Library, perspective, &mut rng);
 
-        // A pending mid-resolution decision may have revealed library cards
-        // to the deciding player (scry / look-at-top-N). Those cards are
-        // known information — pin them back on top in their revealed order.
-        if let Some(suspended) = &self.state.suspended_decision {
-            let player = suspended.decision.player();
-            let revealed = suspended.decision.revealed_cards().to_vec();
-            if !revealed.is_empty() {
-                let library = self.state.zones.zone_cards_mut(ZoneType::Library, player);
-                library.retain(|card| !revealed.contains(card));
-                // revealed[0] is the top of the library = last element.
-                for card in revealed.iter().rev() {
-                    library.push(*card);
-                }
+        self.repin_revealed_library_cards();
+    }
+
+    /// Install one exact opponent hand consistent with `perspective`'s
+    /// viewer-safe hidden pool, then randomize only the remaining unknown
+    /// library order.
+    ///
+    /// When the installed player owns a priority prompt, its legal actions
+    /// are recomputed from the hypothetical hand. Search roots normally have
+    /// the perspective player acting and therefore retain their root offers.
+    /// Other acting-player prompt kinds fail closed because their candidates
+    /// may also depend on private hand state.
+    pub fn determinize_to_hand(
+        &mut self,
+        perspective: PlayerId,
+        hand: &[(CardDefId, usize)],
+        seed: u64,
+    ) -> Result<(), AgentError> {
+        if perspective.0 >= self.state.players.len() {
+            return Err(AgentError(format!(
+                "determinize_to_hand: perspective {} out of range",
+                perspective.0
+            )));
+        }
+        let opponent = PlayerId((perspective.0 + 1) % 2);
+        let hand_size = self.state.zones.size(ZoneType::Hand, opponent);
+        let requested_size = hand.iter().map(|(_, count)| *count).sum::<usize>();
+        if requested_size != hand_size {
+            return Err(AgentError(format!(
+                "determinize_to_hand: requested {requested_size} cards, expected {hand_size}"
+            )));
+        }
+        let mut requested = BTreeMap::<CardDefId, usize>::new();
+        for (definition, count) in hand {
+            if *count == 0 {
+                return Err(AgentError(format!(
+                    "determinize_to_hand: definition {} has a zero count",
+                    definition.0
+                )));
             }
+            if requested.insert(*definition, *count).is_some() {
+                return Err(AgentError(format!(
+                    "determinize_to_hand: duplicate definition {}",
+                    definition.0
+                )));
+            }
+        }
+        if let Some(space) = self.current_action_space.as_ref() {
+            if space.player == Some(opponent) && space.kind != ActionSpaceKind::Priority {
+                return Err(AgentError(format!(
+                    "determinize_to_hand: cannot refresh acting {:?} prompt",
+                    space.kind
+                )));
+            }
+        }
+
+        let pool = self
+            .state
+            .zones
+            .zone_cards(ZoneType::Hand, opponent)
+            .iter()
+            .chain(
+                self.state
+                    .zones
+                    .zone_cards(ZoneType::Library, opponent)
+                    .iter(),
+            )
+            .copied()
+            .collect::<Vec<_>>();
+        let mut by_definition = BTreeMap::<CardDefId, Vec<_>>::new();
+        for card in pool {
+            by_definition
+                .entry(self.state.cards[card].definition_id)
+                .or_default()
+                .push(card);
+        }
+        let available_definitions = by_definition.keys().copied().collect::<BTreeSet<_>>();
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let mut selected = Vec::with_capacity(hand_size);
+        let pool_size = by_definition.values().map(Vec::len).sum::<usize>();
+        let mut remaining = Vec::with_capacity(pool_size.saturating_sub(hand_size));
+        for (definition, mut cards) in by_definition {
+            cards.sort_unstable_by_key(|card| card.0);
+            cards.shuffle(&mut rng);
+            let requested_count = requested.get(&definition).copied().unwrap_or(0);
+            if requested_count > cards.len() {
+                return Err(AgentError(format!(
+                    "determinize_to_hand: requested {requested_count} copies of definition {}, only {} available",
+                    definition.0,
+                    cards.len()
+                )));
+            }
+            let rest = cards.split_off(requested_count);
+            selected.extend(cards);
+            remaining.extend(rest);
+        }
+        for (definition, count) in &requested {
+            if !available_definitions.contains(definition) {
+                return Err(AgentError(format!(
+                    "determinize_to_hand: requested {} copies of definition {}, only 0 available",
+                    count, definition.0
+                )));
+            }
+        }
+
+        selected.shuffle(&mut rng);
+        remaining.shuffle(&mut rng);
+        self.journal_zones();
+        self.state
+            .zones
+            .reassign_hidden(opponent, selected, remaining);
+        self.state
+            .zones
+            .shuffle_canonical(ZoneType::Library, perspective, &mut rng);
+        self.repin_revealed_library_cards();
+
+        if self
+            .current_action_space
+            .as_ref()
+            .is_some_and(|space| space.player == Some(opponent))
+        {
+            self.refresh_priority_actions(opponent);
+        }
+        Ok(())
+    }
+
+    /// Viewer-safe counts for the opponent's current hand-plus-library pool.
+    pub fn hidden_pool_summary(
+        &self,
+        perspective: PlayerId,
+    ) -> Result<HiddenPoolSummary, AgentError> {
+        if perspective.0 >= self.state.players.len() {
+            return Err(AgentError(format!(
+                "hidden_pool_summary: perspective {} out of range",
+                perspective.0
+            )));
+        }
+        let opponent = PlayerId((perspective.0 + 1) % 2);
+        let mut counts = BTreeMap::<CardDefId, usize>::new();
+        for card in self
+            .state
+            .zones
+            .zone_cards(ZoneType::Hand, opponent)
+            .iter()
+            .chain(
+                self.state
+                    .zones
+                    .zone_cards(ZoneType::Library, opponent)
+                    .iter(),
+            )
+        {
+            *counts
+                .entry(self.state.cards[*card].definition_id)
+                .or_default() += 1;
+        }
+        Ok((
+            counts.into_iter().collect(),
+            self.state.zones.size(ZoneType::Hand, opponent),
+            self.state.zones.size(ZoneType::Library, opponent),
+        ))
+    }
+
+    pub(crate) fn opponent_hand_definition_ids(&self, perspective: PlayerId) -> Vec<CardDefId> {
+        let opponent = PlayerId((perspective.0 + 1) % 2);
+        let mut definitions = self
+            .state
+            .zones
+            .zone_cards(ZoneType::Hand, opponent)
+            .iter()
+            .map(|card| self.state.cards[*card].definition_id)
+            .collect::<Vec<_>>();
+        definitions.sort_unstable();
+        definitions
+    }
+
+    fn refresh_priority_actions(&mut self, player: PlayerId) {
+        self.invalidate_mana_cache(PlayerId(0));
+        self.invalidate_mana_cache(PlayerId(1));
+        let actions = self.compute_player_actions(player);
+        self.publish_action_space(ActionSpace {
+            player: Some(player),
+            kind: ActionSpaceKind::Priority,
+            actions,
+            focus: Vec::new(),
+        });
+    }
+
+    fn repin_revealed_library_cards(&mut self) {
+        let Some(suspended) = &self.state.suspended_decision else {
+            return;
+        };
+        let player = suspended.decision.player();
+        let revealed = suspended.decision.revealed_cards().to_vec();
+        if revealed.is_empty() {
+            return;
+        }
+        for card in &revealed {
+            self.state.zones.move_card(*card, player, ZoneType::Library);
+        }
+        let revealed_set = revealed.iter().copied().collect::<BTreeSet<_>>();
+        let library = self.state.zones.zone_cards_mut(ZoneType::Library, player);
+        library.retain(|card| !revealed_set.contains(card));
+        // revealed[0] is the top of the library = last element.
+        for card in revealed.iter().rev() {
+            library.push(*card);
         }
     }
 

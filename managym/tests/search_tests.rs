@@ -5,8 +5,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use managym::{
-    agent::env::Env,
+    agent::{action::Action, env::Env},
     state::{
+        card::CardDefId,
         game_object::{CardId, PlayerId},
         player::PlayerConfig,
         zone::ZoneType,
@@ -75,6 +76,33 @@ fn hidden_pool(game: &Game, player: PlayerId) -> BTreeSet<usize> {
         pool.insert(card.0);
     }
     pool
+}
+
+fn hand_definition_counts(game: &Game, player: PlayerId) -> BTreeMap<CardDefId, usize> {
+    let mut counts = BTreeMap::new();
+    for card in game.state.zones.zone_cards(ZoneType::Hand, player) {
+        *counts
+            .entry(game.state.cards[*card].definition_id)
+            .or_default() += 1;
+    }
+    counts
+}
+
+fn first_valid_hand(pool: &[(CardDefId, usize)], hand_size: usize) -> Vec<(CardDefId, usize)> {
+    let mut remaining = hand_size;
+    let mut hand = Vec::new();
+    for (definition, available) in pool {
+        let count = remaining.min(*available);
+        if count > 0 {
+            hand.push((*definition, count));
+            remaining -= count;
+        }
+        if remaining == 0 {
+            break;
+        }
+    }
+    assert_eq!(remaining, 0, "pool must contain a complete hand");
+    hand
 }
 
 #[test]
@@ -291,6 +319,134 @@ fn determinize_ignores_authority_private_allocation() {
 }
 
 #[test]
+fn determinize_to_hand_installs_exact_definition_counts_and_preserves_root_actions() {
+    let mut game = make_game(39);
+    let viewer = PlayerId(0);
+    let opponent = PlayerId(1);
+    let (pool, hand_size, _) = game.hidden_pool_summary(viewer).expect("hidden pool");
+    let requested = first_valid_hand(&pool, hand_size);
+    let actions_before = game.action_space().expect("root action space").clone();
+
+    game.determinize_to_hand(viewer, &requested, 777)
+        .expect("exact hand should install");
+
+    assert_eq!(game.action_space(), Some(&actions_before));
+    assert_eq!(
+        hand_definition_counts(&game, opponent),
+        requested.into_iter().collect()
+    );
+}
+
+#[test]
+fn determinize_to_hand_is_viewer_equivalent_across_private_allocations() {
+    let game = make_game(43);
+    let viewer = PlayerId(0);
+    let (pool, hand_size, _) = game.hidden_pool_summary(viewer).expect("hidden pool");
+    let requested = first_valid_hand(&pool, hand_size);
+    let mut world_a = game.clone();
+    let mut world_b = game.clone();
+    world_a.determinize(viewer, 101);
+    world_b.determinize(viewer, 202);
+
+    world_a
+        .determinize_to_hand(viewer, &requested, 999)
+        .expect("world a exact hand");
+    world_b
+        .determinize_to_hand(viewer, &requested, 999)
+        .expect("world b exact hand");
+
+    for zone in [ZoneType::Hand, ZoneType::Library] {
+        for player in [PlayerId(0), PlayerId(1)] {
+            assert_eq!(
+                zone_snapshot(&world_a, zone, player),
+                zone_snapshot(&world_b, zone, player),
+                "viewer-equivalent exact worlds diverged"
+            );
+        }
+    }
+}
+
+#[test]
+fn determinize_to_hand_can_vary_physical_copies_without_changing_hand_key() {
+    let game = make_game(45);
+    let viewer = PlayerId(0);
+    let opponent = PlayerId(1);
+    let (pool, hand_size, _) = game.hidden_pool_summary(viewer).expect("hidden pool");
+    let requested = first_valid_hand(&pool, hand_size);
+    let mut physical_hands = BTreeSet::new();
+
+    for seed in 0..8 {
+        let mut world = game.clone();
+        world
+            .determinize_to_hand(viewer, &requested, seed)
+            .expect("exact hand");
+        physical_hands.insert(zone_snapshot(&world, ZoneType::Hand, opponent));
+        assert_eq!(
+            hand_definition_counts(&world, opponent),
+            requested.iter().copied().collect()
+        );
+    }
+
+    assert!(
+        physical_hands.len() > 1,
+        "different seeds should exercise exchangeable physical copies"
+    );
+}
+
+#[test]
+fn determinize_to_hand_refreshes_an_acting_opponents_priority_actions() {
+    let mut game = make_game(47);
+    let acting_player = game
+        .action_space()
+        .and_then(|space| space.player)
+        .expect("acting player");
+    let viewer = PlayerId((acting_player.0 + 1) % 2);
+    let (pool, hand_size, _) = game.hidden_pool_summary(viewer).expect("hidden pool");
+    let requested = first_valid_hand(&pool, hand_size);
+
+    game.determinize_to_hand(viewer, &requested, 123)
+        .expect("acting priority hand should refresh");
+
+    let installed_hand = game
+        .state
+        .zones
+        .zone_cards(ZoneType::Hand, acting_player)
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    for action in &game.action_space().expect("refreshed action space").actions {
+        if let Action::PlayLand { card, .. } | Action::CastSpell { card, .. } = action {
+            assert!(
+                installed_hand.contains(card),
+                "refreshed action retained a card outside the installed hand"
+            );
+        }
+    }
+}
+
+#[test]
+fn determinize_to_hand_rejects_impossible_counts_without_mutation() {
+    let mut game = make_game(49);
+    let viewer = PlayerId(0);
+    let hand_before = zone_snapshot(&game, ZoneType::Hand, PlayerId(1));
+    let library_before = zone_snapshot(&game, ZoneType::Library, PlayerId(1));
+
+    let error = game
+        .determinize_to_hand(viewer, &[(CardDefId(u32::MAX), hand_before.len())], 5)
+        .expect_err("unknown definition must fail");
+
+    assert!(error.to_string().contains("only 0 available"));
+    assert_eq!(
+        zone_snapshot(&game, ZoneType::Hand, PlayerId(1)),
+        hand_before
+    );
+    assert_eq!(
+        zone_snapshot(&game, ZoneType::Library, PlayerId(1)),
+        library_before
+    );
+}
+
+#[test]
 fn random_playout_terminates_with_winner() {
     for seed in 0..5u64 {
         let mut game = make_game(seed);
@@ -328,6 +484,27 @@ fn env_flat_mc_scores_shape_and_bounds() {
         assert!((0.0..=1.0).contains(score), "score {score} out of [0,1]");
     }
     assert!(result.cap_hits <= result.simulations);
+}
+
+#[test]
+fn env_flat_mc_scores_for_hands_reports_installed_worlds() {
+    let env = make_env(53);
+    let action_count = env.action_count().expect("action count");
+    let (pool, hand_size, _) = env.hidden_pool_summary(0).expect("hidden pool");
+    let requested = first_valid_hand(&pool, hand_size);
+    let hands = vec![requested.clone(), requested.clone()];
+    let result = env
+        .flat_mc_scores_for_hands(&hands, &[701, 702], 2, 2000)
+        .expect("sampled flat MC should succeed");
+
+    assert_eq!(result.result.scores.len(), action_count);
+    assert_eq!(result.result.simulations, (action_count * 4) as u64);
+    assert_eq!(result.installed_hands.len(), 2);
+    let expected = requested
+        .into_iter()
+        .flat_map(|(definition, count)| std::iter::repeat_n(definition, count))
+        .collect::<Vec<_>>();
+    assert_eq!(result.installed_hands, vec![expected.clone(), expected]);
 }
 
 #[test]

@@ -47,6 +47,12 @@ use crate::{
 pyo3::create_exception!(_managym, PyAgentError, PyRuntimeError);
 
 #[cfg(feature = "python")]
+type PyHiddenPoolSummary = (Vec<(u32, usize)>, usize, usize);
+
+#[cfg(feature = "python")]
+type PySampledFlatMcResult = (Vec<f64>, u64, u64, Vec<Vec<u32>>);
+
+#[cfg(feature = "python")]
 pub(crate) fn map_agent_err(err: AgentError) -> PyErr {
     PyAgentError::new_err(err.to_string())
 }
@@ -2822,6 +2828,51 @@ impl PyEnv {
         env.determinize(perspective, seed).map_err(map_agent_err)
     }
 
+    /// Install one exact opponent hand by stable card-definition counts.
+    #[pyo3(signature = (hand, seed, perspective=None))]
+    fn determinize_to_hand(
+        &self,
+        hand: Vec<(u32, usize)>,
+        seed: u64,
+        perspective: Option<usize>,
+    ) -> PyResult<()> {
+        let mut env = self
+            .inner
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("env lock poisoned"))?;
+        let perspective = match perspective {
+            Some(player) => player,
+            None => env.current_agent_index().ok_or_else(|| {
+                PyRuntimeError::new_err("determinize_to_hand: no current decision player")
+            })?,
+        };
+        let hand = hand
+            .into_iter()
+            .map(|(definition, count)| (crate::state::card::CardDefId(definition), count))
+            .collect::<Vec<_>>();
+        env.determinize_to_hand(perspective, &hand, seed)
+            .map_err(map_agent_err)
+    }
+
+    /// Viewer-safe opponent hand-plus-library definition counts and sizes.
+    fn hidden_pool_summary(&self, perspective: usize) -> PyResult<PyHiddenPoolSummary> {
+        let env = self
+            .inner
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("env lock poisoned"))?;
+        let (counts, hand_size, library_size) = env
+            .hidden_pool_summary(perspective)
+            .map_err(map_agent_err)?;
+        Ok((
+            counts
+                .into_iter()
+                .map(|(definition, count)| (definition.0, count))
+                .collect(),
+            hand_size,
+            library_size,
+        ))
+    }
+
     /// Play both sides uniformly-random-legal to terminal from the current
     /// state. Returns the winner index, or None on draw / step cap.
     #[pyo3(signature = (seed, max_steps=2000))]
@@ -2886,6 +2937,45 @@ impl PyEnv {
                 .flat_mc_scores(worlds, rollouts, seed, max_steps)
                 .map_err(map_agent_err)?;
             Ok((result.scores, result.simulations, result.cap_hits))
+        })
+    }
+
+    /// Flat MC over exact opponent hands sampled by a caller-owned range.
+    #[pyo3(signature = (hands, world_seeds, rollouts, max_steps=2000))]
+    fn flat_mc_scores_for_hands(
+        &self,
+        py: Python<'_>,
+        hands: Vec<Vec<(u32, usize)>>,
+        world_seeds: Vec<u64>,
+        rollouts: usize,
+        max_steps: usize,
+    ) -> PyResult<PySampledFlatMcResult> {
+        let hands = hands
+            .into_iter()
+            .map(|hand| {
+                hand.into_iter()
+                    .map(|(definition, count)| (crate::state::card::CardDefId(definition), count))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        py.allow_threads(|| {
+            let env = self
+                .inner
+                .lock()
+                .map_err(|_| PyRuntimeError::new_err("env lock poisoned"))?;
+            let sampled = env
+                .flat_mc_scores_for_hands(&hands, &world_seeds, rollouts, max_steps)
+                .map_err(map_agent_err)?;
+            Ok((
+                sampled.result.scores,
+                sampled.result.simulations,
+                sampled.result.cap_hits,
+                sampled
+                    .installed_hands
+                    .into_iter()
+                    .map(|hand| hand.into_iter().map(|definition| definition.0).collect())
+                    .collect(),
+            ))
         })
     }
 

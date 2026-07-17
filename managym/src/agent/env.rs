@@ -14,10 +14,13 @@ use crate::{
         Command as SemanticCommand, DecisionFrame, Observation as SemanticObservation,
         SemanticTransition,
     },
-    flow::{game::Game, search::mix_seed},
+    flow::{
+        game::Game,
+        search::{mix_seed, HiddenPoolSummary},
+    },
     infra::profiler::{empty_info_dict, insert_info, InfoDict, InfoValue, Profiler},
     search_state::{BranchDriver, FullCloneDriver, SearchStateWitness},
-    state::{game_object::PlayerId, player::PlayerConfig},
+    state::{card::CardDefId, game_object::PlayerId, player::PlayerConfig},
 };
 use rand::Rng;
 
@@ -83,6 +86,13 @@ pub struct FlatMcResult {
     pub simulations: u64,
     /// Playouts that hit the step cap without terminating.
     pub cap_hits: u64,
+}
+
+/// Flat-MC result plus the exact installed opponent-hand definitions.
+#[derive(Clone, Debug)]
+pub struct SampledFlatMcResult {
+    pub result: FlatMcResult,
+    pub installed_hands: Vec<Vec<CardDefId>>,
 }
 
 #[derive(Debug)]
@@ -624,6 +634,37 @@ impl Env {
         Ok(())
     }
 
+    pub fn determinize_to_hand(
+        &mut self,
+        perspective: usize,
+        hand: &[(CardDefId, usize)],
+        seed: u64,
+    ) -> Result<(), AgentError> {
+        if perspective > 1 {
+            return Err(AgentError(format!(
+                "determinize_to_hand: perspective {perspective} out of range"
+            )));
+        }
+        let game = self
+            .game
+            .as_mut()
+            .ok_or_else(|| AgentError("env.determinize_to_hand called before reset".to_string()))?;
+        game.determinize_to_hand(PlayerId(perspective), hand, seed)
+    }
+
+    pub fn hidden_pool_summary(&self, perspective: usize) -> Result<HiddenPoolSummary, AgentError> {
+        if perspective > 1 {
+            return Err(AgentError(format!(
+                "hidden_pool_summary: perspective {perspective} out of range"
+            )));
+        }
+        let game = self
+            .game
+            .as_ref()
+            .ok_or_else(|| AgentError("env.hidden_pool_summary called before reset".to_string()))?;
+        game.hidden_pool_summary(PlayerId(perspective))
+    }
+
     /// Reseed the game RNG and play both sides uniformly-random-legal to
     /// terminal. Returns the winner index, or None on draw / step cap.
     pub fn random_playout(
@@ -653,6 +694,65 @@ impl Env {
         seed: u64,
         max_steps: usize,
     ) -> Result<FlatMcResult, AgentError> {
+        let sampled = self.flat_mc_scores_prepared(
+            worlds,
+            rollouts,
+            max_steps,
+            |game, hero, world_index| {
+                let world_seed = mix_seed(seed, world_index as u64);
+                let mut world = game.clone();
+                world.determinize(hero, world_seed);
+                let installed = world.opponent_hand_definition_ids(hero);
+                Ok((world, world_seed, installed))
+            },
+        )?;
+        Ok(sampled.result)
+    }
+
+    /// Flat MC over exact opponent hands already sampled by a belief model.
+    pub fn flat_mc_scores_for_hands(
+        &self,
+        hands: &[Vec<(CardDefId, usize)>],
+        world_seeds: &[u64],
+        rollouts: usize,
+        max_steps: usize,
+    ) -> Result<SampledFlatMcResult, AgentError> {
+        if hands.is_empty() {
+            return Err(AgentError(
+                "flat_mc_scores_for_hands requires at least one hand".to_string(),
+            ));
+        }
+        if hands.len() != world_seeds.len() {
+            return Err(AgentError(format!(
+                "flat_mc_scores_for_hands received {} hands and {} seeds",
+                hands.len(),
+                world_seeds.len()
+            )));
+        }
+        self.flat_mc_scores_prepared(
+            hands.len(),
+            rollouts,
+            max_steps,
+            |game, hero, world_index| {
+                let world_seed = world_seeds[world_index];
+                let mut world = game.clone();
+                world.determinize_to_hand(hero, &hands[world_index], world_seed)?;
+                let installed = world.opponent_hand_definition_ids(hero);
+                Ok((world, world_seed, installed))
+            },
+        )
+    }
+
+    fn flat_mc_scores_prepared<F>(
+        &self,
+        worlds: usize,
+        rollouts: usize,
+        max_steps: usize,
+        mut prepare: F,
+    ) -> Result<SampledFlatMcResult, AgentError>
+    where
+        F: FnMut(&Game, PlayerId, usize) -> Result<(Game, u64, Vec<CardDefId>), AgentError>,
+    {
         let game = self
             .game
             .as_ref()
@@ -676,11 +776,11 @@ impl Env {
         let mut totals = vec![0.0f64; num_actions];
         let mut simulations = 0u64;
         let mut cap_hits = 0u64;
+        let mut installed_hands = Vec::with_capacity(worlds);
 
         for world_index in 0..worlds {
-            let world_seed = mix_seed(seed, world_index as u64);
-            let mut world = game.clone();
-            world.determinize(hero, world_seed);
+            let (world, world_seed, installed) = prepare(game, hero, world_index)?;
+            installed_hands.push(installed);
             #[allow(clippy::needless_range_loop)] // action is a semantic index
             for action in 0..num_actions {
                 for rollout in 0..rollouts {
@@ -711,10 +811,13 @@ impl Env {
         }
 
         let denominator = (worlds * rollouts).max(1) as f64;
-        Ok(FlatMcResult {
-            scores: totals.into_iter().map(|t| t / denominator).collect(),
-            simulations,
-            cap_hits,
+        Ok(SampledFlatMcResult {
+            result: FlatMcResult {
+                scores: totals.into_iter().map(|t| t / denominator).collect(),
+                simulations,
+                cap_hits,
+            },
+            installed_hands,
         })
     }
 

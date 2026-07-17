@@ -220,6 +220,9 @@ def make_player(
         {"kind": "value_greedy", "checkpoint": "/abs/value.pt", "device": "cpu"}
         {"kind": "value_search", "sims": 64, "checkpoint": "/abs/value.pt",
          "depth": 0, "rollouts_per_world": 1, "device": "cpu"}
+        {"kind": "exact_range", "sims": 64, "checkpoint": "/abs/policy.pt",
+         "checkpoint_sha256": "...", "epsilon": 0.05}
+        {"kind": "uniform_range", ...same fields...}
     Returns (player, observation_space_or_None). Checkpoint players carry the
     ObservationSpace their encoder was trained with.
     """
@@ -329,6 +332,35 @@ def make_player(
             ),
             None,
         )
+    if kind in ("exact_range", "uniform_range"):
+        from manabot.belief.likelihood import FrozenPolicyLikelihood
+        from manabot.belief.player import ExactRangePlayer, RangeSampling
+
+        likelihood = FrozenPolicyLikelihood(
+            spec["checkpoint"],
+            expected_sha256=str(spec["checkpoint_sha256"]),
+            batch_size=int(spec.get("likelihood_batch_size", 256)),
+            device=str(spec.get("device", "cpu")),
+            counterfactual_seed=int(spec.get("counterfactual_seed", 0)),
+        )
+        return (
+            ExactRangePlayer(
+                int(spec["sims"]),
+                likelihood=likelihood,
+                sampling=(
+                    RangeSampling.BELIEF
+                    if kind == "exact_range"
+                    else RangeSampling.UNIFORM
+                ),
+                epsilon=float(spec.get("epsilon", 0.05)),
+                rollouts_per_world=int(
+                    spec.get("rollouts_per_world", DEFAULT_ROLLOUTS_PER_WORLD)
+                ),
+                max_steps=int(spec.get("max_steps", DEFAULT_MAX_PLAYOUT_STEPS)),
+                seed=seed,
+            ),
+            likelihood.obs_space,
+        )
     if kind == "random":
         return RandomMatchupPlayer(seed=seed), None
     if kind == "checkpoint":
@@ -359,6 +391,9 @@ def spec_name(spec: dict[str, Any]) -> str:
     if kind == "value_search":
         depth = int(spec.get("depth", 0))
         return spec.get("name", f"vsearch-{spec['sims']}-d{depth}")
+    if kind in ("exact_range", "uniform_range"):
+        default = "belief" if kind == "exact_range" else "uniform"
+        return spec.get("name", f"{default}-{spec['sims']}")
     return kind
 
 
@@ -389,6 +424,8 @@ class MatchupResult:
     hero_search: SearchStats | None
     villain_search: SearchStats | None
     wall_seconds: float
+    hero_evidence: dict[str, Any] | None = None
+    villain_evidence: dict[str, Any] | None = None
 
 
 def play_games(
@@ -440,6 +477,16 @@ def play_games(
             seed=seed + game_index,
             options={"match": match_swapped} if hero_seat == 1 else None,
         )
+        content_hash = str(env.content_pack_manifest()["content_digest"])
+        asset_manifest_hash = content_hash
+        villain_seat = (hero_seat + 1) % 2
+        for player, seat in (
+            (hero_player, hero_seat),
+            (villain_player, villain_seat),
+        ):
+            start_game = getattr(player, "start_game", None)
+            if start_game is not None:
+                start_game(env, seat)
         done = False
         steps = 0
         info: dict[str, Any] = {}
@@ -454,7 +501,31 @@ def play_games(
             counts[kind] = counts.get(kind, 0) + 1
             player = hero_player if acting == hero_seat else villain_player
             action = player.act(env, obs)
+            for observer in (hero_player, villain_player):
+                prepare_step = getattr(observer, "prepare_step", None)
+                if prepare_step is not None:
+                    prepare_step(env, acting, action)
+            command_for_action = getattr(player, "command_for_action", None)
+            if command_for_action is not None:
+                match_id = f"flat-mc-{seed}-{game_index}"
+                command = command_for_action(
+                    raw,
+                    action,
+                    match_id=match_id,
+                    revision=steps,
+                    content_hash=content_hash,
+                    asset_manifest_hash=asset_manifest_hash,
+                )
+                if str(command["match_id"]) != match_id:
+                    raise RuntimeError("command match_id does not match the active game")
+                if int(command["expected_revision"]) != steps:
+                    raise RuntimeError("command revision does not match the active prompt")
+                action = int(command["offer_id"])
             obs, _, terminated, truncated, info = env.step(action)
+            for observer in (hero_player, villain_player):
+                observe_step = getattr(observer, "observe_step", None)
+                if observe_step is not None:
+                    observe_step(env, acting)
             steps += 1
             done = bool(terminated or truncated)
         winner = winner_from_info_or_obs(info, env.last_raw_obs)
@@ -476,9 +547,23 @@ def play_games(
         hero=spec_name(hero_spec),
         villain=spec_name(villain_spec),
         records=records,
-        hero_search=getattr(hero_player, "stats", None),
-        villain_search=getattr(villain_player, "stats", None),
+        hero_search=getattr(
+            hero_player, "search_stats", getattr(hero_player, "stats", None)
+        ),
+        villain_search=getattr(
+            villain_player, "search_stats", getattr(villain_player, "stats", None)
+        ),
         wall_seconds=wall_seconds,
+        hero_evidence=(
+            hero_player.evidence_stats()
+            if hasattr(hero_player, "evidence_stats")
+            else None
+        ),
+        villain_evidence=(
+            villain_player.evidence_stats()
+            if hasattr(villain_player, "evidence_stats")
+            else None
+        ),
     )
 
 
