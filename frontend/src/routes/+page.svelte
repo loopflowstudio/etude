@@ -56,6 +56,18 @@
   const gameActive = $derived(gameStore.observation !== null && !gameStore.gameOver);
   const canPassTurn = $derived(gameActive && gameStore.actions.length > 0);
 
+  // The matchup names the players: "You (UR Lessons) vs Search 64 (GW
+  // Allies)". Selectors hide while a game runs, so the choice is stable.
+  const OPPONENT_LABELS: Record<string, string> = {
+    'search-16': 'Search 16',
+    'search-64': 'Search 64',
+    'search-256': 'Search 256',
+    checkpoint: 'Checkpoint',
+    random: 'Random',
+    passive: 'Passive',
+  };
+  const opponentLabel = $derived(OPPONENT_LABELS[gameStore.opponentChoice] ?? 'Opponent');
+
   function syncStopsToServer(): void {
     if (gameActive) {
       sendSetStops();
@@ -159,62 +171,76 @@
   <!-- The sheet: one continuous leaf. Regions are ruled, never boxed. -->
   <div class="overflow-hidden rounded-sm border border-line bg-panel shadow-[0_1px_2px_rgb(58_40_20/0.1),0_22px_56px_rgb(58_40_20/0.14)]">
     <div class="px-10 pb-10 pt-6 max-md:px-5 max-md:pb-6">
+  <!-- The masthead, in levels: the matchup names the players, fields show
+       only while they matter, one red action, and the connection is a
+       whisper beside it. -->
   <div
     data-testid="game-header"
-    class="flex flex-wrap items-center justify-between gap-3 border-b border-line pb-4"
+    class="flex flex-wrap items-end justify-between gap-x-8 gap-y-4 border-b border-line pb-4"
   >
-    <div data-testid="connection-summary" class="flex items-center gap-3">
-      <span class="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-2">Connection</span>
-      <span
-        data-testid="connection-badge"
-        data-connection-state={gameStore.connection}
-        role="status"
-        aria-live="polite"
-        aria-atomic="true"
-        aria-label={`Connection status: ${gameStore.connection}`}
-        class={`rounded px-2 py-1 text-xs font-semibold ${
-          gameStore.connection === 'connected'
-            ? 'bg-forest/20 text-ink'
-            : gameStore.connection === 'reconnecting' || gameStore.connection === 'connecting'
-              ? 'bg-plains/20 text-ink'
-              : 'bg-panel-muted text-ink-2'
-        }`}
-      >
-        {gameStore.connection}
-      </span>
+    <div class="min-w-0 self-center">
       {#if gameStore.deckNames && gameStore.observation}
         <span
           data-testid="deck-names"
-          class="inline-flex items-center gap-1.5 rounded bg-panel-muted/60 px-2 py-1 text-xs font-semibold text-ink"
+          class="inline-flex flex-wrap items-baseline gap-x-2 font-serif text-xl text-ink"
         >
-          <DeckIdentity name={gameStore.deckNames.hero} /> vs <DeckIdentity
-            name={gameStore.deckNames.villain}
-          />
+          <span class="inline-flex items-baseline">You <span class="text-ink-2">(<span class="mx-1 inline-flex"><DeckIdentity name={gameStore.deckNames.hero} /></span>)</span></span>
+          <span class="text-sm italic text-ink-2">vs</span>
+          <span class="inline-flex items-baseline">{opponentLabel} <span class="text-ink-2">(<span class="mx-1 inline-flex"><DeckIdentity name={gameStore.deckNames.villain} /></span>)</span></span>
         </span>
+      {:else}
+        <span class="font-serif text-lg italic text-ink-2">No game in progress</span>
       {/if}
     </div>
 
-    <div class="flex flex-wrap items-center gap-3">
-      <DeckSelector
-        hero={gameStore.decks.hero}
-        villain={gameStore.decks.villain}
-        onHeroChange={(value) => gameStore.setHeroDeck(value)}
-        onVillainChange={(value) => gameStore.setVillainDeck(value)}
-      />
-      <OpponentSelector
-        value={gameStore.opponentChoice}
-        checkpointPath={gameStore.checkpointPath}
-        checkpointDeterministic={gameStore.checkpointDeterministic}
-        onChange={(value) => gameStore.setOpponentChoice(value)}
-        onCheckpointPathChange={(value) => gameStore.setCheckpointPath(value)}
-        onCheckpointDeterministicChange={(value) => gameStore.setCheckpointDeterministic(value)}
-      />
-      <button
-        class="rounded bg-action px-4 py-2 text-sm font-semibold text-ivory transition hover:bg-action-hover"
-        onclick={startNewGame}
-      >
-        New Game
-      </button>
+    <div class="flex flex-wrap items-end gap-x-5 gap-y-3">
+      {#if !gameStore.observation || gameStore.gameOver}
+        <DeckSelector
+          hero={gameStore.decks.hero}
+          villain={gameStore.decks.villain}
+          onHeroChange={(value) => gameStore.setHeroDeck(value)}
+          onVillainChange={(value) => gameStore.setVillainDeck(value)}
+        />
+        <OpponentSelector
+          value={gameStore.opponentChoice}
+          checkpointPath={gameStore.checkpointPath}
+          checkpointDeterministic={gameStore.checkpointDeterministic}
+          onChange={(value) => gameStore.setOpponentChoice(value)}
+          onCheckpointPathChange={(value) => gameStore.setCheckpointPath(value)}
+          onCheckpointDeterministicChange={(value) => gameStore.setCheckpointDeterministic(value)}
+        />
+      {/if}
+      <div class="flex items-center gap-4">
+        <div data-testid="connection-summary" class="flex items-center gap-1.5">
+          <i
+            aria-hidden="true"
+            class={`inline-block h-1.5 w-1.5 rounded-full ${
+              gameStore.connection === 'connected'
+                ? 'bg-forest'
+                : gameStore.connection === 'reconnecting' || gameStore.connection === 'connecting'
+                  ? 'bg-plains'
+                  : 'bg-swamp'
+            }`}
+          ></i>
+          <span
+            data-testid="connection-badge"
+            data-connection-state={gameStore.connection}
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+            aria-label={`Connection status: ${gameStore.connection}`}
+            class="font-mono text-[9px] font-semibold uppercase tracking-[0.18em] text-ink-2"
+          >
+            {gameStore.connection}
+          </span>
+        </div>
+        <button
+          class="rounded bg-action px-4 py-2 text-sm font-semibold text-ivory transition hover:bg-action-hover"
+          onclick={startNewGame}
+        >
+          New Game
+        </button>
+      </div>
     </div>
   </div>
 

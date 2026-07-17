@@ -24,10 +24,10 @@
   }
 </script>
 
-<div class="flex flex-wrap items-center gap-3">
-  <label class="flex items-center gap-2 text-sm text-ink-2">
-    Your deck
-    <span class="flex items-center gap-1.5 rounded border border-line-strong bg-field py-2 pl-3 pr-1">
+<div class="flex flex-wrap items-end gap-3">
+  <label class="flex flex-col gap-1.5">
+    <span class="font-mono text-[9px] font-semibold uppercase tracking-[0.16em] text-ink-2">Your deck</span>
+    <span class="flex items-center gap-1.5 rounded border border-line bg-field py-2 pl-3 pr-1">
       <DeckIdentity name={labelFor(hero)} symbolsOnly />
       <select
         data-testid="deck-select-hero"
@@ -44,9 +44,9 @@
     </span>
   </label>
 
-  <label class="flex items-center gap-2 text-sm text-ink-2">
-    Opponent deck
-    <span class="flex items-center gap-1.5 rounded border border-line-strong bg-field py-2 pl-3 pr-1">
+  <label class="flex flex-col gap-1.5">
+    <span class="font-mono text-[9px] font-semibold uppercase tracking-[0.16em] text-ink-2">Opponent deck</span>
+    <span class="flex items-center gap-1.5 rounded border border-line bg-field py-2 pl-3 pr-1">
       <DeckIdentity name={labelFor(villain)} symbolsOnly />
       <select
         data-testid="deck-select-villain"
