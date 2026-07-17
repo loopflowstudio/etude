@@ -30,14 +30,14 @@
   <div class="mb-2 text-xs uppercase tracking-wide text-slate-400">{label}</div>
   <div class="flex flex-wrap gap-3">
     {#if permanents.length === 0}
-      <div class="rounded border border-dashed border-slate-700 px-3 py-5 text-xs text-slate-400">No permanents</div>
+      <div class="px-1 py-2 text-xs text-slate-400">No permanents</div>
     {/if}
 
     {#each permanents as permanent}
       <Card
         name={permanent.name ?? 'Unknown Permanent'}
-        power={permanent.power}
-        toughness={permanent.toughness}
+        power={permanent.power === 0 && permanent.toughness === 0 ? null : permanent.power}
+        toughness={permanent.power === 0 && permanent.toughness === 0 ? null : permanent.toughness}
         focused={focusedIds.has(permanent.id)}
         clickable={clickableTargets?.has(permanent.id) ?? false}
         tapped={permanent.tapped}
@@ -48,8 +48,9 @@
           onHoverTarget?.(clickableTargets?.has(permanent.id) ? permanent.id : null);
           onPreviewCard?.({
             name: permanent.name,
-            power: permanent.power,
-            toughness: permanent.toughness,
+            power: permanent.power === 0 && permanent.toughness === 0 ? null : permanent.power,
+            toughness:
+              permanent.power === 0 && permanent.toughness === 0 ? null : permanent.toughness,
           });
         }}
         onHoverEnd={() => {

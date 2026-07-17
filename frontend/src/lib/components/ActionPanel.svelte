@@ -132,7 +132,6 @@
           {disabled}
         >
           <div class="font-medium">{action.description}</div>
-          <div aria-hidden="true" class="mt-1 font-mono text-[10px] text-slate-400">{action.type}</div>
         </button>
       {/each}
     {/if}

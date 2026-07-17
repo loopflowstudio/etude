@@ -114,42 +114,38 @@ that looks best.
 
 **Ink discipline.** Text is two inks — `text` and `text-secondary` — plus
 the bronze display tier. The pie speaks through container washes and
-borders (`/10`–`/20` alpha on the family base), never through body text:
-the turn line is ink on a sun wash, log entries are ink on actor-tinted
-grounds, "Hidden" is ink inside a violet frame. The `*-text` companions
-exist for the rare moments a family must speak in text (error banners);
-treat each new use as an exception to justify.
+borders, never through body text: the turn line is ink on a sun wash, log
+entries are ink on actor-tinted grounds. The `*-text` companions exist for
+the rare moments a family must speak in text (error banners); treat each
+new use as an exception to justify.
 
-### CSS variables
+**Washes are tokens, not arithmetic** *(adopted; implementation pending)*.
+Each family ships a `--{family}-wash` override per mode — roughly 10% of
+the base over the light ground and 22–28% over the dark, lifted until the
+wash reads at 3:1 against `bg` as a non-text boundary. Until those tokens
+land, alpha washes in components must be verified in dark mode by eye —
+`/10` over the umber grounds all but disappears.
 
-The implementation lives in `frontend/src/app.css`. Semantic tokens are
-defined on `:root` and overridden wholesale in the
-`prefers-color-scheme: dark` block; the Tailwind `@theme` aliases
+**Hidden information is counted, not drawn.** A hidden zone shows its
+count (the heading already carries it) and renders hidden cards as
+material — the Swamp-violet frame, unlabeled; a caption saying "HIDDEN"
+restates what the frame already says. Unknown information never occupies
+more space on the page than known information.
+
+**Empty states are silent.** An empty zone is one short phrase in
+`text-secondary` on the zone's own ground — no border, no chip, no dashed
+frame. Placeholders never restate what a heading already says.
+
+### Token source of truth
+
+Token values are stated once, in the mode tables above.
+`frontend/src/app.css` is the single source of truth for the
+implementation; this document never restates hex values outside the
+tables. If a table and `app.css` disagree, `app.css` wins and the table is
+the bug. Semantic tokens are defined on `:root` and overridden wholesale
+in the `prefers-color-scheme: dark` block; the Tailwind `@theme` aliases
 (`slate-*`, `blue-*`, `emerald-*`, …) resolve through them, so components
 never name raw colors.
-
-```css
-:root {
-  --mountain-red: #973427;
-  --sepia-bronze: #6d5a35;
-  --ivory: #f8f1e0;
-
-  --bg: #efe6d4;
-  --bg-surface: #f7f0e0;
-  --bg-muted: #e3d7bd;
-  --border: #c9b892;
-  --text: #3a3122;
-  --text-secondary: #665b42;
-  --accent: var(--mountain-red);
-  --accent-text: var(--sepia-bronze);
-
-  --success: #4c8040;
-  --warning: #9f7a1c;
-  --error: var(--mountain-red);
-  --info: #2e6da8;
-  --neutral: #6a5f86;
-}
-```
 
 ### Card art is not themed
 
@@ -157,6 +153,10 @@ Curated-pack art palettes are fixed, dark-toned colors. Overlays on art (name
 plates, power/toughness badges) use literal dark scrims with literal light
 text and must never route through adaptive tokens — in light mode an adaptive
 scrim turns parchment and erases the text. `visual-system.spec.ts` pins this.
+
+Badges state facts or do not exist: power/toughness renders only on
+creatures — a `0/0` on a land is ornament. Name plates stay horizontal at
+every size; a name the player cannot read is a name removed.
 
 ---
 
@@ -173,6 +173,13 @@ Unchanged from the prior contract: three pillars, bundled locally in
 
 Headings render in `--accent-text` (bronze), not the accent red — display
 text reads, it does not shout.
+
+**Notation, not enumeration.** Mono is a register for game notation, never
+a pipe from the engine. Player-facing surfaces write human notation
+("Turn 5 · Precombat Main"); raw engine identifiers
+(`PRECOMBAT_MAIN_STEP`, `PRIORITY_PLAY_LAND`) belong to Replay/Study
+surfaces or a developer toggle, where studying the machine is the point.
+Identical legal actions coalesce with a count ("Play Island ×3").
 
 ### Font weights
 
@@ -222,15 +229,28 @@ JetBrains Mono: 400 (400–700 alias to Regular)
 |-------|-------|
 | Base | 0 |
 | Dropdown | 100 |
+| Scrim | 190 |
 | Modal | 200 |
 | Toast | 300 |
 | Tooltip | 400 |
+
+The scrim is a full-viewport layer under every modal:
+`color-mix(in srgb, var(--text) 45%, transparent)`. Page content is never
+dimmed by reducing its own opacity.
 
 ## Animation
 
 Transitions run 100ms ease-out on interactive elements. All motion collapses
 under `prefers-reduced-motion: reduce`; presentation beats also expose
 `data-reduced-motion` for tests.
+
+## Interaction States
+
+Every interactive element defines its states from tokens: rest, hover
+(`--accent-hover`), pressed (accent darkened ~8%), focus (the global
+Mountain-red ring), and disabled — 40% ink on `field` with borders
+retained, never whole-panel opacity. Loading and reconnecting states speak
+Plains.
 
 ---
 
@@ -268,6 +288,8 @@ non-text). The full matrix lives in the palette validator used during design.
 - Icon-only and state-bearing controls carry accessible names; card state
   (tapped, summoning sick, damage) is in the card's `aria-label`.
 - Status is never color-only: chips carry text, logs carry actor names.
+- The game log records game vocabulary only — actor and action. UI
+  affordances (key hints, control labels) never enter the record.
 - Scrollable regions are keyboard-reachable; the replay scrubber is labeled.
 
 ---

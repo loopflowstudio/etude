@@ -62,6 +62,24 @@
     event.preventDefault();
     (resultAction ?? resultDialog)?.focus();
   }
+
+  // Notation, not enumeration: the turn line writes human notation; raw
+  // engine identifiers stay in data attributes for Study surfaces.
+  function titleWords(value: string): string {
+    return value
+      .toLowerCase()
+      .split('_')
+      .filter(Boolean)
+      .map((word) => word[0].toUpperCase() + word.slice(1))
+      .join(' ');
+  }
+
+  const turnLine = $derived.by(() => {
+    const phase = titleWords(observation.turn.phase);
+    const step = titleWords(observation.turn.step.replace(/_STEP$/, ''));
+    const stage = step === phase ? phase : `${phase} · ${step}`;
+    return `Turn ${observation.turn.turn_number} · ${stage}`;
+  });
 </script>
 
 <section data-testid="game-board" class="relative space-y-4 rounded border border-slate-700 bg-slate-800 p-4">
@@ -69,8 +87,12 @@
     <PresentationStage player={presentationPlayer} />
   {/if}
 
-  <div class="rounded border border-amber-600/40 bg-amber-600/15 px-3 py-2 text-center font-mono text-xs font-semibold text-slate-200">
-    Turn {observation.turn.turn_number} · {observation.turn.phase} · {observation.turn.step}
+  <div
+    data-phase={observation.turn.phase}
+    data-step={observation.turn.step}
+    class="rounded border border-amber-600/40 bg-amber-600/15 px-3 py-2 text-center font-mono text-xs font-semibold text-slate-200"
+  >
+    {turnLine}
   </div>
 
   <PlayerArea
