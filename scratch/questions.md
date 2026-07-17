@@ -31,6 +31,10 @@
   The new wave operating principle (“lead with building”) and INT-4's explicit
   student/arena deliverable make integrity the only pre-student hard stop.
 - The terminal 100-game Teacher-0 pilot checkpoints are the incumbent controls.
+  Their registered hashes remain in checked-in evidence, but no `.pt` bytes are
+  present in this worktree; the production profile therefore cannot execute
+  those control cells until the exact bytes are supplied. The engineering
+  smoke omits them explicitly and makes no admission claim.
   The stronger 512-game snapshot checkpoint bytes named in checked-in evidence
   are absent, and the 3,000-game recovery manifest remains `running`; neither
   will be reconstructed or represented as terminal evidence.
