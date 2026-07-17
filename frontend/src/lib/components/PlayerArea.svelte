@@ -99,6 +99,7 @@
             power={card.types.is_creature ? card.power : null}
             toughness={card.types.is_creature ? card.toughness : null}
             focused={focusedIds.has(card.id)}
+            spent
             onHoverStart={() => preview(card)}
             onHoverEnd={() => onPreviewCard?.(null)}
           />
@@ -118,6 +119,7 @@
             power={card.types.is_creature ? card.power : null}
             toughness={card.types.is_creature ? card.toughness : null}
             focused={focusedIds.has(card.id)}
+            spent
             onHoverStart={() => preview(card)}
             onHoverEnd={() => onPreviewCard?.(null)}
           />

@@ -1,4 +1,6 @@
 <script lang="ts">
+  // Hidden cards are material, not labels: a Swamp-violet back with a
+  // blind lozenge. Like card art, the back is a fixed world in both modes.
   interface Props {
     focused?: boolean;
     clickable?: boolean;
@@ -9,8 +11,24 @@
 </script>
 
 <div
-  class={`aspect-[5/7] w-20 rounded-lg border bg-gradient-to-br from-slate-700 via-slate-800 to-slate-950 p-2 text-center shadow ${focused ? 'border-blue-400 ring-1 ring-blue-400/70' : 'border-slate-600'} ${clickable ? 'cursor-pointer hover:border-amber-300' : ''} ${className}`}
+  class={`back aspect-[5/7] w-20 rounded-lg p-1 shadow ${focused ? 'ring-1 ring-action' : ''} ${clickable ? 'cursor-pointer' : ''} ${className}`}
 >
-  <!-- Hidden cards are material, not labels: the Swamp-violet frame says it. -->
-  <div class="h-full rounded-md border border-purple-500/40 bg-purple-900/15"></div>
+  <div class="grid h-full place-items-center rounded-md">
+    <i class="lozenge" aria-hidden="true"></i>
+  </div>
 </div>
+
+<style>
+  .back {
+    border: 1px solid color-mix(in srgb, var(--neutral) 62%, var(--border));
+    background:
+      radial-gradient(circle at 50% 42%, rgb(154 142 190 / 0.22) 0, transparent 46%),
+      linear-gradient(152deg, #2a2535 0%, #3d3652 56%, #262130 100%);
+  }
+  .lozenge {
+    width: 12px;
+    height: 12px;
+    transform: rotate(45deg);
+    border: 1px solid rgb(196 188 222 / 0.55);
+  }
+</style>

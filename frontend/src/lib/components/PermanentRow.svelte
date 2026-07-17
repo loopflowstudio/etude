@@ -42,6 +42,7 @@
         clickable={clickableTargets?.has(permanent.id) ?? false}
         tapped={permanent.tapped}
         dimmed={permanent.summoning_sick}
+        counters={permanent.plus1_counters}
         damage={permanent.damage}
         onSelect={() => onSelectTarget?.(permanent.id)}
         onHoverStart={() => {
