@@ -34,6 +34,12 @@
   const widthClass = $derived(size === 'normal' ? 'w-40' : 'w-20');
   const imageClass = 'h-full w-full rounded-md object-cover';
 
+  // A tapped card rotates in place, but its flex slot stays portrait-sized,
+  // so without compensation the rotated card overhangs (height - width) / 2
+  // on each side and shingles under its neighbours. The margin restores the
+  // rotated footprint: 16px for w-20/h-28 cards, 32px for w-40/h-56.
+  const tappedClass = $derived(size === 'normal' ? 'rotate-90 mx-8' : 'rotate-90 mx-4');
+
   // Tapped, summoning-sick, and damage states are shown by rotation, opacity,
   // and badge color; the accessible name must carry them too.
   const stateNotes = $derived(
@@ -53,7 +59,7 @@
   aria-label={accessibleName}
   aria-disabled={!clickable}
   tabindex={clickable ? 0 : -1}
-  class={`group relative aspect-[5/7] ${widthClass} overflow-visible rounded-lg border bg-slate-900 text-left shadow transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-400 ${focused ? 'border-blue-400 ring-1 ring-blue-400/70' : 'border-slate-700'} ${clickable ? 'cursor-pointer hover:-translate-y-1 hover:border-amber-300' : 'cursor-default'} ${tapped ? 'rotate-90' : ''} ${dimmed ? 'opacity-70' : ''}`}
+  class={`group relative aspect-[5/7] ${widthClass} overflow-visible rounded-lg border bg-slate-900 text-left shadow transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-400 ${focused ? 'border-blue-400 ring-1 ring-blue-400/70' : 'border-slate-700'} ${clickable ? 'cursor-pointer hover:-translate-y-1 hover:border-amber-300' : 'cursor-default'} ${tapped ? tappedClass : ''} ${dimmed ? 'opacity-70' : ''}`}
   onclick={() => {
     if (clickable) {
       onSelect?.();
