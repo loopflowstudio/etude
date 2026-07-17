@@ -121,7 +121,7 @@
         {@render rubric(`Hand (${hiddenHandCount})`)}
         <div class="flex flex-wrap items-end gap-2">
           {#if hiddenHandCount === 0}
-            <div class="type-caption px-1 py-3 text-ink-3">Empty hand</div>
+            <div class="type-caption px-1 py-1 text-ink-3">Empty hand</div>
           {/if}
           {#each Array(hiddenHandCount) as _, index}
             <div role="img" aria-label={`Hidden card ${index + 1}`}>
@@ -157,7 +157,7 @@
         {@render rubric(`Hand (${player.hand.length})`)}
         <div class="flex flex-wrap items-end gap-2">
           {#if player.hand.length === 0}
-            <div class="type-caption px-1 py-3 text-ink-3">Empty hand</div>
+            <div class="type-caption px-1 py-1 text-ink-3">Empty hand</div>
           {/if}
           {#each player.hand as card}
             <Card
@@ -185,7 +185,7 @@
       {@render rubric(`Graveyard (${player.graveyard.length})`)}
       <div class="flex flex-wrap items-end gap-2">
         {#if player.graveyard.length === 0}
-          <div class="type-caption px-1 py-3 text-ink-3">Empty graveyard</div>
+          <div class="type-caption px-1 py-1 text-ink-3">Empty graveyard</div>
         {/if}
         {#each player.graveyard as card}
           <Card

@@ -39,9 +39,9 @@
       #221a10"
   >
     <div class="mx-auto flex w-full max-w-[1600px] items-center justify-between px-4 py-3">
-      <div class="leading-none">
+      <div class="flex items-baseline gap-3">
         <div data-testid="brand-name" class="type-brand text-[#f8f1e0]">Etude Fantasia</div>
-        <div class="type-rubric mt-1 text-[#f8f1e0]/65">Play · replay · study</div>
+        <div class="type-rubric hidden text-[#f8f1e0]/65 sm:block">Play · replay · study</div>
       </div>
       <nav class="flex items-center gap-2">
         {#each NAV as item}

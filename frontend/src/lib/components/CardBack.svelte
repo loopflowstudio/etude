@@ -1,6 +1,7 @@
 <script lang="ts">
-  // Hidden cards are material, not labels: a Swamp-violet back with a
-  // blind lozenge. Like card art, the back is a fixed world in both modes.
+  // Hidden cards wear the classic card back (fetched once — see
+  // scripts/fetch-card-art.mjs); when the file is absent the violet
+  // material stands in. Like all plates, the back is a fixed world.
   interface Props {
     focused?: boolean;
     clickable?: boolean;
@@ -11,25 +12,16 @@
 </script>
 
 <div
-  class={`back aspect-[5/7] w-20 rounded-lg p-1 shadow ${focused ? 'ring-1 ring-action' : ''} ${clickable ? 'cursor-pointer' : ''} ${className}`}
->
-  <div class="grid h-full place-items-center rounded-md">
-    <i class="lozenge" aria-hidden="true"></i>
-  </div>
-</div>
+  class={`back aspect-[5/7] w-20 overflow-hidden rounded-lg shadow ${focused ? 'ring-1 ring-action' : ''} ${clickable ? 'cursor-pointer' : ''} ${className}`}
+></div>
 
 <style>
   .back {
     /* A fixed world keeps a fixed frame: no adaptive tokens inside. */
-    border: 1px solid #4c4260;
+    border: 1px solid rgb(6 9 15 / 0.55);
     background:
+      url('/card-art/card-back.jpg') center / cover no-repeat,
       radial-gradient(circle at 50% 42%, rgb(154 142 190 / 0.22) 0, transparent 46%),
       linear-gradient(152deg, #2a2535 0%, #3d3652 56%, #262130 100%);
-  }
-  .lozenge {
-    width: 12px;
-    height: 12px;
-    transform: rotate(45deg);
-    border: 1px solid rgb(196 188 222 / 0.55);
   }
 </style>

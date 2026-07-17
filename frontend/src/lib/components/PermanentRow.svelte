@@ -26,9 +26,9 @@
   }: Props = $props();
 </script>
 
-<div class="flex min-h-16 flex-wrap items-end gap-2">
+<div class="flex flex-wrap items-end gap-2">
   {#if permanents.length === 0}
-    <div class="type-caption px-1 py-3 text-ink-3">No permanents</div>
+    <div class="type-caption px-1 py-1 text-ink-3">No permanents</div>
   {/if}
 
   {#each permanents as permanent}

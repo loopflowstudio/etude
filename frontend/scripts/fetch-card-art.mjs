@@ -78,6 +78,24 @@ let fetched = 0;
 let cached = 0;
 let missing = 0;
 
+// The classic Deckmaster card back, from Scryfall's canonical back image.
+const BACK_URI = 'https://backs.scryfall.io/normal/0/a/0aeebaf5-8c7d-4636-9e82-8c27447861f7.jpg';
+const backFile = path.join(outDir, 'card-back.jpg');
+if (await exists(backFile)) {
+  cached += 1;
+} else {
+  await sleep(DELAY_MS);
+  const back = await fetch(BACK_URI, { headers: { 'User-Agent': USER_AGENT } });
+  if (back.ok) {
+    await writeFile(backFile, Buffer.from(await back.arrayBuffer()));
+    console.log('  ✓ card back (Deckmaster)');
+    fetched += 1;
+  } else {
+    console.log(`  – card back: fetch failed (${back.status}); violet material stays`);
+    missing += 1;
+  }
+}
+
 for (const { name, kind } of identities) {
   const file = path.join(outDir, `${artSlug(name)}.jpg`);
   if (await exists(file)) {
