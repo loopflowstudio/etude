@@ -22,15 +22,15 @@
   const sides: StopSide[] = ['my', 'opponent'];
 </script>
 
-<details class="rounded border border-line bg-panel" data-testid="stops-panel">
-  <summary class="cursor-pointer select-none px-4 py-3 text-sm font-semibold uppercase tracking-wide text-ink-2">
+<details class="min-w-0" data-testid="stops-panel">
+  <summary class="cursor-pointer select-none py-1 font-serif text-base font-semibold text-display">
     Stops
     <span class="ml-2 rounded bg-panel-muted px-2 py-0.5 text-xs font-normal normal-case text-ink-2">
       {stops.auto_pass ? `${activeCount} set` : 'off'}
     </span>
   </summary>
 
-  <div class="space-y-3 border-t border-line p-4">
+  <div class="space-y-3 pt-3">
     <label class="flex items-center gap-2 text-sm text-ink-2">
       <input
         type="checkbox"

@@ -59,17 +59,17 @@
   data-action-space-kind={actionSpaceKind}
   aria-labelledby="action-panel-heading"
   aria-describedby={decisionPrompt ? 'decision-prompt' : undefined}
-  class="rounded border border-panel-muted bg-panel p-4"
+  class="min-w-0"
 >
-  <div class="mb-3 flex items-center justify-between gap-3">
-    <div class="flex items-center gap-2">
-      <h2 id="action-panel-heading" class="text-base font-semibold text-display">Actions</h2>
+  <div class="mb-2 flex items-baseline justify-between gap-3">
+    <div class="flex items-baseline gap-2.5">
+      <h2 id="action-panel-heading" class="font-serif text-base font-semibold text-display">Actions</h2>
       {#if disabled}
-        <span role="status" aria-live="polite" aria-atomic="true" class="rounded bg-swamp/20 px-2 py-0.5 text-xs font-semibold text-ink-2">Game over</span>
+        <span role="status" aria-live="polite" aria-atomic="true" class="rounded bg-swamp/20 px-2 py-0.5 text-[10px] font-semibold text-ink-2">Game over</span>
       {:else if fastForwarding}
-        <span role="status" aria-live="polite" aria-atomic="true" data-testid="auto-passing" class="animate-pulse rounded bg-island/20 px-2 py-0.5 text-xs font-semibold text-ink">Auto-passing…</span>
+        <span role="status" aria-live="polite" aria-atomic="true" data-testid="auto-passing" class="animate-pulse rounded bg-island/20 px-2 py-0.5 text-[10px] font-semibold text-ink">Auto-passing…</span>
       {:else if actions.length > 0}
-        <span role="status" aria-live="polite" aria-atomic="true" class="rounded bg-forest/20 px-2 py-0.5 text-xs font-semibold text-ink">Your move</span>
+        <span role="status" aria-live="polite" aria-atomic="true" class="whitespace-nowrap font-mono text-[9px] font-semibold uppercase tracking-[0.2em] text-mountain-ink">Your move</span>
       {/if}
     </div>
     <div class="flex items-center gap-3">
@@ -80,7 +80,7 @@
       {/if}
       <button
         data-testid="pass-turn"
-        class="rounded border border-line-strong bg-field px-2 py-1 text-xs font-semibold text-ink-2 transition hover:border-action hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+        class="whitespace-nowrap rounded border border-line-strong bg-field px-2 py-1 text-xs font-semibold text-ink-2 transition hover:border-action hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
         disabled={!canPassTurn || fastForwarding}
         onclick={() => onPassTurn?.()}
         title="Auto-pass every priority window until the turn ends"
@@ -95,7 +95,7 @@
       id="decision-prompt"
       data-testid="decision-prompt"
       data-kind={actionSpaceKind}
-      class="mb-3 rounded border border-island/40 bg-island/20 px-3 py-2 text-sm text-ink"
+      class="mb-3 border-l-2 border-action py-0.5 pl-3 font-serif text-sm italic leading-relaxed text-ink"
     >
       {decisionPrompt}
     </p>

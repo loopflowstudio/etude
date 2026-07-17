@@ -89,7 +89,8 @@
     if (!sendPassTurn()) {
       return;
     }
-    gameStore.appendHeroAction('Pass turn (F6)');
+    // The log records game vocabulary, not affordances: no key hints.
+    gameStore.appendHeroAction('Pass turn');
   }
 
   function handleKeydown(event: KeyboardEvent): void {
@@ -146,11 +147,21 @@
   }
 </script>
 
-<main class="mx-auto w-full max-w-[1600px] p-4" data-update-seq={gameStore.updateSeq}>
+<main class="mx-auto w-full max-w-[1400px] px-4 py-6" data-update-seq={gameStore.updateSeq}>
   <h1 class="sr-only">Play</h1>
+
+  {#if gameStore.errorMessage}
+    <section role="alert" aria-atomic="true" class="mb-4 rounded border border-mountain/50 bg-mountain/20 px-4 py-3 text-sm text-mountain-ink">
+      {gameStore.errorMessage}
+    </section>
+  {/if}
+
+  <!-- The sheet: one continuous leaf. Regions are ruled, never boxed. -->
+  <div class="overflow-hidden rounded-sm border border-line bg-panel shadow-[0_1px_2px_rgb(58_40_20/0.1),0_22px_56px_rgb(58_40_20/0.14)]">
+    <div class="px-10 pb-10 pt-6 max-md:px-5 max-md:pb-6">
   <div
     data-testid="game-header"
-    class="mb-4 flex flex-wrap items-center justify-between gap-3 rounded border border-line bg-panel px-4 py-3"
+    class="flex flex-wrap items-center justify-between gap-3 border-b border-line pb-4"
   >
     <div data-testid="connection-summary" class="flex items-center gap-3">
       <span class="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-2">Connection</span>
@@ -207,14 +218,8 @@
     </div>
   </div>
 
-  {#if gameStore.errorMessage}
-    <section role="alert" aria-atomic="true" class="mb-4 rounded border border-mountain/50 bg-mountain/20 px-4 py-3 text-sm text-mountain-ink">
-      {gameStore.errorMessage}
-    </section>
-  {/if}
-
   {#if gameStore.observation}
-    <div class="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_320px_320px]">
+    <div class="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_300px]">
       <GameBoard
         observation={gameStore.observation}
         focusedIds={gameStore.focusIds}
@@ -222,12 +227,17 @@
         onSelectTarget={handleBoardTargetSelect}
         onHoverTarget={handleBoardTargetHover}
         winner={gameStore.winner}
+        deckNames={gameStore.deckNames}
         overlayActionLabel="Play Again"
         onOverlayAction={startNewGame}
         {presentationPlayer}
       />
 
-      <div class="flex flex-col gap-4">
+      <!-- The margin column: actions, stops, and the log as annotations
+           beside the score, behind a single vertical rule. -->
+      <div
+        class="flex min-w-0 flex-col gap-6 pt-4 max-xl:mt-2 max-xl:border-t max-xl:border-line xl:ml-8 xl:border-l xl:border-line xl:pl-8"
+      >
         <ActionPanel
           actions={filteredActions}
           actionSpaceKind={gameStore.actionSpaceKind}
@@ -247,6 +257,32 @@
           }}
         />
 
+        <div class="border-t border-line pt-4">
+          <StopsPanel
+            stops={gameStore.stops}
+            onToggleStop={handleToggleStop}
+            onStopOnStackChange={handleStopOnStackChange}
+            onAutoPassChange={handleAutoPassChange}
+            onReset={handleResetStops}
+          />
+        </div>
+
+        <div class="border-t border-line pt-4">
+          <GameLog entries={gameStore.actionLog} />
+        </div>
+      </div>
+    </div>
+  {:else}
+    <div class="mx-auto max-w-xl py-12 text-center">
+      <p class="mb-1 font-serif text-lg italic text-ink-2">The table is set.</p>
+      <p class="mb-5 text-sm text-ink-2">Start a game to begin.</p>
+      <button
+        class="rounded bg-action px-4 py-2 text-sm font-semibold text-ivory transition hover:bg-action-hover"
+        onclick={startNewGame}
+      >
+        New Game
+      </button>
+      <div class="mx-auto mt-10 max-w-sm border-t border-line pt-4 text-left">
         <StopsPanel
           stops={gameStore.stops}
           onToggleStop={handleToggleStop}
@@ -255,30 +291,10 @@
           onReset={handleResetStops}
         />
       </div>
-
-      <GameLog entries={gameStore.actionLog} />
-    </div>
-  {:else}
-    <div class="mx-auto flex max-w-xl flex-col gap-4">
-      <section class="rounded border border-line bg-panel p-10 text-center text-ink-2">
-        <p class="mb-4 text-lg">Start a game to begin.</p>
-        <button
-          class="rounded bg-action px-4 py-2 text-sm font-semibold text-ivory transition hover:bg-action-hover"
-          onclick={startNewGame}
-        >
-          New Game
-        </button>
-      </section>
-
-      <StopsPanel
-        stops={gameStore.stops}
-        onToggleStop={handleToggleStop}
-        onStopOnStackChange={handleStopOnStackChange}
-        onAutoPassChange={handleAutoPassChange}
-        onReset={handleResetStops}
-      />
     </div>
   {/if}
+    </div>
+  </div>
 </main>
 
 <svelte:window onkeydown={handleKeydown} />

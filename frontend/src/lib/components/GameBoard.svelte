@@ -5,10 +5,12 @@
   import type { PresentationPlayer } from '$lib/presentation.svelte';
 
   import HoverPreview from './HoverPreview.svelte';
-  import PermanentRow from './PermanentRow.svelte';
   import PlayerArea from './PlayerArea.svelte';
   import PresentationStage from './PresentationStage.svelte';
 
+  // The score column of the sheet: the opponent's region, the stack — the
+  // one thing on the page allowed to burn red — and the hero's region,
+  // separated by rules, never boxes.
   interface Props {
     observation: Observation;
     focusedIds?: Set<number>;
@@ -16,6 +18,7 @@
     onSelectTarget?: (objectId: number) => void;
     onHoverTarget?: (objectId: number | null) => void;
     winner?: number | null;
+    deckNames?: { hero: string; villain: string } | null;
     overlayActionLabel?: string | null;
     onOverlayAction?: () => void;
     presentationPlayer?: PresentationPlayer;
@@ -28,6 +31,7 @@
     onSelectTarget = undefined,
     onHoverTarget = undefined,
     winner = undefined,
+    deckNames = null,
     overlayActionLabel = null,
     onOverlayAction = undefined,
     presentationPlayer = undefined,
@@ -82,22 +86,26 @@
   });
 </script>
 
-<section data-testid="game-board" class="relative space-y-4 rounded border border-slate-700 bg-slate-800 p-4">
+<section data-testid="game-board" class="relative min-w-0">
   {#if presentationPlayer}
     <PresentationStage player={presentationPlayer} />
   {/if}
 
+  <!-- The turn, set as a tempo marking. -->
   <div
     data-phase={observation.turn.phase}
     data-step={observation.turn.step}
-    class="rounded border border-amber-600/40 bg-amber-600/15 px-3 py-2 text-center font-mono text-xs font-semibold text-slate-200"
+    class="tempo flex items-center gap-4 pt-1"
   >
-    {turnLine}
+    <span class="font-mono text-[10px] font-semibold uppercase tracking-[0.2em] text-ink-2">
+      {turnLine}
+    </span>
   </div>
 
   <PlayerArea
     label="Opponent"
     player={observation.opponent}
+    deckName={deckNames?.villain ?? null}
     opponent={true}
     {focusedIds}
     {clickableTargets}
@@ -106,67 +114,55 @@
     onPreviewCard={setPreview}
   />
 
-  <section class="rounded border border-emerald-600/30 bg-emerald-600/10 p-3">
-    <h3 class="mb-3 text-sm font-semibold text-accent-text">Battlefield</h3>
-    <div class="space-y-4">
-      <PermanentRow
-        label="Opponent"
-        permanents={observation.opponent.battlefield}
-        {focusedIds}
-        {clickableTargets}
-        {onSelectTarget}
-        {onHoverTarget}
-        onPreviewCard={setPreview}
-      />
-      <PermanentRow
-        label="Hero"
-        permanents={observation.agent.battlefield}
-        {focusedIds}
-        {clickableTargets}
-        {onSelectTarget}
-        {onHoverTarget}
-        onPreviewCard={setPreview}
-      />
-    </div>
-  </section>
-
-  <PlayerArea
-    label="Hero"
-    player={observation.agent}
-    {focusedIds}
-    {clickableTargets}
-    {onSelectTarget}
-    {onHoverTarget}
-    onPreviewCard={setPreview}
-  />
-
   {#if stackCards.length > 0}
-    <section class="rounded border border-indigo-500/40 bg-indigo-900/20 p-3">
-      <h3 class="mb-2 text-xs uppercase tracking-wide text-slate-400">Stack</h3>
-      <div class="flex flex-wrap gap-2 text-xs text-slate-100">
-        {#each stackCards as card}
-          <div
-            role="img"
-            aria-label={card.name}
-            class={`rounded border px-3 py-2 text-left ${focusedIds.has(card.id) ? 'border-blue-400 bg-slate-800' : 'border-indigo-400/50 bg-slate-900/80'}`}
-            onmouseenter={() => {
-              setPreview({
-                name: card.name,
-                power: card.types.is_creature ? card.power : null,
-                toughness: card.types.is_creature ? card.toughness : null,
-              });
-            }}
-            onmouseleave={() => setPreview(null)}
-          >
-            {card.name}
-          </div>
-        {/each}
+    <section class="border-t border-line" aria-label="The stack">
+      <div class="stack-staff">
+        <div class="pt-2 text-right font-mono text-[9px] font-semibold uppercase tracking-[0.16em] text-mountain-ink">
+          The Stack
+        </div>
+        <div class="flex flex-wrap items-end gap-2 py-2">
+          {#each stackCards as card}
+            <div
+              role="img"
+              aria-label={card.name}
+              class={`relative ${focusedIds.has(card.id) ? 'stack-hit' : ''}`}
+              onmouseenter={() => {
+                setPreview({
+                  name: card.name,
+                  power: card.types.is_creature ? card.power : null,
+                  toughness: card.types.is_creature ? card.toughness : null,
+                });
+              }}
+              onmouseleave={() => setPreview(null)}
+            >
+              <span
+                class="inline-block rounded border border-mountain/50 bg-mountain/10 px-3 py-2 font-serif text-sm italic text-ink"
+              >
+                <b class="not-italic font-semibold text-mountain-ink">{card.name}</b>
+              </span>
+            </div>
+          {/each}
+        </div>
       </div>
     </section>
   {/if}
 
+  <div class="border-t border-line">
+    <PlayerArea
+      label="Hero"
+      player={observation.agent}
+      deckName={deckNames?.hero ?? null}
+      {focusedIds}
+      {clickableTargets}
+      {onSelectTarget}
+      {onHoverTarget}
+      onPreviewCard={setPreview}
+    />
+  </div>
+
   {#if observation.game_over}
-    <div class="absolute inset-0 grid place-items-center rounded bg-slate-950/80">
+    <!-- The scrim layer: content is never dimmed by its own opacity. -->
+    <div class="absolute inset-0 z-[190] grid place-items-center rounded bg-[color-mix(in_srgb,var(--text)_45%,transparent)]">
       <div
         bind:this={resultDialog}
         role="alertdialog"
@@ -176,10 +172,10 @@
         tabindex="-1"
         data-testid="game-result-dialog"
         onkeydown={keepResultFocus}
-        class="rounded border border-slate-600 bg-slate-900 p-6 text-center shadow-xl"
+        class="z-[200] rounded-lg border border-line bg-panel p-6 text-center shadow-xl"
       >
-        <h2 id="game-over-heading" class="mb-2 text-2xl font-bold">Game Over</h2>
-        <p id="game-result" data-testid="game-result" class="mb-4 text-slate-300">
+        <h2 id="game-over-heading" class="mb-2 font-serif text-2xl font-semibold text-display">Game Over</h2>
+        <p id="game-result" data-testid="game-result" class="mb-4 text-ink-2">
           {#if winner === null}
             Draw
           {:else if winner === 0}
@@ -192,7 +188,7 @@
           <button
             bind:this={resultAction}
             data-testid="game-result-action"
-            class="rounded bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-500"
+            class="rounded bg-action px-4 py-2 text-sm font-semibold text-ivory transition hover:bg-action-hover"
             onclick={() => onOverlayAction?.()}
           >
             {overlayActionLabel}
@@ -204,3 +200,38 @@
 </section>
 
 <HoverPreview name={previewName} power={previewPower} toughness={previewToughness} />
+
+<style>
+  .tempo::before,
+  .tempo::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+  }
+  .tempo span {
+    white-space: nowrap;
+  }
+
+  .stack-staff {
+    display: grid;
+    grid-template-columns: 88px minmax(0, 1fr);
+    column-gap: 18px;
+    align-items: end;
+    padding: 6px 0;
+  }
+  @media (max-width: 640px) {
+    .stack-staff {
+      grid-template-columns: 1fr;
+    }
+    .stack-staff > :first-child {
+      padding-top: 6px;
+      text-align: left;
+    }
+  }
+  .stack-hit {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 6px;
+  }
+</style>
