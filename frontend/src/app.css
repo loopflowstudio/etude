@@ -205,6 +205,115 @@
   --color-swamp-wash: var(--neutral-wash);
 }
 
+/* ————————————————————————————————————————————————
+   The voices: one text style per role, defined once. Components use these
+   and never set font sizes, families, or tracking inline. Mono is the
+   notation register — rubrics, tempo lines, frame counters — and nothing
+   else. The annotation voice — serif italic — belongs to prompts and
+   marginalia alone.
+   ———————————————————————————————————————————————— */
+@utility type-display {
+  font-family: var(--font-serif);
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: -0.01em;
+}
+@utility type-title {
+  font-family: var(--font-serif);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+@utility type-label {
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: 0.01em;
+}
+@utility type-caption {
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
+}
+@utility type-rubric {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1.4;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+@utility type-annotation {
+  font-family: var(--font-serif);
+  font-style: italic;
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+
+/* ————————————————————————————————————————————————
+   Buttons: three roles, two sizes, one shape. Nothing else is a button.
+   ———————————————————————————————————————————————— */
+@utility btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 14px;
+  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  user-select: none;
+  cursor: pointer;
+  transition-duration: 100ms;
+  transition-property: background-color, border-color, color;
+  transition-timing-function: ease-out;
+}
+@utility btn-sm {
+  height: 26px;
+  padding: 0 10px;
+  font-size: 11px;
+}
+@utility btn-primary {
+  background: var(--accent);
+  color: var(--ivory);
+  &:hover {
+    background: var(--accent-hover);
+  }
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+}
+@utility btn-secondary {
+  background: var(--bg-field);
+  border-color: var(--border);
+  color: var(--text);
+  &:hover {
+    border-color: var(--accent);
+  }
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+    border-color: var(--border);
+  }
+}
+@utility btn-ghost {
+  background: transparent;
+  color: var(--text-secondary);
+  &:hover {
+    background: var(--bg-field);
+    color: var(--text);
+  }
+}
+
 html {
   min-width: 320px;
   min-height: 100%;
@@ -246,9 +355,9 @@ textarea {
   font: inherit;
 }
 
-button,
+button:where(:not(.btn-sm)),
 select,
-input:not([type='checkbox']):not([type='radio']) {
+input:where(:not([type='checkbox'])):where(:not([type='radio'])) {
   min-height: 32px;
 }
 

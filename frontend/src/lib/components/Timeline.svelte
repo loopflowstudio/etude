@@ -31,20 +31,20 @@
 <section class="min-w-0">
   <div class="flex flex-wrap items-center gap-2">
     <button
-      class="grid h-7 w-7 place-items-center rounded border border-line bg-field text-sm text-ink-2 hover:border-ink-2 hover:text-ink"
+      class="btn btn-secondary btn-sm w-7 px-0"
       aria-label="Previous frame"
       onclick={() => onPrevious?.()}
     >
       ‹
     </button>
     <button
-      class="rounded border border-line bg-field px-3 py-1 text-xs font-semibold text-ink hover:border-action"
+      class="btn btn-secondary btn-sm"
       onclick={() => onTogglePlaying?.()}
     >
       {playing ? 'Pause' : 'Play'}
     </button>
     <button
-      class="grid h-7 w-7 place-items-center rounded border border-line bg-field text-sm text-ink-2 hover:border-ink-2 hover:text-ink"
+      class="btn btn-secondary btn-sm w-7 px-0"
       aria-label="Next frame"
       onclick={() => onNext?.()}
     >
@@ -62,11 +62,11 @@
       oninput={(event) => onScrub?.(Number((event.currentTarget as HTMLInputElement).value))}
     />
 
-    <span class="whitespace-nowrap font-mono text-[10px] tabular-nums text-ink-2">
+    <span class="type-rubric whitespace-nowrap tabular-nums text-ink-2">
       Frame {totalFrames === 0 ? 0 : currentFrame + 1} / {totalFrames}
     </span>
 
-    <label class="flex items-center gap-1.5 text-xs text-ink-2">
+    <label class="type-label flex items-center gap-1.5 text-ink-2">
       Speed
       <select
         class="min-h-0 rounded border border-line bg-field px-1.5 py-0.5 text-xs"
@@ -82,12 +82,12 @@
 
   <div class="mt-2 text-sm text-ink-2">
     {#if actionDescription}
-      <span class="font-mono text-[9px] font-semibold uppercase tracking-[0.14em]">
+      <span class="type-rubric">
         {actor === 'villain' ? 'Villain' : actor === 'hero' ? 'Hero' : 'State'}
       </span>
-      <span class="font-serif italic text-ink"> {actionDescription}</span>
+      <span class="type-annotation text-ink"> {actionDescription}</span>
     {:else}
-      <span class="font-serif italic">Initial game state</span>
+      <span class="type-annotation">Initial game state</span>
     {/if}
   </div>
 </section>

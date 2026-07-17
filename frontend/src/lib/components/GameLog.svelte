@@ -30,7 +30,7 @@
 </script>
 
 <section aria-label="Game log">
-  <h2 class="mb-1 font-serif text-base font-semibold text-display">Game Log</h2>
+  <h2 class="type-title mb-1 text-display">Game Log</h2>
 
   <!-- svelte-ignore a11y_no_noninteractive_tabindex (axe requires keyboard access to scrollable regions) -->
   <div
@@ -40,7 +40,7 @@
     tabindex="0"
   >
     {#if entries.length === 0}
-      <p class="py-2 text-sm text-ink-2">Actions will appear here.</p>
+      <p class="type-caption py-2 text-ink-2">Actions will appear here.</p>
     {:else}
       <ol class="m-0 list-none p-0">
         {#each entries as entry}
@@ -48,7 +48,7 @@
             data-testid="log-entry"
             class={`entry grid grid-cols-[52px_minmax(0,1fr)] gap-x-2.5 py-1.5 text-sm leading-snug ${entry.id === activeEntryId ? 'active' : ''}`}
           >
-            <span class="pt-0.5 font-mono text-[8.5px] font-semibold uppercase tracking-[0.14em] text-ink-2">
+            <span class="type-rubric pt-0.5 text-ink-2">
               {actorLabel(entry.actor)}
             </span>
             <span>{lineText(entry)}</span>

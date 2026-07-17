@@ -63,24 +63,24 @@
 >
   <div class="mb-2 flex items-baseline justify-between gap-3">
     <div class="flex items-baseline gap-2.5">
-      <h2 id="action-panel-heading" class="font-serif text-base font-semibold text-display">Actions</h2>
+      <h2 id="action-panel-heading" class="type-title text-display">Actions</h2>
       {#if disabled}
-        <span role="status" aria-live="polite" aria-atomic="true" class="rounded bg-swamp/20 px-2 py-0.5 text-[10px] font-semibold text-ink-2">Game over</span>
+        <span role="status" aria-live="polite" aria-atomic="true" class="type-label rounded-full bg-swamp/20 px-2 py-1 text-ink-2">Game over</span>
       {:else if fastForwarding}
-        <span role="status" aria-live="polite" aria-atomic="true" data-testid="auto-passing" class="animate-pulse rounded bg-island/20 px-2 py-0.5 text-[10px] font-semibold text-ink">Auto-passing…</span>
+        <span role="status" aria-live="polite" aria-atomic="true" data-testid="auto-passing" class="type-label animate-pulse rounded-full bg-island/20 px-2 py-1 text-ink">Auto-passing…</span>
       {:else if actions.length > 0}
-        <span role="status" aria-live="polite" aria-atomic="true" class="whitespace-nowrap font-mono text-[9px] font-semibold uppercase tracking-[0.2em] text-mountain-ink">Your move</span>
+        <span role="status" aria-live="polite" aria-atomic="true" class="type-label whitespace-nowrap uppercase text-mountain-ink">Your move</span>
       {/if}
     </div>
     <div class="flex items-center gap-3">
       {#if selectedTargetId !== null}
-        <button class="text-xs text-ink-2 underline hover:text-ink" onclick={() => onClearSelection?.()}>
+        <button class="type-label text-ink-2 underline underline-offset-2 hover:text-ink" onclick={() => onClearSelection?.()}>
           Show all
         </button>
       {/if}
       <button
         data-testid="pass-turn"
-        class="whitespace-nowrap rounded border border-line-strong bg-field px-2 py-1 text-xs font-semibold text-ink-2 transition hover:border-action hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+        class="btn btn-secondary btn-sm"
         disabled={!canPassTurn || fastForwarding}
         onclick={() => onPassTurn?.()}
         title="Auto-pass every priority window until the turn ends"
@@ -95,14 +95,14 @@
       id="decision-prompt"
       data-testid="decision-prompt"
       data-kind={actionSpaceKind}
-      class="mb-3 border-l-2 border-action py-0.5 pl-3 font-serif text-sm italic leading-relaxed text-ink"
+      class="type-annotation mb-3 border-l-2 border-action py-0.5 pl-3 text-ink"
     >
       {decisionPrompt}
     </p>
   {/if}
 
   {#if selectedTargetId !== null}
-    <p class="mb-3 text-xs text-ink-2">Filtered to actions for selected board target.</p>
+    <p class="type-caption mb-3 text-ink-2">Filtered to actions for selected board target.</p>
   {/if}
 
   <div
@@ -113,7 +113,7 @@
     aria-describedby={decisionPrompt ? 'decision-prompt' : undefined}
   >
     {#if actions.length === 0}
-      <p class="text-sm text-ink-2">No actions available.</p>
+      <p class="type-caption text-ink-2">No actions available.</p>
     {:else}
       {#each actions as action}
         <button

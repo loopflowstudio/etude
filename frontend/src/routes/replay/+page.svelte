@@ -175,16 +175,16 @@
     <div class="px-10 pb-10 pt-6 max-md:px-5 max-md:pb-6">
       <header class="flex flex-wrap items-baseline justify-between gap-3 border-b border-line pb-4">
         <div class="flex items-baseline gap-3">
-          <h2 class="font-serif text-lg font-semibold text-display">The Score</h2>
+          <h2 class="type-title text-display">The Score</h2>
           {#if replayStore.trace}
-            <span class="font-serif text-sm italic text-ink-2">
+            <span class="type-annotation text-ink-2">
               {winnerLabel(replayStore.trace.winner)} wins · {logEntries.length} decisions
             </span>
           {/if}
         </div>
         <div class="flex flex-wrap items-center gap-2">
           {#if replayStore.summaries.length > 0}
-            <label class="flex items-center gap-2 text-xs text-ink-2">
+            <label class="type-label flex items-center gap-2 text-ink-2">
               Trace
               <select
                 data-testid="trace-select"
@@ -205,7 +205,7 @@
             </label>
           {/if}
           <button
-            class="rounded border border-line bg-field px-3 py-1.5 text-xs font-semibold text-ink-2 hover:border-action hover:text-ink"
+            class="btn btn-secondary btn-sm"
             onclick={() => void loadTraces()}
           >
             Refresh
@@ -225,7 +225,7 @@
         <div class="grid grid-cols-1 lg:grid-cols-[380px_minmax(0,1fr)]">
           <!-- The score column -->
           <section aria-label="Score" class="min-w-0 lg:border-r lg:border-line lg:pr-7">
-            <p class="pb-1 pt-3 text-[10px] uppercase tracking-[0.18em] text-ink-2">
+            <p class="type-caption pb-1 pt-3 text-ink-2">
               Click a line to turn the board to that moment
             </p>
             <!-- svelte-ignore a11y_no_noninteractive_tabindex (axe requires keyboard access to scrollable regions) -->
@@ -266,8 +266,8 @@
                           }}
                         ></textarea>
                         <div class="flex gap-1.5 pt-1">
-                          <button type="button" class="note-save" onclick={commitNote}>Save</button>
-                          <button type="button" class="note-cancel" onclick={() => (editingNote = null)}>Cancel</button>
+                          <button type="button" class="btn btn-primary btn-sm" onclick={commitNote}>Save</button>
+                          <button type="button" class="btn btn-ghost btn-sm" onclick={() => (editingNote = null)}>Cancel</button>
                         </div>
                       </div>
                     {:else if notes[entry.id]}
@@ -373,7 +373,7 @@
   .who {
     padding-top: 2px;
     font-family: var(--font-mono);
-    font-size: 8.5px;
+    font-size: 9px;
     font-weight: 600;
     letter-spacing: 0.14em;
     text-transform: uppercase;
@@ -434,21 +434,5 @@
     font-style: italic;
     font-size: 12px;
     padding: 5px 7px;
-  }
-  .note-save,
-  .note-cancel {
-    font-size: 10.5px;
-    font-weight: 600;
-    border-radius: 5px;
-    padding: 2px 9px;
-    cursor: pointer;
-    border: 1px solid var(--border);
-    background: var(--bg-surface);
-    color: var(--text-secondary);
-  }
-  .note-save {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: var(--ivory);
   }
 </style>

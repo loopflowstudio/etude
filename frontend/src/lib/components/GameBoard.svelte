@@ -101,7 +101,7 @@
     data-step={observation.turn.step}
     class="tempo flex items-center gap-4 pt-1"
   >
-    <span class="font-mono text-[10px] font-semibold uppercase tracking-[0.2em] text-ink-2">
+    <span class="type-rubric text-ink-2">
       {turnLine}
     </span>
   </div>
@@ -121,7 +121,7 @@
   {#if stackCards.length > 0}
     <section class="border-t border-line" aria-label="The stack">
       <div class="stack-staff">
-        <div class="pt-2 text-right font-mono text-[9px] font-semibold uppercase tracking-[0.16em] text-mountain-ink">
+        <div class="type-rubric pt-2 text-right text-mountain-ink">
           The Stack
         </div>
         <div class="flex flex-wrap items-end gap-2 py-2">
@@ -140,7 +140,7 @@
               onmouseleave={() => setPreview(null)}
             >
               <span
-                class="inline-block rounded border border-mountain/50 bg-mountain/10 px-3 py-2 font-serif text-sm italic text-ink"
+                class="type-annotation inline-block rounded border border-mountain/50 bg-mountain/10 px-3 py-2 text-ink"
               >
                 <b class="not-italic font-semibold text-mountain-ink">{card.name}</b>
               </span>
@@ -178,7 +178,7 @@
         onkeydown={keepResultFocus}
         class="z-[200] rounded-lg border border-line bg-panel p-6 text-center shadow-xl"
       >
-        <h2 id="game-over-heading" class="mb-2 font-serif text-2xl font-semibold text-display">Game Over</h2>
+        <h2 id="game-over-heading" class="type-display mb-2 text-display">Game Over</h2>
         <p id="game-result" data-testid="game-result" class="mb-4 text-ink-2">
           {#if winner === null}
             Draw
@@ -192,7 +192,7 @@
           <button
             bind:this={resultAction}
             data-testid="game-result-action"
-            class="rounded bg-action px-4 py-2 text-sm font-semibold text-ivory transition hover:bg-action-hover"
+            class="btn btn-primary"
             onclick={() => onOverlayAction?.()}
           >
             {overlayActionLabel}

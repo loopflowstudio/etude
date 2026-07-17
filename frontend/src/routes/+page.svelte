@@ -226,13 +226,13 @@
             aria-live="polite"
             aria-atomic="true"
             aria-label={`Connection status: ${gameStore.connection}`}
-            class="font-mono text-[9px] font-semibold uppercase tracking-[0.18em] text-ink-2"
+            class="type-label uppercase text-ink-2"
           >
             {gameStore.connection}
           </span>
         </div>
         <button
-          class="rounded bg-action px-4 py-2 text-sm font-semibold text-ivory transition hover:bg-action-hover"
+          class="btn btn-primary"
           onclick={startNewGame}
         >
           New Game
@@ -299,10 +299,10 @@
     </div>
   {:else}
     <div class="mx-auto max-w-xl py-12 text-center">
-      <p class="mb-1 font-serif text-lg italic text-ink-2">The table is set.</p>
+      <p class="type-annotation mb-1 text-ink-2">The table is set.</p>
       <p class="mb-5 text-sm text-ink-2">Start a game to begin.</p>
       <button
-        class="rounded bg-action px-4 py-2 text-sm font-semibold text-ivory transition hover:bg-action-hover"
+        class="btn btn-primary"
         onclick={startNewGame}
       >
         New Game

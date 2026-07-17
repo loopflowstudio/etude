@@ -62,7 +62,7 @@
 </script>
 
 {#snippet rubric(text: string)}
-  <div class="pt-2 text-right font-mono text-[9px] font-semibold uppercase tracking-[0.16em] text-ink-2">
+  <div class="type-rubric pt-2 text-right text-ink-2">
     {text}
   </div>
 {/snippet}
@@ -74,8 +74,8 @@
   <div class="rounded-sm border border-line bg-field/70 px-4 py-2">
     <div class="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1">
       <div class="min-w-0">
-        <h2 class="inline font-serif text-lg font-semibold text-display">
-          {label}{#if deckName}<span class="text-sm font-normal italic text-ink-2"> — {deckName}</span>{/if}
+        <h2 class="type-display inline text-display">
+          {label}{#if deckName}<span class="type-annotation text-ink-2"> — {deckName}</span>{/if}
         </h2>
         {#if pieColors.length > 0}
           <span class="ml-3 inline-flex h-[2px] w-[64px] gap-[4px] align-middle" aria-hidden="true">
@@ -86,12 +86,12 @@
         {/if}
       </div>
       <div class="flex items-baseline gap-4">
-        <span class="text-xs italic text-ink-2">Library {player.library_count}</span>
+        <span class="type-caption text-ink-2">Library {player.library_count}</span>
         <div
           class={`flex items-baseline gap-1.5 ${focusedIds.has(player.id) ? 'rounded outline-2 outline-offset-4 outline-action' : ''}`}
         >
           <b class="text-2xl font-semibold leading-none tabular-nums">{player.life}</b>
-          <span class="text-[9px] uppercase tracking-[0.2em] text-ink-2">life</span>
+          <span class="type-rubric text-ink-2">life</span>
         </div>
       </div>
     </div>
@@ -109,7 +109,7 @@
         {@render rubric(`Hand (${hiddenHandCount})`)}
         <div class="flex flex-wrap items-end gap-2">
           {#if hiddenHandCount === 0}
-            <div class="px-1 py-3.5 font-serif text-xs italic text-ink-2">Empty hand</div>
+            <div class="type-caption px-1 py-3.5 text-ink-2">Empty hand</div>
           {/if}
           {#each Array(hiddenHandCount) as _, index}
             <div role="img" aria-label={`Hidden card ${index + 1}`}>
@@ -145,7 +145,7 @@
         {@render rubric(`Hand (${player.hand.length})`)}
         <div class="flex flex-wrap items-end gap-2">
           {#if player.hand.length === 0}
-            <div class="px-1 py-3.5 font-serif text-xs italic text-ink-2">Empty hand</div>
+            <div class="type-caption px-1 py-3.5 text-ink-2">Empty hand</div>
           {/if}
           {#each player.hand as card}
             <Card
@@ -173,7 +173,7 @@
       {@render rubric(`Graveyard (${player.graveyard.length})`)}
       <div class="flex flex-wrap items-end gap-2">
         {#if player.graveyard.length === 0}
-          <div class="px-1 py-3.5 font-serif text-xs italic text-ink-2">Empty graveyard</div>
+          <div class="type-caption px-1 py-3.5 text-ink-2">Empty graveyard</div>
         {/if}
         {#each player.graveyard as card}
           <Card

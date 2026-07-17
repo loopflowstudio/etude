@@ -126,6 +126,35 @@ forest / plains / island / swamp / mountain   register bases
 The migration recipe and full mapping live in
 `frontend/docs/semantic-utilities.md`.
 
+### The voices
+
+One text style per role, defined once in `app.css`; components never set
+font sizes, families, or tracking inline. This is the discipline that
+separates designed from decorated:
+
+| Voice | Face | Job |
+|-------|------|-----|
+| `type-display` | Cormorant 600 · 20 | Player names, page-scale titles |
+| `type-title` | Cormorant 600 · 16 | Panel headings: Actions, Game Log, Stops, The Score |
+| `type-label` | Lato 600 · 11 | Field labels, button-adjacent labels, chips |
+| `type-caption` | Lato 400 · 12 | Library counts, empties, hints, timestamps |
+| `type-rubric` | Mono 600 · 9 · caps | **Notation only**: staff rubrics, tempo lines, frame counters, actor columns, "life" |
+| `type-annotation` | Cormorant italic · 13.5 | **Prompts and marginalia only** |
+
+Body text is the default Lato 14. Mono outside notation, or italic serif
+outside annotation, is a defect.
+
+### Buttons
+
+Three roles, two sizes, one shape — nothing else is a button:
+
+- `btn btn-primary` — the red action; at most one per surface.
+- `btn btn-secondary` — field fill, hairline border, hover turns the
+  border red.
+- `btn btn-ghost` — quiet text that gains a field on hover.
+- `btn-sm` compacts either to 26px for margin-column density; base is
+  32px (44px at touch widths).
+
 ---
 
 ## The Shell

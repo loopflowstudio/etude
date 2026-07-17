@@ -23,9 +23,9 @@
 </script>
 
 <details class="min-w-0" data-testid="stops-panel">
-  <summary class="cursor-pointer select-none py-1 font-serif text-base font-semibold text-display">
+  <summary class="type-title cursor-pointer select-none py-1 text-display">
     Stops
-    <span class="ml-2 rounded bg-panel-muted px-2 py-0.5 text-xs font-normal normal-case text-ink-2">
+    <span class="type-label ml-2 rounded-full bg-panel-muted px-2 py-1 text-ink-2">
       {stops.auto_pass ? `${activeCount} set` : 'off'}
     </span>
   </summary>
@@ -76,7 +76,7 @@
     </div>
 
     <button
-      class="text-xs text-ink-2 underline hover:text-ink"
+      class="type-label text-ink-2 underline underline-offset-2 hover:text-ink"
       data-testid="stops-reset"
       onclick={() => onReset?.()}
     >

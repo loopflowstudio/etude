@@ -28,7 +28,7 @@
 
 <div class="flex min-h-16 flex-wrap items-end gap-2">
   {#if permanents.length === 0}
-    <div class="px-1 py-3.5 font-serif text-xs italic text-ink-2">No permanents</div>
+    <div class="type-caption px-1 py-3.5 text-ink-2">No permanents</div>
   {/if}
 
   {#each permanents as permanent}
