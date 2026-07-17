@@ -34,3 +34,7 @@
 - The first supervised labels use a bounded deterministic engine oracle. Search
   is introduced only if a measured policy failure leaves label quality and
   representation quality confounded.
+- The first implementation slice is the reusable real-engine decision seam.
+  It proves the 35-target frontier with admitted Igneous Inspiration and 33
+  admitted permanents; the separate Lightning Bolt IR and holdout audit remain
+  a later artifact slice rather than being coupled to runtime binding.
