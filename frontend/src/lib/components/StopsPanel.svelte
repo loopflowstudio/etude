@@ -76,7 +76,7 @@
     </div>
 
     <button
-      class="type-label text-ink-2 underline underline-offset-2 hover:text-ink"
+      class="type-label inline-block py-1 text-ink-2 underline underline-offset-2 hover:text-ink"
       data-testid="stops-reset"
       onclick={() => onReset?.()}
     >

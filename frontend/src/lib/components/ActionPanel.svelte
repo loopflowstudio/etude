@@ -74,7 +74,7 @@
     </div>
     <div class="flex items-center gap-3">
       {#if selectedTargetId !== null}
-        <button class="type-label text-ink-2 underline underline-offset-2 hover:text-ink" onclick={() => onClearSelection?.()}>
+        <button class="type-label inline-block py-1 text-ink-2 underline underline-offset-2 hover:text-ink" onclick={() => onClearSelection?.()}>
           Show all
         </button>
       {/if}

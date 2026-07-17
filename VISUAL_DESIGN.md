@@ -214,7 +214,7 @@ Three roles, two sizes, one shape — nothing else is a button:
 Two interactive species live outside the button system, deliberately:
 **rows** (action options, score lines — full-width field rows whose border
 answers hover) and **quiet links** (`type-label`, underlined, ink-2 to
-ink). Marginalia affordances ("+ note") are ghost annotations, not
+ink, padded to the 24px hit minimum). Marginalia affordances ("+ note") are ghost annotations, not
 buttons.
 
 ---

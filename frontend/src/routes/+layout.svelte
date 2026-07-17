@@ -78,9 +78,9 @@
       </div>
       <nav aria-label="Footer" class="type-caption">
         <div class="type-rubric text-ink-2">Table</div>
-        <ul class="mt-2 space-y-1.5">
+        <ul class="mt-1">
           {#each NAV as item}
-            <li><a class="text-ink-2 underline-offset-2 hover:text-ink hover:underline" href={item.href}>{item.label}</a></li>
+            <li><a class="inline-block py-1 text-ink-2 underline-offset-2 hover:text-ink hover:underline" href={item.href}>{item.label}</a></li>
           {/each}
         </ul>
       </nav>
