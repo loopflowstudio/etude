@@ -125,3 +125,35 @@ uv run --extra dev pytest -q tests/etude tests/semantic
 ```
 
 The generator check proves the checked receipt is canonical and current; the focused Etude test proves terminal release-stack authority and all receipt invariants; the full debug Rust command checks engine invariants; and the scoped Python suite checks the affected server and semantic integration. Frontend checks are unnecessary unless implementation changes frontend code or shared generated protocol artifacts.
+
+## Implemented evidence
+
+The fixed release-stack trace required no new offer family or semantic behavior. With match seed 0 and independent seed-0 uniform server-offer policies for the two actors, the unchanged authored content reached terminal at revision 132 with GW Allies winning. All 132 transitions were deliberate and paired one-to-one with a server-built offer, revision-bound command, command receipt, before/after state digest, ordered semantic event group, and ordered presentation event group.
+
+The checked receipt records:
+
+- 132 deliberate commands and zero automatic rules actions;
+- all nine prompt families encountered by the fixed match: priority, target choice, attackers, blockers, discard-then-draw, Waterbend, look-and-select, scry, and pay-or-not;
+- 512 ordered semantic events across twelve event families and 101 ordered presentation events across five presentation families;
+- 26 encountered typed programs, each bound through its compiled `CardDefId` and semantic key to the admitted two-deck IR;
+- terminal revision 132, winner 1, terminal frame hash, exact engine state digest, turn/player/zone/object witness, and the exact compiled manifest hashes;
+- explicit zero counts for legacy fixed-action, card-name dispatch, candidate-cap, and client-legality fallback.
+
+The evidence capture is opt-in on `GameSession`, so ordinary Play sessions do not pay for per-transition state digests or receipt construction. The compatibility action endpoint and the legacy villain index-policy adapter increment the legacy fallback counter; the receipt uses neither. The transitional Lightning Bolt presentation name branch increments the card-name counter when actually selected; the authored trace does not exercise it.
+
+Checked commands and results:
+
+```text
+uv run --extra dev python scripts/generate_authored_match_receipt.py --check
+  passed
+uv run --extra dev pytest -q tests/etude/test_authored_match_authority.py
+  2 passed
+uv run --extra dev pytest -q tests/etude tests/semantic
+  passed
+cargo test --manifest-path managym/Cargo.toml --test authored_match_tests -- --nocapture
+  3 passed in debug
+cargo test --manifest-path managym/Cargo.toml
+  full debug suite passed
+./scripts/verify-clean-machine
+  passed from a fresh sanitized copy; playable in 52,676 ms under the 60,000 ms gate
+```
