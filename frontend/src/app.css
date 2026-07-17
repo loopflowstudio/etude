@@ -145,6 +145,48 @@
   --font-sans: 'Lato', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --font-mono: 'JetBrains Mono', 'SFMono-Regular', Consolas, monospace;
 
+  /*
+   * First-class semantic utilities — the system's vocabulary.
+   * New and migrated components use these; the stock-name shim below
+   * remains only until every component is converted.
+   *
+   *   ink / ink-2          reading text, primary and secondary
+   *   ground               the page floor (--bg)
+   *   panel / panel-muted  raised surfaces and their muted wells
+   *   field                the paper-white fill inside bordered controls
+   *   line / line-strong   hairline and emphasized borders
+   *   action / -hover      interactive accent (fills, hover borders)
+   *   action-soft          quiet accent wash
+   *   display              accent-toned display text (headings, panel titles)
+   *
+   * The five pie families carry Magic's land registers. Each base is a
+   * fill color; each `-ink` companion is its contrast-safe text tone.
+   */
+  --color-ink: var(--text);
+  --color-ink-2: var(--text-secondary);
+  --color-ground: var(--bg);
+  --color-panel: var(--bg-surface);
+  --color-panel-muted: var(--bg-muted);
+  --color-field: var(--bg-field);
+  --color-line: var(--border);
+  --color-line-strong: var(--border-strong);
+  --color-action: var(--accent);
+  --color-action-hover: var(--accent-hover);
+  --color-action-soft: var(--accent-soft);
+  --color-display: var(--accent-text);
+
+  --color-forest: var(--success);
+  --color-forest-ink: var(--success-text);
+  --color-plains: var(--warning);
+  --color-plains-ink: var(--warning-text);
+  --color-island: var(--info);
+  --color-island-ink: var(--info-text);
+  --color-mountain: var(--error);
+  --color-mountain-ink: var(--error-text);
+  --color-swamp: var(--neutral);
+  --color-swamp-ink: var(--neutral-text);
+
+  /* Legacy stock-name shim — do not use in new code. */
   --color-slate-950: var(--bg-surface);
   --color-slate-900: var(--bg-field);
   --color-slate-800: var(--bg-surface);
