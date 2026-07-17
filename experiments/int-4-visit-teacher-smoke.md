@@ -27,7 +27,7 @@ uv run experiments/runners/run_visit_teacher_iteration.py \
 ```
 
 Contract SHA-256:
-`320a050e58bff5644a71cc6b3c1f42efbccb608e7e8af0c55ca66f9bc67a6f02`.
+`d704d8f58d09aca78df3fb95bb3ea63dad5f558cd0b6e470880888e446b9413a`.
 Runtime source SHA-256:
 `14a3c5ff6594ad3c354abd06a9e888a3ad2c2d6e2d741db8954efa4f68c89dea`.
 The complete checked-in receipt is
@@ -50,7 +50,7 @@ visit/value student, and student-guided PUCT round robin ran without illegal
 actions or caps. The two-game results are deliberately not interpreted.
 
 The selected historical decision produced Study artifact
-`2c0d3fd3bed94ea349dde3797478f47f5de963dd3a1e4082acd6d2a294ea7f49`.
+`33fa40dbd97baf423d12616bb8ec2c15477f7ec0d9b84719dafbe3b85efb13b5`.
 Both `etude.StudyArtifact` and the Rust-owned
 `managym::study::StudyArtifact::validate` accepted it. No deal seed, search
 seed, opponent hand, or sampled hidden state entered the artifact.
@@ -59,8 +59,8 @@ seed, opponent hand, or sampled hidden state entered the artifact.
 
 | Traversals | Decisions | p50 | p95 | Labels/s | Traversals/s | Max depth | Cap hits |
 |---:|---:|---:|---:|---:|---:|---:|---:|
-| 4 | 105 | 1.58 ms | 3.24 ms | 572.1 | 2,288.4 | 2 | 0 |
-| 8 | 100 | 3.37 ms | 6.07 ms | 285.1 | 2,281.2 | 3 | 0 |
+| 4 | 105 | 1.61 ms | 3.44 ms | 561.3 | 2,245.3 | 2 | 0 |
+| 8 | 100 | 3.49 ms | 6.02 ms | 279.7 | 2,237.6 | 3 | 0 |
 
 These same-host numbers are fresh cost evidence, but the host was not quiesced
 and the cells were not isolated child-process RSS measurements. The production

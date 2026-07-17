@@ -21,7 +21,7 @@
   ],
   "expected_fingerprints": {
     "world": "w2",
-    "engine_source_sha256": "f63409e13d33d35049611560ede05cab9915406b388aa4c913a8084224114a49",
+    "engine_source_sha256": "b06079570640efef11c0833f199399f9dbd9cb05cc53aa01cbf76f5cad17dcd0",
     "engine_extension_sha256": "890fe39524a32629cf6610c2088607dca66e884abef0ccdece8f556fe9a5466d",
     "engine_extension_name": "_managym.cpython-312-darwin.so",
     "content_manifest_sha256": "02fab67db308685ae2dc14197c9afb368769ef9f78a3e87d77ce342d1777ad01",
