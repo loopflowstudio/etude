@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import UTC, datetime
+import hashlib
 import itertools
 import json
 import math
@@ -47,6 +48,11 @@ from manabot.verify.competency import run_scenario_suite
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EXPERIMENT = "int-4-visit-teacher-production-v1"
 BASE_PROFILE = "iteration"
+RESOURCE_LEDGER = "resource-ledger.jsonl"
+
+
+class ResourceCapReached(RuntimeError):
+    """Raised before launching work when a cumulative production cap is full."""
 
 
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
@@ -131,6 +137,14 @@ def _load_contracts(
     for field in ("workers", "wall_hours", "core_hours", "artifact_bytes"):
         if int(caps.get(field, -1)) != int(base_caps.get(field, -2)):
             raise ContractError(f"production {field} changed the frozen iteration cap")
+    if (
+        caps.get("ledger") != RESOURCE_LEDGER
+        or caps.get("ledger_schema_version") != 1
+        or caps.get("ledger_mode") != "append_only_hash_chained_attempt_receipts"
+        or caps.get("failed_attempts_charged") is not True
+        or caps.get("launch_requires_remaining_capacity") is not True
+    ):
+        raise ContractError("production resource ledger contract drifted")
     return (
         contract,
         contract_hash,
@@ -225,6 +239,165 @@ def _resource_receipt(
         - float(before["system_cpu_seconds"]),
         "peak_rss_bytes": int(after["peak_rss_bytes"]),
     }
+
+
+def _ledger_path(out_dir: Path) -> Path:
+    return out_dir / RESOURCE_LEDGER
+
+
+def _read_resource_ledger(out_dir: Path) -> list[dict[str, Any]]:
+    path = _ledger_path(out_dir)
+    if not path.exists():
+        return []
+    events: list[dict[str, Any]] = []
+    previous: str | None = None
+    for line_number, line in enumerate(path.read_text().splitlines(), start=1):
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise ContractError(
+                f"resource ledger line {line_number} is not valid JSON"
+            ) from error
+        if not isinstance(event, dict):
+            raise ContractError(f"resource ledger line {line_number} is not an object")
+        event_hash = event.get("event_sha256")
+        unsigned = dict(event)
+        unsigned.pop("event_sha256", None)
+        if (
+            event.get("sequence") != line_number
+            or event.get("previous_event_sha256") != previous
+            or event_hash != canonical_sha256(unsigned)
+        ):
+            raise ContractError(f"resource ledger chain drifted at line {line_number}")
+        resources = event.get("resources") or {}
+        numeric_resources = (
+            "wall_seconds",
+            "user_cpu_seconds",
+            "system_cpu_seconds",
+            "peak_rss_bytes",
+        )
+        if (
+            event.get("scope") not in {"job", "stage"}
+            or event.get("status") not in {"completed", "failed"}
+            or any(
+                not isinstance(resources.get(field), (int, float))
+                or not math.isfinite(float(resources[field]))
+                or float(resources[field]) < 0
+                for field in numeric_resources
+            )
+        ):
+            raise ContractError(
+                f"resource ledger receipt invalid at line {line_number}"
+            )
+        events.append(event)
+        previous = str(event_hash)
+    return events
+
+
+def _append_resource_event(
+    out_dir: Path,
+    *,
+    scope: str,
+    name: str,
+    attempt: int,
+    status: str,
+    input_sha256: str,
+    resources: dict[str, Any],
+    result_path: str | None = None,
+    result_sha256: str | None = None,
+) -> dict[str, Any]:
+    events = _read_resource_ledger(out_dir)
+    unsigned = {
+        "schema_version": 1,
+        "sequence": len(events) + 1,
+        "previous_event_sha256": (events[-1]["event_sha256"] if events else None),
+        "recorded_at": datetime.now(UTC).isoformat(),
+        "scope": scope,
+        "name": name,
+        "attempt": attempt,
+        "status": status,
+        "input_sha256": input_sha256,
+        "resources": resources,
+        "artifact_bytes_after": _directory_bytes(out_dir),
+        "result_path": result_path,
+        "result_sha256": result_sha256,
+    }
+    event = {**unsigned, "event_sha256": canonical_sha256(unsigned)}
+    path = _ledger_path(out_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    return event
+
+
+def _resource_ledger_receipt(out_dir: Path) -> dict[str, Any]:
+    events = _read_resource_ledger(out_dir)
+    path = _ledger_path(out_dir)
+    return {
+        "path": str(path.relative_to(out_dir)),
+        "entries": len(events),
+        "head_event_sha256": events[-1]["event_sha256"] if events else None,
+        "sha256": file_sha256(path) if path.exists() else None,
+    }
+
+
+def _validate_ledger_prefix(manifest: dict[str, Any], out_dir: Path) -> None:
+    receipt = manifest.get("resource_ledger")
+    events = _read_resource_ledger(out_dir)
+    if receipt is None:
+        if events:
+            raise ContractError("resource ledger exists without a manifest receipt")
+        return
+    entries = int(receipt.get("entries", -1))
+    if entries < 0 or len(events) < entries:
+        raise ContractError("resource ledger is shorter than its persisted receipt")
+    if entries:
+        prefix_lines = (
+            _ledger_path(out_dir).read_bytes().splitlines(keepends=True)[:entries]
+        )
+        prefix_sha256 = hashlib.sha256(b"".join(prefix_lines)).hexdigest()
+        head = events[entries - 1]["event_sha256"]
+    else:
+        prefix_sha256 = None
+        head = None
+    if (
+        receipt.get("head_event_sha256") != head
+        or receipt.get("sha256") != prefix_sha256
+    ):
+        raise ContractError("resource ledger no longer extends its manifest receipt")
+
+
+def _attempt_number(events: list[dict[str, Any]], scope: str, name: str) -> int:
+    return (
+        max(
+            (
+                int(event["attempt"])
+                for event in events
+                if event.get("scope") == scope and event.get("name") == name
+            ),
+            default=0,
+        )
+        + 1
+    )
+
+
+def _ledger_event(events: list[dict[str, Any]], event_sha256: str) -> dict[str, Any]:
+    matches = [event for event in events if event["event_sha256"] == event_sha256]
+    if len(matches) != 1:
+        raise ContractError(f"resource ledger event {event_sha256} is not unique")
+    return matches[0]
+
+
+def _bound_artifact_path(out_dir: Path, relative: Any, description: str) -> Path:
+    relative_path = Path(str(relative))
+    if relative_path.is_absolute():
+        raise ContractError(f"{description} must be relative to the production run")
+    path = (out_dir / relative_path).resolve()
+    if not path.is_relative_to(out_dir.resolve()):
+        raise ContractError(f"{description} escapes the production run")
+    return path
 
 
 def _relative_gap(left: float, right: float) -> float:
@@ -352,6 +525,18 @@ def _worker_job(job: dict[str, Any], output_path: Path) -> None:
         )
     elif kind == "calibration":
         result = _run_calibration(job["profile"], job["production"])
+    elif kind == "stability":
+        from manabot.sim.teacher1_evidence import evaluate_root_stability
+
+        result = evaluate_root_stability(
+            budgets=[int(value) for value in job["budgets"]],
+            worlds=int(job["worlds"]),
+            c_puct=float(job["c_puct"]),
+            roots=int(job["roots"]),
+            repeat_seeds=[int(value) for value in job["repeat_seeds"]],
+            seed=int(job["seed"]),
+            max_steps=int(job["max_steps"]),
+        )
     else:
         raise ContractError(f"unknown production worker kind {kind!r}")
     payload = {
@@ -364,18 +549,112 @@ def _worker_job(job: dict[str, Any], output_path: Path) -> None:
     _atomic_json(output_path, payload)
 
 
-def _execute_job(out_dir: Path, name: str, job: dict[str, Any]) -> dict[str, Any]:
+_JOB_REFERENCE_FIELDS = {
+    "job_name",
+    "job_path",
+    "result_path",
+    "output_sha256",
+    "ledger_event_sha256",
+}
+
+
+def _job_reference(
+    out_dir: Path,
+    name: str,
+    job_path: Path,
+    output_path: Path,
+    output: dict[str, Any],
+    event: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        **output,
+        "job_name": name,
+        "job_path": str(job_path.relative_to(out_dir)),
+        "result_path": str(output_path.relative_to(out_dir)),
+        "output_sha256": file_sha256(output_path),
+        "ledger_event_sha256": event["event_sha256"],
+    }
+
+
+def _verify_job_reference(
+    out_dir: Path,
+    reference: dict[str, Any],
+    *,
+    events: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    events = _read_resource_ledger(out_dir) if events is None else events
+    name = str(reference.get("job_name"))
+    job_path = _bound_artifact_path(out_dir, reference.get("job_path"), "job input")
+    result_path = _bound_artifact_path(
+        out_dir, reference.get("result_path"), "job result"
+    )
+    if not job_path.is_file() or not result_path.is_file():
+        raise ContractError(f"production job {name} is missing bound files")
+    job = _load_json(job_path)
+    output = _load_json(result_path)
+    input_sha256 = canonical_sha256(job)
+    output_sha256 = file_sha256(result_path)
+    event = _ledger_event(events, str(reference.get("ledger_event_sha256")))
+    if (
+        event.get("scope") != "job"
+        or event.get("name") != name
+        or event.get("status") != "completed"
+        or event.get("input_sha256") != input_sha256
+        or event.get("result_path") != str(result_path.relative_to(out_dir))
+        or event.get("result_sha256") != output_sha256
+        or reference.get("input_sha256") != input_sha256
+        or reference.get("output_sha256") != output_sha256
+    ):
+        raise ContractError(f"production job {name} digest binding drifted")
+    copied_output = {
+        key: value
+        for key, value in reference.items()
+        if key not in _JOB_REFERENCE_FIELDS
+    }
+    if copied_output != output:
+        raise ContractError(f"production job {name} stage copy drifted")
+    return output
+
+
+def _execute_job(
+    out_dir: Path,
+    name: str,
+    job: dict[str, Any],
+    production: dict[str, Any],
+) -> dict[str, Any]:
+    if Path(name).name != name:
+        raise ContractError(f"invalid production job name {name!r}")
     jobs = out_dir / "jobs"
     jobs.mkdir(parents=True, exist_ok=True)
     job_path = jobs / f"{name}.job.json"
-    output_path = jobs / f"{name}.result.json"
     digest = canonical_sha256(job)
-    if output_path.exists():
-        output = _load_json(output_path)
-        if output.get("input_sha256") != digest:
+    events = _read_resource_ledger(out_dir)
+    completed_events = [
+        event
+        for event in events
+        if event.get("scope") == "job"
+        and event.get("name") == name
+        and event.get("status") == "completed"
+    ]
+    if completed_events:
+        event = completed_events[-1]
+        if event.get("input_sha256") != digest:
             raise ContractError(f"completed production job {name} has different inputs")
-        return output
-    _atomic_json(job_path, job)
+        output_path = _bound_artifact_path(
+            out_dir, event["result_path"], "cached job result"
+        )
+        output = _load_json(output_path)
+        reference = _job_reference(out_dir, name, job_path, output_path, output, event)
+        _verify_job_reference(out_dir, reference, events=events)
+        return reference
+    if job_path.exists():
+        if canonical_sha256(_load_json(job_path)) != digest:
+            raise ContractError(f"production job {name} has different saved inputs")
+    else:
+        _atomic_json(job_path, job)
+    _require_launch_capacity(out_dir, production, f"job {name}")
+    attempt = _attempt_number(events, "job", name)
+    output_path = jobs / f"{name}.attempt-{attempt:04d}.result.json"
     command = [
         sys.executable,
         str(Path(__file__).resolve()),
@@ -384,18 +663,49 @@ def _execute_job(out_dir: Path, name: str, job: dict[str, Any]) -> dict[str, Any
         "--worker-output",
         str(output_path),
     ]
-    completed = subprocess.run(
-        command,
-        cwd=REPO_ROOT,
-        check=False,
-        env={**os.environ, "PYTHONHASHSEED": "0", "WANDB_MODE": "disabled"},
+    before = _usage()
+    started = time.perf_counter()
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=REPO_ROOT,
+            check=False,
+            env={**os.environ, "PYTHONHASHSEED": "0", "WANDB_MODE": "disabled"},
+            timeout=_remaining_wall_seconds(out_dir, production),
+        )
+        if completed.returncode:
+            raise RuntimeError(
+                f"production child {name} failed ({completed.returncode})"
+            )
+        output = _load_json(output_path)
+        if output.get("input_sha256") != digest:
+            raise ContractError(f"production child {name} returned the wrong identity")
+        output_sha256 = file_sha256(output_path)
+    except Exception:
+        resources = _resource_receipt(before, started)
+        _append_resource_event(
+            out_dir,
+            scope="job",
+            name=name,
+            attempt=attempt,
+            status="failed",
+            input_sha256=digest,
+            resources=resources,
+        )
+        raise
+    resources = _resource_receipt(before, started)
+    event = _append_resource_event(
+        out_dir,
+        scope="job",
+        name=name,
+        attempt=attempt,
+        status="completed",
+        input_sha256=digest,
+        resources=resources,
+        result_path=str(output_path.relative_to(out_dir)),
+        result_sha256=output_sha256,
     )
-    if completed.returncode:
-        raise RuntimeError(f"production child {name} failed ({completed.returncode})")
-    output = _load_json(output_path)
-    if output.get("input_sha256") != digest:
-        raise ContractError(f"production child {name} returned the wrong identity")
-    return output
+    return _job_reference(out_dir, name, job_path, output_path, output, event)
 
 
 def _checkpoint_spec(receipt: dict[str, Any], name: str) -> dict[str, Any]:
@@ -446,6 +756,7 @@ def _run_teacher(
                     "villain": opponent,
                     "blocks": blocks,
                 },
+                production,
             )
         matched = calibration["matches"][str(budget)]
         flat_sims = int(matched["flat_sims_per_action"])
@@ -461,6 +772,7 @@ def _run_teacher(
                 ),
                 "blocks": blocks,
             },
+            production,
         )
     high = int(profile["high_budget"])
     low = min(int(value) for value in profile["teacher_budgets"])
@@ -474,22 +786,24 @@ def _run_teacher(
             "villain": iteration._teacher_spec(profile, low),
             "blocks": blocks,
         },
+        production,
     )
 
-    stability_before = _usage()
-    stability_started = time.perf_counter()
-    from manabot.sim.teacher1_evidence import evaluate_root_stability
-
-    stability = evaluate_root_stability(
-        budgets=[int(value) for value in profile["teacher_budgets"]],
-        worlds=int(profile["worlds"]),
-        c_puct=float(profile["c_puct"]),
-        roots=int(profile["stability_roots"]),
-        repeat_seeds=[int(value) for value in profile["stability_repeat_seeds"]],
-        seed=int(profile["stability_seed"]),
-        max_steps=int(profile["max_steps"]),
+    stability = _execute_job(
+        out_dir,
+        "teacher-root-stability",
+        {
+            "kind": "stability",
+            "budgets": [int(value) for value in profile["teacher_budgets"]],
+            "worlds": int(profile["worlds"]),
+            "c_puct": float(profile["c_puct"]),
+            "roots": int(profile["stability_roots"]),
+            "repeat_seeds": [int(value) for value in profile["stability_repeat_seeds"]],
+            "seed": int(profile["stability_seed"]),
+            "max_steps": int(profile["max_steps"]),
+        },
+        production,
     )
-    stability_resources = _resource_receipt(stability_before, stability_started)
 
     competency_specs = [{"kind": "random", "name": "random"}]
     competency_specs.extend(
@@ -513,11 +827,11 @@ def _run_teacher(
             "workers": int(production["resource_accounting"]["workers"]),
             "seed": int(production["competencies"]["seed"]),
         },
+        production,
     )
     result = {
         "cells": cells,
         "root_stability": stability,
-        "root_stability_resources": stability_resources,
         "competencies": competencies,
     }
     result["gate"] = _teacher_gate(result, profile, production)
@@ -548,8 +862,9 @@ def _teacher_gate(
     high_control = _result(cells[f"t1-{high}-vs-policy_value"])
     high_low = _result(cells[f"t1-{high}-vs-t1-{low}"])
     high_search = high_random["hero_search"]
-    stability_low = teacher["root_stability"][str(low)]
-    stability_high = teacher["root_stability"][str(high)]
+    stability = _result(teacher["root_stability"])
+    stability_low = stability[str(low)]
+    stability_high = stability[str(high)]
     competencies = _result(teacher["competencies"])
     delayed = []
     competency_nonregression = True
@@ -715,6 +1030,7 @@ def _run_arena(
                     "blocks": list(profile["arena_seed_blocks"]),
                     "seed_offset": seed * 10_000,
                 },
+                production,
             )
         chosen_policy = iteration._checkpoint(training, seed, "chosen_policy_only")
         chosen_value = iteration._checkpoint(training, seed, "chosen_policy_value")
@@ -749,6 +1065,7 @@ def _run_arena(
                     "blocks": list(profile["ablation_seed_blocks"]),
                     "seed_offset": seed * 10_000,
                 },
+                production,
             )
             for name, specs in ablation_specs.items()
         }
@@ -768,6 +1085,7 @@ def _run_arena(
                     "blocks": list(profile["arena_seed_blocks"]),
                     "seed_offset": seed * 10_000,
                 },
+                production,
             )
         per_seed[str(seed)] = {
             "round_robin": round_robin,
@@ -787,6 +1105,7 @@ def _run_arena(
             "workers": int(production["resource_accounting"]["workers"]),
             "seed": int(production["competencies"]["seed"]) + 1_000_000,
         },
+        production,
     )
     high_random = _result(
         teacher["cells"][f"t1-{int(profile['high_budget'])}-vs-random"]
@@ -931,95 +1250,252 @@ def _admission(
     }
 
 
-def _stage_resource(
-    function: Callable[[], dict[str, Any]],
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    before = _usage()
-    started = time.perf_counter()
-    result = function()
-    return result, _resource_receipt(before, started)
-
-
 def _directory_bytes(path: Path) -> int:
     return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
 
 
-def _resource_totals(manifest: dict[str, Any], out_dir: Path) -> dict[str, Any]:
-    completed = [
-        stage
-        for stage in manifest.get("stages", {}).values()
-        if stage.get("status") == "completed"
-    ]
+def _resource_totals(out_dir: Path) -> dict[str, Any]:
+    events = _read_resource_ledger(out_dir)
     return {
         "wall_seconds": sum(
-            float(stage["resources"]["wall_seconds"]) for stage in completed
+            float(event["resources"]["wall_seconds"]) for event in events
         ),
         "user_cpu_seconds": sum(
-            float(stage["resources"]["user_cpu_seconds"]) for stage in completed
+            float(event["resources"]["user_cpu_seconds"]) for event in events
         ),
         "system_cpu_seconds": sum(
-            float(stage["resources"]["system_cpu_seconds"]) for stage in completed
+            float(event["resources"]["system_cpu_seconds"]) for event in events
         ),
         "peak_rss_bytes": max(
-            (int(stage["resources"]["peak_rss_bytes"]) for stage in completed),
+            (int(event["resources"]["peak_rss_bytes"]) for event in events),
             default=0,
         ),
-        "artifact_bytes": _directory_bytes(out_dir),
+        "artifact_bytes": max(
+            _directory_bytes(out_dir),
+            max(
+                (int(event.get("artifact_bytes_after", 0)) for event in events),
+                default=0,
+            ),
+        ),
+        "attempts": len(events),
+        "failed_attempts": sum(event["status"] == "failed" for event in events),
     }
 
 
-def _caps(
-    manifest: dict[str, Any], out_dir: Path, production: dict[str, Any]
-) -> dict[str, Any]:
-    totals = _resource_totals(manifest, out_dir)
+def _caps(out_dir: Path, production: dict[str, Any]) -> dict[str, Any]:
+    totals = _resource_totals(out_dir)
     limits = production["resource_accounting"]
+    wall_limit = float(limits["wall_hours"]) * 3600
+    core_limit = float(limits["core_hours"]) * 3600
+    artifact_limit = int(limits["artifact_bytes"])
+    core_seconds = totals["user_cpu_seconds"] + totals["system_cpu_seconds"]
     checks = {
-        "wall": totals["wall_seconds"] <= float(limits["wall_hours"]) * 3600,
-        "core": totals["user_cpu_seconds"] + totals["system_cpu_seconds"]
-        <= float(limits["core_hours"]) * 3600,
-        "artifacts": totals["artifact_bytes"] <= int(limits["artifact_bytes"]),
+        "wall": totals["wall_seconds"] <= wall_limit,
+        "core": core_seconds <= core_limit,
+        "artifacts": totals["artifact_bytes"] <= artifact_limit,
     }
-    return {"totals": totals, "checks": checks, "passed": all(checks.values())}
+    launchable = {
+        "wall": totals["wall_seconds"] < wall_limit,
+        "core": core_seconds < core_limit,
+        "artifacts": totals["artifact_bytes"] < artifact_limit,
+    }
+    return {
+        "totals": totals,
+        "limits": {
+            "wall_seconds": wall_limit,
+            "core_seconds": core_limit,
+            "artifact_bytes": artifact_limit,
+        },
+        "checks": checks,
+        "launchable_checks": launchable,
+        "passed": all(checks.values()),
+        "launchable": all(launchable.values()),
+    }
+
+
+def _require_launch_capacity(
+    out_dir: Path, production: dict[str, Any], description: str
+) -> None:
+    caps = _caps(out_dir, production)
+    if not caps["launchable"]:
+        failed = [
+            name for name, passed in caps["launchable_checks"].items() if not passed
+        ]
+        raise ResourceCapReached(
+            f"cannot launch {description}; cumulative cap reached: {', '.join(failed)}"
+        )
+
+
+def _remaining_wall_seconds(out_dir: Path, production: dict[str, Any]) -> float:
+    caps = _caps(out_dir, production)
+    remaining = caps["limits"]["wall_seconds"] - caps["totals"]["wall_seconds"]
+    if remaining <= 0:
+        raise ResourceCapReached("cumulative wall cap is exhausted")
+    return remaining
+
+
+def _stage_residual_resources(
+    aggregate: dict[str, Any],
+    ledger_before: dict[str, Any],
+    ledger_after: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "wall_seconds": max(
+            0.0,
+            float(aggregate["wall_seconds"])
+            - (
+                float(ledger_after["wall_seconds"])
+                - float(ledger_before["wall_seconds"])
+            ),
+        ),
+        "user_cpu_seconds": max(
+            0.0,
+            float(aggregate["user_cpu_seconds"])
+            - (
+                float(ledger_after["user_cpu_seconds"])
+                - float(ledger_before["user_cpu_seconds"])
+            ),
+        ),
+        "system_cpu_seconds": max(
+            0.0,
+            float(aggregate["system_cpu_seconds"])
+            - (
+                float(ledger_after["system_cpu_seconds"])
+                - float(ledger_before["system_cpu_seconds"])
+            ),
+        ),
+        "peak_rss_bytes": int(aggregate["peak_rss_bytes"]),
+    }
+
+
+def _load_bound_stage_result(
+    manifest: dict[str, Any],
+    out_dir: Path,
+    name: str,
+    *,
+    events: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    stage = manifest.get("stages", {}).get(name) or {}
+    if stage.get("status") != "completed":
+        raise ContractError(f"production stage {name} is incomplete")
+    result_path = _bound_artifact_path(
+        out_dir, stage.get("result_path"), "stage result"
+    )
+    if not result_path.is_file():
+        raise ContractError(f"production stage {name} result is missing")
+    result_sha256 = file_sha256(result_path)
+    result = _load_json(result_path)
+    events = _read_resource_ledger(out_dir) if events is None else events
+    event = _ledger_event(events, str(stage.get("ledger_event_sha256")))
+    if (
+        result_sha256 != stage.get("result_sha256")
+        or result != stage.get("result")
+        or event.get("scope") != "stage"
+        or event.get("name") != name
+        or event.get("status") != "completed"
+        or event.get("input_sha256") != stage.get("input_sha256")
+        or event.get("result_path") != str(result_path.relative_to(out_dir))
+        or event.get("result_sha256") != result_sha256
+    ):
+        raise ContractError(f"production stage {name} result binding drifted")
+    return result
 
 
 def _run_stage(
     manifest: dict[str, Any],
     manifest_path: Path,
+    out_dir: Path,
+    production: dict[str, Any],
     name: str,
     inputs: dict[str, Any],
     function: Callable[[], dict[str, Any]],
 ) -> dict[str, Any]:
     digest = canonical_sha256(inputs)
+    _validate_ledger_prefix(manifest, out_dir)
     existing = manifest["stages"].get(name)
     if existing and existing.get("status") == "completed":
         if existing.get("input_sha256") != digest:
             raise ContractError(
                 f"completed production stage {name} has different inputs"
             )
-        return existing["result"]
+        return _load_bound_stage_result(manifest, out_dir, name)
+    _require_launch_capacity(out_dir, production, f"stage {name}")
+    events = _read_resource_ledger(out_dir)
+    attempt = _attempt_number(events, "stage", name)
     manifest["stages"][name] = {
         "status": "running",
+        "attempt": attempt,
         "input_sha256": digest,
         "started_at": datetime.now(UTC).isoformat(),
     }
     _atomic_json(manifest_path, manifest)
+    ledger_before = _resource_totals(out_dir)
+    usage_before = _usage()
+    started = time.perf_counter()
     try:
-        result, resources = _stage_resource(function)
+        result = function()
     except Exception as error:
+        aggregate = _resource_receipt(usage_before, started)
+        accounted = _stage_residual_resources(
+            aggregate, ledger_before, _resource_totals(out_dir)
+        )
+        event = _append_resource_event(
+            out_dir,
+            scope="stage",
+            name=name,
+            attempt=attempt,
+            status="failed",
+            input_sha256=digest,
+            resources=accounted,
+        )
         manifest["stages"][name].update(
             status="failed",
             failed_at=datetime.now(UTC).isoformat(),
             error=f"{type(error).__name__}: {error}",
+            aggregate_resources=aggregate,
+            accounted_resources=accounted,
+            ledger_event_sha256=event["event_sha256"],
         )
+        if isinstance(error, ResourceCapReached):
+            manifest["status"] = "inconclusive_resource_cap"
+        manifest["resource_ledger"] = _resource_ledger_receipt(out_dir)
+        manifest["resources"] = _caps(out_dir, production)
         _atomic_json(manifest_path, manifest)
         raise
+    aggregate = _resource_receipt(usage_before, started)
+    accounted = _stage_residual_resources(
+        aggregate, ledger_before, _resource_totals(out_dir)
+    )
+    stage_results = out_dir / "stage-results"
+    stage_results.mkdir(parents=True, exist_ok=True)
+    result_path = stage_results / f"{name}.result.json"
+    _atomic_json(result_path, result)
+    result_sha256 = file_sha256(result_path)
+    event = _append_resource_event(
+        out_dir,
+        scope="stage",
+        name=name,
+        attempt=attempt,
+        status="completed",
+        input_sha256=digest,
+        resources=accounted,
+        result_path=str(result_path.relative_to(out_dir)),
+        result_sha256=result_sha256,
+    )
     manifest["stages"][name] = {
         "status": "completed",
+        "attempt": attempt,
         "input_sha256": digest,
         "finished_at": datetime.now(UTC).isoformat(),
-        "resources": resources,
+        "aggregate_resources": aggregate,
+        "accounted_resources": accounted,
+        "result_path": str(result_path.relative_to(out_dir)),
+        "result_sha256": result_sha256,
+        "ledger_event_sha256": event["event_sha256"],
         "result": result,
     }
+    manifest["resource_ledger"] = _resource_ledger_receipt(out_dir)
+    manifest["resources"] = _caps(out_dir, production)
     _atomic_json(manifest_path, manifest)
     return result
 
@@ -1090,6 +1566,20 @@ def _write_run_report(path: Path, manifest: dict[str, Any]) -> None:
     path.write_text("\n".join(lines))
 
 
+def _iter_job_references(value: Any) -> list[dict[str, Any]]:
+    references: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        if _JOB_REFERENCE_FIELDS <= value.keys():
+            references.append(value)
+        else:
+            for nested in value.values():
+                references.extend(_iter_job_references(nested))
+    elif isinstance(value, list):
+        for nested in value:
+            references.extend(_iter_job_references(nested))
+    return references
+
+
 def _verify(
     out_dir: Path,
     contract_hash: str,
@@ -1102,7 +1592,9 @@ def _verify(
 ) -> dict[str, Any]:
     manifest = _load_json(out_dir / "manifest.json")
     if (
-        manifest.get("contract_sha256") != contract_hash
+        manifest.get("status") != "completed"
+        or manifest.get("experiment") != EXPERIMENT
+        or manifest.get("contract_sha256") != contract_hash
         or manifest.get("profile_sha256") != profile_hash
         or manifest.get("production_contract_sha256") != production_hash
         or manifest.get("runtime") != runtime
@@ -1110,19 +1602,29 @@ def _verify(
     ):
         raise ContractError("production run identity drifted")
     required = ("calibration", "teacher", "dataset", "training", "arena", "study")
-    if any(
-        manifest["stages"].get(name, {}).get("status") != "completed"
+    events = _read_resource_ledger(out_dir)
+    if manifest.get("resource_ledger") != _resource_ledger_receipt(out_dir):
+        raise ContractError("production resource ledger identity drifted")
+    stage_results = {
+        name: _load_bound_stage_result(manifest, out_dir, name, events=events)
         for name in required
-    ):
-        raise ContractError("production run is incomplete")
-    for job_path in sorted((out_dir / "jobs").glob("*.job.json")):
-        name = job_path.name.removesuffix(".job.json")
-        result_path = job_path.with_name(f"{name}.result.json")
-        job = _load_json(job_path)
-        result = _load_json(result_path)
-        if result.get("input_sha256") != canonical_sha256(job):
-            raise ContractError(f"production job {name} identity drifted")
-    dataset = manifest["stages"]["dataset"]["result"]
+    }
+    references = [
+        reference
+        for stage in stage_results.values()
+        for reference in _iter_job_references(stage)
+    ]
+    for reference in references:
+        _verify_job_reference(out_dir, reference, events=events)
+    referenced_events = {reference["ledger_event_sha256"] for reference in references}
+    completed_job_events = {
+        event["event_sha256"]
+        for event in events
+        if event.get("scope") == "job" and event.get("status") == "completed"
+    }
+    if referenced_events != completed_job_events:
+        raise ContractError("completed production jobs do not match stage results")
+    dataset = stage_results["dataset"]
     for shard in dataset["shards"]:
         if file_sha256(shard["path"]) != shard["sha256"]:
             raise RuntimeError(f"dataset shard changed: {shard['path']}")
@@ -1137,23 +1639,25 @@ def _verify(
     )
     if receipt_dict(replay) != dataset["replay"]:
         raise RuntimeError("production exact replay receipt changed")
-    training = manifest["stages"]["training"]["result"]
+    training = stage_results["training"]
     for checkpoint in training["checkpoints"].values():
         if file_sha256(checkpoint["path"]) != checkpoint["sha256"]:
             raise RuntimeError(f"student checkpoint changed: {checkpoint['path']}")
         load_checkpoint_agent(checkpoint["path"])
-    study = manifest["stages"]["study"]["result"]
+    study = stage_results["study"]
     if file_sha256(study["path"]) != study["sha256"]:
         raise RuntimeError("Study artifact changed")
     StudyArtifact.model_validate_json(Path(study["path"]).read_text())
     iteration._validate_study_in_rust(Path(study["path"]))
-    teacher = manifest["stages"]["teacher"]["result"]
+    teacher = stage_results["teacher"]
     if _teacher_gate(teacher, profile, production) != teacher["gate"]:
         raise RuntimeError("teacher gate no longer recomputes exactly")
-    arena = manifest["stages"]["arena"]["result"]
+    arena = stage_results["arena"]
     if _admission(arena, profile, production) != arena["admission"]:
         raise RuntimeError("admission decision no longer recomputes exactly")
-    caps = _caps(manifest, out_dir, production)
+    if manifest.get("admission") != arena["admission"]:
+        raise RuntimeError("manifest admission copy no longer matches bound arena")
+    caps = _caps(out_dir, production)
     if not caps["passed"]:
         raise RuntimeError("verified production run exceeds its resource caps")
     verification = {
@@ -1268,13 +1772,16 @@ def main() -> None:
             "production_contract_sha256": production_hash,
             "runtime": runtime,
             "controls": controls,
+            "resource_ledger": _resource_ledger_receipt(out_dir),
             "stages": {},
         }
         _atomic_json(manifest_path, manifest)
 
-    calibration = _run_stage(
+    calibration_job = _run_stage(
         manifest,
         manifest_path,
+        out_dir,
+        production,
         "calibration",
         {
             "profile_sha256": profile_hash,
@@ -1285,36 +1792,44 @@ def main() -> None:
             out_dir,
             "calibration",
             {"kind": "calibration", "profile": profile, "production": production},
-        )["result"],
+            production,
+        ),
     )
-    if not _caps(manifest, out_dir, production)["passed"]:
+    calibration = _result(calibration_job)
+    if not _caps(out_dir, production)["passed"]:
         manifest["status"] = "inconclusive_resource_cap"
+        manifest["resources"] = _caps(out_dir, production)
         _atomic_json(manifest_path, manifest)
         return
     teacher = _run_stage(
         manifest,
         manifest_path,
+        out_dir,
+        production,
         "teacher",
         {
             "profile_sha256": profile_hash,
             "production_contract_sha256": production_hash,
             "controls": controls,
-            "calibration_sha256": canonical_sha256(calibration),
+            "calibration_output_sha256": calibration_job["output_sha256"],
         },
         lambda: _run_teacher(out_dir, profile, production, controls, calibration),
     )
-    if not _caps(manifest, out_dir, production)["passed"]:
+    if not _caps(out_dir, production)["passed"]:
         manifest["status"] = "inconclusive_resource_cap"
+        manifest["resources"] = _caps(out_dir, production)
         _atomic_json(manifest_path, manifest)
         return
     dataset = _run_stage(
         manifest,
         manifest_path,
+        out_dir,
+        production,
         "dataset",
         {
             "profile_sha256": profile_hash,
             "runtime": runtime,
-            "teacher_gate": teacher["gate"],
+            "teacher_result_sha256": manifest["stages"]["teacher"]["result_sha256"],
         },
         lambda: _run_dataset_with_calibration(out_dir, profile, profile_hash, runtime),
     )
@@ -1326,6 +1841,8 @@ def main() -> None:
     training = _run_stage(
         manifest,
         manifest_path,
+        out_dir,
+        production,
         "training",
         {
             "profile_sha256": profile_hash,
@@ -1335,18 +1852,21 @@ def main() -> None:
             out_dir, profile, dataset, profile_hash=profile_hash
         ),
     )
-    if not _caps(manifest, out_dir, production)["passed"]:
+    if not _caps(out_dir, production)["passed"]:
         manifest["status"] = "inconclusive_resource_cap"
+        manifest["resources"] = _caps(out_dir, production)
         _atomic_json(manifest_path, manifest)
         return
     arena = _run_stage(
         manifest,
         manifest_path,
+        out_dir,
+        production,
         "arena",
         {
             "profile_sha256": profile_hash,
             "training_manifest_sha256": training["manifest_sha256"],
-            "teacher_gate": teacher["gate"],
+            "teacher_result_sha256": manifest["stages"]["teacher"]["result_sha256"],
             "controls": controls,
         },
         lambda: _run_arena(out_dir, profile, production, controls, training, teacher),
@@ -1354,6 +1874,8 @@ def main() -> None:
     study = _run_stage(
         manifest,
         manifest_path,
+        out_dir,
+        production,
         "study",
         {
             "profile_sha256": profile_hash,
@@ -1366,8 +1888,9 @@ def main() -> None:
         ),
     )
     del study
-    cap_result = _caps(manifest, out_dir, production)
+    cap_result = _caps(out_dir, production)
     manifest["resources"] = cap_result
+    manifest["resource_ledger"] = _resource_ledger_receipt(out_dir)
     if not cap_result["passed"]:
         manifest["status"] = "inconclusive_resource_cap"
     else:

@@ -8,7 +8,7 @@
     "profile_sha256": "214b990b900c4be3934b06d529c1df1065430c129226b2f57597cd49c508f9e1"
   },
   "expected_runtime": {
-    "production_source_sha256": "cfaa20f2f02bce0444f2e463c9a634c180769ed3d6e3a1a111c5f965611a9b00",
+    "production_source_sha256": "30f0db1800cef320c1ef02265f18ee93e8450e0eb66647b4e6374f2371d74dc1",
     "chip": "Apple M4 Max",
     "machine": "arm64",
     "operating_system": "macOS 26.0.1",
@@ -69,6 +69,11 @@
   },
   "resource_accounting": {
     "isolated_spawned_children": true,
+    "ledger": "resource-ledger.jsonl",
+    "ledger_schema_version": 1,
+    "ledger_mode": "append_only_hash_chained_attempt_receipts",
+    "failed_attempts_charged": true,
+    "launch_requires_remaining_capacity": true,
     "measure": [
       "peak_rss_bytes",
       "user_cpu_seconds",
@@ -95,7 +100,10 @@
       "finite_in_range_targets",
       "all_sampled_roots_present",
       "exact_trajectory_and_search_replay",
-      "exact_contract_runtime_control_and_artifact_identities"
+      "exact_contract_runtime_control_and_artifact_identities",
+      "exact_job_output_bytes_bound_to_stage_results",
+      "exact_stage_result_bytes_bound_to_manifest_gate_inputs",
+      "cumulative_attempt_resources_within_registered_caps"
     ],
     "failure_disposition": "invalid_no_admission"
   }

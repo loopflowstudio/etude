@@ -2,9 +2,10 @@
 
 ## Directive and current state
 
-Directive v7 is incorporated. PR #133 is landed engineering-smoke evidence,
-not the production result. This serial PR keeps INT-4 open and executes the
-registered production slice. INT-3 is out of scope.
+Directive v12 is incorporated. PR #133 is landed engineering-smoke evidence,
+not the production result, and PR #135 remains unlanded while its reviewed
+integrity repairs are verified. This serial PR keeps INT-4 open and executes
+the registered production slice. INT-3 is out of scope.
 
 The smoke proved the end-to-end authority, replay, four-arm training, neural
 PUCT, arena, and Study paths. It did not run the production controls,
@@ -102,10 +103,12 @@ uv run experiments/runners/run_visit_teacher_production.py \
 ```
 
 `--verify` performs no training or evaluation. It rehashes contracts,
-controls, runtime/source/extension identities, shards, checkpoints, receipts,
-and Study evidence; reruns the exact trajectory and sampled-search replay;
-loads every checkpoint; recomputes summaries and gates from immutable raw
-records; and validates Study in Python and Rust. It writes only
+controls, runtime/source/extension identities, every exact job-result and
+stage-result byte sequence, shards, checkpoints, the append-only resource
+ledger, and Study evidence; proves each manifest copy equals its bound result;
+reruns the exact trajectory and sampled-search replay; loads every checkpoint;
+recomputes summaries and gates from those bound stage results; and validates
+Study in Python and Rust. It writes only
 `verification.json` after all checks pass.
 
 ## Production contract and controls
@@ -135,7 +138,12 @@ result is inspected:
 - Resources: each measured search/matchup/competency cell runs in an isolated
   spawned child. The child reports high-water RSS, user and system CPU time,
   wall time, decisions, labels, traversals/playouts, cap hits, p50/p95 latency,
-  and artifact bytes. Aggregation is deterministic and independent of child
+  and artifact bytes. Every completed or failed job attempt and each stage's
+  non-child residual appends a hash-chained receipt to
+  `resource-ledger.jsonl`; no later receipt replaces earlier cost. Cumulative
+  wall, core, and artifact totals are reconstructed from that ledger across
+  failures and resumes, and remaining capacity is checked before every new
+  stage and child. Aggregation is deterministic and independent of child
   completion order.
 - Calibration diagnostics: root-value Brier score, ten-bin ECE/reliability,
   and per-seed outcomes are reported without promoting game blocks to
@@ -209,9 +217,13 @@ The production manifest is append-only by stage:
 8. `report` — immutable machine receipt plus checked-in compact data/report.
 
 Each completed stage records the hashes of its contracts, runtime, controls,
-and upstream manifests. A resume skips only an exact matching completed stage.
-Partial child output is written to a temporary path and atomically promoted;
-crashes retain completed work without treating partial data as evidence.
+upstream manifests, exact result file, and matching ledger event. Every child
+attempt has an attempt-specific output path; only a completed ledger receipt
+whose digest matches the exact result bytes may be reused or copied into a
+stage. A resume skips only an exact matching completed stage, first proving
+that the current ledger extends the last manifest-bound prefix. Crashes retain
+partial artifacts and failed-attempt cost without treating partial data as
+evidence.
 
 ## Affected surfaces and consumers
 
@@ -247,10 +259,14 @@ Existing smoke commands and receipts must keep validating unchanged.
 - Missing/partial stage artifact or changed upstream hash: rerun that stage;
   never aggregate it as zero or skip the cell.
 - Child failure, non-finite metric, empty latency sample, or competency error:
-  preserve the diagnostic and mark the gate failed; no admission.
+  append the failed-attempt resource receipt, preserve the diagnostic, and
+  mark the gate failed; no admission.
 - Wall/core/artifact/RSS cap reached: stop launching new children, preserve
   completed artifacts, set `inconclusive_resource_cap`, and make no admission
   claim.
+- Missing, changed, unbound, or manifest-divergent job/stage result bytes, or a
+  resource ledger that no longer extends its persisted prefix: fail
+  verification; never recompute a gate from the mutable copy.
 - Search cap hit: count it. A cap rate at or above 0.1% fails economics; it is
   not dropped from denominators.
 - Missing Study field: encode it as unavailable under the schema. Never infer

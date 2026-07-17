@@ -8,6 +8,13 @@ seeds 197/419/887, 48-game arena cells, exact frozen Teacher-0 controls,
 same-host flat-MC calibration, S1-S5 competencies, resource receipts, replay,
 Study validation, and an explicit admission decision.
 
+Every completed or failed attempt now appends a hash-chained resource receipt.
+The runner reconstructs cumulative wall, core, and artifact totals across
+failures and resumes and checks remaining capacity before every stage and
+spawned child. Job and stage results live at attempt-specific immutable paths;
+their exact SHA-256 values bind the stage and manifest copies used by the
+teacher and admission gates.
+
 This is durable implementation progress, not production evidence. Neither
 registered Teacher-0 checkpoint is present in the repository `.runs` cache:
 
@@ -38,20 +45,24 @@ uv run experiments/runners/run_visit_teacher_production.py \
 ```
 
 The independent verifier performs no training or evaluation. It rehashes all
-contracts, controls, source/runtime identities, jobs, shards, checkpoints, and
-Study evidence; exactly replays the sampled trajectories and searches; and
-recomputes the teacher and admission gates from immutable results.
+contracts, controls, source/runtime identities, resource-ledger receipts,
+exact job and stage result bytes, shards, checkpoints, and Study evidence;
+proves the manifest copies match those bytes; exactly replays the sampled
+trajectories and searches; and recomputes the teacher and admission gates from
+the bound stage results.
 
 ## Frozen identities and verification receipts
 
 - Base iteration contract: `9c3f0f600b70ca4fef7131086f6d9b350f9612e690cbb9d621e961a5de27d03c`
-- Production source: `cfaa20f2f02bce0444f2e463c9a634c180769ed3d6e3a1a111c5f965611a9b00`
+- Production source: `30f0db1800cef320c1ef02265f18ee93e8450e0eb66647b4e6374f2371d74dc1`
 - Unchanged PR #133 smoke source: `14a3c5ff6594ad3c354abd06a9e888a3ad2c2d6e2d741db8954efa4f68c89dea`
 - Unchanged PR #133 Study artifact: `35e0949d2e1c325ca52768e2649fd4ca987990213259fcea4cbf36d3e6365e3a`
 
 Fresh verification on 2026-07-17:
 
-- 53 focused Python tests passed through `uv`;
+- 60 focused Python tests passed through `uv`, including cumulative-cap,
+  failed-resume, exact-result tamper, manifest-copy tamper, ledger-prefix, and
+  verify-no-generation regressions;
 - the complete debug `managym` Cargo suite passed, including 12/12 search
   state contract tests and 11/11 search tests;
 - PR #133's smoke independently replayed all 175 decisions and its sampled
