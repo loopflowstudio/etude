@@ -9,6 +9,7 @@ exact boundary must change, not permission to silently approximate it.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import math
 from typing import Iterable, TypeAlias
 
@@ -123,7 +124,9 @@ class ExactHandRange:
         keys = np.asarray(key_list, dtype=np.int16)
         log_weights = np.asarray(
             [
-                sum(_log_choose(count, selected) for count, selected in zip(counts, key))
+                sum(
+                    _log_choose(count, selected) for count, selected in zip(counts, key)
+                )
                 for key in key_list
             ],
             dtype=np.float64,
@@ -162,6 +165,24 @@ class ExactHandRange:
         return 1.0 / float(np.square(probabilities).sum())
 
     @property
+    def normalization_error(self) -> float:
+        """Absolute probability-mass error, retained as an evidence canary."""
+
+        return abs(float(self.probabilities.sum()) - 1.0)
+
+    @property
+    def digest(self) -> str:
+        """Deterministic replay identity for the complete normalized range."""
+
+        digest = hashlib.sha256()
+        digest.update(np.asarray(self.card_def_ids, dtype="<i8").tobytes())
+        digest.update(np.asarray(self.unseen_counts, dtype="<i8").tobytes())
+        digest.update(int(self.hand_size).to_bytes(8, "little", signed=False))
+        digest.update(np.asarray(self.keys, dtype="<i2").tobytes())
+        digest.update(np.asarray(self.log_weights, dtype="<f8").tobytes())
+        return digest.hexdigest()
+
+    @property
     def allocated_bytes(self) -> int:
         return int(self.keys.nbytes + self.log_weights.nbytes)
 
@@ -177,6 +198,19 @@ class ExactHandRange:
     def log_loss(self, hand: HandKey) -> float:
         probability = self.probability(hand)
         return -math.log(probability) if probability > 0.0 else math.inf
+
+    def rank(self, hand: HandKey) -> int | None:
+        """One-based best rank of a hand under descending posterior mass."""
+
+        probability = self.probability(hand)
+        if probability <= 0.0:
+            return None
+        return 1 + int(np.count_nonzero(self.probabilities > probability))
+
+    def inclusion_probabilities(self) -> NDArray[np.float64]:
+        """Probability that each registered definition appears at least once."""
+
+        return (self.probabilities[:, None] * (self.keys > 0)).sum(axis=0)
 
     def sample(self, count: int, seed: int) -> list[HandKey]:
         if count < 1:
@@ -213,10 +247,9 @@ class ExactHandRange:
             raise RangeError("legal action counts cannot be negative")
         mixed = np.zeros_like(likelihood)
         legal = legal_counts > 0
-        mixed[legal] = (
-            (1.0 - epsilon) * likelihood[legal]
-            + epsilon / legal_counts[legal].astype(np.float64)
-        )
+        mixed[legal] = (1.0 - epsilon) * likelihood[legal] + epsilon / legal_counts[
+            legal
+        ].astype(np.float64)
         kept = mixed > 0.0
         if not np.any(kept):
             raise RangeError("public action is illegal in every hypothesis")
@@ -247,7 +280,9 @@ class ExactHandRange:
                 drawn[index] += 1
                 target = tuple(drawn)
                 contribution = float(log_weight) + math.log(available / library_size)
-                rows[target] = float(np.logaddexp(rows.get(target, -math.inf), contribution))
+                rows[target] = float(
+                    np.logaddexp(rows.get(target, -math.inf), contribution)
+                )
         return self._from_rows(
             self.card_def_ids, self.unseen_counts, self.hand_size + 1, rows
         )
@@ -268,7 +303,9 @@ class ExactHandRange:
             key[index] -= 1
             target = tuple(key)
             contribution = float(log_weight)
-            rows[target] = float(np.logaddexp(rows.get(target, -math.inf), contribution))
+            rows[target] = float(
+                np.logaddexp(rows.get(target, -math.inf), contribution)
+            )
         return self._from_rows(
             self.card_def_ids, tuple(counts), self.hand_size - 1, rows
         )

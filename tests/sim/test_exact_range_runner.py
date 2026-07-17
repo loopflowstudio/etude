@@ -36,6 +36,12 @@ def test_contract_pins_world_arena_evidence_and_exclusions() -> None:
     }
     assert "public_belief_solving" in contract["exclusions"]
     assert "broad_deck_generalization" in contract["exclusions"]
+    compute_gate = contract["gates"]["matched_compute"]
+    assert compute_gate["configured_worlds_per_action_ratio_min"] == 1.0
+    assert compute_gate["configured_worlds_per_action_ratio_max"] == 1.0
+    assert compute_gate["configured_rollouts_per_world_ratio_min"] == 1.0
+    assert compute_gate["configured_rollouts_per_world_ratio_max"] == 1.0
+    assert "raw_playout_count_ratio_min" not in compute_gate
 
 
 def test_unresolved_likelihood_artifact_fails_closed() -> None:

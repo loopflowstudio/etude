@@ -43,3 +43,14 @@
   runner fails closed before play. The substrate is runnable in unit tests with
   an explicitly test-only likelihood, but that model cannot produce smoke or
   arena evidence.
+- 2026-07-17: Fixed-viewer replay must omit unchanged raw steps. A targeted
+  cast and combat declaration can span several authoritative prompts before a
+  public commitment; even logging an otherwise empty row per prompt would
+  reveal private prompt count. The tracker now records only a public semantic
+  action or a viewer-visible hidden-pool transition, and the known-truth hand
+  is read solely by the separate evaluation audit after such a transition.
+- 2026-07-17: Matched compute is exact at the configured root budget, not at
+  aggregate playout count. Belief and uniform use the same worlds per action,
+  rollouts per world, native entry point, and end-to-end likelihood work, but
+  divergent play changes decision counts and legal branching. The frozen
+  contract now reports raw totals without requiring them to be equal.

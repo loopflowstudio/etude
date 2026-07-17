@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import time
 from typing import Any, Protocol
 
@@ -19,6 +19,14 @@ class HiddenPoolSnapshot:
     hand_size: int
     library_size: int
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "card_def_ids": list(self.card_def_ids),
+            "unseen_counts": list(self.unseen_counts),
+            "hand_size": self.hand_size,
+            "library_size": self.library_size,
+        }
+
     @classmethod
     def from_engine(
         cls,
@@ -32,7 +40,9 @@ class HiddenPoolSnapshot:
         ids = card_def_ids or tuple(sorted(count_map))
         unknown = set(count_map) - set(ids)
         if unknown:
-            raise RangeError(f"hidden pool introduced unknown definitions: {sorted(unknown)}")
+            raise RangeError(
+                f"hidden pool introduced unknown definitions: {sorted(unknown)}"
+            )
         return cls(
             card_def_ids=ids,
             unseen_counts=tuple(count_map.get(definition, 0) for definition in ids),
@@ -60,9 +70,46 @@ class TrackerStats:
     known_exits: int = 0
     known_returns: int = 0
     update_seconds: float = 0.0
+    update_durations: list[float] = field(default_factory=list)
     likelihood_seconds: float = 0.0
     peak_range_bytes: int = 0
     peak_support_size: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class RangeTransitionRecord:
+    """One replay-verifiable transition containing only viewer-safe facts."""
+
+    sequence: int
+    action: PublicAction | None
+    before: HiddenPoolSnapshot
+    after: HiddenPoolSnapshot
+    hidden_draws: int
+    known_exits: int
+    known_returns: int
+    posterior_digest: str
+    uniform_digest: str
+    posterior_normalization_error: float
+    uniform_normalization_error: float
+    support_size: int
+    effective_range_size: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "sequence": self.sequence,
+            "action": self.action.to_dict() if self.action is not None else None,
+            "before": self.before.to_dict(),
+            "after": self.after.to_dict(),
+            "hidden_draws": self.hidden_draws,
+            "known_exits": self.known_exits,
+            "known_returns": self.known_returns,
+            "posterior_digest": self.posterior_digest,
+            "uniform_digest": self.uniform_digest,
+            "posterior_normalization_error": self.posterior_normalization_error,
+            "uniform_normalization_error": self.uniform_normalization_error,
+            "support_size": self.support_size,
+            "effective_range_size": self.effective_range_size,
+        }
 
 
 class ExactRangeTracker:
@@ -85,6 +132,9 @@ class ExactRangeTracker:
         )
         self.uniform = self.posterior
         self.stats = TrackerStats()
+        self.initial_snapshot = snapshot
+        self.initial_posterior_digest = self.posterior.digest
+        self.records: list[RangeTransitionRecord] = []
         self._record_size()
 
     @classmethod
@@ -111,9 +161,17 @@ class ExactRangeTracker:
         likelihood_root: Any | None = None,
     ) -> None:
         started = time.perf_counter()
+        before = self.snapshot
+        before_stats = (
+            self.stats.hidden_draws,
+            self.stats.known_exits,
+            self.stats.known_returns,
+        )
         if action is not None:
             if self.likelihood is None or likelihood_root is None:
-                raise RangeError("public action update requires a likelihood root and model")
+                raise RangeError(
+                    "public action update requires a likelihood root and model"
+                )
             likelihood = self.likelihood.evaluate(
                 likelihood_root,
                 viewer=self.viewer,
@@ -134,15 +192,36 @@ class ExactRangeTracker:
         )
         self._reconcile(after)
         self.stats.updates += 1
-        self.stats.update_seconds += time.perf_counter() - started
+        elapsed = time.perf_counter() - started
+        self.stats.update_seconds += elapsed
+        self.stats.update_durations.append(elapsed)
         self._record_size()
+        self.records.append(
+            RangeTransitionRecord(
+                sequence=len(self.records),
+                action=action,
+                before=before,
+                after=self.snapshot,
+                hidden_draws=self.stats.hidden_draws - before_stats[0],
+                known_exits=self.stats.known_exits - before_stats[1],
+                known_returns=self.stats.known_returns - before_stats[2],
+                posterior_digest=self.posterior.digest,
+                uniform_digest=self.uniform.digest,
+                posterior_normalization_error=self.posterior.normalization_error,
+                uniform_normalization_error=self.uniform.normalization_error,
+                support_size=self.posterior.support_size,
+                effective_range_size=self.posterior.effective_range_size,
+            )
+        )
 
     def _reconcile(self, after: HiddenPoolSnapshot) -> None:
         if after.card_def_ids != self.snapshot.card_def_ids:
             raise RangeError("hidden-pool card definition order changed")
         deltas = tuple(
             current - previous
-            for current, previous in zip(after.unseen_counts, self.snapshot.unseen_counts)
+            for current, previous in zip(
+                after.unseen_counts, self.snapshot.unseen_counts
+            )
         )
         exits = [(index, -delta) for index, delta in enumerate(deltas) if delta < 0]
         returns = [(index, delta) for index, delta in enumerate(deltas) if delta > 0]
@@ -166,7 +245,9 @@ class ExactRangeTracker:
         )
         hidden_draws = after.hand_size - hand_after_known
         if hidden_draws < 0:
-            raise RangeError("unsupported hidden hand-size decrease without a public definition")
+            raise RangeError(
+                "unsupported hidden hand-size decrease without a public definition"
+            )
         if after.library_size != self.snapshot.library_size - hidden_draws:
             raise RangeError(
                 "unsupported selected-matchup transition: library delta does not match hidden draws"
@@ -192,7 +273,22 @@ class ExactRangeTracker:
                 self.posterior.effective_range_size / self.posterior.support_size
             ),
             "top_hand_mass": float(np.max(probabilities)),
-            "range_bytes": self.posterior.allocated_bytes + self.uniform.allocated_bytes,
+            "range_bytes": self.posterior.allocated_bytes
+            + self.uniform.allocated_bytes,
+            "normalization_error": self.posterior.normalization_error,
+        }
+
+    def replay_receipt(self) -> dict[str, Any]:
+        """Export public inputs and range digests without authority truth."""
+
+        return {
+            "schema_version": 1,
+            "viewer": self.viewer,
+            "initial_snapshot": self.initial_snapshot.to_dict(),
+            "initial_posterior_digest": self.initial_posterior_digest,
+            "transitions": [record.to_dict() for record in self.records],
+            "final_posterior_digest": self.posterior.digest,
+            "final_uniform_digest": self.uniform.digest,
         }
 
     def _record_size(self) -> None:

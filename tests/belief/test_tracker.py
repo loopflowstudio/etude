@@ -42,7 +42,10 @@ class FixedLikelihood:
     ) -> LikelihoodResult:
         self.calls.append((root_engine, viewer, action))
         likelihoods = np.asarray(
-            [self.by_hand[tuple(int(value) for value in key)] for key in hand_range.keys],
+            [
+                self.by_hand[tuple(int(value) for value in key)]
+                for key in hand_range.keys
+            ],
             dtype=np.float64,
         )
         return LikelihoodResult(
@@ -102,9 +105,7 @@ def test_known_exit_and_return_keep_public_pool_exact() -> None:
         hand_size=2,
         library_size=2,
     )
-    tracker = ExactRangeTracker(
-        snapshot, viewer=0, likelihood=None, epsilon=0.0
-    )
+    tracker = ExactRangeTracker(snapshot, viewer=0, likelihood=None, epsilon=0.0)
 
     tracker.observe(FakeEngine(((10, 1), (20, 2)), hand_size=1, library_size=2))
     assert tracker.stats.known_exits == 1
@@ -128,3 +129,22 @@ def test_tracker_reports_range_memory_and_effective_size() -> None:
     assert 1.0 <= diagnostics["effective_range_size"] <= 3.0
     assert diagnostics["range_bytes"] > 0
     assert tracker.stats.peak_range_bytes == diagnostics["range_bytes"]
+
+
+def test_tracker_exports_only_viewer_safe_transition_inputs_and_digests() -> None:
+    engine = FakeEngine(((10, 2), (20, 2)), hand_size=1, library_size=3)
+    tracker = ExactRangeTracker.from_engine(
+        engine, viewer=0, likelihood=None, epsilon=0.0
+    )
+
+    tracker.observe(FakeEngine(((10, 2), (20, 2)), hand_size=2, library_size=2))
+    receipt = tracker.replay_receipt()
+
+    assert receipt["viewer"] == 0
+    assert receipt["initial_snapshot"]["hand_size"] == 1
+    assert receipt["transitions"][0]["hidden_draws"] == 1
+    assert receipt["transitions"][0]["action"] is None
+    assert receipt["transitions"][0]["posterior_normalization_error"] < 1e-12
+    serialized = repr(receipt)
+    assert "focus" not in serialized
+    assert "offer" not in serialized

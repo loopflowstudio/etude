@@ -146,8 +146,10 @@
       "opponent_private_cards_exposed": 0
     },
     "matched_compute": {
-      "raw_playout_count_ratio_min": 1.0,
-      "raw_playout_count_ratio_max": 1.0,
+      "configured_worlds_per_action_ratio_min": 1.0,
+      "configured_worlds_per_action_ratio_max": 1.0,
+      "configured_rollouts_per_world_ratio_min": 1.0,
+      "configured_rollouts_per_world_ratio_max": 1.0,
       "end_to_end_p95_ratio_max": 1.1
     },
     "improved_play": {
@@ -173,4 +175,3 @@
     "broad_card_pool_generalization"
   ]
 }
-

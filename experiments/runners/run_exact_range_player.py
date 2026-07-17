@@ -21,6 +21,7 @@ from typing import Any
 from manabot.sim.flat_mc import aggregate_records, play_games
 from manabot.sim.teacher1_evidence import (
     ContractError,
+    _fresh_env,
     canonical_sha256,
     file_sha256,
     runtime_fingerprints,
@@ -41,7 +42,13 @@ def load_contract(path: Path, stage: str) -> tuple[dict[str, Any], dict[str, Any
     if not isinstance(profile, dict):
         raise ContractError(f"contract has no {stage!r} profile")
     required = contract.get("required_evidence") or {}
-    expected_categories = {"gameplay", "calibration", "integrity", "competencies", "systems"}
+    expected_categories = {
+        "gameplay",
+        "calibration",
+        "integrity",
+        "competencies",
+        "systems",
+    }
     if set(required) != expected_categories:
         raise ContractError("contract does not pin every required evidence category")
     if "public_belief_solving" not in set(contract.get("exclusions") or []):
@@ -103,10 +110,10 @@ def run_smoke(
     profile: dict[str, Any],
     out_dir: Path,
 ) -> dict[str, Any]:
-    checkpoint, checkpoint_sha256 = resolve_artifact(
-        contract, "likelihood_checkpoint"
+    checkpoint, checkpoint_sha256 = resolve_artifact(contract, "likelihood_checkpoint")
+    runtime = runtime_fingerprints(
+        seed=int(contract["algorithm"]["counterfactual_seed"])
     )
-    runtime = runtime_fingerprints(seed=int(contract["algorithm"]["counterfactual_seed"]))
     validate_runtime_fingerprints(contract["expected_fingerprints"], runtime)
     belief = _player_spec(
         contract,
@@ -123,8 +130,10 @@ def run_smoke(
         checkpoint_sha256=checkpoint_sha256,
     )
 
+    out_dir.mkdir(parents=True, exist_ok=True)
     blocks = []
     records = []
+    replay_mismatches = 0
     for block in profile["paired_deal_blocks"]:
         result = play_games(
             belief,
@@ -132,7 +141,40 @@ def run_smoke(
             num_games=int(block["games"]),
             seed=int(block["seed"]),
         )
+        replay = play_games(
+            belief,
+            uniform,
+            num_games=int(block["games"]),
+            seed=int(block["seed"]),
+        )
+        replay_mismatches += int(result.hero_replays != replay.hero_replays)
+        replay_mismatches += int(result.villain_replays != replay.villain_replays)
         records.extend(result.records)
+        block_id = str(block["id"])
+        calibration_path = out_dir / f"{block_id}-known-truth.json"
+        calibration_path.write_text(
+            json.dumps(
+                {
+                    "belief": result.hero_known_truth,
+                    "uniform": result.villain_known_truth,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        replay_path = out_dir / f"{block_id}-public-replays.json"
+        replay_path.write_text(
+            json.dumps(
+                {
+                    "belief": result.hero_replays,
+                    "uniform": result.villain_replays,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
         blocks.append(
             {
                 "id": block["id"],
@@ -140,8 +182,33 @@ def run_smoke(
                 "gameplay": aggregate_records(result.records),
                 "belief": result.hero_evidence,
                 "uniform": result.villain_evidence,
+                "known_truth_artifact": {
+                    "path": str(calibration_path),
+                    "sha256": file_sha256(calibration_path),
+                },
+                "public_replay_artifact": {
+                    "path": str(replay_path),
+                    "sha256": file_sha256(replay_path),
+                },
             }
         )
+    from manabot.belief.audit import viewer_equivalence_audit
+    from manabot.belief.tracker import ExactRangeTracker
+
+    audit_env = _fresh_env(int(contract["algorithm"]["counterfactual_seed"]))
+    audit_viewer = int(audit_env._engine.current_agent_index())
+    audit_tracker = ExactRangeTracker.from_engine(
+        audit_env._engine,
+        viewer=audit_viewer,
+        likelihood=None,
+        epsilon=float(contract["algorithm"]["epsilon"]),
+    )
+    leakage = viewer_equivalence_audit(
+        audit_env._engine,
+        audit_tracker,
+        first_seed=int(contract["algorithm"]["counterfactual_seed"]),
+        second_seed=int(contract["algorithm"]["counterfactual_seed"]) + 1,
+    )
     receipt = {
         "schema_version": 1,
         "experiment": EXPERIMENT,
@@ -153,23 +220,46 @@ def run_smoke(
         "runtime": runtime,
         "gameplay": aggregate_records(records),
         "blocks": blocks,
+        "matched_compute": {
+            "belief_worlds_per_action": int(profile["sims_per_action"])
+            // int(profile["rollouts_per_world"]),
+            "uniform_worlds_per_action": int(profile["sims_per_action"])
+            // int(profile["rollouts_per_world"]),
+            "belief_rollouts_per_world": int(profile["rollouts_per_world"]),
+            "uniform_rollouts_per_world": int(profile["rollouts_per_world"]),
+            "realized_belief_playouts": sum(
+                int((block["belief"] or {}).get("simulations", 0)) for block in blocks
+            ),
+            "realized_uniform_playouts": sum(
+                int((block["uniform"] or {}).get("simulations", 0)) for block in blocks
+            ),
+        },
         "integrity": {
             "illegal_commands": 0,
+            "replay_mismatches": replay_mismatches,
             "installed_hand_mismatches": sum(
                 int((block["belief"] or {}).get("installed_hand_mismatches", 0))
                 + int((block["uniform"] or {}).get("installed_hand_mismatches", 0))
                 for block in blocks
             ),
+            "viewer_equivalent_root_mismatches": leakage[
+                "viewer_projection_mismatches"
+            ],
+            "opponent_private_cards_exposed": leakage["opponent_private_cards_exposed"],
+            "viewer_equivalence_audit": leakage,
         },
         "deferred_registered_evidence": [
-            "known_truth_calibration",
-            "viewer_equivalence_replay",
             "competencies",
-            "full_arena_matrix_and_rating"
+            "full_arena_matrix_and_rating",
         ],
         "completed_at": datetime.now(UTC).isoformat(),
     }
-    out_dir.mkdir(parents=True, exist_ok=True)
+    for metric, expected in contract["gates"]["integrity"].items():
+        if receipt["integrity"].get(metric) != expected:
+            raise ContractError(
+                f"smoke integrity gate failed: {metric}="
+                f"{receipt['integrity'].get(metric)!r}, expected {expected!r}"
+            )
     receipt_path = out_dir / "smoke-receipt.json"
     receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
     return receipt
@@ -192,4 +282,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

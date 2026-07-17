@@ -267,7 +267,10 @@ No microgame is added in this task unless that slice remains ambiguous.
 The registered decision rule is explicit: claim improved play only when the
 paired bootstrap lower bound for belief-minus-uniform play and the rating
 difference lower bound are both above zero, every integrity gate passes, raw
-playout counts match, and the preregistered compute-class tolerances hold.
+playout counts are reported, and the preregistered compute-class tolerances
+hold. Worlds per action and rollouts per world match exactly; realized total
+playouts need not match after the arms choose different actions and visit
+different numbers of legal roots.
 Otherwise report non-improvement or ambiguity without promoting posterior
 quality into a gameplay claim.
 
@@ -406,8 +409,9 @@ Together the verified receipts contain:
   transitions, raw-prompt exposures, or viewer-equivalence differences;
 - equal grouped-action likelihoods across physical-copy assignments for every
   audited hand key;
-- both primary arms executing identical playout counts and the same native
-  search entry point under paired seeds;
+- both primary arms executing identical configured worlds and rollouts per
+  legal root action through the same native search entry point under paired
+  seeds, with realized total playouts reported;
 - reported calibration/log loss, effective range size, competencies, p50/p95
   latency, rollout throughput, peak RSS/range bytes, and full matchup rows.
 

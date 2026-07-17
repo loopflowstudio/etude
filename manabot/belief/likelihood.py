@@ -35,6 +35,20 @@ class PublicAction:
         elif self.card_def_id is not None:
             raise ValueError(f"{self.kind.value} cannot carry a card_def_id")
 
+    def to_dict(self) -> dict[str, str | int | None]:
+        return {"kind": self.kind.value, "card_def_id": self.card_def_id}
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> PublicAction:
+        return cls(
+            PublicActionKind(str(value["kind"])),
+            card_def_id=(
+                int(value["card_def_id"])
+                if value.get("card_def_id") is not None
+                else None
+            ),
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class LikelihoodResult:
@@ -158,7 +172,9 @@ class FrozenPolicyLikelihood:
 
 
 def _matching_action_indexes(raw: Any, observed: PublicAction) -> tuple[list[int], int]:
-    card_definitions = {int(card.id): int(card.registry_key) for card in raw.agent_cards}
+    card_definitions = {
+        int(card.id): int(card.registry_key) for card in raw.agent_cards
+    }
     groups: dict[tuple[Any, ...], list[int]] = {}
     for index, option in enumerate(raw.action_space.actions):
         action_type = int(option.action_type)

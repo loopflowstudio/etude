@@ -77,6 +77,17 @@ def test_sampling_is_reproducible_and_returns_supported_hands() -> None:
     assert all(hand_range.probability(hand) > 0.0 for hand in first)
 
 
+def test_range_digest_rank_and_inclusion_are_replay_stable() -> None:
+    hand_range = ExactHandRange.uniform((10, 20), (2, 2), 2)
+    rebuilt = ExactHandRange.uniform((10, 20), (2, 2), 2)
+
+    assert hand_range.digest == rebuilt.digest
+    assert hand_range.normalization_error < 1e-12
+    assert hand_range.rank((1, 1)) == 1
+    assert hand_range.rank((9, 9)) is None
+    assert hand_range.inclusion_probabilities() == pytest.approx((5 / 6, 5 / 6))
+
+
 def test_impossible_transition_fails_closed() -> None:
     hand_range = ExactHandRange.uniform((10,), (1,), 1)
 

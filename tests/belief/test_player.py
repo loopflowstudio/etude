@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import torch
 
 from manabot.belief.likelihood import (
     FrozenPolicyLikelihood,
@@ -12,8 +13,13 @@ from manabot.belief.likelihood import (
     PublicAction,
     PublicActionKind,
     _matching_action_indexes,
+    file_sha256,
 )
 from manabot.belief.player import ExactRangePlayer, UniformRangePlayer
+from manabot.env import ObservationSpace
+from manabot.infra.hypers import AgentHypers, ObservationSpaceHypers
+from manabot.model.agent import Agent
+from manabot.sim.flat_mc import play_games
 from manabot.sim.teacher1_evidence import _fresh_env
 
 
@@ -103,6 +109,46 @@ def test_exact_range_player_emits_revision_bound_legal_command() -> None:
     assert command["prompt_id"] == 3
     assert command["offer_id"] == action
     assert player.stats.commands_emitted == 1
+    assert player.evidence_stats()["p50_end_to_end_latency_ms"] is not None
+
+
+def test_player_omits_noop_prompt_fragments_from_public_replay() -> None:
+    env = _fresh_env(93)
+    viewer = int(env._engine.current_agent_index())
+    player = ExactRangePlayer(1, likelihood=NeutralLikelihood(), seed=129)
+    player.start_game(env, viewer)
+
+    player.observe_step(env, viewer)
+
+    assert player.tracker is not None
+    assert player.tracker.records == []
+    assert player.stats.range_updates == 0
+
+
+def test_opponent_prepare_uses_public_prompt_kind_not_private_action_index() -> None:
+    env = _fresh_env(94)
+    acting = int(env._engine.current_agent_index())
+    viewer = (acting + 1) % 2
+    player = ExactRangePlayer(1, likelihood=NeutralLikelihood(), seed=129)
+    player.start_game(env, viewer)
+
+    player.prepare_step(env, acting, action=10_000)
+
+    assert player._pending_likelihood_root is not None
+
+
+def test_player_archives_public_replay_at_game_boundary() -> None:
+    env = _fresh_env(95)
+    viewer = int(env._engine.current_agent_index())
+    player = ExactRangePlayer(1, likelihood=NeutralLikelihood(), seed=130)
+    player.start_game(env, viewer)
+
+    player.finish_game(game_index=4, seed=95)
+
+    replay = player.replay_receipts()[0]
+    assert replay["game_index"] == 4
+    assert replay["seed"] == 95
+    assert replay["viewer"] == viewer
 
 
 def test_player_tracks_an_opponent_pass_from_the_fixed_viewer_boundary() -> None:
@@ -130,3 +176,52 @@ def test_player_tracks_an_opponent_pass_from_the_fixed_viewer_boundary() -> None
     assert player.tracker is not None
     assert player.tracker.posterior.card_def_ids == player.tracker.uniform.card_def_ids
     assert player.stats.peak_range_bytes > 0
+
+
+def test_tiny_matchup_records_calibration_replay_and_system_cost(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "tiny-policy.pt"
+    obs_hypers = ObservationSpaceHypers()
+    agent_hypers = AgentHypers()
+    obs_space = ObservationSpace(obs_hypers)
+    agent = Agent(obs_space, agent_hypers)
+    torch.save(
+        {
+            "hypers": {
+                "observation_hypers": obs_hypers.model_dump(),
+                "agent_hypers": agent_hypers.model_dump(),
+            },
+            "model_state_dict": agent.state_dict(),
+        },
+        checkpoint,
+    )
+    digest = file_sha256(checkpoint)
+    common = {
+        "sims": 1,
+        "checkpoint": str(checkpoint),
+        "checkpoint_sha256": digest,
+        "rollouts_per_world": 1,
+        "max_steps": 200,
+        "likelihood_batch_size": 16,
+    }
+    tiny_deck = {"Mountain": 4, "Raging Goblin": 4}
+
+    result = play_games(
+        {"kind": "exact_range", **common},
+        {"kind": "uniform_range", **common},
+        num_games=1,
+        seed=157,
+        hero_deck=tiny_deck,
+        villain_deck=tiny_deck,
+    )
+
+    assert len(result.records) == 1
+    assert result.hero_evidence is not None
+    assert result.villain_evidence is not None
+    assert result.hero_evidence["installed_hand_mismatches"] == 0
+    assert result.hero_evidence["calibration"]["points"] > 0
+    assert result.hero_evidence["p95_end_to_end_latency_ms"] is not None
+    assert result.hero_evidence["peak_rss_bytes"] > 0
+    assert result.hero_replays[0]["game_index"] == 0
+    assert result.hero_known_truth

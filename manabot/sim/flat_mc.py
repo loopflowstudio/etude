@@ -426,6 +426,10 @@ class MatchupResult:
     wall_seconds: float
     hero_evidence: dict[str, Any] | None = None
     villain_evidence: dict[str, Any] | None = None
+    hero_known_truth: list[dict[str, Any]] = field(default_factory=list)
+    villain_known_truth: list[dict[str, Any]] = field(default_factory=list)
+    hero_replays: list[dict[str, Any]] = field(default_factory=list)
+    villain_replays: list[dict[str, Any]] = field(default_factory=list)
 
 
 def play_games(
@@ -469,6 +473,8 @@ def play_games(
     )
 
     records: list[GameRecord] = []
+    hero_known_truth: list[Any] = []
+    villain_known_truth: list[Any] = []
     start = time.perf_counter()
     for i in range(num_games):
         game_index = game_offset + i
@@ -500,6 +506,11 @@ def play_games(
             counts = hero_decisions if acting == hero_seat else villain_decisions
             counts[kind] = counts.get(kind, 0) + 1
             player = hero_player if acting == hero_seat else villain_player
+            record_counts = {
+                id(observer): len(tracker.records)
+                for observer in (hero_player, villain_player)
+                if (tracker := getattr(observer, "tracker", None)) is not None
+            }
             action = player.act(env, obs)
             for observer in (hero_player, villain_player):
                 prepare_step = getattr(observer, "prepare_step", None)
@@ -517,17 +528,44 @@ def play_games(
                     asset_manifest_hash=asset_manifest_hash,
                 )
                 if str(command["match_id"]) != match_id:
-                    raise RuntimeError("command match_id does not match the active game")
+                    raise RuntimeError(
+                        "command match_id does not match the active game"
+                    )
                 if int(command["expected_revision"]) != steps:
-                    raise RuntimeError("command revision does not match the active prompt")
+                    raise RuntimeError(
+                        "command revision does not match the active prompt"
+                    )
                 action = int(command["offer_id"])
             obs, _, terminated, truncated, info = env.step(action)
             for observer in (hero_player, villain_player):
                 observe_step = getattr(observer, "observe_step", None)
                 if observe_step is not None:
                     observe_step(env, acting)
+            for observer, audit_points in (
+                (hero_player, hero_known_truth),
+                (villain_player, villain_known_truth),
+            ):
+                tracker = getattr(observer, "tracker", None)
+                if tracker is None or len(tracker.records) == record_counts.get(
+                    id(observer), 0
+                ):
+                    continue
+                from manabot.belief.audit import score_known_truth
+
+                audit_points.append(
+                    score_known_truth(
+                        env._engine,
+                        tracker,
+                        game_index=game_index,
+                        step=steps,
+                    )
+                )
             steps += 1
             done = bool(terminated or truncated)
+        for player in (hero_player, villain_player):
+            finish_game = getattr(player, "finish_game", None)
+            if finish_game is not None:
+                finish_game(game_index=game_index, seed=seed + game_index)
         winner = winner_from_info_or_obs(info, env.last_raw_obs)
         records.append(
             GameRecord(
@@ -543,6 +581,23 @@ def play_games(
         )
     wall_seconds = time.perf_counter() - start
 
+    hero_evidence = (
+        hero_player.evidence_stats() if hasattr(hero_player, "evidence_stats") else None
+    )
+    villain_evidence = (
+        villain_player.evidence_stats()
+        if hasattr(villain_player, "evidence_stats")
+        else None
+    )
+    if hero_evidence is not None and hero_known_truth:
+        from manabot.belief.audit import aggregate_known_truth
+
+        hero_evidence["calibration"] = aggregate_known_truth(hero_known_truth)
+    if villain_evidence is not None and villain_known_truth:
+        from manabot.belief.audit import aggregate_known_truth
+
+        villain_evidence["calibration"] = aggregate_known_truth(villain_known_truth)
+
     return MatchupResult(
         hero=spec_name(hero_spec),
         villain=spec_name(villain_spec),
@@ -554,15 +609,19 @@ def play_games(
             villain_player, "search_stats", getattr(villain_player, "stats", None)
         ),
         wall_seconds=wall_seconds,
-        hero_evidence=(
-            hero_player.evidence_stats()
-            if hasattr(hero_player, "evidence_stats")
-            else None
+        hero_evidence=hero_evidence,
+        villain_evidence=villain_evidence,
+        hero_known_truth=[point.to_dict() for point in hero_known_truth],
+        villain_known_truth=[point.to_dict() for point in villain_known_truth],
+        hero_replays=(
+            hero_player.replay_receipts()
+            if hasattr(hero_player, "replay_receipts")
+            else []
         ),
-        villain_evidence=(
-            villain_player.evidence_stats()
-            if hasattr(villain_player, "evidence_stats")
-            else None
+        villain_replays=(
+            villain_player.replay_receipts()
+            if hasattr(villain_player, "replay_receipts")
+            else []
         ),
     )
 
