@@ -39,27 +39,27 @@
     <div
       class={`pointer-events-auto w-full max-w-xl rounded-xl border px-4 py-3 shadow-2xl backdrop-blur ${
         beat.importance === 'critical'
-          ? 'border-rose-500/80 bg-slate-800/95'
+          ? 'border-mountain/80 bg-panel/95'
           : beat.importance === 'emphasized'
-            ? 'border-amber-600/60 bg-slate-800/95'
-            : 'border-cyan-400/40 bg-slate-800/95'
+            ? 'border-plains/60 bg-panel/95'
+            : 'border-island/40 bg-panel/95'
       }`}
     >
       <div class="flex items-start justify-between gap-4">
         <div role="status" aria-live="polite" aria-atomic="true">
-          <p class="font-mono text-[9px] font-bold uppercase tracking-[0.16em] text-slate-400">
+          <p class="font-mono text-[9px] font-bold uppercase tracking-[0.16em] text-ink-2">
             Beat {player.currentIndex + 1} of {player.events.length}
           </p>
-          <h2 class="mt-1 text-base font-bold text-slate-100">{beat.heading}</h2>
-          <p class="mt-1 text-sm text-slate-200">{beat.detail}</p>
+          <h2 class="mt-1 text-base font-bold text-ink">{beat.heading}</h2>
+          <p class="mt-1 text-sm text-ink">{beat.detail}</p>
         </div>
         <div class="flex shrink-0 gap-2">
           <button
             type="button"
-            class={`rounded border px-2.5 py-1.5 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 ${
+            class={`rounded border px-2.5 py-1.5 text-xs font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action ${
               player.speed > 1
-                ? 'border-amber-600 bg-amber-600/20 text-slate-100'
-                : 'border-slate-600 bg-slate-900 text-slate-200 hover:border-slate-400'
+                ? 'border-plains bg-plains/20 text-ink'
+                : 'border-line-strong bg-field text-ink hover:border-ink-2'
             }`}
             aria-pressed={player.speed > 1}
             onclick={() => player.setFastForward(player.speed === 1)}
@@ -68,14 +68,14 @@
           </button>
           <button
             type="button"
-            class="rounded border border-slate-600 bg-slate-900 px-2.5 py-1.5 text-xs font-semibold text-slate-200 hover:border-slate-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+            class="rounded border border-line-strong bg-field px-2.5 py-1.5 text-xs font-semibold text-ink hover:border-ink-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action"
             onclick={() => player.skipCurrent()}
           >
             Skip beat
           </button>
           <button
             type="button"
-            class="rounded border border-slate-600 bg-slate-900 px-2.5 py-1.5 text-xs font-semibold text-slate-200 hover:border-slate-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+            class="rounded border border-line-strong bg-field px-2.5 py-1.5 text-xs font-semibold text-ink hover:border-ink-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action"
             onclick={() => player.finishSequence()}
           >
             Finish

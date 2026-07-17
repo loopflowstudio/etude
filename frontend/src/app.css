@@ -186,6 +186,7 @@
   --color-action-hover: var(--accent-hover);
   --color-action-soft: var(--accent-soft);
   --color-display: var(--accent-text);
+  --color-ivory: var(--ivory);
 
   --color-forest: var(--success);
   --color-forest-ink: var(--success-text);

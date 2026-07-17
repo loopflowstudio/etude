@@ -10,7 +10,7 @@
   <title>Etude Fantasia</title>
 </svelte:head>
 
-<div class="min-h-screen bg-slate-900 text-slate-100">
+<div class="min-h-screen text-ink">
   <!-- The banner carries the color pie as a W→U→R→B→G weave: each color
        radiates from its own point, alternating edges, in the manner of the
        loopflow logo's multi-direction gradient. Like the card name plates,

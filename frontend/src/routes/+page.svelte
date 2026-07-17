@@ -150,10 +150,10 @@
   <h1 class="sr-only">Play</h1>
   <div
     data-testid="game-header"
-    class="mb-4 flex flex-wrap items-center justify-between gap-3 rounded border border-slate-700 bg-slate-800 px-4 py-3"
+    class="mb-4 flex flex-wrap items-center justify-between gap-3 rounded border border-line bg-panel px-4 py-3"
   >
     <div data-testid="connection-summary" class="flex items-center gap-3">
-      <span class="font-mono text-[10px] uppercase tracking-[0.14em] text-slate-400">Connection</span>
+      <span class="font-mono text-[10px] uppercase tracking-[0.14em] text-ink-2">Connection</span>
       <span
         data-testid="connection-badge"
         data-connection-state={gameStore.connection}
@@ -163,10 +163,10 @@
         aria-label={`Connection status: ${gameStore.connection}`}
         class={`rounded px-2 py-1 text-xs font-semibold ${
           gameStore.connection === 'connected'
-            ? 'bg-emerald-600/20 text-slate-200'
+            ? 'bg-forest/20 text-ink'
             : gameStore.connection === 'reconnecting' || gameStore.connection === 'connecting'
-              ? 'bg-amber-600/20 text-slate-200'
-              : 'bg-slate-700 text-slate-300'
+              ? 'bg-plains/20 text-ink'
+              : 'bg-panel-muted text-ink-2'
         }`}
       >
         {gameStore.connection}
@@ -174,7 +174,7 @@
       {#if gameStore.deckNames && gameStore.observation}
         <span
           data-testid="deck-names"
-          class="inline-flex items-center gap-1.5 rounded bg-slate-700/60 px-2 py-1 text-xs font-semibold text-slate-200"
+          class="inline-flex items-center gap-1.5 rounded bg-panel-muted/60 px-2 py-1 text-xs font-semibold text-ink"
         >
           <DeckIdentity name={gameStore.deckNames.hero} /> vs <DeckIdentity
             name={gameStore.deckNames.villain}
@@ -199,7 +199,7 @@
         onCheckpointDeterministicChange={(value) => gameStore.setCheckpointDeterministic(value)}
       />
       <button
-        class="rounded bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-500"
+        class="rounded bg-action px-4 py-2 text-sm font-semibold text-ivory transition hover:bg-action-hover"
         onclick={startNewGame}
       >
         New Game
@@ -208,7 +208,7 @@
   </div>
 
   {#if gameStore.errorMessage}
-    <section role="alert" aria-atomic="true" class="mb-4 rounded border border-rose-500/50 bg-rose-900/20 px-4 py-3 text-sm text-rose-200">
+    <section role="alert" aria-atomic="true" class="mb-4 rounded border border-mountain/50 bg-mountain/20 px-4 py-3 text-sm text-mountain-ink">
       {gameStore.errorMessage}
     </section>
   {/if}
@@ -260,10 +260,10 @@
     </div>
   {:else}
     <div class="mx-auto flex max-w-xl flex-col gap-4">
-      <section class="rounded border border-slate-700 bg-slate-800 p-10 text-center text-slate-300">
+      <section class="rounded border border-line bg-panel p-10 text-center text-ink-2">
         <p class="mb-4 text-lg">Start a game to begin.</p>
         <button
-          class="rounded bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-500"
+          class="rounded bg-action px-4 py-2 text-sm font-semibold text-ivory transition hover:bg-action-hover"
           onclick={startNewGame}
         >
           New Game

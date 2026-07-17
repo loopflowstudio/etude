@@ -97,28 +97,28 @@
 
 <main class="mx-auto w-full max-w-[1600px] p-4">
   <div class="grid grid-cols-1 gap-4 xl:grid-cols-[320px_minmax(0,1fr)_320px]">
-    <section class="rounded border border-slate-700 bg-slate-800 p-4">
+    <section class="rounded border border-line bg-panel p-4">
       <div class="mb-3 flex items-center justify-between gap-3">
-        <h1 class="text-lg font-bold text-accent-text">Replay</h1>
-        <button class="rounded border border-slate-600 bg-slate-900 px-3 py-2 text-sm hover:border-blue-400" onclick={() => void loadTraces()}>
+        <h1 class="text-lg font-bold text-display">Replay</h1>
+        <button class="rounded border border-line-strong bg-field px-3 py-2 text-sm hover:border-action" onclick={() => void loadTraces()}>
           Refresh
         </button>
       </div>
 
       {#if replayStore.loadingList}
-        <p class="text-sm text-slate-400">Loading traces…</p>
+        <p class="text-sm text-ink-2">Loading traces…</p>
       {:else if replayStore.summaries.length === 0}
-        <p class="text-sm text-slate-400">No traces yet. Play a game first.</p>
+        <p class="text-sm text-ink-2">No traces yet. Play a game first.</p>
       {:else}
         <div class="space-y-2">
           {#each replayStore.summaries as summary}
             <button
-              class={`w-full rounded border px-3 py-3 text-left text-sm ${replayStore.trace?.id === summary.id ? 'border-blue-400 bg-slate-900' : 'border-slate-700 bg-slate-900/60 hover:border-slate-500'}`}
+              class={`w-full rounded border px-3 py-3 text-left text-sm ${replayStore.trace?.id === summary.id ? 'border-action bg-field' : 'border-line bg-field/60 hover:border-line-strong'}`}
               onclick={() => void loadTrace(summary.id)}
             >
-              <div class="font-mono text-xs text-slate-100">{summary.id}</div>
-              <div class="mt-1 text-xs text-slate-400">{summary.timestamp ?? 'Unknown time'}</div>
-              <div class="mt-1 text-xs text-slate-400">
+              <div class="font-mono text-xs text-ink">{summary.id}</div>
+              <div class="mt-1 text-xs text-ink-2">{summary.timestamp ?? 'Unknown time'}</div>
+              <div class="mt-1 text-xs text-ink-2">
                 Winner: {winnerLabel(summary.winner)} · Events: {summary.num_events}
               </div>
             </button>
@@ -129,13 +129,13 @@
 
     <div class="space-y-4">
       {#if replayStore.errorMessage}
-        <section class="rounded border border-rose-500/50 bg-rose-900/20 px-4 py-3 text-sm text-rose-200">
+        <section class="rounded border border-mountain/50 bg-mountain/20 px-4 py-3 text-sm text-mountain-ink">
           {replayStore.errorMessage}
         </section>
       {/if}
 
       {#if replayStore.loadingTrace}
-        <section class="rounded border border-slate-700 bg-slate-800 p-10 text-center text-slate-300">
+        <section class="rounded border border-line bg-panel p-10 text-center text-ink-2">
           Loading replay…
         </section>
       {:else if currentFrame && replayStore.trace}
@@ -162,7 +162,7 @@
           />
         </div>
       {:else}
-        <section class="rounded border border-slate-700 bg-slate-800 p-10 text-center text-slate-300">
+        <section class="rounded border border-line bg-panel p-10 text-center text-ink-2">
           Select a trace to inspect it.
         </section>
       {/if}
