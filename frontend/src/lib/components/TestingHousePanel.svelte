@@ -62,6 +62,8 @@
 
 <section
   data-testid="testing-house-panel"
+  data-table-id={table.table_id}
+  data-table-mode={table.mode}
   aria-labelledby="testing-house-heading"
   class="border-b border-line bg-field px-5 py-4 md:px-10"
 >
@@ -159,10 +161,12 @@
       {#if table.decisions.length}
         <div class="mt-3 flex flex-wrap gap-2" aria-label="Committed decisions">
           {#each table.decisions as decision}
-            <button
-              type="button"
-              data-testid="restore-table-decision"
-              class="btn btn-secondary min-h-11"
+              <button
+                type="button"
+                data-testid="restore-table-decision"
+                data-decision-address={decision.address}
+                data-decision-revision={decision.revision}
+                class="btn btn-secondary min-h-11"
               onclick={() => onRestoreDecision?.(decision.address)}
             >
               Decision {decision.ordinal + 1}
@@ -213,7 +217,13 @@
     </div>
   </div>
 
-  <p class="sr-only" role="status" aria-live="polite" aria-atomic="true">
+  <p
+    class="sr-only"
+    data-testid="testing-house-announcement"
+    role="status"
+    aria-live="polite"
+    aria-atomic="true"
+  >
     {announcement}
   </p>
 </section>

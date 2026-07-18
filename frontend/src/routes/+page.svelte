@@ -232,7 +232,12 @@
   }
 </script>
 
-<main class="mx-auto w-full max-w-[1400px] px-4 py-6" data-update-seq={gameStore.updateSeq}>
+<main
+  class="mx-auto w-full max-w-[1400px] px-4 py-6"
+  data-update-seq={gameStore.updateSeq}
+  data-frame-revision={gameStore.protocolFrame?.revision ?? -1}
+  data-table-revision={gameStore.table?.table_revision ?? -1}
+>
   <h1 class="sr-only">Play</h1>
 
   {#if gameStore.errorMessage}
