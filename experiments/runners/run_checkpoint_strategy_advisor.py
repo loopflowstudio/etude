@@ -56,7 +56,11 @@ from etude.testing_house_protocol import (
     PlayerAuthoredBeliefProvenance,
     ViewerIdentity,
 )
-from manabot.sim.search_runtime import retained_int7_policy_only_checkpoint
+from manabot.sim.search_runtime import (
+    RetainedInt7EvidenceSnapshot,
+    retained_int7_evidence_snapshot,
+    retained_int7_policy_only_checkpoint,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCHEMA_PATH = REPO_ROOT / "protocol" / "advice-v1.schema.json"
@@ -72,6 +76,18 @@ class CheckpointAdvisorRuntime:
     request: AdviceRequest
     authority_receipt_sha256: str
     parity_receipt_sha256: str
+
+
+@dataclass(frozen=True)
+class RetainedEvidenceVerificationReceipt:
+    """Before/after proof that advice did not change retained INT-7 evidence."""
+
+    before: RetainedInt7EvidenceSnapshot
+    after: RetainedInt7EvidenceSnapshot
+
+    @property
+    def no_write_or_generation_verified(self) -> bool:
+        return self.before == self.after
 
 
 def _file_sha256(path: Path) -> str:
@@ -276,9 +292,10 @@ def _assert_complete_and_private(payload: bytes) -> None:
 
 def checkpoint_fixture(
     runtime: CheckpointAdvisorRuntime,
-) -> tuple[VersionedAdviceFixture, bytes]:
-    """Prove fresh live/Study parity and authored-root immutability."""
+) -> tuple[VersionedAdviceFixture, bytes, RetainedEvidenceVerificationReceipt]:
+    """Prove fresh parity plus Game-root and retained-evidence immutability."""
 
+    retained_before = retained_int7_evidence_snapshot((FIXTURE_SEED,))
     assert runtime.request.viewer is not None
     parsed = ReplayDecisionAddress.parse(runtime.request.address)
     study_forks = runtime.session.study_fork_provider()
@@ -302,6 +319,13 @@ def checkpoint_fixture(
         or _file_sha256(PARITY_RECEIPT_PATH) != runtime.parity_receipt_sha256
     ):
         raise RuntimeError("checkpoint advice changed an authored-match receipt")
+    retained_after = retained_int7_evidence_snapshot((FIXTURE_SEED,))
+    retained_receipt = RetainedEvidenceVerificationReceipt(
+        before=retained_before,
+        after=retained_after,
+    )
+    if not retained_receipt.no_write_or_generation_verified:
+        raise RuntimeError("checkpoint advice changed retained INT-7 evidence")
     _assert_complete_and_private(live_first)
     return (
         VersionedAdviceFixture(
@@ -309,6 +333,7 @@ def checkpoint_fixture(
             response=parse_advice_response_bytes(live_first),
         ),
         live_first,
+        retained_receipt,
     )
 
 
@@ -320,7 +345,7 @@ def main() -> None:
     args = parser.parse_args()
 
     runtime = build_checkpoint_runtime()
-    fixture, response_bytes = checkpoint_fixture(runtime)
+    fixture, response_bytes, retained_receipt = checkpoint_fixture(runtime)
     encoded_fixture = (
         json.dumps(fixture.model_dump(mode="json"), indent=2, sort_keys=True) + "\n"
     )
@@ -355,7 +380,33 @@ def main() -> None:
                 "retained_root_unchanged": True,
                 "authority_receipt_sha256": runtime.authority_receipt_sha256,
                 "parity_receipt_sha256": runtime.parity_receipt_sha256,
-                "checkpoint_generated": False,
+                "retained_evidence_no_write_or_generation_verified": (
+                    retained_receipt.no_write_or_generation_verified
+                ),
+                "retained_evidence_before_sha256": (
+                    retained_receipt.before.receipt_sha256
+                ),
+                "retained_evidence_after_sha256": (
+                    retained_receipt.after.receipt_sha256
+                ),
+                "retained_manifest_digest": (retained_receipt.before.manifest_digest),
+                "retained_manifest_file_sha256": (
+                    retained_receipt.before.manifest_file.sha256
+                ),
+                "retained_manifest_bytes": (
+                    retained_receipt.before.manifest_file.bytes
+                ),
+                "retained_selected_checkpoint_file_sha256": (
+                    retained_receipt.before.selected_checkpoints[0].file.sha256
+                ),
+                "retained_selected_checkpoint_bytes": (
+                    retained_receipt.before.selected_checkpoints[0].file.bytes
+                ),
+                "retained_tree_content_sha256": (
+                    retained_receipt.before.retention_tree_content_sha256
+                ),
+                "retained_tree_files": (retained_receipt.before.retention_tree_files),
+                "retained_tree_bytes": (retained_receipt.before.retention_tree_bytes),
             },
             sort_keys=True,
         )

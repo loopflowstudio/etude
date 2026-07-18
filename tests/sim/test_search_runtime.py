@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
+from experiments.runners.run_int7_value_target_comparison import manifest_digest
 from manabot.sim.flat_mc import load_checkpoint_agent
 from manabot.sim.search_runtime import (
     INT7_VALUE_TARGET_MANIFEST_SHA256,
+    INT7_VALUE_TARGET_RESULT,
     RetainedCheckpointMismatchError,
     RetainedCheckpointUnavailableError,
     model_action_abi_sha256,
     model_observation_abi_sha256,
+    retained_int7_evidence_snapshot,
+    retained_int7_manifest_digest,
     retained_int7_policy_only_checkpoint,
 )
 
@@ -53,6 +59,64 @@ def test_retained_registry_missing_manifest_is_typed_unavailable(
     monkeypatch.setattr(runtime, "INT7_VALUE_TARGET_MANIFEST", tmp_path / "missing")
     with pytest.raises(RetainedCheckpointUnavailableError, match="unavailable"):
         retained_int7_policy_only_checkpoint(197)
+
+
+def test_retained_registry_recomputes_manifest_identity_before_checkpoint_load(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    import manabot.sim.search_runtime as runtime
+
+    manifest = json.loads(runtime.INT7_VALUE_TARGET_MANIFEST.read_text())
+    assert retained_int7_manifest_digest(manifest) == manifest_digest(manifest)
+    assert retained_int7_manifest_digest(manifest) == INT7_VALUE_TARGET_MANIFEST_SHA256
+
+    manifest["evidence_class"] = "tampered-but-self-consistent"
+    manifest["manifest_sha256"] = retained_int7_manifest_digest(manifest)
+    tampered = tmp_path / "manifest.json"
+    tampered.write_text(json.dumps(manifest))
+    monkeypatch.setattr(runtime, "INT7_VALUE_TARGET_MANIFEST", tampered)
+
+    def checkpoint_bytes_must_not_be_read(_path) -> str:
+        raise AssertionError("checkpoint bytes read before manifest authentication")
+
+    monkeypatch.setattr(runtime, "_sha256_file", checkpoint_bytes_must_not_be_read)
+    with pytest.raises(RetainedCheckpointMismatchError, match="identity drifted"):
+        retained_int7_policy_only_checkpoint(197)
+
+
+def test_retained_evidence_snapshot_closes_the_full_root() -> None:
+    before = retained_int7_evidence_snapshot((197,))
+    after = retained_int7_evidence_snapshot((197,))
+
+    assert before == after
+    assert before.receipt_sha256 == after.receipt_sha256
+    assert before.manifest_digest == INT7_VALUE_TARGET_MANIFEST_SHA256
+    assert before.manifest_file.relative_path == "manifest.json"
+    assert before.manifest_file.bytes > 0
+    assert before.manifest_file.sha256
+    assert before.retention_tree_files > 1
+    assert before.retention_tree_bytes > before.manifest_file.bytes
+    assert before.retention_tree_content_sha256
+    assert len(before.files) == before.retention_tree_files
+    assert [file.relative_path for file in before.files] == [
+        path.relative_to(INT7_VALUE_TARGET_RESULT).as_posix()
+        for path in sorted(INT7_VALUE_TARGET_RESULT.rglob("*"))
+        if path.is_file()
+    ]
+    assert [row.training_seed for row in before.selected_checkpoints] == [197]
+    selected = before.selected_checkpoints[0]
+    assert selected.file.sha256 == EXPECTED[197]
+    assert selected.world_id == "w2"
+    assert selected.observation_abi_sha256
+    assert selected.action_abi_sha256
+    assert selected.parameter_count == 102_722
+    assert selected.value_mode == "neutral"
+    assert selected.branch_driver_id == "full_clone/current_game_v1"
+    assert selected.simulations == 32
+    assert selected.sampled_worlds == 4
+    assert selected.c_puct == 1.5
+    assert selected.max_steps == 2000
 
 
 def test_seed_197_checkpoint_model_abis_match_the_registry() -> None:

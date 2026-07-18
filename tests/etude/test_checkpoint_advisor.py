@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 
 from fastapi.testclient import TestClient
 import pytest
@@ -91,12 +92,76 @@ def test_checked_checkpoint_fixture_is_served_by_the_existing_endpoint(
 def test_fresh_live_and_study_checkpoint_advice_is_byte_identical(
     runtime: CheckpointAdvisorRuntime,
 ) -> None:
-    fixture, payload = checkpoint_fixture(runtime)
+    fixture, payload, retained_receipt = checkpoint_fixture(runtime)
 
     assert payload == serialize_advice_response(fixture.response)
     assert fixture == VersionedAdviceFixture.model_validate_json(
         CHECKPOINT_VERSIONED_FIXTURE_PATH.read_bytes()
     )
+    assert retained_receipt.no_write_or_generation_verified
+    assert retained_receipt.before == retained_receipt.after
+    assert retained_receipt.before.manifest_digest == (
+        "3f7a00e179fe49fe111ff8a361501ca8080e501fa7189abeaacb66194a5de5bf"
+    )
+    assert retained_receipt.before.selected_checkpoints[0].file.sha256 == (
+        "1673a237ef2460d0e699667987c29fe6b42c28711bdb2041989f37692edbd1e6"
+    )
+
+
+@pytest.mark.parametrize("drift", ("changed", "generated"))
+def test_checkpoint_fixture_rejects_retained_evidence_drift(
+    runtime: CheckpointAdvisorRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    drift: str,
+) -> None:
+    import experiments.runners.run_checkpoint_strategy_advisor as runner
+    import manabot.sim.search_runtime as search_runtime
+
+    retained_root = tmp_path / "result"
+    checkpoints = retained_root / "checkpoints"
+    checkpoints.mkdir(parents=True)
+    shutil.copyfile(
+        search_runtime.INT7_VALUE_TARGET_MANIFEST,
+        retained_root / "manifest.json",
+    )
+    shutil.copyfile(
+        search_runtime.INT7_VALUE_TARGET_RESULT
+        / "checkpoints"
+        / "visit_policy_only-seed-197.pt",
+        checkpoints / "visit_policy_only-seed-197.pt",
+    )
+    retained_receipt = retained_root / "receipt.json"
+    retained_receipt.write_text('{"status":"retained"}\n')
+    monkeypatch.setattr(search_runtime, "INT7_VALUE_TARGET_RESULT", retained_root)
+    monkeypatch.setattr(
+        search_runtime,
+        "INT7_VALUE_TARGET_MANIFEST",
+        retained_root / "manifest.json",
+    )
+
+    snapshot_calls = 0
+
+    def snapshot_with_drift(training_seeds):
+        nonlocal snapshot_calls
+        snapshot = search_runtime.retained_int7_evidence_snapshot(training_seeds)
+        snapshot_calls += 1
+        if snapshot_calls == 1:
+            if drift == "changed":
+                retained_receipt.write_text('{"status":"changed"}\n')
+            else:
+                (retained_root / "generated.json").write_text("{}\n")
+        return snapshot
+
+    monkeypatch.setattr(
+        runner,
+        "retained_int7_evidence_snapshot",
+        snapshot_with_drift,
+    )
+
+    with pytest.raises(RuntimeError, match="changed retained INT-7 evidence"):
+        checkpoint_fixture(runtime)
+    assert snapshot_calls == 2
 
 
 def test_available_checkpoint_evidence_has_complete_exact_identities(
