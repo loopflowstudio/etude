@@ -42,12 +42,18 @@ import managym
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONTRACT = ROOT / "experiments/contracts/rul-9-played-workloads-v1.json"
 DEFAULT_OUT = ROOT / "experiments/data/rul-9-played-workloads-v1.json"
+DEFAULT_MEASUREMENT_ORIGIN = (
+    ROOT / "experiments/data/rul-9-played-workloads-v1.measurement.json"
+)
 DEFAULT_REPORT = ROOT / "experiments/rul-9-played-workloads-v1.md"
 PARITY_RECEIPT_PATH = parity.RECEIPT_PATH
-SCHEMA_VERSION = 1
+CONTRACT_SCHEMA_VERSION = 1
+MEASUREMENT_SCHEMA_VERSION = 1
+DERIVED_SCHEMA_VERSION = 2
 EXPERIMENT_ID = "rul-9-played-workloads-v1"
 RSS_INTERVAL_SECONDS = 0.005
 WORKER_TIMEOUT_SECONDS = 1_200
+RAW_LINEAGE_ALGORITHM = "canonical-json-sha256-v1"
 
 SOURCE_SINGLETONS = (
     "content/semantic/v1/generated/two_deck.ir.json",
@@ -257,7 +263,7 @@ def load_contract(path: Path = DEFAULT_CONTRACT) -> dict[str, Any]:
 
 
 def validate_contract(contract: Mapping[str, Any]) -> None:
-    if contract.get("schema_version") != SCHEMA_VERSION:
+    if contract.get("schema_version") != CONTRACT_SCHEMA_VERSION:
         raise Rul9Error("RUL-9 contract schema mismatch")
     if contract.get("experiment") != EXPERIMENT_ID:
         raise Rul9Error("RUL-9 contract experiment identity mismatch")
@@ -1397,7 +1403,7 @@ def build_receipt(contract: Mapping[str, Any], contract_path: Path) -> dict[str,
     summary = derive_summary(raw, contract)
     verdict = evaluate_verdict(summary, contract)
     receipt = {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": MEASUREMENT_SCHEMA_VERSION,
         "experiment": EXPERIMENT_ID,
         "run": {
             "started_at": started,
@@ -1436,25 +1442,9 @@ def _identity_projection(identity: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def verify_receipt(
-    contract: Mapping[str, Any],
-    receipt: Mapping[str, Any],
-    *,
-    check_current: bool,
-    current_identity: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    validate_contract(contract)
-    if receipt.get("schema_version") != SCHEMA_VERSION:
-        raise Rul9Error("RUL-9 receipt schema mismatch")
-    if receipt.get("experiment") != EXPERIMENT_ID:
-        raise Rul9Error("RUL-9 receipt experiment mismatch")
-    if receipt.get("artifact_sha256") != artifact_hash(receipt):
-        raise Rul9Error("RUL-9 receipt artifact SHA-256 mismatch")
-    if receipt["run"].get("contract_sha256") != sha256_bytes(canonical_json(contract)):
-        raise Rul9Error("RUL-9 receipt does not bind the contract")
-    identity = receipt.get("identity")
-    if not isinstance(identity, Mapping):
-        raise Rul9Error("RUL-9 receipt identity is missing")
+def _verify_contract_identity(
+    identity: Mapping[str, Any], contract: Mapping[str, Any]
+) -> None:
     if (
         identity["workload"]["authority_receipt_sha256"]
         != contract["release"]["authority_receipt_sha256"]
@@ -1468,6 +1458,28 @@ def verify_receipt(
     for name, expected in contract["expected_inputs"].items():
         if identity["workload"].get(name) != expected:
             raise Rul9Error(f"RUL-9 receipt {name} identity drifted")
+
+
+def _verify_measurement_receipt(
+    contract: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+    *,
+    check_current: bool,
+    current_identity: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    validate_contract(contract)
+    if receipt.get("schema_version") != MEASUREMENT_SCHEMA_VERSION:
+        raise Rul9Error("RUL-9 measurement receipt schema mismatch")
+    if receipt.get("experiment") != EXPERIMENT_ID:
+        raise Rul9Error("RUL-9 receipt experiment mismatch")
+    if receipt.get("artifact_sha256") != artifact_hash(receipt):
+        raise Rul9Error("RUL-9 receipt artifact SHA-256 mismatch")
+    if receipt["run"].get("contract_sha256") != sha256_bytes(canonical_json(contract)):
+        raise Rul9Error("RUL-9 receipt does not bind the contract")
+    identity = receipt.get("identity")
+    if not isinstance(identity, Mapping):
+        raise Rul9Error("RUL-9 receipt identity is missing")
+    _verify_contract_identity(identity, contract)
     derived = derive_summary(receipt["raw"], contract)
     if receipt.get("summary") != derived:
         raise Rul9Error("RUL-9 receipt summary does not rederive from raw evidence")
@@ -1481,6 +1493,178 @@ def verify_receipt(
             raise Rul9Error(
                 "RUL-9 receipt source, binary, or workload identity is stale"
             )
+    return verdict
+
+
+def _origin_path(value: Any) -> Path:
+    if not isinstance(value, str) or not value:
+        raise Rul9Error("RUL-9 measurement-origin path is missing")
+    path = Path(value)
+    return path if path.is_absolute() else ROOT / path
+
+
+def _stored_path(path: Path) -> str:
+    resolved = path.resolve()
+    try:
+        return resolved.relative_to(ROOT).as_posix()
+    except ValueError:
+        return resolved.as_posix()
+
+
+def migrate_receipt(
+    contract: Mapping[str, Any],
+    measurement_path: Path,
+    *,
+    derivation_identity: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Derive a schema-v2 receipt without executing the measured workloads."""
+
+    validate_contract(contract)
+    measurement_bytes = measurement_path.read_bytes()
+    try:
+        measurement = json.loads(measurement_bytes)
+    except json.JSONDecodeError as error:
+        raise Rul9Error(f"cannot load RUL-9 measurement origin: {error}") from error
+    _verify_measurement_receipt(contract, measurement, check_current=False)
+    raw_bytes = canonical_json(measurement["raw"])
+    identity = dict(derivation_identity or runtime_identity())
+    _verify_contract_identity(identity, contract)
+    summary = derive_summary(measurement["raw"], contract)
+    verdict = evaluate_verdict(summary, contract)
+    receipt = {
+        "schema_version": DERIVED_SCHEMA_VERSION,
+        "experiment": EXPERIMENT_ID,
+        "contract": deepcopy(contract),
+        "measurement_origin": {
+            "path": _stored_path(measurement_path),
+            "file_sha256": sha256_bytes(measurement_bytes),
+            "artifact_sha256": measurement["artifact_sha256"],
+            "run": deepcopy(measurement["run"]),
+            "identity": deepcopy(measurement["identity"]),
+            "raw_lineage": {
+                "algorithm": RAW_LINEAGE_ALGORITHM,
+                "canonical_bytes": len(raw_bytes),
+                "sha256": sha256_bytes(raw_bytes),
+            },
+        },
+        "derivation": {
+            "role": "derivation-and-report-only; did-not-produce-measurement-samples",
+            "identity": identity,
+            "contract_sha256": sha256_bytes(canonical_json(contract)),
+        },
+        "raw": deepcopy(measurement["raw"]),
+        "summary": summary,
+        "verdict": verdict,
+    }
+    receipt["artifact_sha256"] = artifact_hash(receipt)
+    return receipt
+
+
+def _verify_derived_receipt(
+    contract: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+    *,
+    check_current: bool,
+    current_identity: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    validate_contract(contract)
+    if receipt.get("schema_version") != DERIVED_SCHEMA_VERSION:
+        raise Rul9Error("RUL-9 derived receipt schema mismatch")
+    if receipt.get("experiment") != EXPERIMENT_ID:
+        raise Rul9Error("RUL-9 receipt experiment mismatch")
+    if receipt.get("artifact_sha256") != artifact_hash(receipt):
+        raise Rul9Error("RUL-9 receipt artifact SHA-256 mismatch")
+    if receipt.get("contract") != contract:
+        raise Rul9Error("RUL-9 derived receipt contract snapshot drifted")
+
+    origin = receipt.get("measurement_origin")
+    if not isinstance(origin, Mapping):
+        raise Rul9Error("RUL-9 measurement-origin lineage is missing")
+    measurement_path = _origin_path(origin.get("path"))
+    try:
+        measurement_bytes = measurement_path.read_bytes()
+        measurement = json.loads(measurement_bytes)
+    except (OSError, json.JSONDecodeError) as error:
+        raise Rul9Error(f"cannot load RUL-9 measurement origin: {error}") from error
+    if origin.get("file_sha256") != sha256_bytes(measurement_bytes):
+        raise Rul9Error("RUL-9 measurement-origin file SHA-256 mismatch")
+    _verify_measurement_receipt(contract, measurement, check_current=False)
+    if origin.get("artifact_sha256") != measurement.get("artifact_sha256"):
+        raise Rul9Error("RUL-9 measurement-origin artifact lineage drifted")
+    if origin.get("run") != measurement.get("run"):
+        raise Rul9Error("RUL-9 measurement-origin run lineage drifted")
+    if origin.get("identity") != measurement.get("identity"):
+        raise Rul9Error("RUL-9 measurement-origin identity lineage drifted")
+
+    origin_raw = canonical_json(measurement["raw"])
+    derived_raw = canonical_json(receipt["raw"])
+    raw_lineage = origin.get("raw_lineage")
+    expected_lineage = {
+        "algorithm": RAW_LINEAGE_ALGORITHM,
+        "canonical_bytes": len(origin_raw),
+        "sha256": sha256_bytes(origin_raw),
+    }
+    if raw_lineage != expected_lineage:
+        raise Rul9Error("RUL-9 canonical raw lineage does not match its origin")
+    if derived_raw != origin_raw:
+        raise Rul9Error(
+            "RUL-9 derived raw canonical bytes differ from measurement origin"
+        )
+
+    derived = derive_summary(receipt["raw"], contract)
+    if receipt.get("summary") != derived:
+        raise Rul9Error("RUL-9 receipt summary does not rederive from raw evidence")
+    _require_zero_counters(derived)
+    verdict = evaluate_verdict(derived, contract)
+    if receipt.get("verdict") != verdict:
+        raise Rul9Error("RUL-9 receipt verdict does not recompute")
+
+    derivation = receipt.get("derivation")
+    if not isinstance(derivation, Mapping):
+        raise Rul9Error("RUL-9 derivation identity is missing")
+    if derivation.get("role") != (
+        "derivation-and-report-only; did-not-produce-measurement-samples"
+    ):
+        raise Rul9Error("RUL-9 derivation role is ambiguous")
+    if derivation.get("contract_sha256") != sha256_bytes(canonical_json(contract)):
+        raise Rul9Error("RUL-9 derivation does not bind the contract")
+    identity = derivation.get("identity")
+    if not isinstance(identity, Mapping):
+        raise Rul9Error("RUL-9 derivation source identity is missing")
+    _verify_contract_identity(identity, contract)
+    if check_current:
+        current = current_identity or runtime_identity()
+        if _identity_projection(identity) != _identity_projection(current):
+            raise Rul9Error(
+                "RUL-9 derivation source, binary, or workload identity is stale"
+            )
+    return verdict
+
+
+def verify_receipt(
+    contract: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+    *,
+    check_current: bool,
+    current_identity: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    schema_version = receipt.get("schema_version")
+    if schema_version == MEASUREMENT_SCHEMA_VERSION:
+        verdict = _verify_measurement_receipt(
+            contract,
+            receipt,
+            check_current=check_current,
+            current_identity=current_identity,
+        )
+    elif schema_version == DERIVED_SCHEMA_VERSION:
+        verdict = _verify_derived_receipt(
+            contract,
+            receipt,
+            check_current=check_current,
+            current_identity=current_identity,
+        )
+    else:
+        raise Rul9Error("RUL-9 receipt schema mismatch")
     if verdict["overall"] != "pass":
         raise Rul9Error(f"RUL-9 product budgets missed: {verdict}")
     return {
@@ -1497,7 +1681,87 @@ def _mib(value: int | float) -> float:
     return float(value) / (1024 * 1024)
 
 
-def render_report(receipt: Mapping[str, Any]) -> str:
+def _report_contract(
+    receipt: Mapping[str, Any], contract: Mapping[str, Any] | None
+) -> Mapping[str, Any]:
+    bound = receipt.get("contract") if contract is None else contract
+    if not isinstance(bound, Mapping):
+        raise Rul9Error("RUL-9 report rendering requires the bound contract")
+    return bound
+
+
+def _report_context(
+    receipt: Mapping[str, Any],
+) -> tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any] | None]:
+    if receipt.get("schema_version") == DERIVED_SCHEMA_VERSION:
+        origin = receipt["measurement_origin"]
+        return origin["run"], origin["identity"], receipt["derivation"]
+    return receipt["run"], receipt["identity"], None
+
+
+def _result_narrative(receipt: Mapping[str, Any], contract: Mapping[str, Any]) -> str:
+    summary = receipt["summary"]
+    verdict = receipt["verdict"]
+    release = summary["release"]
+    training = summary["training"]
+    live = release["surfaces"]["live"]
+    headless = release["surfaces"]["headless"]
+    replay = release["surfaces"]["replay"]
+    release_budget = contract["budgets"]["release"]
+    training_budget = contract["budgets"]["training"]
+    exact_live_misses = {"live Command p95", "live games/s"}
+    release_failures = set(verdict["release"]["failures"])
+
+    trace = (
+        "The measurement-origin source reproduced one exact 132-Command semantic "
+        "trace across live, headless, and persisted replay execution. All authority, "
+        "search, cap, projection, and overflow counters remained zero."
+    )
+    if verdict["overall"] == "pass":
+        outcome = (
+            "The fixed release tape and saturated selected BranchDriver teacher both "
+            "stayed within every pre-registered budget."
+        )
+    elif (
+        release_failures == exact_live_misses
+        and verdict["training"]["status"] == "pass"
+    ):
+        outcome = (
+            "Release missed only the player-facing live gates: WebSocket Command p95 "
+            f"was {live['command_ms']['p95']:.3f} ms against the "
+            f"{release_budget['live_command_p95_ms_max']:.0f} ms maximum, and live "
+            f"complete-game throughput was {live['games_per_second']:.3f}/s against "
+            f"the {release_budget['live_games_per_second_min']:.1f}/s minimum. The "
+            f"inner semantic Command p95 remained {live['inner_command_ms']['p95']:.3f} "
+            f"ms against its {release_budget['inner_command_p95_ms_max']:.0f} ms "
+            f"maximum; headless and replay remained {headless['steps_per_second']:.1f} "
+            f"and {replay['steps_per_second']:.1f} steps/s against the "
+            f"{release_budget['engine_steps_per_second_min']:.0f}/s minimum. Training "
+            f"passed at {training['steps_per_second']:.3f} roots/s, "
+            f"{training['traversals_per_second']:.1f} traversals/s, and "
+            f"{training['games_per_second']:.4f} games/s against minima of "
+            f"{training_budget['steps_per_second_min']:.1f}, "
+            f"{training_budget['traversals_per_second_min']:.0f}, and "
+            f"{training_budget['games_per_second_min']:.2f}."
+        )
+    else:
+        missed = []
+        for cell in ("release", "training", "capacity", "fallbacks"):
+            failures = verdict[cell]["failures"]
+            if failures:
+                missed.append(f"{cell}: {', '.join(failures)}")
+        outcome = "Pre-registered misses were " + "; ".join(missed) + "."
+    return (
+        f"{outcome} {trace} The decision remains "
+        f"`{verdict['representation_decision']}`."
+    )
+
+
+def render_report(
+    receipt: Mapping[str, Any], contract: Mapping[str, Any] | None = None
+) -> str:
+    bound_contract = _report_contract(receipt, contract)
+    measurement_run, measurement_identity, derivation = _report_context(receipt)
     summary = receipt["summary"]
     release = summary["release"]
     training = summary["training"]
@@ -1506,7 +1770,7 @@ def render_report(receipt: Mapping[str, Any]) -> str:
     replay = release["surfaces"]["replay"]
     expanded = training["semantic"]["expanded_semantic_tokens"]
     attribution = training["semantic"]["expanded_maximum_attribution"]
-    frontier = 4096
+    frontier = int(bound_contract["budgets"]["semantic"]["catalog_tokens_max"])
     if expanded["max"] > frontier:
         diagnostic = (
             f"The counterfactual physical-object expansion reached {expanded['max']:.0f} "
@@ -1528,16 +1792,50 @@ def render_report(receipt: Mapping[str, Any]) -> str:
             "The pre-registered capacity gates pass without clipping; retain "
             "`full_clone/current_game_v1` and the shared catalog/reference representation."
         )
+    if derivation is None:
+        integrity = [
+            f"- Measurement source closure: `{measurement_identity['source']['sha256']}` over {len(measurement_identity['source']['files'])} files.",
+            f"- Measurement native extension: `{measurement_identity['binary']['extension_sha256']}` ({measurement_identity['binary']['extension_name']}, release profile).",
+            f"- Contract: `{measurement_run['contract_sha256']}`.",
+            f"- Evidence artifact: `{receipt['artifact_sha256']}`.",
+        ]
+        reproduce = [
+            "uv run experiments/runners/run_rul9_played_workloads.py \\",
+            "  --contract experiments/contracts/rul-9-played-workloads-v1.json \\",
+            "  --out experiments/data/rul-9-played-workloads-v1.json \\",
+            "  --report experiments/rul-9-played-workloads-v1.md",
+        ]
+    else:
+        origin = receipt["measurement_origin"]
+        derivation_identity = derivation["identity"]
+        integrity = [
+            f"- Immutable measurement origin: `{origin['artifact_sha256']}` at `{origin['path']}` (file SHA-256 `{origin['file_sha256']}`).",
+            f"- Measurement source closure: `{measurement_identity['source']['sha256']}` over {len(measurement_identity['source']['files'])} files; these files and the bound native extension `{measurement_identity['binary']['extension_sha256']}` produced the samples.",
+            f"- Canonical raw evidence: `{origin['raw_lineage']['sha256']}` over {origin['raw_lineage']['canonical_bytes']} bytes; the derived receipt retains byte-identical canonical raw samples.",
+            f"- Derivation/report source closure: `{derivation_identity['source']['sha256']}` over {len(derivation_identity['source']['files'])} files; this source only rederived and rendered the retained samples and did not produce them.",
+            f"- Derivation native extension identity: `{derivation_identity['binary']['extension_sha256']}` ({derivation_identity['binary']['extension_name']}, release profile).",
+            f"- Contract: `{derivation['contract_sha256']}`.",
+            f"- Derived evidence artifact: `{receipt['artifact_sha256']}`.",
+        ]
+        reproduce = [
+            "uv run experiments/runners/run_rul9_played_workloads.py \\",
+            "  --migrate \\",
+            f"  --measurement-origin {origin['path']} \\",
+            "  --contract experiments/contracts/rul-9-played-workloads-v1.json \\",
+            "  --out experiments/data/rul-9-played-workloads-v1.json \\",
+            "  --report experiments/rul-9-played-workloads-v1.md",
+        ]
+
     lines = [
         "# RUL-9: Played Release and Training Workloads",
         "",
-        f"**Run:** {receipt['run']['completed_at'][:10]}  ",
+        f"**Run:** {measurement_run['completed_at'][:10]}  ",
         "**Matchup:** UR Lessons versus GW Allies  ",
         f"**Verdict:** **{receipt['verdict']['overall'].upper()}** — release {receipt['verdict']['release']['status']}, training {receipt['verdict']['training']['status']}, capacity {receipt['verdict']['capacity']['status']}, fallbacks {receipt['verdict']['fallbacks']['status']}.",
         "",
         "## Result",
         "",
-        "The fixed release tape and the saturated selected BranchDriver teacher both stayed within their pre-registered budgets. The current source reproduced one exact 132-Command semantic trace across live, headless, and persisted replay execution. All authority, search, cap, projection, and overflow counters remained zero. The selected representation remains `full_clone/current_game_v1`.",
+        _result_narrative(receipt, bound_contract),
         "",
         "| Workload | Command p50 / p95 | Step throughput | Complete games | Peak RSS |",
         "|---|---:|---:|---:|---:|",
@@ -1556,26 +1854,20 @@ def render_report(receipt: Mapping[str, Any]) -> str:
         "",
         "## Integrity",
         "",
-        f"- Authority receipt: `{receipt['identity']['workload']['authority_receipt_sha256']}`.",
-        f"- Frozen PR #153 parity provenance: `{receipt['identity']['workload']['parity_receipt_sha256']}`; current parity is re-executed and retained by this RUL-9 receipt.",
-        f"- Source closure: `{receipt['identity']['source']['sha256']}` over {len(receipt['identity']['source']['files'])} files.",
-        f"- Native extension: `{receipt['identity']['binary']['extension_sha256']}` ({receipt['identity']['binary']['extension_name']}, release profile).",
-        f"- Contract: `{receipt['run']['contract_sha256']}`.",
-        f"- Evidence artifact: `{receipt['artifact_sha256']}`.",
+        f"- Authority receipt: `{measurement_identity['workload']['authority_receipt_sha256']}`.",
+        f"- Frozen PR #153 parity provenance: `{measurement_identity['workload']['parity_receipt_sha256']}`; live/headless/replay parity samples are retained unchanged from the measurement origin.",
+        *integrity,
         f"- Release RSS samples: {release['rss_sample_count']}; training RSS samples: {training['rss_sample_count']}.",
         "- Raw evidence retains every Command/PUCT duration, game duration, RSS sample, semantic census row, terminal hash, outcome hash, and fallback/cap counter.",
         "",
         "## Strongest confound",
         "",
-        "These absolute performance gates were measured on one Apple Silicon host. Exact workload, source, toolchain, worker topology, and binary identities are pinned, but another host may move latency and RSS without changing the representation. The fail-closed verifier treats such drift as new evidence, not as a continuation of this run.",
+        "These absolute performance gates were measured on one Apple Silicon host. Exact workload, measurement source, toolchain, worker topology, and binary identities are pinned, but another host may move latency and RSS without changing the representation. The derivation source is bound separately and did not rerun the workload. The fail-closed verifier treats measurement-origin or derivation drift as new evidence, not as a continuation of this run.",
         "",
         "## Reproduce",
         "",
         "```bash",
-        "uv run experiments/runners/run_rul9_played_workloads.py \\",
-        "  --contract experiments/contracts/rul-9-played-workloads-v1.json \\",
-        "  --out experiments/data/rul-9-played-workloads-v1.json \\",
-        "  --report experiments/rul-9-played-workloads-v1.md",
+        *reproduce,
         "./scripts/verify-rul9-played-workloads",
         "```",
         "",
@@ -1617,7 +1909,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--contract", type=Path, default=DEFAULT_CONTRACT)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--report", type=Path, default=DEFAULT_REPORT)
-    parser.add_argument("--verify", action="store_true")
+    parser.add_argument(
+        "--measurement-origin", type=Path, default=DEFAULT_MEASUREMENT_ORIGIN
+    )
+    operation = parser.add_mutually_exclusive_group()
+    operation.add_argument("--verify", action="store_true")
+    operation.add_argument("--migrate", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -1630,12 +1927,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             verify_receipt(contract, receipt, check_current=True)
             print(_success_line(receipt))
             return 0
-        receipt = build_receipt(contract, args.contract.resolve())
+        if args.migrate:
+            receipt = migrate_receipt(contract, args.measurement_origin.resolve())
+        else:
+            receipt = build_receipt(contract, args.contract.resolve())
         atomic_write(
             args.out,
             json.dumps(receipt, indent=2, sort_keys=True).encode("utf-8") + b"\n",
         )
-        atomic_write(args.report, render_report(receipt).encode("utf-8"))
+        atomic_write(args.report, render_report(receipt, contract).encode("utf-8"))
         verify_receipt(contract, receipt, check_current=True)
         print(_success_line(receipt))
         return 0

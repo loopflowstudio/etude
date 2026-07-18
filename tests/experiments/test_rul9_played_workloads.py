@@ -192,6 +192,22 @@ def fake_receipt(registered: dict, raw: dict | None = None) -> dict:
     return payload
 
 
+def fake_derived_receipt(tmp_path: Path, registered: dict) -> tuple[dict, dict]:
+    measurement = fake_receipt(registered)
+    measurement_path = tmp_path / "measurement.json"
+    measurement_path.write_text(
+        json.dumps(measurement, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    derivation_identity = deepcopy(measurement["identity"])
+    derivation_identity["source"]["sha256"] = "patched-derivation-source"
+    derived = rul9.migrate_receipt(
+        registered,
+        measurement_path,
+        derivation_identity=derivation_identity,
+    )
+    return measurement, derived
+
+
 def test_percentile_and_artifact_hash_are_recomputable() -> None:
     assert rul9.percentile([4, 1, 3, 2], 0.50) == 2.5
     payload = {"value": 1, "artifact_sha256": "old"}
@@ -305,7 +321,7 @@ def test_verifier_rederives_rss_and_exact_training_coordinates() -> None:
 def test_report_only_claims_expanded_frontier_when_observed() -> None:
     registered = contract()
     receipt = fake_receipt(registered)
-    report = rul9.render_report(receipt)
+    report = rul9.render_report(receipt, registered)
     assert "did not reproduce the exploratory expanded-token pressure" in report
     assert "above the 4,096 diagnostic frontier" not in report
 
@@ -314,8 +330,75 @@ def test_report_only_claims_expanded_frontier_when_observed() -> None:
         "expanded_semantic_tokens"
     ] = 5000
     receipt = fake_receipt(registered, raw)
-    report = rul9.render_report(receipt)
+    report = rul9.render_report(receipt, registered)
     assert "above the 4,096 diagnostic frontier" in report
+
+
+def test_report_narrative_derives_the_live_only_miss() -> None:
+    registered = contract()
+    registered["budgets"]["release"]["live_command_p95_ms_max"] = 1.0
+    registered["budgets"]["release"]["live_games_per_second_min"] = 20.0
+    receipt = fake_receipt(registered)
+    report = rul9.render_report(receipt, registered)
+    assert "Release missed only the player-facing live gates" in report
+    assert "WebSocket Command p95 was 2.000 ms against the 1 ms maximum" in report
+    assert "live complete-game throughput was 10.000/s" in report
+    assert "Training passed at 4.000 roots/s" in report
+    assert "both stayed within every pre-registered budget" not in report
+
+
+def test_migration_binds_distinct_sources_and_byte_identical_raw(
+    tmp_path: Path,
+) -> None:
+    registered = contract()
+    measurement, derived = fake_derived_receipt(tmp_path, registered)
+    origin = derived["measurement_origin"]
+
+    assert derived["schema_version"] == rul9.DERIVED_SCHEMA_VERSION
+    assert origin["artifact_sha256"] == measurement["artifact_sha256"]
+    assert origin["identity"] == measurement["identity"]
+    assert derived["derivation"]["identity"]["source"]["sha256"] == (
+        "patched-derivation-source"
+    )
+    assert derived["derivation"]["role"].endswith("did-not-produce-measurement-samples")
+    assert rul9.canonical_json(derived["raw"]) == rul9.canonical_json(
+        measurement["raw"]
+    )
+    verified = rul9.verify_receipt(registered, derived, check_current=False)
+    assert verified["verified"] is True
+
+
+def test_migration_rejects_origin_or_derived_raw_tampering(tmp_path: Path) -> None:
+    registered = contract()
+    measurement, derived = fake_derived_receipt(tmp_path, registered)
+
+    tampered = deepcopy(derived)
+    tampered["raw"]["release"]["surfaces"]["live"][0]["protocol_commands"][0][
+        "duration_ms"
+    ] = 99.0
+    tampered["artifact_sha256"] = rul9.artifact_hash(tampered)
+    with pytest.raises(rul9.Rul9Error, match="canonical bytes differ"):
+        rul9.verify_receipt(registered, tampered, check_current=False)
+
+    measurement_path = Path(derived["measurement_origin"]["path"])
+    measurement["run"]["completed_at"] = "changed"
+    measurement["artifact_sha256"] = rul9.artifact_hash(measurement)
+    measurement_path.write_text(
+        json.dumps(measurement, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    with pytest.raises(rul9.Rul9Error, match="file SHA-256 mismatch"):
+        rul9.verify_receipt(registered, derived, check_current=False)
+
+
+def test_migration_rejects_current_derivation_source_drift(tmp_path: Path) -> None:
+    registered = contract()
+    _, derived = fake_derived_receipt(tmp_path, registered)
+    current = deepcopy(derived["derivation"]["identity"])
+    current["source"]["sha256"] = "newer-source"
+    with pytest.raises(rul9.Rul9Error, match="derivation source.*stale"):
+        rul9.verify_receipt(
+            registered, derived, check_current=True, current_identity=current
+        )
 
 
 def test_real_semantic_census_is_ragged_and_fail_closed() -> None:
@@ -336,9 +419,14 @@ def test_checked_receipt_is_fail_closed_when_present() -> None:
         pytest.skip("canonical RUL-9 evidence is generated after preregistration")
     registered = contract()
     payload = json.loads(rul9.DEFAULT_OUT.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == rul9.DERIVED_SCHEMA_VERSION
     assert payload["artifact_sha256"] == rul9.artifact_hash(payload)
     assert payload["summary"] == rul9.derive_summary(payload["raw"], registered)
     assert payload["verdict"] == rul9.evaluate_verdict(payload["summary"], registered)
+    origin = json.loads(rul9.DEFAULT_MEASUREMENT_ORIGIN.read_text(encoding="utf-8"))
+    assert origin["artifact_sha256"].startswith("498df1")
+    assert payload["measurement_origin"]["artifact_sha256"] == origin["artifact_sha256"]
+    assert rul9.canonical_json(payload["raw"]) == rul9.canonical_json(origin["raw"])
 
     if payload["verdict"]["overall"] == "pass":
         verified = rul9.verify_receipt(registered, payload, check_current=False)
@@ -356,21 +444,4 @@ def test_checked_report_matches_checked_receipt() -> None:
         pytest.skip("canonical RUL-9 evidence is generated after preregistration")
     payload = json.loads(rul9.DEFAULT_OUT.read_text(encoding="utf-8"))
     report = rul9.DEFAULT_REPORT.read_text(encoding="utf-8")
-    release = payload["summary"]["release"]
-    training = payload["summary"]["training"]
-    live = release["surfaces"]["live"]
-
-    assert f"Evidence artifact: `{payload['artifact_sha256']}`" in report
-    assert (
-        f"**Verdict:** **{payload['verdict']['overall'].upper()}** — "
-        f"release {payload['verdict']['release']['status']}, "
-        f"training {payload['verdict']['training']['status']}, "
-        f"capacity {payload['verdict']['capacity']['status']}, "
-        f"fallbacks {payload['verdict']['fallbacks']['status']}."
-    ) in report
-    assert (
-        f"Live release | {live['command_ms']['p50']:.3f} / "
-        f"{live['command_ms']['p95']:.3f} ms"
-    ) in report
-    assert f"{training['steps_per_second']:.3f} roots/s" in report
-    assert f"{training['games_per_second']:.4f}/s" in report
+    assert report == rul9.render_report(payload)

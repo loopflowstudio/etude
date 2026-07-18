@@ -132,6 +132,23 @@ checked receipt, names the strongest confound (single-host performance), and
 states pass/miss independently for release and training. Raw timings remain in
 the receipt; the report does not become a second source of numbers.
 
+#### Derived-receipt migration after renderer repair
+
+Artifact `498df1eda031f1d6ea68f72f792dfd68195bb10eab884b006aa7772b586564da`
+remains the immutable measurement origin at
+`experiments/data/rul-9-played-workloads-v1.measurement.json`. Its original
+source closure, native binary, run identity, raw samples, summaries, and MISS
+verdict are retained byte-for-byte.
+
+The canonical `rul-9-played-workloads-v1.json` is a schema-v2 derived receipt.
+It binds the complete schema-v1 measurement origin and its file/artifact hashes,
+copies the same raw evidence under a canonical-byte hash, and binds the patched
+renderer/verifier source separately as derivation-only identity. The verifier
+compares canonical raw bytes exactly and rejects drift in either identity. The
+patched source never claims to have produced the samples, and migration does
+not execute either workload. Product admission remains fail-closed on the same
+two live release budget misses.
+
 ### 5. Fail-closed verification and diagnosis
 
 The verifier recomputes identities, raw-sample hashes, all percentiles/rates,
