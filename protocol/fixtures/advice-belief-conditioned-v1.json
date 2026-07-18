@@ -10,7 +10,7 @@
       },
       "artifact": {
         "kind": "code_source",
-        "source_bundle_sha256": "2da382ef77a2358312bd3adefd805e99dbdca8f2ea376d15bc181831fa9cc0d3"
+        "source_bundle_sha256": "2e4b897496283c4d82a78ec4d1e10120702724c2ee0d192f91e20a154771ec70"
       },
       "compute": {
         "branch_driver_id": "full_clone/current_game_v1",
@@ -65,7 +65,7 @@
           },
           "artifact": {
             "kind": "code_source",
-            "source_bundle_sha256": "2da382ef77a2358312bd3adefd805e99dbdca8f2ea376d15bc181831fa9cc0d3"
+            "source_bundle_sha256": "2e4b897496283c4d82a78ec4d1e10120702724c2ee0d192f91e20a154771ec70"
           },
           "compute": {
             "branch_driver_id": "full_clone/current_game_v1",
@@ -126,7 +126,7 @@
           },
           "artifact": {
             "kind": "code_source",
-            "source_bundle_sha256": "2da382ef77a2358312bd3adefd805e99dbdca8f2ea376d15bc181831fa9cc0d3"
+            "source_bundle_sha256": "2e4b897496283c4d82a78ec4d1e10120702724c2ee0d192f91e20a154771ec70"
           },
           "compute": {
             "branch_driver_id": "full_clone/current_game_v1",
@@ -523,7 +523,7 @@
       },
       "artifact": {
         "kind": "code_source",
-        "source_bundle_sha256": "2da382ef77a2358312bd3adefd805e99dbdca8f2ea376d15bc181831fa9cc0d3"
+        "source_bundle_sha256": "2e4b897496283c4d82a78ec4d1e10120702724c2ee0d192f91e20a154771ec70"
       },
       "compute": {
         "branch_driver_id": "full_clone/current_game_v1",
@@ -587,8 +587,8 @@
       }
     ],
     "reason": null,
-    "request_sha256": "50fc50f152fbbd6b6ec1b2f22a3404c1e4e5c63be6e6da9920b3d87f88017bc6",
-    "response_sha256": "f8f27e0cc01160f47620f374686401feb5e2ffe0c18f47ad028c82453adcbe8d",
+    "request_sha256": "fc72c84938af87dd6b6e83869ec2d3a477e1b20cf44113cc08ee876d3f603dc1",
+    "response_sha256": "237c91b9c16aeaa41de48c3af990b807233574716ae5272f5b4d69d9d556dc6f",
     "scenario": null,
     "serialization": "advisor-canonical-json-v1",
     "status": "ok",
@@ -601,7 +601,7 @@
         },
         "artifact": {
           "kind": "code_source",
-          "source_bundle_sha256": "2da382ef77a2358312bd3adefd805e99dbdca8f2ea376d15bc181831fa9cc0d3"
+          "source_bundle_sha256": "2e4b897496283c4d82a78ec4d1e10120702724c2ee0d192f91e20a154771ec70"
         },
         "compute": {
           "branch_driver_id": "full_clone/current_game_v1",

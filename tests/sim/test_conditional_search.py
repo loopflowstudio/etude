@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -46,6 +48,26 @@ SEED = 197
 MAX_STEPS = 200
 FAST_SIMS = 4
 FAST_MAX_STEPS = 100
+
+
+def test_import_does_not_reach_training_only_dependencies() -> None:
+    script = """
+import builtins
+import sys
+
+real_import = builtins.__import__
+
+def guarded(name, globals=None, locals=None, fromlist=(), level=0):
+    if name.split('.', 1)[0] == 'psutil':
+        raise ModuleNotFoundError(f'blocked visual dependency: {name}')
+    return real_import(name, globals, locals, fromlist, level)
+
+builtins.__import__ = guarded
+import manabot.sim.conditional_search
+assert 'manabot.model.train' not in sys.modules
+assert 'manabot.sim.flat_mc' not in sys.modules
+"""
+    subprocess.run([sys.executable, "-c", script], check=True)
 
 
 def _build_root_env(seed: int = 42) -> managym.Env:
@@ -171,7 +193,7 @@ def test_frozen_fixture_payload_is_stable_and_runtime_drift_is_explicit() -> Non
         "6acc1f17d1dec836fc0f1f2a1dc25cab740c449694d2c375862ba776fb3b6e03"
     )
     assert runtime_identities.pop("engine_source_sha256") == (
-        "5120f11ffecfc6cb18cd18208adbf2bf0c5d1b607f7c0b78e3a559f83e58e770"
+        "80b54253d013d62c4aec818325e51c570290cec44e6598270397b4627c2dfec3"
     )
     assert frozen_identities == runtime_identities
 

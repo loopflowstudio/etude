@@ -5,6 +5,8 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
+import subprocess
+import sys
 
 from fastapi.testclient import TestClient
 from jsonschema import Draft202012Validator
@@ -39,6 +41,27 @@ RUST_VALIDATOR = Draft202012Validator(RUST_SCHEMA)
 
 SCENARIO_A = "advice-scenario-a"
 SCENARIO_B = "advice-scenario-b"
+
+
+def test_default_play_import_does_not_require_training_dependencies() -> None:
+    script = """
+import builtins
+import sys
+
+blocked = {'numpy', 'torch', 'pandas', 'psutil', 'wandb', 'gymnasium'}
+real_import = builtins.__import__
+
+def guarded(name, globals=None, locals=None, fromlist=(), level=0):
+    if name.split('.', 1)[0] in blocked:
+        raise ModuleNotFoundError(f'blocked clean-runtime dependency: {name}')
+    return real_import(name, globals, locals, fromlist, level)
+
+builtins.__import__ = guarded
+import etude.server
+assert 'manabot.sim.conditional_search' not in sys.modules
+assert 'numpy' not in sys.modules
+"""
+    subprocess.run([sys.executable, "-c", script], check=True)
 
 
 @pytest.fixture(autouse=True)

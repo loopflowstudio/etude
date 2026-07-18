@@ -32,7 +32,6 @@ from typing import Any, Iterable, Mapping, Protocol, Sequence
 import numpy as np
 
 from manabot.belief.range import BeliefState
-from manabot.sim.flat_mc import DEFAULT_MAX_PLAYOUT_STEPS
 from manabot.sim.mcts import (
     LeafEvaluator,
     UniformRandomLeafEvaluator,
@@ -46,6 +45,7 @@ from manabot.sim.search_branch import (
     SearchBranchBackend,
     branch_backend as resolve_branch_backend,
 )
+from manabot.sim.search_runtime import DEFAULT_MAX_PLAYOUT_STEPS
 from managym.possible_worlds import PossibleWorldSpace as CanonicalPossibleWorldSpace
 
 PLANNER_NAME = "determinized_puct"

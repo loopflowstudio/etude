@@ -6,7 +6,7 @@ The advice-v1 vertical slice resolves one canonical committed decision through
 both Game's live-session capability and its Study fork capability. Given the
 same viewer, authored belief scenarios, advisor identity, compute profile, and
 paired seed plan, both routes return the same 13,804 response bytes with
-SHA-256 `f8f27e0cc01160f47620f374686401feb5e2ffe0c18f47ad028c82453adcbe8d`.
+SHA-256 `237c91b9c16aeaa41de48c3af990b807233574716ae5272f5b4d69d9d556dc6f`.
 
 The compatible-deal prior and authored Bolt-heavy range produce a maximum
 absolute policy-probability delta of 0.125. This is one deterministic

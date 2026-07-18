@@ -26,10 +26,10 @@ from typing import (
     Literal,
     Mapping,
     Protocol,
+    Sequence,
     TypeAlias,
 )
 
-import numpy as np
 from pydantic import Field, TypeAdapter, model_validator
 
 from etude.advice_identity import (
@@ -47,12 +47,6 @@ from etude.study_branch import (
 )
 from etude.study_protocol import DecisionEvidence, StudyArtifact, StudyLandmark
 from etude.testing_house_protocol import BeliefScenario, ViewerIdentity
-from manabot.belief.range import BeliefError, BeliefState
-from manabot.sim.conditional_search import (
-    ConditionalStrategyResult,
-    conditional_determinized_puct_beliefs,
-    project_viewer_safe_result,
-)
 from managym.decision import SEMANTIC_DECISION_VERSION, DecisionFrame
 from managym.possible_worlds import (
     POSSIBLE_WORLD_SPACE_VERSION,
@@ -61,7 +55,11 @@ from managym.possible_worlds import (
 )
 
 if TYPE_CHECKING:
-    from manabot.sim.conditional_search import ConditionResult
+    from manabot.belief.range import BeliefState
+    from manabot.sim.conditional_search import (
+        ConditionalStrategyResult,
+        ConditionResult,
+    )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_PATH = REPO_ROOT / "protocol" / "fixtures" / "advice-curated-decision.json"
@@ -785,7 +783,7 @@ class BeliefDistributionPayload(ProtocolModel):
 def belief_distribution_sha256(
     space_identity: str,
     belief_model_id: str,
-    weights: list[float] | tuple[float, ...] | np.ndarray,
+    weights: Sequence[float],
     provenance_identity: str,
 ) -> str:
     return canonical_sha256(
@@ -989,6 +987,9 @@ ADVISOR_SOURCE_PATHS = (
     REPO_ROOT / "etude" / "study_branch.py",
     REPO_ROOT / "manabot" / "belief" / "range.py",
     REPO_ROOT / "manabot" / "sim" / "conditional_search.py",
+    REPO_ROOT / "manabot" / "sim" / "mcts.py",
+    REPO_ROOT / "manabot" / "sim" / "search_branch.py",
+    REPO_ROOT / "manabot" / "sim" / "search_runtime.py",
     REPO_ROOT / "managym" / "decision.py",
     REPO_ROOT / "managym" / "possible_worlds.py",
 )
@@ -1237,6 +1238,11 @@ class AdviceProvider:
             receipts[scenario.id] = receipt
         normalization_finished = time.perf_counter_ns()
 
+        from manabot.sim.conditional_search import (
+            conditional_determinized_puct_beliefs,
+            project_viewer_safe_result,
+        )
+
         compute = identity.compute
         result = conditional_determinized_puct_beliefs(
             decision.root,
@@ -1320,6 +1326,8 @@ class AdviceProvider:
         )
         if payload.distribution_sha256 != expected_distribution_sha256:
             raise AdvisorUnavailable("belief_distribution_mismatch")
+        from manabot.belief.range import BeliefError, BeliefState
+
         try:
             belief = BeliefState.from_probabilities(
                 decision.world_space,
