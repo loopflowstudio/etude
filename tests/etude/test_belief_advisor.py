@@ -145,7 +145,7 @@ def test_flip_endpoint_returns_checked_positive_canonical_bytes() -> None:
         assert probabilities.count(maximum) == 1
         top_offer_ids.append(scenario.actions[probabilities.index(maximum)].offer_id)
     assert top_offer_ids[0] != top_offer_ids[1]
-    labels = {offer.offer_id: offer.label for offer in actual.strategy.offers}
+    labels = {offer.id: offer.label for offer in actual.offers}
     assert labels[top_offer_ids[0]] == "Pass priority"
     assert labels[top_offer_ids[1]] == "Cast Pyroclasm"
     assert response.content == serialize_advice_response(fixture.response)

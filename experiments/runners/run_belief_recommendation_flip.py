@@ -580,7 +580,7 @@ def _assert_positive_response(payload: bytes) -> dict[str, Any]:
         raise RuntimeError("positive advice has no complete comparison")
     if len(response.strategy.scenarios) != 2:
         raise RuntimeError("positive advice must contain two scenarios")
-    labels = {offer.offer_id: offer.label for offer in response.strategy.offers}
+    labels = {offer.id: offer.label for offer in response.offers}
     top_labels: list[str] = []
     visit_margins: list[int] = []
     for scenario in response.strategy.scenarios:
@@ -835,6 +835,86 @@ def _assert_checked_endpoint(fixture: VersionedAdviceFixture) -> None:
         raise RuntimeError("checked endpoint bytes differ from fixture")
 
 
+def verify_checked_evidence() -> tuple[VersionedAdviceFixture, dict[str, Any]]:
+    """Verify the retained result without rerunning post-hoc fixture curation."""
+
+    if not FLIP_VERSIONED_FIXTURE_PATH.is_file() or not RESULT_PATH.is_file():
+        raise RuntimeError("checked INT-15 evidence has not been generated")
+    load_flip_versioned_advice_fixture.cache_clear()
+    fixture = load_flip_versioned_advice_fixture()
+    artifact = json.loads(RESULT_PATH.read_text(encoding="utf-8"))
+    deterministic = artifact.get("deterministic")
+    if not isinstance(deterministic, dict):
+        raise RuntimeError("checked INT-15 deterministic result is missing")
+    if (
+        artifact.get("deterministic_sha256")
+        != hashlib.sha256(_canonical_bytes(deterministic)).hexdigest()
+    ):
+        raise RuntimeError("checked INT-15 deterministic result hash differs")
+
+    expected_cells = {
+        (spec.candidate_id, seed) for spec in CANDIDATES for seed in SEARCH_SEEDS
+    }
+    suite = deterministic.get("suite")
+    if (
+        not isinstance(suite, list)
+        or {(str(row.get("candidate_id")), int(row.get("seed", -1))) for row in suite}
+        != expected_cells
+    ):
+        raise RuntimeError("checked INT-15 curated suite is incomplete")
+    selection = deterministic.get("selection")
+    if selection != {
+        "kind": "post_hoc_fixture_curation",
+        "candidate_id": SELECTED_CANDIDATE_ID,
+        "seed": SELECTED_SEED,
+        "all_observed_cells_retained": True,
+        "prospective_or_stability_evidence": False,
+    }:
+        raise RuntimeError("checked INT-15 curation boundary differs")
+
+    selected_audit = deterministic.get("selected_audit", {})
+    if (
+        selected_audit.get("canonical_results_identical") is not True
+        or selected_audit.get("first_result_sha256")
+        != selected_audit.get("second_result_sha256")
+        or selected_audit.get("branch_receipts_reconciled") is not True
+    ):
+        raise RuntimeError("checked INT-15 selected result identity differs")
+    measurement = artifact.get("measurement", {})
+    if measurement.get("excluded_from_deterministic_hashes_and_equality") is not True:
+        raise RuntimeError("checked INT-15 measurement boundary differs")
+    deterministic_json = json.dumps(deterministic, sort_keys=True)
+    if (
+        "elapsed_seconds" in deterministic_json
+        or "peak_rss_bytes" in deterministic_json
+    ):
+        raise RuntimeError("checked INT-15 deterministic result contains measurements")
+
+    serving = deterministic.get("serving", {})
+    fixture_bytes = FLIP_VERSIONED_FIXTURE_PATH.read_bytes()
+    if serving.get("fixture_sha256") != hashlib.sha256(fixture_bytes).hexdigest():
+        raise RuntimeError("checked INT-15 fixture hash differs")
+    if serving.get("request_sha256") != advice_request_sha256(fixture.request):
+        raise RuntimeError("checked INT-15 request hash differs")
+    if serving.get("response_sha256") != fixture.response.response_sha256:
+        raise RuntimeError("checked INT-15 response hash differs")
+    if serving.get("source_bundle_sha256") != source_bundle_sha256(
+        ADVISOR_SOURCE_PATHS
+    ):
+        raise RuntimeError("checked INT-15 source bundle differs")
+    if serving.get("live_study_public_bytes_identical") is not True:
+        raise RuntimeError("checked INT-15 live/Study identity differs")
+    retained_positive = _assert_positive_response(
+        serialize_advice_response(fixture.response)
+    )
+    for key, value in retained_positive.items():
+        if serving.get(key) != value:
+            raise RuntimeError(f"checked INT-15 serving field differs: {key}")
+    _assert_checked_endpoint(fixture)
+    _assert_frozen_evidence_unchanged()
+    return fixture, artifact
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     mode = parser.add_mutually_exclusive_group(required=True)
@@ -842,29 +922,18 @@ def main() -> None:
     mode.add_argument("--update-fixture", action="store_true")
     args = parser.parse_args()
 
-    fixture, artifact = generate()
-    fixture_text = (
-        json.dumps(fixture.model_dump(mode="json"), indent=2, sort_keys=True) + "\n"
-    )
-    artifact_text = json.dumps(artifact, indent=2, sort_keys=True) + "\n"
     if args.update_fixture:
+        fixture, artifact = generate()
+        fixture_text = (
+            json.dumps(fixture.model_dump(mode="json"), indent=2, sort_keys=True) + "\n"
+        )
+        artifact_text = json.dumps(artifact, indent=2, sort_keys=True) + "\n"
         FLIP_VERSIONED_FIXTURE_PATH.write_text(fixture_text, encoding="utf-8")
         RESULT_PATH.write_text(artifact_text, encoding="utf-8")
+        _assert_checked_endpoint(fixture)
+        _assert_frozen_evidence_unchanged()
     else:
-        if not FLIP_VERSIONED_FIXTURE_PATH.is_file() or not RESULT_PATH.is_file():
-            raise RuntimeError("checked INT-15 evidence has not been generated")
-        if FLIP_VERSIONED_FIXTURE_PATH.read_text(encoding="utf-8") != fixture_text:
-            raise RuntimeError("checked INT-15 fixture differs from regeneration")
-        checked_artifact = json.loads(RESULT_PATH.read_text(encoding="utf-8"))
-        if checked_artifact.get("deterministic") != artifact["deterministic"]:
-            raise RuntimeError("checked INT-15 deterministic result differs")
-        if (
-            checked_artifact.get("deterministic_sha256")
-            != artifact["deterministic_sha256"]
-        ):
-            raise RuntimeError("checked INT-15 deterministic result hash differs")
-    _assert_checked_endpoint(fixture)
-    _assert_frozen_evidence_unchanged()
+        fixture, artifact = verify_checked_evidence()
     print(
         json.dumps(
             {
