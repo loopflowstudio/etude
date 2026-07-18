@@ -44,7 +44,7 @@
         },
         {
           "path": "etude/server.py",
-          "sha256": "1fc205a8d95d3883987d71439b7c7d27058cfcb97fa4244bbae7d73be31f9182"
+          "sha256": "326ba9617a5f4405b5c5ebce5fc09ab631f2fd3e7f24a29738d351e775acb92f"
         },
         {
           "path": "etude/trace.py",
@@ -383,7 +383,7 @@
           "sha256": "cd9f9bdc03e3b97f072cc2ea012b9c421fd7061207daeadda47e0b874fa5c664"
         }
       ],
-      "sha256": "5cbc9aef4a5d2c3b6f24e65581a41e31917a522e06d5e89fdff87d2c43bd95de"
+      "sha256": "147155c3089981ff2e9065124f20e855fc0affa2353280e1109d3ad7b059a654"
     },
     "seed": 0
   },
