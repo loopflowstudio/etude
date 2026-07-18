@@ -82,6 +82,63 @@ Thus a lost accepted response remains idempotently recoverable after a handoff,
 while a delayed unaccepted command from an old grant fails as `stale_grant`
 without reaching match authority.
 
+The table has one closed server-side action dispatcher. The WebSocket parser
+accepts only the tagged `testing-house-v1` message union; it never forwards an
+unknown `type`, arbitrary payload, or client-supplied capability to
+`GameSession`. Under the table lock the dispatcher resolves the participant
+lease, rechecks `grant_revision` and the server-derived capability, validates
+the operation's table/match/owner binding, and only then calls the named table
+or game method:
+
+| Wire operation | Required authority | Authorized destination |
+| --- | --- | --- |
+| `join_table`, `resume` | valid invite or participant lease | participant attachment only; never `GameSession` |
+| `command`, compatibility `action`, `pass_turn` | current pilot + `submit_live_command` | `GameSession.hero_command`, compatibility action adapter, or `GameSession.pass_turn` |
+| `set_stops` | current pilot + `configure_match` | `GameSession.set_stops` |
+| `new_game`, `rematch` | current pilot + `configure_match` | replace/reset the table's `GameSession` |
+| `transfer_pilot` | current pilot + `transfer_pilot` | atomic table-role swap; never match authority |
+| `author_belief` | participant + `author_belief` | that participant's personal belief store only |
+| `share_belief` | participant + `share_belief` + belief ownership | immutable personal-to-table audience transition |
+| `restore_decision`, `retry_decision`, `branch_command`, `return_from_branch`, `return_to_live` | participant + `explore_study` + attempt ownership where applicable | participant-local replay/Study controller and exact fork provider |
+
+`command` is the product path; `action` remains an explicitly authorized
+compatibility adapter and is not an unguarded fallback. Participant-authorized
+HTTP Study endpoints use the same dispatcher and capability policy instead of
+calling `GameSession` or the Study provider directly. Schema-invalid and
+unknown/unsupported message types return typed `invalid_message` or
+`unsupported_message` errors before resolving a game method. A known operation
+without current authority returns `forbidden` or `stale_grant` before any game,
+table, belief, or attempt mutation. There is no default dispatch arm.
+
+The denial tests fingerprint the authoritative match revision/frame hash,
+trace-event and canonical-decision counts, stop configuration, table/grant
+revisions, belief audiences, and branch receipts before and after every watcher
+denial and unknown message. Equality is required, and method spies prove that
+no `GameSession` mutation method was entered. Authorization is therefore a
+mutation-free boundary, not a UI convention.
+
+### Check one Python/TypeScript control contract
+
+Check in `protocol/testing-house-v1.schema.json` and
+`protocol/fixtures/testing-house-control-v1.json`. The schema is generated from
+the closed Pydantic control models and describes a
+`TestingHouseV1ConformanceBundle`; the fixture contains representative pilot
+and watcher access snapshots plus one example of every request, control event,
+and typed rejection variant. It contains opaque example identities only—no
+invite/reconnect secret and no strategy payload.
+
+`tests/etude/test_testing_house_protocol.py` validates and round-trips the
+fixture through Pydantic, compares every tagged variant, enum, field, and
+required key to the checked schema, and asserts extra fields fail closed.
+`frontend/src/lib/testing-house-protocol.test.ts` validates the same fixture
+with AJV and compares the TypeScript tagged union and enums to that schema,
+following the existing experience-protocol conformance pattern. Both tests
+also compare their supported inbound operation set to the closed dispatch
+registry, so adding a wire mutation without authorization and conformance
+coverage fails CI. These new control artifacts do not embed, regenerate, or
+alter `protocol/fixtures/advice-curated-decision.json`; they certify table
+control shape, not strategy evidence.
+
 ### Replace one session credential with two scoped participant leases
 
 Refactor the in-memory registry record into one table containing a
@@ -176,6 +233,14 @@ private receipt fields (`source_digest` and `execution`); the prepared baseline
 found that excluding only `source_digest` causes three existing
 `test_study_runtime.py` return tests to fail under the locked environment.
 
+A branch projection, board, offer, command receipt, and presentation stream are
+returned only to the participant who owns that attempt and remain in that
+participant's local Study controller. They never enter the authoritative table
+snapshot, recovery/update broadcast, or the sibling participant's store, and
+they never advance table revision. Every authoritative broadcast is built only
+from the live `GameSession`; a participant's branch board/state is never
+broadcast or labelled as authoritative table truth.
+
 ### Keep one table through terminal and Study
 
 Add a shared table store/controller rather than navigating connected
@@ -245,8 +310,11 @@ and [WCAG 2.5.8 Target Size](https://www.w3.org/WAI/WCAG22/Understanding/target-
 6. “Authoring” in this slice means stating one of the existing pinned GAM-6 conditions. Advice remains fixture-backed, separately labelled, and never claimed for the live match.
 7. Canonical addresses appear only after a played command commits. The live Study rail grows from captured history; it never invents a pre-command `erd1` address.
 8. A participant owns their branch attempt. Branches never lock live play or one another and must return the exact public recorded decision.
-9. The table stays in memory and single-process, matching the existing release stack. Durable multi-worker rooms are not smuggled into this task.
-10. Terminal changes table time control to Study in place. The shared match does not continue by redirecting both people into the standalone replay browser.
+9. Branch state is an owner-only Study projection. It is never part of an authoritative table broadcast or visible as the sibling participant's table truth.
+10. The closed dispatch registry is the only route to a mutation. Unknown messages and unauthorized known messages fail before `GameSession`, with mutation-free denial as a tested invariant.
+11. One checked control schema and fixture keep Python and TypeScript `testing-house-v1` shapes and supported operations aligned without changing GAM-6 evidence.
+12. The table stays in memory and single-process, matching the existing release stack. Durable multi-worker rooms are not smuggled into this task.
+13. Terminal changes table time control to Study in place. The shared match does not continue by redirecting both people into the standalone replay browser.
 
 Wild success looks like a real testing session: a Discord link opens directly
 to the exact table; the watcher understands whose move it is, shares a read
@@ -285,16 +353,23 @@ failure modes.
 
 Backend contract and integration tests prove:
 
+- the checked `testing-house-v1` control fixture round-trips through the closed
+  Python and TypeScript contracts; their tagged mutations, enums, fields,
+  requiredness, and dispatch operation set cannot drift;
 - pilot and watcher join concurrently with distinct secrets and identical
   player-0 frames/addresses; reconnecting either preserves the other;
-- watcher commands/configuration fail without match mutation; a pilot handoff
-  swaps capability and focus; old grant and stale revision commands fail
-  closed; same-submitter accepted retries remain idempotent;
+- every `command`/`action`, `pass_turn`, `set_stops`, `new_game`/rematch, role,
+  belief/share, and branch mutation enters through the closed dispatcher;
+  unknown/invalid messages and watcher commands/configuration fail before
+  `GameSession` with identical pre/post authority fingerprints;
+- a pilot handoff swaps capability and focus; old grant and stale revision
+  commands fail closed; same-submitter accepted retries remain idempotent;
 - personal beliefs are visible only to their author, explicit sharing reveals
   exact audience/author/provenance, and wrong fixture bindings expose no advice;
 - a watcher forks a committed live decision while a pilot command advances the
   live match, then returns to the identical address/frame/cursor with zero
-  changes to authoritative trace/root evidence;
+  changes to authoritative trace/root evidence; branch board/state reaches
+  only its owner and is absent from all authoritative table broadcasts;
 - both participants receive terminal mode `study` with the same final
   canonical addresses; cross-viewer/table/participant attempts fail closed;
 - the private Study receipt normalizes to the public return under the locked
@@ -317,10 +392,11 @@ Focused verification:
 
 ```bash
 uv run --extra dev pytest tests/etude/test_testing_house.py \
+  tests/etude/test_testing_house_protocol.py \
   tests/etude/test_server.py tests/etude/test_study_runtime.py \
   tests/etude/test_study_branch.py -q
 npm --prefix frontend run check
-npm --prefix frontend test -- --run
+npm --prefix frontend test -- --run src/lib/testing-house-protocol.test.ts
 npm --prefix frontend run test:e2e -- testing-house.spec.ts
 ```
 
