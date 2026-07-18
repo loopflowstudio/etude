@@ -1,6 +1,21 @@
-# Questions and assumptions
+# Review decisions and assumptions
 
-## Blocking provider seam
+## Confirmed by human review
+
+- Proceed with the complete canonical timeline and Retry/return substrate now;
+  do not block that work on the final Intelligence provider.
+- Keep the evidence boundary typed and fail closed. Normal runtime serves no
+  fixture or relabelled evidence; a direct fixture provider is allowed only as
+  constructor-injected test infrastructure.
+- Reveal requires one accepted retry command. The player may Return or leave
+  Study without revealing, but there is no reveal escape hatch that bypasses
+  the prediction.
+- Every Policy/Search alternative preview starts from a fresh exact fork,
+  executes exactly one ordinary semantic command, projects only that committed
+  transition, returns, and discards the fork. It never mutates replay or reuses
+  the player's Retry branch.
+
+## External evidence seam
 
 - No Intelligence symbol or stored lookup on this Task base accepts a
   Game-issued `CanonicalReplayV1`, trace ID, `ReplayDecisionAddress`, restored
@@ -16,10 +31,21 @@
   hashes pretty-printed projection bytes, the Intelligence builder trusts a
   caller string, and validators do not join that digest back to a loaded replay.
 
-Decision: stop before runtime implementation, as directive v1 requires, and
-resume only when Intelligence supplies the exact historical evidence seam or a
-validated artifact for the selected Game replay. Do not recreate search,
-policy, model, budget, or provenance authority in Game.
+Decision: this is not a blocker for the reviewed substrate. Implement a typed
+`HistoricalStudyEvidenceProvider` request carrying the Game projection, its
+Game-computed canonical digest, address, and restored decision. The production
+default returns typed `study_evidence_unavailable`; Game still validates every
+identity on a successful response. Do not recreate search, policy, model,
+budget, or provenance authority in Game.
+
+## Genuine remaining blockers
+
+- None for implementing and landing the Retry/return substrate as a serial PR.
+- Honest player-facing Policy/Search comparison in normal runtime still cannot
+  complete until Intelligence supplies exact evidence for the selected Game
+  address. If that provider is still absent after substrate verification, keep
+  GAM-4 open for the next serial PR rather than completing the Task or claiming
+  the comparison KR.
 
 ## Non-blocking first-slice assumptions
 
@@ -29,6 +55,5 @@ policy, model, budget, or provenance authority in Game.
 - The first evidence-backed landmark must have at least one authored semantic
   event for its played or compared offer so the bounded continuation is
   observable without expanding presentation semantics in this Task.
-- “Retry before reveal” means one accepted ordinary command is required before
-  the server releases policy or search evidence. The historical played command
-  already exists in canonical replay but remains visually hidden until reveal.
+- The historical played command already exists in canonical replay but remains
+  visually hidden until reveal.

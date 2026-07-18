@@ -15,8 +15,8 @@ one exact decision, try a legal line before seeing any policy or search judgment
 then compare three plainly labelled plans on the same semantic table and return
 to the identical recorded position.
 
-Implementation is currently blocked at the directive's provider gate. The only
-Intelligence export symbol is
+The final Intelligence provider is not on this Task base. The only Intelligence
+export symbol is
 `manabot.sim.study_evidence.build_study_artifact(audit, ...)`. It accepts a
 Teacher-1 trajectory audit, hard-codes `source_replay_id` to
 `int-4-trajectory-audit-v1`, and derives its ordinal from that audit chronology.
@@ -30,23 +30,33 @@ evidence (`producer: canonical-replay-fixture`, `analysis_budget.id:
 fixture-only`, one node); using it at runtime would falsely label placeholder
 numbers as policy and search judgment.
 
-The missing provider seam is one callable or stored artifact lookup owned by
-Intelligence that takes a Game-issued historical decision identity and returns
-a validated `StudyArtifact` whose source replay, match, decision address,
-frame, selected offer, played command, model identity, budget, and provenance
-bind to that exact selected replay. Until that seam lands, Game must fail closed
-with “Study evidence is unavailable for this recording” and must not synthesize
-policy/search values or rewrite the artifact identity.
+That gap does not block the reviewed Retry/return substrate. This PR defines a
+typed historical-evidence request and response boundary, implements the exact
+branch lifecycle and player interaction around it, and installs an unavailable
+production provider that fails closed with “Study evidence is unavailable for
+this recording.” A fixture-backed provider may be injected only by tests to
+exercise the post-reveal UI and semantic preview path. Normal `./scripts/play`
+must never synthesize policy/search values, rewrite artifact identity, or serve
+fixture evidence. Intelligence can later plug in one callable or stored lookup
+that returns a validated artifact bound to the exact Game replay without
+changing the Study interaction.
 
 ## The demo
 
 Run `./scripts/play`, finish the pinned UR Lessons versus GW Allies matchup,
 open `/replay`, and choose a human decision from the complete Score. The exact
-table position opens with only “Retry”; after the player chooses one canonical
-offer, “Reveal plans” shows separately labelled Played, Policy, and Search
-cards. Choosing any card focuses its authoritative table objects and plays one
-bounded `PresentationEvent` sequence; “Return to score” restores the original
-frame, offer, event cursor, and timeline selection in one action.
+table position opens with only canonical Retry choices. After one choice is
+accepted, Reveal becomes available and Return remains available; with the
+default unavailable provider, Reveal fails closed without losing the branch,
+and “Return to score” restores the original frame, offer, event cursor, and
+timeline selection in one action.
+
+The real-stack test injects the checked exact-match fixture provider through the
+server constructor—not configuration or an environment variable—and proves the
+future provider path: Reveal shows separately labelled Played, Policy, and
+Search cards; selecting a card focuses authoritative table objects and applies
+exactly one command on a fresh fork to produce one bounded
+`PresentationEvent` sequence before returning to the unchanged recording.
 
 The same flow works with pointer or keyboard, uses a short non-animated beat in
 reduced-motion mode, and stacks the timeline, table, and plan cards into a
@@ -84,6 +94,10 @@ recorded decision -> retry command accepted -> reveal enabled -> plan preview
         +--------------------- return --------------------------+
 ```
 
+Return is available from every Study state. Leaving before reveal simply
+closes the branch; it never reveals implicitly. Reveal has no bypass: the
+server rejects it until the attempt records one accepted ordinary command.
+
 `POST /api/traces/{trace_id}/decisions/{address}/retry` accepts a normal
 protocol `Command`. The server restores the address, forks a fresh
 `StudyBranch`, publishes its structured offers, verifies that the submitted
@@ -94,15 +108,43 @@ attempt ID, and the exact recorded return identity. It contains no
 `StudyArtifact`, policy mass, visits, values, robustness, uncertainty, model,
 budget, or provenance.
 
+The provider boundary is explicit and Game-owned at the join:
+
+```python
+@dataclass(frozen=True)
+class HistoricalStudyEvidenceRequest:
+    projection: CanonicalReplayProjectionV1
+    source_replay_sha256: str
+    address: str
+    restored: RestoredReplayDecision
+
+class HistoricalStudyEvidenceProvider(Protocol):
+    def artifact_for(
+        self, request: HistoricalStudyEvidenceRequest
+    ) -> StudyArtifact: ...
+```
+
+Game adds one canonical semantic digest helper for the complete viewer
+projection and supplies that digest rather than trusting a provider string. The
+default provider raises a typed `StudyEvidenceUnavailableError`. It is wired by
+normal server construction and cannot be replaced by an environment variable
+or client input. Tests may inject a fixture provider directly into the server
+or `GameSession` constructor; this keeps fixture evidence mechanically absent
+from the player runtime. The replay fixture generator switches to the same
+digest helper, and the Rust, Python, and TypeScript Study fixture tests certify
+the regenerated value.
+
 Only after one retry command is accepted may
-`POST /api/study-attempts/{attempt_id}/reveal` ask the injected Intelligence
-provider for evidence. Game validates the returned `StudyArtifact` on the
-server, recomputes the canonical viewer-projection digest, and then explicitly
-joins the requested address to exactly one landmark. The landmark's frame,
-offer, played command, source replay, match, content, asset manifest, viewer,
-and address must equal the restored Game objects byte-for-semantic-byte. Any
-missing or drifted identity fails closed before evidence crosses the client
-boundary. The TypeScript consumer validates the same artifact again.
+`POST /api/study-attempts/{attempt_id}/reveal` ask the injected provider for
+evidence. Game validates the returned `StudyArtifact` on the server, compares
+its source digest with the Game-computed viewer-projection digest, and then
+explicitly joins the requested address to exactly one landmark. The landmark's
+frame, offer, played command, source replay, match, content, asset manifest,
+viewer, and address must equal the restored Game objects byte-for-semantic-byte.
+An unavailable provider returns typed `study_evidence_unavailable`; malformed,
+fixture-only in production, missing, or drifted evidence returns a typed
+fail-closed error. None of these errors closes the attempt, so the player can
+still Return. The TypeScript consumer validates a successful artifact again.
 
 `POST /api/study-attempts/{attempt_id}/return` closes the branch through
 `return_to_recorded`, deletes the attempt, and returns the original
@@ -118,9 +160,11 @@ committed branch observation's `recent_events`, and drains only the single
 command transition as protocol `PresentationEvent` objects. It never compares
 before/after snapshots. The recorded Played plan uses the already canonical
 `RestoredReplayDecision.continuation`, bounded at the next decision for the
-same viewer. A Policy or Search plan with another offer forks the same retained
-root, applies only that command, emits only that transition's events, and then
-discards the preview branch.
+same viewer. Every Policy or Search plan preview—whether or not it agrees with
+Played—forks the same retained root fresh, applies exactly that plan's ordinary
+command, emits only that committed transition's events, calls
+`return_to_recorded`, and discards the preview fork. A preview never reuses the
+player's Retry branch or carries state into the next preview.
 
 The first product slice chooses one evidence-backed landmark whose selected
 offer or one comparison offer produces at least one authored semantic event.
@@ -174,9 +218,9 @@ Fast-forward, Finish, and reduced-motion behavior.
 |----------|---------|-----------------|
 | Does GAM-3 expose the complete viewer-safe timeline and exact restore? | Yes. `GET /api/traces/{trace}/decisions` projects every authorized row with an `erd1` address; the address endpoint restores the exact frame, offer, command, cursor, and bounded continuation. Python, Rust debug, and TypeScript replay tests pass. | Use this API as the only timeline and recorded-continuation truth. Do not build Study navigation from legacy trace frames or the ranked landmark list. |
 | Can Rules fork and execute the exact historical decision without changing replay? | Yes, while the completed `GameSession` retains its private roots. `StudyForkProvider.fork`, `StudyBranch.structured_offers`, `submit`, and `return_to_recorded` pass their exact-root/non-mutation tests. Roots are intentionally not persisted in public traces. | Add only a Game HTTP/session adapter around the merged provider. Old or expired recordings honestly lose Retry but retain replay. Do not persist or expose engine roots. |
-| Can Intelligence provide evidence for the selected Game replay? | No. `build_study_artifact` accepts only a Teacher-1 audit, hard-codes `int-4-trajectory-audit-v1`, and has no replay/address parameter. A direct probe found 48 viewer decisions in `replay.pinned-curated-match` and no accepted replay, trace, address, or decision argument. | This is a blocking external provider seam. Do not implement runtime comparison with fixture or recomputed Game-owned evidence. Resume after Intelligence supplies an exact historical provider or a validated artifact lookup for the Game replay. |
-| Does `source_replay_sha256` have a runtime join algorithm? | Not yet. The pinned artifact hashes the checked-in pretty-printed viewer projection bytes, while `build_study_artifact` trusts a caller-provided digest and the Study validators do not compare it with a loaded replay. | The provider contract must define and share one canonical viewer-projection digest algorithm. Game must recompute it before reveal; matching replay and landmark IDs alone do not justify accepting a claimed source digest. |
-| Does the checked-in matching Study fixture unblock runtime? | No. `study-curated-decision.json` binds the pinned replay but declares `canonical-replay-fixture`, `fixture-only`, one node, uniform probability, and zero values. | Use it only for schema/component tests. Never show it as player-facing policy/search judgment. |
+| Can Intelligence provide evidence for the selected Game replay? | No. `build_study_artifact` accepts only a Teacher-1 audit, hard-codes `int-4-trajectory-audit-v1`, and has no replay/address parameter. A direct probe found 48 viewer decisions in `replay.pinned-curated-match` and no accepted replay, trace, address, or decision argument. | Proceed with Retry/return and a typed `HistoricalStudyEvidenceProvider`. The production default fails closed; an exact Intelligence provider can replace it without changing Game interaction or authority. |
+| Does `source_replay_sha256` have a runtime join algorithm? | Not yet. The pinned artifact hashes the checked-in pretty-printed viewer projection bytes, while `build_study_artifact` trusts a caller-provided digest and the Study validators do not compare it with a loaded replay. | Game owns canonical replay, so this PR adds a canonical semantic viewer-projection digest helper and passes its result into the provider request. Reveal rejects any returned digest mismatch. |
+| Does the checked-in matching Study fixture unblock runtime? | No. `study-curated-decision.json` binds the pinned replay but declares `canonical-replay-fixture`, `fixture-only`, one node, uniform probability, and zero values. | Inject it only in unit and real-stack tests through a constructor-owned provider. Never make it selectable by client, environment, or normal runtime configuration. |
 | Is evidence sealed if the client merely hides a prefetched artifact? | No. Prefetching exposes judgment in the network response and devtools before Retry. | The server does not serialize or fetch the artifact into the attempt response. Reveal is a separate endpoint allowed only after an accepted retry command. |
 | Can plan theater be produced without snapshot diffs? | Yes for the slice: the branch returns committed engine `recent_events`; Game's existing projector turns committed semantic events plus the exact offer into protocol events. Recorded play already carries a canonical bounded continuation. | Reuse the presentation authority and limit alternatives to one command transition. Do not add textual diff narration. |
 | Can a trace loaded after process/session expiry still Retry? | No. Canonical replay persists, authority-private cloned roots do not. Reconstructing from trace fields would require hidden authority or seed semantics absent from the public record. | Scope the first Retry moment to the just-completed retained session and expose a clear unavailable state for old traces. Durable branch restoration is a later Rules/storage decision. |
@@ -201,11 +245,14 @@ Validation performed during kickoff:
 
 ## Key decisions
 
-1. **Block on honest historical evidence.** The Game slice may be designed and
-   its provider boundary specified now, but runtime comparison does not begin
-   until Intelligence returns evidence for the exact Game-issued address.
+1. **Build Retry/return now; fail closed on missing evidence.** The exact
+   Intelligence provider is not required to land the canonical branch
+   substrate. Normal runtime exposes no comparison when that provider is
+   unavailable, while tests inject the exact-match fixture only to prove the
+   typed post-reveal consumer path.
 2. **Retry is mandatory before reveal.** An accepted ordinary command, not a
-   hover or mock selection, unlocks evidence.
+   hover or mock selection, unlocks Reveal. The player may Return without
+   revealing, but cannot reveal without predicting.
 3. **Sealing is a server property.** Policy and search fields do not cross the
    boundary before reveal.
 4. **Replay remains the return truth.** Study branches are disposable; return
@@ -213,9 +260,10 @@ Validation performed during kickoff:
 5. **Plans are labels over authoritative commands.** Played, Policy, and Search
    may agree; their evidence remains separately named and never becomes a
    generic score.
-6. **One command, one semantic episode.** The slice previews one bounded
-   transition or the recorded next-decision continuation. It does not grow a
-   tree, auto-play a branch, or invent narration.
+6. **One fresh fork, one command, one semantic episode.** Every Policy/Search
+   preview starts from the exact root, commits only that command, projects only
+   that transition, returns, and discards the fork. It does not grow a tree,
+   auto-play a branch, or invent narration.
 7. **Expired roots fail visibly.** A replay without a retained Study root is
    still fully navigable, but Retry is disabled with a precise explanation.
 
@@ -232,46 +280,63 @@ those failures impossible rather than merely unlikely.
 
 - In scope: the selected completed UR Lessons versus GW Allies matchup; the
   complete viewer-zero canonical decision timeline; exact decision restore;
-  one ephemeral one-command Retry; explicit reveal after retry; Played,
-  Policy, and Search plan derivation from one validated `StudyArtifact`;
-  authoritative focus highlights; one bounded semantic continuation; one-action
-  return; honest unavailable states; focused pointer, keyboard, reduced-motion,
-  and mobile behavior; unit, contract, and real-stack browser coverage.
+  one ephemeral one-command Retry; exact one-action Return before or after
+  reveal; a typed evidence-provider request and fail-closed default; explicit
+  reveal only after retry; test-injected Played, Policy, and Search plan
+  derivation from one validated `StudyArtifact`; authoritative focus highlights;
+  one bounded semantic continuation; honest unavailable states; focused
+  pointer, keyboard, reduced-motion, and mobile behavior; unit, contract, and
+  real-stack browser coverage.
 - Out of scope: client-side legality or rules; snapshot-diff narration;
   opponent-private projections; persisted or multi-ply branches; a generic
   analysis tree; annotations beyond the existing replay marginalia; sharing,
   chat, team-series orchestration, sideboarding, deck construction, Avatar Cube
-  breadth, generic historical evidence generation inside Game, or durable
-  restoration after the authority-private root expires.
+  breadth, generic historical evidence generation inside Game, a production
+  Intelligence provider, or durable restoration after the authority-private
+  root expires.
 
 ## Done when
 
 This design advances the Wave measures that “every historical player decision
 in a completed game is addressable and restorable” and that a player can
 “inspect evidence, retry an exact position, follow a canonical continuation,
-and return without client-side rules or replay reconstruction.” It is done
-when all of the following are observable:
+and return without client-side rules or replay reconstruction.” This PR proves
+the exact branch-and-return KR and the fail-closed consumer half of comparison;
+it does not claim that normal runtime has honest Policy/Search evidence until
+the Intelligence provider is installed. It is done when all of the following
+are observable:
 
 1. Selecting a completed trace renders every authorized canonical decision in
    order, and activating any row restores the exact server frame and cursor.
 2. Before a retry command is accepted, no response or client state contains
    policy mass, search values, visits, robustness, uncertainty, model, budget,
-   or evidence provenance. Reveal is disabled.
+   or evidence provenance. Reveal is disabled, while Return remains available.
 3. A retry can submit only a command bound to the restored revision, prompt,
    and currently published canonical offer. The recorded trace and replay bytes
    remain unchanged.
-4. Reveal succeeds only with a server-validated artifact whose source digest
-   and landmark bind the selected replay/address. Drift and fixture-only
+4. The normal unavailable provider returns typed `study_evidence_unavailable`
+   after retry without closing the attempt. Reveal succeeds only under an
+   injected provider with a server-validated artifact whose source digest and
+   landmark bind the selected replay/address. Drift and runtime fixture
    evidence fail closed.
-5. Played, Policy, and Search remain separately labelled, preserve distinct
-   evidence units, highlight only IDs from the matching authoritative offer,
-   and play one bounded protocol presentation sequence.
+5. Under the injected exact-match provider, Played, Policy, and Search remain
+   separately labelled and preserve distinct evidence units. Every
+   Policy/Search selection starts a fresh fork, highlights only IDs from the
+   matching authoritative offer, commits exactly one command, plays only that
+   bounded protocol presentation sequence, returns, and discards the fork.
 6. Return restores equality of frame, offer, command, presentation cursor, and
    selected timeline address, then closes the branch.
-7. A real-stack Playwright spec proves pointer and keyboard flows, detects any
-   pre-reveal evidence leak, verifies focus return, runs under reduced motion,
-   and repeats at a phone viewport without horizontal page overflow or
-   sub-44-pixel controls.
+7. Real-stack Playwright specs cover both normal unavailable behavior and a
+   constructor-injected exact fixture. They prove pointer and keyboard flows,
+   detect any pre-reveal evidence leak, verify fresh-fork previews and focus
+   return, run under reduced motion, and repeat at a phone viewport without
+   horizontal page overflow or sub-44-pixel controls.
+
+If the exact Intelligence provider is still absent after these gates pass,
+land this substrate as the current serial PR and keep GAM-4 open for evidence
+integration with `lf pr land --next exact-study-evidence`. Do not use
+`lf pr land -c` or claim the comparison KR until normal runtime passes the same
+reveal proof with non-fixture evidence.
 
 Verification commands:
 
