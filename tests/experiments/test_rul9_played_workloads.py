@@ -179,7 +179,10 @@ def fake_receipt(registered: dict, raw: dict | None = None) -> dict:
     payload = {
         "schema_version": 1,
         "experiment": rul9.EXPERIMENT_ID,
-        "run": {"contract_sha256": rul9.sha256_bytes(rul9.canonical_json(registered))},
+        "run": {
+            "completed_at": "2026-07-18T00:00:00Z",
+            "contract_sha256": rul9.sha256_bytes(rul9.canonical_json(registered)),
+        },
         "identity": fake_identity(registered),
         "raw": evidence,
         "summary": summary,
@@ -290,6 +293,22 @@ def test_verifier_rederives_rss_and_exact_training_coordinates() -> None:
         mutate(raw)
         with pytest.raises(rul9.Rul9Error, match=message):
             rul9.derive_summary(raw, registered)
+
+
+def test_report_only_claims_expanded_frontier_when_observed() -> None:
+    registered = contract()
+    receipt = fake_receipt(registered)
+    report = rul9.render_report(receipt)
+    assert "did not reproduce the exploratory expanded-token pressure" in report
+    assert "above the 4,096 diagnostic frontier" not in report
+
+    raw = fake_raw(registered)
+    raw["training"]["games"][0]["rows"][0]["token_sample"][
+        "expanded_semantic_tokens"
+    ] = 5000
+    receipt = fake_receipt(registered, raw)
+    report = rul9.render_report(receipt)
+    assert "above the 4,096 diagnostic frontier" in report
 
 
 def test_real_semantic_census_is_ragged_and_fail_closed() -> None:

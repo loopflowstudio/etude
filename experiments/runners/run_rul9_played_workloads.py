@@ -1467,15 +1467,28 @@ def render_report(receipt: Mapping[str, Any]) -> str:
     replay = release["surfaces"]["replay"]
     expanded = training["semantic"]["expanded_semantic_tokens"]
     attribution = training["semantic"]["expanded_maximum_attribution"]
-    diagnostic = (
-        f"The counterfactual physical-object expansion reached {expanded['max']:.0f} "
-        "tokens, above the 4,096 diagnostic frontier, while the selected shared "
-        f"catalog remained {training['semantic']['catalog_active_tokens']} active "
-        "tokens with definition-row references and zero overflow. "
-        f"At the maximum, zone attribution was `{json.dumps(attribution.get('tokens_by_zone', {}), sort_keys=True)}`. "
-        "This is repeated visible reference pressure, not runtime clipping; retain "
-        "`full_clone/current_game_v1` and the shared catalog/reference representation."
-    )
+    frontier = 4096
+    if expanded["max"] > frontier:
+        diagnostic = (
+            f"The counterfactual physical-object expansion reached {expanded['max']:.0f} "
+            f"tokens, above the {frontier:,} diagnostic frontier, while the selected "
+            f"shared catalog remained {training['semantic']['catalog_active_tokens']} "
+            "active tokens with definition-row references and zero overflow. "
+            f"At the maximum, zone attribution was `{json.dumps(attribution.get('tokens_by_zone', {}), sort_keys=True)}`. "
+            "This is repeated visible reference pressure, not runtime clipping; retain "
+            "`full_clone/current_game_v1` and the shared catalog/reference representation."
+        )
+    else:
+        diagnostic = (
+            "The final workload did not reproduce the exploratory expanded-token "
+            f"pressure: its counterfactual maximum was {expanded['max']:.0f}, below "
+            f"the {frontier:,} diagnostic frontier. The selected shared catalog "
+            f"remained {training['semantic']['catalog_active_tokens']} active tokens "
+            "with definition-row references and zero overflow. "
+            f"At the maximum, zone attribution was `{json.dumps(attribution.get('tokens_by_zone', {}), sort_keys=True)}`. "
+            "The pre-registered capacity gates pass without clipping; retain "
+            "`full_clone/current_game_v1` and the shared catalog/reference representation."
+        )
     lines = [
         "# RUL-9: Played Release and Training Workloads",
         "",
