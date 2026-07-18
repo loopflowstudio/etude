@@ -9,31 +9,32 @@ from manabot.belief.audit import (
     score_known_truth,
     viewer_equivalence_audit,
 )
-from manabot.belief.tracker import ExactRangeTracker
+from manabot.belief.tracker import BeliefTracker
 from manabot.sim.teacher1_evidence import _fresh_env
 
 
 def test_authority_truth_is_scored_outside_the_tracker_boundary() -> None:
     env = _fresh_env(149)
     viewer = int(env._engine.current_agent_index())
-    tracker = ExactRangeTracker.from_engine(
+    tracker = BeliefTracker.from_engine(
         env._engine, viewer=viewer, likelihood=None, epsilon=0.0
     )
 
     point = score_known_truth(env._engine, tracker, game_index=3, step=0)
 
-    assert sum(point.true_hand) == tracker.posterior.hand_size
+    assert sum(dict(point.true_hand).values()) == tracker.posterior.space.hand_size
     assert point.true_hand_probability > 0.0
     assert math.isfinite(point.true_hand_log_loss)
     assert point.true_hand_rank is not None
     assert point.posterior_digest == tracker.posterior.digest
-    assert len(point.cards) == len(tracker.posterior.card_def_ids)
+    assert len(point.cards) == len(tracker.posterior.space.pool)
+    assert point.space_id == tracker.posterior.space.identity
 
 
 def test_known_truth_aggregate_reports_per_definition_calibration() -> None:
     env = _fresh_env(151)
     viewer = int(env._engine.current_agent_index())
-    tracker = ExactRangeTracker.from_engine(
+    tracker = BeliefTracker.from_engine(
         env._engine, viewer=viewer, likelihood=None, epsilon=0.0
     )
     points = [
@@ -50,14 +51,14 @@ def test_known_truth_aggregate_reports_per_definition_calibration() -> None:
     assert 0.0 <= metrics["mean_per_card_brier"] <= 1.0
     assert 0.0 <= metrics["per_card_ece"] <= 1.0
     assert set(metrics["per_card"]) == {
-        str(definition) for definition in tracker.posterior.card_def_ids
+        name for name, _ in tracker.posterior.space.pool
     }
 
 
 def test_viewer_equivalent_exact_hands_hide_authority_differences() -> None:
     env = _fresh_env(163)
     viewer = int(env._engine.current_agent_index())
-    tracker = ExactRangeTracker.from_engine(
+    tracker = BeliefTracker.from_engine(
         env._engine, viewer=viewer, likelihood=None, epsilon=0.0
     )
 
@@ -66,7 +67,7 @@ def test_viewer_equivalent_exact_hands_hide_authority_differences() -> None:
     )
 
     assert result == {
-        "hands_distinct": True,
+        "worlds_distinct": True,
         "authority_states_distinct": True,
         "viewer_projection_mismatches": 0,
         "opponent_private_cards_exposed": 0,

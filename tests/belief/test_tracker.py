@@ -1,150 +1,345 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+import json
+from typing import Any, Mapping
 
 import numpy as np
 import pytest
 
-from manabot.belief.likelihood import (
-    LikelihoodResult,
-    PublicAction,
-    PublicActionKind,
-)
-from manabot.belief.tracker import ExactRangeTracker, HiddenPoolSnapshot
+from manabot.belief.likelihood import LikelihoodResult, RulesProviderGap
+from manabot.belief.tracker import BeliefTracker
+from managym.decision import Observation, SemanticTransition, TransitionReceipt
+from managym.possible_worlds import PossibleWorld, PossibleWorldSpace
 
 
 @dataclass
 class FakeEngine:
-    counts: tuple[tuple[int, int], ...]
-    hand_size: int
-    library_size: int
+    space: PossibleWorldSpace | None = None
 
-    def hidden_pool_summary(
-        self, viewer: int
-    ) -> tuple[list[tuple[int, int]], int, int]:
-        assert viewer in (0, 1)
-        return list(self.counts), self.hand_size, self.library_size
+    def possible_world_space_json(self, viewer: int) -> str:
+        assert self.space is not None and viewer == self.space.viewer
+        return json.dumps(
+            {
+                "schema_version": 1,
+                "identity": self.space.identity,
+                "viewer": self.space.viewer,
+                "opponent": self.space.opponent,
+                "source_observation": {
+                    "schema_version": 1,
+                    "revision": self.space.source_revision,
+                    "viewer": self.space.viewer,
+                    "viewer_state_hash": self.space.source_viewer_state_hash,
+                },
+                "hand_size": self.space.hand_size,
+                "pool": dict(self.space.pool),
+                "total_weight": str(self.space.total_weight),
+                "worlds": [
+                    {
+                        "index": world.index,
+                        "hand": dict(world.hand),
+                        "weight": str(world.weight),
+                    }
+                    for world in self.space.worlds
+                ],
+            }
+        )
+
+    def semantic_observation_json(self, viewer: int) -> str:
+        assert self.space is not None and viewer == self.space.viewer
+        return json.dumps(
+            {
+                "identity": {
+                    "schema_version": 1,
+                    "revision": self.space.source_revision,
+                    "viewer": viewer,
+                    "viewer_state_hash": self.space.source_viewer_state_hash,
+                },
+                "viewer_state": {"opponent_cards": []},
+                "events": [],
+                "decision": None,
+            }
+        )
+
+
+def _state(
+    identity: str,
+    revision: int,
+    pool: dict[str, int],
+    hand_size: int,
+    rows: list[tuple[dict[str, int], int]],
+) -> tuple[FakeEngine, PossibleWorldSpace, Observation]:
+    engine = FakeEngine()
+    space = PossibleWorldSpace(
+        identity=identity,
+        viewer=0,
+        opponent=1,
+        source_revision=revision,
+        source_viewer_state_hash=f"hash-{identity}",
+        hand_size=hand_size,
+        pool=tuple(sorted(pool.items())),
+        total_weight=sum(weight for _, weight in rows),
+        worlds=tuple(
+            PossibleWorld(index, tuple(sorted(hand.items())), weight)
+            for index, (hand, weight) in enumerate(rows)
+        ),
+        _engine=engine,
+    )
+    engine.space = space
+    observation = Observation(
+        schema_version=1,
+        revision=revision,
+        viewer=0,
+        viewer_state_hash=f"hash-{identity}",
+        viewer_state={"opponent_cards": []},
+        events=(),
+        decision=None,
+    )
+    return engine, space, observation
+
+
+def _transition(
+    before: int,
+    after: int,
+    commitment: Mapping[str, Any] | None,
+    observation: Observation,
+) -> SemanticTransition:
+    return SemanticTransition(
+        receipt=TransitionReceipt(
+            schema_version=1,
+            before_revision=before,
+            after_revision=after,
+            command_id=f"command-{before}",
+            public_commitment=commitment,
+            events=(f"event-{before}",),
+            next_decision=None,
+        ),
+        observation=observation,
+    )
 
 
 class FixedLikelihood:
-    def __init__(self, by_hand: dict[tuple[int, ...], float]) -> None:
-        self.by_hand = by_hand
-        self.calls: list[tuple[Any, int, PublicAction]] = []
+    def __init__(self, likelihoods: tuple[float, ...]) -> None:
+        self.likelihoods = likelihoods
+        self.calls: list[tuple[Any, int, Mapping[str, Any]]] = []
 
     def evaluate(
         self,
         root_engine: Any,
         *,
         viewer: int,
-        action: PublicAction,
-        hand_range,
+        commitment: Mapping[str, Any],
+        belief,
     ) -> LikelihoodResult:
-        self.calls.append((root_engine, viewer, action))
-        likelihoods = np.asarray(
-            [
-                self.by_hand[tuple(int(value) for value in key)]
-                for key in hand_range.keys
-            ],
-            dtype=np.float64,
-        )
+        self.calls.append((root_engine, viewer, commitment))
         return LikelihoodResult(
-            likelihoods=likelihoods,
-            legal_action_counts=np.full(hand_range.support_size, 2, dtype=np.int64),
+            likelihoods=np.asarray(self.likelihoods, dtype=np.float64),
+            legal_action_counts=np.full(belief.support_size, 2, dtype=np.int64),
+            matching_action_counts=np.ones(belief.support_size, dtype=np.int64),
             seconds=0.125,
         )
 
 
-def test_action_update_changes_posterior_but_not_uniform_control() -> None:
-    model = FixedLikelihood({(0, 1): 0.1, (1, 0): 0.9})
-    engine = FakeEngine(((10, 1), (20, 1)), hand_size=1, library_size=1)
-    tracker = ExactRangeTracker.from_engine(
-        engine, viewer=0, likelihood=model, epsilon=0.0
+def test_action_update_changes_posterior_but_not_compatible_prior() -> None:
+    _, before, observation = _state(
+        "before",
+        1,
+        {"A": 1, "B": 1},
+        1,
+        [({"A": 1}, 1), ({"B": 1}, 1)],
+    )
+    after_engine, after, after_observation = _state(
+        "after",
+        2,
+        {"A": 1, "B": 1},
+        1,
+        [({"A": 1}, 1), ({"B": 1}, 1)],
+    )
+    model = FixedLikelihood((0.9, 0.1))
+    tracker = BeliefTracker(
+        before,
+        observation,
+        likelihood=model,
+        epsilon=0.0,
+        model_id="test-model",
     )
 
     tracker.observe(
-        engine,
-        action=PublicAction(PublicActionKind.PASS_PRIORITY),
+        after_engine,
+        acting=1,
+        transition=_transition(1, 2, {"kind": "pass_priority"}, after_observation),
         likelihood_root="public-root",
     )
 
-    assert tracker.posterior.probability((1, 0)) == pytest.approx(0.9)
-    assert tracker.uniform.probability((1, 0)) == pytest.approx(0.5)
+    assert tracker.posterior.probability_of_hand({"A": 1}) == pytest.approx(0.9)
+    assert tracker.prior.probability_of_hand({"A": 1}) == pytest.approx(0.5)
+    assert tracker.space.identity == after.identity
     assert tracker.stats.action_updates == 1
     assert tracker.stats.likelihood_seconds == pytest.approx(0.125)
-    assert model.calls == [
-        ("public-root", 0, PublicAction(PublicActionKind.PASS_PRIORITY))
-    ]
+    assert model.calls == [("public-root", 0, {"kind": "pass_priority"})]
 
 
-def test_hidden_draw_convolves_posterior_and_rebuilds_uniform() -> None:
-    model = FixedLikelihood({(0, 1): 0.1, (1, 0): 0.9})
-    before = FakeEngine(((10, 2), (20, 2)), hand_size=1, library_size=3)
-    tracker = ExactRangeTracker.from_engine(
-        before, viewer=0, likelihood=model, epsilon=0.0
+def test_hidden_draw_convolves_posterior_and_rebuilds_prior() -> None:
+    _, before, observation = _state(
+        "before-draw",
+        1,
+        {"A": 2, "B": 1},
+        1,
+        [({"A": 1}, 2), ({"B": 1}, 1)],
     )
-    tracker.observe(
+    after_engine, _, after_observation = _state(
+        "after-draw",
+        2,
+        {"A": 2, "B": 1},
+        2,
+        [({"A": 2}, 1), ({"A": 1, "B": 1}, 2)],
+    )
+    tracker = BeliefTracker(
         before,
-        action=PublicAction(PublicActionKind.PASS_PRIORITY),
-        likelihood_root="root",
+        observation,
+        likelihood=None,
+        epsilon=0.0,
+        model_id="test-model",
     )
 
-    after = FakeEngine(((10, 2), (20, 2)), hand_size=2, library_size=2)
-    tracker.observe(after)
+    tracker.observe(
+        after_engine,
+        acting=0,
+        transition=_transition(1, 2, None, after_observation),
+    )
 
     assert tracker.stats.hidden_draws == 1
-    assert tracker.posterior.hand_size == 2
-    assert tracker.uniform.hand_size == 2
-    assert tracker.posterior.probability((2, 0)) > tracker.uniform.probability((2, 0))
+    assert tracker.posterior.space.hand_size == 2
+    assert tracker.prior.space.hand_size == 2
 
 
-def test_known_exit_and_return_keep_public_pool_exact() -> None:
-    snapshot = HiddenPoolSnapshot(
-        card_def_ids=(10, 20),
-        unseen_counts=(2, 2),
-        hand_size=2,
-        library_size=2,
+def test_known_exit_and_return_follow_canonical_pool_changes() -> None:
+    _, first, first_observation = _state(
+        "first",
+        1,
+        {"A": 2, "B": 2},
+        2,
+        [({"A": 2}, 1), ({"A": 1, "B": 1}, 4), ({"B": 2}, 1)],
     )
-    tracker = ExactRangeTracker(snapshot, viewer=0, likelihood=None, epsilon=0.0)
-
-    tracker.observe(FakeEngine(((10, 1), (20, 2)), hand_size=1, library_size=2))
+    exit_engine, exited, exit_observation = _state(
+        "exited",
+        2,
+        {"A": 1, "B": 2},
+        1,
+        [({"A": 1}, 1), ({"B": 1}, 2)],
+    )
+    return_engine, _, return_observation = _state(
+        "returned",
+        3,
+        {"A": 2, "B": 2},
+        2,
+        [({"A": 2}, 1), ({"A": 1, "B": 1}, 4), ({"B": 2}, 1)],
+    )
+    model = FixedLikelihood((1.0, 1.0, 1.0))
+    tracker = BeliefTracker(
+        first,
+        first_observation,
+        likelihood=model,
+        epsilon=0.0,
+        model_id="test-model",
+    )
+    tracker.observe(
+        exit_engine,
+        acting=1,
+        transition=_transition(1, 2, {"kind": "cast", "card": "A"}, exit_observation),
+        likelihood_root="cast-root",
+    )
+    assert tracker.space.identity == exited.identity
     assert tracker.stats.known_exits == 1
-    assert tracker.posterior.unseen_counts == (1, 2)
 
-    tracker.observe(FakeEngine(((10, 2), (20, 2)), hand_size=2, library_size=2))
+    tracker.observe(
+        return_engine,
+        acting=0,
+        transition=_transition(2, 3, None, return_observation),
+    )
     assert tracker.stats.known_returns == 1
-    assert tracker.posterior.unseen_counts == (2, 2)
-    assert tracker.posterior.hand_size == 2
+    assert tracker.posterior.space.hand_size == 2
 
 
-def test_tracker_reports_range_memory_and_effective_size() -> None:
-    engine = FakeEngine(((10, 2), (20, 2)), hand_size=2, library_size=2)
-    tracker = ExactRangeTracker.from_engine(
-        engine, viewer=1, likelihood=None, epsilon=0.0
+def test_unidentified_hidden_pool_exit_is_typed_provider_gap() -> None:
+    _, first, observation = _state("gap-first", 1, {"A": 2}, 1, [({"A": 1}, 2)])
+    after_engine, _, after_observation = _state("gap-after", 2, {"A": 1}, 0, [({}, 1)])
+    tracker = BeliefTracker(
+        first,
+        observation,
+        likelihood=None,
+        epsilon=0.0,
+        model_id="test-model",
     )
 
-    diagnostics = tracker.diagnostics()
+    with pytest.raises(RulesProviderGap, match="no canonical public commitment"):
+        tracker.observe(
+            after_engine,
+            acting=1,
+            transition=_transition(1, 2, None, after_observation),
+        )
 
-    assert diagnostics["support_size"] == 3
-    assert 1.0 <= diagnostics["effective_range_size"] <= 3.0
-    assert diagnostics["range_bytes"] > 0
-    assert tracker.stats.peak_range_bytes == diagnostics["range_bytes"]
 
-
-def test_tracker_exports_only_viewer_safe_transition_inputs_and_digests() -> None:
-    engine = FakeEngine(((10, 2), (20, 2)), hand_size=1, library_size=3)
-    tracker = ExactRangeTracker.from_engine(
-        engine, viewer=0, likelihood=None, epsilon=0.0
+def test_one_public_commitment_cannot_explain_multiple_hidden_pool_exits() -> None:
+    _, first, observation = _state(
+        "multi-exit-first",
+        1,
+        {"A": 1, "B": 1},
+        2,
+        [({"A": 1, "B": 1}, 1)],
+    )
+    after_engine, _, after_observation = _state("multi-exit-after", 2, {}, 0, [({}, 1)])
+    tracker = BeliefTracker(
+        first,
+        observation,
+        likelihood=FixedLikelihood((1.0,)),
+        epsilon=0.0,
+        model_id="test-model",
     )
 
-    tracker.observe(FakeEngine(((10, 2), (20, 2)), hand_size=2, library_size=2))
+    with pytest.raises(RulesProviderGap, match="does not match canonical pool"):
+        tracker.observe(
+            after_engine,
+            acting=1,
+            transition=_transition(
+                1, 2, {"kind": "cast", "card": "A"}, after_observation
+            ),
+            likelihood_root="cast-root",
+        )
+
+
+def test_tracker_receipt_binds_observation_space_and_belief_identities() -> None:
+    _, before, observation = _state(
+        "receipt-before",
+        1,
+        {"A": 1, "B": 1},
+        1,
+        [({"A": 1}, 1), ({"B": 1}, 1)],
+    )
+    after_engine, _, after_observation = _state(
+        "receipt-after",
+        2,
+        {"A": 1, "B": 1},
+        1,
+        [({"A": 1}, 1), ({"B": 1}, 1)],
+    )
+    tracker = BeliefTracker(
+        before,
+        observation,
+        likelihood=None,
+        epsilon=0.0,
+        model_id="test-model",
+    )
+    tracker.observe(
+        after_engine,
+        acting=0,
+        transition=_transition(1, 2, None, after_observation),
+    )
+
     receipt = tracker.replay_receipt()
 
     assert receipt["viewer"] == 0
-    assert receipt["initial_snapshot"]["hand_size"] == 1
-    assert receipt["transitions"][0]["hidden_draws"] == 1
-    assert receipt["transitions"][0]["action"] is None
+    assert receipt["initial_space_id"] == "receipt-before"
+    assert receipt["transitions"][0]["after_space_id"] == "receipt-after"
     assert receipt["transitions"][0]["posterior_normalization_error"] < 1e-12
-    serialized = repr(receipt)
-    assert "focus" not in serialized
-    assert "offer" not in serialized
+    assert len(receipt["history_digest"]) == 64

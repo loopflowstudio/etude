@@ -1,59 +1,32 @@
-"""Pinned policy likelihoods over viewer-safe public action identities."""
+"""Pinned policy likelihoods for managym-owned public commitments."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
 import hashlib
+import json
 from pathlib import Path
 import time
-from typing import Any
+from typing import Any, Mapping
 
 import numpy as np
 from numpy.typing import NDArray
 import torch
 
-from manabot.belief.range import ExactHandRange
+from manabot.belief.range import BeliefState
+from managym.decision import DecisionFrame
+from managym.possible_worlds import PossibleWorldSpace
 
 
-class PublicActionKind(str, Enum):
-    PASS_PRIORITY = "pass_priority"
-    COMMIT_DEFINITION = "commit_definition"
-
-
-@dataclass(frozen=True, slots=True)
-class PublicAction:
-    """A deliberately small, viewer-safe selected-matchup action alphabet."""
-
-    kind: PublicActionKind
-    card_def_id: int | None = None
-
-    def __post_init__(self) -> None:
-        if self.kind is PublicActionKind.COMMIT_DEFINITION:
-            if self.card_def_id is None:
-                raise ValueError("commit_definition requires a card_def_id")
-        elif self.card_def_id is not None:
-            raise ValueError(f"{self.kind.value} cannot carry a card_def_id")
-
-    def to_dict(self) -> dict[str, str | int | None]:
-        return {"kind": self.kind.value, "card_def_id": self.card_def_id}
-
-    @classmethod
-    def from_dict(cls, value: dict[str, Any]) -> PublicAction:
-        return cls(
-            PublicActionKind(str(value["kind"])),
-            card_def_id=(
-                int(value["card_def_id"])
-                if value.get("card_def_id") is not None
-                else None
-            ),
-        )
+class RulesProviderGap(RuntimeError):
+    """managym cannot identify this commitment at the admitted boundary."""
 
 
 @dataclass(frozen=True, slots=True)
 class LikelihoodResult:
     likelihoods: NDArray[np.float64]
     legal_action_counts: NDArray[np.int64]
+    matching_action_counts: NDArray[np.int64]
     seconds: float
 
 
@@ -65,14 +38,39 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-class FrozenPolicyLikelihood:
-    """Counterfactual action likelihoods from one hash-pinned w2 policy.
+def _commitment_key(value: Mapping[str, Any]) -> str:
+    kind = value.get("kind")
+    if kind not in {"pass_priority", "cast", "play_land"}:
+        raise RulesProviderGap(f"unsupported public commitment kind {kind!r}")
+    if kind in {"cast", "play_land"} and not value.get("card"):
+        raise RulesProviderGap(f"{kind} commitment has no canonical card name")
+    return json.dumps(dict(value), sort_keys=True, separators=(",", ":"))
 
-    The evaluator never accepts the authority's true hand.  Every row begins
-    from the same retained public root, installs one hand hypothesis through
-    managym's validated exact-hand determinization, and encodes the resulting
-    opponent view.  Duplicate physical copies of one definition are grouped
-    by summing their legal action probabilities.
+
+def _matching_offer_indexes(
+    frame: DecisionFrame, observed: Mapping[str, Any]
+) -> tuple[list[int], int]:
+    """Group offers only by managym's provider-owned public identity."""
+
+    observed_key = _commitment_key(observed)
+    groups: dict[str, list[int]] = {}
+    for index, offer in enumerate(frame.offers):
+        commitment = offer.get("public_commitment")
+        key = (
+            _commitment_key(commitment)
+            if isinstance(commitment, Mapping)
+            else f"unsupported-offer:{offer['id']}"
+        )
+        groups.setdefault(key, []).append(index)
+    return groups.get(observed_key, []), len(frame.offers)
+
+
+class FrozenPolicyLikelihood:
+    """Counterfactual likelihoods from one byte-locked world-w2 policy.
+
+    Each row is materialized by canonical world index through the bound
+    ``PossibleWorldSpace``. The evaluator receives no authority hand and never
+    calls a direct exact-hand installation API.
     """
 
     def __init__(
@@ -111,12 +109,18 @@ class FrozenPolicyLikelihood:
         root_engine: Any,
         *,
         viewer: int,
-        action: PublicAction,
-        hand_range: ExactHandRange,
+        commitment: Mapping[str, Any],
+        belief: BeliefState,
     ) -> LikelihoodResult:
         started = time.perf_counter()
-        likelihoods = np.zeros(hand_range.support_size, dtype=np.float64)
-        legal_counts = np.zeros(hand_range.support_size, dtype=np.int64)
+        root_space = PossibleWorldSpace.from_engine(root_engine, viewer)
+        if root_space.identity != belief.space.identity:
+            raise ValueError(
+                "likelihood root does not match BeliefState space identity"
+            )
+        likelihoods = np.zeros(belief.support_size, dtype=np.float64)
+        legal_counts = np.zeros(belief.support_size, dtype=np.int64)
+        matching_counts = np.zeros(belief.support_size, dtype=np.int64)
         encoded_batch: list[dict[str, np.ndarray]] = []
         matching_batch: list[list[int]] = []
         legal_batch: list[int] = []
@@ -138,25 +142,29 @@ class FrozenPolicyLikelihood:
                 probabilities = torch.softmax(logits, dim=-1).cpu().numpy()
             for local, row in enumerate(row_batch):
                 matching = matching_batch[local]
+                legal_counts[row] = legal_batch[local]
+                matching_counts[row] = len(matching)
                 if matching:
                     likelihoods[row] = float(probabilities[local, matching].sum())
-                    legal_counts[row] = legal_batch[local]
             encoded_batch.clear()
             matching_batch.clear()
             legal_batch.clear()
             row_batch.clear()
 
-        for row, hand in enumerate(hand_range.keys):
-            hand_key = tuple(int(value) for value in hand)
-            hypothesis = root_engine.clone_env()
-            hypothesis.determinize_to_hand(
-                hand=hand_range.as_definition_counts(hand_key),
+        opponent = (viewer + 1) % 2
+        for row in range(belief.space.support_size):
+            hypothesis = root_space.materialize(
+                row,
                 seed=self.counterfactual_seed,
-                perspective=viewer,
+                refresh_opponent_priority=True,
             )
-            opponent = (viewer + 1) % 2
+            if hypothesis.current_agent_index() != opponent:
+                raise RulesProviderGap(
+                    "likelihood materialization did not publish the opponent decision"
+                )
             raw = hypothesis.observation_for_player(opponent)
-            matching, legal_count = _matching_action_indexes(raw, action)
+            frame = DecisionFrame.from_json(hypothesis.semantic_decision_frame_json())
+            matching, legal_count = _matching_offer_indexes(frame, commitment)
             encoded_batch.append(self.obs_space.encode(raw))
             matching_batch.append(matching)
             legal_batch.append(legal_count)
@@ -167,38 +175,15 @@ class FrozenPolicyLikelihood:
         return LikelihoodResult(
             likelihoods=likelihoods,
             legal_action_counts=legal_counts,
+            matching_action_counts=matching_counts,
             seconds=time.perf_counter() - started,
         )
 
 
-def _matching_action_indexes(raw: Any, observed: PublicAction) -> tuple[list[int], int]:
-    card_definitions = {
-        int(card.id): int(card.registry_key) for card in raw.agent_cards
-    }
-    groups: dict[tuple[Any, ...], list[int]] = {}
-    for index, option in enumerate(raw.action_space.actions):
-        action_type = int(option.action_type)
-        focus = tuple(int(value) for value in option.focus)
-        if action_type == 2:
-            key: tuple[Any, ...] = (PublicActionKind.PASS_PRIORITY.value,)
-        elif action_type in (0, 1) and focus:
-            definition = card_definitions.get(focus[0])
-            if definition is None:
-                key = ("unresolved_private_source", action_type)
-            else:
-                key = (PublicActionKind.COMMIT_DEFINITION.value, definition)
-        else:
-            # These candidates are public but not evidence in the thinnest
-            # selected-matchup alphabet.  They still count in the epsilon
-            # denominator and are grouped without physical CardIds.
-            key = ("other", action_type, focus, option.declared)
-        groups.setdefault(key, []).append(index)
-
-    if observed.kind is PublicActionKind.PASS_PRIORITY:
-        observed_key = (PublicActionKind.PASS_PRIORITY.value,)
-    else:
-        observed_key = (
-            PublicActionKind.COMMIT_DEFINITION.value,
-            int(observed.card_def_id),
-        )
-    return groups.get(observed_key, []), len(groups)
+__all__ = [
+    "FrozenPolicyLikelihood",
+    "LikelihoodResult",
+    "RulesProviderGap",
+    "_matching_offer_indexes",
+    "file_sha256",
+]

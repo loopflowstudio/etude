@@ -2,24 +2,30 @@
 
 ## Problem
 
-Uniform determinization throws away the information in an opponent's public
-actions. INT-9 must establish whether that information improves a runnable
-manabot, rather than merely producing a plausible posterior plot. The player
-must therefore maintain its range from exactly the facts available to one
-fixed viewer, sample only history-compatible worlds, choose an authoritative
-legal action, and be compared with a uniform-range player that differs only in
-the sampling distribution used by search.
+Uniform determinization discards information in an opponent's public actions.
+INT-9 must establish whether a likelihood-weighted belief improves a runnable
+manabot in one real matchup, not merely produce an attractive posterior plot.
 
-The selected boundary is the symmetric world-w2 `INTERACTIVE_DECK` matchup
-already frozen by the Teacher-1 contract: 60 cards, ten definitions, and
-10,832 possible opening-hand count vectors. The first player is not a
-public-belief solver. It remains determinization search and may still suffer
-strategy fusion; the claim is only whether better state inference improves
-actual play at the same search budget.
+The repository now has the architectural boundary this experiment must use:
+managym owns viewer-relative `PossibleWorldSpace`, `WorldQuery`, canonical
+viewer Observation/history, deterministic world materialization, semantic
+`DecisionFrame`/`Command`, and legality. manabot may assign probability over
+that domain, but it must not define a second hand key, hidden pool, query
+language, public-action enum, or exact-hand installation path. The existing
+INT-9 substrate predates that boundary and is therefore migration input, not
+the contract to preserve.
+
+The first executable comparison stays deliberately narrow: symmetric world-w2
+`INTERACTIVE_DECK`, a fixed viewer, the exact opponent-hand worlds already
+enumerated by managym, likelihood updates only for canonical viewer-observable
+semantic commitments supported at this boundary, and matched flat search. It
+does not attempt public-belief solving, broad deck generalization, or a second
+action representation.
 
 ## The demo
 
-Run:
+Once the required frozen likelihood checkpoint is available and hash-pinned,
+run:
 
 ```bash
 uv run experiments/runners/run_exact_range_player.py \
@@ -27,370 +33,403 @@ uv run experiments/runners/run_exact_range_player.py \
   --stage smoke --out-dir .runs/int-9-exact-range-v1
 ```
 
-The smoke stage plays the belief and uniform arms through normal managym
-commands, then writes a replayable receipt showing zero illegal commands or
-viewer leaks, an exactly normalized range, belief samples compatible with the
-viewer's complete history, paired game results, calibration/log loss,
-effective range size, p50/p95 latency, rollout throughput, and peak memory. It
-is the developer demo and integrity gate, not the final arena evidence.
+The command plays belief and compatible-deal-prior arms through normal managym
+semantic Commands, then writes a replayable receipt binding every posterior to
+one `PossibleWorldSpace` identity and canonical viewer history. It reports
+normalization, legality, viewer safety, sampled-world compatibility,
+calibration, paired results, latency, throughput, and memory. Until the frozen
+checkpoint exists, the same command fails with a typed evidence-wait receipt;
+unit tests may use an explicitly test-only likelihood but may not promote it to
+smoke or arena evidence.
+
+## User-visible outcome and end-to-end proof
+
+The behavior change is visible to the developer or evaluator running INT-9:
+the manabot listens only to the selected viewer's canonical public history,
+maintains a replay-identical exact posterior over managym worlds, samples those
+worlds for search, and submits a legal semantic `Command`. The paired control
+does the same work but samples the current compatible-deal prior. A successful
+receipt therefore makes the gameplay difference, posterior explanation, cost,
+and complete authority provenance inspectable without revealing the actual
+opponent hand.
+
+The concrete proof scenario is the first supported opponent commitment reached
+from a fixed-viewer priority root in the symmetric world-w2
+`INTERACTIVE_DECK`:
+
+1. managym emits the viewer's canonical `Observation` and current history
+   increment, then constructs the revision-bound `PossibleWorldSpace`;
+2. manabot initializes `BeliefState` from that space's exact compatible-deal
+   weights and records the ordered space and belief identities;
+3. the opponent submits a semantic `Command`, and managym returns the accepted
+   transition plus the viewer-visible commitment/history identity;
+4. the likelihood evaluator materializes canonical world indexes from the
+   retained root, evaluates only the provider-supplied semantic commitment,
+   and produces the next normalized belief;
+5. belief and compatible-prior arms sample paired canonical world indexes and
+   call the same flat-search path with the same world, rollout, and seed
+   budgets;
+6. the selected semantic offer becomes a revision-bound `Command` that
+   managym validates and executes; and
+7. the public replay reconstructs every identity while the separate audit
+   scores the actual canonical world only after the decision.
+
+`uv run pytest tests/belief tests/sim/test_exact_range_runner.py` proves this
+path with an explicitly test-only likelihood. With byte-locked artifacts, the
+smoke command above is the end-to-end evidence proof and must produce a
+verified receipt for both arms. If managym cannot provide the selected
+commitment identity, the observable result is instead a typed Rules provider
+gap; if the frozen checkpoint is absent, it is `evidence_wait`. Neither result
+may be reported as gameplay evidence.
+
+## Source of truth and affected surfaces
+
+The authoritative sources are the existing managym contracts, not the INT-9
+Python substrate:
+
+- `managym/src/possible_worlds.rs` owns `PossibleWorldSpace`, ordered canonical
+  worlds, exact physical-deal weights, `WorldQuery`, conditioning receipts, and
+  materialization;
+- `managym/src/decision.rs` owns viewer `Observation`, `DecisionFrame`,
+  semantic `Command`, `TransitionReceipt`, and legality;
+- `managym/src/python/bindings.rs` and the pure parsing wrappers under
+  `managym/` are derived consumer surfaces and may expose those Rust values but
+  may not redefine them; and
+- the ordered canonical Observation/transition bytes are the history facts.
+  manabot may retain them as agent memory and bind the exact sequence in its
+  receipt, but it may not infer or rewrite missing history.
+
+The current Rust `PossibleWorldSpace` is not yet exposed to Python. Pursuit
+must add one thin, read-only PyO3/Python surface for the existing canonical
+space: its versioned source/space identity, ordered world rows and exact
+weights, query receipts, and source-bound materialization by canonical world
+index. This binding is the only allowed cross-language adapter. Enumeration,
+copy multiplicity, query evaluation, identity serialization, and world
+installation stay in managym; there is no Python fallback. Search-root
+preservation and acting-opponent legality refresh are explicit modes of that
+one canonical materializer, not calls to `determinize_to_hand`.
+
+manabot derives only probability and experiment behavior:
+
+- `manabot/belief/range.py` and its exported `ExactHandRange`/`HandKey` contract
+  are replaced by a bounded `BeliefState` over the bound world's ordered rows;
+- `manabot/belief/tracker.py`, `likelihood.py`, `player.py`, and `audit.py`
+  consume canonical spaces, Observations/transitions, commitment identities,
+  and world indexes; the detached `HiddenPoolSnapshot`, Python `PublicAction`,
+  raw-prompt grouping, and direct-hand installation paths are removed;
+- `manabot/sim/flat_mc.py` keeps the belief/prior player registrations on one
+  factory and search path, but their durable identity is the semantic Command
+  path rather than positional actions;
+- `experiments/runners/run_exact_range_player.py` remains the one CLI and
+  receipt writer; `experiments/contracts/int-9-exact-range-v1.json` must be
+  schema-bumped before it produces evidence, replacing the stale
+  `public_action_alphabet` and direct-hand determinization identities with the
+  canonical world-space, semantic-history, BeliefState, and materializer
+  identities; and
+- `tests/belief/`, `tests/sim/test_exact_range_runner.py`, and managym's Rust
+  possible-world/semantic-decision tests are the affected verification
+  consumers. They are rewritten around canonical rows and identities rather
+  than preserved as compatibility tests for the superseded ontology.
+
+Etude, Study, the existing semantic Command wire DTO, unrelated manabot player
+kinds, and frozen evidence remain unchanged consumers. INT-9 adds no Etude
+executor or presentation surface and does not reinterpret an older receipt as
+evidence under the new contract schema.
 
 ## Approach
 
-### 1. Freeze one executable comparison
+### 1. Freeze one bounded comparison and one honest wait state
 
-`experiments/contracts/int-9-exact-range-v1.json` pins world `w2`, the symmetric
-`INTERACTIVE_DECK`, content/action/observation/protocol hashes, the action
-likelihood checkpoint and SHA-256, epsilon, search worlds and rollouts, deal
-blocks, arena opponents, competency runs, host, caps, and all evidence paths.
-It contains separate bounded `smoke` and registered `arena` stages. The arena
-stage and its decision thresholds are frozen before any arena result is read.
-The real likelihood checkpoint must be recovered byte-for-byte and hash
-matched; a reconstructed or convenient substitute is not evidence. Toy
-likelihoods exist only in unit tests.
+`experiments/contracts/int-9-exact-range-v1.json` pins world w2, the symmetric
+deck, content and semantic contract identities, epsilon, world and rollout
+budgets, paired deals, caps, evidence paths, and the required frozen artifacts.
 The primary pair is:
 
-- `belief`: exact posterior samples after public-action and chance updates;
-- `uniform`: the same tracker, likelihood inference, canonicalization,
-  determinization function, random seeds, rollouts, and command path, but its
-  search sampler uses the exact combinatorial range implied only by the current
-  public zones and hand size.
+- `belief`: samples the normalized likelihood-weighted `BeliefState`;
+- `compatible-prior`: runs the same observation, likelihood, sampling, search,
+  seeds, and Command path, but samples managym's normalized
+  compatible-physical-deal measure for the current space.
 
-Both arms still compute the diagnostic posterior. This deliberately spends the
-same likelihood cost in the control and makes the search sampling distribution
-the only implementation difference. The uniform samples are compatible with
-the current public snapshot but intentionally forget earlier public actions;
-only the belief arm claims compatibility with the complete viewer history.
+Both arms perform the same likelihood work so sampling distribution is the
+only intended algorithmic difference. The control intentionally forgets prior
+action evidence when selecting worlds, while the diagnostic belief continues
+to be computed for matched end-to-end cost.
 
-### 2. Represent the exact range over indistinguishable copies
+The real world-w2 policy/value checkpoint and arena opponents are not present
+in the repository. Their absence is an explicit `evidence_wait`, not a license
+to reconstruct, retrain, or substitute an artifact. Implementation and fixture
+verification may proceed; smoke and arena claims may not.
 
-Add `manabot/belief/range.py`. A `HandKey` is a tuple of counts in the contract's
-sorted `CardDefId` order. A range is a sorted sparse support plus float64 log
-mass. Physical copies with the same definition are exchangeable to the selected
-rules and action model, so one hand key carries the exact multiplicity
+### 2. Express exact range as a bounded manabot `BeliefState`
 
-```text
-product(comb(unseen_count[i], hand_count[i]))
+Replace `ExactHandRange`/`HandKey` as the public probability contract with a
+bounded adapter whose rows are exactly the ordered worlds supplied by one
+managym `PossibleWorldSpace`:
+
+```python
+@dataclass(frozen=True)
+class BeliefState:
+    space: managym.PossibleWorldSpace
+    model_id: str
+    log_probabilities: NDArray[np.float64]
 ```
 
-rather than treating all count vectors as equally likely. Normalization uses
-log-sum-exp; impossible support is a hard error. No pruning, top-k, particles,
-or silent support cap is allowed. Memory and support size are recorded at every
-update.
+The adapter stores no independent card-definition order or hidden-pool schema.
+It validates that the probability vector has one finite, normalized value per
+canonical world and binds its digest to the managym space identity, model
+identity, and float64 log probabilities. It provides only probability-layer
+operations: normalization, likelihood conditioning, sampling canonical world
+indexes, calibration, effective range size, and memory accounting.
 
-At every public commitment, action evidence is applied to the pre-commitment
-range before the resulting zone/chance transitions. The exact transitions are:
+The compatible prior is built by normalizing the exact physical-deal weights
+already attached to managym worlds. No Python recomputation of bounded
+compositions or copy multiplicity is authoritative. Empty support, identity
+mismatch, non-finite mass, and silent pruning are hard failures.
 
-- hidden draw of definition `c`:
-  `P(h + e_c) += P(h) * (unseen[c] - h[c]) / library_size`;
-- a publicly identified card leaving the opponent hand: condition on
-  `h[c] > 0`, then map `h -> h - e_c`;
-- a publicly identified card returning to the opponent hand: map
-  `h -> h + e_c`;
-- opponent public action `a`: multiply by
-  `sigma_tilde(a|h) = (1-epsilon)*sigma(a|h) +
-  epsilon/|legal_canonical_actions(h)|` when `a` is legal, while an illegal
-  action remains a logical zero.
+When public history advances, managym constructs the next canonical space from
+the next canonical viewer Observation/history. The adapter transports belief
+mass only by joining old and new canonical world rows through their managym
+semantic hand-count projections:
 
-Unknown draws and known zone moves are derived from consecutive fixed-viewer
-snapshots plus a viewer-safe public event projection. The current matchup
-contains no hidden discard, scry, shuffle, or hidden decklist operation;
-encountering one fails closed as an unsupported transition instead of guessing.
+- hidden draw of name `c`:
+  `P(h + e_c) += P(h) * (pool[c] - h[c]) / library_size`;
+- publicly known card leaving hand: condition on the canonical world containing
+  it, then join to the next-space world with one fewer copy;
+- publicly known card returning to hand: join to the next-space world with one
+  additional copy;
+- canonical semantic action: multiply each row by the frozen policy likelihood
+  plus the pinned legal-action epsilon mixture.
 
-### 3. Make public action identity independent of engine prompts
+These formulas live in manabot because they are probability updates. The
+hypotheses, card-name semantics, compatible measure, support ordering, and
+world materialization remain managym-owned.
 
-Add `manabot/belief/history.py`. `PublicAction` contains only facts available
-after one semantic commitment: verb, source `CardDefId` when revealed, public
-target object render IDs, and attacker/blocker declarations. A
-`PublicActionBundle` also records the viewer-safe before/after snapshots. Any
-raw prompt transcript stays in the private authority audit and is neither a
-bundle field nor tracker input.
+### 3. Consume canonical Observation/history and semantic Commands
 
-This distinction is required because the legacy action ABI splits one public
-choice across private engine prompts. Targeted casting chooses a source and
-then a target; attacker and blocker declarations are assembled one object at a
-time. The tracker must not treat those raw indices or intermediate candidates
-as public observations. The trusted match adapter accumulates them, emits one
-bundle only when the choice has become public, and proves that the emitted
-bundle is identical for authority roots that differ only in viewer-hidden
-state. Passes and already-atomic public moves emit immediately.
+The tracker consumes the fixed viewer's canonical managym Observation/history
+increment and the accepted semantic `Command`/transition receipt. It does not
+infer history from positional action indices, raw prompt counts, labels, or
+ad-hoc before/after snapshots.
 
-managym owns the selected-matchup projection from accepted action fragments to
-stable `CardDefId`/`ObjectRenderId` semantics; Python owns only bundle assembly
-and Bayesian updates. This avoids deriving public identity from labels or
-physical `CardId`s.
+At one opponent commitment, the belief tracker retains the pre-commitment
+root, waits until managym publishes the viewer-visible history increment, and
+then records the canonical semantic commitment identity from the authoritative
+DecisionFrame/Command path. The likelihood evaluator sums mass only across
+authoritative offers whose managym-provided viewer-visible semantic identity
+matches that commitment. INT-9 never groups or reconstructs positional actions
+or private prompt paths. Revision-local offer IDs and physical object IDs never
+become Bayesian evidence.
 
-For likelihood, every raw prompt path that yields the same `PublicAction`
-collapses to one key and its probability mass is summed. The evaluator
-enumerates matching legal paths from the public action; it does not receive the
-authority path that happened in the retained game. This handles both
-physical duplicate copies and latent split-prompt paths without turning
-revision-local offer IDs into Bayesian evidence. The selected move still
-travels through the existing protocol-v1 `ExperienceFrame` and `Command`
-builders; the command executor validates match, revision, prompt, and offer
-before calling normal authoritative `Env.step`. Public actions are evidence
-records only and never mutate game state.
+INT-9 admits only the selected-matchup semantic commitments for which managym
+can supply a complete viewer-observable identity. If a commitment cannot be
+expressed through the canonical authority, the run fails closed and reports a
+typed Rules provider gap. INT-9 will not fill that gap with a Python
+`PublicAction` enum, an Etude command envelope, or a legacy prompt transcript.
 
-### 4. Pin a real likelihood model and sweep counterfactual hands
+The replay receipt contains Observation/history identities, space identities,
+semantic Command/transition identities, belief digests, and transition counts.
+The actual hidden hand remains available only to the separate authority audit
+used after decisions for calibration.
 
-Add `manabot/belief/likelihood.py`. `FrozenPolicyLikelihood` loads the contract's
-immutable w2 policy/value checkpoint. At each opponent public commitment it:
+### 4. Evaluate likelihood over canonical worlds
 
-1. constructs a counterfactual authoritative clone for every supported hand;
-2. enumerates the legal engine prompt paths in that clone whose viewer-safe
-   projection equals the observed public action;
-3. batches the existing observation encoder and frozen policy forward passes;
-4. multiplies probabilities along each path and sums all paths that produce the
-   observed `PublicAction`;
-5. returns the joint public-action probability and the number of legal public
-   actions for the epsilon mixture.
+`FrozenPolicyLikelihood` loads only the hash-pinned world-w2 checkpoint. At
+each admitted opponent commitment it:
 
-The actual hidden hand is never passed to this interface. A trusted engine
-clone is overwritten with the requested hand key before the opponent
-observation is constructed. Inference streams support-sized batches rather
-than materializing all counterfactual observations, but every hypothesis is
-evaluated: batching is not pruning. The checkpoint, temperature, deterministic
-preprocessing, epsilon, and batch size are contract fields.
+1. verifies that the retained root's `PossibleWorldSpace` identity equals the
+   `BeliefState` space identity;
+2. asks that space to materialize each supported canonical world into an
+   isolated branch;
+3. obtains the hypothetical opponent's normal model Observation and canonical
+   semantic decision frame;
+4. batches the existing encoder and frozen policy forward pass;
+5. sums probability across authoritative offers matching the observed
+   canonical semantic commitment; and
+6. returns one likelihood and canonical legal-action count per belief row.
 
-Count-vector state is admitted only if two invariance tests pass: choosing
-different physical copies for one hand key must produce the same grouped
-public-action probabilities, and viewer-equivalent authority roots must
-produce the same range update. Otherwise physical copies are not exchangeable
-for this likelihood and the run fails rather than claiming an exact posterior.
+The evaluator never accepts the authority's true hand and never calls a
+parallel `determinize_to_hand` API. Search and likelihood both materialize
+worlds through `PossibleWorldSpace`; likelihood materialization refreshes the
+acting opponent's authoritative priority legality, while search materialization
+preserves the fixed viewer's root decision. Unsupported hand-dependent prompt
+kinds fail closed.
 
-Policy-based inference estimates state reach by multiplying the likelihoods of
-the observed opponent actions. This is the same mechanism reported to improve
-both inference and determinized play in Skat
-([Rebstock et al.](https://arxiv.org/abs/1905.10911)). The design retains its
-known risk: a mismatched opponent model can make the resulting player more
-exploitable, so calibration and the full opponent matrix are reported rather
-than treating the posterior as truth.
+Physical copies are already quotiented by the canonical space. Admission still
+tests that distinct physical materializations of one canonical world yield the
+same grouped likelihood and that viewer-equivalent roots yield the same belief
+update. A failure invalidates the bounded model rather than expanding its
+ontology.
 
-### 5. Add exact-hand determinization to the engine
+### 5. Search one shared materialization path
 
-Extend `Game::determinize` with an exact-hand sibling and expose it through
-`managym.Env`:
+The exact-range player samples canonical world indexes from either the
+posterior or compatible prior and passes those indexes, their space identity,
+and paired seeds to one native flat-MC entry point. The engine materializes each
+world through the retained `PossibleWorldSpace`; every root action shares the
+same world and rollout streams. Both arms use identical budgets and tie rules.
 
-```rust
-pub fn determinize_to_hand(
-    &mut self,
-    perspective: PlayerId,
-    hand: &[(CardDefId, usize)],
-    seed: u64,
-) -> Result<(), AgentError>
-```
+The player selects from the current canonical `DecisionFrame` and emits a
+revision-bound semantic `Command`. managym validates and executes the Command;
+the belief layer never mutates authority or claims legality. Positional action
+indices may remain an internal accelerator only where managym binds them to the
+semantic frame; they are absent from durable evidence and likelihood identity.
 
-It validates the requested count sum against the current opponent hand size,
-validates every count against the opponent's hand-plus-library pool, chooses
-physical copies deterministically under the supplied seed, installs exactly
-that hand, shuffles the remainder and the viewer's library, and re-pins any
-currently revealed library cards. The Python binding accepts sorted
-`(card_def_id, count)` pairs. Public state and the fixed-viewer projection must
-remain unchanged. At a search root, where the perspective owns the decision,
-the legal action space must also remain byte-identical. At an opponent
-likelihood root, priority legality must instead be authoritatively recomputed
-from the installed counterfactual hand so stale actions from the true hand can
-never enter the model. Other hand-dependent prompt kinds fail closed unless
-explicitly covered.
+### 6. Keep evidence proportional to the first comparison
 
-Add a flat-MC entry point accepting already sampled hand keys and their seeds.
-For every hand, all root actions share the same world and rollout random
-streams, matching the current common-random-number behavior. It returns scores,
-total playouts, cap hits, and the ordered installed-hand digests. Uniform and
-belief players call this one entry point; neither arm may resample inside a
-different search implementation.
+Known-truth replay scores the posterior without feeding truth back to the
+player:
 
-### 6. Run one stateful player through the existing match loop
+- exact canonical-world negative log likelihood and rank;
+- per-card inclusion Brier score and ECE;
+- top-world mass and effective range size;
+- sampled unique-world count and collision rate; and
+- space/belief identity continuity across every update.
 
-Add `manabot/belief/player.py`. `ExactRangePlayer` owns one tracker for the
-opponent of its seat. Extend the matchup-player protocol with `start_game` and
-`observe_public_transition` lifecycle hooks. The trusted match adapter is
-invoked after every accepted command, but the player hook receives a bundle
-only after a viewer-observable commitment. It contains only:
+The bounded smoke compares belief versus compatible prior through normal play
+and reports integrity plus mechanism evidence. The preregistered arena remains
+the admission claim: paired belief-minus-prior play, population rating,
+uncertainty, competencies, raw playouts, and systems cost. Posterior quality
+explains gameplay; it does not substitute for gameplay.
 
-- the player's fixed-viewer observation before and after the commitment;
-- the public action and actor;
-- public definition/zone changes and hidden-zone count deltas.
-
-On the player's turn, it samples hand keys from either the posterior or uniform
-control using common seeds, calls exact-hand flat MC, picks deterministic
-argmax with the existing tie rule, wraps the selected offer in a protocol
-`Command`, and lets the command executor apply it. Reset starts a new exact
-range; swapping seats starts a tracker for the other opponent. Belief-update,
-search-only, command, and end-to-end time are recorded separately.
-
-### 7. Treat posterior quality as mechanism evidence, not the claim
-
-Known-truth replay games retain the authority witness in a separate audit
-bundle. Replaying the tracker consumes only the viewer projection and public
-action bundles, then scores:
-
-- exact hand-composition negative log likelihood before each opponent action;
-- per-card inclusion reliability, Brier score, and ECE;
-- top-hand mass and true-hand rank;
-- `effective_range_size = 1 / sum(p_h**2)` and its support-normalized value;
-- sampled unique-world count and collision rate.
-
-The receipt calls this effective range size, not evaluation ESS: it measures
-the number of materially weighted exact-hand hypotheses, not independent games
-or rollout samples.
-
-### 8. Arena and ablations
-
-Arena `w2-interactive-belief-v1` includes a direct belief-versus-uniform cell
-and fits the repo's specified batch Bradley-Terry model, expressed on the Elo
-scale with the random anchor fixed at zero. Every cell uses paired deal seeds
-and reports block-bootstrap uncertainty, the full payoff matrix, residuals,
-and native cost.
-
-Both primary arms face random, deterministic policy-only checkpoints, flat
-search, the frozen likelihood checkpoint itself, and any independent frozen
-learned checkpoint named by the registered contract. Fixed scripted
-competencies run for both arms on the same seeds and appear beside the arena
-matrix. Optional Teacher-1 cells may be additive, but cannot replace a required
-opponent slot. The contract fails closed rather than substituting a missing
-artifact.
-
-Three diagnostic arms use the same command/search path:
-
-- `neutral-action`: logical legality and public card movement only;
-- `reset-on-draw`: applies action likelihoods but resets to the exact
-  combinatorial public range after each hidden draw, measuring whether action
-  information survives chance events;
-- `uniform`: full posterior still computed for diagnostics, but search samples
-  the public-only combinatorial range.
-
-Gameplay determines the result. Diagnostics explain it. If the paired belief
-versus uniform interval is ambiguous, the runner writes—but does not execute—a
-preregistration for the smallest information-by-continuation scenario slice.
-No microgame is added in this task unless that slice remains ambiguous.
-
-The registered decision rule is explicit: claim improved play only when the
-paired bootstrap lower bound for belief-minus-uniform play and the rating
-difference lower bound are both above zero, every integrity gate passes, raw
-playout counts are reported, and the preregistered compute-class tolerances
-hold. Worlds per action and rollouts per world match exactly; realized total
-playouts need not match after the arms choose different actions and visit
-different numbers of legal roots.
-Otherwise report non-improvement or ambiguity without promoting posterior
-quality into a gameplay claim.
-
-### 9. Implement in evidence-bearing slices
-
-This design is larger than one commit and may require serial INT-9 PRs, but it
-does not need another diagnostic Task before a player exists:
-
-1. exact range algebra, brute-force oracles, exact-hand determinization, and
-   conditional action-space refresh;
-2. public-action bundling, grouped frozen-policy likelihood, and viewer-safe
-   replay/calibration;
-3. the stateful Command-emitting player, matched uniform arm, and smoke
-   receipt;
-4. registered ablations, competencies, arena, uncertainty, and the mechanism
-   decision.
-
-An earlier substrate slice is useful engineering evidence but does not complete
-INT-9. Completion requires the registered arena receipt or an explicit measured
-failure of that registered run; a fixture model, a posterior plot, or smoke
-alone cannot satisfy the Task.
+No extra ablation, microgame, public-belief solver, new Project, or second PR is
+started by kickoff. If the registered result is ambiguous, the existing
+contract may emit a follow-up preregistration, but it does not execute new
+backlog work.
 
 ## De-risking
 
 | Question | Finding | Impact on design |
-|----------|---------|-----------------|
-| Is the opening exact range tractable? | The selected deck has 10,832 seven-card count vectors, while 386,206,920 physical seven-card subsets collapse into them. Support grows with hand size (22,191 at eight; 75,820 at ten), so silent pruning would invalidate exactness. | Store count vectors with combinatorial mass, use float64 log weights, record support/memory, and fail closed rather than prune. |
-| Can current determinization install a posterior sample? | `Game::determinize` only uniformly reshuffles the opponent hand-plus-library pool. Scenario injection is explicitly non-authoritative test machinery. | Add a validated exact-hand determinization primitive and make both arms use it. |
-| Can one installed-hand action space serve search and likelihood? | No. Search changes only the non-acting opponent hand, so root actions must stay fixed; likelihood changes the acting player's hand, so priority actions must be rebuilt. | Preserve actions at search roots, refresh them at opponent priority roots, and test that no true-hand `CardId` survives. |
-| Can the tracker get the opponent's model view without reading its hand? | `Env.observation_for_player` already produces fixed-viewer projections, and a clone can expose the hypothetical opponent hand after exact determinization. | Counterfactual likelihoods come from public root + hand key; the actual hidden hand remains audit-only. |
-| Are action indices stable Bayesian identities? | No. Offer/action positions are revision-local, duplicate card copies may produce equivalent actions, and cast/combat choices span several prompts. | Group complete prompt paths by one viewer-observable public action and sum their probability mass. |
-| Does the engine already provide complete structured Commands? | The experimental atomic structured bridge covers pass, one-target casts, and attacker sets only. The production protocol/Teacher-1 evidence already wraps every positional legal action in a revision-bound `Command` and replays it authoritatively. | Reuse the complete protocol command envelope and a validating command executor; do not broaden the experimental atomic decoder. |
-| Can fixed-viewer snapshot differences recover chance events? | In the selected matchup, hidden hand-count deltas plus public definition-count deltas distinguish hidden draws, known hand-to-public moves, and Man-o'-War returns. There are no hidden discards, scry, or shuffles. | Implement a selected-matchup transition extractor with fail-closed unsupported cases and event-order tests. |
-| Can raw opponent commands be used as history? | No. Targeted casts and combat declarations expose private intermediate choices before the semantic action becomes public. | The trusted adapter groups prompts and emits only a public bundle proven invariant across viewer-equivalent roots. |
-| Does better inference make determinized search information-set-consistent? | No. Determinization remains exposed to strategy fusion; EPIMC explicitly targets that separate failure mode ([Arjonilla et al.](https://arxiv.org/abs/2408.02380)). | Limit the claim to matched-compute play improvement and exclude public-belief solving. |
-| Can this design claim a public-belief equilibrium? | No. Naive public-policy reductions in two-player zero-sum games need additional regularization/representation conditions ([Sokota et al.](https://proceedings.mlr.press/v202/sokota23a.html)). | Do not add solving, continual resolving, or equilibrium language to INT-9. |
-| What prevents the model from annihilating the true hand? | Behavioral zeroes from a misspecified checkpoint are not logical impossibilities. | Use a pinned epsilon mixture for legal actions; keep illegal actions at exact zero and report surprise/log loss. |
-| What makes the strength comparison causal? | Equal sims integers alone can conceal different code paths and overhead. | Both primary arms compute the same posterior and call the same sampled-hand search with paired seeds; report search-only and end-to-end latency separately. |
+|----------|---------|------------------|
+| Is there already an authoritative hidden-world domain? | Current main provides viewer-relative `PossibleWorldSpace`, exact compatible-deal weights, `WorldQuery`, and deterministic materialization. | Delete the detached hand-range/materializer contract; bind `BeliefState` rows to canonical worlds. |
+| Is a separate Python action alphabet safe? | No. Offer IDs are revision-local, raw prompt structure may be private, and semantic Command authority now lives in managym. | Use canonical DecisionFrame/Command/history projections; unsupported public identity is a provider gap, not a `PublicAction` enum. |
+| Is the opening range tractable? | The selected symmetric deck has 10,832 canonical seven-card worlds; growth remains measurable but exact at this boundary. | Keep the adapter bounded and unpruned; record support and memory at every update. |
+| Can likelihood and search share materialization? | Yes. Both need the same canonical world; only whether the installed opponent currently owns priority changes legality refresh behavior. | Use one `PossibleWorldSpace` materialization contract with explicit search-root preservation and likelihood-root refresh tests. |
+| Can the tracker use true hidden state accidentally? | Canonical viewer Observation/history hides the opponent hand; the actual world is needed only for post-hoc scoring. | Keep truth access in the audit module and prove the acting path has no authority-hand parameter. |
+| Are frozen model artifacts available? | A repository-wide filesystem search found no admissible checkpoint; the contract already marks required artifacts unresolved. | Record `evidence_wait`, fail closed, and prohibit convenient substitutes. |
+| Does better belief eliminate strategy fusion? | No. This remains determinization search and may still be information-set inconsistent. | Limit the claim to whether likelihood-weighted state inference improves matched play. |
+| What keeps the control causal? | Same likelihood work, materializer, worlds/rollouts, seeds, command path, and timing surfaces isolate the sampling distribution. | Compare posterior sampling with current-space compatible-prior sampling only. |
 
 ## Alternatives considered
 
 | Approach | Tradeoff | Why not |
 |----------|----------|---------|
-| Particle filter over physical worlds | Bounded memory and easy online sampling, but only approximate, subject to particle death, and unable to meet the exact-normalization KR. | Exact count-vector support is tractable at the selected boundary and gives a stronger correctness oracle. |
-| Marginal independent card probabilities | Very cheap and scalable, but cannot represent mutually exclusive hand compositions and misprices multi-card evidence. | It repeats the independence weakness documented by policy-inference prior work and cannot install an exact hand. |
-| Handcrafted action propensities | Fast and easy to pin, but duplicates engine legality and makes calibration depend on arbitrary coefficients. | The existing frozen w2 policy can supply a genuine normalized likelihood over authoritative legal actions. |
-| Weight rollout returns after uniform sampling | Avoids exact-hand installation changes, but high-variance importance weights can collapse and make the effective search budget differ between arms. | Sample directly from the exact posterior, keep every rollout equally weighted, and report effective range size separately. |
-| Public-belief MCTS/CFR now | Can address strategy fusion, but changes both beliefs and the planner and requires mixed-strategy/value machinery. | It destroys the causal first comparison and is explicitly outside INT-9. |
-| New exact microgame first | Supplies ground truth but does not build a selected-matchup player. | The wave requires integrated play first; diagnostics are conditional on an ambiguous gameplay result. |
+| Preserve `ExactHandRange`, `HandKey`, and `determinize_to_hand` behind adapters | Smallest code diff, but creates two hidden-world identities and two materialization contracts. | It violates the accepted Rules/Intelligence boundary and makes later conditional search unable to share beliefs safely. |
+| Keep a Python `PublicAction` alphabet over legacy prompts | Easy likelihood grouping for the current prototype. | It duplicates semantic Command authority and risks making private prompt structure durable evidence. |
+| Particle filter over physical cards | Bounded memory and simple online updates. | It abandons exact normalization at a tractable boundary and models distinctions managym intentionally quotients away. |
+| Marginal per-card probabilities | Cheap and compact. | It cannot represent mutually exclusive canonical worlds or materialize an exact correlated opponent hand. |
+| Public-belief MCTS/CFR now | Could address strategy fusion. | It changes planner and inference simultaneously, broadens scope, and destroys the first causal comparison. |
+| Reconstruct or retrain the missing checkpoint | Would unblock a runnable smoke quickly. | It is not the frozen opponent model named by the contract and cannot produce admissible evidence. |
 
 ## Key decisions
 
-1. **The matchup is symmetric w2 `INTERACTIVE_DECK`.** It reuses current
-   teacher/search artifacts and keeps deck strength out of the comparison.
-2. **Exact means normalized count-vector posterior with combinatorial copy
-   mass.** No pruning or particle approximation is permitted.
-3. **Viewer-safe public history is the only tracker input.** Authority truth is
-   retained only for post-hoc scoring.
-4. **Public semantic actions, not raw prompts, are observations.** Joint path
-   probability sums positional duplicates and split-prompt paths, then uses a
-   pinned legal-public-action epsilon floor.
-5. **The action model is a byte-identical frozen w2 policy checkpoint.** A
-   missing or hash-mismatched checkpoint blocks evidence rather than inviting
-   substitution.
-6. **Posterior sampling changes; search does not.** Uniform and belief arms use
-   the same exact-hand flat-MC implementation, budgets, likelihood work, and
-   seeds.
-7. **Commands remain authoritative.** The player selects an offer; protocol
-   `Command` validation and managym execution decide legality.
-8. **Strength is primary.** Calibration, log loss, effective range size, and
-   surprise explain a win-rate/rating result but cannot substitute for it.
-9. **The result is not an equilibrium or anti-fusion claim.** Public-belief
-   solving is the later project KR, not this task.
+1. **managym owns facts and worlds.** `PossibleWorldSpace`, `WorldQuery`,
+   Observation/history, materialization, DecisionFrame, Command, and legality
+   are canonical and are not mirrored in INT-9.
+2. **manabot owns probability only.** `BeliefState` is a normalized vector over
+   one canonical space, with a model identity and no independent hand schema.
+3. **The comparison stays symmetric w2 and flat-search bounded.** This is the
+   smallest end-to-end test of whether action likelihoods improve play.
+4. **Public evidence is semantic and viewer-safe.** No raw prompts, labels,
+   positional offers, or physical private identities enter the belief update.
+5. **One materializer serves likelihood and search.** Root-action preservation
+   and acting-opponent legality refresh are explicit modes of canonical
+   materialization, not separate determinization APIs.
+6. **Unavailable checkpoints create an evidence wait.** Test fixtures can prove
+   mechanics; they cannot satisfy smoke, arena, or admission gates.
+7. **Strength remains primary.** Calibration and effective range size explain
+   a paired gameplay result; they do not become the result.
+8. **Deferred lifecycle review belongs to the Belief-Aware Play Project
+   Session.** Kickoff and gate do not wait on or assign the absent user.
 
 ### Wild success
 
-The belief player gains rating specifically against frozen learned/search
-opponents while remaining neutral against random, its true-hand log loss and
-card reliability improve as actions accumulate, and competencies involving
-held interaction move without a latency-class regression. A replay lets a
-developer inspect exactly which public pass or cast shifted the range and then
-reproduce the sampled worlds and command.
+The belief player gains against frozen learned/search opponents at matched
+compute, especially in held-interaction competencies, while its true canonical
+world log loss improves as public actions accumulate. A developer can replay
+one decision from canonical history through the same space, sampled world,
+semantic Command, and receipt without translation layers.
 
 ### Wild failure
 
-The checkpoint is a poor opponent model, confidently deletes the true hand
-without the epsilon floor, and belief search overfits one opponent while losing
-arena rating. Or exact support expansion makes every update slower than search,
-so the control wins only because it ignores inference cost. The pinned full
-matrix, log loss, surprise, support/memory curve, native/end-to-end latency, and
-uniform same-path control make both failures explicit rather than allowing a
-posterior visualization to masquerade as progress.
+The frozen policy is a mismatched opponent model, or exact support expansion
+makes likelihood inference dominate end-to-end cost. The posterior becomes
+confident without improving play, or the comparison cannot leave
+`evidence_wait` because the frozen artifacts are irrecoverable. The pinned
+matrix, calibration, surprise, support/memory curve, and explicit wait state
+make each failure visible without substituting a new ontology or claim.
+
+## Absent, error, and operational boundaries
+
+Every boundary fails closed with an attributable status:
+
+- a missing, unlocked, or digest-mismatched likelihood/opponent checkpoint
+  produces `evidence_wait` before play and never selects a fallback model;
+- an absent viewer-visible semantic commitment identity produces a typed
+  `rules_provider_gap`, never an inferred Python action or prompt transcript;
+- empty world/query support, a space/source/history identity mismatch,
+  non-finite or non-normalized mass, an out-of-range world index, and a
+  materialization mismatch are hard integrity failures with no state mutation;
+- a stale or illegal semantic `Command` remains a managym rejection and counts
+  as an integrity failure rather than being retried positionally;
+- a test-only likelihood can prove mechanics but is permanently ineligible for
+  smoke, arena, rating, or admission evidence; and
+- exceeding a registered time, artifact, worker, memory, or rollout cap stops
+  the stage and records the cap failure without pruning belief support.
+
+The selected boundary is exact and unpruned. Its opening support is 10,832
+canonical worlds; the contract cap is 512 MiB for the belief representation,
+4 GiB for artifacts, 16 wall-hours, 64 core-hours, and four workers. Both arms
+use the same configured worlds per legal root action, rollouts per world,
+materializer, likelihood work, semantic Command path, and deterministic seed
+plan. Their configured budget ratios must remain exactly 1.0, while raw
+playouts are reported rather than forced equal after divergent play. The
+belief arm's end-to-end p95 may be at most 1.1 times the matched control gate.
+All runtime artifact resolution is local and byte-locked before play; no
+network fetch, retraining, recovery subprocess, or silent resume occurs inside
+the evidence command.
 
 ## Scope
 
-- In scope: symmetric w2 interactive matchup; exact opponent hand ranges;
-  combinatorial prior; canonical opponent-action Bayes updates; hidden draws;
-  known public-to-hand and hand-to-public moves; pinned checkpoint likelihood;
-  exact-hand determinization; likelihood-weighted flat search; matched uniform
-  control; protocol Commands; replay, legality, leakage, calibration,
-  effective range size, competencies, arena, latency, throughput, and memory
-  evidence.
-- Out of scope: public-belief search, CFR, continual resolving, mixed-strategy
-  training, range-conditioned values, opponent adaptation, hidden decklists,
-  broad card/deck generalization, UR Lessons versus GW Allies, deck building,
-  microgames before an ambiguous integrated result, and any Study UI changes.
+- In scope: canonical managym opponent-hand spaces; a bounded normalized
+  manabot `BeliefState`; exact compatible-deal prior; selected viewer-safe
+  likelihood updates; canonical world materialization; shared flat search;
+  semantic Commands; paired belief/prior comparison; replay, calibration,
+  legality, leakage, latency, throughput, memory, and explicit artifact wait.
+- Out of scope: a new hand/query/action schema; legacy prompt history; direct
+  exact-hand installation as a consumer contract; public-belief search; CFR;
+  continual resolving; mixed-strategy training; broad cards/decks; hidden
+  decklists; deck building; Study UI; new Projects, backlog activation, or a
+  second PR.
 
 ## Done when
 
-The following focused checks pass:
+The focused checks pass:
 
 ```bash
-uv run pytest tests/belief tests/sim/test_exact_range_player.py
+uv run pytest tests/belief tests/sim/test_exact_range_runner.py
 cd managym && cargo fmt --check
 cd managym && cargo clippy --all-targets --all-features -- -D warnings
 cd managym && cargo test
 ```
 
-The smoke command above must produce a verified integrity receipt. Task
-completion additionally runs the frozen arena stage:
+They prove:
+
+- every `BeliefState` is normalized and identity-bound to one canonical space;
+- the prior exactly normalizes managym's compatible-deal weights;
+- belief transport matches brute-force tiny-space oracles without an
+  independent hand enumeration;
+- likelihood and search materialize only canonical world indexes;
+- search roots preserve their semantic frame and opponent likelihood roots
+  rebuild authoritative legality;
+- no private hand, physical ID, raw prompt, or positional action becomes
+  belief evidence;
+- belief and control use the same materializer, search entry point, configured
+  worlds/rollouts, and semantic Command path; and
+- a missing checkpoint produces the registered evidence-wait result rather
+  than a fallback model.
+
+With the frozen artifacts present, smoke must produce a verified integrity
+receipt. Task completion additionally runs the frozen arena stage:
 
 ```bash
 uv run experiments/runners/run_exact_range_player.py \
@@ -398,44 +437,29 @@ uv run experiments/runners/run_exact_range_player.py \
   --stage arena --out-dir .runs/int-9-exact-range-v1
 ```
 
-Together the verified receipts contain:
+If artifacts remain unavailable, implementation can be mechanically green but
+the Task remains explicitly waiting for evidence; it does not claim completion.
 
-- exact normalization after every update and correct brute-force results on
-  tiny decks;
-- exact-hand samples matching requested count vectors, preserving every
-  fixed-viewer public field, preserving search-root actions, and rebuilding
-  opponent priority actions without stale true-hand identities;
-- zero illegal Commands, replay mismatches, unsupported selected-matchup
-  transitions, raw-prompt exposures, or viewer-equivalence differences;
-- equal grouped-action likelihoods across physical-copy assignments for every
-  audited hand key;
-- both primary arms executing identical configured worlds and rollouts per
-  legal root action through the same native search entry point under paired
-  seeds, with realized total playouts reported;
-- reported calibration/log loss, effective range size, competencies, p50/p95
-  latency, rollout throughput, peak RSS/range bytes, and full matchup rows.
-
-This advances the wave measures that a complete player act in real managym
-positions, that search/player comparisons report legality, calibration,
-latency, throughput, uncertainty and cost, and that belief-aware play enter a
-world-pinned arena through normal Commands.
+This advances the Intelligence measures that a complete player acts in real
+managym positions, matched search comparisons report legality, calibration,
+latency, throughput, uncertainty, and cost, and evidence remains attributable
+to one world-pinned semantic authority.
 
 ## Measure
 
-Before the arena, run the contract's fixed synthetic and replay corpus to lock:
+Before arena execution, lock the fixed synthetic and replay corpus for:
 
-- normalization error and true-hand retention;
-- posterior versus uniform exact-hand sampling frequencies;
-- viewer-equivalence state/action/range digests;
-- likelihood batch observations/second and updates/second by support size;
-- exact-hand determinization and rollout throughput;
-- p50/p95 likelihood-update, search-only, command, and end-to-end latency;
-- peak RSS, serialized range bytes, and support count.
+- belief normalization and canonical space-identity continuity;
+- posterior versus compatible-prior world-sampling frequencies;
+- viewer-history, semantic-action, materialized-world, and belief digests;
+- likelihood observations/second and updates/second by support size;
+- canonical materialization and rollout throughput;
+- p50/p95 likelihood, search-only, Command, and end-to-end latency; and
+- peak RSS, serialized belief bytes, and canonical support count.
 
-The arena reports belief-minus-uniform paired win difference and its paired
-deal block-bootstrap interval, Bradley-Terry/Elo difference and uncertainty,
-every matchup cell, per-seat splits, competencies, legality/replay/leakage
-counts, and all cost metrics. A positive belief claim requires the
-pre-registered rating/win criterion at the same search budget without an
-integrity failure or compute-class regression; posterior metrics only explain
-the outcome.
+The arena reports paired belief-minus-prior play and block-bootstrap interval,
+population rating difference and uncertainty, full matchup cells, per-seat
+splits, competencies, integrity counts, raw playouts, and systems cost. A
+positive belief claim requires the preregistered gameplay thresholds at matched
+compute with every integrity gate green; posterior metrics only explain the
+outcome.

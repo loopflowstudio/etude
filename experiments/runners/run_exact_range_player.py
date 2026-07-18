@@ -20,15 +20,38 @@ from typing import Any
 
 from manabot.sim.flat_mc import aggregate_records, play_games
 from manabot.sim.teacher1_evidence import (
+    REPO_ROOT,
     ContractError,
     _fresh_env,
     canonical_sha256,
     file_sha256,
     runtime_fingerprints,
+    source_bundle_sha256,
     validate_runtime_fingerprints,
 )
+from managym.decision import SEMANTIC_DECISION_VERSION
+from managym.possible_worlds import POSSIBLE_WORLD_SPACE_VERSION
 
 EXPERIMENT = "int-9-exact-range-v1"
+INT9_SOURCE_PATHS = (
+    REPO_ROOT / "managym" / "decision.py",
+    REPO_ROOT / "managym" / "possible_worlds.py",
+    REPO_ROOT / "manabot" / "belief" / "audit.py",
+    REPO_ROOT / "manabot" / "belief" / "likelihood.py",
+    REPO_ROOT / "manabot" / "belief" / "player.py",
+    REPO_ROOT / "manabot" / "belief" / "range.py",
+    REPO_ROOT / "manabot" / "belief" / "tracker.py",
+    REPO_ROOT / "manabot" / "env" / "env.py",
+    REPO_ROOT / "experiments" / "runners" / "run_exact_range_player.py",
+)
+
+
+class ArtifactUnavailable(ContractError):
+    """A required frozen artifact is absent before any play begins."""
+
+    def __init__(self, artifact: str, detail: str) -> None:
+        super().__init__(detail)
+        self.artifact = artifact
 
 
 def load_contract(path: Path, stage: str) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -36,7 +59,7 @@ def load_contract(path: Path, stage: str) -> tuple[dict[str, Any], dict[str, Any
         contract = json.loads(path.read_text())
     except FileNotFoundError as error:
         raise ContractError(f"contract does not exist: {path}") from error
-    if contract.get("schema_version") != 1 or contract.get("experiment") != EXPERIMENT:
+    if contract.get("schema_version") != 2 or contract.get("experiment") != EXPERIMENT:
         raise ContractError("unexpected INT-9 contract identity")
     profile = (contract.get("profiles") or {}).get(stage)
     if not isinstance(profile, dict):
@@ -53,15 +76,26 @@ def load_contract(path: Path, stage: str) -> tuple[dict[str, Any], dict[str, Any
         raise ContractError("contract does not pin every required evidence category")
     if "public_belief_solving" not in set(contract.get("exclusions") or []):
         raise ContractError("INT-9 contract must exclude public-belief solving")
+    expected_fingerprints = contract.get("expected_fingerprints") or {}
+    if not {
+        "engine_source_sha256",
+        "engine_extension_sha256",
+        "engine_extension_name",
+        "int9_source_sha256",
+        "semantic_decision_version",
+        "possible_world_space_version",
+    }.issubset(expected_fingerprints):
+        raise ContractError("contract does not pin the canonical runtime authority")
     return contract, profile
 
 
 def resolve_artifact(contract: dict[str, Any], name: str) -> tuple[Path, str]:
     record = (contract.get("artifacts") or {}).get(name) or {}
     if record.get("status") != "locked":
-        raise ContractError(
+        raise ArtifactUnavailable(
+            name,
             f"required artifact {name!r} is not byte-locked; "
-            "update path, SHA-256, and status only after independent validation"
+            "update path, SHA-256, and status only after independent validation",
         )
     path_value = record.get("path")
     expected = record.get("sha256")
@@ -71,7 +105,9 @@ def resolve_artifact(contract: dict[str, Any], name: str) -> tuple[Path, str]:
     if not path.is_absolute():
         path = Path(__file__).resolve().parents[2] / path
     if not path.is_file():
-        raise ContractError(f"required artifact {name!r} does not exist: {path}")
+        raise ArtifactUnavailable(
+            name, f"required artifact {name!r} does not exist: {path}"
+        )
     actual = file_sha256(path)
     if actual != expected:
         raise ContractError(
@@ -104,6 +140,20 @@ def _player_spec(
     }
 
 
+def int9_runtime_fingerprints(seed: int) -> dict[str, Any]:
+    """Bind the shared engine runtime and every INT-9 Python consumer."""
+
+    runtime = runtime_fingerprints(seed=seed)
+    runtime.update(
+        {
+            "int9_source_sha256": source_bundle_sha256(INT9_SOURCE_PATHS),
+            "semantic_decision_version": SEMANTIC_DECISION_VERSION,
+            "possible_world_space_version": POSSIBLE_WORLD_SPACE_VERSION,
+        }
+    )
+    return runtime
+
+
 def run_smoke(
     contract_path: Path,
     contract: dict[str, Any],
@@ -111,8 +161,8 @@ def run_smoke(
     out_dir: Path,
 ) -> dict[str, Any]:
     checkpoint, checkpoint_sha256 = resolve_artifact(contract, "likelihood_checkpoint")
-    runtime = runtime_fingerprints(
-        seed=int(contract["algorithm"]["counterfactual_seed"])
+    runtime = int9_runtime_fingerprints(
+        int(contract["algorithm"]["counterfactual_seed"])
     )
     validate_runtime_fingerprints(contract["expected_fingerprints"], runtime)
     belief = _player_spec(
@@ -125,7 +175,7 @@ def run_smoke(
     uniform = _player_spec(
         contract,
         profile,
-        arm="uniform",
+        arm="compatible_prior",
         checkpoint=checkpoint,
         checkpoint_sha256=checkpoint_sha256,
     )
@@ -156,7 +206,7 @@ def run_smoke(
             json.dumps(
                 {
                     "belief": result.hero_known_truth,
-                    "uniform": result.villain_known_truth,
+                    "compatible_prior": result.villain_known_truth,
                 },
                 indent=2,
                 sort_keys=True,
@@ -168,7 +218,7 @@ def run_smoke(
             json.dumps(
                 {
                     "belief": result.hero_replays,
-                    "uniform": result.villain_replays,
+                    "compatible_prior": result.villain_replays,
                 },
                 indent=2,
                 sort_keys=True,
@@ -181,7 +231,7 @@ def run_smoke(
                 "seed": int(block["seed"]),
                 "gameplay": aggregate_records(result.records),
                 "belief": result.hero_evidence,
-                "uniform": result.villain_evidence,
+                "compatible_prior": result.villain_evidence,
                 "known_truth_artifact": {
                     "path": str(calibration_path),
                     "sha256": file_sha256(calibration_path),
@@ -193,11 +243,11 @@ def run_smoke(
             }
         )
     from manabot.belief.audit import viewer_equivalence_audit
-    from manabot.belief.tracker import ExactRangeTracker
+    from manabot.belief.tracker import BeliefTracker
 
     audit_env = _fresh_env(int(contract["algorithm"]["counterfactual_seed"]))
     audit_viewer = int(audit_env._engine.current_agent_index())
-    audit_tracker = ExactRangeTracker.from_engine(
+    audit_tracker = BeliefTracker.from_engine(
         audit_env._engine,
         viewer=audit_viewer,
         likelihood=None,
@@ -210,7 +260,7 @@ def run_smoke(
         second_seed=int(contract["algorithm"]["counterfactual_seed"]) + 1,
     )
     receipt = {
-        "schema_version": 1,
+        "schema_version": 2,
         "experiment": EXPERIMENT,
         "stage": "smoke",
         "evidence_class": profile["evidence_class"],
@@ -223,23 +273,26 @@ def run_smoke(
         "matched_compute": {
             "belief_worlds_per_action": int(profile["sims_per_action"])
             // int(profile["rollouts_per_world"]),
-            "uniform_worlds_per_action": int(profile["sims_per_action"])
+            "compatible_prior_worlds_per_action": int(profile["sims_per_action"])
             // int(profile["rollouts_per_world"]),
             "belief_rollouts_per_world": int(profile["rollouts_per_world"]),
-            "uniform_rollouts_per_world": int(profile["rollouts_per_world"]),
+            "compatible_prior_rollouts_per_world": int(profile["rollouts_per_world"]),
             "realized_belief_playouts": sum(
                 int((block["belief"] or {}).get("simulations", 0)) for block in blocks
             ),
-            "realized_uniform_playouts": sum(
-                int((block["uniform"] or {}).get("simulations", 0)) for block in blocks
+            "realized_compatible_prior_playouts": sum(
+                int((block["compatible_prior"] or {}).get("simulations", 0))
+                for block in blocks
             ),
         },
         "integrity": {
             "illegal_commands": 0,
             "replay_mismatches": replay_mismatches,
-            "installed_hand_mismatches": sum(
-                int((block["belief"] or {}).get("installed_hand_mismatches", 0))
-                + int((block["uniform"] or {}).get("installed_hand_mismatches", 0))
+            "materialization_failures": sum(
+                int((block["belief"] or {}).get("materialization_failures", 0))
+                + int(
+                    (block["compatible_prior"] or {}).get("materialization_failures", 0)
+                )
                 for block in blocks
             ),
             "viewer_equivalent_root_mismatches": leakage[
@@ -272,11 +325,32 @@ def main() -> None:
     parser.add_argument("--out-dir", type=Path, required=True)
     args = parser.parse_args()
     contract, profile = load_contract(args.contract, args.stage)
-    if args.stage != "smoke":
-        raise ContractError(
-            "registered arena execution is intentionally disabled in the substrate slice"
+    try:
+        if args.stage != "smoke":
+            raise ContractError(
+                "registered arena execution is intentionally disabled until frozen "
+                "opponent artifacts are independently byte-locked"
+            )
+        receipt = run_smoke(args.contract, contract, profile, args.out_dir)
+    except ArtifactUnavailable as error:
+        args.out_dir.mkdir(parents=True, exist_ok=True)
+        receipt = {
+            "schema_version": 2,
+            "experiment": EXPERIMENT,
+            "stage": args.stage,
+            "evidence_class": profile["evidence_class"],
+            "status": "evidence_wait",
+            "reason": "required_frozen_artifact_unavailable",
+            "artifact": error.artifact,
+            "detail": str(error),
+            "contract_sha256": canonical_sha256(contract),
+            "contract_path": str(args.contract),
+            "play_started": False,
+            "completed_at": datetime.now(UTC).isoformat(),
+        }
+        (args.out_dir / f"{args.stage}-evidence-wait.json").write_text(
+            json.dumps(receipt, indent=2, sort_keys=True) + "\n"
         )
-    receipt = run_smoke(args.contract, contract, profile, args.out_dir)
     print(json.dumps({"status": receipt["status"], "out_dir": str(args.out_dir)}))
 
 

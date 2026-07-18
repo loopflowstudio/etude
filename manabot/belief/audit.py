@@ -1,29 +1,29 @@
-"""Known-truth calibration kept outside the acting player's information path."""
+"""Known-truth calibration isolated from the acting information path."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 import json
 import math
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 import numpy as np
 
-from manabot.belief.range import ExactHandRange, HandKey, RangeError
-from manabot.belief.tracker import ExactRangeTracker
+from manabot.belief.range import BeliefError, BeliefState
+from manabot.belief.tracker import BeliefTracker
 
-_HAND_ZONE = 1  # managym.ZoneEnum.HAND
+_HAND_ZONE = 1
 
 
 @dataclass(frozen=True, slots=True)
 class CardCalibrationPoint:
-    card_def_id: int
+    card: str
     predicted_inclusion: float
     present: bool
 
-    def to_dict(self) -> dict[str, int | float | bool]:
+    def to_dict(self) -> dict[str, str | float | bool]:
         return {
-            "card_def_id": self.card_def_id,
+            "card": self.card,
             "predicted_inclusion": self.predicted_inclusion,
             "present": self.present,
         }
@@ -37,13 +37,15 @@ class KnownTruthPoint:
     step: int
     viewer: int
     transition_sequence: int
-    true_hand: HandKey
+    true_world_index: int | None
+    true_hand: tuple[tuple[str, int], ...]
     true_hand_probability: float
     true_hand_log_loss: float
     true_hand_rank: int | None
     top_hand_mass: float
     effective_range_size: float
     posterior_digest: str
+    space_id: str
     cards: tuple[CardCalibrationPoint, ...]
 
     def to_dict(self) -> dict[str, Any]:
@@ -52,79 +54,71 @@ class KnownTruthPoint:
             "step": self.step,
             "viewer": self.viewer,
             "transition_sequence": self.transition_sequence,
-            "true_hand": list(self.true_hand),
+            "true_world_index": self.true_world_index,
+            "true_hand": dict(self.true_hand),
             "true_hand_probability": self.true_hand_probability,
             "true_hand_log_loss": self.true_hand_log_loss,
             "true_hand_rank": self.true_hand_rank,
             "top_hand_mass": self.top_hand_mass,
             "effective_range_size": self.effective_range_size,
             "posterior_digest": self.posterior_digest,
+            "space_id": self.space_id,
             "cards": [card.to_dict() for card in self.cards],
         }
 
 
-def authority_hand_key(engine: Any, tracker: ExactRangeTracker) -> HandKey:
-    """Read the opponent hand from authority for evaluation, never inference.
-
-    This function deliberately lives in the audit module.  The player and
-    tracker receive neither this observation nor the returned hand key.
-    """
+def authority_hand(engine: Any, tracker: BeliefTracker) -> dict[str, int]:
+    """Read truth for audit only; player/tracker never receive this value."""
 
     opponent = (tracker.viewer + 1) % 2
     authority_view = engine.observation_for_player(opponent)
-    counts = {definition: 0 for definition in tracker.posterior.card_def_ids}
+    counts: dict[str, int] = {}
     for card in authority_view.agent_cards:
-        if int(card.zone) != _HAND_ZONE:
-            continue
-        definition = int(card.registry_key)
-        if definition not in counts:
-            raise RangeError(
-                f"authority hand contains definition outside the viewer range: {definition}"
-            )
-        counts[definition] += 1
-    hand = tuple(counts[definition] for definition in tracker.posterior.card_def_ids)
-    if sum(hand) != tracker.posterior.hand_size:
-        raise RangeError(
-            "authority hand size does not match the viewer-safe public hand count"
+        if int(card.zone) == _HAND_ZONE:
+            counts[str(card.name)] = counts.get(str(card.name), 0) + 1
+    if sum(counts.values()) != tracker.posterior.space.hand_size:
+        raise BeliefError(
+            "authority hand size does not match the canonical public hand size"
         )
-    return hand
+    return counts
 
 
 def score_known_truth(
     engine: Any,
-    tracker: ExactRangeTracker,
+    tracker: BeliefTracker,
     *,
     game_index: int,
     step: int,
 ) -> KnownTruthPoint:
-    """Score one posterior without feeding the authority witness back to play."""
-
     posterior = tracker.posterior
-    hand = authority_hand_key(engine, tracker)
-    probability = posterior.probability(hand)
+    hand = authority_hand(engine, tracker)
+    world_index = posterior.index_for_hand(hand)
+    probability = (
+        posterior.probability_at(world_index) if world_index is not None else 0.0
+    )
     inclusions = posterior.inclusion_probabilities()
     cards = tuple(
         CardCalibrationPoint(
-            card_def_id=definition,
-            predicted_inclusion=float(inclusion),
-            present=hand[index] > 0,
+            card=card,
+            predicted_inclusion=inclusion,
+            present=hand.get(card, 0) > 0,
         )
-        for index, (definition, inclusion) in enumerate(
-            zip(posterior.card_def_ids, inclusions)
-        )
+        for card, inclusion in inclusions.items()
     )
     return KnownTruthPoint(
         game_index=game_index,
         step=step,
         viewer=tracker.viewer,
         transition_sequence=len(tracker.records),
-        true_hand=hand,
+        true_world_index=world_index,
+        true_hand=tuple(sorted(hand.items())),
         true_hand_probability=probability,
         true_hand_log_loss=(-math.log(probability) if probability > 0.0 else math.inf),
-        true_hand_rank=posterior.rank(hand),
+        true_hand_rank=posterior.rank(world_index) if world_index is not None else None,
         top_hand_mass=float(np.max(posterior.probabilities)),
         effective_range_size=posterior.effective_range_size,
         posterior_digest=posterior.digest,
+        space_id=posterior.space.identity,
         cards=cards,
     )
 
@@ -143,19 +137,16 @@ def _ece(points: Iterable[CardCalibrationPoint], bins: int) -> float:
             if low <= row.predicted_inclusion < high
             or (index == bins - 1 and row.predicted_inclusion == 1.0)
         ]
-        if not bucket:
-            continue
-        predicted = float(np.mean([row.predicted_inclusion for row in bucket]))
-        observed = float(np.mean([row.present for row in bucket]))
-        weighted_error += len(bucket) * abs(predicted - observed)
+        if bucket:
+            predicted = float(np.mean([row.predicted_inclusion for row in bucket]))
+            observed = float(np.mean([row.present for row in bucket]))
+            weighted_error += len(bucket) * abs(predicted - observed)
     return weighted_error / len(rows)
 
 
 def aggregate_known_truth(
     points: Iterable[KnownTruthPoint], *, bins: int = 10
 ) -> dict[str, Any]:
-    """Aggregate hand log loss and per-definition reliability diagnostics."""
-
     rows = list(points)
     if bins < 1:
         raise ValueError("calibration bins must be positive")
@@ -168,11 +159,11 @@ def aggregate_known_truth(
         }
     card_rows = [card for row in rows for card in row.cards]
     ranks = [row.true_hand_rank for row in rows if row.true_hand_rank is not None]
-    definitions = sorted({card.card_def_id for card in card_rows})
+    names = sorted({card.card for card in card_rows})
     per_card: dict[str, Any] = {}
-    for definition in definitions:
-        selected = [card for card in card_rows if card.card_def_id == definition]
-        per_card[str(definition)] = {
+    for name in names:
+        selected = [card for card in card_rows if card.card == name]
+        per_card[name] = {
             "points": len(selected),
             "brier": float(
                 np.mean(
@@ -207,49 +198,53 @@ def aggregate_known_truth(
         "mean_effective_range_size": float(
             np.mean([row.effective_range_size for row in rows])
         ),
-        "true_hand_outside_support": sum(row.true_hand_rank is None for row in rows),
+        "true_hand_outside_support": sum(row.true_world_index is None for row in rows),
         "per_card": per_card,
     }
 
 
-def score_range_for_hand(
-    hand_range: ExactHandRange, hand: HandKey
+def score_belief_for_hand(
+    belief: BeliefState, hand: Mapping[str, int]
 ) -> tuple[float, int | None]:
-    """Small public helper used by brute-force calibration tests."""
-
-    return hand_range.log_loss(hand), hand_range.rank(hand)
+    index = belief.index_for_hand(hand)
+    probability = belief.probability_at(index) if index is not None else 0.0
+    return (
+        -math.log(probability) if probability > 0.0 else math.inf,
+        belief.rank(index) if index is not None else None,
+    )
 
 
 def viewer_equivalence_audit(
-    engine: Any, tracker: ExactRangeTracker, *, first_seed: int, second_seed: int
+    engine: Any, tracker: BeliefTracker, *, first_seed: int, second_seed: int
 ) -> dict[str, int | bool]:
-    """Compare fixed-viewer projections across distinct supported hands."""
+    """Materialize by canonical index and compare fixed-viewer projections."""
 
-    posterior = tracker.posterior
-    first_key = tuple(int(value) for value in posterior.keys[0])
-    second_key = tuple(int(value) for value in posterior.keys[-1])
-    first = engine.clone_env()
-    second = engine.clone_env()
-    first.determinize_to_hand(
-        hand=posterior.as_definition_counts(first_key),
-        seed=first_seed,
-        perspective=tracker.viewer,
-    )
-    second.determinize_to_hand(
-        hand=posterior.as_definition_counts(second_key),
-        seed=second_seed,
-        perspective=tracker.viewer,
-    )
-    first_view = json.loads(first.observation_for_player(tracker.viewer).toJSON())
-    second_view = json.loads(second.observation_for_player(tracker.viewer).toJSON())
+    space = tracker.posterior.space
+    first_index = 0
+    second_index = space.support_size - 1
+    first = space.materialize(first_index, seed=first_seed)
+    second = space.materialize(second_index, seed=second_seed)
+    first_view = json.loads(first.semantic_observation_json(tracker.viewer))
+    second_view = json.loads(second.semantic_observation_json(tracker.viewer))
     exposed = sum(
         int(card["zone"] == _HAND_ZONE)
         for view in (first_view, second_view)
-        for card in view["opponent_cards"]
+        for card in view["viewer_state"]["opponent_cards"]
     )
     return {
-        "hands_distinct": first_key != second_key,
+        "worlds_distinct": first_index != second_index,
         "authority_states_distinct": first.state_digest() != second.state_digest(),
         "viewer_projection_mismatches": int(first_view != second_view),
         "opponent_private_cards_exposed": exposed,
     }
+
+
+__all__ = [
+    "CardCalibrationPoint",
+    "KnownTruthPoint",
+    "aggregate_known_truth",
+    "authority_hand",
+    "score_belief_for_hand",
+    "score_known_truth",
+    "viewer_equivalence_audit",
+]

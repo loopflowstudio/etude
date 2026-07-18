@@ -11,6 +11,7 @@ from gymnasium import spaces
 # Local imports
 from manabot.infra.log import getLogger
 import managym
+from managym.decision import Command, SemanticTransition, apply_semantic_command
 
 # Local directory imports
 from .match import Match, Reward
@@ -154,6 +155,48 @@ class Env(gym.Env):
         py_obs = self.obs_space.encode(raw_obs)
         self._last_obs = raw_obs
         return py_obs, reward, terminated, truncated, info
+
+    def step_semantic(
+        self, command: Command
+    ) -> tuple[dict, float, bool, bool, dict, SemanticTransition]:
+        """Execute one authoritative semantic Command.
+
+        This evaluation path deliberately bypasses positional ``Env.step``.
+        The next model observation is reconstructed for the next acting player;
+        transition events remain available through the canonical receipt.
+        """
+
+        acting = int(self._last_obs.agent.player_index)
+        transition = apply_semantic_command(self._engine, command)
+        terminated = bool(self._engine.is_game_over())
+        truncated = False
+        next_viewer = self._engine.current_agent_index()
+        raw_obs = self._engine.observation_for_player(
+            acting if next_viewer is None else int(next_viewer)
+        )
+        winner = self._engine.winner_index()
+        raw_reward = (
+            (1.0 if winner == acting else -1.0)
+            if terminated and winner is not None
+            else 0.0
+        )
+        reward = self.reward.compute(raw_reward, self._last_obs, raw_obs)
+        info: dict[str, Any] = {
+            "true_terminated": terminated,
+            "true_truncated": truncated,
+        }
+        if winner is not None:
+            info["winner_index"] = int(winner)
+        add_truncation_flags(raw_obs, info, self.obs_space.encoder)
+        self._last_obs = raw_obs
+        return (
+            self.obs_space.encode(raw_obs),
+            reward,
+            terminated,
+            truncated,
+            info,
+            transition,
+        )
 
     def scenario_refresh(self) -> tuple[dict, "managym.Observation"]:
         """Re-sync after managym scenario_* state injection.

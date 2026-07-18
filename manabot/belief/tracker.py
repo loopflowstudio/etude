@@ -1,54 +1,20 @@
-"""Stateful exact-range updates at a fixed acting-viewer boundary."""
+"""Belief tracking from canonical viewer observations and semantic receipts."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
+import json
 import time
-from typing import Any, Protocol
+from typing import Any, Mapping, Protocol
 
-import numpy as np
-
-from manabot.belief.likelihood import LikelihoodResult, PublicAction
-from manabot.belief.range import ExactHandRange, RangeError
-
-
-@dataclass(frozen=True, slots=True)
-class HiddenPoolSnapshot:
-    card_def_ids: tuple[int, ...]
-    unseen_counts: tuple[int, ...]
-    hand_size: int
-    library_size: int
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "card_def_ids": list(self.card_def_ids),
-            "unseen_counts": list(self.unseen_counts),
-            "hand_size": self.hand_size,
-            "library_size": self.library_size,
-        }
-
-    @classmethod
-    def from_engine(
-        cls,
-        engine: Any,
-        viewer: int,
-        *,
-        card_def_ids: tuple[int, ...] | None = None,
-    ) -> HiddenPoolSnapshot:
-        raw_counts, hand_size, library_size = engine.hidden_pool_summary(viewer)
-        count_map = {int(definition): int(count) for definition, count in raw_counts}
-        ids = card_def_ids or tuple(sorted(count_map))
-        unknown = set(count_map) - set(ids)
-        if unknown:
-            raise RangeError(
-                f"hidden pool introduced unknown definitions: {sorted(unknown)}"
-            )
-        return cls(
-            card_def_ids=ids,
-            unseen_counts=tuple(count_map.get(definition, 0) for definition in ids),
-            hand_size=int(hand_size),
-            library_size=int(library_size),
-        )
+from manabot.belief.likelihood import (
+    LikelihoodResult,
+    RulesProviderGap,
+)
+from manabot.belief.range import BeliefError, BeliefState
+from managym.decision import Observation, SemanticTransition
+from managym.possible_worlds import PossibleWorldSpace
 
 
 class ActionLikelihood(Protocol):
@@ -57,8 +23,8 @@ class ActionLikelihood(Protocol):
         root_engine: Any,
         *,
         viewer: int,
-        action: PublicAction,
-        hand_range: ExactHandRange,
+        commitment: Mapping[str, Any],
+        belief: BeliefState,
     ) -> LikelihoodResult: ...
 
 
@@ -77,64 +43,84 @@ class TrackerStats:
 
 
 @dataclass(frozen=True, slots=True)
-class RangeTransitionRecord:
-    """One replay-verifiable transition containing only viewer-safe facts."""
-
+class BeliefTransitionRecord:
     sequence: int
-    action: PublicAction | None
-    before: HiddenPoolSnapshot
-    after: HiddenPoolSnapshot
+    observation_revision: int
+    observation_hash: str
+    before_space_id: str
+    after_space_id: str
+    command_id: str
+    public_commitment: Mapping[str, Any] | None
+    event_ids: tuple[str, ...]
     hidden_draws: int
-    known_exits: int
-    known_returns: int
+    known_exits: tuple[str, ...]
+    known_returns: tuple[str, ...]
     posterior_digest: str
-    uniform_digest: str
+    prior_digest: str
     posterior_normalization_error: float
-    uniform_normalization_error: float
+    prior_normalization_error: float
     support_size: int
+    positive_support_size: int
     effective_range_size: float
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "sequence": self.sequence,
-            "action": self.action.to_dict() if self.action is not None else None,
-            "before": self.before.to_dict(),
-            "after": self.after.to_dict(),
+            "observation": {
+                "revision": self.observation_revision,
+                "viewer_state_hash": self.observation_hash,
+            },
+            "before_space_id": self.before_space_id,
+            "after_space_id": self.after_space_id,
+            "command_id": self.command_id,
+            "public_commitment": dict(self.public_commitment)
+            if self.public_commitment is not None
+            else None,
+            "event_ids": list(self.event_ids),
             "hidden_draws": self.hidden_draws,
-            "known_exits": self.known_exits,
-            "known_returns": self.known_returns,
+            "known_exits": list(self.known_exits),
+            "known_returns": list(self.known_returns),
             "posterior_digest": self.posterior_digest,
-            "uniform_digest": self.uniform_digest,
+            "prior_digest": self.prior_digest,
             "posterior_normalization_error": self.posterior_normalization_error,
-            "uniform_normalization_error": self.uniform_normalization_error,
+            "prior_normalization_error": self.prior_normalization_error,
             "support_size": self.support_size,
+            "positive_support_size": self.positive_support_size,
             "effective_range_size": self.effective_range_size,
         }
 
 
-class ExactRangeTracker:
-    """Exact posterior and matched current-snapshot uniform control."""
+class BeliefTracker:
+    """Posterior plus matched compatible-prior control for one fixed viewer."""
 
     def __init__(
         self,
-        snapshot: HiddenPoolSnapshot,
+        space: PossibleWorldSpace,
+        observation: Observation,
         *,
-        viewer: int,
         likelihood: ActionLikelihood | None,
         epsilon: float,
+        model_id: str,
     ) -> None:
-        self.viewer = viewer
+        if observation.viewer != space.viewer:
+            raise BeliefError("Observation viewer does not match PossibleWorldSpace")
+        if observation.revision != space.source_revision:
+            raise BeliefError("Observation revision does not match PossibleWorldSpace")
+        if observation.viewer_state_hash != space.source_viewer_state_hash:
+            raise BeliefError("Observation hash does not match PossibleWorldSpace")
+        self.viewer = space.viewer
         self.likelihood = likelihood
         self.epsilon = epsilon
-        self.snapshot = snapshot
-        self.posterior = ExactHandRange.uniform(
-            snapshot.card_def_ids, snapshot.unseen_counts, snapshot.hand_size
-        )
-        self.uniform = self.posterior
+        self.space = space
+        self.observation = observation
+        self.posterior = BeliefState.compatible_prior(space, model_id=model_id)
+        self.prior = BeliefState.compatible_prior(space)
         self.stats = TrackerStats()
-        self.initial_snapshot = snapshot
+        self.initial_space_id = space.identity
+        self.initial_observation = observation
         self.initial_posterior_digest = self.posterior.digest
-        self.records: list[RangeTransitionRecord] = []
+        self.records: list[BeliefTransitionRecord] = []
+        self._pending_public_commitment: Mapping[str, Any] | None = None
         self._record_size()
 
     @classmethod
@@ -145,159 +131,198 @@ class ExactRangeTracker:
         viewer: int,
         likelihood: ActionLikelihood | None,
         epsilon: float,
-    ) -> ExactRangeTracker:
+    ) -> "BeliefTracker":
+        space = PossibleWorldSpace.from_engine(engine, viewer)
+        observation = Observation.from_json(engine.semantic_observation_json(viewer))
+        checkpoint = getattr(likelihood, "checkpoint_sha256", None)
+        model_id = (
+            f"frozen-policy-likelihood/sha256:{checkpoint}"
+            if checkpoint
+            else "test-only-likelihood/v1"
+        )
         return cls(
-            HiddenPoolSnapshot.from_engine(engine, viewer),
-            viewer=viewer,
+            space,
+            observation,
             likelihood=likelihood,
             epsilon=epsilon,
+            model_id=model_id,
         )
 
     def observe(
         self,
         after_engine: Any,
         *,
-        action: PublicAction | None = None,
+        acting: int,
+        transition: SemanticTransition,
         likelihood_root: Any | None = None,
     ) -> None:
         started = time.perf_counter()
-        before = self.snapshot
-        before_stats = (
-            self.stats.hidden_draws,
-            self.stats.known_exits,
-            self.stats.known_returns,
-        )
-        if action is not None:
+        before_space = self.space
+        commitment = transition.receipt.public_commitment
+        if acting != self.viewer and commitment is not None:
             if self.likelihood is None or likelihood_root is None:
-                raise RangeError(
-                    "public action update requires a likelihood root and model"
+                raise BeliefError(
+                    "opponent commitment requires a likelihood model and retained root"
                 )
             likelihood = self.likelihood.evaluate(
                 likelihood_root,
                 viewer=self.viewer,
-                action=action,
-                hand_range=self.posterior,
+                commitment=commitment,
+                belief=self.posterior,
             )
-            self.posterior = self.posterior.condition_action(
+            self.posterior = self.posterior.condition_likelihood(
                 likelihood.likelihoods,
                 likelihood.legal_action_counts,
+                likelihood.matching_action_counts,
                 epsilon=self.epsilon,
             )
             self.stats.action_updates += 1
             self.stats.likelihood_seconds += likelihood.seconds
-        after = HiddenPoolSnapshot.from_engine(
-            after_engine,
-            self.viewer,
-            card_def_ids=self.snapshot.card_def_ids,
+            if commitment.get("kind") in {"cast", "play_land"}:
+                self._pending_public_commitment = commitment
+            elif commitment.get("kind") == "pass_priority":
+                self._pending_public_commitment = None
+
+        next_observation = Observation.from_json(
+            after_engine.semantic_observation_json(self.viewer)
         )
-        self._reconcile(after)
+        next_space = PossibleWorldSpace.from_engine(after_engine, self.viewer)
+        transport_commitment = (
+            commitment or self._pending_public_commitment
+            if acting != self.viewer
+            else None
+        )
+        known_exits, known_returns, hidden_draws = self._public_transport_facts(
+            before_space, next_space, transport_commitment
+        )
+        if known_exits:
+            self._pending_public_commitment = None
+        self.posterior = self.posterior.transport(
+            next_space,
+            known_exits=known_exits,
+            known_returns=known_returns,
+            hidden_draws=hidden_draws,
+        )
+        self.prior = BeliefState.compatible_prior(next_space)
+        self.space = next_space
+        self.observation = next_observation
+        self.stats.hidden_draws += hidden_draws
+        self.stats.known_exits += len(known_exits)
+        self.stats.known_returns += len(known_returns)
         self.stats.updates += 1
         elapsed = time.perf_counter() - started
         self.stats.update_seconds += elapsed
         self.stats.update_durations.append(elapsed)
         self._record_size()
         self.records.append(
-            RangeTransitionRecord(
+            BeliefTransitionRecord(
                 sequence=len(self.records),
-                action=action,
-                before=before,
-                after=self.snapshot,
-                hidden_draws=self.stats.hidden_draws - before_stats[0],
-                known_exits=self.stats.known_exits - before_stats[1],
-                known_returns=self.stats.known_returns - before_stats[2],
+                observation_revision=next_observation.revision,
+                observation_hash=next_observation.viewer_state_hash,
+                before_space_id=before_space.identity,
+                after_space_id=next_space.identity,
+                command_id=transition.receipt.command_id,
+                public_commitment=commitment if acting != self.viewer else None,
+                event_ids=transition.receipt.events,
+                hidden_draws=hidden_draws,
+                known_exits=tuple(known_exits),
+                known_returns=tuple(known_returns),
                 posterior_digest=self.posterior.digest,
-                uniform_digest=self.uniform.digest,
+                prior_digest=self.prior.digest,
                 posterior_normalization_error=self.posterior.normalization_error,
-                uniform_normalization_error=self.uniform.normalization_error,
+                prior_normalization_error=self.prior.normalization_error,
                 support_size=self.posterior.support_size,
+                positive_support_size=self.posterior.positive_support_size,
                 effective_range_size=self.posterior.effective_range_size,
             )
         )
 
-    def _reconcile(self, after: HiddenPoolSnapshot) -> None:
-        if after.card_def_ids != self.snapshot.card_def_ids:
-            raise RangeError("hidden-pool card definition order changed")
-        deltas = tuple(
-            current - previous
-            for current, previous in zip(
-                after.unseen_counts, self.snapshot.unseen_counts
-            )
-        )
-        exits = [(index, -delta) for index, delta in enumerate(deltas) if delta < 0]
-        returns = [(index, delta) for index, delta in enumerate(deltas) if delta > 0]
-        for index, count in exits:
-            for _ in range(count):
-                self.posterior = self.posterior.remove_known(
-                    self.snapshot.card_def_ids[index]
+    @staticmethod
+    def _public_transport_facts(
+        before: PossibleWorldSpace,
+        after: PossibleWorldSpace,
+        commitment: Mapping[str, Any] | None,
+    ) -> tuple[list[str], list[str], int]:
+        before_pool = dict(before.pool)
+        after_pool = dict(after.pool)
+        names = sorted(set(before_pool) | set(after_pool))
+        exits = [
+            name
+            for name in names
+            for _ in range(max(0, before_pool.get(name, 0) - after_pool.get(name, 0)))
+        ]
+        returns = [
+            name
+            for name in names
+            for _ in range(max(0, after_pool.get(name, 0) - before_pool.get(name, 0)))
+        ]
+        if exits:
+            if commitment is None or commitment.get("kind") not in {
+                "cast",
+                "play_land",
+            }:
+                raise RulesProviderGap(
+                    "hidden-pool exit has no canonical public commitment identity"
                 )
-                self.stats.known_exits += 1
-        for index, count in returns:
-            for _ in range(count):
-                self.posterior = self.posterior.add_known(
-                    self.snapshot.card_def_ids[index]
+            card = str(commitment.get("card", ""))
+            if exits != [card]:
+                raise RulesProviderGap(
+                    "public commitment card does not match canonical pool change"
                 )
-                self.stats.known_returns += 1
-
-        hand_after_known = (
-            self.snapshot.hand_size
-            - sum(count for _, count in exits)
-            + sum(count for _, count in returns)
-        )
-        hidden_draws = after.hand_size - hand_after_known
+        hidden_draws = after.hand_size - before.hand_size + len(exits) - len(returns)
         if hidden_draws < 0:
-            raise RangeError(
-                "unsupported hidden hand-size decrease without a public definition"
-            )
-        if after.library_size != self.snapshot.library_size - hidden_draws:
-            raise RangeError(
-                "unsupported selected-matchup transition: library delta does not match hidden draws"
-            )
-        for _ in range(hidden_draws):
-            self.posterior = self.posterior.draw_unknown()
-            self.stats.hidden_draws += 1
-        if self.posterior.unseen_counts != after.unseen_counts:
-            raise RangeError("posterior unseen pool diverged from the viewer snapshot")
-        if self.posterior.hand_size != after.hand_size:
-            raise RangeError("posterior hand size diverged from the viewer snapshot")
-        self.uniform = ExactHandRange.uniform(
-            after.card_def_ids, after.unseen_counts, after.hand_size
-        )
-        self.snapshot = after
+            raise BeliefError("canonical space change has an unexplained hand exit")
+        return exits, returns, hidden_draws
 
-    def diagnostics(self) -> dict[str, float | int]:
-        probabilities = self.posterior.probabilities
+    def diagnostics(self) -> dict[str, Any]:
         return {
+            "space_id": self.space.identity,
+            "observation_revision": self.observation.revision,
+            "observation_hash": self.observation.viewer_state_hash,
+            "model_id": self.posterior.model_id,
             "support_size": self.posterior.support_size,
+            "positive_support_size": self.posterior.positive_support_size,
             "effective_range_size": self.posterior.effective_range_size,
-            "effective_range_fraction": (
-                self.posterior.effective_range_size / self.posterior.support_size
-            ),
-            "top_hand_mass": float(np.max(probabilities)),
-            "range_bytes": self.posterior.allocated_bytes
-            + self.uniform.allocated_bytes,
             "normalization_error": self.posterior.normalization_error,
+            "prior_normalization_error": self.prior.normalization_error,
+            "range_bytes": self.posterior.allocated_bytes,
+            "probability_bytes": self.posterior.probability_bytes,
+            "world_space_bytes": self.posterior.space.allocated_bytes,
+            "digest": self.posterior.digest,
+            "prior_digest": self.prior.digest,
         }
 
     def replay_receipt(self) -> dict[str, Any]:
-        """Export public inputs and range digests without authority truth."""
-
-        return {
-            "schema_version": 1,
+        payload = {
+            "schema_version": 2,
             "viewer": self.viewer,
-            "initial_snapshot": self.initial_snapshot.to_dict(),
+            "initial_observation": {
+                "revision": self.initial_observation.revision,
+                "viewer_state_hash": self.initial_observation.viewer_state_hash,
+            },
+            "initial_space_id": self.initial_space_id,
             "initial_posterior_digest": self.initial_posterior_digest,
             "transitions": [record.to_dict() for record in self.records],
-            "final_posterior_digest": self.posterior.digest,
-            "final_uniform_digest": self.uniform.digest,
         }
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        payload["history_digest"] = hashlib.sha256(canonical.encode()).hexdigest()
+        return payload
 
     def _record_size(self) -> None:
         self.stats.peak_range_bytes = max(
             self.stats.peak_range_bytes,
-            self.posterior.allocated_bytes + self.uniform.allocated_bytes,
+            self.posterior.probability_bytes
+            + self.prior.probability_bytes
+            + self.posterior.space.allocated_bytes,
         )
         self.stats.peak_support_size = max(
-            self.stats.peak_support_size,
-            self.posterior.support_size,
-            self.uniform.support_size,
+            self.stats.peak_support_size, self.posterior.support_size
         )
+
+
+__all__ = [
+    "ActionLikelihood",
+    "BeliefTracker",
+    "BeliefTransitionRecord",
+    "TrackerStats",
+]

@@ -14,13 +14,11 @@ use crate::{
         Command as SemanticCommand, DecisionFrame, Observation as SemanticObservation,
         SemanticTransition,
     },
-    flow::{
-        game::Game,
-        search::{mix_seed, HiddenPoolSummary},
-    },
+    flow::{game::Game, search::mix_seed},
     infra::profiler::{empty_info_dict, insert_info, InfoDict, InfoValue, Profiler},
+    possible_worlds::{MaterializeMode, PossibleWorldSpace, PossibleWorldSpaceProjection},
     search_state::{BranchDriver, FullCloneDriver, SearchStateWitness},
-    state::{card::CardDefId, game_object::PlayerId, player::PlayerConfig},
+    state::{game_object::PlayerId, player::PlayerConfig},
 };
 use rand::Rng;
 
@@ -86,13 +84,6 @@ pub struct FlatMcResult {
     pub simulations: u64,
     /// Playouts that hit the step cap without terminating.
     pub cap_hits: u64,
-}
-
-/// Flat-MC result plus the exact installed opponent-hand definitions.
-#[derive(Clone, Debug)]
-pub struct SampledFlatMcResult {
-    pub result: FlatMcResult,
-    pub installed_hands: Vec<Vec<CardDefId>>,
 }
 
 #[derive(Debug)]
@@ -281,6 +272,83 @@ impl Env {
             .ok_or_else(|| AgentError("env.semantic_observation called before reset".to_string()))?
             .semantic_observation(PlayerId(viewer))
             .map_err(|error| AgentError(error.to_string()))
+    }
+
+    /// Canonical viewer-relative possible-world space. Enumeration, exact
+    /// physical-deal weights, ordering, and identity all remain managym-owned.
+    pub fn possible_world_space(
+        &self,
+        viewer: usize,
+    ) -> Result<PossibleWorldSpaceProjection, AgentError> {
+        let game = self.game.as_ref().ok_or_else(|| {
+            AgentError("env.possible_world_space called before reset".to_string())
+        })?;
+        if viewer >= game.state.players.len() {
+            return Err(AgentError(format!(
+                "possible_world_space: viewer {viewer} out of range"
+            )));
+        }
+        Ok(PossibleWorldSpace::for_viewer(game, PlayerId(viewer)).projection())
+    }
+
+    pub fn possible_world_support(
+        &self,
+        viewer: usize,
+        space_identity: &str,
+        query: crate::possible_worlds::WorldQueryWire,
+    ) -> Result<crate::possible_worlds::SupportReceiptProjection, AgentError> {
+        let game = self.game.as_ref().ok_or_else(|| {
+            AgentError("env.possible_world_support called before reset".to_string())
+        })?;
+        if viewer >= game.state.players.len() {
+            return Err(AgentError(format!(
+                "possible_world_support: viewer {viewer} out of range"
+            )));
+        }
+        let space = PossibleWorldSpace::for_viewer(game, PlayerId(viewer));
+        if space.identity() != space_identity {
+            return Err(AgentError(
+                "possible_world_support: space identity mismatch".to_string(),
+            ));
+        }
+        Ok(space.support_projection(query))
+    }
+
+    /// Materialize one canonical world index into an isolated branch. The
+    /// supplied identity must match the current source exactly.
+    pub fn materialize_possible_world(
+        &self,
+        viewer: usize,
+        space_identity: &str,
+        world_index: usize,
+        seed: u64,
+        refresh_opponent_priority: bool,
+    ) -> Result<Env, AgentError> {
+        let game = self.game.as_ref().ok_or_else(|| {
+            AgentError("env.materialize_possible_world called before reset".to_string())
+        })?;
+        if viewer >= game.state.players.len() {
+            return Err(AgentError(format!(
+                "materialize_possible_world: viewer {viewer} out of range"
+            )));
+        }
+        let space = PossibleWorldSpace::for_viewer(game, PlayerId(viewer));
+        if space.identity() != space_identity {
+            return Err(AgentError(
+                "materialize_possible_world: space identity mismatch".to_string(),
+            ));
+        }
+        let mode = if refresh_opponent_priority {
+            MaterializeMode::RefreshOpponentPriority
+        } else {
+            MaterializeMode::PreserveViewerRoot
+        };
+        let branch_game = space
+            .materialize_index(game, world_index, seed, mode)
+            .map_err(|error| AgentError(format!("materialize_possible_world: {error}")))?;
+        let mut branch = self.fork()?;
+        branch.game = Some(branch_game);
+        Ok(branch)
     }
 
     /// Validate and apply one revision-bound semantic Command atomically,
@@ -634,37 +702,6 @@ impl Env {
         Ok(())
     }
 
-    pub fn determinize_to_hand(
-        &mut self,
-        perspective: usize,
-        hand: &[(CardDefId, usize)],
-        seed: u64,
-    ) -> Result<(), AgentError> {
-        if perspective > 1 {
-            return Err(AgentError(format!(
-                "determinize_to_hand: perspective {perspective} out of range"
-            )));
-        }
-        let game = self
-            .game
-            .as_mut()
-            .ok_or_else(|| AgentError("env.determinize_to_hand called before reset".to_string()))?;
-        game.determinize_to_hand(PlayerId(perspective), hand, seed)
-    }
-
-    pub fn hidden_pool_summary(&self, perspective: usize) -> Result<HiddenPoolSummary, AgentError> {
-        if perspective > 1 {
-            return Err(AgentError(format!(
-                "hidden_pool_summary: perspective {perspective} out of range"
-            )));
-        }
-        let game = self
-            .game
-            .as_ref()
-            .ok_or_else(|| AgentError("env.hidden_pool_summary called before reset".to_string()))?;
-        game.hidden_pool_summary(PlayerId(perspective))
-    }
-
     /// Reseed the game RNG and play both sides uniformly-random-legal to
     /// terminal. Returns the winner index, or None on draw / step cap.
     pub fn random_playout(
@@ -694,51 +731,75 @@ impl Env {
         seed: u64,
         max_steps: usize,
     ) -> Result<FlatMcResult, AgentError> {
-        let sampled = self.flat_mc_scores_prepared(
+        self.flat_mc_scores_prepared(
             worlds,
             rollouts,
             max_steps,
+            false,
             |game, hero, world_index| {
                 let world_seed = mix_seed(seed, world_index as u64);
                 let mut world = game.clone();
                 world.determinize(hero, world_seed);
-                let installed = world.opponent_hand_definition_ids(hero);
-                Ok((world, world_seed, installed))
+                Ok((world, world_seed))
             },
-        )?;
-        Ok(sampled.result)
+        )
     }
 
-    /// Flat MC over exact opponent hands already sampled by a belief model.
-    pub fn flat_mc_scores_for_hands(
+    /// Flat MC over canonical possible-world indexes sampled by manabot.
+    /// Hand rows and installation remain private to managym.
+    pub fn flat_mc_scores_for_worlds(
         &self,
-        hands: &[Vec<(CardDefId, usize)>],
+        viewer: usize,
+        space_identity: &str,
+        world_indexes: &[usize],
         world_seeds: &[u64],
         rollouts: usize,
         max_steps: usize,
-    ) -> Result<SampledFlatMcResult, AgentError> {
-        if hands.is_empty() {
+    ) -> Result<FlatMcResult, AgentError> {
+        if world_indexes.is_empty() {
             return Err(AgentError(
-                "flat_mc_scores_for_hands requires at least one hand".to_string(),
+                "flat_mc_scores_for_worlds requires at least one world".to_string(),
             ));
         }
-        if hands.len() != world_seeds.len() {
+        if world_indexes.len() != world_seeds.len() {
             return Err(AgentError(format!(
-                "flat_mc_scores_for_hands received {} hands and {} seeds",
-                hands.len(),
+                "flat_mc_scores_for_worlds received {} worlds and {} seeds",
+                world_indexes.len(),
                 world_seeds.len()
             )));
         }
+        let game = self.game.as_ref().ok_or_else(|| {
+            AgentError("env.flat_mc_scores_for_worlds called before reset".to_string())
+        })?;
+        let actor = current_agent(game)?;
+        if actor.0 != viewer {
+            return Err(AgentError(format!(
+                "flat_mc_scores_for_worlds viewer {viewer} is not acting player {}",
+                actor.0
+            )));
+        }
+        let space = PossibleWorldSpace::for_viewer(game, actor);
+        if space.identity() != space_identity {
+            return Err(AgentError(
+                "flat_mc_scores_for_worlds: space identity mismatch".to_string(),
+            ));
+        }
         self.flat_mc_scores_prepared(
-            hands.len(),
+            world_indexes.len(),
             rollouts,
             max_steps,
-            |game, hero, world_index| {
-                let world_seed = world_seeds[world_index];
-                let mut world = game.clone();
-                world.determinize_to_hand(hero, &hands[world_index], world_seed)?;
-                let installed = world.opponent_hand_definition_ids(hero);
-                Ok((world, world_seed, installed))
+            true,
+            |source, _hero, sample_index| {
+                let world_seed = world_seeds[sample_index];
+                let world = space
+                    .materialize_index(
+                        source,
+                        world_indexes[sample_index],
+                        world_seed,
+                        MaterializeMode::PreserveViewerRoot,
+                    )
+                    .map_err(|error| AgentError(format!("flat_mc_scores_for_worlds: {error}")))?;
+                Ok((world, world_seed))
             },
         )
     }
@@ -748,10 +809,11 @@ impl Env {
         worlds: usize,
         rollouts: usize,
         max_steps: usize,
+        share_rollout_streams: bool,
         mut prepare: F,
-    ) -> Result<SampledFlatMcResult, AgentError>
+    ) -> Result<FlatMcResult, AgentError>
     where
-        F: FnMut(&Game, PlayerId, usize) -> Result<(Game, u64, Vec<CardDefId>), AgentError>,
+        F: FnMut(&Game, PlayerId, usize) -> Result<(Game, u64), AgentError>,
     {
         let game = self
             .game
@@ -776,19 +838,19 @@ impl Env {
         let mut totals = vec![0.0f64; num_actions];
         let mut simulations = 0u64;
         let mut cap_hits = 0u64;
-        let mut installed_hands = Vec::with_capacity(worlds);
 
         for world_index in 0..worlds {
-            let (world, world_seed, installed) = prepare(game, hero, world_index)?;
-            installed_hands.push(installed);
+            let (world, world_seed) = prepare(game, hero, world_index)?;
             #[allow(clippy::needless_range_loop)] // action is a semantic index
             for action in 0..num_actions {
                 for rollout in 0..rollouts {
                     let mut sim = world.clone();
-                    sim.reseed(mix_seed(
-                        world_seed,
-                        (action * rollouts + rollout + 1) as u64,
-                    ));
+                    let stream = if share_rollout_streams {
+                        rollout + 1
+                    } else {
+                        action * rollouts + rollout + 1
+                    };
+                    sim.reseed(mix_seed(world_seed, stream as u64));
                     let done = sim.step(action)?;
                     let outcome = if done {
                         sim.winner_index()
@@ -811,13 +873,10 @@ impl Env {
         }
 
         let denominator = (worlds * rollouts).max(1) as f64;
-        Ok(SampledFlatMcResult {
-            result: FlatMcResult {
-                scores: totals.into_iter().map(|t| t / denominator).collect(),
-                simulations,
-                cap_hits,
-            },
-            installed_hands,
+        Ok(FlatMcResult {
+            scores: totals.into_iter().map(|t| t / denominator).collect(),
+            simulations,
+            cap_hits,
         })
     }
 

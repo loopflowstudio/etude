@@ -39,6 +39,7 @@ from manabot.verify.util import (
     _select_agent_action,
     winner_from_info_or_obs,
 )
+from managym.decision import Command, DecisionFrame
 
 DEFAULT_MAX_PLAYOUT_STEPS = 2000
 DEFAULT_ROLLOUTS_PER_WORLD = 4
@@ -350,7 +351,7 @@ def make_player(
                 sampling=(
                     RangeSampling.BELIEF
                     if kind == "exact_range"
-                    else RangeSampling.UNIFORM
+                    else RangeSampling.COMPATIBLE_PRIOR
                 ),
                 epsilon=float(spec.get("epsilon", 0.05)),
                 rollouts_per_world=int(
@@ -483,8 +484,6 @@ def play_games(
             seed=seed + game_index,
             options={"match": match_swapped} if hero_seat == 1 else None,
         )
-        content_hash = str(env.content_pack_manifest()["content_digest"])
-        asset_manifest_hash = content_hash
         villain_seat = (hero_seat + 1) % 2
         for player, seat in (
             (hero_player, hero_seat),
@@ -516,31 +515,42 @@ def play_games(
                 prepare_step = getattr(observer, "prepare_step", None)
                 if prepare_step is not None:
                     prepare_step(env, acting, action)
-            command_for_action = getattr(player, "command_for_action", None)
-            if command_for_action is not None:
-                match_id = f"flat-mc-{seed}-{game_index}"
-                command = command_for_action(
-                    raw,
-                    action,
-                    match_id=match_id,
-                    revision=steps,
-                    content_hash=content_hash,
-                    asset_manifest_hash=asset_manifest_hash,
+            semantic_execution = any(
+                getattr(observer, "tracker", None) is not None
+                for observer in (hero_player, villain_player)
+            )
+            transition = None
+            if semantic_execution:
+                command_id = f"flat-mc-{seed}-{game_index}-{steps}"
+                command_for_action = getattr(player, "command_for_action", None)
+                if command_for_action is not None:
+                    command = command_for_action(
+                        env._engine, action, command_id=command_id
+                    )
+                else:
+                    frame = DecisionFrame.from_json(
+                        env._engine.semantic_decision_frame_json()
+                    )
+                    if action < 0 or action >= len(frame.offers):
+                        raise RuntimeError("action is outside the DecisionFrame")
+                    command = Command(
+                        command_id=command_id,
+                        expected_revision=frame.revision,
+                        offer_id=int(frame.offers[action]["id"]),
+                    )
+                obs, _, terminated, truncated, info, transition = env.step_semantic(
+                    command
                 )
-                if str(command["match_id"]) != match_id:
-                    raise RuntimeError(
-                        "command match_id does not match the active game"
-                    )
-                if int(command["expected_revision"]) != steps:
-                    raise RuntimeError(
-                        "command revision does not match the active prompt"
-                    )
-                action = int(command["offer_id"])
-            obs, _, terminated, truncated, info = env.step(action)
+            else:
+                obs, _, terminated, truncated, info = env.step(action)
             for observer in (hero_player, villain_player):
                 observe_step = getattr(observer, "observe_step", None)
                 if observe_step is not None:
-                    observe_step(env, acting)
+                    if transition is None:
+                        raise RuntimeError(
+                            "belief observer requires a semantic TransitionReceipt"
+                        )
+                    observe_step(env, acting, transition)
             for observer, audit_points in (
                 (hero_player, hero_known_truth),
                 (villain_player, villain_known_truth),

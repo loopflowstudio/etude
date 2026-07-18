@@ -5,10 +5,10 @@ from pathlib import Path
 import pytest
 
 from experiments.runners.run_exact_range_player import (
+    ArtifactUnavailable,
     load_contract,
     resolve_artifact,
 )
-from manabot.sim.teacher1_evidence import ContractError
 
 CONTRACT = (
     Path(__file__).resolve().parents[2]
@@ -24,7 +24,20 @@ def test_contract_pins_world_arena_evidence_and_exclusions() -> None:
 
     assert contract["world"] == "w2"
     assert contract["arena"]["id"] == "w2-interactive-belief-v1"
-    assert contract["arena"]["required_primary_cell"] == "belief_vs_uniform"
+    assert contract["arena"]["required_primary_cell"] == "belief_vs_compatible_prior"
+    assert contract["algorithm"]["belief_state"].startswith(
+        "normalized_probability_over_managym_possible_world_space"
+    )
+    assert contract["expected_fingerprints"]["semantic_decision_version"] == 3
+    assert contract["expected_fingerprints"]["possible_world_space_version"] == 1
+    assert {
+        "engine_source_sha256",
+        "engine_extension_sha256",
+        "engine_extension_name",
+        "int9_source_sha256",
+    }.issubset(contract["expected_fingerprints"])
+    assert "public_action_alphabet" not in contract["algorithm"]
+    assert "determinization" not in contract["algorithm"]
     assert smoke["evidence_class"] == "engineering_smoke_non_admission"
     assert arena["evidence_class"] == "preregistered_arena"
     assert set(contract["required_evidence"]) == {
@@ -47,5 +60,5 @@ def test_contract_pins_world_arena_evidence_and_exclusions() -> None:
 def test_unresolved_likelihood_artifact_fails_closed() -> None:
     contract, _ = load_contract(CONTRACT, "smoke")
 
-    with pytest.raises(ContractError, match="not byte-locked"):
+    with pytest.raises(ArtifactUnavailable, match="not byte-locked"):
         resolve_artifact(contract, "likelihood_checkpoint")

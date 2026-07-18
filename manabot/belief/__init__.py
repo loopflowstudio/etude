@@ -1,5 +1,5 @@
-"""Viewer-safe exact-range inference for selected manabot matchups."""
+"""Viewer-safe beliefs over canonical managym possible worlds."""
 
-from manabot.belief.range import ExactHandRange, HandKey, RangeError
+from manabot.belief.range import BeliefError, BeliefState
 
-__all__ = ["ExactHandRange", "HandKey", "RangeError"]
+__all__ = ["BeliefError", "BeliefState"]
