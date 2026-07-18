@@ -25,4 +25,3 @@ def test_verify_only_authenticates_retained_exact_range_receipt(
     assert receipt["no_generation"] is True
     assert receipt["no_replay"] is True
     assert receipt["exact_range_status"] == "evidence_wait"
-
