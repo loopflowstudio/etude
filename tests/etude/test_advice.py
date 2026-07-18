@@ -168,7 +168,7 @@ def test_deltas_are_signed_and_non_zero_for_at_least_one_action() -> None:
             )
 
 
-def test_request_advice_fails_closed_on_identity_mismatch() -> None:
+def test_request_advice_fails_closed_on_incomplete_legacy_identity() -> None:
     meta = advice_meta()
     wrong = AdviceRequestIdentity(
         source_replay_id=meta.identity.source_replay_id,
@@ -178,7 +178,7 @@ def test_request_advice_fails_closed_on_identity_mismatch() -> None:
     )
     response = request_advice(meta.address, SCENARIO_A, wrong)
     assert response.status == "unavailable"
-    assert response.reason == "identity_mismatch"
+    assert response.reason == "legacy_identity_incomplete"
     assert response.evidence is None
     assert response.deltas is None
     assert response.frame is None
@@ -246,7 +246,7 @@ def test_post_advice_endpoint_returns_evidence_and_fails_closed() -> None:
         )
         assert closed.status_code == 200
         assert closed.json()["status"] == "unavailable"
-        assert closed.json()["reason"] == "identity_mismatch"
+        assert closed.json()["reason"] == "legacy_identity_incomplete"
         assert closed.json()["evidence"] is None
 
 
