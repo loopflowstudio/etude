@@ -5,6 +5,17 @@ import {
   type StudyArtifact,
 } from './study-protocol';
 
+// This module is the TypeScript twin of the Python adapter in etude/advice.py.
+// Two explicit seams cross the wire here, matching the Python adapter:
+//   - GAM-4 seam: AdviceRequestIdentity + AdviceRequest are the request
+//     contract GAM-4's live decision address and retry/compare controls bind
+//     to. Both the live play page and the Study page POST /api/advice with
+//     this shape.
+//   - INT-13 seam: the DecisionEvidence carried in AdviceResponse.evidence is
+//     the per-action search-evidence shape int13_condition_to_decision_evidence
+//     produces on the server; the surface renders it unchanged whether the
+//     evidence is fixture-backed (today) or INT-13 live (later).
+
 export interface AdviceRequestIdentity {
   source_replay_id: string;
   match_id: string;

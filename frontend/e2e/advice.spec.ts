@@ -139,7 +139,10 @@ test('replay page renders the same surface in study mode at the pinned decision'
   const consoleErrors = collectConsoleErrors(page);
   await startGame(page);
 
-  // Play the game to completion so a trace lands for the replay page.
+  // Play the game to completion so a trace lands for the replay page. The
+  // action list is swapped out whenever a server response lands, so a sampled
+  // button can vanish between count() and click() — retry with a fresh sample,
+  // mirroring the established play.spec.ts loop.
   const actionButtons = page.getByTestId('action-option');
   const gameOver = page.getByText('Game Over', { exact: true });
   for (let i = 0; i < 1000; i += 1) {
@@ -147,11 +150,22 @@ test('replay page renders the same surface in study mode at the pinned decision'
     if (await gameOver.isVisible()) {
       break;
     }
-    const count = await actionButtons.count();
-    if (count === 0) {
+    let clicked = false;
+    for (let attempt = 0; attempt < 5 && !clicked; attempt += 1) {
+      const count = await actionButtons.count();
+      if (count === 0) {
+        break; // response in flight or game over — re-enter the outer wait
+      }
+      try {
+        await actionButtons.nth(0).click({ timeout: 2_000 });
+        clicked = true;
+      } catch {
+        // list changed under us; resample
+      }
+    }
+    if (!clicked) {
       continue;
     }
-    await actionButtons.nth(0).click({ timeout: 2_000 });
   }
   await expect(gameOver).toBeVisible({ timeout: 30_000 });
 

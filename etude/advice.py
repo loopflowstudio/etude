@@ -8,24 +8,50 @@ flat-MC evidence at one ``erd1`` decision, and computes the explicit per-action
 deltas between them. Identity mismatch, unknown scenario, or wrong address fail
 closed to a typed ``unavailable`` state with no evidence.
 
-The adapter is the explicit seam for GAM-4 (live decision address and
-retry/compare contracts) and INT-13 (search evidence): ``request_advice`` and
-``AdviceRequestIdentity`` are the contract those waves can plug into later
-without duplicating the StudyArtifact decision substrate.
+The adapter carries two explicit seams, each a named, typed binding point so
+the upstream waves plug in without duplicating the StudyArtifact substrate:
+
+- **GAM-4 seam** (live decision address + retry/compare): ``AdviceRequestIdentity``
+  and ``request_advice`` are the request contract. GAM-4 publishes the live
+  ``erd1`` decision address and the fork/Retry/return controls; both the live
+  play page and the Study page call the same ``POST /api/advice`` with this
+  identity, so GAM-4's live-address and retry/compare contracts bind here.
+- **INT-13 seam** (search evidence): ``int13_condition_to_decision_evidence``
+  maps one INT-13 ``ConditionResult`` (determinized-PUCT search output from
+  ``manabot.sim.conditional_search``) into the per-action ``DecisionEvidence``
+  this surface renders, and ``int13_result_to_surface_deltas`` reconciles two
+  INT-13 conditions into the surface's per-action delta dict. The prototype
+  serves fixture-backed flat-MC evidence at runtime; these mappings are the
+  typed binding point INT-13's live search fills when it publishes.
+
+This is a prototype advisor (``flat-mc-search-v1``), not a production advisor:
+the footer states "advisory only", and no strength or latency claim is made.
 """
 
 from __future__ import annotations
 
 import functools
+import hashlib
 import json
 import math
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import Field
 
 from etude.experience_protocol import ExperienceFrame, InteractionOffer, ProtocolModel
 from etude.study_protocol import DecisionEvidence, StudyArtifact, StudyLandmark
+
+if TYPE_CHECKING:
+    # INT-13 search-evidence contracts (manabot.sim.conditional_search). The
+    # seam is typed against these so the binding point is explicit and
+    # type-checked, but etude never imports manabot at runtime: the prototype
+    # serves fixture-backed evidence, and the live/Study surface never crosses
+    # the player/training boundary at request time.
+    from manabot.sim.conditional_search import (
+        ConditionalStrategyResult,
+        ConditionResult,
+    )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_PATH = REPO_ROOT / "protocol" / "fixtures" / "advice-curated-decision.json"
@@ -34,10 +60,12 @@ FIXTURE_PATH = REPO_ROOT / "protocol" / "fixtures" / "advice-curated-decision.js
 class AdviceRequestIdentity(ProtocolModel):
     """The advisor + compute identity a request claims to incorporate.
 
-    Mirrors the fixture's pinned ``StudyIdentity``: the source replay and match
-    must match, the advisor id must match the pinned ``model.id``, and the
-    compute id must match the pinned ``analysis_budget.id``. This is the seam
-    INT-13's search evidence and GAM-4's live-address contracts bind to.
+    The GAM-4 seam: this is the request contract GAM-4's live decision-address
+    and retry/compare controls bind to. Mirrors the fixture's pinned
+    ``StudyIdentity`` -- the source replay and match must match, the advisor id
+    must match the pinned ``model.id``, and the compute id must match the pinned
+    ``analysis_budget.id``. When GAM-4 publishes the live ``erd1`` address, the
+    same identity flows through ``POST /api/advice`` unchanged.
     """
 
     source_replay_id: str
@@ -189,6 +217,147 @@ def compute_deltas(
             "uncertainty": left_unc[alternative] - right_unc[alternative],
         }
     return deltas
+
+
+def _evidence_sha256(evidence_core: dict[str, Any]) -> str:
+    """Content-address the evidence core, mirroring the fixture generator."""
+    encoded = json.dumps(evidence_core, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def int13_condition_to_decision_evidence(
+    condition: ConditionResult,
+    alternative_ids: list[str],
+    viewer: int,
+    producer: str,
+    generated_at: str,
+) -> dict[str, Any]:
+    """INT-13 seam: map one ``ConditionResult`` to the ``DecisionEvidence`` shape.
+
+    This is the explicit binding point where INT-13's determinized-PUCT search
+    evidence (``manabot.sim.conditional_search.ConditionResult``) becomes the
+    per-action ``DecisionEvidence`` the shared live/Study surface renders. The
+    prototype serves fixture-backed flat-MC evidence at runtime; this mapping is
+    not on the fixture request path. When INT-13's live search publishes, the
+    ``POST /api/advice`` server can route a live-address request to this mapping
+    instead of the static fixture, without changing the surface or the
+    ``DecisionEvidence`` contract.
+
+    Field mapping (``ConditionResult`` -> ``DecisionEvidence``):
+
+    - ``visit_counts`` -> ``policy_mass`` (normalized to a per-action
+      distribution) and ``visits`` (raw per-action counts).
+    - ``q_values`` -> ``search_value.expected_match_points`` (INT-13 q-values
+      are mean per-action win-probability estimates).
+    - ``uncertainty`` (one scalar) -> ``uncertainty.standard_error`` per action,
+      broadcast with ``method = "int13-scalar-broadcast"``. INT-13 does not yet
+      expose per-action standard error; the broadcast is a documented gap, not a
+      per-action precision claim.
+    - ``condition_mass`` / ``sampled_worlds`` -> ``sampled_world_robustness``
+      with ``favorable_worlds`` per action set to ``sampled_worlds`` when that
+      action's mean q exceeds 0.5 and 0 otherwise (a viewer-safe per-action
+      favorability proxy; the exact per-action favorable-world count is an
+      INT-13 future field).
+
+    ``producer`` is the INT-13 provenance string (e.g.
+    ``"int-13-determinized-puct:v1"``). The returned dict validates as a
+    ``DecisionEvidence`` and carries a content-addressed ``evidence_sha256``.
+    """
+    visit_counts = list(condition.visit_counts)
+    q_values = list(condition.q_values)
+    num_actions = len(alternative_ids)
+    if len(visit_counts) != num_actions or len(q_values) != num_actions:
+        raise ValueError("int13 condition action count does not match alternative_ids")
+    total_visits = sum(visit_counts)
+    denom = total_visits if total_visits > 0 else 1
+    policy_mass = [
+        {"alternative": alt, "probability": count / denom}
+        for alt, count in zip(alternative_ids, visit_counts, strict=True)
+    ]
+    search_value = [
+        {
+            "alternative": alt,
+            "perspective": viewer,
+            "expected_match_points": float(q),
+        }
+        for alt, q in zip(alternative_ids, q_values, strict=True)
+    ]
+    visits = [
+        {"alternative": alt, "visits": int(count)}
+        for alt, count in zip(alternative_ids, visit_counts, strict=True)
+    ]
+    sampled = int(condition.sampled_worlds)
+    sampled_world_robustness = [
+        {
+            "alternative": alt,
+            "favorable_worlds": sampled if float(q) > 0.5 else 0,
+            "sampled_worlds": sampled,
+        }
+        for alt, q in zip(alternative_ids, q_values, strict=True)
+    ]
+    uncertainty = [
+        {
+            "alternative": alt,
+            "standard_error": float(condition.uncertainty),
+            "method": "int13-scalar-broadcast",
+        }
+        for alt in alternative_ids
+    ]
+    core = {
+        "policy_mass": policy_mass,
+        "search_value": search_value,
+        "visits": visits,
+        "sampled_world_robustness": sampled_world_robustness,
+        "uncertainty": uncertainty,
+    }
+    return {
+        **core,
+        "provenance": {
+            "producer": producer,
+            "producer_version": "1",
+            "generated_at": generated_at,
+            "evidence_sha256": _evidence_sha256(core),
+        },
+    }
+
+
+def int13_result_to_surface_deltas(
+    result: ConditionalStrategyResult,
+    left_condition_id: str,
+    right_condition_id: str,
+    alternative_ids: list[str],
+    viewer: int,
+    producer: str,
+    generated_at: str,
+) -> dict[str, dict[str, float]]:
+    """INT-13 seam: reconcile two conditions into the surface's per-action deltas.
+
+    The surface compares two belief scenarios; INT-13 produces one
+    ``ConditionalStrategyResult`` for five aligned conditions (True, Has, Lacks,
+    Q, Not(Q)) at one root. This maps two of those conditions (e.g. Has vs
+    Lacks) into ``DecisionEvidence`` and returns the same per-action
+    ``{policy_mass, search_value, uncertainty}`` delta dict the fixture-backed
+    ``compute_deltas`` produces, so the surface renders INT-13 deltas unchanged.
+    """
+    by_id = result.condition_by_id
+    if left_condition_id not in by_id or right_condition_id not in by_id:
+        raise ValueError(
+            f"int13 result missing condition {left_condition_id!r} or "
+            f"{right_condition_id!r}"
+        )
+    left = DecisionEvidence.model_validate(
+        int13_condition_to_decision_evidence(
+            by_id[left_condition_id], alternative_ids, viewer, producer, generated_at
+        )
+    )
+    right = DecisionEvidence.model_validate(
+        int13_condition_to_decision_evidence(
+            by_id[right_condition_id], alternative_ids, viewer, producer, generated_at
+        )
+    )
+    return compute_deltas(left, right)
 
 
 def _scenario_summary(

@@ -7,19 +7,22 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 from jsonschema import Draft202012Validator
+import numpy as np
 import pytest
 
 from etude.advice import (
-    AdviceRequest,
     AdviceRequestIdentity,
     advice_meta,
     compute_deltas,
+    int13_condition_to_decision_evidence,
+    int13_result_to_surface_deltas,
     load_advice_fixture,
     policy_mass_is_non_uniform,
     request_advice,
 )
 from etude.server import app
-from etude.study_protocol import StudyArtifact
+from etude.study_protocol import DecisionEvidence, StudyArtifact
+from manabot.sim.conditional_search import ConditionalStrategyResult, ConditionResult
 
 PROTOCOL_DIR = Path(__file__).parents[2] / "protocol"
 FIXTURE = json.loads(
@@ -217,3 +220,160 @@ def test_post_advice_endpoint_returns_evidence_and_fails_closed() -> None:
         assert closed.json()["status"] == "unavailable"
         assert closed.json()["reason"] == "identity_mismatch"
         assert closed.json()["evidence"] is None
+
+
+# ---------------------------------------------------------------------------
+# Explicit INT-13 adapter seam: ConditionResult -> DecisionEvidence mapping.
+# These tests prove the seam is real and typed against the INT-13 contracts on
+# main, without wiring INT-13 into the fixture-backed runtime path.
+# ---------------------------------------------------------------------------
+
+GENERATED_AT = "2026-07-18T00:00:00+00:00"
+INT13_PRODUCER = "int-13-determinized-puct:v1"
+ALT_IDS = ["offer-0", "offer-1"]
+
+
+def _condition(
+    condition_id: str,
+    visit_counts: list[int],
+    q_values: list[float],
+    *,
+    uncertainty: float = 0.05,
+    sampled_worlds: int = 16,
+) -> ConditionResult:
+    """Build a minimal real ConditionResult for seam tests."""
+    return ConditionResult(
+        condition_id=condition_id,
+        condition_mass=1.0,
+        support=sampled_worlds,
+        sampled_worlds=sampled_worlds,
+        visit_counts=np.asarray(visit_counts, dtype=np.float64),
+        q_values=np.asarray(q_values, dtype=np.float64),
+        root_value=float(q_values[0]),
+        world_q_values=np.asarray(q_values, dtype=np.float64),
+        world_root_values=np.asarray(q_values, dtype=np.float64),
+        uncertainty=uncertainty,
+        simulations=int(sum(visit_counts)),
+        cap_hits=0,
+        tree_nodes=8,
+        max_depth=3,
+        branch_driver_id="seam-test-driver",
+        branch_receipt={},
+    )
+
+
+def test_int13_seam_maps_condition_to_decision_evidence() -> None:
+    condition = _condition("has", [12, 4], [0.6, 0.3])
+    payload = int13_condition_to_decision_evidence(
+        condition, ALT_IDS, viewer=0, producer=INT13_PRODUCER, generated_at=GENERATED_AT
+    )
+    # The mapped dict validates as the same DecisionEvidence the surface renders.
+    evidence = DecisionEvidence.model_validate(payload)
+    # policy_mass is the normalized visit distribution (non-uniform, real).
+    assert [row.probability for row in evidence.policy_mass] == pytest.approx(
+        [0.75, 0.25]
+    )
+    # search_value carries the per-action q-values.
+    assert [
+        row.expected_match_points for row in evidence.search_value
+    ] == pytest.approx([0.6, 0.3])
+    # uncertainty is the documented scalar broadcast, not a per-action claim.
+    assert [row.method for row in evidence.uncertainty] == [
+        "int13-scalar-broadcast"
+    ] * 2
+    assert [row.standard_error for row in evidence.uncertainty] == pytest.approx(
+        [0.05, 0.05]
+    )
+    # Favorable-worlds proxy: q > 0.5 flags the first action only.
+    robust = {row.alternative: row for row in evidence.sampled_world_robustness}
+    assert robust["offer-0"].favorable_worlds == 16
+    assert robust["offer-1"].favorable_worlds == 0
+    # Provenance is content-addressed and INT-13-named.
+    assert evidence.provenance.producer == INT13_PRODUCER
+    assert evidence.provenance.generated_at == GENERATED_AT
+    assert evidence.provenance.evidence_sha256
+
+
+def test_int13_seam_rejects_action_count_mismatch() -> None:
+    condition = _condition("has", [12, 4, 2], [0.6, 0.3, 0.1])
+    with pytest.raises(ValueError, match="action count"):
+        int13_condition_to_decision_evidence(
+            condition,
+            ALT_IDS,
+            viewer=0,
+            producer=INT13_PRODUCER,
+            generated_at=GENERATED_AT,
+        )
+
+
+def test_int13_result_to_surface_deltas_matches_compute_deltas() -> None:
+    left = _condition("has", [12, 4], [0.6, 0.3], uncertainty=0.05)
+    right = _condition("lacks", [4, 12], [0.3, 0.6], uncertainty=0.08)
+    result = ConditionalStrategyResult(
+        conditions=(left, right),
+        action_count=2,
+        action_labels=tuple(ALT_IDS),
+        root_state_digest="seam-root",
+        planner="determinized_puct",
+        search_params={},
+        prior_sha256="prior",
+        plan_sha256="plan",
+        identities={},
+        realized_compute={},
+        comparison_deltas={},
+    )
+    deltas = int13_result_to_surface_deltas(
+        result,
+        "has",
+        "lacks",
+        ALT_IDS,
+        viewer=0,
+        producer=INT13_PRODUCER,
+        generated_at=GENERATED_AT,
+    )
+    # The seam reuses compute_deltas on the two mapped evidences, so the shape
+    # and values match the fixture-backed delta contract exactly.
+    left_ev = DecisionEvidence.model_validate(
+        int13_condition_to_decision_evidence(
+            left, ALT_IDS, viewer=0, producer=INT13_PRODUCER, generated_at=GENERATED_AT
+        )
+    )
+    right_ev = DecisionEvidence.model_validate(
+        int13_condition_to_decision_evidence(
+            right, ALT_IDS, viewer=0, producer=INT13_PRODUCER, generated_at=GENERATED_AT
+        )
+    )
+    expected = compute_deltas(left_ev, right_ev)
+    assert set(deltas) == set(expected) == set(ALT_IDS)
+    for alt in ALT_IDS:
+        for metric in ("policy_mass", "search_value", "uncertainty"):
+            assert deltas[alt][metric] == pytest.approx(expected[alt][metric])
+    # The two conditions disagree on policy mass for at least one action.
+    assert any(abs(d["policy_mass"]) > 1e-9 for d in deltas.values())
+
+
+def test_int13_result_to_surface_deltas_fails_closed_on_unknown_condition() -> None:
+    left = _condition("has", [12, 4], [0.6, 0.3])
+    result = ConditionalStrategyResult(
+        conditions=(left,),
+        action_count=2,
+        action_labels=tuple(ALT_IDS),
+        root_state_digest="seam-root",
+        planner="determinized_puct",
+        search_params={},
+        prior_sha256="prior",
+        plan_sha256="plan",
+        identities={},
+        realized_compute={},
+        comparison_deltas={},
+    )
+    with pytest.raises(ValueError, match="missing condition"):
+        int13_result_to_surface_deltas(
+            result,
+            "has",
+            "lacks",
+            ALT_IDS,
+            viewer=0,
+            producer=INT13_PRODUCER,
+            generated_at=GENERATED_AT,
+        )

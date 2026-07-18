@@ -14,6 +14,20 @@
   from the `.lf/tmp/scratch-stash` snapshot). The directive text confirms:
   preserve the completed kickoff design and finish normally; do not redo
   research.
+- 2026-07-18 (implementation turn): Re-acknowledged directive v3 with the
+  absolute compatible lf. Checkpointed the WIP, then rebased onto `origin/main`
+  via `lf rebase --manual origin/main` (clean direct rebase; PR #139 plus the
+  two newer commits `522b2fb` INT-13 conditional_search and `f41180f` managym
+  possible_worlds now in history). The INT-13 `ConditionalStrategyResult` /
+  `ConditionResult` contracts landed on main, so the GAM-4/INT-13 adapter seams
+  are now explicit and typed: `int13_condition_to_decision_evidence` and
+  `int13_result_to_surface_deltas` in `etude/advice.py` (TYPE_CHECKING import
+  preserves the runtime etude/manabot boundary; fixture-first at runtime), with
+  the GAM-4 seam on `AdviceRequestIdentity` + `request_advice`. Four seam tests
+  added. The kickoff design doc `scratch/prototype-belief-to-strategy-comparison.md`
+  is preserved unchanged. Suite: 134 etude tests, 13 frontend advice unit tests,
+  5 Playwright advice e2e (study-mode loop hardened with the play.spec retry
+  pattern), `npm run check` and `npm run build` clean, ruff clean.
 
 ## Blockers (reported once, proceeding inline)
 
