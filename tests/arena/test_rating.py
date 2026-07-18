@@ -44,6 +44,17 @@ def test_bootstrap_resamples_global_deal_blocks_and_matrix_is_complete() -> None
     assert bootstrap["replicates"] == 20
     assert bootstrap["failures"] == 0
     assert set(bootstrap["ratings"]) == {"random-v1", "strong-v1"}
+    assert "random-v1__minus__strong-v1" in bootstrap["rating_differences"]
     matrix = payoff_matrix(evidence)
-    assert matrix["random-v1__strong-v1"]["games"] == 16
-    assert matrix["random-v1__strong-v1"]["wins_b"] == 14
+    cell = matrix["random-v1__strong-v1"]
+    assert cell["games"] == 16
+    assert cell["wins_b"] == 14
+    assert set(cell["per_seat"]) == {"0", "1"}
+    assert cell["paired_blocks"] == {
+        "sweeps_a": 1,
+        "splits": 0,
+        "sweeps_b": 7,
+        "draw_or_mixed": 0,
+    }
+    assert np.isfinite(cell["pearson_residual"])
+    assert cell["cell_deviance"] >= 0.0

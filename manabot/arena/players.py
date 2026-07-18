@@ -55,7 +55,25 @@ def build_player(
     if spec["kind"] == "scripted_greedy":
         return ScriptedGreedyPlayer(), None
     player, obs_space = make_player(spec, seed=seed)
-    for field in ("sims", "worlds", "c_puct", "max_steps", "branch_driver_id"):
-        if field in spec and getattr(player, field, None) != spec[field]:
+    attribute_names = {
+        "sims": "simulations" if spec["kind"] == "determinized_puct" else "sims",
+        "rollouts_per_world": "rollouts",
+        "worlds": "worlds",
+        "c_puct": "c_puct",
+        "max_steps": "max_steps",
+        "branch_driver_id": "branch_driver_id",
+    }
+    for field, attribute in attribute_names.items():
+        if field in spec and getattr(player, attribute, None) != spec[field]:
             raise RuntimeError(f"constructed player did not echo {field}")
+    if spec["kind"] == "determinized_puct":
+        semantics = registration.search_semantics
+        if semantics is None:
+            raise RuntimeError("determinized PUCT has no registered search semantics")
+        if player.branch_audit != semantics.branch_audit:
+            raise RuntimeError("constructed player did not echo branch_audit")
+        if type(player.evaluator).__name__ != "UniformRandomLeafEvaluator":
+            raise RuntimeError(
+                "constructed player did not use the registered leaf evaluator"
+            )
     return player, obs_space

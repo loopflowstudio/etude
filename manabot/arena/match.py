@@ -50,7 +50,11 @@ def play_cell(
     out_dir: Path,
     checkpoint_paths: dict[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    import torch
+
+    torch.set_num_threads(1)
     checkpoint_paths = checkpoint_paths or {}
+    deal_seed_set_sha256 = canonical_sha256(list(deal_seeds))
     games: list[dict[str, Any]] = []
     rows: list[dict[str, Any]] = []
     pair = (player_a.player_id, player_b.player_id)
@@ -98,15 +102,23 @@ def play_cell(
                 player_a.player_id: [],
                 player_b.player_id: [],
             }
+            player_decision_ordinals = {
+                player_a.player_id: 0,
+                player_b.player_id: 0,
+            }
             integrity = {
                 "illegal_actions": 0,
                 "truncations": 0,
                 "root_mutations": 0,
                 "private_exposures": 0,
+                "offer_binding_failures": 0,
+                "command_fabrications": 0,
+                "replay_mismatches": 0,
             }
             info: dict[str, Any] = {}
             done = False
             revision = 0
+            game_started = time.perf_counter()
             while not done:
                 raw = env.last_raw_obs
                 actor_seat = int(raw.agent.player_index)
@@ -135,6 +147,9 @@ def play_cell(
                         f"{registration.player_id} returned illegal offer {action}"
                     )
                 command = build_command(frame, action)
+                chosen_offer = next(
+                    offer for offer in frame["offers"] if int(offer["id"]) == action
+                )
                 obs, _, terminated, truncated, info = env.step(action)
                 done = bool(terminated or truncated)
                 integrity["truncations"] += int(
@@ -150,15 +165,27 @@ def play_cell(
                         "revision": revision,
                         "actor": actor_seat,
                         "player_id": registration.player_id,
+                        "player_seed": seeds[registration.player_id],
+                        "player_decision_ordinal": player_decision_ordinals[
+                            registration.player_id
+                        ],
+                        "action_space_kind": frame["action_space"],
                         "frame_sha256": canonical_sha256(frame),
                         "command": command,
+                        "command_sha256": canonical_sha256(command),
+                        "chosen_offer": chosen_offer,
                         "pre_state_digest": pre_digest,
                         "post_state_digest": env._engine.state_digest(),
                         "latency_seconds": elapsed,
                     }
                 )
+                player_decision_ordinals[registration.player_id] += 1
                 revision += 1
+            game_seconds = time.perf_counter() - game_started
             winner = winner_from_info_or_obs(info, env.last_raw_obs)
+            termination_reason = (
+                "truncated" if truncated else "draw" if winner is None else "terminal"
+            )
             game = {
                 "match_id": match_id,
                 "cell_id": _cell_id(*pair),
@@ -170,6 +197,9 @@ def play_cell(
                 ],
                 "player_seeds": seeds,
                 "winner": winner,
+                "terminated": bool(terminated),
+                "truncated": bool(truncated),
+                "termination_reason": termination_reason,
                 "decisions": decisions,
                 "integrity": integrity,
             }
@@ -183,6 +213,7 @@ def play_cell(
                     "cell_id": game["cell_id"],
                     "deal_block": block,
                     "deal_seed": deal_seed,
+                    "deal_seed_set_sha256": deal_seed_set_sha256,
                     "leg": leg,
                     "player_a": player_a.player_id,
                     "player_b": player_b.player_id,
@@ -195,7 +226,11 @@ def play_cell(
                     "player_a_seat": player_a_seat,
                     "winner": winner,
                     "score_a": score_a,
+                    "terminated": bool(terminated),
+                    "truncated": bool(truncated),
+                    "termination_reason": termination_reason,
                     "decisions": len(decisions),
+                    "game_trace_sha256": game["game_trace_sha256"],
                     "trace_path": str(Path("traces") / _trace_name(*pair)),
                     "trace_sha256": game["game_trace_sha256"],
                     "replay_passed": False,
@@ -203,17 +238,30 @@ def play_cell(
                     "latency": {
                         player_id: {
                             "count": len(values),
+                            "seconds": float(sum(values)),
                             "p50": float(np.percentile(values, 50)) if values else None,
                             "p95": float(np.percentile(values, 95)) if values else None,
                         }
                         for player_id, values in latencies.items()
                     },
+                    "game_seconds": game_seconds,
                 }
             )
     trace_path = out_dir / "traces" / _trace_name(*pair)
     trace_receipt = write_trace(trace_path, games)
+    trace_receipt["artifact_path"] = str(Path("traces") / _trace_name(*pair))
     replay = replay_games(games)
+    replay_payload = replay.to_dict()
+    mismatch_count = sum(
+        int(value)
+        for key, value in replay_payload.items()
+        if key not in {"games", "decisions", "passed"}
+    )
     for row in rows:
         row["replay_passed"] = replay.passed
         row["trace_shard_sha256"] = trace_receipt["sha256"]
-    return rows, trace_receipt, replay.to_dict()
+        row["integrity"] = {
+            **row["integrity"],
+            "replay_mismatches": mismatch_count,
+        }
+    return rows, trace_receipt, replay_payload

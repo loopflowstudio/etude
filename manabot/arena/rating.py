@@ -21,6 +21,7 @@ class PopulationFit:
     gradient_norm: float
     hessian_condition: float
     log_loss: float
+    deviance: float
     rows: tuple[dict[str, Any], ...]
 
 
@@ -47,7 +48,11 @@ def fit_population(
     tolerance: float = 1e-10,
     max_iterations: int = 100,
 ) -> PopulationFit:
-    retained = [dict(row) for row in rows]
+    retained = [
+        dict(row)
+        for row in rows
+        if not row.get("truncated") and row.get("termination_reason") != "truncated"
+    ]
     players = tuple(
         sorted(
             {str(row["player_a"]) for row in retained}
@@ -102,11 +107,23 @@ def fit_population(
     )
     residual_rows = []
     for row, predicted in zip(retained, probabilities, strict=True):
+        score = float(row["score_a"])
+        variance = max(float(predicted * (1.0 - predicted)), eps)
+        deviance = 2.0 * (
+            (score * math.log(score / predicted) if score > 0.0 else 0.0)
+            + (
+                (1.0 - score) * math.log((1.0 - score) / (1.0 - predicted))
+                if score < 1.0
+                else 0.0
+            )
+        )
         residual_rows.append(
             {
                 **row,
                 "predicted_score_a": float(predicted),
-                "raw_residual": float(row["score_a"] - predicted),
+                "raw_residual": float(score - predicted),
+                "pearson_residual": float((score - predicted) / math.sqrt(variance)),
+                "deviance": float(deviance),
             }
         )
     return PopulationFit(
@@ -118,6 +135,7 @@ def fit_population(
         gradient_norm,
         float(np.linalg.cond(hessian)),
         log_loss,
+        float(sum(row["deviance"] for row in residual_rows)),
         tuple(residual_rows),
     )
 
@@ -135,6 +153,7 @@ def bootstrap_population(
         raise ValueError("bootstrap requires deal blocks")
     rng = np.random.default_rng(seed)
     samples: dict[str, list[float]] = {}
+    difference_samples: dict[str, list[float]] = {}
     seat_samples: list[float] = []
     failures = 0
     row_blocks = np.asarray([int(row["deal_block"]) for row in rows])
@@ -151,8 +170,17 @@ def bootstrap_population(
         except (ValueError, np.linalg.LinAlgError):
             failures += 1
             continue
+        if not fit.converged:
+            failures += 1
+            continue
         for player, rating in fit.ratings.items():
             samples.setdefault(player, []).append(rating)
+        for left_index, left in enumerate(fit.players):
+            for right in fit.players[left_index + 1 :]:
+                key = f"{left}__minus__{right}"
+                difference_samples.setdefault(key, []).append(
+                    fit.ratings[left] - fit.ratings[right]
+                )
         seat_samples.append(fit.seat0_elo)
 
     def interval(values: list[float]) -> list[float]:
@@ -166,13 +194,22 @@ def bootstrap_population(
         "replicates": replicates,
         "failures": failures,
         "ratings": {player: interval(values) for player, values in samples.items()},
+        "rating_differences": {
+            pair: interval(values) for pair, values in difference_samples.items()
+        },
         "seat0_elo": interval(seat_samples),
     }
 
 
 def payoff_matrix(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    retained = [
+        dict(row)
+        for row in rows
+        if not row.get("truncated") and row.get("termination_reason") != "truncated"
+    ]
+    fit = fit_population(retained)
     cells: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for row in rows:
+    for row in fit.rows:
         a, b = sorted((str(row["player_a"]), str(row["player_b"])))
         cells.setdefault((a, b), []).append(dict(row))
     result = {}
@@ -183,14 +220,61 @@ def payoff_matrix(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
             else 1.0 - float(row["score_a"])
             for row in cell
         ]
+        predicted_scores = [
+            float(row["predicted_score_a"])
+            if row["player_a"] == a
+            else 1.0 - float(row["predicted_score_a"])
+            for row in cell
+        ]
+        seat_results = {}
+        for seat in (0, 1):
+            seat_scores = [
+                score
+                for row, score in zip(cell, scores, strict=True)
+                if (
+                    int(row["player_a_seat"])
+                    if row["player_a"] == a
+                    else 1 - int(row["player_a_seat"])
+                )
+                == seat
+            ]
+            seat_results[str(seat)] = {
+                "games": len(seat_scores),
+                "score_a": float(sum(seat_scores)),
+                "mean_score_a": float(np.mean(seat_scores)) if seat_scores else None,
+            }
+        paired: dict[int, list[float]] = {}
+        for row, score in zip(cell, scores, strict=True):
+            paired.setdefault(int(row["deal_block"]), []).append(score)
+        sweeps_a = sum(values == [1.0, 1.0] for values in paired.values())
+        sweeps_b = sum(values == [0.0, 0.0] for values in paired.values())
+        splits = sum(sorted(values) == [0.0, 1.0] for values in paired.values())
+        paired_draws = len(paired) - sweeps_a - sweeps_b - splits
+        observed = float(np.sum(scores))
+        expected = float(np.sum(predicted_scores))
+        variance = float(np.sum([value * (1.0 - value) for value in predicted_scores]))
         result[f"{a}__{b}"] = {
             "player_a": a,
             "player_b": b,
             "games": len(cell),
-            "score_a": float(np.sum(scores)),
+            "score_a": observed,
             "mean_score_a": float(np.mean(scores)),
             "wins_a": sum(score == 1.0 for score in scores),
             "draws": sum(score == 0.5 for score in scores),
             "wins_b": sum(score == 0.0 for score in scores),
+            "per_seat": seat_results,
+            "paired_blocks": {
+                "sweeps_a": sweeps_a,
+                "splits": splits,
+                "sweeps_b": sweeps_b,
+                "draw_or_mixed": paired_draws,
+            },
+            "expected_score_a": expected,
+            "expected_mean_score_a": expected / len(cell),
+            "raw_residual_percentage_points": 100.0 * (observed - expected) / len(cell),
+            "pearson_residual": (observed - expected) / math.sqrt(variance)
+            if variance > 0.0
+            else 0.0,
+            "cell_deviance": float(sum(float(row["deviance"]) for row in cell)),
         }
     return result
