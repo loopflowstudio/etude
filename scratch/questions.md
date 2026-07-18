@@ -190,3 +190,12 @@ rebased onto it. Decisions below resolve the open questions and the design's
 - **Frozen evidence:** the toy conditional shard + schema_version 2 snapshot
   manifest are generated and frozen into `experiments/data/` (not `.runs/`,
   which is gitignored) as checked-in evidence, mirroring the INT-13 fixture.
+
+## Pre-existing failure noted (not caused by INT-14)
+
+- `tests/sim/test_conditional_search.py::test_checked_fixture_is_deterministic_and_identity_pinned`
+  fails after rebasing onto RUL-8 (#141): RUL-8 added `managym/src/possible_worlds.rs`
+  to the engine source bundle, changing `identities.engine_source_sha256` versus
+  the INT-13 fixture's pinned value. This is a RUL-8/INT-13 fixture-staleness
+  issue, not an INT-14 regression. All 21 `test_conditional_snapshot.py` tests
+  pass; the ablation smoke completes.

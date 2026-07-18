@@ -37,12 +37,22 @@ from experiments.runners.run_teacher0_partial_snapshot import (
     _json_sha256,
     _load_json,
     _snapshot_identity,
-    _trainer_identity,
 )
 from manabot.sim.conditional_distill import (
     CONDITION_LABEL_FORMAT,
     conditional_strategy_shape_digest,
 )
+from manabot.sim.distill import _git_commit
+
+
+def _trainer_identity(root: Path = REPO_ROOT) -> dict[str, Any]:
+    return _identity(
+        root,
+        TRAINER_SOURCE_FILES,
+        commit=_git_commit(),
+        bind_commit=False,
+    )
+
 
 TRAINER_SOURCE_FILES = (
     "experiments/runners/run_belief_conditioned_snapshot.py",

@@ -484,11 +484,9 @@ def load_conditional_shards(
         condition_index = np.asarray(shard[CONDITION_INDEX_KEY], dtype=np.int64)
         condition_weight = np.asarray(shard[CONDITION_WEIGHT_KEY], dtype=np.float32)
         condition_scores = np.asarray(shard[CONDITION_SCORES_KEY], dtype=np.float32)
-        scores = np.asarray(shard[SCORE_KEY], dtype=np.float32)
         actions_valid = np.asarray(shard["actions_valid"], dtype=np.float32)
         decisions = len(condition_count)
         k_max = condition_index.shape[1]
-        max_actions = scores.shape[1]
         decision_rows: list[int] = []
         condition_rows: list[int] = []
         for d in range(decisions):
@@ -503,15 +501,14 @@ def load_conditional_shards(
         idx = np.asarray(decision_rows, dtype=np.int64)
         cond_k = np.asarray(condition_rows, dtype=np.int64)
 
-        # Per-row public obs + meta, repeated per condition.
+        # Per-row public obs + meta, repeated per condition. ``action`` and
+        # ``scores`` are replaced per condition below, so skip them here to
+        # avoid double-appending.
         for key in list(OBS_KEYS) + list(META_KEYS):
-            if key not in shard:
+            if key in ("action", SCORE_KEY) or key not in shard:
                 continue
             col = shard[key]
-            if col.ndim == 1:
-                expanded.setdefault(key, []).append(col[idx])
-            else:
-                expanded.setdefault(key, []).append(col[idx])
+            expanded.setdefault(key, []).append(col[idx])
         # Per-row scores = per-condition strategy scores.
         per_row_scores = condition_scores[idx, cond_k]
         # Guarantee -1 padding matches the legal mask exactly.
@@ -566,6 +563,109 @@ def with_neutral_condition(dataset: dict[str, np.ndarray]) -> dict[str, np.ndarr
     return out
 
 
+# ---------------------------------------------------------------------------
+# Dataset directory builder: shards + sidecars + manifest (schema_version 2)
+# ---------------------------------------------------------------------------
+
+
+def _file_sha256(path: Path) -> str:
+    import hashlib as _hashlib
+
+    h = _hashlib.sha256()
+    with Path(path).open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
+    import json as _json
+    import os as _os
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{_os.getpid()}.tmp")
+    with tmp.open("w") as fh:
+        _json.dump(payload, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+        fh.flush()
+        _os.fsync(fh.fileno())
+    tmp.replace(path)
+
+
+def build_conditional_dataset(
+    out_dir: str | Path,
+    *,
+    num_games: int,
+    games_per_shard: int,
+    sims: int,
+    seed: int,
+    condition_ids: tuple[str, ...] = CONDITION_ROLES,
+) -> dict[str, Any]:
+    """Generate a conditional dataset directory: shards + sidecars + manifest.
+
+    The directory layout matches what
+    ``run_belief_conditioned_snapshot.freeze_conditional_snapshot`` expects:
+    one ``shard_XXXXX.npz`` + ``shard_XXXXX.json`` sidecar per shard, and a
+    ``manifest.json`` with ``schema_version: 2``, a ``run_contract``, a
+    ``run_fingerprint`` (SHA-256 over the contract), and the shard summaries.
+
+    Each shard is produced by ``generate_uniform_determinization_shard``
+    (uniform-determinization toy: K conditions per decision, all sharing the
+    flat-MC scores, uniform weights 1/K). The condition_index tag varies but
+    carries no hidden information, so the pre-registered strength prediction
+    is ~0 gap. This is plumbing/measurement evidence, not a strength claim.
+    """
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    run_contract: dict[str, Any] = {
+        "schema_version": 1,
+        "games": num_games,
+        "games_per_shard": games_per_shard,
+        "sims": sims,
+        "seed": seed,
+        "condition_count": len(condition_ids),
+        "condition_label_format": CONDITION_LABEL_FORMAT,
+        "condition_ids": list(condition_ids),
+        "teacher_spec": {"kind": "flat_mc", "sims": sims},
+        "source_commit": _git_commit(),
+    }
+    run_fingerprint = _canonical_json_sha256(run_contract)
+    shard_count = max(1, num_games // games_per_shard)
+    summaries: list[dict[str, Any]] = []
+    for index in range(shard_count):
+        shard_path = out_dir / f"shard_{index:05d}.npz"
+        game_offset = index * games_per_shard
+        shard_games = min(games_per_shard, num_games - game_offset)
+        summary = generate_uniform_determinization_shard(
+            num_games=shard_games,
+            sims=sims,
+            seed=seed + index * 1_000_000,
+            out_path=shard_path,
+            condition_ids=condition_ids,
+            game_offset=game_offset,
+            dataset_run_fingerprint=run_fingerprint,
+        )
+        summary["shard_index"] = index
+        summary["run_fingerprint"] = run_fingerprint
+        summary["sha256"] = _file_sha256(shard_path)
+        summary["out_path"] = str(shard_path)
+        _atomic_json(shard_path.with_suffix(".json"), summary)
+        summaries.append(summary)
+    manifest = {
+        "schema_version": 2,
+        "status": "completed",
+        "games": num_games,
+        "games_per_shard": games_per_shard,
+        "run_fingerprint": run_fingerprint,
+        "run_contract": run_contract,
+        "shards": sorted(summaries, key=lambda item: item["shard_index"]),
+    }
+    _atomic_json(out_dir / "manifest.json", manifest)
+    return manifest
+
+
 __all__ = [
     "CONDITION_COUNT_KEY",
     "CONDITION_INDEX_KEY",
@@ -586,4 +686,5 @@ __all__ = [
     "generate_uniform_determinization_shard",
     "load_conditional_shards",
     "with_neutral_condition",
+    "build_conditional_dataset",
 ]

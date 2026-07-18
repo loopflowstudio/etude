@@ -257,7 +257,8 @@ class Agent(nn.Module):
             index = torch.zeros((batch,), dtype=torch.long, device=device)
             weight = torch.ones((batch, 1), dtype=torch.float32, device=device)
         index_embed = index_embedding(index)
-        return condition_embedding(torch.cat([index_embed, weight], dim=-1))
+        row = condition_embedding(torch.cat([index_embed, weight], dim=-1))
+        return row.unsqueeze(1)
 
     def get_action_and_value(
         self,
