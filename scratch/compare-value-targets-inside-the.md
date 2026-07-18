@@ -210,6 +210,14 @@ Always name that point-estimate winner. Separately issue a scale decision:
 - otherwise `retain_point_winner_but_smoke_ambiguous`;
 - any integrity failure yields `kill_invalid_evidence` regardless of strength.
 
+Competency noninferiority is one preregistered aggregate gate. For each
+value-target method, sum correct-line outcomes across its three model
+checkpoints, five scenarios, and two frozen competency seeds: exactly 30 binary
+rows. Compare that sum with the corresponding 30-row aggregate for
+`visit_policy_only`; the method passes when the difference is nonnegative, so
+ties pass. Retain and report deltas by model seed and by scenario as diagnostics
+only; neither becomes an additional or post hoc gate.
+
 The decision payload states that no arm is promotion/admission eligible and
 that one 507-row teacher/data seed cannot support a method-level claim.
 

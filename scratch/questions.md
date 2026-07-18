@@ -1,4 +1,4 @@
-# INT-7 Kickoff Assumptions and Review Questions
+# INT-7 Kickoff Assumptions
 
 ## Resolved assumptions
 
@@ -21,26 +21,26 @@
 - The strongest point-estimate complete player is selected by arena rating and
   paired gameplay, never by Brier score. A separate threshold decides whether
   the smoke evidence is separated enough to continue.
+- Competency noninferiority is computed once per value-target method by summing
+  its correct-line outcomes across three model checkpoints, five scenarios,
+  and two frozen competency seeds (30 binary rows), then subtracting the
+  corresponding 30-row `visit_policy_only` aggregate. A nonnegative difference
+  passes, including a tie. Per-model-seed and per-scenario deltas are retained
+  as diagnostics and never become additional gates.
 - The INT-6 smoke schedule is the evaluation authority. The INT-6 contract
   remains byte-for-byte unchanged; new player/evaluator identities belong to
   an additive INT-7 contract.
 - No files under `managym/`, INT-9 belief/world authority, or Study are in
   scope.
+- Training uses ten fixed epochs rather than reproducing INT-4's single epoch.
+  This avoids an undertraining confound while the fixed held-out game exposes
+  overfit risk without result-dependent stopping or tuning.
+- Evaluation uses the complete 17-player, 136-cell, 544-game matrix rather than
+  candidate-versus-anchor-only matches. This makes “full matchups” literal and
+  keeps the diagnostic rating connected without opponent selection.
+- The `continue_<arm>` paired-score separation threshold is preregistered at
+  `0.05`. The point-estimate winner is named regardless; the threshold affects
+  only whether follow-up scaling is recommended.
 
-## Items for review-design
-
-- Confirm that ten fixed epochs are preferable to reproducing INT-4's single
-  epoch. Ten epochs avoids an undertraining confound but increases overfit risk
-  on three training games; the held-out game and fixed schedule expose rather
-  than tune around that risk.
-- Confirm the complete 17-player matrix (544 games) rather than a smaller
-  candidate-versus-anchor-only matrix. The full matrix costs more but makes
-  “full matchups” literal and keeps the diagnostic rating connected without
-  opponent selection.
-- Confirm the `0.05` paired-score separation threshold for `continue_<arm>`.
-  The point-estimate winner is named regardless, so changing this threshold
-  affects only whether follow-up scaling is recommended.
-
-No item blocks kickoff. Until review changes it, the implementation should use
-the decisions above and must not run training before the review-design gate
-approves them.
+All kickoff design questions are resolved. Implementation and training remain
+blocked until the review-design gate approves these assumptions.
