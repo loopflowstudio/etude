@@ -3,24 +3,24 @@
 Contract: `etude.study-branch.contract.v1` (`91d522aa824566b5dc32922960ea307370c49232c442c33048d5e7e0bd10fb53`)
 Driver: `full_clone/current_game_v1`
 Command path: `structured_offers/step_structured_v1`
-Run: `2026-07-18T06:18:21.666483Z`; canonical: `true`
+Run: `2026-07-18T06:22:17.072562Z`; canonical: `true`
 
 ## Interactive lifecycle
 
 | Phase | p50 | p95 | p99 | max |
 |---|---:|---:|---:|---:|
-| Fork | 0.636 ms | 0.998 ms | 2.569 ms | 45.761 ms |
-| Publish offers | 0.008 ms | 0.021 ms | 0.047 ms | 0.212 ms |
-| Structured apply | 0.177 ms | 0.230 ms | 0.589 ms | 5.102 ms |
-| Return | 0.245 ms | 0.328 ms | 0.989 ms | 27.808 ms |
-| End to end | 1.067 ms | 1.825 ms | 4.561 ms | 52.884 ms |
+| Fork | 0.551 ms | 0.624 ms | 0.700 ms | 1.994 ms |
+| Publish offers | 0.007 ms | 0.015 ms | 0.022 ms | 0.038 ms |
+| Structured apply | 0.153 ms | 0.186 ms | 0.224 ms | 0.272 ms |
+| Return | 0.210 ms | 0.250 ms | 0.293 ms | 0.814 ms |
+| End to end | 0.921 ms | 1.070 ms | 1.173 ms | 2.701 ms |
 
-Sustained rate: **678.4 cycles/s** across 2000 checked cycles.
+Sustained rate: **943.0 cycles/s** across 2000 checked cycles.
 
 ## Retained siblings
 
 Retained 512 simultaneous production branches; applied 256 and re-checked 256 untouched siblings.
-Peak RSS delta: **53.5 MiB** (peak 147.0 MiB).
+Peak RSS delta: **54.0 MiB** (peak 147.3 MiB).
 
 ## Exactness, privacy, incarnation, and failure
 
@@ -40,7 +40,7 @@ uv run scripts/bench_study_branch.py verify
 
 Host: `macOS-26.0.1-arm64-arm-64bit`; Python `3.12.12`; logical CPUs: `16`.
 Compiled extension SHA-256: `2335165aff82c05cdc53c011d0622626bc72de590c9a7556db32e53a8cc3b6a4`.
-Source closure SHA-256: `9ac8a33f2b848156637efd45adced5d7dee5d804cb38e33b71cdc566eb2ee2cf` over 109 recorded paths.
-Artifact SHA-256: `262d8697d2cf3bbcc9751851c0600cd0da3faebd54c7852b9cf8b85094255ee7`.
+Source closure SHA-256: `2c1ad685314cdff3859568990acd939955bd6bb36be4fef27d864dcddd858d7e` over 110 recorded paths.
+Artifact SHA-256: `7035661f24124765d61ee7ade63371cb58360a21dc26e227a584af7f1ceaa5bf`.
 
 Raw evidence retains every latency sample, all RSS phase samples, exact source and binary identity, the workload address/object/return digests, failure receipts, and zero-mismatch counters.
