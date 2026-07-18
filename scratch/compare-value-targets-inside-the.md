@@ -43,6 +43,52 @@ INT-6 smoke schedule, verifies every Command trace, and prints one bounded
 decision naming the strongest point-estimate player plus whether the smoke
 evidence separates it from the alternatives.
 
+## Computable design contract
+
+- **User-visible outcome:** the Intelligence researcher can run one command
+  and observe which of policy-only, terminal-outcome, Teacher-1-root-value, or
+  fixed-blend supervision produced the strongest complete visit-trained PUCT
+  player at matched compute, together with an explicit separated-or-ambiguous
+  smoke disposition. The result never presents itself as admission, promotion,
+  method, rating, or general strength evidence.
+- **End-to-end proof:** the documented run begins from the exact retained
+  INT-8 input manifest, verifies and loads its 507 rows, trains twelve matched
+  checkpoints, executes the complete 17-player/544-game INT-6 smoke matrix and
+  128 matched roots, verifies every semantic Command trace, and writes one
+  content-addressed result. The separate documented verify-only command must
+  reproduce no bytes while validating the same complete evidence chain.
+- **Source of truth:** the exact INT-8 retained payload is the only source of
+  trajectory, visit, terminal, root-value, and inherited-cost facts. The
+  frozen INT-6 contract is the only arena schedule, cohort, rating, competency,
+  and profiling authority. The additive frozen INT-7 contract defines the
+  experiment factors, caps, and decision rule; checkpoints, summaries, the
+  report, and the decision are derived evidence.
+- **Affected surfaces and consumers:** the implementation adds the INT-7
+  contract, runner and verify-only CLI, value-target trainer support,
+  neutral/learned checkpoint-leaf evaluation, additive arena registration,
+  cumulative cap ledger, retained result, and experiment report. Existing
+  INT-8 input verification, INT-6 rating/match/competency/profile/replay
+  consumers remain compatible. Frozen INT-6 bytes and INT-9/managym authority
+  consumers do not change.
+- **Absent and error states:** a missing, added, changed, symlinked,
+  regenerated, substituted, or rewritten retained input fails before training;
+  an incomplete target row, mismatched training factor, missing checkpoint,
+  illegal action, private exposure, root mutation, replay mismatch, malformed
+  schedule, artifact tamper, or verification drift fails closed. A projected
+  cap overrun emits typed `resource_cap_exceeded` and retains partial
+  diagnostic receipts. Broad uncertainty with otherwise valid evidence is a
+  successful `retain_point_winner_but_smoke_ambiguous` result, not a failure.
+- **Operational boundary:** the complete registered schedule is fixed at
+  twelve checkpoints, 136 matchup cells/544 games, thirty competency rows per
+  target method, and 128 measured roots, under cumulative hard caps of six wall
+  hours, twenty-four core hours, four workers, and 2,147,483,648 artifact
+  bytes. The runner checks a persistent ledger before every stage or worker
+  launch and never expands a cap or silently reduces the schedule.
+- **Exclusions:** no new teacher labels, corpus regeneration, blend tuning,
+  INT-6 production admission, promotion or general-strength claim, INT-9
+  belief work, managym/Rules/Game/Study authority change, conditional search,
+  new content, or new planner family belongs to INT-7.
+
 ## Approach
 
 ### 1. Freeze the experiment before training
