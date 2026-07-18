@@ -1644,7 +1644,7 @@ def request_versioned_fixture_advice(request: AdviceRequest) -> bytes:
     )
     if not registered_fixtures:
         raise RuntimeError("no versioned advice fixtures are registered")
-    matched = next(
+    matched_registration = next(
         (
             (registration, fixture)
             for registration, fixture in registered_fixtures
@@ -1652,13 +1652,12 @@ def request_versioned_fixture_advice(request: AdviceRequest) -> bytes:
         ),
         None,
     )
-    if matched is not None:
-        registration, fixture = matched
-        matched = fixture
-        assert matched.request.advisor_identity is not None
+    if matched_registration is not None:
+        registration, matched_fixture = matched_registration
+        assert matched_fixture.request.advisor_identity is not None
         try:
             RegisteredAdvisor(
-                matched.request.advisor_identity,
+                matched_fixture.request.advisor_identity,
                 registration.source_paths,
             ).verify_artifact()
         except AdvisorUnavailable as unavailable:
@@ -1671,7 +1670,7 @@ def request_versioned_fixture_advice(request: AdviceRequest) -> bytes:
                     request_sha256=advice_request_sha256(request),
                 )
             )
-        return serialize_advice_response(matched.response)
+        return serialize_advice_response(matched_fixture.response)
     fixture = next(
         (
             candidate
