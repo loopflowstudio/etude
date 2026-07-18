@@ -142,12 +142,13 @@ verdict are retained byte-for-byte.
 
 The canonical `rul-9-played-workloads-v1.json` is a schema-v2 derived receipt.
 It binds the complete schema-v1 measurement origin and its file/artifact hashes,
-copies the same raw evidence under a canonical-byte hash, and binds the patched
-renderer/verifier source separately as derivation-only identity. The verifier
-compares canonical raw bytes exactly and rejects drift in either identity. The
-patched source never claims to have produced the samples, and migration does
-not execute either workload. Product admission remains fail-closed on the same
-two live release budget misses.
+binds its canonical raw byte hash and length without duplicating the sample
+corpus, and binds the patched renderer/verifier source separately as
+derivation-only identity. The verifier loads and fully verifies the immutable
+origin, rederives summary and verdict directly from its raw samples, and rejects
+drift in either identity. The patched source never claims to have produced the
+samples, and migration does not execute either workload. Product admission
+remains fail-closed on the same two live release budget misses.
 
 ### 5. Fail-closed verification and diagnosis
 

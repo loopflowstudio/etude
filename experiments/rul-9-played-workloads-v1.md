@@ -29,11 +29,11 @@ The final workload did not reproduce the exploratory expanded-token pressure: it
 - Frozen PR #153 parity provenance: `af198bb3dcac542a6a34f1cbd8250938e4bfe0e79df7d284de4928873cc0f60b`; live/headless/replay parity samples are retained unchanged from the measurement origin.
 - Immutable measurement origin: `498df1eda031f1d6ea68f72f792dfd68195bb10eab884b006aa7772b586564da` at `experiments/data/rul-9-played-workloads-v1.measurement.json` (file SHA-256 `9a3933a570772e8d3e04b59526faaf1d51b5fc0e26ba8c02e08eae36599bc951`).
 - Measurement source closure: `3f612831df0179a6ce0c1f85e2def15cec6c68ae880ebea5d60d75e8bae13ac2` over 99 files; these files and the bound native extension `c95a85bba1128e6c3afdade5b5cf59dfeb3b1ec464fdd403cdf155a5cf834f8e` produced the samples.
-- Canonical raw evidence: `59f323301f71283635b90fc6cdb43eda2c1079cbf5304c5fceb3d0262e8ba906` over 2316408 bytes; the derived receipt retains byte-identical canonical raw samples.
-- Derivation/report source closure: `1a9fea88b89196c11422d9f5bf2352a78027e4cd66234fc0494560a131c3427a` over 99 files; this source only rederived and rendered the retained samples and did not produce them.
+- Canonical raw evidence: `59f323301f71283635b90fc6cdb43eda2c1079cbf5304c5fceb3d0262e8ba906` over 2316408 bytes in the immutable origin; the derived receipt binds this corpus without duplicating it.
+- Derivation/report source closure: `1d078f3322aede00af77c3e75bc62e2c886059991e6be4233dc51237b100a411` over 99 files; this source only rederived and rendered the retained samples and did not produce them.
 - Derivation native extension identity: `c95a85bba1128e6c3afdade5b5cf59dfeb3b1ec464fdd403cdf155a5cf834f8e` (_managym.cpython-312-darwin.so, release profile).
 - Contract: `9593f3ff7e0eed8fe0316ec66bda96296815480fc0d37441831586cdf3555477`.
-- Derived evidence artifact: `ea5a78e87afca4435a09763773a8fb7fb06a62153aa043174642c62cbc7aa0e7`.
+- Derived evidence artifact: `21fb0d66416ed0f897fb954ced69f71841e136984e2d83869c4806bfc4b707d7`.
 - Release RSS samples: 842; training RSS samples: 782.
 - Raw evidence retains every Command/PUCT duration, game duration, RSS sample, semantic census row, terminal hash, outcome hash, and fallback/cap counter.
 

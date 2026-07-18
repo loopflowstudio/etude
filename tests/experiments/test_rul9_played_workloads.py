@@ -361,23 +361,33 @@ def test_migration_binds_distinct_sources_and_byte_identical_raw(
         "patched-derivation-source"
     )
     assert derived["derivation"]["role"].endswith("did-not-produce-measurement-samples")
-    assert rul9.canonical_json(derived["raw"]) == rul9.canonical_json(
-        measurement["raw"]
-    )
+    assert "raw" not in derived
+    origin_raw = rul9.canonical_json(measurement["raw"])
+    assert origin["raw_lineage"] == {
+        "algorithm": rul9.RAW_LINEAGE_ALGORITHM,
+        "canonical_bytes": len(origin_raw),
+        "sha256": rul9.sha256_bytes(origin_raw),
+    }
     verified = rul9.verify_receipt(registered, derived, check_current=False)
     assert verified["verified"] is True
 
 
-def test_migration_rejects_origin_or_derived_raw_tampering(tmp_path: Path) -> None:
+def test_migration_rejects_origin_lineage_or_derived_summary_tampering(
+    tmp_path: Path,
+) -> None:
     registered = contract()
     measurement, derived = fake_derived_receipt(tmp_path, registered)
 
     tampered = deepcopy(derived)
-    tampered["raw"]["release"]["surfaces"]["live"][0]["protocol_commands"][0][
-        "duration_ms"
-    ] = 99.0
+    tampered["measurement_origin"]["raw_lineage"]["sha256"] = "different"
     tampered["artifact_sha256"] = rul9.artifact_hash(tampered)
-    with pytest.raises(rul9.Rul9Error, match="canonical bytes differ"):
+    with pytest.raises(rul9.Rul9Error, match="canonical raw lineage"):
+        rul9.verify_receipt(registered, tampered, check_current=False)
+
+    tampered = deepcopy(derived)
+    tampered["summary"]["release"]["surfaces"]["live"]["commands"] = 1
+    tampered["artifact_sha256"] = rul9.artifact_hash(tampered)
+    with pytest.raises(rul9.Rul9Error, match="summary does not rederive"):
         rul9.verify_receipt(registered, tampered, check_current=False)
 
     measurement_path = Path(derived["measurement_origin"]["path"])
@@ -421,12 +431,16 @@ def test_checked_receipt_is_fail_closed_when_present() -> None:
     payload = json.loads(rul9.DEFAULT_OUT.read_text(encoding="utf-8"))
     assert payload["schema_version"] == rul9.DERIVED_SCHEMA_VERSION
     assert payload["artifact_sha256"] == rul9.artifact_hash(payload)
-    assert payload["summary"] == rul9.derive_summary(payload["raw"], registered)
-    assert payload["verdict"] == rul9.evaluate_verdict(payload["summary"], registered)
     origin = json.loads(rul9.DEFAULT_MEASUREMENT_ORIGIN.read_text(encoding="utf-8"))
+    assert "raw" not in payload
+    assert payload["summary"] == rul9.derive_summary(origin["raw"], registered)
+    assert payload["verdict"] == rul9.evaluate_verdict(payload["summary"], registered)
     assert origin["artifact_sha256"].startswith("498df1")
     assert payload["measurement_origin"]["artifact_sha256"] == origin["artifact_sha256"]
-    assert rul9.canonical_json(payload["raw"]) == rul9.canonical_json(origin["raw"])
+    origin_raw = rul9.canonical_json(origin["raw"])
+    assert payload["measurement_origin"]["raw_lineage"]["sha256"] == (
+        rul9.sha256_bytes(origin_raw)
+    )
 
     if payload["verdict"]["overall"] == "pass":
         verified = rul9.verify_receipt(registered, payload, check_current=False)

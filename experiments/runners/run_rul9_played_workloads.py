@@ -1552,7 +1552,6 @@ def migrate_receipt(
             "identity": identity,
             "contract_sha256": sha256_bytes(canonical_json(contract)),
         },
-        "raw": deepcopy(measurement["raw"]),
         "summary": summary,
         "verdict": verdict,
     }
@@ -1597,7 +1596,6 @@ def _verify_derived_receipt(
         raise Rul9Error("RUL-9 measurement-origin identity lineage drifted")
 
     origin_raw = canonical_json(measurement["raw"])
-    derived_raw = canonical_json(receipt["raw"])
     raw_lineage = origin.get("raw_lineage")
     expected_lineage = {
         "algorithm": RAW_LINEAGE_ALGORITHM,
@@ -1606,12 +1604,8 @@ def _verify_derived_receipt(
     }
     if raw_lineage != expected_lineage:
         raise Rul9Error("RUL-9 canonical raw lineage does not match its origin")
-    if derived_raw != origin_raw:
-        raise Rul9Error(
-            "RUL-9 derived raw canonical bytes differ from measurement origin"
-        )
 
-    derived = derive_summary(receipt["raw"], contract)
+    derived = derive_summary(measurement["raw"], contract)
     if receipt.get("summary") != derived:
         raise Rul9Error("RUL-9 receipt summary does not rederive from raw evidence")
     _require_zero_counters(derived)
@@ -1761,6 +1755,13 @@ def render_report(
     receipt: Mapping[str, Any], contract: Mapping[str, Any] | None = None
 ) -> str:
     bound_contract = _report_contract(receipt, contract)
+    if receipt.get("schema_version") == DERIVED_SCHEMA_VERSION:
+        _verify_derived_receipt(
+            bound_contract,
+            receipt,
+            check_current=False,
+            current_identity=None,
+        )
     measurement_run, measurement_identity, derivation = _report_context(receipt)
     summary = receipt["summary"]
     release = summary["release"]
@@ -1811,7 +1812,7 @@ def render_report(
         integrity = [
             f"- Immutable measurement origin: `{origin['artifact_sha256']}` at `{origin['path']}` (file SHA-256 `{origin['file_sha256']}`).",
             f"- Measurement source closure: `{measurement_identity['source']['sha256']}` over {len(measurement_identity['source']['files'])} files; these files and the bound native extension `{measurement_identity['binary']['extension_sha256']}` produced the samples.",
-            f"- Canonical raw evidence: `{origin['raw_lineage']['sha256']}` over {origin['raw_lineage']['canonical_bytes']} bytes; the derived receipt retains byte-identical canonical raw samples.",
+            f"- Canonical raw evidence: `{origin['raw_lineage']['sha256']}` over {origin['raw_lineage']['canonical_bytes']} bytes in the immutable origin; the derived receipt binds this corpus without duplicating it.",
             f"- Derivation/report source closure: `{derivation_identity['source']['sha256']}` over {len(derivation_identity['source']['files'])} files; this source only rederived and rendered the retained samples and did not produce them.",
             f"- Derivation native extension identity: `{derivation_identity['binary']['extension_sha256']}` ({derivation_identity['binary']['extension_name']}, release profile).",
             f"- Contract: `{derivation['contract_sha256']}`.",
