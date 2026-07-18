@@ -122,3 +122,71 @@
   multi-condition toy for the ablation. Resolve at implement time.
 - Whether `condition_root_value` is needed in this slice. Assumption: optional
   key, omitted unless the toy producer yields per-condition values cheaply.
+
+## Implement-time assumptions (INT-14, after INT-13 PR #140 landed)
+
+INT-13 shipped on main as `522b2fb` (`manabot/sim/conditional_search.py` +
+`experiments/data/int-13-conditional-strategy-fixture-v1.json`). The branch is
+rebased onto it. Decisions below resolve the open questions and the design's
+"INT-13 does not exist yet" framing now that it does.
+
+- **Frozen shape contract = INT-13's `ConditionalStrategyResult` shape.** The
+  digest-pinned shape is derived from `conditional_search.serialize_result`'s
+  viewer-safe layer (`action_count`, `action_labels`, per-condition
+  `condition_id`/`condition_mass`/`action_distribution`/`q_values`/`root_value`).
+  A test asserts the real INT-13 fixture conforms to the pinned digest, proving
+  "no contract change when INT-13's real result arrives."
+
+- **K=5 for the toy, matching INT-13's condition count.** The toy producer emits
+  5 conditions per decision (True, Has, Lacks, Q, Not(Q) ids) over cheap flat-MC
+  self-play decisions. **Uniform-determinization toy:** every condition's
+  `condition_scores` = the flat-MC per-action scores for that decision
+  (identical across conditions), with uniform weights 1/5. The condition_index
+  tag varies but carries no hidden-info → pre-registered ~0 strength gap holds
+  by construction. This is the strongest honest "plumbing receipt": it cannot
+  show strength because the label is definitionally uninformative.
+
+- **Matched ablation (2x2 factorial).** All four arms share ONE conditioned
+  Agent architecture (`AgentHypers.max_conditions > 0` → one extra neutral
+  object row + a `condition_embedding`; policy/value heads unchanged). All arms
+  train on the SAME D×K expanded rows with the SAME per-row policy targets
+  (each row's `condition_scores`, identical across k for the toy). The ONLY
+  difference across the conditioning dimension: the unconditioned arms
+  (`policy_only`/`policy_value`) see a NEUTRAL condition input
+  (`condition_index=0, condition_weight=1.0`) for every row; the conditioned
+  arms (`belief_conditioned_*`) see the REAL per-row condition
+  (`condition_index=k, condition_weight=1/5`). The value dimension isolates
+  `value_weight` 0 vs 1. Same fixture/init/split/optimizer/seed; only the
+  condition feature content + value_weight differ.
+
+- **Inference uses the neutral condition.** The arena path
+  (`_student_vs_random`/`BatchedSampler`/`ObservationSpace`) does not produce
+  condition keys. The Agent defaults to `condition_index=0,
+  condition_weight=1.0` (the True/uniform condition — the uninformative belief)
+  when condition keys are absent. All arms evaluate under this neutral
+  condition, so the conditioned arm trains with varied labels but plays under
+  the uninformative prior — the train/test mismatch the ~0 prediction covers.
+
+- **Condition channel config lives in `AgentHypers.max_conditions`** (default 0
+  = no condition channel, fully backward compatible). `load_checkpoint_agent`
+  rebuilds `AgentHypers(**hypers["agent_hypers"])`, so the field round-trips
+  through checkpoints with no checkpoint-format change.
+
+- **`train_search_supervised` algorithm is unchanged; only `_batch_observations`
+  is extended** to also batch `condition_index`/`condition_weight` when present
+  in the dataset (backward compatible — existing datasets lack these keys).
+  This honors the design's "reuse unchanged" intent (same loss, same optimizer,
+  same split) while letting the condition side input reach the Agent. Deviation
+  from the literal "unchanged" wording is recorded here.
+
+- **Per-row `scores` = `condition_scores[d, k, :]`** (win-prob-style in [0,1],
+  -1 padding on invalid), so `policy_target_kind = score_softmax` reuses
+  `soft_targets_from_scores` verbatim. `value_target_kind = terminal_outcome`
+  (winner==seat), unchanged. No belief head; the value head stays scalar.
+
+- **`condition_root_value` omitted** in this slice (optional key); the toy
+  yields no cheap per-condition value distinct from the terminal outcome.
+
+- **Frozen evidence:** the toy conditional shard + schema_version 2 snapshot
+  manifest are generated and frozen into `experiments/data/` (not `.runs/`,
+  which is gitignored) as checked-in evidence, mirroring the INT-13 fixture.
