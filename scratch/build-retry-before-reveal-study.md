@@ -212,6 +212,108 @@ Fast-forward, Finish, and reduced-motion behavior.
   removes scrolling/transform animation, and keeps the final committed board
   and text summary readable after the beat.
 
+## Implementation contract
+
+### User-visible outcome
+
+A player studying the just-completed selected matchup can navigate the full
+canonical decision Score, open an exact viewer-safe position, choose one of the
+published Retry offers without seeing Policy or Search judgment, and return in
+one action to the identical recorded position. Reveal is enabled only after the
+Retry command commits. Until the exact Intelligence provider lands, normal play
+shows a precise evidence-unavailable result and preserves Return; the injected
+proof path renders and previews Played, Policy, and Search without changing the
+recording.
+
+### Source of truth
+
+- The persisted `CanonicalReplayV1` and its `ReplayDecisionAddress` are the
+  only timeline, restored-frame, played-command, event-cursor, and recorded
+  continuation truth. The Score, Study selection, and Return response are
+  projections of that record.
+- The retained `StudyForkProvider` root is the only Retry and preview legality
+  authority. Its structured offers and ordinary `Command` submission drive
+  each ephemeral branch; neither HTTP nor TypeScript derives legal actions.
+- `PresentationProjector` consumes the committed branch's semantic engine
+  events. No consumer narrates a before/after snapshot diff.
+- `HistoricalStudyEvidenceProvider` is the only Policy/Search evidence source.
+  Game owns the join: it computes the source replay digest and rejects any
+  artifact whose replay, address, frame, offer, command, content, asset,
+  viewer, model, budget, or provenance identity does not match.
+
+### Affected surfaces and consumers
+
+- Etude server: session-retained roots and attempts; canonical projection
+  digest; Retry, Reveal, preview, and Return HTTP handlers; typed unavailable,
+  invalid-command, identity-mismatch, and expired-root responses.
+- Wire consumers: the existing canonical replay projection and restored
+  decision DTOs remain compatible; new Study attempt/reveal/preview DTOs must
+  omit evidence before Reveal and carry only protocol `PresentationEvent`
+  continuations.
+- Etude replay client: the runes-mode replay store and `/replay` route render
+  the Score and Study state machine; `GameBoard` consumes authoritative focus
+  IDs; the existing presentation player consumes bounded semantic episodes.
+  Ordinary frame-by-frame replay and live play remain behaviorally unchanged.
+- Contract fixtures and readers: the canonical viewer-projection fixture uses
+  the shared digest algorithm; Python, Rust, and TypeScript validators continue
+  to accept the regenerated fixture. Fixture evidence is constructor-injected
+  only in tests and has no environment, URL, or client-controlled runtime path.
+- Verification: Python API/branch tests, TypeScript store/component tests, and
+  real-stack Playwright flows cover the same identities and failure states.
+
+### Absent and error states
+
+- A trace without canonical decisions renders replay normally with an empty or
+  unavailable Study Score; it does not fall back to legacy event inference.
+- A malformed or unauthorized address is rejected before a branch exists. A
+  completed trace whose private root expired remains replayable but reports
+  Retry unavailable.
+- A stale, mismatched, duplicate, or non-offered command is rejected by the
+  structured branch boundary and does not unlock Reveal or mutate replay.
+- Reveal before an accepted Retry is rejected. Leaving or returning before
+  Reveal closes the branch without fetching or exposing evidence.
+- Missing Intelligence evidence returns `study_evidence_unavailable`; malformed,
+  fixture-only in production, digest-drifted, or identity-drifted evidence
+  fails closed. The attempt remains returnable after every Reveal failure.
+- A plan without a matching authoritative offer or previewable semantic event
+  returns a typed unavailable result; it never invents focus IDs or narration.
+- Return is idempotent at the player boundary: the first successful call closes
+  the attempt and restores the recorded decision; a repeated or expired attempt
+  cannot resume branch state and directs the client back to canonical replay.
+
+### Operational boundary
+
+Attempts and private roots remain in-process and expire with the existing
+15-minute `GameSession` inactivity lifetime; this PR adds no persistence,
+subprocess, remote model call, or network fetch. Retry and every Policy/Search
+preview execute exactly one command on one fresh fork, drain one bounded
+semantic transition, then discard it. Non-search UI transitions target p95
+under 100 ms across 20 local repetitions. The Score may contain every
+authorized player-zero decision in the selected match but creates branch state
+only for the currently opened attempt.
+
+### End-to-end proof
+
+With `./scripts/play`, finish the selected matchup, open `/replay`, choose a
+Score row, submit a canonical Retry offer, observe that normal Reveal fails
+closed, and Return to the semantically identical restored decision and
+cursor. The real-stack `study.spec.ts` repeats the flow with a
+constructor-injected exact fixture, proves no Policy/Search evidence crossed
+the boundary before Retry, selects all three labelled plans, verifies each
+alternative used a fresh one-command fork and bounded `PresentationEvent`
+episode, and proves pointer, keyboard, reduced-motion, and phone behavior. The
+verification suite under **Done when** supplies the cross-language and
+regression receipts.
+
+### Exclusions
+
+This serial PR does not generate historical model/search evidence, persist
+private roots or attempts, support opponent-private Study, construct a generic
+analysis tree, infer legality or narration in the client, or add sharing, chat,
+team-series, sideboarding, deck construction, or Avatar Cube breadth. A later
+serial PR installs the exact non-fixture provider and is required before GAM-4
+or the player-visible comparison KR can complete.
+
 ## De-risking
 
 | Question | Finding | Impact on design |
