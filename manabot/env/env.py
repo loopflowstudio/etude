@@ -11,7 +11,11 @@ from gymnasium import spaces
 # Local imports
 from manabot.infra.log import getLogger
 import managym
-from managym.decision import Command, SemanticTransition, apply_semantic_command
+from managym.decision import (
+    Command,
+    SemanticContractError,
+    SemanticTransition,
+)
 
 # Local directory imports
 from .match import Match, Reward
@@ -161,30 +165,25 @@ class Env(gym.Env):
     ) -> tuple[dict, float, bool, bool, dict, SemanticTransition]:
         """Execute one authoritative semantic Command.
 
-        This evaluation path deliberately bypasses positional ``Env.step``.
-        The next model observation is reconstructed for the next acting player;
-        transition events remain available through the canonical receipt.
+        This evaluation path deliberately bypasses positional ``Env.step`` and
+        consumes the native atomic semantic-step result, including its ordinary
+        next-actor observation and canonical transition receipt.
         """
 
-        acting = int(self._last_obs.agent.player_index)
-        transition = apply_semantic_command(self._engine, command)
-        terminated = bool(self._engine.is_game_over())
-        truncated = False
-        next_viewer = self._engine.current_agent_index()
-        raw_obs = self._engine.observation_for_player(
-            acting if next_viewer is None else int(next_viewer)
-        )
-        winner = self._engine.winner_index()
-        raw_reward = (
-            (1.0 if winner == acting else -1.0)
-            if terminated and winner is not None
-            else 0.0
-        )
+        try:
+            transition_json, raw_obs, raw_reward, terminated, truncated, info = (
+                self._engine.step_semantic_command(command.to_json())
+            )
+        except Exception as error:  # managym.AgentError
+            message = str(error)
+            code = message.split(":", 1)[0] if ":" in message else None
+            raise SemanticContractError(message, code=code) from error
+
+        transition = SemanticTransition.from_json(transition_json)
         reward = self.reward.compute(raw_reward, self._last_obs, raw_obs)
-        info: dict[str, Any] = {
-            "true_terminated": terminated,
-            "true_truncated": truncated,
-        }
+        info["true_terminated"] = terminated
+        info["true_truncated"] = truncated
+        winner = self._engine.winner_index()
         if winner is not None:
             info["winner_index"] = int(winner)
         add_truncation_flags(raw_obs, info, self.obs_space.encoder)

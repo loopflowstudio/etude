@@ -38,6 +38,8 @@ def test_python_authority_exposes_only_canonical_exact_world_materialization() -
     assert hasattr(engine, "possible_world_space_json")
     assert hasattr(engine, "materialize_possible_world")
     assert hasattr(engine, "flat_mc_scores_for_worlds")
+    assert hasattr(engine, "step_semantic_command")
+    assert hasattr(engine, "semantic_event_cursor")
     assert not hasattr(engine, "hidden_pool_summary")
     assert not hasattr(engine, "determinize_to_hand")
     assert not hasattr(engine, "flat_mc_scores_for_hands")
@@ -45,7 +47,7 @@ def test_python_authority_exposes_only_canonical_exact_world_materialization() -
 
 def test_provider_commitment_groups_duplicate_semantic_offers() -> None:
     frame = DecisionFrame(
-        schema_version=1,
+        schema_version=3,
         revision=4,
         actor=1,
         fingerprint="frame",
