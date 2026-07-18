@@ -10,12 +10,12 @@
     "path": "result",
     "files": 42,
     "bytes": 21507970,
-    "manifest_file_sha256": "08b0b1e1766f98ddaf88c456eeadd6dcdf41409ca85f09b846f43447271125ea",
-    "manifest_sha256": "07680c08ea5f22cf2baec81341be2e40db4eac5955c65317eb18322455094d30"
+    "manifest_file_sha256": "3dc838ca796232b25ca1483b611e1f79be99a0bcddd3ac9e64d07d3f4b9972df",
+    "manifest_sha256": "af0c3f56745ba4f60e5e3f612787b11c65d6b125917ec1e59b1835e113765b2b"
   },
   "current_verifier": {
     "path": "experiments/runners/run_int18_arena_rating.py",
-    "file_sha256": "c710074bcfdbad5b9a8b491e95f1d415e01cfe9c715d8f5084f5887b4a94f8cc",
+    "file_sha256": "47976d1c9d393767f895b7704019c72267a0d683eed64fa13d9ba0ab710b91c6",
     "role": "current-int18-envelope-derivation-and-verification",
     "boundary": "post-generation-envelope-only",
     "verification_mode": "read-only-no-replay-no-generation",

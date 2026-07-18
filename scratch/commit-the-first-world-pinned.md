@@ -218,9 +218,12 @@ runner hash and requires exact equality with both retained copies while
 continuing to perform no replay and no game generation. The content-addressed
 retention directory and report move to the new envelope manifest identity;
 the historical anchor/challenge files are byte-identical before and after.
+The result-time exact-range evidence wait remains a closed, hashed artifact;
+verification authenticates its retained receipt and status rather than
+re-deriving it from a later mutable INT-9 contract.
 
-The implemented runner receipt is SHA-256 `c710074b...`; the corrected
-envelope identity is `07680c08...`. These identify only current derivation and
+The implemented runner receipt is SHA-256 `47976d1c...`; the corrected
+envelope identity is `af0c3f56...`. These identify only current derivation and
 verification. They do not replace or relabel the frozen execution commit,
 contract, extension, player registrations, anchor manifest, or challenge
 manifest.

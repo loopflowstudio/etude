@@ -1,7 +1,7 @@
 {
   "current_verifier": {
     "boundary": "post-generation-envelope-only",
-    "file_sha256": "c710074bcfdbad5b9a8b491e95f1d415e01cfe9c715d8f5084f5887b4a94f8cc",
+    "file_sha256": "47976d1c9d393767f895b7704019c72267a0d683eed64fa13d9ba0ab710b91c6",
     "generation_authority": false,
     "path": "experiments/runners/run_int18_arena_rating.py",
     "role": "current-int18-envelope-derivation-and-verification",
@@ -208,7 +208,7 @@
     {
       "bytes": 6738,
       "path": "int18-result.json",
-      "sha256": "934f5c724245bcfc339c98637a1f06df5352b10410d2704e426a5948133c03e2"
+      "sha256": "f14ce5e01a8b24edd5466d9001d57e97cd2a09d1800d4748617158f4c2135805"
     },
     {
       "bytes": 4929,
@@ -216,8 +216,8 @@
       "sha256": "e1eb5a71fc99762ecf97d5bc51b3c5d4e84a05b0a8388c3de70b5e6b82dc507d"
     }
   ],
-  "manifest_sha256": "07680c08ea5f22cf2baec81341be2e40db4eac5955c65317eb18322455094d30",
-  "result_sha256": "934f5c724245bcfc339c98637a1f06df5352b10410d2704e426a5948133c03e2",
+  "manifest_sha256": "af0c3f56745ba4f60e5e3f612787b11c65d6b125917ec1e59b1835e113765b2b",
+  "result_sha256": "f14ce5e01a8b24edd5466d9001d57e97cd2a09d1800d4748617158f4c2135805",
   "schema_version": 1,
   "stage": "production"
 }

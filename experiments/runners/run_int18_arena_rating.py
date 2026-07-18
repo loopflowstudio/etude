@@ -512,6 +512,10 @@ def verify(stage: str, out_dir: Path) -> dict[str, Any]:
         raise Int18Error("INT-18 result digest mismatch")
     if result.get("current_verifier") != current_verifier:
         raise Int18Error("INT-18 current verifier result receipt mismatch")
+    if result.get("exact_range_evidence_wait_sha256") != file_sha256(
+        out_dir / "exact-range-evidence-wait.json"
+    ):
+        raise Int18Error("INT-18 exact-range evidence wait receipt mismatch")
     rows = _load_rows(out_dir / "challenge/matches.jsonl")
     run_summary = _verify_rows(rows, stage)
     matrix = load_json(out_dir / "challenge/payoff-matrix.json")
@@ -522,8 +526,11 @@ def verify(stage: str, out_dir: Path) -> dict[str, Any]:
         raise Int18Error("INT-18 connectivity derivation mismatch")
     if load_json(out_dir / "paired-deal-uncertainty.json") != uncertainty:
         raise Int18Error("INT-18 paired uncertainty derivation mismatch")
-    if load_json(out_dir / "exact-range-evidence-wait.json") != _exact_range_wait():
-        raise Int18Error("INT-18 exact-range evidence wait mismatch")
+    exact_range = load_json(out_dir / "exact-range-evidence-wait.json")
+    if exact_range.get("status") != "evidence_wait" or exact_range.get(
+        "play_started"
+    ) is not False:
+        raise Int18Error("INT-18 exact-range evidence wait status mismatch")
     _identity_receipt()
     return {
         "verified": True,
