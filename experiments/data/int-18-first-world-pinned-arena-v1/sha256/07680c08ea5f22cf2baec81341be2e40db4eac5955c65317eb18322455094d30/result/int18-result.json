@@ -13,6 +13,14 @@
   "belief_aware_play_arena_kr_holds": false,
   "challenge_manifest_sha256": "998ad75dcd61e17730208aab216216110a90c3483b5cca45ba0eec49b0f261f7",
   "connectivity_sha256": "682d27085f9e81f9e69e00a828045ba1293c15400484efee69daffe484e9e93c",
+  "current_verifier": {
+    "boundary": "post-generation-envelope-only",
+    "file_sha256": "c710074bcfdbad5b9a8b491e95f1d415e01cfe9c715d8f5084f5887b4a94f8cc",
+    "generation_authority": false,
+    "path": "experiments/runners/run_int18_arena_rating.py",
+    "role": "current-int18-envelope-derivation-and-verification",
+    "verification_mode": "read-only-no-replay-no-generation"
+  },
   "d_puct_rating": 1333.2007719235867,
   "development_pairwise_matches_are_admission_evidence": false,
   "disposition": {

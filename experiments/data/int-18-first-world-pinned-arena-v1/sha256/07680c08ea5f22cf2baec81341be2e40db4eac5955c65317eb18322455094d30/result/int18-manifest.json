@@ -1,4 +1,12 @@
 {
+  "current_verifier": {
+    "boundary": "post-generation-envelope-only",
+    "file_sha256": "c710074bcfdbad5b9a8b491e95f1d415e01cfe9c715d8f5084f5887b4a94f8cc",
+    "generation_authority": false,
+    "path": "experiments/runners/run_int18_arena_rating.py",
+    "role": "current-int18-envelope-derivation-and-verification",
+    "verification_mode": "read-only-no-replay-no-generation"
+  },
   "evidence_class": "production_rating",
   "experiment": "int-18-first-world-pinned-arena-v1",
   "files": [
@@ -198,9 +206,9 @@
       "sha256": "b1877c831d5f94cc9f8d97dd2d88e4ef5c40604d0e9ffc7a814c5b9ce34b385c"
     },
     {
-      "bytes": 6350,
+      "bytes": 6738,
       "path": "int18-result.json",
-      "sha256": "041e3c44b63a41663a7e66573b88622cafb7ab6ddaa8308404a4987fd95a0120"
+      "sha256": "934f5c724245bcfc339c98637a1f06df5352b10410d2704e426a5948133c03e2"
     },
     {
       "bytes": 4929,
@@ -208,8 +216,8 @@
       "sha256": "e1eb5a71fc99762ecf97d5bc51b3c5d4e84a05b0a8388c3de70b5e6b82dc507d"
     }
   ],
-  "manifest_sha256": "f4ac9ef1f305795c54f8fa68d824449da1e503144d3126f95f669f9eaa0489c9",
-  "result_sha256": "041e3c44b63a41663a7e66573b88622cafb7ab6ddaa8308404a4987fd95a0120",
+  "manifest_sha256": "07680c08ea5f22cf2baec81341be2e40db4eac5955c65317eb18322455094d30",
+  "result_sha256": "934f5c724245bcfc339c98637a1f06df5352b10410d2704e426a5948133c03e2",
   "schema_version": 1,
   "stage": "production"
 }

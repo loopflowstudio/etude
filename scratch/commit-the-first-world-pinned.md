@@ -201,3 +201,31 @@ For smoke and production, record:
 - exact-range candidate checkpoint load/hash evidence, registered-artifact
   status, measured likelihood materialization cost, and the typed inclusion or
   evidence-wait decision.
+
+## Review correction: authenticate current verification
+
+The frozen execution closure remains exactly unchanged: release commit
+`76d0834797316c3b6e153ed10e5fadd146a8980a`, anchor manifest
+`cc83abb7...`, challenge manifest `998ad75d...`, and their complete gameplay
+tree. The correction is confined to the current, non-generating INT-18
+envelope.
+
+`experiments/runners/run_int18_arena_rating.py` will derive a
+`current_verifier` receipt containing its repository-relative path, exact file
+SHA-256, role, and authority boundary. Both `int18-result.json` and
+`int18-manifest.json` bind that receipt. `--verify-only` recomputes the live
+runner hash and requires exact equality with both retained copies while
+continuing to perform no replay and no game generation. The content-addressed
+retention directory and report move to the new envelope manifest identity;
+the historical anchor/challenge files are byte-identical before and after.
+
+The implemented runner receipt is SHA-256 `c710074b...`; the corrected
+envelope identity is `07680c08...`. These identify only current derivation and
+verification. They do not replace or relabel the frozen execution commit,
+contract, extension, player registrations, anchor manifest, or challenge
+manifest.
+
+Done when focused verification reports the authenticated current verifier
+SHA-256 and `no_generation=true`, the anchor/challenge manifests and aggregate
+gameplay-tree digest remain unchanged, and the retention/report closure cites
+the new envelope identity.

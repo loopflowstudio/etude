@@ -18,6 +18,7 @@ import sys
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+CURRENT_VERIFIER_PATH = Path(__file__).resolve()
 EXPERIMENT = "int-18-first-world-pinned-arena-v1"
 FROZEN_EXECUTION_COMMIT = "76d0834797316c3b6e153ed10e5fadd146a8980a"
 FROZEN_CONTRACT = REPO_ROOT / "experiments/contracts/int-6-skill-arena-v1.json"
@@ -83,6 +84,17 @@ def file_sha256(path: Path) -> str:
         for block in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _current_verifier_receipt() -> dict[str, Any]:
+    return {
+        "path": CURRENT_VERIFIER_PATH.relative_to(REPO_ROOT).as_posix(),
+        "file_sha256": file_sha256(CURRENT_VERIFIER_PATH),
+        "role": "current-int18-envelope-derivation-and-verification",
+        "boundary": "post-generation-envelope-only",
+        "verification_mode": "read-only-no-replay-no-generation",
+        "generation_authority": False,
+    }
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -398,6 +410,7 @@ def derive(stage: str, out_dir: Path) -> dict[str, Any]:
     anchor_dir = out_dir / "anchor"
     challenge_dir = out_dir / "challenge"
     identity = _identity_receipt()
+    current_verifier = _current_verifier_receipt()
     anchor = _verify_historical_manifest(
         anchor_dir, kind="anchor-freeze", stage=stage
     )
@@ -435,6 +448,7 @@ def derive(stage: str, out_dir: Path) -> dict[str, Any]:
         ),
         "status": "complete",
         "identity": identity,
+        "current_verifier": current_verifier,
         "anchor_manifest_sha256": anchor["manifest_sha256"],
         "challenge_manifest_sha256": challenge["manifest_sha256"],
         "arena_key": challenge["arena_key"],
@@ -461,6 +475,7 @@ def derive(stage: str, out_dir: Path) -> dict[str, Any]:
         "experiment": EXPERIMENT,
         "stage": stage,
         "evidence_class": result["evidence_class"],
+        "current_verifier": current_verifier,
         "result_sha256": file_sha256(out_dir / "int18-result.json"),
         "files": _tree_receipts(out_dir),
     }
@@ -471,9 +486,13 @@ def derive(stage: str, out_dir: Path) -> dict[str, Any]:
 
 def verify(stage: str, out_dir: Path) -> dict[str, Any]:
     manifest = load_json(out_dir / "int18-manifest.json")
-    actual_manifest_sha = manifest.pop("manifest_sha256", None)
-    if actual_manifest_sha != canonical_sha256(manifest):
+    unsigned_manifest = dict(manifest)
+    actual_manifest_sha = unsigned_manifest.pop("manifest_sha256", None)
+    if actual_manifest_sha != canonical_sha256(unsigned_manifest):
         raise Int18Error("INT-18 envelope manifest digest mismatch")
+    current_verifier = _current_verifier_receipt()
+    if manifest.get("current_verifier") != current_verifier:
+        raise Int18Error("INT-18 current verifier manifest receipt mismatch")
     expected_paths = {row["path"] for row in manifest["files"]}
     actual_paths = {
         path.relative_to(out_dir).as_posix()
@@ -489,6 +508,10 @@ def verify(stage: str, out_dir: Path) -> dict[str, Any]:
     result = load_json(out_dir / "int18-result.json")
     if result.get("stage") != stage or result.get("status") != "complete":
         raise Int18Error("INT-18 result stage or status mismatch")
+    if manifest.get("result_sha256") != file_sha256(out_dir / "int18-result.json"):
+        raise Int18Error("INT-18 result digest mismatch")
+    if result.get("current_verifier") != current_verifier:
+        raise Int18Error("INT-18 current verifier result receipt mismatch")
     rows = _load_rows(out_dir / "challenge/matches.jsonl")
     run_summary = _verify_rows(rows, stage)
     matrix = load_json(out_dir / "challenge/payoff-matrix.json")
@@ -505,8 +528,10 @@ def verify(stage: str, out_dir: Path) -> dict[str, Any]:
     return {
         "verified": True,
         "no_generation": True,
+        "no_replay": True,
         "stage": stage,
         "manifest_sha256": actual_manifest_sha,
+        "current_verifier_sha256": current_verifier["file_sha256"],
         **run_summary,
         "components": connectivity["component_count"],
         "bootstrap_replicates": uncertainty["replicates"],

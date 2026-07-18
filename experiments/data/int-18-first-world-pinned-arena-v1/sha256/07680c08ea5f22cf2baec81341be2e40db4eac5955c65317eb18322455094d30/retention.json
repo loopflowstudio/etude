@@ -9,9 +9,17 @@
   "result": {
     "path": "result",
     "files": 42,
-    "bytes": 21507194,
-    "manifest_file_sha256": "8a06b50b03c2b08db47e7fa96f9c3d0219be9d9a6078df3ace13204f0d47c3da",
-    "manifest_sha256": "f4ac9ef1f305795c54f8fa68d824449da1e503144d3126f95f669f9eaa0489c9"
+    "bytes": 21507970,
+    "manifest_file_sha256": "08b0b1e1766f98ddaf88c456eeadd6dcdf41409ca85f09b846f43447271125ea",
+    "manifest_sha256": "07680c08ea5f22cf2baec81341be2e40db4eac5955c65317eb18322455094d30"
+  },
+  "current_verifier": {
+    "path": "experiments/runners/run_int18_arena_rating.py",
+    "file_sha256": "c710074bcfdbad5b9a8b491e95f1d415e01cfe9c715d8f5084f5887b4a94f8cc",
+    "role": "current-int18-envelope-derivation-and-verification",
+    "boundary": "post-generation-envelope-only",
+    "verification_mode": "read-only-no-replay-no-generation",
+    "generation_authority": false
   },
   "anchor": {
     "path": "result/anchor",

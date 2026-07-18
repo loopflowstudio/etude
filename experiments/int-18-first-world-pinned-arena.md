@@ -19,15 +19,21 @@ is `fc9cb76c...`, its arena source closure is `b722c811...`, and its native
 extension is `18d04fe6...`. The dPUCT registration identity is `6b1eb785...`
 and its source closure is `7236414e...`. Current source did not impersonate
 these identities: the historical bytes generated and replayed games, while
-the current INT-18 runner authenticated, derived, and retained the result.
+the current INT-18 runner authenticated, derived, and retained the result. Its
+separate non-generating verifier receipt binds
+`experiments/runners/run_int18_arena_rating.py` at exact SHA-256
+`c710074bcfdbad5b9a8b491e95f1d415e01cfe9c715d8f5084f5887b4a94f8cc`
+with role `current-int18-envelope-derivation-and-verification` and boundary
+`post-generation-envelope-only`. Both the result and envelope manifest retain
+and authenticate that receipt.
 
 The complete result is retained at manifest identity
-`f4ac9ef1f305795c54f8fa68d824449da1e503144d3126f95f669f9eaa0489c9`.
+`07680c08ea5f22cf2baec81341be2e40db4eac5955c65317eb18322455094d30`.
 The anchor manifest is `cc83abb7...`; the challenge manifest is
 `998ad75d...`. The exact identities and source-file receipts are in
-[`int18-result.json`](data/int-18-first-world-pinned-arena-v1/sha256/f4ac9ef1f305795c54f8fa68d824449da1e503144d3126f95f669f9eaa0489c9/result/int18-result.json),
-and the 42-file, 21,507,194-byte retention boundary is in
-[`retention.json`](data/int-18-first-world-pinned-arena-v1/sha256/f4ac9ef1f305795c54f8fa68d824449da1e503144d3126f95f669f9eaa0489c9/retention.json).
+[`int18-result.json`](data/int-18-first-world-pinned-arena-v1/sha256/07680c08ea5f22cf2baec81341be2e40db4eac5955c65317eb18322455094d30/result/int18-result.json),
+and the 42-file, 21,507,970-byte retention boundary is in
+[`retention.json`](data/int-18-first-world-pinned-arena-v1/sha256/07680c08ea5f22cf2baec81341be2e40db4eac5955c65317eb18322455094d30/retention.json).
 
 ## Ratings and paired uncertainty
 
@@ -53,9 +59,9 @@ cohort; the middle three players are not separated by this run.
 
 The complete rating fit, every pairwise difference interval, and all
 per-deal paired sweep/split counts are retained in
-[`rating.json`](data/int-18-first-world-pinned-arena-v1/sha256/f4ac9ef1f305795c54f8fa68d824449da1e503144d3126f95f669f9eaa0489c9/result/challenge/rating.json)
+[`rating.json`](data/int-18-first-world-pinned-arena-v1/sha256/07680c08ea5f22cf2baec81341be2e40db4eac5955c65317eb18322455094d30/result/challenge/rating.json)
 and
-[`paired-deal-uncertainty.json`](data/int-18-first-world-pinned-arena-v1/sha256/f4ac9ef1f305795c54f8fa68d824449da1e503144d3126f95f669f9eaa0489c9/result/paired-deal-uncertainty.json).
+[`paired-deal-uncertainty.json`](data/int-18-first-world-pinned-arena-v1/sha256/07680c08ea5f22cf2baec81341be2e40db4eac5955c65317eb18322455094d30/result/paired-deal-uncertainty.json).
 
 ## Complete payoff matrix
 
@@ -81,8 +87,8 @@ were no draws.
 | random | scripted-greedy | 17–31 | 0.354 | 1 / 15 / 8 |
 
 The machine-readable full matrix is
-[`payoff-matrix.json`](data/int-18-first-world-pinned-arena-v1/sha256/f4ac9ef1f305795c54f8fa68d824449da1e503144d3126f95f669f9eaa0489c9/result/challenge/payoff-matrix.json).
-[`connectivity.json`](data/int-18-first-world-pinned-arena-v1/sha256/f4ac9ef1f305795c54f8fa68d824449da1e503144d3126f95f669f9eaa0489c9/result/connectivity.json)
+[`payoff-matrix.json`](data/int-18-first-world-pinned-arena-v1/sha256/07680c08ea5f22cf2baec81341be2e40db4eac5955c65317eb18322455094d30/result/challenge/payoff-matrix.json).
+[`connectivity.json`](data/int-18-first-world-pinned-arena-v1/sha256/07680c08ea5f22cf2baec81341be2e40db4eac5955c65317eb18322455094d30/result/connectivity.json)
 authenticates six nodes, all 15 expected edges, one component, random-anchor
 reachability, and no missing or unexpected cell.
 
@@ -115,7 +121,7 @@ admit the stateful exact-range player. No neutral likelihood, authored belief,
 or other substitute was used, and no exact-range game was started.
 
 The typed failure is retained in
-[`exact-range-evidence-wait.json`](data/int-18-first-world-pinned-arena-v1/sha256/f4ac9ef1f305795c54f8fa68d824449da1e503144d3126f95f669f9eaa0489c9/result/exact-range-evidence-wait.json).
+[`exact-range-evidence-wait.json`](data/int-18-first-world-pinned-arena-v1/sha256/07680c08ea5f22cf2baec81341be2e40db4eac5955c65317eb18322455094d30/result/exact-range-evidence-wait.json).
 It does not invalidate the independent frozen-anchor/dPUCT result, but the R4
 belief comparison remains open.
 
@@ -133,10 +139,11 @@ Verify the retained result without generating games:
 uv run python experiments/runners/run_int18_arena_rating.py \
   --stage production \
   --out-dir \
-  experiments/data/int-18-first-world-pinned-arena-v1/sha256/f4ac9ef1f305795c54f8fa68d824449da1e503144d3126f95f669f9eaa0489c9/result \
+  experiments/data/int-18-first-world-pinned-arena-v1/sha256/07680c08ea5f22cf2baec81341be2e40db4eac5955c65317eb18322455094d30/result \
   --verify-only
 ```
 
-The command reports `no_generation=true` and the same
-`f4ac9ef1f305795c54f8fa68d824449da1e503144d3126f95f669f9eaa0489c9`
+The command reports `no_generation=true`, `no_replay=true`, current verifier
+SHA-256 `c710074b...`, and the same
+`07680c08ea5f22cf2baec81341be2e40db4eac5955c65317eb18322455094d30`
 manifest identity.
