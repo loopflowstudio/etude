@@ -331,11 +331,46 @@ def test_real_semantic_census_is_ragged_and_fail_closed() -> None:
     assert sum(sample["tokens_by_zone"].values()) == sample["expanded_semantic_tokens"]
 
 
-def test_checked_receipt_verifies_when_present() -> None:
+def test_checked_receipt_is_fail_closed_when_present() -> None:
     if not rul9.DEFAULT_OUT.exists():
         pytest.skip("canonical RUL-9 evidence is generated after preregistration")
     registered = contract()
     payload = json.loads(rul9.DEFAULT_OUT.read_text(encoding="utf-8"))
-    verified = rul9.verify_receipt(registered, payload, check_current=False)
-    assert verified["verified"] is True
-    assert verified["representation_decision"] == ("retain full_clone/current_game_v1")
+    assert payload["artifact_sha256"] == rul9.artifact_hash(payload)
+    assert payload["summary"] == rul9.derive_summary(payload["raw"], registered)
+    assert payload["verdict"] == rul9.evaluate_verdict(payload["summary"], registered)
+
+    if payload["verdict"]["overall"] == "pass":
+        verified = rul9.verify_receipt(registered, payload, check_current=False)
+        assert verified["verified"] is True
+        assert verified["representation_decision"] == (
+            "retain full_clone/current_game_v1"
+        )
+    else:
+        with pytest.raises(rul9.Rul9Error, match="product budgets missed"):
+            rul9.verify_receipt(registered, payload, check_current=False)
+
+
+def test_checked_report_matches_checked_receipt() -> None:
+    if not rul9.DEFAULT_OUT.exists():
+        pytest.skip("canonical RUL-9 evidence is generated after preregistration")
+    payload = json.loads(rul9.DEFAULT_OUT.read_text(encoding="utf-8"))
+    report = rul9.DEFAULT_REPORT.read_text(encoding="utf-8")
+    release = payload["summary"]["release"]
+    training = payload["summary"]["training"]
+    live = release["surfaces"]["live"]
+
+    assert f"Evidence artifact: `{payload['artifact_sha256']}`" in report
+    assert (
+        f"**Verdict:** **{payload['verdict']['overall'].upper()}** — "
+        f"release {payload['verdict']['release']['status']}, "
+        f"training {payload['verdict']['training']['status']}, "
+        f"capacity {payload['verdict']['capacity']['status']}, "
+        f"fallbacks {payload['verdict']['fallbacks']['status']}."
+    ) in report
+    assert (
+        f"Live release | {live['command_ms']['p50']:.3f} / "
+        f"{live['command_ms']['p95']:.3f} ms"
+    ) in report
+    assert f"{training['steps_per_second']:.3f} roots/s" in report
+    assert f"{training['games_per_second']:.4f}/s" in report
