@@ -28,20 +28,27 @@ registered, byte-identical, cap-admissible seam appears.
 
 ## The demo
 
-Run:
+From the authenticated frozen overlay, run the historical anchor and challenger
+commands, then envelope their verified outputs from this branch:
 
 ```bash
-uv run python experiments/runners/run_int18_arena_rating.py \
-  --stage smoke \
-  --out-dir .runs/int-18-first-world-pinned-arena-v1/smoke
+uv run python experiments/runners/run_skill_arena.py freeze-anchors \
+  --contract experiments/contracts/int-6-skill-arena-v1.json \
+  --out-dir <run>/anchor --profile smoke
+uv run python experiments/runners/run_skill_arena.py challenge \
+  --contract experiments/contracts/int-6-skill-arena-v1.json \
+  --anchor-artifact <run>/anchor/manifest.json \
+  --candidate experiments/candidates/int-6-dpuct-32-w4-v1.json \
+  --out-dir <run>/challenge --profile smoke --verify
+uv run python <current-worktree>/experiments/runners/run_int18_arena_rating.py \
+  --stage smoke --out-dir <run>
 ```
 
-The command authenticates and builds the frozen release, plays all 15 cells of
-the six-player smoke cohort on both seat legs of both frozen deals, verifies
-every retained Command trace, and prints the manifest identity plus the paths
-to `rating.json`, `payoff-matrix.json`, `connectivity.json`, and
-`paired-deal-uncertainty.json`. Replacing `smoke` with `production` runs the
-same closed path over the 24-deal production schedule.
+Together they play all 15 cells of the six-player smoke cohort on both seat
+legs of both frozen deals, verify every retained Command trace, and print the
+manifest identity plus the paths to `rating.json`, `payoff-matrix.json`,
+`connectivity.json`, and `paired-deal-uncertainty.json`. Replacing `smoke` with
+`production` runs the same closed path over the 24-deal production schedule.
 
 ## Approach
 
