@@ -60,9 +60,17 @@ first training run. It binds:
   modifying the INT-6 contract;
 - the four arms, three training seeds, target formula, optimizer, architecture,
   split, batch order, PUCT compute class, comparison-seed aliases, decision
-  rule, and resource caps;
+  rule, and exact cumulative hard caps: `wall_hours=6.0`,
+  `core_hours=24.0`, `workers=4`, and
+  `artifact_bytes=2147483648`;
 - `engineering_smoke_only_no_admission_claim` as the only allowed evidence
   class.
+
+The runner maintains a persistent cumulative hard-cap ledger and checks it
+before every stage or worker launch. If the next action could exceed any cap,
+the runner stops fail-closed with typed `resource_cap_exceeded` and retains all
+partial diagnostic receipts. It never extends a cap and never silently shrinks
+the registered training, 544-game, competency, or profiling schedule to fit.
 
 The runner calls the existing INT-8 retained-input verifier before loading any
 shard and again after finalization. It rejects any changed path, byte count,
@@ -321,6 +329,29 @@ self-verification reports:
   `retain_point_winner_but_smoke_ambiguous`, or `kill_invalid_evidence`;
 - `promotion_eligible=false`, `admission_eligible=false`, and
   `method_level_claim=false`.
+
+Exact run command:
+
+```bash
+uv run python experiments/runners/run_int7_value_target_comparison.py \
+  --input-manifest \
+    experiments/data/int-8-retained-int-4-smoke-v1/sha256/13868767846b7004f140cfade3652909347bdbb6708b69cb8c10b36ec2756eb0/input-manifest.json \
+  --out-dir .runs/int-7-value-target-comparison-v1/result
+```
+
+Exact verify-only command over the completed output directory:
+
+```bash
+uv run python experiments/runners/run_int7_value_target_comparison.py \
+  --out-dir .runs/int-7-value-target-comparison-v1/result \
+  --verify-only
+```
+
+Verify-only regenerates nothing. It validates the before/after INT-8 payload
+identities, frozen INT-6 contract SHA-256
+`fc9cb76c0d80ad64951455ac6fede94b1355f383dde2f2964d0e578f62671a71`,
+matched-factor receipts, persistent cumulative cap ledger, every evidence
+artifact, the exact 544-game schedule, and exact Command replay.
 
 Verification before review:
 

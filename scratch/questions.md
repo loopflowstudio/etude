@@ -41,6 +41,20 @@
 - The `continue_<arm>` paired-score separation threshold is preregistered at
   `0.05`. The point-estimate winner is named regardless; the threshold affects
   only whether follow-up scaling is recommended.
+- The exact cumulative hard caps are `wall_hours=6.0`,
+  `core_hours=24.0`, `workers=4`, and
+  `artifact_bytes=2147483648`. The INT-7 contract binds them, and a persistent
+  cumulative ledger is checked before every stage or worker launch. If a next
+  action could exceed a cap, execution stops fail-closed with typed
+  `resource_cap_exceeded` while retaining partial diagnostic receipts. Caps
+  are never extended, and the registered evidence schedule is never silently
+  shrunk to fit.
+- The completed output has a separate `uv run` verify-only path. It regenerates
+  nothing and validates before/after INT-8 payload identities, frozen INT-6
+  contract SHA-256
+  `fc9cb76c0d80ad64951455ac6fede94b1355f383dde2f2964d0e578f62671a71`,
+  matched-factor receipts, the cap ledger, all evidence artifacts, the exact
+  544-game schedule, and exact Command replay.
 
-All kickoff design questions are resolved. Implementation and training remain
-blocked until the review-design gate approves these assumptions.
+All kickoff design questions are resolved. These preregistered assumptions
+bind implementation and training.
