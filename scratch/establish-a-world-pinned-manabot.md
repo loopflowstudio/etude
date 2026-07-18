@@ -6,15 +6,17 @@ Etude Fantasia has runnable random, learned, flat-search, and visit-search
 players, but it does not yet have a stable hill-climbing instrument. Existing
 experiment runners answer local questions with pairwise win rates. They do not
 place every runnable player on one world-pinned scale, preserve a complete
-payoff matrix, or make a promotion decision from replayable population
-evidence.
+payoff matrix, or distinguish a replayable rating from an eligible promotion
+decision.
 
 INT-6 establishes that instrument for Intelligence. A developer training a new
-manabot should be able to register immutable bytes, run one command, and learn
-whether it is stronger than the incumbent at the same inference budget without
-silently changing the world, matchup, opponents, deal distribution, viewer
-boundary, or statistical rule. A reviewer should be able to verify the result
-without generating another game.
+manabot should be able to register immutable bytes, run one command, and place
+it against a stable reference scale without silently changing the world,
+matchup, opponents, deal distribution, viewer boundary, or statistical rule.
+If the cohort contains an exact same-compute incumbent, the same artifact can
+make a promotion decision; if it does not, the result remains a useful rating
+with a typed not-eligible disposition. A reviewer should be able to verify
+either result without generating another game.
 
 Arena v1 deliberately measures play skill in one symmetric selected matchup:
 the w2 `INTERACTIVE_DECK` mirror already used by the Search Teacher and Student
@@ -25,12 +27,9 @@ Arena. It is not a format rating, equilibrium claim, or training league.
 The developer runs:
 
 ```bash
-# One-time arena-v1 anchor freeze, after INT-4 publishes its replacement
-# Teacher-0 control artifact.
+# One-time arena-v1 code-only anchor freeze.
 uv run experiments/runners/run_skill_arena.py freeze-anchors \
   --contract experiments/contracts/int-6-skill-arena-v1.json \
-  --learned-control-artifact \
-    /absolute/path/to/int-4-teacher0-controls-v2/manifest.json \
   --out-dir .runs/int-6-skill-arena-v1/anchors
 
 # Repeatable candidate entry against the frozen anchor evidence.
@@ -42,23 +41,24 @@ uv run experiments/runners/run_skill_arena.py challenge \
   --out-dir .runs/int-6-skill-arena-v1/<candidate>
 ```
 
-The command finishes with a report headed by the candidate's Elo delta and
-promotion disposition. The report also shows the full observed/expected payoff
-matrix, largest Bradley-Terry residuals, S1-S5 competencies, legality and exact
-replay receipts, matched-root p50/p95 latency, throughput, and isolated RSS.
-Every game row links to an immutable Command trace. Re-running the same command
-with `--verify` reads and replays the frozen artifacts without playing a new
-game or invoking a player. Candidate entry never reruns anchor-versus-anchor
-games: it binds the frozen anchor artifact by digest, evaluates the challenger
-against each anchor on the same registered deal blocks, and refits the combined
-population model. It also re-profiles the challenger and challenged incumbent
-together; frozen gameplay is reusable, but a cross-run timing comparison is
-not promotion evidence.
+The command finishes with a report headed by the candidate's Elo coordinate and
+promotion disposition. Against the base code-only cohort the disposition is
+`rated_not_promotion_eligible`, with typed reason
+`exact_incumbent_unavailable`; this is a valid production rating, not a smoke
+result or integrity failure. The report also shows the full observed/expected
+payoff matrix, largest Bradley-Terry residuals, S1-S5 competencies, legality and
+exact replay receipts, matched-root p50/p95 latency, throughput, and isolated
+RSS. Every game row links to an immutable Command trace. Re-running the same
+command with `--verify` reads and replays the frozen artifacts without playing a
+new game or invoking a player.
 
-The learned-control artifact is produced and content-addressed by the amended
-INT-4 control freeze before any arena result exists. The arena validates and
-copies its two registered checkpoint byte files; it never trains controls or
-accepts free-floating checkpoint paths as production anchors.
+Candidate entry never reruns anchor-versus-anchor games: it binds the frozen
+anchor artifact by digest, evaluates the challenger against each anchor on the
+same registered deal blocks, and refits the combined population model. If a
+future cohort contract registers exact learned incumbent bytes, the challenge
+also profiles incumbent and challenger contemporaneously and applies the same
+promotion rule. Adding that anchor creates a new cohort identity and anchor
+artifact; it never appends to or rewrites the base v1 cohort.
 
 ## Approach
 
@@ -75,10 +75,8 @@ the output directory is created. The contract closes:
 - information boundary: `acting-viewer-history-only-v1`;
 - host/runtime class: Python 3.12, CPU inference, one Torch thread per player,
   exact package versions and machine identity;
-- the amended INT-4 learned-control artifact and its canonical SHA-256,
-  including the exact captured checkpoint bytes, training manifest, arm IDs,
-  seeds, dataset/source identities, and checkpoint SHA-256 values;
-- frozen anchor registry and its canonical SHA-256;
+- the exact five-player code-only anchor registry, each implementation source
+  digest, and the registry's canonical SHA-256;
 - rating-model version, optimizer/convergence contract, order-effect
   parameterization, Gaussian-prior digest, and Elo conversion;
 - for candidate runs, the immutable anchor artifact digest whose registry,
@@ -86,8 +84,8 @@ the output directory is created. The contract closes:
   anchor-only matrix are reused;
 - deal-block seeds, player-seed derivation, profile-root selection, competency
   seeds, bootstrap seed, and bootstrap count;
-- promotion incumbent, fixed-compute envelope, thresholds, integrity gates,
-  resource caps, and artifact schema versions;
+- typed promotion eligibility, fixed-compute envelope, approved thresholds,
+  integrity gates, resource caps, and artifact schema versions;
 - the source digest of the additive `manabot.arena` package and runner.
 
 Ratings belong to the complete arena key:
@@ -112,18 +110,18 @@ The runner has two profiles:
   it proves plumbing and always returns `engineering_smoke_non_promotion`.
 - `production`: 24 deal blocks (48 games per matchup), 100 paired competency
   runs per S1-S5 scenario,
-  and 2,000 bootstrap replicates. It may issue a promotion disposition.
+  and 2,000 bootstrap replicates. It issues a rating disposition and may issue
+  a promotion only when the cohort contains an exact eligible incumbent.
 
-The production contract is frozen only after the amended INT-4 control
-artifact exists, so no placeholder or historical missing digest can enter an
-arena key. Reusable modules and tests may be developed earlier against a
-separate fixture contract and a fixture-scoped control artifact; that evidence
-class has a distinct identity and can return only
-`engineering_smoke_non_promotion`.
+The base production contract has no learned checkpoint dependency and can be
+frozen from current source. Tests may additionally create fixture checkpoint
+registrations under a separate fixture contract, but that evidence class has a
+distinct identity and can return only `engineering_smoke_non_promotion`.
+Fixture bytes can never satisfy production registration or promotion.
 
-Production retains the existing INT-4 caps: four outcome workers, 16 cumulative
-wall hours, 64 cumulative core hours, and 4 GiB of artifacts. Failed and resumed
-attempts remain charged through the append-only hash-chained resource ledger.
+Production uses four outcome workers, 16 cumulative wall hours, 64 cumulative
+core hours, and 4 GiB of artifacts. Failed and resumed attempts remain charged
+through the append-only hash-chained resource ledger.
 
 ### 2. Freeze anchors; content-address the challenger
 
@@ -154,33 +152,34 @@ The frozen arena-v1 anchor cohort is:
    and decline optional choices only when no affirmative legal choice exists;
 3. `flat-mc-4-v1`;
 4. `flat-mc-16-v1`;
-5. `flat-mc-64-v1`;
-6. `int4-teacher0-policy-only-v2`, the policy-only arm named and captured by
-   the amended INT-4 control artifact;
-7. `int4-teacher0-policy-value-v2`, the policy/value arm named and captured by
-   that same artifact.
+5. `flat-mc-64-v1`.
 
-The unavailable historical checkpoint digests remain frozen evidence in the
-superseded INT-4 contracts; they are not arena-v1 anchors and are never silently
-reassigned to new bytes. INT-4 owns deterministic retraining and the new
-pre-result control freeze. INT-6 imports that complete artifact by digest,
-requires both checkpoint files to live beneath its content-bound artifact root,
-and records their new hashes and provenance in the arena contract before any
-match runs. A missing, mutable, post-result, or path-only control artifact is a
-preflight failure.
+These registrations map to current executable seams, not future artifacts:
+
+- `random-v1` delegates to
+  `manabot.sim.flat_mc.RandomMatchupPlayer`, seeded from the arena seed plan and
+  checked against the current legal offers before every transition;
+- `flat-mc-{4,16,64}-v1` delegate to
+  `manabot.sim.flat_mc.FlatMCPlayer` through `make_player({"kind": "search"})`
+  with the complete budget parameters stored in each registration;
+- `scripted-greedy-v1` is the only new base player implementation. It conforms
+  to the existing `MatchupPlayer.act(env, obs) -> int` seam and selects only
+  from the acting viewer's raw action-space metadata. Its deterministic rules
+  are the ordered rules above, and its source digest is part of the registry.
 
 Flat-MC budgets mean simulations per legal root action, with four rollouts per
 world, a 2,000-step playout cap, uniform viewer-safe determinization, common
 worlds across actions, and argmax tie-breaking. Those meanings are stored, not
 inferred from a name.
 
-The learned anchors and ordinary learned challengers use
-`policy-cpu-batch1-v1`: deterministic policy-only inference, CPU, one Torch
-thread, batch size one, no decision-time search, p95 matched-root latency no
-more than 10 ms, and isolated peak RSS delta no more than 1 GiB. Flat-search
-anchors have separate compute classes. The challenger manifest declares which
-incumbent it challenges; arena v1 initially permits promotion only against
-`int4-teacher0-policy-value-v2`.
+Checkpoint challengers use `policy-cpu-batch1-v1`: deterministic policy-only
+inference, CPU, one Torch thread, batch size one, no decision-time search, p95
+matched-root latency no more than 10 ms, and isolated peak RSS delta no more
+than 1 GiB. Flat-search anchors have separate compute classes. A checkpoint
+challenger can enter and receive a rating without any learned anchor. If its
+declared incumbent is absent, has unavailable bytes, or has another compute
+class, promotion eligibility is typed unavailable rather than inferred from a
+proxy.
 
 The anchor list and anchor behavior never come from a training scheduler.
 `manabot.arena` does not import `net_opponent`, accept opponent weights, or
@@ -190,15 +189,18 @@ anchor pair once and publishes a content-addressed anchor artifact.
 `challenge` runs only challenger-versus-anchor cells; it must use the exact
 registered deal blocks so the combined uncertainty calculation preserves the
 common-random-number design. Changing any anchor, seed, or anchor evidence byte
-requires a new arena version or a byte-identical regenerated artifact.
+requires a new cohort contract and digest or a byte-identical regenerated
+artifact. A future learned anchor may bind the base artifact as an immutable
+submatrix, but it creates a new `anchor_cohort_sha256`, refits ratings under the
+new key, and never mutates base v1 evidence.
 
 ### 3. Add a stable arena player seam without disturbing frozen experiments
 
 Add `manabot/arena/players.py` with an `ArenaPlayer` protocol and an additive
 factory. It wraps current `manabot.sim.flat_mc.make_player` kinds and adds the
 full-game scripted anchor locally. It does not edit `flat_mc.py`,
-`teacher1_evidence.py`, or the INT-4 runners because those source bytes are
-already frozen by preregistered contracts.
+`teacher1_evidence.py`, or `manabot.verify.competency`; the arena composes their
+current seams additively and carries its own source digest.
 
 Every player receives only the acting viewer's encoded observation or raw
 viewer-oriented observation. Search players may use the authoritative engine
@@ -217,6 +219,14 @@ not invent a third offer or Command meaning. When managym's target semantic
 Command lands, the adapter can migrate behind the arena seam, and any change to
 durable command meaning forks the arena identity rather than rewriting v1
 evidence.
+
+The remaining executable seams are equally direct. `Match` and
+`Match.swapped()` provide the two orientations; `Env.reset(seed=deal_seed,
+options={"match": swapped})` can reset both legs on the same deal rather than
+`play_games`' current successive seeds. `SCENARIOS` and `run_scenario_once` in
+`manabot.verify.competency` accept any object with the same `act(...)` method,
+so the arena can persist per-seed S1-S5 rows without changing scenario
+authority. No base-cohort path loads a checkpoint or imports a training runner.
 
 Errors are fatal. The arena never falls back to pass or action zero after an
 illegal output, because a fallback would turn an integrity failure into fake
@@ -328,13 +338,16 @@ Add a serialized profile stage. It selects a contract-defined corpus of 128
 decision roots from the frozen `random-v1` versus `scripted-greedy-v1` traces
 by canonical `(deal seed, leg, revision)` order, with 16 earlier roots used only
 for warmup. The anchor freeze profiles every anchor for descriptive cohort
-costs. Each challenge re-profiles the challenger and promotion incumbent in the
-same session; old incumbent timing is never used for the fixed-compute gate.
-The two are each profiled in fresh child processes over two counterbalanced
-passes (`incumbent, challenger`, then `challenger, incumbent`) and their samples
-are pooled. Each process replays the prefix Commands, encodes the root through
-that player's observation space, and invokes `act(...)` without applying the
-result. The profiler asserts that `act(...)` did not mutate the root.
+costs. Every challenge profiles the challenger in fresh child processes. When
+an exact promotion incumbent is registered in the same cohort and compute
+class, the challenge re-profiles both in the same session over two
+counterbalanced passes (`incumbent, challenger`, then `challenger, incumbent`)
+and pools their samples; old incumbent timing is never promotion evidence. If
+the incumbent is unavailable, the challenger still receives a complete cost
+profile and the fixed-compute comparison is typed unavailable. Each process
+replays the prefix Commands, encodes the root through that player's observation
+space, and invokes `act(...)` without applying the result. The profiler asserts
+that `act(...)` did not mutate the root.
 
 For each player report:
 
@@ -355,15 +368,25 @@ memory.
 Use the existing authoritative S1-S5 definitions and trackers. The arena's
 player factory drives every anchor and challenger through 100 runs per
 scenario with the same run seeds. Persist per-run correctness, not only the
-aggregate, so candidate-minus-incumbent differences can use a paired seed
-bootstrap. Continue to report Wilson intervals for each standalone rate.
+aggregate. Continue to report Wilson intervals for each standalone rate. When
+an exact incumbent is eligible, candidate-minus-incumbent differences use the
+same rows for a paired seed bootstrap; otherwise the noninferiority comparison
+is typed unavailable without suppressing candidate competency evidence.
 
 This is a diagnostic suite attached to a complete gameplay player. It does not
 gate whether a new architecture may enter the arena.
 
 ### 8. Preregister one strict promotion rule
 
-Production promotes the challenger only when every clause passes:
+Production first computes an explicit eligibility record. Promotion is
+eligible only when the cohort contains an incumbent registration with present,
+digest-valid bytes and the challenger names that exact player; both
+registrations have the same player compute class; and the run is a production
+profile. Missing bytes, an absent incumbent, or a compute-class mismatch yields
+`rated_not_promotion_eligible` with a typed `unavailable` reason. It is not
+converted into `retain_incumbent`, and no code-only anchor is used as a proxy.
+
+For an eligible challenger, promotion requires every clause:
 
 1. **Fixed compute:** challenger and incumbent have the exact same compute
    class; challenger matched-root p95 is at most 1.10x incumbent, throughput is
@@ -381,10 +404,19 @@ Production promotes the challenger only when every clause passes:
    or source/runtime/registry identity mismatches. Search playout cap rate must
    remain at or below 0.001. Resource caps must pass.
 
-The disposition is one of `promote`, `retain_incumbent`,
-`engineering_smoke_non_promotion`, or `invalid_integrity`. It includes every
-clause and input digest; no prose-only judgment can override it after results
-exist.
+Disposition precedence is deterministic:
+
+1. any integrity failure is `invalid_integrity`;
+2. a smoke/fixture run is `engineering_smoke_non_promotion`;
+3. valid production evidence without an eligible incumbent is
+   `rated_not_promotion_eligible`, carrying one of
+   `exact_incumbent_unavailable`, `incumbent_not_in_cohort`, or
+   `compute_class_mismatch`;
+4. eligible production evidence is `promote` only when all fixed-compute,
+   rating, and competency clauses pass, otherwise `retain_incumbent`.
+
+The receipt includes every clause, unavailable field, reason and input digest;
+no prose-only judgment can override it after results exist.
 
 ### 9. Make the result independently verifiable
 
@@ -392,15 +424,15 @@ The resumable runner writes only content-bound artifacts. The anchor freeze
 writes the anchor registry, anchor-only match and trace evidence, descriptive
 profiles, competencies, replay receipt, and matrix under one manifest. A
 candidate run references that manifest and writes challenger-specific gameplay
-and competency evidence, a contemporaneous challenger/incumbent profile, and
-the recomputed combined result:
+and competency evidence, a retained checkpoint copy for checkpoint-backed
+registrations, a challenger profile, an incumbent comparison only when
+eligible, and the recomputed combined result:
 
 ```text
 manifest.json
 resource-ledger.jsonl
-controls/manifest.json                  # anchor artifact only
-controls/checkpoints/<arm>.pt           # anchor artifact only
 players.json
+checkpoints/<player-id>.pt               # checkpoint registrants only
 matches.jsonl
 traces/<player-a>__<player-b>.commands.jsonl.gz
 replay.json
@@ -413,11 +445,11 @@ report.md
 ```
 
 Job outputs and stage-result bytes are immutable and SHA-bound to manifest
-copies, following the INT-4 production runner's pattern. `--verify` validates
-the referenced learned-control artifact before the anchor manifest and the
-anchor manifest before the candidate manifest, then validates
+copies, following the repository's existing bound-stage pattern. `--verify`
+validates the anchor manifest before the candidate manifest, then validates
 contract/runtime/player identities, the resource-ledger chains, every artifact
-digest, trace schema, every Command replay, competency aggregates, the
+digest, retained checkpoint bytes when present, trace schema, every Command
+replay, competency aggregates, the
 Bradley-Terry optimum and bootstrap seed, matrix/residual aggregates, cost
 metrics, and the promotion decision. Verify mode refuses to create missing
 artifacts, play games, invoke players, or bootstrap with an unregistered seed.
@@ -447,9 +479,10 @@ artifacts, play games, invoke players, or bootstrap with an unregistered seed.
 
 | Question | Finding | Impact on design |
 |----------|---------|------------------|
-| Is the selected matchup already pinned? | INT-4 freezes w2 `w2-interactive-deck` and the symmetric `INTERACTIVE_DECK` matchup, including content, ABI and matchup hashes. | Arena v1 reuses that exact mirror rather than creating a new deck or cross-world number. |
-| Can the existing matchup loop produce paired deals? | `flat_mc.play_games` alternates seats but increments the engine seed every game, so its two seat orientations are different deals. | Arena owns a new loop that resets both legs with the same deal seed and keeps player RNG identity separate. |
-| Are arena matches replayable today? | Teacher-1 evidence already proves viewer-safe `ExperienceFrame` + prompt-bound `Command` replay, but ordinary matchup records retain only action indices and outcomes. | Reuse the validated frame/Command builders and store every Command plus hashes; add complete post-run replay without invoking policies. |
+| Is the selected matchup already pinned? | Current main exposes the symmetric `manabot.verify.util.INTERACTIVE_DECK` mirror, while `teacher1_evidence.runtime_fingerprints` reports its content, matchup, Observation/action ABI, protocol, engine-source, and native-extension hashes. | Arena v1 reuses and contract-pins those exact current identities rather than depending on another Task or creating a new deck/world number. |
+| Which current players make the base arena executable? | `flat_mc.MatchupPlayer` is the common `act(env, obs)` seam. `make_player` already constructs seeded `RandomMatchupPlayer` and `FlatMCPlayer`; the latter stores sims/worlds/rollouts/max-steps and uses common worlds across legal root actions. | Freeze random plus flat-MC 4/16/64 directly. Add only the viewer-safe deterministic greedy implementation in `manabot.arena.players`, under the same protocol and a bound source digest. No base registration loads weights. |
+| Can the existing matchup loop produce paired deals? | `flat_mc.play_games` uses `Match.swapped()` but increments the engine seed every game, so adjacent seat orientations are different deals. `Env.reset` already accepts both an exact seed and swapped-match option. | Arena owns a thin loop that calls `Env.reset(seed=deal_seed)` and `Env.reset(seed=deal_seed, options={"match": match.swapped()})` for the two legs, with player RNG identity kept separate. |
+| Are arena matches replayable today? | `teacher1_evidence.build_viewer_frame` and `build_command` validate the acting viewer's frame and offered action; `Env._engine.state_digest()` witnesses roots/transitions; `replay_teacher_trajectories` rebuilds frames, validates Commands, and advances through `Env.step(command.offer_id)` without a player. | Reuse those exact seams in an arena-shaped trace/verifier. Store every Command plus pre/post hashes and never invoke policies or search during verification. |
 | Should arena output claim to be a Game canonical replay? | Game's canonical replay also owns presentation tracks and authorized viewer projection. A simulator does not currently own those presentation events. | Keep arena traces authority-private Intelligence evidence. Do not fabricate Game-owned presentation state. |
 | Can a plain Bradley-Terry MLE always be fitted? | No. Undefeated/winless players or a non-strongly-connected directed result graph can send MLE skill to infinity; a local synthetic 192-0 test reproduced the separation case. | Use a preregistered Gaussian-MAP Bradley-Terry fit. The same synthetic case converged to finite ratings in 12 Newton iterations. |
 | Does regularization have a principled guarantee? | A Gaussian prior makes generalized Bradley-Terry MAP estimation finite and unique; the prior must be visible because it affects extreme ratings. | Freeze a 400-Elo standard deviation and publish convergence/prior metadata rather than silently clipping ratings. |
@@ -458,13 +491,13 @@ artifacts, play games, invoke players, or bootstrap with an unregistered seed.
 | How will non-transitivity appear? | AlphaStar-scale leagues contain strong rock-paper-scissors cycles; one scalar cannot describe them. | Always emit the full matrix, observed-versus-expected residuals and deviance beside Elo. Promotion is against the whole frozen cohort, not rating alone. |
 | Can match-worker timing support fixed-compute claims? | Four-worker outcome runs contend for CPU, while Intelligence memory explicitly requires a quiet host for latency/throughput/RSS cells. | Report native match timing but authorize promotion only from a serialized, isolated, matched-root profile stage. |
 | Can peak memory be attributed in a shared process? | `ru_maxrss` is process-wide and monotone; two players in one long-lived worker make per-player attribution impossible. | Profile each player in a fresh process, record baseline/peak/delta and the sampler limitations. Match-cell RSS remains a separate shared receipt. |
-| Are the learned anchors locally available? | No `.pt` files are present. The two historical Teacher-0 hashes name bytes that were produced but not preserved. Intelligence memory records the accepted resolution: amend INT-4, deterministically retrain both arms, then freeze the new bytes under new identities rather than pretending the missing hashes can be recovered. | INT-4 owns a content-contained replacement control artifact. Arena v1 binds that artifact and its new checkpoint hashes before matches; the historical hashes remain untouched evidence but are not anchors. Smoke uses explicitly fixture-scoped temporary checkpoints and can never promote. |
+| Must learned anchor bytes exist before arena v1 can ship? | No exact learned incumbent bytes are available, and the code-only population is sufficient to identify a connected rating model, exercise paired matches, and rate a checkpoint challenger. It is not sufficient for a same-compute learned promotion comparison. | Freeze the five code-only anchors now. A checkpoint challenger receives `rated_not_promotion_eligible` when no exact incumbent is registered. Adding a learned anchor requires a new cohort contract/digest and cannot mutate v1. Fixture checkpoints remain smoke-only. |
 | Does current main have the target authoritative semantic Command API? | No. `docs/ARCHITECTURE.md` marks managym `MatchAuthority`/`DecisionFrame`/`Command` as the target. Current Teacher-1 evidence instead validates a viewer-safe `ExperienceFrame` and prompt-bound `etude.experience_protocol.Command`, then applies its offered action through managym. | Reuse and source-pin the current tested bridge for arena v1. Do not create another semantic layer or call the trace a future canonical replay; fork arena identity if migration changes durable Command meaning. |
 | Is the native Python engine ready in this worktree? | A `uv run` import found no `managym._managym` extension. | The implementation/demo checklist rebuilds the pinned cp312 extension before integration tests; missing or wrong extension identity is a preflight failure. |
-| Could adding the arena invalidate INT-4? | INT-4's runtime fingerprint hashes `flat_mc.py`, `mcts.py`, and Teacher-1 sources. Editing those files would invalidate its preregistered production identity. | Add `manabot.arena` and adapters without editing frozen INT-4 source files. Arena gets its own source digest. |
+| Can the arena compose current evidence without rewriting frozen helpers? | Yes. The required constructors and scenario definitions are callable from additive modules; `SCENARIOS` plus `run_scenario_once` accept the same player `act(...)` seam. | Add `manabot.arena` adapters without editing `flat_mc.py`, `teacher1_evidence.py`, or `competency.py`. The arena gets its own source digest and existing evidence keeps its historical source identity. |
 | Can a stochastic player be reproduced across worker counts? | Existing players derive internal seeds from runner-local values and call order. Worker scheduling is not an identity. | Derive player seeds from the arena key, unordered pair, deal seed and player ID; reconstruct players per leg. Store all derived seeds. |
 | How should draws and caps enter a binary model? | A real engine draw is a legitimate half result; a nonterminal truncation is not. Current selected-match evidence has zero draws/caps but the schema should not conflate them. | Store termination reason. Score true draws as 0.5; reject truncations; report both explicitly. |
-| Does the complete anchor schedule fit the inherited production cap? | Exp-02 ran 3,900 flat-search games at budgets 16/64/256 in 4.5 CPU-core-hours. Arena v1 freezes 1,008 anchor games, caps flat search at 64, and adds bounded trace/replay/profile/competency work. | Retain the stricter 16 wall-hour/64 core-hour cap. The historical margin is ample, while the cumulative ledger still stops launch if current-source instrumentation makes the estimate stale. |
+| Does the complete anchor schedule fit the production cap? | Exp-02 ran 3,900 flat-search games at budgets 16/64/256 in 4.5 CPU-core-hours. The five-player base has 10 unordered pairs and therefore 480 production anchor games at 24 blocks × two legs, with flat search capped at 64. | Retain the 16 wall-hour/64 core-hour cap. The historical margin is ample for trace/replay/profile/competency work, while the cumulative ledger still stops launch if current instrumentation makes the estimate stale. |
 | Should adaptive opponents improve arena efficiency now? | The task and research program require a stable reference cohort; OpenAI Five likewise separated adaptive training opponents from fixed rating references. | Exhaustively evaluate the frozen cohort in v1. PFSP, near-skill scheduling and exploiters stay out. |
 
 Research references: Butler and Whelan on [Bradley-Terry MLE
@@ -488,10 +521,10 @@ findings are recorded in
 | Hessian-only standard errors | Fast and conventional under independent games. | Games are paired by deal and share seeds across cells. The independence assumption is wrong by construction. |
 | Bootstrap each pair separately | Preserves the two seat legs within a matchup. | It drops correlation created by using the same deal seed across the complete combined schedule. Global deal-block resampling preserves the actual experiment. |
 | Use the Game server to record canonical presentation replays | Produces the richest player-facing trace. | It routes thousands of simulator games through a product server and crosses the Game/Intelligence ownership boundary. Arena only needs Commands and exact authority replay. |
-| Fold arena behavior into `flat_mc.play_games` | Reuses the current loop directly. | It would invalidate frozen INT-4 source identities and overload an experiment-era helper with registry, replay, rating and promotion policy. |
+| Fold arena behavior into `flat_mc.play_games` | Reuses the current loop directly. | It changes the source identity of existing experiment evidence and overloads a pairwise helper with registry, replay, rating and promotion policy. |
 | Rerun the complete anchor round robin for every challenger | Makes every candidate directory fully standalone. | It spends most evaluation cost reproducing evidence whose identities and Commands are already immutable. Arena v1 freezes and verifies the anchor submatrix once, then binds it by digest in every challenge. |
-| Keep waiting for the missing historical Teacher-0 hashes | Preserves the old preregistration literally. | The weight bytes were never retained, so a hash proves identity but cannot reconstruct an artifact. The accepted wave decision is a transparent new control freeze with new IDs; recycling the old IDs would fabricate continuity. |
-| Retrain learned controls inside the arena runner | Makes `freeze-anchors` self-contained. | It couples evaluation to training, weakens the pre-result cohort boundary, and duplicates INT-4 ownership. Arena consumes a completed immutable control artifact and never trains an anchor. |
+| Require a learned incumbent before shipping arena v1 | Enables an immediate promote/retain result for learned candidates. | Exact incumbent bytes do not exist, and another Task is parked. The code-only cohort already delivers a connected, replayable rating instrument; eligibility can fail closed without blocking that value. |
+| Treat a code-only anchor as the learned candidate's incumbent | Produces a numerical delta and apparent promotion decision now. | Compute classes differ, so the result is not fixed-compute evidence. The arena reports `rated_not_promotion_eligible` instead of laundering a proxy into an incumbent. |
 | Add PFSP, exploiters or near-rating scheduling immediately | Reduces games and may improve training. | Those are adaptive training/league policies, not the fixed evaluation instrument INT-6 owns. There is not yet a sufficiently rich admitted archive. |
 
 ## Key decisions
@@ -499,9 +532,9 @@ findings are recorded in
 1. **Arena v1 rates runnable configurations, not abstract algorithms.** A
    policy checkpoint and that checkpoint plus search are different players
    with different compute classes.
-2. **Learned anchors arrive through a pre-result INT-4 control artifact.** New
-   frozen IDs and hashes make the accepted control refresh honest; old missing
-   hashes remain historical evidence and are never reassigned.
+2. **The base cohort is exactly five code-only players.** Random,
+   scripted-greedy and flat-MC 4/16/64 can freeze from current source with no
+   checkpoint or cross-Task dependency.
 3. **The scale is stable because the world, content, estimator/prior, compute
    envelope, anchors and seed schedule are stable.** Absolute `1000` is only
    the random anchor; Elo differences are the evidence.
@@ -512,8 +545,9 @@ findings are recorded in
    independently verifiable without paying repeatedly for anchor games.
 5. **The matched-root profiler is part of the arena, not a benchmark appendix.**
    Fixed-compute promotion cannot depend on contended outcome-worker timing or
-   compare current challenger cost against an old incumbent measurement, so
-   every challenge profiles both configurations contemporaneously.
+   compare current challenger cost against an old incumbent measurement. Every
+   challenge profiles the candidate; an eligible incumbent is re-profiled
+   contemporaneously, otherwise the comparison is typed unavailable.
 6. **Every decision retains the current validated Command bridge.** Action
    indices remain an engine transport inside w2, never the retained evidence
    identity; arena v1 does not pre-implement the target managym Command API.
@@ -522,6 +556,10 @@ findings are recorded in
 8. **The rating model admits its misspecification.** Seat effect, complete
    matrix and residuals stay visible; no Elo rank is called equilibrium or
    superhuman evidence.
+9. **Learned registration extends rather than mutates the base.** A checkpoint
+   challenger may be rated now. Adding an exact learned anchor requires a new
+   cohort contract/digest; only that cohort can make a same-compute promotion
+   decision against it.
 
 ## Wild success
 
@@ -546,44 +584,49 @@ task adds dedicated exploiters and a broader content suite.
 
 - In scope: one w2 symmetric `INTERACTIVE_DECK` mirror; strict player and
   candidate registration; random, deterministic scripted, flat-MC 4/16/64,
-  two newly frozen learned incumbents imported from the amended INT-4 control
-  artifact, and one challenger; a one-time complete
-  paired-deal anchor round robin plus challenger-versus-every-anchor entry;
-  authority-private Command traces and exact replay; batch
+  and one checkpoint challenger; a one-time complete paired-deal code-only
+  anchor round robin plus challenger-versus-every-anchor entry; typed
+  promotion eligibility with fail-closed unavailable reasons; authority-private
+  Command traces and exact replay; batch
   seat-aware Bradley-Terry/Elo; global paired-block uncertainty; full payoff
   matrix and residuals; S1-S5; legality/viewer integrity; native and
   matched-root latency/throughput/RSS; preregistered promotion; independent
   verification.
 - Out of scope: PFSP or any adaptive training-opponent scheduler; sparse or
   near-skill match scheduling; dedicated exploiters or best-response claims;
-  CFR/public-belief solving; training; checkpoint reconstruction; multi-deck,
-  format, Team Sealed, human, or public ladders; cross-world ratings; Game UI or
+  CFR/public-belief solving; training or resuming another Task; manufacturing,
+  reconstructing, or substituting an incumbent checkpoint; multi-deck, format,
+  Team Sealed, human, or public ladders; cross-world ratings; Game UI or
   canonical presentation replay; a superhuman claim.
 
 ## Done when
 
 The implementation is complete when:
 
-1. the checked contract contains no learned-anchor placeholders, binds the
-   complete amended INT-4 control artifact and both captured checkpoint bytes,
-   and rejects any world/content/source/runtime/player/hash, estimator/prior,
-   compute-envelope, or schedule drift before producing evidence;
-2. the frozen anchor artifact has every unordered anchor pair, and each
-   candidate artifact has every challenger-versus-anchor pair, with exactly 24
-   production deal blocks (48 games per matchup), two opposite seat legs per
+1. the checked production contract freezes exactly random, scripted-greedy and
+   flat-MC 4/16/64 with their complete source/config identities and rejects any
+   world/content/source/runtime/player/hash, estimator/prior, compute-envelope,
+   or schedule drift before producing evidence;
+2. the base anchor artifact has all 10 unordered anchor pairs (480 games), and
+   each candidate artifact has all five challenger-versus-anchor pairs (240
+   games), with exactly 24 production deal blocks, two opposite seat legs per
    block, and complete row-level identities;
 3. every surfaced decision becomes a validated retained Command and independent
    replay returns zero frame, offer, Command, state, outcome, privacy or missing
    match mismatches;
 4. the finite seat-aware Bradley-Terry fit, 2,000 global deal-block bootstrap
-   replicates, full matrix, residuals and promotion decision recompute exactly
+   replicates, full matrix, residuals and rating disposition recompute exactly
    from frozen match rows;
 5. every player has S1-S5, legality, replay, latency, throughput and RSS output;
-6. smoke is explicitly fixture-scoped and non-promotional, while production
-   cannot start without the exact new Teacher-0 control artifact and captured
-   bytes; the unavailable historical hashes cannot satisfy this gate;
-7. verify mode performs no generation or policy/search inference;
-8. focused tests and the full Python suite pass through uv, and the debug Rust
+6. a valid production checkpoint challenge without an exact incumbent returns
+   `rated_not_promotion_eligible/exact_incumbent_unavailable`, while an
+   explicitly fixture-scoped checkpoint can return only
+   `engineering_smoke_non_promotion`;
+7. the base contract rejects any added learned anchor, and a test proves an
+   exact learned registration changes `anchor_cohort_sha256` rather than
+   mutating or joining base-v1 ratings;
+8. verify mode performs no generation or policy/search inference;
+9. focused tests and the full Python suite pass through uv, and the debug Rust
    suite passes.
 
 Verification commands:
@@ -629,9 +672,11 @@ Arena v1 advances these Intelligence measures from `wave/intelligence/GOAL.md`:
   uncertainty.”** Arena rows carry all of those identities, while the report
   explicitly stops short of a superhuman claim.
 
-Primary quantitative outputs are candidate-minus-incumbent Elo and its global
-deal-block interval, the complete payoff/residual matrix, S1-S5 paired
-noninferiority, exact replay/integrity counts, and matched-root p50/p95,
-decisions/s and RSS delta. Better means clearing the preregistered promotion
-rule; a valid `retain_incumbent` result is still a trustworthy instrument and
-an honest prototype outcome.
+Primary quantitative outputs are the candidate's arena-local Elo coordinate and
+global deal-block interval, the complete payoff/residual matrix, S1-S5, exact
+replay/integrity counts, and matched-root p50/p95, decisions/s and RSS. When an
+exact same-compute incumbent exists in a later cohort, the same schema also
+reports candidate-minus-incumbent Elo, paired competency noninferiority and
+cost ratios. Better means clearing the preregistered promotion rule when
+eligible; `rated_not_promotion_eligible` is the honest base-v1 production
+outcome, not a failed instrument.
