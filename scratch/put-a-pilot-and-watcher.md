@@ -53,8 +53,10 @@ It does not change Rust/managym's `ExperienceFrame`, `InteractionOffer`,
 - `ViewerAccess` carries `role: pilot | watcher`, a canonical capability list,
   and a monotonically increasing `grant_revision`.
 - `TableSnapshot` carries table mode (`live | study`), participant presence,
-  the current viewer's visible belief scenarios, the latest canonical replay
-  projection, and the unchanged match recovery/update payload.
+  the current viewer's visible belief scenarios, compact summaries of the
+  committed canonical DecisionAddresses, and the unchanged match
+  recovery/update payload. Exact replay rows resolve on demand rather than
+  duplicating every historical frame into every live broadcast.
 - Participant-specific control data stays outside `ExperienceFrame`. Pilot and
   watcher therefore receive byte-identical frames, frame hashes, offers, and
   `erd1` addresses; only their access and visible personal artifacts differ.
