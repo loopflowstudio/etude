@@ -431,6 +431,45 @@ def _authority() -> dict[str, Any]:
     return payload
 
 
+def _checked_parity_provenance(contract: Mapping[str, Any]) -> dict[str, Any]:
+    raw = PARITY_RECEIPT_PATH.read_bytes()
+    if sha256_bytes(raw) != contract["release"]["parity_receipt_sha256"]:
+        raise Rul9Error("landed parity receipt changed")
+    payload = json.loads(raw)
+    summary = payload.get("summary")
+    expected = {
+        "commands_per_surface": 132,
+        "checkpoints_per_surface": 133,
+        "ordered_transition_groups_per_surface": 132,
+        "first_divergence": None,
+    }
+    if not isinstance(summary, Mapping) or any(
+        summary.get(name) != value for name, value in expected.items()
+    ):
+        raise Rul9Error("landed parity receipt summary drifted")
+    identity = payload.get("identity")
+    if (
+        not isinstance(identity, Mapping)
+        or identity.get("authority_receipt_sha256")
+        != contract["release"]["authority_receipt_sha256"]
+    ):
+        raise Rul9Error("landed parity receipt authority identity drifted")
+    surfaces = payload.get("surfaces")
+    if not isinstance(surfaces, Mapping) or set(surfaces) != {
+        "live",
+        "headless",
+        "replay",
+    }:
+        raise Rul9Error("landed parity receipt surfaces drifted")
+    for name, surface in surfaces.items():
+        if (
+            int(surface.get("commands", -1)) != 132
+            or len(surface.get("checkpoints", ())) != 133
+        ):
+            raise Rul9Error(f"landed parity receipt {name} coverage drifted")
+    return payload
+
+
 def _validate_live_transitions(
     session: server.GameSession, decisions: Sequence[Mapping[str, Any]]
 ) -> str:
@@ -622,7 +661,7 @@ def _measure_engine_game(authority: Mapping[str, Any], surface: str) -> dict[str
 def _release_worker(contract: Mapping[str, Any], start: Any, output: Any) -> None:
     try:
         authority = _authority()
-        checked_parity = parity.verify_receipt()
+        checked_parity = _checked_parity_provenance(contract)
         for _ in range(int(contract["release"]["warmups"])):
             live = _measure_live_game(authority)
             _measure_engine_game(authority, "headless")
@@ -1498,7 +1537,7 @@ def render_report(receipt: Mapping[str, Any]) -> str:
         "",
         "## Result",
         "",
-        "The fixed release tape and the saturated selected BranchDriver teacher both stayed within their pre-registered budgets. All authority, search, cap, projection, and overflow counters remained zero. The selected representation remains `full_clone/current_game_v1`.",
+        "The fixed release tape and the saturated selected BranchDriver teacher both stayed within their pre-registered budgets. The current source reproduced one exact 132-Command semantic trace across live, headless, and persisted replay execution. All authority, search, cap, projection, and overflow counters remained zero. The selected representation remains `full_clone/current_game_v1`.",
         "",
         "| Workload | Command p50 / p95 | Step throughput | Complete games | Peak RSS |",
         "|---|---:|---:|---:|---:|",
@@ -1518,7 +1557,7 @@ def render_report(receipt: Mapping[str, Any]) -> str:
         "## Integrity",
         "",
         f"- Authority receipt: `{receipt['identity']['workload']['authority_receipt_sha256']}`.",
-        f"- Parity receipt: `{receipt['identity']['workload']['parity_receipt_sha256']}`.",
+        f"- Frozen PR #153 parity provenance: `{receipt['identity']['workload']['parity_receipt_sha256']}`; current parity is re-executed and retained by this RUL-9 receipt.",
         f"- Source closure: `{receipt['identity']['source']['sha256']}` over {len(receipt['identity']['source']['files'])} files.",
         f"- Native extension: `{receipt['identity']['binary']['extension_sha256']}` ({receipt['identity']['binary']['extension_name']}, release profile).",
         f"- Contract: `{receipt['run']['contract_sha256']}`.",

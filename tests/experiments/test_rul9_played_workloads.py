@@ -202,6 +202,13 @@ def test_percentile_and_artifact_hash_are_recomputable() -> None:
     assert rul9.artifact_hash(payload) != original
 
 
+def test_checked_parity_provenance_is_pinned_without_regeneration() -> None:
+    payload = rul9._checked_parity_provenance(contract())
+    assert payload["summary"]["commands_per_surface"] == 132
+    assert payload["summary"]["checkpoints_per_surface"] == 133
+    assert payload["summary"]["first_divergence"] is None
+
+
 def test_summary_derives_independent_release_and_training_cells() -> None:
     registered = contract()
     summary = rul9.derive_summary(fake_raw(registered), registered)
