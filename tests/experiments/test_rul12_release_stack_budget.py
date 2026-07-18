@@ -85,13 +85,23 @@ def test_checked_correctness_projection_keeps_all_semantic_and_privacy_gates() -
     )
 
 
-def test_contended_run_is_preserved_as_an_honest_structural_miss() -> None:
-    receipt = json.loads(
+@pytest.mark.parametrize(
+    ("filename", "artifact_sha256"),
+    (
         (
-            ROOT / "experiments/data/"
-            "rul-12-release-stack-budget-v1.contended-host-load.json"
-        ).read_text()
-    )
+            "rul-12-release-stack-budget-v1.contended-host-load.json",
+            "71641a8c10691dbf1fc7f07e819d3e6514b80630a1ea0bb92a5801f0e11d0ed9",
+        ),
+        (
+            "rul-12-release-stack-budget-v1.control-recovered-then-contended.json",
+            "c14f3a43b17840217113f9edeaf8e03f9c430e9a725a62222b57ed2fa47b1959",
+        ),
+    ),
+)
+def test_contended_run_is_preserved_as_an_honest_structural_miss(
+    filename: str, artifact_sha256: str
+) -> None:
+    receipt = json.loads((ROOT / "experiments" / "data" / filename).read_text())
     contract = rul12.load_contract()
 
     verdict = rul12.verify_receipt(
@@ -101,9 +111,7 @@ def test_contended_run_is_preserved_as_an_honest_structural_miss() -> None:
         require_pass=False,
     )
 
-    assert receipt["artifact_sha256"] == (
-        "71641a8c10691dbf1fc7f07e819d3e6514b80630a1ea0bb92a5801f0e11d0ed9"
-    )
+    assert receipt["artifact_sha256"] == artifact_sha256
     assert verdict["overall"] == "miss"
     assert verdict["capacity"]["status"] == "pass"
     assert verdict["fallbacks"]["status"] == "pass"
