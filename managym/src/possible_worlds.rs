@@ -490,9 +490,7 @@ impl PossibleWorldSpace {
             .worlds
             .iter()
             .enumerate()
-            .filter_map(|(index, world)| {
-                canonical_query.satisfies(&world.hand).then_some(index)
-            })
+            .filter_map(|(index, world)| canonical_query.satisfies(&world.hand).then_some(index))
             .collect::<Vec<_>>();
         debug_assert_eq!(world_indexes.len(), conditioned.receipt.support_size);
         Ok(ConditioningReceiptProjection {

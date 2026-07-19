@@ -48,14 +48,15 @@ from .enums import (
     ZoneEnum,
 )
 from .experience_protocol import PROTOCOL_VERSION, Command, ExperienceFrame
+from .live_advice import LiveBeliefRuntime, LiveBeliefUnavailable
 from .presentation import PresentationProjector
 from .replay_index import (
     CANONICAL_REPLAY_VERSION,
     CanonicalReplayProjectionV1,
     CanonicalReplayUnavailableError,
     CanonicalReplayV1,
-    DecisionNotFoundError,
     DecisionAddressV2,
+    DecisionNotFoundError,
     InvalidAddressError,
     ReplayDecision,
     ReplayDecisionAddress,
@@ -64,6 +65,7 @@ from .replay_index import (
     canonical_projection_sha256,
     decision_source_sha256,
     load_canonical_replay,
+    parse_decision_address,
     project_replay,
     projection_with_addresses,
     restore_decision,
@@ -281,6 +283,18 @@ class PendingCanonicalDecision:
     frame: ExperienceFrame
     root: managym.Env
     source_sha256: str
+    rules_revision: int
+
+
+@dataclass(frozen=True)
+class ResolvedLiveTrackedPosterior:
+    """Game-owned input capability for the Intelligence live provider."""
+
+    address: DecisionAddressV2
+    frame: ExperienceFrame
+    root: managym.Env
+    source_sha256: str
+    posterior: Any
 
 
 # Transitional name retained for type references in downstream tests.
@@ -968,6 +982,9 @@ class GameSession:
         self._study_roots: dict[int, managym.Env] = {}
         self._pending_decision: PendingCanonicalDecision | None = None
         self._decision_source_sha256: dict[str, str] = {}
+        self._decision_rules_revision: dict[str, int] = {}
+        self._live_beliefs: LiveBeliefRuntime | None = None
+        self._live_advice_supported = False
         self._study_provider: StudyForkProvider | None = None
         self.authority_transitions: list[AuthorityTransition] = []
         self.authority_fallback_counters = {
@@ -1061,6 +1078,12 @@ class GameSession:
         self._study_roots = {}
         self._pending_decision = None
         self._decision_source_sha256 = {}
+        self._decision_rules_revision = {}
+        self._live_beliefs = None
+        self._live_advice_supported = (
+            config.hero_deck_name == "interactive"
+            and config.villain_deck_name == "interactive"
+        )
         self._study_provider = None
         self.authority_transitions = []
         self.authority_fallback_counters = {
@@ -1337,15 +1360,36 @@ class GameSession:
         )
         actor_index = HERO_PLAYER_INDEX if actor == "hero" else 1
         selected_offer: dict[str, Any] | None = None
-        if not auto:
+        if auto:
+            if context is None:
+                context = self._build_decision_context(
+                    self.obs,
+                    viewer=actor_index,
+                )
+            matching_offer_ids = [
+                offer_id
+                for offer_id, engine_index in context.action_by_offer.items()
+                if engine_index == action_index
+            ]
+            if len(matching_offer_ids) != 1:
+                raise RuntimeError("Automatic action has no unique authority offer.")
+            command = self._authority_command(
+                context,
+                matching_offer_ids[0],
+                "auto",
+            )
+            source = "auto"
+        else:
             if context is None or command is None or source not in {"client", "policy"}:
                 raise RuntimeError("Deliberate engine actions require a bound command.")
             if context.viewer != actor_index:
                 raise RuntimeError("Decision context actor differs from engine actor.")
-            offer_id = int(command["offer_id"])
-            selected_offer = next(
-                offer for offer in context.offers if int(offer["id"]) == offer_id
-            )
+        assert context is not None and command is not None
+        offer_id = int(command["offer_id"])
+        selected_offer = next(
+            offer for offer in context.offers if int(offer["id"]) == offer_id
+        )
+        if not auto:
             row = ReplayDecision.model_validate(
                 {
                     "ordinal": len(self.canonical_decisions),
@@ -1376,6 +1420,9 @@ class GameSession:
                 self._decision_source_sha256[
                     committed_address.serialize()
                 ] = pending.source_sha256
+                self._decision_rules_revision[
+                    committed_address.serialize()
+                ] = pending.rules_revision
             self._study_roots[int(row.ordinal)] = retained_root
             self.canonical_decisions.append(row)
         action_description = actions[action_index]["description"]
@@ -1386,30 +1433,41 @@ class GameSession:
         ):
             self.authority_fallback_counters["card_name_dispatch"] += 1
         from_revision = self.revision
-        semantic_transition: SemanticTransition | None = None
-        if auto:
-            next_obs, reward, _, _, _ = self.env.step(action_index)
-        else:
-            assert command is not None
-            semantic_frame = json.loads(self.env.semantic_decision_frame_json())
-            if (
-                int(semantic_frame["actor"]) != actor_index
-                or len(semantic_frame["offers"]) != len(actions)
-                or int(semantic_frame["offers"][action_index]["id"])
-                != int(command["offer_id"])
-            ):
-                raise RuntimeError("Etude decision drifted from semantic authority.")
-            semantic_command = SemanticCommand(
-                command_id=str(command["command_id"]),
-                expected_revision=int(semantic_frame["revision"]),
-                offer_id=int(command["offer_id"]),
+        track_beliefs = (
+            self._live_beliefs is not None
+            and self._live_beliefs.started
+            and self._live_beliefs.valid
+        )
+        likelihood_root = self.env.clone_env() if track_beliefs else None
+        semantic_frame = json.loads(self.env.semantic_decision_frame_json())
+        if (
+            int(semantic_frame["actor"]) != actor_index
+            or len(semantic_frame["offers"]) != len(actions)
+            or int(semantic_frame["offers"][action_index]["id"])
+            != int(command["offer_id"])
+        ):
+            raise RuntimeError("Etude decision drifted from semantic authority.")
+        semantic_command = SemanticCommand(
+            command_id=str(command["command_id"]),
+            expected_revision=int(semantic_frame["revision"]),
+            offer_id=int(command["offer_id"]),
+        )
+        transition_json, next_obs, reward, _, _, _ = self.env.step_semantic_command(
+            semantic_command.to_json()
+        )
+        semantic_transition = SemanticTransition.from_json(transition_json)
+        if semantic_transition.receipt.command_id != str(command["command_id"]):
+            raise RuntimeError("Semantic receipt command identity drifted.")
+        if track_beliefs:
+            assert self._live_beliefs is not None and likelihood_root is not None
+            self._live_beliefs.observe(
+                self.env.clone_env(),
+                acting=actor_index,
+                transition=semantic_transition,
+                likelihood_root=likelihood_root,
             )
-            transition_json, next_obs, reward, _, _, _ = self.env.step_semantic_command(
-                semantic_command.to_json()
-            )
-            semantic_transition = SemanticTransition.from_json(transition_json)
-            if semantic_transition.receipt.command_id != str(command["command_id"]):
-                raise RuntimeError("Semantic receipt command identity drifted.")
+        elif self._live_beliefs is not None:
+            self._live_beliefs.invalidate()
         state_after: str | None = None
         semantic_events: list[dict[str, Any]] = []
         encountered_definition_ids: list[int] = []
@@ -1702,7 +1760,20 @@ class GameSession:
             frame=frame,
             root=self.env.clone_env(),
             source_sha256=decision_source_sha256(address, frame),
+            rules_revision=int(
+                json.loads(self.env.semantic_observation_json(HERO_PLAYER_INDEX))[
+                    "identity"
+                ]["revision"]
+            ),
         )
+        if self._live_advice_supported and (
+            self._live_beliefs is None or not self._live_beliefs.valid
+        ):
+            if self._live_beliefs is not None:
+                self._live_beliefs.close()
+            self._live_beliefs = LiveBeliefRuntime(
+                self._pending_decision.root.clone_env()
+            )
         return self.published_prompt
 
     def _build_decision_context(
@@ -1994,6 +2065,56 @@ class GameSession:
             raw_address, authorized_viewer
         )
 
+    def resolve_live_tracked_posterior(
+        self,
+        raw_address: str,
+        authorized_viewer: int,
+    ) -> ResolvedLiveTrackedPosterior:
+        """Resolve one ed2 root and its off-lock tracked posterior snapshot."""
+
+        address = parse_decision_address(raw_address)
+        if not isinstance(address, DecisionAddressV2):
+            raise DecisionNotFoundError("decision not found")
+        if address.viewer != authorized_viewer or authorized_viewer != 0:
+            raise DecisionNotFoundError("decision not found")
+        runtime = self._live_beliefs
+        if runtime is None:
+            raise LiveBeliefUnavailable("tracked posterior is unavailable")
+
+        pending = self._pending_decision
+        if pending is not None and pending.address == address:
+            frame = pending.frame
+            retained_root = pending.root
+            source_sha256 = pending.source_sha256
+            rules_revision = pending.rules_revision
+        else:
+            if address.ordinal >= len(self.canonical_decisions):
+                raise DecisionNotFoundError("decision not found")
+            row = self.canonical_decisions[address.ordinal]
+            expected = DecisionAddressV2.from_decision(self.canonical_replay(), row)
+            source_sha256 = self._decision_source_sha256.get(address.serialize(), "")
+            rules_revision = self._decision_rules_revision.get(
+                address.serialize(), -1
+            )
+            retained_root = self._study_roots.get(int(address.ordinal))
+            if (
+                address != expected
+                or not source_sha256
+                or rules_revision < 0
+                or retained_root is None
+            ):
+                raise DecisionNotFoundError("decision not found")
+            frame = row.frame
+
+        snapshot = runtime.snapshot(rules_revision)
+        return ResolvedLiveTrackedPosterior(
+            address=address,
+            frame=frame.model_copy(deep=True),
+            root=retained_root.clone_env(),
+            source_sha256=source_sha256,
+            posterior=snapshot,
+        )
+
     def fork_study(self, raw_address: str) -> StudyBranch:
         """Fork one retained player-0 replay decision for ephemeral Study."""
         return self.study_fork_provider().fork(raw_address, HERO_PLAYER_INDEX)
@@ -2268,6 +2389,9 @@ class GameSession:
         self.env = None
         self.obs = None
         self.villain_policy = None
+        if self._live_beliefs is not None:
+            self._live_beliefs.close()
+            self._live_beliefs = None
 
 
 def _error_message(message: str) -> dict[str, str]:
