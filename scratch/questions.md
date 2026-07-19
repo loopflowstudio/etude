@@ -33,3 +33,12 @@
   control satisfying live p95 <= 100 ms, inner p95 <= 10 ms, live completion
   >= 1.0 games/s, headless >= 500 steps/s, and zero fallbacks admits the full
   unchanged measurement.
+- A bounded 2026-07-18 17:05 local recheck still rejected even the one-game
+  control before execution. `lf top` reported 70 Loopflow/provider processes;
+  after a 55-second `lf task wait INT-17`, that Task remained active and its
+  belief-calibration runner (PID 88729) still consumed 92.7-100% CPU. A
+  concurrent Loopflow release Rust link (PID 60550) consumed 300.2% CPU, and
+  host load was 13.19/13.50/25.93. Per the pre-registered two-stage boundary,
+  no control, default receipt, or full workload was started. The next bounded
+  check remains `lf top` after INT-17 and the release build clear, followed by
+  exactly one live/headless control before any formal run.
