@@ -49,3 +49,66 @@
   clean-host control, passing unchanged full run, default receipt/report,
   `RUL12_RELEASE_STACK_OK`, and fresh PR CI; none can be claimed from this
   rejected admission check, and no evidence path was written or relabeled.
+
+## Passing host admission and formal run
+
+- On 2026-07-18 at 18:21 America/Los_Angeles, the immediately preceding
+  process-level monitor reached `host_check_7=4 active_busy=0` at load averages
+  6.89/10.79/10.10. A fresh `lf top` named no active search, training,
+  calibration, Rust/Xcode build, or test workload; the accompanying `uptime`
+  snapshot was 6.37/10.55/10.03. The exact one-game control command was:
+
+  ```bash
+  uv run python - <<'PY'
+  import json
+  from experiments.runners import run_rul9_played_workloads as rul9
+
+  authority = rul9._authority()
+  live = rul9._measure_live_game(authority)
+  headless = rul9._measure_engine_game(authority, "headless")
+
+  live_ms = [float(row["duration_ms"]) for row in live["protocol_commands"]]
+  inner_ms = [float(row["duration_ms"]) for row in live["inner_commands"]]
+  result = {
+      "live_command_p95_ms": rul9.percentile(live_ms, 0.95),
+      "inner_command_p95_ms": rul9.percentile(inner_ms, 0.95),
+      "live_games_per_second": 1.0 / float(live["game_seconds"]),
+      "headless_steps_per_second": float(headless["commands"])
+      / float(headless["game_seconds"]),
+      "live_game_seconds": float(live["game_seconds"]),
+      "headless_game_seconds": float(headless["game_seconds"]),
+      "live_fallback_counters": live["fallback_counters"],
+      "headless_fallback_counters": headless["fallback_counters"],
+      "terminal_state_sha256": live["terminal_state_sha256"],
+      "logical_trace_sha256": live["logical_trace_sha256"],
+  }
+  result["admitted"] = (
+      result["live_command_p95_ms"] <= 100.0
+      and result["inner_command_p95_ms"] <= 10.0
+      and result["live_games_per_second"] >= 1.0
+      and result["headless_steps_per_second"] >= 500.0
+      and all(value == 0 for value in result["live_fallback_counters"].values())
+      and all(
+          value == 0 for value in result["headless_fallback_counters"].values()
+      )
+  )
+  print(json.dumps(result, indent=2, sort_keys=True))
+  raise SystemExit(0 if result["admitted"] else 2)
+  PY
+  ```
+
+- That control exited 0 with live Command p95 29.4016373 ms, inner Command
+  p95 1.93127905 ms, 1.69964991 complete games/s, and 1093.8694 direct
+  headless steps/s. All four live and all four headless authority fallbacks
+  (`legacy_fixed_action`, `card_name_dispatch`, `candidate_cap`, and
+  `client_legality`) were zero. Its live/headless durations were
+  0.588356459/0.120672541 seconds, terminal witness was `e48de247...de7`, and
+  ordered logical trace was `d326bb05...da2`.
+- Only after that control passed all five thresholds did
+  `uv run python experiments/runners/run_rul12_release_stack_budget.py` run
+  the unchanged warmup, ten-game live/headless/persisted-replay release cell,
+  and the unchanged `full_clone/current_game_v1` four-worker x 128-simulation
+  training cell. It exited 0 and wrote the default receipt/report with artifact
+  identity `052a588f...0176` and `RUL12_RELEASE_STACK_OK`: live p50/p95
+  4.969/30.659 ms, 1.649 games/s, headless/replay 1046.3/1047.1 steps/s,
+  training 1394.8 traversals/s, and zero fallbacks, overflow, or provider gaps.
