@@ -42,3 +42,10 @@
   no control, default receipt, or full workload was started. The next bounded
   check remains `lf top` after INT-17 and the release build clear, followed by
   exactly one live/headless control before any formal run.
+- The 2026-07-18 17:13 local changes-requested retry also failed host admission
+  before the control. INT-17 remained active after a bounded 55-second wait,
+  an unrelated Kata Xcode build was still spawning many parallel clang jobs,
+  and load reached 157.56/66.21/40.50. The completed review still requires a
+  clean-host control, passing unchanged full run, default receipt/report,
+  `RUL12_RELEASE_STACK_OK`, and fresh PR CI; none can be claimed from this
+  rejected admission check, and no evidence path was written or relabeled.
