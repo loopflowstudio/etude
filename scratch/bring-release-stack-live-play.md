@@ -123,6 +123,9 @@ whose delay RUL-9 measured, not through an internal microbenchmark.
   inventory, nonzero fallback/overflow/privacy/replay mismatch, stale-reference
   mutation, RUL-11 non-source drift, or training/release budget miss fails
   admission closed.
+- Missing default `rul-12-release-stack-budget-v1.json` or Markdown report is
+  an incomplete Task, not an implied pass. Explicitly named contention receipts
+  remain diagnostic evidence and cannot satisfy the default verifier.
 - A completed controlled run that misses a performance budget still writes its
   honest independently named RUL-12 receipt and report, exits 2, and leaves the
   KR open. No threshold, sample, synchronous terminal cost, or failed game is
@@ -248,6 +251,26 @@ only full canonical-replay reconstruction from table-summary construction. It
 must rerun the unchanged release and `full_clone/current_game_v1` training
 coordinates and gates in the new independently source/binary-bound receipt.
 
+Before starting that full workload, use a two-stage host-admission check. First,
+`lf top` must no longer name an unrelated high-CPU search, training, calibration,
+Rust/Xcode build, or equivalent competing workload. Then run exactly one seed-0
+live game and one direct-headless game through the same RUL-9
+`_measure_live_game` and `_measure_engine_game` helpers used by the formal
+runner. The control admits the full run only when live Command p95 is at most
+100 ms, inner Command p95 is at most 10 ms, live completion is at least 1.0
+games/s, headless execution is at least 500 steps/s, and every authority
+fallback remains zero. Aggregate host load alone is not sufficient: the
+end-to-end control is the readiness decision because prior low one-minute loads
+still failed throughput.
+
+A rejected control is diagnostic only. Record its exact metrics and named host
+confounder, do not start the full workload, and do not create or overwrite the
+default receipt paths. After a passing control, run the exact unchanged warmup,
+ten measured release games, and four-worker x 128-simulation training cell. If
+that full run becomes contended and misses, preserve its source-bound receipt
+and report under an explicit diagnostic suffix and leave the default paths
+absent. Only a passing full run may occupy the default receipt and report paths.
+
 The receipt must bind:
 
 - a relative-path/file-SHA source closure containing the changed replay/server
@@ -267,10 +290,10 @@ fails closed on identity drift, missing samples, changed counter inventories,
 nonzero fallback/overflow, parity mismatch, privacy/stale-reference regression,
 or budget miss.
 
-If a controlled run unexpectedly misses either live gate, still write the
-honest source-bound receipt and report, return status 2, and rank the retained
-phase samples for the next decision. Do not weaken a threshold or add a second
-optimization in the same artifact.
+If an admitted full run unexpectedly misses either live gate, still write the
+honest source-bound receipt and report under a diagnostic suffix, return status
+2, and rank the retained phase samples for the next decision. Do not weaken a
+threshold or add a second optimization in the same artifact.
 
 ## De-risking
 
@@ -376,8 +399,12 @@ The design advances these Rules/Playable Curated World measures:
 
 Completion requires all of the following:
 
+- the immediately preceding host-admission check records `lf top` without a
+  named competing workload and an exact one-game live/headless control passing
+  all five readiness conditions; this schedules the measurement but does not
+  replace any retained ten-game or training sample;
 - `./scripts/verify-rul12-release-stack-budget` exits 0 against the checked
-  additive RUL-12 artifact;
+  default additive RUL-12 artifact and emits `RUL12_RELEASE_STACK_OK`;
 - ten measured live games report Command p95 <= 100 ms and >= 1.0 complete
   games/s without excluding setup, serialization, accepted acknowledgment, or
   terminal persistence;
