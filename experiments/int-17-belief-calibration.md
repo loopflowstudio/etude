@@ -135,7 +135,10 @@ algorithm, cohort, preflight, metrics, prediction, caps, arena interpretation,
 and exclusions exactly, while binding the repaired provider receipt and the
 new runner, engine-source, and extension identities. Its provider identity
 stream must remain `8d9f46fa...` with zero exercised gaps. A focused contract
-validator must reject any scientific-section drift before generation.
+validator must reject any scientific-section drift before generation. The
+prerequisite binds both the unchanged v1 file bytes (`221ef497...`) retained by
+the failure receipt and its canonical JSON payload (`5b764e76...`), so neither
+whitespace-level replacement nor semantic drift can masquerade as continuity.
 
 Only that new, committed execution contract can rerun the unchanged scientific
 experiment after RUL-13; the frozen v1 contract and failure receipt remain

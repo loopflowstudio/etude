@@ -39,7 +39,8 @@
         "exclusions"
       ],
       "source_contract_path": "experiments/contracts/int-17-belief-calibration-v1.json",
-      "source_contract_sha256": "221ef4979ae0e4421efb5953473276b125cb5fdaf91983f4a66660b065d44473",
+      "source_contract_canonical_sha256": "5b764e76820c2794c31aa57f7a8246478e8038721a1b74b93120b5832a246e75",
+      "source_contract_file_sha256": "221ef4979ae0e4421efb5953473276b125cb5fdaf91983f4a66660b065d44473",
       "validation": "fail before generation unless every copied scientific section is canonically equal to v1 and the repaired provider, runner source, engine source, and extension identities match the new contract"
     },
     "scientific_threshold_change": "forbidden"

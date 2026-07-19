@@ -15,7 +15,11 @@ from experiments.runners.run_belief_calibration import (
     parse_args,
     preflight,
 )
-from manabot.sim.teacher1_evidence import ContractError
+from manabot.sim.teacher1_evidence import (
+    ContractError,
+    canonical_sha256,
+    file_sha256,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 CONTRACT = ROOT / "experiments/contracts/int-17-belief-calibration-v1.json"
@@ -109,9 +113,11 @@ def test_rul13_requires_a_new_execution_contract_with_identical_science() -> Non
     assert execution["action"] == "preregister_new_version_after_provider_lands"
     assert execution["new_contract_path"].endswith("int-17-belief-calibration-v2.json")
     assert (
-        execution["source_contract_sha256"]
+        execution["source_contract_file_sha256"]
         == failure["frozen_inputs"]["contract_sha256"]
     )
+    assert file_sha256(CONTRACT) == execution["source_contract_file_sha256"]
+    assert canonical_sha256(contract) == execution["source_contract_canonical_sha256"]
     assert set(execution["scientific_inputs_to_copy_exactly"]) == {
         "trace",
         "likelihood_checkpoint",
