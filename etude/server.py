@@ -55,12 +55,14 @@ from .replay_index import (
     CanonicalReplayUnavailableError,
     CanonicalReplayV1,
     DecisionNotFoundError,
+    DecisionAddressV2,
     InvalidAddressError,
     ReplayDecision,
     ReplayDecisionAddress,
     RestoredReplayDecision,
     ViewerPresentationTrack,
     canonical_projection_sha256,
+    decision_source_sha256,
     load_canonical_replay,
     project_replay,
     projection_with_addresses,
@@ -269,6 +271,16 @@ class DecisionContext:
     actions: list[dict[str, Any]]
     offers: list[dict[str, Any]]
     frame: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class PendingCanonicalDecision:
+    """Prompt-level canonical identity and retained root before selection."""
+
+    address: DecisionAddressV2
+    frame: ExperienceFrame
+    root: managym.Env
+    source_sha256: str
 
 
 # Transitional name retained for type references in downstream tests.
@@ -954,6 +966,8 @@ class GameSession:
         }
         self._authority_command_seq = 0
         self._study_roots: dict[int, managym.Env] = {}
+        self._pending_decision: PendingCanonicalDecision | None = None
+        self._decision_source_sha256: dict[str, str] = {}
         self._study_provider: StudyForkProvider | None = None
         self.authority_transitions: list[AuthorityTransition] = []
         self.authority_fallback_counters = {
@@ -1045,6 +1059,8 @@ class GameSession:
         self.canonical_presentation = {HERO_PLAYER_INDEX: [], 1: []}
         self._authority_command_seq = 0
         self._study_roots = {}
+        self._pending_decision = None
+        self._decision_source_sha256 = {}
         self._study_provider = None
         self.authority_transitions = []
         self.authority_fallback_counters = {
@@ -1347,7 +1363,20 @@ class GameSession:
                     "command": command,
                 }
             )
-            self._study_roots[int(row.ordinal)] = self.env.clone_env()
+            retained_root = self.env.clone_env()
+            if actor_index == HERO_PLAYER_INDEX:
+                pending = self._pending_decision
+                if pending is None:
+                    raise RuntimeError("Hero command has no pending canonical decision.")
+                replay = self.canonical_replay()
+                committed_address = DecisionAddressV2.from_decision(replay, row)
+                if committed_address != pending.address:
+                    raise RuntimeError("Committed decision identity drifted from live prompt.")
+                retained_root = pending.root.clone_env()
+                self._decision_source_sha256[
+                    committed_address.serialize()
+                ] = pending.source_sha256
+            self._study_roots[int(row.ordinal)] = retained_root
             self.canonical_decisions.append(row)
         action_description = actions[action_index]["description"]
         if self.presentation.note_action(
@@ -1606,6 +1635,7 @@ class GameSession:
     def _advance_protocol_revision(self) -> None:
         self.revision += 1
         self.published_prompt = None
+        self._pending_decision = None
 
     def _commit_step_presentation(
         self,
@@ -1655,6 +1685,23 @@ class GameSession:
         self.published_prompt = self._build_decision_context(
             self.obs,
             viewer=HERO_PLAYER_INDEX,
+        )
+        frame = ExperienceFrame.model_validate(self.published_prompt.frame)
+        address = DecisionAddressV2.from_frame(
+            replay_id=f"replay.{self.match_id}",
+            match_id=self.match_id,
+            ordinal=len(self.canonical_decisions),
+            viewer=HERO_PLAYER_INDEX,
+            frame=frame,
+            presentation_cursor=len(
+                self.canonical_presentation[HERO_PLAYER_INDEX]
+            ),
+        )
+        self._pending_decision = PendingCanonicalDecision(
+            address=address,
+            frame=frame,
+            root=self.env.clone_env(),
+            source_sha256=decision_source_sha256(address, frame),
         )
         return self.published_prompt
 
@@ -2366,9 +2413,9 @@ def _visible_beliefs(
 
 
 def _live_decision_summaries(record: SessionRecord) -> list[dict[str, Any]]:
-    return [
+    committed = [
         {
-            "address": ReplayDecisionAddress.from_row(
+            "address": DecisionAddressV2.from_row(
                 replay_id=f"replay.{record.game.match_id}",
                 match_id=record.game.match_id,
                 row=decision,
@@ -2380,6 +2427,20 @@ def _live_decision_summaries(record: SessionRecord) -> list[dict[str, Any]]:
         }
         for decision in record.game.canonical_decisions
         if decision.viewer == HERO_PLAYER_INDEX
+    ]
+    pending = record.game._pending_decision
+    if pending is None:
+        return committed
+    address = pending.address
+    return [
+        *committed,
+        {
+            "address": address.serialize(),
+            "ordinal": address.ordinal,
+            "revision": address.revision,
+            "prompt_id": address.prompt_id,
+            "offer_id": None,
+        },
     ]
 
 
