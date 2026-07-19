@@ -16,12 +16,12 @@
       "sha256": "b7c0c46807372ac5f03dd5233fbd3b35e188ff6dc6ccbbe5f6c77b23ede3f576"
     },
     "verification.json": {
-      "bytes": 1415,
-      "sha256": "1a6941ea50419674ee6ec57cd8a99d1662dffbe9291c4da095d82a56c0c38c6c"
+      "bytes": 2027,
+      "sha256": "fb463fc8c1fda806ab3899d1a4305227031f0bb73e88ba31f48063bdc7da7377"
     }
   },
   "generation_completed": false,
-  "retained_payload_bytes": 6996,
+  "retained_payload_bytes": 7608,
   "schema_version": 1,
   "status": "evidence_wait_rules_materialization_provider"
 }

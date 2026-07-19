@@ -129,6 +129,15 @@ seed-0 trace, both-viewer cohort, INT-7 checkpoint, epsilon, or prediction.
 Until then R3 remains open: this is honest retained systems evidence, not a
 negative belief-calibration result.
 
+After publication rebased the branch onto current main, the INT-17-focused
+suite still passed 27/27 and the exact preflight remained unchanged. The
+broader RUL-11 receipt verifier reported source-provenance drift only: upstream
+`tests/sim/test_conditional_search.py` changed, so that file hash and its
+aggregate relevant-source hash differ from the checked receipt. The generated
+and checked receipts have no functional or identity-stream difference. This
+closure does not rewrite the frozen RUL-11 receipt to bless unrelated source
+drift.
+
 ## Arena interpretation
 
 INT-18's frozen arena rated flat-MC-64 at 1513, flat-MC-16 at 1369, dPUCT-32
