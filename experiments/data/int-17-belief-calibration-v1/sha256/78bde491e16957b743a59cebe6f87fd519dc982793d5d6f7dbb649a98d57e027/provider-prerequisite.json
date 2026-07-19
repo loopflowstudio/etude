@@ -1,0 +1,22 @@
+{
+  "consumer": "FrozenPolicyLikelihood",
+  "contract": {
+    "behavior": [
+      "construct and identity-check one canonical PossibleWorldSpace against one immutable source Env",
+      "retain that managym-owned space behind an identity-bound materializer handle",
+      "materialize many canonical world indices with their declared seeds and RefreshOpponentCommitment mode without re-enumerating the support per index",
+      "return isolated branches with the existing materialize_index semantics",
+      "fail closed on source revision, viewer-state hash, space identity, viewer, index, or mode drift"
+    ],
+    "proposed_surface": "Env.prepare_possible_world_materializer(viewer, space_identity) -> identity-bound handle; handle.materialize_index(world_index, seed, refresh_opponent_commitment)",
+    "required_complexity": "one O(S) support enumeration per likelihood root plus O(S) indexed branch materializations"
+  },
+  "owner": "Rules/managym",
+  "rerun": {
+    "checkpoint_change": "forbidden",
+    "cohort_change": "forbidden",
+    "contract": "experiments/contracts/int-17-belief-calibration-v1.json",
+    "scientific_threshold_change": "forbidden"
+  },
+  "status": "prerequisite_to_rerun_same_frozen_contract"
+}

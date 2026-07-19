@@ -314,3 +314,19 @@ normalization, likelihood/update time, world rows, peak RSS, and exact replay
 integrity. "Better" means positive mean log-loss improvement for each viewer
 and posterior mass above prior on more than 55% of opponent-commitment points;
 failure of that prediction is retained as the first honest calibration result.
+
+## Execution closure (2026-07-18)
+
+The exact frozen command was stopped cleanly after 1:37:56 wall / 84:38 CPU
+with three completed commitment receipts, empty stderr, and no curves. A static
+audit proved that `FrozenPolicyLikelihood` materializes each support row through
+an engine method that reconstructs and recursively enumerates the entire
+`PossibleWorldSpace` for every row. The frozen trace has
+`sum(S^2) = 51,506,080,901`; even the most optimistic coefficient from the
+three completed updates projects 41,575 seconds, exceeding the 21,600-second
+cap. This is a retained systems failure, not a calibration result.
+
+Rerunning the same contract now depends on a Rules-owned identity-bound
+materializer that validates/enumerates one space once and materializes many
+indices without re-enumeration. The cohort, checkpoint, epsilon, metrics,
+prediction, and caps remain frozen.

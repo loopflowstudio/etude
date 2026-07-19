@@ -2,7 +2,7 @@
 
 **World:** w2  
 **Evidence class:** one-seed selected-trace calibration only  
-**Status:** preregistered, unrun  
+**Status:** fail-closed systems result; calibration remains `evidence_wait`  
 **Contract:**
 [`contracts/int-17-belief-calibration-v1.json`](contracts/int-17-belief-calibration-v1.json)
 
@@ -68,4 +68,75 @@ ambiguous and do not support a causal strength claim.
 
 ## Result
 
-Pending the bounded frozen run.
+The exact frozen command ran on 2026-07-18 without changing the checkpoint,
+cohort, likelihood, or thresholds. It was stopped cleanly after **1:37:56
+wall / 84:38 CPU** because completed runtime receipts plus the static provider
+path proved that the six-hour cap could not be met. It emitted no curves and
+left no partial scientific result.
+
+The retained failure receipt is
+[`data/int-17-belief-calibration-v1/sha256/78bde491e16957b743a59cebe6f87fd519dc982793d5d6f7dbb649a98d57e027/manifest.json`](data/int-17-belief-calibration-v1/sha256/78bde491e16957b743a59cebe6f87fd519dc982793d5d6f7dbb649a98d57e027/manifest.json).
+The process completed three public-commitment updates:
+
+| ordinal | commitment | support | incremental wall seconds |
+|---:|---|---:|---:|
+| 0 | play `Island` | 41,806 | 2,234.918 |
+| 1 | pass priority | 17,711 | 470.515 |
+| 2 | cast `Tiger-Seal` | 17,711 | 253.200 |
+
+It was evaluating ordinal 3, play `Forest`, over 121,485 worlds when stopped.
+Stdout contains exactly those three receipts (455 bytes, SHA-256
+`b7c0c468...`); stderr is empty (SHA-256 `e3b0c442...`). The largest sampled
+RSS was 2,106,195,968 bytes, still below the frozen 2 GiB cap. The runner's
+wall and RSS checks occur only after an entire decision ordinal, so they cannot
+bound one pathological likelihood call.
+
+## Systems finding
+
+The production materialization path accidentally makes one likelihood update
+quadratic in the compatible support size:
+
+1. `FrozenPolicyLikelihood.evaluate` visits every row in the belief support
+   and calls `root_space.materialize(row)`.
+2. The Python `PossibleWorldSpace` forwards every row to
+   `Env.materialize_possible_world`.
+3. The Rust provider reconstructs `PossibleWorldSpace::for_viewer` to validate
+   identity before each `materialize_index` call.
+4. `for_viewer` / `from_parts` recursively enumerates the complete support.
+
+At the frozen maximum support of 121,485, one update therefore performs
+14,758,605,225 support-row enumeration operations before policy inference.
+Across all 62 frozen updates, the exact support schedule has
+`sum(S^2) = 51,506,080,901`. Coefficients from the three completed updates
+project **41,575 seconds (11.55 hours)** even under the most optimistic
+observed rate, **65,863 seconds (18.30 hours)** at the median, and 77,258
+seconds at the slowest. Every projection exceeds the 21,600-second cap, so
+continuing would have converted a proven systems failure into an unbounded
+run.
+
+## Prerequisite and disposition
+
+Rules/managym must expose an identity-bound materializer that constructs and
+validates one canonical `PossibleWorldSpace` once, then materializes many
+canonical indices from that retained space without re-enumerating it per row.
+The handle must remain bound to viewer, source revision, viewer-state hash,
+space identity, seed, and materialization mode, return isolated branches with
+the existing `materialize_index` semantics, and fail closed on drift. The
+Intelligence consumer must also check wall/RSS caps between inference batches.
+
+After that provider lands, rerun this same frozen contract. Do not change the
+seed-0 trace, both-viewer cohort, INT-7 checkpoint, epsilon, or prediction.
+Until then R3 remains open: this is honest retained systems evidence, not a
+negative belief-calibration result.
+
+## Arena interpretation
+
+INT-18's frozen arena rated flat-MC-64 at 1513, flat-MC-16 at 1369, dPUCT-32
+at 1333, flat-MC-4 at 1321, scripted at 1203, and random at 1000 over 720
+games. The exact-range player remained `evidence_wait`, so no belief-versus-
+uniform strength comparison exists. This failed calibration run neither
+explains nor changes those ratings and does not retroactively admit the
+unselected INT-7 checkpoint. Once both results exist under joined identities,
+better calibration without arena gain would point to planner use or matched-
+cost effects; worse calibration with arena loss would point first to the
+likelihood model; crossed outcomes would remain ambiguous.

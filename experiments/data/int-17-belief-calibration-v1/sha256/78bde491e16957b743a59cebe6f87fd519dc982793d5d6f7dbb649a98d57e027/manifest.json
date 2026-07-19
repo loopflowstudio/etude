@@ -1,0 +1,27 @@
+{
+  "artifact_kind": "fail_closed_systems_evidence",
+  "experiment": "int-17-belief-calibration-v1",
+  "failure_receipt_sha256": "78bde491e16957b743a59cebe6f87fd519dc982793d5d6f7dbb649a98d57e027",
+  "files": {
+    "failure.json": {
+      "bytes": 3899,
+      "sha256": "78bde491e16957b743a59cebe6f87fd519dc982793d5d6f7dbb649a98d57e027"
+    },
+    "provider-prerequisite.json": {
+      "bytes": 1227,
+      "sha256": "592f66eac5384ca3dac73139b493556585c20370d5df880607872403578cf07f"
+    },
+    "runtime-progress.jsonl": {
+      "bytes": 455,
+      "sha256": "b7c0c46807372ac5f03dd5233fbd3b35e188ff6dc6ccbbe5f6c77b23ede3f576"
+    },
+    "verification.json": {
+      "bytes": 1415,
+      "sha256": "1a6941ea50419674ee6ec57cd8a99d1662dffbe9291c4da095d82a56c0c38c6c"
+    }
+  },
+  "generation_completed": false,
+  "retained_payload_bytes": 6996,
+  "schema_version": 1,
+  "status": "evidence_wait_rules_materialization_provider"
+}
