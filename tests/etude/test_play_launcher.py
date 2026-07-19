@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import socket
 import subprocess
+import tomllib
 from types import SimpleNamespace
 
 import pytest
@@ -205,6 +206,23 @@ def test_native_import_reports_the_extension_abi_and_path():
         "abi": "cp312",
         "module": "/tmp/_managym.cpython-312.so",
     }
+
+
+def test_locked_play_runtime_covers_and_imports_live_advice_dependencies():
+    project = tomllib.loads((play.ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    group = project["dependency-groups"]["play-runtime"]
+    names = {requirement.split("[", 1)[0].split(">", 1)[0] for requirement in group}
+    assert {"numpy", "torch"} <= names
+
+    observed: list[str] = []
+
+    def runner(argv, **_kwargs):
+        assert argv[: len(play.UV_RUNTIME)] == play.UV_RUNTIME
+        observed.extend(argv[-1].split("; "))
+        return completed(argv)
+
+    play.ensure_runtime_imports(runner=runner)
+    assert observed == [f"import {module}" for module in play.RUNTIME_IMPORTS]
 
 
 def test_occupied_port_fails_deterministically():

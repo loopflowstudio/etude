@@ -43,6 +43,8 @@ ops = [
 play-runtime = [
     "fastapi>=0.116.0",
     "maturin>=1.5,<2.0",
+    "numpy>=1.24.0",
+    "torch>=2.0.0",
     "uvicorn[standard]>=0.34.0",
 ]
 

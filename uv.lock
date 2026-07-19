@@ -521,6 +521,9 @@ play = [
 play-runtime = [
     { name = "fastapi" },
     { name = "maturin" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "torch" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -551,6 +554,8 @@ provides-extras = ["play", "dev", "ops"]
 play-runtime = [
     { name = "fastapi", specifier = ">=0.116.0" },
     { name = "maturin", specifier = ">=1.5,<2.0" },
+    { name = "numpy", specifier = ">=1.24.0" },
+    { name = "torch", specifier = ">=2.0.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34.0" },
 ]
 
