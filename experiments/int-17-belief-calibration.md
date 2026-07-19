@@ -46,13 +46,17 @@ viewer 0 and 208,876 for viewer 1. Generation is limited to one worker,
 1,000,000 rows, six wall/core hours, 2 GiB peak RSS, and 64 MiB of retained
 bytes. Crossing any cap yields no calibration result.
 
-## Run
+## Frozen attempt command
 
 ```bash
 uv run --extra dev python experiments/runners/run_belief_calibration.py \
   --contract experiments/contracts/int-17-belief-calibration-v1.json \
   --out-dir .runs/int-17-belief-calibration-v1
 ```
+
+This command identifies the retained v1 attempt. It is not the post-RUL-13
+rerun command: v1 byte-locks the generation-time engine source, extension, and
+INT-17 source identities, so a real provider repair must make v1 fail closed.
 
 ## Interpretation boundary
 
@@ -124,10 +128,19 @@ space identity, seed, and materialization mode, return isolated branches with
 the existing `materialize_index` semantics, and fail closed on drift. The
 Intelligence consumer must also check wall/RSS caps between inference batches.
 
-After that provider lands, rerun this same frozen contract. Do not change the
-seed-0 trace, both-viewer cohort, INT-7 checkpoint, epsilon, or prediction.
-Until then R3 remains open: this is honest retained systems evidence, not a
-negative belief-calibration result.
+After that provider lands, preregister
+`experiments/contracts/int-17-belief-calibration-v2.json` before generation.
+The new execution contract must copy v1's trace, likelihood checkpoint,
+algorithm, cohort, preflight, metrics, prediction, caps, arena interpretation,
+and exclusions exactly, while binding the repaired provider receipt and the
+new runner, engine-source, and extension identities. Its provider identity
+stream must remain `8d9f46fa...` with zero exercised gaps. A focused contract
+validator must reject any scientific-section drift before generation.
+
+Only that new, committed execution contract can rerun the unchanged scientific
+experiment after RUL-13; the frozen v1 contract and failure receipt remain
+historical evidence and are never rewritten. Until then R3 remains open: this
+is honest retained systems evidence, not a negative belief-calibration result.
 
 After publication rebased the branch onto current main, the INT-17-focused
 suite still passed 27/27 and the exact preflight remained unchanged. The

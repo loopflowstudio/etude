@@ -15,8 +15,34 @@
   "rerun": {
     "checkpoint_change": "forbidden",
     "cohort_change": "forbidden",
-    "contract": "experiments/contracts/int-17-belief-calibration-v1.json",
+    "execution_contract": {
+      "action": "preregister_new_version_after_provider_lands",
+      "new_contract_path": "experiments/contracts/int-17-belief-calibration-v2.json",
+      "provider_bound_fields_to_refresh": [
+        "provider_receipt",
+        "expected_runtime"
+      ],
+      "required_identity_continuity": {
+        "identity_stream_sha256": "8d9f46fa86742f323f915ba69bc0007e225415e8fc5504792eac4b49ebae66b6",
+        "rules_provider_gaps": 0
+      },
+      "scientific_inputs_to_copy_exactly": [
+        "trace",
+        "likelihood_checkpoint",
+        "algorithm",
+        "cohort",
+        "preflight",
+        "metrics",
+        "prediction",
+        "caps",
+        "arena_interpretation",
+        "exclusions"
+      ],
+      "source_contract_path": "experiments/contracts/int-17-belief-calibration-v1.json",
+      "source_contract_sha256": "221ef4979ae0e4421efb5953473276b125cb5fdaf91983f4a66660b065d44473",
+      "validation": "fail before generation unless every copied scientific section is canonically equal to v1 and the repaired provider, runner source, engine source, and extension identities match the new contract"
+    },
     "scientific_threshold_change": "forbidden"
   },
-  "status": "prerequisite_to_rerun_same_frozen_contract"
+  "status": "prerequisite_to_preregister_repaired_execution_contract"
 }

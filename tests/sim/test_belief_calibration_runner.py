@@ -19,6 +19,11 @@ from manabot.sim.teacher1_evidence import ContractError
 
 ROOT = Path(__file__).resolve().parents[2]
 CONTRACT = ROOT / "experiments/contracts/int-17-belief-calibration-v1.json"
+FAILURE_DIR = (
+    ROOT
+    / "experiments/data/int-17-belief-calibration-v1/sha256"
+    / "78bde491e16957b743a59cebe6f87fd519dc982793d5d6f7dbb649a98d57e027"
+)
 
 
 def test_contract_locks_real_likelihood_selected_trace_and_negative_policy() -> None:
@@ -31,9 +36,7 @@ def test_contract_locks_real_likelihood_selected_trace_and_negative_policy() -> 
     assert checkpoint.name == "visit_policy_only-seed-197.pt"
     assert contract["likelihood_checkpoint"]["sha256"].startswith("1673a237")
     assert contract["algorithm"]["model_fallback"] == "forbidden"
-    assert contract["algorithm"]["truth_access"] == (
-        "post_update_authority_audit_only"
-    )
+    assert contract["algorithm"]["truth_access"] == ("post_update_authority_audit_only")
     assert contract["cohort"] == {
         "games": 1,
         "game_seed": 0,
@@ -95,3 +98,40 @@ def test_runner_modes_are_mutually_exclusive() -> None:
                 "--verify-only",
             ]
         )
+
+
+def test_rul13_requires_a_new_execution_contract_with_identical_science() -> None:
+    contract = load_contract(CONTRACT)
+    failure = json.loads((FAILURE_DIR / "failure.json").read_text())
+    prerequisite = json.loads((FAILURE_DIR / "provider-prerequisite.json").read_text())
+    execution = prerequisite["rerun"]["execution_contract"]
+
+    assert execution["action"] == "preregister_new_version_after_provider_lands"
+    assert execution["new_contract_path"].endswith("int-17-belief-calibration-v2.json")
+    assert (
+        execution["source_contract_sha256"]
+        == failure["frozen_inputs"]["contract_sha256"]
+    )
+    assert set(execution["scientific_inputs_to_copy_exactly"]) == {
+        "trace",
+        "likelihood_checkpoint",
+        "algorithm",
+        "cohort",
+        "preflight",
+        "metrics",
+        "prediction",
+        "caps",
+        "arena_interpretation",
+        "exclusions",
+    }
+    assert all(
+        key in contract for key in execution["scientific_inputs_to_copy_exactly"]
+    )
+    assert execution["provider_bound_fields_to_refresh"] == [
+        "provider_receipt",
+        "expected_runtime",
+    ]
+    assert execution["required_identity_continuity"] == {
+        "identity_stream_sha256": contract["preflight"]["identity_stream_sha256"],
+        "rules_provider_gaps": 0,
+    }

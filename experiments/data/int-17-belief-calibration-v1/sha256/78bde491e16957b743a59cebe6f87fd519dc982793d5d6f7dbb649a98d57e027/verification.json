@@ -32,6 +32,16 @@
       },
       "status": "int17_passed_provider_source_receipt_stale"
     },
+    "post_review_execution_contract_disposition": {
+      "failure_receipt_unchanged": true,
+      "focused_python_tests": 10,
+      "new_execution_contract_required": "experiments/contracts/int-17-belief-calibration-v2.json",
+      "preflight_identity_stream_sha256": "8d9f46fa86742f323f915ba69bc0007e225415e8fc5504792eac4b49ebae66b6",
+      "preflight_world_rows": 903063,
+      "scientific_inputs_must_equal_v1": true,
+      "status": "passed",
+      "v1_contract_unchanged": true
+    },
     "preflight": {
       "identity_stream_sha256": "8d9f46fa86742f323f915ba69bc0007e225415e8fc5504792eac4b49ebae66b6",
       "seconds": 4.407012083102018,

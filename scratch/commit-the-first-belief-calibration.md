@@ -326,7 +326,10 @@ an engine method that reconstructs and recursively enumerates the entire
 three completed updates projects 41,575 seconds, exceeding the 21,600-second
 cap. This is a retained systems failure, not a calibration result.
 
-Rerunning the same contract now depends on a Rules-owned identity-bound
-materializer that validates/enumerates one space once and materializes many
-indices without re-enumeration. The cohort, checkpoint, epsilon, metrics,
-prediction, and caps remain frozen.
+Execution now depends on a Rules-owned identity-bound materializer that
+validates/enumerates one space once and materializes many indices without
+re-enumeration. Because v1 correctly byte-locks the original runner, engine
+source, and extension, RUL-13 must be followed by a new preregistered execution
+contract that copies the cohort, checkpoint, algorithm, metrics, prediction,
+and caps exactly while binding the repaired provider and runtime identities.
+The v1 contract and failure receipt remain unchanged historical evidence.
