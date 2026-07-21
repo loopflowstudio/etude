@@ -45,12 +45,14 @@ ambiguity or safety-critical invariants, not substitute products.
   were exact with zero fallback; selected delivered 35.76 decisions/s at
   interactive p95 65.99 ms and 4.70 decisions/s saturated at p95 1343.29 ms
   with matched RSS.
-- PR #136 recorded a checked seed-0 UR Lessons versus GW Allies release-stack
-  authority trace: terminal revision 132, 132 Commands across nine prompt
-  families, 26 admitted typed programs, ordered semantic/presentation events,
-  and zero legacy fixed-action, card-name, candidate-cap, or client-legality
-  fallback. Authored replay parity, workload budgets, and another
-  creator-selected increment remain open.
+- The checked RUL-11/RUL-12 selected-match evidence carries one 132-Command
+  live/headless/persisted-replay identity stream, all 62 provider-owned public
+  commitments, a materialized revision-29 hypothesis, and zero exercised
+  `RulesProviderGap`, fallback, overflow, or identity mismatch. RUL-12 measured
+  live p95 at 30.659 ms, live throughput at 1.649 games/s, headless at 1046.3
+  steps/s, and the selected training workload at 10.897 roots/s. This closes
+  the exercised provider and release-budget gaps, not arbitrary unadmitted
+  commitment kinds or worlds.
 - PRs #129 and #134 provide a Rules-owned Study fork over compact full clone.
   A historical viewer-safe decision can execute a structured command, preserve
   retained source and siblings, and return a consuming receipt with the exact
@@ -114,15 +116,15 @@ ambiguity or safety-critical invariants, not substitute products.
   a flag day or a permanent second authority.
 - Replace action-position and duplicated offer/Command meaning one consumer at
   a time while keeping the curated matchup playable.
-- Prove revision-by-revision live/headless/replay parity for the shipped
-  authored trace without creating a parallel replay authority.
 - Finish Study consumer evidence with fork/apply/return latency and peak RSS
   budgets plus focused multi-seed, nested, stale/pack, and privacy stress.
-- Define a possible-world hypothesis quotient that is exact for the first hand
-  range and can scale without making physical-copy order public meaning.
-- Integrate the selected branch runtime into conditional Intelligence search
-  and Study fork/return before optimizing another benchmark-only
-  representation.
+- Eliminate the O(S^2) support reconstruction observed by the INT-17
+  calibration path: one prepared materializer must retain the exact immutable
+  likelihood root across inference batches, enumerate its world space once,
+  bound peak RSS by batch size, and fail closed on identity or root drift.
+- Carry the selected branch runtime through live belief/advice and Study after
+  that materialization seam is proven; do not optimize another benchmark-only
+  representation first.
 - Preserve dense-state speed as card semantics and event histories grow.
 - Let the next creator-selected content increment pressure the IR naturally
   without turning each card into a one-off kernel exception.
