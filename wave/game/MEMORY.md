@@ -33,6 +33,16 @@
 - Canonical replay exposes a stable address for every historical player
   decision. Study may rank highlights, but it does not define or reconstruct
   the replay timeline.
+- GAM-7 / PR #177 shipped the first live belief-conditioned advice seam on
+  2026-07-19. A surfaced prompt receives its canonical `ed2` identity before
+  the pilot acts, and that exact identity promotes into replay/Study; committed
+  summaries resolve directly from decision rows rather than rebuilding replay
+  history or downgrading to frozen `erd1` identities.
+- The admitted live-advice slice remains deliberately narrow: Interactive
+  mirror, player 0, and the server-authored Has/Lacks Counterspell conditions
+  over one pinned tracked posterior. Advice is participant-authenticated,
+  bounded off the match lock, and observational; ActionPanel remains the only
+  live `Command` path.
 - Offline command queues must not replay gameplay decisions into a newer state.
 - Curated assets are versioned content, not opportunistic runtime fetches.
 - WASM is deferred until adapter benchmarks show a product benefit.
@@ -41,6 +51,9 @@
 
 - `docs/research/phase-experience.md`
 - `docs/architecture/experience-protocol-v1.md`
+- GAM-7 / PR #177, merge `e61931e75024e61e90d1d83337e80a9bfcf8e422`:
+  parent-reviewed live/Study identity and non-mutation proof; 17 focused Python
+  tests, full debug `cargo test`, and 10/10 exact-head CI.
 - Legacy implementation notes in `01-play-interface.md` and `05-polish.md`
 - Previous charter in `legacy-gui-charter.md`
 
@@ -49,5 +62,7 @@
 - Keep protocol design ambitious without blocking a thin vertical slice.
 - Preserve the useful existing Svelte/FastAPI table while replacing its
   snapshot/action seam incrementally.
+- With live advice now shipped, make exact fork/Retry/return the next coherent
+  play-to-Study behavior instead of broadening advice to arbitrary worlds.
 - Treat visual authorship as a product requirement without creating a generic
   content platform.
