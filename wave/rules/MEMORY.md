@@ -61,6 +61,13 @@ ambiguity or safety-critical invariants, not substitute products.
 - Revision-bound receipts identify a reproducible relevant source closure.
   Incidental worktree paths, nested agent worktrees, and unrelated files are
   not source identity.
+- RUL-13's unshipped worktree produced promising prepared-materializer evidence
+  on 2026-08-20: one 121,485-world construction served 121,490 rows across 481
+  bounded batches (maximum 256 live branches) in 0.588055 seconds, with
+  676,069,376-byte peak RSS, scalar parity, root/sibling isolation, and zero
+  provider gaps or identity mismatches. This is prototype evidence, not shipped
+  or KR-closing evidence: the patch and receipts remain uncommitted, and the
+  INT-17 v2 run occurred before its preregistration contract could be committed.
 
 ## Durable design decisions
 
@@ -118,10 +125,10 @@ ambiguity or safety-critical invariants, not substitute products.
   a time while keeping the curated matchup playable.
 - Finish Study consumer evidence with fork/apply/return latency and peak RSS
   budgets plus focused multi-seed, nested, stale/pack, and privacy stress.
-- Eliminate the O(S^2) support reconstruction observed by the INT-17
-  calibration path: one prepared materializer must retain the exact immutable
-  likelihood root across inference batches, enumerate its world space once,
-  bound peak RSS by batch size, and fail closed on identity or root drift.
+- Recover and ship RUL-13 through a corrected replacement Task after the PM
+  migration. Preserve its stable worktree before abandoning the immutable
+  lifecycle, commit the INT-17 v2 preregistration before a fresh run, and do
+  not accept the existing untracked v2 result or reimplement the provider.
 - Carry the selected branch runtime through live belief/advice and Study after
   that materialization seam is proven; do not optimize another benchmark-only
   representation first.
