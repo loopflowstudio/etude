@@ -1,8 +1,6 @@
 ---
 pm:
-  provider: linear
   linear_initiative: 427144c1-6896-40e1-a23e-6e7fe9bc9fc4
-  linear_team: 49e062b0-1645-42c3-9bed-6c6c785cafcc
 ---
 
 # Intelligence

@@ -1,8 +1,6 @@
 ---
 pm:
-  provider: linear
   linear_initiative: 21966203-a6bb-4e2c-a902-f43cbe813053
-  linear_team: ef9e3b10-0953-4e92-aba7-0f587336f1cd
 ---
 
 # Game
