@@ -1,8 +1,6 @@
 ---
 pm:
-  provider: linear
   linear_initiative: 2b6f3d99-9176-4b77-af42-710f0f30fde9
-  linear_team: 10edaa86-7f64-4996-93b4-22077965e74e
 ---
 
 # Rules
