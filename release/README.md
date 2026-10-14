@@ -1,23 +1,22 @@
 # Releases
 
-A release is one explicit commit on `main`, landed through a pull request like
-any other:
-
 ```sh
-uv version 0.2.0                 # or: uv version --bump minor
-$EDITOR release/v0.2.0/NOTES.md  # what changed for people using it
-git commit -am "Release 0.2.0"   # with the notes file added
+lf release check            # has anything merged since the last tag?
+lf release run patch        # or minor, major, or an exact X.Y.Z
 ```
 
-When that commit reaches `main`, `.github/workflows/release.yml` sees notes for
-a version that has no tag yet. It builds the package, installs the wheel in a
-clean environment and runs it, publishes `etude-sdk` to PyPI, then tags the
-commit `v0.2.0` and makes a GitHub Release from the notes. Any other push to
-`main` releases nothing.
+A release is an explicit commit. `lf release run` writes notes for the changes
+since the last tag, bumps `version` in `pyproject.toml`, adds
+`release/vX.Y.Z/NOTES.md` and `RELEASE_NOTES.md`, and lands them as a release
+pull request like any other.
 
-PyPI trusts that workflow by name, through the `pypi` environment, so no
-token is stored. If the run fails before publishing, fix it in a new commit;
-the next push to `main` tries again. If it fails after publishing, rerun it:
-PyPI keeps the files it already has and the tag step completes.
+It then starts `.github/workflows/release.yml` on that merged commit. The
+workflow checks that the tag matches the version, builds, installs the wheel
+alone in a clean environment and runs it, and publishes `etude-sdk` to PyPI.
+When it succeeds, `lf release run` tags the commit `vX.Y.Z`.
+
+PyPI trusts that workflow by name, through the `pypi` environment, so no token
+is stored. A failed run can be resumed with `lf release run`; publishing skips
+files PyPI already has. The configuration is in `.lf/config.yaml`.
 
 `release/vX.Y.Z/NOTES.md` stays as the record of each shipped version.

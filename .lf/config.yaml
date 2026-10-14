@@ -1,0 +1,6 @@
+release:
+  targets:
+    default:
+      manifests:
+      - pyproject.toml
+      workflow: .github/workflows/release.yml

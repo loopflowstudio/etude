@@ -1,49 +1,39 @@
 name: Release
 
-# A release is an explicit commit on main: it sets `version` in pyproject.toml
-# and adds release/vVERSION/NOTES.md. When main holds notes for its version and
-# no tag for it yet, this builds, checks and publishes that commit, then tags it.
-# Every other push finds nothing to release. PyPI trusts this workflow by name
+run-name: Release ${{ inputs.tag }}
+
+# `lf release run` starts this on the merged release commit once its release
+# pull request has landed, then pushes the tag after this succeeds. It builds,
+# checks and publishes that exact commit. PyPI trusts this workflow by name
 # (trusted publishing), so no token is stored anywhere.
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, such as v0.2.0
+        required: true
+        type: string
 
-# Releases run one at a time and are never cancelled half-published.
 concurrency:
   group: release
   cancel-in-progress: false
 
 jobs:
-  pending:
+  build:
     runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
       - uses: astral-sh/setup-uv@v6
-      - name: Find an unreleased version with notes
-        id: version
+      - name: Refuse a tag that does not match the package version
+        env:
+          TAG: ${{ inputs.tag }}
         run: |
           version=$(uv version --short)
-          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
-            echo "v$version is already released"
-          elif [ ! -f "release/v$version/NOTES.md" ]; then
-            echo "no release/v$version/NOTES.md, so nothing to release"
-          else
-            echo "releasing v$version" | tee -a "$GITHUB_STEP_SUMMARY"
-            echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "v$version" != "$TAG" ]; then
+            echo "tag $TAG does not match version $version in pyproject.toml"
+            exit 1
           fi
-
-  build:
-    needs: pending
-    if: needs.pending.outputs.version != ''
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v6
+          test -f "release/$TAG/NOTES.md" || { echo "release/$TAG/NOTES.md is missing"; exit 1; }
       - run: uv build
       - name: Install the wheel alone and run it
         run: |
@@ -59,7 +49,7 @@ jobs:
           path: dist/
 
   publish:
-    needs: [pending, build]
+    needs: build
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -69,28 +59,7 @@ jobs:
         with:
           name: dist
           path: dist/
-      # A rerun after a failed tag step finds the files already on PyPI.
+      # A rerun after a later failure finds the files already on PyPI.
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           skip-existing: true
-
-  tag:
-    needs: [pending, publish]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
-        with:
-          name: dist
-          path: dist/
-      - name: Tag the release commit and publish its notes
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.pending.outputs.version }}
-        run: |
-          gh release create "v$VERSION" dist/* \
-            --target "$GITHUB_SHA" \
-            --title "v$VERSION" \
-            --notes-file "release/v$VERSION/NOTES.md"
