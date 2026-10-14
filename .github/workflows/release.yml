@@ -1,32 +1,65 @@
 name: Release
 
-# Pushing a tag vX.Y.Z publishes that version of etude-sdk to PyPI. PyPI trusts
-# this workflow by name (trusted publishing), so no token is stored anywhere.
+# A release is an explicit commit on main: it sets `version` in pyproject.toml
+# and adds release/vVERSION/NOTES.md. When main holds notes for its version and
+# no tag for it yet, this builds, checks and publishes that commit, then tags it.
+# Every other push finds nothing to release. PyPI trusts this workflow by name
+# (trusted publishing), so no token is stored anywhere.
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
+
+# Releases run one at a time and are never cancelled half-published.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
+  pending:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+      - name: Find an unreleased version with notes
+        id: version
+        run: |
+          version=$(uv version --short)
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "v$version is already released"
+          elif [ ! -f "release/v$version/NOTES.md" ]; then
+            echo "no release/v$version/NOTES.md, so nothing to release"
+          else
+            echo "releasing v$version" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "version=$version" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
+    needs: pending
+    if: needs.pending.outputs.version != ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v6
-      - name: Refuse a tag that does not match the package version
-        run: |
-          version=$(uv version --short)
-          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
-            echo "tag $GITHUB_REF_NAME does not match version $version in pyproject.toml"
-            exit 1
-          fi
       - run: uv build
+      - name: Install the wheel alone and run it
+        run: |
+          uv venv "$RUNNER_TEMP/smoke"
+          VIRTUAL_ENV="$RUNNER_TEMP/smoke" uv pip install dist/*.whl
+          cd "$RUNNER_TEMP"
+          smoke/bin/etude --help > /dev/null
+          smoke/bin/etude reports --help > /dev/null
+          smoke/bin/python -c "import etude.track.run, etude.launch.client"
       - uses: actions/upload-artifact@v4
         with:
           name: dist
           path: dist/
 
   publish:
-    needs: build
+    needs: [pending, build]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -36,4 +69,28 @@ jobs:
         with:
           name: dist
           path: dist/
+      # A rerun after a failed tag step finds the files already on PyPI.
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
+
+  tag:
+    needs: [pending, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Tag the release commit and publish its notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.pending.outputs.version }}
+        run: |
+          gh release create "v$VERSION" dist/* \
+            --target "$GITHUB_SHA" \
+            --title "v$VERSION" \
+            --notes-file "release/v$VERSION/NOTES.md"
