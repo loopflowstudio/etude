@@ -1,10 +1,22 @@
 name: Release
 
-# Pushing a tag vX.Y.Z publishes that version of etude-sdk to PyPI. PyPI trusts
-# this workflow by name (trusted publishing), so no token is stored anywhere.
+run-name: Release ${{ inputs.tag }}
+
+# `lf release run` starts this on the merged release commit once its release
+# pull request has landed, then pushes the tag after this succeeds. It builds,
+# checks and publishes that exact commit. PyPI trusts this workflow by name
+# (trusted publishing), so no token is stored anywhere.
 on:
-  push:
-    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, such as v0.2.0
+        required: true
+        type: string
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -13,13 +25,24 @@ jobs:
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v6
       - name: Refuse a tag that does not match the package version
+        env:
+          TAG: ${{ inputs.tag }}
         run: |
           version=$(uv version --short)
-          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
-            echo "tag $GITHUB_REF_NAME does not match version $version in pyproject.toml"
+          if [ "v$version" != "$TAG" ]; then
+            echo "tag $TAG does not match version $version in pyproject.toml"
             exit 1
           fi
+          test -f "release/$TAG/NOTES.md" || { echo "release/$TAG/NOTES.md is missing"; exit 1; }
       - run: uv build
+      - name: Install the wheel alone and run it
+        run: |
+          uv venv "$RUNNER_TEMP/smoke"
+          VIRTUAL_ENV="$RUNNER_TEMP/smoke" uv pip install dist/*.whl
+          cd "$RUNNER_TEMP"
+          smoke/bin/etude --help > /dev/null
+          smoke/bin/etude reports --help > /dev/null
+          smoke/bin/python -c "import etude.track.run, etude.launch.client"
       - uses: actions/upload-artifact@v4
         with:
           name: dist
@@ -36,4 +59,7 @@ jobs:
         with:
           name: dist
           path: dist/
+      # A rerun after a later failure finds the files already on PyPI.
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
