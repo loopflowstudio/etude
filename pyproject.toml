@@ -1,0 +1,62 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "etude-sdk"
+version = "0.1.0"
+description = "Launch training runs on your own or rented machines and track what they record"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=1.26,<3",
+    "pydantic>=2.12,<3",
+    "typer>=0.27,<1",
+]
+
+[project.urls]
+Repository = "https://github.com/loopflowstudio/etude"
+
+[project.optional-dependencies]
+s3 = ["boto3>=1.35,<2"]
+
+[project.scripts]
+etude = "etude.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/etude"]
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "mypy>=1.15,<2", "ruff>=0.11,<1", "moto[s3]>=5,<6"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = '-m "not scale"'
+markers = ["scale: opt-in counting workloads at 10, 100 and 1000 workers"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "TID252", "PLC0415"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+# Every import names its module in full, so a reader never has to work out where it is.
+ban-relative-imports = "all"
+
+[tool.hatch.build.targets.wheel.force-include]
+"pyproject.toml" = "etude/_package/pyproject.toml"
+"uv.lock" = "etude/_package/uv.lock"
+
+[tool.ruff.lint.per-file-ignores]
+# AGENTS.md: entry points load only the command being invoked.
+"src/etude/cli.py" = ["PLC0415"]
+"src/etude/launch/cli.py" = ["PLC0415"]
+"src/etude/track/cli.py" = ["PLC0415"]

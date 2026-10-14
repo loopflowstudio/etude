@@ -1,0 +1,202 @@
+"""The private install, bare guardian and historical wire contracts."""
+
+from __future__ import annotations
+
+import hashlib
+import io
+import os
+import subprocess
+import sys
+import zipfile
+from pathlib import Path
+from typing import Any
+
+import pytest
+from pydantic import ValidationError
+
+from etude.launch.client import _open
+from etude.launch.environment import install
+from etude.launch.providers import package
+from etude.launch.providers.package import program_archive
+from etude.launch.providers.runpod import pod
+from etude.launch.records import Job
+from etude.launch.schemas import Packet, Result
+from etude.launch.storage.files import read_result
+
+
+def test_guardian_runs_without_site_packages() -> None:
+    source = Path(__file__).resolve().parents[2] / "src"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-S",
+            "-c",
+            "import sys; from etude.launch.providers.runpod.pod import GuardianAPI, guard; "
+            "from datetime import datetime, UTC; from decimal import Decimal; "
+            'calls=[]; api=GuardianAPI("fixture", lambda method, *args: '
+            '(calls.append(method) or (404,b"")) if method=="GET" else (204,b"")); '
+            'guard(api,"pod",datetime.now(UTC),Decimal(0)); '
+            'assert "pydantic" not in sys.modules and "typer" not in sys.modules',
+        ],
+        env={**os.environ, "PYTHONPATH": str(source)},
+        capture_output=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_old_packet_loads_and_frozen_models_validate() -> None:
+    packet = Packet.model_validate_json(
+        '{"session":"old","deadline":"2026-10-13 00:00:00+00:00","work":[],"kept":false}'
+    )
+    assert packet.cap_usd == 0 and not packet.autorun
+    assert Packet.model_validate_json(packet.model_dump_json()) == packet
+    with pytest.raises(ValidationError):
+        packet.kept = True
+    job = Job.model_validate_json('{"command":"true","max_hours":1,"max_usd":"0.10"}')
+    assert str(job.max_usd) == "0.10"
+
+
+@pytest.mark.parametrize(
+    "body",
+    ["[]", '{"clocks":{"steps":true}}', '{"clocks":{"steps":"ten"}}', '{"clocks":{"steps":NaN}}'],
+)
+def test_untrusted_result_rejects_invalid_clocks(tmp_path: Path, body: str) -> None:
+    (tmp_path / "etude-result.json").write_text(body)
+    assert read_result(tmp_path) == Result()
+
+
+def test_missing_uv_names_the_requirement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path))
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    with pytest.raises(RuntimeError, match="uv is required"):
+        install(program_archive())
+
+
+def test_job_uses_its_own_python_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    bin = tmp_path / "job-bin"
+    bin.mkdir()
+    executable = bin / "python"
+    executable.write_text('#!/bin/sh\necho job-python\ntest -z "$VIRTUAL_ENV"\n')
+    executable.chmod(0o700)
+    monkeypatch.setenv(
+        "PATH", os.pathsep.join([str(Path(sys.executable).parent), str(bin), os.environ["PATH"]])
+    )
+    monkeypatch.setenv("VIRTUAL_ENV", str(Path(sys.executable).parent.parent))
+    scheduler = _open(tmp_path / "launcher")
+    id = scheduler.launch(Job(command="python", max_hours=0.01))
+    assert scheduler.wait(id, every=0.05, timeout=10)[0].outcome == "succeeded"
+    assert scheduler.logs(id) == "job-python\n"
+
+
+def test_runpod_guardian_payload_is_small_and_independent(tmp_path: Path) -> None:
+    code = program_archive(guardian=True)
+    assert len(code) < 16_000  # startup environment must stay below Linux per-value limits
+    with zipfile.ZipFile(io.BytesIO(code)) as archive:
+        archive.extractall(tmp_path)
+    result = subprocess.run(
+        [sys.executable, "-S", "-c", "import etude.launch.providers.runpod.pod"],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(tmp_path)},
+        capture_output=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_transferred_package_keeps_its_digest_when_forwarded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = package.program_archive()
+    with zipfile.ZipFile(io.BytesIO(original)) as archive:
+        archive.extractall(tmp_path)
+    metadata = tmp_path / "etude/_package"
+    metadata.mkdir()
+    for name in ("pyproject.toml", "uv.lock"):
+        (metadata / name).write_bytes((tmp_path / name).read_bytes())
+    monkeypatch.setattr(package, "__file__", str(tmp_path / "etude/launch/providers/package.py"))
+    assert package.program_archive() == original
+
+
+@pytest.mark.parametrize("failure", ["", "guardian", "digest", "install"])
+def test_stock_boot_requires_guardian_before_download_and_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    events: list[str] = []
+    marker = tmp_path / "guardian-started"
+    code = b"client archive"
+    monkeypatch.setattr(pod, "GUARDIAN_MARKER", marker)
+    monkeypatch.setenv("RUNPOD_POD_ID", "own-pod")
+    monkeypatch.setenv("RUNPOD_API_KEY", "self-key")
+    monkeypatch.setenv("ETUDE_PACKAGE_URL", "https://fixture/package")
+    monkeypatch.setenv(
+        "ETUDE_PACKAGE_SHA256", "wrong" if failure == "digest" else hashlib.sha256(code).hexdigest()
+    )
+    monkeypatch.setenv("ETUDE_BOOTSTRAP_URL", "https://fixture/bootstrap")
+
+    class Timer:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            events.append("guardian spawned")
+
+        def poll(self) -> int | None:
+            if failure == "guardian":
+                return 1
+            marker.write_text("started")
+            events.append("guardian started")
+            return None
+
+    def download(url: str, timeout: int) -> io.BytesIO:
+        assert marker.exists()
+        events.append("download")
+        return io.BytesIO(code)
+
+    def install(archive: bytes) -> Path:
+        assert archive == code and marker.exists()
+        events.append("install")
+        if failure == "install":
+            raise RuntimeError("installation failed")
+        return tmp_path
+
+    def session(command: list[str], **kwargs: Any) -> int:
+        assert command == [
+            str(tmp_path / ".venv/bin/python"),
+            "-m",
+            "etude",
+            "worker",
+            "--bootstrap",
+            "https://fixture/bootstrap",
+        ]
+        assert "PYTHONPATH" not in kwargs["env"]
+        events.append("worker")
+        return 0
+
+    def delete(self: pod.GuardianAPI, id: str) -> None:
+        assert id == "own-pod"
+        events.append("delete")
+
+    monkeypatch.setattr(subprocess, "Popen", Timer)
+    monkeypatch.setattr(subprocess, "call", session)
+    monkeypatch.setattr(pod, "ensure_uv", lambda: None)
+    monkeypatch.setattr(pod, "urlopen", download)
+    monkeypatch.setattr(pod, "install", install)
+    monkeypatch.setattr(pod.GuardianAPI, "delete_self", delete)
+    if failure:
+        with pytest.raises((RuntimeError, ValueError)):
+            pod.main(["pod", "boot"])
+    else:
+        assert pod.main(["pod", "boot"]) == 0
+    expected = ["guardian spawned"]
+    if failure != "guardian":
+        expected += ["guardian started", "download"]
+        if failure != "digest":
+            expected += ["install"]
+            if failure != "install":
+                expected += ["worker"]
+    assert events == [*expected, "delete"]
+
+
+def test_pinned_uv_checksum_is_checked_before_install(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    monkeypatch.setattr(pod, "urlopen", lambda url, timeout: io.BytesIO(b"changed artifact"))
+    with pytest.raises(ValueError, match="checksum"):
+        pod.ensure_uv()

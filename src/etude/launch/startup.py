@@ -1,0 +1,47 @@
+"""Start the session as a detached local process.
+
+The disk journal is separate from startup. The SSH starter installs this same
+program remotely; a rented machine starts it at boot.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+from etude.launch.machines import Allocation
+from etude.launch.schemas import Packet
+from etude.launch.storage.disk import DirectoryJournal
+from etude.launch.storage.files import write
+
+
+class ProcessStart:
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self._children: list[subprocess.Popen[bytes]] = []
+
+    def start(self, machine: Allocation, packet: Packet, bootstrap: str | None) -> str:
+        home = self.root / packet.session
+        home.mkdir(parents=True, mode=0o700)
+        for work in packet.work:
+            DirectoryJournal._place_source(home, work)
+        write(home / "packet.json", packet.model_dump_json())
+        return self.spawn(packet)
+
+    def spawn(self, packet: Packet) -> str:
+        home = self.root / packet.session
+        with (home / "session.log").open("wb") as log:
+            child = subprocess.Popen(
+                [sys.executable, "-m", "etude", "worker", str(home)],
+                cwd=home,
+                env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[2])},
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        self._children.append(child)
+        write(home / "receipt", str(child.pid))
+        return str(child.pid)

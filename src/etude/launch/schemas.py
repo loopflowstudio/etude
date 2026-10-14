@@ -1,0 +1,143 @@
+"""What the launcher asks of a machine's session, and what crosses to that session.
+
+One packet goes out per session; one journal entry per attempt comes back. The
+service never decides anything about jobs. The `session` key and service
+arguments identify one working session, on added and rented machines alike.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from datetime import datetime
+from decimal import Decimal
+from typing import Any
+
+from pydantic import Field, FiniteFloat, Json, JsonValue
+
+from etude.launch.records import Cause, Limit, Outcome, Output, Record
+from etude.launch.storage.s3 import Keys, PostForm
+
+
+class CheckpointRef(Record):
+    """Where a parent's checkpoint lies in the journal, and the digest it must have."""
+
+    run: str  # its file is kept with this run's checkpoints
+    session: str
+    attempt: str
+    name: str
+    sha256: str
+    url: str | None = None
+    content: str | None = None  # base64 for a checkpoint copied through the launcher
+
+
+class Work(Record):
+    """One attempt as the session sees it."""
+
+    attempt: str
+    command: str
+    limit_seconds: int
+    limit_kind: Limit
+    seed: int | None
+    until: str | None  # the job's target, as "clock=value"
+    start: dict[str, float] | None  # where each clock stood at the checkpoint it resumes from
+    config: str | None
+    repo: str | None
+    commit: str | None
+    checkpoint: CheckpointRef | None
+    run: str  # names the run's folder in storage, shared by all its attempts
+    job: str | None = None
+    job_name: str | None = None
+    cohort: str | None = None
+
+
+class Packet(Record):
+    session: str  # the session's id, which also names its journal folder
+    deadline: datetime | None
+    work: tuple[Work, ...]
+    kept: bool = False  # stay until the deadline and take work as it is added
+    autorun: bool = False
+    cap_usd: Decimal = Decimal(0)
+
+
+class Progress(Record):
+    """The journal for one attempt, as far as it has been written."""
+
+    attempt: str
+    started_at: datetime | None
+    finished_at: datetime | None
+    outcome: Outcome | None
+    cause: Cause | None
+    clocks: dict[str, float]
+    checkpoint: str | None
+    outputs: tuple[Output, ...]
+    exit_code: int | None
+
+
+class Observation(Record):
+    alive: bool  # False once the session can write nothing more
+    progress: tuple[Progress, ...]
+    start_unknown: bool = False  # durable startup intent, but attempt claims may not have arrived
+
+
+def progress_from_json(
+    raw: Mapping[str, Any], attempt: str, started_at: datetime | None
+) -> Progress:
+    """Claims supply the authoritative attempt and start time; old journal keys survive."""
+    return Progress.model_validate({**raw, "attempt": attempt, "started_at": started_at})
+
+
+class Result(Record):
+    """Reported progress, optionally with checkpoint files already carried to storage."""
+
+    clocks: dict[str, FiniteFloat] = Field(default_factory=dict)
+    checkpoint: str | None = None
+    outputs: tuple[Output, ...] = ()
+
+
+class BucketAccess(Record):
+    name: str
+    region: str
+    host: str
+    keys: Keys
+
+
+class RunAccess(Record):
+    """What a machine may write for one run: everything under that run's folder.
+
+    The form adds files of up to 5 GB. The keys, when AWS issued them, can
+    also send a large file in parts and delete; they expire before the form.
+    """
+
+    form: PostForm
+    bucket: BucketAccess | None = None
+
+
+class Bootstrap(Record):
+    packet: Json[Packet]
+    form: PostForm  # the session's own folder: its receipt and end note
+    runs: dict[str, RunAccess] = Field(default_factory=dict)  # for the packet's work
+    inbox_url: str
+    fetch: dict[str, str] = Field(default_factory=dict)
+
+
+class Delivery(Record):
+    work: Json[Work]
+    access: RunAccess
+    fetch: dict[str, str] = Field(default_factory=dict)
+
+
+class AttemptRecord(Record):
+    """`<run>/attempts/<attempt>.json`: one attempt as far as it has got.
+
+    Rewritten as it moves: started, reporting progress, then finished, with
+    `finished` holding the worker's final journal entry.
+    """
+
+    started_at: datetime | None = None
+    result: Result = Field(default_factory=Result)
+    finished: dict[str, JsonValue] | None = None
+
+
+class Inbox(Record):
+    stop: tuple[str, ...] = ()
+    work: tuple[Delivery, ...] = ()

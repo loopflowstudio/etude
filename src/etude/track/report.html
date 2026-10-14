@@ -1,0 +1,363 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__ · Etude</title>
+<style>
+:root {
+  color-scheme: light;
+  --surface: #fcfcfb; --panel: #ffffff; --rule: #e4e3df; --grid: #eeede9;
+  --text: #0b0b0b; --text-2: #52514e; --text-3: #7b7a75;
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100;
+  --s5: #e87ba4; --s6: #008300; --s7: #6250d6; --s8: #e34948; --other: #9a9992;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --surface: #1a1a19; --panel: #222221; --rule: #3a3a37; --grid: #2c2c2a;
+    --text: #f0efec; --text-2: #c3c2b7; --text-3: #94938a;
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+    --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767; --other: #77766f;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--surface); color: var(--text);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; font-variant-numeric: tabular-nums; }
+main { max-width: 1280px; margin: 0 auto; padding: 24px 16px 64px; }
+h1 { font-size: 22px; margin: 0 0 2px; }
+h2 { font-size: 15px; margin: 32px 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--rule); }
+p.sub { color: var(--text-2); margin: 0 0 16px; }
+.controls { position: sticky; top: 0; z-index: 3; background: var(--surface);
+  padding: 10px 0; border-bottom: 1px solid var(--rule); display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: center; }
+fieldset { border: 0; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+legend { float: left; margin-right: 8px; color: var(--text-2); padding: 0; }
+label.opt { border: 1px solid var(--rule); border-radius: 6px; padding: 3px 9px; cursor: pointer; background: var(--panel); }
+label.opt:has(input:checked) { border-color: var(--text); }
+label.opt:has(input:focus-visible) { outline: 2px solid var(--s1); outline-offset: 1px; }
+label.opt input { position: absolute; opacity: 0; }
+#meaning { color: var(--text-2); flex-basis: 100%; }
+.key { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 12px 0 0; color: var(--text-2); }
+.key span { display: inline-flex; align-items: center; gap: 6px; }
+.key i, .tip i { display: inline-block; width: 14px; height: 2px; border-radius: 1px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; }
+figure .uplot { margin: 4px 0 0; }
+figure { margin: 0; background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; padding: 10px 10px 4px; position: relative; }
+figcaption { font-weight: 600; overflow-wrap: anywhere; }
+figcaption small { font-weight: 400; color: var(--text-3); margin-left: 6px; }
+svg { display: block; width: 100%; height: auto; overflow: visible; }
+svg text { fill: var(--text-3); font-size: 10px; }
+.tip { position: absolute; pointer-events: none; background: var(--panel); border: 1px solid var(--rule);
+  border-radius: 6px; padding: 6px 8px; font-size: 12px; box-shadow: 0 2px 8px rgb(0 0 0 / .12); z-index: 2; min-width: 120px; }
+.tip b { font-weight: 600; } .tip div { display: flex; gap: 6px; align-items: center; white-space: nowrap; }
+.tip .x { color: var(--text-2); margin-bottom: 3px; }
+table { border-collapse: collapse; width: 100%; background: var(--panel); }
+th, td { text-align: left; padding: 5px 10px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { color: var(--text-2); font-weight: 500; } td.n { text-align: right; }
+.scroll { overflow-x: auto; border: 1px solid var(--rule); border-radius: 8px; }
+.empty { color: var(--text-2); }
+details summary { cursor: pointer; color: var(--text-2); margin: 4px 0 8px; }
+</style>
+<style>__UPLOT_CSS__</style>
+</head>
+<body>
+<main>
+  <h1 id="title"></h1>
+  <p class="sub" id="sub"></p>
+  <p class="sub" id="stamp"></p>
+  <div class="controls">
+    <fieldset id="clocks"><legend>Clock</legend></fieldset>
+    <fieldset id="modes"><legend>Show</legend></fieldset>
+    <div id="meaning"></div>
+  </div>
+  <div class="key" id="key"></div>
+  <h2>Runs</h2>
+  <div class="scroll"><table id="runs"></table></div>
+  <div id="evaluations"></div>
+  <div id="charts"></div>
+</main>
+<script type="application/json" id="data">__DATA__</script>
+<script>__UPLOT_JS__</script>
+<script>
+"use strict";
+const D = JSON.parse(document.getElementById("data").textContent);
+const SLOTS = 8, NS = "http://www.w3.org/2000/svg";
+const color = i => i < SLOTS ? `var(--s${i + 1})` : "var(--other)";
+const el = (tag, text, attrs) => { const n = document.createElement(tag); if (text != null) n.textContent = text;
+  for (const k in attrs || {}) n.setAttribute(k, attrs[k]); return n; };
+const svg = (tag, attrs) => { const n = document.createElementNS(NS, tag);
+  for (const k in attrs) n.setAttribute(k, attrs[k]); return n; };
+const fmt = v => v == null ? "–" : Math.abs(v) >= 1e6 || (v !== 0 && Math.abs(v) < 1e-3)
+  ? v.toExponential(2) : String(+v.toPrecision(4));
+const axis = v => Math.abs(v) >= 1e6 ? +(v / 1e6).toPrecision(3) + "M" : Math.abs(v) >= 1e4 ? +(v / 1e3).toPrecision(3) + "k" : fmt(v);
+// The view lives in the URL, so a reload or a regenerated report shows the same thing.
+const asked = new URLSearchParams(location.hash.slice(1));
+const anyJob = Object.keys(D.jobs).length > 0;
+let clock = D.clocks.some(c => c.name === asked.get("clock")) ? asked.get("clock") : D.clocks[0].name;
+let mode = anyJob && asked.get("mode") === "jobs" ? "jobs" : "runs";
+let live = asked.get("live") !== "0";
+// Run indices switched off; colours stay with the run.
+const hidden = new Set(asked.getAll("hide").map(n => D.runs.findIndex(r => r.name === n)).filter(i => i >= 0));
+function remember() {
+  const p = new URLSearchParams();
+  if (clock !== D.clocks[0].name) p.set("clock", clock);
+  if (mode !== "runs") p.set("mode", mode);
+  if (!live) p.set("live", "0");
+  for (const i of hidden) p.append("hide", D.runs[i].name);
+  history.replaceState(null, "", location.pathname + location.search + (p.size ? "#" + p : ""));
+}
+
+document.getElementById("title").textContent = D.experiment;
+document.getElementById("sub").textContent =
+  `${D.runs.length} run${D.runs.length === 1 ? "" : "s"}, read from their files. Lines are bucket means; the wash is each bucket's min to max. Drag across a chart to zoom, double-click to reset.`;
+{
+  const stamp = document.getElementById("stamp");
+  stamp.append(`Generated ${new Date(D.generated_ms).toLocaleString()}.`);
+  if (D.refresh) {
+    const label = el("label", null, {class: "opt"}), box = el("input", null, {type: "checkbox"});
+    box.checked = live;
+    box.addEventListener("change", () => { live = box.checked; remember(); });
+    label.append(box, document.createTextNode(`Reload every ${D.refresh} s`));
+    stamp.append(" ", label);
+    setInterval(() => { if (live && !document.hidden) location.reload(); }, D.refresh * 1000);
+  }
+}
+
+function options(id, items, current, set) {
+  const box = document.getElementById(id);
+  for (const [value, text] of items) {
+    const label = el("label", null, {class: "opt"});
+    const input = el("input", null, {type: "radio", name: id, value});
+    input.checked = value === current;
+    input.addEventListener("change", () => { set(value); draw(); });
+    label.append(input, document.createTextNode(text));
+    box.append(label);
+  }
+}
+options("clocks", D.clocks.map(c => [c.name, c.name]), clock, v => clock = v);
+if (anyJob) options("modes", [["runs", "Runs"], ["jobs", "Job mean, 95% interval over seeds"]], mode, v => mode = v);
+else document.getElementById("modes").remove();
+
+function runsTable() {
+  const t = document.getElementById("runs");
+  const head = el("tr"); for (const h of ["Show", "Run", "Job", "Seed", "Cohort", "Kind", "State", "Rows", "Checkpoints", "Attempts", "Incomplete", "Dropped"]) head.append(el("th", h));
+  t.append(head);
+  D.runs.forEach((r, i) => {
+    const row = el("tr"), swatch = el("td"), line = el("i"), box = el("input", null, {type: "checkbox", "aria-label": `Show ${r.name}`});
+    box.checked = !hidden.has(i); box.dataset.run = i;
+    box.addEventListener("change", () => { box.checked ? hidden.delete(i) : hidden.add(i); draw(); });
+    line.style.cssText = `display:inline-block;width:14px;height:2px;margin-left:6px;vertical-align:middle;background:${color(i)}`; swatch.append(box, line);
+    row.append(swatch, el("td", r.name), el("td", r.job ?? "–"), el("td", r.seed == null ? "–" : String(r.seed), {class: "n"}), el("td", r.cohort ?? "–"), el("td", r.kind ?? "–"), el("td", r.state),
+      el("td", r.rows.toLocaleString(), {class: "n"}), el("td", String(r.checkpoints), {class: "n"}), el("td", String(r.attempts), {class: "n"}), el("td", String(r.incomplete), {class: "n"}),
+      el("td", r.dropped == null ? "–" : String(r.dropped), {class: "n"}));
+    t.append(row);
+  });
+}
+
+function evaluations() {
+  const box = document.getElementById("evaluations");
+  box.replaceChildren();
+  if (!D.evaluations.length) return;
+  box.append(el("h2", "Evaluations"));
+  const chartsBox = el("div"), details = el("details");
+  details.append(el("summary", `All ${D.evaluations.length} evaluation records`));
+  const wrap = el("div", null, {class: "scroll"}), t = el("table"), head = el("tr");
+  for (const h of ["Definition", "Version", "Model", "From run", "At", "State", "Episodes", "Statistic", "Mean", "Interval", "n", "Method"]) head.append(el("th", h));
+  t.append(head);
+  for (const e of D.evaluations) {
+    const at = Object.entries(e.at).map(([k, v]) => `${k}=${fmt(v)}`).join(", ");
+    const episodes = e.expected_episodes ? `${e.episodes} / ${e.expected_episodes}` : String(e.episodes);
+    const state = e.state === "failed" ? `failed: ${e.failure}` : e.state === "running" ? "running (provisional)" : e.state;
+    const stats = e.estimates.length ? e.estimates : [null];
+    stats.forEach((s, i) => {
+      const row = el("tr");
+      const from = e.run == null ? "not recorded by a run here" : D.runs[e.run].name;
+      for (const text of i ? ["", "", "", "", "", "", ""] : [e.definition, e.version, e.subject, from, at || "–", state, episodes]) row.append(el("td", text));
+      row.append(el("td", s ? s.name : "–"), el("td", s ? fmt(s.mean) : "–", {class: "n"}),
+        el("td", s ? `${fmt(s.lower)} to ${fmt(s.upper)}` : "–"), el("td", s ? String(s.n) : "–", {class: "n"}), el("td", s ? s.method : "–"));
+      t.append(row);
+    });
+  }
+  wrap.append(t); details.append(wrap); box.append(chartsBox, details);
+  // One chart per evaluation statistic: a point with its interval at each coordinate.
+  const groups = new Map();
+  for (const e of D.evaluations) for (const s of e.estimates) {
+    if (e.run == null || e.at[clock] == null || hidden.has(e.run)) continue;
+    const key = `${e.definition} / ${s.name}`;
+    if (!groups.has(key)) groups.set(key, new Map());
+    const byRun = groups.get(key);
+    if (!byRun.has(e.run)) byRun.set(e.run, []);
+    byRun.get(e.run).push({x: e.at[clock], mean: s.mean, min: s.lower, max: s.upper, open: e.state !== "settled"});
+  }
+  if (!groups.size) { chartsBox.append(el("p", "No evaluation's model was recorded as a checkpoint on this clock.", {class: "empty"})); return; }
+  const grid = el("div", null, {class: "grid"}); grid.style.marginBottom = "12px";
+  for (const [title, byRun] of groups) {
+    const lines = [...byRun].map(([run, pts]) => { pts.sort((a, b) => a.x - b.x);
+      return {label: D.runs[run].name, color: color(run), x: pts.map(p => p.x), mean: pts.map(p => p.mean),
+        min: pts.map(p => p.min), max: pts.map(p => p.max), open: pts.map(p => p.open), bars: true}; });
+    grid.append(figure(title, "interval as reported; hollow is still running", lines));
+  }
+  chartsBox.append(grid);
+}
+
+function figure(title, note, lines) {
+  const W = 360, H = 190, L = 44, R = 10, T = 8, B = 22;
+  const fig = el("figure"), cap = el("figcaption", title);
+  if (note) cap.append(el("small", note));
+  fig.append(cap);
+  const xs = lines.flatMap(l => l.x), ys = lines.flatMap(l => [...l.min, ...l.max, ...l.mean]).filter(v => v != null);
+  if (!xs.length || !ys.length) { fig.append(el("p", "No finite values to draw.", {class: "empty"})); return fig; }
+  let x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  if (x0 === x1) { x0 -= 1; x1 += 1; }
+  if (y0 === y1) { const pad = Math.abs(y0) * .1 || 1; y0 -= pad; y1 += pad; }
+  const pad = (y1 - y0) * .06; y0 -= pad; y1 += pad;
+  const sx = v => L + (v - x0) / (x1 - x0) * (W - L - R), sy = v => T + (1 - (v - y0) / (y1 - y0)) * (H - T - B);
+  const root = svg("svg", {viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": title});
+  for (const v of ticks(y0, y1)) {
+    const y = sy(v);
+    root.append(svg("line", {x1: L, x2: W - R, y1: y, y2: y, stroke: "var(--grid)", "stroke-width": 1}));
+    const t = svg("text", {x: L - 6, y: y + 3, "text-anchor": "end"}); t.textContent = axis(v); root.append(t);
+  }
+  for (const v of ticks(x0, x1)) {
+    const t = svg("text", {x: sx(v), y: H - 6, "text-anchor": "middle"});
+    t.textContent = axis(v); root.append(t);
+  }
+  for (const l of lines) {
+    if (l.bars) {
+      l.x.forEach((x, i) => {
+        root.append(svg("line", {x1: sx(x), x2: sx(x), y1: sy(l.min[i]), y2: sy(l.max[i]), stroke: l.color, "stroke-width": 2, "stroke-linecap": "round", opacity: .55}));
+        root.append(svg("circle", {cx: sx(x), cy: sy(l.mean[i]), r: 4, fill: l.open[i] ? "var(--panel)" : l.color, stroke: l.open[i] ? l.color : "var(--panel)", "stroke-width": 2}));
+      });
+      if (l.x.length > 1) root.append(svg("path", {d: path(l.x.map((x, i) => [sx(x), sy(l.mean[i])])), fill: "none", stroke: l.color, "stroke-width": 1, opacity: .5}));
+      continue;
+    }
+    const up = [], down = [];
+    l.x.forEach((x, i) => { if (l.min[i] != null) { up.push([sx(x), sy(l.max[i])]); down.unshift([sx(x), sy(l.min[i])]); } });
+    if (up.length > 1) root.append(svg("path", {d: path([...up, ...down]) + "Z", fill: l.color, opacity: .12}));
+    const mean = l.x.map((x, i) => l.mean[i] == null ? null : [sx(x), sy(l.mean[i])]);
+    root.append(svg("path", {d: path(mean), fill: "none", stroke: l.color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round"}));
+    if (l.x.length === 1 && mean[0]) root.append(svg("circle", {cx: mean[0][0], cy: mean[0][1], r: 4, fill: l.color}));
+  }
+  const hair = svg("line", {y1: T, y2: H - B, stroke: "var(--text-3)", "stroke-width": 1, visibility: "hidden"});
+  const hit = svg("rect", {x: L, y: T, width: W - L - R, height: H - T - B, fill: "transparent", tabindex: 0});
+  root.append(hair, hit);
+  const tip = el("div", null, {class: "tip"}); tip.hidden = true;
+  const show = px => {
+    const box = root.getBoundingClientRect(), vx = x0 + ((px - box.left) / box.width * W - L) / (W - L - R) * (x1 - x0);
+    let best = null;
+    const rows = lines.map(l => { let k = 0; for (let i = 1; i < l.x.length; i++) if (Math.abs(l.x[i] - vx) < Math.abs(l.x[k] - vx)) k = i;
+      if (best == null || Math.abs(l.x[k] - vx) < Math.abs(best - vx)) best = l.x[k]; return [l, k]; });
+    hair.setAttribute("x1", sx(best)); hair.setAttribute("x2", sx(best)); hair.setAttribute("visibility", "visible");
+    tip.replaceChildren(el("div", `${clock} ${fmt(best)}`, {class: "x"}));
+    for (const [l, k] of rows) {
+      const row = el("div"), key = el("i"); key.style.background = l.color;
+      row.append(key, el("b", fmt(l.mean[k])), el("span", l.label + (l.n ? ` (n=${l.n[k]})` : "")));
+      if (l.min[k] != null) row.append(el("span", `${fmt(l.min[k])} to ${fmt(l.max[k])}`));
+      tip.append(row);
+    }
+    tip.hidden = false;
+    const left = (sx(best) / W) * box.width;
+    tip.style.left = Math.min(left + 12, box.width - 150) + "px"; tip.style.top = "34px";
+  };
+  hit.addEventListener("pointermove", e => show(e.clientX));
+  hit.addEventListener("focus", () => { const b = root.getBoundingClientRect(); show(b.left + b.width * .6); });
+  const hide = () => { tip.hidden = true; hair.setAttribute("visibility", "hidden"); };
+  hit.addEventListener("pointerleave", hide); hit.addEventListener("blur", hide);
+  fig.append(root, tip);
+  return fig;
+}
+const token = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const wash = hex => { const n = parseInt(hex.slice(1), 16); return `rgba(${n >> 16},${(n >> 8) & 255},${n & 255},.14)`; };
+// Metric charts: uPlot on canvas, cursors synced across the page.
+function plot(grid, title, note, lines) {
+  const fig = el("figure"), cap = el("figcaption", title), holder = el("div"), tip = el("div", null, {class: "tip"});
+  if (note) cap.append(el("small", note));
+  tip.hidden = true; fig.append(cap, holder, tip); grid.append(fig);
+  const tables = lines.map(l => [l.x, l.mean, l.min, l.max]);
+  const data = tables.length === 1 ? tables[0] : uPlot.join(tables);
+  const series = [{}], bands = [], ink = token("--text-3"), font = "10px system-ui, sans-serif";
+  lines.forEach((l, i) => {
+    const c = token(l.color.slice(4, -1));
+    series.push({label: l.label, stroke: c, width: 2, spanGaps: true, points: {show: l.x.length < 2}},
+      {stroke: "transparent", spanGaps: true, points: {show: false}}, {stroke: "transparent", spanGaps: true, points: {show: false}});
+    bands.push({series: [3 * i + 3, 3 * i + 2], fill: wash(c)});
+  });
+  const show = u => {
+    const k = u.cursor.idx;
+    if (k == null) { tip.hidden = true; return; }
+    tip.replaceChildren(el("div", `${clock} ${fmt(u.data[0][k])}`, {class: "x"}));
+    lines.forEach((l, i) => {
+      const mean = u.data[3 * i + 1][k], lo = u.data[3 * i + 2][k], hi = u.data[3 * i + 3][k];
+      if (mean == null) return;
+      const row = el("div"), key = el("i"); key.style.background = l.color;
+      row.append(key, el("b", fmt(mean)), el("span", l.label + (l.n ? ` (n=${l.n[l.x.indexOf(u.data[0][k])] ?? "?"})` : "")));
+      if (lo != null) row.append(el("span", `${fmt(lo)} to ${fmt(hi)}`));
+      tip.append(row);
+    });
+    tip.hidden = tip.children.length < 2;
+    tip.style.left = Math.min(u.cursor.left + 60, holder.clientWidth - 150) + "px"; tip.style.top = "34px";
+  };
+  new uPlot({
+    width: holder.clientWidth, height: 180, legend: {show: false}, series, bands,
+    cursor: {sync: {key: "etude"}, points: {size: 6}}, scales: {x: {time: false}},
+    axes: [
+      {stroke: ink, font, size: 26, grid: {show: false}, ticks: {show: false}, values: (u, v) => v.map(axis)},
+      {stroke: ink, font, size: 46, grid: {stroke: token("--grid"), width: 1}, ticks: {show: false}, values: (u, v) => v.map(axis)},
+    ],
+    hooks: {setCursor: [show]},
+  }, data, holder);
+}
+function ticks(lo, hi) {
+  // Round steps (1, 2 or 5 times a power of ten), about four per axis.
+  const raw = (hi - lo) / 4, mag = 10 ** Math.floor(Math.log10(raw)), unit = raw / mag;
+  const step = (unit < 1.5 ? 1 : unit < 3.5 ? 2 : unit < 7.5 ? 5 : 10) * mag, out = [];
+  for (let v = Math.ceil(lo / step) * step; v <= hi + step * 1e-9; v += step) out.push(+v.toPrecision(12));
+  return out;
+}
+function path(points) {
+  let d = "", pen = false;
+  for (const p of points) { if (!p) { pen = false; continue; } d += (pen ? "L" : "M") + p[0].toFixed(1) + " " + p[1].toFixed(1); pen = true; }
+  return d;
+}
+
+function draw() {
+  remember();
+  const info = D.clocks.find(c => c.name === clock);
+  document.getElementById("meaning").textContent = `${info.kind === "step" ? "Step" : "Time"}: ${info.meaning}`;
+  const key = document.getElementById("key"); key.replaceChildren();
+  const jobNames = [...new Set(D.runs.map(r => r.job).filter(Boolean))];
+  const entries = mode === "jobs" ? jobNames.map((c, i) => [c, color(i)])
+    : D.runs.map((r, i) => [r.name, color(i)]).filter((_, i) => !hidden.has(i));
+  if (entries.length > 1) for (const [name, c] of entries) { const s = el("span"), i = el("i"); i.style.background = c; s.append(i, document.createTextNode(name)); key.append(s); }
+  evaluations();
+  const charts = document.getElementById("charts"); charts.replaceChildren();
+  const source = (mode === "jobs" ? D.jobs : D.series)[clock] || {};
+  const groups = new Map();
+  for (const metric of Object.keys(source)) {
+    const group = metric.includes("/") ? metric.slice(0, metric.indexOf("/")) : "metrics";
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group).push(metric);
+  }
+  if (!groups.size) charts.append(el("p", clock === "checkpoint" ? "Rows are not logged against checkpoints. Choose another clock to see metrics."
+    : mode === "jobs" ? "No job has two runs on this clock." : "No run has chartable rows on this clock.", {class: "empty"}));
+  for (const [group, metrics] of groups) {
+    charts.append(el("h2", group));
+    const grid = el("div", null, {class: "grid"});
+    charts.append(grid);  // In the document first, so each chart can measure its width.
+    for (const metric of metrics) {
+      const lines = source[metric].filter(s => mode === "jobs" || !hidden.has(s.run)).map(s => mode === "jobs"
+        ? {...s, label: s.job, color: color(jobNames.indexOf(s.job))}
+        : {...s, label: D.runs[s.run].name, color: color(s.run)});
+      if (!lines.length) continue;
+      const bad = lines.reduce((n, l) => n + (l.nonfinite || 0), 0);
+      plot(grid, metric, bad ? `${bad} NaN or infinite, not drawn` : "", lines);
+    }
+  }
+}
+runsTable();
+draw();
+let resizing;
+addEventListener("resize", () => { clearTimeout(resizing); resizing = setTimeout(draw, 150); });
+</script>
+</body>
+</html>
