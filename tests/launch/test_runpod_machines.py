@@ -152,7 +152,7 @@ class RunPod:
             self.pods[id] = {**pod, "createdAt": datetime.now(UTC).isoformat()}
             env = asked["env"]
             assert not any("KEY" in name or "SECRET" in name for name in env)
-            assert asked["ports"] == []
+            assert asked["ports"] == ["22/tcp"] and asked["startSsh"] is True
             self.envs.append(env)
             thread = threading.Thread(
                 target=run_in_pod,

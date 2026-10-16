@@ -106,7 +106,8 @@ def test_create_sends_one_pinned_request_and_keeps_only_checked_facts() -> None:
         "minRamPerGpu": 48,
         "minVcpuCountPerGpu": 6,
     }
-    assert asked[2]["cloud"] == "SECURE" and asked[2]["ports"] == []
+    assert asked[2]["cloud"] == "SECURE" and asked[2]["ports"] == ["22/tcp"]
+    assert asked[2]["startSsh"] is True
     with pytest.raises(ValueError, match="pinned by digest"):
         api.create(image="registry.example/etude:latest", **wanted)
     assert len(provider.asked) == 1
@@ -182,7 +183,7 @@ def test_bills_are_whole_hours_for_this_pod_only() -> None:
     assert api.bills(fact, datetime(2026, 10, 11, 12, 50, tzinfo=UTC)) == ()
 
 
-def test_stock_create_counts_package_reuse_without_ssh(tmp_path: Path) -> None:
+def test_stock_create_counts_package_reuse_without_waiting_for_ssh(tmp_path: Path) -> None:
     storage = Storage()
     provider = Provider(
         replies={
@@ -244,7 +245,8 @@ def test_stock_create_counts_package_reuse_without_ssh(tmp_path: Path) -> None:
     assert len([key for key in storage.objects if "/programs/" in key]) == 1
     for payload in payloads:
         assert payload["image"] == STOCK_IMAGE and payload["registry"] == ""
-        assert payload["ports"] == [] and "PUBLIC_KEY" not in payload["env"]
+        assert payload["ports"] == ["22/tcp"] and payload["startSsh"] is True
+        assert "PUBLIC_KEY" not in payload["env"]  # RunPod injects the account's keys.
         assert payload["entrypoint"] == ["python3.12", "-c", _BOOT]
         assert len(_BOOT.encode()) < 512  # below the previously accepted small bootstrap
         assert len(base64.b64decode(payload["env"]["ETUDE_PROGRAM"])) < 16_000
