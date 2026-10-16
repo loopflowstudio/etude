@@ -74,6 +74,7 @@ details summary { cursor: pointer; color: var(--text-2); margin: 4px 0 8px; }
   <h2>Runs</h2>
   <div class="scroll"><table id="runs"></table></div>
   <div id="evaluations"></div>
+  <section id="timings" hidden></section>
   <div id="charts"></div>
 </main>
 <script type="application/json" id="data">__DATA__</script>
@@ -269,7 +270,8 @@ function figure(title, note, lines) {
 const token = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 const wash = hex => { const n = parseInt(hex.slice(1), 16); return `rgba(${n >> 16},${(n >> 8) & 255},${n & 255},.14)`; };
 // Metric charts: uPlot on canvas, cursors synced across the page.
-function plot(grid, title, note, lines) {
+const plots = [];
+function plot(grid, title, note, lines, unit = "") {
   const fig = el("figure"), cap = el("figcaption", title), holder = el("div"), tip = el("div", null, {class: "tip"});
   if (note) cap.append(el("small", note));
   tip.hidden = true; fig.append(cap, holder, tip); grid.append(fig);
@@ -290,22 +292,22 @@ function plot(grid, title, note, lines) {
       const mean = u.data[3 * i + 1][k], lo = u.data[3 * i + 2][k], hi = u.data[3 * i + 3][k];
       if (mean == null) return;
       const row = el("div"), key = el("i"); key.style.background = l.color;
-      row.append(key, el("b", fmt(mean)), el("span", l.label + (l.n ? ` (n=${l.n[l.x.indexOf(u.data[0][k])] ?? "?"})` : "")));
-      if (lo != null) row.append(el("span", `${fmt(lo)} to ${fmt(hi)}`));
+      row.append(key, el("b", fmt(mean) + unit), el("span", l.label + (l.n ? ` (n=${l.n[l.x.indexOf(u.data[0][k])] ?? "?"})` : "")));
+      if (lo != null) row.append(el("span", `${fmt(lo)} to ${fmt(hi)}${unit}`));
       tip.append(row);
     });
     tip.hidden = tip.children.length < 2;
     tip.style.left = Math.min(u.cursor.left + 60, holder.clientWidth - 150) + "px"; tip.style.top = "34px";
   };
-  new uPlot({
+  plots.push(new uPlot({
     width: holder.clientWidth, height: 180, legend: {show: false}, series, bands,
     cursor: {sync: {key: "etude"}, points: {size: 6}}, scales: {x: {time: false}},
     axes: [
       {stroke: ink, font, size: 26, grid: {show: false}, ticks: {show: false}, values: (u, v) => v.map(axis)},
-      {stroke: ink, font, size: 46, grid: {stroke: token("--grid"), width: 1}, ticks: {show: false}, values: (u, v) => v.map(axis)},
+      {stroke: ink, font, size: unit ? 60 : 46, grid: {stroke: token("--grid"), width: 1}, ticks: {show: false}, values: (u, v) => v.map(n => axis(n) + unit)},
     ],
     hooks: {setCursor: [show]},
-  }, data, holder);
+  }, data, holder));
 }
 function ticks(lo, hi) {
   // Round steps (1, 2 or 5 times a power of ten), about four per axis.
@@ -320,7 +322,37 @@ function path(points) {
   return d;
 }
 
+function timings() {
+  const box = document.getElementById("timings");
+  box.replaceChildren();
+  box.hidden = !Object.keys(D.timings).length;
+  if (box.hidden) return;
+  box.append(el("h2", "Time"), el("p", "Per-run durations in seconds for recorded observations on the selected clock. Missing metrics or clock values are excluded; unavailable is not zero. Nested activities may overlap.", {class: "sub"}));
+  const summaries = (D.timings[clock] || []).filter(s => !hidden.has(D.runs.findIndex(r => r.name === s.run)));
+  if (!summaries.length) { box.append(el("p", "No runs selected.", {class: "empty"})); return; }
+  const wrap = el("div", null, {class: "scroll"}), table = el("table"), head = el("tr");
+  for (const h of ["Run", "Activity", "Recorded", "Finite", "Nonfinite", "Mean (s)", "Min (s)", "Max (s)"]) head.append(el("th", h));
+  table.append(head);
+  for (const s of summaries) {
+    const row = el("tr");
+    row.append(el("td", s.run), el("td", s.metric));
+    for (const n of [s.finite + s.nonfinite, s.finite, s.nonfinite]) row.append(el("td", n.toLocaleString(), {class: "n"}));
+    for (const n of [s.mean, s.min, s.max]) row.append(el("td", fmt(n), {class: "n"}));
+    table.append(row);
+  }
+  wrap.append(table); box.append(wrap);
+  const grid = el("div", null, {class: "grid"}); grid.style.marginTop = "12px"; box.append(grid);
+  for (const metric of new Set(summaries.map(s => s.metric))) {
+    const lines = ((D.series[clock] || {})[metric] || []).filter(s => !hidden.has(s.run))
+      .map(s => ({...s, label: D.runs[s.run].name, color: color(s.run)}));
+    if (lines.some(l => l.mean.some(v => v != null))) plot(grid, metric, "seconds", lines, " s");
+  }
+  if (!grid.children.length) grid.append(el("p", "No finite timing observations on this clock.", {class: "empty"}));
+}
+
 function draw() {
+  for (const chart of plots) chart.destroy();
+  plots.length = 0;
   remember();
   const info = D.clocks.find(c => c.name === clock);
   document.getElementById("meaning").textContent = `${info.kind === "step" ? "Step" : "Time"}: ${info.meaning}`;
@@ -330,15 +362,17 @@ function draw() {
     : D.runs.map((r, i) => [r.name, color(i)]).filter((_, i) => !hidden.has(i));
   if (entries.length > 1) for (const [name, c] of entries) { const s = el("span"), i = el("i"); i.style.background = c; s.append(i, document.createTextNode(name)); key.append(s); }
   evaluations();
+  timings();
   const charts = document.getElementById("charts"); charts.replaceChildren();
   const source = (mode === "jobs" ? D.jobs : D.series)[clock] || {};
   const groups = new Map();
   for (const metric of Object.keys(source)) {
+    if (metric.startsWith("time/")) continue;
     const group = metric.includes("/") ? metric.slice(0, metric.indexOf("/")) : "metrics";
     if (!groups.has(group)) groups.set(group, []);
     groups.get(group).push(metric);
   }
-  if (!groups.size) charts.append(el("p", clock === "checkpoint" ? "Rows are not logged against checkpoints. Choose another clock to see metrics."
+  if (!groups.size && !Object.keys(D.timings).length) charts.append(el("p", clock === "checkpoint" ? "Rows are not logged against checkpoints. Choose another clock to see metrics."
     : mode === "jobs" ? "No job has two runs on this clock." : "No run has chartable rows on this clock.", {class: "empty"}));
   for (const [group, metrics] of groups) {
     charts.append(el("h2", group));

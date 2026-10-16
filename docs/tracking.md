@@ -118,6 +118,27 @@ Rules a caller can rely on:
   “running or unfinished.” Older completion records without a writer remain
   readable, but cannot establish completion after another attempt starts.
 
+### Activity durations
+
+```python
+run.log({"time/collect": collect_seconds, "time/learn": learn_seconds}, updates=update)
+```
+
+Numeric `time/` metrics are elapsed seconds for a named activity in one recorded
+observation or reporting interval; an observation need not be a function call.
+Supply the run's other declared clocks too. Generated and locally served reports
+show a **Time** section with duration curves and each run's recorded, finite and
+nonfinite counts, mean, minimum and maximum in seconds. The clock and run checkboxes
+control both; Time remains per-run when ordinary metrics show job means.
+
+Summaries weight underlying observations equally, regardless of chart bucket
+population, and follow the same latest-write and continuation rules as other
+metrics. Missing metrics or clock values are excluded; nonfinite durations are
+counted but excluded from statistics. Unavailable statistics display a dash,
+and a recorded zero remains zero. Nested labels such as `time/learn/backward`
+remain intact and may overlap; they do not imply additive or exclusive costs,
+total training time, per-call percentiles or device utilization.
+
 ### Checkpoints and evaluations
 
 ```python

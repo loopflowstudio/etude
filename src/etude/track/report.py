@@ -6,7 +6,8 @@ in its URL, so a regenerated or reloaded page shows the same view. It is the
 quickest way to see that what was logged is what was meant: every
 metric against any declared clock with its min-max envelope, runs overlaid,
 jobs as mean and 95% interval over their seeds, and evaluations with their
-intervals. It needs no server and no network; the page embeds its data and uPlot, which
+intervals. TimingSummary adds observation-weighted seconds for `time/` metrics
+from those same chart reads. It needs no server and no network; the page embeds its data and uPlot, which
 is vendored under `vendor/` with its MIT licence.
 """
 
@@ -21,8 +22,8 @@ from pathlib import Path
 
 import numpy as np
 
-from etude.track.read import Floats, RunData, evaluations, read_all
-from etude.track.records import WALL_CLOCK, interval95
+from etude.track.read import Buckets, Floats, RunData, evaluations, read_all
+from etude.track.records import WALL_CLOCK, Record, interval95
 from etude.track.storage import Storage
 
 BUCKETS = 240
@@ -30,6 +31,38 @@ CASE_BUCKETS = 120
 WALL_MEANING = "wall time since the run's first row, seconds"
 CHECKPOINT_CLOCK = "checkpoint"
 CHECKPOINT_MEANING = "the run's nth recorded checkpoint; evaluations only"
+
+
+class TimingSummary(Record):
+    """Recorded logical observations on one clock; durations are seconds."""
+
+    run: str
+    metric: str
+    finite: int
+    nonfinite: int
+    mean: float | None
+    min: float | None
+    max: float | None
+
+
+def _summarize_time(run: str, metric: str, reduced: Buckets) -> TimingSummary:
+    # Buckets retain observation counts: an unweighted mean would give sparse
+    # intervals the same influence as densely recorded ones. Summarize before
+    # display rounding, using the reader's existing continuation/retry rules.
+    weights = reduced.count - reduced.nonfinite
+    valid = weights > 0
+    finite = int(weights.sum())
+    return TimingSummary(
+        run=run,
+        metric=metric,
+        finite=finite,
+        nonfinite=int(reduced.nonfinite.sum()),
+        mean=_round(statistics.fmean(reduced.mean[valid], weights=weights[valid]))
+        if finite
+        else None,
+        min=_round(float(reduced.min[valid].min())) if finite else None,
+        max=_round(float(reduced.max[valid].max())) if finite else None,
+    )
 
 
 def _round(value: float | None) -> float | None:
@@ -113,14 +146,15 @@ def page_data(experiment: str, data: Sequence[RunData]) -> dict[str, object]:
         metrics.update(dict.fromkeys(run.metrics()))
     series: dict[str, dict[str, list[dict[str, object]]]] = {}
     jobs: dict[str, dict[str, list[dict[str, object]]]] = {}
+    timings: dict[str, list[TimingSummary]] = {}
     for clock in clocks:
         for metric in metrics:
             lines: list[dict[str, object]] = []
             members: dict[str, list[RunData]] = {}
             for index, run in enumerate(data):
-                if clock != WALL_CLOCK and clock not in {c.name for c in run.clocks}:
-                    continue
                 reduced = run.chart(metric, clock, BUCKETS)
+                if metric.startswith("time/"):
+                    timings.setdefault(clock, []).append(_summarize_time(run.name, metric, reduced))
                 if not len(reduced):
                     continue
                 origin = float(reduced.x_first[0]) if clock == WALL_CLOCK else 0.0
@@ -134,7 +168,7 @@ def page_data(experiment: str, data: Sequence[RunData]) -> dict[str, object]:
                         "nonfinite": int(reduced.nonfinite.sum()),
                     }
                 )
-                if run.job is not None:
+                if run.job is not None and not metric.startswith("time/"):
                     members.setdefault(run.job, []).append(run)
             if lines:
                 series.setdefault(clock, {})[metric] = lines
@@ -165,6 +199,10 @@ def page_data(experiment: str, data: Sequence[RunData]) -> dict[str, object]:
         ],
         "series": series,
         "jobs": jobs,
+        "timings": {
+            clock: [summary.model_dump(mode="json") for summary in summaries]
+            for clock, summaries in timings.items()
+        },
         "evaluations": [
             {
                 "writer": index_of[view.writer],
