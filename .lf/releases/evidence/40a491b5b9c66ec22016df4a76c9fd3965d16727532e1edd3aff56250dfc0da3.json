@@ -1,0 +1,13 @@
+{
+  "name": "default",
+  "area": [],
+  "tag_prefix": "",
+  "manifests": [
+    "pyproject.toml"
+  ],
+  "workflow": ".github/workflows/release.yml",
+  "verify": [],
+  "prepare": [],
+  "completion": "workflow",
+  "publisher": []
+}
