@@ -167,7 +167,27 @@ A pool's `--image` or `etude pool image` selects a user's own pinned image for
 training dependencies installed ahead of time. It must meet the same Python
 and uv requirements and needs nothing of Etude. `--registry` still supplies a
 provider pull credential for a user's private image. The stock image needs no
-registry credential. No SSH key or port is installed on a rented machine.
+registry credential.
+
+To inspect a new rental over SSH, add your public key (for example, the contents
+of `~/.ssh/id_ed25519.pub`) to your RunPod account's SSH keys before renting.
+Open the pod's **Connect** tab and copy its **SSH over exposed TCP** command:
+
+```sh
+ssh root@POD_IP -p MAPPED_PORT -i ~/.ssh/id_ed25519
+```
+
+Etude requests `startSsh` and exposes `22/tcp`; RunPod supplies the account's
+public keys as `PUBLIC_KEY`, using the account context of `RUNPOD_API_KEY`.
+For a team, register each person's public key in that team's RunPod credentials;
+each person keeps their private key. No separate Etude key setting is needed. Boot starts
+key-only OpenSSH after the guardian and before downloading the client, so SSH
+can help inspect installation problems. Custom images need `ssh-keygen` and
+`/usr/sbin/sshd` installed. Missing keys or SSH startup failures are reported in
+the pod logs and do not stop worker startup. Launch and journal access continue
+to work independently of SSH. Etude configures SSH at boot; this change does not
+modify existing pods or synchronize later key changes. SSH access does not extend
+a rental's deadline.
 
 Owned machines and existing rental windows come first. A rented machine
 always needs storage. A mixed pool without storage can still use its owned

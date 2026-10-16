@@ -157,6 +157,10 @@ def test_stock_boot_requires_guardian_before_download_and_install(
             raise RuntimeError("installation failed")
         return tmp_path
 
+    def start_ssh() -> None:
+        assert marker.exists()
+        events.append("ssh")
+
     def session(command: list[str], **kwargs: Any) -> int:
         assert command == [
             str(tmp_path / ".venv/bin/python"),
@@ -176,6 +180,7 @@ def test_stock_boot_requires_guardian_before_download_and_install(
 
     monkeypatch.setattr(subprocess, "Popen", Timer)
     monkeypatch.setattr(subprocess, "call", session)
+    monkeypatch.setattr(pod, "_start_ssh", start_ssh)
     monkeypatch.setattr(pod, "ensure_uv", lambda: None)
     monkeypatch.setattr(pod, "urlopen", download)
     monkeypatch.setattr(pod, "install", install)
@@ -187,12 +192,66 @@ def test_stock_boot_requires_guardian_before_download_and_install(
         assert pod.main(["pod", "boot"]) == 0
     expected = ["guardian spawned"]
     if failure != "guardian":
-        expected += ["guardian started", "download"]
+        expected += ["guardian started", "ssh", "download"]
         if failure != "digest":
             expected += ["install"]
             if failure != "install":
                 expected += ["worker"]
     assert events == [*expected, "delete"]
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_ssh_keeps_authorized_keys_private_and_reports_startup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure: bool,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    key = "ssh-ed25519 fixture-public-key"
+    monkeypatch.setenv("PUBLIC_KEY", key + "\nssh-ed25519 second-public-key")
+    directory = tmp_path / ".ssh"
+    directory.mkdir()
+    authorized = directory / "authorized_keys"
+    authorized.write_text("ssh-ed25519 existing-public-key\n" + key + "\n")
+    mkdir = Path.mkdir
+
+    def make_directory(
+        self: Path, mode: int = 0o777, parents: bool = False, exist_ok: bool = False
+    ) -> None:
+        # /run belongs to the disposable pod, not the host running this test.
+        mkdir(tmp_path / "sshd" if self == Path("/run/sshd") else self, mode, parents, exist_ok)
+
+    def run(
+        command: list[str], *, check: bool, capture_output: bool, timeout: int
+    ) -> subprocess.CompletedProcess[bytes]:
+        if failure:
+            raise FileNotFoundError("image has no OpenSSH")
+        return subprocess.CompletedProcess(command, 0, b"", b"")
+
+    monkeypatch.setattr(Path, "mkdir", make_directory)
+    monkeypatch.setattr(subprocess, "run", run)
+    pod._start_ssh()
+    assert authorized.read_text().splitlines() == [
+        "ssh-ed25519 existing-public-key",
+        key,
+        "ssh-ed25519 second-public-key",
+    ]
+    assert directory.stat().st_mode & 0o777 == 0o700
+    assert authorized.stat().st_mode & 0o777 == 0o600
+    output = capsys.readouterr().out
+    assert ("SSH unavailable" if failure else "SSH ready") in output
+    assert "public-key" not in output
+
+
+def test_ssh_without_account_keys_explains_setup_without_touching_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("PUBLIC_KEY", raising=False)
+    pod._start_ssh()
+    assert "add a public key to your RunPod account" in capsys.readouterr().out
+    assert not (tmp_path / ".ssh").exists()
 
 
 def test_pinned_uv_checksum_is_checked_before_install(monkeypatch: pytest.MonkeyPatch) -> None:

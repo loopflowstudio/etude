@@ -101,7 +101,7 @@ class RunPodMachines:
 
     def find(self, session_id: str) -> Allocation | None:
         # The immutable receipt already contains identity and charged price.
-        # Health belongs to alive(); rented machines have no SSH endpoint to await.
+        # Health belongs to alive(); worker startup does not wait for SSH.
         pod = self._receipt(session_id)
         if pod is not None:
             return self._allocation(pod)
