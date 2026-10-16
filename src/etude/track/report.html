@@ -195,7 +195,7 @@ function evaluations() {
   for (const [title, byRun] of groups) {
     const lines = [...byRun].map(([run, pts]) => { pts.sort((a, b) => a.x - b.x);
       return {label: D.runs[run].name, color: color(run), x: pts.map(p => p.x), mean: pts.map(p => p.mean),
-        min: pts.map(p => p.min), max: pts.map(p => p.max), open: pts.map(p => p.open), bars: true}; });
+        min: pts.map(p => p.min), max: pts.map(p => p.max), open: pts.map(p => p.open)}; });
     grid.append(figure(title, "interval as reported; hollow is still running", lines));
   }
   chartsBox.append(grid);
@@ -224,20 +224,11 @@ function figure(title, note, lines) {
     t.textContent = axis(v); root.append(t);
   }
   for (const l of lines) {
-    if (l.bars) {
-      l.x.forEach((x, i) => {
-        root.append(svg("line", {x1: sx(x), x2: sx(x), y1: sy(l.min[i]), y2: sy(l.max[i]), stroke: l.color, "stroke-width": 2, "stroke-linecap": "round", opacity: .55}));
-        root.append(svg("circle", {cx: sx(x), cy: sy(l.mean[i]), r: 4, fill: l.open[i] ? "var(--panel)" : l.color, stroke: l.open[i] ? l.color : "var(--panel)", "stroke-width": 2}));
-      });
-      if (l.x.length > 1) root.append(svg("path", {d: path(l.x.map((x, i) => [sx(x), sy(l.mean[i])])), fill: "none", stroke: l.color, "stroke-width": 1, opacity: .5}));
-      continue;
-    }
-    const up = [], down = [];
-    l.x.forEach((x, i) => { if (l.min[i] != null) { up.push([sx(x), sy(l.max[i])]); down.unshift([sx(x), sy(l.min[i])]); } });
-    if (up.length > 1) root.append(svg("path", {d: path([...up, ...down]) + "Z", fill: l.color, opacity: .12}));
-    const mean = l.x.map((x, i) => l.mean[i] == null ? null : [sx(x), sy(l.mean[i])]);
-    root.append(svg("path", {d: path(mean), fill: "none", stroke: l.color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round"}));
-    if (l.x.length === 1 && mean[0]) root.append(svg("circle", {cx: mean[0][0], cy: mean[0][1], r: 4, fill: l.color}));
+    l.x.forEach((x, i) => {
+      root.append(svg("line", {x1: sx(x), x2: sx(x), y1: sy(l.min[i]), y2: sy(l.max[i]), stroke: l.color, "stroke-width": 2, "stroke-linecap": "round", opacity: .55}));
+      root.append(svg("circle", {cx: sx(x), cy: sy(l.mean[i]), r: 4, fill: l.open[i] ? "var(--panel)" : l.color, stroke: l.open[i] ? l.color : "var(--panel)", "stroke-width": 2}));
+    });
+    if (l.x.length > 1) root.append(svg("path", {d: path(l.x.map((x, i) => [sx(x), sy(l.mean[i])])), fill: "none", stroke: l.color, "stroke-width": 1, opacity: .5}));
   }
   const hair = svg("line", {y1: T, y2: H - B, stroke: "var(--text-3)", "stroke-width": 1, visibility: "hidden"});
   const hit = svg("rect", {x: L, y: T, width: W - L - R, height: H - T - B, fill: "transparent", tabindex: 0});
@@ -252,7 +243,7 @@ function figure(title, note, lines) {
     tip.replaceChildren(el("div", `${clock} ${fmt(best)}`, {class: "x"}));
     for (const [l, k] of rows) {
       const row = el("div"), key = el("i"); key.style.background = l.color;
-      row.append(key, el("b", fmt(l.mean[k])), el("span", l.label + (l.n ? ` (n=${l.n[k]})` : "")));
+      row.append(key, el("b", fmt(l.mean[k])), el("span", l.label));
       if (l.min[k] != null) row.append(el("span", `${fmt(l.min[k])} to ${fmt(l.max[k])}`));
       tip.append(row);
     }
@@ -317,9 +308,7 @@ function ticks(lo, hi) {
   return out;
 }
 function path(points) {
-  let d = "", pen = false;
-  for (const p of points) { if (!p) { pen = false; continue; } d += (pen ? "L" : "M") + p[0].toFixed(1) + " " + p[1].toFixed(1); pen = true; }
-  return d;
+  return points.map(([x, y], i) => (i ? "L" : "M") + x.toFixed(1) + " " + y.toFixed(1)).join("");
 }
 
 function timings() {
