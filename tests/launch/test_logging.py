@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta, tzinfo
 from decimal import Decimal
 from pathlib import Path
 from typing import IO
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 from urllib.request import Request
 
 import pytest
@@ -29,7 +29,7 @@ from etude.launch.providers.runpod import pod
 from etude.launch.records import Diagnostic, LogSnapshot, LogStream, Run
 from etude.launch.records import Storage as StorageRecord
 from etude.launch.scheduler import Scheduler
-from etude.launch.schemas import Bootstrap, Observation, Packet
+from etude.launch.schemas import AttemptRecord, Bootstrap, Observation, Packet
 from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.disk import DirectoryJournal
 from etude.launch.storage.files import write
@@ -200,6 +200,77 @@ def test_missing_silent_and_unavailable_are_distinct(tmp_path: Path) -> None:
             assert state in text and "session=s" in text
             assert f"collected={stream.observed_at}" in text
         assert cursor.render(snapshot) == ""
+
+
+def test_disk_completion_during_log_read_keeps_partial_output_refreshable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "s" / "attempts" / "a"
+    home.mkdir(parents=True)
+    log = home / "log"
+    log.write_bytes(b"early output\n")
+    read_bytes = Path.read_bytes
+
+    def read(path: Path) -> bytes:
+        body = read_bytes(path)
+        if path == log:
+            log.write_bytes(b"early output\nfinal output\n")
+            (home / "finished.json").write_text("{}")
+        return body
+
+    monkeypatch.setattr(Path, "read_bytes", read)
+    journal = DirectoryJournal(tmp_path)
+    early = journal.logs("s", "a")
+    assert early.text == "early output\n" and not early.complete
+    final = journal.logs("s", "a")
+    assert final.complete and final.text == "early output\nfinal output\n"
+
+
+def test_bucket_completion_during_log_read_keeps_cached_output_refreshable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    b = bench(tmp_path)
+    run = b.scheduler.launch(job(), "l4")
+    attempt = b.scheduler.attempts(run)[0]
+    session = b.service.sessions[attempt.session]
+    packet = session.packet.model_copy(update={"work": tuple(w for w, _ in session.work())})
+    storage = MemoryStorage()
+    log_key = f"p/{run}/attempts/{attempt.id}.log"
+    record_key = f"p/{run}/attempts/{attempt.id}.json"
+    storage.objects[f"p/sessions/{attempt.session}/packet.json"] = packet.model_dump_json().encode()
+    storage.objects[log_key] = b"early output\n"
+
+    def send(
+        method: str, url: str, body: bytes | None, headers: dict[str, str]
+    ) -> tuple[int, bytes]:
+        reply = storage(method, url, body, headers)
+        if method == "GET" and urlsplit(url).path == f"/{log_key}":
+            storage.objects[log_key] = b"early output\nfinal output\n"
+            storage.objects[record_key] = AttemptRecord(finished={}).model_dump_json().encode()
+        return reply
+
+    journal = BucketJournal(
+        StorageRecord(name="fixture", bucket="fixture", prefix="p", region="us-east-1"),
+        Bucket("fixture", "us-east-1", Keys(access_key="fixture", secret_key="fixture"), send),
+    )
+    original = b.service.logs
+
+    def read(session_id: str, attempt: str | None = None, *, producer: str = "job") -> LogStream:
+        if producer == "job":
+            return journal.logs(session_id, attempt, producer=producer)
+        return original(session_id, attempt, producer=producer)
+
+    monkeypatch.setattr(b.service, "logs", read)
+    early = b.scheduler.logs(run=run)
+    assert job_text(early) == "early output\n"
+    assert not next(s for s in early.streams if s.producer == "job").complete
+    final = b.scheduler.logs(run=run)
+    assert job_text(final) == "early output\nfinal output\n"
+    assert next(s for s in final.streams if s.producer == "job").complete
+    assert len(storage.asked) == 7  # Four reads, then three with the immutable packet cached.
+    storage.objects.clear()
+    assert job_text(b.scheduler.logs(run=run)) == job_text(final)
+    assert len(storage.asked) == 7  # Final evidence needs no further bucket reads.
 
 
 @pytest.mark.parametrize("timeout", [False, True])

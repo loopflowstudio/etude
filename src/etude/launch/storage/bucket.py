@@ -227,8 +227,10 @@ class BucketJournal:
             raw = self._bucket.get(self._session(session_id) + f"out/{producer}.log")
             return snapshot_stream(session_id, None, producer, raw, False)
         run = self._runs(session_id).get(attempt)
-        raw = None if run is None else self._bucket.get(f"{self._run(run)}attempts/{attempt}.log")
+        # Completion is published after final output. Read it first so a concurrent
+        # finish cannot make an older log snapshot permanently cacheable.
         record = None if run is None else self._record(run, attempt)
+        raw = None if run is None else self._bucket.get(f"{self._run(run)}attempts/{attempt}.log")
         return snapshot_stream(
             session_id, attempt, producer, raw, record is not None and record.finished is not None
         )

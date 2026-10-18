@@ -121,12 +121,13 @@ class DirectoryJournal:
             if attempt
             else home / ("session.log" if producer == "worker" else "bootstrap.log")
         )
-        raw = log.read_bytes() if log.exists() else None
+        # A completion marker only covers output read after that marker.
         closed = (
             (home / "attempts" / attempt / "finished.json").exists()
             if attempt
             else (home / "ended").exists()
         )
+        raw = log.read_bytes() if log.exists() else None
         return snapshot_stream(session_id, attempt, producer, raw, closed)
 
     def fetch(self, session_id: str, attempt: str, name: str, destination: Path) -> Path:
