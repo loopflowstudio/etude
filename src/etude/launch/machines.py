@@ -32,6 +32,7 @@ class Bill(Record):
 
 
 class MachineRequest(Record):
+    startup_deadline: datetime | None = None
     session: str
     deadline: datetime | None
     cap_usd: Decimal

@@ -9,6 +9,7 @@ import select
 import signal
 import subprocess
 import sys
+import time
 from datetime import UTC, datetime, timedelta, tzinfo
 from decimal import Decimal
 from pathlib import Path
@@ -283,21 +284,30 @@ def test_installer_retains_sanitized_stderr_and_original_exception(
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path))
     monkeypatch.setenv("ETUDE_LOG_PATH", str(log))
     monkeypatch.setenv("FIXTURE_TOKEN", "fixture-sensitive-value")
-    monkeypatch.setattr("shutil.which", lambda name: "/fixture/uv")
-    stderr = b"download failed: " + b"fixture-sensitive-" + b"value https://host/?signature=secret"
+    uv = tmp_path / "uv"
+    uv.write_text(
+        "#!/bin/sh\necho 'download failed: fixture-sensitive-value https://host/?signature=secret' >&2\n"
+        + ("sleep 30\n" if timeout else "exit 17\n")
+    )
+    uv.chmod(0o700)
+    monkeypatch.setattr("shutil.which", lambda name: str(uv))
+    elapsed = 0.0
+    original_write = logging.Console.write
 
-    def failed(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        if timeout:
-            raise subprocess.TimeoutExpired(["uv"], 120, stderr=stderr)
-        raise subprocess.CalledProcessError(17, ["uv"], stderr=stderr)
+    def collect(self: logging.Console, body: bytes, *, final: bool = False) -> None:
+        nonlocal elapsed
+        original_write(self, body, final=final)
+        if timeout and b"download failed" in body:
+            elapsed = 601
 
-    monkeypatch.setattr(subprocess, "run", failed)
-    with pytest.raises(subprocess.TimeoutExpired if timeout else subprocess.CalledProcessError):
+    monkeypatch.setattr("etude.launch.environment.time.monotonic", lambda: elapsed)
+    monkeypatch.setattr(logging.Console, "write", collect)
+    with pytest.raises(TimeoutError if timeout else subprocess.CalledProcessError):
         install(program_archive())
     text = log.read_text()
     assert "download failed" in text and "[redacted]" in text
     assert "fixture-sensitive-value" not in text and "signature=secret" not in text
-    assert ("120" if timeout else "17") in text
+    assert ("startup deadline reached" if timeout else "17") in text
 
 
 def test_console_redacts_credentials_split_across_pipe_reads(
@@ -1026,7 +1036,10 @@ def test_courier_leaves_collection_incomplete_when_child_exit_is_unconfirmed(
         }
     )
     monkeypatch.setenv("ETUDE_SESSION", packet.session)
-    monkeypatch.setenv("ETUDE_DEADLINE", (datetime.now(UTC) - timedelta(seconds=1)).isoformat())
+    monkeypatch.setenv("ETUDE_DEADLINE", (datetime.now(UTC) + timedelta(seconds=1)).isoformat())
+    monotonic = time.monotonic
+    elapsed = 0.0
+    monkeypatch.setattr(time, "monotonic", lambda: monotonic() + elapsed)
     monkeypatch.delenv("ETUDE_WORKER_LOG_URL", raising=False)
     waits: list[float] = []
     signals: list[str] = []
@@ -1050,6 +1063,8 @@ def test_courier_leaves_collection_incomplete_when_child_exit_is_unconfirmed(
             raise subprocess.TimeoutExpired(["fixture-sensitive-argv"], timeout)
 
     def start(*args: object, **kwargs: object) -> Unconfirmed:
+        nonlocal elapsed
+        elapsed = 2.0
         (tmp_path / packet.session / "session.log").write_bytes(
             b"last available line\npending credential fragment"
         )

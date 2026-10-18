@@ -7,7 +7,7 @@ import hashlib
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from etude.launch.executor import Refused
+from etude.launch.executor import Refused, check_creation
 from etude.launch.machines import Allocation, Bill, MachineRequest, Safeguards
 from etude.launch.providers.package import program_archive
 from etude.launch.providers.runpod.api import PodFact, ProviderUnavailable, RunPodAPI
@@ -71,12 +71,21 @@ class RunPodMachines:
             "ETUDE_WORKER_LOG_URL": request.bootstrap.worker_log_url,
             "ETUDE_BOOTSTRAP_URL": request.bootstrap.url,
             "ETUDE_SESSION": request.session,
+            "ETUDE_STARTUP_DEADLINE": request.startup_deadline.isoformat()
+            if request.startup_deadline
+            else "",
             "ETUDE_DEADLINE": request.deadline.isoformat(),
             "ETUDE_MAX_USD": str(request.cap_usd),
             "ETUDE_PACKAGE_URL": self._bucket.get_url(self._package_key, 13 * 3600),
             "ETUDE_PACKAGE_SHA256": self._package_digest,
             "ETUDE_PROGRAM": base64.b64encode(program_archive(guardian=True)).decode(),
         }
+        limits = [d for d in (request.deadline, request.startup_deadline) if d is not None]
+        if limits and datetime.now(UTC) >= min(limits):
+            raise Refused(
+                "startup or rental deadline expired during preparation; no machine created"
+            )
+        check_creation()
         pod = self._api.create(
             name=f"etude-{request.session}",
             gpu=template.gpu or "",

@@ -32,7 +32,7 @@ from pydantic import Field
 from etude.launch import source
 from etude.launch.database import Database
 from etude.launch.errors import LaunchError
-from etude.launch.executor import Execution, Refused
+from etude.launch.executor import Execution, Refused, creation_guard
 from etude.launch.log_read import read_deadline, remaining
 from etude.launch.logging import bounded, explain, sanitize
 from etude.launch.machines import Safeguards
@@ -214,6 +214,10 @@ class Scheduler:
         elif pool.storage is not None:
             raise LauncherError("only a pool that makes machines on demand has a storage")
         self._store.add_pool(pool)
+
+    def set_pool_startup(self, name: str, seconds: float | None) -> None:
+        """Change the startup allowance for future sessions; None removes that cutoff."""
+        self._store.set_pool_startup(name, seconds)
 
     def set_pool_max(self, name: str, maximum: int) -> None:
         """Bound automatic growth; existing machines keep their windows."""
@@ -1376,13 +1380,26 @@ class Scheduler:
             self._trouble[session.pool] = "waiting for checkpoint access"
             return
         try:
-            self._store.claim(session, now)
+            self._store.claim(session, self._clock())
         except Stale:
             return  # someone else holds the right to create it
         session = self._store.session(session.id)
+        packet = packet.model_copy(update={"startup_deadline": session.startup_deadline})
         service = self._service(session)
+
+        def check() -> None:
+            self._store.check_pool_lock(session.pool)
+            if any(
+                self._store.run(a.run).cancel_requested_at is not None
+                for a in self._store.attempts(session=session.id)
+            ):
+                raise Refused("startup cancelled during preparation; no machine created")
+
         try:
-            receipt = service.create(packet.model_copy(update={"kept": True}) if idle else packet)
+            with creation_guard(check):
+                receipt = service.create(
+                    packet.model_copy(update={"kept": True}) if idle else packet
+                )
         except Refused as error:
             self._diagnose(
                 "machine create", "provider refused; no machine acquired", error, session=session.id
@@ -1508,16 +1525,13 @@ class Scheduler:
             self._end_session(session)
             return
         session = self._creation_facts(session, now)
-        machine = self._store.machine(session.machine)
-        if session.started_at is None and machine.kind == "rented":
-            assert session.claimed_at is not None
-            if now >= min(
-                deadline or now + timedelta(minutes=5),
-                session.claimed_at + timedelta(minutes=5),
-            ):
+        if session.started_at is None:
+            limits = [d for d in (deadline, session.startup_deadline) if d is not None]
+            if limits and now >= min(limits):
                 self._diagnose(
                     "worker startup",
-                    "first receipt not received within startup allowance; cleanup requested",
+                    f"first receipt missing at effective deadline {min(limits).isoformat()}; "
+                    "cleanup requested",
                     session=session.id,
                 )
                 self._end_session(session)

@@ -32,7 +32,7 @@ from decimal import Decimal
 from pathlib import Path
 from urllib.request import urlopen
 
-from etude.launch.environment import install
+from etude.launch.environment import install, startup_timeout
 from etude.launch.logging import (
     CLOSED,
     Console,
@@ -113,7 +113,7 @@ def ensure_uv() -> None:
     """Supply uv when a stock image has only Python; verify before extraction."""
     if shutil.which("uv") is not None:
         return
-    with urlopen(UV_URL, timeout=60) as response:
+    with urlopen(UV_URL, timeout=min(60, startup_timeout() or 60)) as response:
         code = response.read()
     if hashlib.sha256(code).hexdigest() != UV_SHA256:
         raise ValueError("uv download checksum does not match")
@@ -145,7 +145,12 @@ def _start_ssh() -> None:
         authorized.write_text("\n".join(lines) + "\n")
         authorized.chmod(0o600)
         Path("/run/sshd").mkdir(mode=0o755, parents=True, exist_ok=True)
-        subprocess.run(["ssh-keygen", "-A"], check=True, capture_output=True, timeout=30)
+        subprocess.run(
+            ["ssh-keygen", "-A"],
+            check=True,
+            capture_output=True,
+            timeout=min(30, startup_timeout() or 30),
+        )
         subprocess.run(
             [
                 "/usr/sbin/sshd",
@@ -158,7 +163,7 @@ def _start_ssh() -> None:
             ],
             check=True,
             capture_output=True,
-            timeout=30,
+            timeout=min(30, startup_timeout() or 30),
         )
     except (OSError, subprocess.SubprocessError) as error:
         # Custom training images may omit OpenSSH. Never dump command output or keys.
@@ -203,17 +208,20 @@ def main(argv: list[str]) -> int:
         publishing = start_publication(log, url)
         with log_to(log):
             try:
-                latest = time.monotonic() + 30
+                latest = time.monotonic() + min(30, startup_timeout() or 30)
                 while not marker.exists():
                     if timer.poll() is not None or time.monotonic() >= latest:
                         raise RuntimeError("guardian did not start; refusing client installation")
                     time.sleep(0.05)
                 write_log("guardian", "ready; independent deadline active")
+                startup_timeout()
                 _start_ssh()
                 write_log("package download", "ensuring uv")
                 ensure_uv()
                 write_log("package download", "fetching client")
-                with urlopen(os.environ["ETUDE_PACKAGE_URL"], timeout=60) as response:
+                with urlopen(
+                    os.environ["ETUDE_PACKAGE_URL"], timeout=min(60, startup_timeout() or 60)
+                ) as response:
                     code = response.read()
                 if hashlib.sha256(code).hexdigest() != os.environ["ETUDE_PACKAGE_SHA256"]:
                     raise ValueError("client package digest does not match")

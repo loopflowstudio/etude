@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 from etude.launch.logging import CLOSED, log_to, write_log
@@ -37,6 +38,11 @@ class ProcessStart:
 
     def spawn(self, packet: Packet) -> str:
         home = self.root / packet.session
+        if (home / "cancel-start").exists():
+            raise RuntimeError("startup cancelled before worker entry")
+        limits = [d for d in (packet.deadline, packet.startup_deadline) if d is not None]
+        if limits and datetime.now(UTC) >= min(limits):
+            raise TimeoutError("startup or rental deadline reached before worker entry")
         with (home / "session.log").open("wb") as log:
             child = subprocess.Popen(
                 [sys.executable, "-m", "etude", "worker", str(home)],

@@ -119,6 +119,7 @@ class Pool(Record):
     name: str
     on_demand_template: MachineTemplate | None = None  # None: the pool is only what you own
     max_on_demand: int = 0  # on-demand machines in use at once
+    startup_seconds: float | None = Field(default=600, gt=0, allow_inf_nan=False)
     setup_seconds: int = 900  # added to a rental's life when its dollar caps allow
     max_rental_seconds: int = 43_000  # under the 12 hour storage-session ceiling
     off: bool = False  # takes no new runs; what it already holds finishes and stays readable
@@ -286,6 +287,7 @@ class Session(Record):
     machine: str
     planned_at: datetime
     claimed_at: datetime | None
+    startup_deadline: datetime | None = None
     receipt: str | None
     started_at: datetime | None
     refused_at: datetime | None

@@ -500,6 +500,9 @@ def pool_add(
     vcpus: Annotated[int | None, typer.Option(help="minimum virtual CPUs")] = None,
     memory_gb: Annotated[int | None, typer.Option(help="minimum memory")] = None,
     disk_gb: Annotated[int | None, typer.Option(help="disk size")] = None,
+    startup_seconds: Annotated[
+        float, typer.Option(min=0, help="startup allowance; 0 disables it")
+    ] = 600,
     max_usd_per_hour: Annotated[
         str | None, typer.Option(help="make no machine that costs more than this per hour")
     ] = None,
@@ -526,9 +529,21 @@ def pool_add(
             name=name,
             on_demand_template=template,
             max_on_demand=max if template else 0,
+            startup_seconds=startup_seconds or None,
             storage=storage,
         )
     )
+    pools()
+
+
+@pool_app.command("startup")
+@kind(Kind.ask)
+def pool_startup(
+    name: str,
+    seconds: Annotated[float, typer.Option(min=0, help="startup allowance; 0 disables it")] = 600,
+) -> None:
+    """Change the startup allowance for future sessions."""
+    default().set_pool_startup(name, seconds or None)
     pools()
 
 
@@ -602,11 +617,16 @@ def controller_show(ctx: typer.Context) -> None:
 
 @controller_app.command("set")
 @kind(Kind.ask)
-def controller_set(address: str) -> None:
+def controller_set(
+    address: str,
+    startup_seconds: Annotated[
+        float, typer.Option(min=0, help="install allowance; 0 disables it")
+    ] = 600,
+) -> None:
     """Name another machine as the controller. Commands then run there over SSH."""
     from etude.launch import controller
 
-    controller.set_address(address)
+    controller.set_address(address, startup_seconds=startup_seconds or None)
     print("controller: " + address)
 
 

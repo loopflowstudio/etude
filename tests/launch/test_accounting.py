@@ -43,7 +43,7 @@ def test_bills_cover_only_their_hours_and_do_not_change_admission(tmp_path: Path
     assert b.store.rental(held.machine).cap_usd == Decimal(2)
 
 
-def test_unstarted_machine_is_deleted_after_five_minutes(tmp_path: Path) -> None:
+def test_unstarted_machine_is_deleted_after_default_startup_allowance(tmp_path: Path) -> None:
     b = bench(tmp_path)
 
     b.service.observe = lambda session_id: Observation(  # type: ignore[method-assign]
@@ -56,6 +56,8 @@ def test_unstarted_machine_is_deleted_after_five_minutes(tmp_path: Path) -> None
     held = b.store.session(b.scheduler.attempts(run)[0].session)
     assert held.started_at is None
     b.run(301)
+    assert b.store.session(held.id).ended_at is None
+    b.run(300)
     assert b.store.session(held.id).ended_at is not None
     assert b.scheduler.read(run).cause == "machine_lost_before_start"
 

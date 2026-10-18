@@ -39,9 +39,9 @@ def baseline(count: int) -> dict[str, Counts]:
     coefficients pin known debt, not a target or a model of physical HTTP calls.
     """
     return {
-        "status": Counts(provider=2 * count, bucket=count, database=64 * count + 13),
+        "status": Counts(provider=2 * count, bucket=count, database=63 * count + 13),
         "runs": Counts(database=13 * count + 1),
-        "tick": Counts(provider=2 * count, bucket=count, database=26 * count + 12),
+        "tick": Counts(provider=2 * count, bucket=count, database=25 * count + 12),
     }
 
 
@@ -110,8 +110,8 @@ def test_ask_wait_counts(tmp_path: Path) -> None:
             b.scheduler.wait(id, timeout=0)
         wait = counting.snapshot()
     assert ask == Counts(database=22)  # target: ask records intent without remote effects
-    # Packet construction reads its paid window once for deadline, cap and reuse.
-    assert wait == Counts(provider=4, bucket=1, database=70)  # known debt: wait advances work
+    # Creation snapshots pool startup policy once; observation no longer reloads machine kind.
+    assert wait == Counts(provider=4, bucket=1, database=71)  # known debt: wait advances work
 
 
 def test_cohort_git_and_database_counts(
@@ -144,7 +144,7 @@ def test_cohort_git_and_database_counts(
         (["pools"], 36, ("numpy", "boto3", "etude.launch.worker")),
         (
             ["worker", "{directory}"],
-            23,
+            24,
             (
                 "numpy",
                 "boto3",
