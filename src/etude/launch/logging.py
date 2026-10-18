@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -148,11 +149,11 @@ def write_log(operation: str, message: str) -> None:
                 partial.write_text(bounded(previous + line))
                 partial.replace(target)
         else:
-            print(line, end="", flush=True)
+            print(line, end="", file=sys.stderr, flush=True)
     except (OSError, UnicodeError):
         # A full disk or a closed console cannot mask the operation's error or stop cleanup.
         try:
-            print(line, end="", flush=True)
+            print(line, end="", file=sys.stderr, flush=True)
         except OSError:
             pass
 

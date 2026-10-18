@@ -1006,3 +1006,49 @@ runtime versions, a CPU tensor operation and guardian imports with site packages
 disabled inside network-disabled containers. The Prepared image workflow runs it
 on Linux; no GPU or provider account is needed. This is not a full bootstrap or
 CUDA execution test.
+
+
+### Setup, training and cleanup
+
+```python
+job = Job(
+    setup='"$ETUDE_PYTHON" prepare_data.py',
+    command='"$ETUDE_PYTHON" train.py',
+    cleanup='"$ETUDE_PYTHON" collect_diagnostics.py',
+    cleanup_seconds=30,
+    runtime=Runtime(python="python3.12"),
+    max_hours=1,
+)
+```
+
+Setup runs once for each attempt, after source preparation and runtime validation.
+It shares the attempt's hours with training. Both run in the same source directory
+with the same selected runtime and outputs directory, in separate shell processes;
+shell exports and `cd` in setup do not alter the training shell. Use files for
+prepared state. Setup is not a cache: infrastructure recovery may allocate another
+attempt and run it again. A nonzero setup or training exit is terminal and is not
+replayed automatically.
+
+When hooks are configured, logs label setup, run and cleanup, including exit or
+stop reason. `ETUDE_PHASE` identifies the current phase. Cleanup runs after user
+code has begun, including setup failure, cancellation and the attempt time limit.
+It gets its own positive, finite allowance (30 seconds by default), capped by the
+remaining session/rental deadline. Its `ETUDE_DEADLINE` reflects that cap. Cleanup
+ignores the cancellation request so it can collect diagnostics; `ETUDE_STOP_FILE`
+remains present. An expired paid window cannot be extended for cleanup. A killed
+machine or failed preflight cannot promise cleanup.
+
+An exhausted phase is killed, with at most one further second to reap it. Cleanup
+failure is logged and makes an otherwise successful attempt fail; it never replaces
+a setup/training failure, cancellation or time-limit outcome. Cleanup is best-effort
+and must not be the only owner of an essential external action.
+
+Storage GETs retry transport failures and HTTP 429/500/502/503/504 at most three
+times, with 0.1/0.2-second backoff. All attempts share one 60-second ceiling or the
+caller's shorter deadline. Retry diagnostics include attempt and failure category,
+never signed URLs. Without a retained log destination, diagnostics go to stderr
+so command results stay readable on stdout. Missing objects and permanent/authentication errors are not
+retried. Bootstrap waits for a not-yet-published object, but an exhausted or
+permanent read failure ends startup instead of starting another retry loop.
+Writes, launch admission, provider creation and user commands gain no
+automatic replay from this policy.

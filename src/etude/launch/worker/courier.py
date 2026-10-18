@@ -333,9 +333,11 @@ def _run(
         while raw is None:  # startup allowance and the independent rental guardian both apply
             startup_timeout()
             try:
-                raw = read(bootstrap_url, send)
+                with read_deadline(startup_timeout() or 60):
+                    raw = read(bootstrap_url, send)
             except StorageUnavailable as error:
                 _diagnose("bootstrap read", error)
+                raise  # GET owns retries; only a missing object remains pending here.
             if raw is None:
                 sleep(every)
         write_log("bootstrap read", "received")
@@ -349,14 +351,17 @@ def _run(
         for folder in ("stop", "work"):
             (home / folder).mkdir(exist_ok=True)
         write_log("source fetch", "starting")
-        courier.fetch(bootstrap.fetch)
+        with read_deadline(startup_timeout() or 60):
+            courier.fetch(bootstrap.fetch)
         write_log("source fetch", "completed")
         write(home / "packet.json", packet.model_dump_json())
         # Persist start intent before user code can run. A lost write reply must not
         # leave running code with no durable evidence that it might have started.
         startup_timeout()
         write_log("receipt upload", "publishing start intent")
-        post(courier._form, courier._form.prefix + "receipt", str(os.getpid()).encode(), send)
+        with read_deadline(startup_timeout() or 60):
+            post(courier._form, courier._form.prefix + "receipt", str(os.getpid()).encode(), send)
+        startup_timeout()
         write_log("receipt upload", "confirmed")
         package_root = str(Path(__file__).resolve().parents[3])
         with (home / "session.log").open("wb") as log:

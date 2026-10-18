@@ -89,7 +89,9 @@ def test_a_reading_link_is_signed_as_amazon_documents() -> None:
 
 
 def test_put_once_get_and_absence_mean_what_they_say() -> None:
-    storage = Storage(replies=[(200, b""), (412, b""), (404, b""), (503, b"")])
+    storage = Storage(
+        replies=[(200, b""), (412, b""), (404, b""), (503, b""), (503, b""), (503, b"")]
+    )
     held = bucket(storage)
     held.put("r/packet.json", b"{}", once=True)
     assert storage.asked[0][3]["if-none-match"] == "*" and storage.asked[0][2] == b"{}"

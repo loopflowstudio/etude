@@ -22,7 +22,9 @@ def remaining(default: float = 60) -> float:
 def read_deadline(seconds: float) -> Iterator[None]:
     if seconds <= 0:
         raise ValueError("log timeout must be positive")
-    token = _deadline.set(time.monotonic() + seconds)
+    deadline = time.monotonic() + seconds
+    outer = _deadline.get()
+    token = _deadline.set(min(deadline, outer) if outer is not None else deadline)
     try:
         yield
     finally:

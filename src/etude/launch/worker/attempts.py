@@ -152,18 +152,25 @@ def _prepare(session: Path, home: Path, work: Work) -> dict[str, str]:
     return environment
 
 
-def _end(process: subprocess.Popen[bytes]) -> None:
-    """Stop the job and everything it started: ask, wait briefly, then kill."""
-    for sign in (signal.SIGTERM, signal.SIGKILL):
+def _end(process: subprocess.Popen[bytes], deadline: float) -> None:
+    """Stop the command within its allowance, then give KILL one second to reap."""
+    signals = (signal.SIGTERM, signal.SIGKILL) if time.monotonic() < deadline else (signal.SIGKILL,)
+    for sign in signals:
         try:
             os.killpg(process.pid, sign)
         except ProcessLookupError:
             return
         try:
-            process.wait(_GRACE_SECONDS)
+            allowance = (
+                1.0
+                if sign == signal.SIGKILL
+                else min(_GRACE_SECONDS, max(0, deadline - time.monotonic()))
+            )
+            process.wait(allowance)
             return
         except subprocess.TimeoutExpired:
             continue
+    raise TimeoutError("command exit could not be confirmed after termination")
 
 
 class Exit(Record):
@@ -178,11 +185,13 @@ def _execute(
     environment: dict[str, str],
     output: BinaryIO,
     errors: BinaryIO,
-    stop: Path,
+    stop: Path | None,
     deadline: datetime,
 ) -> Exit:
-    if stop.exists() or _now() >= deadline:
-        return Exit(code=None, stopped="cancelled" if stop.exists() else "deadline")
+    latest = time.monotonic() + max(0, (deadline - _now()).total_seconds())
+    cancelled = stop is not None and stop.exists()
+    if cancelled or _now() >= deadline:
+        return Exit(code=None, stopped="cancelled" if cancelled else "deadline")
     process = subprocess.Popen(
         command,
         cwd=home / "src",
@@ -195,15 +204,15 @@ def _execute(
     stopped: Literal["cancelled", "deadline"] | None = None
     try:
         while process.poll() is None:
-            if stop.exists():
+            if stop is not None and stop.exists():
                 stopped = "cancelled"
-            elif _now() >= deadline:
+            elif _now() >= deadline or time.monotonic() >= latest:
                 stopped = "deadline"
             if stopped is not None:
                 break
             time.sleep(0.1)
     finally:
-        _end(process)
+        _end(process, latest)
     return Exit(code=process.returncode, stopped=stopped)
 
 
@@ -257,6 +266,102 @@ def _runtime(
     return result
 
 
+def _phase(
+    name: str,
+    command: str,
+    *,
+    home: Path,
+    environment: dict[str, str],
+    log: BinaryIO,
+    stop: Path | None,
+    deadline: datetime,
+    labelled: bool,
+) -> Exit:
+    if labelled:
+        log.write(f"phase {name}: started\n".encode())
+        log.flush()
+    try:
+        result = _execute(
+            ["sh", "-c", command],
+            home=home,
+            environment={
+                **environment,
+                "ETUDE_PHASE": name,
+                "ETUDE_DEADLINE": deadline.isoformat(),
+            },
+            output=log,
+            errors=log,
+            stop=stop,
+            deadline=deadline,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        log.write((f"phase {name}: failed: " + explain(error) + "\n").encode())
+        result = Exit(code=1)
+    if labelled:
+        log.write(f"phase {name}: {result.stopped or ('exit ' + str(result.code))}\n".encode())
+        log.flush()
+    return result
+
+
+def _commands(
+    home: Path,
+    packet: Packet,
+    work: Work,
+    environment: dict[str, str],
+    log: BinaryIO,
+    stop: Path,
+    limit: datetime,
+) -> Exit:
+    labelled = work.setup is not None or work.cleanup is not None
+    result = Exit(code=0)
+    try:
+        if work.setup is not None:
+            result = _phase(
+                "setup",
+                work.setup,
+                home=home,
+                environment=environment,
+                log=log,
+                stop=stop,
+                deadline=limit,
+                labelled=True,
+            )
+        if result.code == 0 and result.stopped is None:
+            result = _phase(
+                "run",
+                work.command,
+                home=home,
+                environment=environment,
+                log=log,
+                stop=stop,
+                deadline=limit,
+                labelled=labelled,
+            )
+    finally:
+        if work.cleanup is not None:
+            deadline = _now() + timedelta(seconds=work.cleanup_seconds)
+            if packet.deadline is not None:
+                deadline = min(deadline, packet.deadline)
+            cleanup = _phase(
+                "cleanup",
+                work.cleanup,
+                home=home,
+                environment=environment,
+                log=log,
+                stop=None,
+                deadline=deadline,
+                labelled=True,
+            )
+            # Cleanup failure is visible but must not hide the original failure/cancellation.
+            if (
+                result.code == 0
+                and result.stopped is None
+                and (cleanup.code != 0 or cleanup.stopped)
+            ):
+                result = Exit(code=cleanup.code if cleanup.code else 1)
+    return result
+
+
 def _run(session: Path, packet: Packet, work: Work) -> None:
     home = session / "attempts" / work.attempt
     stop = session / "stop" / work.attempt
@@ -270,7 +375,7 @@ def _run(session: Path, packet: Packet, work: Work) -> None:
     try:
         environment = _prepare(session, home, work)
     except (OSError, ValueError, subprocess.CalledProcessError, tarfile.TarError) as error:
-        (home / "log").write_text(f"setup failed: {error!r}\n")
+        (home / "log").write_text("source preparation failed: " + explain(error) + "\n")
         return _finish(home, "lost", "setup_failed")
     started = _now()
     limit = started + timedelta(seconds=work.limit_seconds)
@@ -288,15 +393,7 @@ def _run(session: Path, packet: Packet, work: Work) -> None:
                     claim.write(_now().isoformat())
                     claim.flush()
                     os.link(claim.name, home / "claim")
-                result = _execute(
-                    ["sh", "-c", work.command],
-                    home=home,
-                    environment=environment,
-                    output=log,
-                    errors=log,
-                    stop=stop,
-                    deadline=limit,
-                )
+                result = _commands(home, packet, work, environment, log, stop, limit)
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             log.write(("runtime failed: " + explain(error) + "\n").encode())
             result = Exit(code=1)

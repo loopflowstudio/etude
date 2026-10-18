@@ -33,6 +33,9 @@ class CheckpointRef(Record):
 class Work(Record):
     """One attempt as the session sees it."""
 
+    setup: str | None = None
+    cleanup: str | None = None
+    cleanup_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
     runtime: Runtime | None = None
     attempt: str
     command: str
