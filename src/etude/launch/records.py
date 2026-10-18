@@ -14,6 +14,7 @@ Every time is timezone-aware UTC.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from decimal import Decimal
 from typing import Literal
@@ -183,6 +184,15 @@ class Checkpoint(Record):
     clocks: dict[str, float]
 
 
+class Runtime(Record):
+    """A preinstalled job interpreter and the versions it must already contain."""
+
+    python: str = Field(min_length=1)
+    python_version: str | None = None  # exact version or a dotted prefix, e.g. 3.12
+    packages: dict[str, str] = Field(default_factory=dict)  # exact distribution versions
+    cuda: str | None = None  # PyTorch's compiled CUDA version, not host driver version
+
+
 class Job(Record):
     """What to run, without a seed. Launching freezes it: `revision` becomes a commit.
 
@@ -192,6 +202,7 @@ class Job(Record):
     attempts are how it is launched; they bound each run and can differ between runs.
     """
 
+    runtime: Runtime | None = None
     command: str  # run by sh in the source checkout; reads the ETUDE_* environment
     max_hours: float
     max_usd: Decimal | None = None  # required when its pool can spend money
@@ -209,13 +220,16 @@ class Job(Record):
 
 def job_identity(job: Job) -> dict[str, str | int | None]:
     """The fields that make a job itself. Name and limits are left out on purpose."""
-    return {
+    identity: dict[str, str | int | None] = {
         "command": job.command,
         "config": job.config,
         "repo": job.repo,
         "revision": job.revision,
         "until": job.until,
     }
+    if job.runtime is not None:
+        identity["runtime"] = json.dumps(job.runtime.model_dump(mode="json"), sort_keys=True)
+    return identity
 
 
 class SourcePosition(Record):
