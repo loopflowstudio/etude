@@ -7,8 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from etude.launch.records import Job, Runtime, job_identity
+from etude.launch.records import Cause, Job, Outcome, Runtime, job_identity
 from etude.launch.runtime import RuntimeInfo, select_runtime
+from etude.launch.schemas import Packet, Work
+from etude.launch.worker import attempts
 from tests.launch.counting import job_text
 from tests.launch.test_worker_attempts import local
 
@@ -102,3 +104,40 @@ def test_runtime_probe_shares_attempt_deadline(tmp_path: Path) -> None:
     assert status.outcome == "out_of_time" and not marker.exists()
     assert len(scheduler.attempts(run)) == 1
     assert scheduler.attempts(run)[0].started_at is None
+
+
+def test_failure_diagnostic_precedes_completion_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = tmp_path / "session"
+    session.mkdir()
+    work = Work(
+        attempt="attempt",
+        run="run",
+        command="echo never",
+        runtime=Runtime(python="/missing/job-python"),
+        limit_seconds=30,
+        limit_kind="out_of_time",
+        seed=None,
+        until=None,
+        start=None,
+        config=None,
+        repo=None,
+        commit=None,
+        checkpoint=None,
+    )
+    packet = Packet(session="session", deadline=None, work=(work,))
+    published: list[str] = []
+    finish = attempts._finish
+
+    def observe_completion(
+        home: Path, outcome: Outcome, cause: Cause | None = None, code: int | None = None
+    ) -> None:
+        published.append((home / "log").read_text())
+        finish(home, outcome, cause, code)
+
+    monkeypatch.setattr(attempts, "_finish", observe_completion)
+    attempts._run(session, packet, work)
+    assert (
+        len(published) == 1 and "job interpreter" in published[0] and "unavailable" in published[0]
+    )

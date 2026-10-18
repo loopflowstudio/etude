@@ -299,7 +299,7 @@ def _run(session: Path, packet: Packet, work: Work) -> None:
                 )
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             log.write(("runtime failed: " + explain(error) + "\n").encode())
-            return _finish(home, "failed")
+            result = Exit(code=1)
     outcome: Outcome
     if result.stopped == "cancelled":
         outcome = "cancelled"
