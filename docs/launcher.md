@@ -270,7 +270,8 @@ refused or deleted. A new launch ID cannot bypass that fence. `LaunchError.launc
 and `.runs` identify the retained evidence when admission fails. Cohort admission
 remains atomic.
 
-Snapshots refresh journals within a total 30-second default allowance. Follow
+Snapshots refresh journals with no timeout by default; pass `timeout=30` in Python
+or `--timeout 30` on the CLI to bound the complete read. Follow
 uses the same selection and absolute positions in each sanitized producer, stops
 at its time limit, and never schedules or retries work. It prints new evidence
 without replaying already seen output. Job exit alone does not close startup or
@@ -285,8 +286,8 @@ observation times; clocks on different machines do not establish a total order.
 
 Bootstrap uses a write-only capability for one log object, independent of reading
 the bootstrap packet or installing dependencies. Each startup producer publishes
-at most once every 15 seconds and once at closure, with a two-second request
-allowance. The guardian starts first and remains independent of publication.
+at most once every 15 seconds and once at closure, under `Pool.log_seconds`
+(default `None`) and the remaining rental allowance. The guardian starts first and remains independent of publication.
 A storage outage or death before bootstrap runs can leave an explicit evidence
 gap. Reading logs never needs a live machine after its bucket evidence was
 published or its output cached by the controller.
@@ -899,7 +900,7 @@ Pool(name="gpu", on_demand_template=template, startup_seconds=600)
 Pool(name="slow-image", on_demand_template=template, startup_seconds=None)
 ```
 
-`startup_seconds` defaults to 600. A session snapshots its deadline when creation
+`startup_seconds` defaults to `None` (no startup cutoff). A session snapshots its deadline when creation
 is claimed. Package delivery, image acquisition and client installation share that
 allowance until the worker's start receipt. Changing a pool affects future sessions.
 `None` removes this cutoff; rental time and dollar limits still apply. Arbitrary
@@ -919,21 +920,24 @@ Image pull occurs before the in-machine guardian starts, so cleanup during that
 phase requires an active controller and a confirmed provider identity.
 
 Explicit controller installation also accepts `startup_seconds` in Python and
-`etude controller set ADDRESS --startup-seconds SECONDS`. Waiting for installation
-remains bounded (600 seconds when startup is unlimited); a timed-out wait is not
-proof the remote installation stopped. A log read retains its own shorter deadline.
+`etude controller set ADDRESS --startup-seconds SECONDS`. The default is no
+timeout; a configured allowance governs both the local wait and remote install.
+A timed-out wait is not proof the remote installation stopped. A log read retains
+its own explicitly chosen deadline. Downloads, SSH key generation, sshd startup
+and guardian readiness inherit this budget without separate 30/60-second caps.
 
-The prototype database schema is version 4; older database files are refused.
+The prototype database schema is version 5; older database files are refused.
 
 
 ### Prepare a framework image before renting
 
 ```python
 from etude.launch.images import prepare_pytorch, resolve_image
-from etude.launch.records import MachineTemplate
+from etude.launch.records import Job, MachineTemplate
 
-image = prepare_pytorch(torch="2.10.0", cuda="12.8")
-template = MachineTemplate(provider="runpod", gpu="NVIDIA L4", image=image)
+prepared = prepare_pytorch(torch="2.10.0", cuda="12.8")
+template = MachineTemplate(provider="runpod", gpu="NVIDIA L4", image=prepared.image)
+job = Job(command='"$ETUDE_PYTHON" train.py', runtime=prepared.runtime, max_hours=1)
 # Custom public or private image; uses Docker's configured registry credentials.
 custom = resolve_image("registry.example/team/training:release", timeout=30)
 ```
@@ -944,7 +948,8 @@ etude pool image gpu pytorch/pytorch:2.10.0-cuda12.8-cudnn9-runtime
 etude machines --all --images
 ```
 
-Preparation waits for registry metadata within a finite timeout. It needs Docker
+Preparation waits for registry metadata with `timeout=None` by default. A positive
+`timeout` bounds the whole operation; CLI `--timeout 0` disables the cutoff. It needs Docker
 CLI with Buildx and uses `docker login` credentials; no Docker daemon, layer pull,
 image build or machine rental is performed. The default platform is `linux/amd64`.
 The output records the requested reference, immutable platform manifest and
@@ -952,6 +957,10 @@ verified OS/architecture. Unsupported or ambiguous platforms fail before rental.
 
 `prepare_pytorch(kind="devel", ...)` selects the official development variant for
 jobs that compile CUDA extensions; the default runtime variant omits that toolkit.
+The recipe returns a `PreparedRuntime` containing the immutable image and matching
+Python/Torch/CUDA requirements. The job probes `python` in that image and checks
+the exact Torch CUDA distribution before user code. It installs nothing. Custom
+images use `resolve_image` plus an explicit `Runtime`.
 Version combinations must exist in the upstream registry. Resolution establishes
 artifact identity and platform, not framework ABI compatibility or a speedup.
 
@@ -1006,3 +1015,104 @@ runtime versions, a CPU tensor operation and guardian imports with site packages
 disabled inside network-disabled containers. The Prepared image workflow runs it
 on Linux; no GPU or provider account is needed. This is not a full bootstrap or
 CUDA execution test.
+
+
+### Setup, training and cleanup
+
+```python
+job = Job(
+    setup='"$ETUDE_PYTHON" prepare_data.py',
+    command='"$ETUDE_PYTHON" train.py',
+    cleanup='"$ETUDE_PYTHON" collect_diagnostics.py',
+    cleanup_seconds=30,
+    runtime=Runtime(python="python3.12"),
+    max_hours=1,
+)
+```
+
+Setup runs once for each attempt, after source preparation and runtime validation.
+It shares the attempt's hours with training. Both run in the same source directory
+with the same selected runtime and outputs directory, in separate shell processes;
+shell exports and `cd` in setup do not alter the training shell. Use files for
+prepared state. Setup is not a cache: infrastructure recovery may allocate another
+attempt and run it again. A nonzero setup or training exit is terminal and is not
+replayed automatically.
+
+When hooks are configured, logs label setup, run and cleanup, including exit or
+stop reason. `ETUDE_PHASE` identifies the current phase. Cleanup runs after user
+code has begun, including setup failure, cancellation and the attempt time limit.
+Its `cleanup_seconds` defaults to `None`; a positive finite value limits this
+phase, capped by the remaining session/rental deadline. On owned machines without
+a session deadline, unlimited cleanup can remain in progress until it exits. Its `ETUDE_DEADLINE` reflects that cap. Cleanup
+ignores the cancellation request so it can collect diagnostics; `ETUDE_STOP_FILE`
+remains present. An expired paid window cannot be extended for cleanup. A killed
+machine or failed preflight cannot promise cleanup.
+
+Cancellation requests TERM for the process group. `Job.stop_seconds` optionally
+limits the graceful stop before KILL; its default is `None`, still capped by the
+phase deadline. At an exhausted phase deadline Etude sends KILL immediately and
+reaps the process before closing its output. Cleanup
+failure is logged and makes an otherwise successful attempt fail; it never replaces
+a setup/training failure, cancellation or time-limit outcome. Cleanup is best-effort
+and must not be the only owner of an essential external action.
+
+Storage GETs retry transport failures and HTTP 429/500/502/503/504 at most three
+times, with 0.1/0.2-second backoff. All attempts share the caller's optional deadline, including backoff; none adds
+a separate 60-second ceiling. Retry diagnostics include attempt and failure category,
+never signed URLs. Without a retained log destination, diagnostics go to stderr
+so command results stay readable on stdout. Missing objects and permanent/authentication errors are not
+retried. Bootstrap waits for a not-yet-published object, but an exhausted or
+permanent read failure ends startup instead of starting another retry loop.
+Writes, launch admission, provider creation and user commands gain no
+automatic replay from this policy.
+
+
+
+### Timeout ownership
+
+```python
+from etude.launch.deadline import limit_time
+
+# An optional total allowance for synchronous remote operations in this block.
+with limit_time(900):
+    snapshot = scheduler.logs(run="baseline", timeout=None)
+```
+
+Startup and log retrieval default to no timeout. `None` adds no deadline; nested
+operations still obey an existing caller deadline and rental limits. Positive
+values are seconds; CLI `--timeout 0` and `--startup-seconds 0` select no timeout.
+A finite allowance is shared across requests and is never reset by a retry.
+SSH connection options can be set explicitly in the customer's SSH configuration;
+Etude supplies no hidden connection timeout. Provider HTTP and storage transports
+use the enclosing operation allowance without a separate fixed socket limit.
+
+Finite HTTP operations also bound waiting for the complete response, even when
+a connection keeps streaming bytes. Expiry leaves the in-flight outcome unknown:
+Etude does not infer absence or replay writes. The controller's persisted startup
+deadline and the independent rental guardian remain the lifecycle authorities. A successful transport call does not
+prove that remote work completed or was cancelled.
+
+
+`Pool.delivery_seconds=None` controls the courier's shared session-stop and final
+transfer allowance. A finite value also reserves that much of the paid window
+for final delivery; no implicit two-minute/quarter-window reserve remains.
+The provider deadline always caps it. Final delivery makes at most 40 attempts;
+this is an attempt count, not a hidden elapsed-time deadline.
+`Pool.log_seconds=None` controls each background/final diagnostic publication,
+including its lock wait. An explicit finite value may leave evidence incomplete;
+publication never replaces the original failure. Both settings are available on
+`pool add` as `--delivery-seconds` and `--log-seconds` (zero means no added cutoff).
+The bootstrap receives the latter as `ETUDE_LOG_SECONDS`; direct `publish` callers
+can supply `timeout` themselves. The independent guardian can terminate the rental
+while either operation is blocked.
+
+A caller timeout means it stopped waiting. A lifecycle timeout requests remote
+termination; only a receipt/provider observation confirms that termination. Logs
+retain the phase and available evidence through these transitions. Inspect the
+same run again after a read timeout; do not relaunch to get its logs.
+
+The local database's lock-contention wait is separately explicit:
+`Database(path, timeout=30)` retains a finite default so a competing writer does
+not indefinitely hold a synchronous local command. Override it in seconds; zero
+fails immediately on contention. This is a SQLite lock wait, not a startup or job
+limit. Tracking's separate `Run.finish(timeout=10)` remains independently configurable.

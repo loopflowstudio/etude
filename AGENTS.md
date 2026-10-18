@@ -105,7 +105,7 @@ client dependency installation. The client and each job use separate environment
 `logging.py` is also in the standard-library bootstrap subset. Operational errors
 use its sanitizer before retention; subprocess diagnostics omit argv and traceback
 locals. Journal log reads return `LogStream`, preserving missing versus silent
-output, and share the caller's monotonic deadline through `log_read.py`.
+output, and share the caller's monotonic deadline through `deadline.py`.
 Captured console bytes pass through `Console` across reads before retention.
 Only the owning producer closes a stream, after its captured children exit and
 final console collection succeeds. Courier shutdown and final delivery share one
@@ -133,7 +133,8 @@ found.
 
 **Imports.** Write every import as a full path from the module that defines the
 name. Relative imports are a lint error. Put every import at the top of its
-module: an import inside a function is a lint error too. If that makes two
+module: an import inside a function is a lint error except for the documented CLI and
+optional-dependency exceptions above. If that makes two
 modules import each other, move the shared part or pass it in; do not hide the
 cycle inside a function. Keep every `__init__.py` empty, so importing one
 module never loads the rest.
@@ -151,6 +152,11 @@ Keep output plain, because agents and logs read it.
 **Python is the interface.** Work is described in Python, not in a config
 format. A command-line command is a thin way to call the same functions.
 
+**Timeouts.** Customers own operation allowances. Default to `None` unless a
+documented finite default is justified; every finite default must be overridable.
+Children and retries share remaining time. No hidden per-call caps. Caller wait
+expiry does not prove remote cancellation. Rental deadlines remain binding.
+
 **Dependencies.** Manage them with uv. The launcher and tracking use one set of
 versions for every dependency, from one lock file, whether they ship as one
 package or several. Each must work without the other being used. Code Etude runs on someone else's
@@ -166,7 +172,7 @@ something else.
 **What a command may wait on.** Every command is one of three kinds and says
 which. A read answers from the database, at once, and says how fresh its answer
 is. An ask records what is wanted and returns with an id. Only a wait may
-depend on another machine, and it has a time limit. A command needs only what
+depend on another machine, and accepts an explicit optional time limit. A command needs only what
 its kind implies: a read must work with no provider key and no network.
 
 **Measure by counting.** Machine load makes timings unreliable, so tests count

@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import json
 import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -21,7 +22,8 @@ from collections.abc import Callable, Iterable, Iterator
 from datetime import UTC, datetime, timedelta
 from itertools import chain
 
-from etude.launch.log_read import remaining
+from etude.launch.deadline import call, limit_time, remaining
+from etude.launch.logging import write_log
 from etude.launch.measurement import timed
 from etude.launch.records import Record
 
@@ -82,6 +84,29 @@ def _send(method: str, url: str, body: bytes | None, headers: dict[str, str]) ->
             return reply.status, reply.read()
     except urllib.error.HTTPError as error:
         return error.code, error.read()
+
+
+def _get(url: str, headers: dict[str, str], send: Send) -> tuple[int, bytes]:
+    """Three transient read attempts share one allowance, including backoff."""
+    with limit_time(remaining()):
+        for attempt in range(1, 4):
+            remaining()
+            try:
+                status, body = call(lambda: send("GET", url, None, headers))
+            except OSError as error:
+                if attempt == 3:
+                    raise
+                reason = type(error).__name__
+            else:
+                if status not in (429, 500, 502, 503, 504) or attempt == 3:
+                    return status, body
+                reason = f"HTTP {status}"
+            # Neither signed URLs, object keys nor transport exception text belong here.
+            write_log("storage.read", f"attempt {attempt}/3 failed ({reason}); retrying")
+            pause = 0.1 * 2 ** (attempt - 1)
+            left = remaining()
+            time.sleep(pause if left is None else min(pause, left))
+    raise AssertionError("read retry loop exhausted without a result")
 
 
 def _hash(data: bytes) -> str:
@@ -164,7 +189,17 @@ class Bucket:
         url = f"https://{host}/{_quote(key, safe='/')}" + (f"?{text_query}" if query else "")
         del headers["host"]
         try:
-            return self._send(method, url, body if method in ("PUT", "POST") else None, headers)
+            if method == "GET":
+                return _get(url, headers, self._send)
+            return call(
+                lambda: self._send(
+                    method, url, body if method in ("PUT", "POST") else None, headers
+                )
+            )
+        except TimeoutError:
+            raise StorageUnavailable(
+                f"{method} {key or '(list)'}: operation deadline reached"
+            ) from None
         except OSError:
             raise StorageUnavailable(f"{method} {key or '(list)'}: no reply") from None
 
@@ -420,7 +455,11 @@ def post(form: PostForm, key: str, body: bytes, send: Send = _send) -> None:
     payload = b"".join(parts) + body + f"\r\n--{boundary}--\r\n".encode()
     headers = {"Content-Type": f"multipart/form-data; boundary={boundary}"}
     try:
-        status, _ = send("POST", form.url, payload, headers)
+        status, _ = call(lambda: send("POST", form.url, payload, headers))
+    except TimeoutError:
+        raise StorageUnavailable(
+            f"POST {key}: operation deadline reached; reply unconfirmed"
+        ) from None
     except OSError:
         raise StorageUnavailable(f"POST {key}: no reply") from None
     if status not in (200, 201, 204):
@@ -431,7 +470,9 @@ def post(form: PostForm, key: str, body: bytes, send: Send = _send) -> None:
 def read(url: str, send: Send = _send) -> bytes | None:
     """Follow a reading link. None when storage says the object does not exist."""
     try:
-        status, body = send("GET", url, None, {})
+        status, body = _get(url, {}, send)
+    except TimeoutError:
+        raise StorageUnavailable("GET by link: operation deadline reached") from None
     except OSError:
         raise StorageUnavailable("GET by link: no reply") from None
     if status == 404:

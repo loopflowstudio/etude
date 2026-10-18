@@ -13,8 +13,9 @@ from typing import Literal
 
 from pydantic import Field
 
+from etude.launch.deadline import limit_time, remaining
 from etude.launch.logging import explain
-from etude.launch.records import Image, LauncherError, Record
+from etude.launch.records import Image, LauncherError, Record, Runtime
 
 
 class Platform(Record):
@@ -46,18 +47,20 @@ class Inspection(Record):
 _FORMAT = '{"name":{{json .Name}},"manifest":{{json .Manifest}},"image":{{json .Image}}}'
 
 
-def resolve_image(reference: str, *, platform: str = "linux/amd64", timeout: float = 30) -> Image:
+def resolve_image(
+    reference: str, *, platform: str = "linux/amd64", timeout: float | None = None
+) -> Image:
     """Wait for registry metadata, using docker login credentials; never rent or pull layers."""
     if not reference or reference.startswith("-") or any(c.isspace() for c in reference):
         raise ValueError("use one container image reference")
-    if not math.isfinite(timeout) or timeout <= 0:
-        raise ValueError("image resolution timeout must be positive and finite")
+    if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
+        raise ValueError("image resolution timeout must be positive and finite, or None")
     try:
         result = subprocess.run(
             ["docker", "buildx", "imagetools", "inspect", "--format", _FORMAT, "--", reference],
             capture_output=True,
             check=True,
-            timeout=timeout,
+            timeout=remaining(timeout),
         )
     except FileNotFoundError:
         raise LauncherError(
@@ -97,13 +100,27 @@ def resolve_image(reference: str, *, platform: str = "linux/amd64", timeout: flo
     return Image(requested=reference, resolved=f"{repository}@{digest}", platform=platform)
 
 
+class PreparedRuntime(Record):
+    """Recipe result: select the image on the machine and the runtime on the job."""
+
+    image: Image
+    runtime: Runtime
+
+
 def prepare_pytorch(
     *,
     torch: str,
     cuda: str,
     cudnn: str = "9",
     kind: Literal["runtime", "devel"] = "runtime",
-    timeout: float = 30,
-) -> Image:
+    timeout: float | None = None,
+) -> PreparedRuntime:
     """Resolve an official stable PyTorch/CUDA combination, including devel when needed."""
-    return resolve_image(f"pytorch/pytorch:{torch}-cuda{cuda}-cudnn{cudnn}-{kind}", timeout=timeout)
+    with limit_time(timeout):
+        image = resolve_image(f"pytorch/pytorch:{torch}-cuda{cuda}-cudnn{cudnn}-{kind}")
+    return PreparedRuntime(
+        image=image,
+        runtime=Runtime(
+            python="python", packages={"torch": f"{torch}+cu{cuda.replace('.', '')}"}, cuda=cuda
+        ),
+    )

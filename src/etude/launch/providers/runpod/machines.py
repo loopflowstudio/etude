@@ -7,6 +7,7 @@ import hashlib
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+from etude.launch.deadline import limit_time
 from etude.launch.executor import Refused, check_creation
 from etude.launch.machines import Allocation, Bill, MachineRequest, Safeguards
 from etude.launch.providers.package import program_archive
@@ -68,6 +69,9 @@ class RunPodMachines:
                 self._bucket.put(key, code, once=True)
             self._package_key, self._package_digest = key, digest
         env = {
+            "ETUDE_LOG_SECONDS": str(request.log_seconds)
+            if request.log_seconds is not None
+            else "",
             "ETUDE_IMAGE": (template.image or DEFAULT_IMAGE).model_dump_json(),
             "ETUDE_BOOTSTRAP_LOG_URL": request.bootstrap.log_url,
             "ETUDE_WORKER_LOG_URL": request.bootstrap.worker_log_url,
@@ -88,20 +92,22 @@ class RunPodMachines:
                 "startup or rental deadline expired during preparation; no machine created"
             )
         check_creation()
-        pod = self._api.create(
-            name=f"etude-{request.session}",
-            gpu=template.gpu or "",
-            image=template.image.resolved if template.image else STOCK_IMAGE,
-            registry=self._provider.registry
-            if template.image and template.image.resolved != STOCK_IMAGE
-            else "",
-            env=env,
-            entrypoint=("python3.12", "-c", _BOOT),
-            vcpus=template.vcpus or 4,
-            memory_gb=template.memory_gb or 16,
-            disk_gb=template.disk_gb or 40,
-            data_center=template.data_center,
-        )
+        seconds = (min(limits) - datetime.now(UTC)).total_seconds() if limits else None
+        with limit_time(seconds):
+            pod = self._api.create(
+                name=f"etude-{request.session}",
+                gpu=template.gpu or "",
+                image=template.image.resolved if template.image else STOCK_IMAGE,
+                registry=self._provider.registry
+                if template.image and template.image.resolved != STOCK_IMAGE
+                else "",
+                env=env,
+                entrypoint=("python3.12", "-c", _BOOT),
+                vcpus=template.vcpus or 4,
+                memory_gb=template.memory_gb or 16,
+                disk_gb=template.disk_gb or 40,
+                data_center=template.data_center,
+            )
         self._keep(request.session, pod)
         return self._allocation(pod)
 

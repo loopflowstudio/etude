@@ -143,7 +143,9 @@ class Pool(Record):
     name: str
     on_demand_template: MachineTemplate | None = None  # None: the pool is only what you own
     max_on_demand: int = 0  # on-demand machines in use at once
-    startup_seconds: float | None = Field(default=600, gt=0, allow_inf_nan=False)
+    startup_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    delivery_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    log_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     setup_seconds: int = 900  # added to a rental's life when its dollar caps allow
     max_rental_seconds: int = 43_000  # under the 12 hour storage-session ceiling
     off: bool = False  # takes no new runs; what it already holds finishes and stays readable
@@ -197,11 +199,15 @@ class Job(Record):
     """What to run, without a seed. Launching freezes it: `revision` becomes a commit.
 
     What makes a job itself is what decides the result: the command, the config, the
-    source and the target. Two launches that agree on those are the same job, so
+    source, setup/cleanup, runtime and the target. Two launches that agree on those are the same job, so
     their runs can be found together. The name, the hours, the dollars and the
     attempts are how it is launched; they bound each run and can differ between runs.
     """
 
+    setup: str | None = None
+    cleanup: str | None = None
+    stop_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    cleanup_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     runtime: Runtime | None = None
     command: str  # run by sh in the source checkout; reads the ETUDE_* environment
     max_hours: float
@@ -227,6 +233,9 @@ def job_identity(job: Job) -> dict[str, str | int | None]:
         "revision": job.revision,
         "until": job.until,
     }
+    for name, value in (("setup", job.setup), ("cleanup", job.cleanup)):
+        if value is not None:
+            identity[name] = value
     if job.runtime is not None:
         identity["runtime"] = json.dumps(job.runtime.model_dump(mode="json"), sort_keys=True)
     return identity

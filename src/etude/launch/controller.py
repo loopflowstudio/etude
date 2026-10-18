@@ -25,9 +25,9 @@ from typing import Any, Literal
 
 from pydantic import RootModel, TypeAdapter
 
+from etude.launch.deadline import limit_time, remaining
 from etude.launch.errors import LaunchError
 from etude.launch.listing import show_runs
-from etude.launch.log_read import read_deadline, remaining
 from etude.launch.logging import explain
 from etude.launch.measurement import timed
 from etude.launch.providers.package import program_archive
@@ -140,7 +140,7 @@ def selected() -> str | None:
     return path.read_text().strip() if path.exists() else None
 
 
-def set_address(address: str, *, startup_seconds: float | None = 600) -> None:
+def set_address(address: str, *, startup_seconds: float | None = None) -> None:
     if not address or address.startswith("-") or any(c.isspace() for c in address):
         raise LauncherError("controller needs an SSH address, such as user@host or an SSH alias")
     install(
@@ -183,16 +183,14 @@ def _command(address: str, argv: Sequence[str]) -> list[str]:
 
 
 @timed("ssh.controller.install")
-def install(address: str, *, startup_seconds: float | None = 600) -> None:
+def install(address: str, *, startup_seconds: float | None = None) -> None:
     """Send this client's code to the controller. Safe to repeat."""
     if startup_seconds is not None and (not math.isfinite(startup_seconds) or startup_seconds <= 0):
         raise ValueError("startup_seconds must be positive and finite, or None")
-    # Even unlimited remote startup has a finite wait; a retry reuses the digest lock.
-    allowance = remaining(startup_seconds if startup_seconds is not None else 600)
-    remote_seconds = remaining(startup_seconds if startup_seconds is not None else float("inf"))
+    allowance = remaining(startup_seconds)
     deadline = (
-        (datetime.now(UTC) + timedelta(seconds=remote_seconds)).isoformat()
-        if math.isfinite(remote_seconds)
+        (datetime.now(UTC) + timedelta(seconds=allowance)).isoformat()
+        if allowance is not None
         else ""
     )
     program = "import os\nos.environ['ETUDE_STARTUP_DEADLINE']=" + repr(deadline) + "\n" + _INSTALL
@@ -220,6 +218,7 @@ def _ssh(address: str, argv: Sequence[str], **options: Any) -> subprocess.Comple
 
     Exit status 97 means the command did not start, so running it again is safe.
     """
+    options["timeout"] = remaining(options.get("timeout"))
     done = subprocess.run(_command(address, argv), **options)
     if done.returncode == _MISSING:
         install(address)
@@ -369,9 +368,7 @@ class PythonClient:
             ["--controller-request"],
             input=request.model_copy(update={"api": True}).model_dump_json().encode(),
             capture_output=True,
-            **(
-                {"timeout": remaining(request.timeout or 30)} if request.operation == "logs" else {}
-            ),
+            **({"timeout": remaining(request.timeout)} if request.operation == "logs" else {}),
         )
         if done.returncode:
             raise LauncherError(
@@ -458,12 +455,12 @@ class PythonClient:
         )
 
     def logs(
-        self, *, run: str | None = None, machine: str | None = None, timeout: float = 30
+        self, *, run: str | None = None, machine: str | None = None, timeout: float | None = None
     ) -> LogSnapshot:
-        if timeout <= 0:
+        if timeout is not None and timeout <= 0:
             raise ValueError("log timeout must be positive")
         try:
-            with read_deadline(timeout):
+            with limit_time(timeout):
                 return LogSnapshot.model_validate_json(
                     self._request(
                         Request(
@@ -551,7 +548,7 @@ def receive(scheduler: Scheduler) -> int:
         response = scheduler.cohort_runs(raw.name)
     elif operation == "logs":
         response = scheduler.logs(
-            run=raw.run or None, machine=raw.machine or None, timeout=raw.timeout or 30
+            run=raw.run or None, machine=raw.machine or None, timeout=raw.timeout
         )
     elif operation == "rent":
         if raw.pool is None:

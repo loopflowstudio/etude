@@ -11,6 +11,7 @@ from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
 
+from etude.launch.deadline import call, remaining
 from etude.launch.errors import LauncherError
 from etude.launch.measurement import timed
 
@@ -29,7 +30,7 @@ class ProviderUnavailable(LauncherError):
 def _send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> tuple[int, bytes]:
     request = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=15) as reply:  # noqa: S310
+        with urllib.request.urlopen(request, timeout=remaining()) as reply:  # noqa: S310
             return reply.status, reply.read(_MAX_REPLY_BYTES + 1)
     except urllib.error.HTTPError as error:
         return error.code, b""
@@ -60,7 +61,11 @@ class PodHTTP:
         url = BASE + path + ("?" + urllib.parse.urlencode(params) if params else "")
         body = None if payload is None else json.dumps(payload).encode()
         try:
-            status, raw = self._send(method, url, body, self._headers)
+            status, raw = call(lambda: self._send(method, url, body, self._headers))
+        except TimeoutError:
+            raise ProviderUnavailable(
+                f"{method} {path}: operation deadline reached; reply unconfirmed"
+            ) from None
         except OSError:
             raise ProviderUnavailable(f"{method} {path}: no reply") from None
         if absent_ok and status == 404:

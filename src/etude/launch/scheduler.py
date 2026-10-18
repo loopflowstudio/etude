@@ -31,9 +31,9 @@ from pydantic import Field
 
 from etude.launch import source
 from etude.launch.database import Database
+from etude.launch.deadline import limit_time, remaining
 from etude.launch.errors import LaunchError
 from etude.launch.executor import Execution, Refused, creation_guard
-from etude.launch.log_read import read_deadline, remaining
 from etude.launch.logging import bounded, explain, sanitize
 from etude.launch.machines import Safeguards
 from etude.launch.records import (
@@ -887,7 +887,7 @@ class Scheduler:
         )
 
     def logs(
-        self, *, run: str | None = None, machine: str | None = None, timeout: float = 30
+        self, *, run: str | None = None, machine: str | None = None, timeout: float | None = None
     ) -> LogSnapshot:
         """All retained stages and attempts, with bounded refresh and explicit gaps."""
         selection = self._log_selection(run, machine)
@@ -912,10 +912,10 @@ class Scheduler:
         )
 
     def _collect_logs(
-        self, sessions: Sequence[Session], attempts: Sequence[RunAttempt], timeout: float
+        self, sessions: Sequence[Session], attempts: Sequence[RunAttempt], timeout: float | None
     ) -> tuple[LogStream, ...]:
         streams: list[LogStream] = []
-        with read_deadline(timeout):
+        with limit_time(timeout):
             for session in sessions:
                 if session.refused_at is not None:
                     continue
@@ -1401,7 +1401,11 @@ class Scheduler:
                 raise Refused("startup cancelled during preparation; no machine created")
 
         try:
-            with creation_guard(check):
+            limits = [d for d in (packet.startup_deadline, packet.deadline) if d is not None]
+            seconds = (min(limits) - self._clock()).total_seconds() if limits else None
+            if seconds is not None and seconds <= 0:
+                raise Refused("startup or rental deadline reached before creation")
+            with creation_guard(check), limit_time(seconds):
                 receipt = service.create(
                     packet.model_copy(update={"kept": True}) if idle else packet
                 )
@@ -1475,6 +1479,10 @@ class Scheduler:
             attempt=attempt.id,
             command=spec.command,
             runtime=spec.runtime,
+            setup=spec.setup,
+            cleanup=spec.cleanup,
+            cleanup_seconds=spec.cleanup_seconds,
+            stop_seconds=spec.stop_seconds,
             limit_seconds=attempt.limit_seconds,
             limit_kind=attempt.limit_kind,
             seed=run.seed,
@@ -1496,7 +1504,10 @@ class Scheduler:
         attempts = self._store.attempts(session=session.id)
         first = [a for a in attempts if not a.added]
         work = tuple(self._work(attempt) for attempt in first)
+        pool = self._store.pool(session.pool)
         return Packet(
+            delivery_seconds=pool.delivery_seconds,
+            log_seconds=pool.log_seconds,
             session=session.id,
             deadline=None if rental is None else rental.deadline,
             work=work,
@@ -1536,7 +1547,8 @@ class Scheduler:
             if limits and now >= min(limits):
                 self._diagnose(
                     "worker startup",
-                    f"first receipt missing at effective deadline {min(limits).isoformat()}; "
+                    f"{'startup_seconds' if min(limits) == session.startup_deadline else 'rental'} "
+                    f"deadline {min(limits).isoformat()} reached before first receipt; "
                     "cleanup requested",
                     session=session.id,
                 )

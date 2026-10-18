@@ -17,6 +17,7 @@ FILES = {
     "launch/providers/runpod/pod.py",
     "launch/environment.py",
     "launch/logging.py",
+    "launch/deadline.py",
 }
 
 

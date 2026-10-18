@@ -64,7 +64,7 @@ def test_invalid_startup_allowance_is_rejected(seconds: float) -> None:
         Pool(name="invalid", startup_seconds=seconds)
 
 
-def test_install_output_arrives_before_exit_and_default_allows_over_two_minutes(
+def test_install_output_arrives_before_exit_with_no_default_cutoff(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     log = tmp_path / "bootstrap.log"
@@ -92,7 +92,7 @@ def test_install_output_arrives_before_exit_and_default_allows_over_two_minutes(
     monkeypatch.setattr(Console, "write", output)
     root = install(program_archive())
     assert (root / "ready").exists()
-    assert "600" in log.read_text() and "completed" in log.read_text()
+    assert "unlimited" in log.read_text() and "completed" in log.read_text()
 
 
 def test_detached_ssh_install_is_readable_cancellable_and_not_replayed(
@@ -111,7 +111,7 @@ def test_detached_ssh_install_is_readable_cancellable_and_not_replayed(
     monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
     ssh_script = tmp_path / "ssh"
     # Avoid a login shell resetting PATH in this executable stand-in.
-    ssh_script.write_text('#!/bin/sh\nshift 4\nshift\nexec sh -c "$1"\n')
+    ssh_script.write_text('#!/bin/sh\nshift 2\nshift\nexec sh -c "$1"\n')
     ssh_script.chmod(0o700)
     monkeypatch.setattr("etude.launch.ssh.login_shell", lambda command: command)
     root = tmp_path / "remote"
