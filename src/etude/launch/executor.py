@@ -6,6 +6,9 @@ The launcher depends on its public execution protocol, never on SSH or a provide
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -16,6 +19,24 @@ from etude.launch.records import BootstrapLinks, LogStream
 from etude.launch.schemas import CheckpointRef, Observation, Packet, Work
 from etude.launch.startup import ProcessStart
 from etude.launch.storage.disk import DirectoryJournal
+
+_creation_check: ContextVar[Callable[[], None] | None] = ContextVar("creation_check", default=None)
+
+
+@contextmanager
+def creation_guard(check: Callable[[], None]) -> Iterator[None]:
+    """Carry the controller's placement fence through provider preparation."""
+    token = _creation_check.set(check)
+    try:
+        yield
+    finally:
+        _creation_check.reset(token)
+
+
+def check_creation() -> None:
+    check = _creation_check.get()
+    if check is not None:
+        check()
 
 
 class Refused(Exception):
@@ -114,9 +135,11 @@ class Executor:
                 update={"deadline": deadline - timedelta(seconds=min(120, life / 4))}
             )
         bootstrap = self.journal.prepare(packet, expires_at=deadline)
+        check_creation()
         machine = self.machines.create(
             MachineRequest(
                 session=packet.session,
+                startup_deadline=packet.startup_deadline,
                 deadline=deadline,
                 cap_usd=packet.cap_usd,
                 bootstrap=bootstrap,

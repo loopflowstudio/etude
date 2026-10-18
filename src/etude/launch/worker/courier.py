@@ -16,6 +16,7 @@ from typing import IO
 
 from pydantic import JsonValue
 
+from etude.launch.environment import startup_timeout
 from etude.launch.log_read import read_deadline
 from etude.launch.logging import (
     CLOSED,
@@ -329,7 +330,8 @@ def _run(
         if until := os.environ.get("ETUDE_DEADLINE"):
             deadline = time.monotonic() + (datetime.fromisoformat(until) - _now()).total_seconds()
         raw = None
-        while raw is None:  # the guardian bounds how long this can go on
+        while raw is None:  # startup allowance and the independent rental guardian both apply
+            startup_timeout()
             try:
                 raw = read(bootstrap_url, send)
             except StorageUnavailable as error:
@@ -352,6 +354,7 @@ def _run(
         write(home / "packet.json", packet.model_dump_json())
         # Persist start intent before user code can run. A lost write reply must not
         # leave running code with no durable evidence that it might have started.
+        startup_timeout()
         write_log("receipt upload", "publishing start intent")
         post(courier._form, courier._form.prefix + "receipt", str(os.getpid()).encode(), send)
         write_log("receipt upload", "confirmed")

@@ -65,7 +65,7 @@ CREATE TABLE IF NOT EXISTS storages(
 CREATE TABLE IF NOT EXISTS pools(
   name TEXT PRIMARY KEY, on_demand_template TEXT, max_on_demand INTEGER NOT NULL,
   setup_seconds INTEGER NOT NULL, max_rental_seconds INTEGER NOT NULL,
-  off INTEGER NOT NULL DEFAULT 0, storage TEXT);
+  off INTEGER NOT NULL DEFAULT 0, storage TEXT, startup_seconds REAL);
 CREATE TABLE IF NOT EXISTS machines(
   name TEXT PRIMARY KEY, pool TEXT NOT NULL REFERENCES pools(name), kind TEXT NOT NULL,
   provider TEXT, address TEXT, storage TEXT, deleted_at TEXT);
@@ -81,7 +81,7 @@ CREATE TABLE IF NOT EXISTS runs(
 CREATE TABLE IF NOT EXISTS sessions(
   seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, pool TEXT NOT NULL,
   machine TEXT NOT NULL REFERENCES machines(name), planned_at TEXT NOT NULL,
-  claimed_at TEXT, receipt TEXT, started_at TEXT, refused_at TEXT, ended_at TEXT,
+  claimed_at TEXT, startup_deadline TEXT, receipt TEXT, started_at TEXT, refused_at TEXT, ended_at TEXT,
   version INTEGER NOT NULL DEFAULT 1, autorun INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS rentals(
   machine TEXT PRIMARY KEY REFERENCES machines(name), usd_per_hour TEXT NOT NULL,
@@ -102,7 +102,7 @@ CREATE INDEX IF NOT EXISTS attempts_session ON attempts(session);
 
 Fact = str | int | None
 # Changes with the schema. There are no migrations: a file from another version is refused.
-_VERSION = 2
+_VERSION = 3
 
 
 def _text(at: datetime | None) -> str | None:
@@ -405,7 +405,7 @@ class Database:
             None if pool.on_demand_template is None else pool.on_demand_template.model_dump_json()
         )
         self._db.execute(
-            "INSERT OR IGNORE INTO pools VALUES (?,?,?,?,?,?,?)",
+            "INSERT OR IGNORE INTO pools VALUES (?,?,?,?,?,?,?,?)",
             (
                 pool.name,
                 template,
@@ -414,6 +414,7 @@ class Database:
                 pool.max_rental_seconds,
                 int(pool.off),
                 pool.storage,
+                pool.startup_seconds,
             ),
         )
         if self.pool(pool.name) != pool:
@@ -444,6 +445,13 @@ class Database:
             self._db.execute(
                 "UPDATE settings SET value='controller' WHERE name='default_pool' AND value='local'"
             )
+
+    def set_pool_startup(self, name: str, seconds: float | None) -> None:
+        pool = self.pool(name)
+        checked = Pool.model_validate({**pool.model_dump(), "startup_seconds": seconds})
+        self._db.execute(
+            "UPDATE pools SET startup_seconds=? WHERE name=?", (checked.startup_seconds, name)
+        )
 
     def set_pool_max(self, name: str, maximum: int) -> None:
         self.pool(name)
@@ -706,7 +714,15 @@ class Database:
         """Take the one right to create this session. Whoever gets Stale must not create."""
         with self._together():
             self.check_pool_lock(session.pool)
-            self._change("sessions", session.id, session.version, claimed_at=at.isoformat())
+            seconds = self.pool(session.pool).startup_seconds
+            deadline = None if seconds is None else at + timedelta(seconds=seconds)
+            self._change(
+                "sessions",
+                session.id,
+                session.version,
+                claimed_at=at.isoformat(),
+                startup_deadline=_text(deadline),
+            )
 
     def record_receipt(self, session: Session, receipt: str) -> None:
         self._change(

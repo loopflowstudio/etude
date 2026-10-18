@@ -13,12 +13,13 @@ import json
 import os
 import shlex
 import subprocess
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from pydantic import Field
 
 from etude.launch.log_read import remaining
+from etude.launch.logs import snapshot_stream
 from etude.launch.machines import Allocation
 from etude.launch.measurement import timed
 from etude.launch.providers.package import program_archive
@@ -39,6 +40,7 @@ class CheckpointFile(Record):
 
 
 class RemoteRequest(Record):
+    startup_deadline: datetime | None = None
     action: str
     root: str
     session: str
@@ -87,13 +89,18 @@ import contextlib
 with contextlib.redirect_stdout(sys.stderr):
     links=globals().get("request",{}).get("bootstrap")
     publication=logging.start_publication(pathlib.Path(os.environ["ETUDE_LOG_PATH"]), links["log_url"]) if links else None
+    failed=False
     try:
         root=namespace["install"](code)
     except Exception as error:
+        failed=True
         logging.write_log("client install", logging.explain(error))
+        if globals().get('request',{}).get('action')=='start':
+            from datetime import datetime,UTC
+            (home/'ended').write_text(datetime.now(UTC).isoformat())
         raise
     finally:
-        if os.environ.get("ETUDE_LOG_PATH"):
+        if os.environ.get("ETUDE_LOG_PATH") and (failed or globals().get("request",{}).get("action") != "start"):
             logging.write_log("bootstrap", logging.CLOSED)
         if links:
             publication.set()
@@ -104,14 +111,69 @@ _BOOT = (
 request=json.load(sys.stdin)
 code=base64.b64decode(request.pop("program"))
 import pathlib
+home=pathlib.Path(request['root']).expanduser()/request['session']
+if request['action']=='logs' and request['name']=='bootstrap':
+    path=home/'bootstrap.log'
+    print(json.dumps({'text':path.read_text() if path.exists() else None})); sys.exit(0)
+if request['action']=='started' and not (home/'receipt').exists():
+    print(json.dumps({'started':False})); sys.exit(0)
+if request['action']=='observe' and (home/'boot-claim').exists() and not (home/'receipt').exists():
+    print(json.dumps({'observation':{'alive':not (home/'ended').exists(),'progress':[],'start_unknown':True}})); sys.exit(0)
+if request['action']=='ended':
+    path=home/'ended'
+    print(json.dumps({'text':path.read_text() if path.exists() else None})); sys.exit(0)
+if request['action']=='end':
+    home.mkdir(parents=True,exist_ok=True)
+    (home/'cancel-start').touch()
+    if not (home/'receipt').exists():
+        path=home/'ended'
+        print(json.dumps({'text':path.read_text() if path.exists() else None})); sys.exit(0)
 if request['action']=='start':
+    home.mkdir(parents=True,exist_ok=True,mode=0o700)
+    try:
+        (home/'boot-claim').open('x').close()
+    except FileExistsError:
+        print(json.dumps({'text':'pending'})); sys.exit(0)
+    pid=os.fork()
+    if pid:
+        print(json.dumps({'text':'pending'}),flush=True); os._exit(0)
+    os.setsid()
+    with open(os.devnull,'r+b') as sink:
+        for fd in (0,1,2): os.dup2(sink.fileno(),fd)
+    os.environ['ETUDE_STARTUP_DEADLINE']=request.get('startup_deadline') or ''
+    os.environ['ETUDE_STARTUP_CANCEL']=str(home/'cancel-start')
     log=pathlib.Path(request['root']).expanduser()/request['session']/'bootstrap.log'
     os.environ['ETUDE_LOG_PATH']=str(log)
 else:
     os.environ.pop('ETUDE_LOG_PATH',None)
+    os.environ['ETUDE_STARTUP_DEADLINE']=request['startup_deadline']
 """
     + _INSTALL_CODE
     + """
+if request['action']=='start':
+    import subprocess
+    from datetime import datetime,UTC
+    invoked=False
+    try:
+        if (home/'cancel-start').exists():
+            raise RuntimeError('startup cancelled before worker entry')
+        invoked=True
+        done=subprocess.run([str(root/'.venv/bin/python'),'-m','etude.launch.worker.remote'],
+            input=json.dumps(request).encode(),capture_output=True,timeout=namespace['startup_timeout']())
+        console=logging.Console('worker entry')
+        console.write(done.stderr,final=True)
+        if done.returncode:
+            raise RuntimeError(f'worker entry exited with status {done.returncode}')
+    except Exception as error:
+        logging.write_log('worker entry',logging.explain(error))
+        if not invoked:
+            (home/'ended').write_text(datetime.now(UTC).isoformat())
+        else:
+            logging.write_log('worker entry','reply uncertain; retaining start claim')
+    finally:
+        logging.write_log('bootstrap',logging.CLOSED)
+        if links: logging.publish(home/'bootstrap.log',links['log_url'])
+    sys.exit(0)
 import tempfile
 with tempfile.TemporaryFile() as payload:
     payload.write(json.dumps(request).encode()); payload.seek(0)
@@ -163,9 +225,15 @@ class SSH:
         checkpoints: dict[str, CheckpointFile] | None = None,
         bootstrap: BootstrapLinks | None = None,
         cleanup: tuple[str, ...] = (),
+        startup_deadline: datetime | None = None,
     ) -> RemoteReply:
         request = {
             **RemoteRequest(
+                startup_deadline=(
+                    startup_deadline
+                    if action == "start"
+                    else datetime.now(UTC) + timedelta(seconds=remaining(60))
+                ),
                 action=action,
                 root=self.root,
                 session=session_id,
@@ -193,7 +261,7 @@ class SSH:
                 ],
                 input=json.dumps(request).encode(),
                 capture_output=True,
-                timeout=remaining(150),
+                timeout=remaining(60),
             )
         except (OSError, subprocess.TimeoutExpired):
             raise Unreachable("SSH did not answer") from None
@@ -245,6 +313,7 @@ class SSHStart:
                 "start",
                 packet.session,
                 packet=packet.model_dump_json(),
+                startup_deadline=packet.startup_deadline,
                 files=files,
                 bootstrap=bootstrap,
                 cleanup=machine.cleanup,
@@ -301,7 +370,16 @@ class SSHJournal:
     def logs(
         self, session_id: str, attempt: str | None = None, *, producer: str = "job"
     ) -> LogStream:
-        stream = self.ssh.call("logs", session_id, attempt=attempt or "", name=producer).stream
+        reply = self.ssh.call("logs", session_id, attempt=attempt or "", name=producer)
+        if producer == "bootstrap":
+            return snapshot_stream(
+                session_id,
+                None,
+                producer,
+                reply.text.encode() if reply.text is not None else None,
+                False,
+            )
+        stream = reply.stream
         if stream is None:
             raise Unreachable("SSH returned no log snapshot")
         return stream

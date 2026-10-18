@@ -890,3 +890,37 @@ The records pass increases local SQL counts because paid windows and machine
 acquisition are now explicit reads rather than fields joined into every Session:
 status adds 27 statements per active worker, runs adds 6 and a controller pass
 adds 9. Remote counts are unchanged.
+
+
+### Startup allowance
+
+```python
+Pool(name="gpu", on_demand_template=template, startup_seconds=600)
+Pool(name="slow-image", on_demand_template=template, startup_seconds=None)
+```
+
+`startup_seconds` defaults to 600. A session snapshots its deadline when creation
+is claimed. Package delivery, image acquisition and client installation share that
+allowance until the worker's start receipt. Changing a pool affects future sessions.
+`None` removes this cutoff; rental time and dollar limits still apply. Arbitrary
+setup inside `Job.command` is part of job execution, outside this startup allowance.
+`setup_seconds` remains the extra rental time reserved for startup, not a timeout.
+
+```sh
+etude pool add gpu --provider runpod --gpu "NVIDIA L4" --startup-seconds 900
+etude pool startup gpu --seconds 0
+etude logs --run baseline --follow
+```
+
+CLI zero means unlimited startup. Install output is retained while it runs; logs
+identify the effective deadline when it expires. SSH startup detaches installation
+and returns pending; a lost reply never authorizes a second installer or worker.
+Image pull occurs before the in-machine guardian starts, so cleanup during that
+phase requires an active controller and a confirmed provider identity.
+
+Explicit controller installation also accepts `startup_seconds` in Python and
+`etude controller set ADDRESS --startup-seconds SECONDS`. Waiting for installation
+remains bounded (600 seconds when startup is unlimited); a timed-out wait is not
+proof the remote installation stopped. A log read retains its own shorter deadline.
+
+The prototype database schema is version 3; older database files are refused.

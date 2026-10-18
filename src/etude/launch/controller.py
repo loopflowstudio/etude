@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import math
 import os
 import shlex
 import subprocess
@@ -16,7 +17,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from functools import cache
 from pathlib import Path
@@ -139,10 +140,12 @@ def selected() -> str | None:
     return path.read_text().strip() if path.exists() else None
 
 
-def set_address(address: str) -> None:
+def set_address(address: str, *, startup_seconds: float | None = 600) -> None:
     if not address or address.startswith("-") or any(c.isspace() for c in address):
         raise LauncherError("controller needs an SSH address, such as user@host or an SSH alias")
-    install(address)  # fails here, with a reason, if the machine cannot be a controller
+    install(
+        address, startup_seconds=startup_seconds
+    )  # fails here, with a reason, if the machine cannot be a controller
     home().mkdir(parents=True, exist_ok=True, mode=0o700)
     write(home() / "controller", address)
 
@@ -180,14 +183,25 @@ def _command(address: str, argv: Sequence[str]) -> list[str]:
 
 
 @timed("ssh.controller.install")
-def install(address: str) -> None:
+def install(address: str, *, startup_seconds: float | None = 600) -> None:
     """Send this client's code to the controller. Safe to repeat."""
+    if startup_seconds is not None and (not math.isfinite(startup_seconds) or startup_seconds <= 0):
+        raise ValueError("startup_seconds must be positive and finite, or None")
+    # Even unlimited remote startup has a finite wait; a retry reuses the digest lock.
+    allowance = remaining(startup_seconds if startup_seconds is not None else 600)
+    remote_seconds = remaining(startup_seconds if startup_seconds is not None else float("inf"))
+    deadline = (
+        (datetime.now(UTC) + timedelta(seconds=remote_seconds)).isoformat()
+        if math.isfinite(remote_seconds)
+        else ""
+    )
+    program = "import os\nos.environ['ETUDE_STARTUP_DEADLINE']=" + repr(deadline) + "\n" + _INSTALL
     try:
         done = subprocess.run(
-            ["ssh", "--", address, login_shell(shlex.join([remote_python(), "-c", _INSTALL]))],
+            ["ssh", "--", address, login_shell(shlex.join([remote_python(), "-c", program]))],
             input=_program()[1],
             capture_output=True,
-            timeout=remaining(150),
+            timeout=allowance,
         )
     except (OSError, subprocess.TimeoutExpired):
         raise LauncherError(f"controller {address!r} did not answer over SSH") from None

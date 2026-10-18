@@ -51,6 +51,7 @@ class Work(Record):
 
 
 class Packet(Record):
+    startup_deadline: datetime | None = None
     session: str  # the session's id, which also names its journal folder
     deadline: datetime | None
     work: tuple[Work, ...]
