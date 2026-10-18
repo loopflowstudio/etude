@@ -8,7 +8,7 @@ import pytest
 
 from etude.launch.deadline import limit_time, remaining
 from etude.launch.logging import log_to
-from etude.launch.storage.s3 import Bucket, StorageUnavailable, read
+from etude.launch.storage.s3 import Bucket, Reply, StorageUnavailable, read
 from etude.launch.worker.courier import _run
 from tests.launch.test_storage_s3 import KEYS
 
@@ -18,14 +18,12 @@ class Transport:
         self.replies = replies
         self.requests = 0
 
-    def __call__(
-        self, method: str, url: str, body: bytes | None, headers: dict[str, str]
-    ) -> tuple[int, bytes]:
+    def __call__(self, method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Reply:
         self.requests += 1
         reply = self.replies.pop(0)
         if isinstance(reply, OSError):
             raise reply
-        return reply
+        return Reply(status=reply[0], body=reply[1])
 
 
 @pytest.mark.parametrize("linked", [True, False])
@@ -103,14 +101,12 @@ def test_bootstrap_retries_cannot_renew_startup_allowance(
 
     requests: list[float] = []
 
-    def send(
-        method: str, url: str, body: bytes | None, headers: dict[str, str]
-    ) -> tuple[int, bytes]:
+    def send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Reply:
         left = remaining()
         assert left is not None
         requests.append(left)
         now[0] += 0.01
-        return 503, b""
+        return Reply(status=503, body=b"")
 
     monkeypatch.setattr("etude.launch.environment.datetime", Clock)
     monkeypatch.setattr("etude.launch.deadline.time.monotonic", lambda: now[0])

@@ -926,7 +926,7 @@ A timed-out wait is not proof the remote installation stopped. A log read retain
 its own explicitly chosen deadline. Downloads, SSH key generation, sshd startup
 and guardian readiness inherit this budget without separate 30/60-second caps.
 
-The prototype database schema is version 5; older database files are refused.
+The prototype database schema is version 6; older database files are refused.
 
 
 ### Prepare a framework image before renting
@@ -1116,3 +1116,146 @@ The local database's lock-contention wait is separately explicit:
 not indefinitely hold a synchronous local command. Override it in seconds; zero
 fails immediately on contention. This is a SQLite lock wait, not a startup or job
 limit. Tracking's separate `Run.finish(timeout=10)` remains independently configurable.
+
+## Transfer usage and verified retrieval
+
+```python
+from datetime import UTC, datetime
+from decimal import Decimal
+from pathlib import Path
+
+from etude.launch.client import fetch, usage
+from etude.launch.usage import Rates, Usage
+
+# Wait: fetch verifies the retained transport SHA256 and length before publication.
+first = fetch(run, "checkpoint.pt", Path("results/first"))
+second = fetch(run, "checkpoint.pt", Path("results/second"))
+
+# Read: retained database evidence only; no bucket, provider or worker refresh.
+report = usage(run=run)
+print(
+    report.observed_at,
+    report.received_bytes,
+    report.requests,
+    report.reused_bytes,
+    report.retransferred_bytes,
+)
+print(report.coverage)
+for event in (*report.events, *report.shared_events):
+    print(
+        event.session,
+        event.attempt,
+        event.purpose,
+        event.status,
+        event.request_id,
+        event.received_bytes,
+    )
+
+# An explicit download/request scenario, not an AWS invoice or a rental cap.
+# These are illustrative rates, not a current provider price quotation.
+rates = Rates(
+    as_of=datetime(2026, 10, 18, tzinfo=UTC),
+    description="illustrative output-download route",
+    download_usd_per_gb=Decimal("0.09"),
+    request_usd_per_1000=Decimal("0.0004"),
+)
+outputs = Usage(
+    observed_at=report.observed_at,
+    events=tuple(e for e in report.events if e.purpose == "result"),
+)
+print(outputs.estimate(rates))
+```
+
+`etude usage --run RUN` reads the same retained evidence. `observed_at` is the
+latest included event timestamp, not a claim that remote evidence is current.
+The worker's ordinary synchronization/tick retains session events; the read
+never refreshes them. With a selected SSH controller, the public call still uses
+the existing SSH connection to that controller; the database read itself contacts
+no worker, provider or artifact store. Failed downloads and bootstrap runtime reads remain in
+session evidence when publication succeeds. Hard kills, missing journals and
+truncated operational logs leave unknown intervals.
+
+Run totals include that run's events. Shared source/runtime traffic appears in
+`shared_events`, outside run totals; it has no fabricated per-run allocation.
+Use `usage()` or `usage(machine=...)` for totals that include shared and
+unattributed controller traffic once. Deduplicate exports by `Transfer.id` when
+combining scopes. Upload counts are body bytes supplied to urllib, including
+multipart form framing, not confirmed socket bytes. Response counts are actual
+body reads, including partial responses and failures; object length is separate.
+
+The persistent cache is `$ETUDE_HOME/downloads` (default `~/.etude/downloads`),
+keyed by transport SHA256 and length, with a 20 GiB payload allowance. Both
+completed-output reads and worker source/checkpoint reads use it. The first
+cold acquisition still transfers every byte. For cache-admitted artifacts, verified warm reuse transfers no
+payload bytes, including from a new process or to another destination; control
+metadata reads still cost requests and bytes. Sequential 8 MiB ranges retain
+completed chunks across interruption and require exact ranges and a stable
+strong ETag. Invalid ranges, authentication failures, changed identity or digest
+mismatch fail explicitly. Files larger than the allowance, or acquired while
+other digests occupy it, stream through destination-side staging. Oversized and destination-staged downloads do not retain a reusable cache copy.
+Only verified bytes replace the destination. Downloads add no timeout by default;
+they share an existing caller deadline, and worker inputs remain bounded by the
+rental deadline. Two transport retries share that allowance. Python callers can
+set an allowance with `Cache.fetch(Download(...), destination, timeout=..., retries=...)`
+from `etude.launch.storage.download`.
+
+A local HTTP fixture completes two synthetic runs on one kept machine. It
+installs a fixture runtime, retries a denied source download, shares a 2,097,150
+byte source and 1 MiB checkpoint input, publishes two identical 24 MiB
+checkpoints, collects worker journals through scheduler ticks, and fetches each
+result twice through `Scheduler.fetch`. Worker and controller caches are separate.
+
+| Public result fetches (both runs) | First pair | Warm pair |
+| --- | ---: | ---: |
+| Payload response bytes | 25,165,824 | 0 |
+| Control response bytes | 3,300 | 3,300 |
+| Payload GET requests | 3 | 0 |
+| Control GET requests | 4 | 4 |
+| Verified reused bytes | 25,165,824 | 50,331,648 |
+
+The first pair downloads the shared result once in three ranges. A fresh rental
+still needs every cold input byte. A separate interrupted 12-byte fixture
+observes 6 bytes before failure, then 8 on recovery, reusing the completed
+first 4-byte range.
+
+For the combined workload, the fixture also measures full GETs for the same
+logical input/result reads without reuse. This counterfactual keeps the measured
+control/upload trace fixed; it does not execute an old SDK. Including the one
+failed request, runtime, source/checkpoint inputs, checkpoint uploads and 47
+control requests, the comparison has 59 requests before and 56 after, saves
+78,643,198 response bytes, and reduces the illustrative download/request estimate
+by USD 0.00707908782 at the rates above. Control bytes are measured from their
+actual bodies, including journal JSON and multipart framing; they are not assumed
+free. Upload body counts remain supplied bytes, separate from response bytes.
+
+Every fixture GET matches retained usage, replayed worker events count once,
+and run-owned bytes plus deduplicated shared bytes conserve the combined total.
+Reopening the database with no provider bindings returns the same evidence with
+zero provider, SSH, git or artifact calls.
+
+This is a scoped estimate through completed-result retrieval. Two final
+usage-journal uploads cannot include their own completion in the bodies being
+published; their unretained requests remain unknown. Dependency installation,
+tracking boto3/report reads, other HTTP outside observed collection/fetch paths,
+SSH, machine cleanup, rental, persistent storage and private billing are outside
+the projection. Do not add it to a rental total and label it a full experiment
+cost. Tiny objects can cost more in request charges when chunked unusually small;
+include requests as well as bytes when choosing a route.
+
+For provider reconciliation, project private access logs into frozen
+`Access(backend, request_id, key, response_bytes, status)` records from
+`etude.launch.usage`, then call `reconcile(report, rows)`. Use the event's
+backend hostname and decoded absolute object path. Duplicate request IDs count
+once; conflicting rows fail. `matched`, `unmatched_provider` and
+`unmatched_client` remain separate. Keep request URIs, signatures and credentials
+out of exports. Provider log delivery may omit or duplicate requests, and a GET
+is not by itself proof of billable internet egress. Reconciliation does not
+change observed transport totals or turn them into billed amounts.
+
+Adoption requires the SDK revision containing these APIs on both controller
+and worker; generated archives include the same revision automatically. The
+controller database schema is 6 and deliberately refuses older prototype
+files. Preserve the old database and retained journals before choosing a fresh
+controller home; this change does not migrate or modify live experiment files.
+Use a fresh `ETUDE_HOME` for offline integration proof and install the reviewed
+PR commit with `uv add 'etude-sdk @ git+https://github.com/loopflowstudio/etude@COMMIT'`.

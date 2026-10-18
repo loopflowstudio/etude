@@ -43,8 +43,10 @@ from etude.launch.records import (
     Storage,
     job_identity,
 )
+from etude.launch.usage import Transfer
 
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS transfers(id TEXT PRIMARY KEY, body TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS launches(id TEXT PRIMARY KEY, body TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS launch_runs(launch TEXT NOT NULL, run TEXT NOT NULL,
   PRIMARY KEY(launch, run));
@@ -104,7 +106,7 @@ CREATE INDEX IF NOT EXISTS attempts_session ON attempts(session);
 
 Fact = str | int | None
 # Changes with the schema. There are no migrations: a file from another version is refused.
-_VERSION = 5
+_VERSION = 6
 
 
 def _text(at: datetime | None) -> str | None:
@@ -212,6 +214,20 @@ class Database:
                 if statement.strip():
                     self._db.execute(statement)
             self._db.execute(f"PRAGMA user_version = {_VERSION}")
+
+    def retain_transfer_json(self, raw: str) -> None:
+        self.retain_transfer(Transfer.model_validate_json(raw))
+
+    def retain_transfer(self, event: Transfer) -> None:
+        self._db.execute(
+            "INSERT OR IGNORE INTO transfers VALUES (?, ?)", (event.id, event.model_dump_json())
+        )
+
+    def transfers(self) -> tuple[Transfer, ...]:
+        return tuple(
+            Transfer.model_validate_json(row[0])
+            for row in self._db.execute("SELECT body FROM transfers ORDER BY rowid")
+        )
 
     def begin_launch(self, launch: Launch) -> None:
         with self._together():

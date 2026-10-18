@@ -18,6 +18,8 @@ FILES = {
     "launch/environment.py",
     "launch/logging.py",
     "launch/deadline.py",
+    "launch/storage/__init__.py",
+    "launch/storage/transport.py",
 }
 
 

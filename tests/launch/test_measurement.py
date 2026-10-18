@@ -26,7 +26,7 @@ from etude.launch.providers.runpod.http import PodHTTP
 from etude.launch.records import Job
 from etude.launch.schemas import Packet
 from etude.launch.ssh import SSH
-from etude.launch.storage.s3 import Bucket, Keys
+from etude.launch.storage.s3 import Bucket, Keys, Reply
 from tests.launch.counting import Counting, Counts
 from tests.launch.fake import Bench, bench
 from tests.launch.test_source import repository  # noqa: F401
@@ -141,10 +141,10 @@ def test_cohort_git_and_database_counts(
             9,
             ("numpy", "pydantic", "etude.launch.worker", "etude.launch.scheduler"),
         ),
-        (["pools"], 36, ("numpy", "boto3", "etude.launch.worker")),
+        (["pools"], 39, ("numpy", "boto3", "etude.launch.worker")),
         (
             ["worker", "{directory}"],
-            25,
+            28,
             (
                 "numpy",
                 "boto3",
@@ -273,7 +273,7 @@ def test_counting_covers_physical_transports(
         "fixture",
         "us-west-2",
         Keys(access_key="fixture", secret_key="fixture"),
-        counting.transport("bucket", send),
+        counting.transport("bucket", lambda m, u, b, h: Reply(status=200, body=b"")),
     )
     provider = PodHTTP("fixture", counting.transport("provider", send))
     with counting.record():

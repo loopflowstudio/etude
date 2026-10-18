@@ -40,7 +40,9 @@ from etude.launch.scheduler import Scheduler
 from etude.launch.source import home
 from etude.launch.ssh import SSH, SSHJournal, SSHStart
 from etude.launch.storage.bucket import BucketJournal
-from etude.launch.storage.s3 import Bucket, Keys
+from etude.launch.storage.s3 import Bucket, Keys, Reply, _send
+from etude.launch.storage.transport import observe
+from etude.launch.usage import Usage
 
 
 @cache
@@ -48,6 +50,10 @@ def _open(home: Path) -> Scheduler:
     fresh = not (home / "launcher.db").exists()
     store = Database(home / "launcher.db")
     here = local(home / "sessions")
+
+    def send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Reply:
+        with observe(store.retain_transfer_json):
+            return _send(method, url, body, headers)
 
     def runpod(pool: Pool, machine: Machine | None) -> Execution:
         """Built when first needed, so only RunPod use needs RunPod's keys in the environment."""
@@ -57,7 +63,7 @@ def _open(home: Path) -> Scheduler:
         if pool.storage is None:
             raise LauncherError(f"pool {pool.name!r} has no storage")
         storage = store.storage(pool.storage)
-        bucket = Bucket(storage.bucket, storage.region, Keys.from_environment())
+        bucket = Bucket(storage.bucket, storage.region, Keys.from_environment(), send)
         machines = RunPodMachines(
             store.provider(pool.on_demand_template.provider),
             pool.on_demand_template,
@@ -74,7 +80,7 @@ def _open(home: Path) -> Scheduler:
         journal = SSHJournal(connection)
         if machine.storage:
             storage = store.storage(machine.storage)
-            bucket = Bucket(storage.bucket, storage.region, Keys.from_environment())
+            bucket = Bucket(storage.bucket, storage.region, Keys.from_environment(), send)
             return Executor(
                 OwnedMachine(machine.address),
                 SSHStart(connection),
@@ -184,3 +190,8 @@ def rent(pool: str, hours: float, max_usd: Decimal | None = None) -> str:
 def terminate(machine: str) -> Machine:
     """Delete an idle rented machine and return its acquisition record."""
     return _client().terminate(machine)
+
+
+def usage(*, run: str | None = None, machine: str | None = None) -> Usage:
+    """Read retained transfer usage without polling machines or storage."""
+    return _client().usage(run=run, machine=machine)

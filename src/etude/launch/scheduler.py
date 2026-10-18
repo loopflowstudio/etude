@@ -72,11 +72,14 @@ from etude.launch.records import (
 )
 from etude.launch.schemas import (
     CheckpointRef,
+    Observation,
     Packet,
     Progress,
     Work,
 )
 from etude.launch.storage.s3 import StorageUnavailable
+from etude.launch.storage.transport import attribute, observe
+from etude.launch.usage import Usage
 
 Clock = Callable[[], datetime]
 
@@ -975,7 +978,30 @@ class Scheduler:
         attempt, session = self._latest(run)
         if not any(output.name == name for output in attempt.outputs):
             raise LauncherError(f"run {run} recorded no output {name!r}")
-        return self._service(session).fetch(session.id, attempt.id, name, destination)
+        with (
+            observe(self._store.retain_transfer_json),
+            attribute(session=session.id, machine=session.machine, run=run, attempt=attempt.id),
+        ):
+            return self._service(session).fetch(session.id, attempt.id, name, destination)
+
+    def usage(self, *, run: str | None = None, machine: str | None = None) -> Usage:
+        """Read retained observations offline; shared session traffic stays shared."""
+        sessions = set() if run is None else {a.session for a in self._store.attempts(run=run)}
+        machines = {session.id: session.machine for session in self._store.sessions()}
+        retained = tuple(
+            event.model_copy(update={"machine": event.machine or machines.get(event.session or "")})
+            for event in self._store.transfers()
+        )
+        retained = tuple(e for e in retained if machine is None or e.machine == machine)
+        events = tuple(e for e in retained if run is None or e.run == run)
+        shared = tuple(
+            e for e in retained if run is not None and e.run is None and e.session in sessions
+        )
+        return Usage(
+            events=events,
+            shared_events=shared,
+            observed_at=max((e.observed_at for e in (*events, *shared)), default=None),
+        )
 
     def record(self, run: str) -> RunRecord:
         """The run as frozen at launch, and where it was sent."""
@@ -1473,6 +1499,9 @@ class Scheduler:
                     attempt=checkpoint_attempt.id,
                     name=held.name,
                     sha256=held.sha256,
+                    size_bytes=next(
+                        o.size_bytes for o in checkpoint_attempt.outputs if o.name == held.name
+                    ),
                 )
             )
         return Work(
@@ -1516,6 +1545,17 @@ class Scheduler:
             autorun=session.autorun,
         )
 
+    def _read_journal(self, session: Session, service: Execution) -> Observation:
+        """Retain both collection traffic and worker events, including final collection."""
+        with (
+            observe(self._store.retain_transfer_json),
+            attribute(session=session.id, machine=session.machine, purpose="control"),
+        ):
+            seen = service.observe(session.id)
+        for event in seen.transfers:
+            self._store.retain_transfer(event.model_copy(update={"machine": session.machine}))
+        return seen
+
     def _observe(self, session: Session, now: datetime) -> None:
         if session.ended_at is not None:
             self._end_session(session)  # ended, but its attempts were never settled
@@ -1554,7 +1594,7 @@ class Scheduler:
                 )
                 self._end_session(session)
                 return
-        seen = service.observe(session.id)
+        seen = self._read_journal(session, service)
         if not seen.alive:
             # Progress and machine state are separate reads. Completion may land
             # between them; settle only from the final journal after shutdown.
@@ -1599,7 +1639,7 @@ class Scheduler:
         # Nothing more will be written. Take what the journal holds now, and
         # count any attempt still open as lost with the machine.
         self._collect_logs((session,), self._store.attempts(session=session.id), 2)
-        final = service.observe(session.id)
+        final = self._read_journal(session, service)
         progress = {entry.attempt: entry for entry in final.progress}
         for attempt in self._store.attempts(session=session.id):
             if attempt.outcome is None:

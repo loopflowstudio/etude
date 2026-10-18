@@ -15,7 +15,9 @@ from typing import Any
 from pydantic import Field, FiniteFloat, Json, JsonValue
 
 from etude.launch.records import Cause, Limit, Outcome, Output, Record, Runtime
+from etude.launch.storage.download import Download
 from etude.launch.storage.s3 import Keys, PostForm
+from etude.launch.usage import Transfer
 
 
 class CheckpointRef(Record):
@@ -26,6 +28,7 @@ class CheckpointRef(Record):
     attempt: str
     name: str
     sha256: str
+    size_bytes: int
     url: str | None = None
     content: str | None = None  # base64 for a checkpoint copied through the launcher
 
@@ -84,6 +87,7 @@ class Progress(Record):
 class Observation(Record):
     alive: bool  # False once the session can write nothing more
     progress: tuple[Progress, ...]
+    transfers: tuple[Transfer, ...] = ()
     start_unknown: bool = False  # durable startup intent, but attempt claims may not have arrived
 
 
@@ -125,13 +129,13 @@ class Bootstrap(Record):
     form: PostForm  # the session's own folder: its receipt and end note
     runs: dict[str, RunAccess] = Field(default_factory=dict)  # for the packet's work
     inbox_url: str
-    fetch: dict[str, str] = Field(default_factory=dict)
+    fetch: dict[str, Download] = Field(default_factory=dict)
 
 
 class Delivery(Record):
     work: Json[Work]
     access: RunAccess
-    fetch: dict[str, str] = Field(default_factory=dict)
+    fetch: dict[str, Download] = Field(default_factory=dict)
 
 
 class AttemptRecord(Record):

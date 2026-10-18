@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import base64
 import hashlib
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
+from functools import wraps
 from pathlib import Path
+from typing import Concatenate
 
 from etude.launch.logs import snapshot_stream
 from etude.launch.records import BootstrapLinks, LauncherError, LogStream, Storage
@@ -25,9 +27,23 @@ from etude.launch.schemas import (
     progress_from_json,
 )
 from etude.launch.source import source_archive
+from etude.launch.storage.download import Cache, Download
 from etude.launch.storage.s3 import Bucket
+from etude.launch.storage.transport import attribute
+from etude.launch.usage import Transfer
 
 _GRANT_SECONDS = 13 * 3600
+
+
+def _attribute_session[**P, R](
+    method: Callable[Concatenate[BucketJournal, str, P], R],
+) -> Callable[Concatenate[BucketJournal, str, P], R]:
+    @wraps(method)
+    def call(self: BucketJournal, session_id: str, /, *args: P.args, **kwargs: P.kwargs) -> R:
+        with attribute(session=session_id, purpose="control"):
+            return method(self, session_id, *args, **kwargs)
+
+    return call
 
 
 class BucketJournal:
@@ -78,64 +94,83 @@ class BucketJournal:
         return ref.model_copy(update={"url": self._bucket.get_url(key, _GRANT_SECONDS)})
 
     def prepare(self, packet: Packet, *, expires_at: datetime | None = None) -> BootstrapLinks:
-        root = self._session(packet.session)
-        self._bucket.put(root + "packet.json", packet.model_dump_json().encode(), once=True)
-        bootstrap = Bootstrap.model_validate(
-            {
-                "packet": packet.model_dump_json(),
-                "form": self._bucket.post_form(root + "out/", _GRANT_SECONDS),
-                "runs": {work.run: self._access(work.run) for work in packet.work},
-                "inbox_url": self._bucket.get_url(root + "inbox.json", _GRANT_SECONDS),
-                "fetch": self._fetches(packet.session, packet.work),
-            }
-        )
-        self._bucket.put(root + "inbox.json", Inbox().model_dump_json().encode())
-        self._bucket.put(
-            root + "bootstrap.json", bootstrap.model_dump_json(round_trip=True).encode()
-        )
-        expires_at = expires_at or packet.deadline
-        seconds = (
-            _GRANT_SECONDS
-            if expires_at is None
-            else max(1, min(_GRANT_SECONDS, int((expires_at - datetime.now(UTC)).total_seconds())))
-        )
-        return BootstrapLinks(
-            url=self._bucket.get_url(root + "bootstrap.json", seconds),
-            log_url=self._bucket.put_url(root + "out/bootstrap.log", seconds),
-            worker_log_url=self._bucket.put_url(root + "out/worker.log", seconds),
-        )
+        with attribute(session=packet.session, purpose="control"):
+            root = self._session(packet.session)
+            self._bucket.put(root + "packet.json", packet.model_dump_json().encode(), once=True)
+            bootstrap = Bootstrap.model_validate(
+                {
+                    "packet": packet.model_dump_json(),
+                    "form": self._bucket.post_form(root + "out/", _GRANT_SECONDS),
+                    "runs": {work.run: self._access(work.run) for work in packet.work},
+                    "inbox_url": self._bucket.get_url(root + "inbox.json", _GRANT_SECONDS),
+                    "fetch": self._fetches(packet.session, packet.work),
+                }
+            )
+            self._bucket.put(root + "inbox.json", Inbox().model_dump_json().encode())
+            self._bucket.put(
+                root + "bootstrap.json", bootstrap.model_dump_json(round_trip=True).encode()
+            )
+            expires_at = expires_at or packet.deadline
+            seconds = (
+                _GRANT_SECONDS
+                if expires_at is None
+                else max(
+                    1, min(_GRANT_SECONDS, int((expires_at - datetime.now(UTC)).total_seconds()))
+                )
+            )
+            return BootstrapLinks(
+                url=self._bucket.get_url(root + "bootstrap.json", seconds),
+                log_url=self._bucket.put_url(root + "out/bootstrap.log", seconds),
+                worker_log_url=self._bucket.put_url(root + "out/worker.log", seconds),
+            )
 
+    @_attribute_session
     def started(self, session_id: str) -> bool:
         return self._bucket.get(self._session(session_id) + "out/receipt") is not None
 
+    @_attribute_session
     def ended(self, session_id: str) -> datetime | None:
         raw = self._bucket.get(self._session(session_id) + "out/ended")
         return None if raw is None else datetime.fromisoformat(raw.decode().strip())
 
+    @_attribute_session
     def end(self, session_id: str) -> datetime | None:
         # Provider cleanup owns deletion; a bucket alone cannot stop a machine.
         return self.ended(session_id)
 
-    def _fetches(self, session_id: str, works: Sequence[Work]) -> dict[str, str]:
+    def _fetches(self, session_id: str, works: Sequence[Work]) -> dict[str, Download]:
         """Links to the files this work needs, keyed by where the pod should put them."""
-        links: dict[str, str] = {}
+        links: dict[str, Download] = {}
         for work in works:
             if work.repo is not None and work.commit is not None:
                 key = f"{self._session(session_id)}sources/{work.commit}.tar"
-                if key not in self._bucket.list(key):
-                    self._bucket.put(key, source_archive(work.repo, work.commit))
-                links[f"{session_id}/sources/{work.commit}.tar"] = self._bucket.get_url(
-                    key, _GRANT_SECONDS
-                )
+                local = f"{session_id}/sources/{work.commit}.tar"
+                # A cohort shares inputs; prepare each destination only once.
+                if local not in links:
+                    with attribute(purpose="source"):
+                        archive = source_archive(work.repo, work.commit)
+                        if key not in self._bucket.list(key):
+                            self._bucket.put(key, archive)
+                        links[local] = Download(
+                            url=self._bucket.get_url(key, _GRANT_SECONDS),
+                            sha256=hashlib.sha256(archive).hexdigest(),
+                            size_bytes=len(archive),
+                        )
             held = work.checkpoint
             if held is not None:
+                # Where the machine's worker looks for it, under its sessions folder.
+                local = f"{held.session}/attempts/{held.attempt}/outputs/{held.name}"
+                if local in links:
+                    continue
                 key = f"{self._run(held.run)}checkpoints/{held.name}"
                 if held.content is not None:
                     key = f"{self._session(session_id)}inputs/{held.sha256}"
                     self._bucket.put(key, base64.b64decode(held.content))
-                # Where the machine's worker looks for it, under its own sessions folder.
-                local = f"{held.session}/attempts/{held.attempt}/outputs/{held.name}"
-                links[local] = held.url or self._bucket.get_url(key, _GRANT_SECONDS)
+                links[local] = Download(
+                    url=held.url or self._bucket.get_url(key, _GRANT_SECONDS),
+                    sha256=held.sha256,
+                    size_bytes=held.size_bytes,
+                )
         return links
 
     def _once(self, key: str) -> bytes | None:
@@ -155,9 +190,11 @@ class BucketJournal:
         return {work.attempt: work.run for work in (*given, *added)}
 
     def _record(self, run: str, attempt: str) -> AttemptRecord | None:
-        raw = self._bucket.get(f"{self._run(run)}attempts/{attempt}.json")
+        with attribute(run=run, attempt=attempt, purpose="control"):
+            raw = self._bucket.get(f"{self._run(run)}attempts/{attempt}.json")
         return None if raw is None else AttemptRecord.model_validate_json(raw)
 
+    @_attribute_session
     def observe(self, session_id: str) -> Observation:
         alive = self.ended(session_id) is None
         progress: list[Progress] = []
@@ -188,13 +225,17 @@ class BucketJournal:
                 )
             )
         return Observation(
-            alive=alive, progress=tuple(progress), start_unknown=self.started(session_id)
+            alive=alive,
+            progress=tuple(progress),
+            start_unknown=self.started(session_id),
+            transfers=self._transfers(session_id),
         )
 
     def _inbox(self, session_id: str) -> Inbox:
         raw = self._bucket.get(self._session(session_id) + "inbox.json")
         return Inbox.model_validate_json(raw) if raw else Inbox()
 
+    @_attribute_session
     def stop(self, session_id: str, attempt: str) -> None:
         inbox = self._inbox(session_id)
         if attempt not in inbox.stop:
@@ -204,6 +245,7 @@ class BucketJournal:
                 inbox.model_dump_json(round_trip=True).encode(),
             )
 
+    @_attribute_session
     def add(self, session_id: str, work: Work) -> None:
         inbox = self._inbox(session_id)
         if all(entry.work.attempt != work.attempt for entry in inbox.work):
@@ -220,6 +262,7 @@ class BucketJournal:
                 inbox.model_dump_json(round_trip=True).encode(),
             )
 
+    @_attribute_session
     def logs(
         self, session_id: str, attempt: str | None = None, *, producer: str = "job"
     ) -> LogStream:
@@ -235,21 +278,47 @@ class BucketJournal:
             session_id, attempt, producer, raw, record is not None and record.finished is not None
         )
 
+    @_attribute_session
     def fetch(self, session_id: str, attempt: str, name: str, destination: Path) -> Path:
         run = self._runs(session_id).get(attempt)
         record = None if run is None else self._record(run, attempt)
         if run is None or record is None or record.finished is None:
             raise LauncherError(f"attempt {attempt} recorded no output {name!r}")
         done = progress_from_json(record.finished, attempt, None)
-        expected = next((o.sha256 for o in done.outputs if o.name == name), None)
-        # The checkpoint it reported is kept with the run's; anything else with the attempt.
+        expected = next((o for o in done.outputs if o.name == name), None)
         folder = "checkpoints/" if name == done.checkpoint else f"attempts/{attempt}/"
-        raw = self._bucket.get(f"{self._run(run)}{folder}{name}")
-        if expected is None or raw is None:
+        if expected is None:
             raise LauncherError(f"attempt {attempt} recorded no output {name!r}")
-        if hashlib.sha256(raw).hexdigest() != expected:
-            raise LauncherError(f"output {name!r} no longer matches its recorded digest")
-        destination.mkdir(parents=True, exist_ok=True)
-        copy = destination / Path(name).name
-        copy.write_bytes(raw)
-        return copy
+        key = f"{self._run(run)}{folder}{name}"
+        with attribute(run=run, attempt=attempt, purpose="result"):
+            return Cache().fetch(
+                Download(
+                    url=self._bucket.get_url(key, _GRANT_SECONDS),
+                    sha256=expected.sha256,
+                    size_bytes=expected.size_bytes,
+                ),
+                destination / Path(name).name,
+                send=self._bucket.send,
+            )
+
+    def _transfers(self, session_id: str) -> tuple[Transfer, ...]:
+        events: dict[str, Transfer] = {}
+        root = self._session(session_id) + "out/"
+        raw = self._bucket.get(root + "usage.jsonl")
+        sources = [] if raw is None else raw.decode().splitlines()
+        # Bootstrap/early-worker failures precede the courier's usage journal.
+        for producer in ("bootstrap", "worker"):
+            log = self._bucket.get(root + producer + ".log")
+            if log is not None:
+                sources.extend(
+                    line.partition(" ")[2].removeprefix("transfer: ")
+                    for line in log.decode(errors="replace").splitlines()
+                    if line.partition(" ")[2].startswith("transfer: ")
+                )
+        for line in sources:
+            try:
+                event = Transfer.model_validate_json(line)
+            except ValueError:
+                continue  # interrupted lines are unknown coverage, never zero usage
+            events[event.id] = event.model_copy(update={"session": session_id})
+        return tuple(events.values())

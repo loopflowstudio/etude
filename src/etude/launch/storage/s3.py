@@ -14,21 +14,27 @@ import hmac
 import json
 import os
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 import xml.etree.ElementTree as ET
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from datetime import UTC, datetime, timedelta
 from itertools import chain
 
-from etude.launch.deadline import call, limit_time, remaining
+from etude.launch.deadline import remaining
 from etude.launch.logging import write_log
 from etude.launch.measurement import timed
 from etude.launch.records import Record
+from etude.launch.storage.transport import attribute, request
 
-# Sends one request and returns the status and body. Raises OSError when no reply came.
-Send = Callable[[str, str, bytes | None, dict[str, str]], tuple[int, bytes]]
+
+class Reply(Record):
+    status: int
+    body: bytes
+    headers: dict[str, str] = {}
+
+
+# Custom transports share the enclosing deadline, as the default HTTP transport does.
+Send = Callable[[str, str, bytes | None, dict[str, str]], Reply]
 _NS = "{http://s3.amazonaws.com/doc/2006-03-01/}"
 WEEK = 7 * 24 * 3600  # the longest a link or form signed with these keys may last
 GRANT_LIMIT = 36 * 3600
@@ -77,35 +83,43 @@ class PostForm(Record):
     prefix: str  # every key written with this form must start with it
 
 
-def _send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> tuple[int, bytes]:
-    request = urllib.request.Request(url, data=body, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(request, timeout=remaining()) as reply:  # noqa: S310
-            return reply.status, reply.read()
-    except urllib.error.HTTPError as error:
-        return error.code, error.read()
+def _send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Reply:
+    chunks: list[bytes] = []
+    metadata: dict[str, str] = {}
+
+    def accept(status: int, fields: Mapping[str, str]) -> None:
+        metadata.update(fields)
+        requested = headers.get("Range", headers.get("range"))
+        if requested is not None:
+            start, end = map(int, requested.removeprefix("bytes=").split("-"))
+            if status != 206 or fields.get("content-length") != str(end - start + 1):
+                raise StorageUnavailable(f"range request refused or wrong length (status {status})")
+            if headers.get("If-Match") is not None and fields.get("etag") != headers["If-Match"]:
+                raise StorageUnavailable("download source identity changed")
+
+    status = request(method, url, body, headers, chunks.append, accept)
+    return Reply(status=status, body=b"".join(chunks), headers=metadata)
 
 
-def _get(url: str, headers: dict[str, str], send: Send) -> tuple[int, bytes]:
+def _get(url: str, headers: dict[str, str], send: Send) -> Reply:
     """Three transient read attempts share one allowance, including backoff."""
-    with limit_time(remaining()):
-        for attempt in range(1, 4):
-            remaining()
-            try:
-                status, body = call(lambda: send("GET", url, None, headers))
-            except OSError as error:
-                if attempt == 3:
-                    raise
-                reason = type(error).__name__
-            else:
-                if status not in (429, 500, 502, 503, 504) or attempt == 3:
-                    return status, body
-                reason = f"HTTP {status}"
-            # Neither signed URLs, object keys nor transport exception text belong here.
-            write_log("storage.read", f"attempt {attempt}/3 failed ({reason}); retrying")
-            pause = 0.1 * 2 ** (attempt - 1)
-            left = remaining()
-            time.sleep(pause if left is None else min(pause, left))
+    for attempt in range(1, 4):
+        remaining()
+        try:
+            reply = send("GET", url, None, headers)
+        except OSError as error:
+            if attempt == 3:
+                raise
+            reason = type(error).__name__
+        else:
+            if reply.status not in (429, 500, 502, 503, 504) or attempt == 3:
+                return reply
+            reason = f"HTTP {reply.status}"
+        # Neither signed URLs, object keys nor transport exception text belong here.
+        write_log("storage.read", f"attempt {attempt}/3 failed ({reason}); retrying")
+        pause = 0.1 * 2 ** (attempt - 1)
+        left = remaining()
+        time.sleep(pause if left is None else min(pause, left))
     raise AssertionError("read retry loop exhausted without a result")
 
 
@@ -128,7 +142,7 @@ class Bucket:
         host: str | None = None,
     ) -> None:
         self.name, self.region, self._keys = name, region, keys
-        self._send, self._clock = send, clock
+        self.send, self._clock = send, clock
         self.host = host or f"{name}.s3.{region}.amazonaws.com"
 
     def _signing_key(self, day: str, service: str = "s3") -> bytes:
@@ -159,7 +173,7 @@ class Bucket:
         body: bytes = b"",
         extra: dict[str, str] | None = None,
         service: str = "s3",
-    ) -> tuple[int, bytes]:
+    ) -> Reply:
         """One signed request, to the bucket or, with `service`, to another AWS service."""
         host = self.host if service == "s3" else f"{service}.{self.region}.amazonaws.com"
         stamp = self._stamp()
@@ -190,12 +204,8 @@ class Bucket:
         del headers["host"]
         try:
             if method == "GET":
-                return _get(url, headers, self._send)
-            return call(
-                lambda: self._send(
-                    method, url, body if method in ("PUT", "POST") else None, headers
-                )
-            )
+                return _get(url, headers, self.send)
+            return self.send(method, url, body if method in ("PUT", "POST") else None, headers)
         except TimeoutError:
             raise StorageUnavailable(
                 f"{method} {key or '(list)'}: operation deadline reached"
@@ -205,17 +215,17 @@ class Bucket:
 
     def put(self, key: str, body: bytes, *, once: bool = False) -> None:
         """Write an object. With `once`, refuse if it was ever written: raises AlreadyThere."""
-        status, _ = self._ask("PUT", key, body=body, extra={"if-none-match": "*"} if once else None)
-        if once and status == 412:
+        reply = self._ask("PUT", key, body=body, extra={"if-none-match": "*"} if once else None)
+        if once and reply.status == 412:
             raise AlreadyThere(key)
-        if status != 200:
-            raise _failed(f"PUT {key}", status)
+        if reply.status != 200:
+            raise _failed(f"PUT {key}", reply.status)
 
     def delete(self, key: str) -> None:
         """Remove an object. Removing one that is not there succeeds, as S3 defines it."""
-        status, _ = self._ask("DELETE", key)
-        if status not in (200, 204):
-            raise _failed(f"DELETE {key}", status)
+        reply = self._ask("DELETE", key)
+        if reply.status not in (200, 204):
+            raise _failed(f"DELETE {key}", reply.status)
 
     def put_parts(self, key: str, chunks: Iterable[bytes]) -> None:
         """Write chunks without reading the whole file into memory.
@@ -230,47 +240,35 @@ class Bucket:
         if second is None:
             self.put(key, first)
             return
-        status, body = self._ask("POST", key, query={"uploads": ""})
-        upload = _text(body, "UploadId") if status == 200 else None
+        reply = self._ask("POST", key, query={"uploads": ""})
+        upload = _text(reply.body, "UploadId") if reply.status == 200 else None
         if upload is None:
-            raise _failed(f"start upload of {key}", status)
+            raise _failed(f"start upload of {key}", reply.status)
         try:
-            number = 0
+            parts: list[str] = []
             for number, chunk in enumerate(chain((first, second), waiting), start=1):
-                status, _ = self._ask(
+                reply = self._ask(
                     "PUT", key, query={"partNumber": str(number), "uploadId": upload}, body=chunk
                 )
-                if status != 200:
-                    raise _failed(f"PUT {key} part {number}", status)
-            # The reply to each part carries its tag in a header this module's
-            # `Send` does not return, so the tags are read back in one listing.
-            tags: dict[int, str] = {}
-            marker = "0"
-            while len(tags) < number:
-                status, body = self._ask(
-                    "GET", key, query={"uploadId": upload, "part-number-marker": marker}
-                )
-                listed = _parts(body) if status == 200 else {}
-                if not listed:
-                    raise StorageUnavailable(f"list parts of {key}: status {status}")
-                tags |= listed
-                marker = str(max(listed))
-            done = "".join(
-                f"<Part><PartNumber>{n}</PartNumber><ETag>{tags[n]}</ETag></Part>"
-                for n in sorted(tags)
-            )
+                if reply.status != 200:
+                    raise _failed(f"PUT {key} part {number}", reply.status)
+                tag = reply.headers.get("etag")
+                if not tag:
+                    raise StorageUnavailable(f"PUT {key} part {number}: missing ETag")
+                # UploadPart returns the ETag needed by CompleteMultipartUpload.
+                parts.append(f"<Part><PartNumber>{number}</PartNumber><ETag>{tag}</ETag></Part>")
             # Without a content type of its own, urllib labels a POST body as a
             # web form, and S3 then refuses the signature (seen against AWS).
-            status, body = self._ask(
+            reply = self._ask(
                 "POST",
                 key,
                 query={"uploadId": upload},
-                body=f"<CompleteMultipartUpload>{done}</CompleteMultipartUpload>".encode(),
+                body=f"<CompleteMultipartUpload>{''.join(parts)}</CompleteMultipartUpload>".encode(),
                 extra={"content-type": "application/xml"},
             )
             # S3 can answer 200 and report the failure in the body.
-            if status != 200 or b"<Error>" in body:
-                raise StorageUnavailable(f"finish upload of {key}: status {status}")
+            if reply.status != 200 or b"<Error>" in reply.body:
+                raise StorageUnavailable(f"finish upload of {key}: status {reply.status}")
         except StorageUnavailable:
             try:
                 self._ask("DELETE", key, query={"uploadId": upload})
@@ -296,7 +294,6 @@ class Bucket:
                         "s3:PutObject",
                         "s3:DeleteObject",
                         "s3:AbortMultipartUpload",
-                        "s3:ListMultipartUploadParts",
                     ],
                     "Resource": f"arn:aws:s3:::{self.name}/{prefix}*",
                 }
@@ -310,7 +307,7 @@ class Bucket:
             "Policy": json.dumps(policy, separators=(",", ":")),
         }
         try:
-            status, body = self._ask(
+            reply = self._ask(
                 "POST",
                 "",
                 body=urllib.parse.urlencode(form).encode(),
@@ -319,10 +316,10 @@ class Bucket:
             )
         except StorageUnavailable:
             return None  # the form does not depend on STS answering
-        if status != 200:
+        if reply.status != 200:
             return None
         access, secret, token = (
-            _text(body, field) for field in ("AccessKeyId", "SecretAccessKey", "SessionToken")
+            _text(reply.body, field) for field in ("AccessKeyId", "SecretAccessKey", "SessionToken")
         )
         if not (access and secret and token):
             return None
@@ -330,23 +327,23 @@ class Bucket:
 
     def get(self, key: str) -> bytes | None:
         """An object's bytes, or None when storage says it does not exist."""
-        status, body = self._ask("GET", key)
-        if status == 404:
+        reply = self._ask("GET", key)
+        if reply.status == 404:
             return None
-        if status != 200:
-            raise StorageUnavailable(f"GET {key}: status {status}")
-        return body
+        if reply.status != 200:
+            raise StorageUnavailable(f"GET {key}: status {reply.status}")
+        return reply.body
 
     def list(self, prefix: str) -> list[str]:
         """Every key under a prefix, in order."""
         keys: list[str] = []
         query = {"list-type": "2", "prefix": prefix}
         for _ in range(1000):
-            status, body = self._ask("GET", "", query=query)
-            if status != 200:
-                raise StorageUnavailable(f"list {prefix}: status {status}")
+            reply = self._ask("GET", "", query=query)
+            if reply.status != 200:
+                raise StorageUnavailable(f"list {prefix}: status {reply.status}")
             try:
-                page = ET.fromstring(body)  # noqa: S314
+                page = ET.fromstring(reply.body)  # noqa: S314
             except ET.ParseError:
                 raise StorageUnavailable(f"list {prefix}: unreadable reply") from None
             keys += [node.text or "" for node in page.iter(f"{_NS}Key")]
@@ -414,27 +411,16 @@ class Bucket:
         )
 
 
-def _nodes(body: bytes, name: str) -> list[ET.Element]:
-    """Every element called `name` in an XML reply, whatever namespace it is in."""
+def _text(body: bytes, name: str) -> str | None:
+    """The first named element's text, regardless of the reply's XML namespace."""
     try:
         root = ET.fromstring(body)  # noqa: S314
     except ET.ParseError:
-        return []
-    return [node for node in root.iter() if node.tag.rpartition("}")[2] == name]
-
-
-def _text(body: bytes, name: str) -> str | None:
-    found = _nodes(body, name)
-    return (found[0].text or "").strip() or None if found else None
-
-
-def _parts(body: bytes) -> dict[int, str]:
-    """Part number to tag, from one page of a multipart upload's parts."""
-    listed: dict[int, str] = {}
-    for part in _nodes(body, "Part"):
-        fields = {child.tag.rpartition("}")[2]: (child.text or "").strip() for child in part}
-        listed[int(fields["PartNumber"])] = fields["ETag"]
-    return listed
+        return None
+    for node in root.iter():
+        if node.tag.rpartition("}")[2] == name:
+            return (node.text or "").strip() or None
+    return None
 
 
 @timed("bucket.post")
@@ -455,7 +441,8 @@ def post(form: PostForm, key: str, body: bytes, send: Send = _send) -> None:
     payload = b"".join(parts) + body + f"\r\n--{boundary}--\r\n".encode()
     headers = {"Content-Type": f"multipart/form-data; boundary={boundary}"}
     try:
-        status, _ = call(lambda: send("POST", form.url, payload, headers))
+        with attribute(key="/" + key):
+            status = send("POST", form.url, payload, headers).status
     except TimeoutError:
         raise StorageUnavailable(
             f"POST {key}: operation deadline reached; reply unconfirmed"
@@ -470,13 +457,13 @@ def post(form: PostForm, key: str, body: bytes, send: Send = _send) -> None:
 def read(url: str, send: Send = _send) -> bytes | None:
     """Follow a reading link. None when storage says the object does not exist."""
     try:
-        status, body = _get(url, {}, send)
+        reply = _get(url, {}, send)
     except TimeoutError:
         raise StorageUnavailable("GET by link: operation deadline reached") from None
     except OSError:
         raise StorageUnavailable("GET by link: no reply") from None
-    if status == 404:
+    if reply.status == 404:
         return None
-    if status != 200:
-        raise StorageUnavailable(f"GET by link: status {status}")
-    return body
+    if reply.status != 200:
+        raise StorageUnavailable(f"GET by link: status {reply.status}")
+    return reply.body

@@ -30,7 +30,6 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from urllib.request import urlopen
 
 from etude.launch.deadline import call, limit_time
 from etude.launch.environment import install, startup_timeout
@@ -44,6 +43,7 @@ from etude.launch.logging import (
     write_log,
 )
 from etude.launch.providers.runpod.http import PodHTTP, ProviderUnavailable
+from etude.launch.storage.transport import attribute, send
 
 
 class GuardianAPI(PodHTTP):
@@ -115,13 +115,11 @@ UV_SHA256 = "741ff1f5742c5a4a25d2f829e8395355e43f7a5ae2ebc6368e9ae2df0efb69cf"
 
 
 def _download(url: str) -> bytes:
-    def fetch() -> bytes:
-        with urlopen(url, timeout=startup_timeout()) as response:
-            body: bytes = response.read()
-            return body
-
-    with limit_time(startup_timeout()):
-        return call(fetch)
+    with limit_time(startup_timeout()), attribute(purpose="runtime"):
+        status, body = send("GET", url, None, {})
+        if status != 200:
+            raise OSError(f"runtime download status {status}")
+        return body
 
 
 def ensure_uv() -> None:

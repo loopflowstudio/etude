@@ -54,6 +54,7 @@ from etude.launch.ssh import (
     remote_python,
 )
 from etude.launch.storage.files import write
+from etude.launch.usage import Usage
 
 
 class Source(Record):
@@ -92,6 +93,7 @@ class Request(Record):
         "wait",
         "logs",
         "diagnostics",
+        "usage",
         "cohort_runs",
         "continue_from",
         "rent",
@@ -121,6 +123,7 @@ type Response = (
     | LaunchInput
     | EncodedOutput
     | Machine
+    | Usage
     | LogSnapshot
     | tuple[Diagnostic, ...]
     | tuple[RunRecord, ...]
@@ -473,6 +476,11 @@ class PythonClient:
                 "controller log retrieval time limit reached; evidence remains on controller"
             ) from None
 
+    def usage(self, *, run: str | None = None, machine: str | None = None) -> Usage:
+        return Usage.model_validate_json(
+            self._request(Request(operation="usage", run=run or "", machine=machine or ""))
+        )
+
     def fetch(self, run: str, name: str, destination: Path) -> Path:
         return _save_output(
             EncodedOutput.model_validate_json(
@@ -542,6 +550,8 @@ def receive(scheduler: Scheduler) -> int:
         response = [
             status for status in scheduler.wait(*raw.runs, every=raw.every, timeout=raw.timeout)
         ]
+    elif operation == "usage":
+        response = scheduler.usage(run=raw.run or None, machine=raw.machine or None)
     elif operation == "diagnostics":
         response = scheduler.diagnostics(run=raw.run or None, machine=raw.machine or None)
     elif operation == "cohort_runs":
