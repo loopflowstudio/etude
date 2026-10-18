@@ -44,12 +44,14 @@ controller_app = _app(
 )
 provider_app = _app(help="Record an account that supplies machines.")
 storage_app = _app(help="Add a place in a bucket for records.")
+image_app = _app(help="Resolve container images before renting.")
 for name, sub in (
     ("pool", pool_app),
     ("machine", machine_app),
     ("controller", controller_app),
     ("provider", provider_app),
     ("storage", storage_app),
+    ("image", image_app),
 ):
     app.add_typer(sub, name=name)
 
@@ -420,11 +422,14 @@ def machines(
     all: Annotated[
         bool, typer.Option(help="include rented machines whose window has ended")
     ] = False,
+    images: Annotated[
+        bool, typer.Option(help="show retained image selections without registry access")
+    ] = False,
 ) -> None:
     """List machines: added ones, and rented ones with their window and cost."""
     from etude.launch.listing import show_machines
 
-    show_machines(default(), ended=all)
+    show_machines(default(), ended=all, images=images)
 
 
 @app.command()
@@ -508,7 +513,7 @@ def pool_add(
     ] = None,
 ) -> None:
     """Add a pool: a named set of machines that runs are sent to."""
-    from etude.launch.records import MachineTemplate, Pool
+    from etude.launch.records import Image, MachineTemplate, Pool
 
     template = (
         MachineTemplate(
@@ -518,7 +523,7 @@ def pool_add(
             memory_gb=memory_gb,
             disk_gb=disk_gb,
             max_usd_per_hour=Decimal(max_usd_per_hour) if max_usd_per_hour else None,
-            image=image,
+            image=Image(requested=image, resolved=image) if image else None,
             data_center=data_center,
         )
         if provider
@@ -563,12 +568,29 @@ def pool_default(name: str) -> None:
     pools()
 
 
+@image_app.command("prepare")
+@kind(Kind.wait)
+def image_prepare(reference: str, platform: str = "linux/amd64", timeout: float = 30) -> None:
+    """Wait for registry metadata and print the immutable selection; never rent."""
+    from etude.launch.images import resolve_image
+
+    print(resolve_image(reference, platform=platform, timeout=timeout).model_dump_json())
+
+
 @pool_app.command("image")
-@kind(Kind.ask)
-def pool_image(name: str, image: str) -> None:
-    """Change the image a pool's next machines boot."""
-    default().set_pool_image(name, image)
-    pools()
+@kind(Kind.wait)
+def pool_image(name: str, image: str, timeout: float = 30) -> None:
+    """Resolve an image within timeout, then select it for future machines."""
+    from etude.launch.images import resolve_image
+    from etude.launch.records import Image
+
+    selected = (
+        Image(requested=image, resolved=image)
+        if "@sha256:" in image
+        else resolve_image(image, timeout=timeout)
+    )
+    default().set_pool_image(name, selected)
+    print(selected.model_dump_json())
 
 
 @pool_app.command("off")

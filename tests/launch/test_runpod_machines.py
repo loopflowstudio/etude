@@ -26,7 +26,16 @@ from etude.launch.executor import Executor
 from etude.launch.providers.runpod.api import RunPodAPI
 from etude.launch.providers.runpod.machines import RunPodMachines
 from etude.launch.providers.runpod.pod import GuardianAPI, guard
-from etude.launch.records import Job, LauncherError, MachineTemplate, Pool, Provider, Run, Status
+from etude.launch.records import (
+    Image,
+    Job,
+    LauncherError,
+    MachineTemplate,
+    Pool,
+    Provider,
+    Run,
+    Status,
+)
 from etude.launch.records import Storage as Place
 from etude.launch.scheduler import Scheduler
 from etude.launch.schemas import BucketAccess, Packet, RunAccess, Work
@@ -198,7 +207,7 @@ def cloud(tmp_path: Path) -> Cloud:
         vcpus=6,
         memory_gb=48,
         disk_gb=40,
-        image="r/e@sha256:" + "a" * 64,
+        image=Image(requested="r/e:fixture", resolved="r/e@sha256:" + "a" * 64),
         data_center="EU-RO-1",
     )
     bucket = Bucket(

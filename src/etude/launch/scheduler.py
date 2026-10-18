@@ -38,10 +38,12 @@ from etude.launch.logging import bounded, explain, sanitize
 from etude.launch.machines import Safeguards
 from etude.launch.records import (
     RETRYABLE,
+    STOCK_IMAGE,
     Cause,
     Checkpoint,
     Cohort,
     Diagnostic,
+    Image,
     Job,
     Launch,
     LauncherError,
@@ -154,7 +156,7 @@ class Scheduler:
     ) -> None:
         self._store = store
         self._services = dict(services)  # by service name
-        self._reached: dict[tuple[str, str | None], Execution] = {}
+        self._reached: dict[tuple[str, str | None, str | None], Execution] = {}
         self._trouble: dict[str, str] = {}  # why a pool could not place waiting work
         self._clock = clock
         self._sleep = sleep
@@ -238,10 +240,11 @@ class Scheduler:
             raise LauncherError(f"default pool {pool!r} is turned off; name a pool with --pool")
         return pool
 
-    def set_pool_image(self, name: str, image: str) -> None:
+    def set_pool_image(self, name: str, image: Image | str) -> None:
         """Change the image a pool's next on-demand machines boot. Running ones are untouched."""
-        self._store.set_pool_image(name, image)
-        self._reached.pop((name, None), None)  # its service is built again with the new image
+        self._store.set_pool_image(
+            name, Image(requested=image, resolved=image) if isinstance(image, str) else image
+        )
 
     def add_machine(
         self,
@@ -1262,6 +1265,8 @@ class Scheduler:
                 pool=pool.name,
                 kind="rented",
                 provider=template.provider,
+                image=template.image
+                or (STOCK_IMAGE if self._provider_service(template.provider) == "runpod" else None),
             )
             machine = on_demand
             rental = Rental(
@@ -1668,6 +1673,15 @@ class Scheduler:
         """Reach this session through its added machine or its pool provider."""
         pool = self._store.pool(session.pool)
         machine = self._store.machine(session.machine)
+        if machine.kind == "rented" and machine.image is not None:
+            assert pool.on_demand_template is not None
+            pool = pool.model_copy(
+                update={
+                    "on_demand_template": pool.on_demand_template.model_copy(
+                        update={"image": machine.image}
+                    )
+                }
+            )
         return self._reach(pool, machine if (machine.kind != "rented") else None)
 
     def _provider_service(self, provider: str) -> str:
@@ -1679,7 +1693,12 @@ class Scheduler:
         return service
 
     def _reach(self, pool: Pool, machine: Machine | None) -> Execution:
-        key = (pool.name, None if machine is None else machine.name)
+        image = pool.on_demand_template.image if pool.on_demand_template else None
+        key = (
+            pool.name,
+            None if machine is None else machine.name,
+            image.resolved if image else None,
+        )
         if key not in self._reached:
             name = (
                 machine.kind

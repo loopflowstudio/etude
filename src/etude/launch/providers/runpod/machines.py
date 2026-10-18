@@ -11,6 +11,7 @@ from etude.launch.executor import Refused, check_creation
 from etude.launch.machines import Allocation, Bill, MachineRequest, Safeguards
 from etude.launch.providers.package import program_archive
 from etude.launch.providers.runpod.api import PodFact, ProviderUnavailable, RunPodAPI
+from etude.launch.records import STOCK_IMAGE as DEFAULT_IMAGE
 from etude.launch.records import LauncherError, MachineTemplate, Provider
 from etude.launch.storage.s3 import Bucket
 
@@ -67,6 +68,7 @@ class RunPodMachines:
                 self._bucket.put(key, code, once=True)
             self._package_key, self._package_digest = key, digest
         env = {
+            "ETUDE_IMAGE": (template.image or DEFAULT_IMAGE).model_dump_json(),
             "ETUDE_BOOTSTRAP_LOG_URL": request.bootstrap.log_url,
             "ETUDE_WORKER_LOG_URL": request.bootstrap.worker_log_url,
             "ETUDE_BOOTSTRAP_URL": request.bootstrap.url,
@@ -89,8 +91,10 @@ class RunPodMachines:
         pod = self._api.create(
             name=f"etude-{request.session}",
             gpu=template.gpu or "",
-            image=template.image or STOCK_IMAGE,
-            registry=self._provider.registry if template.image else "",
+            image=template.image.resolved if template.image else STOCK_IMAGE,
+            registry=self._provider.registry
+            if template.image and template.image.resolved != STOCK_IMAGE
+            else "",
             env=env,
             entrypoint=("python3.12", "-c", _BOOT),
             vcpus=template.vcpus or 4,
@@ -153,10 +157,8 @@ class RunPodMachines:
         return Bill(usd=usd, through=through) if through > pod.created_at else None
 
 
-# Stock Python 3.12 image. The caller may select another pinned image.
-STOCK_IMAGE = (
-    "runpod/pytorch@sha256:4d1721e62b56d345c83b4fd6090664be6daf9312caab5b2e76f23d8231941851"
-)
+# Published import retained; the domain record owns the default and its provenance.
+STOCK_IMAGE = DEFAULT_IMAGE.resolved
 _BOOT = """import base64,io,os,pathlib,sys,zipfile
 root=pathlib.Path('/opt/etude/src')
 root.mkdir(parents=True,exist_ok=True)

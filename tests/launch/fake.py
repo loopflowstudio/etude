@@ -20,6 +20,7 @@ from etude.launch.executor import Refused
 from etude.launch.logs import snapshot_stream
 from etude.launch.machines import Bill
 from etude.launch.records import (
+    Image,
     LogStream,
     MachineTemplate,
     Outcome,
@@ -33,7 +34,11 @@ from etude.launch.scheduler import Scheduler
 from etude.launch.schemas import CheckpointRef, Observation, Packet, Progress, Work
 
 L4 = MachineTemplate(
-    provider="fake", gpu="NVIDIA L4", vcpus=6, memory_gb=48, image="test@sha256:abc"
+    provider="fake",
+    gpu="NVIDIA L4",
+    vcpus=6,
+    memory_gb=48,
+    image=Image(requested="test:fixture", resolved="test@sha256:" + "a" * 64),
 )
 
 

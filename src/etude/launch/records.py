@@ -18,7 +18,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from etude.launch.errors import LauncherError as LauncherError
 
@@ -96,6 +96,21 @@ class Storage(Record):
     region: str  # the bucket's region
 
 
+class Image(Record):
+    """A requested registry reference and the immutable artifact selected for it."""
+
+    requested: str
+    resolved: str = Field(pattern=r"^[^\s@]+@sha256:[0-9a-f]{64}$")
+    platform: str | None = None  # unknown for a caller-supplied pinned reference
+
+
+def _image(value: object) -> object:
+    # Published callers pass pinned strings; normalize them into the same record.
+    if isinstance(value, str):
+        return Image(requested=value, resolved=value)
+    return value
+
+
 class MachineTemplate(Record):
     """What a pool's on-demand machines are made from: which provider, what kind, and where."""
 
@@ -105,8 +120,16 @@ class MachineTemplate(Record):
     memory_gb: int | None = None
     disk_gb: int | None = None
     max_usd_per_hour: Decimal | None = None  # above this price, no machine is taken
-    image: str | None = None  # the image the machines boot, pinned by digest
+    image: Image | None = None
+
+    _parse_image = field_validator("image", mode="before")(_image)
     data_center: str | None = None  # the provider's name for the place; None: wherever it has one
+
+
+STOCK_IMAGE = Image(
+    requested="runpod/pytorch@sha256:4d1721e62b56d345c83b4fd6090664be6daf9312caab5b2e76f23d8231941851",
+    resolved="runpod/pytorch@sha256:4d1721e62b56d345c83b4fd6090664be6daf9312caab5b2e76f23d8231941851",
+)
 
 
 class Pool(Record):
@@ -141,6 +164,7 @@ class Machine(Record):
     name: str
     pool: str
     kind: Literal["local", "ssh", "rented"]
+    image: Image | None = None
     provider: str | None = None  # account that supplied a rented machine
     requested_at: datetime | None = None
     provider_id: str | None = None

@@ -66,7 +66,7 @@ def show_pools(scheduler: Scheduler) -> None:
         print(each.name, ("; ".join(parts) or "no machines") + marks, sep="  ")
 
 
-def show_machines(scheduler: Scheduler, *, ended: bool) -> None:
+def show_machines(scheduler: Scheduler, *, ended: bool, images: bool = False) -> None:
     """One line per machine: added, or rented with its window and cost."""
     windows = {rental.machine: (rental, usd) for rental, usd in scheduler.rentals()}
     for each in scheduler.pools():
@@ -88,5 +88,10 @@ def show_machines(scheduler: Scheduler, *, ended: bool) -> None:
             else:
                 window = f"rented until {rental.deadline:%Y-%m-%d %H:%M} UTC"
             print(machine.name, each.name, f"{window}, {cost}", sep="  ")
+            if images and machine.image is not None:
+                image = machine.image
+                print(
+                    f"  image: {image.requested} -> {image.resolved} ({image.platform or 'platform unchecked'})"
+                )
             if rental.billed_usd > rental.cap_usd:
                 print(f"warning: {machine.name} bill exceeds its ${rental.cap_usd:.4f} cap")
