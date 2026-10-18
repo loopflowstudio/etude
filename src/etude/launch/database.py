@@ -21,8 +21,11 @@ from etude.launch.records import (
     Cause,
     Checkpoint,
     Cohort,
+    Diagnostic,
     Job,
+    Launch,
     LauncherError,
+    LogStream,
     Machine,
     MachineTemplate,
     Outcome,
@@ -40,6 +43,14 @@ from etude.launch.records import (
 )
 
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS launches(id TEXT PRIMARY KEY, body TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS launch_runs(launch TEXT NOT NULL, run TEXT NOT NULL,
+  PRIMARY KEY(launch, run));
+CREATE INDEX IF NOT EXISTS launch_runs_run ON launch_runs(run);
+CREATE TABLE IF NOT EXISTS launch_sessions(launch TEXT NOT NULL, session TEXT NOT NULL, acquired INTEGER NOT NULL,
+  PRIMARY KEY(launch, session));
+CREATE TABLE IF NOT EXISTS diagnostics(id TEXT PRIMARY KEY, body TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS log_streams(id TEXT PRIMARY KEY, body TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS pool_locks(
   pool TEXT PRIMARY KEY, owner TEXT NOT NULL, expires_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS settings(name TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -91,7 +102,7 @@ CREATE INDEX IF NOT EXISTS attempts_session ON attempts(session);
 
 Fact = str | int | None
 # Changes with the schema. There are no migrations: a file from another version is refused.
-_VERSION = 1
+_VERSION = 2
 
 
 def _text(at: datetime | None) -> str | None:
@@ -190,6 +201,94 @@ class Database:
                 if statement.strip():
                     self._db.execute(statement)
             self._db.execute(f"PRAGMA user_version = {_VERSION}")
+
+    def begin_launch(self, launch: Launch) -> None:
+        with self._together():
+            for request in launch.requests:
+                if self._db.execute("SELECT 1 FROM runs WHERE id=?", (request.run,)).fetchone():
+                    raise LauncherError(f"run {request.run!r} already admitted")
+                for previous in self.launches(request.run):
+                    if previous.state in {"preparing", "admitting"} or any(
+                        session.refused_at is None and session.ended_at is None
+                        for session in self.launch_sessions(previous.id, acquired_only=True)
+                    ):
+                        raise LauncherError(
+                            f"run {request.run!r}: reconciling existing request {previous.id}"
+                        )
+            self.save_launch(launch)
+            self._db.executemany(
+                "INSERT INTO launch_runs VALUES (?, ?)",
+                ((launch.id, r.run) for r in launch.requests),
+            )
+
+    def launch_evidence(self, identity: str) -> Launch:
+        row = self._db.execute("SELECT body FROM launches WHERE id=?", (identity,)).fetchone()
+        if row is None:
+            raise LauncherError(f"unknown launch {identity}")
+        return Launch.model_validate_json(row[0])
+
+    def claim_launch(self, identity: str) -> Launch:
+        with self._together():
+            launch = self.launch_evidence(identity)
+            if launch.state != "preparing":
+                raise LauncherError(
+                    f"launch {identity} already {launch.state}; inspect retained evidence"
+                )
+            launch = launch.model_copy(update={"state": "admitting"})
+            self.save_launch(launch)
+            return launch
+
+    def save_launch(self, launch: Launch) -> None:
+        self._db.execute(
+            "INSERT OR REPLACE INTO launches VALUES (?, ?)", (launch.id, launch.model_dump_json())
+        )
+
+    def launches(self, run: str) -> tuple[Launch, ...]:
+        return tuple(
+            Launch.model_validate_json(row[0])
+            for row in self._db.execute(
+                "SELECT l.body FROM launches l JOIN launch_runs r ON l.id=r.launch "
+                "WHERE r.run=? ORDER BY l.rowid",
+                (run,),
+            )
+        )
+
+    def link_launch(self, launch: str, session: str, *, acquired: bool = False) -> None:
+        self._db.execute(
+            "INSERT OR IGNORE INTO launch_sessions VALUES (?, ?, ?)",
+            (launch, session, int(acquired)),
+        )
+
+    def launch_sessions(self, launch: str, *, acquired_only: bool = False) -> tuple[Session, ...]:
+        return tuple(
+            self.session(row[0])
+            for row in self._db.execute(
+                "SELECT session FROM launch_sessions WHERE launch=? AND (NOT ? OR acquired)",
+                (launch, int(acquired_only)),
+            )
+        )
+
+    def retain_diagnostic(self, diagnostic: Diagnostic) -> None:
+        self._db.execute(
+            "INSERT OR IGNORE INTO diagnostics VALUES (?, ?)",
+            (diagnostic.id, diagnostic.model_dump_json()),
+        )
+
+    def diagnostics(self) -> tuple[Diagnostic, ...]:
+        return tuple(
+            Diagnostic.model_validate_json(row[0])
+            for row in self._db.execute("SELECT body FROM diagnostics ORDER BY rowid")
+        )
+
+    def retain_log(self, stream: LogStream) -> None:
+        self._db.execute(
+            "INSERT OR REPLACE INTO log_streams VALUES (?, ?)",
+            (stream.id, stream.model_dump_json()),
+        )
+
+    def log(self, identity: str) -> LogStream | None:
+        row = self._db.execute("SELECT body FROM log_streams WHERE id=?", (identity,)).fetchone()
+        return None if row is None else LogStream.model_validate_json(row[0])
 
     def close(self) -> None:
         self._db.close()
@@ -412,6 +511,8 @@ class Database:
         runs: Sequence[RunRecord],
         cohort: Cohort | None,
         attempts: Sequence[RunAttempt] = (),
+        *,
+        launch: str | None = None,
     ) -> None:
         with self._together():
             if attempts:
@@ -455,6 +556,9 @@ class Database:
                 )
 
             self._place(attempts)
+            if launch is not None:
+                evidence = self.launch_evidence(launch)
+                self.save_launch(evidence.model_copy(update={"state": "admitted"}))
 
     def cancel(self, run: RunRecord, at: datetime) -> None:
         self._change("runs", run.id, run.version, cancel_requested_at=at.isoformat())
@@ -515,6 +619,8 @@ class Database:
         attempts: Sequence[RunAttempt] = (),
         on_demand: Machine | None = None,
         rental: Rental | None = None,
+        *,
+        launch: str | None = None,
     ) -> None:
         """Record a session, its attempts and any machine to make, before any provider is asked."""
         with self._together():
@@ -558,6 +664,8 @@ class Database:
                         _text(r.billed_through),
                     ),
                 )
+            if launch is not None:
+                self.link_launch(launch, session.id, acquired=True)
             self._place(attempts)
 
     def place(self, session: Session, attempts: Sequence[RunAttempt]) -> None:

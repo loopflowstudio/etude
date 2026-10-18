@@ -55,7 +55,7 @@ def invoke(request: RemoteRequest) -> RemoteReply:
                 "etude",
                 "worker",
                 "--bootstrap",
-                request.bootstrap,
+                request.bootstrap.url,
                 "--root",
                 str(root),
                 "--cleanup",
@@ -64,7 +64,12 @@ def invoke(request: RemoteRequest) -> RemoteReply:
             with (home / "courier.log").open("wb") as log:
                 process = subprocess.Popen(
                     command,
-                    env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[3])},
+                    env={
+                        **os.environ,
+                        "PYTHONPATH": str(Path(__file__).resolve().parents[3]),
+                        "ETUDE_SESSION": session,
+                        "ETUDE_WORKER_LOG_URL": request.bootstrap.worker_log_url,
+                    },
                     stdin=subprocess.DEVNULL,
                     stdout=log,
                     stderr=subprocess.STDOUT,
@@ -96,7 +101,9 @@ def invoke(request: RemoteRequest) -> RemoteReply:
         journal.stop(session, attempt)
         return RemoteReply()
     if action == "logs":
-        return RemoteReply(text=journal.logs(session, attempt))
+        return RemoteReply(
+            stream=journal.logs(session, request.attempt or None, producer=request.name)
+        )
     if action == "fetch":
         with tempfile.TemporaryDirectory() as directory:
             path = journal.fetch(session, attempt, str(request.name), Path(directory))

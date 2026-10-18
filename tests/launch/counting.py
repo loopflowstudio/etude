@@ -14,7 +14,7 @@ from typing import Any, Literal
 from unittest.mock import patch
 
 from etude.launch.database import Database
-from etude.launch.records import Record
+from etude.launch.records import LogSnapshot, Record
 from etude.launch.storage.s3 import Send
 from tests.launch.fake import FakeService
 
@@ -79,3 +79,7 @@ class Counting:
                 yield self
         finally:
             self.database._db.set_trace_callback(None)
+
+
+def job_text(snapshot: LogSnapshot) -> str:
+    return "".join(stream.text for stream in snapshot.streams if stream.producer == "job")

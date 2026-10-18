@@ -376,3 +376,89 @@ class StartPhase(Record):
     at: datetime | None
     attempt: str | None = None
     evidence: str | None = None
+
+
+class LaunchRequest(Record):
+    run: str
+    fingerprint: str
+    requested_revision: str | None
+    resolved_revision: str | None = None
+
+
+class Launch(Record):
+    """Evidence of admission intent; never an executable or retryable run."""
+
+    id: str
+    requests: tuple[LaunchRequest, ...]
+    created_at: datetime
+    state: Literal["preparing", "admitting", "admitted", "failed"] = "preparing"
+
+
+class Diagnostic(Record):
+    id: str
+    observed_at: datetime
+    produced_at: datetime | None = None
+    operation: str
+    message: str
+    launch: str | None = None
+    session: str | None = None
+    attempt: str | None = None
+    exception: str | None = None
+    exit_code: int | None = None
+    timeout: float | None = None
+
+
+LogProducer = Literal["bootstrap", "worker", "job"]
+
+
+class LogChunk(Record):
+    """Retained characters at an absolute position in one sanitized producer."""
+
+    offset: int
+    text: str
+
+
+class LogStream(Record):
+    """A retained producer snapshot; missing and silent are distinct."""
+
+    id: str
+    producer: LogProducer
+    session: str
+    attempt: str | None = None
+    machine: str | None = None
+    chunks: tuple[LogChunk, ...] = ()
+    position: int = 0
+    observed_at: datetime | None = None
+    received: bool = False
+    complete: bool = False
+    truncated: bool = False
+    retrieval_error: str | None = None
+    diagnostics: tuple[Diagnostic, ...] = ()
+
+    @property
+    def text(self) -> str:
+        return "".join(chunk.text for chunk in self.chunks)
+
+
+class LogSnapshot(Record):
+    settled: bool = False
+    observed_at: datetime
+    launches: tuple[Launch, ...] = ()
+    diagnostics: tuple[Diagnostic, ...] = ()
+    streams: tuple[LogStream, ...] = ()
+
+    @property
+    def complete(self) -> bool:
+        return (
+            self.settled
+            and all(launch.state not in {"preparing", "admitting"} for launch in self.launches)
+            and all(stream.complete and not stream.retrieval_error for stream in self.streams)
+        )
+
+
+class BootstrapLinks(Record):
+    """Read bootstrap instructions and write exactly the two startup log objects."""
+
+    url: str
+    log_url: str
+    worker_log_url: str

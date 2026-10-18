@@ -12,6 +12,7 @@ from etude.launch.machines import OwnedMachine
 from etude.launch.records import Job, Machine, Pool
 from etude.launch.scheduler import Scheduler
 from etude.launch.ssh import SSH, SSHJournal, SSHStart
+from tests.launch.counting import job_text
 
 
 def test_remote_host_runs_kept_work_logs_outputs_and_stops(tmp_path: Path) -> None:
@@ -34,7 +35,7 @@ def test_remote_host_runs_kept_work_logs_outputs_and_stops(tmp_path: Path) -> No
     (status,) = scheduler.wait(run, every=0.1, timeout=20)
     assert status.outcome == "succeeded"
     assert status.rental_ended is None and status.machine == "bench"
-    assert scheduler.logs(run) == "hello\n"
+    assert job_text(scheduler.logs(run=run)) == "hello\n"
     assert scheduler.fetch(run, "weights", tmp_path / "out").read_text() == "weights\n"
     running = scheduler.launch(Job(command="sleep 30", max_hours=0.01, max_usd=Decimal(1)), "bench")
     scheduler.cancel(running)

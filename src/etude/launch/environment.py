@@ -16,6 +16,8 @@ import sys
 import zipfile
 from pathlib import Path
 
+from etude.launch.logging import explain, write_log
+
 
 def install(code: bytes) -> Path:
     base = Path(os.environ.get("ETUDE_HOME") or Path.home() / ".etude") / "programs"
@@ -30,21 +32,32 @@ def install(code: bytes) -> Path:
                 raise RuntimeError("uv is required on the machine; put uv on its login shell PATH")
             with zipfile.ZipFile(io.BytesIO(code)) as archive:
                 archive.extractall(root)
-            result = subprocess.run(
-                [uv, "sync", "--frozen", "--no-dev", "--no-editable", "--python", sys.executable],
-                cwd=root,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                env={
-                    k: v
-                    for k, v in os.environ.items()
-                    if k not in {"VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT"}
-                },
-                timeout=120,
-            )
-            if result.returncode:
-                raise RuntimeError(
-                    "uv could not install the transferred Etude package and its dependencies"
+            write_log("client install", "starting uv sync")
+            try:
+                subprocess.run(
+                    [
+                        uv,
+                        "sync",
+                        "--frozen",
+                        "--no-dev",
+                        "--no-editable",
+                        "--python",
+                        sys.executable,
+                    ],
+                    cwd=root,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    env={
+                        k: v
+                        for k, v in os.environ.items()
+                        if k not in {"VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT"}
+                    },
+                    timeout=120,
+                    check=True,
                 )
+            except subprocess.SubprocessError as error:
+                write_log("client install", explain(error))
+                raise
+            write_log("client install", "completed")
             (root / "ready").touch()
     return root

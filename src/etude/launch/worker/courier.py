@@ -16,7 +16,18 @@ from typing import IO
 
 from pydantic import JsonValue
 
-from etude.launch.records import Output
+from etude.launch.log_read import read_deadline
+from etude.launch.logging import (
+    CLOSED,
+    Console,
+    bounded,
+    explain,
+    log_to,
+    publish,
+    start_publication,
+    write_log,
+)
+from etude.launch.records import Diagnostic, Output
 from etude.launch.schemas import AttemptRecord, Bootstrap, Inbox, Result, RunAccess
 from etude.launch.storage.files import RESULT, read_result, write
 from etude.launch.storage.s3 import (
@@ -33,6 +44,21 @@ from etude.launch.storage.s3 import (
 
 ROOT = Path("/run/etude/sessions")
 _LOG_EVERY_SECONDS = 15.0
+
+
+def _diagnose(operation: str, error: BaseException, attempt: str | None = None) -> None:
+    message = bounded(explain(error))
+    session = os.environ.get("ETUDE_SESSION")
+    diagnostic = Diagnostic(
+        id=hashlib.sha256(f"{session}:{attempt}:{operation}:{message}".encode()).hexdigest(),
+        observed_at=_now(),
+        operation=operation,
+        message=message,
+        exception=type(error).__name__,
+        session=session,
+        attempt=attempt,
+    )
+    write_log("diagnostic", diagnostic.model_dump_json())
 
 
 def _now() -> datetime:
@@ -81,6 +107,8 @@ class Courier:
         self._sent: dict[str, tuple[int, float]] = {}
         self._checkpoint_sent: dict[str, str] = {}
         self._log_sent_at: dict[str, float] = {}
+        self._console_position = 0
+        self._console = Console("worker output")
 
     def fetch(self, links: dict[str, str]) -> None:
         """Download files the work needs to where the session process looks for them."""
@@ -98,7 +126,11 @@ class Courier:
 
     def bring_in(self) -> None:
         """Apply the inbox: mark attempts to stop, and hand over work added since."""
-        raw = read(self._inbox_url, self._send)
+        try:
+            raw = read(self._inbox_url, self._send)
+        except (StorageUnavailable, OSError, ValueError) as error:
+            _diagnose("inbox read", error)
+            raise
         if raw is None:
             return
         inbox = Inbox.model_validate_json(raw)
@@ -109,7 +141,11 @@ class Courier:
             target = self._home / "work" / f"{attempt}.json"
             if not target.exists():
                 self._runs.setdefault(entry.work.run, _Run(entry.access, self._send))
-                self.fetch(entry.fetch)  # its files first, so it never starts without them
+                try:
+                    self.fetch(entry.fetch)  # files precede executable work
+                except (StorageUnavailable, OSError, ValueError) as error:
+                    _diagnose("source fetch", error, attempt)
+                    raise
                 write(target, entry.work.model_dump_json())
 
     def _write(self, run: str, key: str, stream: IO[bytes]) -> None:
@@ -185,78 +221,225 @@ class Courier:
 
     def carry_out(self, final: bool = False) -> None:
         """Send what changed. An attempt's files go before the record that it finished."""
+        self._carry_console(final)
         attempts = self._home / "attempts"
         for home in sorted(attempts.iterdir()) if attempts.is_dir() else []:
             if not (home / "run").exists():
                 continue  # not set up yet
-            run, attempt = (home / "run").read_text(), home.name
-            done = (home / "finished.json").exists()
-            claim = home / "claim"
-            record = AttemptRecord(
-                started_at=datetime.fromisoformat(claim.read_text()) if claim.exists() else None
-            )
-            outputs = home / "outputs"
-            if (outputs / RESULT).exists():
-                reported = read_result(outputs)
-                checkpoint = reported.checkpoint
-                result = Result(clocks=reported.clocks)
-                if checkpoint:
-                    path = outputs / checkpoint
-                    if (
-                        path.is_file()
-                        and not path.is_symlink()
-                        and path.resolve().is_relative_to(outputs.resolve())
-                    ):
-                        # Digest and upload through one open file, so both see the
-                        # same bytes even when training replaces the file meanwhile.
-                        with path.open("rb") as stream:
-                            hashed, size = hashlib.sha256(), 0
-                            for chunk in _chunks(stream):
-                                hashed.update(chunk)
-                                size += len(chunk)
-                            digest = hashed.hexdigest()
-                            key = f"checkpoints/{checkpoint}"
-                            if self._checkpoint_sent.get(f"{run}/{key}") != digest:
-                                self._write(run, key, stream)
-                                self._checkpoint_sent[f"{run}/{key}"] = digest
-                            # Tracking may hold this same snapshot in its run
-                            # folder. Count it as delivered before scanning there.
-                            stat = os.fstat(stream.fileno())
-                            self._sent[f"{run}/{key}"] = (stat.st_size, stat.st_mtime)
-                        result = Result(
-                            clocks=reported.clocks,
-                            checkpoint=checkpoint,
-                            outputs=(Output(name=checkpoint, sha256=digest, size_bytes=size),),
-                        )
-                record = record.model_copy(update={"result": result})
-            self._track(run, done or final)
-            log_due = time.monotonic() - self._log_sent_at.get(attempt, 0.0) > _LOG_EVERY_SECONDS
-            if (home / "log").exists() and (done or final or log_due):
-                self._put(home / "log", run, f"attempts/{attempt}.log")
-                self._log_sent_at[attempt] = time.monotonic()
-            if done:
-                reported_checkpoint = record.result.checkpoint
-                for path in sorted(
-                    p
-                    for p in outputs.rglob("*")
-                    if p.is_file()
-                    and not p.is_symlink()
-                    and p.resolve().is_relative_to(outputs.resolve())
+            try:
+                self._carry_attempt(home, final)
+            except (StorageUnavailable, OSError, ValueError) as error:
+                _diagnose("output delivery", error, home.name)
+                raise
+
+    def _carry_console(self, final: bool) -> None:
+        console = self._home / "session.log"
+        if final or console.exists():
+            with console.open("rb") as output:
+                output.seek(self._console_position)
+                while body := output.read(65536):
+                    self._console.write(body)
+                    self._console_position += len(body)
+            if final:
+                self._console.write(b"", final=True)
+
+    def _carry_attempt(self, home: Path, final: bool) -> None:
+        """Publish an attempt's files before its completion record."""
+        run, attempt = (home / "run").read_text(), home.name
+        done = (home / "finished.json").exists()
+        claim = home / "claim"
+        record = AttemptRecord(
+            started_at=datetime.fromisoformat(claim.read_text()) if claim.exists() else None
+        )
+        outputs = home / "outputs"
+        if (outputs / RESULT).exists():
+            reported = read_result(outputs)
+            checkpoint = reported.checkpoint
+            result = Result(clocks=reported.clocks)
+            if checkpoint:
+                path = outputs / checkpoint
+                if (
+                    path.is_file()
+                    and not path.is_symlink()
+                    and path.resolve().is_relative_to(outputs.resolve())
                 ):
-                    name = path.relative_to(outputs).as_posix()
-                    if name == RESULT or name == reported_checkpoint:
-                        continue  # the record carries the first; the run's checkpoints the second
-                    kept = outputs / reported_checkpoint if reported_checkpoint else None
-                    if kept is not None and kept.exists() and path.samefile(kept):
-                        continue  # the same file under the job's own name
-                    self._put(path, run, f"attempts/{attempt}/{name}")
-                finished: dict[str, JsonValue] = json.loads((home / "finished.json").read_text())
-                record = record.model_copy(update={"finished": finished})
-            note = home / "record.json"
-            content = record.model_dump_json()
-            if not note.exists() or note.read_text() != content:
-                write(note, content)
-            self._put(note, run, f"attempts/{attempt}.json")
+                    # Digest and upload through one open file, so both see the
+                    # same bytes even when training replaces the file meanwhile.
+                    with path.open("rb") as stream:
+                        hashed, size = hashlib.sha256(), 0
+                        for chunk in _chunks(stream):
+                            hashed.update(chunk)
+                            size += len(chunk)
+                        digest = hashed.hexdigest()
+                        key = f"checkpoints/{checkpoint}"
+                        if self._checkpoint_sent.get(f"{run}/{key}") != digest:
+                            self._write(run, key, stream)
+                            self._checkpoint_sent[f"{run}/{key}"] = digest
+                        # Tracking may hold this same snapshot in its run
+                        # folder. Count it as delivered before scanning there.
+                        stat = os.fstat(stream.fileno())
+                        self._sent[f"{run}/{key}"] = (stat.st_size, stat.st_mtime)
+                    result = Result(
+                        clocks=reported.clocks,
+                        checkpoint=checkpoint,
+                        outputs=(Output(name=checkpoint, sha256=digest, size_bytes=size),),
+                    )
+            record = record.model_copy(update={"result": result})
+        self._track(run, done or final)
+        log_due = time.monotonic() - self._log_sent_at.get(attempt, 0.0) > _LOG_EVERY_SECONDS
+        if (home / "log").exists() and (done or final or log_due):
+            self._put(home / "log", run, f"attempts/{attempt}.log")
+            self._log_sent_at[attempt] = time.monotonic()
+        if done:
+            reported_checkpoint = record.result.checkpoint
+            for path in sorted(
+                p
+                for p in outputs.rglob("*")
+                if p.is_file()
+                and not p.is_symlink()
+                and p.resolve().is_relative_to(outputs.resolve())
+            ):
+                name = path.relative_to(outputs).as_posix()
+                if name == RESULT or name == reported_checkpoint:
+                    continue  # the record carries the first; the run's checkpoints the second
+                kept = outputs / reported_checkpoint if reported_checkpoint else None
+                if kept is not None and kept.exists() and path.samefile(kept):
+                    continue  # the same file under the job's own name
+                self._put(path, run, f"attempts/{attempt}/{name}")
+            finished: dict[str, JsonValue] = json.loads((home / "finished.json").read_text())
+            record = record.model_copy(update={"finished": finished})
+        note = home / "record.json"
+        content = record.model_dump_json()
+        if not note.exists() or note.read_text() != content:
+            write(note, content)
+        self._put(note, run, f"attempts/{attempt}.json")
+
+
+def _run(
+    bootstrap_url: str,
+    root: Path,
+    send: Send,
+    sleep: Callable[[float], None],
+    every: float,
+) -> None:
+    process: subprocess.Popen[bytes] | None = None
+    courier: Courier | None = None
+    deadline: float | None = None
+    try:
+        if until := os.environ.get("ETUDE_DEADLINE"):
+            deadline = time.monotonic() + (datetime.fromisoformat(until) - _now()).total_seconds()
+        raw = None
+        while raw is None:  # the guardian bounds how long this can go on
+            try:
+                raw = read(bootstrap_url, send)
+            except StorageUnavailable as error:
+                _diagnose("bootstrap read", error)
+            if raw is None:
+                sleep(every)
+        write_log("bootstrap read", "received")
+        bootstrap = Bootstrap.model_validate_json(raw)
+        packet = bootstrap.packet
+        home = root / packet.session
+        home.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with (home / "courier-claim").open("x"):
+            pass  # a restarted container must not run the session again
+        courier = Courier(home, bootstrap.form, bootstrap.inbox_url, send, bootstrap.runs)
+        for folder in ("stop", "work"):
+            (home / folder).mkdir(exist_ok=True)
+        write_log("source fetch", "starting")
+        courier.fetch(bootstrap.fetch)
+        write_log("source fetch", "completed")
+        write(home / "packet.json", packet.model_dump_json())
+        # Persist start intent before user code can run. A lost write reply must not
+        # leave running code with no durable evidence that it might have started.
+        write_log("receipt upload", "publishing start intent")
+        post(courier._form, courier._form.prefix + "receipt", str(os.getpid()).encode(), send)
+        write_log("receipt upload", "confirmed")
+        package_root = str(Path(__file__).resolve().parents[3])
+        with (home / "session.log").open("wb") as log:
+            process = subprocess.Popen(
+                [sys.executable, "-m", "etude", "worker", str(home)],
+                cwd=home,
+                env={**os.environ, "PYTHONPATH": package_root},
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+            )
+        write(home / "receipt", str(process.pid))
+        while process.poll() is None:
+            for step in (courier.bring_in, courier.carry_out):
+                try:
+                    step()
+                except (StorageUnavailable, OSError, ValueError) as error:
+                    write_log(
+                        "work delivery",
+                        f"pending after {type(error).__name__}; see retained diagnostics",
+                    )
+            sleep(every)
+    except BaseException as error:
+        _diagnose("worker", error)
+        raise
+    finally:
+        original_error = sys.exception()
+        try:
+            if process is not None:
+                assert courier is not None
+                _finish_session(courier, process, sleep, every, deadline)
+            write_log("cleanup", "finalizing worker output before cleanup")
+            write_log("worker", CLOSED)
+        except Exception as error:
+            _diagnose("final collection", error)
+            if courier is not None:
+                try:
+                    # Keep complete lines already available, without inventing EOF.
+                    courier._carry_console(final=False)
+                except Exception as console_error:
+                    _diagnose("console collection", console_error)
+            write_log("worker", "collection incomplete; final output unconfirmed")
+            if original_error is None:
+                raise
+
+
+def _finish_session(
+    courier: Courier,
+    process: subprocess.Popen[bytes],
+    sleep: Callable[[float], None],
+    every: float,
+    deadline: float | None,
+) -> None:
+    """Reap the owned child and collect EOF before declaring this producer closed."""
+    # Share the existing forty-pass allowance across shutdown and final delivery.
+    # The provider's absolute deadline can shorten it; the guardian never waits here.
+    latest = time.monotonic() + 40 * every
+    deadline = latest if deadline is None else min(latest, deadline)
+    if process.poll() is None:
+        write_log("worker stop", "requesting session shutdown")
+        process.terminate()
+        try:
+            # The session gives its job two five-second signal/reap windows.
+            process.wait(timeout=min(10.0, max(0.0, deadline - time.monotonic())))
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=max(0.0, deadline - time.monotonic()))
+    write_log("worker exit", f"exit status {process.returncode}")
+    courier._carry_console(final=True)
+    ended = courier._home / "ended"
+    for _ in range(40):
+        left = deadline - time.monotonic()
+        if left <= 0:
+            break
+        try:
+            # S3 transports already share this monotonic request allowance.
+            with read_deadline(left):
+                courier.carry_out(final=True)
+                note = ended.read_text() if ended.exists() else _now().isoformat()
+                post(courier._form, courier._form.prefix + "ended", note.encode(), courier._send)
+            write_log("final delivery", "completed")
+            return
+        except (StorageUnavailable, OSError) as error:
+            _diagnose("final delivery", error)
+            sleep(min(every, max(0.0, deadline - time.monotonic())))
+    write_log("final delivery", "incomplete; final files or end receipt not confirmed")
 
 
 def run(
@@ -267,53 +450,22 @@ def run(
     sleep: Callable[[float], None] = time.sleep,
     every: float = 3.0,
 ) -> None:
-    raw = None
-    while raw is None:  # the guardian bounds how long this can go on
+    session = os.environ.get("ETUDE_SESSION")
+    log = root / session / "worker.log" if session else root / "worker.log"
+    url = os.environ.get("ETUDE_WORKER_LOG_URL", "")
+    publishing = start_publication(log, url) if url else None
+    with log_to(log):
         try:
-            raw = read(bootstrap_url, send)
-        except StorageUnavailable:
-            pass
-        if raw is None:
-            sleep(every)
-    bootstrap = Bootstrap.model_validate_json(raw)
-    packet = bootstrap.packet
-    home = root / packet.session
-    home.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with (home / "courier-claim").open("x"):
-        pass  # a restarted container must not run the session again
-    courier = Courier(home, bootstrap.form, bootstrap.inbox_url, send, bootstrap.runs)
-    for folder in ("stop", "work"):
-        (home / folder).mkdir(exist_ok=True)
-    courier.fetch(bootstrap.fetch)
-    write(home / "packet.json", packet.model_dump_json())
-    # Persist start intent before user code can run. A lost write reply must not
-    # leave running code with no durable evidence that it might have started.
-    post(courier._form, courier._form.prefix + "receipt", str(os.getpid()).encode(), send)
-    package_root = str(Path(__file__).resolve().parents[3])
-    with (home / "session.log").open("wb") as log:
-        process = subprocess.Popen(
-            [sys.executable, "-m", "etude", "worker", str(home)],
-            cwd=home,
-            env={**os.environ, "PYTHONPATH": package_root},
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-        )
-    write(home / "receipt", str(process.pid))
-    while process.poll() is None:
-        for step in (courier.bring_in, courier.carry_out):
+            write_log("worker entry", "client ready")
+            _run(bootstrap_url, root, send, sleep, every)
+        finally:
+            if publishing is not None:
+                publishing.set()
+                publish(log, url)
+            original_error = sys.exception()
             try:
-                step()
-            except (StorageUnavailable, OSError, ValueError):
-                pass  # storage trouble never stops the work; the next pass tries again
-        sleep(every)
-    ended = home / "ended"
-    for _ in range(40):  # keep trying to deliver the last files, but not forever
-        try:
-            courier.carry_out(final=True)
-            note = ended.read_text() if ended.exists() else _now().isoformat()
-            post(courier._form, courier._form.prefix + "ended", note.encode(), send)
-            break
-        except (StorageUnavailable, OSError):
-            sleep(every)
-    delete_self()
+                delete_self()
+            except Exception as error:
+                print("cleanup unconfirmed: " + explain(error), file=sys.stderr)
+                if original_error is None:
+                    raise

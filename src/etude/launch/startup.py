@@ -11,7 +11,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+from etude.launch.logging import CLOSED, log_to, write_log
 from etude.launch.machines import Allocation
+from etude.launch.records import BootstrapLinks
 from etude.launch.schemas import Packet
 from etude.launch.storage.disk import DirectoryJournal
 from etude.launch.storage.files import write
@@ -22,12 +24,15 @@ class ProcessStart:
         self.root = root
         self._children: list[subprocess.Popen[bytes]] = []
 
-    def start(self, machine: Allocation, packet: Packet, bootstrap: str | None) -> str:
+    def start(self, machine: Allocation, packet: Packet, bootstrap: BootstrapLinks | None) -> str:
         home = self.root / packet.session
         home.mkdir(parents=True, mode=0o700)
         for work in packet.work:
             DirectoryJournal._place_source(home, work)
         write(home / "packet.json", packet.model_dump_json())
+        with log_to(home / "bootstrap.log"):
+            write_log("bootstrap", "local source preparation completed")
+            write_log("bootstrap", CLOSED)
         return self.spawn(packet)
 
     def spawn(self, packet: Packet) -> str:

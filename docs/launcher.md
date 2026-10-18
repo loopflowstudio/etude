@@ -87,7 +87,7 @@ spend money, that is, when the pool can make machines. Sending a job with no
 etude launch job.py
 etude status
 etude wait
-etude logs RUN
+etude logs --run RUN
 etude fetch RUN checkpoint.pt out
 ```
 
@@ -246,6 +246,71 @@ logs, progress and outputs. No inbound connection is needed. This computer and
 owned SSH hosts need no bucket; an owned host can optionally use one for records
 that outlive its disk. Only Amazon S3 is supported.
 
+## Retained launch evidence
+
+```sh
+etude logs --run baseline-seed-7
+etude logs --run baseline-seed-7 --follow --timeout 60
+etude logs --run baseline-seed-7 --job-only
+etude logs --machine MACHINE
+etude status baseline-seed-7 --phases
+```
+
+A run log includes launch preparation, shared machine startup, every execution
+attempt and cleanup. It keeps that meaning before admission and after machine
+deletion. `--cohort NAME` selects the admitted members of a cohort. Machine logs
+contain operational output; run logs select only that run's job output and
+attempt diagnostics.
+
+`Run(id="baseline-seed-7", job=job)` chooses a scientific identity. Failed admission
+leaves independent launch evidence, without creating a Run or RunAttempt or
+consuming that identity. A corrected launch can reuse it. An already-admitted
+identity is a conflict; an unresolved acquisition remains fenced until confirmed
+refused or deleted. A new launch ID cannot bypass that fence. `LaunchError.launch`
+and `.runs` identify the retained evidence when admission fails. Cohort admission
+remains atomic.
+
+Snapshots refresh journals within a total 30-second default allowance. Follow
+uses the same selection and absolute positions in each sanitized producer, stops
+at its time limit, and never schedules or retries work. It prints new evidence
+without replaying already seen output. Job exit alone does not close startup or
+cleanup producers. A queued run or a missing final stream is incomplete.
+
+Headers distinguish output not received, a silent producer, retrieval failure and
+retention truncation. A failed refresh returns the last received content with its
+collection time. Startup snapshots and controller log caches retain at most 1 MiB
+of text per stream: opening milestones and a recent tail, with omitted positions
+marked. Worker observations retain producer timestamps separately from controller
+observation times; clocks on different machines do not establish a total order.
+
+Bootstrap uses a write-only capability for one log object, independent of reading
+the bootstrap packet or installing dependencies. Each startup producer publishes
+at most once every 15 seconds and once at closure, with a two-second request
+allowance. The guardian starts first and remains independent of publication.
+A storage outage or death before bootstrap runs can leave an explicit evidence
+gap. Reading logs never needs a live machine after its bucket evidence was
+published or its output cached by the controller.
+
+```python
+from etude.launch.client import diagnostics, logs
+
+snapshot = logs(run="baseline-seed-7", timeout=30)
+for stream in snapshot.streams:
+    print(stream.producer, stream.attempt, stream.received, stream.complete)
+    print(stream.text)
+for event in diagnostics(run="baseline-seed-7"):
+    print(event.observed_at, event.operation, event.message)
+```
+
+Diagnostics and `status --phases` read retained database facts without provider or
+bucket calls. With an SSH controller selected, those facts live on the controller.
+Preparation intent is recorded there before the submitting client publishes its
+source. A disconnected submitting client can leave a preparing launch; it is
+reported as unresolved and does not authorize automatic resubmission.
+
+This prototype schema is version 2. As with other launcher schema changes, an
+older database is refused; there is no migration path in the prototype.
+
 ## The controller
 
 The controller holds the database and matches waiting runs to machines. No
@@ -256,7 +321,7 @@ computer's database and match while they run.
 etude controller                     # selection, last loop time, waiting-work warning
 etude controller set user@host       # an SSH address or configured alias
 etude launch job.py --pool l4
-etude logs RUN
+etude logs --run RUN
 etude fetch RUN checkpoint.pt out
 etude controller unset               # use this computer again
 ```
@@ -377,7 +442,7 @@ job = Job(
 )
 runs = queue_cohort("capacity", job.runs(1, 2, 3), pool="l4", parallel=1, max_usd=Decimal(15))
 wait(*runs)
-logs(runs[0])
+logs(run=runs[0])
 fetch(runs[0], "checkpoint.pt", Path("out"))
 continued = queue(continue_from(runs[0], "steps=63000"), pool="shed")
 ```

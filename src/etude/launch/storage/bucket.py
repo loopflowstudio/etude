@@ -5,10 +5,11 @@ from __future__ import annotations
 import base64
 import hashlib
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
-from etude.launch.records import LauncherError, Storage
+from etude.launch.logs import snapshot_stream
+from etude.launch.records import BootstrapLinks, LauncherError, LogStream, Storage
 from etude.launch.schemas import (
     AttemptRecord,
     Bootstrap,
@@ -76,7 +77,7 @@ class BucketJournal:
         key = f"{self._run(ref.run)}checkpoints/{ref.name}"
         return ref.model_copy(update={"url": self._bucket.get_url(key, _GRANT_SECONDS)})
 
-    def prepare(self, packet: Packet) -> str:
+    def prepare(self, packet: Packet, *, expires_at: datetime | None = None) -> BootstrapLinks:
         root = self._session(packet.session)
         self._bucket.put(root + "packet.json", packet.model_dump_json().encode(), once=True)
         bootstrap = Bootstrap.model_validate(
@@ -92,7 +93,17 @@ class BucketJournal:
         self._bucket.put(
             root + "bootstrap.json", bootstrap.model_dump_json(round_trip=True).encode()
         )
-        return self._bucket.get_url(root + "bootstrap.json", _GRANT_SECONDS)
+        expires_at = expires_at or packet.deadline
+        seconds = (
+            _GRANT_SECONDS
+            if expires_at is None
+            else max(1, min(_GRANT_SECONDS, int((expires_at - datetime.now(UTC)).total_seconds())))
+        )
+        return BootstrapLinks(
+            url=self._bucket.get_url(root + "bootstrap.json", seconds),
+            log_url=self._bucket.put_url(root + "out/bootstrap.log", seconds),
+            worker_log_url=self._bucket.put_url(root + "out/worker.log", seconds),
+        )
 
     def started(self, session_id: str) -> bool:
         return self._bucket.get(self._session(session_id) + "out/receipt") is not None
@@ -209,10 +220,18 @@ class BucketJournal:
                 inbox.model_dump_json(round_trip=True).encode(),
             )
 
-    def logs(self, session_id: str, attempt: str) -> str:
+    def logs(
+        self, session_id: str, attempt: str | None = None, *, producer: str = "job"
+    ) -> LogStream:
+        if attempt is None:
+            raw = self._bucket.get(self._session(session_id) + f"out/{producer}.log")
+            return snapshot_stream(session_id, None, producer, raw, False)
         run = self._runs(session_id).get(attempt)
         raw = None if run is None else self._bucket.get(f"{self._run(run)}attempts/{attempt}.log")
-        return "" if raw is None else raw.decode(errors="replace")
+        record = None if run is None else self._record(run, attempt)
+        return snapshot_stream(
+            session_id, attempt, producer, raw, record is not None and record.finished is not None
+        )
 
     def fetch(self, session_id: str, attempt: str, name: str, destination: Path) -> Path:
         run = self._runs(session_id).get(attempt)

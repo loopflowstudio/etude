@@ -17,8 +17,10 @@ from pathlib import Path
 
 from etude.launch.database import Database
 from etude.launch.executor import Refused
+from etude.launch.logs import snapshot_stream
 from etude.launch.machines import Bill
 from etude.launch.records import (
+    LogStream,
     MachineTemplate,
     Outcome,
     Output,
@@ -144,9 +146,14 @@ class FakeService:
     def kill(self, session_id: str) -> None:
         self.sessions[session_id].killed_at = self.clock()
 
-    def logs(self, session_id: str, attempt: str) -> str:
+    def logs(
+        self, session_id: str, attempt: str | None = None, *, producer: str = "job"
+    ) -> LogStream:
         self._call("bucket")
-        return f"log of {attempt}\n"
+        held = self.sessions.get(session_id)
+        closed = held is not None and not self._alive(held)
+        raw = f"log of {attempt}\n".encode() if attempt else b"startup\n"
+        return snapshot_stream(session_id, attempt, producer, raw, closed)
 
     def fetch(self, session_id: str, attempt: str, name: str, destination: Path) -> Path:
         self._call("bucket")

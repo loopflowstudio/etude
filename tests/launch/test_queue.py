@@ -1,4 +1,4 @@
-"""Queueing grows pools; launch acquires capacity before recording intent."""
+"""Queueing grows pools; launch acquires capacity before admitting executable work."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import pytest
 from etude.cli import main
 from etude.launch.client import queue, queue_cohort, wait
 from etude.launch.database import Database
+from etude.launch.errors import LaunchError
 from etude.launch.executor import Refused
 from etude.launch.records import Job, LauncherError, Pool, Stale
 from etude.launch.scheduler import Scheduler
@@ -312,9 +313,16 @@ def test_expired_launch_cannot_commit_and_orphan_is_cleaned(tmp_path: Path) -> N
         return receipt
 
     b.service.create = delayed  # type: ignore[method-assign]
-    with pytest.raises(Stale, match="expired"):
+    with pytest.raises(LaunchError, match="expired") as caught:
         b.scheduler.launch(job(), "l4")
+    assert isinstance(caught.value.__cause__, Stale)
     assert not b.store.runs()
+    evidence = b.scheduler.logs(run=caught.value.runs[0])
+    assert evidence.launches[0].id == caught.value.launch
+    assert evidence.launches[0].state == "failed"
+    assert any(
+        "placement lock expired" in diagnostic.message for diagnostic in evidence.diagnostics
+    )
     other.tick()
     assert b.store.sessions()[0].ended_at is not None
     assert not next(iter(b.service.sessions.values())).work()

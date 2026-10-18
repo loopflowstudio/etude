@@ -149,7 +149,7 @@ def worker(
     directory: Annotated[Path | None, typer.Argument()] = None,
     bootstrap: str | None = None,
     root: Path = Path("/run/etude/sessions"),
-    cleanup: Annotated[str, typer.Option(hidden=True)] = "[]",
+    cleanup: Annotated[str | None, typer.Option(hidden=True)] = None,
 ) -> None:
     """Run a working session on this machine."""
     from etude.launch.worker.main import work
@@ -269,13 +269,51 @@ def cancel(
 
 @app.command()
 @kind(Kind.wait)
-def logs(runs: Annotated[list[str], typer.Argument(help="run ids or cohort names")]) -> None:
-    """Print what runs wrote."""
-    from etude.launch.listing import resolve_runs
+def logs(
+    run: Annotated[
+        str | None, typer.Option(help="requested run ID, including failed admission")
+    ] = None,
+    machine: Annotated[str | None, typer.Option(help="machine operational logs")] = None,
+    cohort: Annotated[str | None, typer.Option(help="all runs in a cohort")] = None,
+    job_only: Annotated[bool, typer.Option(help="only job stdout/stderr")] = False,
+    follow: Annotated[
+        bool, typer.Option(help="follow newly retained evidence, without scheduling")
+    ] = False,
+    timeout: Annotated[float, typer.Option(min=0.01, help="total time limit in seconds")] = 30,
+) -> None:
+    """Read retained preparation, startup, execution and cleanup evidence."""
+    import time
 
-    scheduler = default()
-    for run in resolve_runs(scheduler, runs):
-        sys.stdout.write(scheduler.logs(run))
+    from etude.launch.client import _client
+    from etude.launch.logs import LogCursor, render
+
+    if sum(value is not None for value in (run, machine, cohort)) != 1:
+        raise typer.BadParameter("name exactly one --run, --machine or --cohort")
+    scheduler = _client()
+    runs = [r.id for r in scheduler.cohort_runs(cohort)] if cohort else [run]
+    cursors = {identity: LogCursor() for identity in runs}
+    deadline = time.monotonic() + timeout
+    while True:
+        complete = True
+        for identity in runs:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                print("log time limit reached; incomplete")
+                return
+            snapshot = scheduler.logs(run=identity, machine=machine, timeout=left)
+            complete = complete and snapshot.complete
+            sys.stdout.write(
+                cursors[identity].render(snapshot, job_only=job_only)
+                if follow
+                else render(snapshot, job_only=job_only)
+            )
+        sys.stdout.flush()
+        if not follow or complete:
+            return
+        if time.monotonic() >= deadline:
+            print("log time limit reached; incomplete")
+            return
+        time.sleep(min(1, max(0, deadline - time.monotonic())))
 
 
 @app.command()

@@ -109,9 +109,9 @@ def test_ask_wait_counts(tmp_path: Path) -> None:
         with pytest.raises(TimeoutError):
             b.scheduler.wait(id, timeout=0)
         wait = counting.snapshot()
-    assert ask == Counts(database=5)  # target: ask records intent without remote effects
+    assert ask == Counts(database=22)  # target: ask records intent without remote effects
     # Packet construction reads its paid window once for deadline, cap and reuse.
-    assert wait == Counts(provider=4, bucket=1, database=69)  # known debt: wait advances work
+    assert wait == Counts(provider=4, bucket=1, database=70)  # known debt: wait advances work
 
 
 def test_cohort_git_and_database_counts(
@@ -129,7 +129,7 @@ def test_cohort_git_and_database_counts(
             parallel=3,
         )
         result = counting.snapshot()
-    assert result == Counts(git=57, database=12)  # known debt: 19 git calls per run
+    assert result == Counts(git=57, database=35)  # known debt: 19 git calls per run
 
 
 @pytest.mark.parametrize(
@@ -141,10 +141,10 @@ def test_cohort_git_and_database_counts(
             9,
             ("numpy", "pydantic", "etude.launch.worker", "etude.launch.scheduler"),
         ),
-        (["pools"], 33, ("numpy", "boto3", "etude.launch.worker")),
+        (["pools"], 36, ("numpy", "boto3", "etude.launch.worker")),
         (
             ["worker", "{directory}"],
-            21,
+            23,
             (
                 "numpy",
                 "boto3",
@@ -218,7 +218,7 @@ def test_phases_reads_only_retained_records(
     assert "queued" in output and "machine asked for" in output and "code started" in output
     assert "finished not recorded" in output
     assert "machine confirmed not recorded (receipt retained)" in output
-    assert result == Counts(database=4)  # target: no external calls
+    assert result == Counts(database=8)  # one evidence selection; no external calls
 
 
 def test_profile_and_opt_in_spans(

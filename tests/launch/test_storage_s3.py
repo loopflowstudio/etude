@@ -204,3 +204,18 @@ def test_multipart_failure_does_not_read_the_remaining_checkpoint() -> None:
         bucket(storage).put_parts("checkpoint", chunks())
     assert read == 2  # The one-chunk lookahead chooses PUT versus multipart.
     assert len(storage.asked) == 3  # Start, failed first part, abandon.
+
+
+def test_startup_write_capability_is_method_and_object_specific() -> None:
+    storage = Storage(replies=[])
+    held = bucket(storage)
+    write_url = held.put_url("sessions/s/out/bootstrap.log", 300)
+    read_url = held.get_url("sessions/s/out/bootstrap.log", 300)
+    other_url = held.put_url("sessions/s/out/worker.log", 300)
+    write_query = parse_qs(write_url.split("?", 1)[1])
+    assert write_query["X-Amz-Expires"] == ["300"]
+    assert write_query["X-Amz-SignedHeaders"] == ["host"]
+    signature = write_query["X-Amz-Signature"]
+    assert signature != parse_qs(read_url.split("?", 1)[1])["X-Amz-Signature"]
+    assert signature != parse_qs(other_url.split("?", 1)[1])["X-Amz-Signature"]
+    assert storage.asked == []

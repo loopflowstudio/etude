@@ -102,6 +102,17 @@ model-owned JSON serialization. Keep `providers/runpod/http.py`,
 `providers/runpod/pod.py`, `providers/package.py` and `environment.py`
 standard-library-only: the RunPod guardian must start before
 client dependency installation. The client and each job use separate environments.
+`logging.py` is also in the standard-library bootstrap subset. Operational errors
+use its sanitizer before retention; subprocess diagnostics omit argv and traceback
+locals. Journal log reads return `LogStream`, preserving missing versus silent
+output, and share the caller's monotonic deadline through `log_read.py`.
+Captured console bytes pass through `Console` across reads before retention.
+Only the owning producer closes a stream, after its captured children exit and
+final console collection succeeds. Courier shutdown and final delivery share one
+monotonic allowance capped by the provider deadline; uncertain exit or collection
+leaves the stream incomplete while parent cleanup still runs.
+An explicit empty worker cleanup command leaves deletion to its parent; omitted
+cleanup selects the provider's command.
 
 Check before pushing: `uv run pytest`, `uv run mypy`, `uv run ruff check .` and
 `uv run ruff format --check .`. CI runs the tests with the outside network

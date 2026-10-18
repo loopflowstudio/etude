@@ -28,7 +28,7 @@ run.finish()
 ```sh
 etude launch job.py          # run it on this computer, an SSH host or a rented GPU
 etude status                 # where runs stand
-etude logs RUN               # what a run wrote
+etude logs --run RUN          # preparation, every attempt, cleanup
 etude reports write --open   # charts of every run, as one HTML file per experiment
 ```
 

@@ -1,14 +1,15 @@
 """What runs inside a RunPod pod. Standard library only.
 
-Two processes, started by the stock-image bootstrap:
+The stock-image bootstrap starts two children:
 
     python -m etude.launch.providers.runpod.pod guard   # first, and independent of everything else
-    etude session --bootstrap URL
+    etude worker --bootstrap URL --cleanup '[]'
 
 `guard` deletes the pod at its deadline, or sooner if the dollars run out at the
 price actually charged. It needs nothing from the launcher or from storage.
-The session reads its bootstrap link, handles its inbox, carries evidence to
-storage and deletes the pod after final delivery.
+The worker reads its bootstrap link, handles its inbox and carries evidence to
+storage. Bootstrap owns its console until exit, publishes final evidence, then
+deletes the pod. The guardian remains independent of both processes.
 
 The pod holds no account key and no storage keys. It can read the links it was
 given and write under its own folder, until they expire.
@@ -32,6 +33,15 @@ from pathlib import Path
 from urllib.request import urlopen
 
 from etude.launch.environment import install
+from etude.launch.logging import (
+    CLOSED,
+    Console,
+    explain,
+    log_to,
+    publish,
+    start_publication,
+    write_log,
+)
 from etude.launch.providers.runpod.http import PodHTTP, ProviderUnavailable
 
 
@@ -183,33 +193,74 @@ def main(argv: list[str]) -> int:
         timer = subprocess.Popen(
             [sys.executable, "-m", "etude.launch.providers.runpod.pod", "guard"], env=env
         )
-        try:
-            latest = time.monotonic() + 30
-            while not marker.exists():
-                if timer.poll() is not None or time.monotonic() >= latest:
-                    raise RuntimeError("guardian did not start; refusing client installation")
-                time.sleep(0.05)
-            _start_ssh()
-            ensure_uv()
-            with urlopen(os.environ["ETUDE_PACKAGE_URL"], timeout=60) as response:
-                code = response.read()
-            if hashlib.sha256(code).hexdigest() != os.environ["ETUDE_PACKAGE_SHA256"]:
-                raise ValueError("client package digest does not match")
-            root = install(code)
-            python = str(root / ".venv/bin/python")
-            return subprocess.call(
-                [
-                    python,
-                    "-m",
-                    "etude",
-                    "worker",
-                    "--bootstrap",
-                    os.environ["ETUDE_BOOTSTRAP_URL"],
-                ],
-                env={key: value for key, value in os.environ.items() if key != "PYTHONPATH"},
-            )
-        finally:
-            delete_self()
+        log = (
+            GUARDIAN_MARKER.parent
+            / "sessions"
+            / os.environ.get("ETUDE_SESSION", "bootstrap")
+            / "bootstrap.log"
+        )
+        url = os.environ.get("ETUDE_BOOTSTRAP_LOG_URL", "")
+        publishing = start_publication(log, url)
+        with log_to(log):
+            try:
+                latest = time.monotonic() + 30
+                while not marker.exists():
+                    if timer.poll() is not None or time.monotonic() >= latest:
+                        raise RuntimeError("guardian did not start; refusing client installation")
+                    time.sleep(0.05)
+                write_log("guardian", "ready; independent deadline active")
+                _start_ssh()
+                write_log("package download", "ensuring uv")
+                ensure_uv()
+                write_log("package download", "fetching client")
+                with urlopen(os.environ["ETUDE_PACKAGE_URL"], timeout=60) as response:
+                    code = response.read()
+                if hashlib.sha256(code).hexdigest() != os.environ["ETUDE_PACKAGE_SHA256"]:
+                    raise ValueError("client package digest does not match")
+                root = install(code)
+                python = str(root / ".venv/bin/python")
+                write_log("worker entry", "starting installed client")
+                # Keep this producer open across spawn, imports and courier exit.
+                # The child leaves deletion to us so its final stderr is collected first.
+                with subprocess.Popen(
+                    [
+                        python,
+                        "-m",
+                        "etude",
+                        "worker",
+                        "--bootstrap",
+                        os.environ["ETUDE_BOOTSTRAP_URL"],
+                        "--cleanup",
+                        "[]",
+                    ],
+                    env={
+                        key: value
+                        for key, value in os.environ.items()
+                        if key not in {"PYTHONPATH", "ETUDE_LOG_PATH"}
+                    },
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    bufsize=0,
+                ) as worker:
+                    assert worker.stdout is not None
+                    console = Console("worker console")
+                    while body := worker.stdout.read(65536):
+                        console.write(body)
+                    console.write(b"", final=True)
+                    status = worker.wait()
+                write_log("worker exit", f"exit status {status}")
+                return status
+            except Exception as error:
+                write_log("bootstrap", explain(error))
+                write_log("bootstrap exit", "exit status 1")
+                return 1
+            finally:
+                write_log("cleanup", "requesting machine deletion")
+                write_log("bootstrap", CLOSED)
+                publishing.set()
+                # At most two seconds here; the guardian still deletes independently.
+                publish(log, url)
+                delete_self()
     elif argv[1] == "guard":
         marker = GUARDIAN_MARKER
         marker.parent.mkdir(mode=0o700, parents=True, exist_ok=True)

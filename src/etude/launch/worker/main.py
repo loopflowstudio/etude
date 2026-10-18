@@ -10,12 +10,11 @@ from etude.launch.providers.cleanup import command as cleanup_command
 from etude.launch.worker import attempts, courier
 
 
-def work(directory: Path | None, bootstrap: str | None, root: Path, cleanup: str) -> int:
+def work(directory: Path | None, bootstrap: str | None, root: Path, cleanup: str | None) -> int:
     if directory is not None:
         return attempts.run(directory)
-    command: list[str] = json.loads(cleanup)
-    if not command:
-        command = cleanup_command()
+    # Omitted cleanup uses the provider; an explicit empty command leaves it to the parent.
+    command: list[str] = cleanup_command() if cleanup is None else json.loads(cleanup)
 
     def finish() -> None:
         if command:

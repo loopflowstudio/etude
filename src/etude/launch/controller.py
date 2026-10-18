@@ -24,13 +24,20 @@ from typing import Any, Literal
 
 from pydantic import RootModel, TypeAdapter
 
+from etude.launch.errors import LaunchError
 from etude.launch.listing import show_runs
+from etude.launch.log_read import read_deadline, remaining
+from etude.launch.logging import explain
 from etude.launch.measurement import timed
 from etude.launch.providers.package import program_archive
 from etude.launch.records import (
+    Cohort,
     CohortSpec,
+    Diagnostic,
     Job,
+    Launch,
     LauncherError,
+    LogSnapshot,
     Machine,
     Record,
     Run,
@@ -61,6 +68,7 @@ class LaunchInput(Record):
     pool: str | None
     sources: tuple[Source, ...] = ()
     queued: bool = False
+    launch: str | None = None
 
 
 class FetchRequest(Record):
@@ -74,17 +82,23 @@ class Request(Record):
 
     operation: Literal[
         "launch",
+        "prepare_launch",
+        "fail_launch",
         "fetch",
         "record",
         "status",
         "cancel",
         "wait",
         "logs",
+        "diagnostics",
+        "cohort_runs",
         "continue_from",
         "rent",
         "terminate",
     ]
     api: bool = False
+    launch: str = ""
+    message: str = ""
     submission: LaunchInput | None = None
     run: str = ""
     name: str = ""
@@ -98,18 +112,23 @@ class Request(Record):
     max_usd: Decimal | None = None
 
 
-class Reply(
-    RootModel[
-        tuple[str, ...]
-        | list[Status]
-        | RunRecord
-        | Status
-        | LaunchInput
-        | EncodedOutput
-        | Machine
-        | str
-    ]
-):
+type Response = (
+    tuple[str, ...]
+    | list[Status]
+    | RunRecord
+    | Status
+    | LaunchInput
+    | EncodedOutput
+    | Machine
+    | LogSnapshot
+    | tuple[Diagnostic, ...]
+    | tuple[RunRecord, ...]
+    | Launch
+    | str
+)
+
+
+class Reply(RootModel[Response]):
     model_config = {"frozen": True}
 
 
@@ -168,7 +187,7 @@ def install(address: str) -> None:
             ["ssh", "--", address, login_shell(shlex.join([remote_python(), "-c", _INSTALL]))],
             input=_program()[1],
             capture_output=True,
-            timeout=150,
+            timeout=remaining(150),
         )
     except (OSError, subprocess.TimeoutExpired):
         raise LauncherError(f"controller {address!r} did not answer over SSH") from None
@@ -190,14 +209,34 @@ def _ssh(address: str, argv: Sequence[str], **options: Any) -> subprocess.Comple
     done = subprocess.run(_command(address, argv), **options)
     if done.returncode == _MISSING:
         install(address)
+        if "timeout" in options:
+            options["timeout"] = remaining(options["timeout"])
         done = subprocess.run(_command(address, argv), **options)
     return done
 
 
-def prepare(submission: LaunchInput) -> LaunchInput:
-    return _with_sources(
-        submission.model_copy(update={"runs": tuple(freeze(run) for run in submission.runs)})
+def prepare(address: str, submission: LaunchInput) -> LaunchInput:
+    client = PythonClient(address)
+    launch = Launch.model_validate_json(
+        client._request(Request(operation="prepare_launch", submission=submission))
     )
+    requested = tuple(
+        run.model_copy(update={"id": request.run})
+        for run, request in zip(submission.runs, launch.requests, strict=True)
+    )
+    try:
+        return _with_sources(
+            submission.model_copy(
+                update={"launch": launch.id, "runs": tuple(freeze(run) for run in requested)}
+            )
+        )
+    except Exception as error:
+        message = explain(error)
+        try:
+            client._request(Request(operation="fail_launch", launch=launch.id, message=message))
+        except Exception:
+            message += "; controller evidence update unconfirmed"
+        raise LaunchError(launch.id, tuple(r.run for r in launch.requests), message) from error
 
 
 def _with_sources(submission: LaunchInput) -> LaunchInput:
@@ -223,6 +262,20 @@ def _with_sources(submission: LaunchInput) -> LaunchInput:
 
 def submit(scheduler: Scheduler, submission: LaunchInput) -> Sequence[str]:
     cohort = submission.cohort
+    if submission.launch is not None:
+        limits = (
+            None
+            if cohort is None
+            else Cohort(
+                name=cohort.name,
+                parallel=cohort.parallel,
+                max_usd=cohort.max_usd,
+                created_at=datetime.now(UTC),
+            )
+        )
+        return scheduler.submit_launch(
+            submission.launch, submission.runs, submission.pool, limits, queued=submission.queued
+        )
     if cohort is None:
         if len(submission.runs) != 1:
             raise LauncherError("several runs need a cohort")
@@ -248,7 +301,7 @@ def forward(
         return _ssh(address, argv).returncode
     request: Request
     if submission is not None:
-        request = Request(operation="launch", submission=prepare(submission))
+        request = Request(operation="launch", submission=prepare(address, submission))
     else:
         assert fetch is not None
         request = Request(operation="fetch", run=fetch.run, name=fetch.name)
@@ -302,6 +355,9 @@ class PythonClient:
             ["--controller-request"],
             input=request.model_copy(update={"api": True}).model_dump_json().encode(),
             capture_output=True,
+            **(
+                {"timeout": remaining(request.timeout or 30)} if request.operation == "logs" else {}
+            ),
         )
         if done.returncode:
             raise LauncherError(
@@ -316,10 +372,18 @@ class PythonClient:
         pool: str | None,
         queued: bool,
     ) -> tuple[str, ...]:
-        submission = prepare(LaunchInput(runs=tuple(runs), cohort=cohort, pool=pool, queued=queued))
-        return TypeAdapter(tuple[str, ...]).validate_json(
-            self._request(Request(operation="launch", submission=submission))
+        submission = prepare(
+            self.address, LaunchInput(runs=tuple(runs), cohort=cohort, pool=pool, queued=queued)
         )
+        try:
+            return TypeAdapter(tuple[str, ...]).validate_json(
+                self._request(Request(operation="launch", submission=submission))
+            )
+        except Exception as error:
+            assert submission.launch is not None
+            raise LaunchError(
+                submission.launch, tuple(str(run.id) for run in submission.runs), explain(error)
+            ) from error
 
     def queue(self, run: Run | Job, pool: str | None = None) -> str:
         return self._submit([Run(job=run) if isinstance(run, Job) else run], None, pool, True)[0]
@@ -367,8 +431,36 @@ class PythonClient:
     def cancel(self, run: str) -> Status:
         return Status.model_validate_json(self._request(Request(operation="cancel", run=run)))
 
-    def logs(self, run: str) -> str:
-        return TypeAdapter(str).validate_json(self._request(Request(operation="logs", run=run)))
+    def cohort_runs(self, name: str) -> tuple[RunRecord, ...]:
+        return TypeAdapter(tuple[RunRecord, ...]).validate_json(
+            self._request(Request(operation="cohort_runs", name=name))
+        )
+
+    def diagnostics(
+        self, *, run: str | None = None, machine: str | None = None
+    ) -> tuple[Diagnostic, ...]:
+        return TypeAdapter(tuple[Diagnostic, ...]).validate_json(
+            self._request(Request(operation="diagnostics", run=run or "", machine=machine or ""))
+        )
+
+    def logs(
+        self, *, run: str | None = None, machine: str | None = None, timeout: float = 30
+    ) -> LogSnapshot:
+        if timeout <= 0:
+            raise ValueError("log timeout must be positive")
+        try:
+            with read_deadline(timeout):
+                return LogSnapshot.model_validate_json(
+                    self._request(
+                        Request(
+                            operation="logs", run=run or "", machine=machine or "", timeout=timeout
+                        )
+                    )
+                )
+        except (subprocess.TimeoutExpired, TimeoutError):
+            raise LauncherError(
+                "controller log retrieval time limit reached; evidence remains on controller"
+            ) from None
 
     def fetch(self, run: str, name: str, destination: Path) -> Path:
         return _save_output(
@@ -399,21 +491,24 @@ class PythonClient:
 def receive(scheduler: Scheduler) -> int:
     raw = Request.model_validate_json(sys.stdin.buffer.read())
     operation = raw.operation
-    response: (
-        tuple[str, ...]
-        | list[Status]
-        | RunRecord
-        | Status
-        | LaunchInput
-        | EncodedOutput
-        | Machine
-        | str
-    )
-    if operation == "launch":
+    response: Response
+    if operation == "prepare_launch":
+        if raw.submission is None:
+            raise LauncherError("launch needs a submission")
+        response = scheduler.prepare_launch(raw.submission.runs, raw.submission.pool)
+    elif operation == "fail_launch":
+        scheduler.fail_launch(raw.launch, raw.message)
+        response = "failed; no run admitted"
+    elif operation == "launch":
         submission = raw.submission
         if submission is None:
             raise LauncherError("launch needs a submission")
-        _retain(submission.sources)
+        try:
+            _retain(submission.sources)
+        except Exception as error:
+            if submission.launch is not None:
+                scheduler.fail_launch(submission.launch, explain(error))
+            raise
         ids = submit(scheduler, submission)
         if not raw.api:
             show_runs(scheduler, ids)
@@ -436,8 +531,14 @@ def receive(scheduler: Scheduler) -> int:
         response = [
             status for status in scheduler.wait(*raw.runs, every=raw.every, timeout=raw.timeout)
         ]
+    elif operation == "diagnostics":
+        response = scheduler.diagnostics(run=raw.run or None, machine=raw.machine or None)
+    elif operation == "cohort_runs":
+        response = scheduler.cohort_runs(raw.name)
     elif operation == "logs":
-        response = scheduler.logs(raw.run)
+        response = scheduler.logs(
+            run=raw.run or None, machine=raw.machine or None, timeout=raw.timeout or 30
+        )
     elif operation == "rent":
         if raw.pool is None:
             raise LauncherError("rent needs a pool")

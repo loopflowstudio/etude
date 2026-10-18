@@ -70,7 +70,9 @@ def test_a_job_file_launches_a_cohort_and_each_verb_reads_it_back(
     assert [line.split()[0] for line in run(capsys, "runs")] == ids
     done = run(capsys, "wait", *ids)
     assert all("done: succeeded, steps 26000" in line for line in done)
-    assert run(capsys, "logs", ids[3]) == ["arm = large seed 2 from 0 to 26000"]
+    assert "arm = large seed 2 from 0 to 26000" in run(
+        capsys, "logs", "--run", ids[3], "--job-only"
+    )
 
     assert run(capsys, "status") == []
     assert len(run(capsys, "runs")) == 4
@@ -80,11 +82,15 @@ def test_a_job_file_launches_a_cohort_and_each_verb_reads_it_back(
     stage = run(capsys, "continue", "capacity-26k", "steps=40000", "--cohort", "capacity-40k")
     assert len(stage) == 4 and all("queued (waiting for local)" in line for line in stage)
     assert all("steps 40000" in line for line in run(capsys, "wait"))  # none named: all of them
-    assert run(capsys, "logs", "capacity-40k")[0] == "arm = small seed 1 from 26000 to 40000"
+    assert "arm = small seed 1 from 26000 to 40000" in run(
+        capsys, "logs", "--cohort", "capacity-40k", "--job-only"
+    )
     (continued,) = run(capsys, "continue", ids[3], "steps=63000")
     next_id = continued.split()[0]
     assert "steps 63000" in run(capsys, "wait", next_id)[0]
-    assert run(capsys, "logs", next_id) == ["arm = large seed 2 from 26000 to 63000"]
+    assert "arm = large seed 2 from 26000 to 63000" in run(
+        capsys, "logs", "--run", next_id, "--job-only"
+    )
     (copy,) = run(capsys, "fetch", next_id, "checkpoint.pt", str(tmp_path / "out"))
     assert Path(copy).read_text() == "weights\n"
 

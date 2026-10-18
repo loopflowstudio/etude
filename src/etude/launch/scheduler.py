@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
@@ -30,16 +31,25 @@ from pydantic import Field
 
 from etude.launch import source
 from etude.launch.database import Database
+from etude.launch.errors import LaunchError
 from etude.launch.executor import Execution, Refused
+from etude.launch.log_read import read_deadline, remaining
+from etude.launch.logging import bounded, explain, sanitize
 from etude.launch.machines import Safeguards
 from etude.launch.records import (
     RETRYABLE,
     Cause,
     Checkpoint,
     Cohort,
+    Diagnostic,
     Job,
+    Launch,
     LauncherError,
+    LaunchRequest,
     Limit,
+    LogProducer,
+    LogSnapshot,
+    LogStream,
     Machine,
     MachineTemplate,
     Pool,
@@ -124,6 +134,14 @@ class Placement(Record):
     session: Session | None
     machine: Machine | None
     price: Decimal
+
+
+class LogSelection(Record):
+    """Shared launch/session evidence and only the requested run's attempts."""
+
+    launches: tuple[Launch, ...]
+    sessions: tuple[Session, ...]
+    attempts: tuple[RunAttempt, ...]
 
 
 class Scheduler:
@@ -288,10 +306,9 @@ class Scheduler:
                 raise LauncherError(f"machine {machine!r} still has a run on it")
             held = self._store.rented_session(machine)
             if held.ended_at is None and held.refused_at is None and held.receipt is not None:
-                gone = self._service(held).end(held.id)
-                if gone is None:
+                self._end_session(held)
+                if self._store.session(held.id).ended_at is None:
                     raise LauncherError(f"machine {machine!r} did not confirm it ended")
-                self._store.confirm_ended(held, gone)
             return self._store.machine(machine)
 
     def session(self, id: str) -> Session:
@@ -333,11 +350,9 @@ class Scheduler:
 
     def queue(self, run: Run | Job, pool: str | None = None) -> str:
         """Queue one run; its pool may grow within its limits, or the run waits."""
-        record = self._freeze(
-            run if isinstance(run, Run) else Run(job=run), self._pool_name(pool), None
-        )
-        self._store.launch((record,), None)
-        return record.id
+        return self._submit(
+            (run if isinstance(run, Run) else Run(job=run),), pool, None, queued=True
+        )[0]
 
     def queue_cohort(
         self,
@@ -350,10 +365,7 @@ class Scheduler:
     ) -> tuple[str, ...]:
         """Queue a cohort under its shared limits; capacity shortages wait."""
         cohort = self._new_cohort(name, runs, parallel, max_usd)
-        selected = self._pool_name(pool)
-        records = tuple(self._freeze(run, selected, name) for run in runs)
-        self._store.launch(records, cohort)
-        return tuple(record.id for record in records)
+        return self._submit(runs, pool, cohort, queued=True)
 
     def _new_cohort(
         self,
@@ -368,11 +380,9 @@ class Scheduler:
 
     def launch(self, run: Run | Job, pool: str | None = None) -> str:
         """Acquire confirmed capacity, then record and hand over one run."""
-        record = self._freeze(
-            run if isinstance(run, Run) else Run(job=run), self._pool_name(pool), None
-        )
-        self._admit((record,), None)
-        return record.id
+        return self._submit(
+            (run if isinstance(run, Run) else Run(job=run),), pool, None, queued=False
+        )[0]
 
     def launch_cohort(
         self,
@@ -385,12 +395,158 @@ class Scheduler:
     ) -> tuple[str, ...]:
         """Record a named set of runs sharing rentals-at-once and total-dollar limits."""
         cohort = self._new_cohort(name, runs, parallel, max_usd)
-        selected = self._pool_name(pool)
-        records = tuple(self._freeze(run, selected, name) for run in runs)
-        self._admit(records, cohort)
-        return tuple(record.id for record in records)
+        return self._submit(runs, pool, cohort, queued=False)
 
-    def _admit(self, records: Sequence[RunRecord], cohort: Cohort | None) -> None:
+    def _submit(
+        self, runs: Sequence[Run], pool: str | None, cohort: Cohort | None, *, queued: bool
+    ) -> tuple[str, ...]:
+        launch = self.prepare_launch(runs, pool)
+        requested = tuple(
+            run.model_copy(update={"id": request.run})
+            for run, request in zip(runs, launch.requests, strict=True)
+        )
+        return self.submit_launch(launch.id, requested, pool, cohort, queued=queued)
+
+    def prepare_launch(self, runs: Sequence[Run], pool: str | None = None) -> Launch:
+        """Retain valid intent before the submitting client publishes source."""
+        selected = self._pool_name(pool)
+        target = self._store.pool(selected)
+        if not runs:
+            raise LauncherError("a launch needs at least one run")
+        for run in runs:
+            self._validate_job(run.job, target)
+        requested = tuple(run.model_copy(update={"id": run.id or _id()}) for run in runs)
+        ids = tuple(str(run.id) for run in requested)
+        if len(set(ids)) != len(ids):
+            raise LauncherError("a launch cannot request the same run ID twice")
+        launch = Launch(
+            id=_id(),
+            created_at=self._clock(),
+            requests=tuple(
+                LaunchRequest(
+                    run=str(run.id),
+                    fingerprint=hashlib.sha256(run.model_dump_json().encode()).hexdigest(),
+                    requested_revision=sanitize(run.job.revision) if run.job.revision else None,
+                )
+                for run in requested
+            ),
+        )
+        self._store.begin_launch(launch)
+        self._diagnose(
+            "preparation", "awaiting prepared source; job command not started", launch=launch.id
+        )
+        return launch
+
+    def fail_launch(self, identity: str, message: str) -> None:
+        launch = self._store.claim_launch(identity)
+        self._store.save_launch(launch.model_copy(update={"state": "failed"}))
+        self._diagnose("source preparation", message, launch=identity)
+
+    def submit_launch(
+        self,
+        identity: str,
+        runs: Sequence[Run],
+        pool: str | None,
+        cohort: Cohort | None,
+        *,
+        queued: bool,
+    ) -> tuple[str, ...]:
+        launch = self._store.claim_launch(identity)
+        selected = self._pool_name(pool)
+        requested = tuple(runs)
+        ids = tuple(request.run for request in launch.requests)
+        if tuple(run.id for run in requested) != ids:
+            self._store.save_launch(launch.model_copy(update={"state": "failed"}))
+            raise LauncherError("prepared run identities differ from launch intent")
+        operation = "source preparation"
+        self._diagnose(
+            operation, "preparing requested work; job command not started", launch=launch.id
+        )
+        try:
+            records = tuple(
+                self._freeze(run, selected, cohort.name if cohort else None) for run in requested
+            )
+            launch = launch.model_copy(
+                update={
+                    "requests": tuple(
+                        request.model_copy(update={"resolved_revision": record.spec.revision})
+                        for request, record in zip(launch.requests, records, strict=True)
+                    )
+                }
+            )
+            self._store.save_launch(launch)
+            operation = "admission"
+            if queued:
+                self._store.launch(records, cohort, launch=launch.id)
+            else:
+                self._admit(records, cohort, launch.id)
+        except BaseException as error:
+            if self._store.launch_evidence(launch.id).state == "admitted":
+                self._diagnose(
+                    "work delivery", "run admitted; delivery unconfirmed", error, launch=launch.id
+                )
+                if not isinstance(error, Exception):
+                    raise
+                raise LaunchError(
+                    launch.id, ids, "run admitted; delivery unconfirmed; " + explain(error)
+                ) from error
+            self._store.save_launch(launch.model_copy(update={"state": "failed"}))
+            self._diagnose(operation, "admission failed; no run recorded", error, launch=launch.id)
+            if not isinstance(error, Exception):
+                raise
+            sessions = self._store.launch_sessions(launch.id)
+            details = [explain(error), "job command not started"]
+            for session in sessions:
+                certainty = (
+                    "confirmed deleted"
+                    if session.ended_at
+                    else "no machine acquired"
+                    if session.refused_at
+                    else "unconfirmed; reconciliation continues"
+                )
+                details.append(f"machine {session.machine}: cleanup {certainty}")
+            details.extend(
+                d.message
+                for d in self.diagnostics(run=ids[0])
+                if d.exception and d.session in {s.id for s in sessions}
+            )
+            raise LaunchError(launch.id, ids, "; ".join(details)) from error
+        self._diagnose("admission", "run admitted", launch=launch.id)
+        return ids
+
+    def _diagnose(
+        self,
+        operation: str,
+        message: str,
+        error: BaseException | None = None,
+        *,
+        launch: str | None = None,
+        session: str | None = None,
+        attempt: str | None = None,
+        exit_code: int | None = None,
+    ) -> None:
+        message = bounded(message + ("; " + explain(error) if error else ""))
+        identity = hashlib.sha256(
+            json.dumps([launch, session, attempt, operation, message]).encode()
+        ).hexdigest()
+        self._store.retain_diagnostic(
+            Diagnostic(
+                id=identity,
+                observed_at=self._clock(),
+                operation=operation,
+                message=message,
+                launch=launch,
+                session=session,
+                attempt=attempt,
+                exception=type(error).__name__ if error else None,
+                exit_code=error.returncode
+                if isinstance(error, subprocess.CalledProcessError)
+                else exit_code,
+                timeout=error.timeout if isinstance(error, subprocess.TimeoutExpired) else None,
+            )
+        )
+
+    def _admit(self, records: Sequence[RunRecord], cohort: Cohort | None, launch: str) -> None:
         pool_name = records[0].pool
         with self._store.pool_lock(pool_name, self._clock) as acquired:
             if not acquired:
@@ -426,7 +582,7 @@ class Scheduler:
                             now,
                             kept=False,
                         )
-                        self._store.plan(session, (), on_demand, rental)
+                        self._store.plan(session, (), on_demand, rental, launch=launch)
                         made.append(session)
                         if on_demand is not None:
                             # Boot an empty inbox. No executable work leaves before
@@ -448,6 +604,7 @@ class Scheduler:
                             raise LauncherError(
                                 "rented machine expired during launch; etude queue would wait"
                             )
+                    self._store.link_launch(launch, session.id)
                     planned = PlannedRun(
                         run=run,
                         cap_usd=_limit_usd(run.spec),
@@ -469,7 +626,7 @@ class Scheduler:
                 ):
                     raise LauncherError("capacity expired during launch; etude queue would wait")
                 # Runs and claims become visible together, under the same lock.
-                self._store.launch(records, cohort, attempts)
+                self._store.launch(records, cohort, attempts, launch=launch)
             except BaseException:
                 for session in made:
                     try:
@@ -479,8 +636,9 @@ class Scheduler:
                             self._end_session(session)
                         elif session.claimed_at is None:
                             self._store.record_refusal(session, self._clock())
-                    except Exception:
-                        pass  # next tick cleans up; unknown creates are only looked up
+                    except Exception as error:
+                        self._diagnose("cleanup", "cleanup unconfirmed", error, session=session.id)
+                        # Next tick cleans up; unknown creates are only looked up.
                 raise
             # Delivery is retryable from committed attempts; capacity is already held.
             for attempt in attempts:
@@ -491,7 +649,14 @@ class Scheduler:
                         self._create(session, self._clock())
                     else:
                         self._observe(session, self._clock())
-                except (Stale, OSError, LauncherError, StorageUnavailable):
+                except (Stale, OSError, LauncherError, StorageUnavailable) as error:
+                    self._diagnose(
+                        "work delivery",
+                        "delivery pending",
+                        error,
+                        session=session.id,
+                        attempt=attempt.id,
+                    )
                     continue  # committed attempts retain delivery and startup recovery
 
     def _capacity(
@@ -590,10 +755,35 @@ class Scheduler:
 
     def start_phases(self, run: str) -> tuple[StartPhase, ...]:
         """Read retained timestamps only; never tick or ask a machine for freshness."""
-        record = self._store.run(run)
-        phases = [StartPhase(name="queued", at=record.created_at)]
-        for attempt in self._store.attempts(run=run):
-            session = self._store.session(attempt.session)
+        selection = self._log_selection(run, None)
+        phases = [
+            StartPhase(name=f"launch {launch.id} {launch.state}", at=launch.created_at)
+            for launch in selection.launches
+        ]
+        if not selection.launches or any(
+            launch.state == "admitted" for launch in selection.launches
+        ):
+            phases.append(StartPhase(name="queued", at=self._store.run(run).created_at))
+        phases.extend(
+            StartPhase(name=d.operation, at=d.observed_at, attempt=d.attempt, evidence=d.message)
+            for d in self._diagnostics(selection)
+        )
+        sessions = {session.id: session for session in selection.sessions}
+        seen_sessions: set[str] = set()
+        for attempt in selection.attempts:
+            session = sessions[attempt.session]
+            if session.id not in seen_sessions:
+                seen_sessions.add(session.id)
+                startup = self._store.log(f"{session.id}/bootstrap")
+                if startup is not None and startup.received:
+                    phases.append(
+                        StartPhase(
+                            name="retained bootstrap output",
+                            at=startup.observed_at,
+                            evidence=startup.text[-1000:],
+                            attempt=attempt.id,
+                        )
+                    )
             phases.extend(
                 StartPhase(name=name, at=at, attempt=attempt.id, evidence=evidence)
                 for name, at, evidence in (
@@ -656,10 +846,122 @@ class Scheduler:
             self._store.cancel(record, self._clock())
         return self.status(run)
 
-    def logs(self, run: str) -> str:
-        """Everything the latest attempt has printed so far."""
-        attempt, session = self._latest(run)
-        return self._service(session).logs(session.id, attempt.id)
+    def _log_selection(self, run: str | None, machine: str | None) -> LogSelection:
+        if (run is None) == (machine is None):
+            raise LauncherError("name exactly one run or machine")
+        launches = self._store.launches(run) if run is not None else ()
+        attempts = self._store.attempts(run=run) if run is not None else ()
+        sessions = {s.id: s for launch in launches for s in self._store.launch_sessions(launch.id)}
+        for attempt in attempts:
+            if attempt.session not in sessions:
+                sessions[attempt.session] = self._store.session(attempt.session)
+        if machine is not None:
+            self._store.machine(machine)
+            sessions.update((s.id, s) for s in self._store.sessions() if s.machine == machine)
+        elif not launches and not attempts:
+            self._store.run(str(run))  # distinguish a queued run from an unknown identity
+        return LogSelection(launches=launches, sessions=tuple(sessions.values()), attempts=attempts)
+
+    def diagnostics(
+        self, *, run: str | None = None, machine: str | None = None
+    ) -> tuple[Diagnostic, ...]:
+        """Retained facts only: no provider, bucket, or scheduling work."""
+        return self._diagnostics(self._log_selection(run, machine))
+
+    def _diagnostics(self, selection: LogSelection) -> tuple[Diagnostic, ...]:
+        launch_ids = {launch.id for launch in selection.launches}
+        session_ids = {session.id for session in selection.sessions}
+        attempt_ids = {attempt.id for attempt in selection.attempts}
+        return tuple(
+            d
+            for d in self._store.diagnostics()
+            if d.launch in launch_ids
+            or (d.session in session_ids and (d.attempt is None or d.attempt in attempt_ids))
+        )
+
+    def logs(
+        self, *, run: str | None = None, machine: str | None = None, timeout: float = 30
+    ) -> LogSnapshot:
+        """All retained stages and attempts, with bounded refresh and explicit gaps."""
+        selection = self._log_selection(run, machine)
+        streams = self._collect_logs(selection.sessions, selection.attempts, timeout)
+        settled = all(
+            session.ended_at is not None or session.refused_at is not None
+            for session in selection.sessions
+        )
+        if run is not None:
+            if not selection.launches or any(
+                launch.state == "admitted" for launch in selection.launches
+            ):
+                settled = settled and self.read(run).done
+            else:
+                settled = settled and all(launch.state == "failed" for launch in selection.launches)
+        return LogSnapshot(
+            settled=settled,
+            observed_at=self._clock(),
+            launches=selection.launches,
+            diagnostics=self._diagnostics(selection),
+            streams=streams,
+        )
+
+    def _collect_logs(
+        self, sessions: Sequence[Session], attempts: Sequence[RunAttempt], timeout: float
+    ) -> tuple[LogStream, ...]:
+        streams: list[LogStream] = []
+        with read_deadline(timeout):
+            for session in sessions:
+                if session.refused_at is not None:
+                    continue
+                selected: list[tuple[str | None, LogProducer]] = [
+                    (None, "bootstrap"),
+                    (None, "worker"),
+                ]
+                selected.extend((a.id, "job") for a in attempts if a.session == session.id)
+                for attempt, producer in selected:
+                    streams.append(self._collect_log(session, attempt, producer))
+        return tuple(streams)
+
+    def _collect_log(
+        self, session: Session, attempt: str | None, producer: LogProducer
+    ) -> LogStream:
+        """Refresh one producer under the caller's deadline, preserving its cached evidence."""
+        identity = f"{session.id}/{attempt or producer}"
+        cached = self._store.log(identity)
+        if cached is not None and cached.complete:
+            return cached
+        try:
+            remaining()
+            stream = self._service(session).logs(session.id, attempt, producer=producer)
+            if not stream.received and cached is not None:
+                stream = cached.model_copy(
+                    update={"retrieval_error": "previously received object is now unavailable"}
+                )
+            for diagnostic in stream.diagnostics:
+                self._store.retain_diagnostic(
+                    diagnostic.model_copy(
+                        update={
+                            "session": session.id,
+                            "produced_at": diagnostic.observed_at,
+                            "observed_at": self._clock(),
+                        }
+                    )
+                )
+            # Diagnostics travel with the stream, but the table owns retained
+            # observations and selection. Persist them before caching final closure.
+            stream = stream.model_copy(update={"machine": session.machine, "diagnostics": ()})
+            self._store.retain_log(stream)
+        except Exception as error:
+            stream = (
+                cached
+                or LogStream(
+                    id=identity,
+                    producer=producer,
+                    session=session.id,
+                    attempt=attempt,
+                    machine=session.machine,
+                )
+            ).model_copy(update={"retrieval_error": explain(error)})
+        return stream
 
     def fetch(self, run: str, name: str, destination: Path) -> Path:
         """Copy one recorded output into a directory and check it against its digest."""
@@ -757,7 +1059,13 @@ class Scheduler:
             if session.claimed_at is not None:
                 try:
                     self._observe(session, now)
-                except (Stale, OSError, LauncherError, StorageUnavailable):
+                except (Stale, OSError, LauncherError, StorageUnavailable) as error:
+                    self._diagnose(
+                        "observation",
+                        "observation failed; state remains uncertain",
+                        error,
+                        session=session.id,
+                    )
                     continue  # storage or the provider will answer on a later pass
             elif not self._kept(session) and not self._store.attempts(session=session.id):
                 # A crashed admission never asked for this machine. Release its claim.
@@ -766,7 +1074,10 @@ class Scheduler:
         self._plan(pool, now)
         for idle in self._idle_sessions(pool.name, now):
             if not self._kept(idle):
-                self._end_session(idle)
+                try:
+                    self._end_session(idle)
+                except (OSError, LauncherError, StorageUnavailable):
+                    continue  # cleanup retained its error and remains unconfirmed
         for session in self._store.unsettled_sessions():
             if session.pool == pool.name and session.claimed_at is None:
                 self._create(session, now)
@@ -1060,7 +1371,8 @@ class Scheduler:
         self._store.check_pool_lock(session.pool)
         try:
             packet = self._packet(session)
-        except (OSError, LauncherError):
+        except (OSError, LauncherError) as error:
+            self._diagnose("checkpoint access", "preparation failed", error, session=session.id)
             self._trouble[session.pool] = "waiting for checkpoint access"
             return
         try:
@@ -1071,17 +1383,27 @@ class Scheduler:
         service = self._service(session)
         try:
             receipt = service.create(packet.model_copy(update={"kept": True}) if idle else packet)
-        except Refused:
+        except Refused as error:
+            self._diagnose(
+                "machine create", "provider refused; no machine acquired", error, session=session.id
+            )
             self._store.record_refusal(session, now)
             for attempt in self._store.attempts(session=session.id):
                 self._store.fail_before_start(attempt, "capacity_refused", now)
             return
-        except Exception:  # noqa: BLE001
+        except Exception as error:  # noqa: BLE001
+            self._diagnose(
+                "machine create",
+                "create reply unknown; reconciling existing request",
+                error,
+                session=session.id,
+            )
             # No answer is not a refusal: a rental may exist. It is looked up by its
             # identity on later ticks and is never asked for a second time.
             return
         try:
             self._store.record_receipt(session, receipt)
+            self._diagnose("machine create", "machine confirmed", session=session.id)
             self._creation_facts(self._store.session(session.id), now)
         except Stale:
             pass  # another process already found the rental by its identity
@@ -1172,6 +1494,11 @@ class Scheduler:
             receipt = service.find(session.id)
             if receipt is not None:
                 self._store.record_receipt(session, receipt)
+                self._diagnose(
+                    "reconciliation",
+                    "existing machine confirmed; no duplicate create",
+                    session=session.id,
+                )
             elif deadline is not None and now >= deadline:
                 for attempt in attempts:
                     if attempt.outcome is None:
@@ -1188,6 +1515,11 @@ class Scheduler:
                 deadline or now + timedelta(minutes=5),
                 session.claimed_at + timedelta(minutes=5),
             ):
+                self._diagnose(
+                    "worker startup",
+                    "first receipt not received within startup allowance; cleanup requested",
+                    session=session.id,
+                )
                 self._end_session(session)
                 return
         seen = service.observe(session.id)
@@ -1221,12 +1553,20 @@ class Scheduler:
         service = self._service(session)
         gone = session.ended_at
         if gone is None:
-            gone = service.end(session.id)
+            try:
+                gone = service.end(session.id)
+            except Exception as error:
+                self._diagnose("cleanup", "machine deletion unconfirmed", error, session=session.id)
+                self._collect_logs((session,), self._store.attempts(session=session.id), 2)
+                raise
             if gone is None:
+                self._diagnose("cleanup", "machine deletion unconfirmed", session=session.id)
                 return
             self._store.confirm_ended(session, gone)
+            self._diagnose("cleanup", "machine deletion confirmed", session=session.id)
         # Nothing more will be written. Take what the journal holds now, and
         # count any attempt still open as lost with the machine.
+        self._collect_logs((session,), self._store.attempts(session=session.id), 2)
         final = service.observe(session.id)
         progress = {entry.attempt: entry for entry in final.progress}
         for attempt in self._store.attempts(session=session.id):
@@ -1271,6 +1611,13 @@ class Scheduler:
                 outputs=seen.outputs,
                 exit_code=seen.exit_code,
             )
+            self._diagnose(
+                "execution",
+                f"attempt finished: {outcome}; exit status {seen.exit_code if seen.exit_code is not None else 'not received'}",
+                session=session.id,
+                attempt=attempt.id,
+                exit_code=seen.exit_code,
+            )
         elif not alive:
             # Confirmed shutdown fences the old attempt before a replacement is allowed.
             cause: Cause = (
@@ -1288,6 +1635,12 @@ class Scheduler:
                 clocks=seen.clocks if seen else attempt.clocks,
                 checkpoint=seen.checkpoint if seen else None,
                 outputs=seen.outputs if seen else attempt.outputs,
+            )
+            self._diagnose(
+                "execution",
+                f"attempt lost: {cause}; final exit status not received",
+                session=session.id,
+                attempt=attempt.id,
             )
         else:
             if seen is not None:
@@ -1322,19 +1675,25 @@ class Scheduler:
             self._reached[key] = self._services[name](pool, machine)
         return self._reached[key]
 
-    def _freeze(self, run: Run, on: str, cohort: str | None) -> RunRecord:
-        job = run.job
-        pool = self._store.pool(on)
+    @staticmethod
+    def _validate_job(job: Job, pool: Pool) -> None:
         if pool.off:
-            raise LauncherError(f"pool {on!r} is turned off")
+            raise LauncherError(f"pool {pool.name!r} is turned off")
         if not job.command.strip() or job.max_hours <= 0:
             raise LauncherError("a job needs a command and hours")
         if job.max_usd is None and pool.on_demand_template is not None:
-            raise LauncherError(f"pool {on!r} can spend money, so the job needs max_usd")
+            raise LauncherError(f"pool {pool.name!r} can spend money, so the job needs max_usd")
         if job.max_usd is not None and job.max_usd <= 0:
             raise LauncherError("a job's max_usd must be more than zero")
         if job.max_attempts < 1:
             raise LauncherError("a job needs at least one attempt")
+        if job.until is not None:
+            parse_target(job.until)
+
+    def _freeze(self, run: Run, on: str, cohort: str | None) -> RunRecord:
+        job = run.job
+        pool = self._store.pool(on)
+        self._validate_job(job, pool)
         run = source.freeze(run)
         job = run.job
         if job.until is not None:

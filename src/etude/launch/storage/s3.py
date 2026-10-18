@@ -21,6 +21,7 @@ from collections.abc import Callable, Iterable, Iterator
 from datetime import UTC, datetime, timedelta
 from itertools import chain
 
+from etude.launch.log_read import remaining
 from etude.launch.measurement import timed
 from etude.launch.records import Record
 
@@ -77,7 +78,7 @@ class PostForm(Record):
 def _send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> tuple[int, bytes]:
     request = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=60) as reply:  # noqa: S310
+        with urllib.request.urlopen(request, timeout=remaining()) as reply:  # noqa: S310
             return reply.status, reply.read()
     except urllib.error.HTTPError as error:
         return error.code, error.read()
@@ -320,8 +321,15 @@ class Bucket:
             query["continuation-token"] = more
         raise StorageUnavailable(f"list {prefix}: did not end")
 
+    def put_url(self, key: str, seconds: int) -> str:
+        """Write-only capability for exactly one object, without a prefix grant."""
+        return self._url(key, seconds, "PUT")
+
     def get_url(self, key: str, seconds: int) -> str:
-        """A link that reads one object for `seconds`, with no keys needed by its holder."""
+        return self._url(key, seconds, "GET")
+
+    def _url(self, key: str, seconds: int, method: str) -> str:
+        """A capability for one method and object, valid for `seconds`."""
         stamp = self._stamp()
         query = {
             "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
@@ -335,7 +343,7 @@ class Bucket:
         text_query = "&".join(f"{_quote(n)}={_quote(v)}" for n, v in sorted(query.items()))
         path = "/" + _quote(key, safe="/")
         canonical = "\n".join(
-            ("GET", path, text_query, f"host:{self.host}\n", "host", "UNSIGNED-PAYLOAD")
+            (method, path, text_query, f"host:{self.host}\n", "host", "UNSIGNED-PAYLOAD")
         )
         signature = self._signature(stamp, canonical)
         return f"https://{self.host}{path}?{text_query}&X-Amz-Signature={signature}"

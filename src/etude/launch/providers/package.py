@@ -16,6 +16,7 @@ FILES = {
     "launch/providers/runpod/http.py",
     "launch/providers/runpod/pod.py",
     "launch/environment.py",
+    "launch/logging.py",
 }
 
 

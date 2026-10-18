@@ -19,6 +19,7 @@ from etude.launch.records import Job, LauncherError, Machine, Pool, Run, Status
 from etude.launch.scheduler import Scheduler
 from etude.track.read import read, runs
 from etude.track.report import page_data
+from tests.launch.counting import job_text
 
 TRAIN = """
 echo "seed $ETUDE_SEED from ${ETUDE_FROM_VALUE:-0} to $ETUDE_UNTIL_VALUE with $(cat "$ETUDE_CONFIG")"
@@ -79,12 +80,17 @@ def test_a_run_from_a_commit_continues_from_its_own_checkpoint(
     assert (status.outcome, status.rental_ended) == ("succeeded", None)
     assert status.clocks == {"agent_steps": 26_000, "wall_time_ms": 1500}
     suffix = "" if revision else "snapshot\n"
-    assert scheduler.logs(first) == "seed 3 from 0 to 26000 with arm = large\n" + suffix
+    assert (
+        job_text(scheduler.logs(run=first)) == "seed 3 from 0 to 26000 with arm = large\n" + suffix
+    )
 
     second = scheduler.launch(scheduler.continue_from(first, "agent_steps=63000"))
     (status,) = scheduler.wait(second, every=0.05, timeout=30)
     assert (status.outcome, status.clocks["agent_steps"]) == ("succeeded", 63_000)
-    assert scheduler.logs(second) == "seed 3 from 26000 to 63000 with arm = large\n" + suffix
+    assert (
+        job_text(scheduler.logs(run=second))
+        == "seed 3 from 26000 to 63000 with arm = large\n" + suffix
+    )
     copy = scheduler.fetch(second, "checkpoint.pt", tmp_path / "out")
     assert copy.read_text() == "trained to 26000\ntrained to 63000\n"
 
@@ -99,7 +105,7 @@ def test_runs_queue_through_one_machine_and_cancel_stops_the_running_one(tmp_pat
     scheduler.cancel(running)
     done = scheduler.wait(running, queued, every=0.05, timeout=30)
     assert [s.outcome for s in done] == ["cancelled", "succeeded"]
-    assert scheduler.logs(queued) == "next\n"
+    assert job_text(scheduler.logs(run=queued)) == "next\n"
 
 
 def test_a_run_past_its_hours_is_ended_on_the_machine_with_nobody_watching(tmp_path: Path) -> None:
@@ -138,7 +144,7 @@ def test_added_work_has_a_session_but_no_rental_or_session_deadline(tmp_path: Pa
     assert packet["deadline"] is None
     assert scheduler.rentals() == ()
     assert scheduler.wait(first, every=0.05, timeout=10)[0].outcome == "succeeded"
-    assert scheduler.logs(first) == "one\n"
+    assert job_text(scheduler.logs(run=first)) == "one\n"
     with pytest.raises(LauncherError, match="only machines you added"):
         scheduler.rent("local", hours=1)
 

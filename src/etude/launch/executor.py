@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Protocol
 
 from etude.launch.machines import Allocation, Bill, MachineRequest, Machines, OwnedMachine
+from etude.launch.records import BootstrapLinks, LogStream
 from etude.launch.schemas import CheckpointRef, Observation, Packet, Work
 from etude.launch.startup import ProcessStart
 from etude.launch.storage.disk import DirectoryJournal
@@ -56,7 +57,9 @@ class Execution(Protocol):
         """End the session and return when it ended, or None if that is not confirmed."""
         ...
 
-    def logs(self, session_id: str, attempt: str) -> str: ...
+    def logs(
+        self, session_id: str, attempt: str | None = None, *, producer: str = "job"
+    ) -> LogStream: ...
 
     def fetch(self, session_id: str, attempt: str, name: str, destination: Path) -> Path:
         """Copy one output into the destination directory and return its path."""
@@ -68,16 +71,22 @@ class Journal(Protocol):
     def add(self, session_id: str, work: Work) -> None: ...
     def observe(self, session_id: str) -> Observation: ...
     def stop(self, session_id: str, attempt: str) -> None: ...
-    def logs(self, session_id: str, attempt: str) -> str: ...
+    def logs(
+        self, session_id: str, attempt: str | None = None, *, producer: str = "job"
+    ) -> LogStream: ...
     def fetch(self, session_id: str, attempt: str, name: str, destination: Path) -> Path: ...
     def started(self, session_id: str) -> bool: ...
     def ended(self, session_id: str) -> datetime | None: ...
-    def prepare(self, packet: Packet) -> str | None: ...
+    def prepare(
+        self, packet: Packet, *, expires_at: datetime | None = None
+    ) -> BootstrapLinks | None: ...
     def end(self, session_id: str) -> datetime | None: ...
 
 
 class Starter(Protocol):
-    def start(self, machine: Allocation, packet: Packet, bootstrap: str | None) -> str: ...
+    def start(
+        self, machine: Allocation, packet: Packet, bootstrap: BootstrapLinks | None
+    ) -> str: ...
 
 
 class Executor:
@@ -104,7 +113,7 @@ class Executor:
             packet = packet.model_copy(
                 update={"deadline": deadline - timedelta(seconds=min(120, life / 4))}
             )
-        bootstrap = self.journal.prepare(packet)
+        bootstrap = self.journal.prepare(packet, expires_at=deadline)
         machine = self.machines.create(
             MachineRequest(
                 session=packet.session,
@@ -157,8 +166,10 @@ class Executor:
     def stop(self, session_id: str, attempt: str) -> None:
         self.journal.stop(session_id, attempt)
 
-    def logs(self, session_id: str, attempt: str) -> str:
-        return self.journal.logs(session_id, attempt)
+    def logs(
+        self, session_id: str, attempt: str | None = None, *, producer: str = "job"
+    ) -> LogStream:
+        return self.journal.logs(session_id, attempt, producer=producer)
 
     def fetch(self, session_id: str, attempt: str, name: str, destination: Path) -> Path:
         return self.journal.fetch(session_id, attempt, name, destination)
