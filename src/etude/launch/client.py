@@ -166,7 +166,9 @@ def diagnostics(*, run: str | None = None, machine: str | None = None) -> tuple[
     return _client().diagnostics(run=run, machine=machine)
 
 
-def logs(*, run: str | None = None, machine: str | None = None, timeout: float = 30) -> LogSnapshot:
+def logs(
+    *, run: str | None = None, machine: str | None = None, timeout: float | None = None
+) -> LogSnapshot:
     return _client().logs(run=run, machine=machine, timeout=timeout)
 
 

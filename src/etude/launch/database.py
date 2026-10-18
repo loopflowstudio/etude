@@ -8,6 +8,7 @@ file cannot both take one step. Status and spend are computed, never stored.
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
@@ -66,7 +67,7 @@ CREATE TABLE IF NOT EXISTS storages(
 CREATE TABLE IF NOT EXISTS pools(
   name TEXT PRIMARY KEY, on_demand_template TEXT, max_on_demand INTEGER NOT NULL,
   setup_seconds INTEGER NOT NULL, max_rental_seconds INTEGER NOT NULL,
-  off INTEGER NOT NULL DEFAULT 0, storage TEXT, startup_seconds REAL);
+  off INTEGER NOT NULL DEFAULT 0, storage TEXT, startup_seconds REAL, delivery_seconds REAL, log_seconds REAL);
 CREATE TABLE IF NOT EXISTS machines(
   name TEXT PRIMARY KEY, pool TEXT NOT NULL REFERENCES pools(name), kind TEXT NOT NULL,
   provider TEXT, address TEXT, storage TEXT, deleted_at TEXT, image TEXT);
@@ -103,7 +104,7 @@ CREATE INDEX IF NOT EXISTS attempts_session ON attempts(session);
 
 Fact = str | int | None
 # Changes with the schema. There are no migrations: a file from another version is refused.
-_VERSION = 4
+_VERSION = 5
 
 
 def _text(at: datetime | None) -> str | None:
@@ -191,10 +192,13 @@ def _checkpoint_facts(
 
 
 class Database:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, timeout: float = 30) -> None:
+        """Open local state; timeout bounds SQLite lock contention, in seconds."""
+        if not math.isfinite(timeout) or timeout < 0:
+            raise ValueError("database timeout must be nonnegative and finite")
         self._locks: dict[str, tuple[str, Callable[[], datetime]]] = {}
         path.parent.mkdir(parents=True, exist_ok=True)
-        self._db = sqlite3.connect(path, isolation_level=None, timeout=30)
+        self._db = sqlite3.connect(path, isolation_level=None, timeout=timeout)
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode = WAL")
         with self._together():
@@ -412,7 +416,7 @@ class Database:
             None if pool.on_demand_template is None else pool.on_demand_template.model_dump_json()
         )
         self._db.execute(
-            "INSERT OR IGNORE INTO pools VALUES (?,?,?,?,?,?,?,?)",
+            "INSERT OR IGNORE INTO pools VALUES (?,?,?,?,?,?,?,?,?,?)",
             (
                 pool.name,
                 template,
@@ -422,6 +426,8 @@ class Database:
                 int(pool.off),
                 pool.storage,
                 pool.startup_seconds,
+                pool.delivery_seconds,
+                pool.log_seconds,
             ),
         )
         if self.pool(pool.name) != pool:

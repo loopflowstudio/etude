@@ -195,7 +195,7 @@ class Cloud:
     store: Database
 
 
-def cloud(tmp_path: Path) -> Cloud:
+def cloud(tmp_path: Path, *, delivery_seconds: float | None = None) -> Cloud:
     storage = Storage()
     provider = RunPod(storage, tmp_path / "pod")
     store = Database(tmp_path / "launcher.db")
@@ -222,7 +222,13 @@ def cloud(tmp_path: Path) -> Cloud:
     scheduler.add_storage(place)
     scheduler.set_provider(account)
     scheduler.add_pool(
-        Pool(name="l4", on_demand_template=template, max_on_demand=1, setup_seconds=60)
+        Pool(
+            name="l4",
+            on_demand_template=template,
+            max_on_demand=1,
+            setup_seconds=60,
+            delivery_seconds=delivery_seconds,
+        )
     )
     return Cloud(scheduler, storage, provider, store)
 
@@ -249,8 +255,11 @@ def repository(tmp_path: Path) -> Path:
     return repo
 
 
-def test_a_run_from_a_commit_runs_in_a_pod_and_continues_in_another(tmp_path: Path) -> None:
-    c = cloud(tmp_path)
+@pytest.mark.parametrize("delivery_seconds", [None, 60])
+def test_a_run_from_a_commit_runs_in_a_pod_and_continues_in_another(
+    tmp_path: Path, delivery_seconds: float | None
+) -> None:
+    c = cloud(tmp_path, delivery_seconds=delivery_seconds)
     job = Job(
         command="sh train.sh",
         repo=str(repository(tmp_path)),
@@ -276,11 +285,14 @@ def test_a_run_from_a_commit_runs_in_a_pod_and_continues_in_another(tmp_path: Pa
     assert copy.read_text() == "trained to 3\ntrained to 7\n"
     assert c.provider.creates == 2 and c.provider.pods == {}
 
-    # The work is told to stop before the pod is deleted, so its last files can be delivered.
+    # Only an explicit delivery allowance reserves time before rental termination.
     session = c.scheduler.attempts(second)[-1].session
     sent = json.loads(c.storage.objects[f"etude/t/sessions/{session}/packet.json"])
     pod_deadline = datetime.fromisoformat(c.provider.envs[-1]["ETUDE_DEADLINE"])
-    assert 30 <= (pod_deadline - datetime.fromisoformat(sent["deadline"])).total_seconds() <= 120
+    assert (pod_deadline - datetime.fromisoformat(sent["deadline"])).total_seconds() == (
+        delivery_seconds or 0
+    )
+    assert sent["delivery_seconds"] == delivery_seconds
 
     held = c.store.rental(status.machine or "")
     machine = c.store.machine(held.machine)

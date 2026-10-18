@@ -35,7 +35,8 @@ class Work(Record):
 
     setup: str | None = None
     cleanup: str | None = None
-    cleanup_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
+    stop_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    cleanup_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     runtime: Runtime | None = None
     attempt: str
     command: str
@@ -55,6 +56,8 @@ class Work(Record):
 
 
 class Packet(Record):
+    delivery_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    log_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     startup_deadline: datetime | None = None
     session: str  # the session's id, which also names its journal folder
     deadline: datetime | None

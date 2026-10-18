@@ -128,11 +128,13 @@ class Executor:
     def create(self, packet: Packet) -> str:
         deadline = packet.deadline
         # Storage needs time to deliver its final evidence before the machine ends.
-        if not self.machines.owned:
+        if not self.machines.owned and packet.delivery_seconds is not None:
             assert deadline is not None
             life = max(0.0, (deadline - datetime.now(UTC)).total_seconds())
             packet = packet.model_copy(
-                update={"deadline": deadline - timedelta(seconds=min(120, life / 4))}
+                update={
+                    "deadline": deadline - timedelta(seconds=min(packet.delivery_seconds, life))
+                }
             )
         bootstrap = self.journal.prepare(packet, expires_at=deadline)
         check_creation()
@@ -142,6 +144,7 @@ class Executor:
                 startup_deadline=packet.startup_deadline,
                 deadline=deadline,
                 cap_usd=packet.cap_usd,
+                log_seconds=packet.log_seconds,
                 bootstrap=bootstrap,
             )
         )

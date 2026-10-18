@@ -8,7 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from etude.launch.database import Database
-from etude.launch.images import prepare_pytorch, resolve_image
+from etude.launch.images import PreparedRuntime, prepare_pytorch, resolve_image
 from etude.launch.records import Image, LauncherError, MachineTemplate
 from tests.launch.fake import bench
 
@@ -45,10 +45,12 @@ def test_prepare_selects_platform_with_one_metadata_command(
 
     monkeypatch.setattr(subprocess, "run", inspect)
     selected = prepare_pytorch(torch="2.10.0", cuda="12.8")
-    assert selected.requested == "pytorch/pytorch:2.10.0-cuda12.8-cudnn9-runtime"
-    assert selected.resolved == "docker.io/pytorch/pytorch@" + DIGEST
-    assert selected.platform == "linux/amd64" and calls == 1
-    assert Image.model_validate_json(selected.model_dump_json()) == selected
+    assert selected.image.requested == "pytorch/pytorch:2.10.0-cuda12.8-cudnn9-runtime"
+    assert selected.image.resolved == "docker.io/pytorch/pytorch@" + DIGEST
+    assert selected.runtime.packages == {"torch": "2.10.0+cu128"}
+    assert selected.runtime.cuda == "12.8"
+    assert selected.image.platform == "linux/amd64" and calls == 1
+    assert PreparedRuntime.model_validate_json(selected.model_dump_json()) == selected
     with pytest.raises(LauncherError, match="linux/arm64"):
         resolve_image("custom:tag", platform="linux/arm64")
 

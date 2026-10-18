@@ -16,8 +16,8 @@ from typing import IO
 
 from pydantic import JsonValue
 
+from etude.launch.deadline import limit_time
 from etude.launch.environment import startup_timeout
-from etude.launch.log_read import read_deadline
 from etude.launch.logging import (
     CLOSED,
     Console,
@@ -326,6 +326,7 @@ def _run(
     process: subprocess.Popen[bytes] | None = None
     courier: Courier | None = None
     deadline: float | None = None
+    delivery_seconds: float | None = None
     try:
         if until := os.environ.get("ETUDE_DEADLINE"):
             deadline = time.monotonic() + (datetime.fromisoformat(until) - _now()).total_seconds()
@@ -333,7 +334,7 @@ def _run(
         while raw is None:  # startup allowance and the independent rental guardian both apply
             startup_timeout()
             try:
-                with read_deadline(startup_timeout() or 60):
+                with limit_time(startup_timeout()):
                     raw = read(bootstrap_url, send)
             except StorageUnavailable as error:
                 _diagnose("bootstrap read", error)
@@ -343,6 +344,10 @@ def _run(
         write_log("bootstrap read", "received")
         bootstrap = Bootstrap.model_validate_json(raw)
         packet = bootstrap.packet
+        delivery_seconds = packet.delivery_seconds
+        os.environ["ETUDE_LOG_SECONDS"] = (
+            str(packet.log_seconds) if packet.log_seconds is not None else ""
+        )
         home = root / packet.session
         home.mkdir(parents=True, exist_ok=True, mode=0o700)
         with (home / "courier-claim").open("x"):
@@ -351,7 +356,7 @@ def _run(
         for folder in ("stop", "work"):
             (home / folder).mkdir(exist_ok=True)
         write_log("source fetch", "starting")
-        with read_deadline(startup_timeout() or 60):
+        with limit_time(startup_timeout()):
             courier.fetch(bootstrap.fetch)
         write_log("source fetch", "completed")
         write(home / "packet.json", packet.model_dump_json())
@@ -359,7 +364,7 @@ def _run(
         # leave running code with no durable evidence that it might have started.
         startup_timeout()
         write_log("receipt upload", "publishing start intent")
-        with read_deadline(startup_timeout() or 60):
+        with limit_time(startup_timeout()):
             post(courier._form, courier._form.prefix + "receipt", str(os.getpid()).encode(), send)
         startup_timeout()
         write_log("receipt upload", "confirmed")
@@ -392,7 +397,7 @@ def _run(
         try:
             if process is not None:
                 assert courier is not None
-                _finish_session(courier, process, sleep, every, deadline)
+                _finish_session(courier, process, sleep, every, deadline, delivery_seconds)
             write_log("cleanup", "finalizing worker output before cleanup")
             write_log("worker", CLOSED)
         except Exception as error:
@@ -414,31 +419,34 @@ def _finish_session(
     sleep: Callable[[float], None],
     every: float,
     deadline: float | None,
+    seconds: float | None = None,
 ) -> None:
     """Reap the owned child and collect EOF before declaring this producer closed."""
-    # Share the existing forty-pass allowance across shutdown and final delivery.
-    # The provider's absolute deadline can shorten it; the guardian never waits here.
-    latest = time.monotonic() + 40 * every
-    deadline = latest if deadline is None else min(latest, deadline)
+    if seconds is not None:
+        latest = time.monotonic() + seconds
+        deadline = latest if deadline is None else min(latest, deadline)
+
+    def left() -> float | None:
+        return None if deadline is None else max(0.0, deadline - time.monotonic())
+
     if process.poll() is None:
         write_log("worker stop", "requesting session shutdown")
         process.terminate()
         try:
-            # The session gives its job two five-second signal/reap windows.
-            process.wait(timeout=min(10.0, max(0.0, deadline - time.monotonic())))
+            process.wait(timeout=left())
         except subprocess.TimeoutExpired:
             process.kill()
-            process.wait(timeout=max(0.0, deadline - time.monotonic()))
+            process.wait(timeout=left())
     write_log("worker exit", f"exit status {process.returncode}")
     courier._carry_console(final=True)
     ended = courier._home / "ended"
     for _ in range(40):
-        left = deadline - time.monotonic()
-        if left <= 0:
+        allowance = left()
+        if allowance is not None and allowance <= 0:
             break
         try:
             # S3 transports already share this monotonic request allowance.
-            with read_deadline(left):
+            with limit_time(allowance):
                 courier.carry_out(final=True)
                 note = ended.read_text() if ended.exists() else _now().isoformat()
                 post(courier._form, courier._form.prefix + "ended", note.encode(), courier._send)
@@ -446,7 +454,8 @@ def _finish_session(
             return
         except (StorageUnavailable, OSError) as error:
             _diagnose("final delivery", error)
-            sleep(min(every, max(0.0, deadline - time.monotonic())))
+            pause = left()
+            sleep(every if pause is None else min(every, pause))
     write_log("final delivery", "incomplete; final files or end receipt not confirmed")
 
 

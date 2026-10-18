@@ -281,7 +281,7 @@ def logs(
     follow: Annotated[
         bool, typer.Option(help="follow newly retained evidence, without scheduling")
     ] = False,
-    timeout: Annotated[float, typer.Option(min=0.01, help="total time limit in seconds")] = 30,
+    timeout: Annotated[float, typer.Option(min=0, help="total seconds; 0 means no timeout")] = 0,
 ) -> None:
     """Read retained preparation, startup, execution and cleanup evidence."""
     import time
@@ -294,12 +294,12 @@ def logs(
     scheduler = _client()
     runs = [r.id for r in scheduler.cohort_runs(cohort)] if cohort else [run]
     cursors = {identity: LogCursor() for identity in runs}
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + timeout if timeout else None
     while True:
         complete = True
         for identity in runs:
-            left = deadline - time.monotonic()
-            if left <= 0:
+            left = None if deadline is None else deadline - time.monotonic()
+            if left is not None and left <= 0:
                 print("log time limit reached; incomplete")
                 return
             snapshot = scheduler.logs(run=identity, machine=machine, timeout=left)
@@ -312,10 +312,10 @@ def logs(
         sys.stdout.flush()
         if not follow or complete:
             return
-        if time.monotonic() >= deadline:
+        if deadline is not None and time.monotonic() >= deadline:
             print("log time limit reached; incomplete")
             return
-        time.sleep(min(1, max(0, deadline - time.monotonic())))
+        time.sleep(1 if deadline is None else min(1, max(0, deadline - time.monotonic())))
 
 
 @app.command()
@@ -507,7 +507,13 @@ def pool_add(
     disk_gb: Annotated[int | None, typer.Option(help="disk size")] = None,
     startup_seconds: Annotated[
         float, typer.Option(min=0, help="startup allowance; 0 disables it")
-    ] = 600,
+    ] = 0,
+    delivery_seconds: Annotated[
+        float, typer.Option(min=0, help="final delivery allowance; 0 disables it")
+    ] = 0,
+    log_seconds: Annotated[
+        float, typer.Option(min=0, help="log publication allowance; 0 disables it")
+    ] = 0,
     max_usd_per_hour: Annotated[
         str | None, typer.Option(help="make no machine that costs more than this per hour")
     ] = None,
@@ -535,6 +541,8 @@ def pool_add(
             on_demand_template=template,
             max_on_demand=max if template else 0,
             startup_seconds=startup_seconds or None,
+            delivery_seconds=delivery_seconds or None,
+            log_seconds=log_seconds or None,
             storage=storage,
         )
     )
@@ -545,7 +553,7 @@ def pool_add(
 @kind(Kind.ask)
 def pool_startup(
     name: str,
-    seconds: Annotated[float, typer.Option(min=0, help="startup allowance; 0 disables it")] = 600,
+    seconds: Annotated[float, typer.Option(min=0, help="startup allowance; 0 disables it")] = 0,
 ) -> None:
     """Change the startup allowance for future sessions."""
     default().set_pool_startup(name, seconds or None)
@@ -570,16 +578,28 @@ def pool_default(name: str) -> None:
 
 @image_app.command("prepare")
 @kind(Kind.wait)
-def image_prepare(reference: str, platform: str = "linux/amd64", timeout: float = 30) -> None:
+def image_prepare(
+    reference: str,
+    platform: str = "linux/amd64",
+    timeout: Annotated[
+        float, typer.Option(min=0, help="total seconds; 0 disables the timeout")
+    ] = 0,
+) -> None:
     """Wait for registry metadata and print the immutable selection; never rent."""
     from etude.launch.images import resolve_image
 
-    print(resolve_image(reference, platform=platform, timeout=timeout).model_dump_json())
+    print(resolve_image(reference, platform=platform, timeout=timeout or None).model_dump_json())
 
 
 @pool_app.command("image")
 @kind(Kind.wait)
-def pool_image(name: str, image: str, timeout: float = 30) -> None:
+def pool_image(
+    name: str,
+    image: str,
+    timeout: Annotated[
+        float, typer.Option(min=0, help="total seconds; 0 disables the timeout")
+    ] = 0,
+) -> None:
     """Resolve an image within timeout, then select it for future machines."""
     from etude.launch.images import resolve_image
     from etude.launch.records import Image
@@ -587,7 +607,7 @@ def pool_image(name: str, image: str, timeout: float = 30) -> None:
     selected = (
         Image(requested=image, resolved=image)
         if "@sha256:" in image
-        else resolve_image(image, timeout=timeout)
+        else resolve_image(image, timeout=timeout or None)
     )
     default().set_pool_image(name, selected)
     print(selected.model_dump_json())
@@ -643,7 +663,7 @@ def controller_set(
     address: str,
     startup_seconds: Annotated[
         float, typer.Option(min=0, help="install allowance; 0 disables it")
-    ] = 600,
+    ] = 0,
 ) -> None:
     """Name another machine as the controller. Commands then run there over SSH."""
     from etude.launch import controller

@@ -11,7 +11,6 @@ import re
 import subprocess
 import sys
 import threading
-import time
 import traceback
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -19,6 +18,8 @@ from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.request import Request, urlopen
+
+from etude.launch.deadline import call, limit_time, remaining
 
 LIMIT = 1024 * 1024
 OPENING = 4096
@@ -158,22 +159,36 @@ def write_log(operation: str, message: str) -> None:
             pass
 
 
-def publish(path: Path, url: str, timeout: float = 2.0) -> None:
-    """One fixed-object PUT; failure cannot replace the operation being diagnosed."""
-    deadline = time.monotonic() + timeout
-    if not _publication_lock.acquire(timeout=timeout):
+def publish(path: Path, url: str, timeout: float | None = None) -> None:
+    """One best-effort PUT, within the configured log and enclosing rental allowance."""
+    limits = [timeout] if timeout is not None else []
+    if value := os.environ.get("ETUDE_LOG_SECONDS"):
+        limits.append(float(value))
+    if value := os.environ.get("ETUDE_DEADLINE"):
+        limits.append((datetime.fromisoformat(value) - datetime.now(UTC)).total_seconds())
+    seconds = min(limits) if limits else None
+    if seconds is not None and seconds <= 0:
         return
-    try:
-        left = deadline - time.monotonic()
-        if left <= 0:
+
+    def deliver() -> None:
+        left = remaining()
+        acquired = (
+            _publication_lock.acquire() if left is None else _publication_lock.acquire(timeout=left)
+        )
+        if not acquired:
             return
-        body = bounded(path.read_text()).encode()
-        with urlopen(Request(url, data=body, method="PUT"), timeout=left):
-            pass
+        try:
+            body = bounded(path.read_text()).encode()
+            with urlopen(Request(url, data=body, method="PUT"), timeout=remaining()):
+                pass
+        finally:
+            _publication_lock.release()
+
+    try:
+        with limit_time(seconds):
+            call(deliver)
     except (OSError, ValueError):
-        pass
-    finally:
-        _publication_lock.release()
+        pass  # diagnostic delivery cannot replace the error or prevent parent cleanup
 
 
 def start_publication(path: Path, url: str) -> threading.Event:

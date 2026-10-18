@@ -18,7 +18,7 @@ from pathlib import Path
 
 from pydantic import Field
 
-from etude.launch.log_read import remaining
+from etude.launch.deadline import remaining
 from etude.launch.logs import snapshot_stream
 from etude.launch.machines import Allocation
 from etude.launch.measurement import timed
@@ -79,6 +79,9 @@ with zipfile.ZipFile(io.BytesIO(code)) as archive:
     import types
     for name in ("etude", "etude.launch"):
         sys.modules.setdefault(name, types.ModuleType(name))
+    deadline=types.ModuleType("etude.launch.deadline")
+    exec(compile(archive.read("etude/launch/deadline.py"),"deadline.py","exec"),deadline.__dict__)
+    sys.modules[deadline.__name__]=deadline
     logging=types.ModuleType("etude.launch.logging")
     exec(compile(archive.read("etude/launch/logging.py"),"logging.py","exec"),logging.__dict__)
     sys.modules[logging.__name__]=logging
@@ -146,7 +149,7 @@ if request['action']=='start':
     os.environ['ETUDE_LOG_PATH']=str(log)
 else:
     os.environ.pop('ETUDE_LOG_PATH',None)
-    os.environ['ETUDE_STARTUP_DEADLINE']=request['startup_deadline']
+    os.environ['ETUDE_STARTUP_DEADLINE']=request.get('startup_deadline') or ''
 """
     + _INSTALL_CODE
     + """
@@ -232,7 +235,11 @@ class SSH:
                 startup_deadline=(
                     startup_deadline
                     if action == "start"
-                    else datetime.now(UTC) + timedelta(seconds=remaining(60))
+                    else (
+                        datetime.now(UTC) + timedelta(seconds=seconds)
+                        if (seconds := remaining()) is not None
+                        else None
+                    )
                 ),
                 action=action,
                 root=self.root,
@@ -248,23 +255,31 @@ class SSH:
             ).model_dump(mode="json"),
             "program": self._program,
         }
+        allowance = remaining()
+        if action == "start" and startup_deadline is not None:
+            startup_left = (startup_deadline - datetime.now(UTC)).total_seconds()
+            if startup_left <= 0:
+                raise Unreachable("startup deadline reached before SSH request")
+            allowance = startup_left if allowance is None else min(startup_left, allowance)
         try:
             result = subprocess.run(
                 [
                     self.executable,
                     "-o",
                     "BatchMode=yes",
-                    "-o",
-                    "ConnectTimeout=10",
                     self.address,
                     login_shell(shlex.join([self.python, "-c", _BOOT])),
                 ],
                 input=json.dumps(request).encode(),
                 capture_output=True,
-                timeout=remaining(60),
+                timeout=allowance,
             )
-        except (OSError, subprocess.TimeoutExpired):
-            raise Unreachable("SSH did not answer") from None
+        except subprocess.TimeoutExpired:
+            raise Unreachable(
+                f"SSH wait exceeded {allowance} seconds; remote outcome unconfirmed"
+            ) from None
+        except OSError:
+            raise Unreachable("SSH transport failed; remote outcome unconfirmed") from None
         if result.returncode:
             raise Unreachable(
                 "uv is required on the machine"

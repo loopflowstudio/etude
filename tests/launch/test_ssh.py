@@ -17,7 +17,7 @@ from tests.launch.counting import job_text
 
 def test_remote_host_runs_kept_work_logs_outputs_and_stops(tmp_path: Path) -> None:
     executable = tmp_path / "ssh"
-    executable.write_text('#!/bin/sh\nshift 4\nshift\nexec sh -c "$1"\n')
+    executable.write_text('#!/bin/sh\nshift 2\nshift\nexec sh -c "$1"\n')
     executable.chmod(0o755)
     ssh = SSH("bench", str(tmp_path / "remote"), str(executable), sys.executable)
     journal = SSHJournal(ssh)
@@ -48,7 +48,7 @@ def test_remote_host_runs_kept_work_logs_outputs_and_stops(tmp_path: Path) -> No
     executable.write_text("#!/bin/sh\nexit 255\n")
     scheduler.tick()
     assert scheduler._store.session(held).ended_at is None
-    executable.write_text('#!/bin/sh\nshift 4\nshift\nexec sh -c "$1"\n')
+    executable.write_text('#!/bin/sh\nshift 2\nshift\nexec sh -c "$1"\n')
     scheduler.cancel(pending)
     assert scheduler.wait(pending, every=0.1, timeout=20)[0].outcome == "cancelled"
 
@@ -57,7 +57,7 @@ def test_continuation_moves_between_local_and_remote_disk_including_kept_work(
     tmp_path: Path,
 ) -> None:
     executable = tmp_path / "ssh"
-    executable.write_text('#!/bin/sh\nshift 4\nshift\nexec sh -c "$1"\n')
+    executable.write_text('#!/bin/sh\nshift 2\nshift\nexec sh -c "$1"\n')
     executable.chmod(0o755)
     ssh = SSH("bench", str(tmp_path / "remote"), str(executable), sys.executable)
     remote = Executor(OwnedMachine("bench"), SSHStart(ssh), SSHJournal(ssh))

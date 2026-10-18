@@ -32,6 +32,7 @@ class Bill(Record):
 
 
 class MachineRequest(Record):
+    log_seconds: float | None = None
     startup_deadline: datetime | None = None
     session: str
     deadline: datetime | None

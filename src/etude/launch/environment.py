@@ -31,7 +31,7 @@ def startup_timeout() -> float | None:
         if (value := os.environ.get(name))
     ]
     if not limits:
-        return None if "ETUDE_STARTUP_DEADLINE" in os.environ else 600
+        return None
     left = (min(limits) - datetime.now(UTC)).total_seconds()
     if left <= 0:
         raise TimeoutError("startup or rental deadline reached")

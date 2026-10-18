@@ -45,8 +45,6 @@ from etude.launch.runtime import PROBE, find_python, select_runtime
 from etude.launch.schemas import Packet, Progress, Work
 from etude.launch.storage.files import digest, read_result, write
 
-_GRACE_SECONDS = 5.0
-
 
 def _now() -> datetime:
     return datetime.now(UTC)
@@ -152,25 +150,23 @@ def _prepare(session: Path, home: Path, work: Work) -> dict[str, str]:
     return environment
 
 
-def _end(process: subprocess.Popen[bytes], deadline: float) -> None:
-    """Stop the command within its allowance, then give KILL one second to reap."""
-    signals = (signal.SIGTERM, signal.SIGKILL) if time.monotonic() < deadline else (signal.SIGKILL,)
-    for sign in signals:
-        try:
-            os.killpg(process.pid, sign)
-        except ProcessLookupError:
-            return
-        try:
-            allowance = (
-                1.0
-                if sign == signal.SIGKILL
-                else min(_GRACE_SECONDS, max(0, deadline - time.monotonic()))
-            )
-            process.wait(allowance)
-            return
-        except subprocess.TimeoutExpired:
-            continue
-    raise TimeoutError("command exit could not be confirmed after termination")
+def _end(process: subprocess.Popen[bytes], deadline: float | None, seconds: float | None) -> None:
+    """Request termination within the explicit grace and enclosing work deadline."""
+    left = None if deadline is None else max(0.0, deadline - time.monotonic())
+    allowance = seconds if left is None else left if seconds is None else min(left, seconds)
+    try:
+        if allowance is None or allowance > 0:
+            os.killpg(process.pid, signal.SIGTERM)
+            try:
+                process.wait(timeout=allowance)
+                return
+            except subprocess.TimeoutExpired:
+                pass
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    # KILL has ended executable work; collect its OS status before closing output.
+    process.wait()
 
 
 class Exit(Record):
@@ -186,11 +182,14 @@ def _execute(
     output: BinaryIO,
     errors: BinaryIO,
     stop: Path | None,
-    deadline: datetime,
+    deadline: datetime | None,
+    stop_seconds: float | None = None,
 ) -> Exit:
-    latest = time.monotonic() + max(0, (deadline - _now()).total_seconds())
+    latest = (
+        None if deadline is None else time.monotonic() + max(0, (deadline - _now()).total_seconds())
+    )
     cancelled = stop is not None and stop.exists()
-    if cancelled or _now() >= deadline:
+    if cancelled or (deadline is not None and _now() >= deadline):
         return Exit(code=None, stopped="cancelled" if cancelled else "deadline")
     process = subprocess.Popen(
         command,
@@ -206,13 +205,15 @@ def _execute(
         while process.poll() is None:
             if stop is not None and stop.exists():
                 stopped = "cancelled"
-            elif _now() >= deadline or time.monotonic() >= latest:
+            elif deadline is not None and (
+                _now() >= deadline or (latest is not None and time.monotonic() >= latest)
+            ):
                 stopped = "deadline"
             if stopped is not None:
                 break
             time.sleep(0.1)
     finally:
-        _end(process, latest)
+        _end(process, latest, stop_seconds)
     return Exit(code=process.returncode, stopped=stopped)
 
 
@@ -245,6 +246,7 @@ def _runtime(
             errors=errors,
             stop=stop,
             deadline=deadline,
+            stop_seconds=work.stop_seconds,
         )
         errors.seek(0)
         with tempfile.TemporaryDirectory() as directory:
@@ -274,11 +276,15 @@ def _phase(
     environment: dict[str, str],
     log: BinaryIO,
     stop: Path | None,
-    deadline: datetime,
+    deadline: datetime | None,
     labelled: bool,
+    stop_seconds: float | None,
 ) -> Exit:
     if labelled:
-        log.write(f"phase {name}: started\n".encode())
+        effective = deadline.isoformat() if deadline else "none"
+        log.write(
+            f"phase {name}: started; deadline={effective}; stop_seconds={stop_seconds}\n".encode()
+        )
         log.flush()
     try:
         result = _execute(
@@ -287,12 +293,13 @@ def _phase(
             environment={
                 **environment,
                 "ETUDE_PHASE": name,
-                "ETUDE_DEADLINE": deadline.isoformat(),
+                "ETUDE_DEADLINE": deadline.isoformat() if deadline else "",
             },
             output=log,
             errors=log,
             stop=stop,
             deadline=deadline,
+            stop_seconds=stop_seconds,
         )
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         log.write((f"phase {name}: failed: " + explain(error) + "\n").encode())
@@ -325,6 +332,7 @@ def _commands(
                 stop=stop,
                 deadline=limit,
                 labelled=True,
+                stop_seconds=work.stop_seconds,
             )
         if result.code == 0 and result.stopped is None:
             result = _phase(
@@ -336,12 +344,17 @@ def _commands(
                 stop=stop,
                 deadline=limit,
                 labelled=labelled,
+                stop_seconds=work.stop_seconds,
             )
     finally:
         if work.cleanup is not None:
-            deadline = _now() + timedelta(seconds=work.cleanup_seconds)
+            deadline = (
+                None
+                if work.cleanup_seconds is None
+                else _now() + timedelta(seconds=work.cleanup_seconds)
+            )
             if packet.deadline is not None:
-                deadline = min(deadline, packet.deadline)
+                deadline = packet.deadline if deadline is None else min(deadline, packet.deadline)
             cleanup = _phase(
                 "cleanup",
                 work.cleanup,
@@ -351,6 +364,7 @@ def _commands(
                 stop=None,
                 deadline=deadline,
                 labelled=True,
+                stop_seconds=work.stop_seconds,
             )
             # Cleanup failure is visible but must not hide the original failure/cancellation.
             if (

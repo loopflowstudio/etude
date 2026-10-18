@@ -143,7 +143,9 @@ class Pool(Record):
     name: str
     on_demand_template: MachineTemplate | None = None  # None: the pool is only what you own
     max_on_demand: int = 0  # on-demand machines in use at once
-    startup_seconds: float | None = Field(default=600, gt=0, allow_inf_nan=False)
+    startup_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    delivery_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    log_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     setup_seconds: int = 900  # added to a rental's life when its dollar caps allow
     max_rental_seconds: int = 43_000  # under the 12 hour storage-session ceiling
     off: bool = False  # takes no new runs; what it already holds finishes and stays readable
@@ -204,7 +206,8 @@ class Job(Record):
 
     setup: str | None = None
     cleanup: str | None = None
-    cleanup_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
+    stop_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    cleanup_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     runtime: Runtime | None = None
     command: str  # run by sh in the source checkout; reads the ETUDE_* environment
     max_hours: float

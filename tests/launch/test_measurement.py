@@ -110,8 +110,8 @@ def test_ask_wait_counts(tmp_path: Path) -> None:
             b.scheduler.wait(id, timeout=0)
         wait = counting.snapshot()
     assert ask == Counts(database=22)  # target: ask records intent without remote effects
-    # Creation snapshots pool startup policy once; observation no longer reloads machine kind.
-    assert wait == Counts(provider=4, bucket=1, database=71)  # known debt: wait advances work
+    # Creation snapshots startup policy and loads the pool's delivery/publication policy.
+    assert wait == Counts(provider=4, bucket=1, database=72)  # known debt: wait advances work
 
 
 def test_cohort_git_and_database_counts(

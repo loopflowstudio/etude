@@ -32,6 +32,7 @@ from decimal import Decimal
 from pathlib import Path
 from urllib.request import urlopen
 
+from etude.launch.deadline import call, limit_time
 from etude.launch.environment import install, startup_timeout
 from etude.launch.logging import (
     CLOSED,
@@ -83,21 +84,25 @@ def guard(
     monotonic: Callable[[], float] = time.monotonic,
 ) -> None:
     """Wait for the deadline, then delete this pod, for as long as that takes."""
+    latest = monotonic() + max(0.0, (deadline - now()).total_seconds())
     try:
-        paid_until = api.budget_deadline(pod, max_usd)
-        if paid_until is not None:
-            deadline = min(deadline, paid_until)
-    except (ProviderUnavailable, ValueError):
+        left = (deadline - now()).total_seconds()
+        if left > 0:
+            with limit_time(left):
+                paid_until = call(lambda: api.budget_deadline(pod, max_usd))
+            if paid_until is not None:
+                deadline = min(deadline, paid_until)
+    except (ProviderUnavailable, ValueError, TimeoutError):
         pass  # the deadline it was given still stands
     # A clock set backwards must not buy time: stop on whichever measure runs out first.
-    latest = monotonic() + max(0.0, (deadline - now()).total_seconds())
+    latest = min(latest, monotonic() + max(0.0, (deadline - now()).total_seconds()))
     while now() < deadline and monotonic() < latest:
         sleep(min(1.0, max(0.0, latest - monotonic())))
     while True:
         try:
             api.delete_self(pod)
             return
-        except (ProviderUnavailable, ValueError):
+        except (ProviderUnavailable, ValueError, TimeoutError):
             sleep(2.0)
 
 
@@ -109,12 +114,21 @@ UV_URL = (
 UV_SHA256 = "741ff1f5742c5a4a25d2f829e8395355e43f7a5ae2ebc6368e9ae2df0efb69cf"
 
 
+def _download(url: str) -> bytes:
+    def fetch() -> bytes:
+        with urlopen(url, timeout=startup_timeout()) as response:
+            body: bytes = response.read()
+            return body
+
+    with limit_time(startup_timeout()):
+        return call(fetch)
+
+
 def ensure_uv() -> None:
     """Supply uv when a stock image has only Python; verify before extraction."""
     if shutil.which("uv") is not None:
         return
-    with urlopen(UV_URL, timeout=min(60, startup_timeout() or 60)) as response:
-        code = response.read()
+    code = _download(UV_URL)
     if hashlib.sha256(code).hexdigest() != UV_SHA256:
         raise ValueError("uv download checksum does not match")
     with tarfile.open(fileobj=io.BytesIO(code), mode="r:gz") as archive:
@@ -149,7 +163,7 @@ def _start_ssh() -> None:
             ["ssh-keygen", "-A"],
             check=True,
             capture_output=True,
-            timeout=min(30, startup_timeout() or 30),
+            timeout=startup_timeout(),
         )
         subprocess.run(
             [
@@ -163,7 +177,7 @@ def _start_ssh() -> None:
             ],
             check=True,
             capture_output=True,
-            timeout=min(30, startup_timeout() or 30),
+            timeout=startup_timeout(),
         )
     except (OSError, subprocess.SubprocessError) as error:
         # Custom training images may omit OpenSSH. Never dump command output or keys.
@@ -208,9 +222,12 @@ def main(argv: list[str]) -> int:
         publishing = start_publication(log, url)
         with log_to(log):
             try:
-                latest = time.monotonic() + min(30, startup_timeout() or 30)
+                seconds = startup_timeout()
+                latest = None if seconds is None else time.monotonic() + seconds
                 while not marker.exists():
-                    if timer.poll() is not None or time.monotonic() >= latest:
+                    if timer.poll() is not None or (
+                        latest is not None and time.monotonic() >= latest
+                    ):
                         raise RuntimeError("guardian did not start; refusing client installation")
                     time.sleep(0.05)
                 write_log("guardian", "ready; independent deadline active")
@@ -220,10 +237,7 @@ def main(argv: list[str]) -> int:
                 write_log("package download", "ensuring uv")
                 ensure_uv()
                 write_log("package download", "fetching client")
-                with urlopen(
-                    os.environ["ETUDE_PACKAGE_URL"], timeout=min(60, startup_timeout() or 60)
-                ) as response:
-                    code = response.read()
+                code = _download(os.environ["ETUDE_PACKAGE_URL"])
                 if hashlib.sha256(code).hexdigest() != os.environ["ETUDE_PACKAGE_SHA256"]:
                     raise ValueError("client package digest does not match")
                 root = install(code)
@@ -267,7 +281,7 @@ def main(argv: list[str]) -> int:
                 write_log("cleanup", "requesting machine deletion")
                 write_log("bootstrap", CLOSED)
                 publishing.set()
-                # At most two seconds here; the guardian still deletes independently.
+                # Publication inherits the explicit log/rental allowance.
                 publish(log, url)
                 delete_self()
     elif argv[1] == "guard":

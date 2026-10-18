@@ -6,7 +6,7 @@ from typing import Self
 
 import pytest
 
-from etude.launch.log_read import read_deadline, remaining
+from etude.launch.deadline import limit_time, remaining
 from etude.launch.logging import log_to
 from etude.launch.storage.s3 import Bucket, StorageUnavailable, read
 from etude.launch.worker.courier import _run
@@ -76,11 +76,11 @@ def test_retry_backoff_and_nested_reads_share_callers_deadline(
     def sleep(seconds: float) -> None:
         now[0] += seconds
 
-    monkeypatch.setattr("etude.launch.log_read.time.monotonic", lambda: now[0])
+    monkeypatch.setattr("etude.launch.deadline.time.monotonic", lambda: now[0])
     monkeypatch.setattr("etude.launch.storage.s3.time.sleep", sleep)
     transport = Transport([(503, b""), (503, b"")])
-    with read_deadline(0.15):
-        with read_deadline(100):
+    with limit_time(0.15):
+        with limit_time(100):
             assert remaining() == 0.15
             with pytest.raises(StorageUnavailable, match="deadline"):
                 read("https://storage.invalid", transport)
@@ -106,12 +106,14 @@ def test_bootstrap_retries_cannot_renew_startup_allowance(
     def send(
         method: str, url: str, body: bytes | None, headers: dict[str, str]
     ) -> tuple[int, bytes]:
-        requests.append(remaining())
+        left = remaining()
+        assert left is not None
+        requests.append(left)
         now[0] += 0.01
         return 503, b""
 
     monkeypatch.setattr("etude.launch.environment.datetime", Clock)
-    monkeypatch.setattr("etude.launch.log_read.time.monotonic", lambda: now[0])
+    monkeypatch.setattr("etude.launch.deadline.time.monotonic", lambda: now[0])
     monkeypatch.setattr("etude.launch.storage.s3.time.sleep", sleep)
     monkeypatch.setenv("ETUDE_STARTUP_DEADLINE", (start + timedelta(seconds=0.2)).isoformat())
     monkeypatch.delenv("ETUDE_DEADLINE", raising=False)

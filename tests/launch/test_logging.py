@@ -291,6 +291,9 @@ def test_installer_retains_sanitized_stderr_and_original_exception(
     )
     uv.chmod(0o700)
     monkeypatch.setattr("shutil.which", lambda name: str(uv))
+    monkeypatch.setenv(
+        "ETUDE_STARTUP_DEADLINE", (datetime.now(UTC) + timedelta(seconds=600)).isoformat()
+    )
     elapsed = 0.0
     original_write = logging.Console.write
 
@@ -554,6 +557,7 @@ def test_bootstrap_publication_is_one_bounded_request_and_keeps_local_evidence(
     path = tmp_path / "bootstrap.log"
     path.write_text("install failed\n")
     received: list[bytes] = []
+    monkeypatch.setenv("ETUDE_LOG_SECONDS", "2")
     allowances: list[float] = []
 
     def denied(request: Request, *, timeout: float) -> io.BytesIO:
@@ -563,7 +567,7 @@ def test_bootstrap_publication_is_one_bounded_request_and_keeps_local_evidence(
         raise OSError("storage unavailable")
 
     monkeypatch.setattr(logging, "urlopen", denied)
-    logging.publish(path, "https://fixture/write-only")
+    logging.publish(path, "https://fixture/write-only", timeout=2)
     assert received == [b"install failed\n"]
     assert len(allowances) == 1 and 0 < allowances[0] <= 2
     assert path.read_text() == "install failed\n"
@@ -640,6 +644,7 @@ def test_bootstrap_failure_remains_readable_after_deletion_and_restart(
         b.service.kill(session.id)
 
     uploaded: list[bytes] = []
+    monkeypatch.setenv("ETUDE_LOG_SECONDS", "2")
     allowances: list[float] = []
 
     def upload(request: Request, *, timeout: float) -> io.BytesIO:
@@ -762,7 +767,7 @@ def test_expired_log_read_uses_cache_without_starting_another_request(
     identity = b.scheduler.launch(job(), "l4")
     before = b.scheduler.logs(run=identity)
     clock = iter([0.0, 2.0, 2.0, 2.0])
-    monkeypatch.setattr("etude.launch.log_read.time.monotonic", lambda: next(clock))
+    monkeypatch.setattr("etude.launch.deadline.time.monotonic", lambda: next(clock))
     counting = Counting(b.store, b.service)
     with counting.record():
         after = b.scheduler.logs(run=identity, timeout=1)
@@ -842,7 +847,7 @@ def test_courier_owns_child_through_failure_cleanup_and_cached_restart(
     root = tmp_path / "sessions"
     home = root / session.id
     log = home / "worker.log"
-    packet = Packet(session=session.id, deadline=None, work=())
+    packet = Packet(session=session.id, deadline=None, work=(), log_seconds=2)
     bootstrap = Bootstrap.model_validate(
         {
             "packet": packet.model_dump_json(),
@@ -856,6 +861,7 @@ def test_courier_owns_child_through_failure_cleanup_and_cached_restart(
     monkeypatch.delenv("ETUDE_DEADLINE", raising=False)
     uploaded: list[bytes] = []
     receipts: list[str] = []
+    monkeypatch.setenv("ETUDE_LOG_SECONDS", "2")
     allowances: list[float] = []
 
     def upload(request: Request, *, timeout: float) -> io.BytesIO:
