@@ -25,6 +25,7 @@ that clock stood at the checkpoint being resumed.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import signal
@@ -36,8 +37,11 @@ import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import FrameType
+from typing import BinaryIO, Literal
 
-from etude.launch.records import Cause, Outcome, Output
+from etude.launch.logging import Console, explain, log_to, sanitize
+from etude.launch.records import Cause, Outcome, Output, Record
+from etude.launch.runtime import PROBE, find_python, select_runtime
 from etude.launch.schemas import Packet, Progress, Work
 from etude.launch.storage.files import digest, read_result, write
 
@@ -162,6 +166,97 @@ def _end(process: subprocess.Popen[bytes]) -> None:
             continue
 
 
+class Exit(Record):
+    code: int | None
+    stopped: Literal["cancelled", "deadline"] | None = None
+
+
+def _execute(
+    command: list[str],
+    *,
+    home: Path,
+    environment: dict[str, str],
+    output: BinaryIO,
+    errors: BinaryIO,
+    stop: Path,
+    deadline: datetime,
+) -> Exit:
+    if stop.exists() or _now() >= deadline:
+        return Exit(code=None, stopped="cancelled" if stop.exists() else "deadline")
+    process = subprocess.Popen(
+        command,
+        cwd=home / "src",
+        env=environment,
+        stdin=subprocess.DEVNULL,
+        stdout=output,
+        stderr=errors,
+        start_new_session=True,
+    )
+    stopped: Literal["cancelled", "deadline"] | None = None
+    try:
+        while process.poll() is None:
+            if stop.exists():
+                stopped = "cancelled"
+            elif _now() >= deadline:
+                stopped = "deadline"
+            if stopped is not None:
+                break
+            time.sleep(0.1)
+    finally:
+        _end(process)
+    return Exit(code=process.returncode, stopped=stopped)
+
+
+def _runtime(
+    home: Path,
+    work: Work,
+    environment: dict[str, str],
+    log: BinaryIO,
+    stop: Path,
+    deadline: datetime,
+) -> Exit:
+    assert work.runtime is not None
+    runtime = work.runtime
+    executable = find_python(runtime, environment)
+    log.write(sanitize(f"runtime: inspecting {executable}\n").encode())
+    log.flush()
+    with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
+        result = _execute(
+            [
+                executable,
+                "-I",
+                "-c",
+                PROBE,
+                json.dumps(sorted(runtime.packages)),
+                "cuda" if runtime.cuda is not None else "",
+            ],
+            home=home,
+            environment=environment,
+            output=output,
+            errors=errors,
+            stop=stop,
+            deadline=deadline,
+        )
+        errors.seek(0)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "console"
+            with log_to(path):
+                console = Console("runtime")
+                while body := errors.read(65536):
+                    console.write(body)
+                console.write(b"", final=True)
+            if path.exists():
+                log.write(path.read_bytes())
+        if result.stopped or result.code:
+            return result
+        output.seek(0)
+        info = select_runtime(runtime, output.read(), environment)
+    write(home / "runtime.json", info.model_dump_json())
+    log.write(sanitize("runtime: " + info.model_dump_json() + "\n").encode())
+    log.flush()
+    return result
+
+
 def _run(session: Path, packet: Packet, work: Work) -> None:
     home = session / "attempts" / work.attempt
     stop = session / "stop" / work.attempt
@@ -182,46 +277,42 @@ def _run(session: Path, packet: Packet, work: Work) -> None:
     if packet.deadline is not None:
         limit = min(limit, packet.deadline)
     environment["ETUDE_DEADLINE"] = limit.isoformat()
-    # Publish complete bytes and retain exclusive creation: a reader must never
-    # see an empty claim, and a competing session must never replace one.
-    with tempfile.NamedTemporaryFile(mode="w", dir=home) as claim:
-        claim.write(started.isoformat())
-        claim.flush()
-        os.link(claim.name, home / "claim")
+    result = Exit(code=None)
     with (home / "log").open("wb") as log:
-        process = subprocess.Popen(
-            ["sh", "-c", work.command],
-            cwd=home / "src",
-            env=environment,
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-        outcome: Outcome | None = None
         try:
-            while process.poll() is None:
-                if stop.exists():
-                    outcome = "cancelled"
-                elif _now() >= limit:
-                    outcome = (
-                        "lost"
-                        if packet.deadline is not None
-                        and packet.deadline < started + timedelta(seconds=work.limit_seconds)
-                        else work.limit_kind
-                    )
-                if outcome is not None:
-                    break
-                time.sleep(0.1)
-        finally:
-            _end(process)
-    code = process.returncode
-    _finish(
-        home,
-        outcome or ("succeeded" if code == 0 else "failed"),
-        "machine_lost" if outcome == "lost" else None,
-        code=code,
-    )
+            if work.runtime is not None:
+                result = _runtime(home, work, environment, log, stop, limit)
+            if result.stopped is None and (work.runtime is None or result.code == 0):
+                # The claim denotes user code, not the read-only runtime probe.
+                with tempfile.NamedTemporaryFile(mode="w", dir=home) as claim:
+                    claim.write(_now().isoformat())
+                    claim.flush()
+                    os.link(claim.name, home / "claim")
+                result = _execute(
+                    ["sh", "-c", work.command],
+                    home=home,
+                    environment=environment,
+                    output=log,
+                    errors=log,
+                    stop=stop,
+                    deadline=limit,
+                )
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            log.write(("runtime failed: " + explain(error) + "\n").encode())
+            return _finish(home, "failed")
+    outcome: Outcome
+    if result.stopped == "cancelled":
+        outcome = "cancelled"
+    elif result.stopped == "deadline":
+        outcome = (
+            "lost"
+            if packet.deadline is not None
+            and packet.deadline < started + timedelta(seconds=work.limit_seconds)
+            else work.limit_kind
+        )
+    else:
+        outcome = "succeeded" if result.code == 0 else "failed"
+    _finish(home, outcome, "machine_lost" if outcome == "lost" else None, code=result.code)
 
 
 def _terminate(signum: int, frame: FrameType | None) -> None:

@@ -14,7 +14,7 @@ from typing import Any
 
 from pydantic import Field, FiniteFloat, Json, JsonValue
 
-from etude.launch.records import Cause, Limit, Outcome, Output, Record
+from etude.launch.records import Cause, Limit, Outcome, Output, Record, Runtime
 from etude.launch.storage.s3 import Keys, PostForm
 
 
@@ -33,6 +33,7 @@ class CheckpointRef(Record):
 class Work(Record):
     """One attempt as the session sees it."""
 
+    runtime: Runtime | None = None
     attempt: str
     command: str
     limit_seconds: int

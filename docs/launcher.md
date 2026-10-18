@@ -966,3 +966,43 @@ credential reference; Docker login only authenticates preparation.
 The bootstrap overrides vendor entrypoints. Choose an explicit job interpreter to
 reuse the image environment; selecting a PyTorch image alone does not stop a job
 command from installing Torch again. Cold image pulls can still dominate startup.
+
+
+### Reuse a preinstalled job runtime
+
+```python
+from etude.launch.records import Job, Runtime
+
+job = Job(
+    command='"$ETUDE_PYTHON" train.py',
+    max_hours=1,
+    runtime=Runtime(
+        python="python3.12",
+        python_version="3.12",
+        packages={"torch": "2.10.0+cu128"},
+        cuda="12.8",
+    ),
+)
+```
+
+Use the interpreter and exact installed distribution versions from your image.
+Before user code starts, Etude probes that interpreter in isolation, checks the
+requested Python prefix, exact package versions and optional PyTorch CUDA build,
+and records the observed values in the attempt log. The probe shares the attempt's
+deadline and cancellation. A mismatch fails the attempt without starting or
+retrying training. CUDA build validation does not prove host-driver compatibility
+or GPU execution.
+
+`ETUDE_PYTHON` names the verified executable; its directory leads `PATH` and an
+actual virtual environment also sets `VIRTUAL_ENV`. These settings apply only to
+the job. Etude refuses its own client environment and never installs or upgrades
+job dependencies. Missing project dependencies belong in a prepared image or your
+explicit setup command. Vendor entrypoint scripts are not activated implicitly.
+Omitting `runtime` preserves the existing shell environment behavior.
+
+The pinned official PyTorch example has a repeatable CPU check:
+`uv run python scripts/test_pytorch_image.py`. It pulls the image, then checks
+runtime versions, a CPU tensor operation and guardian imports with site packages
+disabled inside network-disabled containers. The Prepared image workflow runs it
+on Linux; no GPU or provider account is needed. This is not a full bootstrap or
+CUDA execution test.

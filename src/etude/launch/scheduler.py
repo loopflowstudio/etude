@@ -1474,6 +1474,7 @@ class Scheduler:
         return Work(
             attempt=attempt.id,
             command=spec.command,
+            runtime=spec.runtime,
             limit_seconds=attempt.limit_seconds,
             limit_kind=attempt.limit_kind,
             seed=run.seed,
