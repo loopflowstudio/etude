@@ -188,7 +188,9 @@ def test_stock_boot_requires_guardian_before_download_and_install(
     monkeypatch.setattr(subprocess, "Popen", start)
     monkeypatch.setattr(pod, "_start_ssh", start_ssh)
     monkeypatch.setattr(pod, "ensure_uv", lambda: None)
-    monkeypatch.setattr(pod, "urlopen", download)
+    monkeypatch.setattr(
+        pod, "send", lambda method, url, body, headers: (200, download(url, timeout=60).read())
+    )
     monkeypatch.setattr(pod, "install", install)
     monkeypatch.setattr(pod.GuardianAPI, "delete_self", delete)
     assert pod.main(["pod", "boot"]) == (1 if failure else 0)
@@ -258,6 +260,6 @@ def test_ssh_without_account_keys_explains_setup_without_touching_disk(
 
 def test_pinned_uv_checksum_is_checked_before_install(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("shutil.which", lambda name: None)
-    monkeypatch.setattr(pod, "urlopen", lambda url, timeout: io.BytesIO(b"changed artifact"))
+    monkeypatch.setattr(pod, "send", lambda method, url, body, headers: (200, b"changed artifact"))
     with pytest.raises(ValueError, match="checksum"):
         pod.ensure_uv()

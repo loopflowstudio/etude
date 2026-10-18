@@ -689,3 +689,21 @@ def controller_run() -> None:
     from etude.launch.controller import loop
 
     loop(default())
+
+
+@app.command()
+@kind(Kind.read)
+def usage(
+    run: str | None = typer.Option(None, help="Run, including its shared session traffic."),
+    machine: str | None = typer.Option(None, help="Machine name."),
+) -> None:
+    """Read retained transfer usage offline; does not refresh remote evidence."""
+    from etude.launch.client import usage as read_usage
+
+    report = read_usage(run=run, machine=machine)
+    print(report.model_dump_json())
+    print(
+        f"received_bytes={report.received_bytes} supplied_bytes={report.supplied_bytes} "
+        f"reused_bytes={report.reused_bytes} retransferred_bytes={report.retransferred_bytes} "
+        f"requests={report.requests}"
+    )

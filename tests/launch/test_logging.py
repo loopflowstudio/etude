@@ -34,7 +34,7 @@ from etude.launch.schemas import AttemptRecord, Bootstrap, Observation, Packet
 from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.disk import DirectoryJournal
 from etude.launch.storage.files import write
-from etude.launch.storage.s3 import Bucket, Keys, PostForm
+from etude.launch.storage.s3 import Bucket, Keys, PostForm, Reply
 from etude.launch.worker import courier as courier_module
 from etude.launch.worker.courier import Courier
 from etude.launch.worker.main import work
@@ -241,9 +241,7 @@ def test_bucket_completion_during_log_read_keeps_cached_output_refreshable(
     storage.objects[f"p/sessions/{attempt.session}/packet.json"] = packet.model_dump_json().encode()
     storage.objects[log_key] = b"early output\n"
 
-    def send(
-        method: str, url: str, body: bytes | None, headers: dict[str, str]
-    ) -> tuple[int, bytes]:
+    def send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Reply:
         reply = storage(method, url, body, headers)
         if method == "GET" and urlsplit(url).path == f"/{log_key}":
             storage.objects[log_key] = b"early output\nfinal output\n"
@@ -392,6 +390,7 @@ def test_worker_leaves_cleanup_to_parent_only_when_explicit(
 
     class Reply(io.BytesIO):
         status = 200
+        headers: dict[str, str] = {}
 
     def read(request: Request, *, timeout: float) -> Reply:
         return Reply(b"{}")  # malformed bootstrap fails before a receipt or user code
@@ -696,7 +695,9 @@ def test_bootstrap_failure_remains_readable_after_deletion_and_restart(
     monkeypatch.setattr(subprocess, "Popen", start)
     monkeypatch.setattr(pod, "_start_ssh", lambda: None)
     monkeypatch.setattr(pod, "ensure_uv", lambda: None)
-    monkeypatch.setattr(pod, "urlopen", download)
+    monkeypatch.setattr(
+        pod, "send", lambda method, url, body, headers: (200, download(url, timeout=60).read())
+    )
     monkeypatch.setattr(pod, "install", install)
     monkeypatch.setattr(pod.GuardianAPI, "delete_self", delete)
     monkeypatch.setattr(logging, "urlopen", upload)

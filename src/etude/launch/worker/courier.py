@@ -30,6 +30,7 @@ from etude.launch.logging import (
 )
 from etude.launch.records import Diagnostic, Output
 from etude.launch.schemas import AttemptRecord, Bootstrap, Inbox, Result, RunAccess
+from etude.launch.storage.download import Cache, Download
 from etude.launch.storage.files import RESULT, read_result, write
 from etude.launch.storage.s3 import (
     PART_BYTES,
@@ -42,6 +43,7 @@ from etude.launch.storage.s3 import (
     post,
     read,
 )
+from etude.launch.storage.transport import attribute, observe
 
 ROOT = Path("/run/etude/sessions")
 _LOG_EVERY_SECONDS = 15.0
@@ -111,19 +113,33 @@ class Courier:
         self._console_position = 0
         self._console = Console("worker output")
 
-    def fetch(self, links: dict[str, str]) -> None:
-        """Download files the work needs to where the session process looks for them."""
-        for path, link in links.items():
-            target = self._home.parent / path
-            if target.exists():
-                continue
-            body = read(link, self._send)
-            if body is None:
-                raise StorageUnavailable(f"{path} is not in storage")
-            target.parent.mkdir(parents=True, exist_ok=True)
-            partial = target.with_name(target.name + ".partial")
-            partial.write_bytes(body)
-            partial.replace(target)
+    def _retain_transfer(self, raw: str) -> None:
+        write_log("transfer", raw)
+        with (self._home / "usage.jsonl").open("a") as stream:
+            stream.write(raw + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+
+    def _carry_usage(self) -> None:
+        path = self._home / "usage.jsonl"
+        if path.exists():
+            post(self._form, self._form.prefix + "usage.jsonl", path.read_bytes(), self._send)
+
+    def fetch(self, links: dict[str, Download]) -> None:
+        """Verify transport bytes before exposing inputs, including existing paths."""
+        timeout: float | None = None
+        if deadline := os.environ.get("ETUDE_DEADLINE"):
+            timeout = (datetime.fromisoformat(deadline) - _now()).total_seconds()
+        with observe(self._retain_transfer), attribute(session=self._home.name):
+            try:
+                with limit_time(timeout):
+                    for path, source in links.items():
+                        purpose = "source" if "/sources/" in path else "checkpoint"
+                        with attribute(purpose=purpose):
+                            Cache().fetch(source, self._home.parent / path, send=self._send)
+            finally:
+                # Recovery evidence is outside the discretionary input allowance.
+                self._carry_usage()
 
     def bring_in(self) -> None:
         """Apply the inbox: mark attempts to stop, and hand over work added since."""
@@ -221,17 +237,23 @@ class Courier:
         self._clear(run, removed)
 
     def carry_out(self, final: bool = False) -> None:
-        """Send what changed. An attempt's files go before the record that it finished."""
-        self._carry_console(final)
-        attempts = self._home / "attempts"
-        for home in sorted(attempts.iterdir()) if attempts.is_dir() else []:
-            if not (home / "run").exists():
-                continue  # not set up yet
-            try:
-                self._carry_attempt(home, final)
-            except (StorageUnavailable, OSError, ValueError) as error:
-                _diagnose("output delivery", error, home.name)
-                raise
+        """Send changed files before their attempt's completion record."""
+        with observe(self._retain_transfer), attribute(session=self._home.name):
+            self._carry_console(final)
+            attempts = self._home / "attempts"
+            for home in sorted(attempts.iterdir()) if attempts.is_dir() else []:
+                if not (home / "run").exists():
+                    continue  # not set up yet
+                try:
+                    with attribute(
+                        run=(home / "run").read_text(), attempt=home.name, purpose="result"
+                    ):
+                        self._carry_attempt(home, final)
+                except (StorageUnavailable, OSError, ValueError) as error:
+                    _diagnose("output delivery", error, home.name)
+                    raise
+
+        self._carry_usage()
 
     def _carry_console(self, final: bool) -> None:
         console = self._home / "session.log"
@@ -274,7 +296,8 @@ class Courier:
                         digest = hashed.hexdigest()
                         key = f"checkpoints/{checkpoint}"
                         if self._checkpoint_sent.get(f"{run}/{key}") != digest:
-                            self._write(run, key, stream)
+                            with attribute(purpose="checkpoint"):
+                                self._write(run, key, stream)
                             self._checkpoint_sent[f"{run}/{key}"] = digest
                         # Tracking may hold this same snapshot in its run
                         # folder. Count it as delivered before scanning there.
@@ -286,7 +309,8 @@ class Courier:
                         outputs=(Output(name=checkpoint, sha256=digest, size_bytes=size),),
                     )
             record = record.model_copy(update={"result": result})
-        self._track(run, done or final)
+        with attribute(purpose="report"):
+            self._track(run, done or final)
         log_due = time.monotonic() - self._log_sent_at.get(attempt, 0.0) > _LOG_EVERY_SECONDS
         if (home / "log").exists() and (done or final or log_due):
             self._put(home / "log", run, f"attempts/{attempt}.log")
@@ -313,7 +337,8 @@ class Courier:
         content = record.model_dump_json()
         if not note.exists() or note.read_text() != content:
             write(note, content)
-        self._put(note, run, f"attempts/{attempt}.json")
+        with attribute(purpose="control"):
+            self._put(note, run, f"attempts/{attempt}.json")
 
 
 def _run(

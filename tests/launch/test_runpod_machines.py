@@ -7,6 +7,8 @@ the real session process it starts.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import subprocess
 import sys
@@ -38,13 +40,13 @@ from etude.launch.records import (
 )
 from etude.launch.records import Storage as Place
 from etude.launch.scheduler import Scheduler
-from etude.launch.schemas import BucketAccess, Packet, RunAccess, Work
+from etude.launch.schemas import Bootstrap, BucketAccess, CheckpointRef, Packet, RunAccess, Work
 from etude.launch.storage.bucket import BucketJournal
-from etude.launch.storage.s3 import Bucket, Keys, StorageUnavailable
+from etude.launch.storage.s3 import Bucket, Keys, Reply, StorageUnavailable
 from etude.launch.worker import courier as courier_module
 from etude.launch.worker.courier import Courier
 from etude.launch.worker.courier import run as run_in_pod
-from tests.launch.counting import job_text
+from tests.launch.counting import Counting, Counts, job_text
 
 TRAIN = """
 echo "seed $ETUDE_SEED from ${ETUDE_FROM_VALUE:-0} to $ETUDE_UNTIL_VALUE"
@@ -53,6 +55,11 @@ echo "trained to $ETUDE_UNTIL_VALUE" >> "$ETUDE_OUTPUT_DIR/checkpoint.pt"
 printf '{"clocks": {"steps": %s}, "checkpoint": "checkpoint.pt"}' "$ETUDE_UNTIL_VALUE" \\
   > "$ETUDE_OUTPUT_DIR/etude-result.json"
 """
+
+
+@pytest.fixture(autouse=True)
+def isolate_download_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "client"))
 
 
 class Storage:
@@ -68,9 +75,7 @@ class Storage:
         self.grants = True
         self.lock = threading.Lock()
 
-    def __call__(
-        self, method: str, url: str, body: bytes | None, headers: dict[str, str]
-    ) -> tuple[int, bytes]:
+    def __call__(self, method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Reply:
         parts = urlsplit(url)
         key = unquote(parts.path.lstrip("/"))
         query = parse_qs(parts.query, keep_blank_values=True)
@@ -78,33 +83,28 @@ class Storage:
             self.asked.append((method, key + ("?" + parts.query if parts.query else "")))
             if parts.netloc.startswith("sts."):
                 if not self.grants:
-                    return 403, b"<ErrorResponse/>"
-                return 200, (
-                    b"<GetFederationTokenResponse><GetFederationTokenResult><Credentials>"
-                    b"<AccessKeyId>ASIATEMPORARY</AccessKeyId><SecretAccessKey>s</SecretAccessKey>"
-                    b"<SessionToken>t</SessionToken></Credentials></GetFederationTokenResult>"
-                    b"</GetFederationTokenResponse>"
+                    return Reply(status=403, body=b"<ErrorResponse/>")
+                return Reply(
+                    status=200,
+                    body=b"<GetFederationTokenResponse><GetFederationTokenResult><Credentials><AccessKeyId>ASIATEMPORARY</AccessKeyId><SecretAccessKey>s</SecretAccessKey><SessionToken>t</SessionToken></Credentials></GetFederationTokenResult></GetFederationTokenResponse>",
                 )
             if method == "POST" and "uploads" in query:
                 upload = f"upload{len(self.uploads)}"
                 self.uploads[upload] = {}
-                return 200, f"<Result><UploadId>{upload}</UploadId></Result>".encode()
+                return Reply(
+                    status=200, body=f"<Result><UploadId>{upload}</UploadId></Result>".encode()
+                )
             if "uploadId" in query:
                 held = self.uploads[query["uploadId"][0]]
                 if method == "PUT":
-                    held[int(query["partNumber"][0])] = body or b""
-                    return 200, b""
-                if method == "GET":
-                    listed = "".join(
-                        f'<Part><PartNumber>{n}</PartNumber><ETag>"tag{n}"</ETag></Part>'
-                        for n in sorted(held)
-                    )
-                    return 200, f"<ListPartsResult>{listed}</ListPartsResult>".encode()
+                    number = int(query["partNumber"][0])
+                    held[number] = body or b""
+                    return Reply(status=200, body=b"", headers={"etag": f'"tag{number}"'})
                 if method == "POST":
                     assert all(f'"tag{n}"' in (body or b"").decode() for n in held)
                     self.objects[key] = b"".join(held[n] for n in sorted(held))
                 del self.uploads[query["uploadId"][0]]
-                return 200, b""
+                return Reply(status=200, body=b"")
             if method == "POST":
                 boundary = headers["Content-Type"].split("boundary=")[1].encode()
                 fields: dict[str, bytes] = {}
@@ -113,15 +113,15 @@ class Storage:
                     name = head.split(b'name="')[1].split(b'"')[0].decode()
                     fields[name] = value.removesuffix(b"\r\n")
                 self.objects[fields["key"].decode()] = fields["file"]
-                return 204, b""
+                return Reply(status=204, body=b"")
             if method == "PUT":
                 if headers.get("if-none-match") == "*" and key in self.objects:
-                    return 412, b""
+                    return Reply(status=412, body=b"")
                 self.objects[key] = body or b""
-                return 200, b""
+                return Reply(status=200, body=b"")
             if method == "DELETE":
                 self.objects.pop(key, None)
-                return 204, b""
+                return Reply(status=204, body=b"")
             if "list-type" in query:
                 found = sorted(k for k in self.objects if k.startswith(query["prefix"][0]))
                 keys = "".join(f"<Contents><Key>{k}</Key></Contents>" for k in found)
@@ -129,8 +129,22 @@ class Storage:
                     '<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
                     f"<IsTruncated>false</IsTruncated>{keys}</ListBucketResult>"
                 )
-                return 200, page.encode()
-            return (200, self.objects[key]) if key in self.objects else (404, b"")
+                return Reply(status=200, body=page.encode())
+            if key in self.objects:
+                value = self.objects[key]
+                if "Range" in headers:
+                    start, end = map(int, headers["Range"].removeprefix("bytes=").split("-"))
+                    return Reply(
+                        status=206,
+                        body=value[start : end + 1],
+                        headers={
+                            "content-range": f"bytes {start}-{end}/{len(value)}",
+                            "content-length": str(end - start + 1),
+                            "etag": hashlib.sha256(value).hexdigest(),
+                        },
+                    )
+                return Reply(status=200, body=value)
+            return Reply(status=404, body=b"")
 
 
 @dataclass
@@ -425,14 +439,73 @@ def test_checkpoint_reaches_storage_before_attempt_ends(tmp_path: Path) -> None:
     assert c.scheduler.wait(run, every=0.05, timeout=10)[0].outcome == "cancelled"
 
 
+def test_shared_inputs_are_prepared_once(tmp_path: Path) -> None:
+    repo = repository(tmp_path)
+    commit = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+    ).stdout.strip()
+    checkpoint = b"shared weights"
+    storage = Storage()
+    counting = Counting(Database(tmp_path / "counting.db"))
+    journal = BucketJournal(
+        Place(name="west", bucket="journal", prefix="test", region="us-west-2"),
+        Bucket(
+            "journal",
+            "us-west-2",
+            Keys(access_key="access", secret_key="secret", session_token="temporary"),
+            counting.transport("bucket", storage),
+        ),
+    )
+    work = Work(
+        attempt="a",
+        command="true",
+        limit_seconds=30,
+        limit_kind="out_of_time",
+        seed=None,
+        until=None,
+        start=None,
+        config=None,
+        repo=str(repo),
+        commit=commit,
+        checkpoint=CheckpointRef(
+            run="parent",
+            session="previous",
+            attempt="parent-attempt",
+            name="weights.pt",
+            sha256=hashlib.sha256(checkpoint).hexdigest(),
+            size_bytes=len(checkpoint),
+            content=base64.b64encode(checkpoint).decode(),
+        ),
+        run="one",
+    )
+    packet = Packet(
+        session="shared",
+        deadline=None,
+        work=(work, work.model_copy(update={"attempt": "b", "run": "two"})),
+    )
+    with counting.record():
+        journal.prepare(packet)
+    # Packet, one source listing/upload, one checkpoint upload, inbox, bootstrap.
+    assert counting.snapshot() == Counts(bucket=6, git=1)
+    bootstrap = Bootstrap.model_validate_json(
+        storage.objects["test/sessions/shared/bootstrap.json"]
+    )
+    assert len(bootstrap.fetch) == 2
+    source = bootstrap.fetch[f"shared/sources/{commit}.tar"]
+    archive = storage.objects[f"test/sessions/shared/sources/{commit}.tar"]
+    assert (source.sha256, source.size_bytes) == (hashlib.sha256(archive).hexdigest(), len(archive))
+    held = bootstrap.fetch["previous/attempts/parent-attempt/outputs/weights.pt"]
+    assert storage.objects[f"test/sessions/shared/inputs/{held.sha256}"] == checkpoint
+
+
 def test_lost_start_receipt_reply_cannot_leave_unreported_running_code(tmp_path: Path) -> None:
     class LostReceipt(Storage):
         def __call__(
             self, method: str, url: str, body: bytes | None, headers: dict[str, str]
-        ) -> tuple[int, bytes]:
+        ) -> Reply:
             response = super().__call__(method, url, body, headers)
             if method == "POST" and "test/sessions/r/out/receipt" in self.objects:
-                return 503, b""  # the write happened; its acknowledgement was lost
+                return Reply(status=503, body=b"")
             return response
 
     storage = LostReceipt()

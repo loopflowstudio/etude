@@ -106,6 +106,8 @@ client dependency installation. The client and each job use separate environment
 use its sanitizer before retention; subprocess diagnostics omit argv and traceback
 locals. Journal log reads return `LogStream`, preserving missing versus silent
 output, and share the caller's monotonic deadline through `deadline.py`.
+HTTP body reads may run in a deadline-bounded thread; emit transfer observations
+on the invoking thread so database retention keeps its connection ownership.
 Captured console bytes pass through `Console` across reads before retention.
 Only the owning producer closes a stream, after its captured children exit and
 final console collection succeeds. Courier shutdown and final delivery share one

@@ -8,14 +8,13 @@ from __future__ import annotations
 
 import subprocess
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Any, Literal
 from unittest.mock import patch
 
 from etude.launch.database import Database
 from etude.launch.records import LogSnapshot, Record
-from etude.launch.storage.s3 import Send
 from tests.launch.fake import FakeService
 
 
@@ -48,12 +47,14 @@ class Counting:
             database=self.calls["database"],
         )
 
-    def transport(self, boundary: Literal["provider", "bucket"], send: Send) -> Send:
+    def transport[T](
+        self,
+        boundary: Literal["provider", "bucket"],
+        send: Callable[[str, str, bytes | None, dict[str, str]], T],
+    ) -> Callable[[str, str, bytes | None, dict[str, str]], T]:
         """Count a physical provider or bucket request while using a supplied reply."""
 
-        def invoke(
-            method: str, url: str, body: bytes | None, headers: dict[str, str]
-        ) -> tuple[int, bytes]:
+        def invoke(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> T:
             self.calls[boundary] += 1
             return send(method, url, body, headers)
 
