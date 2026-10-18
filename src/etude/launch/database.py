@@ -22,6 +22,7 @@ from etude.launch.records import (
     Checkpoint,
     Cohort,
     Diagnostic,
+    Image,
     Job,
     Launch,
     LauncherError,
@@ -68,7 +69,7 @@ CREATE TABLE IF NOT EXISTS pools(
   off INTEGER NOT NULL DEFAULT 0, storage TEXT, startup_seconds REAL);
 CREATE TABLE IF NOT EXISTS machines(
   name TEXT PRIMARY KEY, pool TEXT NOT NULL REFERENCES pools(name), kind TEXT NOT NULL,
-  provider TEXT, address TEXT, storage TEXT, deleted_at TEXT);
+  provider TEXT, address TEXT, storage TEXT, deleted_at TEXT, image TEXT);
 CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, identity TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS runs(
   seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
@@ -102,7 +103,7 @@ CREATE INDEX IF NOT EXISTS attempts_session ON attempts(session);
 
 Fact = str | int | None
 # Changes with the schema. There are no migrations: a file from another version is refused.
-_VERSION = 3
+_VERSION = 4
 
 
 def _text(at: datetime | None) -> str | None:
@@ -142,12 +143,18 @@ def _pool(row: sqlite3.Row) -> Pool:
 
 # A rented machine has one working session for its whole life. What the provider
 # said about making and deleting the machine is recorded on that session.
-_MACHINES = """SELECT m.name, m.pool, m.kind, m.provider, m.address, m.storage,
+_MACHINES = """SELECT m.name, m.pool, m.kind, m.provider, m.address, m.storage, m.image,
     w.claimed_at AS requested_at, w.receipt AS provider_id, w.refused_at,
     COALESCE(w.ended_at, m.deleted_at) AS deleted_at
     FROM machines m LEFT JOIN sessions w ON w.machine=m.name AND m.kind='rented'"""
 _SESSIONS = "SELECT w.* FROM sessions w"
 _RENTALS = "SELECT r.* FROM rentals r"
+
+
+def _machine(row: sqlite3.Row) -> Machine:
+    return Machine.model_validate(
+        {**dict(row), "image": Image.model_validate_json(row["image"]) if row["image"] else None}
+    )
 
 
 def _attempt(row: sqlite3.Row) -> RunAttempt:
@@ -468,7 +475,7 @@ class Database:
         self.pool(name)
         self._db.execute("UPDATE settings SET value=? WHERE name='default_pool'", (name,))
 
-    def set_pool_image(self, name: str, image: str) -> None:
+    def set_pool_image(self, name: str, image: Image) -> None:
         """Change the image a pool's next on-demand machines boot."""
         template = self.pool(name).on_demand_template
         if template is None:
@@ -484,8 +491,8 @@ class Database:
         """Record a machine you own in its pool. Adding the same one again changes nothing."""
         self.pool(machine.pool)  # raises if no such pool
         self._db.execute(
-            "INSERT OR IGNORE INTO machines(name, pool, kind, provider, address, storage)"
-            " VALUES (?,?,?,?,?,?)",
+            "INSERT OR IGNORE INTO machines(name, pool, kind, provider, address, storage, image)"
+            " VALUES (?,?,?,?,?,?,?)",
             (
                 machine.name,
                 machine.pool,
@@ -493,6 +500,7 @@ class Database:
                 machine.provider,
                 machine.address,
                 machine.storage,
+                machine.image.model_dump_json() if machine.image else None,
             ),
         )
         if self.machine(machine.name) != machine:
@@ -502,7 +510,7 @@ class Database:
         row = self._db.execute(f"{_MACHINES} WHERE m.name = ?", (name,)).fetchone()
         if row is None:
             raise LauncherError(f"no machine named {name!r}")
-        return Machine.model_validate(dict(row))
+        return _machine(row)
 
     def machines(self, pool: str, *, rented: bool = False) -> tuple[Machine, ...]:
         """A pool's machines: the ones you added, or every one ever rented for it."""
@@ -510,7 +518,7 @@ class Database:
             f"{_MACHINES} WHERE m.pool = ? AND (m.kind = 'rented') = ? ORDER BY m.rowid",
             (pool, int(rented)),
         )
-        return tuple(Machine.model_validate(dict(row)) for row in rows)
+        return tuple(_machine(row) for row in rows)
 
     # Jobs, runs and cohorts
 

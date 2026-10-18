@@ -923,4 +923,46 @@ Explicit controller installation also accepts `startup_seconds` in Python and
 remains bounded (600 seconds when startup is unlimited); a timed-out wait is not
 proof the remote installation stopped. A log read retains its own shorter deadline.
 
-The prototype database schema is version 3; older database files are refused.
+The prototype database schema is version 4; older database files are refused.
+
+
+### Prepare a framework image before renting
+
+```python
+from etude.launch.images import prepare_pytorch, resolve_image
+from etude.launch.records import MachineTemplate
+
+image = prepare_pytorch(torch="2.10.0", cuda="12.8")
+template = MachineTemplate(provider="runpod", gpu="NVIDIA L4", image=image)
+# Custom public or private image; uses Docker's configured registry credentials.
+custom = resolve_image("registry.example/team/training:release", timeout=30)
+```
+
+```sh
+etude image prepare pytorch/pytorch:2.10.0-cuda12.8-cudnn9-runtime
+etude pool image gpu pytorch/pytorch:2.10.0-cuda12.8-cudnn9-runtime
+etude machines --all --images
+```
+
+Preparation waits for registry metadata within a finite timeout. It needs Docker
+CLI with Buildx and uses `docker login` credentials; no Docker daemon, layer pull,
+image build or machine rental is performed. The default platform is `linux/amd64`.
+The output records the requested reference, immutable platform manifest and
+verified OS/architecture. Unsupported or ambiguous platforms fail before rental.
+
+`prepare_pytorch(kind="devel", ...)` selects the official development variant for
+jobs that compile CUDA extensions; the default runtime variant omits that toolkit.
+Version combinations must exist in the upstream registry. Resolution establishes
+artifact identity and platform, not framework ABI compatibility or a speedup.
+
+Each acquired machine retains its selection across pool edits and controller
+restarts; `machines --images` reads those facts without registry access. Bootstrap
+logs include the same selection. `pool add --image` and existing digest strings
+remain available when resolution has already happened; their platform is unchecked.
+Typed Python callers can construct `Image(requested=..., resolved=...)` for these
+pre-pinned artifacts. Private provider pulls still require the provider's registry
+credential reference; Docker login only authenticates preparation.
+
+The bootstrap overrides vendor entrypoints. Choose an explicit job interpreter to
+reuse the image environment; selecting a PyTorch image alone does not stop a job
+command from installing Torch again. Cold image pulls can still dominate startup.

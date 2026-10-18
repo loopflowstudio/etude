@@ -214,6 +214,7 @@ def main(argv: list[str]) -> int:
                         raise RuntimeError("guardian did not start; refusing client installation")
                     time.sleep(0.05)
                 write_log("guardian", "ready; independent deadline active")
+                write_log("image", os.environ.get("ETUDE_IMAGE", "image metadata unavailable"))
                 startup_timeout()
                 _start_ssh()
                 write_log("package download", "ensuring uv")
