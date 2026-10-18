@@ -1195,7 +1195,10 @@ mismatch fail explicitly. Files larger than the allowance, or acquired while
 other digests occupy it, stream through destination-side staging. Oversized and destination-staged downloads do not retain a reusable cache copy.
 Only verified bytes replace the destination. Downloads add no timeout by default;
 they share an existing caller deadline, and worker inputs remain bounded by the
-rental deadline. Two transport retries share that allowance. Python callers can
+rental deadline. Local digest verification and copying check that allowance
+between chunks and before atomic publication; expiry preserves an existing
+destination. Two transport retries, including HTTP 429/500/502/503/504, share
+one budget across all ranges and the caller's deadline. Python callers can
 set an allowance with `Cache.fetch(Download(...), destination, timeout=..., retries=...)`
 from `etude.launch.storage.download`.
 

@@ -2,7 +2,9 @@
 
 The SHA256 and length identify transport bytes. Completed ranges carry their
 own digests and a stable ETag, so interruption can reuse only validated ranges.
-Only a verified file is published atomically to the caller's destination.
+Only a verified file is published atomically to the caller's destination. Local
+hashing and copying cooperate with the caller's deadline on the invoking thread;
+no abandoned background writer may publish after expiry.
 """
 
 from __future__ import annotations
@@ -10,7 +12,6 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import os
-import shutil
 import tempfile
 import time
 from collections.abc import Iterator
@@ -22,7 +23,7 @@ from pydantic import Field
 
 from etude.launch.deadline import limit_time, remaining
 from etude.launch.records import Record
-from etude.launch.storage.s3 import Send, StorageUnavailable, _send
+from etude.launch.storage.s3 import TRANSIENT_STATUSES, Denied, Send, StorageUnavailable, _send
 from etude.launch.storage.transport import attribute, emit
 
 
@@ -43,16 +44,26 @@ class _Partial(Record):
 
 
 def _digest(path: Path) -> str:
+    digest = hashlib.sha256()
     with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
+        while True:
+            remaining()
+            chunk = stream.read(65536)
+            if not chunk:
+                break
+            digest.update(chunk)
+    remaining()
+    return digest.hexdigest()
 
 
 def _verify(path: Path, source: Download) -> bool:
-    return (
+    valid = (
         path.is_file()
         and path.stat().st_size == source.size_bytes
         and _digest(path) == source.sha256
     )
+    remaining()
+    return valid
 
 
 def _discard(path: Path) -> None:
@@ -80,9 +91,15 @@ def _publish(source: Path, destination: Path) -> Path:
         name = Path(temporary.name)
         try:
             with source.open("rb") as stream:
-                shutil.copyfileobj(stream, temporary)
+                while True:
+                    remaining()
+                    chunk = stream.read(65536)
+                    if not chunk:
+                        break
+                    temporary.write(chunk)
             temporary.flush()
             os.fsync(temporary.fileno())
+            remaining()
             name.replace(destination)
         finally:
             name.unlink(missing_ok=True)
@@ -156,6 +173,7 @@ class Cache:
                     return _publish(target, destination)
                 # Staging is already beside the destination, on the same filesystem.
                 partial.chmod(0o600)
+                remaining()
                 partial.replace(destination)
                 _discard(partial)
                 return destination
@@ -196,10 +214,12 @@ class Cache:
         offset = 0
         with path.open("r+b" if path.exists() else "w+b") as output:
             for part in state.ranges:
+                remaining()
                 data = output.read(part.size_bytes)
                 if len(data) != part.size_bytes or hashlib.sha256(data).hexdigest() != part.sha256:
                     raise StorageUnavailable("retained download range is corrupt")
                 offset += part.size_bytes
+            remaining()
             if offset:
                 emit(
                     "REUSE",
@@ -216,15 +236,23 @@ class Cache:
                 headers = {"Range": f"bytes={offset}-{end}"}
                 if state.etag is not None:
                     headers["If-Match"] = state.etag
+                failure = "transport interrupted"
                 try:
                     reply = send("GET", source.url, None, headers)
+                    remaining()
+                    if reply.status in TRANSIENT_STATUSES:
+                        failure = f"HTTP {reply.status}"
+                        raise OSError(failure)
                 except OSError:
+                    remaining()
                     if retries == 0:
                         raise StorageUnavailable(
-                            "download interrupted; completed ranges retained"
+                            f"download failed ({failure}); completed ranges retained"
                         ) from None
                     retries -= 1
                     continue
+                if reply.status == 403:
+                    raise Denied("download refused (status 403)")
                 etag = reply.headers.get("etag")
                 if (
                     reply.status != 206

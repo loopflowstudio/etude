@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import io
+import os
 import subprocess
 import tarfile
 import threading
@@ -28,6 +29,7 @@ from etude.launch.providers.runpod import pod
 from etude.launch.records import Job, Output, Storage
 from etude.launch.scheduler import Scheduler
 from etude.launch.schemas import Delivery, Inbox, Progress, Result, RunAccess
+from etude.launch.storage import download
 from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.download import Cache, Download
 from etude.launch.storage.files import RESULT
@@ -78,6 +80,10 @@ class HTTP:
                         body = b""
                     elif owner.fault == "timeout":
                         time.sleep(0.1)
+                    elif owner.fault == "transient":
+                        status = 503
+                        body = b"busy"
+                        owner.fault = ""
                 self.send_response(status)
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("ETag", owner.etag)
@@ -282,6 +288,107 @@ def test_outer_deadline_cannot_be_extended(http: HTTP, tmp_path: Path) -> None:
     with limit_time(0.02), pytest.raises((StorageUnavailable, TimeoutError)):
         Cache(tmp_path / "cache").fetch(http.source(), tmp_path / "result", timeout=30)
     assert not (tmp_path / "result").exists()
+
+
+@pytest.mark.parametrize("warm", [False, True])
+@pytest.mark.parametrize("phase", ["digest", "copy"])
+def test_local_expiry_preserves_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, warm: bool, phase: str
+) -> None:
+    payload = b"verified payload"
+    source = Download(
+        url="https://fixture/payload",
+        sha256=hashlib.sha256(payload).hexdigest(),
+        size_bytes=len(payload),
+    )
+    cache = Cache(tmp_path / "cache")
+
+    def send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Reply:
+        return Reply(
+            status=206,
+            body=payload,
+            headers={
+                "content-range": f"bytes 0-{len(payload) - 1}/{len(payload)}",
+                "content-length": str(len(payload)),
+                "etag": '"one"',
+            },
+        )
+
+    if warm:
+        cache.fetch(source, tmp_path / "first", send=send)
+    target = tmp_path / "result"
+    target.write_bytes(b"previous result")
+    clock = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    if phase == "digest":
+        digest = download._digest
+
+        def expire_digest(path: Path) -> str:
+            result = digest(path)
+            clock[0] = 2.0
+            return result
+
+        monkeypatch.setattr(download, "_digest", expire_digest)
+    else:
+        fsync = os.fsync
+
+        def expire_copy(fd: int) -> None:
+            fsync(fd)
+            # Only the destination-side temporary file expires, after a real copy.
+            inode = os.fstat(fd).st_ino
+            if any(p.is_file() and p.stat().st_ino == inode for p in tmp_path.iterdir()):
+                clock[0] = 2.0
+
+        monkeypatch.setattr(os, "fsync", expire_copy)
+    with pytest.raises(TimeoutError):
+        cache.fetch(source, target, timeout=1, send=send)
+    assert target.read_bytes() == b"previous result"
+    assert {p.name for p in tmp_path.iterdir()} == (
+        {"cache", "result", "first"} if warm else {"cache", "result"}
+    )
+
+
+def test_transient_range_http_retains_both_attempts(http: HTTP, tmp_path: Path) -> None:
+    http.fault = "transient"
+    events: list[Transfer] = []
+    with observe(lambda raw: events.append(Transfer.model_validate_json(raw))):
+        result = Cache(tmp_path / "cache").fetch(http.source(), tmp_path / "result")
+    assert result.read_bytes() == b"abcdefghijkl"
+    assert (http.requests, http.received) == (2, 16)
+    assert [(e.status, e.received_bytes, e.request_id) for e in events] == [
+        (503, 4, "request-1"),
+        (206, 12, "request-2"),
+    ]
+
+
+@pytest.mark.parametrize("status", [429, 500, 502, 503, 504])
+def test_transient_range_retries_share_one_budget(tmp_path: Path, status: int) -> None:
+    payload = b"abcdefghijkl"
+    source = Download(
+        url="https://fixture/payload", sha256=hashlib.sha256(payload).hexdigest(), size_bytes=12
+    )
+    ranges: list[str] = []
+
+    def send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Reply:
+        ranges.append(headers["Range"])
+        if len(ranges) % 2:
+            return Reply(status=status, body=b"busy")
+        start, end = map(int, headers["Range"].removeprefix("bytes=").split("-"))
+        return Reply(
+            status=206,
+            body=payload[start : end + 1],
+            headers={
+                "content-range": f"bytes {start}-{end}/12",
+                "content-length": str(end - start + 1),
+                "etag": '"one"',
+            },
+        )
+
+    target = tmp_path / "result"
+    with pytest.raises(StorageUnavailable):
+        Cache(tmp_path / "cache", range_bytes=4).fetch(source, target, send=send, retries=2)
+    assert ranges == ["bytes=0-3", "bytes=0-3", "bytes=4-7", "bytes=4-7", "bytes=8-11"]
+    assert not target.exists()
 
 
 def test_cost_scenario_and_safe_access_reconciliation(http: HTTP, tmp_path: Path) -> None:

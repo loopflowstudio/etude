@@ -41,6 +41,9 @@ GRANT_LIMIT = 36 * 3600
 PART_BYTES = 64 * 1024**2
 
 
+TRANSIENT_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+
 class StorageUnavailable(Exception):
     """No usable answer from storage. This never means an object is absent."""
 
@@ -90,7 +93,10 @@ def _send(method: str, url: str, body: bytes | None, headers: dict[str, str]) ->
     def accept(status: int, fields: Mapping[str, str]) -> None:
         metadata.update(fields)
         requested = headers.get("Range", headers.get("range"))
-        if requested is not None:
+        if requested is not None and status == 403:
+            raise Denied("download refused (status 403)")
+        # Transient error bodies are observed before the caller decides to retry.
+        if requested is not None and status not in TRANSIENT_STATUSES:
             start, end = map(int, requested.removeprefix("bytes=").split("-"))
             if status != 206 or fields.get("content-length") != str(end - start + 1):
                 raise StorageUnavailable(f"range request refused or wrong length (status {status})")
@@ -112,7 +118,7 @@ def _get(url: str, headers: dict[str, str], send: Send) -> Reply:
                 raise
             reason = type(error).__name__
         else:
-            if reply.status not in (429, 500, 502, 503, 504) or attempt == 3:
+            if reply.status not in TRANSIENT_STATUSES or attempt == 3:
                 return reply
             reason = f"HTTP {reply.status}"
         # Neither signed URLs, object keys nor transport exception text belong here.
