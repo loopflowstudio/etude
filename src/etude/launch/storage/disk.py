@@ -17,7 +17,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from etude.launch.records import LauncherError, Output
+from etude.launch.logs import snapshot_stream
+from etude.launch.records import BootstrapLinks, LauncherError, LogStream, Output
 from etude.launch.schemas import (
     CheckpointRef,
     Observation,
@@ -40,7 +41,9 @@ class DirectoryJournal:
             path = self.fetch(ref.session, ref.attempt, ref.name, Path(directory))
             return ref.model_copy(update={"content": base64.b64encode(path.read_bytes()).decode()})
 
-    def prepare(self, packet: Packet) -> str | None:
+    def prepare(
+        self, packet: Packet, *, expires_at: datetime | None = None
+    ) -> BootstrapLinks | None:
         return None
 
     def started(self, session_id: str) -> bool:
@@ -109,9 +112,23 @@ class DirectoryJournal:
             write(ended, datetime.now(UTC).isoformat())  # the process is dead without a note
         return datetime.fromisoformat(ended.read_text())
 
-    def logs(self, session_id: str, attempt: str) -> str:
-        log = self._root / session_id / "attempts" / attempt / "log"
-        return log.read_text(errors="replace") if log.exists() else ""
+    def logs(
+        self, session_id: str, attempt: str | None = None, *, producer: str = "job"
+    ) -> LogStream:
+        home = self._root / session_id
+        log = (
+            home / "attempts" / attempt / "log"
+            if attempt
+            else home / ("session.log" if producer == "worker" else "bootstrap.log")
+        )
+        # A completion marker only covers output read after that marker.
+        closed = (
+            (home / "attempts" / attempt / "finished.json").exists()
+            if attempt
+            else (home / "ended").exists()
+        )
+        raw = log.read_bytes() if log.exists() else None
+        return snapshot_stream(session_id, attempt, producer, raw, closed)
 
     def fetch(self, session_id: str, attempt: str, name: str, destination: Path) -> Path:
         home = self._root / session_id / "attempts" / attempt

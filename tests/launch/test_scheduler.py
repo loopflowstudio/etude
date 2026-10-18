@@ -13,6 +13,7 @@ from etude.launch.database import Database
 from etude.launch.records import Job, LauncherError, MachineTemplate, Output, Pool, Run, Stale
 from etude.launch.schemas import Observation
 from etude.launch.storage.s3 import StorageUnavailable
+from tests.launch.counting import job_text
 from tests.launch.fake import L4, bench, checkpoint_bytes
 
 USD_PER_RUN = Decimal("0.59") * 600 / 3600  # every fake run takes 600 seconds
@@ -41,7 +42,7 @@ def test_one_run_finishes_and_its_session_is_confirmed_ended(tmp_path: Path) -> 
     assert status.rental_ended is True and status.attempts == 1
     assert abs(status.usd - USD_PER_RUN) < Decimal("0.001")
     assert str(status) == "done: succeeded, steps 26000, ~$0.10"
-    assert b.scheduler.logs(one).startswith("log of ")
+    assert job_text(b.scheduler.logs(run=one)).startswith("log of ")
 
 
 def test_a_lost_create_reply_is_looked_up_and_never_asked_twice(tmp_path: Path) -> None:

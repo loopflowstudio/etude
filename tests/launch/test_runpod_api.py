@@ -15,7 +15,7 @@ from etude.launch.database import Database
 from etude.launch.machines import MachineRequest
 from etude.launch.providers.runpod.api import PodFact, ProviderUnavailable, RunPodAPI
 from etude.launch.providers.runpod.machines import _BOOT, STOCK_IMAGE, RunPodMachines
-from etude.launch.records import MachineTemplate
+from etude.launch.records import BootstrapLinks, MachineTemplate
 from etude.launch.records import Provider as Account
 from etude.launch.storage.s3 import Bucket, Keys
 from tests.launch.counting import Counting, Counts
@@ -208,7 +208,11 @@ def test_stock_create_counts_package_reuse_without_waiting_for_ssh(tmp_path: Pat
         session="7f3a",
         deadline=datetime.now(UTC) + timedelta(minutes=5),
         cap_usd=Decimal(1),
-        bootstrap="https://fixture/bootstrap",
+        bootstrap=BootstrapLinks(
+            url="https://fixture/bootstrap",
+            log_url="https://fixture/bootstrap.log",
+            worker_log_url="https://fixture/worker.log",
+        ),
     )
     with counting.record():
         machines.create(request)

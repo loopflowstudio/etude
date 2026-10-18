@@ -22,6 +22,7 @@ from etude.launch.providers.runpod import pod
 from etude.launch.records import Job
 from etude.launch.schemas import Packet, Result
 from etude.launch.storage.files import read_result
+from tests.launch.counting import job_text
 
 
 def test_guardian_runs_without_site_packages() -> None:
@@ -86,7 +87,7 @@ def test_job_uses_its_own_python_path(tmp_path: Path, monkeypatch: pytest.Monkey
     scheduler = _open(tmp_path / "launcher")
     id = scheduler.launch(Job(command="python", max_hours=0.01))
     assert scheduler.wait(id, every=0.05, timeout=10)[0].outcome == "succeeded"
-    assert scheduler.logs(id) == "job-python\n"
+    assert job_text(scheduler.logs(run=id)) == "job-python\n"
 
 
 def test_runpod_guardian_payload_is_small_and_independent(tmp_path: Path) -> None:
@@ -161,7 +162,11 @@ def test_stock_boot_requires_guardian_before_download_and_install(
         assert marker.exists()
         events.append("ssh")
 
-    def session(command: list[str], **kwargs: Any) -> int:
+    popen = subprocess.Popen
+
+    def start(command: list[str], **kwargs: Any) -> Timer | subprocess.Popen[bytes]:
+        if command[-1] == "guard":
+            return Timer()
         assert command == [
             str(tmp_path / ".venv/bin/python"),
             "-m",
@@ -169,27 +174,24 @@ def test_stock_boot_requires_guardian_before_download_and_install(
             "worker",
             "--bootstrap",
             "https://fixture/bootstrap",
+            "--cleanup",
+            "[]",
         ]
         assert "PYTHONPATH" not in kwargs["env"]
         events.append("worker")
-        return 0
+        return popen([sys.executable, "-c", ""], **kwargs)
 
     def delete(self: pod.GuardianAPI, id: str) -> None:
         assert id == "own-pod"
         events.append("delete")
 
-    monkeypatch.setattr(subprocess, "Popen", Timer)
-    monkeypatch.setattr(subprocess, "call", session)
+    monkeypatch.setattr(subprocess, "Popen", start)
     monkeypatch.setattr(pod, "_start_ssh", start_ssh)
     monkeypatch.setattr(pod, "ensure_uv", lambda: None)
     monkeypatch.setattr(pod, "urlopen", download)
     monkeypatch.setattr(pod, "install", install)
     monkeypatch.setattr(pod.GuardianAPI, "delete_self", delete)
-    if failure:
-        with pytest.raises((RuntimeError, ValueError)):
-            pod.main(["pod", "boot"])
-    else:
-        assert pod.main(["pod", "boot"]) == 0
+    assert pod.main(["pod", "boot"]) == (1 if failure else 0)
     expected = ["guardian spawned"]
     if failure != "guardian":
         expected += ["guardian started", "ssh", "download"]

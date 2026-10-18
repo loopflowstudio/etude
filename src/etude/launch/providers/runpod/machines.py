@@ -67,7 +67,9 @@ class RunPodMachines:
                 self._bucket.put(key, code, once=True)
             self._package_key, self._package_digest = key, digest
         env = {
-            "ETUDE_BOOTSTRAP_URL": request.bootstrap,
+            "ETUDE_BOOTSTRAP_LOG_URL": request.bootstrap.log_url,
+            "ETUDE_WORKER_LOG_URL": request.bootstrap.worker_log_url,
+            "ETUDE_BOOTSTRAP_URL": request.bootstrap.url,
             "ETUDE_SESSION": request.session,
             "ETUDE_DEADLINE": request.deadline.isoformat(),
             "ETUDE_MAX_USD": str(request.cap_usd),
@@ -122,13 +124,10 @@ class RunPodMachines:
             return True
 
     def end(self, session_id: str) -> datetime | None:
-        try:
-            pod = self._receipt(session_id) or self._api.named(f"etude-{session_id}")
-            if pod is None:
-                return None
-            return datetime.now(UTC) if self._api.pod(pod.id) is None else self._api.delete(pod)
-        except ProviderUnavailable:
+        pod = self._receipt(session_id) or self._api.named(f"etude-{session_id}")
+        if pod is None:
             return None
+        return datetime.now(UTC) if self._api.pod(pod.id) is None else self._api.delete(pod)
 
     def bill(self, session_id: str, now: datetime) -> Bill | None:
         pod = self._receipt(session_id)

@@ -18,10 +18,11 @@ from pathlib import Path
 
 from pydantic import Field
 
+from etude.launch.log_read import remaining
 from etude.launch.machines import Allocation
 from etude.launch.measurement import timed
 from etude.launch.providers.package import program_archive
-from etude.launch.records import LauncherError, Record
+from etude.launch.records import BootstrapLinks, LauncherError, LogStream, Record
 from etude.launch.schemas import (
     CheckpointRef,
     Observation,
@@ -47,7 +48,7 @@ class RemoteRequest(Record):
     name: str = ""
     files: dict[str, str] = Field(default_factory=dict)
     checkpoints: dict[str, CheckpointFile] = Field(default_factory=dict)
-    bootstrap: str | None = None
+    bootstrap: BootstrapLinks | None = None
     cleanup: tuple[str, ...] = ()
 
 
@@ -58,6 +59,7 @@ class EncodedOutput(Record):
 
 class RemoteReply(Record):
     text: str | None = None
+    stream: LogStream | None = None
     started: bool = False
     observation: Observation | None = None
     output: EncodedOutput | None = None
@@ -72,15 +74,41 @@ class Unreachable(LauncherError):
 # Bootstrap imports only the standard library before the environment is ready.
 _INSTALL_CODE = """import base64,io,json,os,pathlib,sys,zipfile
 with zipfile.ZipFile(io.BytesIO(code)) as archive:
+    import types
+    for name in ("etude", "etude.launch"):
+        sys.modules.setdefault(name, types.ModuleType(name))
+    logging=types.ModuleType("etude.launch.logging")
+    exec(compile(archive.read("etude/launch/logging.py"),"logging.py","exec"),logging.__dict__)
+    sys.modules[logging.__name__]=logging
     source=archive.read("etude/launch/environment.py")
 namespace={"__name__":"etude_install"}
 exec(compile(source,"environment.py","exec"),namespace)
-root=namespace["install"](code)
+import contextlib
+with contextlib.redirect_stdout(sys.stderr):
+    links=globals().get("request",{}).get("bootstrap")
+    publication=logging.start_publication(pathlib.Path(os.environ["ETUDE_LOG_PATH"]), links["log_url"]) if links else None
+    try:
+        root=namespace["install"](code)
+    except Exception as error:
+        logging.write_log("client install", logging.explain(error))
+        raise
+    finally:
+        if os.environ.get("ETUDE_LOG_PATH"):
+            logging.write_log("bootstrap", logging.CLOSED)
+        if links:
+            publication.set()
+            logging.publish(pathlib.Path(os.environ["ETUDE_LOG_PATH"]), links["log_url"])
 """
 _BOOT = (
     """import base64,json,os,sys
 request=json.load(sys.stdin)
 code=base64.b64decode(request.pop("program"))
+import pathlib
+if request['action']=='start':
+    log=pathlib.Path(request['root']).expanduser()/request['session']/'bootstrap.log'
+    os.environ['ETUDE_LOG_PATH']=str(log)
+else:
+    os.environ.pop('ETUDE_LOG_PATH',None)
 """
     + _INSTALL_CODE
     + """
@@ -133,7 +161,7 @@ class SSH:
         name: str = "",
         files: dict[str, str] | None = None,
         checkpoints: dict[str, CheckpointFile] | None = None,
-        bootstrap: str | None = None,
+        bootstrap: BootstrapLinks | None = None,
         cleanup: tuple[str, ...] = (),
     ) -> RemoteReply:
         request = {
@@ -165,7 +193,7 @@ class SSH:
                 ],
                 input=json.dumps(request).encode(),
                 capture_output=True,
-                timeout=150,
+                timeout=remaining(150),
             )
         except (OSError, subprocess.TimeoutExpired):
             raise Unreachable("SSH did not answer") from None
@@ -209,7 +237,7 @@ class SSHStart:
     def __init__(self, ssh: SSH) -> None:
         self.ssh = ssh
 
-    def start(self, machine: Allocation, packet: Packet, bootstrap: str | None) -> str:
+    def start(self, machine: Allocation, packet: Packet, bootstrap: BootstrapLinks | None) -> str:
         ssh = self.ssh
         files = {path: body for work in packet.work for path, body in ssh.files(work).items()}
         return str(
@@ -236,7 +264,9 @@ class SSHJournal:
             raise LauncherError("checkpoint digest mismatch")
         return ref.model_copy(update={"content": raw.body})
 
-    def prepare(self, packet: Packet) -> str | None:
+    def prepare(
+        self, packet: Packet, *, expires_at: datetime | None = None
+    ) -> BootstrapLinks | None:
         return None
 
     def started(self, session_id: str) -> bool:
@@ -268,8 +298,13 @@ class SSHJournal:
     def stop(self, session_id: str, attempt: str) -> None:
         self.ssh.call("stop", session_id, attempt=attempt)
 
-    def logs(self, session_id: str, attempt: str) -> str:
-        return self.ssh.call("logs", session_id, attempt=attempt).text or ""
+    def logs(
+        self, session_id: str, attempt: str | None = None, *, producer: str = "job"
+    ) -> LogStream:
+        stream = self.ssh.call("logs", session_id, attempt=attempt or "", name=producer).stream
+        if stream is None:
+            raise Unreachable("SSH returned no log snapshot")
+        return stream
 
     def fetch(self, session_id: str, attempt: str, name: str, destination: Path) -> Path:
         raw = self.ssh.call("fetch", session_id, attempt=attempt, name=name).output

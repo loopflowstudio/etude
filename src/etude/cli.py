@@ -27,7 +27,7 @@ app.command()(kind(Kind.wait)(sync))
 
 # Commands that run on this computer even when a controller is chosen: they read
 # local files, or they choose the controller.
-_LOCAL = ("launch", "queue", "source", "fetch", "worker")
+_LOCAL = ("launch", "queue", "source", "fetch", "worker", "logs")
 
 
 def _main(argv: list[str]) -> int:

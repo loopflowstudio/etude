@@ -27,8 +27,9 @@ from etude.launch.client import (
     status,
     wait,
 )
-from etude.launch.controller import FetchRequest, forward, warning
+from etude.launch.controller import FetchRequest, PythonClient, forward, warning
 from etude.launch.records import Job, LauncherError, Pool
+from tests.launch.counting import job_text
 from tests.launch.test_source import git
 from tests.launch.test_source import repository as repository
 
@@ -105,8 +106,8 @@ def test_remote_launch_freezes_sources_config_and_returns_outputs(
     repo.rename(tmp_path / "unavailable-source")
     (tmp_path / "config.txt").unlink()
     assert command("wait", "pair").returncode == 0
-    logs = command("logs", "pair")
-    assert logs.stdout == "frozen config\n1\nfrozen config\n2\n", logs.stderr
+    logs = command("logs", "--cohort", "pair", "--job-only")
+    assert "frozen config\n1\n" in logs.stdout and "frozen config\n2\n" in logs.stdout, logs.stderr
     assert not (client / "launcher.db").exists()
     assert len(list((remote / "sources").glob("*.tar"))) == 1
     assert [pool.name for pool in _open(remote).pools()] == ["controller"]
@@ -241,7 +242,7 @@ def test_python_api_uses_controller_and_preserves_checkpoint_ancestry(
     assert continuation.checkpoint is not None and continuation.checkpoint.run == first
     second = queue(continuation)
     assert wait(second, every=0.02, timeout=10)[0].outcome == "succeeded"
-    assert logs(second) == "10 to 20\n"
+    assert job_text(logs(run=second)) == "10 to 20\n"
     assert fetch(second, "checkpoint", tmp_path / "out").read_text() == "weights\n"
     assert _open(remote).record(second).checkpoint == continuation.checkpoint
     pair = launch_cohort("python-pair", job.runs(1, 2))
@@ -295,7 +296,7 @@ def test_python_continuation_returns_frozen_source_from_controller(
     repo.rename(tmp_path / "unavailable")
     second = launch(continuation)
     assert wait(second, every=0.02, timeout=10)[0].outcome == "succeeded"
-    assert logs(second) == "10\n"
+    assert job_text(logs(run=second)) == "10\n"
     assert not (client / "launcher.db").exists()
 
 
@@ -311,6 +312,32 @@ def test_the_controller_is_sent_the_program_and_gets_it_again_if_it_goes_missing
     assert again.returncode == 0 and again.stdout == "controller  the controller (default)\n"
     assert (installed / "etude" / "launch" / "cli.py").exists()
     assert not (client / "launcher.db").exists()
+
+
+@pytest.mark.parametrize("install_seconds, expected_calls", [(20.0, 2), (3.0, 3)])
+def test_log_deadline_includes_missing_controller_installation(
+    monkeypatch: pytest.MonkeyPatch, install_seconds: float, expected_calls: int
+) -> None:
+    elapsed = 0.0
+    calls = 0
+
+    def transport(
+        command: list[str], *, timeout: float, **options: object
+    ) -> subprocess.CompletedProcess[bytes]:
+        nonlocal elapsed, calls
+        calls += 1
+        duration = (1.0, install_seconds, 3.0)[calls - 1]
+        elapsed += min(duration, timeout)
+        if duration > timeout:
+            raise subprocess.TimeoutExpired(command, timeout)
+        return subprocess.CompletedProcess(command, 97 if calls == 1 else 0, b"{}", b"")
+
+    monkeypatch.setattr(time, "monotonic", lambda: elapsed)
+    monkeypatch.setattr(subprocess, "run", transport)
+    with pytest.raises(LauncherError, match="did not answer|time limit reached"):
+        PythonClient("fixture-controller").logs(run="chosen", timeout=5)
+    assert elapsed == 5
+    assert calls == expected_calls
 
 
 def test_a_machine_that_cannot_be_a_controller_is_refused_with_a_reason(

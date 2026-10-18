@@ -27,8 +27,10 @@ from etude.launch.machines import OwnedMachine, Safeguards
 from etude.launch.providers.runpod.api import RunPodAPI
 from etude.launch.providers.runpod.machines import RunPodMachines
 from etude.launch.records import (
+    Diagnostic,
     Job,
     LauncherError,
+    LogSnapshot,
     Machine,
     Pool,
     Run,
@@ -160,8 +162,12 @@ def cancel(run: str) -> Status:
     return _client().cancel(run)
 
 
-def logs(run: str) -> str:
-    return _client().logs(run)
+def diagnostics(*, run: str | None = None, machine: str | None = None) -> tuple[Diagnostic, ...]:
+    return _client().diagnostics(run=run, machine=machine)
+
+
+def logs(*, run: str | None = None, machine: str | None = None, timeout: float = 30) -> LogSnapshot:
+    return _client().logs(run=run, machine=machine, timeout=timeout)
 
 
 def fetch(run: str, name: str, destination: Path) -> Path:

@@ -35,6 +35,7 @@ from etude.launch.storage.s3 import Bucket, Keys, StorageUnavailable
 from etude.launch.worker import courier as courier_module
 from etude.launch.worker.courier import Courier
 from etude.launch.worker.courier import run as run_in_pod
+from tests.launch.counting import job_text
 
 TRAIN = """
 echo "seed $ETUDE_SEED from ${ETUDE_FROM_VALUE:-0} to $ETUDE_UNTIL_VALUE"
@@ -255,13 +256,13 @@ def test_a_run_from_a_commit_runs_in_a_pod_and_continues_in_another(tmp_path: Pa
         {"steps": 3},
         True,
     )
-    assert c.scheduler.logs(first) == "seed 7 from 0 to 3\n"
+    assert job_text(c.scheduler.logs(run=first)) == "seed 7 from 0 to 3\n"
     assert c.provider.pods == {}  # the pod deleted itself once its work was delivered
 
     second = c.scheduler.launch(c.scheduler.continue_from(first, "steps=7"), pool="l4")
     (status,) = c.scheduler.wait(second, every=0.05, timeout=30)
     assert (status.outcome, status.clocks) == ("succeeded", {"steps": 7})
-    assert c.scheduler.logs(second) == "seed 7 from 3 to 7\n"
+    assert job_text(c.scheduler.logs(run=second)) == "seed 7 from 3 to 7\n"
     copy = c.scheduler.fetch(second, "checkpoint.pt", tmp_path / "out")
     assert copy.read_text() == "trained to 3\ntrained to 7\n"
     assert c.provider.creates == 2 and c.provider.pods == {}
@@ -340,7 +341,7 @@ def test_a_kept_session_takes_work_through_its_inbox(tmp_path: Path) -> None:
     (again,) = c.scheduler.wait(second, every=0.05, timeout=30)
     assert (status.outcome, again.outcome) == ("succeeded", "succeeded")
     assert status.machine == again.machine == machine and c.provider.creates == 1
-    assert c.scheduler.logs(second) == "two\n" and len(c.provider.pods) == 1
+    assert job_text(c.scheduler.logs(run=second)) == "two\n" and len(c.provider.pods) == 1
     assert c.scheduler.terminate(machine).deleted_at is not None and c.provider.pods == {}
 
 
@@ -435,7 +436,7 @@ def test_lost_start_receipt_reply_cannot_leave_unreported_running_code(tmp_path:
     packet = Packet(session="r", deadline=datetime.now(UTC) + timedelta(minutes=1), work=(work,))
     bootstrap = journal.prepare(packet)
     with pytest.raises(StorageUnavailable):
-        run_in_pod(bootstrap, lambda: None, tmp_path, send=storage, every=0.01)
+        run_in_pod(bootstrap.url, lambda: None, tmp_path, send=storage, every=0.01)
     assert "test/sessions/r/out/receipt" in storage.objects
     assert not (tmp_path / "r" / "attempts").exists()
 

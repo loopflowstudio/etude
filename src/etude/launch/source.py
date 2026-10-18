@@ -219,14 +219,14 @@ def _publish(
 
 def freeze(run: Run) -> Run:
     """Freeze at the submitting client; a controller receives this same identity."""
-    if run.id is not None:
+    if run.id is not None and (run.job.repo is None or run.source is not None):
         if run.job.repo is not None and (
             run.job.revision is None
             or (run.source is not None and run.source.commit != run.job.revision)
         ):
             raise LauncherError("prepared run source does not match its revision")
         return run
-    id = uuid4().hex[:12]
+    id = run.id or uuid4().hex[:12]
     job = run.job
     source = run.source
     if job.repo is not None:

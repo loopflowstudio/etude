@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Protocol
 
-from etude.launch.records import Record
+from etude.launch.records import BootstrapLinks, Record
 
 
 class Safeguards(Record):
@@ -35,7 +35,7 @@ class MachineRequest(Record):
     session: str
     deadline: datetime | None
     cap_usd: Decimal
-    bootstrap: str | None = None
+    bootstrap: BootstrapLinks | None = None
 
 
 class Machines(Protocol):
