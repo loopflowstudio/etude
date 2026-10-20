@@ -5,9 +5,10 @@ An eval run is a run with kind "evaluation" and no clocks: `run.json`, then
 `tables/` and Etude's record of the match, `matches/KEY.json` (or
 `matches/KEY.failed.json`).
 
-A tournament is stored beside the runs under `tournaments/NAME/`, as files
-that are written once and never replaced: `tournament.json`, one file per
-agent under `entrants/` and `benchmarks/`, and one per eval run under `runs/`.
+A tournament (`Benchmark` or `RoundRobin`) is stored beside the runs under
+`tournaments/NAME/`, as files that are written once and never replaced. Its
+schedule is derived from those files, by `Matchup.matches` and
+`RoundRobin.matches`, wherever it is read.
 
 An agent is what plays together with how it is configured, identified across
 eval runs by a digest of both, never by its name: one checkpoint at two
@@ -19,13 +20,15 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from hashlib import sha256
+from itertools import combinations
 from typing import Any, Literal, Self
 
-from pydantic import Field, JsonValue, model_validator
+from pydantic import BaseModel, Field, JsonValue, field_validator, model_validator
 
-from etude.run.records import Digest, Name, Record
+from etude.run.records import ArtifactRef, Digest, Name, Record
+from etude.run.storage import SAFE_NAME
 
 type Config = dict[str, JsonValue]
 type ColumnType = Literal["BOOLEAN", "BIGINT", "DOUBLE", "VARCHAR"]
@@ -162,28 +165,119 @@ class MatchRecord(Record):
         return f"matches/{self.match.key}.{suffix}"
 
 
-class Tournament(Record):
-    """`tournaments/NAME/tournament.json`: what every match of a tournament shares.
+class Model(Record):
+    """The checkpoint a benchmark is held for, playing with `config`.
 
-    A benchmark pairs every entrant with every benchmark; a round robin pairs
-    every two entrants once. Each pairing is one match per condition. Fixed
-    once stored. `benchmarks` are the ones known when it was described; the
-    stored ones are files beside it, and `tournament.json` leaves them out.
+    `config` is the author's typed model or JSON, such as whether search runs
+    on top of the network and how. Etude stores it and splits on it only.
     """
 
-    format: Literal["benchmark", "round_robin"]
+    config: Config = {}
+
+    @field_validator("config", mode="before")
+    @classmethod
+    def dumped(cls, value: object) -> object:
+        return value.model_dump(mode="json") if isinstance(value, BaseModel) else value
+
+    def agent(self, checkpoint: ArtifactRef) -> Agent:
+        """The agent this side is once `checkpoint`, which must carry its digest, fills it."""
+        if checkpoint.sha256 is None:
+            raise ValueError("checkpoint_agent_requires_digest")
+        # Named for reading only; its last path part, as a training run names its files.
+        name = re.sub(r"\s", "_", checkpoint.uri.rstrip("/").rsplit("/", 1)[-1])
+        return Agent(
+            name=name or checkpoint.sha256[:12],
+            kind="checkpoint",
+            artifact=checkpoint.sha256,
+            uri=checkpoint.uri,
+            config=self.config,
+        )
+
+
+class Matchup(Record):
+    """A named line of a benchmark: `players` in seat order, each a fixed agent or the model.
+
+    Its value is the first player's against the second. Both may be the model,
+    such as search against no search.
+    """
+
+    name: str = Field(min_length=1, max_length=200)
+    players: tuple[Agent | Model, Agent | Model]
+    # Mapping, so a literal like `{"deal": 1}` type-checks as a condition.
+    conditions: tuple[Mapping[str, JsonValue], ...] = Field(min_length=1)
+    games: int = Field(ge=1)
+
+    @property
+    def file(self) -> str:
+        """`matchups/NAME.DEFINITION.json`, digests both: a listing alone shows a redefined name."""
+        return f"matchups/{digest(self.name)}.{digest(self.model_dump(mode='json'))}.json"
+
+    def matches(self, checkpoint: ArtifactRef) -> list[Match]:
+        """One match per condition, with `checkpoint` in every model's seat."""
+        seated = tuple(
+            each.agent(checkpoint) if isinstance(each, Model) else each for each in self.players
+        )
+        return [
+            Match(agents=seated, conditions=dict(given), games=self.games)
+            for given in self.conditions
+        ]
+
+
+class Benchmark(Record):
+    """Matchups a model's checkpoints are each held for, to follow it through training.
+
+    Stored under `tournaments/NAME/`: `benchmark.json` (without matchups),
+    `matchups/` (every matchup any hold defined), `models/SHA256.json` (each
+    checkpoint held) and `runs/`.
+    """
+
     name: Name
     environment: Environment
-    conditions: tuple[Config, ...] = Field(min_length=1)
+    matchups: tuple[Matchup, ...] = ()
+
+    @model_validator(mode="after")
+    def named(self) -> Self:
+        if not SAFE_NAME.match(self.name):
+            raise ValueError("unsafe_tournament_name")
+        if len({each.name for each in self.matchups}) != len(self.matchups):
+            raise ValueError("duplicate_matchup_name")
+        return self
+
+
+class RoundRobin(Record):
+    """Hand-picked agents, every two of them once per condition.
+
+    Stored under `tournaments/NAME/`: `round_robin.json`, `entrants/IDENTITY.json`
+    and `runs/`. Seat swaps belong inside the author's match.
+    """
+
+    name: Name
+    environment: Environment
+    # Mapping, so a literal like `{"deal": 1}` type-checks as a condition.
+    conditions: tuple[Mapping[str, JsonValue], ...] = Field(min_length=1)
     games: int = Field(ge=1)
-    benchmarks: tuple[Agent, ...] = ()
+
+    @model_validator(mode="after")
+    def named(self) -> Self:
+        if not SAFE_NAME.match(self.name):
+            raise ValueError("unsafe_tournament_name")
+        return self
+
+    def matches(self, entrants: Iterable[Agent]) -> list[Match]:
+        """Each pair once per condition, in identity order."""
+        ordered = sorted({each.identity: each for each in entrants}.items())
+        return [
+            Match(agents=(a, b), conditions=dict(given), games=self.games)
+            for (_, a), (_, b) in combinations(ordered, 2)
+            for given in self.conditions
+        ]
 
 
 class TournamentRun(Record):
-    """`tournaments/NAME/runs/RUN.json`: an eval run held for the tournament, and what it was given."""
+    """`tournaments/NAME/runs/RUN.json`: an eval run held for the tournament, and what it added."""
 
     run: Name
+    checkpoint: Digest | None = None
     entrants: tuple[Digest, ...] = ()
-    benchmarks: tuple[Digest, ...] = ()
     # (k, n): the run plays the matches whose key is k modulo n.
     share: tuple[int, int] = (0, 1)

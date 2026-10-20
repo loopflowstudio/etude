@@ -65,7 +65,7 @@ ETUDE_TABLES = (
     "seats",
     "groups",
     "tournaments",
-    "entrants",
+    "schedule",
     "training_checkpoints",
 )
 # Columns Etude adds to every row.

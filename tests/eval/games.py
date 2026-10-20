@@ -2,20 +2,31 @@
 
 from __future__ import annotations
 
+import re
+
 from etude.eval.match import Tables
-from etude.eval.records import Match
+from etude.eval.records import Agent, Match
 
 type Rows = list[dict[str, bool | int | float | str | None]]
 
 
+def strength(seated: Agent) -> int:
+    """The configured strength, or a checkpoint's, which grows with training, plus its search."""
+    if "strength" in seated.config:
+        return int(str(seated.config["strength"]))
+    # The test trainer saves at updates 100, 200 and 300, named `updates-N`: 1, 3 and 5.
+    updates = int(re.sub(r"\D", "", seated.name))
+    return updates // 50 - 1 + int(str(seated.config.get("search", 0)))
+
+
 def play(match: Match) -> Tables:
     """A duel: the stronger agent wins, except the game's first player wins every third game."""
-    strength = [int(str(seated.config["strength"])) for seated in match.agents]
+    strengths = [strength(seated) for seated in match.agents]
     plays: Rows = []
     games: Rows = []
     for game in range(match.games):
         first = game % 2
-        winner = first if game % 3 == 0 else max((1, 0), key=lambda seat: strength[seat])
+        winner = first if game % 3 == 0 else max((1, 0), key=lambda seat: strengths[seat])
         for seat in (0, 1):
             plays.append(
                 {

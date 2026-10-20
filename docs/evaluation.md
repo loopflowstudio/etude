@@ -2,7 +2,7 @@
 
 Play agents against each other in parallel workers, hand Etude whatever tables
 your game code produces, and query them with DuckDB. Tournaments arrange those
-eval runs: a model's checkpoints against fixed benchmarks as it trains, or
+eval runs: each checkpoint of a model through a benchmark's matchups as it trains, or
 hand-picked models in a round robin. Evaluation is independent of training.
 
 ```sh
@@ -12,11 +12,11 @@ uv add 'etude-sdk[eval]'   # DuckDB, for writing and querying tables
 ```python
 from etude.eval.match import Tables, agent, environment
 from etude.eval.query import connect
-from etude.eval.records import Match
-from etude.eval.tournament import benchmark, hold, round_robin, standings
+from etude.eval.records import Benchmark, Match, Matchup, Model, RoundRobin
+from etude.eval.tournament import curves, hold, standings
 
 world = environment("allies-vs-lessons", files=["game/"], config={"world": "w6"})
-deals = [{"deal": 1_910_101_000 + d} for d in range(25)]
+deals = tuple({"deal": 1_910_101_000 + d} for d in range(25))
 heuristic = agent("heuristic", code=["players/heuristic.py"])
 greedy = agent("greedy", code=["players/greedy.py"])
 
@@ -40,28 +40,48 @@ def play(match: Match) -> Tables:  # importable by name: workers are fresh proce
     }
 
 
-progress = benchmark(
-    "ppo-25k-anchors", environment=world, conditions=deals, games=8, benchmarks=[heuristic, greedy]
+# Model is the checkpoint being held, playing with your config (a Pydantic model or JSON).
+progress = Benchmark(
+    name="anchors",
+    environment=world,
+    matchups=(
+        Matchup(
+            name="no search vs heuristic",
+            players=(Model(config=Direct()), heuristic),
+            conditions=deals,
+            games=8,
+        ),
+        Matchup(
+            name="no search vs greedy",
+            players=(Model(config=Direct()), greedy),
+            conditions=deals,
+            games=8,
+        ),
+        Matchup(
+            name="search vs no search",
+            players=(Model(config=PUCT(simulations=64)), Model(config=Direct())),
+            conditions=deals[:10],
+            games=4,
+        ),
+    ),
 )
 
-# On the go: as each checkpoint is saved, one small eval run plays it against the benchmarks.
-hold(
-    progress,
-    enter=[agent("ppo@3", checkpoint=ref, config={"player": "search"})],
-    play=play,
-    storages=[bucket],
-)
+# On the go: as each checkpoint is saved, one small eval run plays every matchup.
+hold(progress, checkpoint=ref, play=play, storages=[bucket])
 
-# Batch: a benchmark added later plays every checkpoint entered so far.
-hold(progress, add_benchmarks=[puct64], play=play, workers=8, storages=[bucket])
+# Batch: add a matchup to the definition; holding with no checkpoint plays every
+# missing match, so the new line is played for every checkpoint held so far.
+hold(progress, play=play, workers=8, storages=[bucket])
 
-# Batch: hand-picked final models, each against every other.
-league = round_robin("finals-1", environment=world, conditions=deals, games=8)
+# Batch: hand-picked models, each against every other.
+league = RoundRobin(name="finals-1", environment=world, conditions=deals, games=8)
 hold(league, enter=finals, play=play, workers=8, storages=[bucket])
 
 db = connect(bucket)  # or "s3://my-bucket/runs", or a directory
-for entry in standings(db, "ppo-25k-anchors", table="plays", value="score").entries:
-    print(entry.name, entry.opponent, entry.value, entry.interval, entry.checkpoint)
+for line in curves(db, "anchors", table="plays", value="score"):
+    print(line.matchup, line.run, [(p.ordinal, p.clocks, p.value) for p in line.points])
+for entry in standings(db, "finals-1", table="plays", value="score").entries:
+    print(entry.name, entry.opponent, entry.value, entry.interval)
 ```
 
 ```python
@@ -117,31 +137,36 @@ evaluate(
 
 ## Tournaments
 
-- **Formats.** A `benchmark` pairs every entrant with every benchmark; a
-  `round_robin` pairs every two entrants once. Each pairing is one match per
-  condition, entrant first.
+- **Benchmarks.** Named matchups, each its own line over training: `players`
+  in seat order, each a fixed agent or `Model(config=...)`, with its own
+  `conditions` and `games`. A matchup's value is its first player's.
+  `hold(benchmark, checkpoint=ref)` puts the checkpoint (by `sha256`) in every
+  model seat and plays each given matchup; with no checkpoint it plays every
+  matchup ever defined for every checkpoint held, skipping what is delivered.
+- **Round robins.** `hold(round_robin, enter=agents)` plays every pair of
+  entrants once per condition; seat swaps belong inside `play`.
 - **Stored.** A tournament lives under `tournaments/NAME/` beside the runs, as
   files written once and never replaced, so many eval runs can grow it at
-  once. Holding a tournament of the same name with other rules is refused; no
-  run may be named `tournaments`.
-- **`hold`** stores the tournament and the agents given, then plays, as one
-  eval run, the matches they add. With none given it plays every scheduled
-  match not yet delivered. `share=(k, n)` plays one of n disjoint parts, for n
+  once. Another format or environment under the same name is refused, as is
+  a matchup name defined again differently. No run may be named `tournaments`.
+- **Splitting.** `share=(k, n)` plays one of n disjoint parts, for n
   machines. The same arguments resume the same eval run.
-- **Cost.** A hold that enters a new agent reads only the tournament's
-  listings, however many matches it holds. Otherwise it also lists each of its
-  eval runs' matches, to skip what any of them delivered.
-- **`standings`** counts each scheduled match once, from the eval run that
-  recorded it last. A benchmark gives each entrant against each benchmark and
-  against all, in training order, with the training run and clocks of a
-  checkpoint entrant. A round robin gives the payoff matrix, best first.
-  `complete` says whether every scheduled match is held.
+- **Cost.** Every hold lists the tournament's folder once. Holding a new
+  checkpoint or new entrants reads nothing more of it; any other hold also
+  lists each of its eval runs' matches, to skip what any of them delivered.
+- **`curves`** gives one line per matchup and training run: each checkpoint's
+  ordinal, the clocks where its run stood when it saved it, and the first
+  player's value with a 95% interval over whole matches.
+- **`standings`** gives a round robin's payoff matrix, best first; `complete`
+  says whether every scheduled match is held. Each match counts once, from
+  the eval run that recorded it last.
 
 ## Querying
 
 `connect` gives each of your tables across every eval run, beside Etude's own:
 `runs`, `agents` (with a `config.KEY` column per scalar config key, dotted when
-nested), `matches`, `seats`, `groups`, `tournaments`, `entrants` and
+nested), `matches`, `seats`, `groups`, `tournaments`, `schedule` (every match
+a tournament calls for, with its matchup and checkpoint) and
 `training_checkpoints` (every checkpoint a training run under the source
 recorded, joined to agents by `artifact`).
 

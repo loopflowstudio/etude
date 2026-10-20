@@ -143,21 +143,28 @@ def render(db: duckdb.DuckDBPyConnection) -> str:
 
 
 def _tournaments(db: duckdb.DuckDBPyConnection) -> str:
-    """Each tournament's format and agents; `etude.eval.tournament.standings` ranks them."""
+    """Each tournament's format and how much of its schedule is held.
+
+    `etude.eval.tournament.curves` and `standings` read their results.
+    """
     found = db.sql(
-        "select t.tournament, t.format, count(*) filter (e.role = 'entrant'),"
-        " count(*) filter (e.role = 'benchmark') from tournaments t"
-        " left join entrants e using (tournament) group by all order by 1"
+        "with held as (select distinct r.tournament, m.match from matches m join runs r"
+        " using (run) where m.state = 'done')"
+        " select t.tournament, t.format, count(distinct s.match),"
+        " count(distinct s.match) filter (h.match is not null)"
+        " from tournaments t left join schedule s using (tournament)"
+        " left join held h on h.tournament = s.tournament and h.match = s.match"
+        " group by all order by 1"
     ).fetchall()
     if not found:
         return ""
     return (
         "<h2>Tournaments</h2><table><tr><th class=name>tournament</th><th class=name>format</th>"
-        "<th>entrants</th><th>benchmarks</th></tr>"
+        "<th>scheduled</th><th>held</th></tr>"
         + "".join(
             f"<tr><td class=name>{escape(name)}</td><td class=name>{escape(format)}</td>"
-            f"<td>{entrants}</td><td>{benchmarks}</td></tr>"
-            for name, format, entrants, benchmarks in found
+            f"<td>{scheduled}</td><td>{held}</td></tr>"
+            for name, format, scheduled, held in found
         )
         + "</table>"
     )
