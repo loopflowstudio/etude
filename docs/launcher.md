@@ -143,6 +143,16 @@ etude pool add l4 --provider runpod --gpu "NVIDIA L4" \
 etude launch job.py --pool l4
 ```
 
+A template without `--gpu` rents RunPod CPU pods: the cheapest secure-cloud CPU
+flavor with at least `--vcpus` (rounded up to a power of two, RunPod's sizes)
+and `--memory-gb`, priced per vCPU and capped like a GPU pod. CPU pods boot the
+same default image. Their disk defaults to 40 GB, or 10 GB per vCPU when smaller.
+
+```sh
+etude pool add cpu --provider runpod --vcpus 8 --memory-gb 16 --max 2 --max-usd-per-hour 0.40
+etude launch job.py --pool cpu --cohort evals --parallel 2 --max-usd 1
+```
+
 Free existing machines are used before creating another. A mixed pool can
 spill onto paid machines when owned ones are busy. Change automatic growth with
 `etude pool max l4 2`; `etude pool max l4 0` allows only existing machines.

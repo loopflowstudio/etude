@@ -491,7 +491,9 @@ def pool_add(
         typer.Option(help="the account that makes this pool's machines; none means it makes none"),
     ] = None,
     max: Annotated[int, typer.Option(help="how many machines the pool may make at once")] = 1,
-    gpu: Annotated[str | None, typer.Option(help="the provider's name for the GPU")] = None,
+    gpu: Annotated[
+        str | None, typer.Option(help="the provider's name for the GPU; omit for CPU machines")
+    ] = None,
     image: Annotated[
         str | None, typer.Option(help="the image its machines boot, pinned by digest")
     ] = None,
