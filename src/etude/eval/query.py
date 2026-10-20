@@ -34,8 +34,8 @@ from typing import TYPE_CHECKING, cast
 import numpy as np
 from pydantic import JsonValue, ValidationError
 
-from etude.eval.records import Agent, Environment, MatchRecord
-from etude.eval.tournament import ETUDE_TABLES, IDENTIFIER, KIND
+from etude.eval.records import COLUMN_TYPES, Agent, ColumnType, Environment, MatchRecord
+from etude.eval.tournament import ETUDE_TABLES, IDENTIFIER, KIND, quote
 from etude.run.errors import EtudeError
 from etude.run.listing import as_storage, declared, places
 from etude.run.records import Digest, Record
@@ -83,15 +83,15 @@ def connect(source: Storage | Path | str) -> duckdb.DuckDBPyConnection:
                     )
         _etude_tables(db, tournaments, records)
         for table, paths in sorted(files.items()):
-            listed = ", ".join(_literal(path) for path in paths)
+            listed = ", ".join(quote(path) for path in paths)
             # A match's rows come from the latest file holding them: a merged file
-            # and the files it replaces may both be present for a while.
+            # and the files it replaces may both be present for a while. Within a
+            # table, file names order by their zero-padded write time.
             db.execute(
-                f'create table "{table}" as select * exclude (_file, _written) from ('
-                f"select *, regexp_extract(_file, '\\.(\\d{{20}})\\.[0-9a-f]+\\.parquet$', 1)"
-                f" as _written from read_parquet([{listed}], union_by_name = true,"
-                " filename = '_file')) qualify _written = max(_written) over"
-                " (partition by tournament, match)"
+                f'create table "{table}" as select * exclude (_file) from read_parquet('
+                f"[{listed}], union_by_name = true, filename = '_file') qualify"
+                " parse_filename(_file) = max(parse_filename(_file))"
+                " over (partition by tournament, match)"
             )
     return db
 
@@ -111,10 +111,6 @@ def _local(storage: Storage, key: str, copy: Path) -> Path:
     copy.parent.mkdir(parents=True, exist_ok=True)
     copy.write_bytes(storage.get(key))
     return copy
-
-
-def _literal(path: Path) -> str:
-    return "'" + str(path).replace("'", "''") + "'"
 
 
 def _etude_tables(
@@ -171,12 +167,12 @@ def _etude_tables(
 def _agents_table(db: duckdb.DuckDBPyConnection, agents: dict[Digest, list[Agent]]) -> None:
     """One row per identity; each scalar config key, dotted when nested, as a column."""
     flat = {identity: _flattened(given[0].config) for identity, given in agents.items()}
-    kinds: dict[str, set[str]] = {}
+    kinds: dict[str, set[ColumnType]] = {}
     for values in flat.values():
         for key, value in values.items():
             if value is not None:
-                kinds.setdefault(key, set()).add(_SQL_TYPES[type(value)])
-    columns: dict[str, str] = {}
+                kinds.setdefault(key, set()).add(COLUMN_TYPES[type(value)])
+    columns: dict[str, ColumnType] = {}
     for key, seen in sorted(kinds.items()):
         if seen == {"BIGINT", "DOUBLE"}:
             seen = {"DOUBLE"}
@@ -205,9 +201,6 @@ def _agents_table(db: duckdb.DuckDBPyConnection, agents: dict[Digest, list[Agent
             for identity, given in agents.items()
         ],
     )
-
-
-_SQL_TYPES: dict[type, str] = {bool: "BOOLEAN", int: "BIGINT", float: "DOUBLE", str: "VARCHAR"}
 
 
 def _flattened(config: dict[str, JsonValue], prefix: str = "") -> dict[str, JsonValue]:

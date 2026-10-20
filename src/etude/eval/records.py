@@ -23,6 +23,14 @@ from etude.run.records import Digest, Name, Record
 type Config = dict[str, JsonValue]
 type ColumnType = Literal["BOOLEAN", "BIGINT", "DOUBLE", "VARCHAR"]
 
+# The column type of each Python value a table or config may hold.
+COLUMN_TYPES: dict[type, ColumnType] = {
+    bool: "BOOLEAN",
+    int: "BIGINT",
+    float: "DOUBLE",
+    str: "VARCHAR",
+}
+
 # Every match has this group, holding every seat.
 EVERYONE = "all"
 

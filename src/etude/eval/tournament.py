@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Literal, NoReturn
 from pydantic import BaseModel, JsonValue, TypeAdapter, ValidationError
 
 from etude.eval.records import (
+    COLUMN_TYPES,
     Agent,
     ColumnType,
     Config,
@@ -333,7 +334,7 @@ class _Writer:
         target = self.files.root / key
         target.parent.mkdir(parents=True, exist_ok=True)
         partial = target.with_name(target.name + ".partial")
-        self.db.execute(f"copy ({query}) to {_literal(partial)} (format parquet)")
+        self.db.execute(f"copy ({query}) to {quote(partial)} (format parquet)")
         partial.replace(target)
 
     def _record(self, record: MatchRecord) -> None:
@@ -348,7 +349,7 @@ class _Writer:
         for table, keys in self.written.items():
             if len(keys) < 2:
                 continue
-            files = ", ".join(_literal(self.files.root / key) for key in keys)
+            files = ", ".join(quote(self.files.root / key) for key in keys)
             self._copy(
                 f"select * from read_parquet([{files}], union_by_name = true)",
                 f"tables/{table}.{time.time_ns():020d}.{self.id}.parquet",
@@ -389,7 +390,8 @@ class _Writer:
             )
 
 
-def _literal(path: Path) -> str:
+def quote(path: Path) -> str:
+    """A path as a DuckDB string literal."""
     return "'" + os.fspath(path).replace("'", "''") + "'"
 
 
@@ -414,9 +416,6 @@ def _checked(scheduled: Match, table: str, rows: Sequence[Row]) -> list[Row]:
     return list(rows)
 
 
-_TYPES: dict[type, ColumnType] = {bool: "BOOLEAN", int: "BIGINT", float: "DOUBLE", str: "VARCHAR"}
-
-
 def _types(
     table: str, rows: Sequence[Row], known: Mapping[str, ColumnType]
 ) -> dict[str, ColumnType]:
@@ -426,7 +425,7 @@ def _types(
         for column, value in row.items():
             if value is None:
                 continue
-            kind = _TYPES.get(type(value))
+            kind = COLUMN_TYPES.get(type(value))
             if kind is None:
                 raise EtudeError("column_value_refused", 422) from TypeError(
                     f"table {table!r}, column {column!r}: {type(value).__name__}"
