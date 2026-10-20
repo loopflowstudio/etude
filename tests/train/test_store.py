@@ -12,19 +12,19 @@ import numpy as np
 import pytest
 from moto import mock_aws
 
-from etude.runs.block_file import block_key, tail_key
-from etude.runs.delivery import RunFiles, StorageDestination, sync
-from etude.runs.errors import EtudeError
-from etude.runs.listing import runs
-from etude.runs.records import Attempt, RunDeclaration, RunFile, SourceKey
-from etude.runs.storage import DirectoryStorage, S3Storage, Storage, run_prefix
+from etude.run.block_file import block_key, tail_key
+from etude.run.delivery import RunFiles, StorageDestination, sync
+from etude.run.errors import EtudeError
+from etude.run.listing import runs
+from etude.run.records import Attempt, RunDeclaration, RunFile, SourceKey
+from etude.run.storage import DirectoryStorage, S3Storage, Storage, run_prefix
 from etude.train.block import Builder
 from etude.train.manifest import Manifest, write_manifest
 from etude.train.read import buckets, read, read_all
 from etude.train.records import Step
 from etude.train.report import pages
 from etude.train.run import log_line, seal_runs, track, write_block
-from tests.runs.storage import MeasuredStorage
+from tests.run.storage import MeasuredStorage
 
 
 def test_reports_fetch_each_runs_metadata_once(tmp_path: Path) -> None:

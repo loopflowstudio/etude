@@ -17,7 +17,7 @@ from etude.launch.database import Database
 from etude.launch.executor import local as local_service
 from etude.launch.records import Job, LauncherError, Machine, Pool, Run, Status
 from etude.launch.scheduler import Scheduler
-from etude.runs.listing import runs
+from etude.run.listing import runs
 from etude.train.read import read
 from etude.train.report import page_data
 from tests.launch.counting import job_text

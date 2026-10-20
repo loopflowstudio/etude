@@ -15,7 +15,7 @@ import typer
 from etude.launch import cli as launch_cli
 from etude.launch.commands import Kind, kind
 from etude.launch.errors import LauncherError
-from etude.runs.errors import EtudeError
+from etude.run.errors import EtudeError
 from etude.train.cli import app as reports_app
 from etude.train.cli import checkpoints, sync
 

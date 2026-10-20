@@ -16,16 +16,16 @@ import numpy as np
 import pytest
 from moto import mock_aws
 
-from etude.runs.block_file import block_key
-from etude.runs.records import RunDeclaration, RunFile, SourceKey
-from etude.runs.storage import DirectoryStorage, S3Storage, Storage, run_prefix
+from etude.run.block_file import block_key
+from etude.run.records import RunDeclaration, RunFile, SourceKey
+from etude.run.storage import DirectoryStorage, S3Storage, Storage, run_prefix
 from etude.train.block import Series, Table, encode
 from etude.train.manifest import write_manifest
 from etude.train.read import buckets, read
 from etude.train.records import Step, Time
 from etude.train.report import pages
 from etude.train.run import track
-from tests.runs.storage import MeasuredStorage
+from tests.run.storage import MeasuredStorage
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("ETUDE_MEASURE") != "1", reason="measurement, not a check"

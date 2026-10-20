@@ -23,10 +23,10 @@ import numpy as np
 import numpy.typing as npt
 from pydantic import ConfigDict, SkipValidation, ValidationError
 
-from etude.runs.block_file import parse, select
-from etude.runs.listing import RUN_FOLDERS, as_storage, declared, places
-from etude.runs.records import WALL_CLOCK, Attempt, Clock, Record, RunFile, RunState
-from etude.runs.storage import Storage, run_prefix
+from etude.run.block_file import parse, select
+from etude.run.listing import RUN_FOLDERS, as_storage, declared, places
+from etude.run.records import WALL_CLOCK, Attempt, Clock, Record, RunFile, RunState
+from etude.run.storage import Storage, run_prefix
 from etude.train.block import Table
 from etude.train.manifest import BlockDescription, Manifest, StoredBlock, describe, fetch
 from etude.train.records import CheckpointRecord

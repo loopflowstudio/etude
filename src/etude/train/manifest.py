@@ -16,10 +16,10 @@ from pathlib import Path
 
 import numpy as np
 
-from etude.runs.block_file import BlockFile, parse, select
-from etude.runs.errors import EtudeError
-from etude.runs.records import Record
-from etude.runs.storage import DirectoryStorage, Storage
+from etude.run.block_file import BlockFile, parse, select
+from etude.run.errors import EtudeError
+from etude.run.records import Record
+from etude.run.storage import DirectoryStorage, Storage
 from etude.train.block import (
     Array,
     Header,

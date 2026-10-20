@@ -14,7 +14,7 @@ import shutil
 from pathlib import Path
 from typing import Any, Protocol
 
-from etude.runs.errors import EtudeError
+from etude.run.errors import EtudeError
 
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._=-]{0,199}$")
 

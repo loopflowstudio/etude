@@ -16,10 +16,10 @@ from hashlib import sha256
 from pathlib import Path
 from stat import S_ISREG
 
-from etude.runs.block_file import parse
-from etude.runs.listing import RUN_FILES, RUN_FOLDERS
-from etude.runs.records import RunFile
-from etude.runs.storage import DirectoryStorage, Storage, run_prefix
+from etude.run.block_file import parse
+from etude.run.listing import RUN_FILES, RUN_FOLDERS
+from etude.run.records import RunFile
+from etude.run.storage import DirectoryStorage, Storage, run_prefix
 
 
 class RunFiles:

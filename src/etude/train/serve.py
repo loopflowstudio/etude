@@ -12,8 +12,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote
 
-from etude.runs.listing import runs
-from etude.runs.storage import Storage
+from etude.run.listing import runs
+from etude.run.storage import Storage
 from etude.train.read import read_all
 from etude.train.report import page_data, render
 

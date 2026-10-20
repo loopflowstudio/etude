@@ -7,8 +7,8 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from etude.runs.records import RunFile
-from etude.runs.storage import DirectoryStorage, Storage
+from etude.run.records import RunFile
+from etude.run.storage import DirectoryStorage, Storage
 
 
 def as_storage(source: Storage | Path | str) -> Storage:

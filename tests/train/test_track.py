@@ -20,10 +20,10 @@ import pytest
 from moto import mock_aws
 
 from etude.cli import main
-from etude.runs.delivery import sync
-from etude.runs.errors import EtudeError
-from etude.runs.listing import runs
-from etude.runs.storage import DirectoryStorage, S3Storage, default_root
+from etude.run.delivery import sync
+from etude.run.errors import EtudeError
+from etude.run.listing import runs
+from etude.run.storage import DirectoryStorage, S3Storage, default_root
 from etude.train.block import rows
 from etude.train.read import buckets, read
 from etude.train.records import Step, Time

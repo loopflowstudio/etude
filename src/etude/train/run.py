@@ -13,7 +13,7 @@ Ownership and invariants:
   folded into recent blocks, then permanent ones by size or cadence.
   Blocks are immutable and are the unit of delivery.
 - The shipper thread copies blocks, whole, to each destination, the
-  author's directory or bucket (`etude.runs.delivery`). A marker per
+  author's directory or bucket (`etude.run.delivery`). A marker per
   destination records what arrived, so `sync` can finish the job later from
   the same files and replays are harmless.
 - The local run directory uses the same layout as a destination, so with no
@@ -46,10 +46,10 @@ from typing import IO, Literal, Self
 
 from pydantic import ValidationError
 
-from etude.runs.block_file import block_key, tail_key
-from etude.runs.delivery import RunFiles, StorageDestination, destinations, ship
-from etude.runs.errors import EtudeError
-from etude.runs.records import (
+from etude.run.block_file import block_key, tail_key
+from etude.run.delivery import RunFiles, StorageDestination, destinations, ship
+from etude.run.errors import EtudeError
+from etude.run.records import (
     ArtifactRef,
     Attempt,
     Clock,
@@ -61,7 +61,7 @@ from etude.runs.records import (
     RunState,
     SourceKey,
 )
-from etude.runs.storage import DirectoryStorage, Storage, run_directory, run_prefix
+from etude.run.storage import DirectoryStorage, Storage, run_directory, run_prefix
 from etude.train.block import Builder, Table, concat
 from etude.train.block import encode as encode_block
 from etude.train.manifest import write_manifest

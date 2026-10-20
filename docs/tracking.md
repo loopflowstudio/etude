@@ -5,7 +5,7 @@ files to your own directory or bucket and reads from them. There is no server
 in this path, and nothing here starts compute or holds a provider credential.
 
 ```python
-from etude.runs.storage import storage_from_uri
+from etude.run.storage import storage_from_uri
 from etude.train.records import Step, Time
 from etude.train.run import track
 
@@ -48,7 +48,7 @@ has no login and listens on this computer only.
 One `etude` command provides compute, reports, sync and checkpoints. The
 launcher (`etude.launch`) and tracking share one package and lock file; neither
 imports the other. Tracking is `etude.train` for training runs, built on
-`etude.runs`: what every run shares (its declaration, files, storage and
+`etude.run`: what every run shares (its declaration, files, storage and
 delivery).
 Install `etude-sdk[s3]` for tracking against a bucket; local tracking does not
 need boto3. Tracking commands read the paths supplied on this computer, even

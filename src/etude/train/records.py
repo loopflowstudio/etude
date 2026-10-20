@@ -13,7 +13,7 @@ from typing import Literal
 
 from pydantic import Field
 
-from etude.runs.records import ArtifactRef, Clock, Name, Record
+from etude.run.records import ArtifactRef, Clock, Name, Record
 
 
 def Step(name: str, meaning: str) -> Clock:  # noqa: N802 - reads as a declaration

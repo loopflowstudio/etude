@@ -41,7 +41,7 @@ def write(
     import time
     import webbrowser
 
-    from etude.runs.storage import default_root, storage_from_uri
+    from etude.run.storage import default_root, storage_from_uri
     from etude.train.report import pages, write
 
     given = source or str(default_root())
@@ -82,7 +82,7 @@ def serve(
     refresh: Annotated[float, typer.Option(help="seconds between a page reloading")] = 5.0,
 ) -> None:
     """Show every experiment's report in the browser, read fresh from the files each time."""
-    from etude.runs.storage import default_root, storage_from_uri
+    from etude.run.storage import default_root, storage_from_uri
     from etude.train.serve import Server
 
     storage = storage_from_uri(source or default_root())
@@ -102,8 +102,8 @@ def sync(
     seal: Annotated[bool, typer.Option(help="close segments a dead process left open")] = False,
 ) -> None:
     """Deliver sealed run files and stored checkpoints to each directory or bucket."""
-    from etude.runs.delivery import sync as deliver
-    from etude.runs.storage import storage_from_uri
+    from etude.run.delivery import sync as deliver
+    from etude.run.storage import storage_from_uri
 
     if seal:
         # Sealing turns training logs into blocks; only then does it need NumPy.
@@ -124,8 +124,8 @@ def checkpoints(
     experiment: Annotated[str | None, typer.Option(help="only this experiment")] = None,
 ) -> None:
     """List recorded checkpoints."""
-    from etude.runs.listing import runs
-    from etude.runs.storage import storage_from_uri
+    from etude.run.listing import runs
+    from etude.run.storage import storage_from_uri
     from etude.train.read import read
 
     storage = storage_from_uri(source)

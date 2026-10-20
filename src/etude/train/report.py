@@ -21,8 +21,8 @@ from pathlib import Path
 
 import numpy as np
 
-from etude.runs.records import WALL_CLOCK
-from etude.runs.storage import Storage
+from etude.run.records import WALL_CLOCK
+from etude.run.storage import Storage
 from etude.train.read import Floats, RunData, read_all
 from etude.train.records import interval95
 
