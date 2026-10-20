@@ -1,16 +1,23 @@
-"""Querying tournaments: `connect` opens every tournament under a source in DuckDB; `compare` asks one question.
+"""Querying eval runs: `connect` opens every one under a source in DuckDB; `compare` asks one question.
 
-`connect` gives one table per author table, holding the rows of every
-tournament (a match's rows from the latest file holding them), beside Etude's
-own tables:
+`connect` gives one table per author table, holding the rows of every eval
+run (a match's rows from the latest file holding them), beside Etude's own
+tables:
 
 | table | columns |
 |---|---|
-| `tournaments` | tournament, experiment, environment (identity), environment_name, environment_config |
+| `runs` | run, experiment, environment (identity), environment_name, environment_config, tournament |
 | `agents` | agent (identity), name, kind, artifact, uri, config, and `config.KEY` per scalar config key |
-| `matches` | tournament, match, conditions, games, seed, state, error |
-| `seats` | tournament, match, player, agent |
-| `groups` | tournament, match, group, player |
+| `matches` | run, match, conditions, games, seed, state, error, wall_ms |
+| `seats` | run, match, player, agent |
+| `groups` | run, match, group, player |
+| `tournaments` | tournament, format, environment, conditions, games |
+| `entrants` | tournament, agent, role (`entrant` or `benchmark`) |
+| `training_checkpoints` | run, experiment, ordinal, artifact, wall_ms, clocks (where each stood) |
+
+`training_checkpoints` holds every checkpoint a training run recorded under
+the source, read from its stored JSON, so a checkpoint agent joins to where
+its run's clocks stood (`agents.artifact = training_checkpoints.artifact`).
 
 Tables are read into memory, from a directory in place and from a bucket
 through a temporary copy, so the connection outlives the files.
@@ -28,14 +35,23 @@ import re
 import tempfile
 import warnings
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import numpy as np
-from pydantic import JsonValue, ValidationError
+from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
-from etude.eval.records import COLUMN_TYPES, Agent, ColumnType, Environment, MatchRecord
-from etude.eval.tournament import ETUDE_TABLES, IDENTIFIER, KIND, quote
+from etude.eval.match import ETUDE_TABLES, IDENTIFIER, KIND, TOURNAMENTS, quote
+from etude.eval.records import (
+    COLUMN_TYPES,
+    Agent,
+    ColumnType,
+    Environment,
+    MatchRecord,
+    Tournament,
+    TournamentRun,
+)
 from etude.run.errors import EtudeError
 from etude.run.listing import as_storage, declared, places
 from etude.run.records import Digest, Record
@@ -51,37 +67,44 @@ _TABLE_FILE = re.compile(r"^tables/([A-Za-z][A-Za-z0-9_]*)\.(\d{20})\.([0-9a-f]+
 
 
 def connect(source: Storage | Path | str) -> duckdb.DuckDBPyConnection:
-    """Every tournament under a directory or bucket, at any depth, as one DuckDB database."""
+    """Every eval run and tournament under a directory or bucket, at any depth, as one DuckDB database."""
     # Imported here: DuckDB is the optional `eval` extra.
     import duckdb  # noqa: PLC0415
 
     storage = as_storage(source)
     db = duckdb.connect()
-    tournaments: list[tuple[str, str, Environment]] = []
-    records: list[tuple[str, MatchRecord]] = []
+    found = _Found()
     with tempfile.TemporaryDirectory(prefix="etude-eval-") as copies:
         files: dict[str, list[Path]] = {}
         for run, folders in sorted(places(storage).items()):
             run_file = declared(storage, folders)
-            found = _environment(storage, folders)
-            if run_file is None or run_file.declaration.kind != KIND or found is None:
+            if run_file is None:
                 continue
-            tournaments.append((run, run_file.experiment, found))
+            if run_file.declaration.kind != KIND:
+                found.checkpoints += _checkpoints(storage, run, run_file.experiment, folders)
+                continue
+            environment = _environment(storage, folders)
+            if environment is None:
+                continue
+            found.runs.append((run, run_file.experiment, environment))
             # One run may be copied to several places; a file's name is the same in each.
             located: dict[str, str] = {}
             for place in folders:
                 for key in storage.keys(place):
                     located.setdefault(key[len(place) :], place)
+            held: dict[str, MatchRecord] = {}
             for name, place in sorted(located.items()):
                 if name.startswith("matches/") and name.endswith(".json"):
-                    records.append(
-                        (run, MatchRecord.model_validate_json(storage.get(place + name)))
-                    )
+                    record = MatchRecord.model_validate_json(storage.get(place + name))
+                    if record.match.key not in held or record.state == "done":
+                        held[record.match.key] = record
                 elif parsed := _TABLE_FILE.match(name):
                     files.setdefault(parsed[1], []).append(
                         _local(storage, place + name, Path(copies) / run / name)
                     )
-        _etude_tables(db, tournaments, records)
+            found.records += [(run, record) for record in held.values()]
+        _tournaments(storage, found)
+        _etude_tables(db, found)
         for table, paths in sorted(files.items()):
             listed = ", ".join(quote(path) for path in paths)
             # A match's rows come from the latest file holding them: a merged file
@@ -91,9 +114,75 @@ def connect(source: Storage | Path | str) -> duckdb.DuckDBPyConnection:
                 f'create table "{table}" as select * exclude (_file) from read_parquet('
                 f"[{listed}], union_by_name = true, filename = '_file') qualify"
                 " parse_filename(_file) = max(parse_filename(_file))"
-                " over (partition by tournament, match)"
+                " over (partition by run, match)"
             )
     return db
+
+
+@dataclass
+class _Found:
+    """What `connect` read, before it becomes Etude's tables."""
+
+    runs: list[tuple[str, str, Environment]] = field(default_factory=list)
+    records: list[tuple[str, MatchRecord]] = field(default_factory=list)
+    tournaments: dict[str, Tournament] = field(default_factory=dict)
+    # (tournament, agent, role), each once.
+    entrants: dict[tuple[str, Digest, str], Agent] = field(default_factory=dict)
+    # Eval run name to its tournament.
+    held_for: dict[str, str] = field(default_factory=dict)
+    checkpoints: list[tuple[str, str, _StoredCheckpoint]] = field(default_factory=list)
+
+
+class _StoredArtifact(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    sha256: str | None = None
+
+
+class _StoredCheckpoint(BaseModel):
+    """What evaluation reads of a training run's `checkpoints/NAME.json`; the rest is training's."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    ordinal: int
+    artifact: _StoredArtifact
+    at: dict[str, float]
+    wall_ms: int
+
+
+def _checkpoints(
+    storage: Storage, run: str, experiment: str, folders: Sequence[str]
+) -> list[tuple[str, str, _StoredCheckpoint]]:
+    found: dict[int, _StoredCheckpoint] = {}
+    for place in folders:
+        for key in storage.keys(place + "checkpoints/"):
+            if key.endswith(".json"):
+                stored = _StoredCheckpoint.model_validate_json(storage.get(key))
+                found.setdefault(stored.ordinal, stored)
+    return [(run, experiment, found[ordinal]) for ordinal in sorted(found)]
+
+
+# `…tournaments/NAME/FILE` at any depth, FILE being `tournament.json` or `FOLDER/ID.json`.
+_TOURNAMENT_FILE = re.compile(
+    rf"^(?:.*/)?{TOURNAMENTS}/([^/]+)/(tournament\.json|(entrants|benchmarks|runs)/[^/]+\.json)$"
+)
+
+
+def _tournaments(storage: Storage, found: _Found) -> None:
+    for key in storage.keys(""):
+        parsed = _TOURNAMENT_FILE.match(key)
+        if parsed is None:
+            continue
+        name, folder = parsed[1], parsed[3]
+        body = storage.get(key)
+        if folder is None:
+            found.tournaments[name] = Tournament.model_validate_json(body)
+        elif folder == "runs":
+            found.held_for[TournamentRun.model_validate_json(body).run] = name
+        else:
+            role = "entrant" if folder == "entrants" else "benchmark"
+            entered = Agent.model_validate_json(body)
+            found.entrants[(name, entered.identity, role)] = entered
 
 
 def _environment(storage: Storage, folders: Sequence[str]) -> Environment | None:
@@ -113,45 +202,40 @@ def _local(storage: Storage, key: str, copy: Path) -> Path:
     return copy
 
 
-def _etude_tables(
-    db: duckdb.DuckDBPyConnection,
-    tournaments: Sequence[tuple[str, str, Environment]],
-    records: Sequence[tuple[str, MatchRecord]],
-) -> None:
+def _etude_tables(db: duckdb.DuckDBPyConnection, found: _Found) -> None:
     db.execute(
-        "create table tournaments (tournament VARCHAR, experiment VARCHAR, environment VARCHAR,"
-        " environment_name VARCHAR, environment_config JSON)"
+        "create table runs (run VARCHAR, experiment VARCHAR, environment VARCHAR,"
+        " environment_name VARCHAR, environment_config JSON, tournament VARCHAR)"
     )
-    db.executemany(
-        "insert into tournaments values (?, ?, ?, ?, ?)",
+    _insert(db, 
+        "insert into runs values (?, ?, ?, ?, ?, ?)",
         [
-            [run, experiment, found.identity, found.name, json.dumps(found.config)]
-            for run, experiment, found in tournaments
+            [run, experiment, environment.identity, environment.name,
+             json.dumps(environment.config), found.held_for.get(run)]
+            for run, experiment, environment in found.runs
         ],
-    )
+    )  # fmt: skip
     db.execute(
-        "create table matches (tournament VARCHAR, match VARCHAR, conditions JSON, games BIGINT,"
-        " seed BIGINT, state VARCHAR, error VARCHAR)"
+        "create table matches (run VARCHAR, match VARCHAR, conditions JSON, games BIGINT,"
+        " seed BIGINT, state VARCHAR, error VARCHAR, wall_ms BIGINT)"
     )
-    db.execute(
-        "create table seats (tournament VARCHAR, match VARCHAR, player BIGINT, agent VARCHAR)"
-    )
-    db.execute(
-        'create table "groups" (tournament VARCHAR, match VARCHAR, "group" VARCHAR, player BIGINT)'
-    )
+    db.execute("create table seats (run VARCHAR, match VARCHAR, player BIGINT, agent VARCHAR)")
+    db.execute('create table "groups" (run VARCHAR, match VARCHAR, "group" VARCHAR, player BIGINT)')
     agents: dict[Digest, list[Agent]] = {}
-    for run, record in records:
+    for run, record in found.records:
         match = record.match
         db.execute(
-            "insert into matches values (?, ?, ?, ?, ?, ?, ?)",
+            "insert into matches values (?, ?, ?, ?, ?, ?, ?, ?)",
             [run, match.key, json.dumps(match.conditions), match.games, match.seed,
-             record.state, record.error],
+             record.state, record.error, record.wall_ms],
         )  # fmt: skip
-        db.executemany(
+        _insert(
+            db,
             "insert into seats values (?, ?, ?, ?)",
             [[run, match.key, seat, seated.identity] for seat, seated in enumerate(match.agents)],
         )
-        db.executemany(
+        _insert(
+            db,
             'insert into "groups" values (?, ?, ?, ?)',
             [
                 [run, match.key, name, seat]
@@ -161,7 +245,45 @@ def _etude_tables(
         )
         for seated in match.agents:
             agents.setdefault(seated.identity, []).append(seated)
+    db.execute(
+        "create table tournaments (tournament VARCHAR, format VARCHAR, environment VARCHAR,"
+        " conditions JSON, games BIGINT)"
+    )
+    _insert(db, 
+        "insert into tournaments values (?, ?, ?, ?, ?)",
+        [
+            [name, held.format, held.environment.identity,
+             json.dumps(list(held.conditions)), held.games]
+            for name, held in sorted(found.tournaments.items())
+        ],
+    )  # fmt: skip
+    db.execute("create table entrants (tournament VARCHAR, agent VARCHAR, role VARCHAR)")
+    _insert(
+        db, "insert into entrants values (?, ?, ?)", [list(key) for key in sorted(found.entrants)]
+    )
+    for (_, identity, _), entered in found.entrants.items():
+        agents.setdefault(identity, []).append(entered)
+    db.execute(
+        "create table training_checkpoints (run VARCHAR, experiment VARCHAR, ordinal BIGINT,"
+        " artifact VARCHAR, wall_ms BIGINT, clocks JSON)"
+    )
+    _insert(db, 
+        "insert into training_checkpoints values (?, ?, ?, ?, ?, ?)",
+        [
+            [run, experiment, stored.ordinal, stored.artifact.sha256, stored.wall_ms,
+             json.dumps(stored.at)]
+            for run, experiment, stored in found.checkpoints
+        ],
+    )  # fmt: skip
     _agents_table(db, agents)
+
+
+def _insert(
+    db: duckdb.DuckDBPyConnection, statement: str, rows: Sequence[Sequence[object]]
+) -> None:
+    # DuckDB refuses an empty batch.
+    if rows:
+        db.executemany(statement, rows)
 
 
 def _agents_table(db: duckdb.DuckDBPyConnection, agents: dict[Digest, list[Agent]]) -> None:
@@ -186,7 +308,8 @@ def _agents_table(db: duckdb.DuckDBPyConnection, agents: dict[Digest, list[Agent
         + "".join(f', "config.{key}" {kind}' for key, kind in columns.items())
         + ")"
     )
-    db.executemany(
+    _insert(
+        db,
         f"insert into agents values ({', '.join('?' for _ in range(6 + len(columns)))})",
         [
             [
@@ -254,7 +377,7 @@ def compare(
     found = db.execute(
         f"""
         with r as (
-            select row_number() over () as _row, tournament, match, player, "group",
+            select row_number() over () as _row, run, match, player, "group",
                 cast("{value}" as DOUBLE) as _value,
                 cast({f'"{per}"' if per else 1} as DOUBLE) as _per
                 {"".join(f', "{name}"' for name in by)}
@@ -262,23 +385,23 @@ def compare(
             where "{value}" is not null and ({where or "true"})
         ),
         teams as (
-            select g.tournament, g.match, g."group", string_agg(s.agent, '+' order by s.agent) as team
-            from "groups" g join seats s using (tournament, match, player)
+            select g.run, g.match, g."group", string_agg(s.agent, '+' order by s.agent) as team
+            from "groups" g join seats s using (run, match, player)
             group by all
         ),
         subjects as (
-            select r.*, s.agent as subject from r join seats s using (tournament, match, player)
+            select r.*, s.agent as subject from r join seats s using (run, match, player)
             union all by name
-            select r.*, t.team as subject from r join teams t using (tournament, match, "group")
+            select r.*, t.team as subject from r join teams t using (run, match, "group")
         ),
         opponents as (
             select distinct x._row, s.agent as opponent
             from subjects x join seats s
-                on s.tournament = x.tournament and s.match = x.match and s.player <> x.player
+                on s.run = x.run and s.match = x.match and s.player <> x.player
             union
             select distinct x._row, t.team
             from subjects x join teams t
-                on t.tournament = x.tournament and t.match = x.match
+                on t.run = x.run and t.match = x.match
                 and t."group" <> x."group" and t."group" <> 'all'
         ),
         pairs as (
@@ -286,9 +409,9 @@ def compare(
             union all
             select x.*, o.opponent from subjects x join opponents o using (_row)
         )
-        select n.environment, r.subject, r.opponent {split}, r.tournament, r.match,
+        select n.environment, r.subject, r.opponent {split}, r.run, r.match,
             sum(r._value) as numerator, sum(r._per) as denominator, count(*) as rows
-        from pairs r join tournaments n using (tournament)
+        from pairs r join runs n using (run)
         group by all
         """
     ).fetchall()

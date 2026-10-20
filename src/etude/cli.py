@@ -41,7 +41,7 @@ def evaluations(
     ] = None,
     open_: Annotated[bool, typer.Option("--open", help="show it in the browser")] = False,
 ) -> None:
-    """Write the report comparing every tournament's agents to DIRECTORY/reports/eval/index.html."""
+    """Write the report comparing every eval run's agents to DIRECTORY/reports/eval/index.html."""
     # Eval runs are composed here, so training's reports never import `etude.eval`.
     import webbrowser
 
@@ -54,7 +54,7 @@ def evaluations(
         storage_from_uri(given), out or (Path(given) / "reports" if local else Path("reports"))
     )
     if target is None:
-        print("no tournaments found", file=sys.stderr)
+        print("no eval runs found", file=sys.stderr)
         raise typer.Exit(1)
     print(target, flush=True)
     if open_:

@@ -1,11 +1,16 @@
-"""File contracts for tournaments: agents, the environment they play in, and matches.
+"""File contracts for evaluation: agents, environments, matches and tournaments.
 
-A tournament is an eval run: `run.json` with kind "evaluation" and no clocks,
-then `environment.json`, then for each match the author's tables as Parquet
-under `tables/` and Etude's record of the match, `matches/KEY.json`.
+An eval run is a run with kind "evaluation" and no clocks: `run.json`, then
+`environment.json`, then for each match the author's tables as Parquet under
+`tables/` and Etude's record of the match, `matches/KEY.json` (or
+`matches/KEY.failed.json`).
+
+A tournament is stored beside the runs under `tournaments/NAME/`, as files
+that are written once and never replaced: `tournament.json`, one file per
+agent under `entrants/` and `benchmarks/`, and one per eval run under `runs/`.
 
 An agent is what plays together with how it is configured, identified across
-tournaments by a digest of both, never by its name: one checkpoint at two
+eval runs by a digest of both, never by its name: one checkpoint at two
 search budgets is two agents. A match seats agents by position (`player`),
 names groups of seats and fixes the conditions it is played under.
 """
@@ -13,6 +18,7 @@ names groups of seats and fixes the conditions it is played under.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from hashlib import sha256
 from typing import Any, Literal, Self
 
@@ -58,7 +64,7 @@ class Agent(Record):
 
 
 class Environment(Record):
-    """What a tournament is played in. Results from different identities are never pooled."""
+    """What matches are played in. Results from different identities are never pooled."""
 
     name: Name
     # The digest of the files that define it.
@@ -104,10 +110,10 @@ class Match(Record):
 
     @property
     def key(self) -> Digest:
-        """Identifies the match within its tournament."""
-        seating = [agent.identity for agent in self.agents]
-        groups = {name: list(seats) for name, seats in self.groups.items()}
-        return digest([seating, groups, self.conditions, self.games])
+        """Identifies the match wherever it is played."""
+        return match_key(
+            [agent.identity for agent in self.agents], self.groups, self.conditions, self.games
+        )
 
     @property
     def seed(self) -> int:
@@ -115,11 +121,60 @@ class Match(Record):
         return int(self.key[:15], 16)
 
 
+def match_key(
+    seating: Sequence[Digest],
+    groups: Mapping[str, Sequence[int]],
+    conditions: Config,
+    games: int,
+) -> Digest:
+    """A match's key from its agents' identities, for readers that hold no `Agent`."""
+    named = {name: list(seats) for name, seats in groups.items()}
+    return digest([list(seating), named, conditions, games])
+
+
 class MatchRecord(Record):
-    """`matches/KEY.json`: how one match went. Written after its tables."""
+    """How one match went, written after its tables: `matches/KEY.json` when done.
+
+    A failed match is `matches/KEY.failed.json`, so a listing alone tells which
+    matches are done; a later success sits beside it and wins.
+    """
 
     match: Match
     state: Literal["done", "failed"]
     error: str | None = None
     # Each table's column types in this match's write; a resume holds later writes to them.
     columns: dict[Name, dict[Name, ColumnType]] = {}
+    # When it was recorded: of two runs holding one match, a tournament takes the later.
+    wall_ms: int = Field(ge=0)
+
+    @property
+    def file(self) -> str:
+        suffix = "json" if self.state == "done" else "failed.json"
+        return f"matches/{self.match.key}.{suffix}"
+
+
+class Tournament(Record):
+    """`tournaments/NAME/tournament.json`: what every match of a tournament shares.
+
+    A benchmark pairs every entrant with every benchmark; a round robin pairs
+    every two entrants once. Each pairing is one match per condition. Fixed
+    once stored. `benchmarks` are the ones known when it was described; the
+    stored ones are files beside it, and `tournament.json` leaves them out.
+    """
+
+    format: Literal["benchmark", "round_robin"]
+    name: Name
+    environment: Environment
+    conditions: tuple[Config, ...] = Field(min_length=1)
+    games: int = Field(ge=1)
+    benchmarks: tuple[Agent, ...] = ()
+
+
+class TournamentRun(Record):
+    """`tournaments/NAME/runs/RUN.json`: an eval run held for the tournament, and what it was given."""
+
+    run: Name
+    entrants: tuple[Digest, ...] = ()
+    benchmarks: tuple[Digest, ...] = ()
+    # (k, n): the run plays the matches whose key is k modulo n.
+    share: tuple[int, int] = (0, 1)

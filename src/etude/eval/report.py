@@ -1,4 +1,4 @@
-"""The eval report: one self-contained page over every tournament under a source.
+"""The eval report: one self-contained page over every eval run under a source.
 
 For each author table and each of its numeric columns, per environment, a
 matrix of subject (row) against opponent (column) with an "all" column, then
@@ -14,8 +14,8 @@ from html import escape
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from etude.eval.match import ETUDE_TABLES
 from etude.eval.query import Comparison, compare, connect
-from etude.eval.tournament import ETUDE_TABLES
 from etude.run.storage import Storage
 
 if TYPE_CHECKING:
@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 SPLIT_VALUES = 12
 NUMERIC = ("BOOLEAN", "BIGINT", "DOUBLE")
 # Keys and coordinates: never a value or a split.
-KEYS = ("player", "group", "game", "tournament", "match")
+KEYS = ("player", "group", "game", "run", "match")
 
 _STYLE = """
 body { font: 14px/1.4 system-ui, sans-serif; margin: 2rem; color: #2b2520; background: #fbf8f3; }
@@ -83,16 +83,16 @@ def _split(found: Sequence[Comparison], column: str, names: dict[str, str]) -> s
 
 
 def render(db: duckdb.DuckDBPyConnection) -> str:
-    """The page for every tournament in a database `etude.eval.query.connect` opened."""
+    """The page for every eval run in a database `etude.eval.query.connect` opened."""
     names: dict[str, str] = dict(db.sql("select agent, name from agents").fetchall())
     environments = db.sql(
-        "select environment, any_value(environment_name), count(*) from tournaments group by all"
+        "select environment, any_value(environment_name), count(*) from runs group by all"
     ).fetchall()
     parts = [
-        "<h1>Tournaments</h1><p>"
+        "<h1>Eval runs</h1><p>"
         + escape(
             "; ".join(
-                f"{name} ({identity[:12]}): {count} tournaments"
+                f"{name} ({identity[:12]}): {count} eval runs"
                 for identity, name, count in environments
             )
         )  # fmt: skip
@@ -108,6 +108,7 @@ def render(db: duckdb.DuckDBPyConnection) -> str:
             ).fetchall()
         )
         + "</table>",
+        _tournaments(db),
     ]
     tables = [name for (name,) in db.sql("show tables").fetchall() if name not in ETUDE_TABLES]
     for table in sorted(tables):
@@ -136,8 +137,29 @@ def render(db: duckdb.DuckDBPyConnection) -> str:
                         _split([c for c in split if c.environment == identity], column, names)
                     )
     return (
-        "<!doctype html><html><head><meta charset=utf-8><title>Tournaments</title>"
+        "<!doctype html><html><head><meta charset=utf-8><title>Eval runs</title>"
         f"<style>{_STYLE}</style></head><body>{''.join(parts)}</body></html>"
+    )
+
+
+def _tournaments(db: duckdb.DuckDBPyConnection) -> str:
+    """Each tournament's format and agents; `etude.eval.tournament.standings` ranks them."""
+    found = db.sql(
+        "select t.tournament, t.format, count(*) filter (e.role = 'entrant'),"
+        " count(*) filter (e.role = 'benchmark') from tournaments t"
+        " left join entrants e using (tournament) group by all order by 1"
+    ).fetchall()
+    if not found:
+        return ""
+    return (
+        "<h2>Tournaments</h2><table><tr><th class=name>tournament</th><th class=name>format</th>"
+        "<th>entrants</th><th>benchmarks</th></tr>"
+        + "".join(
+            f"<tr><td class=name>{escape(name)}</td><td class=name>{escape(format)}</td>"
+            f"<td>{entrants}</td><td>{benchmarks}</td></tr>"
+            for name, format, entrants, benchmarks in found
+        )
+        + "</table>"
     )
 
 
@@ -147,9 +169,9 @@ def _distinct(db: duckdb.DuckDBPyConnection, table: str, column: str) -> int:
 
 
 def write(source: Storage | Path | str, directory: Path) -> Path | None:
-    """Replace `directory/eval/index.html`; None when the source holds no tournament."""
+    """Replace `directory/eval/index.html`; None when the source holds no eval run."""
     db = connect(source)
-    found = db.sql("select count(*) from tournaments").fetchone()
+    found = db.sql("select count(*) from runs").fetchone()
     if found is None or found[0] == 0:
         return None
     target = directory / "eval" / "index.html"

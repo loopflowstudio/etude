@@ -1,452 +1,405 @@
-"""Running a tournament: `evaluate` plays matches in worker processes and stores their tables.
+"""Tournaments: a stored structure that arranges eval runs to produce a set of matches.
 
-`agent`, `environment` and `round_robin` (or `Match` directly) describe what
-`evaluate` plays. The author's `play(match)` returns tables of rows. Etude
-checks that every row names a `player` (a seat) or a `group` of its match and
-that a column keeps one type through the tournament, adds `tournament` and
-`match`, and writes each table as one Parquet file per match, then the match's
-record; both are offered to every destination after each match. A refused or
-raising match is recorded as failed, nothing else of it is stored, and the
-tournament stops.
+`benchmark` and `round_robin` describe a tournament; `hold` stores it and the
+agents it adds, then plays, as one eval run (`etude.eval.match.evaluate`), the
+matches those agents add; `standings` reads the result from a database
+`etude.eval.query.connect` opened.
 
-On finish, each table's files from this process are merged into one, which
-replaces them once delivered. File names carry their write time, and a reader
-takes a match's rows from the latest file holding them, so a match is never
-counted twice.
+A tournament lives under `tournaments/NAME/` beside the runs, in the local
+runs directory and every storage, as files written once and never replaced
+(`etude.eval.records`), so many small eval runs may grow it at once. Its
+schedule is derived from its agents: a benchmark pairs every entrant with
+every benchmark, a round robin every two entrants once, each pairing one match
+per condition, entrant first. Adding an agent only adds matches. A match held
+by two of its eval runs counts once, from the later.
 
-A resume reads the match records already delivered to any destination, so a
-machine with an empty disk skips what was delivered. Workers are fresh
-processes (`spawn`), so `play` must be importable by name.
+An on-the-go hold enters one new checkpoint and reads only the tournament's
+listings, whatever its size: the matches it adds can be held nowhere yet. A
+hold that adds nothing, or adds agents already stored, skips what any of the
+tournament's eval runs delivered, by listing them.
 """
 
 from __future__ import annotations
 
-import multiprocessing
-import os
-import re
-import secrets
-import sys
-import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from hashlib import sha256
-from itertools import permutations
+import json
+from collections.abc import Callable, Mapping, Sequence
+from itertools import combinations
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, NoReturn
+from typing import TYPE_CHECKING, Literal
 
-from pydantic import BaseModel, JsonValue, TypeAdapter, ValidationError
-
+from etude.eval.match import TOURNAMENTS, EvalRun, Tables, as_config, evaluate
+from etude.eval.query import compare
 from etude.eval.records import (
-    COLUMN_TYPES,
+    EVERYONE,
     Agent,
-    ColumnType,
-    Config,
     Environment,
     Match,
-    MatchRecord,
+    Tournament,
+    TournamentRun,
+    digest,
+    match_key,
 )
-from etude.run.declaration import declare
-from etude.run.delivery import RunFiles, StorageDestination, destinations, ship
 from etude.run.errors import EtudeError
-from etude.run.records import ArtifactRef, Record, RunCounters, RunState
-from etude.run.storage import DirectoryStorage, Storage, run_prefix
+from etude.run.records import Digest, Record
+from etude.run.storage import SAFE_NAME, DirectoryStorage, Storage, default_root, run_prefix
 
 if TYPE_CHECKING:
     import duckdb
 
-KIND = "evaluation"
-# Author table and column names: plain SQL identifiers. A leading underscore is Etude's.
-IDENTIFIER = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,62}$")
-# Etude's own tables, which `etude.eval.query.connect` builds beside the author's.
-ETUDE_TABLES = ("tournaments", "agents", "matches", "seats", "groups")
-# Columns Etude adds to every row.
-ADDED = ("tournament", "match")
-
-type Value = bool | int | float | str | None
-type Row = Mapping[str, Value]
-type Tables = Mapping[str, Sequence[Row]]
-
-_CONFIG: TypeAdapter[Config] = TypeAdapter(dict[str, JsonValue])
+type Role = Literal["entrant", "benchmark"]
+_FOLDERS: dict[Role, str] = {"entrant": "entrants", "benchmark": "benchmarks"}
 
 
-class Tournament(Record):
-    """What one call to `evaluate` did."""
-
-    experiment: str
-    name: str
-    environment: Environment
-    played: int
-    # Matches already stored by an earlier attempt.
-    skipped: int
-
-
-def agent(
+def benchmark(
     name: str,
     *,
-    checkpoint: ArtifactRef | None = None,
-    code: Sequence[Path | str] = (),
-    config: Mapping[str, object] | BaseModel | None = None,
-) -> Agent:
-    """A saved model, by its artifact's digest, or code, by its source files; and its config.
-
-    A directory stands for every file below it. Paths are hashed relative to
-    their repository, so the identity is the same on every checkout.
-    """
-    if (checkpoint is None) == (len(code) == 0):
-        raise EtudeError("agent_needs_checkpoint_or_code", 422)
-    if checkpoint is not None:
-        if checkpoint.sha256 is None:
-            raise EtudeError("checkpoint_agent_requires_digest", 422)
-        return Agent(
-            name=name,
-            kind="checkpoint",
-            artifact=checkpoint.sha256,
-            uri=checkpoint.uri,
-            config=_config(config),
-        )
-    if not _files(code):
-        raise EtudeError("code_agent_without_files", 422)
-    return Agent(name=name, kind="code", artifact=_digest_files(code), config=_config(config))
-
-
-def environment(
-    name: str,
-    *,
-    files: Sequence[Path | str] = (),
-    config: Mapping[str, object] | BaseModel | None = None,
-) -> Environment:
-    """What a tournament is played in: its defining files, hashed like code, and its config."""
-    return Environment(name=name, files=_digest_files(files), config=_config(config))
+    environment: Environment,
+    conditions: Sequence[Mapping[str, object]],
+    games: int,
+    benchmarks: Sequence[Agent] = (),
+) -> Tournament:
+    """Every entrant against every benchmark, such as each checkpoint of a run against fixed opponents."""
+    return _described("benchmark", name, environment, conditions, games, benchmarks)
 
 
 def round_robin(
-    roster: Sequence[Agent],
+    name: str,
     *,
+    environment: Environment,
     conditions: Sequence[Mapping[str, object]],
     games: int,
-    seats: int = 2,
-) -> list[Match]:
-    """Every ordered seating of distinct agents, under each of the conditions."""
-    if len({agent.identity for agent in roster}) != len(roster):
-        raise EtudeError("duplicate_agent", 422)
-    return [
-        Match(agents=seated, conditions=_config(given), games=games)
-        for given in conditions
-        for seated in permutations(roster, seats)
-    ]
+) -> Tournament:
+    """Every entrant against every other once; seat swaps belong inside the author's match."""
+    return _described("round_robin", name, environment, conditions, games, ())
 
 
-def _config(config: Mapping[str, object] | BaseModel | None) -> Config:
-    if config is None:
-        return {}
-    data = config.model_dump(mode="json") if isinstance(config, BaseModel) else dict(config)
-    try:
-        return _CONFIG.validate_python(data)
-    except ValidationError as error:
-        raise EtudeError("config_is_not_json", 422) from error
-
-
-def _files(paths: Sequence[Path | str]) -> list[Path]:
-    found: list[Path] = []
-    for given in map(Path, paths):
-        if given.is_dir():
-            found += sorted(path for path in given.rglob("*") if path.is_file())
-        elif given.is_file():
-            found.append(given)
-        else:
-            raise EtudeError("identity_file_missing", 422) from FileNotFoundError(given)
-    return found
-
-
-def _repository_path(path: Path) -> str:
-    """The path below the nearest enclosing repository, or as given outside one."""
-    resolved = path.resolve()
-    for parent in resolved.parents:
-        if (parent / ".git").exists():
-            return resolved.relative_to(parent).as_posix()
-    return path.as_posix()
-
-
-def _digest_files(paths: Sequence[Path | str]) -> str:
-    digest = sha256()
-    named = {_repository_path(path): path for path in _files(paths)}
-    for name in sorted(named):
-        data = named[name].read_bytes()
-        digest.update(f"{name}\0{len(data)}\0".encode() + data)
-    return digest.hexdigest()
-
-
-def evaluate(
-    *,
-    experiment: str,
+def _described(
+    format: Literal["benchmark", "round_robin"],
+    name: str,
     environment: Environment,
-    matches: Sequence[Match],
+    conditions: Sequence[Mapping[str, object]],
+    games: int,
+    benchmarks: Sequence[Agent],
+) -> Tournament:
+    if not SAFE_NAME.match(name):
+        raise EtudeError("unsafe_tournament_name", 422)
+    return Tournament(
+        format=format,
+        name=name,
+        environment=environment,
+        conditions=tuple(as_config(given) for given in conditions),
+        games=games,
+        benchmarks=tuple(benchmarks),
+    )
+
+
+def hold(
+    tournament: Tournament,
+    *,
     play: Callable[[Match], Tables],
+    enter: Sequence[Agent] = (),
+    add_benchmarks: Sequence[Agent] = (),
     workers: int = 1,
-    run: str | None = None,
     directory: Path | str | None = None,
     storages: Sequence[Storage] = (),
-) -> Tournament:
-    """Play every match not already stored in this tournament, `workers` at a time.
+    share: tuple[int, int] = (0, 1),
+) -> EvalRun:
+    """Store the tournament and the agents given, then play the matches they add as one eval run.
 
-    The tournament is an eval run named `run` (see `etude.run.declaration.declare`
-    for its defaults); resuming it requires the same environment. Raises
-    `EtudeError("match_failed")` after recording the first match that raised
-    or returned rows Etude refuses. Delivery failures do not raise: the files
-    stay in the run's directory for `etude sync`, and stderr says so.
+    With no agents to add, plays every scheduled match no eval run of the
+    tournament delivered. `share=(k, n)` plays only the matches whose key is k
+    modulo n, so n machines may split one hold. The eval run is named for the
+    tournament, the agents given and the share, so calling `hold` again with
+    the same arguments resumes it. Raises `EtudeError("tournament_conflict")`
+    when a stored tournament of this name differs, and whatever `evaluate`
+    raises.
     """
-    if workers < 1:
-        raise EtudeError("workers_must_be_positive", 422)
-    if len({scheduled.key for scheduled in matches}) != len(matches):
-        raise EtudeError("duplicate_match", 422)
-    declared = declare(experiment=experiment, clocks=(), run=run, kind=KIND, directory=directory)
-    if declared.declaration.kind != KIND:
-        raise EtudeError("run_is_not_a_tournament", 409)
-    path = declared.root / "environment.json"
-    if not path.is_file():
-        DirectoryStorage(declared.root).put(
-            "environment.json", environment.model_dump_json().encode()
-        )
-    elif Environment.model_validate_json(path.read_bytes()) != environment:
-        raise EtudeError("tournament_environment_conflict", 409)
-    writer = _Writer(declared.root, declared.name, destinations(declared.base, storages))
-    pending = [scheduled for scheduled in matches if scheduled.key not in writer.done]
-    try:
-        for scheduled, outcome in _played(pending, play, workers):
-            if isinstance(outcome, BaseException):
-                writer.fail(scheduled, outcome)
-            writer.store(scheduled, outcome)
-    except BaseException:
-        writer.finish("failed")
-        raise
-    writer.finish("finished")
-    return Tournament(
-        experiment=experiment,
-        name=declared.name,
-        environment=environment,
-        played=len(pending),
-        skipped=len(matches) - len(pending),
+    k, n = share
+    if not 0 <= k < n:
+        raise EtudeError("share_out_of_range", 422)
+    if tournament.format == "round_robin" and add_benchmarks:
+        raise EtudeError("round_robin_has_no_benchmarks", 422)
+    base = Path(directory) if directory is not None else default_root()
+    stored = _Stored(tournament.name, [DirectoryStorage(base), *storages])
+    stored.settle(tournament)
+    listed = {role: stored.listed(role) for role in _FOLDERS}
+    entering = {each.identity: each for each in enter}
+    benching = {each.identity: each for each in add_benchmarks}
+    benching |= {
+        each.identity: each
+        for each in tournament.benchmarks
+        if each.identity not in listed["benchmark"]
+    }
+    added = bool(entering or benching)
+    # Nothing it adds is stored yet, so no eval run can hold a match it adds.
+    fresh = added and not (
+        entering.keys() & listed["entrant"] or benching.keys() & listed["benchmark"]
+    )
+    known = {each.identity: each for each in tournament.benchmarks} | entering | benching
+    benchmarks = (
+        (stored.read("benchmark", listed["benchmark"], known) | benching)
+        if tournament.format == "benchmark"
+        else {}
+    )
+    needs_entrants = tournament.format == "round_robin" or bool(benching) or not added
+    entrants = (
+        stored.read("entrant", listed["entrant"], known) if needs_entrants else {}
+    ) | entering
+    pairs: set[tuple[Digest, Digest]]
+    if tournament.format == "benchmark":
+        pairs = {(e, b) for e in (entrants if not added else entering) for b in benchmarks}
+        pairs |= {(e, b) for e in entrants for b in benching}
+    else:
+        pairs = {
+            (a, b)
+            for a, b in combinations(sorted(entrants), 2)
+            if not added or {a, b} & entering.keys()
+        }
+    agents = entrants | benchmarks
+    matches = [
+        Match(agents=(agents[a], agents[b]), conditions=conditions, games=tournament.games)
+        for a, b in sorted(pairs)
+        for conditions in tournament.conditions
+    ]
+    matches = [each for each in matches if int(each.key, 16) % n == k]
+    if not fresh:
+        delivered = stored.delivered()
+        matches = [each for each in matches if each.key not in delivered]
+    adding: tuple[tuple[Role, dict[Digest, Agent]], ...] = (
+        ("entrant", entering),
+        ("benchmark", benching),
+    )
+    for role, agents_added in adding:
+        for identity, each in agents_added.items():
+            stored.write(f"{_FOLDERS[role]}/{identity}.json", each.model_dump_json().encode())
+    # Named for the arguments, so the same hold resumes the same eval run and
+    # rewrites nothing.
+    named = sorted(entering), sorted(each.identity for each in add_benchmarks)
+    run = f"{tournament.name}.{digest([*named, [k, n]])[:12]}"
+    held = TournamentRun(run=run, entrants=tuple(named[0]), benchmarks=tuple(named[1]), share=share)
+    stored.write(f"runs/{run}.json", held.model_dump_json().encode())
+    return evaluate(
+        experiment=tournament.name,
+        environment=tournament.environment,
+        matches=matches,
+        play=play,
+        workers=workers,
+        run=run,
+        directory=directory,
+        storages=storages,
     )
 
 
-def _played(
-    pending: Sequence[Match], play: Callable[[Match], Tables], workers: int
-) -> Iterator[tuple[Match, Tables | BaseException]]:
-    """Each match with its tables or what it raised, in the order they finish."""
-    if workers == 1:
-        for scheduled in pending:
+class _Stored:
+    """One tournament's folder in each place it is kept: the runs directory and every storage."""
+
+    def __init__(self, name: str, places: Sequence[Storage]) -> None:
+        self.prefix = f"{TOURNAMENTS}/{name}/"
+        self.places = list({place.name: place for place in places}.values())
+        self.present: dict[str, set[str]] = {place.name: set() for place in self.places}
+
+    def settle(self, tournament: Tournament) -> None:
+        """Store `tournament.json` where it is missing; refuse where it differs."""
+        fixed = tournament.model_copy(update={"benchmarks": ()})
+        for place in self.places:
             try:
-                yield scheduled, play(scheduled)
-            except Exception as error:  # noqa: BLE001 - recorded with the match, then raised
-                yield scheduled, error
-        return
-    # Fresh processes everywhere, so a tournament behaves alike on Linux and macOS.
-    context = multiprocessing.get_context("spawn")
-    with ProcessPoolExecutor(min(workers, len(pending) or 1), mp_context=context) as pool:
-        futures = {pool.submit(play, scheduled): scheduled for scheduled in pending}
-        try:
-            for future in as_completed(futures):
-                raised = future.exception()
-                yield futures[future], raised if raised is not None else future.result()
-        finally:
-            # A failure stops the tournament: matches not yet started never start.
-            pool.shutdown(cancel_futures=True)
+                found = Tournament.model_validate_json(place.get(self.prefix + "tournament.json"))
+            except FileNotFoundError:
+                place.put(self.prefix + "tournament.json", fixed.model_dump_json().encode())
+                continue
+            if found != fixed:
+                raise EtudeError("tournament_conflict", 409)
 
-
-class _Writer:
-    """One process's writes to a tournament's folder, and their delivery."""
-
-    def __init__(self, root: Path, name: str, targets: Sequence[StorageDestination]) -> None:
-        # Imported here: DuckDB is the optional `eval` extra.
-        import duckdb  # noqa: PLC0415
-
-        self.files = RunFiles(root)
-        self.name = name
-        self.targets = list(targets)
-        self.id = secrets.token_hex(6)
-        self.problems: dict[str, str] = {}
-        self.written: dict[str, list[str]] = {}
-        self.db: duckdb.DuckDBPyConnection = duckdb.connect()
-        stored = self._stored()
-        self.done = {key for key, record in stored.items() if record.state == "done"}
-        self.columns: dict[str, dict[str, ColumnType]] = {}
-        for record in stored.values():
-            for table, columns in record.columns.items():
-                self.columns.setdefault(table, {}).update(columns)
-
-    def _stored(self) -> dict[str, MatchRecord]:
-        """Match records here and at every destination; a done one wins."""
-        places: list[tuple[Storage, str]] = [(DirectoryStorage(self.files.root), "")]
-        places += [(target.storage, run_prefix(self.name)) for target in self.targets]
-        found: dict[str, MatchRecord] = {}
-        for storage, prefix in places:
-            for key in storage.keys(prefix + "matches/"):
-                if not key.endswith(".json"):
-                    continue
-                record = MatchRecord.model_validate_json(storage.get(key))
-                if found.get(record.match.key) is None or record.state == "done":
-                    found[record.match.key] = record
+    def listed(self, role: Role) -> set[Digest]:
+        """The identities stored for a role in any place, remembering which place holds which."""
+        found: set[Digest] = set()
+        folder = self.prefix + _FOLDERS[role] + "/"
+        for place in self.places:
+            for key in place.keys(folder):
+                self.present[place.name].add(key[len(self.prefix) :])
+                found.add(key[len(folder) :].removesuffix(".json"))
         return found
 
-    def fail(self, scheduled: Match, error: BaseException) -> NoReturn:
-        detail = f"{type(error).__name__}: {error}"[:2000]
-        self._record(MatchRecord(match=scheduled, state="failed", error=detail))
-        self._ship()
-        raise EtudeError("match_failed", 500) from error
-
-    def store(self, scheduled: Match, tables: Tables) -> None:
-        """Check every table, then write them and the match's record; nothing on refusal."""
-        try:
-            checked = {table: _checked(scheduled, table, rows) for table, rows in tables.items()}
-            types = {
-                table: _types(table, rows, self.columns.get(table, {}))
-                for table, rows in checked.items()
-                if rows
-            }
-        except EtudeError as refused:
-            self.fail(scheduled, refused)
-        written = time.time_ns()
-        for table, columns in types.items():
-            key = f"tables/{table}.{written:020d}.{scheduled.key}.parquet"
-            self._write(key, columns, checked[table], scheduled.key)
-            self.written.setdefault(table, []).append(key)
-            self.columns.setdefault(table, {}).update(columns)
-        self._record(MatchRecord(match=scheduled, state="done", columns=types))
-        self._ship()
-
-    def _write(
-        self, key: str, columns: dict[str, ColumnType], rows: Sequence[Row], match: str
-    ) -> None:
-        names = list(columns)
-        self.db.execute(
-            "create or replace table _rows ("
-            + ", ".join(f'"{name}" {kind}' for name, kind in columns.items())
-            + ', "tournament" VARCHAR, "match" VARCHAR)'
-        )
-        self.db.executemany(
-            f"insert into _rows values ({', '.join('?' for _ in range(len(names) + 2))})",
-            [[row.get(name) for name in names] + [self.name, match] for row in rows],
-        )
-        self._copy("select * from _rows", key)
-
-    def _copy(self, query: str, key: str) -> None:
-        """Write a query's result to `key` as Parquet; readers never see half a file."""
-        target = self.files.root / key
-        target.parent.mkdir(parents=True, exist_ok=True)
-        partial = target.with_name(target.name + ".partial")
-        self.db.execute(f"copy ({query}) to {quote(partial)} (format parquet)")
-        partial.replace(target)
-
-    def _record(self, record: MatchRecord) -> None:
-        with self.files.lock:
-            DirectoryStorage(self.files.root).put(
-                f"matches/{record.match.key}.json", record.model_dump_json().encode()
-            )
-
-    def _merge(self) -> None:
-        """Replace each table's files from this process with one, once that one is delivered."""
-        retired: list[str] = []
-        for table, keys in self.written.items():
-            if len(keys) < 2:
+    def read(
+        self, role: Role, identities: set[Digest], known: Mapping[Digest, Agent]
+    ) -> dict[Digest, Agent]:
+        """Each listed agent, from what the caller holds or from the first place holding its file."""
+        found: dict[Digest, Agent] = {}
+        for identity in identities:
+            if identity in known:
+                found[identity] = known[identity]
                 continue
-            files = ", ".join(quote(self.files.root / key) for key in keys)
-            self._copy(
-                f"select * from read_parquet([{files}], union_by_name = true)",
-                f"tables/{table}.{time.time_ns():020d}.{self.id}.parquet",
-            )
-            retired += keys
-        if not retired:
-            return
-        with self.files.lock:
-            with (self.files.root / "tables" / f"{self.id}.removed").open("a") as note:
-                note.write("".join(key + "\n" for key in retired))
-            for key in retired:
-                (self.files.root / key).unlink()
-        self.written.clear()
+            key = f"{_FOLDERS[role]}/{identity}.json"
+            place = next(p for p in self.places if key in self.present[p.name])
+            found[identity] = Agent.model_validate_json(place.get(self.prefix + key))
+        return found
 
-    def _ship(self) -> bool:
-        for target in self.targets:
-            reason = ship(self.files, self.name, target)
-            if reason is None:
-                self.problems.pop(target.name, None)
-            else:
-                self.problems[target.name] = reason
-        return not self.problems
+    def write(self, key: str, body: bytes) -> None:
+        """Store a file in every place not already holding it; tournament files are never replaced."""
+        for place in self.places:
+            if key not in self.present[place.name]:
+                place.put(self.prefix + key, body)
+                self.present[place.name].add(key)
 
-    def finish(self, state: Literal["finished", "failed"]) -> None:
-        self._merge()
-        DirectoryStorage(self.files.root).put(
-            "state.json",
-            RunState(state=state, counters=RunCounters(), writer=self.id)
-            .model_dump_json()
-            .encode(),
-        )
-        self.db.close()
-        if not self._ship():
-            print(
-                f"etude: not delivered: {self.problems}. Files are in {self.files.root}; "
-                "deliver them with `etude sync`.",
-                file=sys.stderr,
-            )
+    def delivered(self) -> set[Digest]:
+        """The keys of every match an eval run of the tournament holds as done, from listings alone."""
+        found: set[Digest] = set()
+        for place in self.places:
+            for key in place.keys(self.prefix + "runs/"):
+                run = key.rsplit("/", 1)[-1].removesuffix(".json")
+                self.present[place.name].add(key[len(self.prefix) :])
+                for held in place.keys(run_prefix(run) + "matches/"):
+                    name = held.rsplit("/", 1)[-1]
+                    if name.endswith(".json") and not name.endswith(".failed.json"):
+                        found.add(name.removesuffix(".json"))
+        return found
 
 
-def quote(path: Path) -> str:
-    """A path as a DuckDB string literal."""
-    return "'" + os.fspath(path).replace("'", "''") + "'"
+class TrainingClocks(Record):
+    """Where a checkpoint entrant's training run stood when it saved the checkpoint."""
+
+    run: str
+    ordinal: int
+    at: dict[str, float]
 
 
-def _checked(scheduled: Match, table: str, rows: Sequence[Row]) -> list[Row]:
-    """The rows, refused unless each names exactly one seat or group of this match."""
-    if not IDENTIFIER.match(table) or table in ETUDE_TABLES:
-        raise EtudeError("table_name_refused", 422) from ValueError(table)
-    for row in rows:
-        player, group = row.get("player"), row.get("group")
-        where = ValueError(f"table {table!r}: {dict(row)!r}")
-        if (player is None) == (group is None):
-            raise EtudeError("row_needs_player_or_group", 422) from where
-        if player is not None and (
-            type(player) is not int or not 0 <= player < len(scheduled.agents)
-        ):
-            raise EtudeError("row_player_not_seated", 422) from where
-        if group is not None and group not in scheduled.groups:
-            raise EtudeError("row_group_not_in_match", 422) from where
-        for column in row:
-            if column in ADDED or not IDENTIFIER.match(column):
-                raise EtudeError("column_name_refused", 422) from where
-    return list(rows)
+class Standing(Record):
+    """An agent's value against one opponent in a tournament, or against the field (`opponent` None)."""
+
+    agent: Digest
+    name: str
+    opponent: Digest | None
+    value: float
+    # A 95% interval resampling whole matches; None with fewer than two.
+    interval: tuple[float, float] | None
+    rows: int
+    matches: int
+    checkpoint: TrainingClocks | None = None
 
 
-def _types(
-    table: str, rows: Sequence[Row], known: Mapping[str, ColumnType]
-) -> dict[str, ColumnType]:
-    """Each column's type in this write. Whole numbers may join a column of fractions."""
-    found: dict[str, ColumnType] = {"player": "BIGINT", "group": "VARCHAR"}
-    for row in rows:
-        for column, value in row.items():
-            if value is None:
-                continue
-            kind = COLUMN_TYPES.get(type(value))
-            if kind is None:
-                raise EtudeError("column_value_refused", 422) from TypeError(
-                    f"table {table!r}, column {column!r}: {type(value).__name__}"
-                )
-            found[column] = _widened(found.get(column, kind), kind, table, column)
-    for column, kind in list(found.items()):
-        if column in known:
-            found[column] = _widened(known[column], kind, table, column, onto=True)
-    # A column given only as nulls here keeps the type an earlier write gave it.
-    nulls = {column for row in rows for column in row} - found.keys()
-    found.update({column: known[column] for column in nulls if column in known})
-    return found
+class Standings(Record):
+    """A tournament's result so far.
+
+    A benchmark's entries are each entrant against each benchmark and against
+    all of them, in training order where entrants are checkpoints. A round
+    robin's are the payoff matrix, entrants ordered by their value against
+    the field, best first.
+    """
+
+    tournament: str
+    format: Literal["benchmark", "round_robin"]
+    # Matches its agents call for, and how many of them an eval run holds.
+    scheduled: int
+    held: int
+    entries: tuple[Standing, ...]
+
+    @property
+    def complete(self) -> bool:
+        return self.held == self.scheduled
 
 
-def _widened(
-    first: ColumnType, then: ColumnType, table: str, column: str, *, onto: bool = False
-) -> ColumnType:
-    if first == then:
-        return first
-    if {first, then} == {"BIGINT", "DOUBLE"} and not (onto and first == "BIGINT"):
-        return "DOUBLE"
-    raise EtudeError("column_type_conflict", 422) from TypeError(
-        f"table {table!r}, column {column!r}: {first} then {then}"
+def standings(
+    db: duckdb.DuckDBPyConnection,
+    tournament: str,
+    *,
+    table: str,
+    value: str,
+    per: str | None = None,
+    where: str | None = None,
+) -> Standings:
+    """The tournament's entrants on `table`'s `value`, as `etude.eval.query.compare` measures it.
+
+    Only the tournament's scheduled matches count, each once, from the eval
+    run that recorded it last.
+    """
+    found = db.execute(
+        "select format, conditions, games from tournaments where tournament = ?", [tournament]
+    ).fetchone()
+    if found is None:
+        raise EtudeError("tournament_not_found", 404)
+    format, conditions, games = found
+    roles: dict[str, list[Digest]] = {"entrant": [], "benchmark": []}
+    for agent, role in db.execute(
+        "select agent, role from entrants where tournament = ? order by agent", [tournament]
+    ).fetchall():
+        roles[role].append(agent)
+    entrants = roles["entrant"]
+    pairs = (
+        [(e, b) for e in entrants for b in roles["benchmark"]]
+        if format == "benchmark"
+        else list(combinations(sorted(entrants), 2))
     )
+    scheduled = {
+        match_key(pair, {EVERYONE: (0, 1)}, given, games)
+        for pair in pairs
+        for given in json.loads(conditions)
+    }
+    latest = db.execute(
+        "select m.match, arg_max(m.run, m.wall_ms) from matches m join runs r using (run)"
+        " where r.tournament = ? and m.state = 'done' group by m.match",
+        [tournament],
+    ).fetchall()
+    chosen = [(run, key) for key, run in latest if key in scheduled]
+    db.execute("create or replace temp table _standing_matches (run VARCHAR, match VARCHAR)")
+    try:
+        db.executemany("insert into _standing_matches values (?, ?)", chosen)
+        compared = compare(
+            db,
+            table=table,
+            value=value,
+            per=per,
+            where="run || '/' || match in (select run || '/' || match from _standing_matches)"
+            + (f" and ({where})" if where else ""),
+        )
+    finally:
+        db.execute("drop table _standing_matches")
+    names: dict[str, str] = dict(db.sql("select agent, name from agents").fetchall())
+    clocks = _training_clocks(db, entrants)
+    # Seats only: a group's row has a team for its subject.
+    entries = [
+        Standing(
+            agent=c.subject[0],
+            name=names[c.subject[0]],
+            opponent=None if c.opponent is None else c.opponent[0],
+            value=c.value,
+            interval=c.interval,
+            rows=c.rows,
+            matches=c.matches,
+            checkpoint=clocks.get(c.subject[0]),
+        )
+        for c in compared
+        if len(c.subject) == 1
+        and c.subject[0] in entrants
+        and (c.opponent is None or len(c.opponent) == 1)
+    ]
+    # Rank: training order for a benchmark, value against the field for a round robin.
+    field = {e.agent: e.value for e in entries if e.opponent is None}
+    rank: dict[Digest | None, tuple[object, ...]] = {None: ()}
+    for each in [*entrants, *roles["benchmark"]]:
+        at = clocks.get(each)
+        rank[each] = (
+            (at is None, at.run if at else "", at.ordinal if at else 0, names.get(each, ""))
+            if format == "benchmark"
+            else (-field.get(each, 0.0), names.get(each, ""))
+        )
+    return Standings(
+        tournament=tournament,
+        format=format,
+        scheduled=len(scheduled),
+        held=len(chosen),
+        entries=tuple(sorted(entries, key=lambda e: (rank[e.agent], rank[e.opponent]))),
+    )
+
+
+def _training_clocks(
+    db: duckdb.DuckDBPyConnection, agents: Sequence[Digest]
+) -> dict[Digest, TrainingClocks]:
+    """Each checkpoint agent's training run and clocks, from the first run recording its artifact."""
+    found: dict[Digest, TrainingClocks] = {}
+    for agent, run, ordinal, at in db.execute(
+        "select a.agent, t.run, t.ordinal, t.clocks from agents a join training_checkpoints t"
+        " on t.artifact = a.artifact where a.kind = 'checkpoint' order by t.run, t.ordinal"
+    ).fetchall():
+        if agent in agents and agent not in found:
+            found[agent] = TrainingClocks(run=run, ordinal=ordinal, at=json.loads(at))
+    return found
