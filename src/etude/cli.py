@@ -1,14 +1,17 @@
 """The `etude` command: launcher and tracking commands, with reports under `etude reports`.
 
 Each half registers its own commands (`etude.launch.cli`, `etude.train.cli`);
-this module joins them, sends launcher commands to a chosen controller, and
-turns expected failures into one line on stderr.
+this module joins them, adds the eval report (`etude reports eval`), sends
+launcher commands to a chosen controller, and turns expected failures into one
+line on stderr.
 """
 
 from __future__ import annotations
 
 import sys
 from collections.abc import Sequence
+from pathlib import Path
+from typing import Annotated
 
 import typer
 
@@ -21,6 +24,43 @@ from etude.train.cli import checkpoints, sync
 
 app = launch_cli.app
 app.add_typer(reports_app, name="reports")
+
+
+@reports_app.command("eval")
+@kind(Kind.wait)
+def evaluations(
+    source: Annotated[
+        str | None,
+        typer.Option(
+            help="a runs directory or s3://bucket/prefix, searched at any depth; "
+            "default: where runs are written on this computer"
+        ),
+    ] = None,
+    out: Annotated[
+        Path | None, typer.Option(help="default: SOURCE/reports, or ./reports for a bucket")
+    ] = None,
+    open_: Annotated[bool, typer.Option("--open", help="show it in the browser")] = False,
+) -> None:
+    """Write the report comparing every eval run's agents to DIRECTORY/reports/eval/index.html."""
+    # Eval runs are composed here, so training's reports never import `etude.eval`.
+    import webbrowser
+
+    from etude.eval.report import write
+    from etude.run.storage import default_root, storage_from_uri
+
+    given = source or str(default_root())
+    local = not given.startswith("s3://")
+    target = write(
+        storage_from_uri(given), out or (Path(given) / "reports" if local else Path("reports"))
+    )
+    if target is None:
+        print("no eval runs found", file=sys.stderr)
+        raise typer.Exit(1)
+    print(target, flush=True)
+    if open_:
+        webbrowser.open(target.resolve().as_uri())
+
+
 # Each may reach a bucket, so it is a wait rather than a read.
 app.command()(kind(Kind.wait)(checkpoints))
 app.command()(kind(Kind.wait)(sync))

@@ -22,7 +22,7 @@ import pytest
         ),
         (
             ["sync", "--directory", "{directory}", "--seal"],
-            19,
+            20,
             ("boto3", "etude.train.report", "etude.train.serve"),
         ),
     ],

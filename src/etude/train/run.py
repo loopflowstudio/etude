@@ -47,6 +47,7 @@ from typing import IO, Literal, Self
 from pydantic import ValidationError
 
 from etude.run.block_file import block_key, tail_key
+from etude.run.declaration import declare
 from etude.run.delivery import RunFiles, StorageDestination, destinations, ship
 from etude.run.errors import EtudeError
 from etude.run.records import (
@@ -56,12 +57,10 @@ from etude.run.records import (
     Continuation,
     Record,
     RunCounters,
-    RunDeclaration,
-    RunFile,
     RunState,
     SourceKey,
 )
-from etude.run.storage import DirectoryStorage, Storage, run_directory, run_prefix
+from etude.run.storage import DirectoryStorage, Storage, run_prefix
 from etude.train.block import Builder, Table, concat
 from etude.train.block import encode as encode_block
 from etude.train.manifest import write_manifest
@@ -676,59 +675,34 @@ def track(
 ) -> Run:
     """Declare or resume a run. Strict: a bad declaration raises here, not later.
 
-    The experiment is always named here; the launcher does not know it. Under
-    `etude launch` the launcher has already said which run this is, so `run`,
-    `job`, `seed` and `cohort` default to what it handed the process
-    (`ETUDE_RUN`, `ETUDE_JOB`, `ETUDE_SEED`, `ETUDE_COHORT`); an argument given
-    here wins. There, `Run.checkpoint` also tells the launcher, and the files
-    are written to `ETUDE_TRACK_DIR`, which the launcher keeps with the job's log. Elsewhere `run` defaults to a new random name.
-    Re-using a name resumes it; its clocks must match the first declaration.
+    The experiment is always named here; the launcher does not know it. The
+    run's identity, and whether it resumes, is settled by
+    `etude.run.declaration.declare`. Under `etude launch`, `Run.checkpoint`
+    also tells the launcher, and the files are written to `ETUDE_TRACK_DIR`,
+    which the launcher keeps with the job's log.
     `ETUDE_FROM_VALUE` on `ETUDE_UNTIL_CLOCK` records the checkpoint resume
     coordinate, from which earlier attempts' points are superseded on read.
-    `config` given as text is kept byte for byte; a mapping is written as JSON.
     """
-    handed = os.environ
-    name = run or handed.get("ETUDE_RUN") or secrets.token_hex(8)
-    if seed is None and "ETUDE_SEED" in handed:
-        seed = int(handed["ETUDE_SEED"])
-    base, root = run_directory(directory, experiment, name)
-    text = (
-        config if isinstance(config, str) or config is None else json.dumps(config, sort_keys=True)
-    )
-    declaration = RunDeclaration(
-        source_key=SourceKey(namespace=namespace, kind="run", source_id=name),
-        clocks=tuple(clocks),
-        job=job or handed.get("ETUDE_JOB"),
-        job_name=None if job else handed.get("ETUDE_JOB_NAME"),
+    declared = declare(
+        experiment=experiment,
+        clocks=clocks,
+        run=run,
+        job=job,
         seed=seed,
-        cohort=cohort or handed.get("ETUDE_COHORT"),
+        cohort=cohort,
         kind=kind,
-        config_json=text,
-        config_sha256=sha256(text.encode()).hexdigest() if text is not None else None,
+        config=config,
         continues=continues,
+        directory=directory,
+        namespace=namespace,
     )
-    files = RunFiles(root)
-    prior = files.run_file()
-    if prior is not None:
-        if prior.experiment != experiment:
-            # Runs are kept by name alone, so a name belongs to one experiment.
-            raise EtudeError("run_name_belongs_to_another_experiment", 409)
-        if prior.declaration.clocks != declaration.clocks:
-            raise EtudeError("run_clock_conflict", 409)
-    else:
-        root.mkdir(parents=True, exist_ok=True)
-        (root / "run.json").write_text(
-            RunFile(
-                experiment=experiment, namespace=namespace, declaration=declaration
-            ).model_dump_json()
-        )
     return Run(
         experiment=experiment,
-        name=name,
+        name=declared.name,
         namespace=namespace,
-        root=root,
-        clocks=declaration.clocks,
-        destinations=destinations(base, storages),
+        root=declared.root,
+        clocks=declared.declaration.clocks,
+        destinations=destinations(declared.base, storages),
         queue_size=queue_size,
         segment_seconds=segment_seconds,
         segment_rows=segment_rows,

@@ -61,8 +61,8 @@ class RunFiles:
         ]
 
     def fingerprint(self, key: str) -> str:
-        """Blocks never change; a stored checkpoint is large; other files are hashed."""
-        if key.endswith((".blk", ".tail")):
+        """Blocks and episode files never change; a stored checkpoint is large; others are hashed."""
+        if key.endswith((".blk", ".tail")) or key.startswith("episodes/"):
             return "sealed"
         if key.startswith("checkpoints/") and not key.endswith(".json"):
             stat = (self.root / key).stat()

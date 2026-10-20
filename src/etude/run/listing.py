@@ -17,8 +17,9 @@ def as_storage(source: Storage | Path | str) -> Storage:
 
 
 # A folder is a run's when it holds one of these directly: its name is the run's.
-RUN_FOLDERS = ("metrics", "checkpoints")
-RUN_FILES = ("run.json", "state.json")
+# `evaluation.json` and `episodes` are an eval run's (`etude.eval`).
+RUN_FOLDERS = ("metrics", "checkpoints", "episodes")
+RUN_FILES = ("run.json", "evaluation.json", "state.json")
 
 
 def places(storage: Storage) -> dict[str, list[str]]:

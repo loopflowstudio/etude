@@ -1,4 +1,8 @@
-"""What every run shares never depends on one kind of run, and no run depends on the launcher."""
+"""What every run shares never depends on one kind of run, and no run depends on the launcher.
+
+Eval runs depend on neither training nor the launcher, and only the top-level
+command composes them with the rest.
+"""
 
 import ast
 from pathlib import Path
@@ -28,9 +32,16 @@ def test_shared_run_code_imports_no_kind_of_run_and_training_imports_no_evaluati
     rules = {
         "etude.run": ("etude.train", "etude.eval", "etude.launch"),
         "etude.train": ("etude.eval", "etude.launch"),
+        "etude.eval": ("etude.train", "etude.launch"),
     }
     for package, forbidden in rules.items():
         imports = _imports(package)
         assert imports, package
         for path, names in imports.items():
             assert not [n for n in names for f in forbidden if _within(n, f)], path
+
+
+def test_only_the_top_level_command_imports_evaluation() -> None:
+    for path, names in _imports("etude").items():
+        if not path.is_relative_to(SOURCE / "etude/eval") and path != SOURCE / "etude/cli.py":
+            assert not [n for n in names if _within(n, "etude.eval")], path
