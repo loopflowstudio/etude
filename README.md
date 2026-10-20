@@ -49,7 +49,7 @@ uv add 'etude-sdk[s3]'             # with S3 storage
 ## Read more
 
 - [Tracking](docs/tracking.md): runs, clocks, checkpoints, reports.
-- [Eval runs](docs/evaluation.md): agents playing each other, compared across runs.
+- [Tournaments](docs/evaluation.md): agents playing each other in parallel, queried with DuckDB.
 - [The launcher](docs/launcher.md): pools, SSH hosts, rented machines, cohorts,
   limits and recovery.
 

@@ -20,6 +20,8 @@ Repository = "https://github.com/loopflowstudio/etude"
 
 [project.optional-dependencies]
 s3 = ["boto3>=1.35,<2"]
+# Tournaments: Parquet tables written and queried with DuckDB.
+eval = ["duckdb>=1.1,<2"]
 
 [project.scripts]
 etude = "etude.cli:main"
@@ -28,7 +30,7 @@ etude = "etude.cli:main"
 packages = ["src/etude"]
 
 [dependency-groups]
-dev = ["pytest>=8,<10", "mypy>=1.15,<2", "ruff>=0.11,<1", "moto[s3]>=5,<6"]
+dev = ["pytest>=8,<10", "mypy>=1.15,<2", "ruff>=0.11,<1", "moto[s3]>=5,<6", "etude-sdk[eval]"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -60,3 +62,6 @@ ban-relative-imports = "all"
 "src/etude/cli.py" = ["PLC0415"]
 "src/etude/launch/cli.py" = ["PLC0415"]
 "src/etude/train/cli.py" = ["PLC0415"]
+
+[tool.uv.sources]
+etude-sdk = { workspace = true }

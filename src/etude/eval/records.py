@@ -1,120 +1,117 @@
-"""File contracts for eval runs: agents, measures and the episodes they play.
+"""File contracts for tournaments: agents, the environment they play in, and matches.
 
-An eval run declares its agents and measures once, in `evaluation.json` beside
-`run.json`, then records episodes. A player is a position in one episode; what
-takes it is an agent, named within the run and identified across runs by a
-digest. A group is a set of positions measured together, such as a team.
+A tournament is an eval run: `run.json` with kind "evaluation" and no clocks,
+then `environment.json`, then for each match the author's tables as Parquet
+under `tables/` and Etude's record of the match, `matches/KEY.json`.
 
-No measure is privileged: win/loss is declared like any other. Each measure is
-a mean or a rate and belongs to one level, player, group or episode.
+An agent is what plays together with how it is configured, identified across
+tournaments by a digest of both, never by its name: one checkpoint at two
+search budgets is two agents. A match seats agents by position (`player`),
+names groups of seats and fixes the conditions it is played under.
 """
 
 from __future__ import annotations
 
-from typing import Literal, Self
+import json
+from hashlib import sha256
+from typing import Any, Literal, Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, JsonValue, model_validator
 
 from etude.run.records import Digest, Name, Record
 
+type Config = dict[str, JsonValue]
+type ColumnType = Literal["BOOLEAN", "BIGINT", "DOUBLE", "VARCHAR"]
+
+# Every match has this group, holding every seat.
+EVERYONE = "all"
+
+
+def digest(value: object) -> Digest:
+    """The digest of a value's canonical JSON, so equal values agree on every machine."""
+    text = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return sha256(text.encode()).hexdigest()
+
 
 class Agent(Record):
-    """What takes a position: a saved model, or code such as a scripted player."""
+    """A saved model or code, and the configuration it plays with."""
 
-    # Local to the run; players refer to it. Runs are joined by `identity`.
+    # What a report calls it; several names may share an identity.
     name: Name
     kind: Literal["checkpoint", "code"]
     # A checkpoint's artifact digest, or the digest of the code's source files.
-    identity: Digest
+    artifact: Digest
     uri: str | None = None
-    # The author's: the training run it came from, a seed, "anchor".
-    labels: dict[Name, str] = {}
+    config: Config = {}
+
+    @property
+    def identity(self) -> Digest:
+        return digest([self.kind, self.artifact, self.config])
 
 
-class Measure(Record):
-    """One declared quantity. A rate divides total hits by total opportunities."""
+class Environment(Record):
+    """What a tournament is played in. Results from different identities are never pooled."""
 
     name: Name
-    meaning: str = Field(min_length=1, max_length=200)
-    kind: Literal["mean", "rate"]
-    of: Literal["player", "group", "episode"]
+    # The digest of the files that define it.
+    files: Digest
+    config: Config = {}
+
+    @property
+    def identity(self) -> Digest:
+        return digest([self.name, self.files, self.config])
 
 
-class Count(Record):
-    """A rate measure's value in one episode: hits out of opportunities."""
+class Match(Record):
+    """A seating of agents under fixed conditions, played for some games.
 
-    hits: float = Field(ge=0)
-    opportunities: int = Field(ge=0)
+    The unit Etude schedules, resumes and resamples. Group `all` holds every
+    seat and is added when not given.
+    """
 
-    @model_validator(mode="after")
-    def bounded(self) -> Self:
-        if self.hits > self.opportunities:
-            raise ValueError("hits_exceed_opportunities")
-        return self
-
-
-type Values = dict[Name, float | Count]
-
-
-class Player(Record):
-    """A position in one episode and the agent that took it."""
-
-    agent: Name
-    labels: dict[Name, str] = {}
-    measures: Values = {}
-
-
-class Group(Record):
-    """Positions measured together: a team, a partnership, a coalition."""
-
-    # Unique within its episode.
-    name: Name
-    # Positions in `Episode.players`; a player may be in several groups.
-    players: tuple[int, ...] = Field(min_length=1)
-    labels: dict[Name, str] = {}
-    measures: Values = {}
-
-
-class Episode(Record):
-    """One finished game or task. Recording a key again replaces it."""
-
-    key: Name
-    # In position order.
-    players: tuple[Player, ...] = Field(min_length=1)
-    groups: tuple[Group, ...] = ()
-    # Episodes sharing a block, such as one deal played both ways, are
-    # resampled together; with no block an episode is its own.
-    block: Name | None = None
-    labels: dict[Name, str] = {}
-    measures: Values = {}
-    # The gameplay log, relative to the run. Etude never reads it.
-    log: str | None = None
-
-    @model_validator(mode="after")
-    def coherent(self) -> Self:
-        if len({group.name for group in self.groups}) != len(self.groups):
-            raise ValueError("duplicate_group")
-        for group in self.groups:
-            if len(set(group.players)) != len(group.players):
-                raise ValueError("duplicate_group_player")
-            if not all(0 <= position < len(self.players) for position in group.players):
-                raise ValueError("group_player_out_of_range")
-        return self
-
-
-class EvaluationFile(Record):
-    """`evaluation.json`: an eval run's agents and measures. Re-declaring must match."""
-
-    schema_version: Literal[1] = 1
+    # By seat: `player` in a row is a position here.
     agents: tuple[Agent, ...] = Field(min_length=1)
-    measures: tuple[Measure, ...] = Field(min_length=1)
+    groups: dict[Name, tuple[int, ...]] = {}
+    conditions: Config = {}
+    games: int = Field(default=1, ge=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def everyone(cls, data: Any) -> Any:
+        if isinstance(data, dict) and EVERYONE not in data.get("groups", {}):
+            seats = tuple(range(len(data.get("agents", ()))))
+            data = {**data, "groups": {EVERYONE: seats, **data.get("groups", {})}}
+        return data
 
     @model_validator(mode="after")
-    def distinct(self) -> Self:
-        if len({agent.name for agent in self.agents}) != len(self.agents):
-            raise ValueError("duplicate_agent_name")
-        if len({agent.identity for agent in self.agents}) != len(self.agents):
-            raise ValueError("duplicate_agent_identity")
-        if len({measure.name for measure in self.measures}) != len(self.measures):
-            raise ValueError("duplicate_measure")
+    def seated(self) -> Self:
+        if self.groups[EVERYONE] != tuple(range(len(self.agents))):
+            raise ValueError("group_all_is_every_seat")
+        for seats in self.groups.values():
+            if not seats or len(set(seats)) != len(seats):
+                raise ValueError("group_seats_empty_or_repeated")
+            if not all(0 <= seat < len(self.agents) for seat in seats):
+                raise ValueError("group_seat_out_of_range")
         return self
+
+    @property
+    def key(self) -> Digest:
+        """Identifies the match within its tournament."""
+        seating = [agent.identity for agent in self.agents]
+        groups = {name: list(seats) for name, seats in self.groups.items()}
+        return digest([seating, groups, self.conditions, self.games])
+
+    @property
+    def seed(self) -> int:
+        """Derived from the key, so a replayed match draws the same games."""
+        return int(self.key[:15], 16)
+
+
+class MatchRecord(Record):
+    """`matches/KEY.json`: how one match went. Written after its tables."""
+
+    match: Match
+    state: Literal["done", "failed"]
+    error: str | None = None
+    # Each table's column types in this match's write; a resume holds later writes to them.
+    columns: dict[Name, dict[Name, ColumnType]] = {}

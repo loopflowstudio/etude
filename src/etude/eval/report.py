@@ -1,11 +1,10 @@
-"""The eval report: one self-contained page over every eval run under a source.
+"""The eval report: one self-contained page over every tournament under a source.
 
-For each measure declared alike by every run that declares it, a matrix of
-subject (row) against opponent (column), with an "all" column, then the same
-pairings split by each label that takes between 2 and `SPLIT_VALUES` values,
-such as a cell or who played first. Episode measures are split by label only.
-Conflicting declarations are listed and not combined. Plain HTML, no script
-and no network; regenerating replaces the file.
+For each author table and each of its numeric columns, per environment, a
+matrix of subject (row) against opponent (column) with an "all" column, then
+the same pairings split by each column that takes between 2 and
+`SPLIT_VALUES` values, such as who was on the play. Plain HTML, no script and
+no network; regenerating replaces the file.
 """
 
 from __future__ import annotations
@@ -13,21 +12,19 @@ from __future__ import annotations
 from collections.abc import Sequence
 from html import escape
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from etude.eval.read import (
-    Comparison,
-    EpisodeView,
-    agent_names,
-    agents,
-    compare,
-    conflicts,
-    episodes,
-    measures,
-)
-from etude.eval.records import Measure
+from etude.eval.query import Comparison, compare, connect
+from etude.eval.tournament import ETUDE_TABLES
 from etude.run.storage import Storage
 
+if TYPE_CHECKING:
+    import duckdb
+
 SPLIT_VALUES = 12
+NUMERIC = ("BOOLEAN", "BIGINT", "DOUBLE")
+# Keys and coordinates: never a value or a split.
+KEYS = ("player", "group", "game", "tournament", "match")
 
 _STYLE = """
 body { font: 14px/1.4 system-ui, sans-serif; margin: 2rem; color: #2b2520; background: #fbf8f3; }
@@ -48,14 +45,14 @@ def _cell(found: Comparison | None) -> str:
     )
     return (
         f"<td>{found.value:.3g}{interval}"
-        f"<br><small>{found.episodes} ep, {found.blocks} blk</small></td>"
+        f"<br><small>{found.rows} rows, {found.matches} matches</small></td>"
     )
 
 
 def _party(identities: tuple[str, ...] | None, names: dict[str, str]) -> str:
     if identities is None:
         return "all"
-    return " + ".join(names[identity] for identity in identities) or "episode"
+    return " + ".join(names.get(identity, identity[:12]) for identity in identities)
 
 
 def _matrix(found: Sequence[Comparison], names: dict[str, str]) -> str:
@@ -72,91 +69,92 @@ def _matrix(found: Sequence[Comparison], names: dict[str, str]) -> str:
     return f"<table><tr><th class=name>subject \\ opponent</th>{head}</tr>{rows}</table>"
 
 
-def _split(found: Sequence[Comparison], label: str, names: dict[str, str]) -> str:
+def _split(found: Sequence[Comparison], column: str, names: dict[str, str]) -> str:
     rows = "".join(
         f"<tr><td class=name>{escape(_party(c.subject, names))}</td>"
         f"<td class=name>{escape(_party(c.opponent, names))}</td>"
-        f"<td class=name>{escape(str(c.labels[label]))}</td>{_cell(c)}</tr>"
+        f"<td class=name>{escape(str(c.split[column]))}</td>{_cell(c)}</tr>"
         for c in found
     )
     return (
         f"<table><tr><th class=name>subject</th><th class=name>opponent</th>"
-        f"<th class=name>{escape(label)}</th><th>value</th></tr>{rows}</table>"
+        f"<th class=name>{escape(column)}</th><th>value</th></tr>{rows}</table>"
     )
 
 
-def _labels(views: Sequence[EpisodeView], measure: Measure) -> list[str]:
-    """Labels worth splitting this measure by: those with a few distinct values."""
-    values: dict[str, set[str]] = {}
-    for view in views:
-        if measure not in view.declaration.measures:
-            continue
-        episode = view.episode
-        sources = [episode.labels]
-        if measure.of == "player":
-            sources += [player.labels for player in episode.players]
-        elif measure.of == "group":
-            sources += [group.labels for group in episode.groups]
-        for labels in sources:
-            for name, value in labels.items():
-                values.setdefault(name, set()).add(value)
-    return sorted(name for name, seen in values.items() if 2 <= len(seen) <= SPLIT_VALUES)
-
-
-def render(views: Sequence[EpisodeView]) -> str:
-    """The page for these episodes."""
-    names = agent_names(views)
-    runs = sorted({(view.experiment, view.run) for view in views})
+def render(db: duckdb.DuckDBPyConnection) -> str:
+    """The page for every tournament in a database `etude.eval.query.connect` opened."""
+    names: dict[str, str] = dict(db.sql("select agent, name from agents").fetchall())
+    environments = db.sql(
+        "select environment, any_value(environment_name), count(*) from tournaments group by all"
+    ).fetchall()
     parts = [
-        f"<h1>Evaluations</h1><p>{len(views)} episodes from {len(runs)} eval runs: "
-        + escape(", ".join(f"{experiment}/{run}" for experiment, run in runs))
+        "<h1>Tournaments</h1><p>"
+        + escape(
+            "; ".join(
+                f"{name} ({identity[:12]}): {count} tournaments"
+                for identity, name, count in environments
+            )
+        )  # fmt: skip
         + "</p>",
         "<h2>Agents</h2><table><tr><th class=name>name</th><th class=name>kind</th>"
-        "<th class=name>identity</th><th class=name>labels</th></tr>"
+        "<th class=name>identity</th><th class=name>config</th></tr>"
         + "".join(
-            f"<tr><td class=name>{escape(names[a.identity])}</td><td class=name>{a.kind}</td>"
-            f"<td class=name><code>{a.identity[:12]}</code></td><td class=name>"
-            + escape(", ".join(f"{k}={v}" for k, v in sorted(a.labels.items())))
-            + "</td></tr>"
-            for a in agents(views)
+            f"<tr><td class=name>{escape(name)}</td><td class=name>{kind}</td>"
+            f"<td class=name><code>{identity[:12]}</code></td>"
+            f"<td class=name>{escape(str(config))}</td></tr>"
+            for identity, name, kind, config in db.sql(
+                "select agent, name, kind, config from agents order by name"
+            ).fetchall()
         )
         + "</table>",
     ]
-    for measure in measures(views):
-        parts.append(
-            f"<h2>{escape(measure.name)}</h2><p>{escape(measure.meaning)} "
-            f"<small>({measure.kind} per {measure.of})</small></p>"
-        )
-        parts.append(_matrix(compare(views, measure.name), names))
-        for label in _labels(views, measure):
-            parts.append(f"<h3>by {escape(label)}</h3>")
-            parts.append(_split(compare(views, measure.name, by=[label]), label, names))
-    found = conflicts(views)
-    if found:
-        parts.append("<h2>Conflicting declarations</h2><p>Not combined.</p><ul>")
-        for conflict in found:
-            versions = "; ".join(
-                f"{m.kind} per {m.of}: {escape(m.meaning)}" for m in conflict.declarations
-            )
-            parts.append(
-                f"<li>{escape(conflict.measure)} in {escape(', '.join(conflict.runs))}: "
-                f"{versions}</li>"
-            )
-        parts.append("</ul>")
+    tables = [name for (name,) in db.sql("show tables").fetchall() if name not in ETUDE_TABLES]
+    for table in sorted(tables):
+        columns = {name: kind for name, kind, *_ in db.sql(f'describe "{table}"').fetchall()}
+        splits = [
+            column
+            for column in columns
+            if column not in KEYS and 2 <= _distinct(db, table, column) <= SPLIT_VALUES
+        ]
+        for value in (c for c, kind in columns.items() if kind in NUMERIC and c not in KEYS):
+            found = compare(db, table=table, value=value)
+            by = {
+                column: compare(db, table=table, value=value, by=[column])
+                for column in splits
+                if column != value
+            }
+            for identity, name, _ in environments:
+                parts.append(
+                    f"<h2>{escape(table)}: {escape(value)}</h2><p><small>environment "
+                    f"{escape(name)} ({identity[:12]})</small></p>"
+                )
+                parts.append(_matrix([c for c in found if c.environment == identity], names))
+                for column, split in by.items():
+                    parts.append(f"<h3>by {escape(column)}</h3>")
+                    parts.append(
+                        _split([c for c in split if c.environment == identity], column, names)
+                    )
     return (
-        "<!doctype html><html><head><meta charset=utf-8><title>Evaluations</title>"
+        "<!doctype html><html><head><meta charset=utf-8><title>Tournaments</title>"
         f"<style>{_STYLE}</style></head><body>{''.join(parts)}</body></html>"
     )
 
 
+def _distinct(db: duckdb.DuckDBPyConnection, table: str, column: str) -> int:
+    found = db.sql(f'select count(distinct "{column}") from "{table}"').fetchone()
+    return 0 if found is None else int(found[0])
+
+
 def write(source: Storage | Path | str, directory: Path) -> Path | None:
-    """Replace `directory/eval/index.html`; None when the source holds no eval run."""
-    views = episodes(source)
-    if not views:
+    """Replace `directory/eval/index.html`; None when the source holds no tournament."""
+    db = connect(source)
+    found = db.sql("select count(*) from tournaments").fetchone()
+    if found is None or found[0] == 0:
         return None
     target = directory / "eval" / "index.html"
     target.parent.mkdir(parents=True, exist_ok=True)
     partial = target.with_name(target.name + ".partial")
-    partial.write_text(render(views))
+    partial.write_text(render(db))
     partial.replace(target)
     return target

@@ -61,8 +61,12 @@ class RunFiles:
         ]
 
     def fingerprint(self, key: str) -> str:
-        """Blocks and episode files never change; a stored checkpoint is large; others are hashed."""
-        if key.endswith((".blk", ".tail")) or key.startswith("episodes/"):
+        """Blocks and tables never change; a stored checkpoint is large; others are hashed."""
+        if (
+            key.endswith((".blk", ".tail"))
+            or key.startswith("tables/")
+            and key.endswith(".parquet")
+        ):
             return "sealed"
         if key.startswith("checkpoints/") and not key.endswith(".json"):
             stat = (self.root / key).stat()
@@ -74,7 +78,7 @@ class RunFiles:
     def removed(self) -> list[str]:
         """Every path, relative to the run, that a writer has retired."""
         lines: list[str] = []
-        for note in sorted((self.root / "metrics").glob("*.removed")):
+        for note in sorted(self.root.glob("*/*.removed")):
             lines += note.read_text().split("\n")[:-1]
         return lines
 

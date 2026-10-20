@@ -1,7 +1,7 @@
 """Declaring a run: settling its identity and writing, or checking, its `run.json`.
 
 Every kind of run starts here; `etude.train.run.track` and
-`etude.eval.run.record` add what their kind writes afterwards.
+`etude.eval.tournament.evaluate` add what their kind writes afterwards.
 """
 
 from __future__ import annotations
