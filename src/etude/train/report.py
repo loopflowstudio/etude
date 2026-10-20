@@ -5,9 +5,9 @@ it again replaces it; the page keeps the reader's clock, mode and hidden runs
 in its URL, so a regenerated or reloaded page shows the same view. It is the
 quickest way to see that what was logged is what was meant: every
 metric against any declared clock with its min-max envelope, runs overlaid,
-jobs as mean and 95% interval over their seeds, and evaluations with their
-intervals. It needs no server and no network; the page embeds its data and uPlot, which
-is vendored under `vendor/` with its MIT licence.
+and jobs as mean and 95% interval over their seeds. It needs no server and no
+network; the page embeds its data and uPlot, which is vendored under `vendor/`
+with its MIT licence.
 """
 
 from __future__ import annotations
@@ -21,15 +21,14 @@ from pathlib import Path
 
 import numpy as np
 
-from etude.track.read import Floats, RunData, evaluations, read_all
-from etude.track.records import WALL_CLOCK, interval95
-from etude.track.storage import Storage
+from etude.run.records import WALL_CLOCK
+from etude.run.storage import Storage
+from etude.train.read import Floats, RunData, read_all
+from etude.train.records import interval95
 
 BUCKETS = 240
 CASE_BUCKETS = 120
 WALL_MEANING = "wall time since the run's first row, seconds"
-CHECKPOINT_CLOCK = "checkpoint"
-CHECKPOINT_MEANING = "the run's nth recorded checkpoint; evaluations only"
 
 
 def _round(value: float | None) -> float | None:
@@ -100,13 +99,6 @@ def page_data(experiment: str, data: Sequence[RunData]) -> dict[str, object]:
         for declared in run.clocks:
             clocks.setdefault(declared.name, declared.model_dump())
     clocks[WALL_CLOCK] = {"name": WALL_CLOCK, "kind": "time", "meaning": WALL_MEANING}
-    if any(run.checkpoints for run in data):
-        clocks[CHECKPOINT_CLOCK] = {
-            "name": CHECKPOINT_CLOCK,
-            "kind": "step",
-            "meaning": CHECKPOINT_MEANING,
-        }
-    index_of = {run.name: index for index, run in enumerate(data)}
     labels = _labels(data)
     metrics: dict[str, None] = {}
     for run in data:
@@ -165,22 +157,6 @@ def page_data(experiment: str, data: Sequence[RunData]) -> dict[str, object]:
         ],
         "series": series,
         "jobs": jobs,
-        "evaluations": [
-            {
-                "writer": index_of[view.writer],
-                # The run that recorded the subject checkpoint; None when none did.
-                "run": index_of[view.run] if view.run is not None else None,
-                "at": view.at | ({CHECKPOINT_CLOCK: view.checkpoint} if view.checkpoint else {}),
-                "definition": view.record.definition.name,
-                "version": view.record.definition.sha256[:12],
-                "subject": view.record.subject.uri,
-                **view.record.model_dump(
-                    mode="json",
-                    include={"state", "episodes", "expected_episodes", "estimates", "failure"},
-                ),
-            }
-            for view in evaluations(data)
-        ],
     }
 
 

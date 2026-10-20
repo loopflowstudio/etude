@@ -1,6 +1,6 @@
 """The `etude` command: launcher and tracking commands, with reports under `etude reports`.
 
-Each half registers its own commands (`etude.launch.cli`, `etude.track.cli`);
+Each half registers its own commands (`etude.launch.cli`, `etude.train.cli`);
 this module joins them, sends launcher commands to a chosen controller, and
 turns expected failures into one line on stderr.
 """
@@ -15,9 +15,9 @@ import typer
 from etude.launch import cli as launch_cli
 from etude.launch.commands import Kind, kind
 from etude.launch.errors import LauncherError
-from etude.track.cli import app as reports_app
-from etude.track.cli import checkpoints, sync
-from etude.track.errors import EtudeError
+from etude.run.errors import EtudeError
+from etude.train.cli import app as reports_app
+from etude.train.cli import checkpoints, sync
 
 app = launch_cli.app
 app.add_typer(reports_app, name="reports")

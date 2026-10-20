@@ -16,15 +16,16 @@ import numpy as np
 import pytest
 from moto import mock_aws
 
-from etude.track.block import Series, Table, encode
-from etude.track.block_file import block_key
-from etude.track.manifest import write_manifest
-from etude.track.read import buckets, read
-from etude.track.records import RunDeclaration, RunFile, SourceKey, Step, Time
-from etude.track.report import pages
-from etude.track.run import init
-from etude.track.storage import DirectoryStorage, S3Storage, Storage, run_prefix
-from tests.track.storage import MeasuredStorage
+from etude.run.block_file import block_key
+from etude.run.records import RunDeclaration, RunFile, SourceKey
+from etude.run.storage import DirectoryStorage, S3Storage, Storage, run_prefix
+from etude.train.block import Series, Table, encode
+from etude.train.manifest import write_manifest
+from etude.train.read import buckets, read
+from etude.train.records import Step, Time
+from etude.train.report import pages
+from etude.train.run import track
+from tests.run.storage import MeasuredStorage
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("ETUDE_MEASURE") != "1", reason="measurement, not a check"
@@ -35,7 +36,7 @@ METRICS = 20
 
 
 def test_log_call_latency(tmp_path: Path) -> None:
-    run = init(
+    run = track(
         experiment="measure", run="latency", clocks=CLOCKS, directory=tmp_path, queue_size=50_000
     )
     row = {f"rl/metric_{i}": float(i) for i in range(METRICS)}
@@ -61,7 +62,7 @@ def test_log_call_latency(tmp_path: Path) -> None:
 
 def test_chart_read_time(tmp_path: Path) -> None:
     rows = 500_000
-    run = init(
+    run = track(
         experiment="measure", run="read", clocks=CLOCKS, directory=tmp_path, queue_size=50_000
     )
     row = {f"rl/metric_{i}": float(i) for i in range(METRICS)}

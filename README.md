@@ -13,10 +13,10 @@ def runs() -> Job:
 
 ```python
 # train.py
-from etude.track.records import Step
-from etude.track.run import init
+from etude.train.records import Step
+from etude.train.run import track
 
-run = init(experiment="capacity-pilot", clocks=[Step("updates", "optimizer updates")])
+run = track(experiment="capacity-pilot", clocks=[Step("updates", "optimizer updates")])
 for update in range(1, 1001):
     loss = train_one_update()
     run.log({"loss": loss}, updates=update)
@@ -48,7 +48,7 @@ uv add 'etude-sdk[s3]'             # with S3 storage
 
 ## Read more
 
-- [Tracking](docs/tracking.md): runs, clocks, checkpoints, evaluations, reports.
+- [Tracking](docs/tracking.md): runs, clocks, checkpoints, reports.
 - [The launcher](docs/launcher.md): pools, SSH hosts, rented machines, cohorts,
   limits and recovery.
 

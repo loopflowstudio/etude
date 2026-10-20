@@ -12,21 +12,24 @@ import numpy as np
 import pytest
 from moto import mock_aws
 
-from etude.track.block import Builder
-from etude.track.block_file import block_key, tail_key
-from etude.track.errors import EtudeError
-from etude.track.manifest import Manifest, write_manifest
-from etude.track.read import buckets, read, read_all, runs
-from etude.track.records import Attempt, RunDeclaration, RunFile, SourceKey, Step
-from etude.track.report import pages
-from etude.track.run import RunFiles, StorageDestination, init, sync, write_block
-from etude.track.storage import DirectoryStorage, S3Storage, Storage, run_prefix
-from tests.track.storage import MeasuredStorage
+from etude.run.block_file import block_key, tail_key
+from etude.run.delivery import RunFiles, StorageDestination, sync
+from etude.run.errors import EtudeError
+from etude.run.listing import runs
+from etude.run.records import Attempt, RunDeclaration, RunFile, SourceKey
+from etude.run.storage import DirectoryStorage, S3Storage, Storage, run_prefix
+from etude.train.block import Builder
+from etude.train.manifest import Manifest, write_manifest
+from etude.train.read import buckets, read, read_all
+from etude.train.records import Step
+from etude.train.report import pages
+from etude.train.run import log_line, seal_runs, track, write_block
+from tests.run.storage import MeasuredStorage
 
 
 def test_reports_fetch_each_runs_metadata_once(tmp_path: Path) -> None:
     for name in ("one", "two"):
-        with init(experiment="e", run=name, clocks=[], directory=tmp_path):
+        with track(experiment="e", run=name, clocks=[], directory=tmp_path):
             pass
     measured = MeasuredStorage(DirectoryStorage(tmp_path))
     report = pages(measured)
@@ -44,7 +47,7 @@ def test_resuming_does_not_inherit_a_previous_attempts_finished_state(
 ) -> None:
     local = tmp_path / "local"
     bucket = DirectoryStorage(tmp_path / "bucket")
-    with init(experiment="e", run="r", clocks=[], directory=local):
+    with track(experiment="e", run="r", clocks=[], directory=local):
         pass
     if not attributed:
         # Earlier evidence has no writer on its completion; retain those bytes.
@@ -56,7 +59,7 @@ def test_resuming_does_not_inherit_a_previous_attempts_finished_state(
     finished = read(bucket, "e", "r").state
     assert finished is not None and finished.state == "finished"
 
-    resumed = init(experiment="e", run="r", clocks=[], directory=local)
+    resumed = track(experiment="e", run="r", clocks=[], directory=local)
     try:
         assert sync(local, storages=[bucket]) == {}
         assert read(local, "e", "r").state is None
@@ -84,7 +87,7 @@ def test_replaced_checkpoint_delivers_new_bytes_once(
         measured = MeasuredStorage(destination)
         for body, uploads in ((b"first", 5), (b"other", 4)):
             model.write_bytes(body)
-            with init(
+            with track(
                 experiment="e", run="r", clocks=[Step("step", "steps")], directory=local
             ) as run:
                 run.checkpoint(model, step=10)
@@ -105,9 +108,9 @@ def test_replaced_checkpoint_delivers_new_bytes_once(
 def test_recent_blocks_compact_and_delete_covered_uploads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("etude.track.run.RECENT_BLOCKS", 2)
+    monkeypatch.setattr("etude.train.run.RECENT_BLOCKS", 2)
     bucket = DirectoryStorage(tmp_path / "bucket")
-    run = init(
+    run = track(
         experiment="e",
         run="r",
         clocks=[Step("step", "steps")],
@@ -139,7 +142,7 @@ def test_recent_blocks_compact_and_delete_covered_uploads(
 
 
 def test_stale_tail_and_explicit_sealing(tmp_path: Path) -> None:
-    run = init(experiment="e", run="r", clocks=[Step("step", "steps")], directory=tmp_path)
+    run = track(experiment="e", run="r", clocks=[Step("step", "steps")], directory=tmp_path)
     run.finish()
     writer = "abcdef123456"
     builder = Builder(["step"])
@@ -150,9 +153,14 @@ def test_stale_tail_and_explicit_sealing(tmp_path: Path) -> None:
     os.utime(run.files.root / key, (time.time() - 61, time.time() - 61))
     assert key in RunFiles(run.files.root).deliverable()
     os.utime(run.files.root / key, None)
+    # A dead process's unsealed log becomes the next block; stopped writers' tails go at once.
+    (run.files.root / f"metrics/00000001-{writer}.open").write_text(
+        log_line(2000, {"step": 2.0}, {"value": 8})
+    )
+    seal_runs(tmp_path)
     bucket = DirectoryStorage(tmp_path / "bucket")
-    assert sync(tmp_path, storages=[bucket], seal=True) == {}
-    assert read(bucket, "e", "r").points("value", "step").y.tolist() == [7]
+    assert sync(tmp_path, storages=[bucket], stopped=True) == {}
+    assert read(bucket, "e", "r").points("value", "step").y.tolist() == [7, 8]
 
 
 @pytest.mark.parametrize("backend", ["directory", "s3"])
@@ -419,7 +427,7 @@ def test_s3_reads_use_one_request_and_normalize_missing_objects() -> None:
 
 def test_destination_without_delete_keeps_covered_blocks_readable(tmp_path: Path) -> None:
     bucket = AppendOnlyDirectory(tmp_path / "bucket")
-    run = init(
+    run = track(
         experiment="e",
         run="r",
         clocks=[Step("step", "steps")],
@@ -443,8 +451,8 @@ def test_destination_without_delete_keeps_covered_blocks_readable(tmp_path: Path
 def test_size_threshold_promotes_before_finish(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("etude.track.run.PERMANENT_BYTES", 1)
-    run = init(
+    monkeypatch.setattr("etude.train.run.PERMANENT_BYTES", 1)
+    run = track(
         experiment="e",
         run="r",
         clocks=[Step("step", "steps")],
@@ -486,7 +494,7 @@ def test_checkpoint_resume_supersedes_before_first_logged_row(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, logging: str
 ) -> None:
     monkeypatch.delenv("ETUDE_FROM_VALUE", raising=False)
-    first = init(experiment="e", run="r", clocks=[Step("step", "steps")], directory=tmp_path)
+    first = track(experiment="e", run="r", clocks=[Step("step", "steps")], directory=tmp_path)
     for step in range(20):
         first.log({"value": step}, step=step)
     first.finish()
@@ -499,7 +507,7 @@ def test_checkpoint_resume_supersedes_before_first_logged_row(
     monkeypatch.setenv("ETUDE_UNTIL_CLOCK", "step")
     monkeypatch.setenv("ETUDE_FROM_VALUE", "10")
     monkeypatch.setenv("ETUDE_ATTEMPT", "attempt-resumed")
-    second = init(experiment="e", run="r", clocks=[Step("step", "steps")], directory=tmp_path)
+    second = track(experiment="e", run="r", clocks=[Step("step", "steps")], directory=tmp_path)
     if logging != "none":
         second.log({"other": 1}, step=12)
     if logging == "metric":

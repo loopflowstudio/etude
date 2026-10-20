@@ -16,7 +16,11 @@ from pathlib import Path
 
 import numpy as np
 
-from etude.track.block import (
+from etude.run.block_file import BlockFile, parse, select
+from etude.run.errors import EtudeError
+from etude.run.records import Record
+from etude.run.storage import DirectoryStorage, Storage
+from etude.train.block import (
     Array,
     Header,
     Number,
@@ -28,10 +32,6 @@ from etude.track.block import (
     header,
     reduce,
 )
-from etude.track.block_file import BlockFile, parse, select
-from etude.track.errors import EtudeError
-from etude.track.records import Record
-from etude.track.storage import DirectoryStorage, Storage
 
 type Endpoints = tuple[Number, Number]
 type Statistics = tuple[Number, Number, Number, Number, Number, Number, Number]

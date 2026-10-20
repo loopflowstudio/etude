@@ -1,21 +1,21 @@
-"""The logging client: `init`, `Run.log`, evaluations, and shipping.
+"""The training client: `track`, `Run.log`, checkpoints, and shipping.
 
 Ownership and invariants:
 
-- `init` is strict and local. It validates the declaration, writes `run.json`
+- `track` is strict and local. It validates the declaration, writes `run.json`
   and starts two daemon threads. It never touches the network.
 - `log` is a put on a bounded in-memory queue. It never blocks, never does
   I/O and never raises into training code. A full queue drops the row and
   counts it; rows still in the queue when the process dies are not durable.
 - The writer thread appends each row to a local log at once and keeps it by
   column in memory. Every few seconds it seals those rows as one small
-  columnar block (`etude.track.block`) and removes the log. Small blocks are
+  columnar block (`etude.train.block`) and removes the log. Small blocks are
   folded into recent blocks, then permanent ones by size or cadence.
   Blocks are immutable and are the unit of delivery.
 - The shipper thread copies blocks, whole, to each destination, the
-  author's directory or bucket. A
-  marker per destination records what arrived, so `sync` can finish the job
-  later from the same files and replays are harmless.
+  author's directory or bucket (`etude.run.delivery`). A marker per
+  destination records what arrived, so `sync` can finish the job later from
+  the same files and replays are harmless.
 - The local run directory uses the same layout as a destination, so with no
   destination configured the files are already the record.
 
@@ -30,7 +30,6 @@ import json
 import math
 import os
 import queue
-import re
 import secrets
 import shutil
 import socket
@@ -40,60 +39,38 @@ import time
 import warnings
 import zlib
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
-from stat import S_ISREG
 from types import TracebackType
 from typing import IO, Literal, Self
 
 from pydantic import ValidationError
 
-from etude.track.block import Builder, Table, concat
-from etude.track.block import encode as encode_block
-from etude.track.block_file import block_key, parse, tail_key
-from etude.track.errors import EtudeError
-from etude.track.manifest import write_manifest
-from etude.track.records import (
+from etude.run.block_file import block_key, tail_key
+from etude.run.delivery import RunFiles, StorageDestination, destinations, ship
+from etude.run.errors import EtudeError
+from etude.run.records import (
     ArtifactRef,
     Attempt,
-    CheckpointRecord,
     Clock,
     Continuation,
-    Estimate,
-    EvaluationDefinition,
-    EvaluationRecord,
     Record,
     RunCounters,
     RunDeclaration,
     RunFile,
     RunState,
     SourceKey,
-    checkpoint_name,
-    subject_identity,
 )
-from etude.track.storage import DirectoryStorage, Storage, default_root, run_prefix
+from etude.run.storage import DirectoryStorage, Storage, run_directory, run_prefix
+from etude.train.block import Builder, Table, concat
+from etude.train.block import encode as encode_block
+from etude.train.manifest import write_manifest
+from etude.train.records import CheckpointRecord, checkpoint_name
 
-SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._=-]{0,199}$")
 # Compaction is bounded by bytes or elapsed cadence, independent of training steps.
 PERMANENT_BYTES, RECENT_BLOCKS = 8_000_000, 64
 
 type Logged = Mapping[str, object]
-type Json = float | int | str | bool | None
-
-
-def encode(value: object) -> Json:
-    """One logged value as strict JSON; non-finite floats become their names."""
-    if value is None or isinstance(value, (bool, str)):
-        return value
-    if not isinstance(value, (int, float)):
-        try:
-            value = float(value)  # type: ignore[arg-type]  # numpy and tensor scalars
-        except (TypeError, ValueError):
-            return str(type(value).__name__)
-    if isinstance(value, float) and not math.isfinite(value):
-        return "NaN" if math.isnan(value) else "Infinity" if value > 0 else "-Infinity"
-    return value
 
 
 def flatten(values: Logged, prefix: str = "") -> Iterator[tuple[str, object]]:
@@ -102,17 +79,6 @@ def flatten(values: Logged, prefix: str = "") -> Iterator[tuple[str, object]]:
             yield from flatten(value, f"{prefix}{name}/")
         else:
             yield prefix + str(name), value
-
-
-def read_rows(path: Path) -> list[dict[str, object]]:
-    """A JSON-lines file's rows. A torn final line from a crash is ignored."""
-    rows: list[dict[str, object]] = []
-    for line in path.read_text().splitlines():
-        try:
-            rows.append(json.loads(line))
-        except ValueError:
-            break
-    return rows
 
 
 def log_line(wall_ms: int, clocks: Mapping[str, float], values: Mapping[str, object]) -> str:
@@ -156,148 +122,15 @@ def seal_logs(root: Path, clocks: Sequence[str]) -> None:
         log.unlink()
 
 
-class RunFiles:
-    """One run's local directory, and the markers of what each destination holds."""
-
-    def __init__(self, root: Path, tail_age: float = 60.0) -> None:
-        self.root = root
-        self.tail_age = tail_age
-        self.lock = threading.RLock()
-
-    def run_file(self) -> RunFile | None:
-        path = self.root / "run.json"
-        return RunFile.model_validate_json(path.read_bytes()) if path.is_file() else None
-
-    def deliverable(self) -> list[str]:
-        """Every file a destination should hold, as keys under the run, in sending order.
-
-        Blocks precede the indexes that describe them, and definitions the
-        evaluations that cite them. A crash log or a half-written file is never
-        sent; a tail only once it is old enough that its writer has died.
-        """
-
-        def folder(name: str) -> list[str]:
-            names: list[str] = []
-            for path in (self.root / name).glob("*"):
-                try:
-                    stat = path.stat()
-                except FileNotFoundError:
-                    continue  # folded away since the listing
-                if not S_ISREG(stat.st_mode) or path.suffix in (".partial", ".open"):
-                    continue
-                if path.suffix == ".tail" and time.time() - stat.st_mtime < self.tail_age:
-                    continue
-                names.append(f"{name}/{path.name}")
-            return sorted(names, key=lambda key: (not key.endswith((".blk", ".tail")), key))
-
-        return (
-            [name for name in ("run.json", "state.json") if (self.root / name).is_file()]
-            + folder("metrics")
-            + folder("checkpoints")
-            + folder("definitions")
-            + folder("evaluations")
-        )
-
-    def fingerprint(self, key: str) -> str:
-        """Blocks never change; a stored checkpoint is large; other files are hashed."""
-        if key.endswith((".blk", ".tail")):
-            return "sealed"
-        if key.startswith("checkpoints/") and not key.endswith(".json"):
-            stat = (self.root / key).stat()
-            # A resume may replace a checkpoint at the same coordinate, even
-            # with the same byte count. Avoid hashing large files on every pass.
-            return f"file-{stat.st_size}-{stat.st_mtime_ns}"
-        return sha256((self.root / key).read_bytes()).hexdigest()
-
-    def removed(self) -> list[str]:
-        """Every path, relative to the run, that a writer has retired."""
-        lines: list[str] = []
-        for note in sorted((self.root / "metrics").glob("*.removed")):
-            lines += note.read_text().split("\n")[:-1]
-        return lines
-
-    def _marker(self, destination: str, key: str) -> Path:
-        return self.root / ".shipped" / destination / (key.replace("/", "__") + ".sent")
-
-    def shipped(self, destination: str, key: str) -> str | None:
-        marker = self._marker(destination, key)
-        return marker.read_text() if marker.is_file() else None
-
-    def mark(self, destination: str, key: str, fingerprint: str) -> None:
-        marker = self._marker(destination, key)
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(fingerprint)
-
-    def pending(self, destination: str) -> list[tuple[str, str]]:
-        pending: list[tuple[str, str]] = []
-        for key in self.deliverable():
-            mark = self.fingerprint(key)
-            if self.shipped(destination, key) != mark:
-                pending.append((key, mark))
-        return pending
-
-
-@dataclass(frozen=True)
-class Delivery:
-    key: str
-    fingerprint: str
-    body: bytes | Path
-
-
-class StorageDestination:
-    """The author's directory or bucket: the same files, copied whole."""
-
-    def __init__(self, storage: Storage) -> None:
-        self.storage = storage
-        self.name = storage.name
-
-    def ship(self, files: RunFiles, run: str) -> None:
-        prefix = run_prefix(run)
-        # Freeze mutable objects together with the permanent-file listing. No
-        # network I/O holds the writer's lock, and large immutable files stream.
-        deliveries: list[Delivery] = []
-        with files.lock:
-            retired = files.removed()
-            for key, fingerprint in files.pending(self.name):
-                block = parse(key)
-                large = key.startswith("checkpoints/") and not key.endswith(".json")
-                body = (
-                    files.root / key
-                    if large or block is not None and block.level >= 2
-                    else (files.root / key).read_bytes()
-                )
-                deliveries.append(Delivery(key, fingerprint, body))
-        for delivery in deliveries:
-            # A missing file aborts the pass too: a concurrent sync/compaction may
-            # have replaced it with a block that was not in this snapshot.
-            if isinstance(delivery.body, Path):
-                self.storage.put_file(prefix + delivery.key, delivery.body)
-            else:
-                self.storage.put(prefix + delivery.key, delivery.body)
-            files.mark(self.name, delivery.key, delivery.fingerprint)
-        for key in retired:
-            if files.shipped(self.name, key) is not None and self.storage.delete(prefix + key):
-                files._marker(self.name, key).unlink(missing_ok=True)
-
-
 class EtudeWarning(UserWarning):
     """A row was set aside or lost. Turn it into an error with `strict=True`."""
-
-
-def ship(files: RunFiles, run: str, destination: StorageDestination) -> str | None:
-    """One delivery pass. Returns None when current, else a short reason."""
-    try:
-        destination.ship(files, run)
-    except Exception as error:  # noqa: BLE001 - delivery must never raise into a run
-        return f"unavailable: {type(error).__name__}"
-    return None
 
 
 _STOP = object()
 
 
 class Run:
-    """A live run, created by `init`. Safe to use from one thread."""
+    """A live run, created by `track`. Safe to use from one thread."""
 
     def __init__(
         self,
@@ -333,7 +166,6 @@ class Run:
             known = CheckpointRecord.model_validate_json(path.read_bytes())
             self._recorded[known.ordinal] = known
         self._checkpoints = max(self._recorded, default=0)
-        self._defined: set[str] = set()
         # The file this process last put in the launcher's output directory.
         self._reported: Path | None = None
         self._destinations = list(destinations)
@@ -370,9 +202,7 @@ class Run:
         self._wake = threading.Event()
         self._stopping = threading.Event()
         self._finished = False
-        self._evaluations: dict[str, EvaluationRecord] = {}
-        self._episodes: dict[str, IO[str]] = {}
-        # Evaluation changes not yet written; only the writer thread touches it.
+        # Checkpoint changes not yet sealed; only the writer thread touches it.
         self._dirty = False
         self._writer = threading.Thread(target=self._write, name="etude-writer", daemon=True)
         self._shipper = threading.Thread(target=self._deliver, name="etude-shipper", daemon=True)
@@ -578,7 +408,9 @@ class Run:
                     (
                         known
                         for known in self._recorded.values()
-                        if subject_identity(known.artifact) == subject_identity(checkpoint)
+                        # The same model: the digest, else the URI.
+                        if (known.artifact.sha256 or known.artifact.uri)
+                        == (checkpoint.sha256 or checkpoint.uri)
                     ),
                     None,
                 )
@@ -595,29 +427,6 @@ class Run:
             return
         self._recorded[changed.ordinal] = changed
         self._offer(changed)
-
-    def evaluation(
-        self,
-        definition: EvaluationDefinition,
-        checkpoint: ArtifactRef | str,
-        *,
-        expected_episodes: int | None = None,
-        key: str | None = None,
-    ) -> Evaluation:
-        """Start applying a definition to a model. This run need not have trained it."""
-        subject = ArtifactRef(uri=checkpoint) if isinstance(checkpoint, str) else checkpoint
-        if definition.sha256 not in self._defined:
-            self._defined.add(definition.sha256)
-            self._offer(definition)
-        return Evaluation(
-            self,
-            {
-                "key": key or f"{definition.name}@{subject_identity(subject)[-40:]}",
-                "definition": definition.ref(),
-                "subject": subject,
-                "expected_episodes": expected_episodes,
-            },
-        )
 
     def _offer(self, item: object) -> None:
         try:
@@ -645,11 +454,6 @@ class Run:
                 stream, builder = None, Builder(self._clock_names)
                 self._sequence += 1
             self._fold(final)
-            for record in self._evaluations.values():
-                self._save("evaluations", record.key, record)
-            self._evaluations.clear()
-            for episodes in self._episodes.values():
-                episodes.flush()
             self._dirty = False
             self._wake.set()
 
@@ -662,16 +466,8 @@ class Run:
                 if item is _STOP:
                     seal(final=True)
                     return
-                if isinstance(item, EvaluationRecord):
-                    self._evaluations[item.key] = item
-                    self._dirty = True
-                elif isinstance(item, CheckpointRecord):
+                if isinstance(item, CheckpointRecord):
                     self._save("checkpoints", checkpoint_name(item.at), item)
-                    self._dirty = True
-                elif isinstance(item, EvaluationDefinition):
-                    self._save("definitions", f"{item.name}@{item.sha256[:12]}", item)
-                elif isinstance(item, tuple) and isinstance(item[0], str):
-                    self._episode(item[0], item[1])
                     self._dirty = True
                 elif isinstance(item, tuple):
                     if stream is None:
@@ -782,16 +578,8 @@ class Run:
     def _save(self, folder: str, name: str, record: Record) -> None:
         """Write one small record whole, so a reader never sees half of it."""
         DirectoryStorage(self.files.root).put(
-            f"{folder}/{_file_name(name)}.json", record.model_dump_json().encode()
+            f"{folder}/{name}.json", record.model_dump_json().encode()
         )
-
-    def _episode(self, key: str, episode: object) -> None:
-        stream = self._episodes.get(key)
-        if stream is None:
-            path = self.files.root / "evaluations" / (_file_name(key) + ".episodes.jsonl")
-            path.parent.mkdir(parents=True, exist_ok=True)
-            stream = self._episodes[key] = path.open("a")
-        stream.write(json.dumps(episode, default=lambda v: encode(v)) + "\n")
 
     # --- the shipper thread --------------------------------------------------
 
@@ -830,8 +618,6 @@ class Run:
             except queue.Full:
                 self.dropped += 1
             self._writer.join(max(0.0, deadline - time.monotonic()))
-            for stream in self._episodes.values():
-                stream.close()
             counters = RunCounters(dropped=self.dropped, incomplete=self.incomplete)
             DirectoryStorage(self.files.root).put(
                 "state.json",
@@ -869,119 +655,7 @@ class Run:
         self.finish("failed" if error is not None else "finished")
 
 
-def _file_name(key: str) -> str:
-    return re.sub(r"[^A-Za-z0-9._=@,-]", "_", key)
-
-
-class Evaluation:
-    """One evaluation being written. Use as a context manager.
-
-    Leaving the block settles it; an exception marks it failed, keeps it and
-    propagates. Episodes go to a file beside the record.
-    """
-
-    def __init__(self, run: Run, fields: dict[str, object]) -> None:
-        self._run = run
-        self._fields = fields
-        self._estimates: dict[str, Estimate] = {}
-        self._episodes = 0
-        self._valid = True
-        self._send("running")
-
-    def _send(self, state: str, failure: str | None = None) -> None:
-        if not self._valid:
-            return
-        try:
-            record = EvaluationRecord.model_validate(
-                self._fields
-                | {
-                    # Wall-clock nanoseconds: increasing across processes and resumes.
-                    "revision": time.time_ns(),
-                    "state": state,
-                    "episodes": self._episodes,
-                    "estimates": tuple(self._estimates.values()),
-                    "failure": failure,
-                    "episodes_uri": "evaluations/"
-                    + _file_name(str(self._fields["key"]))
-                    + ".episodes.jsonl"
-                    if self._episodes
-                    else None,
-                }
-            )
-        except (ValidationError, ValueError):
-            if self._run.strict:
-                raise
-            self._valid = False
-            self._run.incomplete += 1
-            return
-        self._run._offer(record)
-
-    def add(self, episode: Mapping[str, object] | None = None, /, **fields: object) -> None:
-        """Record one finished episode; the evaluation grows and stays running."""
-        self._episodes += 1
-        if self._valid:
-            self._run._offer((str(self._fields["key"]), {**(episode or {}), **fields}))
-        self._send("running")
-
-    def estimate(
-        self, name: str, mean: float, lower: float, upper: float, *, n: int, method: str
-    ) -> None:
-        """A statistic with its interval, as the author computed it."""
-        try:
-            self._estimates[name] = Estimate(
-                name=name, mean=mean, lower=lower, upper=upper, n=n, method=method
-            )
-        except ValidationError:
-            if self._run.strict:
-                raise
-            self._run.incomplete += 1
-
-    def settle(self) -> None:
-        self._send("settled")
-
-    def fail(self, reason: str) -> None:
-        self._send("failed", reason[:2000] or "failed")
-
-    def __enter__(self) -> Self:
-        return self
-
-    def __exit__(
-        self,
-        kind: type[BaseException] | None,
-        error: BaseException | None,
-        trace: TracebackType | None,
-    ) -> None:
-        if error is None:
-            self.settle()
-        else:
-            self.fail(f"{type(error).__name__}: {error}")
-
-
-def definition(name: str, text: str) -> EvaluationDefinition:
-    """An evaluation definition from its exact text; the digest is its version."""
-    return EvaluationDefinition(name=name, text=text, sha256=sha256(text.encode()).hexdigest())
-
-
-def definition_file(path: Path | str, name: str | None = None) -> EvaluationDefinition:
-    """A definition kept as a file in the author's repository, named for the file."""
-    source = Path(path)
-    return definition(name or source.stem, source.read_text())
-
-
-def _destinations(root: Path, storages: Sequence[Storage]) -> list[StorageDestination]:
-    local = DirectoryStorage(root).name
-    return [StorageDestination(storage) for storage in storages if storage.name != local]
-
-
-def _root(directory: Path | str | None, experiment: str, run: str) -> tuple[Path, Path]:
-    for name in (experiment, run):
-        if not SAFE_NAME.match(name):
-            raise EtudeError("unsafe_run_or_experiment_name", 422)
-    base = Path(directory) if directory else default_root()
-    return base, base / run_prefix(run)
-
-
-def init(
+def track(
     *,
     experiment: str,
     clocks: Sequence[Clock],
@@ -1017,7 +691,7 @@ def init(
     name = run or handed.get("ETUDE_RUN") or secrets.token_hex(8)
     if seed is None and "ETUDE_SEED" in handed:
         seed = int(handed["ETUDE_SEED"])
-    base, root = _root(directory, experiment, name)
+    base, root = run_directory(directory, experiment, name)
     text = (
         config if isinstance(config, str) or config is None else json.dumps(config, sort_keys=True)
     )
@@ -1054,7 +728,7 @@ def init(
         namespace=namespace,
         root=root,
         clocks=declaration.clocks,
-        destinations=_destinations(base, storages),
+        destinations=destinations(base, storages),
         queue_size=queue_size,
         segment_seconds=segment_seconds,
         segment_rows=segment_rows,
@@ -1062,40 +736,17 @@ def init(
     )
 
 
-def sync(
-    directory: Path | str,
-    *,
-    storages: Sequence[Storage] = (),
-    seal: bool = False,
-) -> dict[str, dict[str, str]]:
-    """Deliver every run under the runs `directory`. Idempotent; safe beside a live run.
-
-    Only sealed blocks are sent. `seal` first turns the local logs a dead process
-    left behind into blocks. Returns, per run,
-    the destinations that are still not current and why.
-    """
-    base = Path(directory)
-    undelivered: dict[str, dict[str, str]] = {}
-    for root in sorted(path.parent for path in base.glob("*/run.json")):
-        run = root.name
-        files = RunFiles(root, tail_age=0.0 if seal else 60.0)
-        declared = files.run_file()
-        if seal and declared is not None:
+def seal_runs(directory: Path | str) -> None:
+    """Turn the local logs dead processes left in every run under `directory` into blocks."""
+    for root in sorted(path.parent for path in Path(directory).glob("*/run.json")):
+        declared = RunFiles(root).run_file()
+        if declared is not None:
             seal_logs(root, [clock.name for clock in declared.declaration.clocks])
-        for destination in _destinations(base, storages):
-            reason = ship(files, run, destination)
-            if reason is not None:
-                undelivered.setdefault(run, {})[destination.name] = reason
-    return undelivered
 
 
 __all__ = [
     "EtudeWarning",
-    "Evaluation",
     "Run",
-    "definition",
-    "definition_file",
-    "init",
-    "read_rows",
-    "sync",
+    "seal_runs",
+    "track",
 ]

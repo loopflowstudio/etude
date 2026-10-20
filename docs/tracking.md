@@ -5,11 +5,11 @@ files to your own directory or bucket and reads from them. There is no server
 in this path, and nothing here starts compute or holds a provider credential.
 
 ```python
-from etude.track.records import Step, Time
-from etude.track.run import init
-from etude.track.storage import storage_from_uri
+from etude.run.storage import storage_from_uri
+from etude.train.records import Step, Time
+from etude.train.run import track
 
-run = init(
+run = track(
     experiment="capacity-pilot",
     run="capacity-64-seed-0",  # reusing a name resumes it
     job="capacity-64",  # what its siblings share
@@ -36,7 +36,7 @@ uv run etude checkpoints --source s3://my-bucket/runs
 ```
 
 Runs are written to one place per computer, `~/.etude/track` (moved by
-`ETUDE_HOME`, or named with `init(directory=...)`), and `reports write` and
+`ETUDE_HOME`, or named with `track(directory=...)`), and `reports write` and
 `reports serve` read that place when given no source. So writing never chooses how it will
 be read: generate a page, or run the server, over the same files.
 `reports write`, `reports serve` and `checkpoints` take `--source`, a directory or
@@ -46,8 +46,10 @@ storage's prefix reads the whole run. The server
 has no login and listens on this computer only.
 
 One `etude` command provides compute, reports, sync and checkpoints. The
-`etude.launch` and `etude.track` libraries share one package and lock file;
-neither library imports the other.
+launcher (`etude.launch`) and tracking share one package and lock file; neither
+imports the other. Tracking is `etude.train` for training runs, built on
+`etude.run`: what every run shares (its declaration, files, storage and
+delivery).
 Install `etude-sdk[s3]` for tracking against a bucket; local tracking does not
 need boto3. Tracking commands read the paths supplied on this computer, even
 when a launcher controller is selected. Each command loads its own dependencies;
@@ -57,11 +59,11 @@ Under `etude launch` the launcher has already said which run this is, so the
 same script needs only its experiment and clocks:
 
 ```python
-run = init(experiment="capacity-pilot", clocks=[Step("updates", "optimizer updates, absolute")])
+run = track(experiment="capacity-pilot", clocks=[Step("updates", "optimizer updates, absolute")])
 ```
 
 The run, job, seed and cohort come from the launcher (`ETUDE_RUN`,
-`ETUDE_JOB`, `ETUDE_SEED`, `ETUDE_COHORT`); an argument passed to `init` wins.
+`ETUDE_JOB`, `ETUDE_SEED`, `ETUDE_COHORT`); an argument passed to `track` wins.
 The experiment is always named in the script: the launcher does not know it. `run.checkpoint(path, ...)` also writes the launcher's
 `etude-result.json`, so the launcher can resume the run from that checkpoint
 without the script reporting it twice; `run.log` does not report progress to
@@ -100,7 +102,7 @@ Rules a caller can rely on:
   no storage or network I/O, no waiting for delivery. It warns once about bad
   coordinates or a full queue; only `strict=True` raises for bad coordinates.
   A full queue drops the row and counts it in
-  `run.dropped`. `init` is strict and raises on a bad declaration.
+  `run.dropped`. `track` is strict and raises on a bad declaration.
 - **The files are the record.** Everything about a run is in one folder named
   for the run, `RUN/`, in the runs directory and in each storage it delivers
   to: `run.json` (what it is, its experiment included), `state.json`,
@@ -108,8 +110,9 @@ Rules a caller can rely on:
   `checkpoints/` (each named for where its first clock stood, such as
   `steps-1000.pt` beside `steps-1000.json`). Under the launcher the same folder
   in the bucket also holds `attempts/ATTEMPT.log` and `attempts/ATTEMPT.json`.
-  A run's name is unique in its runs directory whatever its experiment. Config, state, checkpoints and evaluations are
-  JSON. Rows are columnar block files (the layout is described at the top of `src/etude/track/block.py`),
+  A run's name is unique in its runs directory whatever its experiment. Config,
+  state and checkpoint records are JSON. Rows are columnar block files (the
+  layout is described at the top of `src/etude/train/block.py`),
   sealed every few seconds and merged as they accumulate, so a chart reads two
   arrays. Rows logged since the last seal are in a local log and are not yet
   read; `sync --seal` seals what a dead process left.
@@ -118,7 +121,7 @@ Rules a caller can rely on:
   “running or unfinished.” Older completion records without a writer remain
   readable, but cannot establish completion after another attempt starts.
 
-### Checkpoints and evaluations
+### Checkpoints
 
 ```python
 # A local file is stored: copied into the run's directory, digested, and
@@ -128,19 +131,11 @@ model = run.checkpoint(
     "out/latest.pt", updates=63_000, learner_transitions=n, training_seconds=t, tags=["periodic"]
 )
 run.tag(model, "best")  # tags can change later
-
-# Any process, then or much later. It needs only the model's reference.
-monitor = definition_file("evals/monitor.toml")  # from etude.track.run
-evaluator = init(experiment="capacity-pilot", run="monitor", clocks=[], kind="evaluation")
-with evaluator.evaluation(monitor, model, expected_episodes=100) as attempt:
-    for game in games:
-        attempt.add(won=game.won)  # grows; shown as provisional
-    attempt.estimate("win", mean, lower, upper, n=100, method="95% bootstrap over deals")
-# leaving the block settles it; an exception marks it failed and keeps it
 ```
 
 - **A checkpoint is a recorded model**: the saved artifact and where every
-  declared clock stood. Its ordinal within the run is a clock too.
+  declared clock stood, numbered within the run from one. `checkpoint` returns
+  its reference; pass that to whatever evaluates the model.
 - **Etude stores the file, in your storage**, at
   `PREFIX/RUN/checkpoints/CLOCK-VALUE.EXT`, uploaded in the background from the
   process that recorded it. The copy is taken before `checkpoint` returns, so saving over the same
@@ -151,15 +146,3 @@ with evaluator.evaluation(monitor, model, expected_episodes=100) as attempt:
   Saving at the same coordinate replaces that checkpoint;
   a later sync delivers the replacement even when its size is unchanged.
   Removing stored files by rule is not built.
-- **An evaluation's subject is a checkpoint.** It carries no coordinate of its
-  own. If a run in the same experiment recorded that checkpoint (matched by
-  digest, else by URI), the report places the evaluation at that run's
-  ordinal and coordinate; if none did, it stands alone. An evaluator with no
-  training run still has to declare a run with no clocks to have somewhere to
-  write.
-- **A definition is a file.** Its name and the digest of its exact text are
-  its identity: editing the file makes a new version. Etude records and
-  compares by the definition; it does not run it.
-- **An evaluation has a state**: running, settled or failed. It grows by
-  replacement, and a failure is kept with its reason. Estimates are what the
-  author computed, with the method named. Episodes stay in the author's files.

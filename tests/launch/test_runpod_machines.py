@@ -540,9 +540,9 @@ def test_tracking_files_reach_storage_while_the_job_runs(tmp_path: Path) -> None
     script = tmp_path / "train.py"
     script.write_text(
         "import time\n"
-        "from etude.track.records import Step\n"
-        "from etude.track.run import init\n"
-        'run = init(experiment="capacity", clocks=[Step("steps", "training steps")],\n'
+        "from etude.train.records import Step\n"
+        "from etude.train.run import track\n"
+        'run = track(experiment="capacity", clocks=[Step("steps", "training steps")],\n'
         "           segment_seconds=0.1)\n"
         'run.log({"loss": 0.5}, steps=1)\n'
         "time.sleep(30)\n"

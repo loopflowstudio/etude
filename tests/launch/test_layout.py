@@ -29,7 +29,9 @@ def test_folder_rules() -> None:
                 )
         if module.startswith("etude.launch."):
             assert not any(
-                name == "etude.track" or name.startswith("etude.track.") for name in imports
+                name == package or name.startswith(package + ".")
+                for name in imports
+                for package in ("etude.run", "etude.train")
             ), path
         edges[module] = imports
         if path.name == "__init__.py":
