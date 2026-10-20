@@ -1,0 +1,189 @@
+"""Tournaments end to end: benchmarks held on the go and in batch, round robins split across runs."""
+
+from __future__ import annotations
+
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+import pytest
+
+from etude.eval.match import agent, environment
+from etude.eval.query import connect
+from etude.eval.records import Agent, Benchmark, Matchup, Model, RoundRobin
+from etude.eval.tournament import curves, hold, standings
+from etude.run.errors import EtudeError
+from etude.run.records import ArtifactRef, Clock
+from etude.run.storage import DirectoryStorage
+from etude.train.run import track
+from tests.eval.games import play
+from tests.run.storage import MeasuredStorage
+
+WORLD = environment("duel", config={"world": "w6"})
+DEALS = tuple({"deal": deal} for deal in range(3))
+DIRECT, SEARCH = Model(config={"search": 0}), Model(config={"search": 2})
+
+
+def scripted(tmp_path: Path, name: str, strength: int) -> Agent:
+    script = tmp_path / "players" / f"{name}.py"
+    script.parent.mkdir(exist_ok=True)
+    script.write_text(f"STRENGTH = {strength}\n")
+    return agent(name, code=[script], config={"strength": strength})
+
+
+def trained(tmp_path: Path, bucket: DirectoryStorage) -> list[ArtifactRef]:
+    """Three checkpoints of one training run, delivered to the bucket."""
+    run = track(
+        experiment="ppo",
+        run="ppo-1",
+        clocks=[Clock(name="updates", kind="step", meaning="optimizer updates")],
+        directory=tmp_path / "trainer",
+        storages=[bucket],
+    )
+    saved = []
+    for ordinal in (1, 2, 3):
+        model = tmp_path / "latest.pt"
+        model.write_bytes(f"weights {ordinal}".encode())
+        saved.append(run.checkpoint(model, updates=100 * ordinal))
+    run.finish(timeout=30)
+    return saved
+
+
+def anchors(tmp_path: Path) -> Benchmark:
+    heuristic, greedy = scripted(tmp_path, "heuristic", 0), scripted(tmp_path, "greedy", 4)
+    return Benchmark(
+        name="anchors",
+        environment=WORLD,
+        matchups=(
+            Matchup(name="no search vs heuristic", players=(DIRECT, heuristic),
+                    conditions=DEALS, games=4),
+            Matchup(name="no search vs greedy", players=(DIRECT, greedy),
+                    conditions=DEALS[:2], games=2),
+            Matchup(name="search vs no search", players=(SEARCH, DIRECT),
+                    conditions=DEALS[:1], games=6),
+        ),
+    )  # fmt: skip
+
+
+def test_checkpoints_held_on_the_go_then_a_matchup_added_in_batch(tmp_path: Path) -> None:
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    checkpoints = trained(tmp_path, bucket)
+    progress = anchors(tmp_path)
+
+    def on_the_go(checkpoint: ArtifactRef, measured: MeasuredStorage, machine: str) -> int:
+        # Each checkpoint's eval run starts on its own machine, with an empty disk.
+        held = hold(progress, checkpoint=checkpoint, play=play, storages=[measured],
+                    directory=tmp_path / "machines" / machine)  # fmt: skip
+        return held.played
+
+    per_checkpoint = 3 + 2 + 1
+    assert on_the_go(checkpoints[0], MeasuredStorage(bucket), "first") == per_checkpoint
+    later = [MeasuredStorage(bucket), MeasuredStorage(bucket)]
+    with ThreadPoolExecutor(2) as pool:
+        played = list(pool.map(on_the_go, checkpoints[1:], later, ["second", "third"]))
+    assert played == [per_checkpoint] * 2
+    # A fixed cost whatever the tournament's size: one checkpoint more in it changes nothing.
+    second, third = ((m.listings, m.requests, m.uploads) for m in later)
+    assert second == third
+    # The tournament's folder and the run's own matches; benchmark.json.
+    assert (second[0], second[1]) == (2, 1)
+    # A retry on another empty machine replays nothing.
+    again = MeasuredStorage(bucket)
+    assert on_the_go(checkpoints[0], again, "retry") == 0
+
+    greedy = scripted(tmp_path, "greedy", 4)
+    added = Matchup(name="search vs greedy", players=(SEARCH, greedy), conditions=DEALS, games=2)
+    grown = progress.model_copy(update={"matchups": (*progress.matchups, added)})
+    batch = hold(grown, play=play, storages=[bucket], directory=tmp_path / "machines" / "batch")
+    # Only the new matchup's matches, for every checkpoint held so far.
+    assert (batch.played, batch.skipped) == (3 * len(DEALS), 0)
+
+    lines = {line.matchup: line for line in curves(connect(bucket), "anchors", table="plays",
+                                                   value="won")}  # fmt: skip
+    assert sorted(lines) == sorted(each.name for each in grown.matchups)
+    for line in lines.values():
+        assert (line.run, line.experiment) == ("ppo-1", "ppo")
+        assert [(p.ordinal, p.clocks) for p in line.points] == [
+            (1, {"updates": 100.0}),
+            (2, {"updates": 200.0}),
+            (3, {"updates": 300.0}),
+        ]
+    assert [p.matches for p in lines["no search vs greedy"].points] == [2, 2, 2]
+    # Training makes the model beat greedy more; search beats no search throughout.
+    against_greedy = [p.value for p in lines["no search vs greedy"].points]
+    assert against_greedy[0] < against_greedy[-1]
+    assert all(p.value > 0.5 for p in lines["search vs no search"].points)
+
+
+def test_a_batch_hold_skips_what_any_eval_run_delivered_by_listing_them(tmp_path: Path) -> None:
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    progress = anchors(tmp_path)
+    for each in trained(tmp_path, bucket):
+        hold(progress, checkpoint=each, play=play, storages=[bucket],
+             directory=tmp_path / each.uri.rsplit("/", 1)[-1])  # fmt: skip
+    measured = MeasuredStorage(bucket)
+    again = hold(progress, play=play, storages=[measured], directory=tmp_path / "batch")
+    assert again.played == 0
+    # The tournament's folder, each of its 3 eval runs' matches, and its own.
+    assert measured.listings == 1 + 3 + 1
+
+
+def test_a_matchup_name_redefined_is_refused(tmp_path: Path) -> None:
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    first, *_ = trained(tmp_path, bucket)
+    progress = anchors(tmp_path)
+    hold(progress, checkpoint=first, play=play, directory=tmp_path)
+    changed = progress.matchups[0].model_copy(update={"games": 8})
+    other = progress.model_copy(update={"matchups": (changed,)})
+    with pytest.raises(EtudeError) as refused:
+        hold(other, checkpoint=first, play=play, directory=tmp_path)
+    assert refused.value.code == "matchup_conflict"
+
+
+def test_a_round_robin_held_as_two_shares_stands_as_one(tmp_path: Path) -> None:
+    finals = [scripted(tmp_path, f"final{strength}", strength) for strength in range(4)]
+    league = RoundRobin(name="finals", environment=WORLD, conditions=DEALS, games=4)
+    split, whole = DirectoryStorage(tmp_path / "split"), DirectoryStorage(tmp_path / "whole")
+    halves = [
+        hold(
+            league,
+            enter=finals,
+            play=play,
+            share=(k, 2),
+            storages=[split],
+            directory=tmp_path / f"machine-{k}",
+        )  # fmt: skip
+        for k in (0, 1)
+    ]
+    one = hold(league, enter=finals, play=play, workers=2, storages=[whole],
+               directory=tmp_path / "machine")  # fmt: skip
+    assert halves[0].name != halves[1].name
+    # Every unordered pair once per deal.
+    assert sum(half.played for half in halves) == one.played == 6 * len(DEALS)
+
+    def table(storage: DirectoryStorage) -> list[tuple[str, str | None, float, int]]:
+        found = standings(connect(storage), "finals", table="plays", value="won")
+        assert found.complete
+        return [(e.name, e.opponent, e.value, e.matches) for e in found.entries]
+
+    assert table(split) == table(whole)
+    # Ordered by value against the field, best first.
+    assert [name for name, opponent, *_ in table(whole) if opponent is None] == [
+        "final3",
+        "final2",
+        "final1",
+        "final0",
+    ]
+
+
+def test_a_tournament_of_the_same_name_with_other_rules_is_refused(tmp_path: Path) -> None:
+    entrant = scripted(tmp_path, "s", 1)
+    hold(RoundRobin(name="finals", environment=WORLD, conditions=DEALS, games=4),
+         enter=[entrant], play=play, directory=tmp_path)  # fmt: skip
+    others: list[Benchmark | RoundRobin] = [
+        RoundRobin(name="finals", environment=WORLD, conditions=DEALS, games=8),
+        Benchmark(name="finals", environment=WORLD),
+    ]
+    for other in others:
+        with pytest.raises(EtudeError) as refused:
+            hold(other, play=play, directory=tmp_path)
+        assert refused.value.code == "tournament_conflict"
