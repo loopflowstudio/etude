@@ -736,7 +736,7 @@ def track(
     )
 
 
-def seal(directory: Path | str) -> None:
+def seal_runs(directory: Path | str) -> None:
     """Turn the local logs dead processes left in every run under `directory` into blocks."""
     for root in sorted(path.parent for path in Path(directory).glob("*/run.json")):
         declared = RunFiles(root).run_file()
@@ -747,6 +747,6 @@ def seal(directory: Path | str) -> None:
 __all__ = [
     "EtudeWarning",
     "Run",
-    "seal",
+    "seal_runs",
     "track",
 ]

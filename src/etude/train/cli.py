@@ -107,9 +107,9 @@ def sync(
 
     if seal:
         # Sealing turns training logs into blocks; only then does it need NumPy.
-        from etude.train.run import seal as seal_logs
+        from etude.train.run import seal_runs
 
-        seal_logs(directory)
+        seal_runs(directory)
     undelivered = deliver(
         directory, storages=[storage_from_uri(uri) for uri in to or []], stopped=seal
     )

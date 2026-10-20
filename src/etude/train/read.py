@@ -451,13 +451,13 @@ def _read(
     storage: Storage,
     experiment: str,
     run: str,
-    places: Sequence[str],
+    folders: Sequence[str],
     *,
     run_file: RunFile | None = None,
 ) -> RunData:
     def listing() -> list[tuple[str, str]]:
         """Every (folder, name under it), first folder first."""
-        return [(place, key[len(place) :]) for place in places for key in storage.keys(place)]
+        return [(place, key[len(place) :]) for place in folders for key in storage.keys(place)]
 
     keys = listing()
     checkpoints: list[CheckpointRecord] = []
@@ -523,9 +523,12 @@ def _read(
         )
     )
     names = {(place, name) for place, name in keys}
-    declared = next((place for place in places if (place, "run.json") in names), None)
+    if run_file is None:
+        declaring = next((place for place in folders if (place, "run.json") in names), None)
+        if declaring is not None:
+            run_file = RunFile.model_validate_json(storage.get(declaring + "run.json"))
     # The state the latest attempt left, where it left one.
-    ended = [place for place in places if (place, "state.json") in names]
+    ended = [place for place in folders if (place, "state.json") in names]
     latest = next((place for _, place in reversed(attempts) if place in ended), None)
     state = latest or (ended[-1] if ended else None)
     run_state = RunState.model_validate_json(storage.get(state + "state.json")) if state else None
@@ -539,11 +542,7 @@ def _read(
     return RunData(
         experiment=experiment,
         name=run,
-        file=run_file
-        if run_file is not None
-        else RunFile.model_validate_json(storage.get(declared + "run.json"))
-        if declared
-        else None,
+        file=run_file,
         state=run_state,
         blocks=tuple(blocks),
         # By time: each machine numbers its own checkpoints from 1.

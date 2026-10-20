@@ -23,7 +23,7 @@ from etude.train.manifest import Manifest, write_manifest
 from etude.train.read import buckets, read, read_all
 from etude.train.records import Step
 from etude.train.report import pages
-from etude.train.run import log_line, seal, track, write_block
+from etude.train.run import log_line, seal_runs, track, write_block
 from tests.runs.storage import MeasuredStorage
 
 
@@ -157,7 +157,7 @@ def test_stale_tail_and_explicit_sealing(tmp_path: Path) -> None:
     (run.files.root / f"metrics/00000001-{writer}.open").write_text(
         log_line(2000, {"step": 2.0}, {"value": 8})
     )
-    seal(tmp_path)
+    seal_runs(tmp_path)
     bucket = DirectoryStorage(tmp_path / "bucket")
     assert sync(tmp_path, storages=[bucket], stopped=True) == {}
     assert read(bucket, "e", "r").points("value", "step").y.tolist() == [7, 8]
