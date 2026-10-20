@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from etude.track.storage import Storage
+from etude.runs.storage import Storage
 
 
 class MeasuredStorage:

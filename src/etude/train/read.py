@@ -9,7 +9,7 @@ coordinate is known, and not beyond it.
 A later write at the same clock value replaces an earlier one.
 Superseded rows stay on disk. Buckets keep their extremes.
 
-Rows are read by column (`etude.track.block`), so a chart costs two arrays.
+Rows are read by column (`etude.train.block`), so a chart costs two arrays.
 """
 
 from __future__ import annotations
@@ -23,22 +23,13 @@ import numpy as np
 import numpy.typing as npt
 from pydantic import ConfigDict, SkipValidation, ValidationError
 
-from etude.track.block import Table
-from etude.track.block_file import parse, select
-from etude.track.manifest import BlockDescription, Manifest, StoredBlock, describe, fetch
-from etude.track.records import (
-    WALL_CLOCK,
-    Attempt,
-    CheckpointRecord,
-    Clock,
-    EvaluationDefinition,
-    EvaluationRecord,
-    Record,
-    RunFile,
-    RunState,
-    subject_identity,
-)
-from etude.track.storage import DirectoryStorage, Storage, run_prefix
+from etude.runs.block_file import parse, select
+from etude.runs.listing import RUN_FOLDERS, as_storage, declared, places
+from etude.runs.records import WALL_CLOCK, Attempt, Clock, Record, RunFile, RunState
+from etude.runs.storage import Storage, run_prefix
+from etude.train.block import Table
+from etude.train.manifest import BlockDescription, Manifest, StoredBlock, describe, fetch
+from etude.train.records import CheckpointRecord
 
 type Floats = npt.NDArray[np.float64]
 
@@ -69,11 +60,8 @@ class RunData(Arrays):
     # One table per process that wrote rows, in the order the processes started.
     blocks: SkipValidation[tuple[StoredBlock, ...]]
     checkpoints: tuple[CheckpointRecord, ...]
-    definitions: tuple[EvaluationDefinition, ...]
     # Every process that wrote to this run, in start order.
     attempts: tuple[Attempt, ...]
-    # Evaluations this run wrote; their subjects may be another run's checkpoints.
-    evaluations: tuple[EvaluationRecord, ...]
 
     @cached_property
     def tables(self) -> tuple[Table, ...]:
@@ -442,72 +430,21 @@ def _clock_range(block: StoredBlock, clock: str) -> tuple[float, float] | None:
     return column.first, column.last
 
 
-def _storage(source: Storage | Path | str) -> Storage:
-    return DirectoryStorage(source) if isinstance(source, (Path, str)) else source
-
-
-# A folder is a run's when it holds one of these directly: its name is the run's.
-_RUN_FOLDERS = ("metrics", "checkpoints", "evaluations", "definitions")
-_RUN_FILES = ("run.json", "state.json")
-
-
-def _places(storage: Storage) -> dict[str, list[str]]:
-    """Each run's folders, as prefixes, by run name, in listing order.
-
-    A run's folder is named for the run and may sit at any depth, so one
-    source can hold several copies of a run, one per machine that wrote to it,
-    and a bucket can hold a launcher's other files beside them.
-    """
-    found: dict[str, dict[str, None]] = {}
-    for key in storage.keys(""):
-        parts = key.split("/")
-        for index in range(1, len(parts)):
-            last = index == len(parts) - 1
-            if (parts[index] in _RUN_FOLDERS and not last) or (last and parts[index] in _RUN_FILES):
-                found.setdefault(parts[index - 1], {})["/".join(parts[:index]) + "/"] = None
-                break
-    return {run: list(places) for run, places in found.items()}
-
-
-def _declared(storage: Storage, places: Sequence[str]) -> RunFile | None:
-    for place in places:
-        try:
-            return RunFile.model_validate_json(storage.get(place + "run.json"))
-        except (FileNotFoundError, ValidationError):
-            continue
-    return None
-
-
-def runs(source: Storage | Path | str) -> list[tuple[str, str]]:
-    """Every (experiment, run) under this directory or bucket, at any depth.
-
-    A run is listed once its declaration, `run.json`, has arrived.
-    """
-    storage = _storage(source)
-    found = []
-    for run, places in _places(storage).items():
-        declared = _declared(storage, places)
-        if declared is not None:
-            found.append((declared.experiment, run))
-    return sorted(found)
-
-
 def read_all(source: Storage | Path | str, experiment: str | None = None) -> list[RunData]:
     """Every run under a source, or every run of one experiment, listing the source once."""
-    storage = _storage(source)
+    storage = as_storage(source)
     data = []
-    for run, places in sorted(_places(storage).items()):
-        declared = _declared(storage, places)
-        if declared is not None and experiment in (None, declared.experiment):
-            data.append(_read(storage, declared.experiment, run, places, run_file=declared))
+    for run, folders in sorted(places(storage).items()):
+        file = declared(storage, folders)
+        if file is not None and experiment in (None, file.experiment):
+            data.append(_read(storage, file.experiment, run, folders, run_file=file))
     return sorted(data, key=lambda one: (one.experiment, one.name))
 
 
 def read(source: Storage | Path | str, experiment: str, run: str) -> RunData:
-    """One run's declaration, state, rows and evaluations. Rows not yet sealed are not read."""
-    storage = _storage(source)
-    places = _places(storage).get(run, [run_prefix(run)])
-    return _read(storage, experiment, run, places)
+    """One run's declaration, state, rows and checkpoints. Rows not yet sealed are not read."""
+    storage = as_storage(source)
+    return _read(storage, experiment, run, places(storage).get(run, [run_prefix(run)]))
 
 
 def _read(
@@ -523,26 +460,20 @@ def _read(
         return [(place, key[len(place) :]) for place in places for key in storage.keys(place)]
 
     keys = listing()
-    evaluations: list[EvaluationRecord] = []
     checkpoints: list[CheckpointRecord] = []
-    definitions: list[EvaluationDefinition] = []
     attempts: list[tuple[Attempt, str]] = []
     for place, name in keys:
         kind, _, leaf = name.partition("/")
-        if not leaf.endswith(".json") or "/" in leaf or kind not in _RUN_FOLDERS:
+        if not leaf.endswith(".json") or "/" in leaf or kind not in RUN_FOLDERS:
             continue
         if kind == "metrics" and leaf.endswith((".index.json", ".permanent.json")):
             continue  # an index, read below
         body = storage.get(place + name)
         try:
-            if kind == "evaluations":
-                evaluations.append(EvaluationRecord.model_validate_json(body))
-            elif kind == "checkpoints":
+            if kind == "checkpoints":
                 checkpoints.append(CheckpointRecord.model_validate_json(body))
-            elif kind == "metrics":
-                attempts.append((Attempt.model_validate_json(body), place))
             else:
-                definitions.append(EvaluationDefinition.model_validate_json(body))
+                attempts.append((Attempt.model_validate_json(body), place))
         except ValidationError:
             continue
     attempts.sort(key=lambda pair: pair[0].started_ms)
@@ -617,42 +548,5 @@ def _read(
         blocks=tuple(blocks),
         # By time: each machine numbers its own checkpoints from 1.
         checkpoints=tuple(sorted(checkpoints, key=lambda record: (record.wall_ms, record.ordinal))),
-        definitions=tuple(definitions),
         attempts=tuple(attempt for attempt, _ in attempts),
-        evaluations=tuple(sorted(evaluations, key=lambda record: record.revision)),
     )
-
-
-class EvaluationView(Record):
-    """An evaluation with what matching its subject to a recorded checkpoint adds."""
-
-    record: EvaluationRecord
-    writer: str
-    # The run that recorded the subject checkpoint, when one did.
-    run: str | None
-    checkpoint: int | None
-    at: dict[str, float]
-
-
-def evaluations(data: Sequence[RunData]) -> list[EvaluationView]:
-    """Every evaluation these runs wrote, matched to the earliest recorded checkpoint."""
-    recorded: dict[str, tuple[int, str, CheckpointRecord]] = {}
-    for run in data:
-        for checkpoint in run.checkpoints:
-            identity = subject_identity(checkpoint.artifact)
-            if identity not in recorded or checkpoint.wall_ms < recorded[identity][0]:
-                recorded[identity] = (checkpoint.wall_ms, run.name, checkpoint)
-    views: list[EvaluationView] = []
-    for run in data:
-        for record in run.evaluations:
-            match = recorded.get(subject_identity(record.subject))
-            views.append(
-                EvaluationView(
-                    record=record,
-                    writer=run.name,
-                    run=match[1] if match else None,
-                    checkpoint=match[2].ordinal if match else None,
-                    at=dict(match[2].at) if match else {},
-                )
-            )
-    return views

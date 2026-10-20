@@ -20,14 +20,16 @@ import pytest
 from moto import mock_aws
 
 from etude.cli import main
-from etude.track.block import rows
-from etude.track.errors import EtudeError
-from etude.track.read import buckets, evaluations, read, runs
-from etude.track.records import Step, Time
-from etude.track.report import page_data, pages
-from etude.track.run import EtudeWarning, Run, definition_file, init, read_rows, sync
-from etude.track.serve import Server
-from etude.track.storage import DirectoryStorage, S3Storage, default_root
+from etude.runs.delivery import sync
+from etude.runs.errors import EtudeError
+from etude.runs.listing import runs
+from etude.runs.storage import DirectoryStorage, S3Storage, default_root
+from etude.train.block import rows
+from etude.train.read import buckets, read
+from etude.train.records import Step, Time
+from etude.train.report import page_data, pages
+from etude.train.run import EtudeWarning, Run, track
+from etude.train.serve import Server
 
 CLOCKS = [
     Step("progress/updates", "optimizer updates, absolute across continuation"),
@@ -50,7 +52,7 @@ def manabot_row(update: int) -> dict[str, object]:
 
 def test_rows_round_trip_through_files_and_a_bucket_directory(tmp_path: Path) -> None:
     bucket = DirectoryStorage(tmp_path / "bucket")
-    run = init(
+    run = track(
         experiment="capacity-pilot",
         run="training-3f9a",
         clocks=CLOCKS,
@@ -117,21 +119,21 @@ def test_resume_replays_harmlessly_and_sync_delivers_what_an_outage_left(
 ) -> None:
     local = tmp_path / "local"
     # First process: no destination is reachable, so only local files exist.
-    first = init(
+    first = track(
         experiment="pilot", run="seed-1", clocks=CLOCKS, directory=local, segment_seconds=0.05
     )
     for update in range(50):
         first.log(manabot_row(update))
     first.finish()
     # A second process resumes the same name behind the last row and replays ten.
-    second = init(
+    second = track(
         experiment="pilot", run="seed-1", clocks=CLOCKS, directory=local, segment_seconds=0.05
     )
     for update in range(40, 80):
         second.log(manabot_row(update), **{"rl/loss": 9.0})
     second.finish()
     with pytest.raises(EtudeError, match="run_clock_conflict"):
-        init(experiment="pilot", run="seed-1", clocks=CLOCKS[:1], directory=local)
+        track(experiment="pilot", run="seed-1", clocks=CLOCKS[:1], directory=local)
 
     bucket = DirectoryStorage(tmp_path / "bucket")
     assert sync(local, storages=[bucket]) == {}
@@ -144,7 +146,7 @@ def test_resume_replays_harmlessly_and_sync_delivers_what_an_outage_left(
 
 
 def test_log_never_blocks_or_raises_and_counts_what_it_drops(tmp_path: Path) -> None:
-    run = init(
+    run = track(
         experiment="pilot",
         run="flood",
         clocks=CLOCKS,
@@ -165,7 +167,7 @@ def test_log_never_blocks_or_raises_and_counts_what_it_drops(tmp_path: Path) -> 
     assert run.dropped > 0 and written + run.dropped == 50_002
     assert elapsed < 5
 
-    strict = init(experiment="pilot", run="strict", clocks=CLOCKS, directory=tmp_path, strict=True)
+    strict = track(experiment="pilot", run="strict", clocks=CLOCKS, directory=tmp_path, strict=True)
     with pytest.raises(EtudeError, match="row_missing_clock"):
         strict.log({"rl/loss": 1.0})
     strict.log(manabot_row(10))
@@ -178,7 +180,7 @@ def test_log_never_blocks_or_raises_and_counts_what_it_drops(tmp_path: Path) -> 
 def test_files_alone_read_back_and_report_with_a_seed_sample(tmp_path: Path) -> None:
 
     for seed, length in enumerate((120, 120, 60)):
-        run = init(
+        run = track(
             experiment="pilot",
             run=f"seed-{seed}",
             clocks=CLOCKS,
@@ -220,71 +222,36 @@ def test_files_alone_read_back_and_report_with_a_seed_sample(tmp_path: Path) -> 
     assert main(["reports", "write", "--source", str(tmp_path), "--experiment", "absent"]) == 1
 
 
-def test_a_separate_process_evaluates_recorded_checkpoints_through_files(tmp_path: Path) -> None:
-    (tmp_path / "monitor.toml").write_text("opponents = ['search-64']\ndeals = 1\nlegs = 4\n")
-    monitor = definition_file(tmp_path / "monitor.toml")
-    assert monitor.name == "monitor"
-    training = init(
+def test_checkpoint_references_read_back_and_an_incomplete_coordinate_is_not_recorded(
+    tmp_path: Path,
+) -> None:
+    training = track(
         experiment="pilot",
         run="training",
         clocks=CLOCKS,
         directory=tmp_path / "trainer",
         segment_seconds=0.05,
     )
-    saved = []
     for update in (100, 200):
         training.log(manabot_row(update))
-        saved.append(
-            training.checkpoint(
-                f"s3://models/pilot/{update}.pt",
-                {"progress/updates": update, "progress/training_seconds": update * 0.25},
-            )
+        training.checkpoint(
+            f"s3://models/pilot/{update}.pt",
+            {"progress/updates": update, "progress/training_seconds": update * 0.25},
         )
     with pytest.warns(EtudeWarning, match="checkpoint_clock_mismatch"):
         training.checkpoint("s3://models/pilot/bad.pt", {"progress/updates": 300})
     training.finish()
-    assert training.incomplete == 1
+    assert training.incomplete == 1 and training.problems == {}
 
-    # Another process, another machine's directory: it knows only the model references.
-    evaluator = init(
-        experiment="pilot",
-        run="monitor",
-        clocks=[],
-        kind="evaluation",
-        directory=tmp_path / "evaluator",
-        segment_seconds=0.05,
-    )
-    with evaluator.evaluation(monitor, saved[0], expected_episodes=4) as attempt:
-        for won in (True, False, True, True):
-            attempt.add(won=won)
-        attempt.estimate("win", 0.75, 0.3, 0.95, n=4, method="test interval")
-    with pytest.raises(RuntimeError), evaluator.evaluation(monitor, saved[1]) as attempt:
-        attempt.add(won=True)
-        raise RuntimeError("opponent crashed")
-    with evaluator.evaluation(monitor, "s3://models/old-baseline.pt") as attempt:
-        attempt.estimate("win", 0.4, 0.1, 0.8, n=4, method="test interval")
-    evaluator.finish()
-    assert evaluator.problems == {} and training.problems == {}
-
-    written = read(tmp_path / "evaluator", "pilot", "monitor")
-    assert [r.state for r in written.evaluations] == ["settled", "failed", "settled"]
-    assert written.definitions == (monitor,)
-    first = written.evaluations[0]
-    assert first.episodes == 4 and first.estimates[0].upper == 0.95
-    episodes = tmp_path / "evaluator/monitor" / str(first.episodes_uri)
-    assert len(read_rows(episodes)) == 4
-    # From files alone, with both directories in hand, subjects match checkpoints.
     trained = read(tmp_path / "trainer", "pilot", "training")
-    assert [c.ordinal for c in trained.checkpoints] == [1, 2]
-    views = evaluations([trained, written])
-    assert [(v.run, v.checkpoint) for v in views] == [
-        ("training", 1),
-        ("training", 2),
-        (None, None),
+    assert [(c.ordinal, c.artifact.uri) for c in trained.checkpoints] == [
+        (1, "s3://models/pilot/100.pt"),
+        (2, "s3://models/pilot/200.pt"),
     ]
-    assert views[1].at == {"progress/updates": 200.0, "progress/training_seconds": 50.0}
-
-    assert written.evaluations[1].failure == "RuntimeError: opponent crashed"
+    assert trained.checkpoints[1].at == {
+        "progress/updates": 200.0,
+        "progress/training_seconds": 50.0,
+    }
 
 
 AT = {"progress/updates": 50, "progress/training_seconds": 12.5}
@@ -301,7 +268,7 @@ def test_metrics_and_checkpoints_reach_an_s3_bucket_and_read_back(
         client = boto3.client("s3")
         client.create_bucket(Bucket="runs")
         bucket = S3Storage("runs", "team/a", client=client)
-        run = init(
+        run = track(
             experiment="pilot",
             run="s3",
             clocks=CLOCKS,
@@ -351,7 +318,7 @@ def test_checkpoints_are_stored_locally_and_tagged_after_a_resume(
     model.write_bytes(b"weights")
 
     def opened() -> Run:
-        return init(
+        return track(
             experiment="pilot",
             run="local",
             clocks=CLOCKS,
@@ -398,7 +365,7 @@ def test_logging_from_training_code_imports_no_command_line_library() -> None:
         [
             sys.executable,
             "-c",
-            "import sys, etude.track.run, etude.track.read, etude.track.report; "
+            "import sys, etude.train.run, etude.train.read, etude.train.report; "
             "print(sorted(name for name in ('typer', 'rich', 'boto3') if name in sys.modules))",
         ],
         capture_output=True,
@@ -412,7 +379,7 @@ def test_the_server_lists_experiments_and_serves_each_report_from_the_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
-    run = init(experiment="pilot", run="a", clocks=CLOCKS)  # no directory named
+    run = track(experiment="pilot", run="a", clocks=CLOCKS)  # no directory named
     run.log(manabot_row(1))
     run.finish()
     server = Server(default_root(), ("127.0.0.1", 0))
@@ -442,7 +409,7 @@ def test_tracking_commands_use_local_files_with_a_selected_controller(
     monkeypatch.delenv("ETUDE_CONTROLLER_LOCAL", raising=False)
     local = tmp_path / "local"
     destination = tmp_path / "copy"
-    with init(experiment="pilot", run="one", clocks=CLOCKS, directory=local) as run:
+    with track(experiment="pilot", run="one", clocks=CLOCKS, directory=local) as run:
         run.log(manabot_row(10))
         run.checkpoint(
             "s3://models/one.pt", {"progress/updates": 10, "progress/training_seconds": 2.5}

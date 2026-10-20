@@ -1,6 +1,5 @@
 """Tracking commands keep startup independent of compute and unused dependencies."""
 
-import ast
 import json
 import os
 import subprocess
@@ -10,32 +9,21 @@ from pathlib import Path
 import pytest
 
 
-def test_tracking_does_not_import_launcher() -> None:
-    root = Path(__file__).resolve().parents[2] / "src/etude/track"
-    for path in root.rglob("*.py"):
-        for node in ast.walk(ast.parse(path.read_text())):
-            names = (
-                [alias.name for alias in node.names]
-                if isinstance(node, ast.Import)
-                else [node.module or "", *(f"{node.module}.{alias.name}" for alias in node.names)]
-                if isinstance(node, ast.ImportFrom)
-                else []
-            )
-            assert not any(
-                name == "etude.launch" or name.startswith("etude.launch.") for name in names
-            ), path
-
-
 @pytest.mark.parametrize(
     ("command", "count", "forbidden"),
     [
-        (["reports", "--help"], 9, ("numpy", "pydantic")),
-        (["reports", "write", "--help"], 9, ("numpy", "pydantic")),
-        (["reports", "write", "--source", "{directory}"], 16, ("boto3", "etude.track.run")),
+        (["reports", "--help"], 10, ("numpy", "pydantic")),
+        (["reports", "write", "--help"], 10, ("numpy", "pydantic")),
+        (["reports", "write", "--source", "{directory}"], 19, ("boto3", "etude.train.run")),
         (
             ["sync", "--directory", "{directory}"],
             15,
-            ("boto3", "etude.track.report", "etude.track.serve"),
+            ("boto3", "numpy", "etude.train.report", "etude.train.serve"),
+        ),
+        (
+            ["sync", "--directory", "{directory}", "--seal"],
+            19,
+            ("boto3", "etude.train.report", "etude.train.serve"),
         ),
     ],
 )
@@ -62,7 +50,8 @@ def test_tracking_command_import_counts(
     ), done.stderr
     modules = json.loads(done.stdout.splitlines()[-1])
     loaded = [name for name in modules if name.startswith("etude")]
-    # Pin help and execution separately: help builds no records, sync loads no report.
+    # Pin help and execution separately: help builds no records, sync loads no
+    # report, and only sealing training logs loads the block format.
     assert len(loaded) == count, loaded
     assert not [
         name

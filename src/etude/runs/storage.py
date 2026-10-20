@@ -1,18 +1,22 @@
 """Where a run's files are kept: the author's own directory or bucket.
 
 Metric blocks are immutable; small manifests are replaced atomically.
-Covered blocks may be deleted only after their permanent replacement arrives. Keys are relative,
-slash-separated and never leave the configured root.
+Covered blocks may be deleted only after their permanent replacement arrives.
+Keys are relative, slash-separated and never leave the configured root. A run's
+folder is named for the run (`run_directory`).
 """
 
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from pathlib import Path
 from typing import Any, Protocol
 
-from etude.track.errors import EtudeError
+from etude.runs.errors import EtudeError
+
+SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._=-]{0,199}$")
 
 
 def run_prefix(run: str) -> str:
@@ -180,6 +184,15 @@ def default_root() -> Path:
     if given:
         return Path(given)
     return Path(os.environ.get("ETUDE_HOME", "~/.etude")).expanduser() / "track"
+
+
+def run_directory(directory: Path | str | None, experiment: str, run: str) -> tuple[Path, Path]:
+    """The runs directory and this run's folder in it; refuses names unsafe as paths."""
+    for name in (experiment, run):
+        if not SAFE_NAME.match(name):
+            raise EtudeError("unsafe_run_or_experiment_name", 422)
+    base = Path(directory) if directory else default_root()
+    return base, base / run_prefix(run)
 
 
 def storage_from_uri(uri: str | Path) -> Storage:

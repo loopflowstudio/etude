@@ -1,4 +1,4 @@
-"""Failures reported by tracking without loading its file records."""
+"""Failures reported by runs without loading their file records."""
 
 
 class EtudeError(Exception):

@@ -59,4 +59,4 @@ ban-relative-imports = "all"
 # AGENTS.md: entry points load only the command being invoked.
 "src/etude/cli.py" = ["PLC0415"]
 "src/etude/launch/cli.py" = ["PLC0415"]
-"src/etude/track/cli.py" = ["PLC0415"]
+"src/etude/train/cli.py" = ["PLC0415"]

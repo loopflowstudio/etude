@@ -1,4 +1,4 @@
-"""Block names and sequence coverage for tracking readers and writers.
+"""Metric block names and sequence coverage, for their writers, readers and delivery.
 
 Names identify the writer and covered sequences without reading block bytes or
 loading NumPy. Wider blocks supersede their covered tails and recent blocks.

@@ -17,8 +17,9 @@ from etude.launch.database import Database
 from etude.launch.executor import local as local_service
 from etude.launch.records import Job, LauncherError, Machine, Pool, Run, Status
 from etude.launch.scheduler import Scheduler
-from etude.track.read import read, runs
-from etude.track.report import page_data
+from etude.runs.listing import runs
+from etude.train.read import read
+from etude.train.report import page_data
 from tests.launch.counting import job_text
 
 TRAIN = """
@@ -151,9 +152,9 @@ def test_added_work_has_a_session_but_no_rental_or_session_deadline(tmp_path: Pa
 
 TRACKED = """
 import os
-from etude.track.records import Step
-from etude.track.run import init
-run = init(experiment="capacity", clocks=[Step("steps", "training steps")])
+from etude.train.records import Step
+from etude.train.run import track
+run = track(experiment="capacity", clocks=[Step("steps", "training steps")])
 for step in range(3):
     run.log({"loss": 1.0 / (step + 1)}, steps=step)
 weights = os.path.join(os.environ["ETUDE_OUTPUT_DIR"], "weights.pt")

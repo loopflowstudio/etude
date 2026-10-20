@@ -135,16 +135,16 @@ def test_cohort_git_and_database_counts(
 @pytest.mark.parametrize(
     ("command", "count", "forbidden"),
     [
-        (["--help"], 9, ("numpy", "pydantic", "etude.launch.scheduler", "etude.launch.worker")),
+        (["--help"], 10, ("numpy", "pydantic", "etude.launch.scheduler", "etude.launch.worker")),
         (
             ["worker", "--help"],
-            9,
+            10,
             ("numpy", "pydantic", "etude.launch.worker", "etude.launch.scheduler"),
         ),
-        (["pools"], 39, ("numpy", "boto3", "etude.launch.worker")),
+        (["pools"], 40, ("numpy", "boto3", "etude.launch.worker")),
         (
             ["worker", "{directory}"],
-            28,
+            29,
             (
                 "numpy",
                 "boto3",
@@ -197,10 +197,11 @@ def test_command_import_counts(
         if any(name == prefix or name.startswith(prefix + ".") for prefix in forbidden)
     ]
     # One `etude` command: tracking contributes only its command table.
-    assert {name for name in loaded if name.startswith("etude.track")} <= {
-        "etude.track",
-        "etude.track.cli",
-        "etude.track.errors",
+    assert {name for name in loaded if name.startswith(("etude.runs", "etude.train"))} <= {
+        "etude.runs",
+        "etude.runs.errors",
+        "etude.train",
+        "etude.train.cli",
     }
     if command[0] == "worker":
         assert not (tmp_path / "home" / "launcher.db").exists()

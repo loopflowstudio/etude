@@ -12,9 +12,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote
 
-from etude.track.read import read_all, runs
-from etude.track.report import page_data, render
-from etude.track.storage import Storage
+from etude.runs.listing import runs
+from etude.runs.storage import Storage
+from etude.train.read import read_all
+from etude.train.report import page_data, render
 
 INDEX = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">

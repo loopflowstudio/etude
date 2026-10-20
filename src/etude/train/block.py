@@ -34,8 +34,8 @@ import numpy as np
 import numpy.typing as npt
 from pydantic import ConfigDict
 
-from etude.track.errors import EtudeError
-from etude.track.records import WALL_CLOCK, Record
+from etude.runs.errors import EtudeError
+from etude.runs.records import WALL_CLOCK, Record
 
 MAGIC, END, VERSION, ALIGN = b"ETUDEBLK", b"KLB1", 1, 64
 
