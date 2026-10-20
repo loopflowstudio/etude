@@ -98,7 +98,9 @@ class Evaluation:
             self._values(episode, "group", group.measures)
         self._values(episode, "episode", episode.measures)
 
-    def _values(self, episode: Episode, level: str, values: Values) -> None:
+    def _values(
+        self, episode: Episode, level: Literal["player", "group", "episode"], values: Values
+    ) -> None:
         for name, value in values.items():
             measure = self._measures.get(name)
             where = ValueError(f"episode {episode.key!r}: measure {name!r} at {level}")

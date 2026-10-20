@@ -22,9 +22,9 @@ import numpy as np
 
 from etude.eval.records import Agent, Count, Episode, EvaluationFile, Measure
 from etude.run.errors import EtudeError
-from etude.run.listing import declared, places
+from etude.run.listing import as_storage, declared, places
 from etude.run.records import Digest, Name, Record
-from etude.run.storage import Storage, storage_from_uri
+from etude.run.storage import Storage
 
 REPLICATES = 2000
 SEED = 0
@@ -70,7 +70,7 @@ class Conflict(Record):
 
 def episodes(source: Storage | Path | str, experiment: str | None = None) -> list[EpisodeView]:
     """Every episode of every eval run under a source, latest write of each key."""
-    storage = source if not isinstance(source, (Path, str)) else storage_from_uri(source)
+    storage = as_storage(source)
     views: list[EpisodeView] = []
     for run, folders in sorted(places(storage).items()):
         run_file = declared(storage, folders)
@@ -169,9 +169,8 @@ def compare(
     # Per key, per block: [numerator, denominator], and the episodes seen.
     sums: dict[_Key, dict[tuple[str, str, str], list[float]]] = {}
     seen: dict[_Key, set[tuple[str, str]]] = {}
+    # `add` refused undeclared measures, so a run without this one yields no values.
     for view in views:
-        if measure not in {m.name for m in view.declaration.measures}:
-            continue
         episode = view.episode
         block = (view.run, *(("block", episode.block) if episode.block else ("key", episode.key)))
         for subject, opponents, labels, value in _measured(view, measure):
