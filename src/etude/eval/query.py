@@ -459,9 +459,9 @@ def compare(
         rows[key] = rows.get(key, 0) + count
     comparisons: list[Comparison] = []
     for key in sorted(blocks, key=lambda k: tuple("" if v is None else str(v) for v in k)):
-        totals = np.array(blocks[key])
-        if totals[:, 1].sum() == 0:
-            continue  # a rate with no opportunities has no value
+        estimated = estimate(blocks[key])
+        if estimated is None:
+            continue
         environment, subject, opponent, *values = key
         comparisons.append(
             Comparison(
@@ -470,26 +470,35 @@ def compare(
                 opponent=None if opponent is None else tuple(str(opponent).split("+")),
                 # DuckDB returns plain values for the author's scalar columns.
                 split=dict(zip(by, cast(list[JsonValue], values))),
-                value=float(totals[:, 0].sum() / totals[:, 1].sum()),
-                interval=resampled_interval(totals[:, 0], totals[:, 1]),
+                value=estimated[0],
+                interval=estimated[1],
                 rows=rows[key],
-                matches=len(totals),
+                matches=len(blocks[key]),
             )
         )
     return comparisons
 
 
-def resampled_interval(
-    numerators: np.ndarray[tuple[int], np.dtype[np.float64]],
-    denominators: np.ndarray[tuple[int], np.dtype[np.float64]],
-) -> tuple[float, float] | None:
-    """A 95% percentile bootstrap of the ratio of totals, resampling blocks."""
-    n = len(numerators)
-    if n < 2:
+def estimate(
+    blocks: Sequence[tuple[float, float]],
+) -> tuple[float, tuple[float, float] | None] | None:
+    """The ratio of totals over (numerator, denominator) blocks, and its 95% interval.
+
+    The interval is a percentile bootstrap resampling whole blocks, None with
+    fewer than two. None overall when there are no opportunities: a rate
+    without them has no value.
+    """
+    totals = np.array(blocks, dtype=np.float64).reshape(-1, 2)
+    numerators, denominators = totals[:, 0], totals[:, 1]
+    if denominators.sum() == 0:
         return None
+    value = float(numerators.sum() / denominators.sum())
+    n = len(totals)
+    if n < 2:
+        return value, None
     weights = np.random.default_rng(SEED).multinomial(n, np.full(n, 1 / n), size=REPLICATES)
-    totals = weights @ denominators
-    kept = totals > 0
-    ratios = (weights @ numerators)[kept] / totals[kept]
+    resampled = weights @ denominators
+    kept = resampled > 0
+    ratios = (weights @ numerators)[kept] / resampled[kept]
     low, high = np.percentile(ratios, [2.5, 97.5])
-    return float(low), float(high)
+    return value, (float(low), float(high))

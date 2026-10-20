@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from hashlib import sha256
 from itertools import combinations
 from typing import Any, Literal, Self
@@ -123,25 +123,14 @@ class Match(Record):
     @property
     def key(self) -> Digest:
         """Identifies the match wherever it is played."""
-        return match_key(
-            [agent.identity for agent in self.agents], self.groups, self.conditions, self.games
-        )
+        seating = [agent.identity for agent in self.agents]
+        groups = {name: list(seats) for name, seats in self.groups.items()}
+        return digest([seating, groups, self.conditions, self.games])
 
     @property
     def seed(self) -> int:
         """Derived from the key, so a replayed match draws the same games."""
         return int(self.key[:15], 16)
-
-
-def match_key(
-    seating: Sequence[Digest],
-    groups: Mapping[str, Sequence[int]],
-    conditions: Config,
-    games: int,
-) -> Digest:
-    """A match's key from its agents' identities, for readers that hold no `Agent`."""
-    named = {name: list(seats) for name, seats in groups.items()}
-    return digest([list(seating), named, conditions, games])
 
 
 class MatchRecord(Record):

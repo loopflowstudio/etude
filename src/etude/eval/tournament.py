@@ -23,14 +23,14 @@ tournament's eval runs delivered, by listing them.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Sequence
+from collections import Counter
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import numpy as np
-
 from etude.eval.match import ETUDE_TABLES, IDENTIFIER, TOURNAMENTS, EvalRun, Tables, evaluate
-from etude.eval.query import compare, resampled_interval
+from etude.eval.query import compare, estimate
 from etude.eval.records import (
     Agent,
     Benchmark,
@@ -118,19 +118,13 @@ def _benchmark_matches(
     stored: _Stored, benchmark: Benchmark, checkpoint: ArtifactRef | None
 ) -> tuple[dict[Digest, Match], bool]:
     """The matches a hold adds, by key, and whether none of them can be delivered yet."""
-    defined: dict[str, set[str]] = {}
-    for file in stored.listed("matchups/"):
-        name, definition = file.removeprefix("matchups/").removesuffix(".json").split(".")
-        defined.setdefault(name, set()).add(definition)
-    given: dict[str, Matchup] = {}
-    for each in benchmark.matchups:
-        name, definition = each.file.removeprefix("matchups/").removesuffix(".json").split(".")
-        if defined.get(name, {definition}) != {definition}:
-            raise EtudeError("matchup_conflict", 409) from ValueError(each.name)
-        given[each.file] = each
-    # Two holds may define one name at once; the schedule would hold both.
-    if any(len(definitions) > 1 for definitions in defined.values()):
-        raise EtudeError("matchup_conflict", 409)
+    given = {each.file: each for each in benchmark.matchups}
+    # A file name's first part is the matchup name's digest. Two holds may also
+    # define one name at once, so stored files are checked against each other too.
+    names = Counter(file.split(".")[0] for file in stored.listed("matchups/") | given.keys())
+    if clashing := {name for name, files in names.items() if files > 1}:
+        redefined = [each.name for file, each in given.items() if file.split(".")[0] in clashing]
+        raise EtudeError("matchup_conflict", 409) from ValueError(redefined or sorted(clashing))
     for file, each in given.items():
         stored.write(file, each.model_dump_json())
     models = stored.listed("models/")
@@ -188,11 +182,13 @@ class _Stored:
         if any(other in present for present in self.present.values()):
             raise EtudeError("tournament_conflict", 409)
         for place in self.places:
-            if file not in self.present[place.name]:
-                place.put(self.prefix + file, tournament.model_dump_json().encode())
-                self.present[place.name].add(file)
-            elif type(tournament).model_validate_json(place.get(self.prefix + file)) != tournament:
+            if (
+                file in self.present[place.name]
+                and type(tournament).model_validate_json(place.get(self.prefix + file))
+                != tournament
+            ):
                 raise EtudeError("tournament_conflict", 409)
+        self.write(file, tournament.model_dump_json())
 
     def listed(self, folder: str) -> set[str]:
         """The files under `folder` in any place."""
@@ -226,8 +222,9 @@ class _Stored:
         return found
 
 
-def _held(db: duckdb.DuckDBPyConnection, tournament: str) -> tuple[int, list[tuple[str, str]]]:
-    """How many matches the tournament schedules, and (run, match) for each one held.
+@contextmanager
+def _held(db: duckdb.DuckDBPyConnection, tournament: str) -> Iterator[tuple[int, int]]:
+    """Temp table `_held` (run, match) of each scheduled match held; yields (scheduled, held).
 
     Each scheduled match counts once, from the tournament's eval run that recorded it last.
     """
@@ -236,18 +233,24 @@ def _held(db: duckdb.DuckDBPyConnection, tournament: str) -> tuple[int, list[tup
         is None
     ):
         raise EtudeError("tournament_not_found", 404)
-    scheduled = {
-        key
-        for (key,) in db.execute(
-            "select distinct match from schedule where tournament = ?", [tournament]
-        ).fetchall()
-    }
-    latest = db.execute(
-        "select m.match, arg_max(m.run, m.wall_ms) from matches m join runs r using (run)"
-        " where r.tournament = ? and m.state = 'done' group by m.match",
+    db.execute(
+        "create or replace temp table _held as"
+        " select arg_max(m.run, m.wall_ms) as run, m.match from matches m join runs r using (run)"
+        " where r.tournament = $1 and m.state = 'done'"
+        " and m.match in (select match from schedule where tournament = $1)"
+        " group by m.match",
         [tournament],
-    ).fetchall()
-    return len(scheduled), sorted((run, key) for key, run in latest if key in scheduled)
+    )
+    try:
+        counted = db.execute(
+            "select (select count(distinct match) from schedule where tournament = ?),"
+            " (select count(*) from _held)",
+            [tournament],
+        ).fetchone()
+        assert counted is not None
+        yield counted[0], counted[1]
+    finally:
+        db.execute("drop table _held")
 
 
 class CurvePoint(Record):
@@ -294,11 +297,7 @@ def curves(
             raise EtudeError("column_name_refused", 422) from ValueError(name)
     if table in ETUDE_TABLES:
         raise EtudeError("curves_need_an_author_table", 422)
-    _, chosen = _held(db, benchmark)
-    db.execute("create or replace temp table _held (run VARCHAR, match VARCHAR)")
-    try:
-        if chosen:
-            db.executemany("insert into _held values (?, ?)", chosen)
+    with _held(db, benchmark):
         found = db.execute(
             f"""
             with r as (
@@ -312,60 +311,53 @@ def curves(
                 select artifact, run, experiment, ordinal, clocks from training_checkpoints
                 qualify row_number() over (partition by artifact order by run, ordinal) = 1
             )
-            select s.matchup, s.checkpoint, t.run, t.experiment, t.ordinal, t.clocks,
-                r.match, sum(r._value), sum(r._per), count(*)
+            select s.matchup, t.run, t.experiment, s.checkpoint, t.ordinal, t.clocks,
+                sum(r._value), sum(r._per), count(*)
             from r join _held using (run, match)
             join schedule s on s.tournament = ? and s.match = r.match
             left join trained t on t.artifact = s.checkpoint
-            group by all
+            group by s.matchup, t.run, t.experiment, s.checkpoint, t.ordinal, t.clocks, r.match
             """,
             [benchmark],
         ).fetchall()
-    finally:
-        db.execute("drop table _held")
-    # Per (matchup, checkpoint): its training coordinates and per-match totals.
-    lines: dict[tuple[str, str | None, str | None], dict[str, list[tuple[float, float, int]]]] = {}
-    where_at: dict[str, tuple[int | None, dict[str, float]]] = {}
-    for (
-        matchup,
-        checkpoint,
-        run,
-        experiment,
-        ordinal,
-        clocks,
-        _,
-        total,
-        opportunities,
-        rows,
-    ) in found:
-        lines.setdefault((matchup, run, experiment), {}).setdefault(checkpoint, []).append(
-            (float(total), float(opportunities), int(rows))
+    # Per point, where its checkpoint stood: each match's totals and rows.
+    blocks: dict[
+        tuple[str, str | None, str | None, str, int | None, str | None],
+        list[tuple[float, float, int]],
+    ] = {}
+    for matchup, run, experiment, checkpoint, ordinal, clocks, total, per_total, rows in found:
+        blocks.setdefault((matchup, run, experiment, checkpoint, ordinal, clocks), []).append(
+            (float(total), float(per_total), int(rows))
         )
-        where_at[checkpoint] = (ordinal, json.loads(clocks) if clocks else {})
-    result: list[Curve] = []
-    for (matchup, run, experiment), points in sorted(
-        lines.items(), key=lambda item: tuple("" if v is None else v for v in item[0])
-    ):
-        made: list[CurvePoint] = []
-        for checkpoint, blocks in points.items():
-            totals = np.array([block[:2] for block in blocks])
-            if totals[:, 1].sum() == 0:
-                continue  # a rate with no opportunities has no value
-            ordinal, clocks = where_at[checkpoint]
-            made.append(
-                CurvePoint(
-                    checkpoint=checkpoint,
-                    ordinal=ordinal,
-                    clocks=clocks,
-                    value=float(totals[:, 0].sum() / totals[:, 1].sum()),
-                    interval=resampled_interval(totals[:, 0], totals[:, 1]),
-                    rows=sum(block[2] for block in blocks),
-                    matches=len(blocks),
-                )
+    lines: dict[tuple[str, str | None, str | None], list[CurvePoint]] = {}
+    for (matchup, run, experiment, checkpoint, ordinal, clocks), totals in blocks.items():
+        estimated = estimate([(total, opportunities) for total, opportunities, _ in totals])
+        if estimated is None:
+            continue
+        lines.setdefault((matchup, run, experiment), []).append(
+            CurvePoint(
+                checkpoint=checkpoint,
+                ordinal=ordinal,
+                clocks=json.loads(clocks) if clocks else {},
+                value=estimated[0],
+                interval=estimated[1],
+                rows=sum(rows for *_, rows in totals),
+                matches=len(totals),
             )
-        made.sort(key=lambda point: (point.ordinal is None, point.ordinal or 0, point.checkpoint))
-        result.append(Curve(matchup=matchup, run=run, experiment=experiment, points=tuple(made)))
-    return result
+        )
+    return [
+        Curve(
+            matchup=matchup,
+            run=run,
+            experiment=experiment,
+            points=tuple(
+                sorted(points, key=lambda p: (p.ordinal is None, p.ordinal or 0, p.checkpoint))
+            ),
+        )
+        for (matchup, run, experiment), points in sorted(
+            lines.items(), key=lambda item: tuple("" if v is None else v for v in item[0])
+        )
+    ]
 
 
 class Standing(Record):
@@ -414,21 +406,15 @@ def standings(
     ).fetchone()
     if found is not None and found[0] != "round_robin":
         raise EtudeError("standings_rank_round_robins", 422)
-    scheduled, chosen = _held(db, round_robin)
-    db.execute("create or replace temp table _standing_matches (run VARCHAR, match VARCHAR)")
-    try:
-        if chosen:
-            db.executemany("insert into _standing_matches values (?, ?)", chosen)
+    with _held(db, round_robin) as (scheduled, held):
         compared = compare(
             db,
             table=table,
             value=value,
             per=per,
-            where="run || '/' || match in (select run || '/' || match from _standing_matches)"
+            where="run || '/' || match in (select run || '/' || match from _held)"
             + (f" and ({where})" if where else ""),
         )
-    finally:
-        db.execute("drop table _standing_matches")
     names: dict[str, str] = dict(db.sql("select agent, name from agents").fetchall())
     # Seats only: a group's row has a team for its subject.
     entries = [
@@ -445,16 +431,16 @@ def standings(
         if len(c.subject) == 1 and (c.opponent is None or len(c.opponent) == 1)
     ]
     field = {e.agent: e.value for e in entries if e.opponent is None}
-    rank: dict[Digest | None, tuple[float, str]] = {None: (float("-inf"), "")}
-    rank |= {agent: (-value, names.get(agent, "")) for agent, value in field.items()}
+
+    def rank(agent: Digest | None) -> tuple[float, str]:
+        # Against the field first, then opponents best first.
+        if agent is None:
+            return float("-inf"), ""
+        return -field.get(agent, float("-inf")), names[agent]
+
     return Standings(
         tournament=round_robin,
         scheduled=scheduled,
-        held=len(chosen),
-        entries=tuple(
-            sorted(
-                entries,
-                key=lambda e: (rank.get(e.agent, (0.0, "")), rank.get(e.opponent, (0.0, ""))),
-            )
-        ),
+        held=held,
+        entries=tuple(sorted(entries, key=lambda e: (rank(e.agent), rank(e.opponent)))),
     )
