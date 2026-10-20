@@ -18,6 +18,7 @@ names groups of seats and fixes the conditions it is played under.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping, Sequence
 from hashlib import sha256
 from typing import Any, Literal, Self
@@ -39,6 +40,14 @@ COLUMN_TYPES: dict[type, ColumnType] = {
 
 # Every match has this group, holding every seat.
 EVERYONE = "all"
+
+# `tables/TABLE.WRITTEN.WRITER.parquet`: WRITTEN is zero-padded nanoseconds, so a
+# table's file names order by write time; WRITER is a match key or a merging process.
+TABLE_FILE = re.compile(r"^tables/([A-Za-z][A-Za-z0-9_]*)\.(\d{20})\.([0-9a-f]+)\.parquet$")
+
+
+def table_file(table: str, written_ns: int, writer: str) -> str:
+    return f"tables/{table}.{written_ns:020d}.{writer}.parquet"
 
 
 def digest(value: object) -> Digest:

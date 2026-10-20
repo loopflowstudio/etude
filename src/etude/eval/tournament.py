@@ -22,7 +22,7 @@ tournament's eval runs delivered, by listing them.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from itertools import combinations
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -130,9 +130,9 @@ def hold(
         for each in tournament.benchmarks
         if each.identity not in listed["benchmark"]
     }
-    added = bool(entering or benching)
+    added = entering.keys() | benching.keys()
     # Nothing it adds is stored yet, so no eval run can hold a match it adds.
-    fresh = added and not (
+    fresh = bool(added) and not (
         entering.keys() & listed["entrant"] or benching.keys() & listed["benchmark"]
     )
     known = {each.identity: each for each in tournament.benchmarks} | entering | benching
@@ -141,42 +141,31 @@ def hold(
         if tournament.format == "benchmark"
         else {}
     )
+    # Entering checkpoints alone pair only with benchmarks, so other entrants stay unread.
     needs_entrants = tournament.format == "round_robin" or bool(benching) or not added
     entrants = (
         stored.read("entrant", listed["entrant"], known) if needs_entrants else {}
     ) | entering
-    pairs: set[tuple[Digest, Digest]]
-    if tournament.format == "benchmark":
-        pairs = {(e, b) for e in (entrants if not added else entering) for b in benchmarks}
-        pairs |= {(e, b) for e in entrants for b in benching}
-    else:
-        pairs = {
-            (a, b)
-            for a, b in combinations(sorted(entrants), 2)
-            if not added or {a, b} & entering.keys()
-        }
     agents = entrants | benchmarks
     matches = [
         Match(agents=(agents[a], agents[b]), conditions=conditions, games=tournament.games)
-        for a, b in sorted(pairs)
+        for a, b in _pairs(tournament.format, entrants, benchmarks)
+        if not added or added & {a, b}
         for conditions in tournament.conditions
     ]
     matches = [each for each in matches if int(each.key, 16) % n == k]
     if not fresh:
         delivered = stored.delivered()
         matches = [each for each in matches if each.key not in delivered]
-    adding: tuple[tuple[Role, dict[Digest, Agent]], ...] = (
-        ("entrant", entering),
-        ("benchmark", benching),
-    )
-    for role, agents_added in adding:
-        for identity, each in agents_added.items():
-            stored.write(f"{_FOLDERS[role]}/{identity}.json", each.model_dump_json().encode())
+    for folder, given in (("entrants", entering), ("benchmarks", benching)):
+        for identity, each in given.items():
+            stored.write(f"{folder}/{identity}.json", each.model_dump_json().encode())
     # Named for the arguments, so the same hold resumes the same eval run and
     # rewrites nothing.
-    named = sorted(entering), sorted(each.identity for each in add_benchmarks)
-    run = f"{tournament.name}.{digest([*named, [k, n]])[:12]}"
-    held = TournamentRun(run=run, entrants=tuple(named[0]), benchmarks=tuple(named[1]), share=share)
+    entered = tuple(sorted(entering))
+    benched = tuple(sorted(each.identity for each in add_benchmarks))
+    run = f"{tournament.name}.{digest([entered, benched, [k, n]])[:12]}"
+    held = TournamentRun(run=run, entrants=entered, benchmarks=benched, share=share)
     stored.write(f"runs/{run}.json", held.model_dump_json().encode())
     return evaluate(
         experiment=tournament.name,
@@ -188,6 +177,17 @@ def hold(
         directory=directory,
         storages=storages,
     )
+
+
+def _pairs(
+    format: Literal["benchmark", "round_robin"],
+    entrants: Iterable[Digest],
+    benchmarks: Iterable[Digest],
+) -> list[tuple[Digest, Digest]]:
+    """The tournament's pairings, entrant first: one match per pairing per condition."""
+    if format == "benchmark":
+        return [(e, b) for e in sorted(entrants) for b in sorted(benchmarks)]
+    return list(combinations(sorted(entrants), 2))
 
 
 class _Stored:
@@ -324,14 +324,9 @@ def standings(
     ).fetchall():
         roles[role].append(agent)
     entrants = roles["entrant"]
-    pairs = (
-        [(e, b) for e in entrants for b in roles["benchmark"]]
-        if format == "benchmark"
-        else list(combinations(sorted(entrants), 2))
-    )
     scheduled = {
         match_key(pair, {EVERYONE: (0, 1)}, given, games)
-        for pair in pairs
+        for pair in _pairs(format, entrants, roles["benchmark"])
         for given in json.loads(conditions)
     }
     latest = db.execute(

@@ -43,6 +43,7 @@ from etude.eval.records import (
     Environment,
     Match,
     MatchRecord,
+    table_file,
 )
 from etude.run.declaration import declare
 from etude.run.delivery import RunFiles, StorageDestination, destinations, ship
@@ -302,7 +303,7 @@ class _Writer:
             self.fail(scheduled, refused)
         written = time.time_ns()
         for table, columns in types.items():
-            key = f"tables/{table}.{written:020d}.{scheduled.key}.parquet"
+            key = table_file(table, written, scheduled.key)
             self._write(key, columns, checked[table], scheduled.key)
             self.written.setdefault(table, []).append(key)
             self.columns.setdefault(table, {}).update(columns)
@@ -345,7 +346,7 @@ class _Writer:
             files = ", ".join(quote(self.files.root / key) for key in keys)
             self._copy(
                 f"select * from read_parquet([{files}], union_by_name = true)",
-                f"tables/{table}.{time.time_ns():020d}.{self.id}.parquet",
+                table_file(table, time.time_ns(), self.id),
             )
             retired += keys
         if not retired:

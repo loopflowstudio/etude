@@ -45,6 +45,7 @@ from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 from etude.eval.match import ETUDE_TABLES, IDENTIFIER, KIND, TOURNAMENTS, quote
 from etude.eval.records import (
     COLUMN_TYPES,
+    TABLE_FILE,
     Agent,
     ColumnType,
     Environment,
@@ -62,8 +63,6 @@ if TYPE_CHECKING:
 
 REPLICATES = 2000
 SEED = 0
-# `tables/TABLE.WRITTEN.KEY.parquet`, WRITTEN being nanoseconds, zero-padded.
-_TABLE_FILE = re.compile(r"^tables/([A-Za-z][A-Za-z0-9_]*)\.(\d{20})\.([0-9a-f]+)\.parquet$")
 
 
 def connect(source: Storage | Path | str) -> duckdb.DuckDBPyConnection:
@@ -98,7 +97,7 @@ def connect(source: Storage | Path | str) -> duckdb.DuckDBPyConnection:
                     record = MatchRecord.model_validate_json(storage.get(place + name))
                     if record.match.key not in held or record.state == "done":
                         held[record.match.key] = record
-                elif parsed := _TABLE_FILE.match(name):
+                elif parsed := TABLE_FILE.match(name):
                     files.setdefault(parsed[1], []).append(
                         _local(storage, place + name, Path(copies) / run / name)
                     )
