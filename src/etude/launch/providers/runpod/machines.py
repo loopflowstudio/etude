@@ -16,7 +16,7 @@ from etude.launch.executor import Refused, check_creation
 from etude.launch.machines import Allocation, Bill, MachineRequest, Safeguards
 from etude.launch.providers.package import program_archive
 from etude.launch.providers.runpod.api import PodFact, ProviderUnavailable, Quote, RunPodAPI
-from etude.launch.records import GPU, Hardware, LauncherError, MachineTemplate, Provider
+from etude.launch.records import GPU, Hardware, LauncherError, MachineTemplate, Offer, Provider
 from etude.launch.records import STOCK_IMAGE as DEFAULT_IMAGE
 from etude.launch.storage.s3 import Bucket
 
@@ -47,11 +47,11 @@ class RunPodMachines:
             data_center=template.data_center,
         )
 
-    def price(self) -> Decimal:
+    def offer(self) -> Offer:
         quote = self._quote()
-        if not quote.available:
-            raise Refused("provider reports no available machines")
-        return quote.usd_per_hour
+        return Offer(
+            hardware=quote.hardware, usd_per_hour=quote.usd_per_hour, available=quote.available
+        )
 
     def _key(self, session_id: str) -> str:
         return f"{self._prefix}/sessions/{session_id}/receipt.json"

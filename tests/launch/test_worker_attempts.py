@@ -34,10 +34,8 @@ printf '{"clocks": {"%s": %s, "wall_time_ms": 1500}, "checkpoint": "checkpoint.p
 
 def local(tmp_path: Path) -> Scheduler:
     service = local_service(tmp_path / "sessions")
-    scheduler = Scheduler(
-        Database(tmp_path / "launcher.db"), {"local": lambda pool, machine: service}
-    )
-    scheduler.add_pool(Pool(name="local", setup_seconds=30))
+    scheduler = Scheduler(Database(tmp_path / "launcher.db"), {"local": lambda held: service})
+    scheduler.add_pool(Pool(name="local"))
     scheduler._store.add_machine(Machine(name="local", pool="local", kind="local"))
     return scheduler
 
@@ -103,7 +101,7 @@ def test_runs_queue_through_one_machine_and_cancel_stops_the_running_one(tmp_pat
     queued = scheduler.queue(Job(command="echo next", max_hours=0.1, max_usd=Decimal(1)))
     scheduler.tick()
     until(scheduler, running, "running")
-    assert scheduler.read(queued).reason == "waiting for local: pool cannot make more machines"
+    assert scheduler.read(queued).reason == "waiting for local: no free machine"
     scheduler.cancel(running)
     done = scheduler.wait(running, queued, every=0.05, timeout=30)
     assert [s.outcome for s in done] == ["cancelled", "succeeded"]
@@ -136,8 +134,6 @@ def test_a_killed_session_retries_its_run(tmp_path: Path) -> None:
 
 def test_added_work_has_a_session_but_no_rental_or_session_deadline(tmp_path: Path) -> None:
     scheduler = local(tmp_path)
-    # A pool's session ceiling must not shorten an owned run.
-    scheduler._store._db.execute("UPDATE pools SET max_rental_seconds=1")
     first = scheduler.launch(Job(command="sleep 2; echo one", max_hours=0.01, max_usd=Decimal(1)))
     attempt = scheduler.attempts(first)[0]
     session = scheduler._store.session(attempt.session)
@@ -147,7 +143,7 @@ def test_added_work_has_a_session_but_no_rental_or_session_deadline(tmp_path: Pa
     assert scheduler.rentals() == ()
     assert scheduler.wait(first, every=0.05, timeout=10)[0].outcome == "succeeded"
     assert job_text(scheduler.logs(run=first)) == "one\n"
-    with pytest.raises(LauncherError, match="only machines you added"):
+    with pytest.raises(LauncherError, match="no on-demand named 'local'"):
         scheduler.rent("local", hours=1)
 
 

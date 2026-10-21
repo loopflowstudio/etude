@@ -39,18 +39,18 @@ def baseline(count: int) -> dict[str, Counts]:
     coefficients pin known debt, not a target or a model of physical HTTP calls.
     """
     return {
-        "status": Counts(provider=2 * count, bucket=count, database=63 * count + 13),
+        "status": Counts(provider=2 * count, bucket=count, database=63 * count + 14),
         "runs": Counts(database=13 * count + 1),
-        "tick": Counts(provider=2 * count, bucket=count, database=25 * count + 12),
+        "tick": Counts(provider=2 * count, bucket=count, database=25 * count + 13),
     }
 
 
 def sessions(tmp_path: Path, count: int) -> tuple[Bench, tuple[str, ...], Counting]:
-    b = bench(tmp_path, max_on_demand=count)
+    b = bench(tmp_path, max_machines=count)
     ids = b.scheduler.queue_cohort(
         "baseline",
         Job(command="true", max_hours=1, max_usd=Decimal(1)).runs(*range(count)),
-        "l4",
+        rent="l4",
         parallel=count,
     )
     b.scheduler.tick()
@@ -88,6 +88,7 @@ def test_command_kinds() -> None:
     for app in (
         cli.app,
         cli.pool_app,
+        cli.ondemand_app,
         cli.machine_app,
         cli.provider_app,
         cli.storage_app,
@@ -103,7 +104,7 @@ def test_ask_wait_counts(tmp_path: Path) -> None:
     b = bench(tmp_path)
     counting = Counting(b.store, b.service)
     with counting.record():
-        id = b.scheduler.queue(Job(command="true", max_hours=1, max_usd=Decimal(1)), "l4")
+        id = b.scheduler.queue(Job(command="true", max_hours=1, max_usd=Decimal(1)), rent="l4")
         ask = counting.snapshot()
     with counting.record():
         with pytest.raises(TimeoutError):
@@ -125,11 +126,11 @@ def test_cohort_git_and_database_counts(
         b.scheduler.queue_cohort(
             "cohort",
             Job(command="true", repo=str(repo), max_hours=1, max_usd=Decimal(1)).runs(1, 2, 3),
-            "l4",
+            rent="l4",
             parallel=3,
         )
         result = counting.snapshot()
-    assert result == Counts(git=57, database=35)  # known debt: 19 git calls per run
+    assert result == Counts(git=57, database=37)  # known debt: 19 git calls per run
 
 
 @pytest.mark.parametrize(

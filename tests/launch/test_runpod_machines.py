@@ -34,7 +34,7 @@ from etude.launch.records import (
     Job,
     LauncherError,
     MachineTemplate,
-    Pool,
+    OnDemand,
     Provider,
     Run,
     Status,
@@ -245,14 +245,14 @@ def cloud(
         None,
         BucketJournal(place, bucket),
     )
-    scheduler = Scheduler(store, {"runpod": lambda pool, machine: service})
+    scheduler = Scheduler(store, {"runpod": lambda held: service})
     scheduler.add_storage(place)
     scheduler.set_provider(account)
-    scheduler.add_pool(
-        Pool(
+    scheduler.add_ondemand(
+        OnDemand(
             name="l4",
-            on_demand_template=template,
-            max_on_demand=1,
+            template=template,
+            max_machines=1,
             setup_seconds=60,
             delivery_seconds=delivery_seconds,
         )
@@ -294,7 +294,7 @@ def test_a_run_from_a_commit_runs_in_a_pod_and_continues_in_another(
         max_hours=0.05,
         max_usd=Decimal(1),
     )
-    first = c.scheduler.launch(Run(job=job, seed=7), pool="l4")
+    first = c.scheduler.launch(Run(job=job, seed=7), rent="l4")
     (status,) = c.scheduler.wait(first, every=0.05, timeout=30)
     assert (status.outcome, status.clocks, status.rental_ended) == (
         "succeeded",
@@ -304,7 +304,7 @@ def test_a_run_from_a_commit_runs_in_a_pod_and_continues_in_another(
     assert job_text(c.scheduler.logs(run=first)) == "seed 7 from 0 to 3\n"
     assert c.provider.pods == {}  # the pod deleted itself once its work was delivered
 
-    second = c.scheduler.launch(c.scheduler.continue_from(first, "steps=7"), pool="l4")
+    second = c.scheduler.launch(c.scheduler.continue_from(first, "steps=7"), rent="l4")
     (status,) = c.scheduler.wait(second, every=0.05, timeout=30)
     assert (status.outcome, status.clocks) == ("succeeded", {"steps": 7})
     assert job_text(c.scheduler.logs(run=second)) == "seed 7 from 3 to 7\n"
@@ -343,7 +343,7 @@ def test_a_run_from_a_commit_runs_in_a_pod_and_continues_in_another(
 def test_a_lost_create_reply_finds_the_pod_by_name_and_never_asks_twice(tmp_path: Path) -> None:
     c = cloud(tmp_path)
     c.provider.lose_reply = True
-    one = c.scheduler.queue(Job(command="echo hi", max_hours=0.05, max_usd=Decimal(1)), pool="l4")
+    one = c.scheduler.queue(Job(command="echo hi", max_hours=0.05, max_usd=Decimal(1)), rent="l4")
     c.scheduler.tick()
     assert c.scheduler.read(one).phase == "renting"
     (status,) = c.scheduler.wait(one, every=0.05, timeout=30)
@@ -359,7 +359,7 @@ def test_machines_and_status_show_the_hardware_rented(
 ) -> None:
     # Without a GPU, 6 vCPUs and 48 GB round up to the 16 vCPU size of a 4 GB/vCPU flavor.
     c = cloud(tmp_path, gpu=gpu)
-    one = c.scheduler.launch(Job(command="true", max_hours=0.05, max_usd=Decimal(1)), "l4")
+    one = c.scheduler.launch(Job(command="true", max_hours=0.05, max_usd=Decimal(1)), rent="l4")
     (status,) = c.scheduler.wait(one, every=0.05, timeout=30)
     assert status.outcome == "succeeded"
     capsys.readouterr()
@@ -375,11 +375,11 @@ def test_no_stock_is_a_refusal_and_cancel_reaches_a_running_pod(tmp_path: Path) 
     c.provider.available = "NONE"
 
     with pytest.raises(LauncherError, match="no available machines.*etude queue"):
-        c.scheduler.launch(Job(command="true", max_hours=0.05, max_usd=Decimal(1)), "l4")
+        c.scheduler.launch(Job(command="true", max_hours=0.05, max_usd=Decimal(1)), rent="l4")
     assert not c.scheduler.runs(done=True)
     one = c.scheduler.queue(
         Job(command="sleep 30", max_hours=0.05, max_usd=Decimal(1), max_attempts=2),
-        pool="l4",
+        rent="l4",
     )
     assert c.provider.creates == 0
     assert not c.scheduler.attempts(one)
@@ -400,11 +400,11 @@ def test_a_kept_session_takes_work_through_its_inbox(tmp_path: Path) -> None:
     c = cloud(tmp_path)
     machine = c.scheduler.rent("l4", hours=0.05)
     first = c.scheduler.launch(
-        Job(command="echo one", max_hours=0.01, max_usd=Decimal(1)), pool="l4"
+        Job(command="echo one", max_hours=0.01, max_usd=Decimal(1)), rent="l4"
     )
     (status,) = c.scheduler.wait(first, every=0.05, timeout=30)
     second = c.scheduler.launch(
-        Job(command="echo two", max_hours=0.01, max_usd=Decimal(1)), pool="l4"
+        Job(command="echo two", max_hours=0.01, max_usd=Decimal(1)), rent="l4"
     )
     (again,) = c.scheduler.wait(second, every=0.05, timeout=30)
     assert (status.outcome, again.outcome) == ("succeeded", "succeeded")
@@ -459,7 +459,7 @@ def test_checkpoint_reaches_storage_before_attempt_ends(tmp_path: Path) -> None:
             max_hours=0.05,
             max_usd=Decimal(1),
         ),
-        "l4",
+        rent="l4",
     )
     until(c.scheduler, run, "running")
     key = f"etude/t/{run}/checkpoints/checkpoint.pt"
@@ -581,7 +581,7 @@ def test_tracking_files_reach_storage_while_the_job_runs(tmp_path: Path) -> None
         "time.sleep(30)\n"
     )
     run = c.scheduler.launch(
-        Job(command=f"{sys.executable} {script}", max_hours=0.05, max_usd=Decimal(1)), "l4"
+        Job(command=f"{sys.executable} {script}", max_hours=0.05, max_usd=Decimal(1)), rent="l4"
     )
     until(c.scheduler, run, "running")
     rows = f"etude/t/{run}/metrics/"

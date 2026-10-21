@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
@@ -36,7 +37,8 @@ def _app(*, help: str | None = None, invoke_without_command: bool = False) -> ty
 
 
 app = _app(help="Launch runs on your own or rented machines, and track what they record.")
-pool_app = _app(help="Add a pool, or change its limit, image, default or whether it takes runs.")
+pool_app = _app(help="Add a pool of machines you own, or change whether it takes runs.")
+ondemand_app = _app(help="Add an on-demand to rent from: a machine template and a budget.")
 machine_app = _app(help="Add a machine you own.")
 controller_app = _app(
     help="Show or choose the machine that holds the database, or run its loop.",
@@ -47,6 +49,7 @@ storage_app = _app(help="Add a place in a bucket for records.")
 image_app = _app(help="Resolve container images before renting.")
 for name, sub in (
     ("pool", pool_app),
+    ("ondemand", ondemand_app),
     ("machine", machine_app),
     ("controller", controller_app),
     ("provider", provider_app),
@@ -60,11 +63,13 @@ def _submit(
     ctx: typer.Context,
     file: Path | None,
     pool: str | None,
+    rent: str | None,
     cohort: str | None,
     parallel: int,
     max_usd: str | None,
     help: bool,
     queued: bool,
+    quote: bool = False,
 ) -> None:
     if help:
         print(ctx.get_help())
@@ -87,8 +92,17 @@ def _submit(
         if cohort
         else None
     )
-    submission = controller.LaunchInput(runs=tuple(runs), cohort=spec, pool=pool, queued=queued)
+    submission = controller.LaunchInput(
+        runs=tuple(runs), cohort=spec, pool=pool, rent=rent, queued=queued
+    )
     address = controller.selected()
+    if quote:
+        from etude.launch.listing import show_quote
+
+        show_quote(
+            controller.quote(controller.PythonClient(address) if address else default(), submission)
+        )
+        return
     if address:
         raise typer.Exit(controller.forward(address, [], submission))
     scheduler = default()
@@ -97,7 +111,12 @@ def _submit(
 
 FileArgument = Annotated[Path | None, typer.Argument(help="a Python file defining runs()")]
 PoolOption = Annotated[
-    str | None, typer.Option(help="the pool to send runs to; the default pool when omitted")
+    str | None,
+    typer.Option(help="the pool of machines you own to use; the default when neither is named"),
+]
+RentOption = Annotated[
+    str | None,
+    typer.Option(help="the on-demand to rent from, after the pool's free machines"),
 ]
 CohortOption = Annotated[
     str | None, typer.Option(help="a name for these runs together; required for several runs")
@@ -118,13 +137,17 @@ def launch(
     ctx: typer.Context,
     file: FileArgument = None,
     pool: PoolOption = None,
+    rent: RentOption = None,
     cohort: CohortOption = None,
     parallel: ParallelOption = 1,
     max_usd: CohortUsd = None,
+    quote: Annotated[
+        bool, typer.Option(help="print the machines and the most they could cost; rent nothing")
+    ] = False,
     help: FileHelp = False,
 ) -> None:
     """Queue a file's runs and get the machines to start them now, or fail and queue nothing."""
-    _submit(ctx, file, pool, cohort, parallel, max_usd, help, False)
+    _submit(ctx, file, pool, rent, cohort, parallel, max_usd, help, False, quote)
 
 
 @app.command(
@@ -136,13 +159,14 @@ def queue(
     ctx: typer.Context,
     file: FileArgument = None,
     pool: PoolOption = None,
+    rent: RentOption = None,
     cohort: CohortOption = None,
     parallel: ParallelOption = 1,
     max_usd: CohortUsd = None,
     help: FileHelp = False,
 ) -> None:
-    """Add a file's runs to a pool's queue. The pool starts them when a machine has room."""
-    _submit(ctx, file, pool, cohort, parallel, max_usd, help, True)
+    """Add a file's runs to the queue. They start when a machine has room or can be rented."""
+    _submit(ctx, file, pool, rent, cohort, parallel, max_usd, help, True)
 
 
 @app.command()
@@ -202,6 +226,7 @@ def history(
     ] = None,
     cohort: Annotated[str | None, typer.Option(help="only runs of this cohort")] = None,
     pool: Annotated[str | None, typer.Option(help="only runs sent to this pool")] = None,
+    rent: Annotated[str | None, typer.Option(help="only runs that may rent from this")] = None,
     job: Annotated[
         str | None, typer.Option(help="only runs of this job, by digest or name")
     ] = None,
@@ -214,7 +239,9 @@ def history(
         scheduler,
         [
             r.id
-            for r in scheduler.runs(done=True, contains=contains, cohort=cohort, pool=pool, job=job)
+            for r in scheduler.runs(
+                done=True, contains=contains, cohort=cohort, pool=pool, rent=rent, job=job
+            )
         ],
     )
 
@@ -360,7 +387,7 @@ def continue_run(
     first = scheduler.record(parents[0])
     again = [scheduler.continue_from(parent, until) for parent in parents]
     if first.cohort != run:
-        ids = [scheduler.queue(again[0], first.pool)]
+        ids = [scheduler.queue(again[0], first.pool, rent=first.rent)]
     elif cohort is None:
         raise LauncherError("continuing a cohort needs --cohort with the new cohort's name")
     else:
@@ -370,6 +397,7 @@ def continue_run(
                 cohort,
                 again,
                 first.pool,
+                rent=first.rent,
                 parallel=old.parallel,
                 max_usd=Decimal(max_usd) if max_usd else old.max_usd,
             )
@@ -380,17 +408,17 @@ def continue_run(
 @app.command()
 @kind(Kind.ask)
 def rent(
-    pool: Annotated[str, typer.Option(help="pool that can make machines")],
+    ondemand: Annotated[str, typer.Option(help="the on-demand to rent from")],
     hours: Annotated[float, typer.Option(help="how long to hold the machine")],
     max_usd: Annotated[
         str | None, typer.Option(help="end the window sooner if it would cost more than this")
     ] = None,
 ) -> None:
-    """Make a machine in a pool for a window of time. It takes queued runs. This costs money."""
+    """Rent a machine for a window of time. It takes queued runs. This costs money."""
     from etude.launch.listing import show_machines
 
     scheduler = default()
-    scheduler.rent(pool, hours, Decimal(max_usd) if max_usd else None)
+    scheduler.rent(ondemand, hours, Decimal(max_usd) if max_usd else None)
     show_machines(scheduler, ended=False)
 
 
@@ -410,10 +438,48 @@ def terminate(
 @app.command()
 @kind(Kind.read)
 def pools() -> None:
-    """List pools: their machines, whether they make more, and the default."""
+    """List pools: the machines you own in each, and the default."""
     from etude.launch.listing import show_pools
 
     show_pools(default())
+
+
+@app.command()
+@kind(Kind.read)
+def ondemands() -> None:
+    """List on-demands: what each rents, its budget and its machines now."""
+    from etude.launch.listing import show_ondemands
+
+    show_ondemands(default())
+
+
+@app.command()
+@kind(Kind.wait)
+def availability(
+    rent: Annotated[str, typer.Option(help="the on-demand to ask about")],
+    timeout: Annotated[
+        float, typer.Option(min=0, help="total seconds; 0 disables the timeout")
+    ] = 0,
+) -> None:
+    """Ask the provider what an on-demand would rent now, and at what price. Rents nothing."""
+    from etude.launch.listing import show_availability
+
+    show_availability(default().availability(rent, timeout=timeout or None))
+
+
+@app.command("default")
+@kind(Kind.ask)
+def choose_default(
+    pool: Annotated[str | None, typer.Option(help="the pool runs use when none is named")] = None,
+    rent: Annotated[
+        str | None, typer.Option(help="the on-demand runs rent from when none is named")
+    ] = None,
+) -> None:
+    """Choose where runs go when a launch names neither --pool nor --rent."""
+    scheduler = default()
+    scheduler.set_default(pool, rent=rent)
+    chosen = scheduler.default_target()
+    print("default:", f"pool {chosen.pool or 'none'},", f"rent {chosen.rent or 'none'}")
 
 
 @app.command()
@@ -482,18 +548,58 @@ def storage_add(
     storages()
 
 
+StartupSeconds = Annotated[float, typer.Option(min=0, help="startup allowance; 0 disables it")]
+DeliverySeconds = Annotated[
+    float, typer.Option(min=0, help="final delivery allowance; 0 disables it")
+]
+LogSeconds = Annotated[float, typer.Option(min=0, help="log publication allowance; 0 disables it")]
+
+
 @pool_app.command("add")
 @kind(Kind.ask)
 def pool_add(
     name: str,
-    provider: Annotated[
-        str | None,
-        typer.Option(help="the account that makes this pool's machines; none means it makes none"),
+    startup_seconds: StartupSeconds = 0,
+    delivery_seconds: DeliverySeconds = 0,
+    log_seconds: LogSeconds = 0,
+) -> None:
+    """Add a pool: a named set of machines you own that runs are sent to."""
+    from etude.launch.records import Pool
+
+    default().add_pool(
+        Pool(
+            name=name,
+            startup_seconds=startup_seconds or None,
+            delivery_seconds=delivery_seconds or None,
+            log_seconds=log_seconds or None,
+        )
+    )
+    pools()
+
+
+@pool_app.command("startup")
+@kind(Kind.ask)
+def pool_startup(name: str, seconds: StartupSeconds = 0) -> None:
+    """Change the startup allowance for a pool's future sessions."""
+    default().set_startup(name, seconds or None)
+    pools()
+
+
+@ondemand_app.command("add")
+@kind(Kind.ask)
+def ondemand_add(
+    name: str,
+    provider: Annotated[str, typer.Option(help="the account that rents its machines")],
+    max: Annotated[int, typer.Option(help="how many machines it may rent at once")] = 1,
+    max_usd_per_hour: Annotated[
+        str | None, typer.Option(help="rent no machine that costs more than this per hour")
     ] = None,
-    max: Annotated[int, typer.Option(help="how many machines the pool may make at once")] = 1,
     gpu: Annotated[
         str | None, typer.Option(help="the provider's name for the GPU; omit for CPU machines")
     ] = None,
+    vcpus: Annotated[int | None, typer.Option(help="minimum virtual CPUs")] = None,
+    memory_gb: Annotated[int | None, typer.Option(help="minimum memory")] = None,
+    disk_gb: Annotated[int | None, typer.Option(help="disk size")] = None,
     image: Annotated[
         str | None, typer.Option(help="the image its machines boot, pinned by digest")
     ] = None,
@@ -504,78 +610,50 @@ def pool_add(
         str | None,
         typer.Option(help="where its records go; the provider's storage when omitted"),
     ] = None,
-    vcpus: Annotated[int | None, typer.Option(help="minimum virtual CPUs")] = None,
-    memory_gb: Annotated[int | None, typer.Option(help="minimum memory")] = None,
-    disk_gb: Annotated[int | None, typer.Option(help="disk size")] = None,
-    startup_seconds: Annotated[
-        float, typer.Option(min=0, help="startup allowance; 0 disables it")
-    ] = 0,
-    delivery_seconds: Annotated[
-        float, typer.Option(min=0, help="final delivery allowance; 0 disables it")
-    ] = 0,
-    log_seconds: Annotated[
-        float, typer.Option(min=0, help="log publication allowance; 0 disables it")
-    ] = 0,
-    max_usd_per_hour: Annotated[
-        str | None, typer.Option(help="make no machine that costs more than this per hour")
-    ] = None,
+    startup_seconds: StartupSeconds = 0,
+    delivery_seconds: DeliverySeconds = 0,
+    log_seconds: LogSeconds = 0,
 ) -> None:
-    """Add a pool: a named set of machines that runs are sent to."""
-    from etude.launch.records import Image, MachineTemplate, Pool
+    """Add an on-demand: a machine template to rent and a budget for renting it."""
+    from etude.launch.records import Image, MachineTemplate, OnDemand
 
-    template = (
-        MachineTemplate(
-            provider=provider,
-            gpu=gpu,
-            vcpus=vcpus,
-            memory_gb=memory_gb,
-            disk_gb=disk_gb,
-            max_usd_per_hour=Decimal(max_usd_per_hour) if max_usd_per_hour else None,
-            image=Image(requested=image, resolved=image) if image else None,
-            data_center=data_center,
-        )
-        if provider
-        else None
-    )
-    default().add_pool(
-        Pool(
+    default().add_ondemand(
+        OnDemand(
             name=name,
-            on_demand_template=template,
-            max_on_demand=max if template else 0,
+            template=MachineTemplate(
+                provider=provider,
+                gpu=gpu,
+                vcpus=vcpus,
+                memory_gb=memory_gb,
+                disk_gb=disk_gb,
+                image=Image(requested=image, resolved=image) if image else None,
+                data_center=data_center,
+            ),
+            max_machines=max,
+            max_usd_per_hour=Decimal(max_usd_per_hour) if max_usd_per_hour else None,
             startup_seconds=startup_seconds or None,
             delivery_seconds=delivery_seconds or None,
             log_seconds=log_seconds or None,
             storage=storage,
         )
     )
-    pools()
+    ondemands()
 
 
-@pool_app.command("startup")
+@ondemand_app.command("max")
 @kind(Kind.ask)
-def pool_startup(
-    name: str,
-    seconds: Annotated[float, typer.Option(min=0, help="startup allowance; 0 disables it")] = 0,
-) -> None:
-    """Change the startup allowance for future sessions."""
-    default().set_pool_startup(name, seconds or None)
-    pools()
+def ondemand_max(name: str, maximum: int) -> None:
+    """Change how many machines an on-demand may rent at once. Zero means only by hand."""
+    default().set_ondemand_max(name, maximum)
+    ondemands()
 
 
-@pool_app.command("max")
+@ondemand_app.command("startup")
 @kind(Kind.ask)
-def pool_max(name: str, maximum: int) -> None:
-    """Change how many machines a pool may make. Zero means it makes none."""
-    default().set_pool_max(name, maximum)
-    pools()
-
-
-@pool_app.command("default")
-@kind(Kind.ask)
-def pool_default(name: str) -> None:
-    """Choose the pool that runs go to when none is named."""
-    default().set_default_pool(name)
-    pools()
+def ondemand_startup(name: str, seconds: StartupSeconds = 0) -> None:
+    """Change the startup allowance for an on-demand's future machines."""
+    default().set_startup(name, seconds or None)
+    ondemands()
 
 
 @image_app.command("prepare")
@@ -593,9 +671,9 @@ def image_prepare(
     print(resolve_image(reference, platform=platform, timeout=timeout or None).model_dump_json())
 
 
-@pool_app.command("image")
+@ondemand_app.command("image")
 @kind(Kind.wait)
-def pool_image(
+def ondemand_image(
     name: str,
     image: str,
     timeout: Annotated[
@@ -611,7 +689,7 @@ def pool_image(
         if "@sha256:" in image
         else resolve_image(image, timeout=timeout or None)
     )
-    default().set_pool_image(name, selected)
+    default().set_ondemand_image(name, selected)
     print(selected.model_dump_json())
 
 
@@ -643,9 +721,21 @@ def machine_add(
         str | None,
         typer.Option(help="an existing pool to add it to; a pool of its own when omitted"),
     ] = None,
+    cost_usd: Annotated[str, typer.Option(help="what it cost you, already committed")] = "0",
+    expires_at: Annotated[
+        datetime | None,
+        typer.Option(help="when it stops being yours, in UTC; never when omitted"),
+    ] = None,
 ) -> None:
     """Add a machine you own, reached by SSH."""
-    default().add_machine(name, address, pool=pool, storage=storage)
+    default().add_machine(
+        name,
+        address,
+        pool=pool,
+        storage=storage,
+        cost_usd=Decimal(cost_usd),
+        expires_at=None if expires_at is None else expires_at.replace(tzinfo=UTC),
+    )
     pools()
 
 

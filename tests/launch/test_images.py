@@ -62,7 +62,7 @@ def test_pinned_legacy_input_validates_without_registry_access() -> None:
         MachineTemplate.model_validate({"provider": "runpod", "image": "r/e:mutable"})
 
 
-def test_machine_image_survives_pool_changes_and_database_restart(tmp_path: Path) -> None:
+def test_machine_image_survives_ondemand_changes_and_database_restart(tmp_path: Path) -> None:
     b = bench(tmp_path)
     first = b.scheduler.rent("l4", hours=1)
     original = b.store.machine(first).image
@@ -71,12 +71,12 @@ def test_machine_image_survives_pool_changes_and_database_restart(tmp_path: Path
         resolved="registry/custom@sha256:" + "b" * 64,
         platform="linux/amd64",
     )
-    b.scheduler.set_pool_image("l4", selected)
+    b.scheduler.set_ondemand_image("l4", selected)
     second = b.scheduler.rent("l4", hours=1)
     restarted = Database(tmp_path / "launcher.db")
     assert restarted.machine(first).image == original
     assert restarted.machine(second).image == selected
-    assert restarted.pool("l4").on_demand_template is not None
+    assert restarted.ondemand("l4").template.image == selected
     assert b.service.creates == 2
 
 

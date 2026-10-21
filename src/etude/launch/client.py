@@ -10,7 +10,8 @@
     print(wait(*runs))
 
 Each function uses the selected SSH controller, or a launcher under ETUDE_HOME
-(default ~/.etude) with an initial pool, "local", holding this computer.
+(default ~/.etude) with an initial pool, "local", holding this computer. A
+call names a pool (`pool=`), an on-demand to rent from (`rent=`), or both.
 """
 
 from __future__ import annotations
@@ -27,12 +28,15 @@ from etude.launch.machines import OwnedMachine, Safeguards
 from etude.launch.providers.runpod.api import RunPodAPI
 from etude.launch.providers.runpod.machines import RunPodMachines
 from etude.launch.records import (
+    Availability,
     Diagnostic,
     Job,
     LauncherError,
     LogSnapshot,
     Machine,
+    OnDemand,
     Pool,
+    Quote,
     Run,
     Status,
 )
@@ -55,26 +59,28 @@ def _open(home: Path) -> Scheduler:
         with observe(store.retain_transfer_json):
             return _send(method, url, body, headers)
 
-    def runpod(pool: Pool, machine: Machine | None) -> Execution:
+    def runpod(held: Machine | OnDemand) -> Execution:
         """Built when first needed, so only RunPod use needs RunPod's keys in the environment."""
 
-        if pool.on_demand_template is None or "RUNPOD_API_KEY" not in os.environ:
+        if not isinstance(held, OnDemand):
+            raise LauncherError("RunPod reaches machines rented from an on-demand")
+        if "RUNPOD_API_KEY" not in os.environ:
             raise LauncherError("RUNPOD_API_KEY is not set")
-        if pool.storage is None:
-            raise LauncherError(f"pool {pool.name!r} has no storage")
-        storage = store.storage(pool.storage)
+        if held.storage is None:
+            raise LauncherError(f"on-demand {held.name!r} has no storage")
+        storage = store.storage(held.storage)
         bucket = Bucket(storage.bucket, storage.region, Keys.from_environment(), send)
         machines = RunPodMachines(
-            store.provider(pool.on_demand_template.provider),
-            pool.on_demand_template,
+            store.provider(held.template.provider),
+            held.template,
             RunPodAPI(os.environ["RUNPOD_API_KEY"]),
             bucket,
             storage.prefix,
         )
         return Executor(machines, None, BucketJournal(storage, bucket))
 
-    def ssh(pool: Pool, machine: Machine | None) -> Execution:
-        if machine is None or machine.address is None:
+    def ssh(machine: Machine | OnDemand) -> Execution:
+        if not isinstance(machine, Machine) or machine.address is None:
             raise LauncherError("an SSH machine needs an address")
         connection = SSH(machine.address)
         journal = SSHJournal(connection)
@@ -90,11 +96,9 @@ def _open(home: Path) -> Scheduler:
         return Executor(OwnedMachine(machine.address), SSHStart(connection), journal)
 
     runpod.safeguards = Safeguards(start_command=True)  # type: ignore[attr-defined]
-    scheduler = Scheduler(
-        store, {"local": lambda pool, machine: here, "ssh": ssh, "runpod": runpod}
-    )
+    scheduler = Scheduler(store, {"local": lambda machine: here, "ssh": ssh, "runpod": runpod})
     if fresh:  # this computer is offered once; `etude pool off local` withdraws it
-        scheduler.add_pool(Pool(name="local", setup_seconds=60))
+        scheduler.add_pool(Pool(name="local"))
         store.add_machine(Machine(name="local", pool="local", kind="local"))
     if os.environ.get("ETUDE_CONTROLLER_LOCAL"):
         store.name_controller_pool()
@@ -110,8 +114,8 @@ def _client() -> Scheduler | PythonClient:
     return PythonClient(address) if address else default()
 
 
-def queue(run: Run | Job, pool: str | None = None) -> str:
-    return _client().queue(run, pool)
+def queue(run: Run | Job, pool: str | None = None, *, rent: str | None = None) -> str:
+    return _client().queue(run, pool, rent=rent)
 
 
 def queue_cohort(
@@ -119,20 +123,15 @@ def queue_cohort(
     runs: list[Run],
     pool: str | None = None,
     *,
+    rent: str | None = None,
     parallel: int = 1,
     max_usd: Decimal | None = None,
 ) -> tuple[str, ...]:
-    return _client().queue_cohort(
-        name,
-        runs,
-        pool,
-        parallel=parallel,
-        max_usd=max_usd,
-    )
+    return _client().queue_cohort(name, runs, pool, rent=rent, parallel=parallel, max_usd=max_usd)
 
 
-def launch(run: Run | Job, pool: str | None = None) -> str:
-    return _client().launch(run, pool)
+def launch(run: Run | Job, pool: str | None = None, *, rent: str | None = None) -> str:
+    return _client().launch(run, pool, rent=rent)
 
 
 def launch_cohort(
@@ -140,16 +139,29 @@ def launch_cohort(
     runs: list[Run],
     pool: str | None = None,
     *,
+    rent: str | None = None,
     parallel: int = 1,
     max_usd: Decimal | None = None,
 ) -> tuple[str, ...]:
-    return _client().launch_cohort(
-        name,
-        runs,
-        pool,
-        parallel=parallel,
-        max_usd=max_usd,
-    )
+    return _client().launch_cohort(name, runs, pool, rent=rent, parallel=parallel, max_usd=max_usd)
+
+
+def quote(
+    runs: list[Run],
+    pool: str | None = None,
+    *,
+    rent: str | None = None,
+    cohort: str | None = None,
+    parallel: int = 1,
+    max_usd: Decimal | None = None,
+) -> Quote:
+    """The machines a launch would take now and the most they could cost; rents nothing."""
+    return _client().quote(runs, pool, rent=rent, cohort=cohort, parallel=parallel, max_usd=max_usd)
+
+
+def availability(rent: str, *, timeout: float | None = None) -> Availability:
+    """Ask an on-demand's provider what it would rent now, at what price; rents nothing."""
+    return _client().availability(rent, timeout=timeout)
 
 
 def continue_from(run: str, until: str) -> Run:
@@ -182,9 +194,9 @@ def fetch(run: str, name: str, destination: Path) -> Path:
     return _client().fetch(run, name, destination)
 
 
-def rent(pool: str, hours: float, max_usd: Decimal | None = None) -> str:
-    """Make a paid machine in an on-demand pool and return its name."""
-    return _client().rent(pool, hours, max_usd)
+def rent(ondemand: str, hours: float, max_usd: Decimal | None = None) -> str:
+    """Rent a machine from an on-demand for a window and return its name."""
+    return _client().rent(ondemand, hours, max_usd)
 
 
 def terminate(machine: str) -> Machine:

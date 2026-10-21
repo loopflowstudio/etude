@@ -25,23 +25,23 @@ from tests.launch.test_runpod_machines import cloud
 
 
 @pytest.mark.parametrize("seconds", [600, 30, None])
-def test_startup_policy_survives_restart_and_pool_changes(
+def test_startup_policy_survives_restart_and_ondemand_changes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seconds: float | None
 ) -> None:
     b = bench(tmp_path)
-    b.scheduler.set_pool_startup("l4", seconds)
+    b.scheduler.set_startup("l4", seconds)
     monkeypatch.setattr(b.service, "started", lambda session: False)
     monkeypatch.setattr(b.service, "observe", lambda session: Observation(alive=True, progress=()))
     run = b.scheduler.launch(
-        Job(command="train", max_hours=1, max_usd=Decimal(1), max_attempts=1), "l4"
+        Job(command="train", max_hours=1, max_usd=Decimal(1), max_attempts=1), rent="l4"
     )
     session = b.store.session(b.scheduler.attempts(run)[0].session)
     expected = None if seconds is None else b.clock() + timedelta(seconds=seconds)
     assert session.startup_deadline == expected
-    b.scheduler.set_pool_startup("l4", 1)
+    b.scheduler.set_startup("l4", 1)
     reopened = Database(tmp_path / "launcher.db")
     assert reopened.session(session.id).startup_deadline == expected
-    assert reopened.pool("l4").startup_seconds == 1
+    assert reopened.ondemand("l4").startup_seconds == 1
     b.run((seconds or 600) - 1)
     assert b.store.machine(session.machine).deleted_at is None
     b.run(2)
@@ -183,5 +183,5 @@ def test_delayed_preparation_cannot_create_after_authority_or_startup_expires(
     monkeypatch.setattr(machines, "datetime", Clock)
     monkeypatch.setattr(b.scheduler, "_clock", Clock.now)
     with pytest.raises(LaunchError):
-        b.scheduler.launch(Job(command="true", max_hours=1, max_usd=Decimal(1)), "l4")
+        b.scheduler.launch(Job(command="true", max_hours=1, max_usd=Decimal(1)), rent="l4")
     assert b.provider.creates == 0

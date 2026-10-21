@@ -120,7 +120,7 @@ def test_machines_join_pools_and_this_computer_can_be_turned_off(
     assert run(capsys, "machine", "add", "bench", "bench")[-1] == "bench  bench"
     listed = run(capsys, "machine", "add", "second", "second", "--pool", "bench")
     assert listed[-1] == "bench  bench, second"
-    assert main(["pool", "add", "l4", "--provider", "lambda", "--gpu", "NVIDIA L4"]) == 1
+    assert main(["ondemand", "add", "l4", "--provider", "lambda", "--gpu", "NVIDIA L4"]) == 1
     assert "no provider named 'lambda'" in capsys.readouterr().err
     assert main(["machine", "add", "local", "localhost"]) == 1
     assert "already the local pool" in capsys.readouterr().err
@@ -135,18 +135,19 @@ def test_machines_join_pools_and_this_computer_can_be_turned_off(
         run(capsys, "pools")[0] == "local  this computer (default) (off)"
     )  # still off on the next call
     assert run(capsys, "machines") == [
-        "local  local  added (this computer)",
-        "bench  bench  added",
-        "second  bench  added",
+        "local  local  owned (this computer), $0.00 committed, never expires",
+        "bench  bench  owned, $0.00 committed, never expires",
+        "second  bench  owned, $0.00 committed, never expires",
     ]
 
 
-def test_pool_default_max_and_owned_status(
+def test_default_target_and_owned_status(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
-    run(capsys, "pool", "max", "local", "0")
-    run(capsys, "pool", "default", "local")
+    assert run(capsys, "default", "--pool", "local") == ["default: pool local, rent none"]
+    assert main(["default"]) == 1
+    assert "needs a pool, an on-demand or both" in capsys.readouterr().err
     path = tmp_path / "job.py"
     path.write_text(
         'from etude.launch.records import Job, Run\ndef runs(): return Job(command="echo hi", max_hours=0.001, max_usd=1)\n'
@@ -154,7 +155,9 @@ def test_pool_default_max_and_owned_status(
     (line,) = run(capsys, "launch", str(path))
     assert "machine local" in line
     assert "succeeded" in run(capsys, "wait", line.split()[0])[0]
-    assert run(capsys, "machines") == ["local  local  added (this computer)"]  # no session
+    assert run(capsys, "machines") == [  # no session
+        "local  local  owned (this computer), $0.00 committed, never expires"
+    ]
     path.write_text(
         'from etude.launch.records import Job, Run\ndef runs(): return Job(command="echo free", max_hours=0.001)\n'
     )
@@ -205,27 +208,22 @@ def test_a_second_bucket_or_place_is_a_second_pool_not_a_second_provider(
     assert run(capsys, *account, "west") == ["runpod  runpod  storage west"]
 
     l4 = ["--provider", "runpod", "--gpu", "NVIDIA L4", "--image", image]
-    run(capsys, "pool", "add", "l4", *l4)
-    listed = run(capsys, "pool", "add", "l4-eu", *l4, "--data-center", "EU-RO-1", "--storage", "eu")
-    assert (
-        "l4  makes up to 1 NVIDIA L4 on runpod; safeguards: machine timer, launcher cleanup; records in west"
-        in listed
+    run(capsys, "ondemand", "add", "l4", *l4, "--max-usd-per-hour", "0.80")
+    listed = run(
+        capsys, "ondemand", "add", "l4-eu", *l4, "--data-center", "EU-RO-1", "--storage", "eu"
     )
-    assert (
-        "l4-eu  makes up to 1 NVIDIA L4 on runpod in EU-RO-1; safeguards: machine timer, launcher cleanup; records in eu"
-        in listed
-    )
+    assert listed == [
+        "l4  NVIDIA L4 on runpod; up to 1 at once under $0.80/hour;"
+        " safeguards: machine timer, launcher cleanup; records in west",
+        "l4-eu  NVIDIA L4 on runpod in EU-RO-1; up to 1 at once;"
+        " safeguards: machine timer, launcher cleanup; records in eu",
+    ]
 
-    run(
-        capsys, *account, "eu"
-    )  # the provider's storage changes; the pool already added keeps its own
-    assert (
-        "l4  makes up to 1 NVIDIA L4 on runpod; safeguards: machine timer, launcher cleanup; records in west"
-        in run(capsys, "pools")
-    )
-    assert main(["pool", "image", "local", image]) == 1
-    assert "makes no machines on demand" in capsys.readouterr().err
-    assert main(["pool", "image", "l4", "r/e@sha256:" + "b" * 64]) == 0
+    run(capsys, *account, "eu")  # the provider's storage changes; an added on-demand keeps its own
+    assert run(capsys, "ondemands")[0].endswith("records in west")
+    assert main(["ondemand", "image", "local", image]) == 1
+    assert "no on-demand named 'local'" in capsys.readouterr().err
+    assert main(["ondemand", "image", "l4", "r/e@sha256:" + "b" * 64]) == 0
 
 
 @pytest.mark.parametrize("cohort", [False, True])
@@ -246,7 +244,7 @@ def test_launch_makes_machines_that_start_themselves(
         capsys,
         "launch",
         str(path),
-        "--pool",
+        "--rent",
         "l4",
         *(["--cohort", "pair"] if cohort else []),
     )
@@ -263,7 +261,7 @@ def test_explicit_rent_uses_the_same_startup_rule(
 ) -> None:
     b = bench(tmp_path)
     monkeypatch.setattr(import_module("etude.launch.cli"), "default", lambda: b.scheduler)
-    run(capsys, "rent", "--pool", "l4", "--hours", "1")
+    run(capsys, "rent", "--ondemand", "l4", "--hours", "1")
     assert all(held.packet.autorun is True for held in b.service.sessions.values())
     assert all(not held.packet.work for held in b.service.sessions.values())
 

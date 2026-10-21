@@ -9,14 +9,14 @@ from pathlib import Path
 import pytest
 
 from etude.launch.machines import Allocation, Bill
-from etude.launch.records import Job, LauncherError, MachineTemplate, Pool, Storage
+from etude.launch.records import Job, LauncherError, MachineTemplate, OnDemand, Storage
 from etude.launch.schemas import Observation
 from tests.launch.fake import bench
 
 
 def test_bills_cover_only_their_hours_and_do_not_change_admission(tmp_path: Path) -> None:
     b = bench(tmp_path, usd_per_hour="1")
-    run = b.scheduler.queue(Job(command="train", max_hours=2, max_usd=Decimal(2)), "l4")
+    run = b.scheduler.queue(Job(command="train", max_hours=2, max_usd=Decimal(2)), rent="l4")
     b.scheduler.tick()
     held = b.store.session(b.scheduler.attempts(run)[0].session)
     b.service.seconds = 5000
@@ -45,14 +45,14 @@ def test_bills_cover_only_their_hours_and_do_not_change_admission(tmp_path: Path
 
 def test_unstarted_machine_is_deleted_after_configured_startup_allowance(tmp_path: Path) -> None:
     b = bench(tmp_path)
-    b.store.set_pool_startup("l4", 600)
+    b.scheduler.set_startup("l4", 600)
 
     b.service.observe = lambda session_id: Observation(  # type: ignore[method-assign]
         alive=b.service._alive(b.service.sessions[session_id]), progress=()
     )
     b.service.started = lambda session_id: False  # type: ignore[method-assign]
     run = b.scheduler.launch(
-        Job(command="train", max_hours=1, max_usd=Decimal(1), max_attempts=1), "l4"
+        Job(command="train", max_hours=1, max_usd=Decimal(1), max_attempts=1), rent="l4"
     )
     held = b.store.session(b.scheduler.attempts(run)[0].session)
     assert held.started_at is None
@@ -68,7 +68,7 @@ def test_actual_create_price_replaces_quote_without_raising_cap(tmp_path: Path) 
     b.service.allocation = lambda session_id: Allocation(  # type: ignore[method-assign]
         id=session_id, address=None, usd_per_hour=Decimal("0.7"), created_at=b.clock()
     )
-    run = b.scheduler.launch(Job(command="train", max_hours=1, max_usd=Decimal(1)), "l4")
+    run = b.scheduler.launch(Job(command="train", max_hours=1, max_usd=Decimal(1)), rent="l4")
     held = b.store.session(b.scheduler.attempts(run)[0].session)
     assert b.store.rental(held.machine).usd_per_hour == Decimal("0.7")
     assert b.store.rental(held.machine).cap_usd == Decimal("0.59")
@@ -77,43 +77,44 @@ def test_actual_create_price_replaces_quote_without_raising_cap(tmp_path: Path) 
 def test_rented_machine_requires_storage_but_not_a_private_image(tmp_path: Path) -> None:
     b = bench(tmp_path)
     job = Job(command="train", max_hours=1, max_usd=Decimal(1))
-    b.scheduler.add_pool(
-        Pool(name="stock", on_demand_template=MachineTemplate(provider="ssh"), max_on_demand=2)
+    b.scheduler.add_ondemand(
+        OnDemand(name="stock", template=MachineTemplate(provider="ssh"), max_machines=2)
     )
-    with pytest.raises(LauncherError, match="pool storage"):
-        b.scheduler.launch(job, "stock")
-    with pytest.raises(LauncherError, match="pool storage"):
+    with pytest.raises(LauncherError, match="needs a storage"):
+        b.scheduler.launch(job, rent="stock")
+    with pytest.raises(LauncherError, match="needs a storage"):
         b.scheduler.rent("stock", hours=2)
     assert not b.store.runs()
     b.scheduler.add_storage(
         Storage(name="stock-store", bucket="journal", region="us-west-2", prefix="test")
     )
-    b.scheduler.add_pool(
-        Pool(
+    b.scheduler.add_ondemand(
+        OnDemand(
             name="stock-ready",
-            on_demand_template=MachineTemplate(provider="ssh"),
+            template=MachineTemplate(provider="ssh"),
             storage="stock-store",
-            max_on_demand=2,
+            max_machines=2,
         )
     )
     machine = b.scheduler.rent("stock-ready", hours=2)
     held = b.store.rented_session(machine).id
-    run = b.scheduler.launch(job, "stock-ready")
+    run = b.scheduler.launch(job, rent="stock-ready")
     assert b.scheduler.attempts(run)[0].session == held
     assert b.store.session(held).autorun
 
 
 def test_missing_autorun_setup_does_not_exclude_an_owned_host(tmp_path: Path) -> None:
     b = bench(tmp_path)
-    b.scheduler.add_pool(
-        Pool(name="mixed", on_demand_template=MachineTemplate(provider="ssh"), max_on_demand=1)
+    b.scheduler.add_ondemand(
+        OnDemand(name="unstored", template=MachineTemplate(provider="ssh"), max_machines=1)
     )
-    b.scheduler.add_machine("host", "owned", pool="mixed")
-    first = b.scheduler.launch(Job(command="train", max_hours=1, max_usd=Decimal(1)), "mixed")
-    second = b.scheduler.queue(Job(command="train", max_hours=1, max_usd=Decimal(1)), "mixed")
+    b.scheduler.add_machine("host", "owned")
+    job = Job(command="train", max_hours=1, max_usd=Decimal(1))
+    first = b.scheduler.launch(job, "host", rent="unstored")
+    second = b.scheduler.queue(job, "host", rent="unstored")
     b.scheduler.tick()
     assert not b.store.session(b.scheduler.attempts(first)[0].session).autorun
-    assert "pool storage" in str(b.scheduler.read(second))
+    assert "needs a storage" in str(b.scheduler.read(second))
     assert b.service.creates == 0
     b.run(601)
     assert b.scheduler.read(second).phase == "setting_up"
@@ -121,7 +122,7 @@ def test_missing_autorun_setup_does_not_exclude_an_owned_host(tmp_path: Path) ->
 
 def test_unreported_start_intent_prevents_retry_after_machine_loss(tmp_path: Path) -> None:
     b = bench(tmp_path)
-    run = b.scheduler.launch(Job(command="train", max_hours=1, max_usd=Decimal(1)), "l4")
+    run = b.scheduler.launch(Job(command="train", max_hours=1, max_usd=Decimal(1)), rent="l4")
     held = b.scheduler.attempts(run)[0].session
     observe = b.service.observe
     b.service.observe = lambda session_id: observe(session_id).model_copy(  # type: ignore[method-assign]

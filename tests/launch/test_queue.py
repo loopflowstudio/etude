@@ -13,7 +13,7 @@ from etude.launch.client import queue, queue_cohort, wait
 from etude.launch.database import Database
 from etude.launch.errors import LaunchError
 from etude.launch.executor import Refused
-from etude.launch.records import Job, LauncherError, Pool, Stale
+from etude.launch.records import Job, LauncherError, Offer, OnDemand, Pool, Stale
 from etude.launch.scheduler import Scheduler
 from etude.launch.schemas import Packet, Work
 from tests.launch.fake import L4, bench
@@ -24,15 +24,15 @@ def job() -> Job:
 
 
 def test_queue_grows_after_restart(tmp_path: Path) -> None:
-    b = bench(tmp_path, max_on_demand=0)
-    run = b.scheduler.queue(job(), "l4")
+    b = bench(tmp_path, max_machines=0)
+    run = b.scheduler.queue(job(), rent="l4")
     b.scheduler.tick()
     assert b.scheduler.read(run).phase == "queued"
     # Previously queued rows keep their metadata but gain the corrected scheduling behavior.
     b.store._db.execute("UPDATE runs SET queued=1 WHERE id=?", (run,))
-    b.scheduler.set_pool_max("l4", 1)
+    b.scheduler.set_ondemand_max("l4", 1)
     reopened = Scheduler(
-        Database(tmp_path / "launcher.db"), {"runpod": lambda p, m: b.service}, b.clock
+        Database(tmp_path / "launcher.db"), {"runpod": lambda held: b.service}, b.clock
     )
     reopened.tick()
     assert reopened.read(run).phase == "setting_up"
@@ -40,11 +40,11 @@ def test_queue_grows_after_restart(tmp_path: Path) -> None:
 
 
 def test_queue_needs_no_capacity(tmp_path: Path) -> None:
-    b = bench(tmp_path, max_on_demand=0)
+    b = bench(tmp_path, max_machines=0)
     b.scheduler.add_pool(Pool(name="empty"))
     one = b.scheduler.queue(job(), "empty")
     b.scheduler.tick()
-    ids = b.scheduler.queue_cohort("pair", job().runs(1, 2), "l4", parallel=2)
+    ids = b.scheduler.queue_cohort("pair", job().runs(1, 2), rent="l4", parallel=2)
     b.scheduler.tick()
     assert all(b.scheduler.read(id).phase == "queued" for id in (one, *ids))
     assert b.service.creates == 0
@@ -53,7 +53,7 @@ def test_queue_needs_no_capacity(tmp_path: Path) -> None:
 def test_rented_machine_takes_queued_cohort_and_never_replaces_it(tmp_path: Path) -> None:
     b = bench(tmp_path)
     machine = b.scheduler.rent("l4", hours=3)
-    ids = b.scheduler.queue_cohort("pair", job().runs(1, 2), "l4")
+    ids = b.scheduler.queue_cohort("pair", job().runs(1, 2), rent="l4")
     b.scheduler.tick()
     assert b.scheduler.read(ids[0]).machine == machine
     assert b.scheduler.read(ids[1]).phase == "queued"
@@ -69,7 +69,7 @@ def test_rented_machine_takes_queued_cohort_and_never_replaces_it(tmp_path: Path
 def test_queue_retry_replaces_lost_capacity(tmp_path: Path) -> None:
     b = bench(tmp_path)
     b.scheduler.rent("l4", hours=2)
-    run = b.scheduler.queue(job(), "l4")
+    run = b.scheduler.queue(job(), rent="l4")
     b.scheduler.tick()
     b.service.kill(b.scheduler.attempts(run)[0].session)  # before code starts
     b.run(1)
@@ -81,8 +81,8 @@ def test_queue_retry_replaces_lost_capacity(tmp_path: Path) -> None:
 
 def test_queue_uses_an_added_machine(tmp_path: Path) -> None:
     b = bench(tmp_path)
-    b.scheduler.add_machine("owned", "host", pool="l4")
-    run = b.scheduler.queue(job(), "l4")
+    b.scheduler.add_machine("owned", "host")
+    run = b.scheduler.queue(job(), "owned", rent="l4")
     b.scheduler.tick()
     assert b.scheduler.read(run).machine == "owned"
     b.run(601)
@@ -105,7 +105,7 @@ def test_cli_queue_records_the_choice(
         + (".runs(1, 2)" if cohort else "")
     )
     assert (
-        main(["queue", str(path), "--pool", "l4", *(["--cohort", "pair"] if cohort else [])]) == 0
+        main(["queue", str(path), "--rent", "l4", *(["--cohort", "pair"] if cohort else [])]) == 0
     )
     ids = [line.split()[0] for line in capsys.readouterr().out.splitlines()]
     assert len(ids) == (2 if cohort else 1)
@@ -129,66 +129,62 @@ def test_public_queue_functions_run_locally(
 def test_tick_moves_an_older_queue_retry(tmp_path: Path) -> None:
     b = bench(tmp_path)
     b.service.refuse = 1
-    earlier = b.scheduler.queue(job(), "l4")
+    earlier = b.scheduler.queue(job(), rent="l4")
     b.scheduler.tick()
     assert b.scheduler.read(earlier).phase == "queued"
-    queued = b.scheduler.queue(job(), "l4")
+    queued = b.scheduler.queue(job(), rent="l4")
     b.scheduler.tick()
     assert b.service.creates == 3
     assert b.scheduler.read(queued).phase == "setting_up"
 
 
-@pytest.mark.parametrize("reason", ["limit", "template", "price", "job", "cohort", "provider"])
+@pytest.mark.parametrize("reason", ["limit", "owned", "price", "job", "cohort", "provider"])
 def test_launch_refuses_without_recording(tmp_path: Path, reason: str) -> None:
-    b = bench(tmp_path, max_on_demand=0 if reason == "limit" else 1)
-    pool = "l4"
+    b = bench(tmp_path, max_machines=0 if reason == "limit" else 1)
+    pool: str | None = None
+    rent: str | None = "l4"
     selected = job()
     cap = None
     expected = reason
-    if reason == "template":
+    if reason == "owned":
         b.scheduler.add_pool(Pool(name="empty"))
-        pool = "empty"
-        expected = "cannot make more machines"
+        pool, rent = "empty", None
+        expected = "no free machine"
     elif reason == "price":
         b.service.usd_per_hour = Decimal(999)
-        # The fake pool has no ceiling; use a deliberately low one.
-
-        b.scheduler.add_pool(
-            Pool(
-                name="cheap",
-                on_demand_template=L4.model_copy(update={"max_usd_per_hour": Decimal(".1")}),
-                max_on_demand=1,
-            )
+        # The fake on-demand has no ceiling; use a deliberately low one.
+        b.scheduler.add_ondemand(
+            OnDemand(name="cheap", template=L4, max_machines=1, max_usd_per_hour=Decimal(".1"))
         )
-        pool = "cheap"
+        rent = "cheap"
     elif reason == "job":
         selected = Job(command="train", max_hours=1, max_usd=Decimal(".01"))
     elif reason == "cohort":
         cap = Decimal(".01")
     elif reason == "provider":
 
-        def unavailable() -> Decimal:
+        def unavailable() -> Offer:
             raise RuntimeError("provider has no capacity")
 
-        b.service.price = unavailable  # type: ignore[method-assign]
+        b.service.offer = unavailable  # type: ignore[method-assign]
     with pytest.raises(LauncherError, match=expected + ".*etude queue"):
-        b.scheduler.launch_cohort("test", selected.runs(1, 2), pool, max_usd=cap)
+        b.scheduler.launch_cohort("test", selected.runs(1, 2), pool, rent=rent, max_usd=cap)
     assert b.store.runs() == ()
     assert b.store.sessions() == ()
     assert b.service.creates == 0
 
 
 def test_launch_checks_only_first_parallel_runs_and_queue_drains(tmp_path: Path) -> None:
-    b = bench(tmp_path, max_on_demand=1)
-    ids = b.scheduler.launch_cohort("six", job().runs(*range(6)), "l4", parallel=1)
+    b = bench(tmp_path, max_machines=1)
+    ids = b.scheduler.launch_cohort("six", job().runs(*range(6)), rent="l4", parallel=1)
     assert all(s.outcome == "succeeded" for s in b.scheduler.wait(*ids, every=601))
     assert b.service.creates == 1
 
 
 def test_launch_cannot_count_one_machine_twice(tmp_path: Path) -> None:
-    b = bench(tmp_path, max_on_demand=1)
+    b = bench(tmp_path, max_machines=1)
     with pytest.raises(LauncherError, match="machine limit"):
-        b.scheduler.launch_cohort("pair", job().runs(1, 2), "l4", parallel=2)
+        b.scheduler.launch_cohort("pair", job().runs(1, 2), rent="l4", parallel=2)
     assert not b.store.runs()
 
 
@@ -198,10 +194,10 @@ def test_cli_continue_waits_without_capacity(
     b = bench(tmp_path)
     monkeypatch.setattr(import_module("etude.launch.cli"), "default", lambda: b.scheduler)
     parent = b.scheduler.launch(
-        Job(command="train", max_hours=1, max_usd=Decimal(1), until="steps=3"), "l4"
+        Job(command="train", max_hours=1, max_usd=Decimal(1), until="steps=3"), rent="l4"
     )
     b.run(601)
-    b.scheduler.set_pool_max("l4", 0)
+    b.scheduler.set_ondemand_max("l4", 0)
     assert main(["continue", parent, "steps=7"]) == 0
     child = capsys.readouterr().out.split()[0]
     record = b.scheduler.record(child)
@@ -214,7 +210,7 @@ def test_launch_refusal_records_no_run(tmp_path: Path) -> None:
     b = bench(tmp_path)
     b.service.refuse = 1
     with pytest.raises(LauncherError, match="provider refused"):
-        b.scheduler.launch(job(), "l4")
+        b.scheduler.launch(job(), rent="l4")
     assert not b.store.runs()
     assert b.store.sessions()[0].refused_at is not None
     b.scheduler.tick()
@@ -224,7 +220,9 @@ def test_launch_refusal_records_no_run(tmp_path: Path) -> None:
 def test_launch_checks_total_cost_of_parallel_runs(tmp_path: Path) -> None:
     b = bench(tmp_path)
     with pytest.raises(LauncherError, match="cohort dollars"):
-        b.scheduler.launch_cohort("pair", job().runs(1, 2), "l4", parallel=2, max_usd=Decimal(".9"))
+        b.scheduler.launch_cohort(
+            "pair", job().runs(1, 2), rent="l4", parallel=2, max_usd=Decimal(".9")
+        )
     assert not b.store.runs()
     assert not b.store.sessions()
 
@@ -232,11 +230,11 @@ def test_launch_checks_total_cost_of_parallel_runs(tmp_path: Path) -> None:
 def test_queue_never_calls_provider(tmp_path: Path) -> None:
     b = bench(tmp_path)
 
-    def unavailable() -> Decimal:
+    def unavailable() -> Offer:
         pytest.fail("queue contacted the provider")
 
-    b.service.price = unavailable  # type: ignore[method-assign]
-    run = b.scheduler.queue(job(), "l4")
+    b.service.offer = unavailable  # type: ignore[method-assign]
+    run = b.scheduler.queue(job(), rent="l4")
     assert b.scheduler.read(run).phase == "queued"
     assert b.service.creates == 0
 
@@ -264,7 +262,7 @@ def test_partial_launch_cleans_up_without_executable_work(
 
     b.service.create = second_fails  # type: ignore[method-assign]
     with pytest.raises(LauncherError, match="unknown" if lost_reply else "refused"):
-        b.scheduler.launch_cohort("pair", job().runs(1, 2), "l4", parallel=2)
+        b.scheduler.launch_cohort("pair", job().runs(1, 2), rent="l4", parallel=2)
     assert not b.store.runs() and not b.store.cohort_exists("pair")
     assert b.store.sessions()[0].ended_at is not None
     b.scheduler.tick()  # lookup the unknown identity
@@ -275,18 +273,18 @@ def test_partial_launch_cleans_up_without_executable_work(
 
 
 def test_launch_lock_fences_rivals_and_keeps_other_pools_working(tmp_path: Path) -> None:
-    b = bench(tmp_path, max_on_demand=1)
+    b = bench(tmp_path, max_machines=1)
     b.scheduler.add_machine("shed", "owned")
     other = Scheduler(Database(tmp_path / "launcher.db"), b.scheduler._services, b.clock)
     create = b.service.create
     queued: list[str] = []
 
     def competing(packet: Packet) -> str:
-        with pytest.raises(LauncherError, match="pool is busy"):
-            other.launch(job(), "l4")
+        with pytest.raises(LauncherError, match="it is busy"):
+            other.launch(job(), rent="l4")
         with pytest.raises(LauncherError, match="busy"):
             other.rent("l4", 1)
-        queued.append(other.queue(job(), "l4"))
+        queued.append(other.queue(job(), rent="l4"))
         local = other.launch(job(), "shed")
         other.tick()
         assert other.read(local).machine is not None
@@ -295,7 +293,7 @@ def test_launch_lock_fences_rivals_and_keeps_other_pools_working(tmp_path: Path)
         return create(packet)
 
     b.service.create = competing  # type: ignore[method-assign]
-    run = b.scheduler.launch(job(), "l4")
+    run = b.scheduler.launch(job(), rent="l4")
     assert b.scheduler.read(run).machine is not None
     assert b.scheduler.read(queued[0]).machine is None
     assert b.service.creates == 1
@@ -314,7 +312,7 @@ def test_expired_launch_cannot_commit_and_orphan_is_cleaned(tmp_path: Path) -> N
 
     b.service.create = delayed  # type: ignore[method-assign]
     with pytest.raises(LaunchError, match="expired") as caught:
-        b.scheduler.launch(job(), "l4")
+        b.scheduler.launch(job(), rent="l4")
     assert isinstance(caught.value.__cause__, Stale)
     assert not b.store.runs()
     evidence = b.scheduler.logs(run=caught.value.runs[0])
@@ -329,10 +327,10 @@ def test_expired_launch_cannot_commit_and_orphan_is_cleaned(tmp_path: Path) -> N
 
 
 def test_launch_uses_claimed_added_and_rented_machines(tmp_path: Path) -> None:
-    b = bench(tmp_path, max_on_demand=1)
+    b = bench(tmp_path, max_machines=1)
     reserved = b.scheduler.rent("l4", 2)
-    b.scheduler.add_machine("owned", "host", pool="l4")
-    ids = b.scheduler.launch_cohort("pair", job().runs(1, 2), "l4", parallel=2)
+    b.scheduler.add_machine("owned", "host")
+    ids = b.scheduler.launch_cohort("pair", job().runs(1, 2), "owned", rent="l4", parallel=2)
     assert b.scheduler.read(ids[0]).machine == reserved
     assert b.scheduler.read(ids[1]).machine == "owned"
     assert b.service.creates == 1
@@ -354,7 +352,7 @@ def test_launch_confirms_first_wave_before_delivering_any_work(tmp_path: Path) -
     first, second, later = b.scheduler.launch_cohort(
         "three",
         job().runs(1, 2, 3),
-        "l4",
+        rent="l4",
         parallel=2,
     )
     assert b.scheduler.read(first).machine != b.scheduler.read(second).machine
@@ -367,11 +365,11 @@ def test_machines_lists_rented_windows_and_terminate_takes_the_machine_name(
 ) -> None:
     b = bench(tmp_path)
     monkeypatch.setattr(import_module("etude.launch.cli"), "default", lambda: b.scheduler)
-    assert main(["rent", "--pool", "l4", "--hours", "1"]) == 0
+    assert main(["rent", "--ondemand", "l4", "--hours", "1"]) == 0
     (line,) = capsys.readouterr().out.splitlines()
-    name, pool, state = line.split("  ", 2)
-    assert pool == "l4" and name.startswith("l4-") and state.startswith("rented until ")
-    assert main(["pools"]) == 0
+    name, ondemand, state = line.split("  ", 2)
+    assert ondemand == "l4" and name.startswith("l4-") and state.startswith("rented until ")
+    assert main(["ondemands"]) == 0
     assert f"rented: {name}" in capsys.readouterr().out
     assert main(["terminate", "--machine", name]) == 0
     assert capsys.readouterr().out == ""  # nothing is rented now

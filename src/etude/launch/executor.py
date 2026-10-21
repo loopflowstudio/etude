@@ -10,12 +10,11 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 from pathlib import Path
 from typing import Protocol
 
 from etude.launch.machines import Allocation, Bill, MachineRequest, Machines, OwnedMachine
-from etude.launch.records import BootstrapLinks, LogStream
+from etude.launch.records import BootstrapLinks, LogStream, Offer
 from etude.launch.schemas import CheckpointRef, Observation, Packet, Work
 from etude.launch.startup import ProcessStart
 from etude.launch.storage.disk import DirectoryJournal
@@ -55,8 +54,8 @@ class Execution(Protocol):
 
     def bill(self, session_id: str, now: datetime) -> Bill | None: ...
 
-    def price(self) -> Decimal:
-        """US dollars per hour for a rented machine created now."""
+    def offer(self) -> Offer:
+        """What a rented machine created now would be, its US dollars per hour, and whether one can be had."""
         ...
 
     def create(self, packet: Packet) -> str:
@@ -128,8 +127,8 @@ class Executor:
         self.machines, self.starter, self.journal = machines, starter, journal
         self.control = control or journal
 
-    def price(self) -> Decimal:
-        return self.machines.price()
+    def offer(self) -> Offer:
+        return self.machines.offer()
 
     def create(self, packet: Packet) -> str:
         deadline = packet.deadline

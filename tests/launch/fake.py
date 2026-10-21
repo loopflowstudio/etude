@@ -20,12 +20,14 @@ from etude.launch.executor import Refused
 from etude.launch.logs import snapshot_stream
 from etude.launch.machines import Allocation, Bill
 from etude.launch.records import (
+    GPU,
     Image,
     LogStream,
     MachineTemplate,
+    Offer,
+    OnDemand,
     Outcome,
     Output,
-    Pool,
     Provider,
     Storage,
     parse_target,
@@ -107,9 +109,10 @@ class FakeService:
         self._call("provider")
         return None
 
-    def price(self) -> Decimal:
+    def offer(self) -> Offer:
         self._call("provider")
-        return self.usd_per_hour
+        hardware = GPU(id="NVIDIA L4", min_vcpus=6, min_memory_gb=48)
+        return Offer(hardware=hardware, usd_per_hour=self.usd_per_hour, available=True)
 
     def create(self, packet: Packet) -> str:
         self._call("provider")
@@ -274,14 +277,14 @@ class Bench:
         self.scheduler.tick()
 
 
-def bench(tmp_path: Path, *, max_on_demand: int = 4, usd_per_hour: str = "0.59") -> Bench:
+def bench(tmp_path: Path, *, max_machines: int = 4, usd_per_hour: str = "0.59") -> Bench:
     clock = Clock()
     service = FakeService(clock, usd_per_hour)
     store = Database(tmp_path / "launcher.db")
     free = FakeService(clock, "0")
     scheduler = Scheduler(
         store,
-        {"runpod": lambda pool, machine: service, "ssh": lambda pool, machine: free},
+        {"runpod": lambda held: service, "ssh": lambda held: free},
         clock=clock,
         sleep=clock.advance,
     )
@@ -289,7 +292,7 @@ def bench(tmp_path: Path, *, max_on_demand: int = 4, usd_per_hour: str = "0.59")
         Storage(name="test", bucket="bucket", prefix="prefix", region="us-west-2")
     )
     scheduler.set_provider(Provider(name="fake", kind="runpod", registry="", storage="test"))
-    scheduler.add_pool(
-        Pool(name="l4", on_demand_template=L4, max_on_demand=max_on_demand, setup_seconds=0)
+    scheduler.add_ondemand(
+        OnDemand(name="l4", template=L4, max_machines=max_machines, setup_seconds=0)
     )
     return Bench(clock, service, scheduler, store)
