@@ -17,6 +17,7 @@ Every time is timezone-aware UTC.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from decimal import Decimal
 from typing import Literal
@@ -291,11 +292,37 @@ class Runtime(Record):
     cuda: str | None = None  # PyTorch's compiled CUDA version, not host driver version
 
 
+class Input(Record):
+    """A file a job is given before it starts: an object in storage, checked by its digest.
+
+    The worker fetches it through its storage access before the job starts, and
+    refuses bytes that do not match. Inputs need the machine to keep records in a storage.
+    """
+
+    name: str  # where the job finds it: ETUDE_INPUTS_DIR/NAME
+    key: str = Field(min_length=1)  # the object's key in the bucket of the machine's storage
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    size_bytes: int = Field(ge=0)
+
+    @field_validator("name")
+    @classmethod
+    def _plain(cls, name: str) -> str:
+        if name in (".", "..") or not re.fullmatch(r"[A-Za-z0-9._-]+", name):
+            raise ValueError(f"input name {name!r} must be a plain file name")
+        return name
+
+
+def _distinct(value: tuple[Input, ...]) -> tuple[Input, ...]:
+    if len({given.name for given in value}) != len(value):
+        raise ValueError("each input needs its own name")
+    return value
+
+
 class Job(Record):
     """What to run, without a seed. Launching freezes it: `revision` becomes a commit.
 
     What makes a job itself is what decides the result: the command, the config, the
-    source, setup/cleanup, runtime and the target. Two launches that agree on those are the same job, so
+    source, its inputs, setup/cleanup, runtime and the target. Two launches that agree on those are the same job, so
     their runs can be found together. The name, the hours, the dollars and the
     attempts are how it is launched; they bound each run and can differ between runs.
     """
@@ -314,6 +341,9 @@ class Job(Record):
     repo: str | None = None  # a local git repository; None runs in an empty directory
     revision: str | None = None  # None snapshots working files; a named revision is exact
     max_attempts: int = 3  # tries allowed after confirmed infrastructure failure
+    inputs: tuple[Input, ...] = ()  # files at ETUDE_INPUTS_DIR/NAME when the job starts
+
+    _check_inputs = field_validator("inputs")(_distinct)
 
     def runs(self, *seeds: int, params: dict[str, Param] | None = None) -> list[Run]:
         """This job once per seed, each recording the parameters that led to it."""
@@ -334,6 +364,13 @@ def job_identity(job: Job) -> dict[str, str | int | None]:
             identity[name] = value
     if job.runtime is not None:
         identity["runtime"] = json.dumps(job.runtime.model_dump(mode="json"), sort_keys=True)
+    if job.inputs:
+        identity["inputs"] = json.dumps(
+            sorted(
+                (given.model_dump(mode="json") for given in job.inputs), key=lambda i: i["name"]
+            ),
+            sort_keys=True,
+        )
     return identity
 
 

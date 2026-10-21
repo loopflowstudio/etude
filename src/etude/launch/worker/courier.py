@@ -30,7 +30,7 @@ from etude.launch.logging import (
 )
 from etude.launch.records import Diagnostic, Output
 from etude.launch.schemas import AttemptRecord, Bootstrap, Inbox, Result, RunAccess
-from etude.launch.storage.download import Cache, Download
+from etude.launch.storage.download import Cache, Download, Mismatch
 from etude.launch.storage.files import RESULT, read_result, write
 from etude.launch.storage.s3 import (
     PART_BYTES,
@@ -112,9 +112,14 @@ class Courier:
         self._log_sent_at: dict[str, float] = {}
         self._console_position = 0
         self._console = Console("worker output")
+        self._inbox: bytes | None = None  # the inbox as last read
+        self._usage_sent = -1  # bytes of the usage journal last delivered
 
     def _retain_transfer(self, raw: str) -> None:
-        write_log("transfer", raw)
+        """Keep a transfer in the session's usage journal, not the worker log.
+
+        The log says what changed; usage and diagnostics read this journal.
+        """
         with (self._home / "usage.jsonl").open("a") as stream:
             stream.write(raw + "\n")
             stream.flush()
@@ -122,8 +127,13 @@ class Courier:
 
     def _carry_usage(self) -> None:
         path = self._home / "usage.jsonl"
-        if path.exists():
-            post(self._form, self._form.prefix + "usage.jsonl", path.read_bytes(), self._send)
+        if path.exists() and path.stat().st_size != self._usage_sent:
+            body = path.read_bytes()
+            # Delivering the journal is not itself journaled: each delivery would
+            # change it and need another. A failed delivery raises to the caller.
+            with observe(lambda raw: None):
+                post(self._form, self._form.prefix + "usage.jsonl", body, self._send)
+            self._usage_sent = len(body)
 
     def fetch(self, links: dict[str, Download]) -> None:
         """Verify transport bytes before exposing inputs, including existing paths."""
@@ -134,7 +144,8 @@ class Courier:
             try:
                 with limit_time(timeout):
                     for path, source in links.items():
-                        purpose = "source" if "/sources/" in path else "checkpoint"
+                        kind = path.split("/")[1]
+                        purpose = {"sources": "source", "inputs": "input"}.get(kind, "checkpoint")
                         with attribute(purpose=purpose):
                             Cache().fetch(source, self._home.parent / path, send=self._send)
             finally:
@@ -142,15 +153,29 @@ class Courier:
                 self._carry_usage()
 
     def bring_in(self) -> None:
-        """Apply the inbox: mark attempts to stop, and hand over work added since."""
+        """Apply the inbox: mark attempts to stop, and hand over work added since.
+
+        A poll that finds the inbox unchanged leaves no record; a changed or
+        failed read keeps its transfer, and a change is logged.
+        """
+        polled: list[str] = []
         try:
-            raw = read(self._inbox_url, self._send)
+            with observe(polled.append), attribute(session=self._home.name):
+                raw = read(self._inbox_url, self._send)
         except (StorageUnavailable, OSError, ValueError) as error:
+            for event in polled:
+                self._retain_transfer(event)
             _diagnose("inbox read", error)
             raise
+        if raw == self._inbox:
+            return
+        for event in polled:
+            self._retain_transfer(event)
+        self._inbox = raw
         if raw is None:
             return
         inbox = Inbox.model_validate_json(raw)
+        write_log("inbox", f"{len(inbox.work)} work, {len(inbox.stop)} to stop")
         for attempt in inbox.stop:
             (self._home / "stop" / str(attempt)).touch()
         for entry in inbox.work:
@@ -160,6 +185,10 @@ class Courier:
                 self._runs.setdefault(entry.work.run, _Run(entry.access, self._send))
                 try:
                     self.fetch(entry.fetch)  # files precede executable work
+                except Mismatch as error:
+                    # Permanent: hand the work over so its setup fails and says why,
+                    # rather than asking for the same wrong bytes until the deadline.
+                    _diagnose("input verification", error, attempt)
                 except (StorageUnavailable, OSError, ValueError) as error:
                     _diagnose("source fetch", error, attempt)
                     raise

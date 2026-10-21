@@ -57,6 +57,7 @@ class BucketJournal:
           ...                           whatever the job's tracker keeps for the run
         PREFIX/sessions/SESSION/        one machine's instructions, inbox and notes
           out/receipt, out/ended        written by the machine
+        PREFIX/sources/SHA256.tar       a commit's source archive, named by its digest
 
     A machine may write only under the folders of the runs it is given, and
     under its own `out/`.
@@ -66,6 +67,8 @@ class BucketJournal:
         self._prefix, self._bucket = storage.prefix, bucket
         self._kept: dict[str, bytes] = {}
         self._finished: dict[str, Progress] = {}
+        # Staged archives by repository and commit: their key, digest and size.
+        self._sources: dict[tuple[str, str], tuple[str, str, int]] = {}
 
     def _session(self, session_id: str) -> str:
         return f"{self._prefix}/sessions/{session_id}/"
@@ -138,24 +141,43 @@ class BucketJournal:
         # Provider cleanup owns deletion; a bucket alone cannot stop a machine.
         return self.ended(session_id)
 
+    def stage(self, repo: str, commit: str) -> None:
+        """Put a commit's source archive in storage unless it is there; safe to repeat.
+
+        The launcher stages before renting, so no paid machine waits on the upload.
+        """
+        self._source(repo, commit)
+
+    def _source(self, repo: str, commit: str) -> Download:
+        if (repo, commit) not in self._sources:
+            with attribute(purpose="source"):
+                archive = source_archive(repo, commit)
+                digest = hashlib.sha256(archive).hexdigest()
+                key = f"{self._prefix}/sources/{digest}.tar"
+                if key not in self._bucket.list(key):
+                    self._bucket.put(key, archive)
+            self._sources[repo, commit] = (key, digest, len(archive))
+        key, digest, size = self._sources[repo, commit]
+        return Download(
+            url=self._bucket.get_url(key, _GRANT_SECONDS), sha256=digest, size_bytes=size
+        )
+
     def _fetches(self, session_id: str, works: Sequence[Work]) -> dict[str, Download]:
         """Links to the files this work needs, keyed by where the pod should put them."""
         links: dict[str, Download] = {}
         for work in works:
             if work.repo is not None and work.commit is not None:
-                key = f"{self._session(session_id)}sources/{work.commit}.tar"
                 local = f"{session_id}/sources/{work.commit}.tar"
                 # A cohort shares inputs; prepare each destination only once.
                 if local not in links:
-                    with attribute(purpose="source"):
-                        archive = source_archive(work.repo, work.commit)
-                        if key not in self._bucket.list(key):
-                            self._bucket.put(key, archive)
-                        links[local] = Download(
-                            url=self._bucket.get_url(key, _GRANT_SECONDS),
-                            sha256=hashlib.sha256(archive).hexdigest(),
-                            size_bytes=len(archive),
-                        )
+                    links[local] = self._source(work.repo, work.commit)
+            for given in work.inputs:
+                # Named by digest, so attempts given the same file share one download.
+                links[f"{session_id}/inputs/{given.sha256}"] = Download(
+                    url=self._bucket.get_url(given.key, _GRANT_SECONDS),
+                    sha256=given.sha256,
+                    size_bytes=given.size_bytes,
+                )
             held = work.checkpoint
             if held is not None:
                 # Where the machine's worker looks for it, under its sessions folder.

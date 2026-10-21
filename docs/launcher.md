@@ -314,7 +314,7 @@ that outlive its disk. Only Amazon S3 is supported.
 ```sh
 etude logs --run baseline-seed-7
 etude logs --run baseline-seed-7 --follow --timeout 60
-etude logs --run baseline-seed-7 --job-only
+etude logs --run baseline-seed-7 --job-only     # the job's output alone
 etude logs --machine MACHINE
 etude status baseline-seed-7 --phases
 ```
@@ -323,7 +323,10 @@ A run log includes launch preparation, shared machine startup, every execution
 attempt and cleanup. It keeps that meaning before admission and after machine
 deletion. `--cohort NAME` selects the admitted members of a cohort. Machine logs
 contain operational output; run logs select only that run's job output and
-attempt diagnostics.
+attempt diagnostics. The worker's log says what changed, such as an inbox with
+new work or a delivery that failed, not every poll: an inbox read that finds
+nothing new leaves no line and no usage record, and every other transfer goes
+to the session's usage journal (`etude usage`), not the log.
 
 `Run(id="baseline-seed-7", job=job)` chooses a scientific identity. Failed admission
 leaves independent launch evidence, without creating a Run or RunAttempt or
@@ -614,6 +617,31 @@ Training code reads `ETUDE_OUTPUT_DIR`, `ETUDE_STOP_FILE`, `ETUDE_DEADLINE`,
 `ETUDE_SEED`, `ETUDE_CONFIG`, `ETUDE_UNTIL_CLOCK` and `ETUDE_UNTIL_VALUE`.
 A resumed attempt or continuation also receives `ETUDE_CHECKPOINT` and `ETUDE_FROM_VALUE`.
 
+A job can be given files by name:
+
+```python
+from etude.launch.records import Input, Job
+
+policy = Input(
+    name="policy.pt", key="etude/launch/RUN/checkpoints/policy.pt", sha256="…", size_bytes=1048576
+)
+job = Job(
+    command='python eval.py --policy "$ETUDE_INPUTS_DIR/policy.pt"',
+    inputs=(policy,),
+    max_hours=1,
+    max_usd=Decimal(2),
+)
+```
+
+`key` names an object in the bucket of the storage the machine keeps its
+records in (the on-demand's, or an owned host's `--storage`). The launcher gives
+the worker a scoped read link; the worker downloads it with the same verified,
+resumable download as source and checkpoints, before the job starts, and puts it
+at `ETUDE_INPUTS_DIR/NAME`. Bytes that do not match the digest are refused: the
+job's command never runs and the attempt ends `lost (setup_failed)` with the
+reason in its log. Inputs are part of the job's identity. A machine with no
+storage cannot be given inputs.
+
 The job is also told who it is: `ETUDE_RUN` (the run's id), `ETUDE_JOB` (the
 digest its job's runs share), `ETUDE_JOB_NAME` when the job has a name,
 `ETUDE_ATTEMPT`, and `ETUDE_COHORT` when the run has one. It runs in
@@ -634,6 +662,7 @@ PREFIX/RUN/                      everything about one run
   checkpoints/NAME               each checkpoint the job reported
   run.json  state.json  metrics/ the job's tracking files for the run, as they are
 PREFIX/sessions/SESSION/         one machine's instructions, inbox and notes
+PREFIX/sources/SHA256.tar        a commit's source archive, named by its digest
 ```
 
 The job is given `ETUDE_TRACK_DIR`, `track` beside the `sessions` directory
@@ -902,6 +931,12 @@ the common ancestor with origin's default branch (date and subject included),
 commits ahead, nearest release from `git describe --tags`, and whether it is a
 snapshot. These facts stay as observed at submission even when branches move.
 Older runs without these facts still show their original commit.
+
+Before anything is rented for a run, its source archive is put in the
+on-demand's storage (once per archive digest), so a rental's window starts only
+after the upload: no paid machine waits on it. `git archive` honours
+`export-ignore` in the commit's `.gitattributes`; mark large files the job does
+not need that way to keep the archive small.
 
 Omit `revision` (or use `None`) to include final working files, including
 nonignored untracked files. Etude makes a deterministic commit parented by HEAD:

@@ -14,7 +14,7 @@ from typing import Any
 
 from pydantic import Field, FiniteFloat, Json, JsonValue
 
-from etude.launch.records import Cause, Limit, Outcome, Output, Record, Runtime
+from etude.launch.records import Cause, Input, Limit, Outcome, Output, Record, Runtime
 from etude.launch.storage.download import Download
 from etude.launch.storage.s3 import Keys, PostForm
 from etude.launch.usage import Transfer
@@ -56,6 +56,7 @@ class Work(Record):
     job: str | None = None
     job_name: str | None = None
     cohort: str | None = None
+    inputs: tuple[Input, ...] = ()  # delivered to SESSION/inputs/SHA256
 
 
 class Packet(Record):
