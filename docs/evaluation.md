@@ -40,26 +40,31 @@ def play(match: Match) -> Tables:  # importable by name: workers are fresh proce
     }
 
 
-# Model is the checkpoint being held, playing with your config (a Pydantic model or JSON).
+# Model is the checkpoint being held, run by your inference code and playing with
+# your config (a Pydantic model or JSON). Name the code, so a change to it is a new agent.
+net = ["players/net.py"]
 progress = Benchmark(
     name="anchors",
     environment=world,
     matchups=(
         Matchup(
             name="no search vs heuristic",
-            players=(Model(config=Direct()), heuristic),
+            players=(Model(code=net, config=Direct()), heuristic),
             conditions=deals,
             games=8,
         ),
         Matchup(
             name="no search vs greedy",
-            players=(Model(config=Direct()), greedy),
+            players=(Model(code=net, config=Direct()), greedy),
             conditions=deals,
             games=8,
         ),
         Matchup(
             name="search vs no search",
-            players=(Model(config=PUCT(simulations=64)), Model(config=Direct())),
+            players=(
+                Model(code=net, config=PUCT(simulations=64)),
+                Model(code=net, config=Direct()),
+            ),
             conditions=deals[:10],
             games=4,
         ),
@@ -79,9 +84,9 @@ hold(league, enter=finals, play=play, workers=8, storages=[bucket])
 
 db = connect(bucket)  # or "s3://my-bucket/runs", or a directory
 for line in curves(db, "anchors", table="plays", value="score"):
-    print(line.matchup, line.run, [(p.ordinal, p.clocks, p.value) for p in line.points])
+    print(line.matchup, line.run, [(p.name, p.clocks, p.value) for p in line.points])
 for entry in standings(db, "finals-1", table="plays", value="score").entries:
-    print(entry.name, entry.opponent, entry.value, entry.interval)
+    print(entry.name, entry.opponent_name, entry.value, entry.interval)
 ```
 
 ```python
@@ -112,10 +117,19 @@ evaluate(
 )
 ```
 
-- **Agents.** A checkpoint (by artifact `sha256`) or code (by its source files,
-  hashed relative to the repository), plus a config: free JSON or a Pydantic
-  model. The identity covers both, so one checkpoint at two search budgets is
-  two agents. Names are for reading; joins use identity.
+- **Agents.** A checkpoint (by artifact `sha256`) or code (by its source
+  files), plus a config: free JSON or a Pydantic model. A checkpoint agent
+  should also name the code that runs it,
+  `agent("net", checkpoint=ref, code=["players/net.py"], config=...)`. The
+  identity covers all of them, so one checkpoint at two search budgets, or
+  under changed inference code, is two agents. Names are for reading; joins
+  use identity.
+- **Source files.** A directory stands for the files below it. In a git
+  checkout only tracked files count, named by their path in the checkout, so
+  caches and scratch files never change an identity. A launched job's source
+  has no `.git`; there files are named by their path below `ETUDE_SOURCE_DIR`,
+  which the launcher sets, so the same commit gives the same identity on a
+  rented machine as on yours.
 - **Matches.** A seating of agents under fixed `conditions`, played for
   `games`: the unit Etude schedules, resumes and resamples. Seat swaps belong
   inside `play`. Group `all` holds every seat; an agent may sit in two seats.
@@ -130,6 +144,8 @@ evaluate(
   resuming with another is refused, and comparisons keep environments apart.
 - **Resume.** Calling `evaluate` again with the same `run` skips every match
   already delivered to any of `storages`, even on a machine with an empty disk.
+- **Progress.** Each stored match prints one line to stderr:
+  `etude: RUN: 12/36 matches played, 220s elapsed`.
 - **Storage.** Each match writes one Parquet file per table under
   `RUN/tables/` and its record under `RUN/matches/`, delivered after every
   match; `etude sync` finishes delivery later. On finish, a process's files
@@ -151,8 +167,12 @@ evaluate(
   `tournament.json` in its own folder: the definition it was held with, and
   the checkpoint or entrants it added. A tournament is every eval run naming
   it, so a hold on a rented machine delivers its part like any other run, and
-  many eval runs can grow one tournament at once. A match two of them hold
-  counts once.
+  many eval runs can grow one tournament at once.
+- **Reuse.** A match is the same wherever it is played, so within one
+  environment its results are reused by key: `curves`, `standings` and a
+  batch hold count a scheduled match that any eval run of the environment
+  holds, whether held for this tournament, another, or none. Each counts
+  once, from the eval run that recorded it last.
 - **Conflicts.** Another format, environment or round-robin rules under one
   name (`tournament_conflict`), or a matchup name defined two ways
   (`matchup_conflict`), is refused by a batch hold and by `curves` and
@@ -161,17 +181,23 @@ evaluate(
   (`ETUDE_RUN`), so `etude logs` and `status` lead to it and a retry resumes
   it. Elsewhere it is named for the tournament and what is given; the same
   call resumes it.
-- **Splitting.** `share=(k, n)` plays one of n disjoint parts, for n machines.
+- **Splitting.** `share=(k, n)` plays one of n disjoint parts, for n
+  machines: the scheduled matches in key order, dealt round, so parts differ
+  by at most one match. Delivered matches are dealt too, so a retried share
+  keeps its part.
 - **Cost.** Holding a checkpoint or entrants reads nothing of the
   tournament: it plays their matches. Holding nothing new (batch) lists each
-  place once and reads each eval run's `tournament.json`, to play what the
-  tournament calls for and no eval run delivered.
+  place once and reads each eval run once (its `tournament.json`, or its
+  `environment.json` when it was held for no tournament), to play what the
+  tournament calls for and no eval run of its environment delivered.
 - **`curves`** gives one line per matchup and training run: each checkpoint's
-  ordinal, the clocks where its run stood when it saved it, and the first
-  player's value with a 95% interval over whole matches.
-- **`standings`** gives a round robin's payoff matrix, best first; `complete`
-  says whether every scheduled match is held. Each match counts once, from
-  the eval run that recorded it last.
+  name, ordinal, the clocks where its run stood when it saved it, and the
+  first player's value with a 95% interval over whole matches. Checkpoints
+  no training run under the source recorded make one line per matchup,
+  ordered by name, numbers in order (`updates-900` before `updates-1000`).
+- **`standings`** gives a round robin's payoff matrix, best first, each entry
+  naming its agent and opponent; `complete` says whether every scheduled
+  match is held.
 
 ## Querying
 
@@ -187,5 +213,5 @@ recorded, joined to agents by `artifact`).
 each opponent and against all: a seat's agent against the other seats'
 agents, or a group against the match's other groups. The value is
 `sum(value) / sum(per)`, or the mean without `per`. The 95% interval is a
-percentile bootstrap over whole matches with a fixed seed; fewer than two
-matches have none.
+percentile bootstrap over whole matches with a fixed seed, independent of
+the order rows are read in; fewer than two matches have none.

@@ -29,22 +29,22 @@ import sys
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NoReturn
 
-from pydantic import BaseModel, JsonValue, TypeAdapter, ValidationError
+from pydantic import BaseModel
 
 from etude.eval.records import (
     COLUMN_TYPES,
     Agent,
     ColumnType,
-    Config,
     Environment,
     Match,
     MatchRecord,
+    as_config,
     table_file,
 )
+from etude.eval.source import digest_files
 from etude.run.declaration import declare
 from etude.run.delivery import RunFiles, StorageDestination, destinations, ship
 from etude.run.errors import EtudeError
@@ -75,8 +75,6 @@ type Value = bool | int | float | str | None
 type Row = Mapping[str, Value]
 type Tables = Mapping[str, Sequence[Row]]
 
-_CONFIG: TypeAdapter[Config] = TypeAdapter(dict[str, JsonValue])
-
 
 class EvalRun(Record):
     """What one call to `evaluate` did."""
@@ -98,24 +96,25 @@ def agent(
 ) -> Agent:
     """A saved model, by its artifact's digest, or code, by its source files; and its config.
 
-    A directory stands for every file below it. Paths are hashed relative to
-    their repository, so the identity is the same on every checkout.
+    A checkpoint agent should also name the code that runs it, so results
+    from changed inference code are another agent's. A directory stands for
+    every file below it; files are hashed as `etude.eval.source.digest_files`
+    says, so the identity is the same on every checkout.
     """
-    if (checkpoint is None) == (len(code) == 0):
+    if checkpoint is None and not code:
         raise EtudeError("agent_needs_checkpoint_or_code", 422)
-    if checkpoint is not None:
-        if checkpoint.sha256 is None:
-            raise EtudeError("checkpoint_agent_requires_digest", 422)
-        return Agent(
-            name=name,
-            kind="checkpoint",
-            artifact=checkpoint.sha256,
-            uri=checkpoint.uri,
-            config=as_config(config),
-        )
-    if not _files(code):
-        raise EtudeError("code_agent_without_files", 422)
-    return Agent(name=name, kind="code", artifact=_digest_files(code), config=as_config(config))
+    if checkpoint is None:
+        return Agent(name=name, kind="code", artifact=digest_files(code), config=as_config(config))
+    if checkpoint.sha256 is None:
+        raise EtudeError("checkpoint_agent_requires_digest", 422)
+    return Agent(
+        name=name,
+        kind="checkpoint",
+        artifact=checkpoint.sha256,
+        uri=checkpoint.uri,
+        code=digest_files(code) if code else None,
+        config=as_config(config),
+    )
 
 
 def environment(
@@ -125,47 +124,7 @@ def environment(
     config: Mapping[str, object] | BaseModel | None = None,
 ) -> Environment:
     """What matches are played in: its defining files, hashed like code, and its config."""
-    return Environment(name=name, files=_digest_files(files), config=as_config(config))
-
-
-def as_config(config: Mapping[str, object] | BaseModel | None) -> Config:
-    if config is None:
-        return {}
-    data = config.model_dump(mode="json") if isinstance(config, BaseModel) else dict(config)
-    try:
-        return _CONFIG.validate_python(data)
-    except ValidationError as error:
-        raise EtudeError("config_is_not_json", 422) from error
-
-
-def _files(paths: Sequence[Path | str]) -> list[Path]:
-    found: list[Path] = []
-    for given in map(Path, paths):
-        if given.is_dir():
-            found += sorted(path for path in given.rglob("*") if path.is_file())
-        elif given.is_file():
-            found.append(given)
-        else:
-            raise EtudeError("identity_file_missing", 422) from FileNotFoundError(given)
-    return found
-
-
-def _repository_path(path: Path) -> str:
-    """The path below the nearest enclosing repository, or as given outside one."""
-    resolved = path.resolve()
-    for parent in resolved.parents:
-        if (parent / ".git").exists():
-            return resolved.relative_to(parent).as_posix()
-    return path.as_posix()
-
-
-def _digest_files(paths: Sequence[Path | str]) -> str:
-    digest = sha256()
-    named = {_repository_path(path): path for path in _files(paths)}
-    for name in sorted(named):
-        data = named[name].read_bytes()
-        digest.update(f"{name}\0{len(data)}\0".encode() + data)
-    return digest.hexdigest()
+    return Environment(name=name, files=digest_files(files), config=as_config(config))
 
 
 def evaluate(
@@ -182,7 +141,9 @@ def evaluate(
     """Play every match not already stored in this eval run, `workers` at a time.
 
     The eval run is named `run` (see `etude.run.declaration.declare` for its
-    defaults); resuming it requires the same environment. Raises
+    defaults); resuming it requires the same environment. Prints one line to
+    stderr as each match is stored: how many of the pending are, and since
+    when. Raises
     `EtudeError("match_failed")` after recording the first match that raised
     or returned rows Etude refuses. Delivery failures do not raise: the files
     stay in the run's directory for `etude sync`, and stderr says so.
@@ -203,11 +164,18 @@ def evaluate(
         raise EtudeError("eval_run_environment_conflict", 409)
     writer = _Writer(declared.root, declared.name, destinations(declared.base, storages))
     pending = [scheduled for scheduled in matches if scheduled.key not in writer.done]
+    started = time.monotonic()
     try:
-        for scheduled, outcome in _played(pending, play, workers):
+        for count, (scheduled, outcome) in enumerate(_played(pending, play, workers), 1):
             if isinstance(outcome, BaseException):
                 writer.fail(scheduled, outcome)
             writer.store(scheduled, outcome)
+            print(
+                f"etude: {declared.name}: {count}/{len(pending)} matches played,"
+                f" {time.monotonic() - started:.0f}s elapsed",
+                file=sys.stderr,
+                flush=True,
+            )
     except BaseException:
         writer.finish("failed")
         raise

@@ -567,7 +567,9 @@ A resumed attempt or continuation also receives `ETUDE_CHECKPOINT` and `ETUDE_FR
 
 The job is also told who it is: `ETUDE_RUN` (the run's id), `ETUDE_JOB` (the
 digest its job's runs share), `ETUDE_JOB_NAME` when the job has a name,
-`ETUDE_ATTEMPT`, and `ETUDE_COHORT` when the run has one. [Tracking](tracking.md) reads these, so a launched job names only
+`ETUDE_ATTEMPT`, and `ETUDE_COHORT` when the run has one. It runs in
+`ETUDE_SOURCE_DIR`, its commit's files without `.git`; [evaluation](evaluation.md)
+hashes identity files relative to it. [Tracking](tracking.md) reads these, so a launched job names only
 its experiment and clocks. The launcher has no experiment; the script names it. A script that records its
 checkpoints with tracking's `run.checkpoint(...)` does not write
 `etude-result.json` itself: tracking writes it.

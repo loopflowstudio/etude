@@ -2,19 +2,23 @@
 
 from __future__ import annotations
 
+import random
 import shutil
+import subprocess
 from collections.abc import Sequence
 from hashlib import sha256
 from itertools import permutations
 from pathlib import Path
+from typing import Any
 
 import boto3  # type: ignore[import-untyped]
 import pytest
 from moto import mock_aws
+from pydantic import BaseModel
 
 from etude.eval.match import agent, environment, evaluate
-from etude.eval.query import compare, connect
-from etude.eval.records import Agent, Config, Match
+from etude.eval.query import compare, connect, estimate
+from etude.eval.records import Agent, Config, Match, Model
 from etude.eval.report import render
 from etude.run.errors import EtudeError
 from etude.run.records import ArtifactRef
@@ -45,7 +49,7 @@ def seatings(agents: Sequence[Agent], *, conditions: Sequence[Config], games: in
 
 
 def test_matches_in_two_workers_resumes_from_storage_without_replaying(
-    tmp_path: Path,
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     agents = roster(tmp_path)
     # One checkpoint at two search budgets is two agents; one script at two strengths too.
@@ -59,6 +63,10 @@ def test_matches_in_two_workers_resumes_from_storage_without_replaying(
         run="league-1", directory=tmp_path / "local", storages=[bucket],
     )  # fmt: skip
     assert (first.played, first.skipped) == (24, 0)
+    # One plain line per stored match, so a long eval run is never silent.
+    progress = [line for line in capsys.readouterr().err.splitlines() if "matches played" in line]
+    assert len(progress) == 24
+    assert progress[-1].startswith("etude: league-1: 24/24 matches played, ")
     # Each table's per-match files were merged into one, and the merged file replaced them.
     tables = bucket.keys("league-1/tables/")
     assert sorted(
@@ -244,3 +252,80 @@ def test_an_agent_may_play_itself(tmp_path: Path) -> None:
         ((deep.identity,), (deep.identity,)): (0.5, 12),
         ((deep.identity,), None): (0.5, 12),
     }
+
+
+class Direct(BaseModel):
+    search: int = 0
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+
+
+def test_a_checkpoint_agent_is_another_agent_when_its_inference_code_changes(
+    tmp_path: Path,
+) -> None:
+    model = ArtifactRef(uri="s3://models/updates-100.pt", sha256=sha256(b"a").hexdigest())
+    inference = tmp_path / "inference.py"
+    inference.write_text("def act(state): return 0\n")
+    before = agent("net", checkpoint=model, code=[inference], config=Direct())
+    # A benchmark's model seat names its code the same way, typed config and all.
+    seated = Model(code=[inference], config=Direct()).agent(model)
+    assert seated.identity == before.identity
+    assert agent("net", checkpoint=model, config=Direct()).identity != before.identity
+    inference.write_text("def act(state): return 1\n")
+    assert agent("net", checkpoint=model, code=[inference], config=Direct()).identity != (
+        before.identity
+    )
+
+
+def test_code_identity_is_its_tracked_files_alike_in_a_checkout_and_a_launched_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "repo"
+    (repo / "players").mkdir(parents=True)
+    (repo / "players" / "greedy.py").write_text("STRENGTH = 4\n")
+    (repo / "game.py").write_text("RULES = 1\n")
+    _git(repo, "init", "-q")
+    _git(repo, "add", ".")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", "c")
+    # As the launcher extracts a commit: its files without `.git`, somewhere else.
+    source = tmp_path / "session" / "src"
+    shutil.copytree(repo, source, ignore=shutil.ignore_patterns(".git"))
+    # Caches and scratch beside the checked-out code are untracked.
+    (repo / "players" / "__pycache__").mkdir()
+    (repo / "players" / "__pycache__" / "greedy.pyc").write_bytes(b"\0")
+    (repo / "players" / "notes.txt").write_text("scratch\n")
+    calls = 0
+    run = subprocess.run
+
+    def counted(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        nonlocal calls
+        calls += 1
+        return run(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", counted)
+    checked_out = agent("greedy", code=[repo / "players", repo / "game.py"])
+    # One `git ls-files` for the checkout, whatever number of paths are in it.
+    assert calls == 1
+    monkeypatch.chdir(source)
+    monkeypatch.setenv("ETUDE_SOURCE_DIR", str(source))
+    launched = agent("greedy", code=["players", "game.py"])
+    assert launched.identity == checked_out.identity
+    with pytest.raises(EtudeError) as refused:
+        agent("cache", code=[repo / "players" / "__pycache__"])
+    assert refused.value.code == "identity_path_without_files"
+    (repo / "players" / "greedy.py").write_text("STRENGTH = 5\n")
+    assert agent("greedy", code=[repo / "players", repo / "game.py"]).identity != (
+        checked_out.identity
+    )
+
+
+def test_an_interval_does_not_depend_on_the_order_matches_are_read_in() -> None:
+    hits = (0, 1, 1, 2, 3, 3, 4, 4, 2, 0, 1, 3)
+    # Matches of unequal length, so the order of resampled blocks would show.
+    blocks = [(float(each), float(4 + each % 3)) for each in hits]
+    shuffled = blocks[:]
+    random.Random(7).shuffle(shuffled)
+    assert shuffled != blocks
+    assert estimate(shuffled) == estimate(blocks)

@@ -13,21 +13,33 @@ it added. A tournament is nothing more than the eval runs naming it;
 
 An agent is what plays together with how it is configured, identified across
 eval runs by a digest of both, never by its name: one checkpoint at two
-search budgets is two agents. A match seats agents by position (`player`),
-names groups of seats and fixes the conditions it is played under.
+search budgets is two agents, and so is one checkpoint run by two versions of
+its inference code when the agent names that code. A match seats agents by
+position (`player`), names groups of seats and fixes the conditions it is
+played under.
 """
 
 from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from hashlib import sha256
 from itertools import combinations
-from typing import Any, Literal, Self
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Literal, Self
 
-from pydantic import BaseModel, Field, JsonValue, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    JsonValue,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
+from etude.eval.source import digest_files
 from etude.run.errors import EtudeError
 from etude.run.records import ArtifactRef, Digest, Name, Record
 from etude.run.storage import SAFE_NAME
@@ -54,6 +66,20 @@ EVERYONE = "all"
 TABLE_FILE = re.compile(r"^tables/([A-Za-z][A-Za-z0-9_]*)\.(\d{20})\.([0-9a-f]+)\.parquet$")
 
 
+_CONFIG: TypeAdapter[Config] = TypeAdapter(dict[str, JsonValue])
+
+
+def as_config(config: Mapping[str, object] | BaseModel | None) -> Config:
+    """An author's config, a Pydantic model or a mapping, as the JSON Etude stores."""
+    if config is None:
+        return {}
+    data = config.model_dump(mode="json") if isinstance(config, BaseModel) else dict(config)
+    try:
+        return _CONFIG.validate_python(data)
+    except ValidationError as error:
+        raise EtudeError("config_is_not_json", 422) from error
+
+
 def table_file(table: str, written_ns: int, writer: str) -> str:
     return f"tables/{table}.{written_ns:020d}.{writer}.parquet"
 
@@ -73,11 +99,15 @@ class Agent(Record):
     # A checkpoint's artifact digest, or the digest of the code's source files.
     artifact: Digest
     uri: str | None = None
+    # A checkpoint's: the digest of the source files that run it, when named.
+    code: Digest | None = None
     config: Config = {}
 
     @property
     def identity(self) -> Digest:
-        return digest([self.kind, self.artifact, self.config])
+        if self.code is None:
+            return digest([self.kind, self.artifact, self.config])
+        return digest([self.kind, self.artifact, self.code, self.config])
 
 
 class Environment(Record):
@@ -160,18 +190,39 @@ class MatchRecord(Record):
 
 
 class Model(Record):
-    """The checkpoint a benchmark is held for, playing with `config`.
+    """The checkpoint a benchmark is held for, run by `code` and playing with `config`.
 
     `config` is the author's typed model or JSON, such as whether search runs
     on top of the network and how. Etude stores it and splits on it only.
+    `code` is the inference code's source files, hashed like a code agent's,
+    so a checkpoint run by changed code is another agent.
     """
 
+    # The digest of the inference code's source files, when named.
+    code: Digest | None = None
     config: Config = {}
+
+    if TYPE_CHECKING:
+        # What a person writes; the validators below make the stored fields of it.
+        def __init__(
+            self,
+            *,
+            code: Sequence[Path | str] = (),
+            config: Mapping[str, object] | BaseModel | None = None,
+        ) -> None: ...
+
+    @field_validator("code", mode="before")
+    @classmethod
+    def hashed(cls, value: object) -> object:
+        # Source files given as a list or tuple of paths; a stored record holds their digest.
+        if isinstance(value, list | tuple):
+            return digest_files(value) if value else None
+        return value
 
     @field_validator("config", mode="before")
     @classmethod
     def dumped(cls, value: object) -> object:
-        return value.model_dump(mode="json") if isinstance(value, BaseModel) else value
+        return as_config(value) if value is None or isinstance(value, BaseModel) else value
 
     def agent(self, checkpoint: ArtifactRef) -> Agent:
         """The agent this side is once `checkpoint`, which must carry its digest, fills it."""
@@ -184,6 +235,7 @@ class Model(Record):
             kind="checkpoint",
             artifact=checkpoint.sha256,
             uri=checkpoint.uri,
+            code=self.code,
             config=self.config,
         )
 
@@ -266,7 +318,7 @@ class TournamentRun(Record):
     tournament: Benchmark | RoundRobin
     checkpoint: ArtifactRef | None = None
     entrants: tuple[Agent, ...] = ()
-    # (k, n): the run plays the matches whose key is k modulo n.
+    # (k, n): of the schedule's keys in sorted order, the run plays every nth from the kth.
     share: tuple[int, int] = (0, 1)
 
 

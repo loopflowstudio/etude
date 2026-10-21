@@ -14,7 +14,7 @@ Installed separately from the job environment. Run as
     attempts/<attempt>/finished.json
     ended                        when this session ended; nothing is written after it
 
-A job is a shell command. It reads ETUDE_OUTPUT_DIR, ETUDE_STOP_FILE,
+A job is a shell command run in ETUDE_SOURCE_DIR. It reads ETUDE_OUTPUT_DIR, ETUDE_STOP_FILE,
 ETUDE_DEADLINE, ETUDE_SEED, ETUDE_UNTIL_CLOCK, ETUDE_UNTIL_VALUE, ETUDE_FROM_VALUE,
 ETUDE_CHECKPOINT and
 ETUDE_CONFIG, and may write `etude-result.json` in its output directory as
@@ -104,6 +104,8 @@ def _prepare(session: Path, home: Path, work: Work) -> dict[str, str]:
         for part in environment.get("PATH", os.defpath).split(os.pathsep)
         if Path(part).absolute() != client_bin.absolute()
     )
+    # The job runs here: its commit's files, without `.git`.
+    environment["ETUDE_SOURCE_DIR"] = str(source)
     environment["ETUDE_OUTPUT_DIR"] = str(home / "outputs")
     environment["ETUDE_STOP_FILE"] = str(session / "stop" / work.attempt)
     # Where the job's tracking files go: one place on this machine for every
