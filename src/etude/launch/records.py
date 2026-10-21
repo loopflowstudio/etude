@@ -6,7 +6,8 @@ namespace, and a run names a pool, an on-demand or both. Machine describes an
 added or rented computer; Rental describes only its paid window. RunAttempt allocates
 a run to either kind of machine. Session is internal: one start of Etude's
 process on a machine, and its journal folder.
-Jobs describe commands and limits; cohorts group runs.
+Jobs describe what runs and its limits (`etude.jobs` makes them from Python
+functions); cohorts group runs.
 
 Units: a clock is any named count of progress a job keeps, such as steps,
 agent_steps or wall_time_ms. Positions on a clock are absolute. Hours and US
@@ -332,7 +333,9 @@ class Job(Record):
     stop_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     cleanup_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     runtime: Runtime | None = None
-    command: str  # run by sh in the source checkout; reads the ETUDE_* environment
+    # Run by sh in the source checkout; reads the ETUDE_* environment. A typed job's
+    # (`etude.jobs`) is Etude's own; written by hand only for work that is not Python.
+    command: str
     max_hours: float
     max_usd: Decimal | None = None  # required when the run may rent
     name: str = ""

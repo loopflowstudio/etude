@@ -145,8 +145,14 @@ def _record(added: TournamentRun, run: str, directory: Path | str | None) -> Non
     path = declared.root / TOURNAMENT_FILE
     if not path.is_file():
         DirectoryStorage(declared.root).put(TOURNAMENT_FILE, added.model_dump_json().encode())
-    elif TournamentRun.model_validate_json(path.read_bytes()) != added:
+    elif _resumed(TournamentRun.model_validate_json(path.read_bytes())) != _resumed(added):
         raise EtudeError("eval_run_tournament_conflict", 409)
+
+
+def _resumed(added: TournamentRun) -> dict[str, object]:
+    """What a resumed hold must repeat. A checkpoint is its digest: a retry on another
+    attempt finds the same file at another path."""
+    return added.model_dump(mode="json", exclude={"checkpoint": {"uri"}})
 
 
 def _stored(
