@@ -160,14 +160,17 @@ def _machine(row: sqlite3.Row) -> Machine:
         {
             **dict(row),
             "image": Image.model_validate_json(row["image"]) if row["image"] else None,
-            "hardware": json.loads(row["hardware"]) if row["hardware"] else None,
+            "hardware": _hardware(row),
         }
     )
 
 
 def _session(row: sqlite3.Row) -> Session:
-    hardware = json.loads(row["hardware"]) if row["hardware"] else None
-    return Session.model_validate({**dict(row), "hardware": hardware})
+    return Session.model_validate({**dict(row), "hardware": _hardware(row)})
+
+
+def _hardware(row: sqlite3.Row) -> object:  # validated by the record holding it
+    return json.loads(row["hardware"]) if row["hardware"] else None
 
 
 def _attempt(row: sqlite3.Row) -> RunAttempt:
