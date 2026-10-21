@@ -214,8 +214,8 @@ etude terminate --machine MACHINE
 ```
 
 `etude machines` is the one list. Each machine is `added`, or `rented` with
-the hardware the provider was asked for (a GPU type, or a CPU flavor and its
-vCPUs), the end of its window and its cost; `etude status` names it beside the
+the hardware the provider was asked for (a GPU type with the minimum vCPUs
+and memory its host must have, or a CPU flavor and its exact vCPUs), the end of its window and its cost; `etude status` names it beside the
 run's machine. `etude machines --all` includes rented
 machines whose window has ended, so late bills stay visible. `terminate` takes
 the machine's name. `etude pools` shows each pool's machines, whether it makes

@@ -350,7 +350,10 @@ def test_a_lost_create_reply_finds_the_pod_by_name_and_never_asks_twice(tmp_path
     assert status.outcome == "succeeded" and c.provider.creates == 1
 
 
-@pytest.mark.parametrize(("gpu", "shown"), [("NVIDIA L4", "NVIDIA L4"), (None, "cpu3g 16 vCPUs")])
+@pytest.mark.parametrize(
+    ("gpu", "shown"),
+    [("NVIDIA L4", "NVIDIA L4 with at least 6 vCPUs, 48 GB"), (None, "cpu3g 16 vCPUs")],
+)
 def test_machines_and_status_show_the_hardware_rented(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], gpu: str | None, shown: str
 ) -> None:

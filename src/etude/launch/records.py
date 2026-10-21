@@ -135,7 +135,8 @@ class GPU(Record):
     min_memory_gb: int
 
     def __str__(self) -> str:
-        return self.id
+        # The host's CPU and memory are only known as the minimums asked for.
+        return f"{self.id} with at least {self.min_vcpus} vCPUs, {self.min_memory_gb} GB"
 
 
 class CPU(Record):
