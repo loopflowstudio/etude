@@ -55,8 +55,7 @@ from etude.eval.records import (
     ColumnType,
     Environment,
     MatchRecord,
-    RoundRobin,
-    Tournament,
+    Scheduled,
     TournamentRun,
     assemble,
 )
@@ -167,19 +166,13 @@ def _checkpoints(
     return [(run, experiment, found[ordinal]) for ordinal in sorted(found)]
 
 
-def _tournaments(found: _Found) -> dict[str, Tournament | EtudeError]:
-    """Each tournament its eval runs name, assembled from them, or the conflict among them."""
+def _tournaments(found: _Found) -> dict[str, list[TournamentRun]]:
+    """The eval runs naming each tournament, in run order."""
     by_name: dict[str, list[TournamentRun]] = {}
     for run in sorted(found.held):
         added = found.held[run]
         by_name.setdefault(added.tournament.name, []).append(added)
-    assembled: dict[str, Tournament | EtudeError] = {}
-    for name, held in sorted(by_name.items()):
-        try:
-            assembled[name] = assemble(held)
-        except EtudeError as conflict:
-            assembled[name] = conflict
-    return assembled
+    return by_name
 
 
 def _environment(storage: Storage, folders: Sequence[str]) -> Environment | None:
@@ -251,23 +244,20 @@ def _etude_tables(db: duckdb.DuckDBPyConnection, found: _Found) -> None:
         "create table schedule (tournament VARCHAR, match VARCHAR, matchup VARCHAR,"
         " checkpoint VARCHAR)"
     )
-    scheduled = []
-    for name, assembled in _tournaments(found).items():
-        if isinstance(assembled, EtudeError):
-            first = next(
-                run.tournament for run in found.held.values() if run.tournament.name == name
-            )
-            db.execute(
-                "insert into tournaments values (?, ?, ?, ?)",
-                [name, _format(first), first.environment.identity, assembled.code],
-            )
-            continue
-        definition = assembled.definition
+    scheduled: list[Scheduled] = []
+    for name, held in _tournaments(found).items():
+        # Every eval run agrees with the first on format and environment, or conflicts.
+        first = held[0].tournament
+        conflict: str | None = None
+        try:
+            schedule = assemble(held).schedule()
+        except EtudeError as refused:
+            conflict, schedule = refused.code, []
         db.execute(
-            "insert into tournaments values (?, ?, ?, null)",
-            [name, _format(definition), definition.environment.identity],
-        )
-        schedule = assembled.schedule()
+            "insert into tournaments values (?, ?, ?, ?)",
+            [name, "benchmark" if isinstance(first, Benchmark) else "round_robin",
+             first.environment.identity, conflict],
+        )  # fmt: skip
         _insert(
             db,
             "insert into schedule values (?, ?, ?, ?)",
@@ -291,10 +281,6 @@ def _etude_tables(db: duckdb.DuckDBPyConnection, found: _Found) -> None:
         ],
     )  # fmt: skip
     _agents_table(db, agents)
-
-
-def _format(definition: Benchmark | RoundRobin) -> str:
-    return "benchmark" if isinstance(definition, Benchmark) else "round_robin"
 
 
 def _insert(
