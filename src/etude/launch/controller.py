@@ -32,6 +32,7 @@ from etude.launch.logging import explain
 from etude.launch.measurement import timed
 from etude.launch.providers.package import program_archive
 from etude.launch.records import (
+    Availability,
     Cohort,
     CohortSpec,
     Diagnostic,
@@ -40,10 +41,12 @@ from etude.launch.records import (
     LauncherError,
     LogSnapshot,
     Machine,
+    Quote,
     Record,
     Run,
     RunRecord,
     Status,
+    Target,
 )
 from etude.launch.scheduler import Scheduler
 from etude.launch.source import freeze, home, retain, source_archive
@@ -68,6 +71,7 @@ class LaunchInput(Record):
     runs: tuple[Run, ...]
     cohort: CohortSpec | None
     pool: str | None
+    rent: str | None = None
     sources: tuple[Source, ...] = ()
     queued: bool = False
     launch: str | None = None
@@ -98,6 +102,8 @@ class Request(Record):
         "continue_from",
         "rent",
         "terminate",
+        "quote",
+        "availability",
     ]
     api: bool = False
     launch: str = ""
@@ -109,7 +115,7 @@ class Request(Record):
     every: float = 1.0
     timeout: float | None = None
     until: str = ""
-    pool: str | None = None
+    rent: str = ""  # the on-demand to rent from or ask about
     machine: str = ""
     hours: float = 0
     max_usd: Decimal | None = None
@@ -128,6 +134,8 @@ type Response = (
     | tuple[Diagnostic, ...]
     | tuple[RunRecord, ...]
     | Launch
+    | Quote
+    | Availability
     | str
 )
 
@@ -290,20 +298,37 @@ def submit(scheduler: Scheduler, submission: LaunchInput) -> Sequence[str]:
             )
         )
         return scheduler.submit_launch(
-            submission.launch, submission.runs, submission.pool, limits, queued=submission.queued
+            submission.launch,
+            submission.runs,
+            Target(pool=submission.pool, rent=submission.rent),
+            limits,
+            queued=submission.queued,
         )
     if cohort is None:
         if len(submission.runs) != 1:
             raise LauncherError("several runs need a cohort")
         send_run = scheduler.queue if submission.queued else scheduler.launch
-        return [send_run(submission.runs[0], submission.pool)]
+        return [send_run(submission.runs[0], submission.pool, rent=submission.rent)]
     send_cohort = scheduler.queue_cohort if submission.queued else scheduler.launch_cohort
     return send_cohort(
         cohort.name,
         submission.runs,
         submission.pool,
+        rent=submission.rent,
         parallel=cohort.parallel,
         max_usd=cohort.max_usd,
+    )
+
+
+def quote(scheduler: Scheduler | PythonClient, submission: LaunchInput) -> Quote:
+    cohort = submission.cohort
+    return scheduler.quote(
+        submission.runs,
+        submission.pool,
+        rent=submission.rent,
+        cohort=None if cohort is None else cohort.name,
+        parallel=1 if cohort is None else cohort.parallel,
+        max_usd=None if cohort is None else cohort.max_usd,
     )
 
 
@@ -371,7 +396,11 @@ class PythonClient:
             ["--controller-request"],
             input=request.model_copy(update={"api": True}).model_dump_json().encode(),
             capture_output=True,
-            **({"timeout": remaining(request.timeout)} if request.operation == "logs" else {}),
+            **(
+                {"timeout": remaining(request.timeout)}
+                if request.operation in ("logs", "availability")
+                else {}
+            ),
         )
         if done.returncode:
             raise LauncherError(
@@ -383,11 +412,18 @@ class PythonClient:
         self,
         runs: Sequence[Run],
         cohort: CohortSpec | None,
-        pool: str | None,
+        target: Target,
         queued: bool,
     ) -> tuple[str, ...]:
         submission = prepare(
-            self.address, LaunchInput(runs=tuple(runs), cohort=cohort, pool=pool, queued=queued)
+            self.address,
+            LaunchInput(
+                runs=tuple(runs),
+                cohort=cohort,
+                pool=target.pool,
+                rent=target.rent,
+                queued=queued,
+            ),
         )
         try:
             return TypeAdapter(tuple[str, ...]).validate_json(
@@ -399,11 +435,13 @@ class PythonClient:
                 submission.launch, tuple(str(run.id) for run in submission.runs), explain(error)
             ) from error
 
-    def queue(self, run: Run | Job, pool: str | None = None) -> str:
-        return self._submit([Run(job=run) if isinstance(run, Job) else run], None, pool, True)[0]
+    def queue(self, run: Run | Job, pool: str | None = None, *, rent: str | None = None) -> str:
+        one = [Run(job=run) if isinstance(run, Job) else run]
+        return self._submit(one, None, Target(pool=pool, rent=rent), True)[0]
 
-    def launch(self, run: Run | Job, pool: str | None = None) -> str:
-        return self._submit([Run(job=run) if isinstance(run, Job) else run], None, pool, False)[0]
+    def launch(self, run: Run | Job, pool: str | None = None, *, rent: str | None = None) -> str:
+        one = [Run(job=run) if isinstance(run, Job) else run]
+        return self._submit(one, None, Target(pool=pool, rent=rent), False)[0]
 
     def queue_cohort(
         self,
@@ -411,12 +449,12 @@ class PythonClient:
         runs: Sequence[Run],
         pool: str | None = None,
         *,
+        rent: str | None = None,
         parallel: int = 1,
         max_usd: Decimal | None = None,
     ) -> tuple[str, ...]:
-        return self._submit(
-            runs, CohortSpec(name=name, parallel=parallel, max_usd=max_usd), pool, True
-        )
+        cohort = CohortSpec(name=name, parallel=parallel, max_usd=max_usd)
+        return self._submit(runs, cohort, Target(pool=pool, rent=rent), True)
 
     def launch_cohort(
         self,
@@ -424,11 +462,34 @@ class PythonClient:
         runs: Sequence[Run],
         pool: str | None = None,
         *,
+        rent: str | None = None,
         parallel: int = 1,
         max_usd: Decimal | None = None,
     ) -> tuple[str, ...]:
-        return self._submit(
-            runs, CohortSpec(name=name, parallel=parallel, max_usd=max_usd), pool, False
+        cohort = CohortSpec(name=name, parallel=parallel, max_usd=max_usd)
+        return self._submit(runs, cohort, Target(pool=pool, rent=rent), False)
+
+    def quote(
+        self,
+        runs: Sequence[Run],
+        pool: str | None = None,
+        *,
+        rent: str | None = None,
+        cohort: str | None = None,
+        parallel: int = 1,
+        max_usd: Decimal | None = None,
+    ) -> Quote:
+        spec = (
+            None if cohort is None else CohortSpec(name=cohort, parallel=parallel, max_usd=max_usd)
+        )
+        submission = LaunchInput(runs=tuple(runs), cohort=spec, pool=pool, rent=rent)
+        return Quote.model_validate_json(
+            self._request(Request(operation="quote", submission=submission))
+        )
+
+    def availability(self, rent: str, *, timeout: float | None = None) -> Availability:
+        return Availability.model_validate_json(
+            self._request(Request(operation="availability", rent=rent, timeout=timeout))
         )
 
     def record(self, run: str) -> RunRecord:
@@ -489,9 +550,9 @@ class PythonClient:
             FetchRequest(run=run, name=name, destination=destination),
         )
 
-    def rent(self, on: str, hours: float, max_usd: Decimal | None = None) -> str:
+    def rent(self, ondemand: str, hours: float, max_usd: Decimal | None = None) -> str:
         return TypeAdapter(str).validate_json(
-            self._request(Request(operation="rent", pool=on, hours=hours, max_usd=max_usd))
+            self._request(Request(operation="rent", rent=ondemand, hours=hours, max_usd=max_usd))
         )
 
     def terminate(self, machine: str) -> Machine:
@@ -514,7 +575,9 @@ def receive(scheduler: Scheduler) -> int:
     if operation == "prepare_launch":
         if raw.submission is None:
             raise LauncherError("launch needs a submission")
-        response = scheduler.prepare_launch(raw.submission.runs, raw.submission.pool)
+        response = scheduler.prepare_launch(
+            raw.submission.runs, raw.submission.pool, rent=raw.submission.rent
+        )
     elif operation == "fail_launch":
         scheduler.fail_launch(raw.launch, raw.message)
         response = "failed; no run admitted"
@@ -561,9 +624,15 @@ def receive(scheduler: Scheduler) -> int:
             run=raw.run or None, machine=raw.machine or None, timeout=raw.timeout
         )
     elif operation == "rent":
-        if raw.pool is None:
-            raise LauncherError("rent needs a pool")
-        response = scheduler.rent(raw.pool, raw.hours, raw.max_usd)
+        if not raw.rent:
+            raise LauncherError("rent needs an on-demand")
+        response = scheduler.rent(raw.rent, raw.hours, raw.max_usd)
+    elif operation == "quote":
+        if raw.submission is None:
+            raise LauncherError("quote needs a submission")
+        response = quote(scheduler, raw.submission)
+    elif operation == "availability":
+        response = scheduler.availability(raw.rent, timeout=raw.timeout)
     elif operation == "terminate":
         response = scheduler.terminate(raw.machine)
     elif operation == "continue_from":

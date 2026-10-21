@@ -345,7 +345,7 @@ def test_one_cpu_rental_quotes_creates_and_deletes_with_pinned_provider_calls(
         ),
     )
     with counting.record():
-        assert machines.price() == Decimal("0.24")
+        assert machines.offer().usd_per_hour == Decimal("0.24")
         assert counting.snapshot() == Counts(provider=1)
     with counting.record():
         allocation = machines.create(request)

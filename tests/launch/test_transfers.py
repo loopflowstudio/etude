@@ -450,7 +450,7 @@ def test_runtime_bootstrap_failure_reaches_retained_session_usage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     b = bench(tmp_path)
-    run = b.scheduler.launch(Job(command="true", max_hours=1, max_usd=Decimal(1)), "l4")
+    run = b.scheduler.launch(Job(command="true", max_hours=1, max_usd=Decimal(1)), rent="l4")
     session = b.scheduler.attempts(run)[0].session
     monkeypatch.setattr("shutil.which", lambda name: None)
     monkeypatch.setattr(pod, "UV_URL", http.url + "/payload")
@@ -475,10 +475,10 @@ def test_completed_workload_before_and_after(
     http: HTTP, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Real transport and publication; only provisioning and job execution are fake.
-    b = bench(tmp_path, max_on_demand=1)
+    b = bench(tmp_path, max_machines=1)
     b.scheduler.rent("l4", 1)
     runs = b.scheduler.queue_cohort(
-        "experiment", Job(command="true", max_hours=0.25, max_usd=Decimal(1)).runs(1, 2), "l4"
+        "experiment", Job(command="true", max_hours=0.25, max_usd=Decimal(1)).runs(1, 2), rent="l4"
     )
     b.scheduler.tick()
     first = b.scheduler.attempts(runs[0])[0]

@@ -58,25 +58,25 @@ def test_failed_preparation_survives_restart_and_does_not_consume_id(
     monkeypatch.setattr(source, "freeze", fail)
     requested = Run(id="baseline-seed-7", job=job())
     with pytest.raises(LaunchError) as caught:
-        b.scheduler.launch(requested, "l4")
+        b.scheduler.launch(requested, rent="l4")
     assert caught.value.runs == (requested.id,)
     assert b.store.runs() == () and b.service.creates == 0
     b.store.close()
     store = Database(tmp_path / "launcher.db")
-    scheduler = Scheduler(store, {"runpod": lambda pool, machine: b.service}, clock=b.clock)
+    scheduler = Scheduler(store, {"runpod": lambda held: b.service}, clock=b.clock)
     snapshot = scheduler.logs(run="baseline-seed-7")
     assert "source publication refused" in render(snapshot)
     assert snapshot.launches[0].id == caught.value.launch
     assert snapshot.streams == ()
     monkeypatch.setattr(source, "freeze", original)
-    assert scheduler.launch(requested, "l4") == "baseline-seed-7"
+    assert scheduler.launch(requested, rent="l4") == "baseline-seed-7"
     assert len(store.runs()) == 1
     assert [launch.state for launch in scheduler.logs(run="baseline-seed-7").launches] == [
         "failed",
         "admitted",
     ]
     with pytest.raises(LauncherError, match="already admitted"):
-        scheduler.launch(requested, "l4")
+        scheduler.launch(requested, rent="l4")
     assert b.service.creates == 1
 
 
@@ -85,15 +85,15 @@ def test_uncertain_creation_blocks_reusing_id_until_confirmed_cleanup(tmp_path: 
     b.service.lose_reply = 1
     requested = Run(id="chosen", job=job())
     with pytest.raises(LaunchError):
-        b.scheduler.launch(requested, "l4")
+        b.scheduler.launch(requested, rent="l4")
     for _ in range(2):
         with pytest.raises(LauncherError, match="reconciling existing request"):
-            b.scheduler.launch(requested, "l4")
+            b.scheduler.launch(requested, rent="l4")
     assert b.service.creates == 1 and b.store.runs() == ()
     assert "reply never arrived" in render(b.scheduler.logs(run="chosen"))
     b.run(1)
     b.run(1)
-    b.scheduler.launch(requested, "l4")
+    b.scheduler.launch(requested, rent="l4")
     assert b.service.creates == 2 and len(b.store.runs()) == 1
 
 
@@ -115,7 +115,7 @@ def test_partial_cohort_retains_shared_failure_without_admitting_members(
     monkeypatch.setattr(b.service, "create", fail_second)
     with pytest.raises(LaunchError):
         b.scheduler.launch_cohort(
-            "pair", [Run(id="one", job=job()), Run(id="two", job=job())], "l4", parallel=2
+            "pair", [Run(id="one", job=job()), Run(id="two", job=job())], rent="l4", parallel=2
         )
     assert b.store.runs() == ()
     assert not b.store.cohort_exists("pair")
@@ -131,7 +131,7 @@ def test_all_attempts_retained_after_cleanup_and_storage_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     b = bench(tmp_path)
-    run = b.scheduler.queue(job(), "l4")
+    run = b.scheduler.queue(job(), rent="l4")
     cursor = LogCursor()
     snapshots = [b.scheduler.logs(run=run)]
     followed = [cursor.render(snapshots[-1])]
@@ -156,7 +156,7 @@ def test_all_attempts_retained_after_cleanup_and_storage_failure(
     assert len([s for s in before.streams if s.producer == "job"]) == 2
     b.store.close()
     store = Database(tmp_path / "launcher.db")
-    scheduler = Scheduler(store, {"runpod": lambda pool, machine: b.service}, clock=b.clock)
+    scheduler = Scheduler(store, {"runpod": lambda held: b.service}, clock=b.clock)
 
     def unavailable(*args: object, **kwargs: object) -> LogStream:
         raise OSError("storage denied")
@@ -231,7 +231,7 @@ def test_bucket_completion_during_log_read_keeps_cached_output_refreshable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     b = bench(tmp_path)
-    run = b.scheduler.launch(job(), "l4")
+    run = b.scheduler.launch(job(), rent="l4")
     attempt = b.scheduler.attempts(run)[0]
     session = b.service.sessions[attempt.session]
     packet = session.packet.model_copy(update={"work": tuple(w for w, _ in session.work())})
@@ -427,7 +427,7 @@ def test_follow_positions_survive_truncation_without_repeating_text() -> None:
 
 def test_log_reads_and_phases_never_drive_execution(tmp_path: Path) -> None:
     b = bench(tmp_path)
-    run = b.scheduler.launch(job(), "l4")
+    run = b.scheduler.launch(job(), rent="l4")
     counting = Counting(b.store, b.service)
     with counting.record():
         b.scheduler.logs(run=run)
@@ -447,9 +447,9 @@ def test_log_reads_and_phases_never_drive_execution(tmp_path: Path) -> None:
 def test_machine_view_excludes_job_output(tmp_path: Path) -> None:
     b = bench(tmp_path)
     machine = b.scheduler.rent("l4", 2)
-    first = b.scheduler.launch(Run(id="first", job=job()), "l4")
+    first = b.scheduler.launch(Run(id="first", job=job()), rent="l4")
     b.run(601)
-    second = b.scheduler.launch(Run(id="second", job=job()), "l4")
+    second = b.scheduler.launch(Run(id="second", job=job()), rent="l4")
     assert "log of" not in render(b.scheduler.logs(machine=machine))
     assert b.scheduler.attempts(first)[0].id not in job_text(b.scheduler.logs(run=second))
     assert b.scheduler.attempts(second)[0].id not in job_text(b.scheduler.logs(run=first))
@@ -480,7 +480,7 @@ def test_cached_partial_output_and_refresh_error_are_both_visible(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     b = bench(tmp_path)
-    identity = b.scheduler.launch(job(), "l4")
+    identity = b.scheduler.launch(job(), rent="l4")
     before = b.scheduler.logs(run=identity)
 
     def unavailable(*args: object, **kwargs: object) -> LogStream:
@@ -498,7 +498,7 @@ def test_cached_partial_output_and_refresh_error_are_both_visible(
 
 def test_queue_is_not_mistaken_for_complete_logs(tmp_path: Path) -> None:
     b = bench(tmp_path)
-    identity = b.scheduler.queue(job(), "l4")
+    identity = b.scheduler.queue(job(), rent="l4")
     snapshot = b.scheduler.logs(run=identity)
     assert snapshot.streams == () and not snapshot.complete
     assert b.service.creates == 0
@@ -512,9 +512,9 @@ def test_diagnostics_use_positions_without_showing_another_attempts_error(
 ) -> None:
     b = bench(tmp_path)
     b.scheduler.rent("l4", 2)
-    first = b.scheduler.launch(job(), "l4")
+    first = b.scheduler.launch(job(), rent="l4")
     b.run(601)
-    second = b.scheduler.launch(job(), "l4")
+    second = b.scheduler.launch(job(), rent="l4")
     previous = b.scheduler.attempts(first)[0]
     error = Diagnostic(
         id="previous-error",
@@ -540,7 +540,7 @@ def test_diagnostics_use_positions_without_showing_another_attempts_error(
     assert all(not stream.diagnostics for stream in snapshot.streams)
     b.store.close()
     store = Database(tmp_path / "launcher.db")
-    scheduler = Scheduler(store, {"runpod": lambda pool, machine: b.service}, clock=b.clock)
+    scheduler = Scheduler(store, {"runpod": lambda held: b.service}, clock=b.clock)
     after = scheduler.logs(run=first)
     assert "other job" in render(after)
     (retained,) = (d for d in after.diagnostics if d.id == error.id)
@@ -578,7 +578,7 @@ def test_client_chosen_id_freezes_source_before_admission(
 ) -> None:
     repo, _ = repository
     b = bench(tmp_path)
-    identity = b.scheduler.queue(Run(id="my-scientific-id", job=job(repo=str(repo))), "l4")
+    identity = b.scheduler.queue(Run(id="my-scientific-id", job=job(repo=str(repo))), rent="l4")
     record = b.scheduler.record(identity)
     assert record.id == "my-scientific-id"
     assert record.source is not None and record.spec.revision == record.source.commit
@@ -590,11 +590,11 @@ def test_remote_preparation_failure_keeps_controller_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     b = bench(tmp_path)
-    launch = b.scheduler.prepare_launch((Run(id="remote-id", job=job()),), "l4")
+    launch = b.scheduler.prepare_launch((Run(id="remote-id", job=job()),), rent="l4")
     b.scheduler.fail_launch(launch.id, "source publication failed: denied")
     assert "source publication failed" in render(b.scheduler.logs(run="remote-id"))
     assert b.store.runs() == () and b.service.creates == 0
-    assert b.scheduler.launch(Run(id="remote-id", job=job()), "l4") == "remote-id"
+    assert b.scheduler.launch(Run(id="remote-id", job=job()), rent="l4") == "remote-id"
 
 
 @pytest.mark.parametrize("failure", ["install", "spawn", "import", "entry"])
@@ -606,7 +606,7 @@ def test_bootstrap_failure_remains_readable_after_deletion_and_restart(
     storage_denied: bool,
 ) -> None:
     b = bench(tmp_path)
-    identity = b.scheduler.launch(Run(id="install-failure", job=job(max_attempts=1)), "l4")
+    identity = b.scheduler.launch(Run(id="install-failure", job=job(max_attempts=1)), rent="l4")
     session = b.scheduler.session(b.scheduler.attempts(identity)[0].session)
     marker = tmp_path / "guardian-started"
     monkeypatch.setattr(pod, "GUARDIAN_MARKER", marker)
@@ -708,7 +708,7 @@ def test_bootstrap_failure_remains_readable_after_deletion_and_restart(
     assert b.store.machine(session.machine).deleted_at is not None
     b.store.close()
     store = Database(tmp_path / "launcher.db")
-    scheduler = Scheduler(store, {"runpod": lambda pool, machine: b.service}, clock=b.clock)
+    scheduler = Scheduler(store, {"runpod": lambda held: b.service}, clock=b.clock)
 
     def unavailable(*args: object, **kwargs: object) -> LogStream:
         raise OSError("storage now unavailable")
@@ -747,7 +747,7 @@ def test_cleanup_failure_retains_reason_and_never_claims_deletion(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     b = bench(tmp_path)
-    identity = b.scheduler.launch(job(), "l4")
+    identity = b.scheduler.launch(job(), rent="l4")
 
     def unavailable(session: str) -> None:
         raise OSError("deletion endpoint unavailable")
@@ -765,7 +765,7 @@ def test_expired_log_read_uses_cache_without_starting_another_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     b = bench(tmp_path)
-    identity = b.scheduler.launch(job(), "l4")
+    identity = b.scheduler.launch(job(), rent="l4")
     before = b.scheduler.logs(run=identity)
     clock = iter([0.0, 2.0, 2.0, 2.0])
     monkeypatch.setattr("etude.launch.deadline.time.monotonic", lambda: next(clock))
@@ -792,11 +792,11 @@ def test_failure_after_atomic_admission_does_not_relabel_it_as_failed_admission(
 
     monkeypatch.setattr(b.service, "observe", broken)
     with pytest.raises(LaunchError, match="run admitted; delivery unconfirmed"):
-        b.scheduler.launch(Run(id="admitted", job=job()), "l4")
+        b.scheduler.launch(Run(id="admitted", job=job()), rent="l4")
     assert b.store.run("admitted").id == "admitted"
     assert b.store.launches("admitted")[0].state == "admitted"
     with pytest.raises(LauncherError, match="already admitted"):
-        b.scheduler.launch(Run(id="admitted", job=job()), "l4")
+        b.scheduler.launch(Run(id="admitted", job=job()), rent="l4")
     assert b.service.creates == 1
 
 
@@ -843,7 +843,7 @@ def test_courier_owns_child_through_failure_cleanup_and_cached_restart(
     failure: str,
 ) -> None:
     b = bench(tmp_path)
-    identity = b.scheduler.launch(Run(id="courier-failure", job=job(max_attempts=1)), "l4")
+    identity = b.scheduler.launch(Run(id="courier-failure", job=job(max_attempts=1)), rent="l4")
     session = b.scheduler.session(b.scheduler.attempts(identity)[0].session)
     root = tmp_path / "sessions"
     home = root / session.id
@@ -995,7 +995,7 @@ signal.pause()
     # Restart with the earlier open snapshot still cached, then refresh final output.
     b.store.close()
     store = Database(tmp_path / "launcher.db")
-    scheduler = Scheduler(store, {"runpod": lambda pool, machine: b.service}, clock=b.clock)
+    scheduler = Scheduler(store, {"runpod": lambda held: b.service}, clock=b.clock)
     after = scheduler.logs(run=identity)
     worker = next(s for s in after.streams if s.producer == "worker")
     assert worker.complete is (failure != "console")
@@ -1016,7 +1016,7 @@ signal.pause()
     assert store.machine(session.machine).deleted_at is not None
     store.close()
     store = Database(tmp_path / "launcher.db")
-    scheduler = Scheduler(store, {"runpod": lambda pool, machine: b.service}, clock=b.clock)
+    scheduler = Scheduler(store, {"runpod": lambda held: b.service}, clock=b.clock)
 
     def unavailable(*args: object, **kwargs: object) -> LogStream:
         raise OSError("storage unavailable after cleanup")

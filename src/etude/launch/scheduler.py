@@ -1,6 +1,10 @@
 """The scheduler: owner of one launcher database, and the one loop that moves work forward.
 
 It queues and admits runs, matches waiting runs to machines and enforces limits.
+A run may use a pool's machines you own, rent from an on-demand, or both; a
+free owned machine is always used before anything is rented. Each pool and
+on-demand (a supply) has its own placement lock, and `tick` visits every pool
+before any on-demand.
 
 Four rules hold whatever fails:
 
@@ -21,10 +25,10 @@ import json
 import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import ExitStack
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import cast
 from uuid import uuid4
 
 from pydantic import Field
@@ -39,10 +43,12 @@ from etude.launch.machines import Safeguards
 from etude.launch.records import (
     RETRYABLE,
     STOCK_IMAGE,
+    Availability,
     Cause,
     Checkpoint,
     Cohort,
     Diagnostic,
+    Hardware,
     Image,
     Job,
     Launch,
@@ -53,9 +59,12 @@ from etude.launch.records import (
     LogSnapshot,
     LogStream,
     Machine,
-    MachineTemplate,
+    Offer,
+    OnDemand,
     Pool,
     Provider,
+    Quote,
+    QuotedMachine,
     Record,
     Rental,
     Run,
@@ -66,6 +75,8 @@ from etude.launch.records import (
     StartPhase,
     Status,
     Storage,
+    Supply,
+    Target,
     job_identity,
     number,
     parse_target,
@@ -82,6 +93,8 @@ from etude.launch.storage.transport import attribute, observe
 from etude.launch.usage import Usage
 
 Clock = Callable[[], datetime]
+# How the scheduler reaches a machine you own, or the provider behind an on-demand.
+Reach = Callable[[Machine | OnDemand], Execution]
 
 
 def _limit_usd(job: Job) -> Decimal:
@@ -133,12 +146,14 @@ class PlannedRun(Record):
 
 
 class Placement(Record):
-    """Capacity selected under a pool lock; None machine means a new paid machine."""
+    """Capacity selected under its supplies' locks; None machine means a new rented machine."""
 
     run: RunRecord
+    supply: str  # the pool or on-demand the machine belongs to, or would be rented from
     session: Session | None
     machine: Machine | None
     price: Decimal
+    hardware: Hardware | None = None  # what a new rental would ask for
 
 
 class LogSelection(Record):
@@ -153,14 +168,14 @@ class Scheduler:
     def __init__(
         self,
         store: Database,
-        services: Mapping[str, Callable[[Pool, Machine | None], Execution]],
+        services: Mapping[str, Reach],
         clock: Clock = _utcnow,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._store = store
-        self._services = dict(services)  # by service name
-        self._reached: dict[tuple[str, str | None, str | None], Execution] = {}
-        self._trouble: dict[str, str] = {}  # why a pool could not place waiting work
+        self._services = dict(services)  # by service name: a machine kind or a provider kind
+        self._reached: dict[tuple[str, str, str | None], Execution] = {}
+        self._trouble: dict[str, str] = {}  # why a pool or on-demand could not place work
         self._clock = clock
         self._sleep = sleep
 
@@ -206,48 +221,71 @@ class Scheduler:
         return self._store.cohort(name)
 
     def add_pool(self, pool: Pool) -> None:
-        """Make a pool available to launch on. A pool with a template needs that provider's service here."""
-        if pool.on_demand_template is not None:
-            self._provider_service(
-                pool.on_demand_template.provider
-            )  # raises if it cannot be reached
-            known = {each.name: each.storage for each in self._store.providers()}
-            # Fixed here, so changing the provider later cannot move a live rental's records.
-            named = pool.storage or known.get(pool.on_demand_template.provider)
-            if named is not None:
-                pool = pool.model_copy(update={"storage": self._store.storage(named).name})
-        elif pool.storage is not None:
-            raise LauncherError("only a pool that makes machines on demand has a storage")
+        """Make a pool of machines you own available to launch on."""
         self._store.add_pool(pool)
 
-    def set_pool_startup(self, name: str, seconds: float | None) -> None:
-        """Change the startup allowance for future sessions; None removes that cutoff."""
-        self._store.set_pool_startup(name, seconds)
+    def add_ondemand(self, ondemand: OnDemand) -> None:
+        """Make an on-demand available to rent from. Its provider's service must be held here."""
+        self._provider_service(ondemand.template.provider)  # raises if it cannot be reached
+        known = {each.name: each.storage for each in self._store.providers()}
+        # Fixed here, so changing the provider later cannot move a live rental's records.
+        named = ondemand.storage or known.get(ondemand.template.provider)
+        if named is not None:
+            ondemand = ondemand.model_copy(update={"storage": self._store.storage(named).name})
+        self._store.add_ondemand(ondemand)
 
-    def set_pool_max(self, name: str, maximum: int) -> None:
-        """Bound automatic growth; existing machines keep their windows."""
-        self._store.set_pool_max(name, maximum)
+    def ondemands(self) -> tuple[OnDemand, ...]:
+        return self._store.ondemands()
 
-    def set_default_pool(self, name: str) -> None:
-        self._store.set_default_pool(name)
+    def set_startup(self, name: str, seconds: float | None) -> None:
+        """Change a pool's or on-demand's startup allowance for future sessions; None removes it."""
+        supply = self._store.supply(name)
+        if isinstance(supply, Pool):
+            self._store.set_pool_startup(name, seconds)
+        else:
+            self._store.change_ondemand(
+                OnDemand.model_validate({**supply.model_dump(), "startup_seconds": seconds})
+            )
 
-    def default_pool(self) -> str:
-        """The pool a queue or launch goes to when none is named."""
-        return self._store.default_pool()
-
-    def _pool_name(self, name: str | None) -> str:
-        if name is not None:
-            return name
-        pool = self._store.default_pool()
-        if self._store.pool(pool).off:
-            raise LauncherError(f"default pool {pool!r} is turned off; name a pool with --pool")
-        return pool
-
-    def set_pool_image(self, name: str, image: Image | str) -> None:
-        """Change the image a pool's next on-demand machines boot. Running ones are untouched."""
-        self._store.set_pool_image(
-            name, Image(requested=image, resolved=image) if isinstance(image, str) else image
+    def set_ondemand_max(self, name: str, maximum: int) -> None:
+        """Bound automatic renting; machines already rented keep their windows."""
+        if maximum < 0:
+            raise LauncherError("an on-demand's machine limit must be zero or greater")
+        self._store.change_ondemand(
+            self._store.ondemand(name).model_copy(update={"max_machines": maximum})
         )
+
+    def set_ondemand_image(self, name: str, image: Image | str) -> None:
+        """Change the image an on-demand's next machines boot. Running ones are untouched."""
+        selected = Image(requested=image, resolved=image) if isinstance(image, str) else image
+        ondemand = self._store.ondemand(name)
+        template = ondemand.template.model_copy(update={"image": selected})
+        self._store.change_ondemand(ondemand.model_copy(update={"template": template}))
+
+    def set_default(self, pool: str | None = None, *, rent: str | None = None) -> None:
+        """Choose where runs go when a launch names neither a pool nor an on-demand."""
+        if pool is None and rent is None:
+            raise LauncherError("a default needs a pool, an on-demand or both")
+        self._store.set_default_target(Target(pool=pool, rent=rent))
+
+    def default_target(self) -> Target:
+        """Where a queue or launch goes when it names neither a pool nor an on-demand."""
+        return self._store.default_target()
+
+    def _target(self, pool: str | None, rent: str | None) -> Target:
+        if pool is not None or rent is not None:
+            return Target(pool=pool, rent=rent)
+        target = self._store.default_target()
+        if target.pool is not None and self._store.pool(target.pool).off:
+            if target.rent is None:
+                raise LauncherError(
+                    f"default pool {target.pool!r} is turned off; name a pool with --pool"
+                    " or an on-demand with --rent"
+                )
+            target = Target(rent=target.rent)
+        if target.pool is None and target.rent is None:
+            raise LauncherError("no default; name a pool with --pool or an on-demand with --rent")
+        return target
 
     def add_machine(
         self,
@@ -256,51 +294,65 @@ class Scheduler:
         *,
         pool: str | None = None,
         storage: str | None = None,
+        cost_usd: Decimal = Decimal(0),
+        expires_at: datetime | None = None,
     ) -> None:
-        """Add an owned SSH host; this computer is already the local pool."""
+        """Add an owned SSH host, with what it cost and when it stops being yours.
+
+        This computer is already the local pool. Without a pool, the host gets
+        a pool of its own name.
+        """
         if name == "local":
             raise LauncherError("this computer is already the local pool; use pool on/off local")
+        if cost_usd < 0:
+            raise LauncherError("a machine's cost must be zero or more")
         if storage is not None:
             self._store.storage(storage)
         if pool is None:
             self._store.add_pool(Pool(name=name))
         self._store.add_machine(
-            Machine(name=name, pool=pool or name, kind="ssh", address=address, storage=storage)
+            Machine(
+                name=name,
+                pool=pool or name,
+                kind="ssh",
+                address=address,
+                storage=storage,
+                cost_usd=cost_usd,
+                expires_at=expires_at,
+            )
         )
 
-    def machines(self, pool: str, *, rented: bool = False) -> tuple[Machine, ...]:
-        """A pool's machines: the ones you own, or every one made on demand for it so far."""
-        return self._store.machines(pool, rented=rented)
+    def machines(self, supply: str) -> tuple[Machine, ...]:
+        """A pool's machines, or every machine rented from an on-demand so far."""
+        return self._store.machines(supply)
 
-    def rent(self, on: str, hours: float, max_usd: Decimal | None = None) -> str:
-        """Hold a machine in a pool until a deadline, for runs to be launched onto.
+    def rent(self, ondemand: str, hours: float, max_usd: Decimal | None = None) -> str:
+        """Hold a machine from an on-demand until a deadline, for runs to be launched onto.
 
         Launching does this for itself when no existing machine has room; doing
         it by hand pays for setup once across several launches. Returns the
         machine's name. It ends at its deadline, or sooner with `terminate`.
-        Rented machines start themselves; added machines use SSH.
         """
-        with self._store.pool_lock(on, self._clock) as acquired:
+        with self._store.lock(ondemand, self._clock) as acquired:
             if not acquired:
-                raise LauncherError(f"pool {on!r} is busy")
+                raise LauncherError(f"on-demand {ondemand!r} is busy")
             now = self._clock()
-            pool = self._store.pool(on)
-            if pool.on_demand_template is None:
+            supply = self._store.ondemand(ondemand)
+            offer = self._rentable(supply, manual=True)
+            if offer is None:
                 raise LauncherError(
-                    f"pool {on!r} has only machines you added; it cannot make one to rent"
+                    f"on-demand {ondemand!r} has no machine to rent right now: "
+                    + self._trouble.get(ondemand, "unknown")
                 )
-            held = None if pool.off else self._hold(pool, manual=True)
-            if held is None:
-                raise LauncherError(f"pool {on!r} has no machine to rent right now")
-            _, price = held  # explicit rent always makes an on-demand machine
+            price = offer.usd_per_hour
             life = hours * 3600
             if price > 0 and max_usd is not None:
                 life = min(life, float(max_usd / price * 3600))
             if life < 1:
                 raise LauncherError("a rental needs hours, and dollars for at least a second")
-            session, on_demand, rental = self._session(pool, None, price, life, now, kept=True)
-            self._store.plan(session, (), on_demand, rental)
-            self._tick_pool(pool, self._clock())
+            session, rented, rental = self._session(supply, None, price, life, now, kept=True)
+            self._store.plan(session, (), rented, rental)
+            self._tick_supply(supply, self._clock())
             return session.machine
 
     def terminate(self, machine: str) -> Machine:
@@ -309,9 +361,9 @@ class Scheduler:
         if named.kind != "rented":
             raise LauncherError(f"machine {machine!r} was added; it cannot be terminated")
         self.tick()
-        with self._store.pool_lock(named.pool, self._clock) as acquired:
+        with self._store.lock(named.supply, self._clock) as acquired:
             if not acquired:
-                raise LauncherError(f"pool {named.pool!r} is busy")
+                raise LauncherError(f"on-demand {named.supply!r} is busy")
             if self._store.machine_busy(machine):
                 raise LauncherError(f"machine {machine!r} still has a run on it")
             held = self._store.rented_session(machine)
@@ -340,11 +392,9 @@ class Scheduler:
     def pools(self) -> tuple[Pool, ...]:
         return self._store.pools()
 
-    def safeguards(self, pool: str) -> tuple[str, ...]:
-        template = self._store.pool(pool).on_demand_template
-        if template is None:
-            return ()
-
+    def safeguards(self, ondemand: str) -> tuple[str, ...]:
+        """What ends an on-demand's machines if the launcher stops watching."""
+        template = self._store.ondemand(ondemand).template
         declared = getattr(
             self._services[self._provider_service(template.provider)], "safeguards", Safeguards()
         )
@@ -358,10 +408,30 @@ class Scheduler:
             if enabled
         )
 
-    def queue(self, run: Run | Job, pool: str | None = None) -> str:
-        """Queue one run; its pool may grow within its limits, or the run waits."""
+    def availability(self, rent: str, *, timeout: float | None = None) -> Availability:
+        """Ask an on-demand's provider what it would rent now and at what price.
+
+        This waits on the provider, within `timeout` seconds when given. It rents nothing.
+        """
+        ondemand = self._store.ondemand(rent)
+        with limit_time(timeout):
+            offer = self._reach(ondemand).offer()
+        return Availability(
+            ondemand=rent,
+            offer=offer,
+            max_usd_per_hour=ondemand.max_usd_per_hour,
+            in_use=sum(s.supply == rent for s in self._store.unsettled_sessions()),
+            max_machines=ondemand.max_machines,
+            observed_at=self._clock(),
+        )
+
+    def queue(self, run: Run | Job, pool: str | None = None, *, rent: str | None = None) -> str:
+        """Queue one run; it waits for a free machine, or for its on-demand to rent one."""
         return self._submit(
-            (run if isinstance(run, Run) else Run(job=run),), pool, None, queued=True
+            (run if isinstance(run, Run) else Run(job=run),),
+            self._target(pool, rent),
+            None,
+            queued=True,
         )[0]
 
     def queue_cohort(
@@ -370,12 +440,13 @@ class Scheduler:
         runs: Sequence[Run],
         pool: str | None = None,
         *,
+        rent: str | None = None,
         parallel: int = 1,
         max_usd: Decimal | None = None,
     ) -> tuple[str, ...]:
         """Queue a cohort under its shared limits; capacity shortages wait."""
         cohort = self._new_cohort(name, runs, parallel, max_usd)
-        return self._submit(runs, pool, cohort, queued=True)
+        return self._submit(runs, self._target(pool, rent), cohort, queued=True)
 
     def _new_cohort(
         self,
@@ -388,10 +459,13 @@ class Scheduler:
             raise LauncherError("a cohort needs runs and positive limits")
         return Cohort(name=name, parallel=parallel, max_usd=max_usd, created_at=self._clock())
 
-    def launch(self, run: Run | Job, pool: str | None = None) -> str:
+    def launch(self, run: Run | Job, pool: str | None = None, *, rent: str | None = None) -> str:
         """Acquire confirmed capacity, then record and hand over one run."""
         return self._submit(
-            (run if isinstance(run, Run) else Run(job=run),), pool, None, queued=False
+            (run if isinstance(run, Run) else Run(job=run),),
+            self._target(pool, rent),
+            None,
+            queued=False,
         )[0]
 
     def launch_cohort(
@@ -400,27 +474,91 @@ class Scheduler:
         runs: Sequence[Run],
         pool: str | None = None,
         *,
+        rent: str | None = None,
         parallel: int = 1,
         max_usd: Decimal | None = None,
     ) -> tuple[str, ...]:
         """Record a named set of runs sharing rentals-at-once and total-dollar limits."""
         cohort = self._new_cohort(name, runs, parallel, max_usd)
-        return self._submit(runs, pool, cohort, queued=False)
+        return self._submit(runs, self._target(pool, rent), cohort, queued=False)
+
+    def quote(
+        self,
+        runs: Sequence[Run],
+        pool: str | None = None,
+        *,
+        rent: str | None = None,
+        cohort: str | None = None,
+        parallel: int = 1,
+        max_usd: Decimal | None = None,
+    ) -> Quote:
+        """The machines a launch would take now and the most they could cost. Rents nothing.
+
+        It asks the on-demand's provider for its price, so it waits on the provider.
+        Without capacity it raises, as the launch would.
+        """
+        target = self._target(pool, rent)
+        limits = None if cohort is None else self._new_cohort(cohort, runs, parallel, max_usd)
+        records = []
+        for index, run in enumerate(runs):
+            self._validate_job(run.job, target)
+            records.append(
+                RunRecord(
+                    id=run.id or f"run{index + 1}",
+                    job="",
+                    spec=run.job,
+                    seed=run.seed,
+                    checkpoint=None,
+                    pool=target.pool,
+                    rent=target.rent,
+                    cohort=cohort,
+                    created_at=self._clock(),
+                    cancel_requested_at=None,
+                    version=1,
+                )
+            )
+        if not records:
+            raise LauncherError("a launch needs at least one run")
+        quoted = []
+        for placement in self._capacity(records, limits):
+            price = placement.price
+            record = placement.run
+            if placement.machine is None:
+                ondemand = self._store.ondemand(placement.supply)
+                life = self._life(ondemand, records, limits, price)
+                seconds = min(life, ondemand.max_rental_seconds)
+                most = price * Decimal(seconds) / 3600
+            else:
+                most = min(price * Decimal(str(record.spec.max_hours)), _limit_usd(record.spec))
+            quoted.append(
+                QuotedMachine(
+                    run=record.name,
+                    machine=placement.machine.name if placement.machine else None,
+                    hardware=placement.hardware,
+                    usd_per_hour=price,
+                    max_usd=most,
+                )
+            )
+        caps = sum((_limit_usd(r.spec) for r in records), Decimal(0))
+        if limits is not None and limits.max_usd is not None:
+            caps = min(caps, limits.max_usd)
+        return Quote(machines=tuple(quoted), limit_usd=None if target.rent is None else caps)
 
     def _submit(
-        self, runs: Sequence[Run], pool: str | None, cohort: Cohort | None, *, queued: bool
+        self, runs: Sequence[Run], target: Target, cohort: Cohort | None, *, queued: bool
     ) -> tuple[str, ...]:
-        launch = self.prepare_launch(runs, pool)
+        launch = self.prepare_launch(runs, target.pool, rent=target.rent)
         requested = tuple(
             run.model_copy(update={"id": request.run})
             for run, request in zip(runs, launch.requests, strict=True)
         )
-        return self.submit_launch(launch.id, requested, pool, cohort, queued=queued)
+        return self.submit_launch(launch.id, requested, target, cohort, queued=queued)
 
-    def prepare_launch(self, runs: Sequence[Run], pool: str | None = None) -> Launch:
+    def prepare_launch(
+        self, runs: Sequence[Run], pool: str | None = None, *, rent: str | None = None
+    ) -> Launch:
         """Retain valid intent before the submitting client publishes source."""
-        selected = self._pool_name(pool)
-        target = self._store.pool(selected)
+        target = self._target(pool, rent)
         if not runs:
             raise LauncherError("a launch needs at least one run")
         for run in runs:
@@ -456,13 +594,13 @@ class Scheduler:
         self,
         identity: str,
         runs: Sequence[Run],
-        pool: str | None,
+        target: Target,
         cohort: Cohort | None,
         *,
         queued: bool,
     ) -> tuple[str, ...]:
         launch = self._store.claim_launch(identity)
-        selected = self._pool_name(pool)
+        selected = self._target(target.pool, target.rent)
         requested = tuple(runs)
         ids = tuple(request.run for request in launch.requests)
         if tuple(run.id for run in requested) != ids:
@@ -556,45 +694,61 @@ class Scheduler:
             )
         )
 
+    def _check_locks(self, names: Sequence[str]) -> None:
+        for name in names:
+            self._store.check_lock(name)
+
+    def _life(
+        self,
+        ondemand: OnDemand,
+        records: Sequence[RunRecord],
+        cohort: Cohort | None,
+        price: Decimal,
+    ) -> float:
+        """Seconds a first-wave rental is held: its share of the hours, within the dollars."""
+        slots = cohort.parallel if cohort else 1
+        hours = sum(r.spec.max_hours for r in records) / slots
+        cap = (
+            cohort.max_usd
+            if cohort and cohort.max_usd is not None
+            else sum((_limit_usd(r.spec) for r in records), Decimal(0))
+        ) / slots
+        return min(
+            hours * 3600 + ondemand.setup_seconds,
+            float(cap / price * 3600) if price else float("inf"),
+        )
+
     def _admit(self, records: Sequence[RunRecord], cohort: Cohort | None, launch: str) -> None:
-        pool_name = records[0].pool
-        with self._store.pool_lock(pool_name, self._clock) as acquired:
-            if not acquired:
-                raise LauncherError(
-                    f"cannot launch on {pool_name!r}: pool is busy; etude queue would wait"
-                )
+        target = Target(pool=records[0].pool, rent=records[0].rent)
+        names = [name for name in (target.pool, target.rent) if name is not None]
+        with ExitStack() as locks:
+            for name in names:  # pools before on-demands, as tick takes them
+                if not locks.enter_context(self._store.lock(name, self._clock)):
+                    raise LauncherError(
+                        f"cannot launch on {name!r}: it is busy; etude queue would wait"
+                    )
             placements = self._capacity(records, cohort)
-            slots = cohort.parallel if cohort else 1
-            hours = sum(r.spec.max_hours for r in records) / slots
-            cap = (
-                cohort.max_usd
-                if cohort and cohort.max_usd is not None
-                else sum((_limit_usd(r.spec) for r in records), Decimal(0))
-            ) / slots
             made: list[Session] = []
             attempts: list[RunAttempt] = []
             try:
                 for placement in placements:
                     run, existing = placement.run, placement.session
                     machine, price = placement.machine, placement.price
-                    self._store.check_pool_lock(pool_name)
+                    self._check_locks(names)
                     now = self._clock()
                     if existing is None:
-                        pool = self._store.pool(pool_name)
-                        session, on_demand, rental = self._session(
-                            pool,
-                            machine,
-                            price,
-                            min(
-                                hours * 3600 + pool.setup_seconds,
-                                float(cap / price * 3600) if price else float("inf"),
-                            ),
-                            now,
-                            kept=False,
+                        supply = self._store.supply(placement.supply)
+                        life = (
+                            self._life(supply, records, cohort, price)
+                            if isinstance(supply, OnDemand)
+                            else 0.0
                         )
-                        self._store.plan(session, (), on_demand, rental, launch=launch)
+                        session, rented, rental = self._session(
+                            supply, machine, price, life, now, kept=False
+                        )
+                        self._store.plan(session, (), rented, rental, launch=launch)
                         made.append(session)
-                        if on_demand is not None:
+                        if rented is not None:
                             # Boot an empty inbox. No executable work leaves before
                             # the entire first wave has confirmed capacity.
                             self._create(session, now, idle=True)
@@ -606,7 +760,8 @@ class Scheduler:
                                     else "create reply unknown"
                                 )
                                 raise LauncherError(
-                                    f"cannot launch on {pool_name!r}: {reason}; etude queue would wait"
+                                    f"cannot launch on {placement.supply!r}: {reason};"
+                                    " etude queue would wait"
                                 )
                     else:
                         session = self._store.session(existing.id)
@@ -630,17 +785,17 @@ class Scheduler:
                             added=session.receipt is not None,
                         )
                     )
-                self._store.check_pool_lock(pool_name)
+                self._check_locks(names)
                 if any(
                     not self._live(self._store.session(a.session), self._clock()) for a in attempts
                 ):
                     raise LauncherError("capacity expired during launch; etude queue would wait")
-                # Runs and claims become visible together, under the same lock.
+                # Runs and claims become visible together, under the same locks.
                 self._store.launch(records, cohort, attempts, launch=launch)
             except BaseException:
                 for session in made:
                     try:
-                        self._store.check_pool_lock(pool_name)
+                        self._check_locks(names)
                         session = self._store.session(session.id)
                         if session.receipt is not None:
                             self._end_session(session)
@@ -654,7 +809,7 @@ class Scheduler:
             for attempt in attempts:
                 session = self._store.session(attempt.session)
                 try:
-                    self._store.check_pool_lock(pool_name)
+                    self._check_locks(names)
                     if session.claimed_at is None:
                         self._create(session, self._clock())
                     else:
@@ -674,22 +829,33 @@ class Scheduler:
         records: Sequence[RunRecord],
         cohort: Cohort | None,
     ) -> list[Placement]:
-        """Choose the first wave under the pool lock, checking all limits before spending."""
+        """Choose the first wave, checking all limits before spending.
+
+        Idle machines come first, then the pool's free machines, then rentals
+        from the on-demand. Nothing is claimed here.
+        """
         placements: list[Placement] = []
-        pool = self._store.pool(records[0].pool)
+        target = Target(pool=records[0].pool, rent=records[0].rent)
+        pool = None if target.pool is None else self._store.pool(target.pool)
+        ondemand = None if target.rent is None else self._store.ondemand(target.rent)
+        label = " or ".join(name for name in (target.pool, target.rent) if name is not None)
         now = self._clock()
         used: set[str] = set()
         made = 0
         left = None if cohort is None else cohort.max_usd
         first = records[: 1 if cohort is None else cohort.parallel]
-        if pool.off:
+        if pool is not None and pool.off:
             raise LauncherError(f"pool {pool.name!r} is turned off")
         if cohort is not None and self._store.cohort_exists(cohort.name):
             raise LauncherError(f"cohort {cohort.name!r} already exists")
-        idle = self._idle_sessions(pool.name, now)
+        idle = [
+            session
+            for name in (target.pool, target.rent)
+            if name is not None
+            for session in self._idle_sessions(name, now)
+        ]
         for run in first:
-            existing: Session | None = None
-            held: tuple[Machine | None, Decimal] | None = None
+            held: Placement | None = None
             reason = "no free machine"
             for session in idle:
                 if session.id in used:
@@ -702,27 +868,40 @@ class Scheduler:
                     reason = "rented machine has too little time remaining"
                     continue
                 used.add(session.id)
-                existing = session
-                held = (
-                    self._store.machine(session.machine),
-                    Decimal(0) if rental is None else rental.usd_per_hour,
+                held = Placement(
+                    run=run,
+                    supply=session.supply,
+                    session=session,
+                    machine=self._store.machine(session.machine),
+                    price=Decimal(0) if rental is None else rental.usd_per_hour,
                 )
                 break
-            if held is None:
-                held = self._hold(pool, excluded=used, additional=made)
+            if held is None and pool is not None:
+                owned = self._free_owned(pool, now, excluded=used)
                 reason = self._trouble.get(pool.name, reason)
-                if held is not None:
-                    machine, _ = held
-                    if machine is None:
-                        made += 1
-                    else:
-                        used.add(machine.name)
+                if owned is not None:
+                    used.add(owned.name)
+                    held = Placement(
+                        run=run, supply=pool.name, session=None, machine=owned, price=Decimal(0)
+                    )
+            if held is None and ondemand is not None:
+                offer = self._rentable(ondemand, additional=made)
+                reason = self._trouble.get(ondemand.name, reason)
+                if offer is not None:
+                    made += 1
+                    held = Placement(
+                        run=run,
+                        supply=ondemand.name,
+                        session=None,
+                        machine=None,
+                        price=offer.usd_per_hour,
+                        hardware=offer.hardware,
+                    )
             if held is not None:
-                machine, price = held
                 hours = Decimal(str(run.spec.max_hours))
-                if machine is None:
-                    hours += Decimal(pool.setup_seconds) / 3600
-                cost = price * hours
+                if held.machine is None and ondemand is not None:
+                    hours += Decimal(ondemand.setup_seconds) / 3600
+                cost = held.price * hours
                 if cost > _limit_usd(run.spec):
                     reason = "job dollars do not cover the hours"
                     held = None
@@ -732,10 +911,8 @@ class Scheduler:
                 elif left is not None:
                     left -= cost
             if held is None:
-                raise LauncherError(
-                    f"cannot launch on {pool.name!r}: {reason}; etude queue would wait"
-                )
-            placements.append(Placement(run=run, session=existing, machine=held[0], price=held[1]))
+                raise LauncherError(f"cannot launch on {label}: {reason}; etude queue would wait")
+            placements.append(held)
         return placements
 
     def continue_from(self, run: str, until: str) -> Run:
@@ -817,6 +994,7 @@ class Scheduler:
         done: bool = False,
         cohort: str | None = None,
         pool: str | None = None,
+        rent: str | None = None,
         job: str | None = None,
         contains: str | None = None,
     ) -> tuple[RunRecord, ...]:
@@ -827,6 +1005,7 @@ class Scheduler:
             if (done or not self.read(r.id).done)
             and (cohort is None or r.cohort == cohort)
             and (pool is None or r.pool == pool)
+            and (rent is None or r.rent == rent)
             and (job is None or r.job == job or r.spec.name == job)
             and (contains is None or source.contains(r, contains))
         )
@@ -1068,28 +1247,53 @@ class Scheduler:
         cohort = None if record.cohort is None else self._store.cohort(record.cohort)
         if cohort is not None and self._cohort_live(cohort.name, now) >= cohort.parallel:
             return seen.model_copy(update={"reason": f"cohort runs {cohort.parallel} at a time"})
-        trouble = self._trouble.get(record.pool)
-        why = f"waiting for {record.pool}" + (f": {trouble}" if trouble else "")
-        return seen.model_copy(update={"reason": why})
+        waits = [
+            name + (f": {self._trouble[name]}" if name in self._trouble else "")
+            for name in (record.pool, record.rent)
+            if name is not None
+        ]
+        return seen.model_copy(update={"reason": "waiting for " + "; ".join(waits)})
 
     # The loop
 
     def tick(self) -> None:
-        """Take every step that can be taken now. Safe to call from anywhere, often."""
-        for pool in self._store.pools():
-            with self._store.pool_lock(pool.name, self._clock) as acquired:
+        """Take every step that can be taken now. Safe to call from anywhere, often.
+
+        Every pool goes before any on-demand, so a run that may use both takes a
+        free owned machine before anything is rented for it.
+        """
+        supplies: tuple[Supply, ...] = (*self._store.pools(), *self._store.ondemands())
+        for supply in supplies:
+            with self._store.lock(supply.name, self._clock) as acquired:
                 if acquired:
                     try:
-                        self._tick_pool(pool, self._clock())
+                        self._tick_supply(supply, self._clock())
                     except Stale:
                         continue
         self._bills(self._clock())
 
-    def _tick_pool(self, pool: Pool, now: datetime) -> None:
+    def _tick_supply(self, supply: Supply, now: datetime) -> None:
         for session in self._store.unsettled_sessions():
-            if session.pool != pool.name:
+            if session.supply != supply.name:
                 continue
-            self._store.check_pool_lock(pool.name)
+            self._store.check_lock(supply.name)
+            if (
+                session.ended_at is None
+                and isinstance(supply, Pool)
+                and self._store.machine(session.machine).expired(now)
+            ):
+                # An owned machine leaves its pool at expiry. Its unfinished
+                # attempts end as lost with it, and retry elsewhere.
+                self._diagnose(
+                    "machine expiry",
+                    "owned machine expired; ending its session",
+                    session=session.id,
+                )
+                try:
+                    self._end_session(session)
+                except (OSError, LauncherError, StorageUnavailable):
+                    pass  # cleanup retained its error and remains unconfirmed
+                continue
             if session.claimed_at is not None:
                 try:
                     self._observe(session, now)
@@ -1104,16 +1308,16 @@ class Scheduler:
             elif not self._kept(session) and not self._store.attempts(session=session.id):
                 # A crashed admission never asked for this machine. Release its claim.
                 self._store.record_refusal(session, now)
-        self._store.check_pool_lock(pool.name)
-        self._plan(pool, now)
-        for idle in self._idle_sessions(pool.name, now):
+        self._store.check_lock(supply.name)
+        self._plan(supply, now)
+        for idle in self._idle_sessions(supply.name, now):
             if not self._kept(idle):
                 try:
                     self._end_session(idle)
                 except (OSError, LauncherError, StorageUnavailable):
                     continue  # cleanup retained its error and remains unconfirmed
         for session in self._store.unsettled_sessions():
-            if session.pool == pool.name and session.claimed_at is None:
+            if session.supply == supply.name and session.claimed_at is None:
                 self._create(session, now)
 
     def _estimated(self, record: Session | Rental, now: datetime) -> bool:
@@ -1150,14 +1354,13 @@ class Scheduler:
             except Exception:  # unavailable billing leaves an estimate
                 continue
 
-    def _plan(self, pool: Pool, now: datetime) -> None:
-        """Send waiting runs to a free rented machine, an added machine, or a new one."""
+    def _plan(self, supply: Supply, now: datetime) -> None:
+        """Send waiting runs to a free kept machine, a free owned machine, or a new rental."""
+        off = isinstance(supply, Pool) and supply.off
         waiting = (
-            []
-            if pool.off
-            else [r for r in self._store.waiting(pool.name) if not self.read(r.id).done]
+            [] if off else [r for r in self._store.waiting(supply.name) if not self.read(r.id).done]
         )
-        for kept in self._idle_sessions(pool.name, now):
+        for kept in self._idle_sessions(supply.name, now):
             if not waiting:
                 return
             rental = self._store.rental_for(kept)
@@ -1172,106 +1375,111 @@ class Scheduler:
                 self._store.place(kept, (attempt,))
             except Stale:
                 return  # another process placed this run
-            self._store.check_pool_lock(pool.name)
+            self._store.check_lock(supply.name)
             self._service(kept).add(kept.id, self._work(attempt))
             waiting.remove(planned.run)
         while waiting:
-            held = self._hold(pool)
-            if held is None:
-                return
-            owned, price = held
-            planned = self._next_run(waiting, price, now)
-            if planned is None:
-                return
-            hours = planned.run.spec.max_hours
-            cap = planned.cap_usd
-            slots = 1
-            if planned.run.cohort is not None:
-                cohort = self._store.cohort(planned.run.cohort)
-                slots = max(1, cohort.parallel - self._cohort_live(cohort.name, now))
-                pending = [r for r in waiting if r.cohort == cohort.name]
-                hours = sum(r.spec.max_hours for r in pending)
-                cap = sum((_limit_usd(r.spec) for r in pending), Decimal(0))
-                remaining = self._cohort_left(cohort, now)
-                if remaining is not None:
-                    cap = min(cap, remaining)
-            life = hours * 3600 / slots + pool.setup_seconds
-            if price > 0:
-                life = min(life, float(cap / slots / price * 3600))
-            session, on_demand, rental = self._session(
-                pool,
-                owned,
-                price,
-                life,
-                now,
-                kept=False,
-            )
+            if isinstance(supply, Pool):
+                owned = self._free_owned(supply, now)
+                if owned is None:
+                    return
+                planned = self._next_run(waiting, Decimal(0), now)
+                if planned is None:
+                    return
+                session, _, _ = self._session(supply, owned, Decimal(0), 0.0, now, kept=False)
+                rented, rental = None, None
+            else:
+                offer = self._rentable(supply)
+                if offer is None:
+                    return
+                price = offer.usd_per_hour
+                planned = self._next_run(waiting, price, now)
+                if planned is None:
+                    return
+                hours = planned.run.spec.max_hours
+                cap = planned.cap_usd
+                slots = 1
+                if planned.run.cohort is not None:
+                    cohort = self._store.cohort(planned.run.cohort)
+                    slots = max(1, cohort.parallel - self._cohort_live(cohort.name, now))
+                    pending = [r for r in waiting if r.cohort == cohort.name]
+                    hours = sum(r.spec.max_hours for r in pending)
+                    cap = sum((_limit_usd(r.spec) for r in pending), Decimal(0))
+                    remaining = self._cohort_left(cohort, now)
+                    if remaining is not None:
+                        cap = min(cap, remaining)
+                life = hours * 3600 / slots + supply.setup_seconds
+                if price > 0:
+                    life = min(life, float(cap / slots / price * 3600))
+                session, rented, rental = self._session(supply, None, price, life, now, kept=False)
             try:
                 self._store.plan(
-                    session,
-                    (self._attempt(planned, session, 0, now),),
-                    on_demand,
-                    rental,
+                    session, (self._attempt(planned, session, 0, now),), rented, rental
                 )
             except Stale:
                 return  # another process planned this run
             waiting.remove(planned.run)
 
-    def _hold(
-        self,
-        pool: Pool,
-        *,
-        manual: bool = False,
-        excluded: set[str] | None = None,
-        additional: int = 0,
-    ) -> tuple[Machine | None, Decimal] | None:
-        """A machine for a new session and its price: owned first, else on demand.
+    def _free_owned(
+        self, pool: Pool, now: datetime, *, excluded: set[str] | None = None
+    ) -> Machine | None:
+        """A machine of the pool with no session or unfinished run, and not expired.
 
-        The machine is None when one would be made on demand. The result is None when
-        the pool has nothing free, may make no more, or asks more than its ceiling.
+        Its cost is already committed, so it never limits placement.
         """
-        live = [r for r in self._store.unsettled_sessions() if r.pool == pool.name]
-        mine = self._store.machines(pool.name)
-        busy = {r.machine for r in live} | (excluded or set())
-        busy |= {m.name for m in mine if self._store.machine_busy(m.name)}
-        owned = None if manual else next((m for m in mine if m.name not in busy), None)
-        on_demand = sum(self._store.rental_for(r) is not None for r in live) + additional
-        if owned is None and (
-            pool.on_demand_template is None
-            or (on_demand >= pool.max_on_demand and not (manual and pool.max_on_demand == 0))
+        busy = {s.machine for s in self._store.unsettled_sessions() if s.supply == pool.name}
+        busy |= excluded or set()
+        for machine in self._store.machines(pool.name):
+            if (
+                machine.name not in busy
+                and not machine.expired(now)
+                and not self._store.machine_busy(machine.name)
+            ):
+                self._trouble.pop(pool.name, None)
+                return machine
+        self._trouble[pool.name] = "no free machine"
+        return None
+
+    def _rentable(
+        self, ondemand: OnDemand, *, manual: bool = False, additional: int = 0
+    ) -> Offer | None:
+        """What the on-demand would rent now, if its budget allows one more machine.
+
+        None when it may rent no more, its provider has none or asks more than
+        its ceiling; the reason is kept for status. A machine rented by hand is
+        allowed under a zero limit.
+        """
+        live = sum(s.supply == ondemand.name for s in self._store.unsettled_sessions())
+        if live + additional >= ondemand.max_machines and not (
+            manual and ondemand.max_machines == 0
         ):
-            self._trouble[pool.name] = (
-                "pool cannot make more machines"
-                if pool.on_demand_template is None
-                else "pool is at its machine limit"
-            )
+            self._trouble[ondemand.name] = "at its machine limit"
             return None
-        if owned is None and pool.storage is None:
-            problem = "a rented machine needs a pool storage"
+        if ondemand.storage is None:
+            problem = "a rented machine needs a storage"
             if manual:
                 raise LauncherError(problem)
-            self._trouble[pool.name] = problem
+            self._trouble[ondemand.name] = problem
             return None
         try:
-            price = self._reach(pool, owned).price()
+            offer = self._reach(ondemand).offer()
         except Exception as trouble:  # noqa: BLE001
             # No price, no rental: the runs stay queued, and status says why.
-            self._trouble[pool.name] = str(trouble) or type(trouble).__name__
+            self._trouble[ondemand.name] = str(trouble) or type(trouble).__name__
             return None
-        self._trouble.pop(pool.name, None)
-        ceiling = (
-            None
-            if owned is not None or pool.on_demand_template is None
-            else pool.on_demand_template.max_usd_per_hour
-        )
-        if ceiling is not None and price > ceiling:
-            self._trouble[pool.name] = "price is above the pool ceiling"
-            return None  # dearer than this pool allows: wait for the price to come back
-        return owned, price
+        ceiling = ondemand.max_usd_per_hour
+        if not offer.available:
+            self._trouble[ondemand.name] = "provider reports no available machines"
+            return None
+        if ceiling is not None and offer.usd_per_hour > ceiling:
+            self._trouble[ondemand.name] = "price is above its ceiling"
+            return None  # dearer than this on-demand allows: wait for the price to come back
+        self._trouble.pop(ondemand.name, None)
+        return offer
 
     def _session(
         self,
-        pool: Pool,
+        supply: Supply,
         owned: Machine | None,
         price: Decimal,
         life: float,
@@ -1279,23 +1487,23 @@ class Scheduler:
         *,
         kept: bool,
     ) -> tuple[Session, Machine | None, Rental | None]:
-        """A working session, with a bounded window only when making a machine."""
+        """A working session, with a machine and a bounded window only when renting."""
         id = _id()
-        on_demand = None
+        rented = None
         rental = None
         if owned is None:
-            template = pool.on_demand_template
-            assert template is not None  # _hold already checked on-demand capability
-            life = min(life, float(pool.max_rental_seconds))
-            on_demand = Machine(
-                name=f"{pool.name}-{id}",
-                pool=pool.name,
+            assert isinstance(supply, OnDemand)  # only an on-demand rents
+            template = supply.template
+            life = min(life, float(supply.max_rental_seconds))
+            rented = Machine(
+                name=f"{supply.name}-{id}",
+                ondemand=supply.name,
                 kind="rented",
                 provider=template.provider,
                 image=template.image
                 or (STOCK_IMAGE if self._provider_service(template.provider) == "runpod" else None),
             )
-            machine = on_demand
+            machine = rented
             rental = Rental(
                 machine=machine.name,
                 usd_per_hour=price,
@@ -1307,7 +1515,7 @@ class Scheduler:
             machine = owned
         session = Session(
             id=id,
-            pool=pool.name,
+            supply=supply.name,
             machine=machine.name,
             planned_at=now,
             claimed_at=None,
@@ -1318,7 +1526,7 @@ class Scheduler:
             version=1,
             autorun=owned is None,
         )
-        return session, on_demand, rental
+        return session, rented, rental
 
     def _attempt(
         self,
@@ -1351,12 +1559,12 @@ class Scheduler:
             added=added,
         )
 
-    def _idle_sessions(self, pool: str, now: datetime) -> list[Session]:
-        """Sessions in a pool that are up and have nothing left to run."""
+    def _idle_sessions(self, supply: str, now: datetime) -> list[Session]:
+        """Sessions of a pool or on-demand that are up and have nothing left to run."""
         return [
             r
             for r in self._store.unsettled_sessions()
-            if r.pool == pool
+            if r.supply == supply
             and r.receipt is not None
             and self._live(r, now)
             and not self._store.machine_busy(r.machine)
@@ -1404,12 +1612,12 @@ class Scheduler:
         return (paid, "over_budget") if paid < seconds else (seconds, "out_of_time")
 
     def _create(self, session: Session, now: datetime, *, idle: bool = False) -> None:
-        self._store.check_pool_lock(session.pool)
+        self._store.check_lock(session.supply)
         try:
             packet = self._packet(session)
         except (OSError, LauncherError) as error:
             self._diagnose("checkpoint access", "preparation failed", error, session=session.id)
-            self._trouble[session.pool] = "waiting for checkpoint access"
+            self._trouble[session.supply] = "waiting for checkpoint access"
             return
         try:
             self._store.claim(session, self._clock())
@@ -1420,7 +1628,7 @@ class Scheduler:
         service = self._service(session)
 
         def check() -> None:
-            self._store.check_pool_lock(session.pool)
+            self._store.check_lock(session.supply)
             if any(
                 self._store.run(a.run).cancel_requested_at is not None
                 for a in self._store.attempts(session=session.id)
@@ -1538,10 +1746,10 @@ class Scheduler:
         attempts = self._store.attempts(session=session.id)
         first = [a for a in attempts if not a.added]
         work = tuple(self._work(attempt) for attempt in first)
-        pool = self._store.pool(session.pool)
+        supply = self._store.supply(session.supply)
         return Packet(
-            delivery_seconds=pool.delivery_seconds,
-            log_seconds=pool.log_seconds,
+            delivery_seconds=supply.delivery_seconds,
+            log_seconds=supply.log_seconds,
             session=session.id,
             deadline=None if rental is None else rental.deadline,
             work=work,
@@ -1609,7 +1817,7 @@ class Scheduler:
         for attempt in attempts:
             if attempt.outcome is None:
                 if seen.alive and attempt.added and attempt.id not in progress:
-                    self._store.check_pool_lock(session.pool)
+                    self._store.check_lock(session.supply)
                     service.add(session.id, self._work(attempt))
                 self._record(
                     session,
@@ -1626,7 +1834,7 @@ class Scheduler:
 
     def _end_session(self, session: Session) -> None:
         """Confirm shutdown, retain final evidence, then settle any unfinished attempts."""
-        self._store.check_pool_lock(session.pool)
+        self._store.check_lock(session.supply)
         service = self._service(session)
         gone = session.ended_at
         if gone is None:
@@ -1728,19 +1936,15 @@ class Scheduler:
     # Reading the records
 
     def _service(self, session: Session) -> Execution:
-        """Reach this session through its added machine or its pool provider."""
-        pool = self._store.pool(session.pool)
+        """Reach this session through its owned machine or its on-demand's provider."""
         machine = self._store.machine(session.machine)
-        if machine.kind == "rented" and machine.image is not None:
-            assert pool.on_demand_template is not None
-            pool = pool.model_copy(
-                update={
-                    "on_demand_template": pool.on_demand_template.model_copy(
-                        update={"image": machine.image}
-                    )
-                }
-            )
-        return self._reach(pool, machine if (machine.kind != "rented") else None)
+        if machine.kind != "rented":
+            return self._reach(machine)
+        ondemand = self._store.ondemand(session.supply)
+        if machine.image is not None:  # the image it booted, whatever the template says now
+            template = ondemand.template.model_copy(update={"image": machine.image})
+            ondemand = ondemand.model_copy(update={"template": template})
+        return self._reach(ondemand)
 
     def _provider_service(self, provider: str) -> str:
         """The service a provider uses. A provider with no record is its own service's name."""
@@ -1750,30 +1954,33 @@ class Scheduler:
             raise LauncherError(f"no provider named {provider!r}")
         return service
 
-    def _reach(self, pool: Pool, machine: Machine | None) -> Execution:
-        image = pool.on_demand_template.image if pool.on_demand_template else None
-        key = (
-            pool.name,
-            None if machine is None else machine.name,
-            image.resolved if image else None,
-        )
+    def _reach(self, held: Machine | OnDemand) -> Execution:
+        key: tuple[str, str, str | None]
+        if isinstance(held, Machine):
+            key = ("machine", held.name, None)
+        else:
+            image = held.template.image
+            key = ("ondemand", held.name, image.resolved if image else None)
         if key not in self._reached:
-            name = (
-                machine.kind
-                if machine
-                else self._provider_service(cast(MachineTemplate, pool.on_demand_template).provider)
+            service = (
+                held.kind
+                if isinstance(held, Machine)
+                else self._provider_service(held.template.provider)
             )
-            self._reached[key] = self._services[name](pool, machine)
+            self._reached[key] = self._services[service](held)
         return self._reached[key]
 
-    @staticmethod
-    def _validate_job(job: Job, pool: Pool) -> None:
-        if pool.off:
-            raise LauncherError(f"pool {pool.name!r} is turned off")
+    def _validate_job(self, job: Job, target: Target) -> None:
+        if target.pool is not None and self._store.pool(target.pool).off:
+            raise LauncherError(f"pool {target.pool!r} is turned off")
+        if target.rent is not None:
+            self._store.ondemand(target.rent)  # raises if no such on-demand
         if not job.command.strip() or job.max_hours <= 0:
             raise LauncherError("a job needs a command and hours")
-        if job.max_usd is None and pool.on_demand_template is not None:
-            raise LauncherError(f"pool {pool.name!r} can spend money, so the job needs max_usd")
+        if job.max_usd is None and target.rent is not None:
+            raise LauncherError(
+                f"on-demand {target.rent!r} can spend money, so the job needs max_usd"
+            )
         if job.max_usd is not None and job.max_usd <= 0:
             raise LauncherError("a job's max_usd must be more than zero")
         if job.max_attempts < 1:
@@ -1781,15 +1988,14 @@ class Scheduler:
         if job.until is not None:
             parse_target(job.until)
 
-    def _freeze(self, run: Run, on: str, cohort: str | None) -> RunRecord:
+    def _freeze(self, run: Run, target: Target, cohort: str | None) -> RunRecord:
         job = run.job
-        pool = self._store.pool(on)
-        self._validate_job(job, pool)
+        self._validate_job(job, target)
         run = source.freeze(run)
         job = run.job
         if job.until is not None:
-            clock, target = parse_target(job.until)
-            job = job.model_copy(update={"until": f"{clock}={number(target)}"})
+            clock, position = parse_target(job.until)
+            job = job.model_copy(update={"until": f"{clock}={number(position)}"})
         held = run.checkpoint
         if held is not None:
             written = any(
@@ -1805,7 +2011,7 @@ class Scheduler:
                     f"a continuation needs a target on a clock its parent reported: "
                     f"{', '.join(sorted(held.clocks)) or 'it reported none'}"
                 )
-            if target <= held.clocks[clock]:
+            if position <= held.clocks[clock]:
                 raise LauncherError(
                     f"the target {job.until} is not beyond the checkpoint's "
                     f"{clock}={number(held.clocks[clock])}"
@@ -1819,7 +2025,8 @@ class Scheduler:
             spec=job,
             seed=run.seed,
             checkpoint=held,
-            pool=on,
+            pool=target.pool,
+            rent=target.rent,
             cohort=cohort,
             created_at=self._clock(),
             cancel_requested_at=None,

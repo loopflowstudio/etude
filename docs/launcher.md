@@ -1,18 +1,36 @@
 # The launcher
 
-A pool is a named set of machines with a queue. It uses a free machine, makes
-another within its limits, or leaves a run waiting.
+```sh
+etude pool add lab                                   # machines you own
+etude machine add mini me@mini.local --pool lab      # cost $0, never expires
+etude ondemand add runpod-cpu8 --provider runpod --vcpus 8 --memory-gb 16 \
+    --max 2 --max-usd-per-hour 0.40                  # a template and a budget
+etude availability --rent runpod-cpu8                # what it would rent, at what price
+etude launch job.py --rent runpod-cpu8 --quote       # machines and maximum spend; rents nothing
+etude launch job.py --pool lab --rent runpod-cpu8    # the Mini first, then rent
+etude machines --all                                 # owned: cost, expiry; rented: hardware, cost
+```
+
+A launch says where its runs may go. A **pool** is a named set of machines you
+own. An **on-demand** is a machine template and a budget to rent with: how
+many machines at once and the most to pay per hour. `--pool P` uses only P's
+machines, `--rent R` only rents from R, and both use a free machine of P
+before renting from R. A run that cannot start yet waits.
 
 | Command | Meaning |
 | --- | --- |
-| `etude queue FILE.py [--pool P]` | Add runs. The pool may grow; lack of capacity leaves them waiting. |
-| `etude launch FILE.py [--pool P]` | Acquire machines for the first runs (up to cohort parallelism), then record the runs. Failure records no runs. |
-| `etude rent --pool POOL --hours H` | Make a machine for a window of time; it takes queued runs. |
+| `etude queue FILE.py [--pool P] [--rent R]` | Add runs. They start when a machine is free or can be rented; lack of capacity leaves them waiting. |
+| `etude launch FILE.py [--pool P] [--rent R]` | Acquire machines for the first runs (up to cohort parallelism), then record the runs. Failure records no runs. |
+| `etude launch FILE.py ... --quote` | Print the machines the first wave would take and the most they could cost. Rents nothing. |
+| `etude availability --rent R` | Ask R's provider what it would rent now, at what price. Rents nothing. |
+| `etude rent --ondemand R --hours H` | Rent a machine for a window of time; it takes queued runs. |
 
+Pools and on-demands share one namespace: a name refers to one of them.
 Launch claims free machines and asks the provider to confirm any new machines
-before recording runs. A pool lock with an owner and a five-minute expiry protects
-those claims without holding a database transaction. Other pools and readers keep
-working. Machines are acquired with empty inboxes; only after all first-wave
+before recording runs. Each pool and on-demand has a placement lock with an
+owner and a five-minute expiry; a launch holds the locks of everything it may
+use, without holding a database transaction. Other pools, on-demands and
+readers keep working. Machines are acquired with empty inboxes; only after all first-wave
 machines are confirmed are runs and attempts recorded together and work delivered.
 A refusal or unknown create reply is an error, with no runs recorded. Confirmed
 machines made for the failed launch are deleted; unknown creates retain their
@@ -22,49 +40,63 @@ machines. New machines also retain their independent deadline.
 
 The guarantee is capacity at admission, not successful boot or training. Later
 boot failure follows existing retry rules. Later waves use the same queue as
-ordinary submissions. Launch checks template, machine limit, availability, price
-ceiling and dollars for the requested hours before spending.
+ordinary submissions. Launch checks the on-demand's machine limit,
+availability, price ceiling and dollars for the requested hours before spending.
 
 Queue submission only writes intent and never waits for a provider. The standing
 `etude controller run` loop, `etude wait`, or another command's scheduling pass
-matches waiting runs and grows the pool within its limits. Keep that loop running
+matches waiting runs, visiting every pool before any on-demand, and rents
+within each on-demand's limits. Keep that loop running
 when the queue must move without further commands.
-`etude continue` queues new runs with their checkpoint ancestry and absolute
-targets; lack of capacity does not reject continuation.
+`etude continue` queues new runs with their checkpoint ancestry, absolute
+targets and the parent's pool and on-demand; lack of capacity does not reject continuation.
 
 | Record | The question it answers | Exists for |
 | --- | --- | --- |
-| **Machine** | What is it and how did I get it: added or rented? | Every machine |
+| **Pool** | Which machines do I own, and do they take new runs? | Owned machines |
+| **OnDemand** | What do I rent, how many at once, and at what most per hour? | Rented machines |
+| **Machine** | What is it and how did I get it: owned (what it cost, when it expires) or rented? | Every machine |
 | **Rental** | How long is the paid window, at what price and cap, and what has it cost? | Rented machines only |
 | **RunAttempt** | Which run is allocated to which machine, for what window, and how did it go? | Every machine |
 
 Unfinished RunAttempts make a machine busy. A rental contains no run or startup
-facts; its pool comes from its machine. Machine.kind is `local`, `ssh` or
-`rented`, with the provider account in a separate field. A Session is internal:
+facts. Machine.kind is `local`, `ssh` or `rented`, with the provider account in
+a separate field; an owned machine names its pool and a rented one names the
+on-demand it came from. A Session is internal:
 one start of Etude's process on a machine, and the journal folder it writes. A
 rented machine has one session for its life; a machine you added has one per
 start, one at a time.
 
+An owned machine's cost is committed when it is added (`--cost-usd`, default
+0) and it stops being yours at `--expires-at` (default never). Its cost never
+limits placement: a free owned machine is always used before renting. At its
+expiry it leaves its pool; an attempt still on it ends as lost with the machine
+(`machine_lost`), and the run retries wherever it may go, which may mean renting.
+Owned machines are never deleted. A machine bought for a window, such as SF
+Compute's, is an owned machine with that window's price and end.
 
-Python exposes `queue(job_or_run, pool)` and `queue_cohort(name, runs, pool, ...)`,
-with the same cohort limits as launch. Both commands
-use the configured SSH controller and default pool, initially `local`.
+Python exposes `queue(job_or_run, pool, rent=...)` and
+`queue_cohort(name, runs, pool, rent=..., ...)`, with the same cohort limits as
+launch, plus `quote(...)` and `availability(rent)`. All use the configured SSH
+controller. With neither a pool nor an on-demand named, a launch uses the
+configured default, initially the pool `local`.
 
 Spending is bounded by limits, not by a flag: the job's `max_usd` and
-`max_hours`, the cohort's `max_usd`, the pool's price ceiling and the pool's
-limit on machines.
+`max_hours`, the cohort's `max_usd`, the on-demand's price ceiling and its
+limit on machines at once.
 
 The `etude-sdk` package uses Python 3.12 and one shared dependency set for launching and tracking, installed with uv. It runs on this
 computer, SSH hosts and RunPod machines, without any Etude account.
 
 A **Job** specifies a command, source commit, config, target and limits. It has
 no seed or machine settings. A **Run** pairs a job with a seed and goes to a
-pool. A **Cohort** launches runs together under shared limits. A **RunAttempt**
+pool, an on-demand or both. A **Cohort** launches runs together under shared limits. A **RunAttempt**
 allocates a run to a machine for a bounded execution window. `status` shows the machine.
 
-`Pool.on_demand_template` is a **MachineTemplate** that chooses the provider, GPU, size, image, data center and
-hourly price ceiling. A **Provider** holds account settings; a **Storage** names
-a bucket and prefix. Credentials stay outside these records.
+`OnDemand.template` is a **MachineTemplate** that chooses the provider, GPU,
+size, image and data center; the on-demand holds the budget. A **Provider**
+holds account settings; a **Storage** names a bucket and prefix. Credentials
+stay outside these records.
 
 ## Start here
 
@@ -79,9 +111,9 @@ def runs() -> Job:
     )
 ```
 
-A job always states `max_hours`. It needs `max_usd` only when its pool can
-spend money, that is, when the pool can make machines. Sending a job with no
-`max_usd` to such a pool is an error that says so.
+A job always states `max_hours`. It needs `max_usd` only when it may rent,
+that is, when it names an on-demand. Sending a job with no `max_usd` to an
+on-demand is an error that says so.
 
 ```sh
 etude launch job.py
@@ -91,9 +123,10 @@ etude logs --run RUN
 etude fetch RUN checkpoint.pt out
 ```
 
-With no `--pool`, launch uses the configured default, initially `local`.
-Change it with `etude pool default POOL`. If the default is off, launch asks
-for an explicit pool. The built-in machine is already added to `local`.
+With neither `--pool` nor `--rent`, launch uses the configured default,
+initially the pool `local`. Change it with `etude default --pool P --rent R`
+(either or both). If the default pool is off, launch rents from the default
+on-demand, or asks for an explicit one. The built-in machine is already added to `local`.
 `etude pool off local` stops new placements; `etude pool on local` resumes them.
 
 Add a host using the address accepted by OpenSSH:
@@ -101,6 +134,7 @@ Add a host using the address accepted by OpenSSH:
 ```sh
 etude machine add shed me@shed.local
 etude machine add bench bench --pool lab --storage west
+etude machine add window me@window --pool lab --cost-usd 120 --expires-at 2026-11-01T00:00:00
 etude launch job.py --pool shed
 ```
 
@@ -138,9 +172,9 @@ temporary keys are kept in the courier's memory and never written to disk.
 ```sh
 etude storage add west --bucket BUCKET --prefix etude/launch --region us-west-2
 etude provider set runpod --kind runpod --storage west
-etude pool add l4 --provider runpod --gpu "NVIDIA L4" \
+etude ondemand add l4 --provider runpod --gpu "NVIDIA L4" \
     --vcpus 6 --memory-gb 48 --disk-gb 40 --max 1 --max-usd-per-hour 0.80
-etude launch job.py --pool l4
+etude launch job.py --rent l4
 ```
 
 A template without `--gpu` rents RunPod CPU pods: the cheapest secure-cloud CPU
@@ -151,15 +185,28 @@ On a CPU pod `os.cpu_count()` reports the host's CPUs; size worker pools from
 `len(os.sched_getaffinity(0))`.
 
 ```sh
-etude pool add cpu --provider runpod --vcpus 8 --memory-gb 16 --max 2 --max-usd-per-hour 0.40
-etude launch job.py --pool cpu --cohort evals --parallel 2 --max-usd 1
+etude ondemand add cpu --provider runpod --vcpus 8 --memory-gb 16 --max 2 --max-usd-per-hour 0.40
+etude availability --rent cpu
+etude launch job.py --rent cpu --cohort evals --parallel 2 --max-usd 1 --quote
+etude launch job.py --rent cpu --cohort evals --parallel 2 --max-usd 1
 ```
 
-Free existing machines are used before creating another. A mixed pool can
-spill onto paid machines when owned ones are busy. Change automatic growth with
-`etude pool max l4 2`; `etude pool max l4 0` allows only existing machines.
+`availability` asks the provider, so it is a wait: it prints what would be
+rented, the price and ceiling, how many of the on-demand's machines are in use
+and when the provider answered; `--timeout` bounds it. `--quote` places the
+first wave as launch would, asking the provider for prices, and prints one line
+per run: an owned or already rented machine it would use, or the hardware it
+would rent and the most that window could cost. It then prints the maximum
+spend of those machines and the job and cohort caps on the whole launch. It
+records nothing and rents nothing; without capacity it fails as launch would.
+
+Free existing machines are used before renting another. With `--pool` and
+`--rent` together, runs spill onto rented machines when owned ones are busy.
+Change automatic renting with `etude ondemand max l4 2`; `etude ondemand max l4 0`
+allows only machines rented by hand.
 A zero limit still permits an explicit `rent`; a positive limit bounds
-concurrent on-demand windows. Lowering the limit leaves current windows intact.
+concurrent rented windows. Lowering the limit leaves current windows intact.
+The limit and ceiling belong to the on-demand, so every launch that names it shares them.
 The default RunPod image is pinned stock
 `runpod/pytorch@sha256:4d1721e62b56d345c83b4fd6090664be6daf9312caab5b2e76f23d8231941851`.
 It needs Python 3.12 on PATH. uv must also be available; when absent, boot
@@ -167,7 +214,7 @@ fetches uv 0.8.22 for Linux x86_64 and verifies its SHA-256
 `741ff1f5742c5a4a25d2f829e8395355e43f7a5ae2ebc6368e9ae2df0efb69cf`
 before installing it. The guardian starts before either download.
 
-The launcher stores its private package in the pool's storage under
+The launcher stores its private package in the on-demand's storage under
 `PREFIX/programs/DIGEST.zip`, once per digest. Boot fetches it by a scoped link,
 checks its digest, installs with `uv sync --frozen` into
 `~/.etude/programs/DIGEST/.venv`, then runs `etude worker --bootstrap URL`.
@@ -175,7 +222,7 @@ Etude is never fetched by package name from an index. The client and each job
 use separate environments. The provider start command contains only a small
 standard-library bootstrap; no Etude files need to be present in the image.
 
-A pool's `--image` or `etude pool image` selects a user's own pinned image for
+An on-demand's `--image` or `etude ondemand image` selects a user's own pinned image for
 training dependencies installed ahead of time. It must meet the same Python
 and uv requirements and needs nothing of Etude. `--registry` still supplies a
 provider pull credential for a user's private image. The stock image needs no
@@ -202,39 +249,41 @@ modify existing pods or synchronize later key changes. SSH access does not exten
 a rental's deadline.
 
 Owned machines and existing rental windows come first. A rented machine
-always needs storage. A mixed pool without storage can still use its owned
-hosts; waiting runs report missing storage when growth is needed.
+always needs storage. A launch with `--pool` and `--rent` can still use its
+owned hosts when the on-demand has no storage; waiting runs report missing
+storage when renting is needed.
 A rental made by hand starts itself with an empty inbox:
 
 ```sh
-etude rent --pool l4 --hours 0.5 --max-usd 0.40
-etude launch job.py --pool l4
+etude rent --ondemand l4 --hours 0.5 --max-usd 0.40
+etude launch job.py --rent l4
 etude machines
 etude terminate --machine MACHINE
 ```
 
-`etude machines` is the one list. Each machine is `added`, or `rented` with
-the hardware the provider was asked for (a GPU type with the minimum vCPUs
+`etude machines` is the one list. Each owned machine shows its pool, its
+committed cost and its expiry (or that it never expires). Each rented machine
+shows its on-demand, the hardware the provider was asked for (a GPU type with the minimum vCPUs
 and memory its host must have, or a CPU flavor and its exact vCPUs), the end of its window and its cost; `etude status` names it beside the
 run's machine. `etude machines --all` includes rented
 machines whose window has ended, so late bills stay visible. `terminate` takes
-the machine's name. `etude pools` shows each pool's machines, whether it makes
-more, and which pool is the default.
+the machine's name. `etude pools` shows each pool's machines and `etude ondemands` each
+on-demand's template, budget, machines and safeguards; both mark the default.
 
 A rental made by hand boots with no runs, then takes work from its bucket
 inbox. There is one rental record and execution path. A window made by hand stays
-until its deadline or termination; one made by pool growth ends when no work is left.
+until its deadline or termination; one rented for queued work ends when no work is left.
 Every rented machine takes waiting runs that fit its remaining time. The
 controller delivers each next run; keep its loop running to drain the queue.
-There is no run-count packing setting. A pool-created machine ends when no
+There is no run-count packing setting. A machine rented for queued work ends when no
 waiting run fits; a manually rented one waits until its deadline or termination. Terminate refuses
 while it still has unfinished work.
 
 The launcher needs `RUNPOD_API_KEY`, `AWS_ACCESS_KEY_ID` and
 `AWS_SECRET_ACCESS_KEY` from the configured secret manager. No secrets enter
-SQLite. A pool takes its provider's storage when added and keeps it. A storage
+SQLite. An on-demand takes its provider's storage when added and keeps it. A storage
 cannot change; add another name. `--data-center` selects a RunPod data center;
-omitting it lets RunPod place the machine. `pool image` affects future machines.
+omitting it lets RunPod place the machine. `ondemand image` affects future machines.
 
 ## The worker and its bucket
 
@@ -300,7 +349,7 @@ observation times; clocks on different machines do not establish a total order.
 
 Bootstrap uses a write-only capability for one log object, independent of reading
 the bootstrap packet or installing dependencies. Each startup producer publishes
-at most once every 15 seconds and once at closure, under `Pool.log_seconds`
+at most once every 15 seconds and once at closure, under `log_seconds` on its pool or on-demand
 (default `None`) and the remaining rental allowance. The guardian starts first and remains independent of publication.
 A storage outage or death before bootstrap runs can leave an explicit evidence
 gap. Reading logs never needs a live machine after its bucket evidence was
@@ -335,7 +384,7 @@ computer's database and match while they run.
 ```sh
 etude controller                     # selection, last loop time, waiting-work warning
 etude controller set user@host       # an SSH address or configured alias
-etude launch job.py --pool l4
+etude launch job.py --rent l4
 etude logs --run RUN
 etude fetch RUN checkpoint.pt out
 etude controller unset               # use this computer again
@@ -393,7 +442,7 @@ bucket inboxes; they never need a reachable address for the controller.
 
 ## Safeguards and bills
 
-`etude pools` lists each on-demand pool's safeguards. Providers declare lifetime
+`etude ondemands` lists each on-demand's safeguards. Providers declare lifetime
 and startup-command support. RunPod supports a startup timer, but no provider
 lifetime setting. Its timer begins before client installation and ends the pod at the
 deadline or when its dollar cap runs out at the actual price. Autorun uses the
@@ -455,7 +504,7 @@ job = Job(
     max_hours=6,
     max_usd=Decimal(5),
 )
-runs = queue_cohort("capacity", job.runs(1, 2, 3), pool="l4", parallel=1, max_usd=Decimal(15))
+runs = queue_cohort("capacity", job.runs(1, 2, 3), rent="l4", parallel=1, max_usd=Decimal(15))
 wait(*runs)
 logs(run=runs[0])
 fetch(runs[0], "checkpoint.pt", Path("out"))
@@ -488,12 +537,12 @@ def runs(hidden: int = 256, seeds: int = 3) -> list[Run]:
 
 
 if __name__ == "__main__":
-    launch_cohort("capacity", runs(hidden=512), pool="l4", parallel=2)
+    launch_cohort("capacity", runs(hidden=512), rent="l4", parallel=2)
 ```
 
 ```sh
-etude queue capacity.py --pool l4 --cohort capacity --parallel 2 --max-usd 20
-etude launch capacity.py --hidden 512 --seeds 5 --pool l4 --cohort big
+etude queue capacity.py --rent l4 --cohort capacity --parallel 2 --max-usd 20
+etude launch capacity.py --hidden 512 --seeds 5 --pool lab --rent l4 --cohort big
 python capacity.py          # whatever its __main__ block does
 ```
 
@@ -623,7 +672,7 @@ coverage rules, and neither Python package imports the other.
 Continuation uses a succeeded parent's recorded checkpoint and verifies its
 digest. Bucket checkpoints travel by scoped link; disk checkpoints pass through
 the launching computer. Continuation can move between local, SSH and bucket
-journals. The `continue` command retains the parent's pool. Its target must exceed the parent's position on the named clock.
+journals. The `continue` command retains the parent's pool and on-demand. Its target must exceed the parent's position on the named clock.
 
 ```sh
 etude continue RUN steps=63000
@@ -720,9 +769,9 @@ remain pinned in counting tests.
 
 | Kind | Commands | Allowed dependency | Expected result |
 | --- | --- | --- | --- |
-| Read | `status`, `runs`, `pools`, `machines`, `providers`, `storages`, `controller` | database only | immediate answer with freshness |
-| Ask | `queue`, `cancel`, `terminate`, `rent`, `pool` mutations, `machine add`, `provider set`, `storage add` | database only | recorded intent and an id where applicable |
-| Wait | `wait`, `launch`, `fetch`, `logs`, `source`, `continue` | other machines with a time limit | completion or the limit |
+| Read | `status`, `runs`, `pools`, `ondemands`, `machines`, `providers`, `storages`, `controller` | database only | immediate answer with freshness |
+| Ask | `queue`, `cancel`, `terminate`, `rent`, `pool` and `ondemand` mutations, `default`, `machine add`, `provider set`, `storage add` | database only | recorded intent and an id where applicable |
+| Wait | `wait`, `launch` (with or without `--quote`), `availability`, `fetch`, `logs`, `source`, `continue` | other machines with a time limit | completion or the limit |
 
 Controller selection mutations are asks. `worker` and `controller run` are waits
 because they deliberately execute long-lived loops; they retain their existing
@@ -730,7 +779,7 @@ lifetime rules. Job-file `runs()` is an input function, not a launcher command.
 
 The full expectation also gives external work to the controller loop, makes asks
 safe to repeat with caller-chosen identities, restricts waits to watching, bounds
-lists, states answer freshness and prevents one pool's trouble delaying another.
+lists, states answer freshness and prevents one supply's trouble delaying another.
 Commands require only dependencies implied by their kind: reads must work without
 provider keys or a network. These are documented expectations for the follow-up;
 this foundation does not enforce them, add ids or deadlines, remove refreshes,
@@ -883,7 +932,7 @@ job digest or display name. An unknown revision is an error.
 
 ```sh
 etude runs
-etude runs --contains v0.3.0 --cohort capacity --pool l4
+etude runs --contains v0.3.0 --cohort capacity --rent l4
 etude runs --job JOB_ID
 etude source RUN_ID recovered-source
 etude source RUN_ID                     # creates etude-source-RUN_ID
@@ -910,20 +959,21 @@ adds 9. Remote counts are unchanged.
 ### Startup allowance
 
 ```python
-Pool(name="gpu", on_demand_template=template, startup_seconds=600)
-Pool(name="slow-image", on_demand_template=template, startup_seconds=None)
+OnDemand(name="gpu", template=template, startup_seconds=600)
+OnDemand(name="slow-image", template=template, startup_seconds=None)
+Pool(name="lab", startup_seconds=120)
 ```
 
 `startup_seconds` defaults to `None` (no startup cutoff). A session snapshots its deadline when creation
 is claimed. Package delivery, image acquisition and client installation share that
-allowance until the worker's start receipt. Changing a pool affects future sessions.
+allowance until the worker's start receipt. Changing a pool or on-demand affects future sessions.
 `None` removes this cutoff; rental time and dollar limits still apply. Arbitrary
 setup inside `Job.command` is part of job execution, outside this startup allowance.
 `setup_seconds` remains the extra rental time reserved for startup, not a timeout.
 
 ```sh
-etude pool add gpu --provider runpod --gpu "NVIDIA L4" --startup-seconds 900
-etude pool startup gpu --seconds 0
+etude ondemand add gpu --provider runpod --gpu "NVIDIA L4" --startup-seconds 900
+etude ondemand startup gpu --seconds 0
 etude logs --run baseline --follow
 ```
 
@@ -940,7 +990,7 @@ A timed-out wait is not proof the remote installation stopped. A log read retain
 its own explicitly chosen deadline. Downloads, SSH key generation, sshd startup
 and guardian readiness inherit this budget without separate 30/60-second caps.
 
-The prototype database schema is version 6; older database files are refused.
+The prototype database schema is version 8; older database files are refused.
 
 
 ### Prepare a framework image before renting
@@ -958,7 +1008,7 @@ custom = resolve_image("registry.example/team/training:release", timeout=30)
 
 ```sh
 etude image prepare pytorch/pytorch:2.10.0-cuda12.8-cudnn9-runtime
-etude pool image gpu pytorch/pytorch:2.10.0-cuda12.8-cudnn9-runtime
+etude ondemand image gpu pytorch/pytorch:2.10.0-cuda12.8-cudnn9-runtime
 etude machines --all --images
 ```
 
@@ -978,9 +1028,9 @@ images use `resolve_image` plus an explicit `Runtime`.
 Version combinations must exist in the upstream registry. Resolution establishes
 artifact identity and platform, not framework ABI compatibility or a speedup.
 
-Each acquired machine retains its selection across pool edits and controller
+Each acquired machine retains its selection across on-demand edits and controller
 restarts; `machines --images` reads those facts without registry access. Bootstrap
-logs include the same selection. `pool add --image` and existing digest strings
+logs include the same selection. `ondemand add --image` and existing digest strings
 remain available when resolution has already happened; their platform is unchecked.
 Typed Python callers can construct `Image(requested=..., resolved=...)` for these
 pre-pinned artifacts. Private provider pulls still require the provider's registry
@@ -1107,15 +1157,15 @@ deadline and the independent rental guardian remain the lifecycle authorities. A
 prove that remote work completed or was cancelled.
 
 
-`Pool.delivery_seconds=None` controls the courier's shared session-stop and final
+`delivery_seconds=None` on a pool or on-demand controls the courier's shared session-stop and final
 transfer allowance. A finite value also reserves that much of the paid window
 for final delivery; no implicit two-minute/quarter-window reserve remains.
 The provider deadline always caps it. Final delivery makes at most 40 attempts;
 this is an attempt count, not a hidden elapsed-time deadline.
-`Pool.log_seconds=None` controls each background/final diagnostic publication,
+`log_seconds=None` controls each background/final diagnostic publication,
 including its lock wait. An explicit finite value may leave evidence incomplete;
 publication never replaces the original failure. Both settings are available on
-`pool add` as `--delivery-seconds` and `--log-seconds` (zero means no added cutoff).
+`pool add` and `ondemand add` as `--delivery-seconds` and `--log-seconds` (zero means no added cutoff).
 The bootstrap receives the latter as `ETUDE_LOG_SECONDS`; direct `publish` callers
 can supply `timeout` themselves. The independent guardian can terminate the rental
 while either operation is blocked.

@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Protocol
 
-from etude.launch.records import BootstrapLinks, Hardware, Record
+from etude.launch.records import BootstrapLinks, Hardware, Offer, Record
 
 
 class Safeguards(Record):
@@ -45,7 +45,7 @@ class Machines(Protocol):
     safeguards: Safeguards
     owned: bool
 
-    def price(self) -> Decimal: ...
+    def offer(self) -> Offer: ...
     def create(self, request: MachineRequest) -> Allocation: ...
     def find(self, session_id: str) -> Allocation | None: ...
     def alive(self, session_id: str) -> bool: ...
@@ -62,8 +62,8 @@ class OwnedMachine:
     def __init__(self, address: str | None = None) -> None:
         self.address = address
 
-    def price(self) -> Decimal:
-        return Decimal(0)
+    def offer(self) -> Offer:
+        return Offer(hardware=None, usd_per_hour=Decimal(0), available=True)
 
     def create(self, request: MachineRequest) -> Allocation:
         return Allocation(

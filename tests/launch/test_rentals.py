@@ -18,11 +18,11 @@ from tests.launch.counting import Counting, Counts
 from tests.launch.fake import bench
 
 
-def test_rent_refuses_an_added_pool_without_external_calls(tmp_path: Path) -> None:
+def test_rent_refuses_a_pool_without_external_calls(tmp_path: Path) -> None:
     b = bench(tmp_path)
     b.scheduler.add_machine("bench", "fixture")
     counting = Counting(b.store, b.service)
-    with counting.record(), pytest.raises(LauncherError, match="only machines you added"):
+    with counting.record(), pytest.raises(LauncherError, match="no on-demand named 'bench'"):
         b.scheduler.rent("bench", 1)
     assert counting.snapshot() == Counts(database=5)
     assert b.store.rentals() == ()
@@ -34,15 +34,15 @@ def test_commands_rent_and_terminate_by_machine_name(
 ) -> None:
     b = bench(tmp_path)
     monkeypatch.setattr(cli, "default", lambda: b.scheduler)
-    assert main(["rent", "--pool", "l4", "--hours", "1"]) == 0
+    assert main(["rent", "--ondemand", "l4", "--hours", "1"]) == 0
     assert "rented until" in capsys.readouterr().out
-    machine = b.scheduler.machines("l4", rented=True)[0]
+    machine = b.scheduler.machines("l4")[0]
     assert machine.kind == "rented" and machine.provider == "fake"
     assert machine.requested_at == b.clock.now
     assert machine.provider_id is not None and machine.address is None
-    assert main(["pools"]) == 0
+    assert main(["ondemands"]) == 0
     assert "rented: " + machine.name in capsys.readouterr().out
-    run = b.scheduler.queue(Job(command="train", max_hours=1, max_usd=Decimal(1)), "l4")
+    run = b.scheduler.queue(Job(command="train", max_hours=1, max_usd=Decimal(1)), rent="l4")
     b.scheduler.tick()
     assert b.store.machine_busy(machine.name)
     assert main(["terminate", "--machine", machine.name]) == 1
@@ -60,7 +60,7 @@ def test_python_rental_calls_use_selected_controller(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     requests: list[Request] = []
-    machine = Machine(name="remote-pod", pool="gpu", kind="rented", provider="account")
+    machine = Machine(name="remote-pod", ondemand="gpu", kind="rented", provider="account")
 
     def request(self: PythonClient, value: Request) -> bytes:
         requests.append(value)
@@ -72,22 +72,22 @@ def test_python_rental_calls_use_selected_controller(
     assert client.rent("gpu", 1, Decimal(2)) == "remote-pod"
     assert client.terminate("remote-pod") == machine
     assert [r.operation for r in requests] == ["rent", "terminate"]
-    assert requests[0].pool == "gpu" and requests[0].max_usd == Decimal(2)
+    assert requests[0].rent == "gpu" and requests[0].max_usd == Decimal(2)
     assert requests[1].machine == "remote-pod"
     assert not (tmp_path / "launcher.db").exists()
 
 
 def test_machine_allocation_outlives_its_session(tmp_path: Path) -> None:
-    b = bench(tmp_path, max_on_demand=1)
+    b = bench(tmp_path, max_machines=1)
     machine = b.scheduler.rent("l4", 1)
-    run = b.scheduler.queue(Job(command="train", max_hours=1, max_usd=Decimal(1)), "l4")
+    run = b.scheduler.queue(Job(command="train", max_hours=1, max_usd=Decimal(1)), rent="l4")
     b.scheduler.tick()
     attempt = b.scheduler.attempts(run)[0]
     # Retained history can hold an unfinished allocation from an older session.
     # The current session's empty attempt list must not make that machine free.
     b.store._db.execute(
-        """INSERT INTO sessions(id,pool,machine,planned_at,ended_at)
-        SELECT 'earlier',pool,machine,planned_at,? FROM sessions WHERE id=?""",
+        """INSERT INTO sessions(id,machine,planned_at,ended_at)
+        SELECT 'earlier',machine,planned_at,? FROM sessions WHERE id=?""",
         (b.clock.now.isoformat(), attempt.session),
     )
     b.store._db.execute("UPDATE attempts SET session='earlier' WHERE id=?", (attempt.id,))
@@ -107,7 +107,7 @@ def test_added_session_reuses_capacity_without_a_paid_window(tmp_path: Path) -> 
     # Recover after completion was recorded but before session cleanup happened.
     b.store.finish(attempt, b.clock.now, "succeeded")
     second = b.scheduler.queue(Job(command="train", max_hours=1), "bench")
-    with b.store.pool_lock("bench", b.clock) as acquired:
+    with b.store.lock("bench", b.clock) as acquired:
         assert acquired
         b.scheduler._plan(b.store.pool("bench"), b.clock.now)
     placed = b.scheduler.attempts(second)[0]

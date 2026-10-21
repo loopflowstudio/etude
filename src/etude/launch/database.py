@@ -30,7 +30,7 @@ from etude.launch.records import (
     LauncherError,
     LogStream,
     Machine,
-    MachineTemplate,
+    OnDemand,
     Outcome,
     Output,
     Pool,
@@ -42,6 +42,8 @@ from etude.launch.records import (
     SourcePosition,
     Stale,
     Storage,
+    Supply,
+    Target,
     job_identity,
 )
 from etude.launch.usage import Transfer
@@ -56,10 +58,11 @@ CREATE TABLE IF NOT EXISTS launch_sessions(launch TEXT NOT NULL, session TEXT NO
   PRIMARY KEY(launch, session));
 CREATE TABLE IF NOT EXISTS diagnostics(id TEXT PRIMARY KEY, body TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS log_streams(id TEXT PRIMARY KEY, body TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS pool_locks(
-  pool TEXT PRIMARY KEY, owner TEXT NOT NULL, expires_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS locks(
+  supply TEXT PRIMARY KEY, owner TEXT NOT NULL, expires_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS settings(name TEXT PRIMARY KEY, value TEXT NOT NULL);
 INSERT OR IGNORE INTO settings VALUES ('default_pool', 'local');
+INSERT OR IGNORE INTO settings VALUES ('default_rent', '');
 CREATE TABLE IF NOT EXISTS cohorts(
   name TEXT PRIMARY KEY, parallel INTEGER NOT NULL, max_usd TEXT,
   created_at TEXT NOT NULL);
@@ -68,23 +71,28 @@ CREATE TABLE IF NOT EXISTS providers(
 CREATE TABLE IF NOT EXISTS storages(
   name TEXT PRIMARY KEY, bucket TEXT NOT NULL, prefix TEXT NOT NULL, region TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS pools(
-  name TEXT PRIMARY KEY, on_demand_template TEXT, max_on_demand INTEGER NOT NULL,
-  setup_seconds INTEGER NOT NULL, max_rental_seconds INTEGER NOT NULL,
-  off INTEGER NOT NULL DEFAULT 0, storage TEXT, startup_seconds REAL, delivery_seconds REAL, log_seconds REAL);
+  name TEXT PRIMARY KEY, off INTEGER NOT NULL DEFAULT 0,
+  startup_seconds REAL, delivery_seconds REAL, log_seconds REAL);
+CREATE TABLE IF NOT EXISTS ondemands(name TEXT PRIMARY KEY, body TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS machines(
-  name TEXT PRIMARY KEY, pool TEXT NOT NULL REFERENCES pools(name), kind TEXT NOT NULL,
-  provider TEXT, address TEXT, storage TEXT, deleted_at TEXT, image TEXT);
+  name TEXT PRIMARY KEY, kind TEXT NOT NULL,
+  pool TEXT REFERENCES pools(name), ondemand TEXT REFERENCES ondemands(name),
+  cost_usd TEXT NOT NULL DEFAULT '0', expires_at TEXT,
+  provider TEXT, address TEXT, storage TEXT, deleted_at TEXT, image TEXT,
+  CHECK ((pool IS NULL) != (ondemand IS NULL)));
 CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, identity TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS runs(
   seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
   job TEXT NOT NULL REFERENCES jobs(id), spec TEXT NOT NULL, seed INTEGER, checkpoint TEXT,
-  pool TEXT NOT NULL REFERENCES pools(name), cohort TEXT REFERENCES cohorts(name),
+  pool TEXT REFERENCES pools(name), rent TEXT REFERENCES ondemands(name),
+  cohort TEXT REFERENCES cohorts(name),
   created_at TEXT NOT NULL,
   cancel_requested_at TEXT, version INTEGER NOT NULL DEFAULT 1,
   autorun INTEGER NOT NULL DEFAULT 0, queued INTEGER NOT NULL DEFAULT 0,
-  params TEXT NOT NULL DEFAULT '{}', source TEXT);
+  params TEXT NOT NULL DEFAULT '{}', source TEXT,
+  CHECK (pool IS NOT NULL OR rent IS NOT NULL));
 CREATE TABLE IF NOT EXISTS sessions(
-  seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, pool TEXT NOT NULL,
+  seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
   machine TEXT NOT NULL REFERENCES machines(name), planned_at TEXT NOT NULL,
   claimed_at TEXT, startup_deadline TEXT, receipt TEXT, started_at TEXT, refused_at TEXT, ended_at TEXT,
   version INTEGER NOT NULL DEFAULT 1, autorun INTEGER NOT NULL DEFAULT 0, hardware TEXT);
@@ -107,7 +115,7 @@ CREATE INDEX IF NOT EXISTS attempts_session ON attempts(session);
 
 Fact = str | int | None
 # Changes with the schema. There are no migrations: a file from another version is refused.
-_VERSION = 7
+_VERSION = 8
 
 
 def _text(at: datetime | None) -> str | None:
@@ -133,25 +141,16 @@ def _run(row: sqlite3.Row) -> RunRecord:
     )
 
 
-def _pool(row: sqlite3.Row) -> Pool:
-    template = row["on_demand_template"]
-    return Pool.model_validate(
-        {
-            **dict(row),
-            "on_demand_template": None
-            if template is None
-            else MachineTemplate.model_validate_json(template),
-        }
-    )
-
-
 # A rented machine has one working session for its whole life. What the provider
 # said about making and deleting the machine is recorded on that session.
-_MACHINES = """SELECT m.name, m.pool, m.kind, m.provider, m.address, m.storage, m.image,
+_MACHINES = """SELECT m.name, m.pool, m.ondemand, m.kind, m.cost_usd, m.expires_at,
+    m.provider, m.address, m.storage, m.image,
     w.claimed_at AS requested_at, w.receipt AS provider_id, w.hardware, w.refused_at,
     COALESCE(w.ended_at, m.deleted_at) AS deleted_at
     FROM machines m LEFT JOIN sessions w ON w.machine=m.name AND m.kind='rented'"""
-_SESSIONS = "SELECT w.* FROM sessions w"
+# A session's supply is its machine's: one owner for the fact.
+_SESSIONS = """SELECT w.*, COALESCE(m.pool, m.ondemand) AS supply
+    FROM sessions w JOIN machines m ON m.name = w.machine"""
 _RENTALS = "SELECT r.* FROM rentals r"
 
 
@@ -345,47 +344,48 @@ class Database:
         self._db.execute("COMMIT")
 
     @contextmanager
-    def pool_lock(self, pool: str, clock: Callable[[], datetime]) -> Iterator[bool]:
-        """Lease placement authority for five minutes, without holding a transaction.
+    def lock(self, supply: str, clock: Callable[[], datetime]) -> Iterator[bool]:
+        """Lease placement authority over a pool or on-demand for five minutes.
 
-        Other pools and readers keep working. Every placement write renews the
-        lease and fences an expired owner; abandoned sessions retain their IDs.
+        No transaction is held: other supplies and readers keep working. Every
+        placement write renews the lease and fences an expired owner; abandoned
+        sessions retain their IDs.
         """
         owner = uuid4().hex
         now = clock()
         with self._together():
             acquired = (
                 self._db.execute(
-                    """INSERT INTO pool_locks VALUES (?,?,?) ON CONFLICT(pool) DO UPDATE
+                    """INSERT INTO locks VALUES (?,?,?) ON CONFLICT(supply) DO UPDATE
                 SET owner=excluded.owner, expires_at=excluded.expires_at
-                WHERE pool_locks.expires_at <= ?""",
-                    (pool, owner, (now + timedelta(minutes=5)).isoformat(), now.isoformat()),
+                WHERE locks.expires_at <= ?""",
+                    (supply, owner, (now + timedelta(minutes=5)).isoformat(), now.isoformat()),
                 ).rowcount
                 == 1
             )
         if not acquired:
             yield False
             return
-        self._locks[pool] = owner, clock
+        self._locks[supply] = owner, clock
         try:
             yield True
         finally:
-            self._locks.pop(pool)
-            self._db.execute("DELETE FROM pool_locks WHERE pool=? AND owner=?", (pool, owner))
+            self._locks.pop(supply)
+            self._db.execute("DELETE FROM locks WHERE supply=? AND owner=?", (supply, owner))
 
-    def check_pool_lock(self, pool: str) -> None:
+    def check_lock(self, supply: str) -> None:
         """Fence stale processes before effects and inside placement transactions."""
-        held = self._locks.get(pool)
+        held = self._locks.get(supply)
         if held is None:
-            raise Stale(f"pool {pool!r} has no placement lock")
+            raise Stale(f"{supply!r} has no placement lock")
         owner, clock = held
         now = clock()
         changed = self._db.execute(
-            "UPDATE pool_locks SET expires_at=? WHERE pool=? AND owner=? AND expires_at>?",
-            ((now + timedelta(minutes=5)).isoformat(), pool, owner, now.isoformat()),
+            "UPDATE locks SET expires_at=? WHERE supply=? AND owner=? AND expires_at>?",
+            ((now + timedelta(minutes=5)).isoformat(), supply, owner, now.isoformat()),
         )
         if changed.rowcount != 1:
-            raise Stale(f"pool {pool!r} placement lock expired")
+            raise Stale(f"{supply!r} placement lock expired")
 
     def _change(self, table: str, id: str | str | str, version: int, **facts: Fact) -> None:
         sets = "".join(f"{name} = ?, " for name in facts)
@@ -437,28 +437,27 @@ class Database:
             Storage.model_validate(dict(row)) for row in self._db.execute("SELECT * FROM storages")
         )
 
+    def _unnamed(self, name: str) -> None:
+        """Pools and on-demands share one namespace, so a name refers to one supply."""
+        for table in ("pools", "ondemands"):
+            if self._db.execute(f"SELECT 1 FROM {table} WHERE name=?", (name,)).fetchone():
+                raise LauncherError(f"{name!r} already names a {table[:-1]}")
+
     def add_pool(self, pool: Pool) -> None:
         """Record a pool. Adding the same one again changes nothing."""
-        if pool.max_on_demand < 0:
-            raise LauncherError("pool machine limit must be zero or greater")
-        template = (
-            None if pool.on_demand_template is None else pool.on_demand_template.model_dump_json()
-        )
-        self._db.execute(
-            "INSERT OR IGNORE INTO pools VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (
-                pool.name,
-                template,
-                pool.max_on_demand,
-                pool.setup_seconds,
-                pool.max_rental_seconds,
-                int(pool.off),
-                pool.storage,
-                pool.startup_seconds,
-                pool.delivery_seconds,
-                pool.log_seconds,
-            ),
-        )
+        with self._together():
+            if not self._db.execute("SELECT 1 FROM pools WHERE name=?", (pool.name,)).fetchone():
+                self._unnamed(pool.name)
+                self._db.execute(
+                    "INSERT INTO pools VALUES (?,?,?,?,?)",
+                    (
+                        pool.name,
+                        int(pool.off),
+                        pool.startup_seconds,
+                        pool.delivery_seconds,
+                        pool.log_seconds,
+                    ),
+                )
         if self.pool(pool.name) != pool:
             raise LauncherError(f"pool {pool.name!r} already exists with other settings")
 
@@ -466,10 +465,50 @@ class Database:
         row = self._db.execute("SELECT * FROM pools WHERE name = ?", (name,)).fetchone()
         if row is None:
             raise LauncherError(f"no pool named {name!r}")
-        return _pool(row)
+        return Pool.model_validate(dict(row))
 
     def pools(self) -> tuple[Pool, ...]:
-        return tuple(_pool(row) for row in self._db.execute("SELECT * FROM pools"))
+        return tuple(
+            Pool.model_validate(dict(row)) for row in self._db.execute("SELECT * FROM pools")
+        )
+
+    def add_ondemand(self, ondemand: OnDemand) -> None:
+        """Record an on-demand. Adding the same one again changes nothing."""
+        with self._together():
+            if not self._db.execute(
+                "SELECT 1 FROM ondemands WHERE name=?", (ondemand.name,)
+            ).fetchone():
+                self._unnamed(ondemand.name)
+                self._db.execute(
+                    "INSERT INTO ondemands VALUES (?,?)",
+                    (ondemand.name, ondemand.model_dump_json()),
+                )
+        if self.ondemand(ondemand.name) != ondemand:
+            raise LauncherError(f"on-demand {ondemand.name!r} already exists with other settings")
+
+    def change_ondemand(self, ondemand: OnDemand) -> None:
+        """Replace an on-demand's settings; machines it already rented keep their windows."""
+        self.ondemand(ondemand.name)  # raises if no such on-demand
+        self._db.execute(
+            "UPDATE ondemands SET body=? WHERE name=?", (ondemand.model_dump_json(), ondemand.name)
+        )
+
+    def ondemand(self, name: str) -> OnDemand:
+        row = self._db.execute("SELECT body FROM ondemands WHERE name = ?", (name,)).fetchone()
+        if row is None:
+            raise LauncherError(f"no on-demand named {name!r}")
+        return OnDemand.model_validate_json(row[0])
+
+    def ondemands(self) -> tuple[OnDemand, ...]:
+        return tuple(
+            OnDemand.model_validate_json(row[0])
+            for row in self._db.execute("SELECT body FROM ondemands ORDER BY rowid")
+        )
+
+    def supply(self, name: str) -> Supply:
+        """The pool or on-demand with this name."""
+        row = self._db.execute("SELECT body FROM ondemands WHERE name = ?", (name,)).fetchone()
+        return self.pool(name) if row is None else OnDemand.model_validate_json(row[0])
 
     def name_controller_pool(self) -> None:
         """The controller's built-in machine must not be advertised as client-local.
@@ -479,10 +518,13 @@ class Database:
         if not any(p.name == "local" for p in self.pools()):
             return
         with self._together():
-            if any(p.name == "controller" for p in self.pools()):
-                raise LauncherError("cannot rename local pool: controller pool already exists")
+            if self._db.execute(
+                "SELECT 1 FROM pools WHERE name='controller' UNION SELECT 1 FROM ondemands"
+                " WHERE name='controller'"
+            ).fetchone():
+                raise LauncherError("cannot rename local pool: 'controller' is already named")
             self._db.execute("UPDATE pools SET name='controller' WHERE name='local'")
-            for table in ("machines", "runs", "sessions"):
+            for table in ("machines", "runs"):
                 self._db.execute(f"UPDATE {table} SET pool='controller' WHERE pool='local'")
             self._db.execute(
                 "UPDATE settings SET value='controller' WHERE name='default_pool' AND value='local'"
@@ -495,43 +537,40 @@ class Database:
             "UPDATE pools SET startup_seconds=? WHERE name=?", (checked.startup_seconds, name)
         )
 
-    def set_pool_max(self, name: str, maximum: int) -> None:
-        self.pool(name)
-        if maximum < 0:
-            raise LauncherError("pool machine limit must be zero or greater")
-        self._db.execute("UPDATE pools SET max_on_demand = ? WHERE name = ?", (maximum, name))
+    def default_target(self) -> Target:
+        # An empty value names nothing.
+        rows = dict(self._db.execute("SELECT name, value FROM settings").fetchall())
+        return Target(pool=rows["default_pool"] or None, rent=rows["default_rent"] or None)
 
-    def default_pool(self) -> str:
-        return str(
-            self._db.execute("SELECT value FROM settings WHERE name='default_pool'").fetchone()[0]
-        )
-
-    def set_default_pool(self, name: str) -> None:
-        self.pool(name)
-        self._db.execute("UPDATE settings SET value=? WHERE name='default_pool'", (name,))
-
-    def set_pool_image(self, name: str, image: Image) -> None:
-        """Change the image a pool's next on-demand machines boot."""
-        template = self.pool(name).on_demand_template
-        if template is None:
-            raise LauncherError(f"pool {name!r} makes no machines on demand")
-        changed = template.model_copy(update={"image": image}).model_dump_json()
-        self._db.execute("UPDATE pools SET on_demand_template = ? WHERE name = ?", (changed, name))
+    def set_default_target(self, target: Target) -> None:
+        with self._together():
+            if target.pool is not None:
+                self.pool(target.pool)
+            if target.rent is not None:
+                self.ondemand(target.rent)
+            for name, value in (("default_pool", target.pool), ("default_rent", target.rent)):
+                self._db.execute("UPDATE settings SET value=? WHERE name=?", (value or "", name))
 
     def turn_pool(self, name: str, *, off: bool) -> None:
         self.pool(name)  # raises if no such pool
         self._db.execute("UPDATE pools SET off = ? WHERE name = ?", (int(off), name))
 
     def add_machine(self, machine: Machine) -> None:
-        """Record a machine you own in its pool. Adding the same one again changes nothing."""
-        self.pool(machine.pool)  # raises if no such pool
+        """Record a machine in its pool or on-demand. Adding the same one again changes nothing."""
+        if machine.pool is not None:
+            self.pool(machine.pool)  # raises if no such pool
+        if machine.ondemand is not None:
+            self.ondemand(machine.ondemand)
         self._db.execute(
-            "INSERT OR IGNORE INTO machines(name, pool, kind, provider, address, storage, image)"
-            " VALUES (?,?,?,?,?,?,?)",
+            "INSERT OR IGNORE INTO machines(name, kind, pool, ondemand, cost_usd, expires_at,"
+            " provider, address, storage, image) VALUES (?,?,?,?,?,?,?,?,?,?)",
             (
                 machine.name,
-                machine.pool,
                 machine.kind,
+                machine.pool,
+                machine.ondemand,
+                str(machine.cost_usd),
+                _text(machine.expires_at),
                 machine.provider,
                 machine.address,
                 machine.storage,
@@ -547,11 +586,10 @@ class Database:
             raise LauncherError(f"no machine named {name!r}")
         return _machine(row)
 
-    def machines(self, pool: str, *, rented: bool = False) -> tuple[Machine, ...]:
-        """A pool's machines: the ones you added, or every one ever rented for it."""
+    def machines(self, supply: str) -> tuple[Machine, ...]:
+        """A pool's machines, or every machine ever rented from an on-demand."""
         rows = self._db.execute(
-            f"{_MACHINES} WHERE m.pool = ? AND (m.kind = 'rented') = ? ORDER BY m.rowid",
-            (pool, int(rented)),
+            f"{_MACHINES} WHERE m.pool = ? OR m.ondemand = ? ORDER BY m.rowid", (supply, supply)
         )
         return tuple(_machine(row) for row in rows)
 
@@ -566,8 +604,8 @@ class Database:
         launch: str | None = None,
     ) -> None:
         with self._together():
-            if attempts:
-                self.check_pool_lock(runs[0].pool)
+            for supply in {self.session(a.session).supply for a in attempts}:
+                self.check_lock(supply)
             if cohort is not None:
                 try:
                     self._db.execute(
@@ -588,8 +626,9 @@ class Database:
                 )
                 held = run.checkpoint
                 self._db.execute(
-                    """INSERT INTO runs(id, job, spec, seed, checkpoint, pool, cohort,
-                       created_at, autorun, queued, params, source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    """INSERT INTO runs(id, job, spec, seed, checkpoint, pool, rent, cohort,
+                       created_at, autorun, queued, params, source)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         run.id,
                         run.job,
@@ -597,6 +636,7 @@ class Database:
                         run.seed,
                         None if held is None else held.model_dump_json(),
                         run.pool,
+                        run.rent,
                         run.cohort,
                         run.created_at.isoformat(),
                         int(run.autorun),
@@ -644,8 +684,8 @@ class Database:
             created_at=datetime.fromisoformat(row["created_at"]),
         )
 
-    def waiting(self, pool: str) -> tuple[RunRecord, ...]:
-        """Runs that want a new attempt, oldest first.
+    def waiting(self, supply: str) -> tuple[RunRecord, ...]:
+        """Runs that may use this pool or on-demand and want a new attempt, oldest first.
 
         A run waits when nobody cancelled it and every attempt so far had a
         confirmed infrastructure loss, with tries left. The launcher checks budgets.
@@ -654,11 +694,11 @@ class Database:
         rows = self._db.execute(
             f"""SELECT r.*, (SELECT count(*) FROM attempts a WHERE a.run = r.id) AS tries
                 FROM runs r
-                WHERE r.pool = ? AND r.cancel_requested_at IS NULL
+                WHERE (r.pool = ? OR r.rent = ?) AND r.cancel_requested_at IS NULL
                 AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.run = r.id AND (
                   a.outcome IS NULL OR a.outcome != 'lost' OR a.cause NOT IN ({marks})))
                 ORDER BY r.seq""",
-            (pool, *sorted(RETRYABLE)),
+            (supply, supply, *sorted(RETRYABLE)),
         ).fetchall()
         return tuple(run for row in rows if (run := _run(row)).spec.max_attempts > row["tries"])
 
@@ -668,34 +708,32 @@ class Database:
         self,
         session: Session,
         attempts: Sequence[RunAttempt] = (),
-        on_demand: Machine | None = None,
+        rented: Machine | None = None,
         rental: Rental | None = None,
         *,
         launch: str | None = None,
     ) -> None:
-        """Record a session, its attempts and any machine to make, before any provider is asked."""
+        """Record a session, its attempts and any machine to rent, before any provider is asked."""
         with self._together():
-            self.check_pool_lock(session.pool)
+            self.check_lock(session.supply)
             if self.machine_busy(session.machine):
                 raise Stale(f"machine {session.machine!r} still has a run on it")
-            pool = self.pool(session.pool)
-            if pool.off:
-                raise Stale(f"pool {pool.name!r} is turned off")
-            live = [w for w in self.unsettled_sessions() if w.pool == session.pool]
-            if on_demand is None:
+            live = [w for w in self.unsettled_sessions() if w.supply == session.supply]
+            if rented is None:
+                if self.pool(session.supply).off:
+                    raise Stale(f"pool {session.supply!r} is turned off")
                 if any(w.machine == session.machine for w in live):
                     raise Stale(f"machine {session.machine!r} already has a session")
             else:
-                active = sum(self.machine(w.machine).kind == "rented" for w in live)
-                manual = rental is not None and rental.kept and pool.max_on_demand == 0
-                if not manual and active >= pool.max_on_demand:
-                    raise Stale(f"pool {pool.name!r} is at its machine limit")
-                self.add_machine(on_demand)
+                limit = self.ondemand(session.supply).max_machines
+                manual = rental is not None and rental.kept and limit == 0
+                if not manual and len(live) >= limit:
+                    raise Stale(f"on-demand {session.supply!r} is at its machine limit")
+                self.add_machine(rented)
             self._db.execute(
-                """INSERT INTO sessions(id,pool,machine,planned_at,autorun) VALUES (?,?,?,?,?)""",
+                """INSERT INTO sessions(id,machine,planned_at,autorun) VALUES (?,?,?,?)""",
                 (
                     session.id,
-                    session.pool,
                     session.machine,
                     session.planned_at.isoformat(),
                     int(session.autorun),
@@ -722,7 +760,7 @@ class Database:
     def place(self, session: Session, attempts: Sequence[RunAttempt]) -> None:
         """Put more attempts on a session that already exists."""
         with self._together():
-            self.check_pool_lock(session.pool)
+            self.check_lock(session.supply)
             self._change("sessions", session.id, session.version)
             if self.machine_busy(session.machine):
                 raise Stale(f"session {session.id!r} already has work")
@@ -756,8 +794,8 @@ class Database:
     def claim(self, session: Session, at: datetime) -> None:
         """Take the one right to create this session. Whoever gets Stale must not create."""
         with self._together():
-            self.check_pool_lock(session.pool)
-            seconds = self.pool(session.pool).startup_seconds
+            self.check_lock(session.supply)
+            seconds = self.supply(session.supply).startup_seconds
             deadline = None if seconds is None else at + timedelta(seconds=seconds)
             self._change(
                 "sessions",

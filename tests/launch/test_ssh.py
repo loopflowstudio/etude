@@ -22,7 +22,7 @@ def test_remote_host_runs_kept_work_logs_outputs_and_stops(tmp_path: Path) -> No
     ssh = SSH("bench", str(tmp_path / "remote"), str(executable), sys.executable)
     journal = SSHJournal(ssh)
     service = Executor(OwnedMachine("bench"), SSHStart(ssh), journal)
-    scheduler = Scheduler(Database(tmp_path / "state.db"), {"ssh": lambda pool, machine: service})
+    scheduler = Scheduler(Database(tmp_path / "state.db"), {"ssh": lambda held: service})
     scheduler.add_machine("bench", "bench")
     run = scheduler.launch(
         Job(
@@ -63,9 +63,7 @@ def test_continuation_moves_between_local_and_remote_disk_including_kept_work(
     remote = Executor(OwnedMachine("bench"), SSHStart(ssh), SSHJournal(ssh))
     here = local(tmp_path / "local")
     store = Database(tmp_path / "state.db")
-    scheduler = Scheduler(
-        store, {"ssh": lambda pool, machine: remote, "local": lambda pool, machine: here}
-    )
+    scheduler = Scheduler(store, {"ssh": lambda held: remote, "local": lambda held: here})
     scheduler.add_pool(Pool(name="local"))
     store.add_machine(Machine(name="local", pool="local", kind="local"))
     scheduler.add_machine("bench", "bench")
