@@ -144,16 +144,28 @@ evaluate(
   model seat and plays each given matchup; with no checkpoint it plays every
   matchup ever defined for every checkpoint held, skipping what is delivered.
 - **Round robins.** `hold(round_robin, enter=agents)` plays every pair of
-  entrants once per condition; seat swaps belong inside `play`.
-- **Stored.** A tournament lives under `tournaments/NAME/` beside the runs, as
-  files written once and never replaced, so many eval runs can grow it at
-  once. Another format or environment under the same name is refused, as is
-  a matchup name defined again differently. No run may be named `tournaments`.
-- **Splitting.** `share=(k, n)` plays one of n disjoint parts, for n
-  machines. The same arguments resume the same eval run.
-- **Cost.** Every hold lists the tournament's folder once. Holding a new
-  checkpoint or new entrants reads nothing more of it; any other hold also
-  lists each of its eval runs' matches, to skip what any of them delivered.
+  the agents given once per condition; seat swaps belong inside `play`.
+  `hold(round_robin)` then plays every pair of every entrant so far that no
+  eval run delivered, such as a late entrant against the earlier ones.
+- **Stored in its eval runs.** Each eval run a `hold` starts keeps
+  `tournament.json` in its own folder: the definition it was held with, and
+  the checkpoint or entrants it added. A tournament is every eval run naming
+  it, so a hold on a rented machine delivers its part like any other run, and
+  many eval runs can grow one tournament at once. A match two of them hold
+  counts once.
+- **Conflicts.** Another format, environment or round-robin rules under one
+  name (`tournament_conflict`), or a matchup name defined two ways
+  (`matchup_conflict`), is refused by a batch hold and by `curves` and
+  `standings`; `connect` reports it in the `tournaments` table.
+- **Run names.** Under `etude launch` the eval run is the launched run
+  (`ETUDE_RUN`), so `etude logs` and `status` lead to it and a retry resumes
+  it. Elsewhere it is named for the tournament and what is given; the same
+  call resumes it.
+- **Splitting.** `share=(k, n)` plays one of n disjoint parts, for n machines.
+- **Cost.** Holding a checkpoint or entrants reads nothing of the
+  tournament: it plays their matches. Holding nothing new (batch) lists each
+  place once and reads each eval run's `tournament.json`, to play what the
+  tournament calls for and no eval run delivered.
 - **`curves`** gives one line per matchup and training run: each checkpoint's
   ordinal, the clocks where its run stood when it saved it, and the first
   player's value with a 95% interval over whole matches.
@@ -164,9 +176,10 @@ evaluate(
 ## Querying
 
 `connect` gives each of your tables across every eval run, beside Etude's own:
-`runs`, `agents` (with a `config.KEY` column per scalar config key, dotted when
-nested), `matches`, `seats`, `groups`, `tournaments`, `schedule` (every match
-a tournament calls for, with its matchup and checkpoint) and
+`runs` (with the tournament each was held for), `agents` (with a `config.KEY`
+column per scalar config key, dotted when nested), `matches`, `seats`,
+`groups`, `tournaments` (with any `conflict` among its eval runs), `schedule`
+(every match a tournament calls for, with its matchup and checkpoint) and
 `training_checkpoints` (every checkpoint a training run under the source
 recorded, joined to agents by `artifact`).
 

@@ -5,10 +5,11 @@ An eval run is a run with kind "evaluation" and no clocks: `run.json`, then
 `tables/` and Etude's record of the match, `matches/KEY.json` (or
 `matches/KEY.failed.json`).
 
-A tournament (`Benchmark` or `RoundRobin`) is stored beside the runs under
-`tournaments/NAME/`, as files that are written once and never replaced. Its
-schedule is derived from those files, by `Matchup.matches` and
-`RoundRobin.matches`, wherever it is read.
+An eval run held for a tournament (`Benchmark` or `RoundRobin`) also stores
+`tournament.json` (`TournamentRun`): the definition it was held with and what
+it added. A tournament is nothing more than the eval runs naming it;
+`assemble` makes one from them, and its schedule follows by
+`Matchup.matches` and `RoundRobin.matches` wherever it is read.
 
 An agent is what plays together with how it is configured, identified across
 eval runs by a digest of both, never by its name: one checkpoint at two
@@ -27,6 +28,7 @@ from typing import Any, Literal, Self
 
 from pydantic import BaseModel, Field, JsonValue, field_validator, model_validator
 
+from etude.run.errors import EtudeError
 from etude.run.records import ArtifactRef, Digest, Name, Record
 from etude.run.storage import SAFE_NAME
 
@@ -40,6 +42,9 @@ COLUMN_TYPES: dict[type, ColumnType] = {
     float: "DOUBLE",
     str: "VARCHAR",
 }
+
+# An eval run held for a tournament keeps this file in its folder (`TournamentRun`).
+TOURNAMENT_FILE = "tournament.json"
 
 # Every match has this group, holding every seat.
 EVERYONE = "all"
@@ -196,11 +201,6 @@ class Matchup(Record):
     conditions: tuple[Mapping[str, JsonValue], ...] = Field(min_length=1)
     games: int = Field(ge=1)
 
-    @property
-    def file(self) -> str:
-        """`matchups/NAME.DEFINITION.json`, digests both: a listing alone shows a redefined name."""
-        return f"matchups/{digest(self.name)}.{digest(self.model_dump(mode='json'))}.json"
-
     def matches(self, checkpoint: ArtifactRef) -> list[Match]:
         """One match per condition, with `checkpoint` in every model's seat."""
         seated = tuple(
@@ -215,9 +215,7 @@ class Matchup(Record):
 class Benchmark(Record):
     """Matchups a model's checkpoints are each held for, to follow it through training.
 
-    Stored under `tournaments/NAME/`: `benchmark.json` (without matchups),
-    `matchups/` (every matchup any hold defined), `models/SHA256.json` (each
-    checkpoint held) and `runs/`.
+    Its matchups are every matchup any of its eval runs was held with.
     """
 
     name: Name
@@ -236,8 +234,8 @@ class Benchmark(Record):
 class RoundRobin(Record):
     """Hand-picked agents, every two of them once per condition.
 
-    Stored under `tournaments/NAME/`: `round_robin.json`, `entrants/IDENTITY.json`
-    and `runs/`. Seat swaps belong inside the author's match.
+    Its entrants are every agent any of its eval runs entered. Seat swaps
+    belong inside the author's match.
     """
 
     name: Name
@@ -263,10 +261,74 @@ class RoundRobin(Record):
 
 
 class TournamentRun(Record):
-    """`tournaments/NAME/runs/RUN.json`: an eval run held for the tournament, and what it added."""
+    """`RUN/tournament.json`: the tournament an eval run was held for, and what it added."""
 
-    run: Name
-    checkpoint: Digest | None = None
-    entrants: tuple[Digest, ...] = ()
+    tournament: Benchmark | RoundRobin
+    checkpoint: ArtifactRef | None = None
+    entrants: tuple[Agent, ...] = ()
     # (k, n): the run plays the matches whose key is k modulo n.
     share: tuple[int, int] = (0, 1)
+
+
+class Scheduled(Record):
+    """A match a tournament calls for; a benchmark's also names its matchup and checkpoint."""
+
+    match: Match
+    matchup: str | None = None
+    checkpoint: Digest | None = None
+
+
+class Tournament(Record):
+    """A tournament as its eval runs hold it: every matchup, checkpoint and entrant they added."""
+
+    definition: Benchmark | RoundRobin
+    checkpoints: tuple[ArtifactRef, ...] = ()
+    entrants: tuple[Agent, ...] = ()
+
+    def schedule(self) -> list[Scheduled]:
+        """Each matchup for each checkpoint, or each pair of entrants; held or not."""
+        if isinstance(self.definition, RoundRobin):
+            return [Scheduled(match=match) for match in self.definition.matches(self.entrants)]
+        return [
+            Scheduled(match=match, matchup=matchup.name, checkpoint=checkpoint.sha256)
+            for matchup in self.definition.matchups
+            for checkpoint in self.checkpoints
+            for match in matchup.matches(checkpoint)
+        ]
+
+
+def assemble(held: Iterable[TournamentRun]) -> Tournament:
+    """The tournament its eval runs make together, from the first of them on.
+
+    Raises `EtudeError("tournament_conflict")` when they disagree on its
+    format or environment, or a round robin's conditions or games, and
+    `EtudeError("matchup_conflict")` when they define one matchup name two ways.
+    """
+    runs = list(held)
+    first = runs[0].tournament
+    matchups: dict[str, Matchup] = {}
+    checkpoints: dict[Digest, ArtifactRef] = {}
+    entrants: dict[Digest, Agent] = {}
+    for run in runs:
+        given = run.tournament
+        if type(given) is not type(first) or given.environment != first.environment:
+            raise EtudeError("tournament_conflict", 409) from ValueError(first.name)
+        if isinstance(given, RoundRobin) and given != first:
+            raise EtudeError("tournament_conflict", 409) from ValueError(first.name)
+        if isinstance(given, Benchmark):
+            for each in given.matchups:
+                if matchups.setdefault(each.name, each) != each:
+                    raise EtudeError("matchup_conflict", 409) from ValueError(each.name)
+        if run.checkpoint is not None and run.checkpoint.sha256 is not None:
+            checkpoints.setdefault(run.checkpoint.sha256, run.checkpoint)
+        entrants.update((each.identity, each) for each in run.entrants)
+    definition = (
+        first.model_copy(update={"matchups": tuple(matchups[name] for name in sorted(matchups))})
+        if isinstance(first, Benchmark)
+        else first
+    )
+    return Tournament(
+        definition=definition,
+        checkpoints=tuple(checkpoints[key] for key in sorted(checkpoints)),
+        entrants=tuple(entrants[key] for key in sorted(entrants)),
+    )

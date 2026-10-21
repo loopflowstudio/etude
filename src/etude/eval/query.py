@@ -11,11 +11,14 @@ tables:
 | `matches` | run, match, conditions, games, seed, state, error, wall_ms |
 | `seats` | run, match, player, agent |
 | `groups` | run, match, group, player |
-| `tournaments` | tournament, format (`benchmark` or `round_robin`), environment |
+| `tournaments` | tournament, format (`benchmark` or `round_robin`), environment, conflict |
 | `schedule` | tournament, match, matchup and checkpoint (artifact digest) of a benchmark's match |
 | `training_checkpoints` | run, experiment, ordinal, artifact, wall_ms, clocks (where each stood) |
 
-`schedule` holds every match a stored tournament calls for, held or not.
+A tournament is assembled from the eval runs naming it in their
+`tournament.json`. `schedule` holds every match it calls for, held or not.
+When its eval runs disagree, `conflict` names how (`tournament_conflict`,
+`matchup_conflict`) and it has no schedule.
 `training_checkpoints` holds every checkpoint a training run recorded under
 the source, read from its stored JSON, so a checkpoint agent joins to where
 its run's clocks stood (`agents.artifact = training_checkpoints.artifact`).
@@ -32,7 +35,6 @@ except `all`. Results from different environments are never pooled.
 from __future__ import annotations
 
 import json
-import re
 import tempfile
 import warnings
 from collections.abc import Sequence
@@ -43,23 +45,23 @@ from typing import TYPE_CHECKING, cast
 import numpy as np
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
-from etude.eval.match import ETUDE_TABLES, IDENTIFIER, KIND, TOURNAMENTS, quote
+from etude.eval.match import ETUDE_TABLES, IDENTIFIER, KIND, quote
 from etude.eval.records import (
     COLUMN_TYPES,
     TABLE_FILE,
+    TOURNAMENT_FILE,
     Agent,
     Benchmark,
     ColumnType,
     Environment,
-    Match,
     MatchRecord,
-    Matchup,
-    RoundRobin,
+    Scheduled,
     TournamentRun,
+    assemble,
 )
 from etude.run.errors import EtudeError
 from etude.run.listing import as_storage, declared, places
-from etude.run.records import ArtifactRef, Digest, Record
+from etude.run.records import Digest, Record
 from etude.run.storage import DirectoryStorage, Storage
 
 if TYPE_CHECKING:
@@ -70,7 +72,7 @@ SEED = 0
 
 
 def connect(source: Storage | Path | str) -> duckdb.DuckDBPyConnection:
-    """Every eval run and tournament under a directory or bucket, at any depth, as one DuckDB database."""
+    """Every eval run, and the tournaments they make, under a directory or bucket at any depth, in DuckDB."""
     # Imported here: DuckDB is the optional `eval` extra.
     import duckdb  # noqa: PLC0415
 
@@ -101,12 +103,14 @@ def connect(source: Storage | Path | str) -> duckdb.DuckDBPyConnection:
                     record = MatchRecord.model_validate_json(storage.get(place + name))
                     if record.match.key not in held or record.state == "done":
                         held[record.match.key] = record
+                elif name == TOURNAMENT_FILE:
+                    found.held.setdefault(run, TournamentRun.model_validate_json(
+                        storage.get(place + name)))  # fmt: skip
                 elif parsed := TABLE_FILE.match(name):
                     files.setdefault(parsed[1], []).append(
                         _local(storage, place + name, Path(copies) / run / name)
                     )
             found.records += [(run, record) for record in held.values()]
-        _tournaments(storage, found)
         _etude_tables(db, found)
         for table, paths in sorted(files.items()):
             listed = ", ".join(quote(path) for path in paths)
@@ -128,13 +132,8 @@ class _Found:
 
     runs: list[tuple[str, str, Environment]] = field(default_factory=list)
     records: list[tuple[str, MatchRecord]] = field(default_factory=list)
-    tournaments: dict[str, Benchmark | RoundRobin] = field(default_factory=dict)
-    # Per tournament, each stored file of a folder by its name.
-    matchups: dict[str, dict[str, Matchup]] = field(default_factory=dict)
-    models: dict[str, dict[str, ArtifactRef]] = field(default_factory=dict)
-    entrants: dict[str, dict[str, Agent]] = field(default_factory=dict)
-    # Eval run name to its tournament.
-    held_for: dict[str, str] = field(default_factory=dict)
+    # Each eval run held for a tournament, by its name, and what it added.
+    held: dict[str, TournamentRun] = field(default_factory=dict)
     checkpoints: list[tuple[str, str, _StoredCheckpoint]] = field(default_factory=list)
 
 
@@ -167,50 +166,13 @@ def _checkpoints(
     return [(run, experiment, found[ordinal]) for ordinal in sorted(found)]
 
 
-# `…tournaments/NAME/FILE` at any depth: the tournament's own file, or `FOLDER/ID.json`.
-_TOURNAMENT_FILE = re.compile(
-    rf"^(?:.*/)?{TOURNAMENTS}/([^/]+)/"
-    r"(benchmark\.json|round_robin\.json|(matchups|models|entrants|runs)/([^/]+)\.json)$"
-)
-
-
-def _tournaments(storage: Storage, found: _Found) -> None:
-    for key in storage.keys(""):
-        parsed = _TOURNAMENT_FILE.match(key)
-        if parsed is None:
-            continue
-        name, file, folder, stem = parsed[1], parsed[2], parsed[3], parsed[4]
-        body = storage.get(key)
-        if file == "benchmark.json":
-            found.tournaments[name] = Benchmark.model_validate_json(body)
-        elif file == "round_robin.json":
-            found.tournaments[name] = RoundRobin.model_validate_json(body)
-        elif folder == "runs":
-            found.held_for[TournamentRun.model_validate_json(body).run] = name
-        elif folder == "matchups":
-            found.matchups.setdefault(name, {})[stem] = Matchup.model_validate_json(body)
-        elif folder == "models":
-            found.models.setdefault(name, {})[stem] = ArtifactRef.model_validate_json(body)
-        else:
-            found.entrants.setdefault(name, {})[stem] = Agent.model_validate_json(body)
-
-
-def _schedule(found: _Found) -> list[tuple[str, Match, str | None, str | None]]:
-    """Every match each stored tournament calls for, with its matchup and checkpoint."""
-    scheduled: list[tuple[str, Match, str | None, str | None]] = []
-    for name, held in sorted(found.tournaments.items()):
-        if isinstance(held, RoundRobin):
-            entrants = found.entrants.get(name, {}).values()
-            scheduled += [(name, match, None, None) for match in held.matches(entrants)]
-            continue
-        models = sorted(found.models.get(name, {}).values(), key=lambda ref: ref.uri)
-        scheduled += [
-            (name, match, matchup.name, ref.sha256)
-            for _, matchup in sorted(found.matchups.get(name, {}).items())
-            for ref in models
-            for match in matchup.matches(ref)
-        ]
-    return scheduled
+def _tournaments(found: _Found) -> dict[str, list[TournamentRun]]:
+    """The eval runs naming each tournament, in run order."""
+    by_name: dict[str, list[TournamentRun]] = {}
+    for run in sorted(found.held):
+        added = found.held[run]
+        by_name.setdefault(added.tournament.name, []).append(added)
+    return by_name
 
 
 def _environment(storage: Storage, folders: Sequence[str]) -> Environment | None:
@@ -239,7 +201,8 @@ def _etude_tables(db: duckdb.DuckDBPyConnection, found: _Found) -> None:
         "insert into runs values (?, ?, ?, ?, ?, ?)",
         [
             [run, experiment, environment.identity, environment.name,
-             json.dumps(environment.config), found.held_for.get(run)]
+             json.dumps(environment.config),
+             found.held[run].tournament.name if run in found.held else None]
             for run, experiment, environment in found.runs
         ],
     )  # fmt: skip
@@ -273,29 +236,37 @@ def _etude_tables(db: duckdb.DuckDBPyConnection, found: _Found) -> None:
         )
         for seated in match.agents:
             agents.setdefault(seated.identity, []).append(seated)
-    db.execute("create table tournaments (tournament VARCHAR, format VARCHAR, environment VARCHAR)")
-    _insert(
-        db,
-        "insert into tournaments values (?, ?, ?)",
-        [
-            [name, "benchmark" if isinstance(held, Benchmark) else "round_robin",
-             held.environment.identity]
-            for name, held in sorted(found.tournaments.items())
-        ],
-    )  # fmt: skip
+    db.execute(
+        "create table tournaments (tournament VARCHAR, format VARCHAR, environment VARCHAR,"
+        " conflict VARCHAR)"
+    )
     db.execute(
         "create table schedule (tournament VARCHAR, match VARCHAR, matchup VARCHAR,"
         " checkpoint VARCHAR)"
     )
-    scheduled = _schedule(found)
-    _insert(
-        db,
-        "insert into schedule values (?, ?, ?, ?)",
-        [[name, match.key, matchup, checkpoint] for name, match, matchup, checkpoint in scheduled],
-    )
+    scheduled: list[Scheduled] = []
+    for name, held in _tournaments(found).items():
+        # Every eval run agrees with the first on format and environment, or conflicts.
+        first = held[0].tournament
+        conflict: str | None = None
+        try:
+            schedule = assemble(held).schedule()
+        except EtudeError as refused:
+            conflict, schedule = refused.code, []
+        db.execute(
+            "insert into tournaments values (?, ?, ?, ?)",
+            [name, "benchmark" if isinstance(first, Benchmark) else "round_robin",
+             first.environment.identity, conflict],
+        )  # fmt: skip
+        _insert(
+            db,
+            "insert into schedule values (?, ?, ?, ?)",
+            [[name, each.match.key, each.matchup, each.checkpoint] for each in schedule],
+        )
+        scheduled += schedule
     # Agents of matches not yet held, so every scheduled agent has a name.
-    for _, match, _, _ in scheduled:
-        for seated in match.agents:
+    for each in scheduled:
+        for seated in each.match.agents:
             agents.setdefault(seated.identity, []).append(seated)
     db.execute(
         "create table training_checkpoints (run VARCHAR, experiment VARCHAR, ordinal BIGINT,"
