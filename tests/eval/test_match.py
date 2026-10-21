@@ -244,10 +244,3 @@ def test_an_agent_may_play_itself(tmp_path: Path) -> None:
         ((deep.identity,), (deep.identity,)): (0.5, 12),
         ((deep.identity,), None): (0.5, 12),
     }
-
-
-def test_no_run_may_take_the_tournaments_folder(tmp_path: Path) -> None:
-    with pytest.raises(EtudeError) as refused:
-        evaluate(experiment="league", environment=environment("duel"), play=play, matches=[],
-                 run="tournaments", directory=tmp_path)  # fmt: skip
-    assert refused.value.code == "run_name_reserved"

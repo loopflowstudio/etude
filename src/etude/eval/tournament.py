@@ -1,51 +1,56 @@
-"""Tournaments: stored structures that arrange eval runs to produce a set of matches.
+"""Tournaments: structures that arrange eval runs to produce a set of matches.
 
 A `Benchmark` (`etude.eval.records`) is named matchups a model's checkpoints
 are held for; a `RoundRobin` is hand-picked agents, every two of them once.
-`hold` stores the tournament and what it adds, then plays, as one eval run
-(`etude.eval.match.evaluate`), the matches added. `curves` follows each
-matchup over training; `standings` ranks a round robin. Both read a database
-`etude.eval.query.connect` opened.
+`hold` plays, as one eval run (`etude.eval.match.evaluate`), the matches a
+tournament adds. `curves` follows each matchup over training; `standings`
+ranks a round robin. Both read a database `etude.eval.query.connect` opened.
 
-A tournament lives under `tournaments/NAME/` beside the runs, in the local
-runs directory and every storage, as files written once and never replaced,
-so many small eval runs may grow it at once. Its schedule is derived from
-those files: each matchup for each checkpoint held, or each pair of entrants.
-Adding a matchup, a checkpoint or an entrant only adds matches. A match held
-by two of the tournament's eval runs counts once, from the later.
+A tournament is stored nowhere but in its eval runs: each keeps, in its own
+folder, `tournament.json` (`TournamentRun`), the definition it was held with
+and the checkpoint or entrants it added. The tournament is every eval run
+naming it (`etude.eval.records.assemble`), so a run delivered from a rented
+machine like any other run brings its part of the tournament with it, and
+many small eval runs may grow one tournament at once. A match two of them
+hold counts once, from the later.
 
-A hold reads one listing of the tournament's folder per place. Holding a new
-checkpoint, or new entrants, also reads nothing else of the tournament: the
-matches it adds can be held nowhere yet. Any other hold skips what the
-tournament's eval runs delivered, by listing them.
+Holding a checkpoint, or entrants, reads nothing of the tournament: it plays
+the matches those add, which no other eval run need have played. Any other
+hold lists each place once, reads every eval run's `tournament.json`, and
+plays what the tournament calls for and none of its eval runs delivered.
 """
 
 from __future__ import annotations
 
 import json
-from collections import Counter
+import os
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from etude.eval.match import ETUDE_TABLES, IDENTIFIER, TOURNAMENTS, EvalRun, Tables, evaluate
+from etude.eval.match import ETUDE_TABLES, IDENTIFIER, KIND, EvalRun, Tables, evaluate
 from etude.eval.query import compare, estimate
 from etude.eval.records import (
+    TOURNAMENT_FILE,
     Agent,
     Benchmark,
     Match,
-    Matchup,
     RoundRobin,
     TournamentRun,
+    assemble,
     digest,
 )
+from etude.run.declaration import declare
 from etude.run.errors import EtudeError
 from etude.run.records import ArtifactRef, Digest, Record
-from etude.run.storage import DirectoryStorage, Storage, default_root, run_prefix
+from etude.run.storage import DirectoryStorage, Storage, default_root
 
 if TYPE_CHECKING:
     import duckdb
+
+# A run's `tournament.json`, at any depth of a listing.
+_IN_RUN = "/" + TOURNAMENT_FILE
 
 
 def hold(
@@ -59,49 +64,56 @@ def hold(
     storages: Sequence[Storage] = (),
     share: tuple[int, int] = (0, 1),
 ) -> EvalRun:
-    """Store the tournament and what is given, then play the matches added as one eval run.
+    """Play, as one eval run, the matches the tournament adds; the run records what was given.
 
     A benchmark held with `checkpoint` (on the go) plays each of the given
     matchups with the checkpoint in the model's seats. Held without one
-    (batch), it plays every matchup ever defined for every checkpoint held,
-    skipping what was delivered, so a matchup added later is played for
-    every checkpoint so far. A round robin enters the agents given and plays
-    their pairs; with none, every pair not yet delivered.
+    (batch), it plays every matchup any eval run defined for every checkpoint
+    any held, skipping what was delivered, so a matchup added later is played
+    for every checkpoint so far. A round robin held with `enter` plays every
+    pair of the agents given; with none, every pair of every entrant so far
+    not yet delivered.
 
     `share=(k, n)` plays only the matches whose key is k modulo n, so n
-    machines may split one hold. The eval run is named for the tournament,
-    what is given and the share, so the same call resumes it. Raises
-    `EtudeError("tournament_conflict")` when the stored tournament has another
-    format or environment, `EtudeError("matchup_conflict")` when a matchup's
-    name is stored with another definition, and whatever `evaluate` raises.
+    machines may split one hold. Under `etude launch` the eval run is the
+    launched run (`ETUDE_RUN`); elsewhere it is named for what is given, so
+    the same call resumes it. A batch hold raises
+    `EtudeError("tournament_conflict")` when the tournament's eval runs or
+    this definition disagree on its format, environment or rules, and
+    `EtudeError("matchup_conflict")` when they define a matchup name two ways;
+    an on-the-go hold leaves those to be found on read. Raises whatever
+    `evaluate` raises.
     """
     k, n = share
     if not 0 <= k < n:
         raise EtudeError("share_out_of_range", 422)
-    base = Path(directory) if directory is not None else default_root()
-    stored = _Stored(tournament.name, [DirectoryStorage(base), *storages])
-    if isinstance(tournament, Benchmark):
-        if enter:
-            raise EtudeError("benchmark_holds_checkpoints_not_entrants", 422)
-        stored.settle("benchmark.json", tournament.model_copy(update={"matchups": ()}))
-        matches, fresh = _benchmark_matches(stored, tournament, checkpoint)
-    else:
-        if checkpoint is not None:
-            raise EtudeError("round_robin_holds_entrants_not_checkpoints", 422)
-        stored.settle("round_robin.json", tournament)
-        matches, fresh = _round_robin_matches(stored, tournament, enter)
+    if isinstance(tournament, Benchmark) and enter:
+        raise EtudeError("benchmark_holds_checkpoints_not_entrants", 422)
+    if isinstance(tournament, RoundRobin) and checkpoint is not None:
+        raise EtudeError("round_robin_holds_entrants_not_checkpoints", 422)
+    if checkpoint is not None and checkpoint.sha256 is None:
+        raise EtudeError("checkpoint_agent_requires_digest", 422)
+    added = TournamentRun(
+        tournament=tournament, checkpoint=checkpoint, entrants=tuple(enter), share=share
+    )
+    on_the_go = checkpoint is not None or bool(enter)
+    delivered: set[Digest] = set()
+    held = [added]
+    if not on_the_go:
+        base = Path(directory) if directory is not None else default_root()
+        stored, delivered = _stored(tournament.name, [DirectoryStorage(base), *storages])
+        held = [*stored, added]
     # Two matchups may share a match; it is played once.
-    pending = [each for key, each in sorted(matches.items()) if int(key, 16) % n == k]
-    if not fresh:
-        delivered = stored.delivered()
-        pending = [each for each in pending if each.key not in delivered]
-    model = checkpoint.sha256 if checkpoint is not None else None
-    entrants = tuple(sorted({each.identity for each in enter}))
-    # Named for the arguments, so the same hold resumes the same eval run and
-    # rewrites nothing.
-    run = f"{tournament.name}.{digest([model, list(entrants), [k, n]])[:12]}"
-    added = TournamentRun(run=run, checkpoint=model, entrants=entrants, share=share)
-    stored.write(f"runs/{run}.json", added.model_dump_json())
+    matches = {each.match.key: each.match for each in assemble(held).schedule()}
+    pending = [
+        match
+        for key, match in sorted(matches.items())
+        if int(key, 16) % n == k and key not in delivered
+    ]
+    run = os.environ.get("ETUDE_RUN") or (
+        f"{tournament.name}.{digest(added.model_dump(mode='json'))[:12]}"
+    )
+    _record(added, run, directory)
     return evaluate(
         experiment=tournament.name,
         environment=tournament.environment,
@@ -114,112 +126,41 @@ def hold(
     )
 
 
-def _benchmark_matches(
-    stored: _Stored, benchmark: Benchmark, checkpoint: ArtifactRef | None
-) -> tuple[dict[Digest, Match], bool]:
-    """The matches a hold adds, by key, and whether none of them can be delivered yet."""
-    given = {each.file: each for each in benchmark.matchups}
-    # A file name's first part is the matchup name's digest. Two holds may also
-    # define one name at once, so stored files are checked against each other too.
-    names = Counter(file.split(".")[0] for file in stored.listed("matchups/") | given.keys())
-    if clashing := {name for name, files in names.items() if files > 1}:
-        redefined = [each.name for file, each in given.items() if file.split(".")[0] in clashing]
-        raise EtudeError("matchup_conflict", 409) from ValueError(redefined or sorted(clashing))
-    for file, each in given.items():
-        stored.write(file, each.model_dump_json())
-    models = stored.listed("models/")
-    if checkpoint is not None:
-        if checkpoint.sha256 is None:
-            raise EtudeError("checkpoint_agent_requires_digest", 422)
-        model = f"models/{checkpoint.sha256}.json"
-        fresh = model not in models
-        stored.write(model, checkpoint.model_dump_json())
-        return {m.key: m for each in given.values() for m in each.matches(checkpoint)}, fresh
-    matchups = [
-        given.get(file) or Matchup.model_validate_json(stored.read(file))
-        for file in sorted(stored.listed("matchups/"))
-    ]
-    held = [ArtifactRef.model_validate_json(stored.read(file)) for file in sorted(models)]
-    return {m.key: m for each in matchups for ref in held for m in each.matches(ref)}, False
+def _record(added: TournamentRun, run: str, directory: Path | str | None) -> None:
+    """Write `tournament.json` in the eval run's folder; a resumed run must have been held alike."""
+    declared = declare(
+        experiment=added.tournament.name, clocks=(), run=run, kind=KIND, directory=directory
+    )
+    if declared.declaration.kind != KIND:
+        raise EtudeError("run_is_not_an_eval_run", 409)
+    path = declared.root / TOURNAMENT_FILE
+    if not path.is_file():
+        DirectoryStorage(declared.root).put(TOURNAMENT_FILE, added.model_dump_json().encode())
+    elif TournamentRun.model_validate_json(path.read_bytes()) != added:
+        raise EtudeError("eval_run_tournament_conflict", 409)
 
 
-def _round_robin_matches(
-    stored: _Stored, round_robin: RoundRobin, enter: Sequence[Agent]
-) -> tuple[dict[Digest, Match], bool]:
-    """The matches a hold adds, by key, and whether none of them can be delivered yet."""
-    entering = {each.identity: each for each in enter}
-    listed = stored.listed("entrants/")
-    files = {f"entrants/{identity}.json": each for identity, each in entering.items()}
-    fresh = bool(entering) and not files.keys() & listed
-    entrants = [
-        files.get(file) or Agent.model_validate_json(stored.read(file)) for file in sorted(listed)
-    ]
-    for file, each in files.items():
-        stored.write(file, each.model_dump_json())
-    matches = round_robin.matches([*entrants, *entering.values()])
-    return {
-        m.key: m
-        for m in matches
-        if not entering or {seated.identity for seated in m.agents} & entering.keys()
-    }, fresh
+def _stored(name: str, places: Sequence[Storage]) -> tuple[list[TournamentRun], set[Digest]]:
+    """The tournament's eval runs in every place, and the keys of every match they hold as done.
 
-
-class _Stored:
-    """One tournament's folder in each place it is kept: the runs directory and every storage."""
-
-    def __init__(self, name: str, places: Sequence[Storage]) -> None:
-        self.prefix = f"{TOURNAMENTS}/{name}/"
-        self.places = list({place.name: place for place in places}.values())
-        # Each place's files, relative to the folder, from one listing.
-        self.present = {
-            place.name: {key[len(self.prefix) :] for key in place.keys(self.prefix)}
-            for place in self.places
-        }
-
-    def settle(self, file: str, tournament: Benchmark | RoundRobin) -> None:
-        """Store the tournament's own file where it is missing; refuse where it differs."""
-        other = "round_robin.json" if file == "benchmark.json" else "benchmark.json"
-        if any(other in present for present in self.present.values()):
-            raise EtudeError("tournament_conflict", 409)
-        for place in self.places:
-            if (
-                file in self.present[place.name]
-                and type(tournament).model_validate_json(place.get(self.prefix + file))
-                != tournament
-            ):
-                raise EtudeError("tournament_conflict", 409)
-        self.write(file, tournament.model_dump_json())
-
-    def listed(self, folder: str) -> set[str]:
-        """The files under `folder` in any place."""
-        return {
-            file for present in self.present.values() for file in present if file.startswith(folder)
-        }
-
-    def read(self, file: str) -> bytes:
-        place = next(p for p in self.places if file in self.present[p.name])
-        return place.get(self.prefix + file)
-
-    def write(self, file: str, body: str) -> None:
-        """Store a file in every place not already holding it; tournament files are never replaced."""
-        for place in self.places:
-            if file not in self.present[place.name]:
-                place.put(self.prefix + file, body.encode())
-                self.present[place.name].add(file)
-
-    def delivered(self) -> set[Digest]:
-        """The keys of every match an eval run of the tournament holds as done, from listings alone."""
-        found: set[Digest] = set()
-        for place in self.places:
-            for file in self.present[place.name]:
-                if not file.startswith("runs/"):
-                    continue
-                run = file.removeprefix("runs/").removesuffix(".json")
-                for held in place.keys(run_prefix(run) + "matches/"):
-                    name = held.rsplit("/", 1)[-1]
-                    if name.endswith(".json") and not name.endswith(".failed.json"):
-                        found.add(name.removesuffix(".json"))
-        return found
+    One listing per place, and one read of each eval run's `tournament.json`.
+    """
+    held: dict[str, TournamentRun] = {}
+    delivered: set[Digest] = set()
+    for place in {place.name: place for place in places}.values():
+        keys = place.keys("")
+        folders = [key.removesuffix(TOURNAMENT_FILE) for key in keys if key.endswith(_IN_RUN)]
+        mine: set[str] = set()
+        for folder in folders:
+            added = TournamentRun.model_validate_json(place.get(folder + TOURNAMENT_FILE))
+            if added.tournament.name == name:
+                mine.add(folder)
+                held.setdefault(folder.rstrip("/").rsplit("/", 1)[-1], added)
+        for key in keys:
+            folder, _, file = key.rpartition("matches/")
+            if folder in mine and file.endswith(".json") and not file.endswith(".failed.json"):
+                delivered.add(file.removesuffix(".json"))
+    return [held[run] for run in sorted(held)], delivered
 
 
 @contextmanager
@@ -227,12 +168,15 @@ def _held(db: duckdb.DuckDBPyConnection, tournament: str) -> Iterator[tuple[int,
     """Temp table `_held` (run, match) of each scheduled match held; yields (scheduled, held).
 
     Each scheduled match counts once, from the tournament's eval run that recorded it last.
+    Raises the conflict `connect` found among the tournament's eval runs, if any.
     """
-    if (
-        db.execute("select 1 from tournaments where tournament = ?", [tournament]).fetchone()
-        is None
-    ):
+    found = db.execute(
+        "select conflict from tournaments where tournament = ?", [tournament]
+    ).fetchone()
+    if found is None:
         raise EtudeError("tournament_not_found", 404)
+    if found[0] is not None:
+        raise EtudeError(found[0], 409) from ValueError(tournament)
     db.execute(
         "create or replace temp table _held as"
         " select arg_max(m.run, m.wall_ms) as run, m.match from matches m join runs r using (run)"
