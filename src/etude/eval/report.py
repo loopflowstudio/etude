@@ -143,14 +143,14 @@ def render(db: duckdb.DuckDBPyConnection) -> str:
 
 
 def _tournaments(db: duckdb.DuckDBPyConnection) -> str:
-    """Each tournament's format and how much of its schedule is held.
+    """Each tournament's format and how much of its schedule is held, or how its eval runs conflict.
 
     `etude.eval.tournament.curves` and `standings` read their results.
     """
     found = db.sql(
         "with held as (select distinct r.tournament, m.match from matches m join runs r"
         " using (run) where m.state = 'done')"
-        " select t.tournament, t.format, count(distinct s.match),"
+        " select t.tournament, t.format, t.conflict, count(distinct s.match),"
         " count(distinct s.match) filter (h.match is not null)"
         " from tournaments t left join schedule s using (tournament)"
         " left join held h on h.tournament = s.tournament and h.match = s.match"
@@ -163,8 +163,12 @@ def _tournaments(db: duckdb.DuckDBPyConnection) -> str:
         "<th>scheduled</th><th>held</th></tr>"
         + "".join(
             f"<tr><td class=name>{escape(name)}</td><td class=name>{escape(format)}</td>"
-            f"<td>{scheduled}</td><td>{held}</td></tr>"
-            for name, format, scheduled, held in found
+            + (
+                f"<td colspan=2>{escape(conflict)}</td></tr>"
+                if conflict
+                else f"<td>{scheduled}</td><td>{held}</td></tr>"
+            )
+            for name, format, conflict, scheduled, held in found
         )
         + "</table>"
     )

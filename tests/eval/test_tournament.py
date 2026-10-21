@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -84,8 +85,8 @@ def test_checkpoints_held_on_the_go_then_a_matchup_added_in_batch(tmp_path: Path
     # A fixed cost whatever the tournament's size: one checkpoint more in it changes nothing.
     second, third = ((m.listings, m.requests, m.uploads) for m in later)
     assert second == third
-    # The tournament's folder and the run's own matches; benchmark.json.
-    assert (second[0], second[1]) == (2, 1)
+    # Nothing of the tournament is read: only the run's own matches are listed, to resume.
+    assert (second[0], second[1]) == (1, 0)
     # A retry on another empty machine replays nothing.
     again = MeasuredStorage(bucket)
     assert on_the_go(checkpoints[0], again, "retry") == 0
@@ -123,20 +124,51 @@ def test_a_batch_hold_skips_what_any_eval_run_delivered_by_listing_them(tmp_path
     measured = MeasuredStorage(bucket)
     again = hold(progress, play=play, storages=[measured], directory=tmp_path / "batch")
     assert again.played == 0
-    # The tournament's folder, each of its 3 eval runs' matches, and its own.
-    assert measured.listings == 1 + 3 + 1
+    # One listing of the bucket and one of its own matches; each eval run's tournament.json.
+    assert (measured.listings, measured.requests) == (1 + 1, 3)
 
 
-def test_a_matchup_name_redefined_is_refused(tmp_path: Path) -> None:
+def test_a_matchup_name_redefined_is_refused_by_a_batch_hold_and_on_read(
+    tmp_path: Path,
+) -> None:
     bucket = DirectoryStorage(tmp_path / "bucket")
-    first, *_ = trained(tmp_path, bucket)
+    first, second, _ = trained(tmp_path, bucket)
     progress = anchors(tmp_path)
-    hold(progress, checkpoint=first, play=play, directory=tmp_path)
+    hold(progress, checkpoint=first, play=play, storages=[bucket], directory=tmp_path / "a")
     changed = progress.matchups[0].model_copy(update={"games": 8})
     other = progress.model_copy(update={"matchups": (changed,)})
+    # On the go reads nothing of the tournament, so the redefinition is played...
+    hold(other, checkpoint=second, play=play, storages=[bucket], directory=tmp_path / "b")
+    # ...and found by everything that reads it.
     with pytest.raises(EtudeError) as refused:
-        hold(other, checkpoint=first, play=play, directory=tmp_path)
+        hold(other, play=play, storages=[bucket], directory=tmp_path / "c")
     assert refused.value.code == "matchup_conflict"
+    db = connect(bucket)
+    assert db.sql("select conflict from tournaments").fetchall() == [("matchup_conflict",)]
+    with pytest.raises(EtudeError) as refused:
+        curves(db, "anchors", table="plays", value="won")
+    assert refused.value.code == "matchup_conflict"
+
+
+def test_a_hold_launched_on_a_machine_keeps_its_tournament_in_its_own_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    checkpoints = trained(tmp_path, bucket)
+    progress = anchors(tmp_path)
+    for ordinal, checkpoint in enumerate(checkpoints):
+        # As `etude launch` runs it: the courier carries only `track/<ETUDE_RUN>/`.
+        track = tmp_path / f"machine-{ordinal}" / "track"
+        monkeypatch.setenv("ETUDE_RUN", f"anchors-eval-{ordinal}")
+        monkeypatch.setenv("ETUDE_TRACK_DIR", str(track))
+        held = hold(progress, checkpoint=checkpoint, play=play)
+        assert held.name == f"anchors-eval-{ordinal}"
+        assert [path.name for path in track.iterdir()] == [held.name]
+        shutil.copytree(track / held.name, bucket.root / "delivered" / held.name)
+    monkeypatch.delenv("ETUDE_RUN")
+    lines = curves(connect(bucket), "anchors", table="plays", value="won")
+    assert sorted(line.matchup for line in lines) == sorted(m.name for m in progress.matchups)
+    assert all([p.ordinal for p in line.points] == [1, 2, 3] for line in lines)
 
 
 def test_a_round_robin_held_as_two_shares_stands_as_one(tmp_path: Path) -> None:

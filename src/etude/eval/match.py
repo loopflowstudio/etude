@@ -70,8 +70,6 @@ ETUDE_TABLES = (
 )
 # Columns Etude adds to every row.
 ADDED = ("run", "match")
-# Tournaments are kept beside the runs, so no run takes this name.
-TOURNAMENTS = "tournaments"
 
 type Value = bool | int | float | str | None
 type Row = Mapping[str, Value]
@@ -193,8 +191,6 @@ def evaluate(
         raise EtudeError("workers_must_be_positive", 422)
     if len({scheduled.key for scheduled in matches}) != len(matches):
         raise EtudeError("duplicate_match", 422)
-    if run == TOURNAMENTS:
-        raise EtudeError("run_name_reserved", 422)
     declared = declare(experiment=experiment, clocks=(), run=run, kind=KIND, directory=directory)
     if declared.declaration.kind != KIND:
         raise EtudeError("run_is_not_an_eval_run", 409)

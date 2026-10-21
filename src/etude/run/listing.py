@@ -17,10 +17,11 @@ def as_storage(source: Storage | Path | str) -> Storage:
 
 
 # A folder is a run's when it holds one of these directly: its name is the run's.
-# `environment.json`, `tables` and `matches` are an eval run's (`etude.eval`).
+# `environment.json`, `tournament.json`, `tables` and `matches` are an eval run's
+# (`etude.eval`).
 # Delivery sends folders in this order, so a match's tables precede its record.
 RUN_FOLDERS = ("metrics", "checkpoints", "tables", "matches")
-RUN_FILES = ("run.json", "environment.json", "state.json")
+RUN_FILES = ("run.json", "environment.json", "tournament.json", "state.json")
 
 
 def places(storage: Storage) -> dict[str, list[str]]:
