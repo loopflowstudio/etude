@@ -1029,6 +1029,7 @@ class Scheduler:
             usd=sum((self._attempt_usd(a, now) for a in attempts), Decimal(0)),
             attempts=len(attempts),
             machine=None if last is None else last.machine,
+            hardware=None if session is None else session.hardware,
             rental_ended=None
             if rental is None
             else self._store.machine(rental.machine).deleted_at is not None,
@@ -1462,9 +1463,13 @@ class Scheduler:
 
     def _creation_facts(self, session: Session, now: datetime) -> Session:
         service = self._service(session)
-        price = service.charged_price(session.id)
-        if price is not None and price != self._usd_per_hour(session):
-            self._store.record_price(session, price)
+        receipt = service.allocation(session.id)
+        if receipt is not None and receipt.usd_per_hour != self._usd_per_hour(session):
+            self._store.record_price(session, receipt.usd_per_hour)
+            session = self._store.session(session.id)
+        hardware = None if receipt is None else receipt.hardware
+        if hardware is not None and hardware != session.hardware:
+            self._store.record_hardware(session, hardware)
             session = self._store.session(session.id)
         if session.started_at is None and service.started(session.id):
             self._store.record_started(session, now)

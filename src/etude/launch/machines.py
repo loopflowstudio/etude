@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Protocol
 
-from etude.launch.records import BootstrapLinks, Record
+from etude.launch.records import BootstrapLinks, Hardware, Record
 
 
 class Safeguards(Record):
@@ -24,6 +24,7 @@ class Allocation(Record):
     usd_per_hour: Decimal
     created_at: datetime
     cleanup: tuple[str, ...] = ()
+    hardware: Hardware | None = None  # what the provider was asked for; None for owned
 
 
 class Bill(Record):

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from etude.launch.machines import Bill
+from etude.launch.machines import Allocation, Bill
 from etude.launch.records import Job, LauncherError, MachineTemplate, Pool, Storage
 from etude.launch.schemas import Observation
 from tests.launch.fake import bench
@@ -65,7 +65,9 @@ def test_unstarted_machine_is_deleted_after_configured_startup_allowance(tmp_pat
 
 def test_actual_create_price_replaces_quote_without_raising_cap(tmp_path: Path) -> None:
     b = bench(tmp_path)
-    b.service.charged_price = lambda session_id: Decimal("0.7")  # type: ignore[method-assign]
+    b.service.allocation = lambda session_id: Allocation(  # type: ignore[method-assign]
+        id=session_id, address=None, usd_per_hour=Decimal("0.7"), created_at=b.clock()
+    )
     run = b.scheduler.launch(Job(command="train", max_hours=1, max_usd=Decimal(1)), "l4")
     held = b.store.session(b.scheduler.attempts(run)[0].session)
     assert b.store.rental(held.machine).usd_per_hour == Decimal("0.7")

@@ -1,4 +1,8 @@
-"""Layer 1 RunPod machines: pricing, stock-image boot, bills and deletion."""
+"""Layer 1 RunPod machines: pricing, stock-image boot, bills and deletion.
+
+A template naming a GPU rents a GPU pod; one naming none rents the cheapest
+CPU pod with its vCPUs and memory. Both share create, receipts, bills and deletion.
+"""
 
 from __future__ import annotations
 
@@ -11,9 +15,9 @@ from etude.launch.deadline import limit_time
 from etude.launch.executor import Refused, check_creation
 from etude.launch.machines import Allocation, Bill, MachineRequest, Safeguards
 from etude.launch.providers.package import program_archive
-from etude.launch.providers.runpod.api import PodFact, ProviderUnavailable, RunPodAPI
+from etude.launch.providers.runpod.api import PodFact, ProviderUnavailable, Quote, RunPodAPI
+from etude.launch.records import GPU, Hardware, LauncherError, MachineTemplate, Provider
 from etude.launch.records import STOCK_IMAGE as DEFAULT_IMAGE
-from etude.launch.records import LauncherError, MachineTemplate, Provider
 from etude.launch.storage.s3 import Bucket
 
 
@@ -29,15 +33,22 @@ class RunPodMachines:
         bucket: Bucket,
         prefix: str,
     ) -> None:
-        if template.gpu is None:
-            raise LauncherError("a RunPod machine template needs a gpu")
         self._provider, self._template, self._api = provider, template, api
         self._bucket, self._prefix = bucket, prefix
         self._package_key: str | None = None
         self._package_digest = ""
 
+    def _quote(self) -> Quote:
+        template = self._template
+        return self._api.quote(
+            gpu=template.gpu,
+            vcpus=template.vcpus or 4,
+            memory_gb=template.memory_gb or 16,
+            data_center=template.data_center,
+        )
+
     def price(self) -> Decimal:
-        quote = self._api.quote(self._template.gpu or "", self._template.data_center)
+        quote = self._quote()
         if not quote.available:
             raise Refused("provider reports no available machines")
         return quote.usd_per_hour
@@ -55,9 +66,11 @@ class RunPodMachines:
     def create(self, request: MachineRequest) -> Allocation:
         assert request.deadline is not None
         template = self._template
-        if not self._api.quote(template.gpu or "", template.data_center).available:
+        quote = self._quote()
+        if not quote.available:
             raise Refused(
-                f"no {template.gpu} available in {template.data_center or 'any data center'}"
+                f"no {template.gpu or 'CPU pod'} available in"
+                f" {template.data_center or 'any data center'}"
             )
         if request.bootstrap is None:
             raise LauncherError("a rented machine needs a storage bootstrap link")
@@ -96,16 +109,14 @@ class RunPodMachines:
         with limit_time(seconds):
             pod = self._api.create(
                 name=f"etude-{request.session}",
-                gpu=template.gpu or "",
+                hardware=quote.hardware,
                 image=template.image.resolved if template.image else STOCK_IMAGE,
                 registry=self._provider.registry
                 if template.image and template.image.resolved != STOCK_IMAGE
                 else "",
                 env=env,
                 entrypoint=("python3.12", "-c", _BOOT),
-                vcpus=template.vcpus or 4,
-                memory_gb=template.memory_gb or 16,
-                disk_gb=template.disk_gb or 40,
+                disk_gb=template.disk_gb or _disk_gb(quote.hardware),
                 data_center=template.data_center,
             )
         self._keep(request.session, pod)
@@ -118,6 +129,7 @@ class RunPodMachines:
             address=pod.address,
             usd_per_hour=pod.usd_per_hour,
             created_at=pod.created_at,
+            hardware=pod.hardware,
         )
 
     def find(self, session_id: str) -> Allocation | None:
@@ -161,6 +173,11 @@ class RunPodMachines:
             usd += row.usd
             through += timedelta(hours=1)
         return Bill(usd=usd, through=through) if through > pod.created_at else None
+
+
+def _disk_gb(hardware: Hardware) -> int:
+    # RunPod caps a CPU pod's container disk at 10 GB per vCPU on its smallest flavors.
+    return 40 if isinstance(hardware, GPU) else min(40, 10 * hardware.vcpus)
 
 
 # Published import retained; the domain record owns the default and its provenance.

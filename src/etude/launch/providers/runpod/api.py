@@ -11,12 +11,14 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from etude.launch.errors import LauncherError
 from etude.launch.providers.runpod.http import _ID, PodHTTP
 from etude.launch.providers.runpod.http import ProviderUnavailable as ProviderUnavailable
-from etude.launch.records import Record
+from etude.launch.records import CPU, GPU, Hardware, Record
 
 
 class Quote(Record):
+    hardware: Hardware  # what was priced; create asks for exactly this
     usd_per_hour: Decimal
     available: bool  # False only when the catalog positively reports none
 
@@ -28,6 +30,7 @@ class PodFact(Record):
     created_at: datetime
     status: str
     address: str | None = None  # retained for historical SSH receipts
+    hardware: Hardware | None = None  # what create asked for; a pod found by name omits it
 
 
 class HourBill(Record):
@@ -52,11 +55,17 @@ class RunPodAPI(PodHTTP):
             raise ProviderUnavailable("a pod record was missing its expected fields")
         return fact
 
-    def quote(self, gpu: str, data_center: str | None = None) -> Quote:
-        """The secure-cloud hourly price for one GPU type, and whether any can be had.
+    def quote(
+        self, *, gpu: str | None, vcpus: int, memory_gb: int, data_center: str | None = None
+    ) -> Quote:
+        """The secure-cloud hourly price for one machine, and whether any can be had.
 
-        With a data center named, only stock there counts; the price is the same everywhere.
+        With a GPU named, one of that type on a host with at least `vcpus` and
+        `memory_gb`. Without, the cheapest CPU pod with at least both, preferring
+        flavors in stock. With a data center named, only stock there counts.
         """
+        if gpu is None:
+            return self._cpu_quote(vcpus, memory_gb, data_center)
         catalog = self._ask(
             "GET",
             "catalog/gpus",
@@ -65,15 +74,46 @@ class RunPodAPI(PodHTTP):
         try:
             row = next(row for row in catalog["gpus"] if row["id"] == gpu)
             price = Decimal(str(row["price"]["secure"]))
-            availability = row.get("availability")
-            if data_center is not None:  # a place the catalog does not list has none
-                places = {place["id"]: place.get("availability") for place in row["dataCenters"]}
-                availability = places.get(data_center, "NONE")
+            available = _available(row, data_center)
         except (KeyError, TypeError, StopIteration, InvalidOperation):
             raise ProviderUnavailable(f"no price for {gpu}") from None
         if price <= 0:
             raise ProviderUnavailable(f"no price for {gpu}")
-        return Quote(usd_per_hour=price, available=availability != "NONE")
+        hardware = GPU(id=gpu, min_vcpus=vcpus, min_memory_gb=memory_gb)
+        return Quote(hardware=hardware, usd_per_hour=price, available=available)
+
+    def _cpu_quote(self, vcpus: int, memory_gb: int, data_center: str | None) -> Quote:
+        # RunPod rents CPU pods in power-of-two vCPU counts, with memory a fixed
+        # multiple of them per flavor, and prices them per vCPU.
+        smallest = 2
+        while smallest < vcpus:
+            smallest *= 2
+        catalog = self._ask(
+            "GET",
+            "catalog/cpus",
+            params={"include": "AVAILABILITY", "product": "POD", "vcpuCount": str(smallest)},
+        )
+        quotes: list[Quote] = []
+        try:
+            for row in catalog["cpus"]:
+                size = max(smallest, int(row["vcpu"]["min"]))
+                while size * Decimal(str(row["ramGbPerVcpu"])) < memory_gb:
+                    size *= 2
+                price = Decimal(str(row["price"]["securePerVcpu"])) * size
+                if size > int(row["vcpu"]["max"]) or price <= 0:
+                    continue
+                quotes.append(
+                    Quote(
+                        hardware=CPU(flavor=str(row["id"]), vcpus=size),
+                        usd_per_hour=price,
+                        available=_available(row, data_center),
+                    )
+                )
+        except (KeyError, TypeError, ValueError, InvalidOperation):
+            raise ProviderUnavailable("the CPU catalog was unreadable") from None
+        if not quotes:
+            raise LauncherError(f"no RunPod CPU pod has {vcpus} vCPUs and {memory_gb} GB")
+        return min(quotes, key=lambda quote: (not quote.available, quote.usd_per_hour))
 
     def pod(self, id: str) -> PodFact | None:
         """One pod by the provider's id, or None when the provider says it does not exist."""
@@ -109,12 +149,10 @@ class RunPodAPI(PodHTTP):
         self,
         *,
         name: str,
-        gpu: str,
+        hardware: Hardware,
         image: str,
         registry: str,
         env: dict[str, str],
-        vcpus: int,
-        memory_gb: int,
         disk_gb: int,
         data_center: str | None = None,
         entrypoint: tuple[str, ...],
@@ -122,11 +160,10 @@ class RunPodAPI(PodHTTP):
         """Ask for one on-demand pod. Any error leaves it unknown whether one exists."""
         if "@sha256:" not in image or "RUNPOD_API_KEY" in env:
             raise ValueError("the image must be pinned by digest and the account key kept out")
-        payload = {
+        payload: dict[str, Any] = {
             "name": name,
             "image": image,
             "registry": registry,
-            "gpu": {"id": gpu, "count": 1, "minRamPerGpu": memory_gb, "minVcpuCountPerGpu": vcpus},
             "cloud": "SECURE",
             "disk": disk_gb,
             "startSsh": True,
@@ -135,12 +172,21 @@ class RunPodAPI(PodHTTP):
             "entrypoint": list(entrypoint),
             "env": env,
         }
+        if isinstance(hardware, GPU):
+            payload["gpu"] = {
+                "id": hardware.id,
+                "count": 1,
+                "minRamPerGpu": hardware.min_memory_gb,
+                "minVcpuCountPerGpu": hardware.min_vcpus,
+            }
+        else:
+            payload["cpu"] = {"id": hardware.flavor, "vcpuCount": hardware.vcpus}
         if data_center is not None:
             payload["dataCenterIds"] = [data_center]
         pod = self._pod(self._ask("POST", "pods", payload=payload))
         if pod.name != name or pod.usd_per_hour <= 0 or pod.status in {"EXITED", "TERMINATED"}:
             raise ProviderUnavailable("the created pod is not the one asked for")
-        return pod
+        return pod.model_copy(update={"hardware": hardware})
 
     def delete(self, pod: PodFact) -> datetime:
         """Delete exactly this pod and return when the provider confirmed it.
@@ -188,3 +234,12 @@ class RunPodAPI(PodHTTP):
         except (KeyError, TypeError, ValueError, InvalidOperation):
             raise ProviderUnavailable("the billing records were incomplete") from None
         return tuple(HourBill(hour=hour, usd=usd) for hour, usd in sorted(bills.items()))
+
+
+def _available(row: Any, data_center: str | None) -> bool:
+    """False only when a catalog row positively reports none, there or anywhere."""
+    if data_center is None:
+        return bool(row.get("availability") != "NONE")
+    # A place the catalog does not list has none.
+    places = {place["id"]: place.get("availability") for place in row["dataCenters"]}
+    return bool(places.get(data_center, "NONE") != "NONE")

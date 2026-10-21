@@ -13,6 +13,7 @@ def show_runs(scheduler: Scheduler, ids: Sequence[str]) -> None:
     for run in ids:
         status = scheduler.read(run)
         where = f", machine {status.machine}" if status.machine else ""
+        where += f" ({status.hardware})" if status.hardware else ""
         record = scheduler.record(run)
         print(run, record.name, str(status) + where, sep="  ")
         if record.spec.repo is not None:
@@ -87,7 +88,8 @@ def show_machines(scheduler: Scheduler, *, ended: bool, images: bool = False) ->
                 window = f"rented, ended {machine.deleted_at:%Y-%m-%d %H:%M} UTC"
             else:
                 window = f"rented until {rental.deadline:%Y-%m-%d %H:%M} UTC"
-            print(machine.name, each.name, f"{window}, {cost}", sep="  ")
+            hardware = f"{machine.hardware}, " if machine.hardware else ""
+            print(machine.name, each.name, f"{hardware}{window}, {cost}", sep="  ")
             if images and machine.image is not None:
                 image = machine.image
                 print(

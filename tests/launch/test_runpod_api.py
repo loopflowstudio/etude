@@ -15,7 +15,7 @@ from etude.launch.database import Database
 from etude.launch.machines import MachineRequest
 from etude.launch.providers.runpod.api import PodFact, ProviderUnavailable, RunPodAPI
 from etude.launch.providers.runpod.machines import _BOOT, STOCK_IMAGE, RunPodMachines
-from etude.launch.records import BootstrapLinks, MachineTemplate
+from etude.launch.records import CPU, GPU, BootstrapLinks, LauncherError, MachineTemplate
 from etude.launch.records import Provider as Account
 from etude.launch.storage.s3 import Bucket, Keys
 from tests.launch.counting import Counting, Counts
@@ -58,10 +58,12 @@ def test_a_quote_reads_price_and_positive_absence_of_stock() -> None:
         {"id": "NVIDIA A40", "price": {"secure": 0.4}, "availability": "NONE"},
     ]
     api = RunPodAPI("key", Provider(replies={"GET catalog/gpus": (200, {"gpus": gpus})}))
-    assert api.quote("NVIDIA L4").usd_per_hour == Decimal("0.59")
-    assert api.quote("NVIDIA L4").available and not api.quote("NVIDIA A40").available
+    l4 = api.quote(gpu="NVIDIA L4", vcpus=6, memory_gb=48)
+    assert l4.usd_per_hour == Decimal("0.59") and l4.available
+    assert l4.hardware == GPU(id="NVIDIA L4", min_vcpus=6, min_memory_gb=48)
+    assert not api.quote(gpu="NVIDIA A40", vcpus=6, memory_gb=48).available
     with pytest.raises(ProviderUnavailable):
-        api.quote("NVIDIA H100")
+        api.quote(gpu="NVIDIA H100", vcpus=6, memory_gb=48)
 
 
 def test_a_quote_for_one_data_center_counts_only_stock_there() -> None:
@@ -73,9 +75,62 @@ def test_a_quote_for_one_data_center_counts_only_stock_there() -> None:
         "dataCenters": places,
     }
     api = RunPodAPI("key", Provider(replies={"GET catalog/gpus": (200, {"gpus": [l4]})}))
-    assert api.quote("NVIDIA L4", "EU-RO-1").available
-    assert not api.quote("NVIDIA L4", "US-TX-3").available
-    assert not api.quote("NVIDIA L4", "EU-SE-1").available  # not listed: none there
+    for place, available in (("EU-RO-1", True), ("US-TX-3", False), ("EU-SE-1", False)):
+        quote = api.quote(gpu="NVIDIA L4", vcpus=4, memory_gb=16, data_center=place)
+        assert quote.available == available  # a place not listed has none
+
+
+def cpu_flavor(
+    id: str, per_vcpu: float, ram_per_vcpu: int, stock: dict[str, str]
+) -> dict[str, Any]:
+    return {
+        "id": id,
+        "price": {"securePerVcpu": per_vcpu},
+        "ramGbPerVcpu": ram_per_vcpu,
+        "vcpu": {"min": 2, "max": 32},
+        "availability": "HIGH" if set(stock.values()) - {"NONE"} else "NONE",
+        "dataCenters": [{"id": place, "availability": level} for place, level in stock.items()],
+    }
+
+
+def test_without_a_gpu_the_cheapest_fitting_cpu_pod_is_quoted() -> None:
+    cpus = [
+        cpu_flavor("cpu3c", 0.03, 2, {"US-KS-2": "HIGH", "EU-RO-1": "NONE"}),
+        cpu_flavor("cpu3g", 0.04, 4, {"US-KS-2": "HIGH", "EU-RO-1": "LOW"}),
+        cpu_flavor("cpu5c", 0.02, 2, {}),  # cheapest, but out of stock everywhere
+    ]
+    provider = Provider(replies={"GET catalog/cpus": (200, {"cpus": cpus})})
+    api = RunPodAPI("key", provider)
+    # 8 vCPUs with 16 GB fits the compute flavor exactly.
+    quote = api.quote(gpu=None, vcpus=8, memory_gb=16)
+    assert quote.hardware == CPU(flavor="cpu3c", vcpus=8) and quote.available
+    assert quote.usd_per_hour == Decimal("0.24")
+    # Sizes round up to a power of two, and grow until the memory fits.
+    assert api.quote(gpu=None, vcpus=6, memory_gb=48).hardware == CPU(flavor="cpu3g", vcpus=16)
+    assert api.quote(gpu=None, vcpus=4, memory_gb=16).hardware == CPU(flavor="cpu3g", vcpus=4)
+    # Only stock in a named place counts.
+    there = api.quote(gpu=None, vcpus=8, memory_gb=16, data_center="EU-RO-1")
+    assert there.hardware == CPU(flavor="cpu3g", vcpus=8) and there.available
+    nowhere = api.quote(gpu=None, vcpus=8, memory_gb=16, data_center="US-TX-3")
+    assert not nowhere.available
+    with pytest.raises(LauncherError, match="no RunPod CPU pod"):
+        api.quote(gpu=None, vcpus=8, memory_gb=512)
+
+
+def test_a_cpu_pod_is_asked_for_by_flavor_and_size_without_a_gpu() -> None:
+    provider = Provider(replies={"POST pods": (200, {**POD, "cost": 0.24})})
+    api = RunPodAPI("key", provider)
+    api.create(
+        name="etude-7f3a",
+        hardware=CPU(flavor="cpu3c", vcpus=8),
+        image="registry.example/etude@sha256:" + "a" * 64,
+        registry="",
+        env={},
+        disk_gb=40,
+        entrypoint=("python3.12", "-c", "boot"),
+    )
+    ((_, _, asked),) = provider.asked
+    assert asked["cpu"] == {"id": "cpu3c", "vcpuCount": 8} and "gpu" not in asked
 
 
 def test_create_sends_one_pinned_request_and_keeps_only_checked_facts() -> None:
@@ -83,11 +138,9 @@ def test_create_sends_one_pinned_request_and_keeps_only_checked_facts() -> None:
     api = RunPodAPI("key", provider)
     wanted: dict[str, Any] = {
         "name": "etude-7f3a",
-        "gpu": "NVIDIA L4",
+        "hardware": GPU(id="NVIDIA L4", min_vcpus=6, min_memory_gb=48),
         "registry": "reg1",
         "env": {"ETUDE_SESSION": "etude-7f3a"},
-        "vcpus": 6,
-        "memory_gb": 48,
         "disk_gb": 40,
         "entrypoint": ("python3.12", "-c", "boot"),
     }
@@ -98,6 +151,7 @@ def test_create_sends_one_pinned_request_and_keeps_only_checked_facts() -> None:
         usd_per_hour=Decimal("0.59"),
         created_at=datetime(2026, 10, 11, 12, 10, tzinfo=UTC),
         status="RUNNING",
+        hardware=wanted["hardware"],
     )
     (asked,) = provider.asked
     assert asked[2]["gpu"] == {
@@ -116,12 +170,10 @@ def test_create_sends_one_pinned_request_and_keeps_only_checked_facts() -> None:
 def test_a_failed_or_mismatched_create_is_unknown_not_refused() -> None:
     wanted: dict[str, Any] = {
         "name": "etude-7f3a",
-        "gpu": "NVIDIA L4",
+        "hardware": GPU(id="NVIDIA L4", min_vcpus=6, min_memory_gb=48),
         "image": "registry.example/etude@sha256:" + "a" * 64,
         "registry": "reg1",
         "env": {},
-        "vcpus": 6,
-        "memory_gb": 48,
         "disk_gb": 40,
         "entrypoint": ("python3.12", "-c", "boot"),
     }
@@ -254,3 +306,55 @@ def test_stock_create_counts_package_reuse_without_waiting_for_ssh(tmp_path: Pat
         assert payload["entrypoint"] == ["python3.12", "-c", _BOOT]
         assert len(_BOOT.encode()) < 512  # below the previously accepted small bootstrap
         assert len(base64.b64decode(payload["env"]["ETUDE_PROGRAM"])) < 16_000
+
+
+def test_one_cpu_rental_quotes_creates_and_deletes_with_pinned_provider_calls(
+    tmp_path: Path,
+) -> None:
+    cpu_pod = {**POD, "cost": 0.24}
+    provider = Provider(
+        replies={
+            "GET catalog/cpus": (
+                200,
+                {"cpus": [cpu_flavor("cpu3c", 0.03, 2, {"US-KS-2": "HIGH"})]},
+            ),
+            "POST pods": (200, cpu_pod),
+            "GET pods/abc123": (200, cpu_pod),
+            "DELETE pods/abc123": (200, None),
+        }
+    )
+    counting = Counting(Database(tmp_path / "launcher.db"))
+    bucket = Bucket(
+        "journal",
+        "us-west-2",
+        Keys(access_key="fixture", secret_key="fixture"),
+        counting.transport("bucket", Storage()),
+    )
+    api = RunPodAPI("key", counting.transport("provider", provider))
+    account = Account(name="runpod", kind="runpod", registry="unused", storage="west")
+    template = MachineTemplate(provider="runpod", vcpus=8, memory_gb=16)
+    machines = RunPodMachines(account, template, api, bucket, "test")
+    request = MachineRequest(
+        session="7f3a",
+        deadline=datetime.now(UTC) + timedelta(minutes=5),
+        cap_usd=Decimal(1),
+        bootstrap=BootstrapLinks(
+            url="https://fixture/bootstrap",
+            log_url="https://fixture/bootstrap.log",
+            worker_log_url="https://fixture/worker.log",
+        ),
+    )
+    with counting.record():
+        assert machines.price() == Decimal("0.24")
+        assert counting.snapshot() == Counts(provider=1)
+    with counting.record():
+        allocation = machines.create(request)
+        assert counting.snapshot() == Counts(provider=2, bucket=3)
+    assert allocation.usd_per_hour == Decimal("0.24")
+    assert allocation.hardware == CPU(flavor="cpu3c", vcpus=8)
+    with counting.record():
+        assert machines.end("7f3a") is not None
+        assert counting.snapshot() == Counts(provider=3, bucket=1)
+    (created,) = [payload for method, _, payload in provider.asked if method == "POST"]
+    assert created["cpu"] == {"id": "cpu3c", "vcpuCount": 8} and "gpu" not in created
+    assert created["disk"] == 40 and created["image"] == STOCK_IMAGE
