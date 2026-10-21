@@ -24,7 +24,7 @@ from etude.run.errors import EtudeError
 from etude.run.records import ArtifactRef
 from etude.run.storage import DirectoryStorage, S3Storage
 from tests.eval.games import play, play_teams, play_text_hits, play_unkeyed
-from tests.run.storage import MeasuredStorage
+from tests.run.storage import CountedClient, MeasuredStorage
 
 
 def roster(tmp_path: Path) -> list[Agent]:
@@ -329,3 +329,34 @@ def test_an_interval_does_not_depend_on_the_order_matches_are_read_in() -> None:
     random.Random(7).shuffle(shuffled)
     assert shuffled != blocks
     assert estimate(shuffled) == estimate(blocks)
+
+
+def test_queries_reports_and_resumes_read_each_bucket_file_once_per_computer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"):
+        monkeypatch.setenv(name, "testing")
+    with mock_aws():
+        client = CountedClient(boto3.client("s3", region_name="us-east-1"))
+        client.create_bucket(Bucket="runs")
+        matches = seatings(roster(tmp_path), conditions=[{}], games=4)
+        evaluate(
+            experiment="league", environment=environment("duel"), play=play, matches=matches,
+            run="league-1", directory=tmp_path / "local", storages=[S3Storage("runs", client=client)],
+        )  # fmt: skip
+        written = client.stored("runs")
+        # Each use opens the bucket afresh, as separate commands on one computer do.
+        db = connect(S3Storage("runs", client=client))
+        assert db.sql("select count(*) from plays").fetchone() == (12 * 4 * 2,)
+        first = client.bytes
+        assert 0 < first <= written
+        for _ in range(3):
+            render(connect(S3Storage("runs", client=client)))
+        shutil.rmtree(tmp_path / "local")
+        again = evaluate(
+            experiment="league", environment=environment("duel"), play=play, matches=matches,
+            run="league-1", directory=tmp_path / "local", storages=[S3Storage("runs", client=client)],
+        )  # fmt: skip
+        assert again.skipped == 12
+        # Later queries and the resume ask only by ETag, and storage sends no body.
+        assert client.bytes == first

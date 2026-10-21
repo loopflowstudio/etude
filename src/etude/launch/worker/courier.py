@@ -39,9 +39,11 @@ from etude.launch.storage.s3 import (
     PostForm,
     Send,
     StorageUnavailable,
+    Version,
     _send,
     post,
     read,
+    read_version,
 )
 from etude.launch.storage.transport import attribute, observe
 
@@ -112,7 +114,7 @@ class Courier:
         self._log_sent_at: dict[str, float] = {}
         self._console_position = 0
         self._console = Console("worker output")
-        self._inbox: bytes | None = None  # the inbox as last read
+        self._inbox: Version | None = None  # the inbox as last read
         self._usage_sent = -1  # bytes of the usage journal last delivered
 
     def _retain_transfer(self, raw: str) -> None:
@@ -155,26 +157,30 @@ class Courier:
     def bring_in(self) -> None:
         """Apply the inbox: mark attempts to stop, and hand over work added since.
 
-        A poll that finds the inbox unchanged leaves no record; a changed or
-        failed read keeps its transfer, and a change is logged.
+        A poll asks with the ETag of the inbox last read, so an unchanged inbox
+        sends no body, and leaves no record; a changed or failed read keeps its
+        transfer, and a change is logged.
         """
         polled: list[str] = []
         try:
             with observe(polled.append), attribute(session=self._home.name):
-                raw = read(self._inbox_url, self._send)
+                found = read_version(self._inbox_url, self._inbox, self._send)
         except (StorageUnavailable, OSError, ValueError) as error:
             for event in polled:
                 self._retain_transfer(event)
             _diagnose("inbox read", error)
             raise
-        if raw == self._inbox:
+        before, self._inbox = self._inbox, found
+        unchanged = (found is None and before is None) or (
+            found is not None and before is not None and found.body == before.body
+        )
+        if unchanged:
             return
         for event in polled:
             self._retain_transfer(event)
-        self._inbox = raw
-        if raw is None:
+        if found is None:
             return
-        inbox = Inbox.model_validate_json(raw)
+        inbox = Inbox.model_validate_json(found.body)
         write_log("inbox", f"{len(inbox.work)} work, {len(inbox.stop)} to stop")
         for attempt in inbox.stop:
             (self._home / "stop" / str(attempt)).touch()

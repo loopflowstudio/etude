@@ -19,7 +19,7 @@ from stat import S_ISREG
 from etude.run.block_file import parse
 from etude.run.listing import RUN_FILES, RUN_FOLDERS
 from etude.run.records import RunFile
-from etude.run.storage import DirectoryStorage, Storage, run_prefix
+from etude.run.storage import DirectoryStorage, Storage, run_prefix, sealed
 
 
 class RunFiles:
@@ -62,11 +62,7 @@ class RunFiles:
 
     def fingerprint(self, key: str) -> str:
         """Blocks and tables never change; a stored checkpoint is large; others are hashed."""
-        if (
-            key.endswith((".blk", ".tail"))
-            or key.startswith("tables/")
-            and key.endswith(".parquet")
-        ):
+        if sealed(key):
             return "sealed"
         if key.startswith("checkpoints/") and not key.endswith(".json"):
             stat = (self.root / key).stat()
