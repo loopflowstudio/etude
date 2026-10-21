@@ -25,6 +25,7 @@ import pytest
 
 from etude.launch.database import Database
 from etude.launch.executor import Executor
+from etude.launch.listing import show_machines, show_runs
 from etude.launch.providers.runpod.api import RunPodAPI
 from etude.launch.providers.runpod.machines import RunPodMachines
 from etude.launch.providers.runpod.pod import GuardianAPI, guard
@@ -167,6 +168,16 @@ class RunPod:
             here = [{"id": "EU-RO-1", "availability": self.available}]
             gpu = {"id": "NVIDIA L4", "price": {"secure": 0.59}, "dataCenters": here}
             return 200, json.dumps({"gpus": [gpu]}).encode()
+        if path == "catalog/cpus":
+            here = [{"id": "EU-RO-1", "availability": self.available}]
+            cpu = {
+                "id": "cpu3g",
+                "price": {"securePerVcpu": 0.04},
+                "ramGbPerVcpu": 4,
+                "vcpu": {"min": 2, "max": 32},
+                "dataCenters": here,
+            }
+            return 200, json.dumps({"cpus": [cpu]}).encode()
         if method == "POST":
             asked = json.loads(body or b"{}")
             assert asked["dataCenterIds"] == ["EU-RO-1"]  # the pool's place is the one asked for
@@ -209,7 +220,9 @@ class Cloud:
     store: Database
 
 
-def cloud(tmp_path: Path, *, delivery_seconds: float | None = None) -> Cloud:
+def cloud(
+    tmp_path: Path, *, delivery_seconds: float | None = None, gpu: str | None = "NVIDIA L4"
+) -> Cloud:
     storage = Storage()
     provider = RunPod(storage, tmp_path / "pod")
     store = Database(tmp_path / "launcher.db")
@@ -217,7 +230,7 @@ def cloud(tmp_path: Path, *, delivery_seconds: float | None = None) -> Cloud:
     place = Place(name="west", bucket="journals", prefix="etude/t", region="us-west-2")
     template = MachineTemplate(
         provider="runpod",
-        gpu="NVIDIA L4",
+        gpu=gpu,
         vcpus=6,
         memory_gb=48,
         disk_gb=40,
@@ -335,6 +348,23 @@ def test_a_lost_create_reply_finds_the_pod_by_name_and_never_asks_twice(tmp_path
     assert c.scheduler.read(one).phase == "renting"
     (status,) = c.scheduler.wait(one, every=0.05, timeout=30)
     assert status.outcome == "succeeded" and c.provider.creates == 1
+
+
+@pytest.mark.parametrize(("gpu", "shown"), [("NVIDIA L4", "NVIDIA L4"), (None, "cpu3g 16 vCPUs")])
+def test_machines_and_status_show_the_hardware_rented(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], gpu: str | None, shown: str
+) -> None:
+    # Without a GPU, 6 vCPUs and 48 GB round up to the 16 vCPU size of a 4 GB/vCPU flavor.
+    c = cloud(tmp_path, gpu=gpu)
+    one = c.scheduler.launch(Job(command="true", max_hours=0.05, max_usd=Decimal(1)), "l4")
+    (status,) = c.scheduler.wait(one, every=0.05, timeout=30)
+    assert status.outcome == "succeeded"
+    capsys.readouterr()
+    show_runs(c.scheduler, [one])
+    show_machines(c.scheduler, ended=True)
+    run_line, machine_line = capsys.readouterr().out.splitlines()
+    assert f"machine {status.machine} ({shown})" in run_line
+    assert machine_line.startswith(f"{status.machine}  l4  {shown}, rented")
 
 
 def test_no_stock_is_a_refusal_and_cancel_reaches_a_running_pod(tmp_path: Path) -> None:

@@ -147,6 +147,8 @@ A template without `--gpu` rents RunPod CPU pods: the cheapest secure-cloud CPU
 flavor with at least `--vcpus` (rounded up to a power of two, RunPod's sizes)
 and `--memory-gb`, priced per vCPU and capped like a GPU pod. CPU pods boot the
 same default image. Their disk defaults to 40 GB, or 10 GB per vCPU when smaller.
+On a CPU pod `os.cpu_count()` reports the host's CPUs; size worker pools from
+`len(os.sched_getaffinity(0))`.
 
 ```sh
 etude pool add cpu --provider runpod --vcpus 8 --memory-gb 16 --max 2 --max-usd-per-hour 0.40
@@ -212,7 +214,9 @@ etude terminate --machine MACHINE
 ```
 
 `etude machines` is the one list. Each machine is `added`, or `rented` with
-the end of its window and its cost. `etude machines --all` includes rented
+the hardware the provider was asked for (a GPU type, or a CPU flavor and its
+vCPUs), the end of its window and its cost; `etude status` names it beside the
+run's machine. `etude machines --all` includes rented
 machines whose window has ended, so late bills stay visible. `terminate` takes
 the machine's name. `etude pools` shows each pool's machines, whether it makes
 more, and which pool is the default.

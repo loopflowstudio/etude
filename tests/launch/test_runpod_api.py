@@ -13,9 +13,9 @@ import pytest
 
 from etude.launch.database import Database
 from etude.launch.machines import MachineRequest
-from etude.launch.providers.runpod.api import CPU, GPU, PodFact, ProviderUnavailable, RunPodAPI
+from etude.launch.providers.runpod.api import PodFact, ProviderUnavailable, RunPodAPI
 from etude.launch.providers.runpod.machines import _BOOT, STOCK_IMAGE, RunPodMachines
-from etude.launch.records import BootstrapLinks, LauncherError, MachineTemplate
+from etude.launch.records import CPU, GPU, BootstrapLinks, LauncherError, MachineTemplate
 from etude.launch.records import Provider as Account
 from etude.launch.storage.s3 import Bucket, Keys
 from tests.launch.counting import Counting, Counts
@@ -151,6 +151,7 @@ def test_create_sends_one_pinned_request_and_keeps_only_checked_facts() -> None:
         usd_per_hour=Decimal("0.59"),
         created_at=datetime(2026, 10, 11, 12, 10, tzinfo=UTC),
         status="RUNNING",
+        hardware=wanted["hardware"],
     )
     (asked,) = provider.asked
     assert asked[2]["gpu"] == {
@@ -350,6 +351,7 @@ def test_one_cpu_rental_quotes_creates_and_deletes_with_pinned_provider_calls(
         allocation = machines.create(request)
         assert counting.snapshot() == Counts(provider=2, bucket=3)
     assert allocation.usd_per_hour == Decimal("0.24")
+    assert allocation.hardware == CPU(flavor="cpu3c", vcpus=8)
     with counting.record():
         assert machines.end("7f3a") is not None
         assert counting.snapshot() == Counts(provider=3, bucket=1)

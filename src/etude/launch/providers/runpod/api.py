@@ -14,26 +14,11 @@ from typing import Any
 from etude.launch.errors import LauncherError
 from etude.launch.providers.runpod.http import _ID, PodHTTP
 from etude.launch.providers.runpod.http import ProviderUnavailable as ProviderUnavailable
-from etude.launch.records import Record
-
-
-class GPU(Record):
-    """One GPU of a type, on a host with at least this much CPU and memory."""
-
-    id: str  # RunPod's GPU type id, such as "NVIDIA L4"
-    min_vcpus: int
-    min_memory_gb: int
-
-
-class CPU(Record):
-    """A CPU pod: RunPod sizes it by vCPU count, and memory follows from the flavor."""
-
-    flavor: str  # RunPod's CPU flavor id, such as "cpu3c"
-    vcpus: int  # a power of two within the flavor's range
+from etude.launch.records import CPU, GPU, Hardware, Record
 
 
 class Quote(Record):
-    hardware: GPU | CPU  # what was priced; create asks for exactly this
+    hardware: Hardware  # what was priced; create asks for exactly this
     usd_per_hour: Decimal
     available: bool  # False only when the catalog positively reports none
 
@@ -45,6 +30,7 @@ class PodFact(Record):
     created_at: datetime
     status: str
     address: str | None = None  # retained for historical SSH receipts
+    hardware: Hardware | None = None  # what create asked for; a pod found by name omits it
 
 
 class HourBill(Record):
@@ -163,7 +149,7 @@ class RunPodAPI(PodHTTP):
         self,
         *,
         name: str,
-        hardware: GPU | CPU,
+        hardware: Hardware,
         image: str,
         registry: str,
         env: dict[str, str],
@@ -200,7 +186,7 @@ class RunPodAPI(PodHTTP):
         pod = self._pod(self._ask("POST", "pods", payload=payload))
         if pod.name != name or pod.usd_per_hour <= 0 or pod.status in {"EXITED", "TERMINATED"}:
             raise ProviderUnavailable("the created pod is not the one asked for")
-        return pod
+        return pod.model_copy(update={"hardware": hardware})
 
     def delete(self, pod: PodFact) -> datetime:
         """Delete exactly this pod and return when the provider confirmed it.

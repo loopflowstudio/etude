@@ -23,6 +23,7 @@ from etude.launch.records import (
     Checkpoint,
     Cohort,
     Diagnostic,
+    Hardware,
     Image,
     Job,
     Launch,
@@ -86,7 +87,7 @@ CREATE TABLE IF NOT EXISTS sessions(
   seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL, pool TEXT NOT NULL,
   machine TEXT NOT NULL REFERENCES machines(name), planned_at TEXT NOT NULL,
   claimed_at TEXT, startup_deadline TEXT, receipt TEXT, started_at TEXT, refused_at TEXT, ended_at TEXT,
-  version INTEGER NOT NULL DEFAULT 1, autorun INTEGER NOT NULL DEFAULT 0);
+  version INTEGER NOT NULL DEFAULT 1, autorun INTEGER NOT NULL DEFAULT 0, hardware TEXT);
 CREATE TABLE IF NOT EXISTS rentals(
   machine TEXT PRIMARY KEY REFERENCES machines(name), usd_per_hour TEXT NOT NULL,
   cap_usd TEXT NOT NULL, deadline TEXT NOT NULL, kept INTEGER NOT NULL DEFAULT 0,
@@ -106,7 +107,7 @@ CREATE INDEX IF NOT EXISTS attempts_session ON attempts(session);
 
 Fact = str | int | None
 # Changes with the schema. There are no migrations: a file from another version is refused.
-_VERSION = 6
+_VERSION = 7
 
 
 def _text(at: datetime | None) -> str | None:
@@ -147,7 +148,7 @@ def _pool(row: sqlite3.Row) -> Pool:
 # A rented machine has one working session for its whole life. What the provider
 # said about making and deleting the machine is recorded on that session.
 _MACHINES = """SELECT m.name, m.pool, m.kind, m.provider, m.address, m.storage, m.image,
-    w.claimed_at AS requested_at, w.receipt AS provider_id, w.refused_at,
+    w.claimed_at AS requested_at, w.receipt AS provider_id, w.hardware, w.refused_at,
     COALESCE(w.ended_at, m.deleted_at) AS deleted_at
     FROM machines m LEFT JOIN sessions w ON w.machine=m.name AND m.kind='rented'"""
 _SESSIONS = "SELECT w.* FROM sessions w"
@@ -156,8 +157,17 @@ _RENTALS = "SELECT r.* FROM rentals r"
 
 def _machine(row: sqlite3.Row) -> Machine:
     return Machine.model_validate(
-        {**dict(row), "image": Image.model_validate_json(row["image"]) if row["image"] else None}
+        {
+            **dict(row),
+            "image": Image.model_validate_json(row["image"]) if row["image"] else None,
+            "hardware": json.loads(row["hardware"]) if row["hardware"] else None,
+        }
     )
+
+
+def _session(row: sqlite3.Row) -> Session:
+    hardware = json.loads(row["hardware"]) if row["hardware"] else None
+    return Session.model_validate({**dict(row), "hardware": hardware})
 
 
 def _attempt(row: sqlite3.Row) -> RunAttempt:
@@ -762,6 +772,14 @@ class Database:
             receipt=receipt,
         )
 
+    def record_hardware(self, session: Session, hardware: Hardware) -> None:
+        self._change(
+            "sessions",
+            session.id,
+            session.version,
+            hardware=hardware.model_dump_json(),
+        )
+
     def record_started(self, session: Session, at: datetime) -> None:
         self._change("sessions", session.id, session.version, started_at=at.isoformat())
 
@@ -798,7 +816,7 @@ class Database:
         ).fetchone()
         if row is None:
             raise LauncherError(f"machine {machine!r} has no rental")
-        return Session.model_validate(dict(row))
+        return _session(row)
 
     def rentals(self) -> tuple[Rental, ...]:
         return tuple(Rental.model_validate(dict(row)) for row in self._db.execute(_RENTALS))
@@ -813,10 +831,7 @@ class Database:
         )
 
     def sessions(self) -> tuple[Session, ...]:
-        return tuple(
-            Session.model_validate(dict(row))
-            for row in self._db.execute(f"{_SESSIONS} ORDER BY w.seq")
-        )
+        return tuple(_session(row) for row in self._db.execute(f"{_SESSIONS} ORDER BY w.seq"))
 
     def record_refusal(self, session: Session, at: datetime) -> None:
         self._change("sessions", session.id, session.version, refused_at=at.isoformat())
@@ -832,7 +847,7 @@ class Database:
         row = self._db.execute(f"{_SESSIONS} WHERE w.id = ?", (id,)).fetchone()
         if row is None:
             raise LauncherError(f"no session {id!r}")
-        return Session.model_validate(dict(row))
+        return _session(row)
 
     def unsettled_sessions(self) -> tuple[Session, ...]:
         """Sessions not refused and either still running or with attempts not yet settled.
@@ -845,7 +860,7 @@ class Database:
                (SELECT 1 FROM attempts a WHERE a.session = w.id AND a.outcome IS NULL))
                ORDER BY w.seq"""
         )
-        return tuple(Session.model_validate(dict(row)) for row in rows)
+        return tuple(_session(row) for row in rows)
 
     def cohort_sessions(self, name: str) -> tuple[Session, ...]:
         rows = self._db.execute(
@@ -853,7 +868,7 @@ class Database:
                JOIN runs r ON r.id = a.run WHERE r.cohort = ?) ORDER BY w.seq""",
             (name,),
         )
-        return tuple(Session.model_validate(dict(row)) for row in rows)
+        return tuple(_session(row) for row in rows)
 
     def cohort_runs(self, name: str) -> tuple[RunRecord, ...]:
         self.cohort(name)  # raises if no such cohort

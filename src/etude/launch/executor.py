@@ -46,7 +46,13 @@ class Refused(Exception):
 class Execution(Protocol):
     def checkpoint(self, ref: CheckpointRef) -> CheckpointRef: ...
     def started(self, session_id: str) -> bool: ...
-    def charged_price(self, session_id: str) -> Decimal | None: ...
+    def allocation(self, session_id: str) -> Allocation | None:
+        """The provider's receipt for a rented machine: its charged price and hardware.
+
+        None for a machine you own, and while no receipt is found.
+        """
+        ...
+
     def bill(self, session_id: str, now: datetime) -> Bill | None: ...
 
     def price(self) -> Decimal:
@@ -170,11 +176,8 @@ class Executor:
     def checkpoint(self, ref: CheckpointRef) -> CheckpointRef:
         return self.journal.checkpoint(ref)
 
-    def charged_price(self, session_id: str) -> Decimal | None:
-        if self.machines.owned:
-            return Decimal(0)
-        machine = self.machines.find(session_id)
-        return None if machine is None else machine.usd_per_hour
+    def allocation(self, session_id: str) -> Allocation | None:
+        return None if self.machines.owned else self.machines.find(session_id)
 
     def bill(self, session_id: str, now: datetime) -> Bill | None:
         return self.machines.bill(session_id, now)

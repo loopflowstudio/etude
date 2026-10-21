@@ -18,7 +18,7 @@ from pathlib import Path
 from etude.launch.database import Database
 from etude.launch.executor import Refused
 from etude.launch.logs import snapshot_stream
-from etude.launch.machines import Bill
+from etude.launch.machines import Allocation, Bill
 from etude.launch.records import (
     Image,
     LogStream,
@@ -97,9 +97,11 @@ class FakeService:
         self._call("bucket")
         return session_id in self.sessions
 
-    def charged_price(self, session_id: str) -> Decimal | None:
+    def allocation(self, session_id: str) -> Allocation | None:
         self._call("provider")
-        return self.usd_per_hour
+        return Allocation(
+            id=session_id, address=None, usd_per_hour=self.usd_per_hour, created_at=self.clock()
+        )
 
     def bill(self, session_id: str, now: datetime) -> Bill | None:
         self._call("provider")

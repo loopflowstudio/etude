@@ -15,16 +15,9 @@ from etude.launch.deadline import limit_time
 from etude.launch.executor import Refused, check_creation
 from etude.launch.machines import Allocation, Bill, MachineRequest, Safeguards
 from etude.launch.providers.package import program_archive
-from etude.launch.providers.runpod.api import (
-    CPU,
-    GPU,
-    PodFact,
-    ProviderUnavailable,
-    Quote,
-    RunPodAPI,
-)
+from etude.launch.providers.runpod.api import PodFact, ProviderUnavailable, Quote, RunPodAPI
+from etude.launch.records import GPU, Hardware, LauncherError, MachineTemplate, Provider
 from etude.launch.records import STOCK_IMAGE as DEFAULT_IMAGE
-from etude.launch.records import LauncherError, MachineTemplate, Provider
 from etude.launch.storage.s3 import Bucket
 
 
@@ -136,6 +129,7 @@ class RunPodMachines:
             address=pod.address,
             usd_per_hour=pod.usd_per_hour,
             created_at=pod.created_at,
+            hardware=pod.hardware,
         )
 
     def find(self, session_id: str) -> Allocation | None:
@@ -181,7 +175,7 @@ class RunPodMachines:
         return Bill(usd=usd, through=through) if through > pod.created_at else None
 
 
-def _disk_gb(hardware: GPU | CPU) -> int:
+def _disk_gb(hardware: Hardware) -> int:
     # RunPod caps a CPU pod's container disk at 10 GB per vCPU on its smallest flavors.
     return 40 if isinstance(hardware, GPU) else min(40, 10 * hardware.vcpus)
 

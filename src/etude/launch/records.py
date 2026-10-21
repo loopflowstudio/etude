@@ -127,6 +127,31 @@ class MachineTemplate(Record):
     data_center: str | None = None  # the provider's name for the place; None: wherever it has one
 
 
+class GPU(Record):
+    """One GPU of a type, on a host with at least this much CPU and memory."""
+
+    id: str  # the provider's GPU type id, such as "NVIDIA L4"
+    min_vcpus: int
+    min_memory_gb: int
+
+    def __str__(self) -> str:
+        return self.id
+
+
+class CPU(Record):
+    """A CPU machine of one flavor, sized by vCPU count; memory follows from the flavor."""
+
+    flavor: str  # the provider's CPU flavor id, such as "cpu3c"
+    vcpus: int
+
+    def __str__(self) -> str:
+        return f"{self.flavor} {self.vcpus} vCPUs"
+
+
+# What a provider was asked to rent, which may be larger than the template asked for.
+Hardware = GPU | CPU
+
+
 STOCK_IMAGE = Image(
     requested="runpod/pytorch@sha256:4d1721e62b56d345c83b4fd6090664be6daf9312caab5b2e76f23d8231941851",
     resolved="runpod/pytorch@sha256:4d1721e62b56d345c83b4fd6090664be6daf9312caab5b2e76f23d8231941851",
@@ -171,6 +196,7 @@ class Machine(Record):
     provider: str | None = None  # account that supplied a rented machine
     requested_at: datetime | None = None
     provider_id: str | None = None
+    hardware: Hardware | None = None  # None: not rented, or found by name without its receipt
     refused_at: datetime | None = None
     address: str | None = None  # SSH address for an added host; never a provider receipt
     storage: str | None = None
@@ -341,6 +367,7 @@ class Session(Record):
     ended_at: datetime | None
     version: int
     autorun: bool = False
+    hardware: Hardware | None = None
 
 
 class RunAttempt(Record):
@@ -388,6 +415,7 @@ class Status(Record):
     rental_ended: bool | None  # True only on a dated confirmation
 
     machine: str | None = None
+    hardware: Hardware | None = None
     estimated: bool = False
 
     @property
