@@ -88,7 +88,7 @@ limit on machines at once.
 The `etude-sdk` package uses Python 3.12 and one shared dependency set for launching and tracking, installed with uv. It runs on this
 computer, SSH hosts and RunPod machines, without any Etude account.
 
-A **Job** specifies a command, source commit, config, target and limits. It has
+A **Job** specifies what runs, source commit, config, target and limits. It has
 no seed or machine settings. A **Run** pairs a job with a seed and goes to a
 pool, an on-demand or both. A **Cohort** launches runs together under shared limits. A **RunAttempt**
 allocates a run to a machine for a bounded execution window. `status` shows the machine.
@@ -102,13 +102,14 @@ stay outside these records.
 
 ```python
 # job.py
+from etude.jobs import training
 from etude.launch.records import Job
+
+from train import TrainConfig, train  # train(config: TrainConfig) -> None
 
 
 def runs() -> Job:
-    return Job(
-        command='echo hello; echo weights > "$ETUDE_OUTPUT_DIR/checkpoint.pt"', max_hours=0.1
-    )
+    return training(train, config=TrainConfig(lr=1e-3), max_hours=0.1)
 ```
 
 A job always states `max_hours`. It needs `max_usd` only when it may rent,
@@ -166,6 +167,67 @@ used: files up to 5 GB, read whole into memory, and nothing deleted. RunPod
 supplies a separate self key for deletion. Job environments exclude all of
 these keys; jobs currently run under the same account as the worker, so the
 temporary keys are kept in the courier's memory and never written to disk.
+
+## Typed jobs
+
+```python
+from decimal import Decimal
+
+from etude.jobs import evaluation, training
+from etude.launch.records import Input
+
+job = training(train, config=TrainConfig(lr=1e-3), max_hours=6, max_usd=Decimal(30))
+weights = Input(
+    name="updates-500",
+    key="etude/launch/RUN/checkpoints/updates-500",
+    sha256="…",
+    size_bytes=1048576,
+)
+check = evaluation(progress, play=play, checkpoint=weights, max_hours=0.5, max_usd=Decimal(1))
+```
+
+The job type decides the command. Both return a `Job` whose command imports
+the function in the job's own environment and calls it with the config:
+`uv run python -m etude.call --function MODULE:NAME` in the checkout, which is
+then a uv project depending on `etude-sdk`, or `"$ETUDE_PYTHON" -m etude.call ...`
+with a `runtime`, whose interpreter must already hold `etude-sdk` and the
+project's dependencies. `etude.call` reads `ETUDE_CONFIG`, validates it into the
+type of the function's one parameter and calls it in `ETUDE_SOURCE_DIR`. It
+imports nothing else of Etude before the function's own module.
+
+- **Functions** are named by import path, so they are defined at the top of a
+  module: not in the job file, `__main__` or another function. The job's
+  `repo` is the git checkout the function's file is in (for an evaluation,
+  `play`'s) unless `repo` is given; `repo=None` names a function installed in
+  the job's environment. The module is imported from the folder its name
+  starts in, so a job file beside `train.py`, a package at the root and a
+  `src/` layout all work.
+- **Configs** are Pydantic models: the model's defaults are the recipe, and its
+  JSON is the job's config, so it is part of the job's identity. A config of
+  another type, or one that would not validate back into the parameter's
+  type, raises `LauncherError` when the job is made, before any quote, launch
+  or rental.
+- **Every other `Job` field** (`max_hours`, `max_usd`, `until`, `inputs`,
+  `runtime`, `setup`, `name`, ...) is a keyword of both (`JobOptions`).
+- **The job file imports the function**, so `etude launch` must be able to
+  import its module. When it imports training libraries at its top, launch
+  from the project's environment: `uv run etude launch job.py`.
+- **An evaluation** holds a [tournament](evaluation.md#tournaments) as one eval
+  run, which is the launched run. A benchmark's `checkpoint` is an `Input`: it
+  reaches the machine verified by digest and fills every model seat, where
+  `play` finds the file at the agent's `uri`. A round robin takes `enter=`
+  agents. Holding nothing new (batch) is refused, since a launched job reads no
+  other eval run. `workers=` plays matches in parallel processes. The job's
+  environment needs `etude-sdk[eval]`.
+- **Commands are for work that is not Python**:
+  `Job(command="./simulate --games 1000", max_hours=1)` runs by `sh` in the
+  checkout with the `ETUDE_*` environment below. Python work is a typed job,
+  so there is one way to run it.
+
+Not built yet: evaluating as training goes,
+`training(..., evaluations=[evaluation(progress, play=play, ...)], every=5)`,
+where the controller watches the training run's checkpoints and launches the
+evaluation for every fifth one and the last.
 
 ## Rented machines
 
@@ -476,6 +538,7 @@ defines it, by its full path, and relative imports are a lint error:
 
 | Import | What it is |
 | --- | --- |
+| `from etude.jobs import training, evaluation` | typed jobs: Etude decides the command |
 | `from etude.launch.records import Job, Run` | what to run |
 | `from etude.launch.client import queue, launch, status, wait, ...` | the calls a script makes; they go to the controller when one is set |
 | `from etude.launch.database import Database` | the SQLite records in `launcher.db` |
@@ -484,7 +547,7 @@ defines it, by its full path, and relative imports are a lint error:
 | `from etude.launch.scheduler import Scheduler` | the owner of one database: queueing, admission, matching runs to machines |
 
 Records are frozen Pydantic models, constructed with named fields:
-`Job(command="python train.py", max_hours=2)` and `Run(job=job, seed=1)`.
+`Job(command="./simulate", max_hours=2)` and `Run(job=job, seed=1)`.
 Use `model_dump_json()` for JSON and `model_validate_json()` to load it. Imports sit at the top of each module, so every command, including `--help`,
 loads the whole launcher: 33 modules and Pydantic, about 70 ms measured on
 2026-10-13. A test pins the module count. Each remote command imports client dependencies once
@@ -496,13 +559,13 @@ in its installed environment.
 from decimal import Decimal
 from pathlib import Path
 
+from etude.jobs import training
 from etude.launch.client import continue_from, fetch, logs, queue, queue_cohort, wait
-from etude.launch.records import Job
+from train import TrainConfig, train
 
-job = Job(
-    command="python3.12 train.py",
-    repo=".",
-    config=Path("large.toml").read_text(),
+job = training(
+    train,
+    config=TrainConfig(hidden=1024),
     until="steps=26000",
     max_hours=6,
     max_usd=Decimal(5),
@@ -523,16 +586,18 @@ before anything goes to a controller:
 # capacity.py
 from decimal import Decimal
 
+from etude.jobs import training
 from etude.launch.client import launch_cohort
-from etude.launch.records import Job, Run
+from etude.launch.records import Run
+from train import TrainConfig, train
 
 
 def runs(hidden: int = 256, seeds: int = 3) -> list[Run]:
-    job = Job(
-        command=f"python train.py --hidden {hidden}",
+    job = training(
+        train,
+        config=TrainConfig(hidden=hidden),
         max_hours=2,
         max_usd=Decimal(1),
-        repo=".",
         until="steps=26000",
         name=f"hidden{hidden}",
     )
@@ -579,10 +644,12 @@ def runs() -> list[Run]:
 ```
 
 Several runs require `--cohort`. Cohort limits belong to command flags, not the
-file. `config` is the config's text and a relative `repo` is relative to the
-directory the command is run from, exactly as when Python calls the launcher
-directly. A file that keeps a config beside itself reads it:
-`config=(Path(__file__).parent / "large.toml").read_text()`.
+file. A job file's folder is on the import path, as for `python job.py`, so it
+imports its neighbours. A relative `repo` is relative to the directory the
+command is run from, exactly as when Python calls the launcher directly. A
+config is a Pydantic model in Python, not a file beside the job: a named
+setting is a function or class method returning one, such as
+`TrainConfig.large()`.
 
 TOML job files are no longer accepted. A script may also call `queue` or `launch` from
 `etude.launch.client` directly. Where commands accept run IDs, a cohort name selects
@@ -620,18 +687,22 @@ A resumed attempt or continuation also receives `ETUDE_CHECKPOINT` and `ETUDE_FR
 A job can be given files by name:
 
 ```python
-from etude.launch.records import Input, Job
+from etude.jobs import training
+from etude.launch.records import Input
 
 policy = Input(
     name="policy.pt", key="etude/launch/RUN/checkpoints/policy.pt", sha256="…", size_bytes=1048576
 )
-job = Job(
-    command='python eval.py --policy "$ETUDE_INPUTS_DIR/policy.pt"',
+job = training(
+    finetune,  # opens Path(os.environ["ETUDE_INPUTS_DIR"]) / "policy.pt"
+    config=FinetuneConfig(),
     inputs=(policy,),
     max_hours=1,
     max_usd=Decimal(2),
 )
 ```
+
+An evaluation job's `checkpoint` is an input like this one.
 
 `key` names an object in the bucket of the storage the machine keeps its
 records in (the on-demand's, or an owned host's `--storage`). The launcher gives
@@ -1033,12 +1104,19 @@ The prototype database schema is version 8; older database files are refused.
 ### Prepare a framework image before renting
 
 ```python
+from etude.jobs import training
 from etude.launch.images import prepare_pytorch, resolve_image
-from etude.launch.records import Job, MachineTemplate
+from etude.launch.records import MachineTemplate
 
 prepared = prepare_pytorch(torch="2.10.0", cuda="12.8")
 template = MachineTemplate(provider="runpod", gpu="NVIDIA L4", image=prepared.image)
-job = Job(command='"$ETUDE_PYTHON" train.py', runtime=prepared.runtime, max_hours=1)
+job = training(
+    train,
+    config=TrainConfig(),
+    runtime=prepared.runtime,
+    setup='"$ETUDE_PYTHON" -m pip install etude-sdk',  # the stock image has no Etude
+    max_hours=1,
+)
 # Custom public or private image; uses Docker's configured registry credentials.
 custom = resolve_image("registry.example/team/training:release", timeout=30)
 ```
@@ -1081,10 +1159,12 @@ command from installing Torch again. Cold image pulls can still dominate startup
 ### Reuse a preinstalled job runtime
 
 ```python
-from etude.launch.records import Job, Runtime
+from etude.jobs import training
+from etude.launch.records import Runtime
 
-job = Job(
-    command='"$ETUDE_PYTHON" train.py',
+job = training(
+    train,
+    config=TrainConfig(),
     max_hours=1,
     runtime=Runtime(
         python="python3.12",
@@ -1108,7 +1188,8 @@ actual virtual environment also sets `VIRTUAL_ENV`. These settings apply only to
 the job. Etude refuses its own client environment and never installs or upgrades
 job dependencies. Missing project dependencies belong in a prepared image or your
 explicit setup command. Vendor entrypoint scripts are not activated implicitly.
-Omitting `runtime` preserves the existing shell environment behavior.
+Without `runtime`, a typed job runs `uv run python` in the checkout and a
+command runs in the shell's environment.
 
 The pinned official PyTorch example has a repeatable CPU check:
 `uv run python scripts/test_pytorch_image.py`. It pulls the image, then checks
@@ -1121,9 +1202,10 @@ CUDA execution test.
 ### Setup, training and cleanup
 
 ```python
-job = Job(
+job = training(
+    train,
+    config=TrainConfig(),
     setup='"$ETUDE_PYTHON" prepare_data.py',
-    command='"$ETUDE_PYTHON" train.py',
     cleanup='"$ETUDE_PYTHON" collect_diagnostics.py',
     cleanup_seconds=30,
     runtime=Runtime(python="python3.12"),

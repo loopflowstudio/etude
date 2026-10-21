@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import runpy
+import sys
 import typing
 from collections.abc import Sequence
 from pathlib import Path
@@ -20,6 +21,10 @@ def read_job_file(path: Path, given: Sequence[str] = (), *, help: bool = False) 
 
     if path.suffix != ".py":
         raise LauncherError("job files must be Python (.py), defining runs()")
+    # As `python job.py` would, so the file can import its neighbours: `from train import train`.
+    folder = str(path.resolve().parent)
+    if folder not in sys.path:
+        sys.path.insert(0, folder)
     function = runpy.run_path(str(path.resolve())).get("runs")
     if not callable(function):
         raise LauncherError(f"{path.name}: define runs() returning a Job, a Run, or a list of Runs")
@@ -35,7 +40,7 @@ def read_job_file(path: Path, given: Sequence[str] = (), *, help: bool = False) 
             values.append(function(**kwargs))
         except Exception as error:
             hint = (
-                ". Records take named fields, such as Job(command=..., max_hours=...)"
+                ". Records take named fields, such as Run(job=..., seed=1)"
                 if isinstance(error, TypeError) and "positional argument" in str(error)
                 else ""
             )

@@ -179,7 +179,7 @@ evaluate(
   `standings`; `connect` reports it in the `tournaments` table.
 - **Run names.** Under `etude launch` the eval run is the launched run
   (`ETUDE_RUN`), so `etude logs` and `status` lead to it and a retry resumes
-  it. Elsewhere it is named for the tournament and what is given; the same
+  it, finding the same checkpoint (by digest) wherever the retry put it. Elsewhere it is named for the tournament and what is given; the same
   call resumes it.
 - **Splitting.** `share=(k, n)` plays one of n disjoint parts, for n
   machines: the scheduled matches in key order, dealt round, so parts differ
@@ -198,6 +198,49 @@ evaluate(
 - **`standings`** gives a round robin's payoff matrix, best first, each entry
   naming its agent and opponent; `complete` says whether every scheduled
   match is held.
+
+## Evaluation jobs
+
+```python
+# eval.py
+from decimal import Decimal
+
+from etude.jobs import evaluation
+from etude.launch.records import Input, Job
+
+from arena import play, progress  # play(match: Match) -> Tables; progress is a Benchmark
+
+
+def runs(checkpoint: str, sha256: str, size_bytes: int) -> Job:
+    weights = Input(
+        name=checkpoint,
+        key=f"etude/launch/ppo-1/checkpoints/{checkpoint}",  # PREFIX/RUN/checkpoints/NAME
+        sha256=sha256,
+        size_bytes=size_bytes,
+    )
+    return evaluation(
+        progress, play=play, checkpoint=weights, workers=8, max_hours=0.5, max_usd=Decimal(1)
+    )
+```
+
+```sh
+etude launch eval.py --rent cpu8 --checkpoint updates-500 --sha256 … --size-bytes 1048576
+```
+
+An evaluation job holds a tournament on a launched machine, and nobody writes
+its command: Etude calls `hold` there with `play`, imported by name from your
+checkout, and the checkpoint, which reaches the machine as the job's input,
+verified by digest. The input's name names the checkpoint, and its file is the
+`uri` of every model seat, which `play` opens. A round robin takes `enter=`
+agents instead. The eval run is the launched run, so its tables reach the
+machine's storage with the run's other files and `connect` finds them there.
+Holding nothing new (batch) is refused: a launched job reads no other eval
+run. The job's environment needs `etude-sdk[eval]`; the rest is as for any
+[typed job](launcher.md#typed-jobs).
+
+Next: evaluating as training goes, declared on the training job as
+`training(..., evaluations=[evaluation(...)], every=5)`, with the controller
+launching one evaluation job for every fifth checkpoint.
 
 ## Querying
 

@@ -196,6 +196,20 @@ def test_a_hold_launched_on_a_machine_keeps_its_tournament_in_its_own_run(
     assert all([p.ordinal for p in line.points] == [1, 2, 3] for line in lines)
 
 
+def test_a_retried_hold_finds_its_checkpoint_by_digest_wherever_it_lies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (checkpoint, *_) = trained(tmp_path, DirectoryStorage(tmp_path / "bucket"))
+    progress = anchors(tmp_path)
+    monkeypatch.setenv("ETUDE_RUN", "anchors-eval")
+    first = hold(progress, checkpoint=checkpoint, play=play, directory=tmp_path / "machine")
+    # A second attempt is given the same file at another path.
+    moved = checkpoint.model_copy(update={"uri": (tmp_path / "attempt-2" / "updates-100").as_uri()})
+    again = hold(progress, checkpoint=moved, play=play, directory=tmp_path / "machine")
+    assert first.played > 0
+    assert (again.name, again.played, again.skipped) == ("anchors-eval", 0, first.played)
+
+
 def test_a_round_robin_held_as_two_shares_stands_as_one(tmp_path: Path) -> None:
     finals = [scripted(tmp_path, f"final{strength}", strength) for strength in range(4)]
     league = RoundRobin(name="finals", environment=WORLD, conditions=DEALS, games=4)
