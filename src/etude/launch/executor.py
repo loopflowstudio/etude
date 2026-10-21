@@ -69,6 +69,10 @@ class Execution(Protocol):
         """Hand one more piece of work to a kept session. Safe to repeat."""
         ...
 
+    def stage(self, repo: str, commit: str) -> None:
+        """Put a commit's source where this execution's machines fetch it. Safe to repeat."""
+        ...
+
     def find(self, session_id: str) -> str | None:
         """The provider's name for a session whose create reply was lost, if it exists."""
         ...
@@ -95,6 +99,7 @@ class Execution(Protocol):
 class Journal(Protocol):
     def checkpoint(self, ref: CheckpointRef) -> CheckpointRef: ...
     def add(self, session_id: str, work: Work) -> None: ...
+    def stage(self, repo: str, commit: str) -> None: ...
     def observe(self, session_id: str) -> Observation: ...
     def stop(self, session_id: str, attempt: str) -> None: ...
     def logs(
@@ -190,6 +195,9 @@ class Executor:
 
     def add(self, session_id: str, work: Work) -> None:
         self.journal.add(session_id, work)
+
+    def stage(self, repo: str, commit: str) -> None:
+        self.journal.stage(repo, commit)
 
     def stop(self, session_id: str, attempt: str) -> None:
         self.journal.stop(session_id, attempt)

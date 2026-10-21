@@ -718,9 +718,23 @@ class Scheduler:
             float(cap / price * 3600) if price else float("inf"),
         )
 
+    def _stage(self, ondemand: OnDemand, runs: Sequence[RunRecord]) -> None:
+        """Put the runs' source archives in the on-demand's storage before renting for them.
+
+        A rental's window starts when it is made, so no paid machine waits on an upload.
+        """
+        service = self._reach(ondemand)
+        for repo, commit in sorted(
+            {(r.spec.repo, r.spec.revision) for r in runs if r.spec.repo and r.spec.revision}
+        ):
+            service.stage(repo, commit)
+
     def _admit(self, records: Sequence[RunRecord], cohort: Cohort | None, launch: str) -> None:
         target = Target(pool=records[0].pool, rent=records[0].rent)
         names = [name for name in (target.pool, target.rent) if name is not None]
+        if target.rent is not None:
+            # Before the locks: an upload can outlast their lease.
+            self._stage(self._store.ondemand(target.rent), records)
         with ExitStack() as locks:
             for name in names:  # pools before on-demands, as tick takes them
                 if not locks.enter_context(self._store.lock(name, self._clock)):
@@ -1396,6 +1410,14 @@ class Scheduler:
                 planned = self._next_run(waiting, price, now)
                 if planned is None:
                     return
+                try:
+                    self._stage(supply, [planned.run])
+                except (OSError, LauncherError, StorageUnavailable) as error:
+                    self._diagnose("source upload", "upload failed; nothing rented", error)
+                    self._trouble[supply.name] = "source upload failed"
+                    return
+                now = self._clock()  # the rental's window starts after the upload
+                self._store.check_lock(supply.name)
                 hours = planned.run.spec.max_hours
                 cap = planned.cap_usd
                 slots = 1
@@ -1738,6 +1760,7 @@ class Scheduler:
             job=run.job,
             job_name=spec.name or None,
             cohort=run.cohort,
+            inputs=spec.inputs,
         )
 
     def _packet(self, session: Session) -> Packet:

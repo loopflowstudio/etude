@@ -353,6 +353,9 @@ class SSHJournal:
     ) -> BootstrapLinks | None:
         return None
 
+    def stage(self, repo: str, commit: str) -> None:
+        """Nothing to do ahead: source is copied to the host when its session starts."""
+
     def started(self, session_id: str) -> bool:
         return self.ssh.call("started", session_id).started
 

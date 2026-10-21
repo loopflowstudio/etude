@@ -631,7 +631,7 @@ def test_completed_workload_before_and_after(
         observed_at=cold.observed_at,
         events=tuple(e for e in cold.events if e.id not in replayed_ids),
     )
-    assert (cold_reads.received_bytes, cold_reads.requests) == (25169124, 7)
+    assert (cold_reads.received_bytes, cold_reads.requests) == (25169180, 7)
     assert cold_reads.reused_bytes == len(payload)
     for index, run in enumerate(runs):
         assert (
@@ -652,7 +652,7 @@ def test_completed_workload_before_and_after(
         observed_at=after.observed_at,
         events=tuple(e for e in after.events if e.purpose == "control"),
     )
-    assert (warm.received_bytes, warm.requests) == (3300, 4)  # inbox + completion per run
+    assert (warm.received_bytes, warm.requests) == (3356, 4)  # inbox + completion per run
     assert sum(e.received_bytes for e in warm.events if e.purpose == "result") == 0
     assert (bulk.received_bytes, bulk.reused_bytes) == (
         len(archive.getvalue()) + len(http.objects["/source"]) + 1024**2 + len(payload),
@@ -668,12 +668,12 @@ def test_completed_workload_before_and_after(
     assert sum(e.status == 403 for e in after.events) == 1
     assert control.requests > 0 and control.supplied_bytes > 0
     assert bulk.requests == 9  # runtime, failed source, source, input, 2 uploads, 3 ranges
-    assert control.requests == 47  # worker publication, scheduler collection and public fetches
+    assert control.requests == 44  # worker publication, scheduler collection and public fetches
 
     assert sum(e.operation == "GET" for e in after.events) == http.requests
     assert after.received_bytes == http.received
-    # Final journal publication cannot report its own completion in that body.
-    assert http.posts - sum(e.operation == "POST" for e in after.events) == 2
+    # Usage journal deliveries are not journaled: each would change the journal.
+    assert http.posts - sum(e.operation == "POST" for e in after.events) == 5
 
     # Measure the predecessor's repeated full payload reads. Preserve the same
     # observed control/upload trace so the comparison changes only payload reuse.
@@ -697,7 +697,7 @@ def test_completed_workload_before_and_after(
         download_usd_per_gb=Decimal("0.09"),
         request_usd_per_1000=Decimal("0.0004"),
     )
-    assert (before.requests, after.requests) == (59, 56)
+    assert (before.requests, after.requests) == (56, 53)
     assert before.estimate(rates) - after.estimate(rates) == Decimal("0.00707908782")
     assert after.requests == control.requests + bulk.requests
     own = [b.scheduler.usage(run=run) for run in runs]
@@ -769,3 +769,27 @@ def test_worker_source_and_checkpoint_share_verified_transport_bytes(
     assert sum(e.received_bytes for e in events if e.purpose == "source") == 12
     assert sum(e.reused_bytes for e in events if e.purpose == "checkpoint") == 12
     assert (http.requests, http.received) == (1, 12)
+
+
+def test_unchanged_inbox_polls_leave_no_log_lines_or_usage(http: HTTP, tmp_path: Path) -> None:
+    home = tmp_path / "sessions" / "polled"
+    (home / "stop").mkdir(parents=True)
+    http.objects["/inbox"] = Inbox().model_dump_json().encode()
+    form = PostForm(url=http.url + "/upload", prefix="out/", fields={})
+    courier = Courier(home, form, http.url + "/inbox")
+    log = tmp_path / "worker.log"
+    with log_to(log):
+        for _ in range(5):
+            courier.bring_in()
+        http.objects["/inbox"] = Inbox(stop=("attempt",)).model_dump_json().encode()
+        for _ in range(5):
+            courier.bring_in()
+    assert http.requests == 10
+    lines = [line.split(" ", 1)[1] for line in log.read_text().splitlines()]
+    assert lines == ["inbox: 0 work, 0 to stop", "inbox: 0 work, 1 to stop"]  # changes only
+    events = [
+        Transfer.model_validate_json(line)
+        for line in (home / "usage.jsonl").read_text().splitlines()
+    ]
+    assert [(e.operation, e.status) for e in events] == [("GET", 200), ("GET", 200)]
+    assert (home / "stop" / "attempt").exists()

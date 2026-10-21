@@ -53,6 +53,9 @@ class DirectoryJournal:
         note = self._root / session_id / "ended"
         return datetime.fromisoformat(note.read_text()) if note.exists() else None
 
+    def stage(self, repo: str, commit: str) -> None:
+        """Nothing to do ahead: a session's source is written beside it when it starts."""
+
     def add(self, session_id: str, work: Work) -> None:
         added = self._root / session_id / "work"
         added.mkdir(exist_ok=True)

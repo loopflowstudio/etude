@@ -13,7 +13,7 @@ from pydantic import Field
 
 from etude.launch.records import Record
 
-Purpose = Literal["source", "runtime", "checkpoint", "result", "control", "report"]
+Purpose = Literal["source", "input", "runtime", "checkpoint", "result", "control", "report"]
 
 
 class Transfer(Record):

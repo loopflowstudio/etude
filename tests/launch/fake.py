@@ -85,6 +85,7 @@ class FakeService:
         self.creates = 0
         self.sessions: dict[str, FakeSession] = {}
         self.most_live = 0
+        self.staged: list[tuple[str, int]] = []  # each staged commit, with creates before it
 
     def _call(self, boundary: str) -> None:
         self.calls[boundary] += 1
@@ -126,6 +127,10 @@ class FakeService:
             self.lose_reply -= 1
             raise ConnectionError("the reply never arrived")
         return f"provider-{packet.session}"
+
+    def stage(self, repo: str, commit: str) -> None:
+        self._call("bucket")
+        self.staged.append((commit, self.creates))
 
     def add(self, session_id: str, work: Work) -> None:
         self._call("bucket")

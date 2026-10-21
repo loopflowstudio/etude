@@ -33,6 +33,10 @@ class Download(Record):
     size_bytes: int = Field(ge=0)
 
 
+class Mismatch(StorageUnavailable):
+    """The bytes arrived but are not the ones named; asking again cannot help."""
+
+
 class _Range(Record):
     size_bytes: int
     sha256: str
@@ -165,7 +169,7 @@ class Cache:
                 if not _verify(partial, source):
                     with _lock(self.root / "capacity.lock"):
                         _discard(partial)
-                    raise StorageUnavailable("download length or SHA256 mismatch")
+                    raise Mismatch("download length or SHA256 mismatch")
                 if cacheable:
                     with _lock(self.root / "capacity.lock"):
                         partial.replace(target)

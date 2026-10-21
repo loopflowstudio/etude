@@ -22,6 +22,7 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
+from pydantic import ValidationError
 
 from etude.launch.database import Database
 from etude.launch.executor import Executor
@@ -31,6 +32,7 @@ from etude.launch.providers.runpod.machines import RunPodMachines
 from etude.launch.providers.runpod.pod import GuardianAPI, guard
 from etude.launch.records import (
     Image,
+    Input,
     Job,
     LauncherError,
     MachineTemplate,
@@ -182,6 +184,8 @@ class RunPod:
             asked = json.loads(body or b"{}")
             assert asked["dataCenterIds"] == ["EU-RO-1"]  # the pool's place is the one asked for
             self.creates += 1
+            with self.storage.lock:  # one timeline of storage requests and pod creates
+                self.storage.asked.append(("CREATE", asked["name"]))
             id = f"pod{self.creates}"
             pod = {"id": id, "name": asked["name"], "cost": 0.59, "status": "RUNNING"}
             self.pods[id] = {**pod, "createdAt": datetime.now(UTC).isoformat()}
@@ -280,6 +284,71 @@ def repository(tmp_path: Path) -> Path:
     ):
         subprocess.run(["git", "-C", str(repo), *command], check=True)
     return repo
+
+
+@pytest.mark.parametrize("queued", [False, True])
+def test_a_runs_source_is_in_storage_before_any_pod_is_rented_for_it(
+    tmp_path: Path, queued: bool
+) -> None:
+    c = cloud(tmp_path)
+    c.scheduler.set_ondemand_max("l4", 2)
+    job = Job(
+        command="sh train.sh", repo=str(repository(tmp_path)), max_hours=0.05, max_usd=Decimal(1)
+    )
+    if queued:
+        runs = c.scheduler.queue_cohort("pair", job.runs(1, 2), rent="l4", parallel=2)
+        c.scheduler.tick()
+    else:
+        runs = c.scheduler.launch_cohort("pair", job.runs(1, 2), rent="l4", parallel=2)
+    timeline = [(method, key.partition("?")[0]) for method, key in c.storage.asked]
+    uploads = [
+        i for i, (method, key) in enumerate(timeline) if method == "PUT" and "/sources/" in key
+    ]
+    creates = [i for i, (method, _) in enumerate(timeline) if method == "CREATE"]
+    assert len(uploads) == 1 and len(creates) == 2  # one archive for the cohort, then the pods
+    assert uploads[0] < creates[0]
+    (key,) = {timeline[i][1] for i in uploads}
+    assert key.startswith("etude/t/sources/") and key.endswith(".tar")  # named by digest
+    statuses = c.scheduler.wait(*runs, every=0.05, timeout=30)
+    assert [s.outcome for s in statuses] == ["succeeded", "succeeded"]
+
+
+def test_inputs_reach_the_job_by_name_once_and_wrong_bytes_are_refused(tmp_path: Path) -> None:
+    c = cloud(tmp_path)
+    weights = b"weights from an earlier tournament\n"
+    c.storage.objects["shared/weights.pt"] = weights
+    given = Input(
+        name="weights.pt",
+        key="shared/weights.pt",
+        sha256=hashlib.sha256(weights).hexdigest(),
+        size_bytes=len(weights),
+    )
+    job = Job(
+        command='cat "$ETUDE_INPUTS_DIR/weights.pt"',
+        inputs=(given,),
+        max_hours=0.05,
+        max_usd=Decimal(1),
+        max_attempts=1,
+    )
+    run = c.scheduler.launch(job, rent="l4")
+    (status,) = c.scheduler.wait(run, every=0.05, timeout=30)
+    assert status.outcome == "succeeded"
+    assert job_text(c.scheduler.logs(run=run)) == weights.decode()
+    reads = [k for m, k in c.storage.asked if m == "GET" and k.startswith("shared/weights.pt")]
+    assert len(reads) == 1  # one verified download, by the worker, through a scoped link
+
+    wrong = given.model_copy(update={"sha256": hashlib.sha256(b"other").hexdigest()})
+    refused = c.scheduler.launch(job.model_copy(update={"inputs": (wrong,)}), rent="l4")
+    (status,) = c.scheduler.wait(refused, every=0.05, timeout=30)
+    assert (status.outcome, status.cause) == ("lost", "setup_failed")
+    said = job_text(c.scheduler.logs(run=refused))  # the job's command never started
+    assert said.startswith("source preparation failed: ValueError: input weights.pt was not")
+    assert c.scheduler.record(refused).job != c.scheduler.record(run).job  # inputs are identity
+    assert c.provider.pods == {}
+    with pytest.raises(ValidationError, match="plain file name"):
+        given.model_validate({**given.model_dump(), "name": "../weights.pt"})
+    with pytest.raises(ValidationError, match="its own name"):
+        job.model_validate({**job.model_dump(), "inputs": [given.model_dump()] * 2})
 
 
 @pytest.mark.parametrize("delivery_seconds", [None, 60])
@@ -525,8 +594,11 @@ def test_shared_inputs_are_prepared_once(tmp_path: Path) -> None:
     )
     assert len(bootstrap.fetch) == 2
     source = bootstrap.fetch[f"shared/sources/{commit}.tar"]
-    archive = storage.objects[f"test/sessions/shared/sources/{commit}.tar"]
+    archive = storage.objects[f"test/sources/{source.sha256}.tar"]  # shared by every session
     assert (source.sha256, source.size_bytes) == (hashlib.sha256(archive).hexdigest(), len(archive))
+    with counting.record():
+        journal.stage(str(repo), commit)  # already staged: no git, no bucket
+    assert counting.snapshot() == Counts()
     held = bootstrap.fetch["previous/attempts/parent-attempt/outputs/weights.pt"]
     assert storage.objects[f"test/sessions/shared/inputs/{held.sha256}"] == checkpoint
 

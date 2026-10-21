@@ -16,7 +16,7 @@ Installed separately from the job environment. Run as
 
 A job is a shell command run in ETUDE_SOURCE_DIR. It reads ETUDE_OUTPUT_DIR, ETUDE_STOP_FILE,
 ETUDE_DEADLINE, ETUDE_SEED, ETUDE_UNTIL_CLOCK, ETUDE_UNTIL_VALUE, ETUDE_FROM_VALUE,
-ETUDE_CHECKPOINT and
+ETUDE_CHECKPOINT, ETUDE_INPUTS_DIR and
 ETUDE_CONFIG, and may write `etude-result.json` in its output directory as
 `{"clocks": {"steps": 63000, "wall_time_ms": 5400000}, "checkpoint": "checkpoint.pt"}`.
 ETUDE_UNTIL_CLOCK and ETUDE_UNTIL_VALUE are the job's target; ETUDE_FROM_VALUE is where
@@ -140,6 +140,18 @@ def _prepare(session: Path, home: Path, work: Work) -> dict[str, str]:
         if digest(local) != ref.sha256:
             raise ValueError("checkpoint_digest_mismatch")
         environment["ETUDE_CHECKPOINT"] = str(local)
+    if work.inputs:
+        folder = home / "inputs"
+        folder.mkdir()
+        for given in work.inputs:
+            held = session / "inputs" / given.sha256  # the courier verified it on arrival
+            if not held.is_file():
+                raise ValueError(
+                    f"input {given.name} was not delivered: its bytes did not match its digest,"
+                    " or the machine keeps no storage"
+                )
+            os.link(held, folder / given.name)
+        environment["ETUDE_INPUTS_DIR"] = str(folder)
     if work.seed is not None:
         environment["ETUDE_SEED"] = str(work.seed)
     if work.until is not None:
