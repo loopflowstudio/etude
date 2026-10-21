@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import io
 from pathlib import Path
+from typing import Any
 
 from etude.run.storage import Storage
 
@@ -47,3 +49,26 @@ class MeasuredStorage:
 
     def uri(self, key: str) -> str:
         return self.storage.uri(key)
+
+
+class CountedClient:
+    """A boto3 S3 client that counts the body bytes the bucket actually sends."""
+
+    def __init__(self, client: Any) -> None:
+        self.client = client
+        self.bytes = 0
+
+    def get_object(self, **fields: Any) -> Any:
+        reply = self.client.get_object(**fields)
+        body = reply["Body"].read()
+        self.bytes += len(body)
+        reply["Body"] = io.BytesIO(body)
+        return reply
+
+    def stored(self, bucket: str) -> int:
+        """Every byte the bucket holds: what has been written there and not replaced."""
+        pages = self.client.get_paginator("list_objects_v2").paginate(Bucket=bucket)
+        return sum(item["Size"] for page in pages for item in page.get("Contents", []))
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.client, name)

@@ -24,7 +24,7 @@ from etude.train.read import buckets, read, read_all
 from etude.train.records import Step
 from etude.train.report import pages
 from etude.train.run import log_line, seal_runs, track, write_block
-from tests.run.storage import MeasuredStorage
+from tests.run.storage import CountedClient, MeasuredStorage
 
 
 def test_reports_fetch_each_runs_metadata_once(tmp_path: Path) -> None:
@@ -729,3 +729,22 @@ def test_a_run_split_across_machine_folders_reads_as_one(tmp_path: Path) -> None
     assert points.x.tolist() == list(range(20))
     assert points.y.tolist() == [*range(11), *(step + 100 for step in range(11, 20))]
     assert read(tmp_path, "e", "r").rows == 24
+
+
+def test_watched_reports_read_each_bucket_file_once_per_computer(tmp_path: Path) -> None:
+    local = tmp_path / "local"
+    with track(experiment="e", run="r", clocks=[Step("step", "steps")], directory=local) as run:
+        for step in range(5000):
+            run.log({"loss": 1 / (step + 1), "reward": float(step)}, step=step)
+    with mock_aws():
+        client = CountedClient(boto3.client("s3", region_name="us-east-1"))
+        client.create_bucket(Bucket="etude-watched")
+        assert sync(local, storages=[S3Storage("etude-watched", client=client)]) == {}
+        written = client.stored("etude-watched")
+        # `etude reports write --watch` and `etude reports serve` regenerate every few seconds.
+        first = pages(S3Storage("etude-watched", client=client))
+        assert 0 < client.bytes <= written
+        read_once = client.bytes
+        for _ in range(5):
+            assert pages(S3Storage("etude-watched", client=client)) == first
+        assert client.bytes == read_once

@@ -160,6 +160,11 @@ class Cache:
                 cacheable = source.size_bytes <= self.max_bytes and self._make_room(
                     key, source.size_bytes
                 )
+                if not cacheable and _verify(destination, source):
+                    # Too large to cache, but a retried attempt or another job on
+                    # this machine already holds it where it goes.
+                    emit("REUSE", source.url, reused=source.size_bytes, completed=True)
+                    return destination
                 partial = (
                     self.root / f"{key}.partial"
                     if cacheable

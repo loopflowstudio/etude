@@ -28,7 +28,7 @@ from etude.launch.logging import log_to
 from etude.launch.providers.runpod import pod
 from etude.launch.records import Job, Output, Storage
 from etude.launch.scheduler import Scheduler
-from etude.launch.schemas import Delivery, Inbox, Progress, Result, RunAccess
+from etude.launch.schemas import AttemptRecord, Delivery, Inbox, Progress, Result, RunAccess
 from etude.launch.storage import download
 from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.download import Cache, Download
@@ -63,8 +63,12 @@ class HTTP:
                 body = owner.objects.get(path)
                 status = 200 if body is not None else 404
                 body = body or b""
+                # Like S3's, an ETag changes with the object's bytes.
+                etag = f'{owner.etag[:-1]}-{hashlib.md5(body).hexdigest()}"'
                 requested = self.headers.get("Range")
                 content_range = None
+                if status == 200 and self.headers.get("If-None-Match") == etag:
+                    status, body = 304, b""  # as S3 answers a current version
                 if requested:
                     owner.ranges.append(requested)
                     start, end = map(int, requested.removeprefix("bytes=").split("-"))
@@ -86,7 +90,7 @@ class HTTP:
                         owner.fault = ""
                 self.send_response(status)
                 self.send_header("Content-Length", str(len(body)))
-                self.send_header("ETag", owner.etag)
+                self.send_header("ETag", etag)
                 self.send_header("x-amz-request-id", f"request-{owner.requests}")
                 if content_range:
                     self.send_header("Content-Range", content_range)
@@ -253,6 +257,10 @@ def test_bounded_cache_and_oversized_download(http: HTTP, tmp_path: Path) -> Non
     destination.write_bytes(b"previous verified result")
     assert cache.fetch(http.source("/large"), destination).read_bytes() == b"z" * 25
     assert destination.stat().st_mode & 0o777 == 0o600
+    # Uncacheable, yet fetched again to where it already is, it is not downloaded again.
+    received = http.received
+    assert cache.fetch(http.source("/large"), destination).read_bytes() == b"z" * 25
+    assert http.received == received
     assert not list(tmp_path.glob(".*.partial"))
     assert not list(tmp_path.glob(".*.json"))
 
@@ -631,7 +639,8 @@ def test_completed_workload_before_and_after(
         observed_at=cold.observed_at,
         events=tuple(e for e in cold.events if e.id not in replayed_ids),
     )
-    assert (cold_reads.received_bytes, cold_reads.requests) == (25169180, 7)
+    # The payload alone: the records fetch consults are already held, and unchanged.
+    assert (cold_reads.received_bytes, cold_reads.requests) == (len(payload), 7)
     assert cold_reads.reused_bytes == len(payload)
     for index, run in enumerate(runs):
         assert (
@@ -652,7 +661,8 @@ def test_completed_workload_before_and_after(
         observed_at=after.observed_at,
         events=tuple(e for e in after.events if e.purpose == "control"),
     )
-    assert (warm.received_bytes, warm.requests) == (3356, 4)  # inbox + completion per run
+    # Inbox + completion per run, each answered "not modified" without a body.
+    assert (warm.received_bytes, warm.requests) == (0, 4)
     assert sum(e.received_bytes for e in warm.events if e.purpose == "result") == 0
     assert (bulk.received_bytes, bulk.reused_bytes) == (
         len(archive.getvalue()) + len(http.objects["/source"]) + 1024**2 + len(payload),
@@ -668,7 +678,8 @@ def test_completed_workload_before_and_after(
     assert sum(e.status == 403 for e in after.events) == 1
     assert control.requests > 0 and control.supplied_bytes > 0
     assert bulk.requests == 9  # runtime, failed source, source, input, 2 uploads, 3 ranges
-    assert control.requests == 44  # worker publication, scheduler collection and public fetches
+    # Worker publication, scheduler collection and public fetches; a start receipt is read once.
+    assert control.requests == 40
 
     assert sum(e.operation == "GET" for e in after.events) == http.requests
     assert after.received_bytes == http.received
@@ -697,7 +708,7 @@ def test_completed_workload_before_and_after(
         download_usd_per_gb=Decimal("0.09"),
         request_usd_per_1000=Decimal("0.0004"),
     )
-    assert (before.requests, after.requests) == (56, 53)
+    assert (before.requests, after.requests) == (52, 49)
     assert before.estimate(rates) - after.estimate(rates) == Decimal("0.00707908782")
     assert after.requests == control.requests + bulk.requests
     own = [b.scheduler.usage(run=run) for run in runs]
@@ -785,6 +796,10 @@ def test_unchanged_inbox_polls_leave_no_log_lines_or_usage(http: HTTP, tmp_path:
         for _ in range(5):
             courier.bring_in()
     assert http.requests == 10
+    # Unchanged polls are answered without a body: each version's bytes arrive once.
+    assert http.received == len(Inbox().model_dump_json()) + len(
+        Inbox(stop=("attempt",)).model_dump_json()
+    )
     lines = [line.split(" ", 1)[1] for line in log.read_text().splitlines()]
     assert lines == ["inbox: 0 work, 0 to stop", "inbox: 0 work, 1 to stop"]  # changes only
     events = [
@@ -793,3 +808,39 @@ def test_unchanged_inbox_polls_leave_no_log_lines_or_usage(http: HTTP, tmp_path:
     ]
     assert [(e.operation, e.status) for e in events] == [("GET", 200), ("GET", 200)]
     assert (home / "stop" / "attempt").exists()
+
+
+def test_polling_a_session_reads_each_version_of_its_files_once(http: HTTP, tmp_path: Path) -> None:
+    b = bench(tmp_path)
+    run = b.scheduler.launch(Job(command="true", max_hours=1, max_usd=Decimal(1)), rent="l4")
+    attempt = b.scheduler.attempts(run)[0]
+    b.scheduler.tick()
+    fake = b.service.sessions[attempt.session]
+    packet = fake.packet.model_copy(update={"work": tuple(w for w, _ in fake.work())})
+    session = f"/p/sessions/{attempt.session}/"
+    http.objects[session + "packet.json"] = packet.model_dump_json().encode()
+    http.objects[session + "inbox.json"] = Inbox().model_dump_json().encode()
+    http.objects[session + "out/receipt"] = b"1234"
+    http.objects[session + "out/worker.log"] = b"worker log line\n" * 100
+    http.objects[session + "out/usage.jsonl"] = b""
+    record = f"/p/{run}/attempts/{attempt.id}.json"
+    log = f"/p/{run}/attempts/{attempt.id}.log"
+    http.objects[record] = AttemptRecord(started_at=datetime.now(UTC)).model_dump_json().encode()
+    http.objects[log] = b"step 1\n" * 1000
+    journal = BucketJournal(
+        Storage(name="test", bucket="test", region="r", prefix="p"),
+        Bucket("test", "r", Keys(access_key="a", secret_key="s"), http.send),
+    )
+    written = sum(len(body) for key, body in http.objects.items() if key.startswith("/p/"))
+
+    def poll() -> None:
+        for _ in range(10):
+            journal.observe(attempt.session)
+            journal.logs(attempt.session, attempt.id)
+            journal.logs(attempt.session, producer="worker")
+
+    poll()
+    assert http.received == written  # ten polls read each file once
+    http.objects[log] += b"step 2\n" * 1000
+    poll()
+    assert http.received == written + len(http.objects[log])  # only the new version

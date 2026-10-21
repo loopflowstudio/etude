@@ -33,6 +33,31 @@ class Reply(Record):
     headers: dict[str, str] = {}
 
 
+class Version(Record):
+    """An object's bytes as this process last read them, and the ETag storage gave them.
+
+    Asking again with the ETag (`If-None-Match`) costs no body while the object is
+    unchanged: storage answers 304 and the reader keeps these bytes.
+    """
+
+    body: bytes
+    etag: str | None = None
+
+
+def _version(reply: Reply, kept: Version | None, what: str) -> Version | None:
+    if reply.status == 304 and kept is not None:
+        return kept
+    if reply.status == 404:
+        return None
+    if reply.status != 200:
+        raise _failed(what, reply.status)
+    return Version(body=reply.body, etag=reply.headers.get("etag"))
+
+
+def _unless(kept: Version | None) -> dict[str, str]:
+    return {"If-None-Match": kept.etag} if kept is not None and kept.etag else {}
+
+
 # Custom transports share the enclosing deadline, as the default HTTP transport does.
 Send = Callable[[str, str, bytes | None, dict[str, str]], Reply]
 _NS = "{http://s3.amazonaws.com/doc/2006-03-01/}"
@@ -220,7 +245,11 @@ class Bucket:
             raise StorageUnavailable(f"{method} {key or '(list)'}: no reply") from None
 
     def put(self, key: str, body: bytes, *, once: bool = False) -> None:
-        """Write an object. With `once`, refuse if it was ever written: raises AlreadyThere."""
+        """Write an object. With `once`, refuse if it was ever written: raises AlreadyThere.
+
+        The request signs the body's SHA256, so storage itself refuses bytes that
+        changed on the way; nothing reads an upload back to check it.
+        """
         reply = self._ask("PUT", key, body=body, extra={"if-none-match": "*"} if once else None)
         if once and reply.status == 412:
             raise AlreadyThere(key)
@@ -333,12 +362,12 @@ class Bucket:
 
     def get(self, key: str) -> bytes | None:
         """An object's bytes, or None when storage says it does not exist."""
-        reply = self._ask("GET", key)
-        if reply.status == 404:
-            return None
-        if reply.status != 200:
-            raise StorageUnavailable(f"GET {key}: status {reply.status}")
-        return reply.body
+        found = self.get_version(key)
+        return None if found is None else found.body
+
+    def get_version(self, key: str, kept: Version | None = None) -> Version | None:
+        """An object's current version; `kept` itself when it is unchanged, sent without a body."""
+        return _version(self._ask("GET", key, extra=_unless(kept)), kept, f"GET {key}")
 
     def list(self, prefix: str) -> list[str]:
         """Every key under a prefix, in order."""
@@ -459,17 +488,19 @@ def post(form: PostForm, key: str, body: bytes, send: Send = _send) -> None:
         raise StorageUnavailable(f"POST {key}: status {status}")
 
 
-@timed("bucket.read")
 def read(url: str, send: Send = _send) -> bytes | None:
     """Follow a reading link. None when storage says the object does not exist."""
+    found = read_version(url, None, send)
+    return None if found is None else found.body
+
+
+@timed("bucket.read")
+def read_version(url: str, kept: Version | None, send: Send = _send) -> Version | None:
+    """Follow a reading link for the object's current version; `kept` when unchanged."""
     try:
-        reply = _get(url, {}, send)
+        reply = _get(url, _unless(kept), send)
     except TimeoutError:
         raise StorageUnavailable("GET by link: operation deadline reached") from None
     except OSError:
         raise StorageUnavailable("GET by link: no reply") from None
-    if reply.status == 404:
-        return None
-    if reply.status != 200:
-        raise StorageUnavailable(f"GET by link: status {reply.status}")
-    return reply.body
+    return _version(reply, kept, "GET by link")
