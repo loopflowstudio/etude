@@ -11,19 +11,25 @@ folder, `tournament.json` (`TournamentRun`), the definition it was held with
 and the checkpoint or entrants it added. The tournament is every eval run
 naming it (`etude.eval.records.assemble`), so a run delivered from a rented
 machine like any other run brings its part of the tournament with it, and
-many small eval runs may grow one tournament at once. A match two of them
-hold counts once, from the later.
+many small eval runs may grow one tournament at once.
+
+A match is the same wherever it is played, so its results are reused by key
+within one environment: a scheduled match that any eval run of the
+tournament's environment holds counts, once, from the run that recorded it
+last, whether that run was held for this tournament, another, or none.
 
 Holding a checkpoint, or entrants, reads nothing of the tournament: it plays
-the matches those add, which no other eval run need have played. Any other
-hold lists each place once, reads every eval run's `tournament.json`, and
-plays what the tournament calls for and none of its eval runs delivered.
+the matches those add. Any other hold lists each place once, reads each eval
+run once (its `tournament.json`, or its `environment.json` when it was held
+for no tournament), and plays what the tournament calls for and no eval run
+of its environment delivered.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -35,6 +41,7 @@ from etude.eval.records import (
     TOURNAMENT_FILE,
     Agent,
     Benchmark,
+    Environment,
     Match,
     RoundRobin,
     TournamentRun,
@@ -49,8 +56,8 @@ from etude.run.storage import DirectoryStorage, Storage, default_root
 if TYPE_CHECKING:
     import duckdb
 
-# A run's `tournament.json`, at any depth of a listing.
-_IN_RUN = "/" + TOURNAMENT_FILE
+# Every eval run's `etude.eval.records.Environment`.
+_ENVIRONMENT_FILE = "environment.json"
 
 
 def hold(
@@ -69,13 +76,15 @@ def hold(
     A benchmark held with `checkpoint` (on the go) plays each of the given
     matchups with the checkpoint in the model's seats. Held without one
     (batch), it plays every matchup any eval run defined for every checkpoint
-    any held, skipping what was delivered, so a matchup added later is played
-    for every checkpoint so far. A round robin held with `enter` plays every
-    pair of the agents given; with none, every pair of every entrant so far
-    not yet delivered.
+    any held, skipping what any eval run of its environment delivered, so a
+    matchup added later is played for every checkpoint so far. A round robin
+    held with `enter` plays every pair of the agents given; with none, every
+    pair of every entrant so far not yet delivered.
 
-    `share=(k, n)` plays only the matches whose key is k modulo n, so n
-    machines may split one hold. Under `etude launch` the eval run is the
+    `share=(k, n)` deals the scheduled matches, in key order, to n parts and
+    plays the kth, so n machines may split one hold with at most one match
+    between their shares. The deal covers delivered matches too, so a resumed
+    share keeps its part. Under `etude launch` the eval run is the
     launched run (`ETUDE_RUN`); elsewhere it is named for what is given, so
     the same call resumes it. A batch hold raises
     `EtudeError("tournament_conflict")` when the tournament's eval runs or
@@ -101,14 +110,14 @@ def hold(
     held = [added]
     if not on_the_go:
         base = Path(directory) if directory is not None else default_root()
-        stored, delivered = _stored(tournament.name, [DirectoryStorage(base), *storages])
+        stored, delivered = _stored(tournament, [DirectoryStorage(base), *storages])
         held = [*stored, added]
     # Two matchups may share a match; it is played once.
     matches = {each.match.key: each.match for each in assemble(held).schedule()}
     pending = [
         match
-        for key, match in sorted(matches.items())
-        if int(key, 16) % n == k and key not in delivered
+        for index, (key, match) in enumerate(sorted(matches.items()))
+        if index % n == k and key not in delivered
     ]
     run = os.environ.get("ETUDE_RUN") or (
         f"{tournament.name}.{digest(added.model_dump(mode='json'))[:12]}"
@@ -140,34 +149,53 @@ def _record(added: TournamentRun, run: str, directory: Path | str | None) -> Non
         raise EtudeError("eval_run_tournament_conflict", 409)
 
 
-def _stored(name: str, places: Sequence[Storage]) -> tuple[list[TournamentRun], set[Digest]]:
-    """The tournament's eval runs in every place, and the keys of every match they hold as done.
+def _stored(
+    tournament: Benchmark | RoundRobin, places: Sequence[Storage]
+) -> tuple[list[TournamentRun], set[Digest]]:
+    """The tournament's eval runs in every place, and every match that any eval
+    run of its environment holds as done.
 
-    One listing per place, and one read of each eval run's `tournament.json`.
+    One listing per place, and one read of each eval run: its
+    `tournament.json`, or its `environment.json` when it has none.
     """
     held: dict[str, TournamentRun] = {}
     delivered: set[Digest] = set()
+    environment = tournament.environment.identity
     for place in {place.name: place for place in places}.values():
         keys = place.keys("")
-        folders = [key.removesuffix(TOURNAMENT_FILE) for key in keys if key.endswith(_IN_RUN)]
-        mine: set[str] = set()
-        for folder in folders:
+        # Eval run folders: those held for a tournament, and the rest.
+        tournaments = _folders(keys, TOURNAMENT_FILE)
+        alike = {
+            folder
+            for folder in _folders(keys, _ENVIRONMENT_FILE) - tournaments
+            if Environment.model_validate_json(place.get(folder + _ENVIRONMENT_FILE)).identity
+            == environment
+        }
+        for folder in tournaments:
             added = TournamentRun.model_validate_json(place.get(folder + TOURNAMENT_FILE))
-            if added.tournament.name == name:
-                mine.add(folder)
+            # A tournament's eval run is played in the tournament's environment.
+            if added.tournament.environment.identity == environment:
+                alike.add(folder)
+            if added.tournament.name == tournament.name:
                 held.setdefault(folder.rstrip("/").rsplit("/", 1)[-1], added)
         for key in keys:
             folder, _, file = key.rpartition("matches/")
-            if folder in mine and file.endswith(".json") and not file.endswith(".failed.json"):
+            if folder in alike and file.endswith(".json") and not file.endswith(".failed.json"):
                 delivered.add(file.removesuffix(".json"))
     return [held[run] for run in sorted(held)], delivered
+
+
+def _folders(keys: Sequence[str], file: str) -> set[str]:
+    """The run folders, at any depth of a listing, that hold `file`."""
+    return {key.removesuffix(file) for key in keys if key.endswith("/" + file)}
 
 
 @contextmanager
 def _held(db: duckdb.DuckDBPyConnection, tournament: str) -> Iterator[tuple[int, int]]:
     """Temp table `_held` (run, match) of each scheduled match held; yields (scheduled, held).
 
-    Each scheduled match counts once, from the tournament's eval run that recorded it last.
+    Each scheduled match counts once, from whichever eval run of the
+    tournament's environment recorded it last.
     Raises the conflict `connect` found among the tournament's eval runs, if any.
     """
     found = db.execute(
@@ -180,7 +208,8 @@ def _held(db: duckdb.DuckDBPyConnection, tournament: str) -> Iterator[tuple[int,
     db.execute(
         "create or replace temp table _held as"
         " select arg_max(m.run, m.wall_ms) as run, m.match from matches m join runs r using (run)"
-        " where r.tournament = $1 and m.state = 'done'"
+        " where r.environment = (select environment from tournaments where tournament = $1)"
+        " and m.state = 'done'"
         " and m.match in (select match from schedule where tournament = $1)"
         " group by m.match",
         [tournament],
@@ -201,6 +230,8 @@ class CurvePoint(Record):
     """A matchup's value for one checkpoint, and where its training run stood when it was saved."""
 
     checkpoint: Digest
+    # What the checkpoint is called: the last part of its URI, as a training run names its files.
+    name: str
     # None for a checkpoint no training run under the source recorded.
     ordinal: int | None
     clocks: dict[str, float]
@@ -212,7 +243,10 @@ class CurvePoint(Record):
 
 
 class Curve(Record):
-    """One matchup of a benchmark over one training run's checkpoints, in training order."""
+    """One matchup of a benchmark over one training run's checkpoints, in training order.
+
+    Checkpoints no training run recorded follow, by name with numbers in order.
+    """
 
     matchup: str
     # The training run and its experiment; None for checkpoints no run recorded.
@@ -254,33 +288,41 @@ def curves(
             trained as (
                 select artifact, run, experiment, ordinal, clocks from training_checkpoints
                 qualify row_number() over (partition by artifact order by run, ordinal) = 1
+            ),
+            named as (
+                select artifact, min(name) as name from agents where kind = 'checkpoint'
+                group by artifact
             )
-            select s.matchup, t.run, t.experiment, s.checkpoint, t.ordinal, t.clocks,
+            select s.matchup, t.run, t.experiment, s.checkpoint, n.name, t.ordinal, t.clocks,
                 sum(r._value), sum(r._per), count(*)
             from r join _held using (run, match)
             join schedule s on s.tournament = ? and s.match = r.match
+            join named n on n.artifact = s.checkpoint
             left join trained t on t.artifact = s.checkpoint
-            group by s.matchup, t.run, t.experiment, s.checkpoint, t.ordinal, t.clocks, r.match
+            group by s.matchup, t.run, t.experiment, s.checkpoint, n.name, t.ordinal, t.clocks,
+                r.match
             """,
             [benchmark],
         ).fetchall()
     # Per point, where its checkpoint stood: each match's totals and rows.
     blocks: dict[
-        tuple[str, str | None, str | None, str, int | None, str | None],
+        tuple[str, str | None, str | None, str, str, int | None, str | None],
         list[tuple[float, float, int]],
     ] = {}
-    for matchup, run, experiment, checkpoint, ordinal, clocks, total, per_total, rows in found:
-        blocks.setdefault((matchup, run, experiment, checkpoint, ordinal, clocks), []).append(
+    for *point, total, per_total, rows in found:
+        matchup, run, experiment, checkpoint, name, ordinal, clocks = point
+        blocks.setdefault((matchup, run, experiment, checkpoint, name, ordinal, clocks), []).append(
             (float(total), float(per_total), int(rows))
         )
     lines: dict[tuple[str, str | None, str | None], list[CurvePoint]] = {}
-    for (matchup, run, experiment, checkpoint, ordinal, clocks), totals in blocks.items():
+    for (matchup, run, experiment, checkpoint, name, ordinal, clocks), totals in blocks.items():
         estimated = estimate([(total, opportunities) for total, opportunities, _ in totals])
         if estimated is None:
             continue
         lines.setdefault((matchup, run, experiment), []).append(
             CurvePoint(
                 checkpoint=checkpoint,
+                name=name,
                 ordinal=ordinal,
                 clocks=json.loads(clocks) if clocks else {},
                 value=estimated[0],
@@ -294,14 +336,18 @@ def curves(
             matchup=matchup,
             run=run,
             experiment=experiment,
-            points=tuple(
-                sorted(points, key=lambda p: (p.ordinal is None, p.ordinal or 0, p.checkpoint))
-            ),
+            points=tuple(sorted(points, key=_training_order)),
         )
         for (matchup, run, experiment), points in sorted(
             lines.items(), key=lambda item: tuple("" if v is None else v for v in item[0])
         )
     ]
+
+
+def _training_order(point: CurvePoint) -> tuple[bool, int, list[str | int], str]:
+    # Digit runs compare as numbers, so `updates-900` comes before `updates-1000`.
+    named = [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", point.name)]
+    return point.ordinal is None, point.ordinal or 0, named, point.checkpoint
 
 
 class Standing(Record):
@@ -310,6 +356,7 @@ class Standing(Record):
     agent: Digest
     name: str
     opponent: Digest | None
+    opponent_name: str | None
     value: float
     # A 95% interval resampling whole matches; None with fewer than two.
     interval: tuple[float, float] | None
@@ -366,6 +413,7 @@ def standings(
             agent=c.subject[0],
             name=names[c.subject[0]],
             opponent=None if c.opponent is None else c.opponent[0],
+            opponent_name=None if c.opponent is None else names[c.opponent[0]],
             value=c.value,
             interval=c.interval,
             rows=c.rows,

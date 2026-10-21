@@ -148,12 +148,13 @@ def _tournaments(db: duckdb.DuckDBPyConnection) -> str:
     `etude.eval.tournament.curves` and `standings` read their results.
     """
     found = db.sql(
-        "with held as (select distinct r.tournament, m.match from matches m join runs r"
+        # Any eval run of the tournament's environment may hold a scheduled match.
+        "with held as (select distinct r.environment, m.match from matches m join runs r"
         " using (run) where m.state = 'done')"
         " select t.tournament, t.format, t.conflict, count(distinct s.match),"
         " count(distinct s.match) filter (h.match is not null)"
         " from tournaments t left join schedule s using (tournament)"
-        " left join held h on h.tournament = s.tournament and h.match = s.match"
+        " left join held h on h.environment = t.environment and h.match = s.match"
         " group by all order by 1"
     ).fetchall()
     if not found:

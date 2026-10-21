@@ -457,9 +457,10 @@ def estimate(
 
     The interval is a percentile bootstrap resampling whole blocks, None with
     fewer than two. None overall when there are no opportunities: a rate
-    without them has no value.
+    without them has no value. Blocks are sorted before resampling, so the
+    interval does not depend on the order they were read in.
     """
-    totals = np.array(blocks, dtype=np.float64).reshape(-1, 2)
+    totals = np.array(sorted(blocks), dtype=np.float64).reshape(-1, 2)
     numerators, denominators = totals[:, 0], totals[:, 1]
     if denominators.sum() == 0:
         return None

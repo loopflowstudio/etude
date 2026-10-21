@@ -23,6 +23,7 @@ from etude.train.report import page_data
 from tests.launch.counting import job_text
 
 TRAIN = """
+test -f "$ETUDE_SOURCE_DIR/train.sh" || exit 3
 echo "seed $ETUDE_SEED from ${ETUDE_FROM_VALUE:-0} to $ETUDE_UNTIL_VALUE with $(cat "$ETUDE_CONFIG")"
 cat "${ETUDE_CHECKPOINT:-/dev/null}" > "$ETUDE_OUTPUT_DIR/checkpoint.pt"
 echo "trained to $ETUDE_UNTIL_VALUE" >> "$ETUDE_OUTPUT_DIR/checkpoint.pt"
