@@ -82,7 +82,11 @@ def read(source: Storage | Path | str, training: list[RunData]) -> list[dict[str
             if trained.file is None or link.training != trained.file.declaration.source_key:
                 raise ValueError("evaluation_training_identity_mismatch")
             if (
-                link.checkpoint not in trained.checkpoints
+                not any(
+                    saved.model_copy(update={"tags": ()})
+                    == link.checkpoint.model_copy(update={"tags": ()})
+                    for saved in trained.checkpoints
+                )
                 or link.checkpoint.artifact.sha256 is None
             ):
                 raise ValueError("evaluation_checkpoint_mismatch")

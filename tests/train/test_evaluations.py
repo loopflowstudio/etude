@@ -133,3 +133,13 @@ def test_linked_curves_keep_coordinates_identity_gaps_and_refresh(
         and incomplete["pending"] == 1
     )
     assert json.loads(json.dumps(page))["experiment"] == "learning"
+
+    # Mutable checkpoint tags cannot move or detach a linked point.
+    metadata = source / "train-a" / "checkpoints" / "updates-101.json"
+    metadata.write_text(
+        trained.checkpoints[0].model_copy(update={"tags": ("best",)}).model_dump_json()
+    )
+    assert (
+        cast(list[dict[str, object]], pages(source)["learning"]["evaluations"])[0]["training_run"]
+        == "train-a"
+    )
