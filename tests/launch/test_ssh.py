@@ -27,7 +27,7 @@ def test_remote_host_runs_kept_work_logs_outputs_and_stops(tmp_path: Path) -> No
     run = scheduler.launch(
         Job(
             command='echo weights > "$ETUDE_OUTPUT_DIR/weights"; echo hello',
-            max_hours=0.001,
+            max_hours=0.01,
             max_usd=Decimal(1),
         ),
         "bench",
