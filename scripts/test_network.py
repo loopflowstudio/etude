@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import os
 import platform
+import pwd
 import shutil
 import socket
 import subprocess
 import sys
 from pathlib import Path
+
+_CALLER = "TEST_NETWORK_CALLER"  # uid:gid to return to inside the namespace
 
 _MACOS_RULES = """(version 1)(allow default)
 (deny network*)
@@ -44,11 +47,10 @@ def _isolated(arguments: list[str]) -> None:
     """Inside the isolation: drop back to the calling user, prove it holds, then run."""
     if platform.system() == "Linux":
         subprocess.run(["ip", "link", "set", "lo", "up"], check=True)
-        if user := os.environ.get("SUDO_USER"):
-            gid = int(os.environ["SUDO_GID"])
-            os.setgroups(os.getgrouplist(user, gid))
-            os.setgid(gid)
-            os.setuid(int(os.environ["SUDO_UID"]))
+        uid, gid = (int(part) for part in os.environ.pop(_CALLER).split(":"))
+        os.setgroups(os.getgrouplist(pwd.getpwuid(uid).pw_name, gid))
+        os.setgid(gid)
+        os.setuid(uid)
     _probe()
     # Environments a test builds (a stand-in controller's) come from uv's cache,
     # which `uv sync` filled before isolation.
@@ -68,8 +70,11 @@ def main(arguments: list[str]) -> int:
         command = ["sandbox-exec", "-p", _MACOS_RULES, *child]
     elif platform.system() == "Linux" and shutil.which("unshare") and shutil.which("ip"):
         # Root makes the network namespace; the child returns to this user at once.
-        environment = [f"PATH={os.environ['PATH']}", f"HOME={os.environ['HOME']}"]
-        command = ["sudo", "-n", "-E", "env", *environment, "unshare", "--net", *child]
+        # sudo-rs (Ubuntu 25.10 and later) ignores -E and sets no SUDO_* variables,
+        # so the environment and the caller's identity travel explicitly.
+        environment = [f"{name}={value}" for name, value in os.environ.items()]
+        environment.append(f"{_CALLER}={os.getuid()}:{os.getgid()}")
+        command = ["sudo", "-n", "env", *environment, "unshare", "--net", *child]
     else:
         raise SystemExit("needs macOS sandbox-exec, or Linux sudo, unshare and ip")
     return subprocess.call(command)

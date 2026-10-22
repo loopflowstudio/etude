@@ -40,13 +40,20 @@ etude launch job.py --pool lab --rent cpu  # free owned machines first, then ren
 Eval runs play matches in parallel worker processes and store the tables your `play(match)` returns as Parquet. Benchmarks, round robins and `connect` build on them, and everything is read through DuckDB.
 
 ```python
-progress = Benchmark(name="anchors", environment=world, matchups=(
-    Matchup(name="search vs no search",
+progress = Benchmark(
+    name="anchors",
+    environment=world,
+    matchups=(
+        Matchup(
+            name="search vs no search",
             players=(Model(config=PUCT(simulations=64)), Model(config=Direct())),
-            conditions=deals[:10], games=4),
-))
-hold(progress, checkpoint=ref, play=play, storages=[bucket])   # per checkpoint
-hold(progress, play=play, workers=8, storages=[bucket])        # batch: fill what is missing
+            conditions=deals[:10],
+            games=4,
+        ),
+    ),
+)
+hold(progress, checkpoint=ref, play=play, storages=[bucket])  # per checkpoint
+hold(progress, play=play, workers=8, storages=[bucket])  # batch: fill what is missing
 
 db = connect(bucket)
 for line in curves(db, "anchors", table="plays", value="score"):
