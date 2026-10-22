@@ -263,3 +263,51 @@ agents, or a group against the match's other groups. The value is
 `sum(value) / sum(per)`, or the mean without `per`. The 95% interval is a
 percentile bootstrap over whole matches with a fixed seed, independent of
 the order rows are read in; fewer than two matches have none.
+
+### Evaluations in training reports
+
+`etude reports write --source ./runs --watch 5` and `etude reports serve
+--source ./runs` draw linked evaluations in the training report, on each exact
+checkpoint clock. The evaluator writes its ordinary match tables; the training
+run holds a prospective request, so missing, partial and failed evaluations
+remain visible even before results arrive.
+
+```python
+from etude.reports import Evaluation, record
+from etude.train.read import read
+
+training = read("./runs", "experiment", "training-run")
+assert training.file is not None
+checkpoint = training.checkpoints[-1]
+record(
+    "./runs",
+    training.name,
+    Evaluation(
+        training=training.file.declaration.source_key,
+        checkpoint=checkpoint,
+        run="evaluation-run",  # stable ID supplied to the evaluation launcher
+        benchmark=protocol_digest,
+        label="fixed monitoring cohort",
+        subject=checkpoint_agent.identity,
+    ),
+)
+```
+
+Register before submitting the evaluation. `benchmark` is a digest of the
+frozen environment, inference settings, opponents and deal/seat cohort; it
+excludes the changing candidate weights. A label is only for display. A changed
+binding for the same evaluation ID is refused. The referenced checkpoint must
+belong to that exact training source key, and the evaluation subject must use
+its digest. Another training run recording the same bytes cannot take ownership.
+
+Each numeric author column is a separate curve, split by protocol, environment,
+opponent and training run. Coordinates are never bucketed or taken from eval
+completion time. Counts distinguish scheduled, completed, failed and pending
+matches, scheduled games, and observed rows for each metric. Intervals resample
+whole evaluation matches; they are not intervals over training seeds. With one
+match, no interval is available. An absent result is a gap, never a zero.
+
+The top-level `etude.reports` reader owns this cross-kind join. Training and
+evaluation run implementations still do not import one another. DuckDB is
+needed only when a linked evaluation request exists; install the `eval` extra
+for those reports.

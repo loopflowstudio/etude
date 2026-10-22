@@ -14,7 +14,7 @@ import pytest
     [
         (["reports", "--help"], 10, ("numpy", "pydantic")),
         (["reports", "write", "--help"], 10, ("numpy", "pydantic")),
-        (["reports", "write", "--source", "{directory}"], 19, ("boto3", "etude.train.run")),
+        (["reports", "write", "--source", "{directory}"], 20, ("boto3", "etude.train.run")),
         (
             ["sync", "--directory", "{directory}"],
             15,

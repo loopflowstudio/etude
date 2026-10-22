@@ -21,6 +21,7 @@ from pathlib import Path
 
 import numpy as np
 
+from etude.reports import read
 from etude.run.records import WALL_CLOCK
 from etude.run.storage import Storage
 from etude.train.read import Floats, RunData, read_all
@@ -164,10 +165,16 @@ def pages(
     source: Storage | Path | str, experiment: str | None = None
 ) -> dict[str, dict[str, object]]:
     """What each experiment's report draws, for one experiment or every one found."""
-    data = read_all(source, experiment)
+    data = [
+        run
+        for run in read_all(source, experiment)
+        if run.file is None or run.file.declaration.kind != "evaluation"
+    ]
     names = sorted({run.experiment for run in data})
     return {
-        name: page_data(name, [run for run in data if run.experiment == name]) for name in names
+        name: page_data(name, [run for run in data if run.experiment == name])
+        | {"evaluations": read(source, [run for run in data if run.experiment == name])}
+        for name in names
     }
 
 
