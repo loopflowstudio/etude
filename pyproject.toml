@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "etude-sdk"
-version = "0.1.2"
+version = "0.1.3"
 description = "Launch training runs on your own or rented machines and track what they record"
 readme = "README.md"
 license = "MIT"
