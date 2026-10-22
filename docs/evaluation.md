@@ -97,7 +97,12 @@ db.sql("""select a.name, avg(score) from plays
 
 ```sh
 uv run etude reports eval --open   # every eval run under ~/.etude/track
+uv run etude reports eval --watch 5 --open   # keep the page current as evals arrive
 ```
+
+Watching waits for the first eval run when none exists yet, opens the page once,
+and refreshes it at the requested interval. Ctrl-C stops regeneration. It reads
+retained evaluation results; it does not launch jobs or allocate compute.
 
 ## Eval runs
 

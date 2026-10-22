@@ -9,6 +9,7 @@ no network; regenerating replaces the file.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from html import escape
 from pathlib import Path
@@ -82,8 +83,11 @@ def _split(found: Sequence[Comparison], column: str, names: dict[str, str]) -> s
     )
 
 
-def render(db: duckdb.DuckDBPyConnection) -> str:
+def render(db: duckdb.DuckDBPyConnection, *, refresh: float | None = None) -> str:
     """The page for every eval run in a database `etude.eval.query.connect` opened."""
+    if refresh is not None and (not math.isfinite(refresh) or refresh <= 0):
+        raise ValueError("report refresh must be finite and positive")
+    reload = f'<meta http-equiv="refresh" content="{refresh}">' if refresh is not None else ""
     names: dict[str, str] = dict(db.sql("select agent, name from agents").fetchall())
     environments = db.sql(
         "select environment, any_value(environment_name), count(*) from runs group by all"
@@ -138,7 +142,7 @@ def render(db: duckdb.DuckDBPyConnection) -> str:
                     )
     return (
         "<!doctype html><html><head><meta charset=utf-8><title>Eval runs</title>"
-        f"<style>{_STYLE}</style></head><body>{''.join(parts)}</body></html>"
+        f"{reload}<style>{_STYLE}</style></head><body>{''.join(parts)}</body></html>"
     )
 
 
@@ -180,15 +184,20 @@ def _distinct(db: duckdb.DuckDBPyConnection, table: str, column: str) -> int:
     return 0 if found is None else int(found[0])
 
 
-def write(source: Storage | Path | str, directory: Path) -> Path | None:
+def write(
+    source: Storage | Path | str, directory: Path, *, refresh: float | None = None
+) -> Path | None:
     """Replace `directory/eval/index.html`; None when the source holds no eval run."""
     db = connect(source)
-    found = db.sql("select count(*) from runs").fetchone()
-    if found is None or found[0] == 0:
-        return None
-    target = directory / "eval" / "index.html"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    partial = target.with_name(target.name + ".partial")
-    partial.write_text(render(db))
-    partial.replace(target)
-    return target
+    try:
+        found = db.sql("select count(*) from runs").fetchone()
+        if found is None or found[0] == 0:
+            return None
+        target = directory / "eval" / "index.html"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        partial = target.with_name(target.name + ".partial")
+        partial.write_text(render(db, refresh=refresh))
+        partial.replace(target)
+        return target
+    finally:
+        db.close()
