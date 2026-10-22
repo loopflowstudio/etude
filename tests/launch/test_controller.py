@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
 
@@ -142,20 +143,16 @@ def test_loop_survives_an_empty_queue_and_places_later_work(
         stderr=subprocess.PIPE,
     ) as process:
         try:
-            deadline = time.monotonic() + 10
-            while not (remote / "controller-heartbeat").exists() and time.monotonic() < deadline:
-                time.sleep(0.05)
-            assert process.poll() is None
-            assert (remote / "controller-heartbeat").exists()
+            heartbeat = remote / "controller-heartbeat"
+            _until_while_alive(process, heartbeat.exists)
             job = tmp_path / "job.py"
             job.write_text(
                 'from etude.launch.records import Job, Run\ndef runs(): return Job(command="sleep 0.2", max_hours=0.01, max_usd=1).runs(1, 2)\n'
             )
             assert command("launch", str(job), "--cohort", "later").returncode == 0
             scheduler = _open(remote)
-            while scheduler.runs() and time.monotonic() < deadline:
-                time.sleep(0.1)  # read only: the standing loop must finish the second run
-            assert not scheduler.runs()
+            # Read only: the standing loop must finish both runs.
+            _until_while_alive(process, lambda: not scheduler.runs())
             assert len(scheduler.runs(done=True)) == 2
             assert all(
                 scheduler.read(run.id).outcome == "succeeded" for run in scheduler.runs(done=True)
@@ -163,6 +160,19 @@ def test_loop_survives_an_empty_queue_and_places_later_work(
         finally:
             process.terminate()
             process.wait(timeout=5)
+
+
+def _until_while_alive(process: subprocess.Popen[bytes], done: Callable[[], bool]) -> None:
+    """Wait for the standing loop to make `done` true; fail as soon as it exits.
+
+    The only time limit catches a hung loop. Progress is judged by the condition,
+    not the clock, because cold CLI starts on a loaded machine take seconds.
+    """
+    give_up = time.monotonic() + 300
+    while not done():
+        assert process.poll() is None, process.stderr.read() if process.stderr else ""
+        assert time.monotonic() < give_up, "the controller loop made no progress"
+        time.sleep(0.05)
 
 
 def test_waiting_work_warns_when_loop_is_absent_or_stale(

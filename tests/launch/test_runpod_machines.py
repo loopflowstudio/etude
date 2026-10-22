@@ -161,10 +161,20 @@ class RunPod:
     lose_reply: bool = False
     available: str = "HIGH"
     envs: list[dict[str, str]] = field(default_factory=list)
+    # Pods delete themselves from their own threads while the client reads them.
+    lock: threading.Lock = field(default_factory=threading.Lock)
 
     def __call__(
         self, method: str, url: str, body: bytes | None, headers: dict[str, str]
     ) -> tuple[int, bytes]:
+        with self.lock:
+            return self._answer(method, url, body)
+
+    def _delete(self, id: str) -> None:
+        with self.lock:
+            self.pods.pop(id, None)
+
+    def _answer(self, method: str, url: str, body: bytes | None) -> tuple[int, bytes]:
         path = urlsplit(url).path.removeprefix("/v2/")
         if path == "catalog/gpus":
             here = [{"id": "EU-RO-1", "availability": self.available}]
@@ -188,14 +198,15 @@ class RunPod:
                 self.storage.asked.append(("CREATE", asked["name"]))
             id = f"pod{self.creates}"
             pod = {"id": id, "name": asked["name"], "cost": 0.59, "status": "RUNNING"}
-            self.pods[id] = {**pod, "createdAt": datetime.now(UTC).isoformat()}
+            pod["createdAt"] = datetime.now(UTC).isoformat()
+            self.pods[id] = pod
             env = asked["env"]
             assert not any("KEY" in name or "SECRET" in name for name in env)
             assert asked["ports"] == ["22/tcp"] and asked["startSsh"] is True
             self.envs.append(env)
             thread = threading.Thread(
                 target=run_in_pod,
-                args=(env["ETUDE_BOOTSTRAP_URL"], lambda: self.pods.pop(id, None)),
+                args=(env["ETUDE_BOOTSTRAP_URL"], lambda: self._delete(id)),
                 kwargs={"root": self.root, "send": self.storage, "every": 0.05},
                 daemon=True,
             )
@@ -203,7 +214,7 @@ class RunPod:
             if self.lose_reply:
                 self.lose_reply = False
                 raise OSError("the reply never arrived")
-            return 200, json.dumps(self.pods[id]).encode()
+            return 200, json.dumps(pod).encode()
         if path == "pods":
             paging = {"hasNextPage": False, "nextCursor": None}
             return 200, json.dumps(

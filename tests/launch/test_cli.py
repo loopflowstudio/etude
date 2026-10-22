@@ -150,7 +150,7 @@ def test_default_target_and_owned_status(
     assert "needs a pool, an on-demand or both" in capsys.readouterr().err
     path = tmp_path / "job.py"
     path.write_text(
-        'from etude.launch.records import Job, Run\ndef runs(): return Job(command="echo hi", max_hours=0.001, max_usd=1)\n'
+        'from etude.launch.records import Job, Run\ndef runs(): return Job(command="echo hi", max_hours=0.01, max_usd=1)\n'
     )
     (line,) = run(capsys, "launch", str(path))
     assert "machine local" in line

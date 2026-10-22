@@ -114,7 +114,7 @@ def _prepare(session: Path, home: Path, work: Work) -> dict[str, str]:
     shared = session.parent.parent / "track"
     shared.mkdir(exist_ok=True)
     environment["ETUDE_TRACK_DIR"] = str(shared)
-    (home / "run").write_text(work.run)
+    write(home / "run", work.run)  # the courier reads it while this runs
     environment["ETUDE_ATTEMPT"] = work.attempt
     for name, value in (
         ("ETUDE_RUN", work.run),
@@ -179,6 +179,11 @@ def _end(process: subprocess.Popen[bytes], deadline: float | None, seconds: floa
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
+    except PermissionError:
+        # Darwin briefly answers EPERM, not ESRCH, for the group of a leader just
+        # reaped while other processes are exiting; that group is already gone.
+        if process.returncode is None:
+            raise
     # KILL has ended executable work; collect its OS status before closing output.
     process.wait()
 
