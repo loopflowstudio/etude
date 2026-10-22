@@ -40,9 +40,14 @@ def evaluations(
         Path | None, typer.Option(help="default: SOURCE/reports, or ./reports for a bucket")
     ] = None,
     open_: Annotated[bool, typer.Option("--open", help="show it in the browser")] = False,
+    watch: Annotated[
+        float | None,
+        typer.Option(min=0.1, help="regenerate the report every SECONDS"),
+    ] = None,
 ) -> None:
     """Write the report comparing every eval run's agents to DIRECTORY/reports/eval/index.html."""
     # Eval runs are composed here, so training's reports never import `etude.eval`.
+    import time
     import webbrowser
 
     from etude.eval.report import write
@@ -50,15 +55,25 @@ def evaluations(
 
     given = source or str(default_root())
     local = not given.startswith("s3://")
-    target = write(
-        storage_from_uri(given), out or (Path(given) / "reports" if local else Path("reports"))
-    )
-    if target is None:
+    storage = storage_from_uri(given)
+    directory = out or (Path(given) / "reports" if local else Path("reports"))
+    written = False
+    try:
+        while True:
+            target = write(storage, directory, refresh=watch)
+            if target is not None and not written:
+                print(target, flush=True)
+                if open_:
+                    webbrowser.open(target.resolve().as_uri())
+                written = True
+            if watch is None:
+                break
+            time.sleep(watch)
+    except KeyboardInterrupt:
+        pass
+    if not written:
         print("no eval runs found", file=sys.stderr)
         raise typer.Exit(1)
-    print(target, flush=True)
-    if open_:
-        webbrowser.open(target.resolve().as_uri())
 
 
 # Each may reach a bucket, so it is a wait rather than a read.

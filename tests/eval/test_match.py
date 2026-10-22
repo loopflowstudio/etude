@@ -20,6 +20,7 @@ from etude.eval.match import agent, environment, evaluate
 from etude.eval.query import compare, connect, estimate
 from etude.eval.records import Agent, Config, Match, Model
 from etude.eval.report import render
+from etude.eval.report import write as write_report
 from etude.run.errors import EtudeError
 from etude.run.records import ArtifactRef
 from etude.run.storage import DirectoryStorage, S3Storage
@@ -351,7 +352,7 @@ def test_queries_reports_and_resumes_read_each_bucket_file_once_per_computer(
         first = client.bytes
         assert 0 < first <= written
         for _ in range(3):
-            render(connect(S3Storage("runs", client=client)))
+            write_report(S3Storage("runs", client=client), tmp_path / "reports", refresh=0.1)
         shutil.rmtree(tmp_path / "local")
         again = evaluate(
             experiment="league", environment=environment("duel"), play=play, matches=matches,
