@@ -33,6 +33,7 @@ from uuid import uuid4
 
 from pydantic import Field
 
+from etude.carriage import Mismatch
 from etude.launch import source
 from etude.launch.database import Database
 from etude.launch.deadline import limit_time, remaining
@@ -1609,7 +1610,7 @@ class Scheduler:
         self._store.check_lock(session.supply)
         try:
             packet = self._packet(session)
-        except (OSError, ValueError, LauncherError) as error:
+        except (OSError, Mismatch, LauncherError) as error:
             self._await_relay(session, error)
             return
         try:
@@ -1765,7 +1766,7 @@ class Scheduler:
         """
         try:
             work = self._work(attempt)
-        except (OSError, ValueError, LauncherError) as error:
+        except (OSError, Mismatch, LauncherError) as error:
             self._await_relay(session, error, attempt=attempt.id)
             return
         self._service(session).add(session.id, work)

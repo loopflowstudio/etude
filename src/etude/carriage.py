@@ -29,6 +29,12 @@ from stat import S_ISREG
 from typing import Literal
 
 CHECKPOINTS = "checkpoints"
+
+
+class Mismatch(ValueError):
+    """Relayed checkpoint bytes that do not match the record naming them."""
+
+
 # Names of checkpoint files held elsewhere (in storage, on another host) and
 # not here, one per line. A dot-name, so no carrier ever sends it.
 STORED = f"{CHECKPOINTS}/.stored"
@@ -219,7 +225,7 @@ def put_back(root: Path, files: Mapping[str, bytes]) -> None:
     """Write what `restore_set` or `recorded_file` gave into this host's folder, keeping what it has.
 
     Records come first, so each checkpoint file is checked against the digest
-    of the record that names it; a mismatch raises `ValueError` and writes no file.
+    of the record that names it; a mismatch raises `Mismatch` and writes no file.
     """
     ordered = sorted(files, key=lambda key: (checkpoint_file(key), key))
     for key in ordered:
@@ -232,7 +238,7 @@ def put_back(root: Path, files: Mapping[str, bytes]) -> None:
         if checkpoint_file(key):
             named = {file.key: file.sha256 for _, file in _recorded(root).values()}
             if named.get(key) != sha256(files[key]).hexdigest():
-                raise ValueError(f"{key} does not match the checkpoint record that names it")
+                raise Mismatch(f"{key} does not match the checkpoint record that names it")
         target.parent.mkdir(parents=True, exist_ok=True)
         partial = target.with_name(target.name + ".partial")
         partial.write_bytes(files[key])
