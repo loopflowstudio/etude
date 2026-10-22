@@ -596,7 +596,7 @@ def test_completed_workload_before_and_after(
             sha256=hashlib.sha256(payload).hexdigest(),
             size_bytes=len(payload),
         )
-        (outputs / RESULT).write_text(Result(checkpoint=output.name).model_dump_json())
+        (outputs / RESULT).write_text(Result().model_dump_json())
         finished = Progress(
             attempt=a.id,
             started_at=b.clock(),
@@ -604,7 +604,6 @@ def test_completed_workload_before_and_after(
             outcome="succeeded",
             cause=None,
             clocks={},
-            checkpoint=output.name,
             outputs=(output,),
             exit_code=0,
         )
@@ -671,7 +670,7 @@ def test_completed_workload_before_and_after(
     assert {e.purpose for e in after.events} >= {
         "source",
         "runtime",
-        "checkpoint",
+        "input",
         "result",
         "control",
     }
@@ -755,7 +754,7 @@ def test_active_cache_capacity_streams_another_digest_without_overfilling(
     assert active.read_bytes() == b"reservedsize"
 
 
-def test_worker_source_and_checkpoint_share_verified_transport_bytes(
+def test_worker_source_and_input_share_verified_transport_bytes(
     http: HTTP,
     tmp_path: Path,
 ) -> None:
@@ -767,18 +766,17 @@ def test_worker_source_and_checkpoint_share_verified_transport_bytes(
     courier.fetch(
         {
             "worker-session/sources/source.tar": http.source(),
-            "previous-session/attempts/attempt/outputs/checkpoint.pt": http.source(),
+            "worker-session/inputs/weights": http.source(),
         }
     )
     assert target.read_bytes() == b"abcdefghijkl"
-    checkpoint = tmp_path / "sessions/previous-session/attempts/attempt/outputs/checkpoint.pt"
-    assert checkpoint.read_bytes() == b"abcdefghijkl"
+    assert (home / "inputs/weights").read_bytes() == b"abcdefghijkl"
     events = [
         Transfer.model_validate_json(line)
         for line in (home / "usage.jsonl").read_text().splitlines()
     ]
     assert sum(e.received_bytes for e in events if e.purpose == "source") == 12
-    assert sum(e.reused_bytes for e in events if e.purpose == "checkpoint") == 12
+    assert sum(e.reused_bytes for e in events if e.purpose == "input") == 12
     assert (http.requests, http.received) == (1, 12)
 
 

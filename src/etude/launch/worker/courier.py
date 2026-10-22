@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import subprocess
 import sys
@@ -11,11 +12,19 @@ import time
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
-from stat import S_ISREG
 from typing import IO
 
 from pydantic import JsonValue
 
+from etude.carriage import (
+    checkpoint_file,
+    immutable,
+    listing,
+    note_stored,
+    purpose,
+    resume_file,
+    retired,
+)
 from etude.launch.deadline import limit_time
 from etude.launch.environment import startup_timeout
 from etude.launch.logging import (
@@ -28,8 +37,8 @@ from etude.launch.logging import (
     start_publication,
     write_log,
 )
-from etude.launch.records import Diagnostic, Output
-from etude.launch.schemas import AttemptRecord, Bootstrap, Inbox, Result, RunAccess
+from etude.launch.records import Diagnostic
+from etude.launch.schemas import AttemptRecord, Bootstrap, Inbox, RunAccess
 from etude.launch.storage.download import Cache, Download, Mismatch
 from etude.launch.storage.files import RESULT, read_result, write
 from etude.launch.storage.s3 import (
@@ -70,6 +79,12 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+def _until_deadline() -> float | None:
+    """Seconds left before the rental's deadline (`ETUDE_DEADLINE`), when it has one."""
+    deadline = os.environ.get("ETUDE_DEADLINE")
+    return None if not deadline else (datetime.fromisoformat(deadline) - _now()).total_seconds()
+
+
 def _chunks(stream: IO[bytes]) -> Iterator[bytes]:
     stream.seek(0)
     while chunk := stream.read(PART_BYTES):
@@ -93,10 +108,12 @@ class Courier:
     """Carries one session's files between its directory and storage.
 
     Each attempt's files go to its run's folder (see `BucketJournal`): the log
-    and a record of the attempt under `attempts/`, the checkpoint it reports
-    under `checkpoints/`, and the job's tracking folder for the run as it is.
-    Large files go in parts, and replaced tracking files are deleted, where the
-    run's access includes keys; with the form alone, neither happens.
+    and a record of the attempt under `attempts/`, and the run's tracked
+    folder as it is, by the rules the tracker's own shipper follows
+    (`etude.carriage`), so every checkpoint the tracker records is in storage
+    while the attempt still runs. Large files go in parts, and replaced
+    tracking files are deleted, where the run's access includes keys; with the
+    form alone, neither happens.
     """
 
     def __init__(
@@ -110,7 +127,6 @@ class Courier:
         self._home, self._form, self._inbox_url, self._send = home, form, inbox_url, send
         self._runs = {run: _Run(access, send) for run, access in (runs or {}).items()}
         self._sent: dict[str, tuple[int, float]] = {}
-        self._checkpoint_sent: dict[str, str] = {}
         self._log_sent_at: dict[str, float] = {}
         self._console_position = 0
         self._console = Console("worker output")
@@ -139,20 +155,75 @@ class Courier:
 
     def fetch(self, links: dict[str, Download]) -> None:
         """Verify transport bytes before exposing inputs, including existing paths."""
-        timeout: float | None = None
-        if deadline := os.environ.get("ETUDE_DEADLINE"):
-            timeout = (datetime.fromisoformat(deadline) - _now()).total_seconds()
         with observe(self._retain_transfer), attribute(session=self._home.name):
             try:
-                with limit_time(timeout):
+                with limit_time(_until_deadline()):
                     for path, source in links.items():
                         kind = path.split("/")[1]
-                        purpose = {"sources": "source", "inputs": "input"}.get(kind, "checkpoint")
-                        with attribute(purpose=purpose):
+                        with attribute(purpose="source" if kind == "sources" else "input"):
                             Cache().fetch(source, self._home.parent / path, send=self._send)
             finally:
                 # Recovery evidence is outside the discretionary input allowance.
                 self._carry_usage()
+
+    def restore(self, links: dict[str, str]) -> None:
+        """Put back what storage holds of a resumed run's folder, before its job starts.
+
+        `links` are read links by RUN/KEY. Only what this machine lacks is read:
+        the declaration and every checkpoint record, then the one checkpoint
+        file the latest record names (`etude.carriage.resume_file`), verified
+        by its digest. What is restored counts as sent, so it is not uploaded
+        back. The names of the checkpoint files left in storage stay taken
+        (`etude.carriage.taken`).
+        """
+        by_run: dict[str, dict[str, str]] = {}
+        for name, url in links.items():
+            run, _, key = name.partition("/")
+            by_run.setdefault(run, {})[key] = url
+        with observe(self._retain_transfer), attribute(session=self._home.name):
+            try:
+                with limit_time(_until_deadline()):
+                    for run, keys in sorted(by_run.items()):
+                        self._restore(run, keys)
+            finally:
+                self._carry_usage()
+
+    def _restore(self, run: str, keys: dict[str, str]) -> None:
+        folder = self._track_root / run
+        # Every checkpoint name storage holds stays taken, restored or not.
+        note_stored(folder, [key.rpartition("/")[2] for key in keys if checkpoint_file(key)])
+        for key, url in sorted(keys.items()):
+            target = folder / key
+            if checkpoint_file(key) or target.exists():
+                continue
+            with attribute(run=run, purpose="report"):
+                body = read(url, self._send)
+            if body is None:
+                continue  # listed, then retired
+            target.parent.mkdir(parents=True, exist_ok=True)
+            partial = target.with_name(target.name + ".partial")
+            partial.write_bytes(body)
+            partial.replace(target)
+            self._restored(run, key, target)
+        wanted = resume_file(folder)
+        if wanted is None or (folder / wanted.key).exists() or wanted.key not in keys:
+            return
+        with attribute(run=run, purpose="checkpoint"):
+            Cache().fetch(
+                Download(url=keys[wanted.key], sha256=wanted.sha256, size_bytes=wanted.size_bytes),
+                folder / wanted.key,
+                send=self._send,
+            )
+        self._restored(run, wanted.key, folder / wanted.key)
+
+    def _restored(self, run: str, key: str, path: Path) -> None:
+        stat = path.stat()
+        self._sent[f"{run}/{key}"] = (stat.st_size, stat.st_mtime)
+
+    @property
+    def _track_root(self) -> Path:
+        """Where jobs on this machine keep their runs' tracked folders (`ETUDE_TRACK_DIR`)."""
+        return self._home.parent.parent / "track"
 
     def bring_in(self) -> None:
         """Apply the inbox: mark attempts to stop, and hand over work added since.
@@ -191,6 +262,7 @@ class Courier:
                 self._runs.setdefault(entry.work.run, _Run(entry.access, self._send))
                 try:
                     self.fetch(entry.fetch)  # files precede executable work
+                    self.restore(entry.restore)
                 except Mismatch as error:
                     # Permanent: hand the work over so its setup fails and says why,
                     # rather than asking for the same wrong bytes until the deadline.
@@ -215,7 +287,10 @@ class Courier:
     def _put(self, path: Path, run: str, key: str) -> None:
         stat = path.stat()
         seen = (stat.st_size, stat.st_mtime)
-        if self._sent.get(f"{run}/{key}") != seen:
+        sent = self._sent.get(f"{run}/{key}")
+        if sent is not None and immutable(key):
+            return  # never replaced, so never sent again
+        if sent != seen:
             with path.open("rb") as stream:
                 self._write(run, key, stream)
             self._sent[f"{run}/{key}"] = seen
@@ -236,37 +311,20 @@ class Courier:
             del self._sent[f"{run}/{key}"]
 
     def _track(self, run: str, done: bool) -> None:
-        """The job's tracking folder for this run, as it is, then what it retired.
+        """The job's tracked folder for this run, as it is, then what it retired.
 
-        A file still being written (`.open`, `.partial`) waits until it is
-        whole, and one the job keeps to itself while it runs (`.tail`, and
-        anything under a folder whose name starts with `.`) until it has ended.
-        A `.removed` file lists paths, relative to the folder, that the job has
-        replaced; they are deleted once this pass has sent their replacements.
+        Which files are ready, their order and purpose follow `etude.carriage`.
+        Tails wait until the attempt has ended. A retired file is deleted
+        once this pass has sent its replacement.
         """
-        folder = self._home.parent.parent / "track" / run
-        if not folder.is_dir():
-            return
-        # Read the removal notes BEFORE listing uploads. A file retired during
-        # this pass cannot be deleted before its replacement has been sent.
-        removed = [
-            line
-            for note in sorted(folder.rglob("*.removed"))
-            for line in note.read_text().split("\n")[:-1]
-        ]
-        for path in sorted(folder.rglob("*")):
-            name = path.relative_to(folder)
+        folder = self._track_root / run
+        removed = retired(folder) if folder.is_dir() else []
+        for key in listing(folder, tail_seconds=0.0 if done else math.inf):
             # Training removes files while this runs. One gone by now is
             # skipped; what replaced it is seen on the next pass.
             try:
-                if (
-                    S_ISREG(path.stat().st_mode)
-                    and not path.is_symlink()
-                    and not any(part.startswith(".") for part in name.parts)
-                    and path.suffix not in (".open", ".partial")
-                    and (done or path.suffix != ".tail")
-                ):
-                    self._put(path, run, name.as_posix())
+                with attribute(purpose=purpose(key)):
+                    self._put(folder / key, run, key)
             except FileNotFoundError:
                 continue
         self._clear(run, removed)
@@ -311,47 +369,13 @@ class Courier:
         )
         outputs = home / "outputs"
         if (outputs / RESULT).exists():
-            reported = read_result(outputs)
-            checkpoint = reported.checkpoint
-            result = Result(clocks=reported.clocks)
-            if checkpoint:
-                path = outputs / checkpoint
-                if (
-                    path.is_file()
-                    and not path.is_symlink()
-                    and path.resolve().is_relative_to(outputs.resolve())
-                ):
-                    # Digest and upload through one open file, so both see the
-                    # same bytes even when training replaces the file meanwhile.
-                    with path.open("rb") as stream:
-                        hashed, size = hashlib.sha256(), 0
-                        for chunk in _chunks(stream):
-                            hashed.update(chunk)
-                            size += len(chunk)
-                        digest = hashed.hexdigest()
-                        key = f"checkpoints/{checkpoint}"
-                        if self._checkpoint_sent.get(f"{run}/{key}") != digest:
-                            with attribute(purpose="checkpoint"):
-                                self._write(run, key, stream)
-                            self._checkpoint_sent[f"{run}/{key}"] = digest
-                        # Tracking may hold this same snapshot in its run
-                        # folder. Count it as delivered before scanning there.
-                        stat = os.fstat(stream.fileno())
-                        self._sent[f"{run}/{key}"] = (stat.st_size, stat.st_mtime)
-                    result = Result(
-                        clocks=reported.clocks,
-                        checkpoint=checkpoint,
-                        outputs=(Output(name=checkpoint, sha256=digest, size_bytes=size),),
-                    )
-            record = record.model_copy(update={"result": result})
-        with attribute(purpose="report"):
-            self._track(run, done or final)
+            record = record.model_copy(update={"result": read_result(outputs)})
+        self._track(run, done or final)
         log_due = time.monotonic() - self._log_sent_at.get(attempt, 0.0) > _LOG_EVERY_SECONDS
         if (home / "log").exists() and (done or final or log_due):
             self._put(home / "log", run, f"attempts/{attempt}.log")
             self._log_sent_at[attempt] = time.monotonic()
         if done:
-            reported_checkpoint = record.result.checkpoint
             for path in sorted(
                 p
                 for p in outputs.rglob("*")
@@ -360,12 +384,8 @@ class Courier:
                 and p.resolve().is_relative_to(outputs.resolve())
             ):
                 name = path.relative_to(outputs).as_posix()
-                if name == RESULT or name == reported_checkpoint:
-                    continue  # the record carries the first; the run's checkpoints the second
-                kept = outputs / reported_checkpoint if reported_checkpoint else None
-                if kept is not None and kept.exists() and path.samefile(kept):
-                    continue  # the same file under the job's own name
-                self._put(path, run, f"attempts/{attempt}/{name}")
+                if name != RESULT:  # the record carries it
+                    self._put(path, run, f"attempts/{attempt}/{name}")
             finished: dict[str, JsonValue] = json.loads((home / "finished.json").read_text())
             record = record.model_copy(update={"finished": finished})
         note = home / "record.json"
@@ -418,6 +438,7 @@ def _run(
         write_log("source fetch", "starting")
         with limit_time(startup_timeout()):
             courier.fetch(bootstrap.fetch)
+            courier.restore(bootstrap.restore)
         write_log("source fetch", "completed")
         write(home / "packet.json", packet.model_dump_json())
         # Persist start intent before user code can run. A lost write reply must not

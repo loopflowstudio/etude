@@ -20,7 +20,6 @@ from uuid import uuid4
 from etude.launch.records import (
     RETRYABLE,
     Cause,
-    Checkpoint,
     Cohort,
     Diagnostic,
     Hardware,
@@ -83,7 +82,7 @@ CREATE TABLE IF NOT EXISTS machines(
 CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, identity TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS runs(
   seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
-  job TEXT NOT NULL REFERENCES jobs(id), spec TEXT NOT NULL, seed INTEGER, checkpoint TEXT,
+  job TEXT NOT NULL REFERENCES jobs(id), spec TEXT NOT NULL, seed INTEGER,
   pool TEXT REFERENCES pools(name), rent TEXT REFERENCES ondemands(name),
   cohort TEXT REFERENCES cohorts(name),
   created_at TEXT NOT NULL,
@@ -105,9 +104,8 @@ CREATE TABLE IF NOT EXISTS attempts(
   run TEXT NOT NULL REFERENCES runs(id), session TEXT NOT NULL REFERENCES sessions(id), machine TEXT NOT NULL REFERENCES machines(name),
   number INTEGER NOT NULL, position INTEGER NOT NULL, limit_seconds INTEGER NOT NULL,
   limit_kind TEXT NOT NULL, started_at TEXT, finished_at TEXT, outcome TEXT, cause TEXT,
-  clocks TEXT NOT NULL DEFAULT '{}', checkpoint TEXT, outputs TEXT NOT NULL DEFAULT '[]', exit_code INTEGER,
-  version INTEGER NOT NULL DEFAULT 1, planned_at TEXT, added INTEGER NOT NULL DEFAULT 0,
-  checkpoint_clocks TEXT NOT NULL DEFAULT '{}');
+  clocks TEXT NOT NULL DEFAULT '{}', outputs TEXT NOT NULL DEFAULT '[]', exit_code INTEGER,
+  version INTEGER NOT NULL DEFAULT 1, planned_at TEXT, added INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS runs_job ON runs(job);
 CREATE INDEX IF NOT EXISTS attempts_run ON attempts(run);
 CREATE INDEX IF NOT EXISTS attempts_session ON attempts(session);
@@ -115,7 +113,7 @@ CREATE INDEX IF NOT EXISTS attempts_session ON attempts(session);
 
 Fact = str | int | None
 # Changes with the schema. There are no migrations: a file from another version is refused.
-_VERSION = 8
+_VERSION = 9
 
 
 def _text(at: datetime | None) -> str | None:
@@ -132,9 +130,6 @@ def _run(row: sqlite3.Row) -> RunRecord:
         {
             **dict(row),
             "spec": Job.model_validate_json(row["spec"]),
-            "checkpoint": Checkpoint.model_validate_json(row["checkpoint"])
-            if row["checkpoint"] is not None
-            else None,
             "params": json.loads(row["params"]),
             "source": SourcePosition.model_validate_json(row["source"]) if row["source"] else None,
         }
@@ -178,31 +173,8 @@ def _attempt(row: sqlite3.Row) -> RunAttempt:
             **dict(row),
             "clocks": json.loads(row["clocks"]),
             "outputs": json.loads(row["outputs"]),
-            "checkpoint_clocks": json.loads(row["checkpoint_clocks"]),
         }
     )
-
-
-def _checkpoint_facts(
-    attempt: RunAttempt,
-    clocks: dict[str, float] | None,
-    checkpoint: str | None,
-    outputs: Sequence[Output],
-) -> dict[str, Fact]:
-    """Freeze checkpoint coordinates and digests until another checkpoint is reported.
-
-    Later progress may add outputs, but must not replace the retained checkpoint's
-    digest with newer bytes at the same name. Completion follows the same rule.
-    """
-    retained = list(outputs)
-    if not checkpoint:
-        names = {old.name for old in attempt.outputs}
-        retained = [*attempt.outputs, *(o for o in outputs if o.name not in names)]
-    return {
-        "checkpoint": checkpoint or attempt.checkpoint,
-        "checkpoint_clocks": json.dumps(clocks if checkpoint else attempt.checkpoint_clocks),
-        "outputs": json.dumps([o.model_dump(mode="json") for o in retained]),
-    }
 
 
 class Database:
@@ -624,17 +596,15 @@ class Database:
                     "INSERT OR IGNORE INTO jobs VALUES (?, ?)",
                     (run.job, json.dumps(job_identity(run.spec), sort_keys=True)),
                 )
-                held = run.checkpoint
                 self._db.execute(
-                    """INSERT INTO runs(id, job, spec, seed, checkpoint, pool, rent, cohort,
+                    """INSERT INTO runs(id, job, spec, seed, pool, rent, cohort,
                        created_at, autorun, queued, params, source)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         run.id,
                         run.job,
                         run.spec.model_dump_json(),
                         run.seed,
-                        None if held is None else held.model_dump_json(),
                         run.pool,
                         run.rent,
                         run.cohort,
@@ -929,21 +899,9 @@ class Database:
     def start(self, attempt: RunAttempt, at: datetime) -> None:
         self._change("attempts", attempt.id, attempt.version, started_at=at.isoformat())
 
-    def record_progress(
-        self,
-        attempt: RunAttempt,
-        clocks: dict[str, float],
-        checkpoint: str | None,
-        outputs: Sequence[Output],
-    ) -> None:
-        """Retain the last reported checkpoint before a machine can disappear."""
-        self._change(
-            "attempts",
-            attempt.id,
-            attempt.version,
-            clocks=json.dumps(clocks),
-            **_checkpoint_facts(attempt, clocks, checkpoint, outputs),
-        )
+    def record_progress(self, attempt: RunAttempt, clocks: dict[str, float]) -> None:
+        """Retain where the job last said its clocks stood."""
+        self._change("attempts", attempt.id, attempt.version, clocks=json.dumps(clocks))
 
     def finish(
         self,
@@ -953,7 +911,6 @@ class Database:
         *,
         cause: Cause | None = None,
         clocks: dict[str, float] | None = None,
-        checkpoint: str | None = None,
         outputs: Sequence[Output] = (),
         exit_code: int | None = None,
     ) -> None:
@@ -965,7 +922,7 @@ class Database:
             outcome=outcome,
             cause=cause,
             clocks=json.dumps(clocks or {}),
-            **_checkpoint_facts(attempt, clocks, checkpoint, outputs),
+            outputs=json.dumps([o.model_dump(mode="json") for o in outputs]),
             exit_code=exit_code,
         )
 

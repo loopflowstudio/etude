@@ -64,16 +64,14 @@ run = track(experiment="capacity-pilot", clocks=[Step("updates", "optimizer upda
 
 The run, job, seed and cohort come from the launcher (`ETUDE_RUN`,
 `ETUDE_JOB`, `ETUDE_SEED`, `ETUDE_COHORT`); an argument passed to `track` wins.
-The experiment is always named in the script: the launcher does not know it. `run.checkpoint(path, ...)` also writes the launcher's
-`etude-result.json`, so the launcher can resume the run from that checkpoint
-without the script reporting it twice; `run.log` does not report progress to
-the launcher. The files are written to `ETUDE_TRACK_DIR`, one place on the
-machine for every run and attempt, and uploaded to the machine's bucket as
-each file is finished when it has one. A local checkpoint is copied into the
-run's directory before the call returns; the launcher receives a link to that
-snapshot (a copy across filesystems). Overwriting the trainer's original file
-cannot change the recorded checkpoint. Attempts share the run's files, including
-in the launcher's bucket. Tracking never imports the launcher and works without it.
+The experiment is always named in the script: the launcher does not know it.
+The files are written to `ETUDE_TRACK_DIR`, one place on the machine for every
+run and attempt, and the launcher carries them to the machine's bucket as each
+file is finished, by the same rules as `sync` (`etude.carriage`): every
+checkpoint is in the bucket while the job still runs. Tracking reports the
+highest value logged on each clock to the launcher's `etude-result.json`, for
+`etude status`; checkpoints are the run's alone. Attempts share the run's files,
+including in the launcher's bucket. Tracking never imports the launcher and works without it.
 
 Rules a caller can rely on:
 
@@ -90,7 +88,8 @@ Rules a caller can rely on:
   resume from an earlier checkpoint is a new process and does neither.
 - **Continuation is lineage.** A run may name a parent run, a clock and the
   value it continues from. The parent is unchanged. The report does not join
-  the two yet.
+  the two yet. A launched continuation (`etude continue`) declares this
+  itself, from the parent's checkpoint it is handed in `ETUDE_CONTINUES`.
 - **Reads are bucketed and keep extremes**: per bucket first, last, min, max,
   mean, count and a count of NaN or infinite values. A range with fewer points
   than buckets returns the points themselves.
@@ -134,15 +133,28 @@ run.tag(model, "best")  # tags can change later
 ```
 
 - **A checkpoint is a recorded model**: the saved artifact and where every
-  declared clock stood, numbered within the run from one. `checkpoint` returns
-  its reference; pass that to whatever evaluates the model.
+  declared clock stood, numbered within the run from one, across every attempt
+  on every machine. `checkpoint` returns its reference; pass that to whatever
+  evaluates the model.
 - **Etude stores the file, in your storage**, at
-  `PREFIX/RUN/checkpoints/CLOCK-VALUE.EXT`, uploaded in the background from the
-  process that recorded it. The copy is taken before `checkpoint` returns, so saving over the same
-  path afterwards is safe, and the call takes about as long as writing the
+  `PREFIX/RUN/checkpoints/CLOCK-VALUE.EXT`, uploaded in the background before
+  its record. The copy is taken before `checkpoint` returns, so saving over the
+  same path afterwards is safe, and the call takes about as long as writing the
   file did. A JSON model uses `.json.data` to keep it distinct from the JSON
-  checkpoint record. Under the launcher, `.snapshot` is appended if the
-  generated name would replace the trainer's original output path.
-  Saving at the same coordinate replaces that checkpoint;
-  a later sync delivers the replacement even when its size is unchanged.
-  Removing stored files by rule is not built.
+  checkpoint record. Removing stored files by rule is not built.
+- **Nothing recorded is replaced.** Recording the same model at the same
+  coordinate again returns the existing reference and sends nothing. A
+  different model at a recorded coordinate is a new checkpoint,
+  `CLOCK-VALUE.ordinal-N.EXT` beside the first. A name some file already
+  holds is never reused, even one an interrupted attempt kept without its
+  record. Only tags change later.
+- **Resume from the latest.** A later attempt of a run sees every checkpoint
+  recorded so far; on another machine the launcher restores the records and
+  the latest file before the job starts, and ordinals continue. A continuation gets its parent's
+  checkpoint until it records its own. Its file is on this machine:
+  `latest = run.latest_checkpoint()`, then load
+  `urllib.parse.urlparse(latest.artifact.uri).path`; it is `None` on a first start.
+- **Readers give storage addresses.** `etude checkpoints --source` and
+  `etude.train.read` report each file where it is in the source read, not
+  where the machine that wrote it kept it; a record whose file has not arrived
+  is listed as recorded.

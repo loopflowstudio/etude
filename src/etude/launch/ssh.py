@@ -24,19 +24,8 @@ from etude.launch.machines import Allocation
 from etude.launch.measurement import timed
 from etude.launch.providers.package import program_archive
 from etude.launch.records import BootstrapLinks, LauncherError, LogStream, Record
-from etude.launch.schemas import (
-    CheckpointRef,
-    Observation,
-    Packet,
-    Work,
-)
+from etude.launch.schemas import Observation, Packet, Work
 from etude.launch.source import source_archive
-
-
-class CheckpointFile(Record):
-    content: str | None
-    url: str | None
-    sha256: str
 
 
 class RemoteRequest(Record):
@@ -48,8 +37,10 @@ class RemoteRequest(Record):
     work: str = ""
     attempt: str = ""
     name: str = ""
+    key: str = ""  # one file of the run's folder `name`, for "held"
     files: dict[str, str] = Field(default_factory=dict)
-    checkpoints: dict[str, CheckpointFile] = Field(default_factory=dict)
+    # A run's folder relayed from another host, base64 by key (`etude.carriage.restore_set`).
+    folder: dict[str, str] = Field(default_factory=dict)
     bootstrap: BootstrapLinks | None = None
     cleanup: tuple[str, ...] = ()
 
@@ -65,6 +56,7 @@ class RemoteReply(Record):
     started: bool = False
     observation: Observation | None = None
     output: EncodedOutput | None = None
+    folder: dict[str, str] | None = None
 
 
 class Unreachable(LauncherError):
@@ -224,8 +216,9 @@ class SSH:
         work: str = "",
         attempt: str = "",
         name: str = "",
+        key: str = "",
         files: dict[str, str] | None = None,
-        checkpoints: dict[str, CheckpointFile] | None = None,
+        folder: dict[str, str] | None = None,
         bootstrap: BootstrapLinks | None = None,
         cleanup: tuple[str, ...] = (),
         startup_deadline: datetime | None = None,
@@ -248,8 +241,9 @@ class SSH:
                 work=work,
                 attempt=attempt,
                 name=name,
+                key=key,
                 files=files or {},
-                checkpoints=checkpoints or {},
+                folder=folder or {},
                 bootstrap=bootstrap,
                 cleanup=cleanup,
             ).model_dump(mode="json"),
@@ -301,21 +295,6 @@ class SSH:
         }
 
 
-def checkpoint_files(works: tuple[Work, ...]) -> dict[str, CheckpointFile]:
-    """Files needed by a continuation, shared by initial packets and later inbox work."""
-    return {
-        work.checkpoint.session
-        + "/attempts/"
-        + work.checkpoint.attempt
-        + "/outputs/"
-        + work.checkpoint.name: CheckpointFile(
-            content=work.checkpoint.content, url=work.checkpoint.url, sha256=work.checkpoint.sha256
-        )
-        for work in works
-        if work.checkpoint is not None
-    }
-
-
 class SSHStart:
     def __init__(self, ssh: SSH) -> None:
         self.ssh = ssh
@@ -332,7 +311,6 @@ class SSHStart:
                 files=files,
                 bootstrap=bootstrap,
                 cleanup=machine.cleanup,
-                checkpoints=checkpoint_files(packet.work),
             ).text
         )
 
@@ -340,13 +318,6 @@ class SSHStart:
 class SSHJournal:
     def __init__(self, ssh: SSH) -> None:
         self.ssh = ssh
-
-    def checkpoint(self, ref: CheckpointRef) -> CheckpointRef:
-        raw = self.ssh.call("fetch", ref.session, attempt=ref.attempt, name=ref.name).output
-        assert raw is not None
-        if raw.sha256 != ref.sha256:
-            raise LauncherError("checkpoint digest mismatch")
-        return ref.model_copy(update={"content": raw.body})
 
     def prepare(
         self, packet: Packet, *, expires_at: datetime | None = None
@@ -373,8 +344,17 @@ class SSHJournal:
             session_id,
             work=work.model_dump_json(),
             files=self.ssh.files(work),
-            checkpoints=checkpoint_files((work,)),
         )
+
+    def held(self, run: str, key: str | None = None) -> dict[str, bytes]:
+        folder = self.ssh.call("held", "", name=run, key=key or "").folder
+        if folder is None:
+            raise Unreachable("SSH returned no run folder")
+        return {key: base64.b64decode(body) for key, body in folder.items()}
+
+    def hold(self, run: str, files: dict[str, bytes]) -> None:
+        encoded = {key: base64.b64encode(body).decode() for key, body in files.items()}
+        self.ssh.call("hold", "", name=run, folder=encoded)
 
     def observe(self, session_id: str) -> Observation:
         observation = self.ssh.call("observe", session_id).observation

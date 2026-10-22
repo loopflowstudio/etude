@@ -430,6 +430,25 @@ def _clock_range(block: StoredBlock, clock: str) -> tuple[float, float] | None:
     return column.first, column.last
 
 
+def _order(record: CheckpointRecord) -> tuple[int, int]:
+    return record.ordinal, record.wall_ms
+
+
+def _here(
+    record: CheckpointRecord, storage: Storage, place: str, keys: set[tuple[str, str]]
+) -> CheckpointRecord:
+    """The record with its file's address in this storage, where the file sits beside it.
+
+    The record names the file where it was written, which may be a machine
+    that no longer exists. A missing file leaves the record as it is.
+    """
+    name = "checkpoints/" + record.artifact.uri.rpartition("/")[2]
+    if record.artifact.sha256 is None or (place, name) not in keys:
+        return record
+    artifact = record.artifact.model_copy(update={"uri": storage.uri(place + name)})
+    return record.model_copy(update={"artifact": artifact})
+
+
 def read_all(source: Storage | Path | str, experiment: str | None = None) -> list[RunData]:
     """Every run under a source, or every run of one experiment, listing the source once."""
     storage = as_storage(source)
@@ -460,6 +479,7 @@ def _read(
         return [(place, key[len(place) :]) for place in folders for key in storage.keys(place)]
 
     keys = listing()
+    present = set(keys)
     checkpoints: list[CheckpointRecord] = []
     attempts: list[tuple[Attempt, str]] = []
     for place, name in keys:
@@ -471,7 +491,9 @@ def _read(
         body = storage.get(place + name)
         try:
             if kind == "checkpoints":
-                checkpoints.append(CheckpointRecord.model_validate_json(body))
+                checkpoints.append(
+                    _here(CheckpointRecord.model_validate_json(body), storage, place, present)
+                )
             else:
                 attempts.append((Attempt.model_validate_json(body), place))
         except ValidationError:
@@ -545,7 +567,7 @@ def _read(
         file=run_file,
         state=run_state,
         blocks=tuple(blocks),
-        # By time: each machine numbers its own checkpoints from 1.
-        checkpoints=tuple(sorted(checkpoints, key=lambda record: (record.wall_ms, record.ordinal))),
+        # A later attempt continues its run's ordinals; each is kept once.
+        checkpoints=tuple({r.ordinal: r for r in sorted(checkpoints, key=_order)}.values()),
         attempts=tuple(attempt for attempt, _ in attempts),
     )

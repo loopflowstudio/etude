@@ -20,14 +20,11 @@ from etude.launch.schemas import Packet
 from tests.launch.fake import bench
 
 JOB_FILE = r"""
+import sys
 from etude.launch.records import Job, Run
 from decimal import Decimal
 from pathlib import Path
-command = '''
-echo "$(cat "$ETUDE_CONFIG") seed $ETUDE_SEED from ${ETUDE_FROM_VALUE:-0} to $ETUDE_UNTIL_VALUE"
-echo weights > "$ETUDE_OUTPUT_DIR/checkpoint.pt"
-printf '{"clocks": {"steps": %s}, "checkpoint": "checkpoint.pt"}' "$ETUDE_UNTIL_VALUE" > "$ETUDE_OUTPUT_DIR/etude-result.json"
-'''
+command = f"{sys.executable} {Path(__file__).parent / 'train.py'}"
 here = Path(__file__).parent
 
 
@@ -43,6 +40,27 @@ if __name__ == "__main__":
 """
 
 
+# A tracked job: it resumes from the checkpoint its run, or its parent, recorded.
+TRAIN = r"""
+import os
+from pathlib import Path
+from urllib.parse import urlparse
+from etude.train.records import Step
+from etude.train.run import track
+run = track(experiment="capacity", clocks=[Step("steps", "training steps")])
+latest = run.latest_checkpoint()
+start = 0 if latest is None else int(latest.at["steps"])
+target = int(os.environ["ETUDE_UNTIL_VALUE"])
+config = Path(os.environ["ETUDE_CONFIG"]).read_text()
+print(f"{config} seed {os.environ['ETUDE_SEED']} from {start} to {target}")
+weights = Path(os.environ["ETUDE_OUTPUT_DIR"]) / "weights.pt"
+weights.write_text("weights\n")
+run.log({"loss": 0.5}, steps=target)
+run.checkpoint(weights, steps=target)
+run.finish()
+"""
+
+
 def run(capsys: pytest.CaptureFixture[str], *argv: str) -> list[str]:
     assert main(argv) == 0
     return capsys.readouterr().out.splitlines()
@@ -55,6 +73,7 @@ def test_a_job_file_launches_a_cohort_and_each_verb_reads_it_back(
     for arm in ("small", "large"):
         (tmp_path / f"{arm}.toml").write_text(f"arm = {arm}")
     (tmp_path / "job.py").write_text(JOB_FILE)
+    (tmp_path / "train.py").write_text(TRAIN)
 
     launched = run(
         capsys, "launch", str(tmp_path / "job.py"), "--cohort", "capacity-26k", "--max-usd", "20"
@@ -77,21 +96,30 @@ def test_a_job_file_launches_a_cohort_and_each_verb_reads_it_back(
     assert run(capsys, "status") == []
     assert len(run(capsys, "runs")) == 4
     assert [line.split()[0] for line in run(capsys, "status", "capacity-26k")] == ids
-    assert main(["continue", "capacity-26k", "steps=40000"]) == 1
+    assert main(["continue", "--run", "capacity-26k", "--until", "steps=40000"]) == 1
     assert "needs --cohort" in capsys.readouterr().err
-    stage = run(capsys, "continue", "capacity-26k", "steps=40000", "--cohort", "capacity-40k")
+    stage = run(
+        capsys,
+        "continue",
+        "--run",
+        "capacity-26k",
+        "--until",
+        "steps=40000",
+        "--cohort",
+        "capacity-40k",
+    )
     assert len(stage) == 4 and all("queued (waiting for local)" in line for line in stage)
     assert all("steps 40000" in line for line in run(capsys, "wait"))  # none named: all of them
     assert "arm = small seed 1 from 26000 to 40000" in run(
         capsys, "logs", "--cohort", "capacity-40k", "--job-only"
     )
-    (continued,) = run(capsys, "continue", ids[3], "steps=63000")
+    (continued,) = run(capsys, "continue", "--run", ids[3], "--until", "steps=63000")
     next_id = continued.split()[0]
     assert "steps 63000" in run(capsys, "wait", next_id)[0]
     assert "arm = large seed 2 from 26000 to 63000" in run(
         capsys, "logs", "--run", next_id, "--job-only"
     )
-    (copy,) = run(capsys, "fetch", next_id, "checkpoint.pt", str(tmp_path / "out"))
+    (copy,) = run(capsys, "fetch", next_id, "weights.pt", str(tmp_path / "out"))
     assert Path(copy).read_text() == "weights\n"
 
 

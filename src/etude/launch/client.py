@@ -164,10 +164,6 @@ def availability(rent: str, *, timeout: float | None = None) -> Availability:
     return _client().availability(rent, timeout=timeout)
 
 
-def continue_from(run: str, until: str) -> Run:
-    return _client().continue_from(run, until)
-
-
 def status(run: str) -> Status:
     return _client().status(run)
 

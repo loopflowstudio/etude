@@ -9,17 +9,15 @@ may be repeated or interrupted at any point: a replay is harmless.
 from __future__ import annotations
 
 import threading
-import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
-from stat import S_ISREG
 
+from etude.carriage import checkpoint_file, immutable, listing, retired
 from etude.run.block_file import parse
-from etude.run.listing import RUN_FILES, RUN_FOLDERS
 from etude.run.records import RunFile
-from etude.run.storage import DirectoryStorage, Storage, run_prefix, sealed
+from etude.run.storage import DirectoryStorage, Storage, run_prefix
 
 
 class RunFiles:
@@ -37,46 +35,20 @@ class RunFiles:
     def deliverable(self) -> list[str]:
         """Every file a destination should hold, as keys under the run, in sending order.
 
-        Blocks precede the indexes that describe them. A crash log or a
-        half-written file is never sent; a tail only once it is old enough that
-        its writer has died.
+        The rules are the courier's too (`etude.carriage.listing`). A tail is
+        sent only once it is old enough that its writer has died.
         """
-
-        def folder(name: str) -> list[str]:
-            names: list[str] = []
-            for path in (self.root / name).glob("*"):
-                try:
-                    stat = path.stat()
-                except FileNotFoundError:
-                    continue  # folded away since the listing
-                if not S_ISREG(stat.st_mode) or path.suffix in (".partial", ".open"):
-                    continue
-                if path.suffix == ".tail" and time.time() - stat.st_mtime < self.tail_age:
-                    continue
-                names.append(f"{name}/{path.name}")
-            return sorted(names, key=lambda key: (not key.endswith((".blk", ".tail")), key))
-
-        return [name for name in RUN_FILES if (self.root / name).is_file()] + [
-            key for name in RUN_FOLDERS for key in folder(name)
-        ]
+        return listing(self.root, tail_seconds=self.tail_age)
 
     def fingerprint(self, key: str) -> str:
-        """Blocks and tables never change; a stored checkpoint is large; others are hashed."""
-        if sealed(key):
-            return "sealed"
-        if key.startswith("checkpoints/") and not key.endswith(".json"):
-            stat = (self.root / key).stat()
-            # A resume may replace a checkpoint at the same coordinate, even
-            # with the same byte count. Avoid hashing large files on every pass.
-            return f"file-{stat.st_size}-{stat.st_mtime_ns}"
+        """Immutable files are sent once; others are hashed, so a change is sent again."""
+        if immutable(key):
+            return "immutable"
         return sha256((self.root / key).read_bytes()).hexdigest()
 
     def removed(self) -> list[str]:
         """Every path, relative to the run, that a writer has retired."""
-        lines: list[str] = []
-        for note in sorted(self.root.glob("*/*.removed")):
-            lines += note.read_text().split("\n")[:-1]
-        return lines
+        return retired(self.root)
 
     def _marker(self, destination: str, key: str) -> Path:
         return self.root / ".shipped" / destination / (key.replace("/", "__") + ".sent")
@@ -122,10 +94,9 @@ class StorageDestination:
             retired = files.removed()
             for key, fingerprint in files.pending(self.name):
                 block = parse(key)
-                large = key.startswith("checkpoints/") and not key.endswith(".json")
                 body = (
                     files.root / key
-                    if large or block is not None and block.level >= 2
+                    if checkpoint_file(key) or block is not None and block.level >= 2
                     else (files.root / key).read_bytes()
                 )
                 deliveries.append(Delivery(key, fingerprint, body))

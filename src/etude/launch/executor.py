@@ -15,7 +15,7 @@ from typing import Protocol
 
 from etude.launch.machines import Allocation, Bill, MachineRequest, Machines, OwnedMachine
 from etude.launch.records import BootstrapLinks, LogStream, Offer
-from etude.launch.schemas import CheckpointRef, Observation, Packet, Work
+from etude.launch.schemas import Observation, Packet, Work
 from etude.launch.startup import ProcessStart
 from etude.launch.storage.disk import DirectoryJournal
 
@@ -43,7 +43,6 @@ class Refused(Exception):
 
 
 class Execution(Protocol):
-    def checkpoint(self, ref: CheckpointRef) -> CheckpointRef: ...
     def started(self, session_id: str) -> bool: ...
     def allocation(self, session_id: str) -> Allocation | None:
         """The provider's receipt for a rented machine: its charged price and hardware.
@@ -79,6 +78,20 @@ class Execution(Protocol):
 
     def observe(self, session_id: str) -> Observation: ...
 
+    def held(self, run: str, key: str | None = None) -> dict[str, bytes] | None:
+        """What another machine needs of a run's folder on this one, by key.
+
+        A retry elsewhere: `etude.carriage.restore_set`. With `key`, just that
+        recorded file and its record (`etude.carriage.recorded_file`), as a
+        job's input. None where storage holds the run and other machines read
+        it from there. Raises while the machine cannot be reached.
+        """
+        ...
+
+    def hold(self, run: str, files: dict[str, bytes]) -> None:
+        """Put a run's folder, relayed from the machine that held it, on this one. Safe to repeat."""
+        ...
+
     def stop(self, session_id: str, attempt: str) -> None:
         """Ask one attempt to stop. Safe to repeat."""
         ...
@@ -97,10 +110,11 @@ class Execution(Protocol):
 
 
 class Journal(Protocol):
-    def checkpoint(self, ref: CheckpointRef) -> CheckpointRef: ...
     def add(self, session_id: str, work: Work) -> None: ...
     def stage(self, repo: str, commit: str) -> None: ...
     def observe(self, session_id: str) -> Observation: ...
+    def held(self, run: str, key: str | None = None) -> dict[str, bytes] | None: ...
+    def hold(self, run: str, files: dict[str, bytes]) -> None: ...
     def stop(self, session_id: str, attempt: str) -> None: ...
     def logs(
         self, session_id: str, attempt: str | None = None, *, producer: str = "job"
@@ -177,9 +191,6 @@ class Executor:
     def started(self, session_id: str) -> bool:
         return self.journal.started(session_id)
 
-    def checkpoint(self, ref: CheckpointRef) -> CheckpointRef:
-        return self.journal.checkpoint(ref)
-
     def allocation(self, session_id: str) -> Allocation | None:
         return None if self.machines.owned else self.machines.find(session_id)
 
@@ -198,6 +209,13 @@ class Executor:
 
     def stage(self, repo: str, commit: str) -> None:
         self.journal.stage(repo, commit)
+
+    def held(self, run: str, key: str | None = None) -> dict[str, bytes] | None:
+        return self.journal.held(run, key)
+
+    def hold(self, run: str, files: dict[str, bytes]) -> None:
+        # The machine's own control reaches its disk even where storage is the journal.
+        self.control.hold(run, files)
 
     def stop(self, session_id: str, attempt: str) -> None:
         self.journal.stop(session_id, attempt)

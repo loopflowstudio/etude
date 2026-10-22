@@ -7,7 +7,6 @@ the real session process it starts.
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 import subprocess
@@ -24,6 +23,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 import pytest
 from pydantic import ValidationError
 
+from etude.jobs import continue_from
 from etude.launch.database import Database
 from etude.launch.executor import Executor
 from etude.launch.listing import show_machines, show_runs
@@ -43,20 +43,44 @@ from etude.launch.records import (
 )
 from etude.launch.records import Storage as Place
 from etude.launch.scheduler import Scheduler
-from etude.launch.schemas import Bootstrap, BucketAccess, CheckpointRef, Packet, RunAccess, Work
+from etude.launch.schemas import Bootstrap, BucketAccess, Packet, RunAccess, Work
 from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.s3 import Bucket, Keys, Reply, StorageUnavailable
+from etude.launch.storage.transport import emit
 from etude.launch.worker import courier as courier_module
 from etude.launch.worker.courier import Courier
 from etude.launch.worker.courier import run as run_in_pod
+from etude.run.records import ArtifactRef
+from etude.train.records import Step
+from etude.train.run import Run as TrackedRun
+from etude.train.run import track
 from tests.launch.counting import Counting, Counts, job_text
 
 TRAIN = """
-echo "seed $ETUDE_SEED from ${ETUDE_FROM_VALUE:-0} to $ETUDE_UNTIL_VALUE"
-cat "${ETUDE_CHECKPOINT:-/dev/null}" > "$ETUDE_OUTPUT_DIR/checkpoint.pt"
-echo "trained to $ETUDE_UNTIL_VALUE" >> "$ETUDE_OUTPUT_DIR/checkpoint.pt"
-printf '{"clocks": {"steps": %s}, "checkpoint": "checkpoint.pt"}' "$ETUDE_UNTIL_VALUE" \\
-  > "$ETUDE_OUTPUT_DIR/etude-result.json"
+echo "seed $ETUDE_SEED to $ETUDE_UNTIL_VALUE"
+echo "trained to $ETUDE_UNTIL_VALUE" > "$ETUDE_OUTPUT_DIR/weights.pt"
+printf '{"clocks": {"steps": %s}}' "$ETUDE_UNTIL_VALUE" > "$ETUDE_OUTPUT_DIR/etude-result.json"
+"""
+
+# A tracked job that resumes from its run's latest checkpoint, or its parent's.
+TRACKED = """
+import os
+from pathlib import Path
+from urllib.parse import urlparse
+from etude.train.records import Step
+from etude.train.run import track
+run = track(experiment="capacity", clocks=[Step("steps", "training steps")])
+latest = run.latest_checkpoint()
+start = 0 if latest is None else int(latest.at["steps"])
+kept = "" if latest is None else Path(urlparse(latest.artifact.uri).path).read_text()
+target = int(os.environ["ETUDE_UNTIL_VALUE"])
+print(f"seed {os.environ['ETUDE_SEED']} from {start} to {target}")
+for step in range(start + 1, target + 1):
+    run.log({"loss": 1.0 / step}, steps=step)
+weights = Path(os.environ["ETUDE_OUTPUT_DIR"]) / "weights.pt"
+weights.write_text(kept + f"trained to {target}\\n")
+run.checkpoint(weights, steps=target)
+run.finish()
 """
 
 
@@ -227,6 +251,37 @@ class RunPod:
         return (200, json.dumps(self.pods[id]).encode()) if id in self.pods else (404, b"")
 
 
+class BucketObjects:
+    """The in-memory bucket as tracking's readers see a bucket (`etude.run.storage.Storage`)."""
+
+    def __init__(self, storage: Storage, bucket: str) -> None:
+        self.storage, self.bucket = storage, bucket
+        self.name = f"s3-{bucket}"
+
+    def put(self, key: str, data: bytes) -> None:
+        self.storage.objects[key] = data
+
+    def put_file(self, key: str, path: Path) -> None:
+        self.storage.objects[key] = path.read_bytes()
+
+    def delete(self, key: str) -> bool:
+        return self.storage.objects.pop(key, None) is not None
+
+    def get(self, key: str) -> bytes:
+        if key not in self.storage.objects:
+            raise FileNotFoundError(key)
+        return self.storage.objects[key]
+
+    def get_range(self, key: str, start: int, length: int) -> bytes:
+        return self.get(key)[start : start + length]
+
+    def uri(self, key: str) -> str:
+        return f"s3://{self.bucket}/{key}"
+
+    def keys(self, prefix: str) -> list[str]:
+        return sorted(key for key in self.storage.objects if key.startswith(prefix))
+
+
 @dataclass
 class Cloud:
     scheduler: Scheduler
@@ -367,9 +422,17 @@ def test_a_run_from_a_commit_runs_in_a_pod_and_continues_in_another(
     tmp_path: Path, delivery_seconds: float | None
 ) -> None:
     c = cloud(tmp_path, delivery_seconds=delivery_seconds)
+    repo = repository(tmp_path)
+    (repo / "train.py").write_text(TRACKED)
+    subprocess.run(["git", "-C", str(repo), "add", "train.py"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        + ["commit", "-qm", "track"],
+        check=True,
+    )
     job = Job(
-        command="sh train.sh",
-        repo=str(repository(tmp_path)),
+        command=f"{sys.executable} train.py",
+        repo=str(repo),
         until="steps=3",
         max_hours=0.05,
         max_usd=Decimal(1),
@@ -384,11 +447,15 @@ def test_a_run_from_a_commit_runs_in_a_pod_and_continues_in_another(
     assert job_text(c.scheduler.logs(run=first)) == "seed 7 from 0 to 3\n"
     assert c.provider.pods == {}  # the pod deleted itself once its work was delivered
 
-    second = c.scheduler.launch(c.scheduler.continue_from(first, "steps=7"), rent="l4")
+    # The parent's checkpoint, resolved from the bucket, reaches the next pod as an input.
+    parent = c.scheduler.record(first)
+    second = c.scheduler.launch(
+        continue_from(parent, "steps=7", source=BucketObjects(c.storage, "journals")), rent="l4"
+    )
     (status,) = c.scheduler.wait(second, every=0.05, timeout=30)
     assert (status.outcome, status.clocks) == ("succeeded", {"steps": 7})
     assert job_text(c.scheduler.logs(run=second)) == "seed 7 from 3 to 7\n"
-    copy = c.scheduler.fetch(second, "checkpoint.pt", tmp_path / "out")
+    copy = c.scheduler.fetch(second, "weights.pt", tmp_path / "out")
     assert copy.read_text() == "trained to 3\ntrained to 7\n"
     assert c.provider.creates == 2 and c.provider.pods == {}
 
@@ -417,7 +484,7 @@ def test_a_run_from_a_commit_runs_in_a_pod_and_continues_in_another(
     folder = f"etude/t/{second}/"
     keys = [k.removeprefix(folder) for k in c.storage.objects if k.startswith(folder)]
     assert {f"attempts/{attempt}.json", f"attempts/{attempt}.log"} <= set(keys)
-    assert "checkpoints/checkpoint.pt" in keys
+    assert {"run.json", "checkpoints/steps-7.json", "checkpoints/steps-7.pt"} <= set(keys)
 
 
 def test_a_lost_create_reply_finds_the_pod_by_name_and_never_asks_twice(tmp_path: Path) -> None:
@@ -530,34 +597,11 @@ def test_the_guardian_deletes_the_pod_at_the_deadline_or_when_the_dollars_run_ou
     assert deleted_at(0.59, "5", reply=503) == 3600  # price unknown: the deadline still holds
 
 
-def test_checkpoint_reaches_storage_before_attempt_ends(tmp_path: Path) -> None:
-    c = cloud(tmp_path)
-    run = c.scheduler.launch(
-        Job(
-            command='echo retained > "$ETUDE_OUTPUT_DIR/checkpoint.pt"; '
-            'echo \'{"clocks":{"steps":3},"checkpoint":"checkpoint.pt"}\' > "$ETUDE_OUTPUT_DIR/etude-result.json"; sleep 30',
-            max_hours=0.05,
-            max_usd=Decimal(1),
-        ),
-        rent="l4",
-    )
-    until(c.scheduler, run, "running")
-    key = f"etude/t/{run}/checkpoints/checkpoint.pt"
-    deadline = time.monotonic() + 10
-    while key not in c.storage.objects and time.monotonic() < deadline:
-        time.sleep(0.05)
-    assert c.storage.objects[key] == b"retained\n"
-    assert c.scheduler.read(run).phase == "running"
-    c.scheduler.cancel(run)
-    assert c.scheduler.wait(run, every=0.05, timeout=10)[0].outcome == "cancelled"
-
-
 def test_shared_inputs_are_prepared_once(tmp_path: Path) -> None:
     repo = repository(tmp_path)
     commit = subprocess.run(
         ["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
     ).stdout.strip()
-    checkpoint = b"shared weights"
     storage = Storage()
     counting = Counting(Database(tmp_path / "counting.db"))
     journal = BucketJournal(
@@ -576,19 +620,9 @@ def test_shared_inputs_are_prepared_once(tmp_path: Path) -> None:
         limit_kind="out_of_time",
         seed=None,
         until=None,
-        start=None,
         config=None,
         repo=str(repo),
         commit=commit,
-        checkpoint=CheckpointRef(
-            run="parent",
-            session="previous",
-            attempt="parent-attempt",
-            name="weights.pt",
-            sha256=hashlib.sha256(checkpoint).hexdigest(),
-            size_bytes=len(checkpoint),
-            content=base64.b64encode(checkpoint).decode(),
-        ),
         run="one",
     )
     packet = Packet(
@@ -598,20 +632,18 @@ def test_shared_inputs_are_prepared_once(tmp_path: Path) -> None:
     )
     with counting.record():
         journal.prepare(packet)
-    # Packet, one source listing/upload, one checkpoint upload, inbox, bootstrap.
-    assert counting.snapshot() == Counts(bucket=6, git=1)
+    # Packet, one source listing/upload, inbox, bootstrap.
+    assert counting.snapshot() == Counts(bucket=5, git=1)
     bootstrap = Bootstrap.model_validate_json(
         storage.objects["test/sessions/shared/bootstrap.json"]
     )
-    assert len(bootstrap.fetch) == 2
+    assert len(bootstrap.fetch) == 1
     source = bootstrap.fetch[f"shared/sources/{commit}.tar"]
     archive = storage.objects[f"test/sources/{source.sha256}.tar"]  # shared by every session
     assert (source.sha256, source.size_bytes) == (hashlib.sha256(archive).hexdigest(), len(archive))
     with counting.record():
         journal.stage(str(repo), commit)  # already staged: no git, no bucket
     assert counting.snapshot() == Counts()
-    held = bootstrap.fetch["previous/attempts/parent-attempt/outputs/weights.pt"]
-    assert storage.objects[f"test/sessions/shared/inputs/{held.sha256}"] == checkpoint
 
 
 def test_lost_start_receipt_reply_cannot_leave_unreported_running_code(tmp_path: Path) -> None:
@@ -636,11 +668,9 @@ def test_lost_start_receipt_reply_cannot_leave_unreported_running_code(tmp_path:
         limit_kind="out_of_time",
         seed=None,
         until=None,
-        start=None,
         config=None,
         repo=None,
         commit=None,
-        checkpoint=None,
         run="run-a",
     )
     packet = Packet(session="r", deadline=datetime.now(UTC) + timedelta(minutes=1), work=(work,))
@@ -820,18 +850,14 @@ def test_a_large_checkpoint_goes_in_parts_and_arrives_whole(
 ) -> None:
     monkeypatch.setattr(courier_module, "PART_BYTES", 4)
     storage = Storage()
-    courier, attempt, _ = machine(tmp_path, storage)
-    (attempt / "outputs/model.pt").write_bytes(b"0123456789")
-    (attempt / "outputs/etude-result.json").write_text(
-        json.dumps({"clocks": {"steps": 1}, "checkpoint": "model.pt"})
-    )
+    courier, _, track = machine(tmp_path, storage)
+    (track / "checkpoints").mkdir()
+    (track / "checkpoints/steps-1.pt").write_bytes(b"0123456789")
     courier.carry_out()
-    assert storage.objects["etude/run1/checkpoints/model.pt"] == b"0123456789"
+    assert storage.objects["etude/run1/checkpoints/steps-1.pt"] == b"0123456789"
     assert storage.uploads == {}  # the upload was finished, not left open
-    sent = [what for method, what in storage.asked if method == "PUT" and "model.pt" in what]
+    sent = [what for method, what in storage.asked if method == "PUT" and "steps-1.pt" in what]
     assert len(sent) == 3  # 4 + 4 + 2 bytes
-    recorded = json.loads(storage.objects["etude/run1/attempts/a1.json"])
-    assert recorded["result"]["outputs"][0]["size_bytes"] == 10
 
 
 def test_a_file_that_vanishes_mid_pass_does_not_stop_the_others(tmp_path: Path) -> None:
@@ -870,27 +896,266 @@ def test_replaced_files_are_deleted_before_the_attempt_is_reported_finished(
     assert deleted < finished
 
 
-def test_finished_outputs_do_not_repeat_the_reported_checkpoint(tmp_path: Path) -> None:
+def test_finished_outputs_go_under_the_attempt_and_checkpoints_under_the_run(
+    tmp_path: Path,
+) -> None:
     storage = Storage()
     courier, attempt, track = machine(tmp_path, storage)
     outputs = attempt / "outputs"
-    (outputs / "checkpoint.pt").write_bytes(b"weights")
-    (outputs / "steps-10.pt").hardlink_to(outputs / "checkpoint.pt")  # tracking's name for it
+    (outputs / "weights.pt").write_bytes(b"weights")
     (track / "checkpoints").mkdir()
-    (track / "checkpoints/steps-10.pt").hardlink_to(outputs / "steps-10.pt")
-    (outputs / "notes.txt").write_text("kept")
-    (outputs / "etude-result.json").write_text(
-        json.dumps({"clocks": {"steps": 10}, "checkpoint": "steps-10.pt"})
-    )
+    (track / "checkpoints/steps-10.pt").write_bytes(b"weights")
+    (outputs / "etude-result.json").write_text(json.dumps({"clocks": {"steps": 10}}))
     (attempt / "finished.json").write_text("{}")
     courier.carry_out()
     stored = sorted(key.removeprefix("etude/run1/") for key in storage.objects)
-    assert stored == [
-        "attempts/a1.json",
-        "attempts/a1/notes.txt",
-        "checkpoints/steps-10.pt",
-    ]
-    assert storage.objects["etude/run1/checkpoints/steps-10.pt"] == b"weights"
-    assert storage.asked.count(("PUT", "etude/run1/checkpoints/steps-10.pt")) == 1
+    assert stored == ["attempts/a1.json", "attempts/a1/weights.pt", "checkpoints/steps-10.pt"]
+    recorded = json.loads(storage.objects["etude/run1/attempts/a1.json"])
+    assert recorded["result"] == {"clocks": {"steps": 10.0}}
     courier.carry_out()
     assert storage.asked.count(("PUT", "etude/run1/checkpoints/steps-10.pt")) == 1
+
+
+def _tracked(root: Path, run: str = "run1") -> TrackedRun:
+    """A tracked run writing into a machine's track folder, as a launched job's would."""
+    return track(
+        experiment="capacity",
+        clocks=[Step("steps", "training steps")],
+        run=run,
+        directory=root,
+        segment_seconds=0.05,
+    )
+
+
+def _kept(folder: Path, records: int) -> None:
+    """Wait for the tracker's writer to have kept this many checkpoint records."""
+    deadline = time.monotonic() + 10
+    while len(list((folder / "checkpoints").glob("*.json"))) < records:
+        assert time.monotonic() < deadline, "the tracker never kept its record"
+        time.sleep(0.01)
+
+
+def _sent(storage: Storage, part: str) -> list[str]:
+    """Keys written under the run's checkpoints, in the order they were sent."""
+    return [
+        what.removeprefix("etude/run1/")
+        for method, what in storage.asked
+        if method in ("PUT", "POST") and part in what
+    ]
+
+
+class Observed(Storage):
+    """The bucket, reporting each request as the real transport does, so usage sees it."""
+
+    def __call__(self, method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Reply:
+        reply = super().__call__(method, url, body, headers)
+        emit(method, url, supplied=len(body or b""), status=reply.status, completed=True)
+        return reply
+
+
+def test_each_checkpoint_reaches_storage_while_the_attempt_runs(tmp_path: Path) -> None:
+    storage = Observed()
+    courier, attempt, folder = machine(tmp_path, storage)
+    run = _tracked(folder.parent)
+    weights = tmp_path / "weights.pt"
+    for step in (1, 2, 3):
+        weights.write_bytes(f"weights at {step}".encode())
+        run.checkpoint(weights, steps=step)
+        _kept(folder, step)
+        courier.carry_out()
+        assert storage.objects[f"etude/run1/checkpoints/steps-{step}.pt"] == weights.read_bytes()
+    assert not (attempt / "finished.json").exists()
+    # One upload per file and per record, each file before its record.
+    assert _sent(storage, "/checkpoints/") == [
+        name
+        for step in (1, 2, 3)
+        for name in (f"checkpoints/steps-{step}.pt", f"checkpoints/steps-{step}.json")
+    ]
+    journal = (courier._home / "usage.jsonl").read_text().splitlines()
+    usage = [json.loads(line) for line in journal]
+    purposes = {
+        u["key"].rpartition("/")[2]: u["purpose"] for u in usage if "/checkpoints/" in u["key"]
+    }
+    assert purposes == {
+        **{f"steps-{step}.pt": "checkpoint" for step in (1, 2, 3)},
+        **{f"steps-{step}.json": "report" for step in (1, 2, 3)},
+    }
+
+    # The same model again changes nothing; another at a recorded coordinate is a new version.
+    first = storage.objects["etude/run1/checkpoints/steps-3.json"]
+    again = run.checkpoint(weights, steps=3)
+    courier.carry_out()
+    assert len(_sent(storage, "/checkpoints/")) == 6
+    latest = run.latest_checkpoint()
+    assert latest is not None and (latest.ordinal, latest.artifact.sha256) == (3, again.sha256)
+    weights.write_bytes(b"retrained")
+    run.checkpoint(weights, steps=3)
+    _kept(folder, 4)
+    courier.carry_out()
+    assert _sent(storage, "/checkpoints/")[6:] == [
+        "checkpoints/steps-3.ordinal-4.pt",
+        "checkpoints/steps-3.ordinal-4.json",
+    ]
+    assert storage.objects["etude/run1/checkpoints/steps-3.pt"] == b"weights at 3"
+    assert storage.objects["etude/run1/checkpoints/steps-3.json"] == first
+    assert storage.objects["etude/run1/checkpoints/steps-3.ordinal-4.pt"] == b"retrained"
+
+    # Interrupted: the job never finishes, and storage already holds every checkpoint.
+    (courier._home / "session.log").touch()
+    courier.carry_out(final=True)
+    kept = [k for k in storage.objects if k.startswith("etude/run1/checkpoints/")]
+    assert len(kept) == 8
+    run.finish()
+
+
+def test_a_retry_on_a_fresh_machine_resumes_from_the_runs_latest_checkpoint(
+    tmp_path: Path,
+) -> None:
+    storage = Storage()
+    courier, _, folder = machine(tmp_path / "one", storage)
+    run = _tracked(folder.parent)
+    weights = tmp_path / "weights.pt"
+    for step in (1, 2, 3):
+        weights.write_bytes(f"weights at {step}".encode() * 100)
+        run.checkpoint(weights, steps=step)
+    _kept(folder, 3)
+    run.finish()
+    courier.carry_out()
+    written = sum(len(body) for key, body in storage.objects.items() if "/checkpoints/" in key)
+
+    journal = BucketJournal(
+        Place(name="east", bucket="b", prefix="etude", region="us-east-1"),
+        Bucket("b", "us-east-1", Keys(access_key="AKIA", secret_key="secret"), storage),
+    )
+    retry = Work(
+        attempt="a2",
+        command="true",
+        limit_seconds=30,
+        limit_kind="out_of_time",
+        seed=None,
+        until=None,
+        config=None,
+        repo=None,
+        commit=None,
+        run="run1",
+        resumes=True,
+    )
+    asked = len(storage.asked)
+    journal.prepare(Packet(session="r2", deadline=None, work=(retry,)))
+    listed = [what for _, what in storage.asked[asked:] if "list-type" in what]
+    assert len(listed) == 1  # links are made, not read
+    bootstrap = Bootstrap.model_validate_json(storage.objects["etude/sessions/r2/bootstrap.json"])
+
+    fresh, _, there = machine(tmp_path / "two", storage)
+    asked = len(storage.asked)
+    fresh.restore(bootstrap.restore)
+    reads = [what.partition("?")[0] for method, what in storage.asked[asked:] if method == "GET"]
+    # The declaration and every record, then only the file the latest record names.
+    assert reads == [
+        "etude/run1/checkpoints/steps-1.json",
+        "etude/run1/checkpoints/steps-2.json",
+        "etude/run1/checkpoints/steps-3.json",
+        "etude/run1/run.json",
+        "etude/run1/checkpoints/steps-3.pt",
+    ]
+    assert sum(len(storage.objects[key]) for key in reads) <= 2 * written
+
+    resumed = _tracked(there.parent)
+    latest = resumed.latest_checkpoint()
+    assert latest is not None and latest.ordinal == 3
+    assert Path(urlsplit(latest.artifact.uri).path).read_bytes() == b"weights at 3" * 100
+    weights.write_bytes(b"weights at 4")
+    resumed.checkpoint(weights, steps=4)
+    _kept(there, 4)
+    resumed.finish()
+    asked = len(storage.asked)
+    fresh.carry_out()
+    sent = [
+        what
+        for method, what in storage.asked[asked:]
+        if method == "PUT" and "/checkpoints/" in what
+    ]
+    # Nothing restored goes back, and ordinals continue.
+    assert sent == ["etude/run1/checkpoints/steps-4.pt", "etude/run1/checkpoints/steps-4.json"]
+    assert json.loads(storage.objects["etude/run1/checkpoints/steps-4.json"])["ordinal"] == 4
+
+
+def _orphaned(tmp_path: Path, storage: Storage) -> tuple[Courier, Path, Path]:
+    """Two checkpoints recorded, then a writer that died after keeping steps-3.pt, before its record."""
+    courier, _, folder = machine(tmp_path, storage)
+    run = _tracked(folder.parent)
+    weights = tmp_path / "weights.pt"
+    for step in (1, 2):
+        weights.write_bytes(f"weights at {step}".encode())
+        run.checkpoint(weights, steps=step)
+    _kept(folder, 2)
+    run.finish()
+    (folder / "checkpoints/steps-3.pt").write_bytes(b"orphan")
+    courier.carry_out()
+    assert storage.objects["etude/run1/checkpoints/steps-3.pt"] == b"orphan"
+    return courier, folder, weights
+
+
+def _retrained(courier: Courier, folder: Path, weights: Path) -> ArtifactRef:
+    """The next attempt resumes from steps 2 and reaches steps 3 with different bytes."""
+    resumed = _tracked(folder.parent)
+    latest = resumed.latest_checkpoint()
+    assert latest is not None and latest.ordinal == 2
+    weights.write_bytes(b"weights at 3")
+    reference = resumed.checkpoint(weights, steps=3)
+    _kept(folder, 3)
+    resumed.finish()
+    courier.carry_out()
+    return reference
+
+
+def _intact(storage: Storage) -> None:
+    """The orphan's key holds its one upload, and the new record names bytes storage holds."""
+    assert storage.asked.count(("PUT", "etude/run1/checkpoints/steps-3.pt")) == 1
+    assert storage.objects["etude/run1/checkpoints/steps-3.pt"] == b"orphan"
+    record = json.loads(storage.objects["etude/run1/checkpoints/steps-3.ordinal-3.json"])
+    kept = storage.objects["etude/run1/checkpoints/steps-3.ordinal-3.pt"]
+    assert (record["ordinal"], record["artifact"]["sha256"]) == (
+        3,
+        hashlib.sha256(kept).hexdigest(),
+    )
+
+
+def test_a_retry_on_the_same_host_never_reuses_a_file_left_without_its_record(
+    tmp_path: Path,
+) -> None:
+    storage = Storage()
+    courier, folder, weights = _orphaned(tmp_path, storage)
+    reference = _retrained(courier, folder, weights)
+    assert reference.uri.endswith("/steps-3.ordinal-3.pt")
+    assert (folder / "checkpoints/steps-3.pt").read_bytes() == b"orphan"
+    _intact(storage)
+
+
+def test_a_retry_on_a_fresh_machine_never_reuses_a_name_storage_holds(tmp_path: Path) -> None:
+    storage = Storage()
+    _orphaned(tmp_path / "one", storage)
+    journal = BucketJournal(
+        Place(name="east", bucket="b", prefix="etude", region="us-east-1"),
+        Bucket("b", "us-east-1", Keys(access_key="AKIA", secret_key="secret"), storage),
+    )
+    retry = Work(
+        attempt="a2",
+        command="true",
+        limit_seconds=30,
+        limit_kind="out_of_time",
+        seed=None,
+        until=None,
+        config=None,
+        repo=None,
+        commit=None,
+        run="run1",
+        resumes=True,
+    )
+    journal.prepare(Packet(session="r2", deadline=None, work=(retry,)))
+    bootstrap = Bootstrap.model_validate_json(storage.objects["etude/sessions/r2/bootstrap.json"])
+    fresh, _, there = machine(tmp_path / "two", storage)
+    fresh.restore(bootstrap.restore)
+    assert not (there / "checkpoints/steps-3.pt").exists()  # listed, never read
+    _retrained(fresh, there, tmp_path / "one" / "weights.pt")
+    _intact(storage)

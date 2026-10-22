@@ -120,11 +120,9 @@ def test_failure_diagnostic_precedes_completion_record(
         limit_kind="out_of_time",
         seed=None,
         until=None,
-        start=None,
         config=None,
         repo=None,
         commit=None,
-        checkpoint=None,
     )
     packet = Packet(session="session", deadline=None, work=(work,))
     published: list[str] = []

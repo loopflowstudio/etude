@@ -45,7 +45,6 @@ from etude.launch.records import (
     STOCK_IMAGE,
     Availability,
     Cause,
-    Checkpoint,
     Cohort,
     Diagnostic,
     Hardware,
@@ -82,7 +81,6 @@ from etude.launch.records import (
     parse_target,
 )
 from etude.launch.schemas import (
-    CheckpointRef,
     Observation,
     Packet,
     Progress,
@@ -176,6 +174,7 @@ class Scheduler:
         self._services = dict(services)  # by service name: a machine kind or a provider kind
         self._reached: dict[tuple[str, str, str | None], Execution] = {}
         self._trouble: dict[str, str] = {}  # why a pool or on-demand could not place work
+        self._relayed: set[str] = set()  # attempts handed their run's folder by this process
         self._clock = clock
         self._sleep = sleep
 
@@ -508,7 +507,6 @@ class Scheduler:
                     job="",
                     spec=run.job,
                     seed=run.seed,
-                    checkpoint=None,
                     pool=target.pool,
                     rent=target.rent,
                     cohort=cohort,
@@ -928,31 +926,6 @@ class Scheduler:
                 raise LauncherError(f"cannot launch on {label}: {reason}; etude queue would wait")
             placements.append(held)
         return placements
-
-    def continue_from(self, run: str, until: str) -> Run:
-        """The same seed, resumed from `run`'s checkpoint, on its job with a further target.
-
-        `until` is "clock=value" on any clock the run reported, and absolute:
-        "steps=63000" trains to step 63,000. The result is a plain Run to pass to launch or
-        launch_cohort; it names its parent and the checkpoint's digest.
-        """
-        parent = self._store.run(run)
-        won = next((a for a in self._store.attempts(run=run) if a.outcome == "succeeded"), None)
-        if won is None or won.checkpoint is None:
-            raise LauncherError(f"run {run} has no succeeded attempt that named a checkpoint")
-        output = next((o for o in won.outputs if o.name == won.checkpoint), None)
-        if output is None:
-            raise LauncherError(f"run {run} named a checkpoint it did not write")
-        checkpoint = Checkpoint(
-            run=run, name=output.name, sha256=output.sha256, clocks=won.checkpoint_clocks
-        )
-        return Run(
-            job=parent.spec.model_copy(update={"until": until}),
-            seed=parent.seed,
-            checkpoint=checkpoint,
-            params=dict(parent.params),
-            source=parent.source,
-        )
 
     def start_phases(self, run: str) -> tuple[StartPhase, ...]:
         """Read retained timestamps only; never tick or ask a machine for freshness."""
@@ -1390,8 +1363,8 @@ class Scheduler:
             except Stale:
                 return  # another process placed this run
             self._store.check_lock(supply.name)
-            self._service(kept).add(kept.id, self._work(attempt))
             waiting.remove(planned.run)
+            self._hand(kept, attempt)
         while waiting:
             if isinstance(supply, Pool):
                 owned = self._free_owned(supply, now)
@@ -1573,7 +1546,6 @@ class Scheduler:
             outcome=None,
             cause=None,
             clocks={},
-            checkpoint=None,
             outputs=(),
             exit_code=None,
             version=1,
@@ -1637,9 +1609,8 @@ class Scheduler:
         self._store.check_lock(session.supply)
         try:
             packet = self._packet(session)
-        except (OSError, LauncherError) as error:
-            self._diagnose("checkpoint access", "preparation failed", error, session=session.id)
-            self._trouble[session.supply] = "waiting for checkpoint access"
+        except (OSError, ValueError, LauncherError) as error:
+            self._await_relay(session, error)
             return
         try:
             self._store.claim(session, self._clock())
@@ -1706,39 +1677,62 @@ class Scheduler:
             session = self._store.session(session.id)
         return session
 
+    def _relay(self, attempt: RunAttempt, run: RunRecord) -> None:
+        """Hand an attempt what it needs of runs' folders from the machines that last ran them.
+
+        A later attempt gets its own run's records, declaration and latest
+        checkpoint file, so ordinals continue; an input that is a run's file
+        (`Input.run`) gets just that file. Only between machines without shared
+        storage (`Execution.held`). Raises while a holding machine cannot be
+        reached, and the attempt waits: nothing is silently left behind.
+        """
+        if attempt.id in self._relayed:
+            return
+        carried: list[tuple[str, int | None, str | None]] = [
+            (given.run, None, given.key) for given in run.spec.inputs if given.run is not None
+        ]
+        if attempt.number > 1:
+            carried.insert(0, (attempt.run, attempt.number, None))
+        if carried:
+            session = self._store.session(attempt.session)
+            for source, before, key in carried:
+                self._carry(source, session, before=before, key=key)
+        self._relayed.add(attempt.id)
+
+    def _carry(
+        self, run: str, session: Session, *, before: int | None = None, key: str | None = None
+    ) -> None:
+        """Copy a run's folder, or one `key` of it, from its latest started attempt's machine."""
+        holder = self._holder(run, before)
+        if holder is not None and holder.machine != session.machine:
+            files = self._service(holder).held(run, key)
+            if files is not None:
+                self._service(session).hold(run, files)
+
+    def _holder(self, run: str, before: int | None = None) -> Session | None:
+        """The session of the run's latest started attempt (numbered below `before`)."""
+        prior = [
+            a
+            for a in self._store.attempts(run=run)
+            if a.started_at is not None and (before is None or a.number < before)
+        ]
+        if not prior:
+            return None
+        return self._store.session(max(prior, key=lambda a: a.number).session)
+
+    def held(self, run: str) -> dict[str, bytes] | None:
+        """The run's folder as the machine that last ran it holds it (`Execution.held`).
+
+        None where storage holds the run, or it never started. A wait: it
+        reaches that machine, and raises while the machine cannot be reached.
+        """
+        holder = self._holder(run)
+        return None if holder is None else self._service(holder).held(run)
+
     def _work(self, attempt: RunAttempt) -> Work:
         run = self._store.run(attempt.run)
-        spec, held = run.spec, run.checkpoint
-        ref: CheckpointRef | None = None
-        prior = [a for a in self._store.attempts(run=run.id) if a.number < attempt.number]
-        checkpoint_attempt = next((a for a in reversed(prior) if a.checkpoint is not None), None)
-        if checkpoint_attempt is not None:
-            output = next(
-                o for o in checkpoint_attempt.outputs if o.name == checkpoint_attempt.checkpoint
-            )
-            held = Checkpoint(
-                run=run.id,
-                name=output.name,
-                sha256=output.sha256,
-                clocks=checkpoint_attempt.checkpoint_clocks,
-            )
-        elif held is not None:
-            checkpoint_attempt = next(
-                a for a in self._store.attempts(run=held.run) if a.outcome == "succeeded"
-            )
-        if held is not None and checkpoint_attempt is not None:
-            ref = self._service(self._store.session(checkpoint_attempt.session)).checkpoint(
-                CheckpointRef(
-                    run=checkpoint_attempt.run,
-                    session=checkpoint_attempt.session,
-                    attempt=checkpoint_attempt.id,
-                    name=held.name,
-                    sha256=held.sha256,
-                    size_bytes=next(
-                        o.size_bytes for o in checkpoint_attempt.outputs if o.name == held.name
-                    ),
-                )
-            )
+        self._relay(attempt, run)
+        spec = run.spec
         return Work(
             attempt=attempt.id,
             command=spec.command,
@@ -1751,17 +1745,43 @@ class Scheduler:
             limit_kind=attempt.limit_kind,
             seed=run.seed,
             until=spec.until,
-            start=None if held is None else held.clocks,
             config=spec.config,
             repo=spec.repo,
             commit=None if spec.repo is None else spec.revision,
-            checkpoint=ref,
             run=run.id,
+            resumes=attempt.number > 1,
             job=run.job,
             job_name=spec.name or None,
             cohort=run.cohort,
             inputs=spec.inputs,
+            environment=spec.environment,
         )
+
+    def _hand(self, session: Session, attempt: RunAttempt) -> None:
+        """Add placed work to a kept session; while its run's folder cannot be relayed, it waits.
+
+        A placed attempt not yet in the session's journal is handed again on
+        each pass, so the wait ends when the holding machine answers.
+        """
+        try:
+            work = self._work(attempt)
+        except (OSError, ValueError, LauncherError) as error:
+            self._await_relay(session, error, attempt=attempt.id)
+            return
+        self._service(session).add(session.id, work)
+
+    def _await_relay(
+        self, session: Session, error: Exception, *, attempt: str | None = None
+    ) -> None:
+        """Note why work for `session` waits: the machine holding a run's folder did not answer."""
+        self._diagnose(
+            "run folder relay",
+            "waiting for its host",
+            error,
+            session=None if attempt else session.id,
+            attempt=attempt,
+        )
+        self._trouble[session.supply] = "waiting for the machine holding a run's folder"
 
     def _packet(self, session: Session) -> Packet:
         """What one session is sent: its deadline, its work and where its records go."""
@@ -1841,7 +1861,7 @@ class Scheduler:
             if attempt.outcome is None:
                 if seen.alive and attempt.added and attempt.id not in progress:
                     self._store.check_lock(session.supply)
-                    service.add(session.id, self._work(attempt))
+                    self._hand(session, attempt)
                 self._record(
                     session,
                     attempt,
@@ -1915,7 +1935,6 @@ class Scheduler:
                 outcome,
                 cause=seen.cause,
                 clocks=seen.clocks,
-                checkpoint=seen.checkpoint,
                 outputs=seen.outputs,
                 exit_code=seen.exit_code,
             )
@@ -1941,7 +1960,6 @@ class Scheduler:
                 "lost",
                 cause=cause,
                 clocks=seen.clocks if seen else attempt.clocks,
-                checkpoint=seen.checkpoint if seen else None,
                 outputs=seen.outputs if seen else attempt.outputs,
             )
             self._diagnose(
@@ -1952,7 +1970,7 @@ class Scheduler:
             )
         else:
             if seen is not None:
-                self._store.record_progress(attempt, seen.clocks, seen.checkpoint, seen.outputs)
+                self._store.record_progress(attempt, seen.clocks)
             if run.cancel_requested_at is not None or self._remaining(run, now)[1] <= 0:
                 self._service(session).stop(session.id, attempt.id)
 
@@ -2019,26 +2037,6 @@ class Scheduler:
         if job.until is not None:
             clock, position = parse_target(job.until)
             job = job.model_copy(update={"until": f"{clock}={number(position)}"})
-        held = run.checkpoint
-        if held is not None:
-            written = any(
-                attempt.outcome == "succeeded"
-                and attempt.checkpoint_clocks == held.clocks
-                and any(o.name == held.name and o.sha256 == held.sha256 for o in attempt.outputs)
-                for attempt in self._store.attempts(run=held.run)
-            )
-            if not written:
-                raise LauncherError("a continuation needs its parent's recorded checkpoint")
-            if job.until is None or clock not in held.clocks:
-                raise LauncherError(
-                    f"a continuation needs a target on a clock its parent reported: "
-                    f"{', '.join(sorted(held.clocks)) or 'it reported none'}"
-                )
-            if position <= held.clocks[clock]:
-                raise LauncherError(
-                    f"the target {job.until} is not beyond the checkpoint's "
-                    f"{clock}={number(held.clocks[clock])}"
-                )
         frozen = json.dumps(job_identity(job), sort_keys=True).encode()
         assert run.id is not None  # source.freeze assigns the submitting client's identity
         return RunRecord(
@@ -2047,7 +2045,6 @@ class Scheduler:
             job=hashlib.sha256(frozen).hexdigest()[:12],
             spec=job,
             seed=run.seed,
-            checkpoint=held,
             pool=target.pool,
             rent=target.rent,
             cohort=cohort,

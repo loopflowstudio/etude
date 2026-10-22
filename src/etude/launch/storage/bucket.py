@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
@@ -11,13 +10,13 @@ from functools import wraps
 from pathlib import Path
 from typing import Concatenate
 
+from etude.carriage import CHECKPOINTS
 from etude.launch.logs import snapshot_stream
 from etude.launch.records import BootstrapLinks, LauncherError, LogStream, Storage
 from etude.launch.schemas import (
     AttemptRecord,
     Bootstrap,
     BucketAccess,
-    CheckpointRef,
     Delivery,
     Inbox,
     Observation,
@@ -56,9 +55,8 @@ class BucketJournal:
         PREFIX/RUN/                     everything about one run, from every attempt
           attempts/ATTEMPT.log          what the job printed
           attempts/ATTEMPT.json         start, progress and how it ended
-          attempts/ATTEMPT/NAME         other files the job left in its output directory
-          checkpoints/NAME              the checkpoints the job reported
-          ...                           whatever the job's tracker keeps for the run
+          attempts/ATTEMPT/NAME         files the job left in its output directory
+          run.json  checkpoints/  ...   the run's tracked folder, as the tracker keeps it
         PREFIX/sessions/SESSION/        one machine's instructions, inbox and notes
           out/receipt, out/ended        written by the machine
         PREFIX/sources/SHA256.tar       a commit's source archive, named by its digest
@@ -103,10 +101,6 @@ class BucketJournal:
             ),
         )
 
-    def checkpoint(self, ref: CheckpointRef) -> CheckpointRef:
-        key = f"{self._run(ref.run)}checkpoints/{ref.name}"
-        return ref.model_copy(update={"url": self._bucket.get_url(key, _GRANT_SECONDS)})
-
     def prepare(self, packet: Packet, *, expires_at: datetime | None = None) -> BootstrapLinks:
         with attribute(session=packet.session, purpose="control"):
             root = self._session(packet.session)
@@ -118,6 +112,7 @@ class BucketJournal:
                     "runs": {work.run: self._access(work.run) for work in packet.work},
                     "inbox_url": self._bucket.get_url(root + "inbox.json", _GRANT_SECONDS),
                     "fetch": self._fetches(packet.session, packet.work),
+                    "restore": self._restore(packet.work),
                 }
             )
             self._bucket.put(root + "inbox.json", Inbox().model_dump_json().encode())
@@ -183,28 +178,42 @@ class BucketJournal:
                 if local not in links:
                     links[local] = self._source(work.repo, work.commit)
             for given in work.inputs:
+                # A run's file is where its folder was carried.
+                key = given.key if given.run is None else self._run(given.run) + given.key
                 # Named by digest, so attempts given the same file share one download.
                 links[f"{session_id}/inputs/{given.sha256}"] = Download(
-                    url=self._bucket.get_url(given.key, _GRANT_SECONDS),
+                    url=self._bucket.get_url(key, _GRANT_SECONDS),
                     sha256=given.sha256,
                     size_bytes=given.size_bytes,
                 )
-            held = work.checkpoint
-            if held is not None:
-                # Where the machine's worker looks for it, under its sessions folder.
-                local = f"{held.session}/attempts/{held.attempt}/outputs/{held.name}"
-                if local in links:
-                    continue
-                key = f"{self._run(held.run)}checkpoints/{held.name}"
-                if held.content is not None:
-                    key = f"{self._session(session_id)}inputs/{held.sha256}"
-                    self._bucket.put(key, base64.b64decode(held.content))
-                links[local] = Download(
-                    url=held.url or self._bucket.get_url(key, _GRANT_SECONDS),
-                    sha256=held.sha256,
-                    size_bytes=held.size_bytes,
+        return links
+
+    def _restore(self, works: Sequence[Work]) -> dict[str, str]:
+        """Read links to what storage holds of each resumed run's folder, by RUN/KEY.
+
+        The run's declaration and every object under `checkpoints/`; the
+        machine reads only what it lacks, and of the checkpoint files only the
+        one its latest record names (`etude.carriage.resume_file`). Linking
+        reads nothing: one listing per resumed run.
+        """
+        links: dict[str, str] = {}
+        for work in works:
+            if not work.resumes:
+                continue
+            folder = self._run(work.run)
+            with attribute(run=work.run, attempt=work.attempt, purpose="control"):
+                kept = self._bucket.list(f"{folder}{CHECKPOINTS}/")
+            for key in [folder + "run.json", *kept]:
+                links[f"{work.run}/{key[len(folder) :]}"] = self._bucket.get_url(
+                    key, _GRANT_SECONDS
                 )
         return links
+
+    def held(self, run: str, key: str | None = None) -> None:
+        """Nothing to hand over: storage holds the run, and a later machine restores from it."""
+
+    def hold(self, run: str, files: dict[str, bytes]) -> None:
+        """Nothing to keep: a machine of this journal restores the run from storage."""
 
     def _current(self, session_id: str, key: str) -> bytes | None:
         """A changing object's bytes; storage sends none while they are those last read."""
@@ -256,7 +265,6 @@ class BucketJournal:
                 self._finished[attempt] = done
                 progress.append(done)
                 continue
-            outputs = record.result.outputs
             progress.append(
                 Progress(
                     attempt=attempt,
@@ -265,8 +273,7 @@ class BucketJournal:
                     outcome=None,
                     cause=None,
                     clocks=record.result.clocks,
-                    checkpoint=record.result.checkpoint if outputs else None,
-                    outputs=outputs,
+                    outputs=(),
                     exit_code=None,
                 )
             )
@@ -300,6 +307,7 @@ class BucketJournal:
                     "work": work.model_dump_json(),
                     "access": self._access(work.run),
                     "fetch": self._fetches(session_id, [work]),
+                    "restore": self._restore([work]),
                 }
             )
             inbox = inbox.model_copy(update={"work": (*inbox.work, entry)})
@@ -336,10 +344,9 @@ class BucketJournal:
             raise LauncherError(f"attempt {attempt} recorded no output {name!r}")
         done = progress_from_json(record.finished, attempt, None)
         expected = next((o for o in done.outputs if o.name == name), None)
-        folder = "checkpoints/" if name == done.checkpoint else f"attempts/{attempt}/"
         if expected is None:
             raise LauncherError(f"attempt {attempt} recorded no output {name!r}")
-        key = f"{self._run(run)}{folder}{name}"
+        key = f"{self._run(run)}attempts/{attempt}/{name}"
         with attribute(run=run, attempt=attempt, purpose="result"):
             return Cache().fetch(
                 Download(

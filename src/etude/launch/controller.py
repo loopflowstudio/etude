@@ -99,7 +99,6 @@ class Request(Record):
         "diagnostics",
         "usage",
         "cohort_runs",
-        "continue_from",
         "rent",
         "terminate",
         "quote",
@@ -114,7 +113,6 @@ class Request(Record):
     runs: tuple[str, ...] = ()
     every: float = 1.0
     timeout: float | None = None
-    until: str = ""
     rent: str = ""  # the on-demand to rent from or ask about
     machine: str = ""
     hours: float = 0
@@ -560,13 +558,6 @@ class PythonClient:
             self._request(Request(operation="terminate", machine=machine))
         )
 
-    def continue_from(self, run: str, until: str) -> Run:
-        submission = LaunchInput.model_validate_json(
-            self._request(Request(operation="continue_from", run=run, until=until))
-        )
-        _retain(submission.sources)
-        return submission.runs[0]
-
 
 def receive(scheduler: Scheduler) -> int:
     raw = Request.model_validate_json(sys.stdin.buffer.read())
@@ -635,9 +626,6 @@ def receive(scheduler: Scheduler) -> int:
         response = scheduler.availability(raw.rent, timeout=raw.timeout)
     elif operation == "terminate":
         response = scheduler.terminate(raw.machine)
-    elif operation == "continue_from":
-        run = scheduler.continue_from(raw.run, raw.until)
-        response = _with_sources(LaunchInput(runs=(run,), cohort=None, pool=None))
     else:
         raise LauncherError("unknown controller operation")
     print(Reply(response).model_dump_json())
