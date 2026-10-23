@@ -15,7 +15,6 @@ from etude.launch.ssh import EncodedOutput, RemoteReply, RemoteRequest
 from etude.launch.startup import ProcessStart
 from etude.launch.storage.disk import DirectoryJournal
 from etude.launch.storage.files import digest, write
-from etude.launch.storage.s3 import read
 
 
 def invoke(request: RemoteRequest) -> RemoteReply:
@@ -28,16 +27,6 @@ def invoke(request: RemoteRequest) -> RemoteReply:
         target = home / name
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(base64.b64decode(body))
-    for name, source in request.checkpoints.items():
-        target = root / name
-        checkpoint_body = read(source.url) if source.url else base64.b64decode(source.content or "")
-        if checkpoint_body is None:
-            raise ValueError("checkpoint unavailable")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if not target.exists():
-            target.write_bytes(checkpoint_body)
-        if digest(target) != source.sha256:
-            raise ValueError("checkpoint digest mismatch")
     if action == "start":
         packet = Packet.model_validate_json(request.packet)
         # A directory can contain staged source files, but a start is exclusive.
@@ -91,6 +80,14 @@ def invoke(request: RemoteRequest) -> RemoteReply:
     if action == "ended":
         at = journal.ended(session)
         return RemoteReply(text=at.isoformat() if at else None)
+    if action == "held":
+        held = journal.held(request.name, request.key or None)
+        return RemoteReply(folder={key: base64.b64encode(b).decode() for key, b in held.items()})
+    if action == "hold":
+        journal.hold(
+            request.name, {key: base64.b64decode(body) for key, body in request.folder.items()}
+        )
+        return RemoteReply()
     if action == "observe":
         return RemoteReply(observation=journal.observe(session))
     if action == "end":

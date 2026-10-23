@@ -18,12 +18,10 @@ from etude.cli import main
 from etude.launch.client import (
     _open,
     cancel,
-    continue_from,
     fetch,
     launch,
     launch_cohort,
     logs,
-    queue,
     queue_cohort,
     status,
     wait,
@@ -33,6 +31,23 @@ from etude.launch.records import Job, LauncherError, Pool
 from tests.launch.counting import job_text
 from tests.launch.test_source import git
 from tests.launch.test_source import repository as repository
+
+# A tracked job: it records a checkpoint, and a continuation starts from its parent's.
+TRACKED = """
+import os
+from pathlib import Path
+from etude.train.records import Step
+from etude.train.run import track
+run = track(experiment="capacity", clocks=[Step("steps", "training steps")])
+latest = run.latest_checkpoint()
+start = 0 if latest is None else int(latest.at["steps"])
+target = int(os.environ["ETUDE_UNTIL_VALUE"])
+weights = Path(os.environ["ETUDE_OUTPUT_DIR"]) / "weights.pt"
+weights.write_text(f"from {start} to {target}\\n")
+run.log({"loss": 0.5}, steps=target)
+run.checkpoint(weights, steps=target)
+run.finish()
+"""
 
 
 def command(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -75,12 +90,9 @@ def test_remote_launch_freezes_sources_config_and_returns_outputs(
     repo = tmp_path / "source with spaces"
     repo.mkdir()
     (repo / "train.sh").write_text(
-        'cat "$ETUDE_CONFIG"\n'
-        'echo "$ETUDE_SEED"\n'
-        'echo saved > "$ETUDE_OUTPUT_DIR/checkpoint"\n'
-        'printf \'{"clocks":{"steps":%s},"checkpoint":"checkpoint"}\' '
-        '"$ETUDE_UNTIL_VALUE" > "$ETUDE_OUTPUT_DIR/etude-result.json"\n'
+        f'cat "$ETUDE_CONFIG"\necho "$ETUDE_SEED"\n{sys.executable} train.py\n'
     )
+    (repo / "train.py").write_text(TRACKED)
     for args in (
         ["init", "-q"],
         ["add", "."],
@@ -116,14 +128,14 @@ def test_remote_launch_freezes_sources_config_and_returns_outputs(
     frozen = _open(remote).record(ids[0]).spec
     assert frozen.repo == str(repo) and frozen.revision != "HEAD"
     # Continuation works without the client's repository: it uses the retained archive.
-    continued = command("continue", ids[0], "steps=20")
+    continued = command("continue", "--run", ids[0], "--until", "steps=20")
     assert continued.returncode == 0, continued.stderr
     next_id = continued.stdout.split()[0]
     assert command("wait", next_id).returncode == 0
     destination = tmp_path / "fetched files"
-    fetched = command("fetch", next_id, "checkpoint", str(destination))
+    fetched = command("fetch", next_id, "weights.pt", str(destination))
     assert fetched.returncode == 0, fetched.stderr
-    assert (destination / "checkpoint").read_text() == "saved\n"
+    assert (destination / "weights.pt").read_text() == "from 10 to 20\n"
     assert command("controller").stdout.startswith("controller: controller-alias\nlast loop: ")
     assert command("controller", "unset").returncode == 0
     assert command("pools").stdout == "local  this computer (default)\n"
@@ -237,9 +249,9 @@ def test_python_api_uses_controller_and_preserves_checkpoint_ancestry(
 ) -> None:
     client, remote = controller
     job = Job(
-        command='echo "$ETUDE_FROM_VALUE to $ETUDE_UNTIL_VALUE"; '
-        'echo weights > "$ETUDE_OUTPUT_DIR/checkpoint"; '
-        'printf \'{"clocks":{"steps":%s},"checkpoint":"checkpoint"}\' '
+        command='echo "to $ETUDE_UNTIL_VALUE"; '
+        'echo weights > "$ETUDE_OUTPUT_DIR/weights"; '
+        'printf \'{"clocks":{"steps":%s}}\' '
         '"$ETUDE_UNTIL_VALUE" > "$ETUDE_OUTPUT_DIR/etude-result.json"',
         max_hours=0.01,
         max_usd=Decimal(1),
@@ -248,65 +260,13 @@ def test_python_api_uses_controller_and_preserves_checkpoint_ancestry(
     first = launch(job)
     assert wait(first, every=0.02, timeout=10)[0].outcome == "succeeded"
     assert status(first).clocks == {"steps": 10}
-    continuation = continue_from(first, "steps=20")
-    assert continuation.checkpoint is not None and continuation.checkpoint.run == first
-    second = queue(continuation)
-    assert wait(second, every=0.02, timeout=10)[0].outcome == "succeeded"
-    assert job_text(logs(run=second)) == "10 to 20\n"
-    assert fetch(second, "checkpoint", tmp_path / "out").read_text() == "weights\n"
-    assert _open(remote).record(second).checkpoint == continuation.checkpoint
+    assert job_text(logs(run=first)) == "to 10\n"
+    assert fetch(first, "weights", tmp_path / "out").read_text() == "weights\n"
     pair = launch_cohort("python-pair", job.runs(1, 2))
     assert all(s.outcome == "succeeded" for s in wait(*pair, every=0.02, timeout=10))
     assert command("pool", "add", "waiting").returncode == 0
     queued = queue_cohort("python-waiting", job.runs(3, 4), pool="waiting")
     assert all(cancel(run).outcome == "cancelled" for run in queued)
-    assert not (client / "launcher.db").exists()
-
-
-def test_python_continuation_returns_frozen_source_from_controller(
-    controller: tuple[Path, Path],
-    tmp_path: Path,
-) -> None:
-    client, _ = controller
-    repo = tmp_path / "source"
-    repo.mkdir()
-    (repo / "train.sh").write_text(
-        'echo "$ETUDE_FROM_VALUE"; echo saved > "$ETUDE_OUTPUT_DIR/checkpoint"; '
-        'printf \'{"clocks":{"steps":%s},"checkpoint":"checkpoint"}\' '
-        '"$ETUDE_UNTIL_VALUE" > "$ETUDE_OUTPUT_DIR/etude-result.json"'
-    )
-    for args in (
-        ["init", "-q"],
-        ["add", "."],
-        [
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.test",
-            "commit",
-            "-qm",
-            "source",
-        ],
-    ):
-        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
-    run = launch(
-        Job(
-            command="sh train.sh",
-            max_hours=0.01,
-            max_usd=Decimal(1),
-            repo=str(repo),
-            until="steps=10",
-        )
-    )
-    wait(run, every=0.02, timeout=10)
-    refs = git(repo, "for-each-ref", "refs/etude/runs")
-    continuation = continue_from(run, "steps=20")
-    assert continuation.id is None
-    assert git(repo, "for-each-ref", "refs/etude/runs") == refs
-    repo.rename(tmp_path / "unavailable")
-    second = launch(continuation)
-    assert wait(second, every=0.02, timeout=10)[0].outcome == "succeeded"
-    assert job_text(logs(run=second)) == "10\n"
     assert not (client / "launcher.db").exists()
 
 

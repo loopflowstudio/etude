@@ -1,7 +1,8 @@
 """Where a run's files are kept: the author's own directory or bucket.
 
-Metric blocks and table files are sealed (`sealed`): written once and never
-changed. Small manifests and records are replaced atomically. Covered blocks
+Metric blocks, table files and stored checkpoints are immutable
+(`etude.carriage.immutable`): written once and never changed. Small manifests
+and records are replaced atomically. Covered blocks
 may be deleted only after their permanent replacement arrives. A bucket's
 reader keeps what it reads in an `ObjectCache`, so no computer reads the same
 bytes from a bucket twice.
@@ -20,21 +21,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from etude.carriage import immutable
 from etude.run.errors import EtudeError
 
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._=-]{0,199}$")
-
-
-def sealed(key: str) -> bool:
-    """Whether a run's file never changes once written: a metric block or tail, or a table file.
-
-    The key may sit under any folders; its last two parts decide.
-    """
-    folder, _, name = key.rpartition("/")
-    kind = folder.rpartition("/")[2]
-    return (kind == "metrics" and name.endswith((".blk", ".tail"))) or (
-        kind == "tables" and name.endswith(".parquet")
-    )
 
 
 def run_prefix(run: str) -> str:
@@ -129,7 +119,7 @@ class ObjectCache:
     """Objects this computer has already read from one bucket, by key, on its disk.
 
     A bucket bills every byte it sends, so a reader asks for an object's bytes
-    at most once per computer: a sealed object is never asked for again, and
+    at most once per computer: an immutable object is never asked for again, and
     any other is asked for with the ETag of the bytes kept, which storage
     answers without a body while they are current. Each entry is one file,
     replaced whole, so concurrent readers see an old entry or a new one and
@@ -194,8 +184,8 @@ class S3Storage:
 
     `client` is a boto3 S3 client; boto3 is imported only when none is given,
     so the logging client itself has no cloud dependency. Reads go through
-    `cache` (by default this computer's): a sealed object is fetched once, any
-    other is asked for again only by ETag, and a sealed block's ranges are
+    `cache` (by default this computer's): an immutable object is fetched once, any
+    other is asked for again only by ETag, and an immutable object's ranges are
     each fetched once. Writes carry a SHA256 that the bucket checks; nothing
     reads an upload back.
     """
@@ -239,7 +229,7 @@ class S3Storage:
     def get(self, key: str) -> bytes:
         name = self.prefix + key
         kept = self.cache.load(name)
-        if kept is not None and sealed(key):
+        if kept is not None and immutable(key):
             return kept.body
         found = self._get(key, unless=None if kept is None else kept.etag)
         if found is None:
@@ -253,7 +243,7 @@ class S3Storage:
         if length == 0:
             return b""
         byte_range = f"bytes={start}-{start + length - 1}"
-        if not sealed(key):
+        if not immutable(key):
             found = self._get(key, byte_range)
             assert found is not None
             return found[0]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import signal
@@ -10,24 +11,27 @@ import sys
 import time
 from decimal import Decimal
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pytest
 
+from etude.jobs import continue_from
 from etude.launch.database import Database
 from etude.launch.executor import local as local_service
-from etude.launch.records import Job, LauncherError, Machine, Pool, Run, Status
+from etude.launch.records import Job, LauncherError, Machine, Pool, Run, Status, job_identity
 from etude.launch.scheduler import Scheduler
 from etude.run.listing import runs
 from etude.train.read import read
+from etude.train.records import Step
 from etude.train.report import page_data
+from etude.train.run import track
 from tests.launch.counting import job_text
 
 TRAIN = """
 test -f "$ETUDE_SOURCE_DIR/train.sh" || exit 3
-echo "seed $ETUDE_SEED from ${ETUDE_FROM_VALUE:-0} to $ETUDE_UNTIL_VALUE with $(cat "$ETUDE_CONFIG")"
-cat "${ETUDE_CHECKPOINT:-/dev/null}" > "$ETUDE_OUTPUT_DIR/checkpoint.pt"
-echo "trained to $ETUDE_UNTIL_VALUE" >> "$ETUDE_OUTPUT_DIR/checkpoint.pt"
-printf '{"clocks": {"%s": %s, "wall_time_ms": 1500}, "checkpoint": "checkpoint.pt"}' \\
+echo "seed $ETUDE_SEED to $ETUDE_UNTIL_VALUE with $(cat "$ETUDE_CONFIG")"
+echo "trained to $ETUDE_UNTIL_VALUE" > "$ETUDE_OUTPUT_DIR/weights.pt"
+printf '{"clocks": {"%s": %s, "wall_time_ms": 1500}}' \\
   "$ETUDE_UNTIL_CLOCK" "$ETUDE_UNTIL_VALUE" > "$ETUDE_OUTPUT_DIR/etude-result.json"
 """
 
@@ -50,7 +54,7 @@ def until(scheduler: Scheduler, job: str, phase: str) -> Status:
 
 
 @pytest.mark.parametrize("revision", ["HEAD", None])
-def test_a_run_from_a_commit_continues_from_its_own_checkpoint(
+def test_a_run_from_a_commit_reports_progress_and_keeps_its_outputs(
     tmp_path: Path, revision: str | None
 ) -> None:
     repo = tmp_path / "repo"
@@ -80,19 +84,74 @@ def test_a_run_from_a_commit_continues_from_its_own_checkpoint(
     assert (status.outcome, status.rental_ended) == ("succeeded", None)
     assert status.clocks == {"agent_steps": 26_000, "wall_time_ms": 1500}
     suffix = "" if revision else "snapshot\n"
-    assert (
-        job_text(scheduler.logs(run=first)) == "seed 3 from 0 to 26000 with arm = large\n" + suffix
-    )
+    assert job_text(scheduler.logs(run=first)) == "seed 3 to 26000 with arm = large\n" + suffix
+    copy = scheduler.fetch(first, "weights.pt", tmp_path / "out")
+    assert copy.read_text() == "trained to 26000\n"
 
-    second = scheduler.launch(scheduler.continue_from(first, "agent_steps=63000"))
-    (status,) = scheduler.wait(second, every=0.05, timeout=30)
-    assert (status.outcome, status.clocks["agent_steps"]) == ("succeeded", 63_000)
-    assert (
-        job_text(scheduler.logs(run=second))
-        == "seed 3 from 26000 to 63000 with arm = large\n" + suffix
+
+CONTINUED = """
+import os
+from pathlib import Path
+from urllib.parse import urlparse
+from etude.train.records import Step
+from etude.train.run import track
+run = track(experiment="capacity", clocks=[Step("steps", "training steps")])
+latest = run.latest_checkpoint()
+start = 0 if latest is None else int(latest.at["steps"])
+kept = "" if latest is None else Path(urlparse(latest.artifact.uri).path).read_text()
+target = int(os.environ["ETUDE_UNTIL_VALUE"])
+for step in range(start + 1, target + 1):
+    run.log({"loss": 1.0 / step}, steps=step)
+weights = Path(os.environ["ETUDE_OUTPUT_DIR"]) / "weights.pt"
+weights.write_text(kept + f"trained to {target}\\n")
+run.checkpoint(weights, steps=target)
+run.finish()
+"""
+
+
+def test_a_continuation_starts_from_its_parents_recorded_checkpoint(tmp_path: Path) -> None:
+    scheduler = local(tmp_path)
+    (tmp_path / "train.py").write_text(CONTINUED)
+    spec = Job(
+        command=f"{sys.executable} {tmp_path / 'train.py'}",
+        until="steps=2",
+        max_hours=0.1,
+        max_usd=Decimal(1),
     )
-    copy = scheduler.fetch(second, "checkpoint.pt", tmp_path / "out")
-    assert copy.read_text() == "trained to 26000\ntrained to 63000\n"
+    first = scheduler.launch(Run(job=spec, seed=3))
+    assert scheduler.wait(first, every=0.05, timeout=30)[0].outcome == "succeeded"
+    tracked = tmp_path / "track"
+    with pytest.raises(LauncherError, match="not beyond the checkpoint's steps=2"):
+        continue_from(scheduler.record(first), "steps=2", source=tracked)
+    with pytest.raises(LauncherError, match="a clock its checkpoint recorded: steps"):
+        continue_from(scheduler.record(first), "updates=9", source=tracked)
+
+    # Tagging the parent's checkpoint later does not make the continuation another job.
+    identity = job_identity(continue_from(scheduler.record(first), "steps=5", source=tracked).job)
+    parent = track(
+        experiment="capacity",
+        clocks=[Step("steps", "training steps")],
+        run=first,
+        directory=tracked,
+    )
+    parent.tag(1, "best")
+    parent.finish()
+    assert read(tracked, "capacity", first).checkpoints[0].tags == ("best",)
+    continued = continue_from(scheduler.record(first), "steps=5", source=tracked)
+    assert job_identity(continued.job) == identity
+
+    second = scheduler.launch(continued)
+    (status,) = scheduler.wait(second, every=0.05, timeout=30)
+    assert (status.outcome, status.clocks) == ("succeeded", {"steps": 5})
+    data = read(tracked, "capacity", second)
+    (checkpoint,) = data.checkpoints
+    assert Path(urlparse(checkpoint.artifact.uri).path).read_text() == (
+        "trained to 2\ntrained to 5\n"
+    )
+    assert data.file is not None and data.file.declaration.continues is not None
+    continues = data.file.declaration.continues
+    assert (continues.parent.source_id, continues.clock, continues.value) == (first, "steps", 2)
+    assert scheduler.record(second).seed == 3
 
 
 def test_runs_queue_through_one_machine_and_cancel_stops_the_running_one(tmp_path: Path) -> None:
@@ -162,12 +221,9 @@ run.finish()
 """
 
 
-@pytest.mark.parametrize("filename", ["weights.pt", "steps-2.pt"])
-def test_a_launched_job_tracks_as_its_run_without_naming_itself(
-    tmp_path: Path, filename: str
-) -> None:
+def test_a_launched_job_tracks_as_its_run_without_naming_itself(tmp_path: Path) -> None:
     scheduler = local(tmp_path)
-    (tmp_path / "train.py").write_text(TRACKED.replace('"weights.pt"', repr(filename)))
+    (tmp_path / "train.py").write_text(TRACKED)
     job = Job(
         command=f"{sys.executable} {tmp_path / 'train.py'}",
         name="hidden256",
@@ -197,15 +253,14 @@ def test_a_launched_job_tracks_as_its_run_without_naming_itself(
         )
         (attempt,) = data.attempts
         assert attempt.attempt == launched.id
-        # The script never wrote etude-result.json; recording the checkpoint told the launcher.
-        # Named for where its first clock stood, so it sits beside the run's record of it.
-        snapshot = "steps-2.pt.snapshot" if filename == "steps-2.pt" else "steps-2.pt"
-        assert (launched.checkpoint, launched.clocks) == (snapshot, {"steps": 2})
+        # The script never wrote etude-result.json; tracking reported its progress.
+        assert launched.clocks == {"steps": 2}
         (checkpoint,) = data.checkpoints
-        (kept,) = [output for output in launched.outputs if output.name == snapshot]
-        assert checkpoint.artifact.sha256 == kept.sha256
-        assert scheduler.fetch(record.id, snapshot, tmp_path / "saved").read_bytes() == b"weights"
-        assert (tracked / record.id / "checkpoints" / snapshot).read_bytes() == b"weights"
+        # Named for where its first clock stood; the launcher holds no copy of it.
+        stored = tracked / record.id / "checkpoints" / "steps-2.pt"
+        assert stored.read_bytes() == b"weights"
+        assert checkpoint.artifact.sha256 == hashlib.sha256(b"weights").hexdigest()
+        assert [o.name for o in launched.outputs] == ["etude-result.json", "weights.pt"]
     page = page_data("capacity", pages)
     rows = page["runs"]
     assert isinstance(rows, list) and {row["job"] for row in rows} == {"hidden256"}

@@ -14,20 +14,18 @@ Installed separately from the job environment. Run as
     attempts/<attempt>/finished.json
     ended                        when this session ended; nothing is written after it
 
-A job is a shell command run in ETUDE_SOURCE_DIR. It reads ETUDE_OUTPUT_DIR, ETUDE_STOP_FILE,
-ETUDE_DEADLINE, ETUDE_SEED, ETUDE_UNTIL_CLOCK, ETUDE_UNTIL_VALUE, ETUDE_FROM_VALUE,
-ETUDE_CHECKPOINT, ETUDE_INPUTS_DIR and
-ETUDE_CONFIG, and may write `etude-result.json` in its output directory as
-`{"clocks": {"steps": 63000, "wall_time_ms": 5400000}, "checkpoint": "checkpoint.pt"}`.
-ETUDE_UNTIL_CLOCK and ETUDE_UNTIL_VALUE are the job's target; ETUDE_FROM_VALUE is where
-that clock stood at the checkpoint being resumed.
+A job is a shell command run in ETUDE_SOURCE_DIR, with its own environment
+variables. It reads ETUDE_OUTPUT_DIR, ETUDE_STOP_FILE, ETUDE_DEADLINE, ETUDE_SEED,
+ETUDE_UNTIL_CLOCK, ETUDE_UNTIL_VALUE, ETUDE_INPUTS_DIR, ETUDE_TRACK_DIR and
+ETUDE_CONFIG, and may report its progress in `etude-result.json` in its output
+directory as `{"clocks": {"steps": 63000, "wall_time_ms": 5400000}}`.
+ETUDE_UNTIL_CLOCK and ETUDE_UNTIL_VALUE are the job's target.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import shutil
 import signal
 import subprocess
 import sys
@@ -40,7 +38,7 @@ from types import FrameType
 from typing import BinaryIO, Literal
 
 from etude.launch.logging import Console, explain, log_to, sanitize
-from etude.launch.records import Cause, Outcome, Output, Record
+from etude.launch.records import Cause, Input, Outcome, Output, Record
 from etude.launch.runtime import PROBE, find_python, select_runtime
 from etude.launch.schemas import Packet, Progress, Work
 from etude.launch.storage.files import digest, read_result, write
@@ -71,7 +69,6 @@ def _finish(
         outcome=outcome,
         cause=cause,
         clocks=result.clocks,
-        checkpoint=result.checkpoint,
         exit_code=code,
         outputs=tuple(
             Output(
@@ -86,7 +83,7 @@ def _finish(
 
 
 def _prepare(session: Path, home: Path, work: Work) -> dict[str, str]:
-    """Lay out source, config and checkpoint; return the job's environment."""
+    """Lay out source, config and inputs; return the job's environment."""
     source = home / "src"
     source.mkdir()
     (home / "outputs").mkdir()
@@ -97,6 +94,8 @@ def _prepare(session: Path, home: Path, work: Work) -> dict[str, str]:
         if name in ("PATH", "HOME", "LANG", "TMPDIR", "LD_LIBRARY_PATH")
         or name.startswith(("NVIDIA_", "CUDA_"))
     }
+    # The job's own; Etude's names below win.
+    environment.update({variable.name: variable.value for variable in work.environment})
     # The job may activate its own environment; never inherit the client's Python.
     client_bin = Path(sys.executable).parent
     environment["PATH"] = os.pathsep.join(
@@ -131,24 +130,19 @@ def _prepare(session: Path, home: Path, work: Work) -> dict[str, str]:
     if work.config is not None:
         (home / "config").write_text(work.config)
         environment["ETUDE_CONFIG"] = str(home / "config")
-    if work.checkpoint is not None:
-        ref = work.checkpoint
-        held = session.parent / ref.session / "attempts" / ref.attempt / "outputs" / ref.name
-        local = home / "checkpoint" / Path(ref.name).name
-        local.parent.mkdir()
-        shutil.copyfile(held, local)
-        if digest(local) != ref.sha256:
-            raise ValueError("checkpoint_digest_mismatch")
-        environment["ETUDE_CHECKPOINT"] = str(local)
     if work.inputs:
         folder = home / "inputs"
         folder.mkdir()
         for given in work.inputs:
             held = session / "inputs" / given.sha256  # the courier verified it on arrival
+            if not held.is_file() and given.run is not None:
+                # This machine's folder for that run: its own, or relayed to it.
+                kept = shared / given.run / given.key
+                held = kept if _matches(kept, given) else held
             if not held.is_file():
                 raise ValueError(
                     f"input {given.name} was not delivered: its bytes did not match its digest,"
-                    " or the machine keeps no storage"
+                    " or this machine has neither storage nor the file"
                 )
             os.link(held, folder / given.name)
         environment["ETUDE_INPUTS_DIR"] = str(folder)
@@ -158,10 +152,14 @@ def _prepare(session: Path, home: Path, work: Work) -> dict[str, str]:
         clock, _, target = work.until.partition("=")
         environment["ETUDE_UNTIL_CLOCK"] = clock
         environment["ETUDE_UNTIL_VALUE"] = target
-        if work.start is not None and clock in work.start:
-            at = work.start[clock]
-            environment["ETUDE_FROM_VALUE"] = str(int(at) if float(at).is_integer() else at)
     return environment
+
+
+def _matches(path: Path, given: Input) -> bool:
+    """Whether a file on this machine holds the input's bytes."""
+    return (
+        path.is_file() and path.stat().st_size == given.size_bytes and digest(path) == given.sha256
+    )
 
 
 def _end(process: subprocess.Popen[bytes], deadline: float | None, seconds: float | None) -> None:

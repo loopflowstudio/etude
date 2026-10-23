@@ -367,44 +367,6 @@ def fetch(
     print(default().fetch(run, name, directory))
 
 
-@app.command("continue")
-@kind(Kind.wait)
-def continue_run(
-    run: Annotated[str, typer.Argument(help="a run id, or a cohort name for all of its runs")],
-    until: Annotated[
-        str, typer.Argument(help="how far to go, as clock=value, such as steps=63000")
-    ],
-    cohort: Annotated[
-        str | None, typer.Option(help="the new cohort's name, when continuing a cohort")
-    ] = None,
-    max_usd: Annotated[str | None, typer.Option(help="the new cohort's dollar ceiling")] = None,
-) -> None:
-    """Go past a run's target from its checkpoint. This makes a new run with a parent."""
-    from etude.launch.listing import resolve_runs, show_runs
-
-    scheduler = default()
-    parents = resolve_runs(scheduler, [run])
-    first = scheduler.record(parents[0])
-    again = [scheduler.continue_from(parent, until) for parent in parents]
-    if first.cohort != run:
-        ids = [scheduler.queue(again[0], first.pool, rent=first.rent)]
-    elif cohort is None:
-        raise LauncherError("continuing a cohort needs --cohort with the new cohort's name")
-    else:
-        old = scheduler.cohort(run)
-        ids = list(
-            scheduler.queue_cohort(
-                cohort,
-                again,
-                first.pool,
-                rent=first.rent,
-                parallel=old.parallel,
-                max_usd=Decimal(max_usd) if max_usd else old.max_usd,
-            )
-        )
-    show_runs(scheduler, ids)
-
-
 @app.command()
 @kind(Kind.ask)
 def rent(

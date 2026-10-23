@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import hashlib
+import json
 from datetime import timedelta
 from decimal import Decimal
 from importlib import import_module
@@ -18,16 +18,21 @@ from etude.launch.records import (
     MachineTemplate,
     Offer,
     OnDemand,
-    Output,
     Pool,
     Run,
     Stale,
     Target,
 )
+from etude.launch.scheduler import Scheduler
 from etude.launch.schemas import Observation
+from etude.launch.ssh import Unreachable
+from etude.launch.storage.disk import DirectoryJournal
 from etude.launch.storage.s3 import StorageUnavailable
+from etude.train.records import Step
+from etude.train.run import Run as TrackedRun
+from etude.train.run import track
 from tests.launch.counting import Counting, job_text
-from tests.launch.fake import L4, Bench, bench, checkpoint_bytes
+from tests.launch.fake import L4, Bench, Clock, FakeService, bench
 
 USD_PER_RUN = Decimal("0.59") * 600 / 3600  # every fake run takes 600 seconds
 
@@ -250,7 +255,13 @@ def test_manabot_cohort_shape(tmp_path: Path) -> None:
     b.scheduler.tick()
     for target in (63_000, 100_000):
         assert all(s.outcome == "succeeded" for s in b.scheduler.wait(*stages[-1], every=60))
-        continued = [b.scheduler.continue_from(p, f"updates={target}") for p in stages[-1]]
+        continued = [
+            Run(
+                job=b.store.run(p).spec.model_copy(update={"until": f"updates={target}"}),
+                seed=b.store.run(p).seed,
+            )
+            for p in stages[-1]
+        ]
         stages.append(
             b.scheduler.queue_cohort(
                 f"capacity-{target // 1000}k", continued, rent="l4", max_usd=Decimal(30)
@@ -270,41 +281,14 @@ def test_manabot_cohort_shape(tmp_path: Path) -> None:
             "updates=100000",
         ]
         assert len(b.store.job_runs(records[0].job)) == 3  # one job, its three seeds
-        held = records[2].checkpoint
-        assert held is not None and (held.run, held.clocks) == (middle, {"updates": 63_000})
-        parent_attempt = b.scheduler.attempts(middle)[0].id
-        assert held.sha256 == hashlib.sha256(checkpoint_bytes(parent_attempt)).hexdigest()
         attempt = b.scheduler.attempts(final)[0]
         work = next(
             w for w, _ in b.service.sessions[attempt.session].work() if w.attempt == attempt.id
         )
-        assert (work.start, work.until) == ({"updates": 63_000}, "updates=100000")
-        assert work.checkpoint is not None and work.checkpoint.attempt == parent_attempt
+        assert (work.until, work.resumes) == ("updates=100000", False)
     spent = sum(b.scheduler.read(j).usd for stage in stages for j in stage)
     assert abs(spent - USD_PER_RUN * 18) < Decimal("0.01")
     assert all(b.scheduler.read(j).rental_ended for stage in stages for j in stage)
-
-
-def test_a_continuation_names_a_clock_its_parent_reported_and_moves_forward(
-    tmp_path: Path,
-) -> None:
-    b = bench(tmp_path)
-    parent = b.scheduler.queue(job(until="steps=26000"), rent="l4")
-    b.scheduler.tick()
-    with pytest.raises(LauncherError, match="no succeeded attempt"):
-        b.scheduler.continue_from(parent, "steps=63000")
-    b.run(601)
-    for target, problem in (
-        ("steps=26000", "not beyond the checkpoint's steps=26000"),
-        ("agent_steps=90000", "a clock its parent reported: steps"),
-        ("steps", "not a target; write it as clock=value"),
-        ("steps=many", "not a target"),
-    ):
-        with pytest.raises(LauncherError, match=problem):
-            b.scheduler.queue(b.scheduler.continue_from(parent, target), rent="l4")
-    further = b.scheduler.queue(b.scheduler.continue_from(parent, "steps=63000.0"), rent="l4")
-    b.scheduler.tick()
-    assert b.scheduler.record(further).spec.until == "steps=63000"  # one way to write a target
 
 
 def test_supplies_are_stored_and_a_run_names_where_it_may_go(tmp_path: Path) -> None:
@@ -662,57 +646,18 @@ def test_completion_between_progress_and_machine_reads_uses_final_journal(tmp_pa
     assert b.scheduler.attempts(run)[0].outputs
 
 
-def test_recovery_uses_last_checkpoint_without_creating_a_parent_run(tmp_path: Path) -> None:
+def test_a_retry_resumes_its_run_without_creating_a_parent_run(tmp_path: Path) -> None:
+    """The launcher hands a later attempt its run, and says it resumes; tracking does the rest."""
     b = bench(tmp_path)
     run = b.scheduler.queue(job(until="steps=100"), rent="l4")
     b.scheduler.tick()
     first = b.scheduler.attempts(run)[0]
-    original = b.service.observe
-    data = checkpoint_bytes(first.id)
-    output = Output(
-        name="checkpoint.pt", sha256=hashlib.sha256(data).hexdigest(), size_bytes=len(data)
-    )
-
-    def observe(session_id: str) -> Observation:
-        observation = original(session_id)
-        if session_id == first.session:
-            if first.planned_at is not None and b.clock() > first.planned_at + timedelta(
-                seconds=100
-            ):
-                return observation.model_copy(
-                    update={
-                        "progress": tuple(
-                            p.model_copy(update={"clocks": {"steps": 60}})
-                            for p in observation.progress
-                        )
-                    }
-                )
-            return observation.model_copy(
-                update={
-                    "progress": tuple(
-                        p.model_copy(
-                            update={
-                                "clocks": {"steps": 40},
-                                "checkpoint": output.name,
-                                "outputs": (output,),
-                            }
-                        )
-                        for p in observation.progress
-                    )
-                }
-            )
-        return observation
-
-    b.service.observe = observe  # type: ignore[method-assign]
     b.run(100)
-    b.run(1)  # later progress without a checkpoint must not advance its resume coordinate
     b.service.kill(first.session)
     b.run(1)
     second = b.scheduler.attempts(run)[1]
-    work = b.service.sessions[second.session].packet.work[0]
-    assert work.start == {"steps": 40}
-    assert work.checkpoint is not None and work.checkpoint.sha256 == output.sha256
-    assert b.scheduler.record(run).checkpoint is None
+    works = [b.service.sessions[a.session].packet.work[0] for a in (first, second)]
+    assert [(w.run, w.resumes) for w in works] == [(run, False), (run, True)]
     b.run(601)
     assert b.scheduler.read(run).outcome == "succeeded"
     assert len(b.scheduler.runs(done=True)) == 1
@@ -765,3 +710,85 @@ def test_a_job_needs_dollars_only_where_money_can_be_spent(tmp_path: Path) -> No
     assert b.scheduler.record(run).spec.max_usd is None
     with pytest.raises(LauncherError, match="more than zero"):
         b.scheduler.queue(Job(command="train", max_hours=1, max_usd=Decimal(0)), "mine")
+
+
+class Host(FakeService):
+    """An owned machine with its own disk and no bucket: a run's folder lives only there."""
+
+    def __init__(self, clock: Clock, root: Path) -> None:
+        super().__init__(clock, "0")
+        self.disk = DirectoryJournal(root / "sessions")
+        self.track = root / "track"
+        self.reachable = True
+
+    def held(self, run: str, key: str | None = None) -> dict[str, bytes] | None:
+        self._call("ssh")
+        if not self.reachable:
+            raise Unreachable("SSH transport failed; remote outcome unconfirmed")
+        return self.disk.held(run, key)
+
+    def hold(self, run: str, files: dict[str, bytes]) -> None:
+        self._call("ssh")
+        self.disk.hold(run, files)
+
+
+def _tracked(directory: Path, run: str) -> TrackedRun:
+    return track(
+        experiment="lab", clocks=[Step("steps", "training steps")], run=run, directory=directory
+    )
+
+
+def test_a_retry_on_another_owned_host_waits_for_and_continues_the_runs_folder(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    hosts = {name: Host(clock, tmp_path / name) for name in ("first", "second")}
+    store = Database(tmp_path / "launcher.db")
+    scheduler = Scheduler(store, {"ssh": lambda held: hosts[held.name]}, clock=clock)
+    scheduler.add_pool(Pool(name="lab"))
+    scheduler.add_machine("first", "owned", pool="lab", expires_at=clock() + timedelta(seconds=150))
+    scheduler.add_machine("second", "owned", pool="lab")
+    run = scheduler.queue(job(until="steps=100", max_usd=None), "lab")
+    scheduler.tick()
+    first = scheduler.attempts(run)[0]
+    assert store.session(first.session).machine == "first"
+
+    tracked = _tracked(hosts["first"].track, run)
+    weights = tmp_path / "weights.pt"
+    for step in (1, 2):
+        weights.write_bytes(f"weights at {step}".encode())
+        tracked.checkpoint(weights, steps=step)
+    tracked.finish()
+
+    hosts["first"].reachable = False
+    clock.advance(200)  # the first host's window has ended: the retry goes elsewhere
+    hosts["first"].kill(first.session)
+    scheduler.tick()
+    scheduler.tick()
+    second = scheduler.attempts(run)[1]
+    assert store.session(second.session).machine == "second"
+    assert not hosts["second"].sessions  # it waits for the folder, and starts nothing
+    assert scheduler.read(run).phase == "renting"
+
+    hosts["first"].reachable = True
+    scheduler.tick()
+    scheduler.tick()
+    assert hosts["second"].sessions
+    # Asked on each pass until the holder answered, then never again.
+    assert hosts["first"].calls["ssh"] == 3 and hosts["second"].calls["ssh"] == 1
+    relayed = hosts["second"].track / run / "checkpoints"
+    assert sorted(p.name for p in relayed.iterdir()) == [
+        ".stored",
+        "steps-1.json",
+        "steps-2.json",
+        "steps-2.pt",
+    ]
+
+    resumed = _tracked(hosts["second"].track, run)
+    latest = resumed.latest_checkpoint()
+    assert latest is not None and latest.ordinal == 2
+    weights.write_bytes(b"weights at 3")
+    assert resumed.checkpoint(weights, steps=3).sha256 is not None
+    resumed.finish()
+    record = json.loads((relayed / "steps-3.json").read_text())
+    assert record["ordinal"] == 3

@@ -33,7 +33,7 @@ from etude.launch.records import (
     parse_target,
 )
 from etude.launch.scheduler import Scheduler
-from etude.launch.schemas import CheckpointRef, Observation, Packet, Progress, Work
+from etude.launch.schemas import Observation, Packet, Progress, Work
 
 L4 = MachineTemplate(
     provider="fake",
@@ -68,7 +68,7 @@ class FakeSession:
         return [(work, self.created_at) for work in self.packet.work] + self.added
 
 
-def checkpoint_bytes(attempt: str) -> bytes:
+def output_bytes(attempt: str) -> bytes:
     return f"weights after {attempt}".encode()
 
 
@@ -91,10 +91,6 @@ class FakeService:
         self.calls[boundary] += 1
         if self.delay_seconds:
             time.sleep(self.delay_seconds)
-
-    def checkpoint(self, ref: CheckpointRef) -> CheckpointRef:
-        self._call("bucket")
-        return ref
 
     def started(self, session_id: str) -> bool:
         self._call("bucket")
@@ -147,6 +143,12 @@ class FakeService:
         held = self.sessions[session_id]
         return Observation(alive=self._alive(held), progress=self._progress(held))
 
+    def held(self, run: str, key: str | None = None) -> dict[str, bytes] | None:
+        return None  # storage holds every run
+
+    def hold(self, run: str, files: dict[str, bytes]) -> None:
+        pass
+
     def stop(self, session_id: str, attempt: str) -> None:
         self._call("bucket")
         self.sessions[session_id].stops.setdefault(attempt, self.clock())
@@ -174,7 +176,7 @@ class FakeService:
         self._call("bucket")
         destination.mkdir(parents=True, exist_ok=True)
         copy = destination / name
-        copy.write_bytes(checkpoint_bytes(attempt))
+        copy.write_bytes(output_bytes(attempt))
         return copy
 
     def _ended_at(self, session: FakeSession) -> datetime:
@@ -218,7 +220,6 @@ class FakeService:
                         outcome=None,
                         cause=None,
                         clocks={},
-                        checkpoint=None,
                         outputs=(),
                         exit_code=None,
                     )
@@ -247,14 +248,13 @@ class FakeService:
                 outcome=outcome,
                 cause="machine_lost" if outcome == "lost" else None,
                 clocks={},
-                checkpoint=None,
                 outputs=(),
                 exit_code=1,
             )
-        data = checkpoint_bytes(work.attempt)
+        data = output_bytes(work.attempt)
         clocks = dict([parse_target(work.until)]) if work.until else {}
         output = Output(
-            name="checkpoint.pt", sha256=hashlib.sha256(data).hexdigest(), size_bytes=len(data)
+            name="weights.pt", sha256=hashlib.sha256(data).hexdigest(), size_bytes=len(data)
         )
         return Progress(
             attempt=work.attempt,
@@ -263,7 +263,6 @@ class FakeService:
             outcome=outcome,
             cause=None,
             clocks=clocks,
-            checkpoint=output.name,
             outputs=(output,),
             exit_code=0,
         )

@@ -99,11 +99,9 @@ def test_cleanup_never_extends_paid_window(tmp_path: Path) -> None:
         limit_kind="out_of_time",
         seed=None,
         until=None,
-        start=None,
         config=None,
         repo=None,
         commit=None,
-        checkpoint=None,
     )
     packet = Packet(
         session="session",

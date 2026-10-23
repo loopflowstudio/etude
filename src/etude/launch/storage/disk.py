@@ -6,21 +6,19 @@ its own deadline, and leaves a dated `ended` file when it ends.
 
 from __future__ import annotations
 
-import base64
 import json
 import os
 import shutil
 import signal
-import tempfile
 import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from etude.carriage import put_back, recorded_file, restore_set
 from etude.launch.logs import snapshot_stream
-from etude.launch.records import BootstrapLinks, LauncherError, LogStream, Output
+from etude.launch.records import BootstrapLinks, LauncherError, LogStream
 from etude.launch.schemas import (
-    CheckpointRef,
     Observation,
     Packet,
     Progress,
@@ -29,17 +27,11 @@ from etude.launch.schemas import (
 )
 from etude.launch.source import source_archive
 from etude.launch.storage.files import digest, read_result, write
-from etude.launch.storage.s3 import read
 
 
 class DirectoryJournal:
     def __init__(self, root: Path) -> None:
         self._root = root
-
-    def checkpoint(self, ref: CheckpointRef) -> CheckpointRef:
-        with tempfile.TemporaryDirectory() as directory:
-            path = self.fetch(ref.session, ref.attempt, ref.name, Path(directory))
-            return ref.model_copy(update={"content": base64.b64encode(path.read_bytes()).decode()})
 
     def prepare(
         self, packet: Packet, *, expires_at: datetime | None = None
@@ -65,18 +57,6 @@ class DirectoryJournal:
 
     @staticmethod
     def _place_source(home: Path, work: Work) -> None:
-        if work.checkpoint is not None:
-            ref = work.checkpoint
-            target = home.parent / ref.session / "attempts" / ref.attempt / "outputs" / ref.name
-            body = (
-                read(ref.url) if ref.url else base64.b64decode(ref.content) if ref.content else None
-            )
-            if body is not None:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                if not target.exists():
-                    target.write_bytes(body)
-                if digest(target) != ref.sha256:
-                    raise LauncherError("checkpoint digest mismatch")
         if work.repo is None or work.commit is None:
             return
         archive = home / "sources" / f"{work.commit}.tar"
@@ -85,6 +65,17 @@ class DirectoryJournal:
             partial = archive.with_name(archive.name + ".partial")
             partial.write_bytes(source_archive(work.repo, work.commit))
             partial.replace(archive)
+
+    def _folder(self, run: str) -> Path:
+        """The run's tracked folder on this host, shared by its sessions (`ETUDE_TRACK_DIR`)."""
+        return self._root.parent / "track" / run
+
+    def held(self, run: str, key: str | None = None) -> dict[str, bytes]:
+        folder = self._folder(run)
+        return restore_set(folder) if key is None else recorded_file(folder, key)
+
+    def hold(self, run: str, files: dict[str, bytes]) -> None:
+        put_back(self._folder(run), files)
 
     def observe(self, session_id: str) -> Observation:
         home = self._root / session_id
@@ -175,22 +166,6 @@ class DirectoryJournal:
         started = datetime.fromisoformat(claim.read_text()) if claim.exists() else None
         if not finished.exists():
             result = read_result(home / "outputs")
-            checkpoint = result.checkpoint
-            outputs: tuple[Output, ...] = ()
-            if checkpoint:
-                path = home / "outputs" / checkpoint
-                if (
-                    path.is_file()
-                    and not path.is_symlink()
-                    and path.resolve().is_relative_to((home / "outputs").resolve())
-                ):
-                    outputs = (
-                        Output(
-                            name=checkpoint, sha256=digest(path), size_bytes=path.stat().st_size
-                        ),
-                    )
-                else:
-                    checkpoint = None
             return Progress(
                 attempt=home.name,
                 started_at=started,
@@ -198,8 +173,7 @@ class DirectoryJournal:
                 outcome=None,
                 cause=None,
                 clocks=result.clocks,
-                checkpoint=checkpoint,
-                outputs=outputs,
+                outputs=(),
                 exit_code=None,
             )
         raw: dict[str, Any] = json.loads(finished.read_text())

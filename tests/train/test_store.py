@@ -73,7 +73,7 @@ def test_resuming_does_not_inherit_a_previous_attempts_finished_state(
 
 @pytest.mark.parametrize("backend", ["directory", "s3"])
 @pytest.mark.parametrize("suffix", [".pt", ".json"])
-def test_replaced_checkpoint_delivers_new_bytes_once(
+def test_a_new_model_at_a_recorded_step_is_a_new_version(
     tmp_path: Path, backend: str, suffix: str
 ) -> None:
     local = tmp_path / "local"
@@ -85,7 +85,10 @@ def test_replaced_checkpoint_delivers_new_bytes_once(
             client.create_bucket(Bucket="etude-checkpoints")
             destination = S3Storage("etude-checkpoints", client=client)
         measured = MeasuredStorage(destination)
-        for body, uploads in ((b"first", 5), (b"other", 4)):
+        extension = suffix + ".data" if suffix == ".json" else suffix
+        # Each process: an attempt record and the state, then any new checkpoint and its record.
+        kept = {"": b"first", ".ordinal-2": b"other"}
+        for body, uploads, recorded in ((b"first", 5, 1), (b"other", 4, 2), (b"other", 2, 2)):
             model.write_bytes(body)
             with track(
                 experiment="e", run="r", clocks=[Step("step", "steps")], directory=local
@@ -95,11 +98,12 @@ def test_replaced_checkpoint_delivers_new_bytes_once(
             before = measured.uploads
             assert sync(local, storages=[measured]) == {}
             assert measured.uploads - before == uploads
-            (checkpoint,) = read(destination, "e", "r").checkpoints
-            extension = suffix + ".data" if suffix == ".json" else suffix
-            key = f"r/checkpoints/step-10{extension}"
-            assert destination.get(key) == body
-            assert checkpoint.artifact.size_bytes == len(body)
+            checkpoints = read(destination, "e", "r").checkpoints
+            assert [c.ordinal for c in checkpoints] == list(range(1, recorded + 1))
+            # Nothing delivered is replaced: a new model at the same step is a new version.
+            for version, held in list(kept.items())[:recorded]:
+                assert destination.get(f"r/checkpoints/step-10{version}{extension}") == held
+            assert checkpoints[-1].artifact.size_bytes == len(body)
             before = measured.uploads
             assert sync(local, storages=[measured]) == {}
             assert measured.uploads == before
@@ -493,10 +497,12 @@ def test_attempt_resume_cuts_metrics_even_when_the_new_attempt_omits_them(tmp_pa
 def test_checkpoint_resume_supersedes_before_first_logged_row(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, logging: str
 ) -> None:
-    monkeypatch.delenv("ETUDE_FROM_VALUE", raising=False)
     first = track(experiment="e", run="r", clocks=[Step("step", "steps")], directory=tmp_path)
     for step in range(20):
         first.log({"value": step}, step=step)
+        if step == 10:
+            (tmp_path / "model.pt").write_bytes(b"weights at 10")
+            first.checkpoint(tmp_path / "model.pt", step=10)
     first.finish()
     evidence = {
         path: path.read_bytes()
@@ -504,8 +510,7 @@ def test_checkpoint_resume_supersedes_before_first_logged_row(
         for path in (first.files.root / folder).glob("*")
     }
 
-    monkeypatch.setenv("ETUDE_UNTIL_CLOCK", "step")
-    monkeypatch.setenv("ETUDE_FROM_VALUE", "10")
+    # The next attempt resumes from the run's latest checkpoint, which it finds recorded.
     monkeypatch.setenv("ETUDE_ATTEMPT", "attempt-resumed")
     second = track(experiment="e", run="r", clocks=[Step("step", "steps")], directory=tmp_path)
     if logging != "none":

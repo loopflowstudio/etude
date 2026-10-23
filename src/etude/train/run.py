@@ -31,7 +31,6 @@ import math
 import os
 import queue
 import secrets
-import shutil
 import socket
 import sys
 import threading
@@ -39,13 +38,16 @@ import time
 import warnings
 import zlib
 from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from hashlib import sha256
+from itertools import chain, count
 from pathlib import Path
 from types import TracebackType
 from typing import IO, Literal, Self
 
 from pydantic import ValidationError
 
+from etude.carriage import taken
 from etude.run.block_file import block_key, tail_key
 from etude.run.declaration import declare
 from etude.run.delivery import RunFiles, StorageDestination, destinations, ship
@@ -64,7 +66,7 @@ from etude.run.storage import DirectoryStorage, Storage, run_prefix
 from etude.train.block import Builder, Table, concat
 from etude.train.block import encode as encode_block
 from etude.train.manifest import write_manifest
-from etude.train.records import CheckpointRecord, checkpoint_name
+from etude.train.records import CheckpointRecord, ParentCheckpoint, checkpoint_name
 
 # Compaction is bounded by bytes or elapsed cadence, independent of training steps.
 PERMANENT_BYTES, RECENT_BLOCKS = 8_000_000, 64
@@ -121,11 +123,24 @@ def seal_logs(root: Path, clocks: Sequence[str]) -> None:
         log.unlink()
 
 
+def _suffix(source: Path) -> str:
+    """A stored checkpoint's suffix: its source's, except that JSON never takes a record's."""
+    return ".json.data" if source.suffix == ".json" else source.suffix
+
+
 class EtudeWarning(UserWarning):
     """A row was set aside or lost. Turn it into an error with `strict=True`."""
 
 
 _STOP = object()
+
+
+@dataclass(frozen=True)
+class _Kept:
+    """A checkpoint record for the writer, and the name it is kept under."""
+
+    name: str
+    record: CheckpointRecord
 
 
 class Run:
@@ -144,6 +159,7 @@ class Run:
         segment_seconds: float,
         segment_rows: int,
         strict: bool,
+        inherited: CheckpointRecord | None = None,
     ) -> None:
         self.experiment = experiment
         self.name = name
@@ -160,23 +176,23 @@ class Run:
         # The highest value this process has logged for each clock.
         self._high: dict[str, float] = {}
         self._clock_names = tuple(clock.name for clock in clocks)
+        # Every checkpoint recorded in this folder, by any attempt on any machine,
+        # and the name its record and file are kept under.
         self._recorded: dict[int, CheckpointRecord] = {}
+        self._names: dict[int, str] = {}
         for path in sorted((root / "checkpoints").glob("*.json")):
             known = CheckpointRecord.model_validate_json(path.read_bytes())
             self._recorded[known.ordinal] = known
+            self._names[known.ordinal] = path.stem
         self._checkpoints = max(self._recorded, default=0)
-        # The file this process last put in the launcher's output directory.
-        self._reported: Path | None = None
+        self._inherited = inherited
         self._destinations = list(destinations)
         self._segment_seconds = segment_seconds
         self._segment_rows = segment_rows
         self._writer_id = secrets.token_hex(6)
-        resumed_at: dict[str, float] = {}
-        if (start := os.environ.get("ETUDE_FROM_VALUE")) is not None:
-            clock = os.environ.get("ETUDE_UNTIL_CLOCK")
-            if clock is None:
-                raise ValueError("ETUDE_FROM_VALUE requires ETUDE_UNTIL_CLOCK")
-            resumed_at[clock] = float(start)
+        # A later attempt or a continuation resumes from here, and its rows
+        # supersede earlier attempts' from these coordinates on.
+        latest = self.latest_checkpoint()
         self._save(
             "metrics",
             self._writer_id,
@@ -186,7 +202,7 @@ class Run:
                 host=socket.gethostname(),
                 attempt=os.environ.get("ETUDE_ATTEMPT"),
                 pod=os.environ.get("RUNPOD_POD_ID"),
-                resumed_at=resumed_at,
+                resumed_at={} if latest is None else dict(latest.at),
             ),
         )
         seal_logs(self.files.root, self._clock_names)  # what an earlier process left unsealed
@@ -203,6 +219,8 @@ class Run:
         self._finished = False
         # Checkpoint changes not yet sealed; only the writer thread touches it.
         self._dirty = False
+        # The clocks last written to the launcher's progress file.
+        self._progress: dict[str, float] = {}
         self._writer = threading.Thread(target=self._write, name="etude-writer", daemon=True)
         self._shipper = threading.Thread(target=self._deliver, name="etude-shipper", daemon=True)
         self._writer.start()
@@ -278,23 +296,48 @@ class Run:
         the call takes about as long as writing the file did. Given an address
         such as `s3://...` or an `ArtifactRef`, only the reference is recorded.
 
+        Recording is idempotent and nothing recorded is replaced. The same
+        model at the same coordinate returns the existing record's reference.
+        A different one at a recorded coordinate is kept as a new version,
+        `CLOCK-VALUE.ordinal-N`, beside the first.
+
         Returns the model's reference: pass it to whatever evaluates the model.
         Missing a clock, or an unreadable file, the checkpoint is not recorded.
         """
+        staged: Path | None = None
         try:
             coordinate = {**(at or {}), **clocks}
             if set(coordinate) != set(self._clock_names):
                 raise ValueError("checkpoint_clock_mismatch")
-            ordinal = self._checkpoints + 1
             at = {name: float(coordinate[name]) for name in self._clock_names}
+            name = checkpoint_name(at)
+            reference, staged = self._stage(artifact, name)
+            for known in self._recorded.values():
+                same = (known.artifact.sha256 or known.artifact.uri) == (
+                    reference.sha256 or reference.uri
+                )
+                if known.at == at and same:
+                    if staged is not None:
+                        staged.unlink()
+                    return known.artifact
+            ordinal = self._checkpoints + 1
+            stored = staged is not None and not isinstance(artifact, ArtifactRef)
+            suffix = (
+                "" if isinstance(artifact, ArtifactRef) or not stored else _suffix(Path(artifact))
+            )
+            name = self._unused(name, suffix, ordinal)
+            if staged is not None and stored:
+                reference = self._keep(staged, name + suffix, reference)
             record = CheckpointRecord(
                 ordinal=ordinal,
-                artifact=self._stored(artifact, checkpoint_name(at)),
+                artifact=reference,
                 at=at,
                 wall_ms=time.time_ns() // 1_000_000,
                 tags=tuple(dict.fromkeys(tags)),
             )
         except (ValidationError, ValueError, TypeError, OSError) as error:
+            if staged is not None:
+                staged.unlink(missing_ok=True)
             if self.strict:
                 raise
             self.incomplete += 1
@@ -302,92 +345,78 @@ class Run:
             return artifact if isinstance(artifact, ArtifactRef) else ArtifactRef(uri=str(artifact))
         self._checkpoints = ordinal
         self._recorded[ordinal] = record
-        self._offer(record)
-        self._tell_launcher(artifact, record.at)
+        self._names[ordinal] = name
+        self._offer(_Kept(name, record))
         return record.artifact
 
-    def _tell_launcher(self, artifact: ArtifactRef | Path | str, at: Mapping[str, float]) -> None:
-        """Under `etude launch`, report this checkpoint the way the launcher reads it.
+    def latest_checkpoint(self) -> CheckpointRecord | None:
+        """The checkpoint to resume from: the latest this run recorded, on any attempt.
 
-        The launcher resumes a run from the checkpoint named in
-        `etude-result.json` in the job's output directory, at the clocks beside
-        it. Writing that here means a script reports a checkpoint once. A file
-        is linked from the tracker's snapshot into the output directory, since
-        the launcher only carries files from there. The trainer may overwrite
-        its own file without changing this snapshot. Only checkpoints are reported: the file holds
-        one set of clocks, so later progress written with an earlier
-        checkpoint's name would misstate where that checkpoint stood.
+        A later attempt sees every earlier attempt's records, restored to a
+        fresh machine before the job starts, and its file at the record's
+        `artifact.uri`, which is on this machine. A continuation gets its
+        parent's checkpoint until it records its own. None when there is none.
         """
-        outputs = os.environ.get("ETUDE_OUTPUT_DIR")
-        if outputs is None or isinstance(artifact, ArtifactRef) or "://" in str(artifact):
-            return
-        try:
-            directory = Path(outputs).resolve()
-            source = self._checkpoint_path(artifact, checkpoint_name(dict(at)))
-            name = source.name
-            target = directory / name
-            if target != source:
-                partial = directory / f"{name}.partial"
-                partial.unlink(missing_ok=True)
-                try:
-                    os.link(source, partial)
-                except OSError:  # another file system, or one without links
-                    shutil.copyfile(source, partial)
-                partial.replace(target)
-                # Only the latest checkpoint is reported; the name made for the
-                # one before is ours to remove, so outputs do not pile up.
-                if self._reported is not None and self._reported != target:
-                    self._reported.unlink(missing_ok=True)
-                self._reported = target
-            result = directory / "etude-result.json"
-            partial = directory / "etude-result.json.partial"
-            partial.write_text(json.dumps({"clocks": dict(at), "checkpoint": name}))
-            partial.replace(result)
-        except OSError as error:
-            if self.strict:
-                raise
-            self._warn("checkpoint", f"the launcher was not told of a checkpoint ({error})")
+        if not self._recorded:
+            return self._inherited
+        record = self._recorded[max(self._recorded)]
+        # The file keeps its name wherever the record was written.
+        local = self.files.root / "checkpoints" / record.artifact.uri.rpartition("/")[2]
+        if record.artifact.sha256 is None or not local.is_file():
+            return record
+        artifact = record.artifact.model_copy(update={"uri": local.resolve().as_uri()})
+        return record.model_copy(update={"artifact": artifact})
 
-    def _stored(self, artifact: ArtifactRef | Path | str, name: str) -> ArtifactRef:
-        """The reference to record; a local file is first copied in and digested."""
+    def _stage(
+        self, artifact: ArtifactRef | Path | str, name: str
+    ) -> tuple[ArtifactRef, Path | None]:
+        """The reference to record; a local file is first copied in and digested.
+
+        The copy is staged under a name no carrier sends until it is kept.
+        """
         if isinstance(artifact, ArtifactRef):
-            return artifact
+            return artifact, None
         if isinstance(artifact, str) and "://" in artifact:
-            return ArtifactRef(uri=artifact)
+            return ArtifactRef(uri=artifact), None
         source = Path(artifact)
-        staged = self._checkpoint_path(source, name)
-        key = staged.relative_to(self.files.root).as_posix()
-        staged.parent.mkdir(parents=True, exist_ok=True)
-        partial = staged.with_name(staged.name + ".partial")
+        folder = self.files.root / "checkpoints"
+        folder.mkdir(parents=True, exist_ok=True)
+        staged = folder / f"{name}.{secrets.token_hex(4)}.partial"
         digest = sha256()
         # A copy, not a link: a trainer that saves over the same path would
         # otherwise change the recorded model after the fact.
-        with source.open("rb") as reader, partial.open("wb") as writer:
-            while block := reader.read(8 * 1024 * 1024):
-                digest.update(block)
-                writer.write(block)
-        partial.replace(staged)
-        remote = next(iter(self._destinations), None)
-        return ArtifactRef(
-            uri=remote.storage.uri(run_prefix(self.name) + key)
-            if remote
-            else staged.resolve().as_uri(),
-            sha256=digest.hexdigest(),
-            size_bytes=staged.stat().st_size,
+        try:
+            with source.open("rb") as reader, staged.open("wb") as writer:
+                while block := reader.read(8 * 1024 * 1024):
+                    digest.update(block)
+                    writer.write(block)
+        except OSError:
+            staged.unlink(missing_ok=True)
+            raise
+        return (
+            ArtifactRef(uri="", sha256=digest.hexdigest(), size_bytes=staged.stat().st_size),
+            staged,
         )
 
-    def _checkpoint_path(self, source: Path | str, name: str) -> Path:
-        suffix = Path(source).suffix
-        # JSON checkpoints must not overwrite the coordinate's JSON record.
-        if suffix == ".json":
-            suffix += ".data"
-        filename = name + suffix
-        outputs = os.environ.get("ETUDE_OUTPUT_DIR")
-        if outputs is not None and Path(outputs).resolve() / filename == Path(source).resolve():
-            # The launcher's link must not replace the trainer's own path:
-            # its next in-place save would then mutate our snapshot too.
-            filename += ".snapshot"
-        return self.files.root / "checkpoints" / filename
+    def _unused(self, name: str, suffix: str, ordinal: int) -> str:
+        """The first of `name`, `name.ordinal-N`, `name.ordinal-N-2`, ... no record or file holds.
+
+        A file counts even without a record, here or where storage or another
+        host keeps it (`etude.carriage.taken`), so nothing is ever replaced.
+        """
+        files, records = taken(self.files.root), set(self._names.values())
+        versions = (f"{name}.ordinal-{ordinal}-{n}" for n in count(2))
+        candidates = chain((name, f"{name}.ordinal-{ordinal}"), versions)
+        return next(c for c in candidates if c not in records and c + suffix not in files)
+
+    def _keep(self, staged: Path, filename: str, reference: ArtifactRef) -> ArtifactRef:
+        """Give a staged copy its recorded name, which nothing has used before."""
+        kept = staged.with_name(filename)
+        staged.replace(kept)
+        key = kept.relative_to(self.files.root).as_posix()
+        remote = next(iter(self._destinations), None)
+        uri = remote.storage.uri(run_prefix(self.name) + key) if remote else kept.resolve().as_uri()
+        return reference.model_copy(update={"uri": uri})
 
     def tag(self, checkpoint: ArtifactRef | int, *tags: str) -> None:
         """Add labels to a checkpoint this run recorded, by reference or ordinal."""
@@ -425,7 +454,7 @@ class Run:
             self._warn("tag", f"a checkpoint was not tagged ({error})")
             return
         self._recorded[changed.ordinal] = changed
-        self._offer(changed)
+        self._offer(_Kept(self._names[changed.ordinal], changed))
 
     def _offer(self, item: object) -> None:
         try:
@@ -453,6 +482,7 @@ class Run:
                 stream, builder = None, Builder(self._clock_names)
                 self._sequence += 1
             self._fold(final)
+            self._report_progress()
             self._dirty = False
             self._wake.set()
 
@@ -465,8 +495,8 @@ class Run:
                 if item is _STOP:
                     seal(final=True)
                     return
-                if isinstance(item, CheckpointRecord):
-                    self._save("checkpoints", checkpoint_name(item.at), item)
+                if isinstance(item, _Kept):
+                    self._save("checkpoints", item.name, item.record)
                     self._dirty = True
                 elif isinstance(item, tuple):
                     if stream is None:
@@ -546,6 +576,22 @@ class Run:
             self._tails.clear()
             self._tail_bytes = 0
             self._folded_at = time.monotonic()
+
+    def _report_progress(self) -> None:
+        """Under `etude launch`, say how far the run has got, for the launcher's status.
+
+        `etude-result.json` in `ETUDE_OUTPUT_DIR` holds the highest value
+        logged on each clock. It is progress only: checkpoints are this
+        run's records, never the launcher's.
+        """
+        outputs = os.environ.get("ETUDE_OUTPUT_DIR")
+        high = dict(self._high)
+        if outputs is None or high == self._progress:
+            return
+        DirectoryStorage(Path(outputs)).put(
+            "etude-result.json", json.dumps({"clocks": high}).encode()
+        )
+        self._progress = high
 
     def _row(self, row: Logged) -> tuple[dict[str, float], dict[str, object]]:
         """A logged row as its clock values and everything else, ready to store."""
@@ -677,12 +723,19 @@ def track(
 
     The experiment is always named here; the launcher does not know it. The
     run's identity, and whether it resumes, is settled by
-    `etude.run.declaration.declare`. Under `etude launch`, `Run.checkpoint`
-    also tells the launcher, and the files are written to `ETUDE_TRACK_DIR`,
-    which the launcher keeps with the job's log.
-    `ETUDE_FROM_VALUE` on `ETUDE_UNTIL_CLOCK` records the checkpoint resume
-    coordinate, from which earlier attempts' points are superseded on read.
+    `etude.run.declaration.declare`. Under `etude launch` the files are
+    written to `ETUDE_TRACK_DIR`, which the launcher carries to storage as they
+    are, and a later attempt finds the run's checkpoints there
+    (`Run.latest_checkpoint`). A continuation (`etude.jobs.continue_from`) is
+    handed its parent's checkpoint in `ETUDE_CONTINUES`: unless `continues` is
+    given, the run declares that it continues its parent from there.
     """
+    inherited = _inherited()
+    if inherited is not None and continues is None:
+        parent, record = inherited
+        until = os.environ.get("ETUDE_UNTIL_CLOCK")
+        clock = until if until in record.at else next(iter(record.at))
+        continues = Continuation(parent=parent, clock=clock, value=record.at[clock])
     declared = declare(
         experiment=experiment,
         clocks=clocks,
@@ -707,7 +760,26 @@ def track(
         segment_seconds=segment_seconds,
         segment_rows=segment_rows,
         strict=strict,
+        inherited=None if inherited is None else inherited[1],
     )
+
+
+def _inherited() -> tuple[SourceKey, CheckpointRecord] | None:
+    """The parent's checkpoint a continuation was handed, with its file on this machine."""
+    given = os.environ.get("ETUDE_CONTINUES")
+    if not given:
+        return None
+    parent = ParentCheckpoint.model_validate_json(given)
+    record = parent.checkpoint
+    if parent.input is not None:
+        folder = os.environ.get("ETUDE_INPUTS_DIR")
+        if not folder:
+            raise EtudeError("continuation_input_missing", 422)
+        local = (Path(folder) / parent.input).resolve().as_uri()
+        record = record.model_copy(
+            update={"artifact": record.artifact.model_copy(update={"uri": local})}
+        )
+    return parent.parent, record
 
 
 def seal_runs(directory: Path | str) -> None:

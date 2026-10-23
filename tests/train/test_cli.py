@@ -4,9 +4,17 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
+
+from etude.cli import main
+from etude.eval.query import connect
+from etude.run.delivery import sync
+from etude.run.storage import DirectoryStorage
+from etude.train.records import Step
+from etude.train.run import track
 
 
 @pytest.mark.parametrize(
@@ -14,7 +22,7 @@ import pytest
     [
         (["reports", "--help"], 10, ("numpy", "pydantic")),
         (["reports", "write", "--help"], 10, ("numpy", "pydantic")),
-        (["reports", "write", "--source", "{directory}"], 19, ("boto3", "etude.train.run")),
+        (["reports", "write", "--source", "{directory}"], 20, ("boto3", "etude.train.run")),
         (
             ["sync", "--directory", "{directory}"],
             15,
@@ -66,3 +74,32 @@ def test_tracking_command_import_counts(
         "etude.launch.errors",
     }
     assert not (tmp_path / "home" / "launcher.db").exists()
+
+
+def test_checkpoints_are_listed_at_their_storage_address_while_the_run_goes_on(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    local, bucket = tmp_path / "local", tmp_path / "bucket"
+    run = track(experiment="e", run="r", clocks=[Step("step", "steps")], directory=local)
+    model = tmp_path / "model.pt"
+    for step in (1, 2, 3):
+        model.write_bytes(f"weights at {step}".encode())
+        run.checkpoint(model, step=step)
+    deadline = time.monotonic() + 10
+    while len(list((local / "r/checkpoints").glob("*.json"))) < 3:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    assert sync(local, storages=[DirectoryStorage(bucket)]) == {}
+    assert not (bucket / "r/state.json").exists()  # the run has not finished
+
+    assert main(["checkpoints", "--source", str(bucket)]) == 0
+    listed = [line.split("\t") for line in capsys.readouterr().out.splitlines()]
+    # Where each file is in the source read, not where the machine that wrote it kept it.
+    assert [(fields[1], fields[-1]) for fields in listed] == [
+        (str(step), (bucket / f"r/checkpoints/step-{step}.pt").resolve().as_uri())
+        for step in (1, 2, 3)
+    ]
+    pytest.importorskip("duckdb")
+    recorded = connect(bucket).execute("select ordinal from training_checkpoints").fetchall()
+    assert sorted(recorded) == [(1,), (2,), (3,)]
+    run.finish()

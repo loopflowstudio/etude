@@ -16,6 +16,8 @@ from etude.launch.executor import Refused
 from etude.launch.records import Job, LauncherError, Offer, OnDemand, Pool, Stale
 from etude.launch.scheduler import Scheduler
 from etude.launch.schemas import Packet, Work
+from etude.train.records import ParentCheckpoint, Step
+from etude.train.run import track
 from tests.launch.fake import L4, bench
 
 
@@ -197,11 +199,22 @@ def test_cli_continue_waits_without_capacity(
         Job(command="train", max_hours=1, max_usd=Decimal(1), until="steps=3"), rent="l4"
     )
     b.run(601)
+    # What the parent's job recorded, as tracking keeps it in its runs directory.
+    weights = tmp_path / "weights.pt"
+    weights.write_bytes(b"weights")
+    tracked = track(
+        experiment="capacity", clocks=[Step("steps", "steps")], run=parent, directory=tmp_path
+    )
+    tracked.checkpoint(weights, steps=3)
+    tracked.finish()
     b.scheduler.set_ondemand_max("l4", 0)
-    assert main(["continue", parent, "steps=7"]) == 0
+    argv = ["continue", "--run", parent, "--until", "steps=7", "--source", str(tmp_path)]
+    assert main(argv) == 0
     child = capsys.readouterr().out.split()[0]
     record = b.scheduler.record(child)
-    assert record.checkpoint is not None and record.checkpoint.run == parent
+    (given,) = record.spec.environment
+    handed = ParentCheckpoint.model_validate_json(given.value)
+    assert (handed.parent.source_id, handed.checkpoint.at) == (parent, {"steps": 3})
     assert record.spec.until == "steps=7" and record.autorun
     assert b.scheduler.read(child).phase == "queued"
 

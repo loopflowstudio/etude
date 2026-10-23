@@ -48,8 +48,9 @@ Queue submission only writes intent and never waits for a provider. The standing
 matches waiting runs, visiting every pool before any on-demand, and rents
 within each on-demand's limits. Keep that loop running
 when the queue must move without further commands.
-`etude continue` queues new runs with their checkpoint ancestry, absolute
-targets and the parent's pool and on-demand; lack of capacity does not reject continuation.
+`etude continue` queues new runs that start from a parent's recorded
+checkpoint, with absolute targets and the parent's pool and on-demand; lack of
+capacity does not reject continuation.
 
 | Record | The question it answers | Exists for |
 | --- | --- | --- |
@@ -481,7 +482,7 @@ the client sends none. How a controller obtains them is not settled: a command
 arriving over SSH does not see secrets that a terminal session there loads.
 
 The functions in `etude.launch.client` (`queue`, `launch`, their cohort forms,
-`status`, `wait`, `cancel`, `logs`, `fetch` and `continue_from`) use the
+`status`, `wait`, `cancel`, `logs` and `fetch`) use the
 selected controller and return the same Python values. An explicitly
 constructed `Scheduler` remains the owner of a local database.
 
@@ -559,8 +560,8 @@ in its installed environment.
 from decimal import Decimal
 from pathlib import Path
 
-from etude.jobs import training
-from etude.launch.client import continue_from, fetch, logs, queue, queue_cohort, wait
+from etude.jobs import continue_from, training
+from etude.launch.client import default, fetch, logs, queue, queue_cohort, wait
 from train import TrainConfig, train
 
 job = training(
@@ -573,8 +574,11 @@ job = training(
 runs = queue_cohort("capacity", job.runs(1, 2, 3), rent="l4", parallel=1, max_usd=Decimal(15))
 wait(*runs)
 logs(run=runs[0])
-fetch(runs[0], "checkpoint.pt", Path("out"))
-continued = queue(continue_from(runs[0], "steps=63000"), pool="shed")
+fetch(runs[0], "weights.pt", Path("out"))  # a file the job left in its output directory
+parent = default().record(runs[0])
+continued = queue(
+    continue_from(parent, "steps=63000", source="s3://bucket/etude/launch"), pool="shed"
+)
 ```
 
 For the command line, a Python file defines a function `runs()` that returns a
@@ -659,7 +663,8 @@ its runs.
 
 A run ends when it reaches its target, fails, is cancelled, or uses up its hours
 or dollars. Losing a machine does not end a run. It is tried again on another
-machine, from the last checkpoint it reported, as a new RunAttempt of the same run.
+machine as a new RunAttempt of the same run, which resumes from the latest
+checkpoint its [tracking](tracking.md) recorded.
 
 The run's hours and dollars span all attempts. Hours count code execution;
 dollars include its attributed setup and failed attempts. A machine's window
@@ -668,9 +673,13 @@ A run with no checkpoint starts again from the beginning. Each attempt's code
 starts at most once; uncertain starts remain fenced. `lost` denotes exhausted
 attempts or an unresolved start whose execution cannot safely be repeated.
 
-A checkpoint on a lost host's disk waits for access to that host; it is never
-silently discarded. Bucket checkpoints survive pod deletion. Automatic recovery
-retains the run ID and seed. `etude continue` instead goes further than the target
+The launcher has no checkpoints of its own: a run's checkpoints are its tracked
+files. They are carried to the bucket as they are recorded, so they survive pod
+deletion, and a later attempt on a fresh machine with a bucket is given back
+the run's records and its latest checkpoint file before the job starts, and
+nothing else. Between owned hosts without a bucket, the controller relays the
+same from the host that last ran the run; while that host cannot be reached,
+the retry waits. Either way its ordinals continue. Automatic recovery retains the run ID and seed. `etude continue` instead goes further than the target
 or branches from a completed run, making a new run with a parent.
 
 There is no `retry` flag; `max_attempts=1` bounds a job to one attempt.
@@ -682,7 +691,8 @@ and optimizer updates can be distinct clocks. Targets such as `steps=63000`
 are absolute, including after continuation. Hours and dollars bound execution.
 Training code reads `ETUDE_OUTPUT_DIR`, `ETUDE_STOP_FILE`, `ETUDE_DEADLINE`,
 `ETUDE_SEED`, `ETUDE_CONFIG`, `ETUDE_UNTIL_CLOCK` and `ETUDE_UNTIL_VALUE`.
-A resumed attempt or continuation also receives `ETUDE_CHECKPOINT` and `ETUDE_FROM_VALUE`.
+A job's own `environment` variables are set too; Etude's `ETUDE_*` names take
+precedence.
 
 A job can be given files by name:
 
@@ -711,16 +721,15 @@ resumable download as source and checkpoints, before the job starts, and puts it
 at `ETUDE_INPUTS_DIR/NAME`. Bytes that do not match the digest are refused: the
 job's command never runs and the attempt ends `lost (setup_failed)` with the
 reason in its log. Inputs are part of the job's identity. A machine with no
-storage cannot be given inputs.
+storage can be given only a run's file (`Input.run`, as continuation does).
 
 The job is also told who it is: `ETUDE_RUN` (the run's id), `ETUDE_JOB` (the
 digest its job's runs share), `ETUDE_JOB_NAME` when the job has a name,
 `ETUDE_ATTEMPT`, and `ETUDE_COHORT` when the run has one. It runs in
 `ETUDE_SOURCE_DIR`, its commit's files without `.git`; [evaluation](evaluation.md)
 hashes identity files relative to it. [Tracking](tracking.md) reads these, so a launched job names only
-its experiment and clocks. The launcher has no experiment; the script names it. A script that records its
-checkpoints with tracking's `run.checkpoint(...)` does not write
-`etude-result.json` itself: tracking writes it.
+its experiment and clocks. The launcher has no experiment; the script names it. A tracked
+script does not write `etude-result.json` itself: tracking reports its clocks.
 
 A storage holds one folder per run, shared by every attempt on every machine,
 and the machines' own working files apart:
@@ -729,9 +738,9 @@ and the machines' own working files apart:
 PREFIX/RUN/                      everything about one run
   attempts/ATTEMPT.log           what the job printed
   attempts/ATTEMPT.json          when it started, its progress, how it ended
-  attempts/ATTEMPT/NAME          other files the job left in its output directory
-  checkpoints/NAME               each checkpoint the job reported
-  run.json  state.json  metrics/ the job's tracking files for the run, as they are
+  attempts/ATTEMPT/NAME          files the job left in its output directory
+  run.json  state.json  metrics/ the run's tracked files, as they are,
+  checkpoints/                     every checkpoint tracking recorded among them
 PREFIX/sessions/SESSION/         one machine's instructions, inbox and notes
 PREFIX/sources/SHA256.tar        a commit's source archive, named by its digest
 ```
@@ -740,19 +749,22 @@ The job is given `ETUDE_TRACK_DIR`, `track` beside the `sessions` directory
 (on this computer `~/.etude/track`), and tracking keeps the run's files in
 `ETUDE_TRACK_DIR/RUN/`. The courier copies that folder into the run's folder
 in storage while the job runs; the job still holds no keys. A second attempt,
-on this machine or another, writes into the same run folder. Files ending
-`.open` or `.partial` wait until they are whole, and `.tail` files and
-anything under a folder starting with `.` until the attempt has ended.
+on this machine or another, writes into the same run folder. The courier and
+tracking's own `sync` follow one set of rules (`etude.carriage`): files ending
+`.open` or `.partial` wait until they are whole, `.tail` files until the
+attempt has ended, and anything under a folder starting with `.` stays; each
+pass sends checkpoint files before their records; checkpoint bytes count as
+`checkpoint` in usage; and an object under `checkpoints/` is sent once and
+never replaced.
 
-Write the checkpoint completely, then atomically replace `etude-result.json`
-in the output directory:
+A job reports its progress by atomically replacing `etude-result.json` in the
+output directory; `etude status` shows it:
 
 ```json
-{"clocks":{"steps":26000,"learner_transitions":52000},"checkpoint":"checkpoint.pt"}
+{"clocks":{"steps":26000,"learner_transitions":52000}}
 ```
 
-The courier uploads a reported checkpoint while the attempt is running, before
-publishing that report. It uploads final outputs before the completion note.
+The courier uploads final outputs before the completion note.
 
 The other job-written handoff is any file ending `.removed` in the run's
 tracking folder, such as `metrics/0123456789ab.removed`, listing paths
@@ -771,14 +783,24 @@ credentials, old copies remain readable. A restarted courier conservatively
 leaves old copies it did not upload. The launcher knows no block format or
 coverage rules, and neither Python package imports the other.
 
-Continuation uses a succeeded parent's recorded checkpoint and verifies its
-digest. Bucket checkpoints travel by scoped link; disk checkpoints pass through
-the launching computer. Continuation can move between local, SSH and bucket
-journals. The `continue` command retains the parent's pool and on-demand. Its target must exceed the parent's position on the named clock.
+Continuation starts a new run of the parent's job and seed from one of the
+parent's recorded checkpoints, its latest unless `--ordinal` says. `etude.jobs`
+reads the checkpoint's record from `--source`, where the parent's tracked
+folder is (its bucket, or a runs directory). Without `--source`, it reads this
+computer's runs directory, else the records on the owned host that last ran
+the parent. The file reaches the machine as an input of the parent run
+(`Input(run=PARENT, key="checkpoints/NAME")`), verified by digest: from the
+bucket where the parent's folder was carried, or, without one, from that
+host's folder for the parent. Between owned hosts the controller relays just
+that file to the new run's host before it starts, and the run waits while the
+parent's host cannot be reached. Tracking is handed the record in
+`ETUDE_CONTINUES`. The `continue` command retains the parent's pool and
+on-demand. Its target must exceed the checkpoint's position on the named
+clock.
 
 ```sh
-etude continue RUN steps=63000
-etude continue COHORT steps=63000 --cohort NEXT
+etude continue --run RUN --until steps=63000 --source s3://bucket/etude/launch
+etude continue --run COHORT --until steps=63000 --cohort NEXT --source s3://bucket/etude/launch
 etude cancel RUN
 ```
 

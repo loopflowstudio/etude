@@ -13,7 +13,7 @@ from typing import Literal
 
 from pydantic import Field
 
-from etude.run.records import ArtifactRef, Clock, Name, Record
+from etude.run.records import ArtifactRef, Clock, Name, Record, SourceKey
 
 
 def Step(name: str, meaning: str) -> Clock:  # noqa: N802 - reads as a declaration
@@ -49,7 +49,8 @@ def interval95(mean: float, std: float, n: int) -> tuple[float, float] | None:
 class CheckpointRecord(Record):
     """A recorded model: what a run saved and where every one of its clocks stood.
 
-    `ordinal` counts a run's checkpoints from one. When Etude stored the file,
+    `ordinal` counts a run's checkpoints from one, across its attempts on
+    every machine. When Etude stored the file,
     the artifact carries its digest and size and the file sits beside this
     record, in the author's directory or bucket. Everything here is fixed
     except `tags`.
@@ -64,13 +65,28 @@ class CheckpointRecord(Record):
     tags: tuple[Name, ...] = Field(default=(), max_length=32)
 
 
+class ParentCheckpoint(Record):
+    """`ETUDE_CONTINUES`: the parent run and the checkpoint of it a continuation starts from.
+
+    The checkpoint is the parent's record, without tags. A file stored in the
+    parent's folder reaches the machine as the job's input named `input`,
+    and the record addresses it within that folder (`checkpoints/NAME`). With
+    no input, the record references a model elsewhere by its own address.
+    """
+
+    parent: SourceKey
+    checkpoint: CheckpointRecord
+    input: str | None = None
+
+
 def checkpoint_name(at: dict[str, float]) -> str:
     """A checkpoint's file name under its run: where the first declared clock stood.
 
     Safe in any bucket and shell: the clock's name keeps letters, digits, `.`,
     `_` and `-`, anything else becomes `_`, and the value is a plain number. A
-    second checkpoint at the same coordinate, such as one saved again after a
-    resume, takes the same name. The exact clocks are in the record itself.
+    different checkpoint at a coordinate already recorded is kept as
+    `NAME.ordinal-N` (`etude.train.run.Run.checkpoint`). The exact clocks are
+    in the record itself.
     """
     clock, value = next(iter(at.items()))
     number = str(int(value)) if float(value).is_integer() else repr(float(value))

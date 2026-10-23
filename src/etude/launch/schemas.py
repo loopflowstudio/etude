@@ -14,23 +14,10 @@ from typing import Any
 
 from pydantic import Field, FiniteFloat, Json, JsonValue
 
-from etude.launch.records import Cause, Input, Limit, Outcome, Output, Record, Runtime
+from etude.launch.records import Cause, Input, Limit, Outcome, Output, Record, Runtime, Variable
 from etude.launch.storage.download import Download
 from etude.launch.storage.s3 import Keys, PostForm
 from etude.launch.usage import Transfer
-
-
-class CheckpointRef(Record):
-    """Where a parent's checkpoint lies in the journal, and the digest it must have."""
-
-    run: str  # its file is kept with this run's checkpoints
-    session: str
-    attempt: str
-    name: str
-    sha256: str
-    size_bytes: int
-    url: str | None = None
-    content: str | None = None  # base64 for a checkpoint copied through the launcher
 
 
 class Work(Record):
@@ -47,16 +34,18 @@ class Work(Record):
     limit_kind: Limit
     seed: int | None
     until: str | None  # the job's target, as "clock=value"
-    start: dict[str, float] | None  # where each clock stood at the checkpoint it resumes from
     config: str | None
     repo: str | None
     commit: str | None
-    checkpoint: CheckpointRef | None
     run: str  # names the run's folder in storage, shared by all its attempts
+    # A later attempt of its run: the run's folder is restored first where the
+    # machine does not hold it (`etude.carriage.resume_file`).
+    resumes: bool = False
     job: str | None = None
     job_name: str | None = None
     cohort: str | None = None
     inputs: tuple[Input, ...] = ()  # delivered to SESSION/inputs/SHA256
+    environment: tuple[Variable, ...] = ()
 
 
 class Packet(Record):
@@ -80,7 +69,6 @@ class Progress(Record):
     outcome: Outcome | None
     cause: Cause | None
     clocks: dict[str, float]
-    checkpoint: str | None
     outputs: tuple[Output, ...]
     exit_code: int | None
 
@@ -100,11 +88,9 @@ def progress_from_json(
 
 
 class Result(Record):
-    """Reported progress, optionally with checkpoint files already carried to storage."""
+    """`etude-result.json`: the progress a job reports, where each of its clocks stands."""
 
     clocks: dict[str, FiniteFloat] = Field(default_factory=dict)
-    checkpoint: str | None = None
-    outputs: tuple[Output, ...] = ()
 
 
 class BucketAccess(Record):
@@ -131,12 +117,15 @@ class Bootstrap(Record):
     runs: dict[str, RunAccess] = Field(default_factory=dict)  # for the packet's work
     inbox_url: str
     fetch: dict[str, Download] = Field(default_factory=dict)
+    restore: dict[str, str] = Field(default_factory=dict)  # see Delivery
 
 
 class Delivery(Record):
     work: Json[Work]
     access: RunAccess
     fetch: dict[str, Download] = Field(default_factory=dict)
+    # Read links to what storage holds of a resumed run's folder, by RUN/KEY.
+    restore: dict[str, str] = Field(default_factory=dict)
 
 
 class AttemptRecord(Record):

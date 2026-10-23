@@ -23,7 +23,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from etude.launch.errors import LauncherError as LauncherError
 
@@ -275,15 +275,6 @@ class Machine(Record):
         return self.expires_at is not None and now >= self.expires_at
 
 
-class Checkpoint(Record):
-    """One output file of a parent run, named by digest, and where each clock stood."""
-
-    run: str
-    name: str
-    sha256: str
-    clocks: dict[str, float]
-
-
 class Runtime(Record):
     """A preinstalled job interpreter and the versions it must already contain."""
 
@@ -294,16 +285,22 @@ class Runtime(Record):
 
 
 class Input(Record):
-    """A file a job is given before it starts: an object in storage, checked by its digest.
+    """A file a job is given before it starts, checked by its digest.
 
-    The worker fetches it through its storage access before the job starts, and
-    refuses bytes that do not match. Inputs need the machine to keep records in a storage.
+    Either an object in the bucket of the machine's storage, or, with `run`, a
+    file of that run's folder (`key` relative to it, such as
+    `checkpoints/steps-100.pt`). The worker fetches a bucket object through its
+    storage access. A run's file comes from the bucket where the run's folder
+    was carried, else from this machine's folder for that run, relayed by the
+    scheduler from the machine that last ran it. Bytes that do not match are
+    refused before the job starts.
     """
 
     name: str  # where the job finds it: ETUDE_INPUTS_DIR/NAME
-    key: str = Field(min_length=1)  # the object's key in the bucket of the machine's storage
+    key: str = Field(min_length=1)
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     size_bytes: int = Field(ge=0)
+    run: str | None = None  # the run whose folder holds the file
 
     @field_validator("name")
     @classmethod
@@ -311,6 +308,22 @@ class Input(Record):
         if name in (".", "..") or not re.fullmatch(r"[A-Za-z0-9._-]+", name):
             raise ValueError(f"input name {name!r} must be a plain file name")
         return name
+
+    @model_validator(mode="after")
+    def _within(self) -> Input:
+        parts = self.key.split("/")
+        if self.run is not None and (self.key.startswith("/") or {"", ".", ".."} & set(parts)):
+            raise ValueError(
+                f"input key {self.key!r} must be a path within run {self.run}'s folder"
+            )
+        return self
+
+
+class Variable(Record):
+    """One environment variable a job is given."""
+
+    name: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    value: str
 
 
 def _distinct(value: tuple[Input, ...]) -> tuple[Input, ...]:
@@ -345,6 +358,8 @@ class Job(Record):
     revision: str | None = None  # None snapshots working files; a named revision is exact
     max_attempts: int = 3  # tries allowed after confirmed infrastructure failure
     inputs: tuple[Input, ...] = ()  # files at ETUDE_INPUTS_DIR/NAME when the job starts
+    # Set in the job's environment; Etude's own ETUDE_* settings take precedence.
+    environment: tuple[Variable, ...] = ()
 
     _check_inputs = field_validator("inputs")(_distinct)
 
@@ -367,6 +382,10 @@ def job_identity(job: Job) -> dict[str, str | int | None]:
             identity[name] = value
     if job.runtime is not None:
         identity["runtime"] = json.dumps(job.runtime.model_dump(mode="json"), sort_keys=True)
+    if job.environment:
+        identity["environment"] = json.dumps(
+            sorted([v.name, v.value] for v in job.environment), sort_keys=True
+        )
     if job.inputs:
         identity["inputs"] = json.dumps(
             sorted(
@@ -397,7 +416,6 @@ class Run(Record):
 
     job: Job
     seed: int | None = None
-    checkpoint: Checkpoint | None = None  # set by continue_from
     # The values a runs() function was called with. Kept for reading; a job's
     # identity comes from what it runs, never from these.
     params: dict[str, Param] = Field(default_factory=dict)
@@ -410,7 +428,6 @@ class RunRecord(Record):
     job: str  # digest of what decides the result; runs of one job share it
     spec: Job  # as launched, with this run's name and limits
     seed: int | None
-    checkpoint: Checkpoint | None
     pool: str | None  # the pool whose machines it may use
     rent: str | None  # the on-demand it may rent from, after the pool's free machines
     cohort: str | None
@@ -501,14 +518,12 @@ class RunAttempt(Record):
     outcome: Outcome | None
     cause: Cause | None
     clocks: dict[str, float]  # where the run last reported each of its clocks
-    checkpoint: str | None  # the output the run named as its checkpoint
     outputs: tuple[Output, ...]
     exit_code: int | None
     version: int
     # When it was placed. Its share of the cost starts no earlier.
     planned_at: datetime | None = None
     added: bool = False  # placed on a session that already existed
-    checkpoint_clocks: dict[str, float] = Field(default_factory=dict)  # frozen with checkpoint
 
 
 class Status(Record):

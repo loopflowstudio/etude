@@ -6,6 +6,7 @@ tournaments arranged on top of it.
 """
 
 import ast
+import sys
 from pathlib import Path
 
 SOURCE = Path(__file__).resolve().parents[2] / "src"
@@ -54,3 +55,15 @@ def test_the_eval_run_imports_nothing_arranged_on_top_of_it() -> None:
     names = _imports("etude.eval")[path]
     above = ("etude.eval.tournament", "etude.eval.query", "etude.eval.report")
     assert not [n for n in names for f in above if _within(n, f)]
+
+
+def test_carriage_rules_import_only_the_standard_library() -> None:
+    """Both carriers import them, so they import neither the launcher nor tracking."""
+    path = SOURCE / "etude/carriage.py"
+    names: set[str] = set()
+    for node in ast.walk(ast.parse(path.read_text())):
+        if isinstance(node, ast.Import):
+            names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            names.add(node.module or "")
+    assert {name.split(".")[0] for name in names} <= sys.stdlib_module_names | {"__future__"}

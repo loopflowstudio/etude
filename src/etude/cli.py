@@ -76,6 +76,78 @@ def evaluations(
         raise typer.Exit(1)
 
 
+@app.command("continue")
+@kind(Kind.wait)
+def continue_run(
+    run: Annotated[str, typer.Option(help="a run id, or a cohort name for all of its runs")],
+    until: Annotated[str, typer.Option(help="how far to go, as clock=value, such as steps=63000")],
+    source: Annotated[
+        str | None,
+        typer.Option(
+            help="where the parents' tracked folders are: s3://bucket/prefix, or a runs "
+            "directory; default: where runs are written on this computer, else the "
+            "machine that last ran the parent"
+        ),
+    ] = None,
+    ordinal: Annotated[
+        int | None, typer.Option(help="the parent's checkpoint to start from; default: its latest")
+    ] = None,
+    cohort: Annotated[
+        str | None, typer.Option(help="the new cohort's name, when continuing a cohort")
+    ] = None,
+    max_usd: Annotated[str | None, typer.Option(help="the new cohort's dollar ceiling")] = None,
+) -> None:
+    """Go past a run's target from a checkpoint it recorded. This makes a new run with a parent."""
+    # Continuation joins the launcher's runs with tracking's checkpoints.
+    import tempfile
+    from decimal import Decimal
+
+    from etude.carriage import put_back
+    from etude.jobs import continue_from
+    from etude.launch.listing import resolve_runs, show_runs
+    from etude.run.listing import places
+    from etude.run.storage import default_root, storage_from_uri
+
+    scheduler = launch_cli.default()
+    storage = storage_from_uri(source or default_root())
+    parents = resolve_runs(scheduler, [run])
+    first = scheduler.record(parents[0])
+    with tempfile.TemporaryDirectory() as relayed:
+        if source is None:
+            # A parent that ran on another owned host: its records, from there.
+            here = places(storage)
+            for parent in parents:
+                files = None if parent in here else scheduler.held(parent)
+                if files is not None:
+                    put_back(Path(relayed) / parent, files)
+        again = [
+            continue_from(
+                scheduler.record(parent),
+                until,
+                source=relayed if (Path(relayed) / parent).is_dir() else storage,
+                ordinal=ordinal,
+            )
+            for parent in parents
+        ]
+    if first.cohort != run:
+        ids = [scheduler.queue(again[0], first.pool, rent=first.rent)]
+    elif cohort is None:
+        raise LauncherError("continuing a cohort needs --cohort with the new cohort's name")
+    else:
+        old = scheduler.cohort(run)
+        ids = list(
+            scheduler.queue_cohort(
+                cohort,
+                again,
+                first.pool,
+                rent=first.rent,
+                parallel=old.parallel,
+                max_usd=Decimal(max_usd) if max_usd else old.max_usd,
+            )
+        )
+    show_runs(scheduler, ids)
+
+
 # Each may reach a bucket, so it is a wait rather than a read.
 app.command()(kind(Kind.wait)(checkpoints))
 app.command()(kind(Kind.wait)(sync))
