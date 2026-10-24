@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from etude.eval.match import agent, environment, evaluate
-from etude.eval.query import connect
+from etude.eval.query import statsdb
 from etude.eval.records import Agent, Benchmark, Matchup, Model, RoundRobin
 from etude.eval.tournament import curves, hold, standings
 from etude.run.errors import EtudeError
@@ -24,6 +24,8 @@ WORLD = environment("duel", config={"world": "w6"})
 OTHER = environment("duel", config={"world": "w7"})
 DEALS = tuple({"deal": deal} for deal in range(3))
 DIRECT, SEARCH = Model(config={"search": 0}), Model(config={"search": 2})
+# The experiment trains the model and evaluates it.
+EXPERIMENT = "ppo"
 
 
 def scripted(tmp_path: Path, name: str, strength: int) -> Agent:
@@ -36,7 +38,7 @@ def scripted(tmp_path: Path, name: str, strength: int) -> Agent:
 def trained(tmp_path: Path, bucket: DirectoryStorage) -> list[ArtifactRef]:
     """Three checkpoints of one training run, delivered to the bucket."""
     run = track(
-        experiment="ppo",
+        experiment=EXPERIMENT,
         run="ppo-1",
         clocks=[Clock(name="updates", kind="step", meaning="optimizer updates")],
         directory=tmp_path / "trainer",
@@ -74,7 +76,7 @@ def test_checkpoints_held_on_the_go_then_a_matchup_added_in_batch(tmp_path: Path
 
     def on_the_go(checkpoint: ArtifactRef, measured: MeasuredStorage, machine: str) -> int:
         # Each checkpoint's eval run starts on its own machine, with an empty disk.
-        held = hold(progress, checkpoint=checkpoint, play=play, storages=[measured],
+        held = hold(progress, experiment=EXPERIMENT, checkpoint=checkpoint, play=play, storages=[measured],
                     directory=tmp_path / "machines" / machine)  # fmt: skip
         return held.played
 
@@ -96,11 +98,17 @@ def test_checkpoints_held_on_the_go_then_a_matchup_added_in_batch(tmp_path: Path
     greedy = scripted(tmp_path, "greedy", 4)
     added = Matchup(name="search vs greedy", players=(SEARCH, greedy), conditions=DEALS, games=2)
     grown = progress.model_copy(update={"matchups": (*progress.matchups, added)})
-    batch = hold(grown, play=play, storages=[bucket], directory=tmp_path / "machines" / "batch")
+    batch = hold(
+        grown,
+        experiment=EXPERIMENT,
+        play=play,
+        storages=[bucket],
+        directory=tmp_path / "machines" / "batch",
+    )
     # Only the new matchup's matches, for every checkpoint held so far.
     assert (batch.played, batch.skipped) == (3 * len(DEALS), 0)
 
-    lines = {line.matchup: line for line in curves(connect(bucket), "anchors", table="plays",
+    lines = {line.matchup: line for line in curves(statsdb(EXPERIMENT, bucket), "anchors", table="plays",
                                                    value="won")}  # fmt: skip
     assert sorted(lines) == sorted(each.name for each in grown.matchups)
     for line in lines.values():
@@ -122,13 +130,20 @@ def test_a_batch_hold_skips_what_any_eval_run_of_its_environment_delivered(tmp_p
     progress = anchors(tmp_path)
     checkpoints = trained(tmp_path, bucket)
     for each in checkpoints:
-        hold(progress, checkpoint=each, play=play, storages=[bucket],
+        hold(progress, experiment=EXPERIMENT, checkpoint=each, play=play, storages=[bucket],
              directory=tmp_path / each.uri.rsplit("/", 1)[-1])  # fmt: skip
     measured = MeasuredStorage(bucket)
-    again = hold(progress, play=play, storages=[measured], directory=tmp_path / "batch")
+    again = hold(
+        progress,
+        experiment=EXPERIMENT,
+        play=play,
+        storages=[measured],
+        directory=tmp_path / "batch",
+    )
     assert again.played == 0
-    # One listing of the bucket and one of its own matches; each eval run's tournament.json.
-    assert (measured.listings, measured.requests) == (1 + 1, 3)
+    # One listing of the bucket and one of its own matches; each eval run's run.json and
+    # tournament.json.
+    assert (measured.listings, measured.requests) == (1 + 1, 3 + 3)
 
     # Eval runs held for no tournament already played a matchup about to be added:
     # two checkpoints' matches in this environment, the third's in another.
@@ -138,17 +153,20 @@ def test_a_batch_hold_skips_what_any_eval_run_of_its_environment_delivered(tmp_p
         ("adhoc", WORLD, checkpoints[:2]),
         ("elsewhere", OTHER, checkpoints[2:]),
     ):
-        evaluate(experiment=run, environment=world, play=play, run=run, storages=[bucket],
+        evaluate(experiment=EXPERIMENT, environment=world, play=play, run=run, storages=[bucket],
                  matches=[match for each in held for match in added.matches(each)],
                  directory=tmp_path / run)  # fmt: skip
     grown = progress.model_copy(update={"matchups": (*progress.matchups, added)})
     measured = MeasuredStorage(bucket)
-    batch = hold(grown, play=play, storages=[measured], directory=tmp_path / "batch")
+    batch = hold(
+        grown, experiment=EXPERIMENT, play=play, storages=[measured], directory=tmp_path / "batch"
+    )
     # Only the third checkpoint's: a match is reused by key within one environment.
     assert batch.played == len(DEALS)
-    # Each eval run is read once more: the two held for no tournament, by environment.json.
-    assert (measured.listings, measured.requests) == (1 + 1, 4 + 2)
-    lines = {line.matchup: line for line in curves(connect(bucket), "anchors", table="plays",
+    # Each eval run's run.json; the four held for the tournament by tournament.json, the
+    # two held for none by environment.json.
+    assert (measured.listings, measured.requests) == (1 + 1, 6 + 4 + 2)
+    lines = {line.matchup: line for line in curves(statsdb(EXPERIMENT, bucket), "anchors", table="plays",
                                                    value="won")}  # fmt: skip
     assert [p.matches for p in lines["search vs greedy"].points] == [len(DEALS)] * 3
 
@@ -159,16 +177,30 @@ def test_a_matchup_name_redefined_is_refused_by_a_batch_hold_and_on_read(
     bucket = DirectoryStorage(tmp_path / "bucket")
     first, second, _ = trained(tmp_path, bucket)
     progress = anchors(tmp_path)
-    hold(progress, checkpoint=first, play=play, storages=[bucket], directory=tmp_path / "a")
+    hold(
+        progress,
+        experiment=EXPERIMENT,
+        checkpoint=first,
+        play=play,
+        storages=[bucket],
+        directory=tmp_path / "a",
+    )
     changed = progress.matchups[0].model_copy(update={"games": 8})
     other = progress.model_copy(update={"matchups": (changed,)})
     # On the go reads nothing of the tournament, so the redefinition is played...
-    hold(other, checkpoint=second, play=play, storages=[bucket], directory=tmp_path / "b")
+    hold(
+        other,
+        experiment=EXPERIMENT,
+        checkpoint=second,
+        play=play,
+        storages=[bucket],
+        directory=tmp_path / "b",
+    )
     # ...and found by everything that reads it.
     with pytest.raises(EtudeError) as refused:
-        hold(other, play=play, storages=[bucket], directory=tmp_path / "c")
+        hold(other, experiment=EXPERIMENT, play=play, storages=[bucket], directory=tmp_path / "c")
     assert refused.value.code == "matchup_conflict"
-    db = connect(bucket)
+    db = statsdb(EXPERIMENT, bucket)
     assert db.sql("select conflict from tournaments").fetchall() == [("matchup_conflict",)]
     with pytest.raises(EtudeError) as refused:
         curves(db, "anchors", table="plays", value="won")
@@ -186,12 +218,12 @@ def test_a_hold_launched_on_a_machine_keeps_its_tournament_in_its_own_run(
         track = tmp_path / f"machine-{ordinal}" / "track"
         monkeypatch.setenv("ETUDE_RUN", f"anchors-eval-{ordinal}")
         monkeypatch.setenv("ETUDE_TRACK_DIR", str(track))
-        held = hold(progress, checkpoint=checkpoint, play=play)
+        held = hold(progress, experiment=EXPERIMENT, checkpoint=checkpoint, play=play)
         assert held.name == f"anchors-eval-{ordinal}"
         assert [path.name for path in track.iterdir()] == [held.name]
         shutil.copytree(track / held.name, bucket.root / "delivered" / held.name)
     monkeypatch.delenv("ETUDE_RUN")
-    lines = curves(connect(bucket), "anchors", table="plays", value="won")
+    lines = curves(statsdb(EXPERIMENT, bucket), "anchors", table="plays", value="won")
     assert sorted(line.matchup for line in lines) == sorted(m.name for m in progress.matchups)
     assert all([p.ordinal for p in line.points] == [1, 2, 3] for line in lines)
 
@@ -202,10 +234,18 @@ def test_a_retried_hold_finds_its_checkpoint_by_digest_wherever_it_lies(
     (checkpoint, *_) = trained(tmp_path, DirectoryStorage(tmp_path / "bucket"))
     progress = anchors(tmp_path)
     monkeypatch.setenv("ETUDE_RUN", "anchors-eval")
-    first = hold(progress, checkpoint=checkpoint, play=play, directory=tmp_path / "machine")
+    first = hold(
+        progress,
+        experiment=EXPERIMENT,
+        checkpoint=checkpoint,
+        play=play,
+        directory=tmp_path / "machine",
+    )
     # A second attempt is given the same file at another path.
     moved = checkpoint.model_copy(update={"uri": (tmp_path / "attempt-2" / "updates-100").as_uri()})
-    again = hold(progress, checkpoint=moved, play=play, directory=tmp_path / "machine")
+    again = hold(
+        progress, experiment=EXPERIMENT, checkpoint=moved, play=play, directory=tmp_path / "machine"
+    )
     assert first.played > 0
     assert (again.name, again.played, again.skipped) == ("anchors-eval", 0, first.played)
 
@@ -217,6 +257,7 @@ def test_a_round_robin_held_as_two_shares_stands_as_one(tmp_path: Path) -> None:
     halves = [
         hold(
             league,
+            experiment=EXPERIMENT,
             enter=finals,
             play=play,
             share=(k, 2),
@@ -225,14 +266,14 @@ def test_a_round_robin_held_as_two_shares_stands_as_one(tmp_path: Path) -> None:
         )  # fmt: skip
         for k in (0, 1)
     ]
-    one = hold(league, enter=finals, play=play, workers=2, storages=[whole],
+    one = hold(league, experiment=EXPERIMENT, enter=finals, play=play, workers=2, storages=[whole],
                directory=tmp_path / "machine")  # fmt: skip
     assert halves[0].name != halves[1].name
     # Every unordered pair once per deal.
     assert sum(half.played for half in halves) == one.played == 6 * len(DEALS)
 
     def table(storage: DirectoryStorage) -> list[tuple[str, str | None, float, int]]:
-        found = standings(connect(storage), "finals", table="plays", value="won")
+        found = standings(statsdb(EXPERIMENT, storage), "finals", table="plays", value="won")
         assert found.complete
         return [(e.name, e.opponent_name, e.value, e.matches) for e in found.entries]
 
@@ -249,14 +290,14 @@ def test_a_round_robin_held_as_two_shares_stands_as_one(tmp_path: Path) -> None:
 def test_a_tournament_of_the_same_name_with_other_rules_is_refused(tmp_path: Path) -> None:
     entrant = scripted(tmp_path, "s", 1)
     hold(RoundRobin(name="finals", environment=WORLD, conditions=DEALS, games=4),
-         enter=[entrant], play=play, directory=tmp_path)  # fmt: skip
+         experiment=EXPERIMENT, enter=[entrant], play=play, directory=tmp_path)  # fmt: skip
     others: list[Benchmark | RoundRobin] = [
         RoundRobin(name="finals", environment=WORLD, conditions=DEALS, games=8),
         Benchmark(name="finals", environment=WORLD),
     ]
     for other in others:
         with pytest.raises(EtudeError) as refused:
-            hold(other, play=play, directory=tmp_path)
+            hold(other, experiment=EXPERIMENT, play=play, directory=tmp_path)
         assert refused.value.code == "tournament_conflict"
 
 
@@ -268,19 +309,26 @@ def test_round_robin_shares_differ_by_at_most_one_and_count_matches_any_run_held
     bucket = DirectoryStorage(tmp_path / "bucket")
 
     def share(k: int) -> int:
-        return hold(league, enter=finals, play=play, share=(k, 4), storages=[bucket],
+        return hold(league, experiment=EXPERIMENT, enter=finals, play=play, share=(k, 4), storages=[bucket],
                     directory=tmp_path / f"machine-{k}").played  # fmt: skip
 
     # 18 matches dealt four ways; the fourth share is not played yet.
     assert [share(k) for k in range(3)] == [5, 5, 4]
     # A retry of a share deals it alike, and finds its part delivered.
     assert share(1) == 0
-    assert not standings(connect(bucket), "finals", table="plays", value="won").complete
+    assert not standings(statsdb(EXPERIMENT, bucket), "finals", table="plays", value="won").complete
     # Another tournament in the same environment plays the same matches...
     rematch = league.model_copy(update={"name": "rematch"})
-    hold(rematch, enter=finals, play=play, storages=[bucket], directory=tmp_path / "rematch")
+    hold(
+        rematch,
+        experiment=EXPERIMENT,
+        enter=finals,
+        play=play,
+        storages=[bucket],
+        directory=tmp_path / "rematch",
+    )
     # ...so the first is complete, each match counted once.
-    found = standings(connect(bucket), "finals", table="plays", value="won")
+    found = standings(statsdb(EXPERIMENT, bucket), "finals", table="plays", value="won")
     assert (found.complete, found.scheduled) == (True, 18)
     assert {e.matches for e in found.entries if e.opponent is not None} == {len(DEALS)}
 
@@ -295,9 +343,9 @@ def test_curves_of_checkpoints_no_training_run_recorded_follow_their_names(
         checkpoint = ArtifactRef(
             uri=f"s3://models/{name}", sha256=sha256(name.encode()).hexdigest()
         )
-        hold(progress, checkpoint=checkpoint, play=play, storages=[bucket],
+        hold(progress, experiment=EXPERIMENT, checkpoint=checkpoint, play=play, storages=[bucket],
              directory=tmp_path / name)  # fmt: skip
-    for line in curves(connect(bucket), "anchors", table="plays", value="won"):
+    for line in curves(statsdb(EXPERIMENT, bucket), "anchors", table="plays", value="won"):
         assert line.run is None
         assert [(p.name, p.ordinal) for p in line.points] == [
             ("updates-150.pt", None),

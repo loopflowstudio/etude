@@ -184,7 +184,9 @@ weights = Input(
     sha256="…",
     size_bytes=1048576,
 )
-check = evaluation(progress, play=play, checkpoint=weights, max_hours=0.5, max_usd=Decimal(1))
+check = evaluation(
+    progress, experiment="ppo", play=play, checkpoint=weights, max_hours=0.5, max_usd=Decimal(1)
+)
 ```
 
 The job type decides the command. Both return a `Job` whose command imports

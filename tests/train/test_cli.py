@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from etude.cli import main
-from etude.eval.query import connect
+from etude.eval.query import statsdb
 from etude.run.delivery import sync
 from etude.run.storage import DirectoryStorage
 from etude.train.records import Step
@@ -100,6 +100,6 @@ def test_checkpoints_are_listed_at_their_storage_address_while_the_run_goes_on(
         for step in (1, 2, 3)
     ]
     pytest.importorskip("duckdb")
-    recorded = connect(bucket).execute("select ordinal from training_checkpoints").fetchall()
+    recorded = statsdb("e", bucket).execute("select ordinal from training_checkpoints").fetchall()
     assert sorted(recorded) == [(1,), (2,), (3,)]
     run.finish()

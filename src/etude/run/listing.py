@@ -31,8 +31,13 @@ def places(storage: Storage) -> dict[str, list[str]]:
     source can hold several copies of a run, one per machine that wrote to it,
     and a bucket can hold a launcher's other files beside them.
     """
+    return run_folders(storage.keys(""))
+
+
+def run_folders(keys: Sequence[str]) -> dict[str, list[str]]:
+    """`places` from a listing already made, so a reader can list a source once."""
     found: dict[str, dict[str, None]] = {}
-    for key in storage.keys(""):
+    for key in keys:
         parts = key.split("/")
         for index in range(1, len(parts)):
             last = index == len(parts) - 1

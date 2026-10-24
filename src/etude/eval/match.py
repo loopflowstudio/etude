@@ -57,7 +57,7 @@ if TYPE_CHECKING:
 KIND = "evaluation"
 # Author table and column names: plain SQL identifiers. A leading underscore is Etude's.
 IDENTIFIER = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,62}$")
-# Etude's own tables, which `etude.eval.query.connect` builds beside the author's.
+# Etude's own tables, which `etude.eval.query.statsdb` keeps beside the author's.
 ETUDE_TABLES = (
     "runs",
     "agents",

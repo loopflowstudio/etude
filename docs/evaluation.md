@@ -1,9 +1,10 @@
 # Evaluation
 
 Play agents against each other in parallel workers, hand Etude whatever tables
-your game code produces, and query them with DuckDB. Tournaments arrange those
-eval runs: each checkpoint of a model through a benchmark's matchups as it trains, or
-hand-picked models in a round robin. Evaluation is independent of training.
+your game code produces, and query each experiment's results as one DuckDB
+database. Tournaments decide which matches to play: each checkpoint of a model
+through a benchmark's matchups as it trains, or hand-picked models in a round
+robin. Evaluation is independent of training.
 
 ```sh
 uv add 'etude-sdk[eval]'   # DuckDB, for writing and querying tables
@@ -11,7 +12,7 @@ uv add 'etude-sdk[eval]'   # DuckDB, for writing and querying tables
 
 ```python
 from etude.eval.match import Tables, agent, environment
-from etude.eval.query import connect
+from etude.eval.query import statsdb
 from etude.eval.records import Benchmark, Match, Matchup, Model, RoundRobin
 from etude.eval.tournament import curves, hold, standings
 
@@ -72,17 +73,17 @@ progress = Benchmark(
 )
 
 # On the go: as each checkpoint is saved, one small eval run plays every matchup.
-hold(progress, checkpoint=ref, play=play, storages=[bucket])
+hold(progress, experiment="ppo", checkpoint=ref, play=play, storages=[bucket])
 
 # Batch: add a matchup to the definition; holding with no checkpoint plays every
 # missing match, so the new line is played for every checkpoint held so far.
-hold(progress, play=play, workers=8, storages=[bucket])
+hold(progress, experiment="ppo", play=play, workers=8, storages=[bucket])
 
 # Batch: hand-picked models, each against every other.
 league = RoundRobin(name="finals-1", environment=world, conditions=deals, games=8)
-hold(league, enter=finals, play=play, workers=8, storages=[bucket])
+hold(league, experiment="ppo", enter=finals, play=play, workers=8, storages=[bucket])
 
-db = connect(bucket)  # or "s3://my-bucket/runs", or a directory
+db = statsdb("ppo", bucket)  # or "s3://my-bucket/runs", a directory, or nothing: ~/.etude/track
 for line in curves(db, "anchors", table="plays", value="score"):
     print(line.matchup, line.run, [(p.name, p.clocks, p.value) for p in line.points])
 for entry in standings(db, "finals-1", table="plays", value="score").entries:
@@ -96,7 +97,7 @@ db.sql("""select a.name, avg(score) from plays
 ```
 
 ```sh
-uv run etude reports eval --open   # every eval run under ~/.etude/track
+uv run etude reports eval --open   # a page per experiment with eval runs under ~/.etude/track
 uv run etude reports eval --watch 5 --open   # keep the page current as evals arrive
 ```
 
@@ -168,20 +169,25 @@ evaluate(
   the agents given once per condition; seat swaps belong inside `play`.
   `hold(round_robin)` then plays every pair of every entrant so far that no
   eval run delivered, such as a late entrant against the earlier ones.
+- **Held for an experiment.** A tournament only decides which matches to
+  play. `hold(..., experiment=...)` makes its eval run the experiment's, so
+  its results sit beside the experiment's training runs and their
+  checkpoints in the experiment's database.
 - **Stored in its eval runs.** Each eval run a `hold` starts keeps
   `tournament.json` in its own folder: the definition it was held with, and
   the checkpoint or entrants it added. A tournament is every eval run naming
   it, so a hold on a rented machine delivers its part like any other run, and
   many eval runs can grow one tournament at once.
 - **Reuse.** A match is the same wherever it is played, so within one
-  environment its results are reused by key: `curves`, `standings` and a
-  batch hold count a scheduled match that any eval run of the environment
-  holds, whether held for this tournament, another, or none. Each counts
-  once, from the eval run that recorded it last.
+  experiment and environment its results are reused by key: `curves`,
+  `standings` and a batch hold count a scheduled match that any of the
+  experiment's eval runs in the environment holds, whether held for this
+  tournament, another, or none. Each counts once, from the eval run that
+  recorded it last.
 - **Conflicts.** Another format, environment or round-robin rules under one
   name (`tournament_conflict`), or a matchup name defined two ways
   (`matchup_conflict`), is refused by a batch hold and by `curves` and
-  `standings`; `connect` reports it in the `tournaments` table.
+  `standings`; `statsdb` reports it in the `tournaments` table.
 - **Run names.** Under `etude launch` the eval run is the launched run
   (`ETUDE_RUN`), so `etude logs` and `status` lead to it and a retry resumes
   it, finding the same checkpoint (by digest) wherever the retry put it. Elsewhere it is named for the tournament and what is given; the same
@@ -192,9 +198,10 @@ evaluate(
   keeps its part.
 - **Cost.** Holding a checkpoint or entrants reads nothing of the
   tournament: it plays their matches. Holding nothing new (batch) lists each
-  place once and reads each eval run once (its `tournament.json`, or its
-  `environment.json` when it was held for no tournament), to play what the
-  tournament calls for and no eval run of its environment delivered.
+  place once and reads each eval run's `run.json` and, for the experiment's,
+  its `tournament.json` (or its `environment.json` when it was held for no
+  tournament), to play what the tournament calls for and none of the
+  experiment's eval runs in its environment delivered.
 - **`curves`** gives one line per matchup and training run: each checkpoint's
   name, ordinal, the clocks where its run stood when it saved it, and the
   first player's value with a 95% interval over whole matches. Checkpoints
@@ -238,7 +245,7 @@ checkout, and the checkpoint, which reaches the machine as the job's input,
 verified by digest. The input's name names the checkpoint, and its file is the
 `uri` of every model seat, which `play` opens. A round robin takes `enter=`
 agents instead. The eval run is the launched run, so its tables reach the
-machine's storage with the run's other files and `connect` finds them there.
+machine's storage with the run's other files and `statsdb` finds them there.
 Holding nothing new (batch) is refused: a launched job reads no other eval
 run. The job's environment needs `etude-sdk[eval]`; the rest is as for any
 [typed job](launcher.md#typed-jobs).
@@ -249,13 +256,22 @@ launching one evaluation job for every fifth checkpoint.
 
 ## Querying
 
-`connect` gives each of your tables across every eval run, beside Etude's own:
+`statsdb(experiment, store)` gives each of your tables across every eval run of
+the experiment, beside Etude's own:
 `runs` (with the tournament each was held for), `agents` (with a `config.KEY`
 column per scalar config key, dotted when nested), `matches`, `seats`,
 `groups`, `tournaments` (with any `conflict` among its eval runs), `schedule`
 (every match a tournament calls for, with its matchup and checkpoint) and
 `training_checkpoints` (every checkpoint a training run under the source
 recorded, joined to agents by `artifact`).
+
+The database is kept in a file under `ETUDE_HOME/statsdb`, one per
+experiment and store. Opening it lists the store once and reads only what
+arrived since it was last opened, so a query never waits on every result
+being read again. The store stays the authority: `statsdb(..., rebuild=True)`
+reads everything again, and a database from another Etude schema is rebuilt
+on its own. One process opens it at a time; another gets `statsdb_in_use`.
+Experiments are never joined: each has its own database.
 
 `compare(db, table=, value=, per=, where=, by=)` sets each subject against
 each opponent and against all: a seat's agent against the other seats'
