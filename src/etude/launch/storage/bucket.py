@@ -16,19 +16,17 @@ from etude.launch.records import BootstrapLinks, LauncherError, LogStream, Stora
 from etude.launch.schemas import (
     AttemptRecord,
     Bootstrap,
-    BucketAccess,
     Delivery,
     Inbox,
     Observation,
     Packet,
     Progress,
-    RunAccess,
     Work,
     progress_from_json,
 )
 from etude.launch.source import source_archive
 from etude.launch.storage.download import Cache, Download
-from etude.launch.storage.s3 import Bucket, Version
+from etude.launch.storage.s3 import Bucket, Grant, Version
 from etude.launch.storage.transport import attribute
 from etude.launch.usage import Transfer
 
@@ -85,31 +83,22 @@ class BucketJournal:
     def _run(self, run: str) -> str:
         return f"{self._prefix}/{run}/"
 
-    def _access(self, run: str) -> RunAccess:
-        """What a machine may write for one run; keys where AWS will issue them."""
-        folder = self._run(run)
-        keys = self._bucket.grant(folder, _GRANT_SECONDS, run)
-        return RunAccess(
-            form=self._bucket.post_form(folder, _GRANT_SECONDS),
-            bucket=None
-            if keys is None
-            else BucketAccess(
-                name=self._bucket.name,
-                region=self._bucket.region,
-                host=self._bucket.host,
-                keys=keys,
-            ),
-        )
+    def _access(self, run: str) -> Grant:
+        """What a machine may write for one run: everything under its folder."""
+        return self._bucket.grant(self._run(run), _GRANT_SECONDS, run)
 
     def prepare(self, packet: Packet, *, expires_at: datetime | None = None) -> BootstrapLinks:
         with attribute(session=packet.session, purpose="control"):
             root = self._session(packet.session)
+            # Grants first: where none can be issued, nothing is written and nothing rented.
+            out = self._bucket.grant(root + "out/", _GRANT_SECONDS, packet.session)
+            runs = {work.run: self._access(work.run) for work in packet.work}
             self._bucket.put(root + "packet.json", packet.model_dump_json().encode(), once=True)
             bootstrap = Bootstrap.model_validate(
                 {
                     "packet": packet.model_dump_json(),
-                    "form": self._bucket.post_form(root + "out/", _GRANT_SECONDS),
-                    "runs": {work.run: self._access(work.run) for work in packet.work},
+                    "out": out,
+                    "runs": runs,
                     "inbox_url": self._bucket.get_url(root + "inbox.json", _GRANT_SECONDS),
                     "fetch": self._fetches(packet.session, packet.work),
                     "restore": self._restore(packet.work),

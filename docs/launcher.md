@@ -155,18 +155,44 @@ A machine you own is reached by SSH. A machine you rent starts itself.
 The standard-library guardian starts first, using bare Python; its deadline and
 pod deletion do not depend on installing or importing client dependencies.
 
-Owned hosts keep records on their disk unless `--storage` is supplied. Machines
-writing to a storage receive scoped links and a write-only form, valid thirteen
-hours. They never receive the launcher's own account or bucket keys. When the
-launcher's AWS keys belong to an IAM user allowed `sts:GetFederationToken`, the
-machine also receives temporary keys, valid the same thirteen hours, that can
-write, upload in parts and delete under the folders of the runs it is given,
-and nowhere else; each run's keys come with its work. With them a checkpoint of any size is sent in 64 MB parts
-without being held in memory, and metric blocks that a larger block has
-replaced are deleted. Without them, or once they expire, the form alone is
-used: files up to 5 GB, read whole into memory, and nothing deleted. RunPod
-supplies a separate self key for deletion. Job environments exclude all of
-these keys; jobs currently run under the same account as the worker, so the
+Owned hosts keep records on their disk unless `--storage` is supplied. A
+storage is an S3 or a Cloudflare R2 bucket, with keys from the launcher's
+environment:
+
+```sh
+etude storage add west --bucket BUCKET --prefix etude/launch --region us-west-2
+etude storage add r2 --bucket BUCKET --prefix etude/launch --provider r2
+```
+
+```python
+from etude.launch.records import Storage
+
+Storage(name="r2", bucket="BUCKET", prefix="etude/launch", provider="r2")
+```
+
+| Provider | Launcher environment |
+| --- | --- |
+| `s3` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` |
+| `r2` | `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_API_TOKEN` |
+
+Machines writing to a storage receive scoped links and a grant for each folder
+they write, valid thirteen hours: their session's `out/` and the folder of
+each run they are given, whose grant comes with its work. They never receive
+the launcher's own account or bucket keys. A grant holds temporary keys that
+can write, upload in parts and delete under that folder and nowhere else, so a
+checkpoint of any size is sent in 64 MB parts without being held in memory,
+and metric blocks that a larger block has replaced are deleted.
+
+- **R2** issues the keys through Cloudflare's API with `R2_API_TOKEN`; they can
+  also read the folder. R2 has no upload forms, so a launch whose keys cannot
+  be issued fails before anything is rented.
+- **S3** issues them only when the launcher's keys belong to an IAM user
+  allowed `sts:GetFederationToken`, so a grant also holds a write-only form.
+  Without keys, or once they expire, the form alone is used: files up to 5 GB,
+  read whole into memory, and nothing deleted.
+
+RunPod supplies a separate self key for deletion. Job environments exclude all
+of these keys; jobs currently run under the same account as the worker, so the
 temporary keys are kept in the courier's memory and never written to disk.
 
 ## Typed jobs
@@ -359,8 +385,8 @@ etude worker --bootstrap URL --root /path/to/sessions
 ```
 
 `DIRECTORY` already contains the rental packet and source files. A
-bootstrap link supplies the packet, source links, inbox link and scoped upload
-form. The worker opens no launcher database. A bootstrap worker carries records
+bootstrap link supplies the packet, source links, inbox link and the grants
+for its folders. The worker opens no launcher database. A bootstrap worker carries records
 to the bucket; on RunPod it deletes its own pod when delivery finishes, with an
 independent guardian bounding its lifetime. Supplying links for machines Etude
 did not make is outside this build.
@@ -1325,12 +1351,10 @@ limit. Tracking's separate `Run.finish(timeout=10)` remains independently config
 ## Transfer usage and verified retrieval
 
 ```python
-from datetime import UTC, datetime
-from decimal import Decimal
 from pathlib import Path
 
 from etude.launch.client import fetch, usage
-from etude.launch.usage import Rates, Usage
+from etude.launch.usage import R2, S3_US_WEST_2, Usage
 
 # Wait: fetch verifies the retained transport SHA256 and length before publication.
 first = fetch(run, "checkpoint.pt", Path("results/first"))
@@ -1356,19 +1380,12 @@ for event in (*report.events, *report.shared_events):
         event.received_bytes,
     )
 
-# An explicit download/request scenario, not an AWS invoice or a rental cap.
-# These are illustrative rates, not a current provider price quotation.
-rates = Rates(
-    as_of=datetime(2026, 10, 18, tzinfo=UTC),
-    description="illustrative output-download route",
-    download_usd_per_gb=Decimal("0.09"),
-    request_usd_per_1000=Decimal("0.0004"),
-)
+# A download/request scenario at dated list prices, not an invoice or a rental cap.
 outputs = Usage(
     observed_at=report.observed_at,
     events=tuple(e for e in report.events if e.purpose == "result"),
 )
-print(outputs.estimate(rates))
+print(outputs.estimate(S3_US_WEST_2), outputs.estimate(R2))
 ```
 
 `etude usage --run RUN` reads the same retained evidence. `observed_at` is the

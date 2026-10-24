@@ -92,13 +92,27 @@ class Storage(Record):
     """A named place in a bucket where sessions keep their packets, logs and outputs.
 
     It never changes once added, because live sessions are read from it.
-    Its keys come from the environment of whoever runs the launcher.
+    Its keys come from the environment of whoever runs the launcher
+    (`etude.launch.storage.s3.open_bucket`): an R2 bucket's account is
+    `R2_ACCOUNT_ID`, so no account is recorded here.
     """
 
     name: str
     bucket: str
     prefix: str  # the folder in that bucket its sessions live under
-    region: str  # the bucket's region
+    provider: Literal["s3", "r2"] = "s3"
+    region: str | None = None  # an S3 bucket's region; R2 has none
+
+    @model_validator(mode="after")
+    def _region_where_needed(self) -> Storage:
+        if (self.provider == "s3") != (self.region is not None):
+            raise ValueError("an S3 storage needs its region, and an R2 storage takes none")
+        return self
+
+    @property
+    def uri(self) -> str:
+        """Where it is, as tracking names a bucket folder: `s3://BUCKET/PREFIX` or `r2://...`."""
+        return f"{self.provider}://{self.bucket}/{self.prefix}"
 
 
 class Image(Record):

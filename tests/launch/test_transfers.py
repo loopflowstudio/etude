@@ -28,14 +28,22 @@ from etude.launch.logging import log_to
 from etude.launch.providers.runpod import pod
 from etude.launch.records import Job, Output, Storage
 from etude.launch.scheduler import Scheduler
-from etude.launch.schemas import AttemptRecord, Delivery, Inbox, Progress, Result, RunAccess
+from etude.launch.schemas import AttemptRecord, Delivery, Inbox, Progress, Result
 from etude.launch.storage import download
 from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.download import Cache, Download
 from etude.launch.storage.files import RESULT
-from etude.launch.storage.s3 import Bucket, Keys, PostForm, Reply, StorageUnavailable, _send
+from etude.launch.storage.s3 import (
+    Bucket,
+    Grant,
+    Keys,
+    PostForm,
+    Reply,
+    StorageUnavailable,
+    _send,
+)
 from etude.launch.storage.transport import attribute, observe
-from etude.launch.usage import Access, Rates, Transfer, Usage, reconcile
+from etude.launch.usage import R2, S3_US_WEST_2, Access, Transfer, Usage, reconcile
 from etude.launch.worker.courier import Courier
 from tests.launch.counting import Counting, Counts
 from tests.launch.fake import bench
@@ -282,7 +290,7 @@ def test_download_inherits_caller_allowance(http: HTTP, tmp_path: Path) -> None:
     with limit_time(600):
         courier = Courier(
             home,
-            PostForm(url=http.url + "/upload", prefix="out/", fields={}),
+            Grant(prefix="out/", form=PostForm(url=http.url + "/upload", fields={})),
             "unused",
             send,
         )
@@ -411,15 +419,11 @@ def test_cost_scenario_and_safe_access_reconciliation(http: HTTP, tmp_path: Path
         events.clear()
         cache.fetch(http.source(), tmp_path / "warm")
     warm = Usage(events=tuple(events), observed_at=datetime.now(UTC))
-    rates = Rates(
-        as_of=datetime(2026, 10, 18, tzinfo=UTC),
-        description="synthetic route",
-        download_usd_per_gb=Decimal("0.09"),
-        request_usd_per_1000=Decimal("0.0004"),
-    )
     assert (cold.received_bytes, cold.requests, warm.received_bytes, warm.requests) == (12, 3, 0, 0)
-    assert cold.estimate(rates) == Decimal("0.00000120108")
-    assert warm.estimate(rates) == 0
+    # Three reads and 12 bytes out: S3 bills the egress, R2 only the reads.
+    assert cold.estimate(S3_US_WEST_2) == Decimal("0.00000120108")
+    assert cold.estimate(R2) == Decimal("0.00000108")
+    assert warm.estimate(S3_US_WEST_2) == warm.estimate(R2) == 0
     first = cold.events[0]
     row = Access(
         backend=first.backend,
@@ -527,10 +531,10 @@ def test_completed_workload_before_and_after(
     home.mkdir(parents=True)
     courier = Courier(
         home,
-        PostForm(url=http.url + "/upload", prefix=root + "out/", fields={}),
+        Grant(prefix=root + "out/", form=PostForm(url=http.url + "/upload", fields={})),
         http.url + "/inbox",
         runs={
-            run: RunAccess(form=PostForm(url=http.url + "/upload", prefix=f"p/{run}/", fields={}))
+            run: Grant(prefix=f"p/{run}/", form=PostForm(url=http.url + "/upload", fields={}))
             for run in runs
         },
     )
@@ -562,10 +566,9 @@ def test_completed_workload_before_and_after(
                     Delivery.model_validate(
                         {
                             "work": work.model_dump_json(round_trip=True),
-                            "access": RunAccess(
-                                form=PostForm(
-                                    url=http.url + "/upload", prefix=f"p/{work.run}/", fields={}
-                                )
+                            "access": Grant(
+                                prefix=f"p/{work.run}/",
+                                form=PostForm(url=http.url + "/upload", fields={}),
                             ),
                             "fetch": {},
                         }
@@ -701,14 +704,9 @@ def test_completed_workload_before_and_after(
     assert before.received_bytes - after.received_bytes == len(
         http.objects["/source"]
     ) + 1024**2 + 3 * len(payload)
-    rates = Rates(
-        as_of=datetime(2026, 10, 18, tzinfo=UTC),
-        description="synthetic same-route response bytes and supplied request counts",
-        download_usd_per_gb=Decimal("0.09"),
-        request_usd_per_1000=Decimal("0.0004"),
-    )
     assert (before.requests, after.requests) == (52, 49)
-    assert before.estimate(rates) - after.estimate(rates) == Decimal("0.00707908782")
+    saved = before.estimate(S3_US_WEST_2) - after.estimate(S3_US_WEST_2)
+    assert saved == Decimal("0.00707908782")
     assert after.requests == control.requests + bulk.requests
     own = [b.scheduler.usage(run=run) for run in runs]
     shared = {e.id: e for report in own for e in report.shared_events}
@@ -762,7 +760,9 @@ def test_worker_source_and_input_share_verified_transport_bytes(
     target = home / "sources/source.tar"
     target.parent.mkdir(parents=True)
     target.write_bytes(b"unverified stale input")
-    courier = Courier(home, PostForm(url=http.url + "/upload", prefix="out/", fields={}), "unused")
+    courier = Courier(
+        home, Grant(prefix="out/", form=PostForm(url=http.url + "/upload", fields={})), "unused"
+    )
     courier.fetch(
         {
             "worker-session/sources/source.tar": http.source(),
@@ -784,7 +784,7 @@ def test_unchanged_inbox_polls_leave_no_log_lines_or_usage(http: HTTP, tmp_path:
     home = tmp_path / "sessions" / "polled"
     (home / "stop").mkdir(parents=True)
     http.objects["/inbox"] = Inbox().model_dump_json().encode()
-    form = PostForm(url=http.url + "/upload", prefix="out/", fields={})
+    form = Grant(prefix="out/", form=PostForm(url=http.url + "/upload", fields={}))
     courier = Courier(home, form, http.url + "/inbox")
     log = tmp_path / "worker.log"
     with log_to(log):

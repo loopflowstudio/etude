@@ -10,6 +10,7 @@ from urllib.parse import parse_qs
 
 import pytest
 
+from etude.launch.records import Storage as Place
 from etude.launch.storage.s3 import (
     AlreadyThere,
     Bucket,
@@ -17,6 +18,7 @@ from etude.launch.storage.s3 import (
     Keys,
     Reply,
     StorageUnavailable,
+    open_bucket,
     post,
 )
 
@@ -119,8 +121,6 @@ def test_a_writing_form_is_limited_to_its_folder_and_its_time() -> None:
     sent = storage.asked[0][2] or b""
     assert b'name="key"\r\n\r\netude/r1/out/log\r\n' in sent and sent.count(b"line\n") == 1
     assert sent.index(b'name="file"') > sent.index(b'name="policy"')  # the file goes last
-    with pytest.raises(ValueError, match="outside"):
-        post(form, "etude/r2/out/log", b"", storage)
 
 
 GRANTED = (
@@ -131,10 +131,12 @@ GRANTED = (
 )
 
 
-def test_temporary_keys_are_asked_of_sts_for_one_folder_and_a_bounded_time() -> None:
+def test_an_s3_grant_asks_sts_for_keys_to_one_folder_and_brings_a_form() -> None:
     storage = Storage([Reply(status=200, body=GRANTED)])
-    keys = bucket(storage).grant("etude/r1/out/", 13 * 3600, "r1/with spaces")
-    assert keys == Keys(access_key="ASIA", secret_key="secret", session_token="token")
+    grant = bucket(storage).grant("etude/r1/out/", 13 * 3600, "r1/with spaces")
+    assert grant.bucket is not None and grant.form is not None
+    assert grant.bucket.keys == Keys(access_key="ASIA", secret_key="secret", session_token="token")
+    assert (grant.prefix, grant.bucket.host) == ("etude/r1/out/", "examplebucket.s3.amazonaws.com")
     ((method, url, body, headers),) = storage.asked
     assert (method, url) == ("POST", "https://sts.us-east-1.amazonaws.com/")
     assert "/us-east-1/sts/aws4_request" in headers["authorization"]
@@ -146,16 +148,62 @@ def test_temporary_keys_are_asked_of_sts_for_one_folder_and_a_bounded_time() -> 
     assert "s3:DeleteObject" in statement["Action"] and "s3:GetObject" not in statement["Action"]
 
 
-def test_no_temporary_keys_when_sts_refuses_or_the_caller_holds_temporary_keys() -> None:
-    assert (
-        bucket(Storage([Reply(status=403, body=b"<ErrorResponse/>")])).grant("p/", 3600, "r")
-        is None
-    )
+def test_an_s3_grant_is_a_form_alone_when_sts_refuses_or_the_caller_holds_temporary_keys() -> None:
+    refused = bucket(Storage([Reply(status=403, body=b"<ErrorResponse/>")])).grant("p/", 3600, "r")
+    assert refused.bucket is None and refused.form is not None
     unasked = Storage([])
     borrowed = Bucket(
         "b", "us-east-1", Keys(access_key="ASIA", secret_key="s", session_token="session"), unasked
     )
-    assert borrowed.grant("p/", 3600, "r") is None and unasked.asked == []
+    alone = borrowed.grant("p/", 3600, "r")
+    assert alone.bucket is None and alone.form is not None and unasked.asked == []
+
+
+def r2(storage: Storage, token: str | None = "cloudflare-token") -> Bucket:
+    return Bucket(
+        "manabot", "auto", KEYS, storage, clock=lambda: WHEN, account="0123abcd", token=token
+    )
+
+
+def test_an_r2_grant_is_cloudflare_keys_for_one_folder_and_no_form() -> None:
+    issued = {"accessKeyId": "temp", "secretAccessKey": "s", "sessionToken": "t"}
+    storage = Storage([Reply(status=200, body=json.dumps({"result": issued}).encode())])
+    grant = r2(storage).grant("launch/run1/", 13 * 3600, "run1")
+    assert grant.form is None and grant.bucket is not None
+    assert grant.bucket.keys == Keys(access_key="temp", secret_key="s", session_token="t")
+    assert (grant.bucket.host, grant.bucket.region) == (
+        "manabot.0123abcd.r2.cloudflarestorage.com",
+        "auto",
+    )
+    ((method, url, body, headers),) = storage.asked
+    assert (method, url) == (
+        "POST",
+        "https://api.cloudflare.com/client/v4/accounts/0123abcd/r2/temp-access-credentials",
+    )
+    assert headers["Authorization"] == "Bearer cloudflare-token"
+    assert json.loads(body or b"") == {
+        "bucket": "manabot",
+        "parentAccessKeyId": KEYS.access_key,
+        "permission": "object-read-write",
+        "ttlSeconds": 13 * 3600,
+        "prefixes": ["launch/run1/"],
+    }
+    # The machine's bucket signs for R2's region at R2's host.
+    held = Storage([Reply(status=200, body=b"")])
+    Bucket(
+        grant.bucket.name, grant.bucket.region, grant.bucket.keys, held, host=grant.bucket.host
+    ).put("launch/run1/x", b"x")
+    assert held.asked[0][1] == "https://manabot.0123abcd.r2.cloudflarestorage.com/launch/run1/x"
+    assert "/auto/s3/aws4_request" in held.asked[0][3]["authorization"]
+
+
+def test_an_r2_grant_that_cannot_be_issued_fails_rather_than_degrading() -> None:
+    with pytest.raises(StorageUnavailable, match="R2_API_TOKEN"):
+        r2(Storage([]), token=None).grant("p/", 3600, "r")
+    with pytest.raises(Denied):
+        r2(Storage([Reply(status=403, body=b"{}")])).grant("p/", 3600, "r")
+    with pytest.raises(StorageUnavailable, match="unreadable"):
+        r2(Storage([Reply(status=200, body=b'{"result": {}}')])).grant("p/", 3600, "r")
 
 
 def test_one_chunk_is_one_put_and_several_are_a_multipart_upload() -> None:
@@ -259,3 +307,22 @@ def test_startup_write_capability_is_method_and_object_specific() -> None:
     assert signature != parse_qs(read_url.split("?", 1)[1])["X-Amz-Signature"]
     assert signature != parse_qs(other_url.split("?", 1)[1])["X-Amz-Signature"]
     assert storage.asked == []
+
+
+def test_a_storage_opens_its_providers_bucket_with_keys_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_API_TOKEN"):
+        monkeypatch.setenv(name, "fixture")
+    for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"):
+        monkeypatch.setenv(name, "fixture")
+    monkeypatch.delenv("AWS_SESSION_TOKEN", raising=False)
+    r2 = open_bucket(Place(name="r", bucket="manabot", prefix="launch", provider="r2"))
+    s3 = open_bucket(Place(name="s", bucket="runs", prefix="launch", region="us-west-2"))
+    assert (r2.host, r2.region) == ("manabot.fixture.r2.cloudflarestorage.com", "auto")
+    assert (s3.host, s3.region) == ("runs.s3.us-west-2.amazonaws.com", "us-west-2")
+    monkeypatch.delenv("R2_ACCOUNT_ID")
+    with pytest.raises(StorageUnavailable, match="R2_ACCOUNT_ID"):
+        open_bucket(Place(name="r", bucket="manabot", prefix="launch", provider="r2"))
+    with pytest.raises(ValueError, match="region"):
+        Place(name="r", bucket="manabot", prefix="launch", provider="r2", region="us-west-2")

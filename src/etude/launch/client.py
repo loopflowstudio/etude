@@ -44,7 +44,7 @@ from etude.launch.scheduler import Scheduler
 from etude.launch.source import home
 from etude.launch.ssh import SSH, SSHJournal, SSHStart
 from etude.launch.storage.bucket import BucketJournal
-from etude.launch.storage.s3 import Bucket, Keys, Reply, _send
+from etude.launch.storage.s3 import Reply, _send, open_bucket
 from etude.launch.storage.transport import observe
 from etude.launch.usage import Usage
 
@@ -69,7 +69,7 @@ def _open(home: Path) -> Scheduler:
         if held.storage is None:
             raise LauncherError(f"on-demand {held.name!r} has no storage")
         storage = store.storage(held.storage)
-        bucket = Bucket(storage.bucket, storage.region, Keys.from_environment(), send)
+        bucket = open_bucket(storage, send)
         machines = RunPodMachines(
             store.provider(held.template.provider),
             held.template,
@@ -86,7 +86,7 @@ def _open(home: Path) -> Scheduler:
         journal = SSHJournal(connection)
         if machine.storage:
             storage = store.storage(machine.storage)
-            bucket = Bucket(storage.bucket, storage.region, Keys.from_environment(), send)
+            bucket = open_bucket(storage, send)
             return Executor(
                 OwnedMachine(machine.address),
                 SSHStart(connection),

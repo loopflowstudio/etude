@@ -18,6 +18,7 @@ from etude.launch.records import BootstrapLinks, LogStream, Offer
 from etude.launch.schemas import Observation, Packet, Work
 from etude.launch.startup import ProcessStart
 from etude.launch.storage.disk import DirectoryJournal
+from etude.launch.storage.s3 import StorageUnavailable
 
 _creation_check: ContextVar[Callable[[], None] | None] = ContextVar("creation_check", default=None)
 
@@ -160,7 +161,12 @@ class Executor:
                     "deadline": deadline - timedelta(seconds=min(packet.delivery_seconds, life))
                 }
             )
-        bootstrap = self.journal.prepare(packet, expires_at=deadline)
+        try:
+            bootstrap = self.journal.prepare(packet, expires_at=deadline)
+        except StorageUnavailable as error:
+            # Nothing has been asked of the provider: no machine can exist. An R2
+            # storage whose keys cannot be granted fails here, before any rental.
+            raise Refused(f"storage could not prepare the session: {error}") from error
         check_creation()
         machine = self.machines.create(
             MachineRequest(
