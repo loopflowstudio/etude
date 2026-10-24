@@ -34,7 +34,7 @@ from etude.launch.schemas import AttemptRecord, Bootstrap, Observation, Packet
 from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.disk import DirectoryJournal
 from etude.launch.storage.files import write
-from etude.launch.storage.s3 import Bucket, Keys, PostForm, Reply
+from etude.launch.storage.s3 import Bucket, Grant, Keys, PostForm, Reply
 from etude.launch.worker import courier as courier_module
 from etude.launch.worker.courier import Courier
 from etude.launch.worker.main import work
@@ -363,7 +363,7 @@ def test_courier_redacts_across_console_refreshes_before_retention(
     monkeypatch.setenv("FIXTURE_TOKEN", "fixture-sensitive-value")
     console = tmp_path / "session.log"
     retained = tmp_path / "worker.log"
-    courier = Courier(tmp_path, PostForm(url="unused", fields={}, prefix=""), "unused")
+    courier = Courier(tmp_path, Grant(prefix="", form=PostForm(url="unused", fields={})), "unused")
     with logging.log_to(retained):
         console.write_bytes((b"x" * LIMIT if oversized else b"error ") + b"fixture-sensitive-")
         courier.carry_out()
@@ -833,7 +833,8 @@ def test_log_capabilities_cover_final_delivery_but_not_extra_rental_time(
     links = journal.prepare(packet, expires_at=now + timedelta(seconds=300))
     for url in (links.log_url, links.worker_log_url):
         assert parse_qs(url.split("?", 1)[1])["X-Amz-Expires"] == ["300"]
-    assert len(storage.asked) == 3  # packet, inbox and bootstrap; signing makes no requests
+    # The session folder's grant, packet, inbox and bootstrap; signing makes no requests.
+    assert len(storage.asked) == 4
 
 
 @pytest.mark.parametrize("failure", ["receipt", "loop", "console", "none"])
@@ -852,7 +853,7 @@ def test_courier_owns_child_through_failure_cleanup_and_cached_restart(
     bootstrap = Bootstrap.model_validate(
         {
             "packet": packet.model_dump_json(),
-            "form": PostForm(url="unused", fields={}, prefix=""),
+            "out": Grant(prefix="", form=PostForm(url="unused", fields={})),
             "inbox_url": "unused",
         }
     )
@@ -1038,7 +1039,7 @@ def test_courier_leaves_collection_incomplete_when_child_exit_is_unconfirmed(
     bootstrap = Bootstrap.model_validate(
         {
             "packet": packet.model_dump_json(),
-            "form": PostForm(url="unused", fields={}, prefix=""),
+            "out": Grant(prefix="", form=PostForm(url="unused", fields={})),
             "inbox_url": "unused",
         }
     )

@@ -40,7 +40,7 @@ Runs are written to one place per computer, `~/.etude/track` (moved by
 `reports serve` read that place when given no source. So writing never chooses how it will
 be read: generate a page, or run the server, over the same files.
 `reports write`, `reports serve` and `checkpoints` take `--source`, a directory or
-`s3://bucket/prefix`, and find runs in it at any depth. Attempts on rented
+`s3://bucket/prefix` or `r2://bucket/prefix`, and find runs in it at any depth. Attempts on rented
 machines write to the same `PREFIX/RUN/` folder; pointing `--source` at the
 storage's prefix reads the whole run. The server
 has no login and listens on this computer only.
@@ -51,7 +51,9 @@ imports the other. Tracking is `etude.train` for training runs, built on
 `etude.run`: what every run shares (its declaration, files, storage and
 delivery).
 Install `etude-sdk[s3]` for tracking against a bucket; local tracking does not
-need boto3. Tracking commands read the paths supplied on this computer, even
+need boto3. `s3://` uses boto3's own configuration. `r2://` reaches Cloudflare
+R2 at `https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com` with `R2_ACCESS_KEY_ID`
+and `R2_SECRET_ACCESS_KEY`, as DuckDB's `r2://` does. Tracking commands read the paths supplied on this computer, even
 when a launcher controller is selected. Each command loads its own dependencies;
 help and the worker do not load NumPy.
 

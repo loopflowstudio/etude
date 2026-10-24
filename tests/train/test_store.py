@@ -17,7 +17,7 @@ from etude.run.delivery import RunFiles, StorageDestination, sync
 from etude.run.errors import EtudeError
 from etude.run.listing import runs
 from etude.run.records import Attempt, RunDeclaration, RunFile, SourceKey
-from etude.run.storage import DirectoryStorage, S3Storage, Storage, run_prefix
+from etude.run.storage import DirectoryStorage, S3Storage, Storage, run_prefix, storage_from_uri
 from etude.train.block import Builder
 from etude.train.manifest import Manifest, write_manifest
 from etude.train.read import buckets, read, read_all
@@ -753,3 +753,57 @@ def test_watched_reports_read_each_bucket_file_once_per_computer(tmp_path: Path)
         for _ in range(5):
             assert pages(S3Storage("etude-watched", client=client)) == first
         assert client.bytes == read_once
+
+
+def test_a_long_run_uploads_a_small_multiple_of_what_it_finally_stores(tmp_path: Path) -> None:
+    """Each fold uploads its new rows, never the run's whole history again."""
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    measured = MeasuredStorage(bucket)
+    run = track(
+        experiment="e",
+        run="r",
+        clocks=[Step("step", "steps")],
+        directory=tmp_path / "local",
+        segment_seconds=0.01,
+        storages=[measured],
+    )
+    for step in range(40_000):
+        run.log({"loss": 1 / (step + 1), "reward": float(step)}, step=step)
+        if step % 500 == 0:
+            time.sleep(0.02)  # many segments, so many folds and deliveries
+    run.finish()
+    stored = sum(len(bucket.get(key)) for key in bucket.keys(""))
+    (note,) = [key for key in bucket.keys("") if key.endswith(".removed")]
+    assert len(bucket.get(note).splitlines()) >= 5  # replaced blocks were delivered first
+    # A row travels as a tail, in a recent block and in its permanent block.
+    assert stored < measured.written <= 3 * stored
+
+
+def test_an_r2_uri_reaches_the_accounts_endpoint_with_r2_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in ("R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "AWS_ACCESS_KEY_ID"):
+        monkeypatch.delenv(name, raising=False)
+    with pytest.raises(EtudeError, match="r2_requires_r2_account_id"):
+        storage_from_uri("r2://manabot/runs")
+    monkeypatch.setenv("R2_ACCOUNT_ID", "fixture")
+    monkeypatch.setenv("R2_ACCESS_KEY_ID", "fixture-access")
+    monkeypatch.setenv("R2_SECRET_ACCESS_KEY", "fixture-secret")
+    # moto answers for this endpoint as it does for S3's own.
+    monkeypatch.setenv("MOTO_S3_CUSTOM_ENDPOINTS", "https://fixture.r2.cloudflarestorage.com")
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    with mock_aws():
+        storage = storage_from_uri("r2://manabot/runs")
+        assert isinstance(storage, S3Storage)
+        assert storage.client.meta.endpoint_url == "https://fixture.r2.cloudflarestorage.com"
+        assert storage.client.meta.region_name == "auto"
+        storage.client.create_bucket(
+            Bucket="manabot", CreateBucketConfiguration={"LocationConstraint": "auto"}
+        )
+        local = tmp_path / "local"
+        with track(experiment="e", run="r", clocks=[Step("step", "steps")], directory=local) as run:
+            run.log({"loss": 0.5}, step=1)
+        assert sync(local, storages=[storage]) == {}
+        assert storage.uri("r/run.json") == "r2://manabot/runs/r/run.json"
+        assert storage.name == "r2-manabot-runs"
+        assert read(storage_from_uri("r2://manabot/runs"), "e", "r").rows == 1

@@ -16,7 +16,7 @@ from pydantic import Field, FiniteFloat, Json, JsonValue
 
 from etude.launch.records import Cause, Input, Limit, Outcome, Output, Record, Runtime, Variable
 from etude.launch.storage.download import Download
-from etude.launch.storage.s3 import Keys, PostForm
+from etude.launch.storage.s3 import Grant
 from etude.launch.usage import Transfer
 
 
@@ -93,28 +93,10 @@ class Result(Record):
     clocks: dict[str, FiniteFloat] = Field(default_factory=dict)
 
 
-class BucketAccess(Record):
-    name: str
-    region: str
-    host: str
-    keys: Keys
-
-
-class RunAccess(Record):
-    """What a machine may write for one run: everything under that run's folder.
-
-    The form adds files of up to 5 GB. The keys, when AWS issued them, can
-    also send a large file in parts and delete; they expire before the form.
-    """
-
-    form: PostForm
-    bucket: BucketAccess | None = None
-
-
 class Bootstrap(Record):
     packet: Json[Packet]
-    form: PostForm  # the session's own folder: its receipt and end note
-    runs: dict[str, RunAccess] = Field(default_factory=dict)  # for the packet's work
+    out: Grant  # the session's own folder: its receipt, usage and end note
+    runs: dict[str, Grant] = Field(default_factory=dict)  # each run's folder, for the packet's work
     inbox_url: str
     fetch: dict[str, Download] = Field(default_factory=dict)
     restore: dict[str, str] = Field(default_factory=dict)  # see Delivery
@@ -122,7 +104,7 @@ class Bootstrap(Record):
 
 class Delivery(Record):
     work: Json[Work]
-    access: RunAccess
+    access: Grant  # the run's folder
     fetch: dict[str, Download] = Field(default_factory=dict)
     # Read links to what storage holds of a resumed run's folder, by RUN/KEY.
     restore: dict[str, str] = Field(default_factory=dict)

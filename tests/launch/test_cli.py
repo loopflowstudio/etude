@@ -348,7 +348,7 @@ def test_bootstrap_session_carries_records_without_a_launcher(
             "packet": packet.model_dump_json(),
             "fetch": {},
             "inbox_url": url + "/inbox",
-            "form": {"url": url + "/upload", "fields": {}, "prefix": "out/"},
+            "out": {"prefix": "out/", "form": {"url": url + "/upload", "fields": {}}},
         }
     ).encode()
     thread = Thread(target=server.serve_forever)

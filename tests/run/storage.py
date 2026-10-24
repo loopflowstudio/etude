@@ -17,15 +17,19 @@ class MeasuredStorage:
         self.requests = 0
         self.ranges = 0
         self.uploads = 0
+        self.written = 0  # bytes uploaded, replaced objects included
         self.listings = 0
 
     def put(self, key: str, data: bytes) -> None:
         self.storage.put(key, data)
         self.uploads += 1
+        self.written += len(data)
 
     def put_file(self, key: str, path: Path) -> None:
+        size = path.stat().st_size
         self.storage.put_file(key, path)
         self.uploads += 1
+        self.written += size
 
     def delete(self, key: str) -> bool:
         return self.storage.delete(key)

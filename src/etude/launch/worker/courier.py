@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import math
 import os
@@ -38,14 +39,14 @@ from etude.launch.logging import (
     write_log,
 )
 from etude.launch.records import Diagnostic
-from etude.launch.schemas import AttemptRecord, Bootstrap, Inbox, RunAccess
+from etude.launch.schemas import AttemptRecord, Bootstrap, Inbox
 from etude.launch.storage.download import Cache, Download, Mismatch
 from etude.launch.storage.files import RESULT, read_result, write
 from etude.launch.storage.s3 import (
     PART_BYTES,
     Bucket,
     Denied,
-    PostForm,
+    Grant,
     Send,
     StorageUnavailable,
     Version,
@@ -91,17 +92,45 @@ def _chunks(stream: IO[bytes]) -> Iterator[bytes]:
         yield chunk
 
 
-class _Run:
-    """Where one run's files go, and with what this machine may write them."""
+class _Folder:
+    """Where one granted folder's files go, and with what this machine may write them."""
 
-    def __init__(self, access: RunAccess, send: Send) -> None:
-        self.form = access.form
-        granted = access.bucket
+    def __init__(self, grant: Grant, send: Send) -> None:
+        self.prefix, self.form, self._send = grant.prefix, grant.form, send
+        granted = grant.bucket
         self.bucket = (
             None
             if granted is None
             else Bucket(granted.name, granted.region, granted.keys, send, host=granted.host)
         )
+
+    def write(self, key: str, stream: IO[bytes]) -> None:
+        """Store one object from an open file, read from its start: in parts with keys."""
+        if self.bucket is not None:
+            try:
+                self.bucket.put_parts(self.prefix + key, _chunks(stream))
+                return
+            except Denied:
+                if self.form is None:
+                    raise  # R2: the keys were all there was
+                self.bucket = None  # the keys have run out; the form has not
+        assert self.form is not None  # a grant holds keys or a form
+        stream.seek(0)
+        post(self.form, self.prefix + key, stream.read(), self._send)
+
+    def write_bytes(self, key: str, body: bytes) -> None:
+        self.write(key, io.BytesIO(body))
+
+    def delete(self, key: str) -> bool:
+        """Remove an object; False when these keys cannot, or no keys were granted."""
+        if self.bucket is None:
+            return False
+        try:
+            self.bucket.delete(self.prefix + key)
+        except Denied:
+            self.bucket = None
+            return False
+        return True
 
 
 class Courier:
@@ -112,20 +141,21 @@ class Courier:
     folder as it is, by the rules the tracker's own shipper follows
     (`etude.carriage`), so every checkpoint the tracker records is in storage
     while the attempt still runs. Large files go in parts, and replaced
-    tracking files are deleted, where the run's access includes keys; with the
+    tracking files are deleted, where the run's grant includes keys; with a
     form alone, neither happens.
     """
 
     def __init__(
         self,
         home: Path,
-        form: PostForm,
+        out: Grant,
         inbox_url: str,
         send: Send = _send,
-        runs: dict[str, RunAccess] | None = None,
+        runs: dict[str, Grant] | None = None,
     ) -> None:
-        self._home, self._form, self._inbox_url, self._send = home, form, inbox_url, send
-        self._runs = {run: _Run(access, send) for run, access in (runs or {}).items()}
+        self._home, self._inbox_url, self._send = home, inbox_url, send
+        self._out = _Folder(out, send)  # the session's own folder
+        self._runs = {run: _Folder(grant, send) for run, grant in (runs or {}).items()}
         self._sent: dict[str, tuple[int, float]] = {}
         self._log_sent_at: dict[str, float] = {}
         self._console_position = 0
@@ -150,7 +180,7 @@ class Courier:
             # Delivering the journal is not itself journaled: each delivery would
             # change it and need another. A failed delivery raises to the caller.
             with observe(lambda raw: None):
-                post(self._form, self._form.prefix + "usage.jsonl", body, self._send)
+                self._out.write_bytes("usage.jsonl", body)
             self._usage_sent = len(body)
 
     def fetch(self, links: dict[str, Download]) -> None:
@@ -259,7 +289,7 @@ class Courier:
             attempt = entry.work.attempt
             target = self._home / "work" / f"{attempt}.json"
             if not target.exists():
-                self._runs.setdefault(entry.work.run, _Run(entry.access, self._send))
+                self._runs.setdefault(entry.work.run, _Folder(entry.access, self._send))
                 try:
                     self.fetch(entry.fetch)  # files precede executable work
                     self.restore(entry.restore)
@@ -272,18 +302,6 @@ class Courier:
                     raise
                 write(target, entry.work.model_dump_json())
 
-    def _write(self, run: str, key: str, stream: IO[bytes]) -> None:
-        """Store one object under the run's folder from an open file, read from its start."""
-        place = self._runs[run]
-        if place.bucket is not None:
-            try:
-                place.bucket.put_parts(place.form.prefix + key, _chunks(stream))
-                return
-            except Denied:
-                place.bucket = None  # the keys have run out; the form has not
-        stream.seek(0)
-        post(place.form, place.form.prefix + key, stream.read(), self._send)
-
     def _put(self, path: Path, run: str, key: str) -> None:
         stat = path.stat()
         seen = (stat.st_size, stat.st_mtime)
@@ -292,21 +310,15 @@ class Courier:
             return  # never replaced, so never sent again
         if sent != seen:
             with path.open("rb") as stream:
-                self._write(run, key, stream)
+                self._runs[run].write(key, stream)
             self._sent[f"{run}/{key}"] = seen
 
     def _clear(self, run: str, removed: list[str]) -> None:
         """Delete what the job retired, but only what this courier uploaded."""
-        place = self._runs[run]
         for key in removed:
-            if place.bucket is None:
-                return
             if f"{run}/{key}" not in self._sent:
                 continue
-            try:
-                place.bucket.delete(place.form.prefix + key)
-            except Denied:
-                place.bucket = None
+            if not self._runs[run].delete(key):
                 return
             del self._sent[f"{run}/{key}"]
 
@@ -432,7 +444,7 @@ def _run(
         home.mkdir(parents=True, exist_ok=True, mode=0o700)
         with (home / "courier-claim").open("x"):
             pass  # a restarted container must not run the session again
-        courier = Courier(home, bootstrap.form, bootstrap.inbox_url, send, bootstrap.runs)
+        courier = Courier(home, bootstrap.out, bootstrap.inbox_url, send, bootstrap.runs)
         for folder in ("stop", "work"):
             (home / folder).mkdir(exist_ok=True)
         write_log("source fetch", "starting")
@@ -446,7 +458,7 @@ def _run(
         startup_timeout()
         write_log("receipt upload", "publishing start intent")
         with limit_time(startup_timeout()):
-            post(courier._form, courier._form.prefix + "receipt", str(os.getpid()).encode(), send)
+            courier._out.write_bytes("receipt", str(os.getpid()).encode())
         startup_timeout()
         write_log("receipt upload", "confirmed")
         package_root = str(Path(__file__).resolve().parents[3])
@@ -530,7 +542,7 @@ def _finish_session(
             with limit_time(allowance):
                 courier.carry_out(final=True)
                 note = ended.read_text() if ended.exists() else _now().isoformat()
-                post(courier._form, courier._form.prefix + "ended", note.encode(), courier._send)
+                courier._out.write_bytes("ended", note.encode())
             write_log("final delivery", "completed")
             return
         except (StorageUnavailable, OSError) as error:

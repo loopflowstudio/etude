@@ -68,7 +68,8 @@ CREATE TABLE IF NOT EXISTS cohorts(
 CREATE TABLE IF NOT EXISTS providers(
   name TEXT PRIMARY KEY, kind TEXT NOT NULL, registry TEXT NOT NULL, storage TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS storages(
-  name TEXT PRIMARY KEY, bucket TEXT NOT NULL, prefix TEXT NOT NULL, region TEXT NOT NULL);
+  name TEXT PRIMARY KEY, bucket TEXT NOT NULL, prefix TEXT NOT NULL, provider TEXT NOT NULL,
+  region TEXT);
 CREATE TABLE IF NOT EXISTS pools(
   name TEXT PRIMARY KEY, off INTEGER NOT NULL DEFAULT 0,
   startup_seconds REAL, delivery_seconds REAL, log_seconds REAL);
@@ -113,7 +114,7 @@ CREATE INDEX IF NOT EXISTS attempts_session ON attempts(session);
 
 Fact = str | int | None
 # Changes with the schema. There are no migrations: a file from another version is refused.
-_VERSION = 9
+_VERSION = 10
 
 
 def _text(at: datetime | None) -> str | None:
@@ -393,7 +394,8 @@ class Database:
     def add_storage(self, storage: Storage) -> None:
         """Record a storage. Adding the same one again changes nothing; it never changes."""
         self._db.execute(
-            "INSERT OR IGNORE INTO storages VALUES (?,?,?,?)", tuple(storage.model_dump().values())
+            "INSERT OR IGNORE INTO storages VALUES (?,?,?,?,?)",
+            tuple(storage.model_dump().values()),
         )
         if self.storage(storage.name) != storage:
             raise LauncherError(f"storage {storage.name!r} already exists with other settings")
