@@ -50,10 +50,12 @@ import tempfile
 import warnings
 from bisect import bisect_left
 from collections.abc import Iterator, Sequence
+from functools import cache
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, cast
 
 import numpy as np
+import numpy.typing as npt
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
 from etude.eval.match import ETUDE_TABLES, IDENTIFIER, KIND, quote
@@ -664,6 +666,26 @@ def compare(
     return comparisons
 
 
+def _weights(n: int) -> npt.NDArray[np.int64]:
+    """How often each of `n` blocks is drawn in each replicate: fixed by the seed and `n` alone.
+
+    A report asks for thousands of estimates over a few matches each, so small
+    counts are drawn once per process (at most 33 MB for every count to 64).
+    """
+    return _kept_weights(n) if n <= 64 else _draw(n)
+
+
+def _draw(n: int) -> npt.NDArray[np.int64]:
+    return np.random.default_rng(SEED).multinomial(n, np.full(n, 1 / n), size=REPLICATES)
+
+
+@cache
+def _kept_weights(n: int) -> npt.NDArray[np.int64]:
+    drawn = _draw(n)
+    drawn.setflags(write=False)
+    return drawn
+
+
 def estimate(
     blocks: Sequence[tuple[float, float]],
 ) -> tuple[float, tuple[float, float] | None] | None:
@@ -682,7 +704,7 @@ def estimate(
     n = len(totals)
     if n < 2:
         return value, None
-    weights = np.random.default_rng(SEED).multinomial(n, np.full(n, 1 / n), size=REPLICATES)
+    weights = _weights(n)
     resampled = weights @ denominators
     kept = resampled > 0
     ratios = (weights @ numerators)[kept] / resampled[kept]
