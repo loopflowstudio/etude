@@ -87,7 +87,10 @@ Rules a caller can rely on:
 - **No ordering rule in storage.** A repeated or lower clock value is accepted
   and kept. A read returns the latest write per clock value. A clock that goes
   backwards within one process warns once, and raises under `strict=True`; a
-  resume from an earlier checkpoint is a new process and does neither.
+  resume from an earlier checkpoint is a new process and does neither. A
+  resumed process's rows replace earlier attempts' from the run's latest
+  checkpoint on; one restored from elsewhere, such as its own snapshot, passes
+  `track(..., resumed_at={"step": 13})`.
 - **Continuation is lineage.** A run may name a parent run, a clock and the
   value it continues from. The parent is unchanged. The report does not join
   the two yet. A launched continuation (`etude continue`) declares this

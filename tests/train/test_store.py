@@ -492,6 +492,42 @@ def test_attempt_resume_cuts_metrics_even_when_the_new_attempt_omits_them(tmp_pa
     assert data.chart("value", "step").last[-1] == 100
 
 
+def test_a_process_restored_past_the_latest_checkpoint_says_where_it_stands(
+    tmp_path: Path,
+) -> None:
+    first = track(experiment="e", run="r", clocks=[Step("step", "steps")], directory=tmp_path)
+    for step in range(15):
+        first.log({"value": step}, step=step)
+        if step == 10:
+            (tmp_path / "model.pt").write_bytes(b"weights at 10")
+            first.checkpoint(tmp_path / "model.pt", step=10)
+    first.finish()
+
+    # Restored from its own snapshot at step 13, after the checkpoint at 10.
+    second = track(
+        experiment="e",
+        run="r",
+        clocks=[Step("step", "steps")],
+        directory=tmp_path,
+        resumed_at={"step": 13},
+    )
+    second.log({"value": 100}, step=14)
+    second.finish()
+    data = read(tmp_path, "e", "r")
+    assert data.attempts[-1].resumed_at == {"step": 13}
+    assert data.points("value", "step").x.tolist() == [*range(14), 14]
+    assert data.points("value", "step").y.tolist() == [*range(14), 100]
+
+    with pytest.raises(EtudeError, match="resumed_at_unknown_clock"):
+        track(
+            experiment="e",
+            run="r",
+            clocks=[Step("step", "steps")],
+            directory=tmp_path,
+            resumed_at={"seconds": 1},
+        )
+
+
 @pytest.mark.parametrize("backend", ["directory", "s3"])
 @pytest.mark.parametrize("logging", ["metric", "other", "none"])
 def test_checkpoint_resume_supersedes_before_first_logged_row(
