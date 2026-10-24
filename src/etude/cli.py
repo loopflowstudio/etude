@@ -77,6 +77,54 @@ def evaluations(
         raise typer.Exit(1)
 
 
+@app.command("eval")
+@kind(Kind.wait)
+def eval_experiment(
+    file: Annotated[Path, typer.Argument(help="a Python file defining eval(state)")],
+    source: Annotated[
+        str | None,
+        typer.Option(
+            help="where training and eval runs are: s3://bucket/prefix or a runs directory; "
+            "default: where runs are written on this computer"
+        ),
+    ] = None,
+    pool: Annotated[
+        str | None, typer.Option(help="launch on this pool of machines you own")
+    ] = None,
+    rent: Annotated[
+        str | None, typer.Option(help="launch on machines rented from this on-demand")
+    ] = None,
+    watch: Annotated[
+        float | None, typer.Option(min=1, help="pass again every SECONDS until Ctrl-C")
+    ] = None,
+) -> None:
+    """Play, or with --pool or --rent launch, the matches eval(state) wants that no run delivered."""
+    # Experiments join tracking, evaluation and the launcher.
+    import time
+
+    from etude.experiment import advance, read_experiment
+    from etude.run.storage import default_root, storage_from_uri
+
+    eval_function = read_experiment(file)
+    storage = storage_from_uri(source or default_root())
+    try:
+        while True:
+            for done in advance(eval_function, source=storage, pool=pool, rent=rent):
+                line = f"{done.tournament}: {done.new} new"
+                if done.running:
+                    line += f", {done.running} already running"
+                if done.launched:
+                    line += f", launched {done.launched}"
+                elif done.played:
+                    line += f", {done.played} played"
+                print(line, flush=True)
+            if watch is None:
+                break
+            time.sleep(watch)
+    except KeyboardInterrupt:
+        pass
+
+
 @app.command("continue")
 @kind(Kind.wait)
 def continue_run(

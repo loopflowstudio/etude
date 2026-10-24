@@ -255,12 +255,87 @@ verified by digest. The input's name names the checkpoint, and its file is the
 agents instead. The eval run is the launched run, so its tables reach the
 machine's storage with the run's other files and `statsdb` finds them there.
 Holding nothing new (batch) is refused: a launched job reads no other eval
-run. The job's environment needs `etude-sdk[eval]`; the rest is as for any
+run; an experiment's pass decides what is new first ([Experiments](#experiments)).
+The job's environment needs `etude-sdk[eval]`; the rest is as for any
 [typed job](launcher.md#typed-jobs).
 
-Next: evaluating as training goes, declared on the training job as
-`training(..., evaluations=[evaluation(...)], every=5)`, with the controller
-launching one evaluation job for every fifth checkpoint.
+## Experiments
+
+An experiment file says what to evaluate given what exists, and `etude eval`
+plays whatever that calls for and no eval run has delivered. Run it while
+training goes, after it ends, or with a matchup added later: each pass looks
+again.
+
+```python
+# experiment.py
+from etude.eval.records import Benchmark, Matchup
+from etude.experiment import ExperimentState
+from etude.jobs import evaluation
+from etude.launch.records import Job
+
+# direct is a Model, heuristic an agent, deals the conditions
+from arena import deals, direct, heuristic, play, world
+
+
+def eval(state: ExperimentState) -> list[Job]:
+    run = state.run("ppo-1")
+    rated = run.checkpoints.every(5)  # every fifth checkpoint by ordinal
+    pairs = [
+        Matchup(
+            name=f"{new.name} vs {old.name}",
+            tags=("consecutive",),
+            players=(new.agent(direct), old.agent(direct)),
+            conditions=deals,
+            games=8,
+        )
+        for old, new in zip(rated, rated[1:])
+    ]
+    if run.final is not None:  # once training has finished
+        pairs += [
+            Matchup(
+                name=f"final vs {old.name}",
+                tags=("endpoint",),
+                players=(run.final.agent(direct), old.agent(direct)),
+                conditions=deals,
+                games=8,
+            )
+            for old in rated[:-1]
+        ]
+    anchors = Matchup(name="vs heuristic", players=(direct, heuristic), conditions=deals, games=8)
+    ladder = Benchmark(name="ladder", environment=world, matchups=(anchors, *pairs))
+    return [evaluation(ladder, experiment="ppo", play=play, checkpoints=rated, workers=8,
+                       max_hours=1)]
+```
+
+```sh
+etude eval experiment.py --source s3://bucket/etude/launch               # play here
+etude eval experiment.py --source s3://bucket/etude/launch --rent cpu8   # launch
+etude eval experiment.py --source s3://bucket/etude/launch --rent cpu8 --watch 600
+```
+
+- **State.** `state.runs` is every training run under the source: its name,
+  experiment, whether it is `running`, `finished` or `failed`, and the
+  checkpoints it stored, each with its ordinal, clocks and tags.
+  `Checkpoints` is a tuple, so a slice works too; `every(n)`, `at(clock,
+  *values)` and `tagged(tag)` choose by ordinal, coordinate or tag, and
+  `final` is the last checkpoint once a run has finished.
+- **What `eval` returns.** Evaluation jobs holding a benchmark for the
+  checkpoints it chose. Seat a chosen checkpoint with `checkpoint.agent(model)`
+  to make a matchup of fixed agents, played once rather than per checkpoint.
+  `tags` mark matchups for readers, such as pairs a rating fit leaves out.
+- **A pass.** For each job, the matches its benchmark calls for that no eval
+  run of its experiment in its environment delivered. Without `--pool` or `--rent` they are
+  played here and delivered to the source. With one, a job is launched to play
+  exactly those, with each checkpoint they seat as an input from its training
+  run's folder; the machine's storage must deliver to the source.
+- **Not twice.** A launched pass is named for its matches and kept in
+  `ETUDE_HOME/experiments/launched.json`, so a later pass neither launches it
+  again nor plays its matches while it runs. A pass that finds one of them
+  failed stops, so a watch never spends again unattended; look, then rerun.
+- **Changing the design.** A new matchup or benchmark is played for every
+  checkpoint chosen, including those of finished runs, and a match another of
+  the experiment's tournaments already played is reused. Redefining a matchup under the same
+  name is refused (`matchup_conflict`): give the new one a new name.
 
 ## Querying
 

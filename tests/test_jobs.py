@@ -14,7 +14,7 @@ import pytest
 
 from etude.eval.match import agent, environment
 from etude.eval.query import statsdb
-from etude.eval.records import Benchmark, Matchup, Model
+from etude.eval.records import Benchmark, Matchup, Model, RoundRobin
 from etude.jobs import JobOptions, evaluation
 from etude.launch.errors import LauncherError
 from etude.launch.job_file import read_job_file
@@ -229,8 +229,19 @@ def test_an_evaluation_job_holds_a_benchmark_for_the_checkpoint_it_is_given(
 
 def test_an_evaluation_holds_what_its_tournament_takes() -> None:
     progress = Benchmark(name="anchors", environment=environment("duel"))
-    with pytest.raises(LauncherError, match="give it a checkpoint"):
-        evaluation(progress, experiment="ppo", play=lambda match: {}, max_hours=0.1, repo=None)
+    entrant = agent("fixed", code=[Path(__file__)])
+    with pytest.raises(LauncherError, match="give it checkpoints, no entrants"):
+        evaluation(
+            progress,
+            experiment="ppo",
+            play=lambda match: {},
+            enter=[entrant],
+            max_hours=0.1,
+            repo=None,
+        )
+    league = RoundRobin(name="league", environment=environment("duel"), conditions=({},), games=1)
+    with pytest.raises(LauncherError, match="give it entrants"):
+        evaluation(league, experiment="ppo", play=lambda match: {}, max_hours=0.1, repo=None)
 
 
 def test_the_job_command_starts_by_importing_no_other_part_of_etude() -> None:

@@ -12,7 +12,7 @@ beside Etude's own tables:
 | `seats` | run, match, player, agent |
 | `groups` | run, match, group, player |
 | `tournaments` | tournament, format (`benchmark` or `round_robin`), environment, conflict |
-| `schedule` | tournament, match, matchup and checkpoint (artifact digest) of a benchmark's match; no checkpoint for a matchup of fixed agents |
+| `schedule` | tournament, match, matchup, checkpoint (artifact digest) and the matchup's tags of a benchmark's match; no checkpoint for a matchup of fixed agents |
 | `training_checkpoints` | run, experiment, ordinal, artifact, wall_ms, clocks (where each stood) |
 
 A tournament is assembled from the experiment's eval runs naming it in their
@@ -431,7 +431,7 @@ def _summaries(db: duckdb.DuckDBPyConnection) -> None:
     )
     db.execute(
         "create or replace table schedule (tournament VARCHAR, match VARCHAR, matchup VARCHAR,"
-        " checkpoint VARCHAR)"
+        " checkpoint VARCHAR, tags VARCHAR[])"
     )
     by_name: dict[str, list[TournamentRun]] = {}
     for run in sorted(held):
@@ -452,8 +452,11 @@ def _summaries(db: duckdb.DuckDBPyConnection) -> None:
         )  # fmt: skip
         _insert(
             db,
-            "insert into schedule values (?, ?, ?, ?)",
-            [[name, each.match.key, each.matchup, each.checkpoint] for each in schedule],
+            "insert into schedule values (?, ?, ?, ?, ?)",
+            [
+                [name, each.match.key, each.matchup, each.checkpoint, list(each.tags)]
+                for each in schedule
+            ],
         )
         scheduled += schedule
     # Agents of matches not yet held, so every scheduled agent has a name.

@@ -254,6 +254,9 @@ class Matchup(Record):
     # Mapping, so a literal like `{"deal": 1}` type-checks as a condition.
     conditions: tuple[Mapping[str, JsonValue], ...] = Field(min_length=1)
     games: int = Field(ge=1)
+    # The author's labels, such as "consecutive" or "held-out", for choosing
+    # which matchups a reading counts; `schedule` carries them.
+    tags: tuple[Name, ...] = ()
 
     @property
     def fixed(self) -> bool:
@@ -331,10 +334,19 @@ class TournamentRun(Record):
     """`RUN/tournament.json`: the tournament an eval run was held for, and what it added."""
 
     tournament: Benchmark | RoundRobin
-    checkpoint: ArtifactRef | None = None
+    checkpoints: tuple[ArtifactRef, ...] = ()
     entrants: tuple[Agent, ...] = ()
     # (k, n): of the schedule's keys in sorted order, the run plays every nth from the kth.
     share: tuple[int, int] = (0, 1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def one_checkpoint(cls, data: Any) -> Any:
+        # Files from etude-sdk 0.2 name at most one checkpoint, as `checkpoint`.
+        if isinstance(data, dict) and "checkpoint" in data:
+            given = data.pop("checkpoint")
+            data = {**data, "checkpoints": [] if given is None else [given]}
+        return data
 
 
 class Scheduled(Record):
@@ -344,6 +356,7 @@ class Scheduled(Record):
     match: Match
     matchup: str | None = None
     checkpoint: Digest | None = None
+    tags: tuple[Name, ...] = ()
 
 
 class Tournament(Record):
@@ -359,13 +372,15 @@ class Tournament(Record):
         if isinstance(self.definition, RoundRobin):
             return [Scheduled(match=match) for match in self.definition.matches(self.entrants)]
         fixed = [
-            Scheduled(match=match, matchup=matchup.name)
+            Scheduled(match=match, matchup=matchup.name, tags=matchup.tags)
             for matchup in self.definition.matchups
             if matchup.fixed
             for match in matchup.matches()
         ]
         return fixed + [
-            Scheduled(match=match, matchup=matchup.name, checkpoint=checkpoint.sha256)
+            Scheduled(
+                match=match, matchup=matchup.name, checkpoint=checkpoint.sha256, tags=matchup.tags
+            )
             for matchup in self.definition.matchups
             if not matchup.fixed
             for checkpoint in self.checkpoints
@@ -395,8 +410,9 @@ def assemble(held: Iterable[TournamentRun]) -> Tournament:
             for each in given.matchups:
                 if matchups.setdefault(each.name, each) != each:
                     raise EtudeError("matchup_conflict", 409) from ValueError(each.name)
-        if run.checkpoint is not None and run.checkpoint.sha256 is not None:
-            checkpoints.setdefault(run.checkpoint.sha256, run.checkpoint)
+        for checkpoint in run.checkpoints:
+            if checkpoint.sha256 is not None:
+                checkpoints.setdefault(checkpoint.sha256, checkpoint)
         entrants.update((each.identity, each) for each in run.entrants)
     definition = (
         first.model_copy(update={"matchups": tuple(matchups[name] for name in sorted(matchups))})

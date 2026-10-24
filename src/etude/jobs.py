@@ -32,7 +32,7 @@ import inspect
 import os
 import shlex
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from decimal import Decimal
 from pathlib import Path, PurePosixPath
 from typing import Required, TypedDict, Unpack, cast
@@ -44,6 +44,7 @@ from etude.carriage import CHECKPOINTS
 from etude.eval.match import Tables
 from etude.eval.records import Agent, Benchmark, Match, RoundRobin
 from etude.eval.tournament import hold
+from etude.experiment import Checkpoint, ExperimentState, checkpoint_file, checkpoint_inputs
 from etude.launch.errors import LauncherError
 from etude.launch.records import (
     Input,
@@ -55,6 +56,7 @@ from etude.launch.records import (
     number,
     parse_target,
 )
+from etude.run.errors import EtudeError
 from etude.run.listing import as_storage, declared, places
 from etude.run.records import ArtifactRef, Record, SourceKey
 from etude.run.storage import Storage
@@ -104,9 +106,15 @@ class Evaluation(Record):
     play: Function
     # A benchmark's checkpoint, as the job's input of that name.
     checkpoint: Input | None = None
+    # Checkpoints an experiment's eval chose to hold the benchmark for.
+    checkpoints: tuple[Checkpoint, ...] = ()
     # A round robin's entrants.
     entrants: tuple[Agent, ...] = ()
     workers: int = Field(default=1, ge=1)
+    # The matches a pass found new (`etude.experiment.advance`), and the
+    # job input holding each checkpoint they seat, by its digest.
+    matches: tuple[Match, ...] | None = None
+    files: dict[str, str] = {}
 
 
 def evaluation(
@@ -115,6 +123,7 @@ def evaluation(
     experiment: str,
     play: Callable[[Match], Tables],
     checkpoint: Input | None = None,
+    checkpoints: Sequence[Checkpoint] = (),
     enter: Sequence[Agent] = (),
     workers: int = 1,
     **options: Unpack[JobOptions],
@@ -124,14 +133,20 @@ def evaluation(
     A benchmark is held for `checkpoint`, which reaches the machine as the
     job's input and fills every model seat; a round robin plays every pair of
     `enter`. Each model's config is in its seat (`etude.eval.records.Model`),
-    so the tournament is the whole of what is evaluated. A launched job reads
-    no other eval run, so holding nothing new (batch) is refused: give a
-    checkpoint or entrants. The eval run is the launched run, so `etude logs`
-    and `status` lead to it and a retry resumes it.
+    so the tournament is the whole of what is evaluated. The eval run is the
+    launched run, so `etude logs` and `status` lead to it and a retry resumes it.
+
+    An experiment's `eval(state)` returns one with `checkpoints` instead, the
+    ones it chose, or none for matchups of chosen checkpoints alone; `etude
+    eval` finds what is new and plays it here or launches a job for exactly
+    that. Launched as given, such a job is refused: a machine reads no other
+    eval run, so cannot tell what is new.
     """
-    if isinstance(tournament, Benchmark) and (checkpoint is None or enter):
-        raise LauncherError(f"{tournament.name} is a benchmark: give it a checkpoint, no entrants")
-    if isinstance(tournament, RoundRobin) and (checkpoint is not None or not enter):
+    if isinstance(tournament, Benchmark) and enter:
+        raise LauncherError(f"{tournament.name} is a benchmark: give it checkpoints, no entrants")
+    if checkpoint is not None and checkpoints:
+        raise LauncherError("give one checkpoint input, or the checkpoints an experiment chose")
+    if isinstance(tournament, RoundRobin) and (checkpoint is not None or checkpoints or not enter):
         raise LauncherError(f"{tournament.name} is a round robin: give it entrants, no checkpoint")
     if checkpoint is not None:
         options["inputs"] = (*options.get("inputs", ()), checkpoint)
@@ -140,10 +155,45 @@ def evaluation(
         experiment=experiment,
         play=_function(play, _repo(play, options)),
         checkpoint=checkpoint,
+        checkpoints=tuple(checkpoints),
         entrants=tuple(enter),
         workers=workers,
     )
     return _job(_hold, spec, origin=play, options=options)
+
+
+def evaluation_spec(job: Job) -> Evaluation:
+    """What an evaluation job holds; raises `EtudeError` for any other job."""
+    if job.config is None or "etude.jobs:_hold" not in job.command:
+        raise EtudeError("not_an_evaluation_job", 422)
+    return Evaluation.model_validate_json(job.config)
+
+
+def with_matches(job: Job, matches: Sequence[Match], state: ExperimentState) -> Job:
+    """The job playing exactly `matches`, with each checkpoint they seat as an input.
+
+    A checkpoint is a file of the training run that saved it, so the launcher
+    fetches it from that run's bucket folder or relays it from its last
+    machine, verified by digest.
+    """
+    spec = evaluation_spec(job)
+    saved = checkpoint_inputs(matches, state)
+    files = {sha: f"checkpoint-{sha[:16]}{PurePosixPath(each.name).suffix}"
+             for sha, each in saved.items()}  # fmt: skip
+    inputs = tuple(
+        Input(
+            name=files[sha],
+            key=checkpoint_file(each),
+            sha256=sha,
+            size_bytes=cast(int, each.artifact.size_bytes),  # observe keeps only stored files
+            run=each.run,
+        )
+        for sha, each in sorted(saved.items())
+    )
+    spec = spec.model_copy(update={"matches": tuple(matches), "files": files})
+    return job.model_copy(
+        update={"config": spec.model_dump_json(), "inputs": (*job.inputs, *inputs)}
+    )
 
 
 # The job input that carries a continuation's checkpoint file, before its suffix.
@@ -228,28 +278,47 @@ def continue_from(
 
 
 def _hold(evaluation: Evaluation) -> None:
-    """On the machine: hold the tournament, with the checkpoint input in the model's seats."""
+    """On the machine: hold the tournament, with the checkpoint inputs in their seats."""
     # Loaded by import path: the function `evaluation` was given, typed there.
     play = cast(Callable[[Match], Tables], evaluation.play.load())
+    if evaluation.checkpoints and evaluation.matches is None:
+        raise SystemExit("etude: an experiment's evaluation job is launched by `etude eval`")
+    folder = os.environ.get("ETUDE_INPUTS_DIR")
+    if (evaluation.checkpoint is not None or evaluation.files) and not folder:
+        raise SystemExit("etude: an evaluation job's checkpoints arrive as inputs")
     checkpoint = None
     if evaluation.checkpoint is not None:
         given = evaluation.checkpoint
-        folder = os.environ.get("ETUDE_INPUTS_DIR")
-        if not folder:
-            raise SystemExit("etude: an evaluation job's checkpoint arrives as an input")
         checkpoint = ArtifactRef(
-            uri=(Path(folder) / given.name).as_uri(),
+            uri=(Path(str(folder)) / given.name).as_uri(),
             sha256=given.sha256,
             size_bytes=given.size_bytes,
         )
+    matches = None
+    if evaluation.matches is not None:
+        here = {sha: (Path(str(folder)) / name).as_uri() for sha, name in evaluation.files.items()}
+        matches = [_located(match, here) for match in evaluation.matches]
     hold(
         evaluation.tournament,
         experiment=evaluation.experiment,
         play=play,
         checkpoint=checkpoint,
+        checkpoints=tuple(each.artifact for each in evaluation.checkpoints),
         enter=evaluation.entrants,
+        matches=matches,
         workers=evaluation.workers,
     )
+
+
+def _located(match: Match, here: Mapping[str, str]) -> Match:
+    """The match with each checkpoint agent's `uri` at its file on this machine."""
+    agents = tuple(
+        seated.model_copy(update={"uri": here[seated.artifact]})
+        if seated.kind == "checkpoint" and seated.artifact in here
+        else seated
+        for seated in match.agents
+    )
+    return match.model_copy(update={"agents": agents})
 
 
 def _job(

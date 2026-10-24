@@ -371,23 +371,25 @@ def test_pairs_of_checkpoints_named_as_they_appear_are_each_played_once(tmp_path
         return Benchmark(name="ladder", environment=WORLD, matchups=(anchor, *consecutive))
 
     # On the go, a checkpoint plays only the matchups its model seats call for.
-    first = hold(wanted(checkpoints[:2]), checkpoint=checkpoints[0], play=play, storages=[bucket],
+    first = hold(wanted(checkpoints[:2]), experiment=EXPERIMENT, checkpoint=checkpoints[0], play=play,
+                 storages=[bucket],
                  directory=tmp_path / "go")  # fmt: skip
     assert first.played == len(DEALS)
 
     def held(saved: list[ArtifactRef], machine: str) -> int:
         definition = wanted(saved)
         for checkpoint in saved:  # what a training run's on-the-go holds would add
-            hold(definition, checkpoint=checkpoint, play=play, storages=[bucket],
+            hold(definition, experiment=EXPERIMENT, checkpoint=checkpoint, play=play, storages=[bucket],
                  directory=tmp_path / machine / str(checkpoint.sha256)[:8])  # fmt: skip
-        return hold(definition, play=play, storages=[bucket], directory=tmp_path / machine).played
+        return hold(definition, experiment=EXPERIMENT, play=play, storages=[bucket],
+                    directory=tmp_path / machine).played  # fmt: skip
 
     # The first pair is played when its second checkpoint appears, then only the new pair.
     assert held(checkpoints[:2], "pass-1") == len(DEALS)
     assert held(checkpoints, "pass-2") == len(DEALS)
     assert held(checkpoints, "pass-3") == 0
 
-    db = connect(bucket)
+    db = statsdb(EXPERIMENT, bucket)
     pairs = db.sql(
         "select matchup, count(*) from schedule where tournament = 'ladder' and checkpoint is null"
         " group by matchup order by matchup"
