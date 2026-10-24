@@ -61,7 +61,7 @@ from etude.eval.query import statsdb
 from etude.eval.tournament import curves, hold
 
 hold(progress, experiment="ppo", checkpoint=ref, play=play, storages=[bucket])
-db = statsdb("ppo", bucket)   # or a directory, or nothing: ~/.etude/track
+db = statsdb("ppo", bucket)  # or a directory, or nothing: ~/.etude/track
 curves(db, "anchors", table="plays", value="score")
 ```
 
