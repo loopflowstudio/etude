@@ -293,7 +293,7 @@ def bench(tmp_path: Path, *, max_machines: int = 4, usd_per_hour: str = "0.59") 
         sleep=clock.advance,
     )
     scheduler.add_storage(
-        Storage(name="test", bucket="bucket", prefix="prefix", region="us-west-2")
+        Storage(name="test", bucket="bucket", prefix="prefix", provider="s3", region="us-west-2")
     )
     scheduler.set_provider(Provider(name="fake", kind="runpod", registry="", storage="test"))
     scheduler.add_ondemand(

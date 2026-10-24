@@ -471,7 +471,7 @@ def test_runtime_bootstrap_failure_reaches_retained_session_usage(
         pod.ensure_uv()
     http.objects[f"/p/sessions/{session}/out/bootstrap.log"] = log.read_bytes()
     journal = BucketJournal(
-        Storage(name="test", bucket="test", region="r", prefix="p"),
+        Storage(name="test", bucket="test", provider="s3", region="r", prefix="p"),
         Bucket("test", "r", Keys(access_key="a", secret_key="s"), http.send),
     )
     monkeypatch.setattr(b.service, "observe", journal.observe)
@@ -543,7 +543,7 @@ def test_completed_workload_before_and_after(
     with pytest.raises(StorageUnavailable):
         courier.fetch({source_path: http.source("/source")})
     journal = BucketJournal(
-        Storage(name="test", bucket="test", region="r", prefix="p"),
+        Storage(name="test", bucket="test", provider="s3", region="r", prefix="p"),
         Bucket("test", "r", Keys(access_key="a", secret_key="s"), http.send),
     )
     monkeypatch.setattr(b.service, "observe", journal.observe)
@@ -826,7 +826,7 @@ def test_polling_a_session_reads_each_version_of_its_files_once(http: HTTP, tmp_
     http.objects[record] = AttemptRecord(started_at=datetime.now(UTC)).model_dump_json().encode()
     http.objects[log] = b"step 1\n" * 1000
     journal = BucketJournal(
-        Storage(name="test", bucket="test", region="r", prefix="p"),
+        Storage(name="test", bucket="test", provider="s3", region="r", prefix="p"),
         Bucket("test", "r", Keys(access_key="a", secret_key="s"), http.send),
     )
     written = sum(len(body) for key, body in http.objects.items() if key.startswith("/p/"))

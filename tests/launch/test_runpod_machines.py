@@ -305,7 +305,9 @@ def cloud(
     place = (
         Place(name="west", bucket="journals", prefix="etude/t", provider="r2")
         if r2
-        else Place(name="west", bucket="journals", prefix="etude/t", region="us-west-2")
+        else Place(
+            name="west", bucket="journals", prefix="etude/t", provider="s3", region="us-west-2"
+        )
     )
     template = MachineTemplate(
         provider="runpod",
@@ -630,7 +632,7 @@ def test_shared_inputs_are_prepared_once(tmp_path: Path) -> None:
     storage = Storage()
     counting = Counting(Database(tmp_path / "counting.db"))
     journal = BucketJournal(
-        Place(name="west", bucket="journal", prefix="test", region="us-west-2"),
+        Place(name="west", bucket="journal", prefix="test", provider="s3", region="us-west-2"),
         Bucket(
             "journal",
             "us-west-2",
@@ -684,7 +686,8 @@ def test_lost_start_receipt_reply_cannot_leave_unreported_running_code(tmp_path:
     storage = LostReceipt()
     bucket = Bucket("journal", "us-west-2", Keys(access_key="access", secret_key="secret"), storage)
     journal = BucketJournal(
-        Place(name="west", bucket="journal", prefix="test", region="us-west-2"), bucket
+        Place(name="west", bucket="journal", prefix="test", provider="s3", region="us-west-2"),
+        bucket,
     )
     work = Work(
         attempt="a",
@@ -1045,7 +1048,7 @@ def test_a_retry_on_a_fresh_machine_resumes_from_the_runs_latest_checkpoint(
     written = sum(len(body) for key, body in storage.objects.items() if "/checkpoints/" in key)
 
     journal = BucketJournal(
-        Place(name="east", bucket="b", prefix="etude", region="us-east-1"),
+        Place(name="east", bucket="b", prefix="etude", provider="s3", region="us-east-1"),
         Bucket("b", "us-east-1", Keys(access_key="AKIA", secret_key="secret"), storage),
     )
     retry = Work(
@@ -1157,7 +1160,7 @@ def test_a_retry_on_a_fresh_machine_never_reuses_a_name_storage_holds(tmp_path: 
     storage = Storage()
     _orphaned(tmp_path / "one", storage)
     journal = BucketJournal(
-        Place(name="east", bucket="b", prefix="etude", region="us-east-1"),
+        Place(name="east", bucket="b", prefix="etude", provider="s3", region="us-east-1"),
         Bucket("b", "us-east-1", Keys(access_key="AKIA", secret_key="secret"), storage),
     )
     retry = Work(

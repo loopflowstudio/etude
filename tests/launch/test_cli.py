@@ -216,7 +216,10 @@ def test_a_second_bucket_or_place_is_a_second_pool_not_a_second_provider(
         ]
     )
     assert "no storage named 'west'" in capsys.readouterr().err
-    west = ["storage", "add", "west", "--bucket", "b-west", "--prefix", "etude", "--region"]
+    west = ["storage", "add", "west", "--bucket", "b-west", "--prefix", "etude"]
+    assert main(west) == 1  # the provider is always stated
+    assert "--provider" in capsys.readouterr().err
+    west += ["--provider", "s3", "--region"]
     assert run(capsys, *west, "us-west-2") == ["west  s3://b-west/etude  us-west-2"]
     assert main([*west, "eu-west-1"]) == 1  # a storage never changes; add another instead
     assert "already exists with other settings" in capsys.readouterr().err
@@ -229,6 +232,8 @@ def test_a_second_bucket_or_place_is_a_second_pool_not_a_second_provider(
         "b-eu",
         "--prefix",
         "etude",
+        "--provider",
+        "s3",
         "--region",
         "eu-west-1",
     )

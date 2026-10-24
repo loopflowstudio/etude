@@ -318,7 +318,9 @@ def test_a_storage_opens_its_providers_bucket_with_keys_from_the_environment(
         monkeypatch.setenv(name, "fixture")
     monkeypatch.delenv("AWS_SESSION_TOKEN", raising=False)
     r2 = open_bucket(Place(name="r", bucket="manabot", prefix="launch", provider="r2"))
-    s3 = open_bucket(Place(name="s", bucket="runs", prefix="launch", region="us-west-2"))
+    s3 = open_bucket(
+        Place(name="s", bucket="runs", prefix="launch", provider="s3", region="us-west-2")
+    )
     assert (r2.host, r2.region) == ("manabot.fixture.r2.cloudflarestorage.com", "auto")
     assert (s3.host, s3.region) == ("runs.s3.us-west-2.amazonaws.com", "us-west-2")
     monkeypatch.delenv("R2_ACCOUNT_ID")

@@ -504,7 +504,7 @@ def storage_add(
     provider: Annotated[
         Literal["s3", "r2"],
         typer.Option(help="s3, keys from AWS_*; or r2, account and keys from R2_*"),
-    ] = "s3",
+    ],
     region: Annotated[str | None, typer.Option(help="an S3 bucket's region")] = None,
 ) -> None:
     """Add a place in a bucket for records. It cannot be changed afterwards."""
