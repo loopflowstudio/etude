@@ -63,6 +63,7 @@ details summary { cursor: pointer; color: var(--text-2); margin: 4px 0 8px; }
   <h1 id="title"></h1>
   <p class="sub" id="sub"></p>
   <p class="sub" id="stamp"></p>
+  <p class="sub" id="owner"></p>
   <div class="controls">
     <fieldset id="clocks"><legend>Clock</legend></fieldset>
     <fieldset id="modes"><legend>Show</legend></fieldset>
@@ -72,6 +73,10 @@ details summary { cursor: pointer; color: var(--text-2); margin: 4px 0 8px; }
   <h2>Runs</h2>
   <div class="scroll"><table id="runs"></table></div>
   <div id="charts"></div>
+  <h2>Checkpoint evaluations</h2>
+  <p>Exact checkpoint coordinates. Bands resample whole game matches, not training seeds. Missing or failed requests are gaps. Last result time describes evaluation freshness, never the x axis.</p>
+  <div class="scroll"><table id="evaluations"></table></div>
+  <div id="evaluation-charts" class="grid"></div>
 </main>
 <script type="application/json" id="data">__DATA__</script>
 <script>__UPLOT_JS__</script>
@@ -118,6 +123,10 @@ document.getElementById("sub").textContent =
   }
 }
 
+if (D.owner) {
+  const o = D.owner, age = o.observed_at ? Math.max(0, (Date.now() - Date.parse(o.observed_at)) / 1000) : null;
+  document.getElementById("owner").textContent = `Owner: last training observation ${o.observed_at ?? "none"} (${age == null ? "unknown age" : Math.round(age) + " s ago"}); phase ${o.remote_phase}; update ${o.remote_updates}; cleanup ${o.cleanup_confirmed}; cost ${o.inclusive_cost ?? "unknown"}; settled ${o.settled}; error ${o.error ?? "none"}. Deadline ${new Date(D.owner_deadline * 1000).toISOString()}.`;
+}
 function options(id, items, current, set) {
   const box = document.getElementById(id);
   for (const [value, text] of items) {
@@ -160,7 +169,7 @@ function plot(grid, title, note, lines) {
   const series = [{}], bands = [], ink = token("--text-3"), font = "10px system-ui, sans-serif";
   lines.forEach((l, i) => {
     const c = token(l.color.slice(4, -1));
-    series.push({label: l.label, stroke: c, width: 2, spanGaps: true, points: {show: l.x.length < 2}},
+    series.push({label: l.label, stroke: c, width: 2, spanGaps: !l.evaluation, points: {show: l.evaluation || l.x.length < 2}},
       {stroke: "transparent", spanGaps: true, points: {show: false}}, {stroke: "transparent", spanGaps: true, points: {show: false}});
     bands.push({series: [3 * i + 3, 3 * i + 2], fill: wash(c)});
   });
@@ -192,6 +201,7 @@ function plot(grid, title, note, lines) {
 
 function draw() {
   remember();
+  evaluationCharts();
   const info = D.clocks.find(c => c.name === clock);
   document.getElementById("meaning").textContent = `${info.kind === "step" ? "Step" : "Time"}: ${info.meaning}`;
   const key = document.getElementById("key"); key.replaceChildren();
@@ -222,7 +232,42 @@ function draw() {
     }
   }
 }
+function evaluationCharts() {
+  const grid = document.getElementById("evaluation-charts"); grid.replaceChildren();
+  const groups = new Map();
+  for (const e of D.evaluations || []) {
+    const run = D.runs.findIndex(r => r.name === e.training_run);
+    if (hidden.has(run) || e.checkpoint.at[clock] == null) continue;
+    for (const r of e.results) {
+      const key = JSON.stringify([e.training_run, e.benchmark, r.environment, r.opponent, r.table, r.metric]);
+      if (!groups.has(key)) groups.set(key, {e, r, points: []});
+      groups.get(key).points.push({e, r});
+    }
+  }
+  for (const {e, r, points} of groups.values()) {
+    // Every request in this protocol contributes a position, including absent results.
+    const all = (D.evaluations || []).filter(p => p.training_run === e.training_run && p.benchmark === e.benchmark && p.checkpoint.at[clock] != null)
+      .sort((a, b) => a.checkpoint.at[clock] - b.checkpoint.at[clock] || a.run.localeCompare(b.run));
+    const values = all.map(p => p.state === "failed" ? undefined : points.find(v => v.e.run === p.run)?.r);
+    plot(grid, `${e.label}: ${r.table}/${r.metric}`, `${e.training_run}; protocol ${e.benchmark.slice(0, 12)}; opponent ${r.opponent.join("+").slice(0, 12)}`, [{
+      x: all.map(p => p.checkpoint.at[clock]), mean: values.map(v => v?.value ?? null),
+      min: values.map(v => v?.interval?.[0] ?? null), max: values.map(v => v?.interval?.[1] ?? null),
+      label: e.training_run, color: color(Math.max(0, D.runs.findIndex(t => t.name === e.training_run))), evaluation: true,
+    }]);
+  }
+}
+function evaluationTable() {
+  const table = document.getElementById("evaluations"), head = el("tr");
+  for (const h of ["Training run", "Checkpoint SHA256", "Coordinates", "Evaluation run", "Protocol", "State", "Done / scheduled", "Failed / pending", "Latest result", "Rows / matches per metric (scheduled games)"]) head.append(el("th", h));
+  table.append(head);
+  for (const e of D.evaluations || []) {
+    const row = el("tr");
+    for (const v of [e.training_run, e.checkpoint.artifact.sha256, JSON.stringify(e.checkpoint.at), e.run, `${e.label} (${e.benchmark})`, e.state, `${e.done} / ${e.scheduled ?? "unknown"}`, `${e.failed} / ${e.pending ?? "unknown"}`, e.latest_result_ms == null ? "none" : new Date(e.latest_result_ms).toISOString(), e.results.map(r => `${r.table}/${r.metric}: ${r.rows} rows / ${r.matches} matches (${e.scheduled_games ?? "unknown"} games scheduled)`).join("; ")]) row.append(el("td", String(v)));
+    table.append(row);
+  }
+}
 runsTable();
+evaluationTable();
 draw();
 let resizing;
 addEventListener("resize", () => { clearTimeout(resizing); resizing = setTimeout(draw, 150); });

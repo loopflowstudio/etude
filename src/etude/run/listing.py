@@ -20,7 +20,7 @@ def as_storage(source: Storage | Path | str) -> Storage:
 # `environment.json`, `tournament.json`, `tables` and `matches` are an eval run's
 # (`etude.eval`).
 # Delivery sends folders in this order, so a match's tables precede its record.
-RUN_FOLDERS = ("metrics", "checkpoints", "tables", "matches")
+RUN_FOLDERS = ("metrics", "checkpoints", "tables", "matches", "evaluations")
 RUN_FILES = ("run.json", "environment.json", "tournament.json", "state.json")
 
 

@@ -14,8 +14,7 @@ from urllib.parse import unquote
 
 from etude.run.listing import runs
 from etude.run.storage import Storage
-from etude.train.read import read_all
-from etude.train.report import page_data, render
+from etude.train.report import pages, render
 
 INDEX = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -51,10 +50,8 @@ class Server(ThreadingHTTPServer):
         return INDEX.format(refresh=int(self.refresh), body=body)
 
     def report(self, experiment: str) -> str | None:
-        data = read_all(self.source, experiment)
-        if not data:
-            return None
-        return render(page_data(experiment, data), refresh=self.refresh)
+        page = pages(self.source, experiment).get(experiment)
+        return render(page, refresh=self.refresh) if page else None
 
 
 class _Handler(BaseHTTPRequestHandler):

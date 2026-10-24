@@ -62,6 +62,8 @@ class RunData(Arrays):
     checkpoints: tuple[CheckpointRecord, ...]
     # Every process that wrote to this run, in start order.
     attempts: tuple[Attempt, ...]
+    # Prospective evaluation requests; the cross-kind report reader owns their schema.
+    evaluation_files: tuple[str, ...] = ()
 
     @cached_property
     def tables(self) -> tuple[Table, ...]:
@@ -486,6 +488,8 @@ def _read(
         kind, _, leaf = name.partition("/")
         if not leaf.endswith(".json") or "/" in leaf or kind not in RUN_FOLDERS:
             continue
+        if kind == "evaluations":
+            continue
         if kind == "metrics" and leaf.endswith((".index.json", ".permanent.json")):
             continue  # an index, read below
         body = storage.get(place + name)
@@ -570,4 +574,9 @@ def _read(
         # A later attempt continues its run's ordinals; each is kept once.
         checkpoints=tuple({r.ordinal: r for r in sorted(checkpoints, key=_order)}.values()),
         attempts=tuple(attempt for attempt, _ in attempts),
+        evaluation_files=tuple(
+            place + name
+            for place, name in keys
+            if name.startswith("evaluations/") and name.endswith(".json")
+        ),
     )

@@ -1,7 +1,7 @@
 """What every run shares never depends on one kind of run, and no run depends on the launcher.
 
 Eval runs depend on neither training nor the launcher, and only the top-level
-command and typed jobs (`etude.jobs`) compose them with the rest. The eval run knows nothing of the
+command typed jobs (`etude.jobs`) and the cross-kind report reader (`etude.reports`) compose them with the rest. The eval run knows nothing of the
 tournaments arranged on top of it.
 """
 
@@ -44,7 +44,7 @@ def test_shared_run_code_imports_no_kind_of_run_and_training_imports_no_evaluati
 
 
 def test_only_the_top_level_command_and_typed_jobs_import_evaluation() -> None:
-    composers = {SOURCE / "etude/cli.py", SOURCE / "etude/jobs.py"}
+    composers = {SOURCE / "etude/cli.py", SOURCE / "etude/jobs.py", SOURCE / "etude/reports.py"}
     for path, names in _imports("etude").items():
         if not path.is_relative_to(SOURCE / "etude/eval") and path not in composers:
             assert not [n for n in names if _within(n, "etude.eval")], path
