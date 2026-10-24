@@ -86,8 +86,9 @@ def hold(
     A benchmark held with `checkpoint` (on the go) plays each of the given
     matchups with the checkpoint in the model's seats. Held without one
     (batch), it plays every matchup any eval run defined for every checkpoint
-    any held, skipping what any eval run of its environment delivered, so a
-    matchup added later is played for every checkpoint so far. A round robin
+    any held, and each matchup of fixed agents once, skipping what any eval
+    run of its environment delivered, so a matchup added later is played for
+    every checkpoint so far. A round robin
     held with `enter` plays every pair of the agents given; with none, every
     pair of every entrant so far not yet delivered.
 
@@ -122,8 +123,13 @@ def hold(
         base = Path(directory) if directory is not None else default_root()
         stored, delivered = _stored(tournament, experiment, [DirectoryStorage(base), *storages])
         held = [*stored, added]
-    # Two matchups may share a match; it is played once.
-    matches = {each.match.key: each.match for each in assemble(held).schedule()}
+    # Two matchups may share a match; it is played once. On the go, a matchup of
+    # fixed agents is not the checkpoint's: a batch hold plays it, once.
+    matches = {
+        each.match.key: each.match
+        for each in assemble(held).schedule()
+        if checkpoint is None or each.checkpoint is not None
+    }
     pending = [
         match
         for index, (key, match) in enumerate(sorted(matches.items()))

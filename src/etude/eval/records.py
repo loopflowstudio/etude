@@ -244,7 +244,9 @@ class Matchup(Record):
     """A named line of a benchmark: `players` in seat order, each a fixed agent or the model.
 
     Its value is the first player's against the second. Both may be the model,
-    such as search against no search.
+    such as search against no search. With no model seat it is played once,
+    not for each checkpoint, so two chosen checkpoints can meet:
+    `Model.agent(checkpoint)` seats one as the benchmark's model would be.
     """
 
     name: str = Field(min_length=1, max_length=200)
@@ -253,13 +255,23 @@ class Matchup(Record):
     conditions: tuple[Mapping[str, JsonValue], ...] = Field(min_length=1)
     games: int = Field(ge=1)
 
-    def matches(self, checkpoint: ArtifactRef) -> list[Match]:
+    @property
+    def fixed(self) -> bool:
+        """Whether every seat is a fixed agent, so no checkpoint changes its matches."""
+        return not any(isinstance(each, Model) for each in self.players)
+
+    def matches(self, checkpoint: ArtifactRef | None = None) -> list[Match]:
         """One match per condition, with `checkpoint` in every model's seat."""
-        seated = tuple(
-            each.agent(checkpoint) if isinstance(each, Model) else each for each in self.players
-        )
+        seated: list[Agent] = []
+        for each in self.players:
+            if isinstance(each, Agent):
+                seated.append(each)
+            elif checkpoint is None:
+                raise ValueError("model_seat_needs_a_checkpoint")
+            else:
+                seated.append(each.agent(checkpoint))
         return [
-            Match(agents=seated, conditions=dict(given), games=self.games)
+            Match(agents=tuple(seated), conditions=dict(given), games=self.games)
             for given in self.conditions
         ]
 
@@ -267,7 +279,10 @@ class Matchup(Record):
 class Benchmark(Record):
     """Matchups a model's checkpoints are each held for, to follow it through training.
 
-    Its matchups are every matchup any of its eval runs was held with.
+    Its matchups are every matchup any of its eval runs was held with. A
+    matchup of fixed agents is held once, such as one checkpoint against an
+    earlier one, so an experiment can name the pairs it wants as checkpoints
+    appear and a batch hold plays those not yet played.
     """
 
     name: Name
@@ -323,7 +338,8 @@ class TournamentRun(Record):
 
 
 class Scheduled(Record):
-    """A match a tournament calls for; a benchmark's also names its matchup and checkpoint."""
+    """A match a tournament calls for; a benchmark's also names its matchup and, for a
+    matchup with a model seat, its checkpoint."""
 
     match: Match
     matchup: str | None = None
@@ -338,12 +354,20 @@ class Tournament(Record):
     entrants: tuple[Agent, ...] = ()
 
     def schedule(self) -> list[Scheduled]:
-        """Each matchup for each checkpoint, or each pair of entrants; held or not."""
+        """Each matchup for each checkpoint, or once when fixed, or each pair of entrants;
+        held or not."""
         if isinstance(self.definition, RoundRobin):
             return [Scheduled(match=match) for match in self.definition.matches(self.entrants)]
-        return [
+        fixed = [
+            Scheduled(match=match, matchup=matchup.name)
+            for matchup in self.definition.matchups
+            if matchup.fixed
+            for match in matchup.matches()
+        ]
+        return fixed + [
             Scheduled(match=match, matchup=matchup.name, checkpoint=checkpoint.sha256)
             for matchup in self.definition.matchups
+            if not matchup.fixed
             for checkpoint in self.checkpoints
             for match in matchup.matches(checkpoint)
         ]

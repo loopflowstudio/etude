@@ -12,7 +12,7 @@ beside Etude's own tables:
 | `seats` | run, match, player, agent |
 | `groups` | run, match, group, player |
 | `tournaments` | tournament, format (`benchmark` or `round_robin`), environment, conflict |
-| `schedule` | tournament, match, matchup and checkpoint (artifact digest) of a benchmark's match |
+| `schedule` | tournament, match, matchup and checkpoint (artifact digest) of a benchmark's match; no checkpoint for a matchup of fixed agents |
 | `training_checkpoints` | run, experiment, ordinal, artifact, wall_ms, clocks (where each stood) |
 
 A tournament is assembled from the experiment's eval runs naming it in their

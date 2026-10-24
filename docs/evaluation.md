@@ -165,6 +165,14 @@ evaluate(
   `hold(benchmark, checkpoint=ref)` puts the checkpoint (by `sha256`) in every
   model seat and plays each given matchup; with no checkpoint it plays every
   matchup ever defined for every checkpoint held, skipping what is delivered.
+- **Pairs of checkpoints.** A matchup with no model seat is played once, not
+  per checkpoint, so chosen checkpoints can meet: seat each as
+  `Model(...).agent(ref)`, the agent a model seat would make of it. Build the
+  benchmark from the checkpoints saved so far, such as each against the one
+  before it, and hold it in batch whenever more appear; each pass plays only
+  the pairs not yet delivered. A hold on the go leaves these matchups to batch.
+  Their rows are `schedule` rows with no `checkpoint`; `curves` follows only
+  matchups with a model seat.
 - **Round robins.** `hold(round_robin, enter=agents)` plays every pair of
   the agents given once per condition; seat swaps belong inside `play`.
   `hold(round_robin)` then plays every pair of every entrant so far that no

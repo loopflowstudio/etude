@@ -352,3 +352,58 @@ def test_curves_of_checkpoints_no_training_run_recorded_follow_their_names(
             ("updates-900.pt", None),
             ("updates-1000.pt", None),
         ]
+
+
+def test_pairs_of_checkpoints_named_as_they_appear_are_each_played_once(tmp_path: Path) -> None:
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    checkpoints = trained(tmp_path, bucket)
+    heuristic = scripted(tmp_path, "heuristic", 0)
+
+    def wanted(saved: list[ArtifactRef]) -> Benchmark:
+        """Each checkpoint against the heuristic, and each against the one before it."""
+        consecutive = [
+            Matchup(name=f"{DIRECT.agent(new).name} vs {DIRECT.agent(old).name}",
+                    players=(DIRECT.agent(new), DIRECT.agent(old)), conditions=DEALS, games=2)
+            for old, new in zip(saved, saved[1:])
+        ]  # fmt: skip
+        anchor = Matchup(name="vs heuristic", players=(DIRECT, heuristic), conditions=DEALS,
+                         games=2)  # fmt: skip
+        return Benchmark(name="ladder", environment=WORLD, matchups=(anchor, *consecutive))
+
+    # On the go, a checkpoint plays only the matchups its model seats call for.
+    first = hold(wanted(checkpoints[:2]), checkpoint=checkpoints[0], play=play, storages=[bucket],
+                 directory=tmp_path / "go")  # fmt: skip
+    assert first.played == len(DEALS)
+
+    def held(saved: list[ArtifactRef], machine: str) -> int:
+        definition = wanted(saved)
+        for checkpoint in saved:  # what a training run's on-the-go holds would add
+            hold(definition, checkpoint=checkpoint, play=play, storages=[bucket],
+                 directory=tmp_path / machine / str(checkpoint.sha256)[:8])  # fmt: skip
+        return hold(definition, play=play, storages=[bucket], directory=tmp_path / machine).played
+
+    # The first pair is played when its second checkpoint appears, then only the new pair.
+    assert held(checkpoints[:2], "pass-1") == len(DEALS)
+    assert held(checkpoints, "pass-2") == len(DEALS)
+    assert held(checkpoints, "pass-3") == 0
+
+    db = connect(bucket)
+    pairs = db.sql(
+        "select matchup, count(*) from schedule where tournament = 'ladder' and checkpoint is null"
+        " group by matchup order by matchup"
+    ).fetchall()
+    assert pairs == [
+        ("updates-200.pt vs updates-100.pt", 3),
+        ("updates-300.pt vs updates-200.pt", 3),
+    ]
+    # Curves follow only the matchups with a model seat.
+    assert [line.matchup for line in curves(db, "ladder", table="plays", value="won")] == [
+        "vs heuristic"
+    ]
+    # The later checkpoint wins each pair; its results are found by matchup name.
+    later = db.sql(
+        "select s.matchup, avg(p.won::int) from plays p"
+        " join schedule s on s.match = p.match and s.tournament = 'ladder'"
+        " where s.checkpoint is null and p.player = 0 group by s.matchup"
+    ).fetchall()
+    assert all(value > 0.5 for _, value in later)
