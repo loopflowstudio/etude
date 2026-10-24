@@ -1,10 +1,11 @@
-"""The eval report: one self-contained page over every eval run under a source.
+"""The eval report: one self-contained page per experiment, over its eval runs.
 
 For each author table and each of its numeric columns, per environment, a
 matrix of subject (row) against opponent (column) with an "all" column, then
 the same pairings split by each column that takes between 2 and
 `SPLIT_VALUES` values, such as who was on the play. Plain HTML, no script and
-no network; regenerating replaces the file.
+no network; regenerating replaces the file. Each page reads the experiment's
+database (`etude.eval.query.statsdb`).
 """
 
 from __future__ import annotations
@@ -15,8 +16,9 @@ from html import escape
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from etude.eval.match import ETUDE_TABLES
-from etude.eval.query import Comparison, compare, connect
+from etude.eval.match import ETUDE_TABLES, KIND
+from etude.eval.query import Comparison, compare, statsdb
+from etude.run.listing import as_storage, declared, places
 from etude.run.storage import Storage
 
 if TYPE_CHECKING:
@@ -84,16 +86,18 @@ def _split(found: Sequence[Comparison], column: str, names: dict[str, str]) -> s
 
 
 def render(db: duckdb.DuckDBPyConnection, *, refresh: float | None = None) -> str:
-    """The page for every eval run in a database `etude.eval.query.connect` opened."""
+    """The page for every eval run in an experiment's database (`etude.eval.query.statsdb`)."""
     if refresh is not None and (not math.isfinite(refresh) or refresh <= 0):
         raise ValueError("report refresh must be finite and positive")
     reload = f'<meta http-equiv="refresh" content="{refresh}">' if refresh is not None else ""
     names: dict[str, str] = dict(db.sql("select agent, name from agents").fetchall())
+    kept = db.sql("select experiment from kept.statsdb").fetchone()
+    title = escape(f"{kept[0] if kept else ''}: eval runs")
     environments = db.sql(
         "select environment, any_value(environment_name), count(*) from runs group by all"
     ).fetchall()
     parts = [
-        "<h1>Eval runs</h1><p>"
+        f"<h1>{title}</h1><p>"
         + escape(
             "; ".join(
                 f"{name} ({identity[:12]}): {count} eval runs"
@@ -141,7 +145,7 @@ def render(db: duckdb.DuckDBPyConnection, *, refresh: float | None = None) -> st
                         _split([c for c in split if c.environment == identity], column, names)
                     )
     return (
-        "<!doctype html><html><head><meta charset=utf-8><title>Eval runs</title>"
+        f"<!doctype html><html><head><meta charset=utf-8><title>{title}</title>"
         f"{reload}<style>{_STYLE}</style></head><body>{''.join(parts)}</body></html>"
     )
 
@@ -185,19 +189,38 @@ def _distinct(db: duckdb.DuckDBPyConnection, table: str, column: str) -> int:
 
 
 def write(
-    source: Storage | Path | str, directory: Path, *, refresh: float | None = None
-) -> Path | None:
-    """Replace `directory/eval/index.html`; None when the source holds no eval run."""
-    db = connect(source)
-    try:
-        found = db.sql("select count(*) from runs").fetchone()
-        if found is None or found[0] == 0:
-            return None
-        target = directory / "eval" / "index.html"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        partial = target.with_name(target.name + ".partial")
-        partial.write_text(render(db, refresh=refresh))
-        partial.replace(target)
-        return target
-    finally:
-        db.close()
+    source: Storage | Path | str,
+    directory: Path,
+    *,
+    experiment: str | None = None,
+    refresh: float | None = None,
+) -> list[Path]:
+    """Replace `directory/eval/EXPERIMENT.html` for each experiment with an eval run, or one."""
+    storage = as_storage(source)
+    experiments = sorted(
+        {
+            file.experiment
+            for folders in places(storage).values()
+            if (file := declared(storage, folders)) is not None
+            and file.declaration.kind == KIND
+            and experiment in (None, file.experiment)
+        }
+    )
+    written: list[Path] = []
+    for name in experiments:
+        db = statsdb(name, storage)
+        try:
+            found = db.sql(
+                "select count(*) from runs where experiment = ?", params=[name]
+            ).fetchone()
+            if found is None or found[0] == 0:
+                continue
+            target = directory / "eval" / f"{name}.html"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            partial = target.with_name(target.name + ".partial")
+            partial.write_text(render(db, refresh=refresh))
+            partial.replace(target)
+            written.append(target)
+        finally:
+            db.close()
+    return written

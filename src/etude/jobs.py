@@ -1,7 +1,7 @@
 """Typed jobs: work described as Python functions, so nobody writes a command.
 
     training(train, config=TrainConfig(lr=3e-4), max_hours=6, max_usd=Decimal(30))
-    evaluation(progress, play=play, checkpoint=weights, max_hours=0.5, max_usd=Decimal(1))
+    evaluation(progress, experiment="ppo", play=play, checkpoint=weights, max_hours=0.5, max_usd=Decimal(1))
     continue_from(parent, "steps=63000", source="s3://bucket/etude/launch")
 
 Each returns an `etude.launch.records.Job` whose command Etude decides: it runs
@@ -100,6 +100,7 @@ class Evaluation(Record):
     """An evaluation job's config: what `_hold` holds, with what, on the machine."""
 
     tournament: Benchmark | RoundRobin
+    experiment: str
     play: Function
     # A benchmark's checkpoint, as the job's input of that name.
     checkpoint: Input | None = None
@@ -111,13 +112,14 @@ class Evaluation(Record):
 def evaluation(
     tournament: Benchmark | RoundRobin,
     *,
+    experiment: str,
     play: Callable[[Match], Tables],
     checkpoint: Input | None = None,
     enter: Sequence[Agent] = (),
     workers: int = 1,
     **options: Unpack[JobOptions],
 ) -> Job:
-    """A job that holds `tournament` with the author's `play`, as one eval run.
+    """A job that holds `tournament` with the author's `play`, as one eval run of `experiment`.
 
     A benchmark is held for `checkpoint`, which reaches the machine as the
     job's input and fills every model seat; a round robin plays every pair of
@@ -135,6 +137,7 @@ def evaluation(
         options["inputs"] = (*options.get("inputs", ()), checkpoint)
     spec = Evaluation(
         tournament=tournament,
+        experiment=experiment,
         play=_function(play, _repo(play, options)),
         checkpoint=checkpoint,
         entrants=tuple(enter),
@@ -241,6 +244,7 @@ def _hold(evaluation: Evaluation) -> None:
         )
     hold(
         evaluation.tournament,
+        experiment=evaluation.experiment,
         play=play,
         checkpoint=checkpoint,
         enter=evaluation.entrants,

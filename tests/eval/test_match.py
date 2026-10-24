@@ -17,7 +17,7 @@ from moto import mock_aws
 from pydantic import BaseModel
 
 from etude.eval.match import agent, environment, evaluate
-from etude.eval.query import compare, connect, estimate
+from etude.eval.query import compare, estimate, statsdb
 from etude.eval.records import Agent, Config, Match, Model
 from etude.eval.report import render
 from etude.eval.report import write as write_report
@@ -87,7 +87,7 @@ def test_matches_in_two_workers_resumes_from_storage_without_replaying(
     # One listing of the delivered match records and one read of each.
     assert (measured.listings, measured.requests) == (1, 24)
 
-    db = connect(bucket)
+    db = statsdb("league", bucket)
     assert db.sql("select count(*) from plays").fetchone() == (24 * 4 * 2,)
     assert db.sql("select count(*), count(distinct match) from games").fetchone() == (96, 24)
     assert db.sql("select distinct state from matches").fetchall() == [("done",)]
@@ -99,7 +99,7 @@ def test_sql_joins_results_to_agents_by_config_key(tmp_path: Path) -> None:
         experiment="league", environment=environment("duel"), play=play,
         matches=seatings(agents, conditions=[{"deal": 0}], games=6), directory=tmp_path,
     )  # fmt: skip
-    db = connect(tmp_path)
+    db = statsdb("league", tmp_path)
     found = db.sql(
         'select a."config.search.simulations", avg(won::int) from plays '
         "join seats using (run, match, player) join agents a using (agent) "
@@ -125,7 +125,7 @@ def test_compare_gives_a_rate_with_an_interval_that_resamples_matches(tmp_path: 
         matches=seatings(agents[:2], conditions=[{"deal": d} for d in range(5)], games=6),
         directory=tmp_path,
     )  # fmt: skip
-    db = connect(tmp_path)
+    db = statsdb("league", tmp_path)
     found = compare(db, table="plays", value="hits", per="attacks", by=["on_play"])
     deep, shallow = agents[0].identity, agents[1].identity
     cell = next(
@@ -165,7 +165,7 @@ def test_a_row_without_player_or_group_is_refused_and_nothing_of_its_match_is_st
     assert refused.value.code == "match_failed"
     cause = refused.value.__cause__
     assert isinstance(cause, EtudeError) and cause.code == "row_needs_player_or_group"
-    db = connect(tmp_path)
+    db = statsdb("league", tmp_path)
     assert db.sql("select state, error from matches").fetchall() == [
         ("failed", "EtudeError: row_needs_player_or_group")
     ]
@@ -199,7 +199,7 @@ def test_two_environments_are_never_pooled(tmp_path: Path) -> None:
         evaluate(experiment="league", environment=seven, play=play, matches=matches, run="on-w6",
                  directory=tmp_path)  # fmt: skip
     assert conflict.value.code == "eval_run_environment_conflict"
-    found = compare(connect(tmp_path), table="plays", value="won")
+    found = compare(statsdb("league", tmp_path), table="plays", value="won")
     pooled = [c for c in found if c.subject == (agents[0].identity,) and c.opponent is None]
     assert sorted(c.environment for c in pooled) == sorted([six.identity, seven.identity])
     assert all(c.matches == 2 for c in pooled)
@@ -211,7 +211,7 @@ def test_group_keyed_rows_compare_teams_in_a_two_on_two(tmp_path: Path) -> None:
     assert match.groups["all"] == (0, 1, 2, 3)
     evaluate(experiment="teams", environment=environment("doubles"), play=play_teams,
              matches=[match], directory=tmp_path)  # fmt: skip
-    found = compare(connect(tmp_path), table="teams", value="won")
+    found = compare(statsdb("teams", tmp_path), table="teams", value="won")
     north, south = tuple(sorted((a.identity, c.identity))), tuple(sorted((b.identity, d.identity)))
     by_pair = {(x.subject, x.opponent): x.value for x in found}
     assert by_pair == {
@@ -237,7 +237,7 @@ def test_an_eval_run_delivered_to_a_bucket_is_queried_and_reported_from_it(
             matches=seatings(roster(tmp_path), conditions=[{}], games=4),
             directory=tmp_path / "local", storages=[bucket],
         )  # fmt: skip
-        db = connect(bucket)
+        db = statsdb("league", bucket)
         assert db.sql("select count(*) from plays").fetchone() == (12 * 4 * 2,)
         page = render(db)
     assert "deep" in page and "on_play" in page and "won" in page
@@ -247,7 +247,7 @@ def test_an_agent_may_play_itself(tmp_path: Path) -> None:
     deep = roster(tmp_path)[0]
     evaluate(experiment="mirror", environment=environment("duel"), play=play,
              matches=[Match(agents=(deep, deep), games=6)], directory=tmp_path)  # fmt: skip
-    found = compare(connect(tmp_path), table="plays", value="won")
+    found = compare(statsdb("mirror", tmp_path), table="plays", value="won")
     # Equal strength: seat 1 wins the ties, and each seat its every-third games on the play.
     assert {(c.subject, c.opponent): (c.value, c.rows) for c in found} == {
         ((deep.identity,), (deep.identity,)): (0.5, 12),
@@ -347,7 +347,7 @@ def test_queries_reports_and_resumes_read_each_bucket_file_once_per_computer(
         )  # fmt: skip
         written = client.stored("runs")
         # Each use opens the bucket afresh, as separate commands on one computer do.
-        db = connect(S3Storage("runs", client=client))
+        db = statsdb("league", S3Storage("runs", client=client))
         assert db.sql("select count(*) from plays").fetchone() == (12 * 4 * 2,)
         first = client.bytes
         assert 0 < first <= written

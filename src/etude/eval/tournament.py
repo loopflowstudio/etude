@@ -4,7 +4,7 @@ A `Benchmark` (`etude.eval.records`) is named matchups a model's checkpoints
 are held for; a `RoundRobin` is hand-picked agents, every two of them once.
 `hold` plays, as one eval run (`etude.eval.match.evaluate`), the matches a
 tournament adds. `curves` follows each matchup over training; `standings`
-ranks a round robin. Both read a database `etude.eval.query.connect` opened.
+ranks a round robin. Both read an experiment's database (`etude.eval.query.statsdb`).
 
 A tournament is stored nowhere but in its eval runs: each keeps, in its own
 folder, `tournament.json` (`TournamentRun`), the definition it was held with
@@ -13,16 +13,19 @@ naming it (`etude.eval.records.assemble`), so a run delivered from a rented
 machine like any other run brings its part of the tournament with it, and
 many small eval runs may grow one tournament at once.
 
-A match is the same wherever it is played, so its results are reused by key
-within one environment: a scheduled match that any eval run of the
-tournament's environment holds counts, once, from the run that recorded it
-last, whether that run was held for this tournament, another, or none.
+A tournament only decides which matches to play; its results belong to the
+experiment it was held for. A match is the same wherever it is played, so
+its results are reused by key within one experiment and environment: a
+scheduled match that any of the experiment's eval runs in the tournament's
+environment holds counts, once, from the run that recorded it last, whether
+that run was held for this tournament, another, or none.
 
 Holding a checkpoint, or entrants, reads nothing of the tournament: it plays
 the matches those add. Any other hold lists each place once, reads each eval
-run once (its `tournament.json`, or its `environment.json` when it was held
-for no tournament), and plays what the tournament calls for and no eval run
-of its environment delivered.
+run's `run.json` and, for the experiment's, its `tournament.json` (or its
+`environment.json` when it was held for no tournament), and plays what the
+tournament calls for and no eval run of the experiment in its environment
+delivered.
 """
 
 from __future__ import annotations
@@ -34,6 +37,8 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from pydantic import ValidationError
 
 from etude.eval.match import ETUDE_TABLES, IDENTIFIER, KIND, EvalRun, Tables, evaluate
 from etude.eval.query import compare, estimate
@@ -50,7 +55,7 @@ from etude.eval.records import (
 )
 from etude.run.declaration import declare
 from etude.run.errors import EtudeError
-from etude.run.records import ArtifactRef, Digest, Record
+from etude.run.records import ArtifactRef, Digest, Record, RunFile
 from etude.run.storage import DirectoryStorage, Storage, default_root
 
 if TYPE_CHECKING:
@@ -63,6 +68,7 @@ _ENVIRONMENT_FILE = "environment.json"
 def hold(
     tournament: Benchmark | RoundRobin,
     *,
+    experiment: str,
     play: Callable[[Match], Tables],
     checkpoint: ArtifactRef | None = None,
     enter: Sequence[Agent] = (),
@@ -71,7 +77,11 @@ def hold(
     storages: Sequence[Storage] = (),
     share: tuple[int, int] = (0, 1),
 ) -> EvalRun:
-    """Play, as one eval run, the matches the tournament adds; the run records what was given.
+    """Play, as one eval run of `experiment`, the matches the tournament adds; the run records what was given.
+
+    The tournament only decides which matches to play: its results are the
+    experiment's, beside its training runs, wherever the experiment's
+    database (`etude.eval.query.statsdb`) reads them.
 
     A benchmark held with `checkpoint` (on the go) plays each of the given
     matchups with the checkpoint in the model's seats. Held without one
@@ -110,7 +120,7 @@ def hold(
     held = [added]
     if not on_the_go:
         base = Path(directory) if directory is not None else default_root()
-        stored, delivered = _stored(tournament, [DirectoryStorage(base), *storages])
+        stored, delivered = _stored(tournament, experiment, [DirectoryStorage(base), *storages])
         held = [*stored, added]
     # Two matchups may share a match; it is played once.
     matches = {each.match.key: each.match for each in assemble(held).schedule()}
@@ -122,9 +132,9 @@ def hold(
     run = os.environ.get("ETUDE_RUN") or (
         f"{tournament.name}.{digest(added.model_dump(mode='json'))[:12]}"
     )
-    _record(added, run, directory)
+    _record(added, experiment, run, directory)
     return evaluate(
-        experiment=tournament.name,
+        experiment=experiment,
         environment=tournament.environment,
         matches=pending,
         play=play,
@@ -135,11 +145,9 @@ def hold(
     )
 
 
-def _record(added: TournamentRun, run: str, directory: Path | str | None) -> None:
+def _record(added: TournamentRun, experiment: str, run: str, directory: Path | str | None) -> None:
     """Write `tournament.json` in the eval run's folder; a resumed run must have been held alike."""
-    declared = declare(
-        experiment=added.tournament.name, clocks=(), run=run, kind=KIND, directory=directory
-    )
+    declared = declare(experiment=experiment, clocks=(), run=run, kind=KIND, directory=directory)
     if declared.declaration.kind != KIND:
         raise EtudeError("run_is_not_an_eval_run", 409)
     path = declared.root / TOURNAMENT_FILE
@@ -156,24 +164,30 @@ def _resumed(added: TournamentRun) -> dict[str, object]:
 
 
 def _stored(
-    tournament: Benchmark | RoundRobin, places: Sequence[Storage]
+    tournament: Benchmark | RoundRobin, experiment: str, places: Sequence[Storage]
 ) -> tuple[list[TournamentRun], set[Digest]]:
-    """The tournament's eval runs in every place, and every match that any eval
-    run of its environment holds as done.
+    """The tournament's eval runs of the experiment in every place, and every match
+    that an eval run of the experiment in its environment holds as done.
 
-    One listing per place, and one read of each eval run: its
-    `tournament.json`, or its `environment.json` when it has none.
+    One listing per place, each eval run's `run.json`, and one more read of each
+    of the experiment's: its `tournament.json`, or its `environment.json` when
+    it has none.
     """
     held: dict[str, TournamentRun] = {}
     delivered: set[Digest] = set()
     environment = tournament.environment.identity
     for place in {place.name: place for place in places}.values():
         keys = place.keys("")
-        # Eval run folders: those held for a tournament, and the rest.
-        tournaments = _folders(keys, TOURNAMENT_FILE)
+        ours = {
+            folder
+            for folder in _folders(keys, TOURNAMENT_FILE) | _folders(keys, _ENVIRONMENT_FILE)
+            if _experiment(place, folder) == experiment
+        }
+        # The experiment's eval run folders: those held for a tournament, and the rest.
+        tournaments = _folders(keys, TOURNAMENT_FILE) & ours
         alike = {
             folder
-            for folder in _folders(keys, _ENVIRONMENT_FILE) - tournaments
+            for folder in (_folders(keys, _ENVIRONMENT_FILE) & ours) - tournaments
             if Environment.model_validate_json(place.get(folder + _ENVIRONMENT_FILE)).identity
             == environment
         }
@@ -191,6 +205,14 @@ def _stored(
     return [held[run] for run in sorted(held)], delivered
 
 
+def _experiment(place: Storage, folder: str) -> str | None:
+    """The experiment a run folder's `run.json` names; None before it arrives."""
+    try:
+        return RunFile.model_validate_json(place.get(folder + "run.json")).experiment
+    except (FileNotFoundError, ValidationError):
+        return None
+
+
 def _folders(keys: Sequence[str], file: str) -> set[str]:
     """The run folders, at any depth of a listing, that hold `file`."""
     return {key.removesuffix(file) for key in keys if key.endswith("/" + file)}
@@ -202,7 +224,7 @@ def _held(db: duckdb.DuckDBPyConnection, tournament: str) -> Iterator[tuple[int,
 
     Each scheduled match counts once, from whichever eval run of the
     tournament's environment recorded it last.
-    Raises the conflict `connect` found among the tournament's eval runs, if any.
+    Raises the conflict `statsdb` found among the tournament's eval runs, if any.
     """
     found = db.execute(
         "select conflict from tournaments where tournament = ?", [tournament]

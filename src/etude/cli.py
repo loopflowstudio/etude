@@ -36,6 +36,7 @@ def evaluations(
             "default: where runs are written on this computer"
         ),
     ] = None,
+    experiment: Annotated[str | None, typer.Option(help="only this experiment")] = None,
     out: Annotated[
         Path | None, typer.Option(help="default: SOURCE/reports, or ./reports for a bucket")
     ] = None,
@@ -45,7 +46,7 @@ def evaluations(
         typer.Option(min=0.1, help="regenerate the report every SECONDS"),
     ] = None,
 ) -> None:
-    """Write the report comparing every eval run's agents to DIRECTORY/reports/eval/index.html."""
+    """Write each experiment's report comparing its eval runs' agents to DIRECTORY/reports/eval/EXPERIMENT.html."""
     # Eval runs are composed here, so training's reports never import `etude.eval`.
     import time
     import webbrowser
@@ -57,15 +58,15 @@ def evaluations(
     local = not given.startswith("s3://")
     storage = storage_from_uri(given)
     directory = out or (Path(given) / "reports" if local else Path("reports"))
-    written = False
+    written: set[Path] = set()
     try:
         while True:
-            target = write(storage, directory, refresh=watch)
-            if target is not None and not written:
-                print(target, flush=True)
-                if open_:
-                    webbrowser.open(target.resolve().as_uri())
-                written = True
+            for target in write(storage, directory, experiment=experiment, refresh=watch):
+                if target not in written:
+                    print(target, flush=True)
+                    if open_:
+                        webbrowser.open(target.resolve().as_uri())
+                    written.add(target)
             if watch is None:
                 break
             time.sleep(watch)

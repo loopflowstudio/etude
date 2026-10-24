@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from etude.eval.match import agent, environment
-from etude.eval.query import connect
+from etude.eval.query import statsdb
 from etude.eval.records import Benchmark, Matchup, Model
 from etude.jobs import JobOptions, evaluation
 from etude.launch.errors import LauncherError
@@ -195,6 +195,7 @@ def test_an_evaluation_job_holds_a_benchmark_for_the_checkpoint_it_is_given(
     )
     job = evaluation(
         progress,
+        experiment="ppo",
         play=duel.play,
         checkpoint=given,
         max_hours=0.1,
@@ -216,7 +217,7 @@ def test_an_evaluation_job_holds_a_benchmark_for_the_checkpoint_it_is_given(
         if key.startswith(folder):
             (delivered / run / key.removeprefix(folder)).parent.mkdir(parents=True, exist_ok=True)
             (delivered / run / key.removeprefix(folder)).write_bytes(body)
-    db = connect(delivered)
+    db = statsdb("ppo", delivered)
     assert (
         db.sql(
             "select a.name, p.bytes from plays p join seats s using (run, match, player)"
@@ -229,7 +230,7 @@ def test_an_evaluation_job_holds_a_benchmark_for_the_checkpoint_it_is_given(
 def test_an_evaluation_holds_what_its_tournament_takes() -> None:
     progress = Benchmark(name="anchors", environment=environment("duel"))
     with pytest.raises(LauncherError, match="give it a checkpoint"):
-        evaluation(progress, play=lambda match: {}, max_hours=0.1, repo=None)
+        evaluation(progress, experiment="ppo", play=lambda match: {}, max_hours=0.1, repo=None)
 
 
 def test_the_job_command_starts_by_importing_no_other_part_of_etude() -> None:

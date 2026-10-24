@@ -39,7 +39,7 @@ def test_watch_waits_for_results_and_refreshes_open_page(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     source = tmp_path / "runs"
-    target = tmp_path / "reports" / "eval" / "index.html"
+    target = tmp_path / "reports" / "eval" / "live-report.html"
     opened: list[str] = []
     pages: list[str] = []
     polls = 0
@@ -92,4 +92,4 @@ def test_single_report_retains_no_results_error(tmp_path: Path) -> None:
 def test_single_report_does_not_reload(tmp_path: Path) -> None:
     _record(tmp_path, 1)
     assert main(["reports", "eval", "--source", str(tmp_path)]) == 0
-    assert "http-equiv" not in (tmp_path / "reports" / "eval" / "index.html").read_text()
+    assert "http-equiv" not in (tmp_path / "reports" / "eval" / "live-report.html").read_text()
