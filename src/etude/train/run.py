@@ -160,6 +160,7 @@ class Run:
         segment_rows: int,
         strict: bool,
         inherited: CheckpointRecord | None = None,
+        resumed_at: Mapping[str, float] | None = None,
     ) -> None:
         self.experiment = experiment
         self.name = name
@@ -192,7 +193,9 @@ class Run:
         self._writer_id = secrets.token_hex(6)
         # A later attempt or a continuation resumes from here, and its rows
         # supersede earlier attempts' from these coordinates on.
-        latest = self.latest_checkpoint()
+        if resumed_at is None:
+            latest = self.latest_checkpoint()
+            resumed_at = {} if latest is None else latest.at
         self._save(
             "metrics",
             self._writer_id,
@@ -202,7 +205,7 @@ class Run:
                 host=socket.gethostname(),
                 attempt=os.environ.get("ETUDE_ATTEMPT"),
                 pod=os.environ.get("RUNPOD_POD_ID"),
-                resumed_at={} if latest is None else dict(latest.at),
+                resumed_at=dict(resumed_at),
             ),
         )
         seal_logs(self.files.root, self._clock_names)  # what an earlier process left unsealed
@@ -718,6 +721,7 @@ def track(
     segment_seconds: float = 2.0,
     segment_rows: int = 5_000,
     strict: bool = False,
+    resumed_at: Mapping[str, float] | None = None,
 ) -> Run:
     """Declare or resume a run. Strict: a bad declaration raises here, not later.
 
@@ -729,7 +733,17 @@ def track(
     (`Run.latest_checkpoint`). A continuation (`etude.jobs.continue_from`) is
     handed its parent's checkpoint in `ETUDE_CONTINUES`: unless `continues` is
     given, the run declares that it continues its parent from there.
+
+    A resumed run's rows replace earlier attempts' from its latest checkpoint
+    on. A process that restored its state from somewhere else, such as a
+    snapshot of its own taken after that checkpoint, passes where it stands
+    as `resumed_at`, keyed by declared clocks.
     """
+    if resumed_at is not None and any(
+        clock not in {c.name for c in clocks} or not math.isfinite(value)
+        for clock, value in resumed_at.items()
+    ):
+        raise EtudeError("resumed_at_unknown_clock", 422)
     inherited = _inherited()
     if inherited is not None and continues is None:
         parent, record = inherited
@@ -761,6 +775,7 @@ def track(
         segment_rows=segment_rows,
         strict=strict,
         inherited=None if inherited is None else inherited[1],
+        resumed_at=resumed_at,
     )
 
 
