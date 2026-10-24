@@ -114,12 +114,30 @@ class AttemptRecord(Record):
     """`<run>/attempts/<attempt>.json`: one attempt as far as it has got.
 
     Rewritten as it moves: started, reporting progress, then finished, with
-    `finished` holding the worker's final journal entry.
+    `finished` holding the worker's final journal entry. `log_ends` names the
+    stored pieces of what the job printed (`log_piece`) by where each ends, in
+    bytes; it is None until the job's log exists. A piece is stored before the
+    record that names it, so a reader of the record finds every piece it names.
     """
 
     started_at: datetime | None = None
     result: Result = Field(default_factory=Result)
     finished: dict[str, JsonValue] | None = None
+    log_ends: tuple[int, ...] | None = None
+
+    def log_pieces(self, attempt: str) -> tuple[str, ...]:
+        """The keys, in the run's folder, of the log's pieces in order."""
+        ends = self.log_ends or ()
+        return tuple(log_piece(attempt, start) for start in (0, *ends[:-1]))
+
+
+def log_piece(attempt: str, start: int) -> str:
+    """Where the piece of an attempt's log that starts at byte `start` is kept.
+
+    Pieces are sealed once and never rewritten. Named, as Kafka names log
+    segments, by their first offset, zero-padded so names sort in log order.
+    """
+    return f"attempts/{attempt}.log/{start:020d}"
 
 
 class Inbox(Record):

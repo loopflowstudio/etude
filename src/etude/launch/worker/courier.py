@@ -39,7 +39,7 @@ from etude.launch.logging import (
     write_log,
 )
 from etude.launch.records import Diagnostic
-from etude.launch.schemas import AttemptRecord, Bootstrap, Inbox
+from etude.launch.schemas import AttemptRecord, Bootstrap, Inbox, log_piece
 from etude.launch.storage.download import Cache, Download, Mismatch
 from etude.launch.storage.files import RESULT, read_result, write
 from etude.launch.storage.s3 import (
@@ -58,7 +58,11 @@ from etude.launch.storage.s3 import (
 from etude.launch.storage.transport import attribute, observe
 
 ROOT = Path("/run/etude/sessions")
-_LOG_EVERY_SECONDS = 15.0
+# A log piece waits about a twentieth of its attempt's age, between 15 seconds
+# and 5 minutes, before it is sealed: new output reaches storage within that,
+# and a 12-hour attempt leaves about two hundred pieces, not one per poll.
+_PIECE_LEAST_SECONDS = 15.0
+_PIECE_MOST_SECONDS = 300.0
 
 
 def _diagnose(operation: str, error: BaseException, attempt: str | None = None) -> None:
@@ -133,16 +137,35 @@ class _Folder:
         return True
 
 
+class _Log:
+    """One attempt's log as carried: where its sealed pieces end, and when."""
+
+    def __init__(self, now: float) -> None:
+        self.ends: tuple[int, ...] = ()
+        self.opened = now
+        self.sealed: float | None = None  # the first output is sent at once
+
+    @property
+    def sent(self) -> int:
+        return self.ends[-1] if self.ends else 0
+
+    def due(self, now: float) -> bool:
+        if self.sealed is None:
+            return True
+        wait = (now - self.opened) / 20
+        return now - self.sealed >= min(_PIECE_MOST_SECONDS, max(_PIECE_LEAST_SECONDS, wait))
+
+
 class Courier:
     """Carries one session's files between its directory and storage.
 
-    Each attempt's files go to its run's folder (see `BucketJournal`): the log
-    and a record of the attempt under `attempts/`, and the run's tracked
-    folder as it is, by the rules the tracker's own shipper follows
-    (`etude.carriage`), so every checkpoint the tracker records is in storage
-    while the attempt still runs. Large files go in parts, and replaced
-    tracking files are deleted, where the run's grant includes keys; with a
-    form alone, neither happens.
+    Each attempt's files go to its run's folder (see `BucketJournal`): its log,
+    in appended pieces each sent once, and a record of the attempt naming them,
+    under `attempts/`, and the run's tracked folder as it is, by the rules the
+    tracker's own shipper follows (`etude.carriage`), so every checkpoint the
+    tracker records is in storage while the attempt still runs. Large files go
+    in parts, and replaced tracking files are deleted, where the run's grant
+    includes keys; with a form alone, neither happens.
     """
 
     def __init__(
@@ -157,7 +180,7 @@ class Courier:
         self._out = _Folder(out, send)  # the session's own folder
         self._runs = {run: _Folder(grant, send) for run, grant in (runs or {}).items()}
         self._sent: dict[str, tuple[int, float]] = {}
-        self._log_sent_at: dict[str, float] = {}
+        self._logs: dict[str, _Log] = {}
         self._console_position = 0
         self._console = Console("worker output")
         self._inbox: Version | None = None  # the inbox as last read
@@ -383,10 +406,11 @@ class Courier:
         if (outputs / RESULT).exists():
             record = record.model_copy(update={"result": read_result(outputs)})
         self._track(run, done or final)
-        log_due = time.monotonic() - self._log_sent_at.get(attempt, 0.0) > _LOG_EVERY_SECONDS
-        if (home / "log").exists() and (done or final or log_due):
-            self._put(home / "log", run, f"attempts/{attempt}.log")
-            self._log_sent_at[attempt] = time.monotonic()
+        if (home / "log").exists():
+            log = self._logs.setdefault(attempt, _Log(time.monotonic()))
+            if done or final or log.due(time.monotonic()):
+                self._seal(home / "log", run, attempt, log)
+            record = record.model_copy(update={"log_ends": log.ends})
         if done:
             for path in sorted(
                 p
@@ -406,6 +430,24 @@ class Courier:
             write(note, content)
         with attribute(purpose="control"):
             self._put(note, run, f"attempts/{attempt}.json")
+
+    def _seal(self, path: Path, run: str, attempt: str, log: _Log) -> None:
+        """Store what the job has printed since the last piece, as new pieces.
+
+        The job only appends to its log, so the bytes before `log.sent` are
+        stored already. A piece is at most one part, so each is one request.
+        A failed write leaves the piece unsealed; it is written again whole,
+        under the same name, and no record has named it yet.
+        """
+        with path.open("rb") as stream:
+            # Up to what is there now: output printed during the upload waits
+            # for the next piece instead of making a small one of its own.
+            size = os.fstat(stream.fileno()).st_size
+            stream.seek(log.sent)
+            while body := stream.read(min(PART_BYTES, size - log.sent)):
+                self._runs[run].write_bytes(log_piece(attempt, log.sent), body)
+                log.ends = (*log.ends, log.sent + len(body))
+                log.sealed = time.monotonic()
 
 
 def _run(

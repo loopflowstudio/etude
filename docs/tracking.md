@@ -110,7 +110,8 @@ Rules a caller can rely on:
   `metrics/` (row blocks and their indexes, from every attempt) and
   `checkpoints/` (each named for where its first clock stood, such as
   `steps-1000.pt` beside `steps-1000.json`). Under the launcher the same folder
-  in the bucket also holds `attempts/ATTEMPT.log` and `attempts/ATTEMPT.json`.
+  in the bucket also holds `attempts/ATTEMPT.json` and the pieces of the job's log
+  it names, under `attempts/ATTEMPT.log/`.
   A run's name is unique in its runs directory whatever its experiment. Config,
   state and checkpoint records are JSON. Rows are columnar block files (the
   layout is described at the top of `src/etude/train/block.py`),

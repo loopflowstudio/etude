@@ -449,6 +449,12 @@ A storage outage or death before bootstrap runs can leave an explicit evidence
 gap. Reading logs never needs a live machine after its bucket evidence was
 published or its output cached by the controller.
 
+A job's output reaches storage as appended pieces, each sent once and never
+rewritten, and the attempt's record names them; a reader reads each piece once.
+New output is sealed into a piece after 15 seconds at first, waiting longer as
+the attempt ages, to at most 5 minutes, so a 12-hour attempt leaves about two
+hundred pieces. The last piece goes with the attempt's ending.
+
 ```python
 from etude.launch.client import diagnostics, logs
 
@@ -764,8 +770,8 @@ and the machines' own working files apart:
 
 ```text
 PREFIX/RUN/                      everything about one run
-  attempts/ATTEMPT.log           what the job printed
-  attempts/ATTEMPT.json          when it started, its progress, how it ended
+  attempts/ATTEMPT.log/OFFSET    what the job printed, in pieces named by first byte
+  attempts/ATTEMPT.json          when it started, its progress, how it ended, its pieces
   attempts/ATTEMPT/NAME          files the job left in its output directory
   run.json  state.json  metrics/ the run's tracked files, as they are,
   checkpoints/                     every checkpoint tracking recorded among them
