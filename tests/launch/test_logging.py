@@ -30,7 +30,7 @@ from etude.launch.providers.runpod import pod
 from etude.launch.records import Diagnostic, LogSnapshot, LogStream, Run
 from etude.launch.records import Storage as StorageRecord
 from etude.launch.scheduler import Scheduler
-from etude.launch.schemas import AttemptRecord, Bootstrap, Observation, Packet
+from etude.launch.schemas import AttemptRecord, Bootstrap, Observation, Packet, log_piece
 from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.disk import DirectoryJournal
 from etude.launch.storage.files import write
@@ -236,16 +236,23 @@ def test_bucket_completion_during_log_read_keeps_cached_output_refreshable(
     session = b.service.sessions[attempt.session]
     packet = session.packet.model_copy(update={"work": tuple(w for w, _ in session.work())})
     storage = MemoryStorage()
-    log_key = f"p/{run}/attempts/{attempt.id}.log"
-    record_key = f"p/{run}/attempts/{attempt.id}.json"
+    folder = f"p/{run}/"
+    record_key = f"{folder}attempts/{attempt.id}.json"
     storage.objects[f"p/sessions/{attempt.session}/packet.json"] = packet.model_dump_json().encode()
-    storage.objects[log_key] = b"early output\n"
+    first, last = b"early output\n", b"final output\n"
+    storage.objects[folder + log_piece(attempt.id, 0)] = first
+    storage.objects[record_key] = AttemptRecord(log_ends=(len(first),)).model_dump_json().encode()
 
     def send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Reply:
         reply = storage(method, url, body, headers)
-        if method == "GET" and urlsplit(url).path == f"/{log_key}":
-            storage.objects[log_key] = b"early output\nfinal output\n"
-            storage.objects[record_key] = AttemptRecord(finished={}).model_dump_json().encode()
+        if method == "GET" and urlsplit(url).path == f"/{record_key}":
+            # The attempt finishes while its earlier record is on the way.
+            storage.objects[folder + log_piece(attempt.id, len(first))] = last
+            storage.objects[record_key] = (
+                AttemptRecord(finished={}, log_ends=(len(first), len(first) + len(last)))
+                .model_dump_json()
+                .encode()
+            )
         return reply
 
     journal = BucketJournal(
@@ -268,7 +275,8 @@ def test_bucket_completion_during_log_read_keeps_cached_output_refreshable(
     final = b.scheduler.logs(run=run)
     assert job_text(final) == "early output\nfinal output\n"
     assert next(s for s in final.streams if s.producer == "job").complete
-    assert len(storage.asked) == 7  # Four reads, then three with the immutable packet cached.
+    # Four reads, then three: the packet and the first piece are never read again.
+    assert len(storage.asked) == 7
     storage.objects.clear()
     assert job_text(b.scheduler.logs(run=run)) == job_text(final)
     assert len(storage.asked) == 7  # Final evidence needs no further bucket reads.

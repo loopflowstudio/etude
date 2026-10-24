@@ -43,7 +43,7 @@ from etude.launch.records import (
 )
 from etude.launch.records import Storage as Place
 from etude.launch.scheduler import Scheduler
-from etude.launch.schemas import Bootstrap, Packet, Work
+from etude.launch.schemas import AttemptRecord, Bootstrap, Packet, Work, log_piece
 from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.s3 import Bucket, Grant, Keys, Reply, StorageUnavailable
 from etude.launch.storage.transport import emit
@@ -497,7 +497,7 @@ def test_a_run_from_a_commit_runs_in_a_pod_and_continues_in_another(
     attempt = c.scheduler.attempts(second)[0].id
     folder = f"etude/t/{second}/"
     keys = [k.removeprefix(folder) for k in c.storage.objects if k.startswith(folder)]
-    assert {f"attempts/{attempt}.json", f"attempts/{attempt}.log"} <= set(keys)
+    assert {f"attempts/{attempt}.json", log_piece(attempt, 0)} <= set(keys)
     assert {"run.json", "checkpoints/steps-7.json", "checkpoints/steps-7.pt"} <= set(keys)
 
 
@@ -754,6 +754,59 @@ def machine(tmp_path: Path, storage: Storage) -> tuple[Courier, Path, Path]:
     )
     courier = Courier(home, session, "unused", storage, {"run1": access})
     return courier, attempt, track
+
+
+def test_a_twelve_hour_log_is_sent_once_in_a_few_hundred_pieces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = Storage()
+    courier, attempt, _ = machine(tmp_path, storage)
+    now = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    log = attempt / "log"
+    log.write_bytes(b"")
+    # A line a second, carried every 15 seconds (the machine's loop carries every 3).
+    with log.open("ab") as job:
+        for second in range(12 * 3600):
+            job.write(f"step {second}\n".encode())
+            if second % 15 == 0:
+                job.flush()
+                now[0] = float(second)
+                courier.carry_out()
+    (attempt / "finished.json").write_text("{}")
+    (courier._home / "session.log").touch()
+    courier.carry_out(final=True)
+    folder = "etude/run1/attempts/"
+    pieces = sorted(k for k in storage.objects if k.startswith(folder + "a1.log/"))
+    puts = [key for method, key in storage.asked if method in ("PUT", "POST")]
+    # Each piece is written once, so the bytes sent are the log's bytes, once.
+    assert sorted(key for key in puts if key in pieces) == pieces
+    assert b"".join(storage.objects[key] for key in pieces) == log.read_bytes()
+    # The record is rewritten only to name a new piece, the last with its ending.
+    assert (len(pieces), puts.count(folder + "a1.json")) == (197, 197)
+    record = AttemptRecord.model_validate_json(storage.objects[folder + "a1.json"])
+    assert ["etude/run1/" + key for key in record.log_pieces("a1")] == pieces
+
+
+def test_output_printed_during_an_upload_waits_for_the_next_piece(tmp_path: Path) -> None:
+    class Printing(Storage):
+        """The job prints a line while each piece of its log is on the way."""
+
+        def __call__(
+            self, method: str, url: str, body: bytes | None, headers: dict[str, str]
+        ) -> Reply:
+            if method == "PUT" and ".log/" in url:
+                with log.open("ab") as job:
+                    job.write(b"printed meanwhile\n")
+            return super().__call__(method, url, body, headers)
+
+    storage = Printing()
+    courier, attempt, _ = machine(tmp_path, storage)
+    log = attempt / "log"
+    log.write_bytes(b"first\n")
+    courier.carry_out()
+    pieces = [k for k in storage.objects if ".log/" in k]
+    assert [storage.objects[k] for k in pieces] == [b"first\n"]
 
 
 def test_a_machine_deletes_only_uploaded_files_in_the_removal_note(tmp_path: Path) -> None:

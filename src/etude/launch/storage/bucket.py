@@ -51,8 +51,8 @@ class BucketJournal:
     """A storage's folder, laid out by run, with each machine's working files apart.
 
         PREFIX/RUN/                     everything about one run, from every attempt
-          attempts/ATTEMPT.log          what the job printed
-          attempts/ATTEMPT.json         start, progress and how it ended
+          attempts/ATTEMPT.log/OFFSET   what the job printed, in pieces by first byte
+          attempts/ATTEMPT.json         start, progress, how it ended, and its pieces
           attempts/ATTEMPT/NAME         files the job left in its output directory
           run.json  checkpoints/  ...   the run's tracked folder, as the tracker keeps it
         PREFIX/sessions/SESSION/        one machine's instructions, inbox and notes
@@ -63,15 +63,15 @@ class BucketJournal:
     under its own `out/`.
 
     Polling never re-reads bytes this journal holds: an object that cannot
-    change is read once, and a changing one (records, logs, the inbox) is asked
-    for with the ETag of the version last read, so storage sends its body only
-    when it has changed.
+    change (a log piece, a packet) is read once, and a changing one (records,
+    the inbox, the machine's own logs) is asked for with the ETag of the
+    version last read, so storage sends its body only when it has changed.
     """
 
     def __init__(self, storage: Storage, bucket: Bucket) -> None:
         self._prefix, self._bucket = storage.prefix, bucket
         self._kept: dict[str, bytes] = {}
-        # The version last read of each changing object, by session, most recent last.
+        # The version last read of each object, by session, most recent last.
         self._versions: OrderedDict[str, dict[str, Version]] = OrderedDict()
         self._finished: dict[str, Progress] = {}
         # Staged archives by repository and commit: their key, digest and size.
@@ -204,12 +204,17 @@ class BucketJournal:
     def hold(self, run: str, files: dict[str, bytes]) -> None:
         """Nothing to keep: a machine of this journal restores the run from storage."""
 
-    def _current(self, session_id: str, key: str) -> bytes | None:
-        """A changing object's bytes; storage sends none while they are those last read."""
+    def _held(self, session_id: str) -> dict[str, Version]:
+        """What is kept of one session's objects, now its most recently asked about."""
         versions = self._versions.setdefault(session_id, {})
         self._versions.move_to_end(session_id)
         while len(self._versions) > _SESSIONS_KEPT:
             self._versions.popitem(last=False)
+        return versions
+
+    def _current(self, session_id: str, key: str) -> bytes | None:
+        """A changing object's bytes; storage sends none while they are those last read."""
+        versions = self._held(session_id)
         found = self._bucket.get_version(key, versions.get(key))
         if found is None:
             versions.pop(key, None)
@@ -225,6 +230,19 @@ class BucketJournal:
                 return None
             self._kept[key] = raw
         return self._kept[key]
+
+    def _log(self, session_id: str, run: str, attempt: str, record: AttemptRecord) -> bytes:
+        """The pieces of an attempt's log its record names, joined; each is read once."""
+        versions = self._held(session_id)
+        keys = [self._run(run) + piece for piece in record.log_pieces(attempt)]
+        for key in keys:
+            if key not in versions:
+                with attribute(run=run, attempt=attempt, purpose="result"):
+                    found = self._bucket.get_version(key)
+                if found is None:
+                    raise LauncherError(f"log piece {key} is named by its record but missing")
+                versions[key] = found
+        return b"".join(versions[key].body for key in keys)
 
     def _runs(self, session_id: str) -> dict[str, str]:
         """Each attempt this session was given, to its run."""
@@ -313,13 +331,13 @@ class BucketJournal:
             raw = self._current(session_id, self._session(session_id) + f"out/{producer}.log")
             return snapshot_stream(session_id, None, producer, raw, False)
         run = self._runs(session_id).get(attempt)
-        # Completion is published after final output. Read it first so a concurrent
-        # finish cannot make an older log snapshot permanently cacheable.
+        # The record names the pieces stored before it, finished or not, so the
+        # text and its completion are from one moment.
         record = None if run is None else self._record(session_id, run, attempt)
         raw = (
             None
-            if run is None
-            else self._current(session_id, f"{self._run(run)}attempts/{attempt}.log")
+            if run is None or record is None or record.log_ends is None
+            else self._log(session_id, run, attempt, record)
         )
         return snapshot_stream(
             session_id, attempt, producer, raw, record is not None and record.finished is not None

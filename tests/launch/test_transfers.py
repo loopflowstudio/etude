@@ -28,7 +28,7 @@ from etude.launch.logging import log_to
 from etude.launch.providers.runpod import pod
 from etude.launch.records import Job, Output, Storage
 from etude.launch.scheduler import Scheduler
-from etude.launch.schemas import AttemptRecord, Delivery, Inbox, Progress, Result
+from etude.launch.schemas import AttemptRecord, Delivery, Inbox, Progress, Result, log_piece
 from etude.launch.storage import download
 from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.download import Cache, Download
@@ -822,9 +822,12 @@ def test_polling_a_session_reads_each_version_of_its_files_once(http: HTTP, tmp_
     http.objects[session + "out/worker.log"] = b"worker log line\n" * 100
     http.objects[session + "out/usage.jsonl"] = b""
     record = f"/p/{run}/attempts/{attempt.id}.json"
-    log = f"/p/{run}/attempts/{attempt.id}.log"
-    http.objects[record] = AttemptRecord(started_at=datetime.now(UTC)).model_dump_json().encode()
-    http.objects[log] = b"step 1\n" * 1000
+    started = AttemptRecord(started_at=datetime.now(UTC))
+    first = b"step 1\n" * 1000
+    http.objects[f"/p/{run}/" + log_piece(attempt.id, 0)] = first
+    http.objects[record] = (
+        started.model_copy(update={"log_ends": (len(first),)}).model_dump_json().encode()
+    )
     journal = BucketJournal(
         Storage(name="test", bucket="test", provider="s3", region="r", prefix="p"),
         Bucket("test", "r", Keys(access_key="a", secret_key="s"), http.send),
@@ -839,6 +842,14 @@ def test_polling_a_session_reads_each_version_of_its_files_once(http: HTTP, tmp_
 
     poll()
     assert http.received == written  # ten polls read each file once
-    http.objects[log] += b"step 2\n" * 1000
+    second = b"step 2\n" * 1000
+    http.objects[f"/p/{run}/" + log_piece(attempt.id, len(first))] = second
+    http.objects[record] = (
+        started.model_copy(update={"log_ends": (len(first), len(first) + len(second))})
+        .model_dump_json()
+        .encode()
+    )
     poll()
-    assert http.received == written + len(http.objects[log])  # only the new version
+    # Only the new record and the new piece; the first piece is never read again.
+    assert http.received == written + len(http.objects[record]) + len(second)
+    assert journal.logs(attempt.session, attempt.id).text == (first + second).decode()
