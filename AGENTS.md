@@ -147,9 +147,10 @@ module never loads the rest.
 **Records.** Anything stored or sent between machines is a frozen Pydantic
 model. Do not keep a second kind of record beside them.
 
-**Command line.** Use Typer. Every input is a `--flag`; do not add positional
-conventions a person has to remember, such as a bare `--` or `name=value`.
-Keep output plain, because agents and logs read it.
+**Command line.** Use Typer. A command's one required input may be positional
+(`etude storage add NAME`); the rest are `--flag`s. Do not add conventions a
+person has to remember, such as a bare `--` or `name=value`. Keep output plain,
+because agents and logs read it.
 
 **Python is the interface.** Work is described in Python, not in a config
 format. A command-line command is a thin way to call the same functions.
