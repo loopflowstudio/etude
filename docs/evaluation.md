@@ -264,10 +264,11 @@ The job's environment needs `etude-sdk[eval]`; the rest is as for any
 An experiment file says what to evaluate given what exists, and `etude eval`
 plays whatever that calls for and no eval run has delivered. Run it while
 training goes, after it ends, or with a matchup added later: each pass looks
-again.
+again. The experiment is named for the file: `ppo.py` evaluates the training
+runs of experiment `ppo`, and its eval runs are that experiment's.
 
 ```python
-# experiment.py
+# ppo.py
 from etude.eval.records import Benchmark, Matchup
 from etude.experiment import ExperimentState
 from etude.jobs import evaluation
@@ -303,19 +304,18 @@ def eval(state: ExperimentState) -> list[Job]:
         ]
     anchors = Matchup(name="vs heuristic", players=(direct, heuristic), conditions=deals, games=8)
     ladder = Benchmark(name="ladder", environment=world, matchups=(anchors, *pairs))
-    return [evaluation(ladder, experiment="ppo", play=play, checkpoints=rated, workers=8,
-                       max_hours=1)]
+    return [evaluation(ladder, play=play, checkpoints=rated, workers=8, max_hours=1)]
 ```
 
 ```sh
-etude eval experiment.py --source s3://bucket/etude/launch               # play here
-etude eval experiment.py --source s3://bucket/etude/launch --rent cpu8   # launch
-etude eval experiment.py --source s3://bucket/etude/launch --rent cpu8 --watch 600
+etude eval ppo.py --source s3://bucket/etude/launch               # play here
+etude eval ppo.py --source s3://bucket/etude/launch --rent cpu8   # launch
+etude eval ppo.py --source s3://bucket/etude/launch --rent cpu8 --watch 600
 ```
 
-- **State.** `state.runs` is every training run under the source: its name,
-  experiment, whether it is `running`, `finished` or `failed`, and the
-  checkpoints it stored, each with its ordinal, clocks and tags.
+- **State.** `state.runs` is the experiment's training runs under the
+  source: each one's name, whether it is `running`, `finished` or `failed`,
+  and the checkpoints it stored, each with its ordinal, clocks and tags.
   `Checkpoints` is a tuple, so a slice works too; `every(n)`, `at(clock,
   *values)` and `tagged(tag)` choose by ordinal, coordinate or tag, and
   `final` is the last checkpoint once a run has finished.

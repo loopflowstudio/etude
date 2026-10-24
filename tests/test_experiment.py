@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import shutil
 import time
-from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
 from urllib.parse import urlparse
@@ -15,7 +14,14 @@ from etude.eval.match import agent, environment
 from etude.eval.query import statsdb
 from etude.eval.records import Agent, Benchmark, Matchup, Model
 from etude.eval.tournament import curves
-from etude.experiment import Checkpoint, ExperimentState, advance, observe, read_experiment
+from etude.experiment import (
+    Checkpoint,
+    Experiment,
+    ExperimentState,
+    advance,
+    observe,
+    read_experiment,
+)
 from etude.jobs import _hold, evaluation, evaluation_spec
 from etude.launch.records import Job, Outcome, Run, Status
 from etude.run.errors import EtudeError
@@ -62,11 +68,11 @@ def save(run: Run_, bucket: DirectoryStorage, tmp_path: Path, saves: range) -> N
 
 
 def _saved(run: Run_, bucket: DirectoryStorage) -> tuple[Checkpoint, ...]:
-    found = [each for each in observe(bucket).runs if each.name == run.name]
+    found = [each for each in observe(bucket, "ppo").runs if each.name == run.name]
     return found[0].checkpoints if found else ()
 
 
-def design(tmp_path: Path) -> Callable[[ExperimentState], Job]:
+def design(tmp_path: Path) -> Experiment:
     """Every second checkpoint against the heuristic, each against the previous one, and
     the final checkpoint against the first once training has finished."""
     anchor = heuristic(tmp_path)
@@ -92,9 +98,9 @@ def design(tmp_path: Path) -> Callable[[ExperimentState], Job]:
         anchors = Matchup(name="vs heuristic", players=(DIRECT, anchor), conditions=DEALS,
                           games=2)  # fmt: skip
         progress = Benchmark(name="ladder", environment=WORLD, matchups=(anchors, *pairs))
-        return evaluation(progress, experiment="ppo", play=play, checkpoints=rated, max_hours=0.1)
+        return evaluation(progress, play=play, checkpoints=rated, max_hours=0.1)
 
-    return eval_
+    return Experiment(name="ppo", eval=eval_)
 
 
 def test_each_pass_plays_what_the_checkpoints_saved_so_far_call_for(tmp_path: Path) -> None:
@@ -104,7 +110,8 @@ def test_each_pass_plays_what_the_checkpoints_saved_so_far_call_for(tmp_path: Pa
 
     training = trainer(bucket, tmp_path)
     save(training, bucket, tmp_path, range(1, 4))
-    state = observe(bucket)
+    state = observe(bucket, "ppo")
+    assert observe(bucket, "another").runs == ()
     assert [c.ordinal for c in state.run("ppo-1").checkpoints.every(2)] == [2]
     assert state.run("ppo-1").final is None
     (first,) = advance(eval_, source=bucket, directory=local)
@@ -137,20 +144,35 @@ def test_each_pass_plays_what_the_checkpoints_saved_so_far_call_for(tmp_path: Pa
     def post_hoc(state: ExperimentState) -> Job:
         every = Matchup(name="vs heuristic", players=(DIRECT, anchor), conditions=DEALS, games=2)
         sweep = Benchmark(name="sweep", environment=WORLD, matchups=(every,))
-        return evaluation(sweep, experiment="ppo", play=play, checkpoints=state.run("ppo-1").checkpoints,
+        return evaluation(sweep, play=play, checkpoints=state.run("ppo-1").checkpoints,
                           max_hours=0.1)  # fmt: skip
 
-    (later,) = advance(post_hoc, source=bucket, directory=local)
+    (later,) = advance(Experiment(name="ppo", eval=post_hoc), source=bucket, directory=local)
     assert (later.new, later.played) == (3 * len(DEALS), 3 * len(DEALS))
     with statsdb("ppo", bucket) as db:
         (swept,) = curves(db, "sweep", table="plays", value="won")
     assert [p.ordinal for p in swept.points] == [1, 2, 3, 4, 5]
 
 
+def test_an_eval_job_belongs_to_the_experiment_of_its_file(tmp_path: Path) -> None:
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    anchors = Matchup(name="vs heuristic", players=(DIRECT, heuristic(tmp_path)), conditions=DEALS,
+                      games=2)  # fmt: skip
+    progress = Benchmark(name="ladder", environment=WORLD, matchups=(anchors,))
+
+    def elsewhere(state: ExperimentState) -> Job:
+        return evaluation(progress, experiment="another", play=play, max_hours=0.1)
+
+    with pytest.raises(EtudeError, match="eval_job_of_another_experiment"):
+        advance(Experiment(name="ppo", eval=elsewhere), source=bucket, directory=tmp_path / "e")
+
+
 def test_an_experiment_file_defines_eval(tmp_path: Path) -> None:
     file = tmp_path / "experiment.py"
     file.write_text("def eval(state):\n    return []\n")
-    assert read_experiment(file)(ExperimentState()) == []
+    read = read_experiment(file)
+    assert read.name == "experiment"
+    assert read.eval(ExperimentState(experiment="experiment")) == []
     (tmp_path / "train_only.py").write_text("def train():\n    return []\n")
     with pytest.raises(EtudeError, match="experiment_file_defines_no_eval"):
         read_experiment(tmp_path / "train_only.py")
@@ -239,7 +261,8 @@ def test_a_pass_job_launched_as_given_is_refused_on_the_machine(tmp_path: Path) 
     training = trainer(bucket, tmp_path)
     save(training, bucket, tmp_path, range(1, 3))
     training.finish(timeout=30)
-    job = design(tmp_path)(observe(bucket))
+    job = design(tmp_path).eval(observe(bucket, "ppo"))
+    assert isinstance(job, Job)
     with pytest.raises(SystemExit, match="etude eval"):
         _hold(evaluation_spec(job))
 
@@ -247,5 +270,5 @@ def test_a_pass_job_launched_as_given_is_refused_on_the_machine(tmp_path: Path) 
 def test_a_finished_run_without_checkpoints_has_no_final(tmp_path: Path) -> None:
     bucket = DirectoryStorage(tmp_path / "bucket")
     trainer(bucket, tmp_path).finish(timeout=30)
-    run = observe(bucket).run("ppo-1")
+    run = observe(bucket, "ppo").run("ppo-1")
     assert (run.state, run.final, run.checkpoints.last) == ("finished", None, None)

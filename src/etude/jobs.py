@@ -102,7 +102,8 @@ class Evaluation(Record):
     """An evaluation job's config: what `_hold` holds, with what, on the machine."""
 
     tournament: Benchmark | RoundRobin
-    experiment: str
+    # None in a job an experiment's eval returns: `etude eval` names it for the file.
+    experiment: str | None
     play: Function
     # A benchmark's checkpoint, as the job's input of that name.
     checkpoint: Input | None = None
@@ -120,8 +121,8 @@ class Evaluation(Record):
 def evaluation(
     tournament: Benchmark | RoundRobin,
     *,
-    experiment: str,
     play: Callable[[Match], Tables],
+    experiment: str | None = None,
     checkpoint: Input | None = None,
     checkpoints: Sequence[Checkpoint] = (),
     enter: Sequence[Agent] = (),
@@ -137,10 +138,11 @@ def evaluation(
     launched run, so `etude logs` and `status` lead to it and a retry resumes it.
 
     An experiment's `eval(state)` returns one with `checkpoints` instead, the
-    ones it chose, or none for matchups of chosen checkpoints alone; `etude
-    eval` finds what is new and plays it here or launches a job for exactly
-    that. Launched as given, such a job is refused: a machine reads no other
-    eval run, so cannot tell what is new.
+    ones it chose, or none for matchups of chosen checkpoints alone, and no
+    `experiment`: `etude eval` names it for the file, finds what is new and
+    plays it here or launches a job for exactly that. Launched as given, such
+    a job is refused: a machine reads no other eval run, so cannot tell what
+    is new. Any other job names its `experiment`.
     """
     if isinstance(tournament, Benchmark) and enter:
         raise LauncherError(f"{tournament.name} is a benchmark: give it checkpoints, no entrants")
@@ -148,6 +150,8 @@ def evaluation(
         raise LauncherError("give one checkpoint input, or the checkpoints an experiment chose")
     if isinstance(tournament, RoundRobin) and (checkpoint is not None or checkpoints or not enter):
         raise LauncherError(f"{tournament.name} is a round robin: give it entrants, no checkpoint")
+    if experiment is None and (checkpoint is not None or isinstance(tournament, RoundRobin)):
+        raise LauncherError(f"name the experiment {tournament.name}'s eval run belongs to")
     if checkpoint is not None:
         options["inputs"] = (*options.get("inputs", ()), checkpoint)
     spec = Evaluation(
@@ -281,7 +285,7 @@ def _hold(evaluation: Evaluation) -> None:
     """On the machine: hold the tournament, with the checkpoint inputs in their seats."""
     # Loaded by import path: the function `evaluation` was given, typed there.
     play = cast(Callable[[Match], Tables], evaluation.play.load())
-    if evaluation.checkpoints and evaluation.matches is None:
+    if evaluation.experiment is None or (evaluation.checkpoints and evaluation.matches is None):
         raise SystemExit("etude: an experiment's evaluation job is launched by `etude eval`")
     folder = os.environ.get("ETUDE_INPUTS_DIR")
     if (evaluation.checkpoint is not None or evaluation.files) and not folder:

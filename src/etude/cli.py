@@ -80,7 +80,10 @@ def evaluations(
 @app.command("eval")
 @kind(Kind.wait)
 def eval_experiment(
-    file: Annotated[Path, typer.Argument(help="a Python file defining eval(state)")],
+    file: Annotated[
+        Path,
+        typer.Argument(help="a Python file defining eval(state); the experiment is named for it"),
+    ],
     source: Annotated[
         str | None,
         typer.Option(
@@ -105,11 +108,11 @@ def eval_experiment(
     from etude.experiment import advance, read_experiment
     from etude.run.storage import default_root, storage_from_uri
 
-    eval_function = read_experiment(file)
+    experiment = read_experiment(file)
     storage = storage_from_uri(source or default_root())
     try:
         while True:
-            for done in advance(eval_function, source=storage, pool=pool, rent=rent):
+            for done in advance(experiment, source=storage, pool=pool, rent=rent):
                 line = f"{done.tournament}: {done.new} new"
                 if done.running:
                     line += f", {done.running} already running"

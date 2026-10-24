@@ -1,8 +1,10 @@
 """Experiments: an eval function that names what to evaluate, and the pass that plays what is new.
 
-An experiment file defines `eval(state)`. `state` (`ExperimentState`, from
-`observe`) is every training run under a source, with the checkpoints each
-recorded and whether it has ended. `eval` returns the evaluation jobs it wants
+An experiment file defines `eval(state)`; the experiment is named for the
+file, so `ppo.py` is experiment `ppo`. `state` (`ExperimentState`, from
+`observe`) is the experiment's training runs under a source, with the
+checkpoints each recorded and whether it has ended. Its evaluations are the
+experiment's too, so `etude report` finds them beside its training runs. `eval` returns the evaluation jobs it wants
 now (`etude.jobs.evaluation`): a benchmark held for the checkpoints it chose,
 and matchups of chosen checkpoints against each other. It is called again on
 every pass, so a design that depends on what exists, such as each checkpoint
@@ -107,8 +109,9 @@ class TrainingRun:
 
 @dataclass(frozen=True)
 class ExperimentState:
-    """Every training run under a source, as a pass found it. Never stored."""
+    """An experiment's training runs under a source, as a pass found it. Never stored."""
 
+    experiment: str
     runs: tuple[TrainingRun, ...] = ()
 
     def run(self, name: str) -> TrainingRun:
@@ -118,10 +121,6 @@ class ExperimentState:
                 return each
         raise EtudeError("run_not_found", 404) from ValueError(name)
 
-    def experiment(self, name: str) -> tuple[TrainingRun, ...]:
-        """The training runs of one experiment, by run name."""
-        return tuple(each for each in self.runs if each.experiment == name)
-
     def checkpoint(self, sha256: Digest) -> Checkpoint | None:
         for each in self.runs:
             for saved in each.checkpoints:
@@ -130,15 +129,19 @@ class ExperimentState:
         return None
 
 
-def observe(source: Storage | Path | str) -> ExperimentState:
-    """The training runs under a directory or bucket and their stored checkpoints.
+def observe(source: Storage | Path | str, experiment: str) -> ExperimentState:
+    """The experiment's training runs under a directory or bucket and their stored checkpoints.
 
     A checkpoint whose file Etude did not store, so no digest, is left out:
     nothing can be evaluated without its bytes.
     """
     runs = []
     for data in read_all(source):
-        if data.file is None or data.file.declaration.kind == "evaluation":
+        if (
+            data.file is None
+            or data.experiment != experiment
+            or data.file.declaration.kind == "evaluation"
+        ):
             continue
         saved = Checkpoints(
             Checkpoint(
@@ -156,7 +159,7 @@ def observe(source: Storage | Path | str) -> ExperimentState:
         runs.append(
             TrainingRun(name=data.name, experiment=data.experiment, state=state, checkpoints=saved)
         )
-    return ExperimentState(runs=tuple(runs))
+    return ExperimentState(experiment=experiment, runs=tuple(runs))
 
 
 # ---------------------------------------------------------------------------
@@ -166,8 +169,16 @@ def observe(source: Storage | Path | str) -> ExperimentState:
 type EvalFunction = Callable[[ExperimentState], object]
 
 
-def read_experiment(path: Path) -> EvalFunction:
-    """The file's `eval(state)`. The file may import its neighbours, as a job file may."""
+@dataclass(frozen=True)
+class Experiment:
+    """An experiment file: the experiment named for it, and its `eval(state)`."""
+
+    name: str
+    eval: EvalFunction
+
+
+def read_experiment(path: Path) -> Experiment:
+    """The file's experiment. The file may import its neighbours, as a job file may."""
     if path.suffix != ".py":
         raise EtudeError("experiment_file_must_be_python", 422) from ValueError(path)
     folder = str(path.resolve().parent)
@@ -176,7 +187,7 @@ def read_experiment(path: Path) -> EvalFunction:
     found = runpy.run_path(str(path.resolve())).get("eval")
     if not callable(found):
         raise EtudeError("experiment_file_defines_no_eval", 422) from ValueError(path)
-    return cast(EvalFunction, found)
+    return Experiment(name=path.stem, eval=cast(EvalFunction, found))
 
 
 # ---------------------------------------------------------------------------
@@ -196,26 +207,29 @@ class Pass(Record):
 
 
 def advance(
-    eval_function: EvalFunction,
+    experiment: Experiment,
     *,
     source: Storage,
     pool: str | None = None,
     rent: str | None = None,
     directory: Path | str | None = None,
 ) -> list[Pass]:
-    """One pass: observe `source`, ask `eval_function`, and play or launch what is new.
+    """One pass: observe `source`, ask the experiment's `eval`, and play or launch what is new.
 
-    Without `pool` or `rent` the matches are played here, as one eval run per
-    job delivered to `source`. With one, each job with new matches is launched
-    to play exactly those; the machine's storage must deliver to `source`, or
-    the next pass will find them still new. Raises `EtudeError("launched_pass_failed")`
-    when a run an earlier pass launched failed.
+    Each job's eval run is the experiment's; a job naming another experiment is
+    refused with `EtudeError("eval_job_of_another_experiment")`.
+
+        Without `pool` or `rent` the matches are played here, as one eval run per
+        job delivered to `source`. With one, each job with new matches is launched
+        to play exactly those; the machine's storage must deliver to `source`, or
+        the next pass will find them still new. Raises `EtudeError("launched_pass_failed")`
+        when a run an earlier pass launched failed.
     """
     # Imported here: typed jobs import this module for `Checkpoint`.
     from etude.jobs import Evaluation, evaluation_spec, with_matches  # noqa: PLC0415
 
-    state = observe(source)
-    returned = eval_function(state)
+    state = observe(source, experiment.name)
+    returned = experiment.eval(state)
     given: list[object] = list(returned) if isinstance(returned, list | tuple) else [returned]
     jobs = [each for each in given if isinstance(each, Job)]
     if len(jobs) != len(given):
@@ -223,12 +237,16 @@ def advance(
     ledger = _Ledger(_ledger_root(directory)) if pool or rent else None
     running = ledger.running() if ledger is not None else set()
     passes = []
-    for job in jobs:
-        spec: Evaluation = evaluation_spec(job)
+    for given_job in jobs:
+        spec: Evaluation = evaluation_spec(given_job)
+        if spec.experiment not in (None, experiment.name):
+            raise EtudeError("eval_job_of_another_experiment", 422) from ValueError(spec.experiment)
+        spec = spec.model_copy(update={"experiment": experiment.name})
+        job = given_job.model_copy(update={"config": spec.model_dump_json()})
         checkpoints = tuple(each.artifact for each in spec.checkpoints)
         new = unplayed(
             spec.tournament,
-            experiment=spec.experiment,
+            experiment=experiment.name,
             checkpoints=checkpoints,
             directory=directory,
             storages=[source],
@@ -242,7 +260,7 @@ def advance(
             play = cast(Callable[[Match], Tables], spec.play.load(job.repo))
             held = hold(
                 spec.tournament,
-                experiment=spec.experiment,
+                experiment=experiment.name,
                 play=play,
                 checkpoints=checkpoints,
                 matches=pending,

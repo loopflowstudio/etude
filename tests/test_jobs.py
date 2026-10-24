@@ -239,6 +239,9 @@ def test_an_evaluation_holds_what_its_tournament_takes() -> None:
             max_hours=0.1,
             repo=None,
         )
+    weights = Input(name="w", key="w", sha256="0" * 64, size_bytes=1)
+    with pytest.raises(LauncherError, match="name the experiment"):
+        evaluation(progress, play=lambda match: {}, checkpoint=weights, max_hours=0.1, repo=None)
     league = RoundRobin(name="league", environment=environment("duel"), conditions=({},), games=1)
     with pytest.raises(LauncherError, match="give it entrants"):
         evaluation(league, experiment="ppo", play=lambda match: {}, max_hours=0.1, repo=None)
