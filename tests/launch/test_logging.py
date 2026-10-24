@@ -249,7 +249,9 @@ def test_bucket_completion_during_log_read_keeps_cached_output_refreshable(
         return reply
 
     journal = BucketJournal(
-        StorageRecord(name="fixture", bucket="fixture", prefix="p", region="us-east-1"),
+        StorageRecord(
+            name="fixture", bucket="fixture", prefix="p", provider="s3", region="us-east-1"
+        ),
         Bucket("fixture", "us-east-1", Keys(access_key="fixture", secret_key="fixture"), send),
     )
     original = b.service.logs
@@ -820,7 +822,10 @@ def test_log_capabilities_cover_final_delivery_but_not_extra_rental_time(
         clock=lambda: now,
     )
     journal = BucketJournal(
-        StorageRecord(name="fixture", bucket="fixture", prefix="p", region="us-east-1"), bucket
+        StorageRecord(
+            name="fixture", bucket="fixture", prefix="p", provider="s3", region="us-east-1"
+        ),
+        bucket,
     )
     packet = Packet(
         session="s",

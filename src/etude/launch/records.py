@@ -100,7 +100,7 @@ class Storage(Record):
     name: str
     bucket: str
     prefix: str  # the folder in that bucket its sessions live under
-    provider: Literal["s3", "r2"] = "s3"
+    provider: Literal["s3", "r2"]  # always stated: which service, and so whose keys
     region: str | None = None  # an S3 bucket's region; R2 has none
 
     @model_validator(mode="after")

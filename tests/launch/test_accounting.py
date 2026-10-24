@@ -86,7 +86,9 @@ def test_rented_machine_requires_storage_but_not_a_private_image(tmp_path: Path)
         b.scheduler.rent("stock", hours=2)
     assert not b.store.runs()
     b.scheduler.add_storage(
-        Storage(name="stock-store", bucket="journal", region="us-west-2", prefix="test")
+        Storage(
+            name="stock-store", bucket="journal", provider="s3", region="us-west-2", prefix="test"
+        )
     )
     b.scheduler.add_ondemand(
         OnDemand(

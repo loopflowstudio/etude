@@ -160,7 +160,7 @@ storage is an S3 or a Cloudflare R2 bucket, with keys from the launcher's
 environment:
 
 ```sh
-etude storage add west --bucket BUCKET --prefix etude/launch --region us-west-2
+etude storage add west --bucket BUCKET --prefix etude/launch --provider s3 --region us-west-2
 etude storage add r2 --bucket BUCKET --prefix etude/launch --provider r2
 ```
 
@@ -261,7 +261,7 @@ evaluation for every fifth one and the last.
 ## Rented machines
 
 ```sh
-etude storage add west --bucket BUCKET --prefix etude/launch --region us-west-2
+etude storage add west --bucket BUCKET --prefix etude/launch --provider s3 --region us-west-2
 etude provider set runpod --kind runpod --storage west
 etude ondemand add l4 --provider runpod --gpu "NVIDIA L4" \
     --vcpus 6 --memory-gb 48 --disk-gb 40 --max 1 --max-usd-per-hour 0.80
