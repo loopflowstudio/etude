@@ -1,9 +1,17 @@
-"""An S3 bucket through plain HTTPS, signed with AWS Signature Version 4.
+"""An S3 or R2 bucket through plain HTTPS, signed with AWS Signature Version 4.
 
-Standard library only. It does what a session's records need and no more:
+Plain urllib, no AWS SDK. It does what a session's records need and no more:
 put, get and list objects; make a link that reads one object for a while; and
-make a form that lets its holder write under one folder for a while. The link
-and the form carry no keys, so a machine can be handed them and nothing else.
+`grant` a machine what it may write under one folder for a while. Links and
+grants carry no long-lived keys, so a machine can be handed them and nothing else.
+
+`open_bucket` reaches a launcher `Storage` with keys from the environment.
+Cloudflare R2 speaks the same signed requests at its own host, in region
+`auto`. Checked against a real R2 bucket on 2026-10-24: it refuses a body whose
+signed `x-amz-content-sha256` differs (400), honours `If-None-Match: *` (412)
+and `If-None-Match: ETAG` (304), `Range` (206), multipart uploads, presigned
+links and session tokens. It has no POST forms (501) and no STS; Cloudflare's
+API issues its prefix-scoped keys instead.
 """
 
 from __future__ import annotations
@@ -19,11 +27,14 @@ import xml.etree.ElementTree as ET
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from datetime import UTC, datetime, timedelta
 from itertools import chain
+from typing import Literal
+
+from pydantic import model_validator
 
 from etude.launch.deadline import remaining
 from etude.launch.logging import write_log
 from etude.launch.measurement import timed
-from etude.launch.records import Record
+from etude.launch.records import Record, Storage
 from etude.launch.storage.transport import attribute, request
 
 
@@ -85,30 +96,73 @@ class AlreadyThere(Exception):
     """An object that must be written only once has been written before."""
 
 
+def _environment(name: str) -> str:
+    value = os.environ.get(name)
+    if not value:
+        raise StorageUnavailable(f"{name} is not set")
+    return value
+
+
 class Keys(Record):
     access_key: str
     secret_key: str
     session_token: str | None = None
 
     @staticmethod
-    def from_environment() -> Keys:
-        """The standard AWS variables. Long-lived keys are needed for links that outlast an hour."""
-        try:
+    def from_environment(provider: Literal["s3", "r2"]) -> Keys:
+        """The provider's standard variables: `AWS_*` for S3, `R2_*` for R2.
+
+        Long-lived keys are needed for links that outlast an hour.
+        """
+        if provider == "r2":
             return Keys(
-                access_key=os.environ["AWS_ACCESS_KEY_ID"],
-                secret_key=os.environ["AWS_SECRET_ACCESS_KEY"],
-                session_token=os.environ.get("AWS_SESSION_TOKEN") or None,
+                access_key=_environment("R2_ACCESS_KEY_ID"),
+                secret_key=_environment("R2_SECRET_ACCESS_KEY"),
             )
-        except KeyError as missing:
-            raise StorageUnavailable(f"{missing.args[0]} is not set") from None
+        return Keys(
+            access_key=_environment("AWS_ACCESS_KEY_ID"),
+            secret_key=_environment("AWS_SECRET_ACCESS_KEY"),
+            session_token=os.environ.get("AWS_SESSION_TOKEN") or None,
+        )
 
 
 class PostForm(Record):
-    """Where to POST a file, and the fields that must go with it. `key` is the writer's to choose."""
+    """Where to POST a file, and the fields that must go with it. `key` is the writer's to choose.
+
+    Its signed policy confines keys to its grant's prefix; S3 refuses any other.
+    """
 
     url: str
     fields: dict[str, str]
-    prefix: str  # every key written with this form must start with it
+
+
+class BucketAccess(Record):
+    """A bucket as a machine reaches it, with keys scoped to one folder."""
+
+    name: str
+    region: str
+    host: str
+    keys: Keys
+
+
+class Grant(Record):
+    """What a machine may write under one folder of a bucket, for a while.
+
+    Keys (`bucket`) write a file of any size in parts and delete; a form adds
+    files of up to 5 GB, read whole. S3 issues keys only to an IAM user allowed
+    `sts:GetFederationToken`, so there a form always comes too and takes over
+    once the keys expire. R2 has no forms and always issues keys.
+    """
+
+    prefix: str  # every key written with this grant starts with it
+    bucket: BucketAccess | None = None
+    form: PostForm | None = None
+
+    @model_validator(mode="after")
+    def _writes_somehow(self) -> Grant:
+        if self.bucket is None and self.form is None:
+            raise ValueError("a grant needs keys or a form")
+        return self
 
 
 def _send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Reply:
@@ -163,6 +217,11 @@ def _quote(text: str, safe: str = "") -> str:
 
 
 class Bucket:
+    """One bucket on S3, or on R2 when `account` names the Cloudflare account that holds it.
+
+    `token`, a Cloudflare API token, is needed only to `grant` on R2.
+    """
+
     def __init__(
         self,
         name: str,
@@ -171,10 +230,19 @@ class Bucket:
         send: Send = _send,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         host: str | None = None,
+        *,
+        account: str | None = None,
+        token: str | None = None,
     ) -> None:
         self.name, self.region, self._keys = name, region, keys
         self.send, self._clock = send, clock
-        self.host = host or f"{name}.s3.{region}.amazonaws.com"
+        self.account, self._token = account, token
+        default = (
+            f"{name}.s3.{region}.amazonaws.com"
+            if account is None
+            else f"{name}.{account}.r2.cloudflarestorage.com"
+        )
+        self.host = host or default
 
     def _signing_key(self, day: str, service: str = "s3") -> bytes:
         key = ("AWS4" + self._keys.secret_key).encode()
@@ -311,12 +379,69 @@ class Bucket:
                 pass  # the bucket's own rule for unfinished uploads is the backstop
             raise
 
-    def grant(self, prefix: str, seconds: int, name: str) -> Keys | None:
-        """Temporary keys that can write, send in parts and delete under `prefix` only.
+    def grant(self, prefix: str, seconds: int, name: str) -> Grant:
+        """What a machine may write under `prefix` for `seconds`, and nowhere else.
+
+        On S3, a form, and keys too where AWS issues them. On R2, keys from
+        Cloudflare's API; raises StorageUnavailable when they cannot be had,
+        since R2 has nothing to fall back on. The keys can do no more than the
+        caller's own.
+        """
+        if self.account is not None:
+            return Grant(prefix=prefix, bucket=self._access(self._r2_keys(prefix, seconds)))
+        keys = self._federation_keys(prefix, seconds, name)
+        return Grant(
+            prefix=prefix,
+            bucket=None if keys is None else self._access(keys),
+            form=self.post_form(prefix, seconds),
+        )
+
+    def _access(self, keys: Keys) -> BucketAccess:
+        return BucketAccess(name=self.name, region=self.region, host=self.host, keys=keys)
+
+    def _r2_keys(self, prefix: str, seconds: int) -> Keys:
+        """Temporary R2 keys that read and write objects under `prefix` only.
+
+        Cloudflare's `temp-access-credentials` call; the keys inherit no more
+        than the parent access key the bucket was opened with.
+        """
+        if not self._token:
+            raise StorageUnavailable("R2_API_TOKEN is not set; R2 grants need a Cloudflare token")
+        body = {
+            "bucket": self.name,
+            "parentAccessKeyId": self._keys.access_key,
+            "permission": "object-read-write",
+            "ttlSeconds": max(1, min(seconds, WEEK)),
+            "prefixes": [prefix],
+        }
+        url = f"https://api.cloudflare.com/client/v4/accounts/{self.account}/r2/temp-access-credentials"
+        headers = {"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"}
+        try:
+            # The usage journal names the call, not the account in its path.
+            with attribute(purpose="control", key="/r2/temp-access-credentials"):
+                reply = self.send("POST", url, json.dumps(body).encode(), headers)
+        except TimeoutError:
+            raise StorageUnavailable("R2 grant: operation deadline reached") from None
+        except OSError:
+            raise StorageUnavailable("R2 grant: no reply") from None
+        if reply.status != 200:
+            raise _failed("R2 grant", reply.status)
+        try:
+            result = json.loads(reply.body)["result"]
+            return Keys(
+                access_key=result["accessKeyId"],
+                secret_key=result["secretAccessKey"],
+                session_token=result["sessionToken"],
+            )
+        except (ValueError, KeyError, TypeError):
+            raise StorageUnavailable("R2 grant: unreadable reply") from None
+
+    def _federation_keys(self, prefix: str, seconds: int, name: str) -> Keys | None:
+        """Temporary S3 keys that can write, send in parts and delete under `prefix` only.
 
         None when AWS will not issue them: the caller is not an IAM user (keys
         that are themselves temporary cannot ask), or lacks
-        `sts:GetFederationToken`. The keys can do no more than the caller can.
+        `sts:GetFederationToken`.
         """
         if self._keys.session_token:
             return None
@@ -442,8 +567,28 @@ class Bucket:
         return PostForm(
             url=f"https://{self.host}/",
             fields={**fields, "policy": encoded, "x-amz-signature": signature},
-            prefix=prefix,
         )
+
+
+def open_bucket(storage: Storage, send: Send = _send) -> Bucket:
+    """The storage's bucket, with the launcher's keys from the environment.
+
+    S3 reads `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`;
+    R2 reads `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` and, to
+    grant machines their keys, `R2_API_TOKEN`.
+    """
+    keys = Keys.from_environment(storage.provider)
+    if storage.provider == "r2":
+        return Bucket(
+            storage.bucket,
+            "auto",  # R2 signs every request for this region
+            keys,
+            send,
+            account=_environment("R2_ACCOUNT_ID"),
+            token=os.environ.get("R2_API_TOKEN") or None,
+        )
+    assert storage.region is not None  # `Storage` requires one for S3
+    return Bucket(storage.bucket, storage.region, keys, send)
 
 
 def _text(body: bytes, name: str) -> str | None:
@@ -460,9 +605,7 @@ def _text(body: bytes, name: str) -> str | None:
 
 @timed("bucket.post")
 def post(form: PostForm, key: str, body: bytes, send: Send = _send) -> None:
-    """Write one object with a form. The key must start with the form's prefix."""
-    if not key.startswith(form.prefix):
-        raise ValueError(f"{key} is outside {form.prefix}")
+    """Write one object with a form. Storage refuses a key outside the form's prefix."""
     boundary = "etude" + hashlib.sha256(key.encode()).hexdigest()[:24]
     parts: list[bytes] = []
     for name, value in {"key": key, **form.fields}.items():

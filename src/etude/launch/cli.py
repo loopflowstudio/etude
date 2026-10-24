@@ -6,7 +6,7 @@ import sys
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Literal
 
 import typer
 
@@ -492,7 +492,7 @@ def provider_set(
 def storages() -> None:
     """List the places in buckets where records are kept."""
     for place in default().storages():
-        print(place.name, f"s3://{place.bucket}/{place.prefix}", place.region, sep="  ")
+        print(place.name, place.uri, place.region or "-", sep="  ")
 
 
 @storage_app.command("add")
@@ -501,12 +501,22 @@ def storage_add(
     name: str,
     bucket: Annotated[str, typer.Option(help="the bucket's name")],
     prefix: Annotated[str, typer.Option(help="the folder in that bucket to use")],
-    region: Annotated[str, typer.Option(help="the bucket's region")],
+    provider: Annotated[
+        Literal["s3", "r2"],
+        typer.Option(help="s3, keys from AWS_*; or r2, account and keys from R2_*"),
+    ] = "s3",
+    region: Annotated[str | None, typer.Option(help="an S3 bucket's region")] = None,
 ) -> None:
     """Add a place in a bucket for records. It cannot be changed afterwards."""
+    from pydantic import ValidationError
+
     from etude.launch.records import Storage
 
-    default().add_storage(Storage(name=name, bucket=bucket, prefix=prefix, region=region))
+    try:
+        place = Storage(name=name, bucket=bucket, prefix=prefix, provider=provider, region=region)
+    except ValidationError as error:
+        raise typer.BadParameter(error.errors()[0]["msg"].removeprefix("Value error, ")) from None
+    default().add_storage(place)
     storages()
 
 

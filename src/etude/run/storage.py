@@ -19,7 +19,7 @@ import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from etude.carriage import immutable
 from etude.run.errors import EtudeError
@@ -180,10 +180,13 @@ class ObjectCache:
 
 
 class S3Storage:
-    """An S3-compatible bucket reached with the author's own credentials.
+    """An S3 or R2 bucket reached with the author's own credentials.
 
-    `client` is a boto3 S3 client; boto3 is imported only when none is given,
-    so the logging client itself has no cloud dependency. Reads go through
+    `client` is a boto3 S3 client. When none is given, boto3 is imported and
+    configured from the environment: for S3 as boto3 itself is, and for R2 at
+    `https://R2_ACCOUNT_ID.r2.cloudflarestorage.com` with `R2_ACCESS_KEY_ID`
+    and `R2_SECRET_ACCESS_KEY`, as DuckDB's `r2://` reads them. So the logging
+    client itself has no cloud dependency. Reads go through
     `cache` (by default this computer's): an immutable object is fetched once, any
     other is asked for again only by ETag, and an immutable object's ranges are
     each fetched once. Writes carry a SHA256 that the bucket checks; nothing
@@ -197,20 +200,14 @@ class S3Storage:
         *,
         client: Any = None,
         cache: ObjectCache | None = None,
+        provider: Literal["s3", "r2"] = "s3",
     ) -> None:
-        if client is None:
-            try:
-                # This cloud entry point loads its SDK; local tracking does not need it.
-                import boto3  # type: ignore[import-untyped,import-not-found,unused-ignore]  # noqa: PLC0415
-            except ImportError:
-                raise EtudeError("s3_requires_boto3", 422) from None
-            client = boto3.client("s3")
-        self.client = client
-        self.bucket = bucket
+        self.client = client or _client(provider)
+        self.bucket, self.provider = bucket, provider
         self.prefix = prefix.strip("/") + "/" if prefix.strip("/") else ""
-        self.name = f"s3-{bucket}-{self.prefix.strip('/').replace('/', '-')}".rstrip("-")
+        self.name = f"{provider}-{bucket}-{self.prefix.strip('/').replace('/', '-')}".rstrip("-")
         # The same bucket name may exist at several S3-compatible endpoints.
-        self.cache = cache or ObjectCache(f"{client.meta.endpoint_url}/{bucket}")
+        self.cache = cache or ObjectCache(f"{self.client.meta.endpoint_url}/{bucket}")
 
     def put(self, key: str, data: bytes) -> None:
         self.client.put_object(
@@ -224,7 +221,7 @@ class S3Storage:
         )
 
     def uri(self, key: str) -> str:
-        return f"s3://{self.bucket}/{self.prefix}{key}"
+        return f"{self.provider}://{self.bucket}/{self.prefix}{key}"
 
     def get(self, key: str) -> bytes:
         name = self.prefix + key
@@ -301,6 +298,38 @@ class S3Storage:
         return sorted(found)
 
 
+def _client(provider: Literal["s3", "r2"]) -> Any:
+    try:
+        # This cloud entry point loads its SDK; local tracking does not need it.
+        import boto3  # type: ignore[import-untyped,import-not-found,unused-ignore]  # noqa: PLC0415
+        from botocore.config import Config  # type: ignore[import-untyped,import-not-found,unused-ignore]  # noqa: PLC0415
+    except ImportError:
+        raise EtudeError(f"{provider}_requires_boto3", 422) from None
+    if provider == "s3":
+        return boto3.client("s3")
+    try:
+        account, access, secret = (
+            os.environ[name]
+            for name in ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY")
+        )
+    except KeyError as missing:
+        raise EtudeError(f"r2_requires_{missing.args[0].lower()}", 422) from None
+    # Uploads still name SHA256 themselves; this stops boto3 adding CRC checksums
+    # of its own, which R2 is not relied on to accept. R2 has no object versions,
+    # so nothing here asks for one.
+    config = Config(
+        request_checksum_calculation="when_required", response_checksum_validation="when_required"
+    )
+    return boto3.client(
+        "s3",
+        endpoint_url=f"https://{account}.r2.cloudflarestorage.com",
+        aws_access_key_id=access,
+        aws_secret_access_key=secret,
+        region_name="auto",
+        config=config,
+    )
+
+
 def default_root() -> Path:
     """Where runs are written and read when nothing says otherwise.
 
@@ -324,9 +353,11 @@ def run_directory(directory: Path | str | None, experiment: str, run: str) -> tu
 
 
 def storage_from_uri(uri: str | Path) -> Storage:
-    """`s3://bucket/prefix` is a bucket; anything else is a local directory."""
+    """`s3://bucket/prefix` or `r2://bucket/prefix` is a bucket; anything else is a directory."""
     text = str(uri)
-    if text.startswith("s3://"):
-        bucket, _, prefix = text[5:].partition("/")
-        return S3Storage(bucket, prefix)
+    providers: tuple[Literal["s3", "r2"], ...] = ("s3", "r2")
+    for provider in providers:
+        if text.startswith(f"{provider}://"):
+            bucket, _, prefix = text.removeprefix(f"{provider}://").partition("/")
+            return S3Storage(bucket, prefix, provider=provider)
     return DirectoryStorage(text)

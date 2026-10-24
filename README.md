@@ -70,7 +70,7 @@ Etude needs Python 3.12 and [uv](https://docs.astral.sh/uv/).
 ```sh
 uv tool install etude-sdk          # the `etude` command
 uv add etude-sdk                   # the library, in a training project
-uv add 'etude-sdk[s3]'             # with S3 storage
+uv add 'etude-sdk[s3]'             # with S3 or R2 storage
 ```
 
 ## Read more

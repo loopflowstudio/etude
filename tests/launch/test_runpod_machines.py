@@ -43,9 +43,9 @@ from etude.launch.records import (
 )
 from etude.launch.records import Storage as Place
 from etude.launch.scheduler import Scheduler
-from etude.launch.schemas import Bootstrap, BucketAccess, Packet, RunAccess, Work
+from etude.launch.schemas import Bootstrap, Packet, Work
 from etude.launch.storage.bucket import BucketJournal
-from etude.launch.storage.s3 import Bucket, Keys, Reply, StorageUnavailable
+from etude.launch.storage.s3 import Bucket, Grant, Keys, Reply, StorageUnavailable
 from etude.launch.storage.transport import emit
 from etude.launch.worker import courier as courier_module
 from etude.launch.worker.courier import Courier
@@ -291,13 +291,22 @@ class Cloud:
 
 
 def cloud(
-    tmp_path: Path, *, delivery_seconds: float | None = None, gpu: str | None = "NVIDIA L4"
+    tmp_path: Path,
+    *,
+    delivery_seconds: float | None = None,
+    gpu: str | None = "NVIDIA L4",
+    r2: bool = False,
 ) -> Cloud:
+    """A RunPod account and its storage: S3, or with `r2` an R2 bucket that has no API token."""
     storage = Storage()
     provider = RunPod(storage, tmp_path / "pod")
     store = Database(tmp_path / "launcher.db")
     account = Provider(name="runpod", kind="runpod", registry="reg1", storage="west")
-    place = Place(name="west", bucket="journals", prefix="etude/t", region="us-west-2")
+    place = (
+        Place(name="west", bucket="journals", prefix="etude/t", provider="r2")
+        if r2
+        else Place(name="west", bucket="journals", prefix="etude/t", region="us-west-2")
+    )
     template = MachineTemplate(
         provider="runpod",
         gpu=gpu,
@@ -307,8 +316,11 @@ def cloud(
         image=Image(requested="r/e:fixture", resolved="r/e@sha256:" + "a" * 64),
         data_center="EU-RO-1",
     )
-    bucket = Bucket(
-        "journals", "us-west-2", Keys(access_key="access", secret_key="secret"), storage
+    keys = Keys(access_key="access", secret_key="secret")
+    bucket = (
+        Bucket("journals", "auto", keys, storage, account="account")
+        if r2
+        else Bucket("journals", "us-west-2", keys, storage)
     )
     service = Executor(
         RunPodMachines(account, template, RunPodAPI("key", provider), bucket, place.prefix),
@@ -543,6 +555,19 @@ def test_no_stock_is_a_refusal_and_cancel_reaches_a_running_pod(tmp_path: Path) 
     assert c.provider.pods == {}
 
 
+def test_an_r2_storage_that_cannot_grant_keys_fails_the_launch_before_renting(
+    tmp_path: Path,
+) -> None:
+    c = cloud(tmp_path, r2=True)
+    with pytest.raises(LauncherError, match="R2_API_TOKEN"):
+        c.scheduler.launch(Job(command="true", max_hours=0.05, max_usd=Decimal(1)), rent="l4")
+    assert (c.provider.creates, c.scheduler.runs(done=True)) == (0, ())
+    # Refused, not unknown: no pod was asked for, so none is looked for later.
+    (session,) = c.store.sessions()
+    assert session.refused_at is not None and session.receipt is None
+    assert not any(key.endswith("packet.json") for key in c.storage.objects)
+
+
 def test_a_kept_session_takes_work_through_its_inbox(tmp_path: Path) -> None:
     c = cloud(tmp_path)
     machine = c.scheduler.rent("l4", hours=0.05)
@@ -652,7 +677,7 @@ def test_lost_start_receipt_reply_cannot_leave_unreported_running_code(tmp_path:
             self, method: str, url: str, body: bytes | None, headers: dict[str, str]
         ) -> Reply:
             response = super().__call__(method, url, body, headers)
-            if method == "POST" and "test/sessions/r/out/receipt" in self.objects:
+            if method in ("POST", "PUT") and "test/sessions/r/out/receipt" in self.objects:
                 return Reply(status=503, body=b"")
             return response
 
@@ -714,20 +739,16 @@ def test_tracking_files_reach_storage_while_the_job_runs(tmp_path: Path) -> None
 def machine(tmp_path: Path, storage: Storage) -> tuple[Courier, Path, Path]:
     """A courier on a rented machine with one running attempt, and that run's tracking folder."""
     held = Bucket("b", "us-east-1", Keys(access_key="AKIA", secret_key="secret"), storage)
-    keys = held.grant("etude/run1/", 3600, "run1")
-    access = RunAccess(
-        form=held.post_form("etude/run1/", 3600),
-        bucket=None
-        if keys is None
-        else BucketAccess(name="b", region="us-east-1", host=held.host, keys=keys),
-    )
+    access = held.grant("etude/run1/", 3600, "run1")
     home = tmp_path / "pod/sessions/r"
     attempt = home / "attempts/a1"
     (attempt / "outputs").mkdir(parents=True)
     (attempt / "run").write_text("run1")
     track = tmp_path / "pod/track/run1"
     (track / "metrics").mkdir(parents=True)
-    session = held.post_form("etude/sessions/r/out/", 3600)
+    session = Grant(
+        prefix="etude/sessions/r/out/", form=held.post_form("etude/sessions/r/out/", 3600)
+    )
     courier = Courier(home, session, "unused", storage, {"run1": access})
     return courier, attempt, track
 

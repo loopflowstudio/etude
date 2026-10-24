@@ -5,7 +5,7 @@ than being multiplied by the number of runs. Missing coverage remains unknown.
 """
 
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Literal
 
@@ -41,16 +41,43 @@ class Transfer(Record):
 
 
 class Rates(Record):
-    """Caller-selected dated USD rates; GB means 1,000,000,000 bytes.
+    """A storage provider's dated USD list prices; GB means 1,000,000,000 bytes.
 
-    Download rate must match the chosen route. Storage requires byte-hours from
-    an inventory, which transport observations do not establish.
+    The download rate must match the route the bytes took. Storage is billed by
+    byte-hours from an inventory, which transport observations do not
+    establish, so `Usage.estimate` leaves it out.
     """
 
     as_of: datetime
     description: str
     download_usd_per_gb: Decimal = Field(ge=0)
-    request_usd_per_1000: Decimal = Field(ge=0)
+    write_usd_per_million: Decimal = Field(ge=0)  # PUT, POST, LIST: S3's PUT tier, R2's Class A
+    read_usd_per_million: Decimal = Field(ge=0)  # GET, HEAD: S3's GET tier, R2's Class B
+    storage_usd_per_gb_month: Decimal = Field(ge=0)
+
+
+# Published list prices on 2026-10-24. Deleting is free on both.
+S3_US_WEST_2 = Rates(
+    as_of=datetime(2026, 10, 24, tzinfo=UTC),
+    description="S3 Standard in us-west-2, first tier of internet egress",
+    download_usd_per_gb=Decimal("0.09"),
+    write_usd_per_million=Decimal("5.00"),
+    read_usd_per_million=Decimal("0.40"),
+    storage_usd_per_gb_month=Decimal("0.023"),
+)
+R2 = Rates(
+    as_of=datetime(2026, 10, 24, tzinfo=UTC),
+    description="Cloudflare R2 Standard, beyond the free tier; egress is free",
+    download_usd_per_gb=Decimal(0),
+    write_usd_per_million=Decimal("4.50"),
+    read_usd_per_million=Decimal("0.36"),
+    storage_usd_per_gb_month=Decimal("0.015"),
+)
+
+
+def _writes(event: Transfer) -> bool:
+    """Billed at the write rate. A listing is a GET of the bucket's root (virtual-host style)."""
+    return event.operation in ("PUT", "POST") or (event.operation == "GET" and event.key == "/")
 
 
 class Usage(Record):
@@ -107,10 +134,13 @@ class Usage(Record):
         return sum(event.operation != "REUSE" for event in self.events)
 
     def estimate(self, rates: Rates) -> Decimal:
-        """A download/request scenario, excluding unknown storage and other traffic."""
+        """Downloads and requests at these rates, excluding storage and unobserved traffic."""
+        writes = sum(_writes(event) for event in self.events)
+        reads = sum(e.operation in ("GET", "HEAD") and not _writes(e) for e in self.events)
         return (
             Decimal(self.received_bytes) / 10**9 * rates.download_usd_per_gb
-            + Decimal(self.requests) / 1000 * rates.request_usd_per_1000
+            + Decimal(writes) / 10**6 * rates.write_usd_per_million
+            + Decimal(reads) / 10**6 * rates.read_usd_per_million
         )
 
 
