@@ -1,7 +1,8 @@
 """Where a run's files are kept: the author's own directory or bucket.
 
-Metric blocks, table files and stored checkpoints are immutable
-(`etude.carriage.immutable`): written once and never changed. Small manifests
+Metric blocks, table files, stored checkpoints and files under a run's
+`artifacts/` are immutable (`etude.carriage.immutable`): written once and never
+changed. Small manifests
 and records are replaced atomically. Covered blocks
 may be deleted only after their permanent replacement arrives. A bucket's
 reader keeps what it reads in an `ObjectCache`, so no computer reads the same

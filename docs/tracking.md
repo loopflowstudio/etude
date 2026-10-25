@@ -121,6 +121,12 @@ Rules a caller can rely on:
   sealed every few seconds and merged as they accumulate, so a chart reads two
   arrays. Rows logged since the last seal are in a local log and are not yet
   read; `sync --seal` seals what a dead process left.
+- **Your own files travel with the run.** Any other file in the run's folder
+  is delivered too. A file that may change is hashed on every delivery pass
+  and sent again when it does. A file under `artifacts/`, at any depth, is
+  sent once and never read again, so write each one once and name it by its
+  content (such as `artifacts/evidence/SHA256.json.gz`); a later change to
+  it is never delivered.
 - **Completion belongs to an attempt.** Resuming a run makes its previous
   completion inapplicable. Until the new writer finishes, the report says
   “running or unfinished.” Older completion records without a writer remain
