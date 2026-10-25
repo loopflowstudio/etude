@@ -5,13 +5,22 @@ from __future__ import annotations
 import shutil
 from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
 from etude.eval.match import agent, environment, evaluate
 from etude.eval.query import statsdb
-from etude.eval.records import Agent, Benchmark, Matchup, Model, RoundRobin
+from etude.eval.records import (
+    Agent,
+    Benchmark,
+    CheckpointKey,
+    CheckpointRef,
+    Matchup,
+    Model,
+    RoundRobin,
+    TournamentRun,
+)
 from etude.eval.tournament import curves, hold, standings
 from etude.run.errors import EtudeError
 from etude.run.records import ArtifactRef, Clock
@@ -35,7 +44,7 @@ def scripted(tmp_path: Path, name: str, strength: int) -> Agent:
     return agent(name, code=[script], config={"strength": strength})
 
 
-def trained(tmp_path: Path, bucket: DirectoryStorage) -> list[ArtifactRef]:
+def trained(tmp_path: Path, bucket: DirectoryStorage) -> list[CheckpointRef]:
     """Three checkpoints of one training run, delivered to the bucket."""
     run = track(
         experiment=EXPERIMENT,
@@ -48,7 +57,9 @@ def trained(tmp_path: Path, bucket: DirectoryStorage) -> list[ArtifactRef]:
     for ordinal in (1, 2, 3):
         model = tmp_path / "latest.pt"
         model.write_bytes(f"weights {ordinal}".encode())
-        saved.append(run.checkpoint(model, updates=100 * ordinal))
+        artifact = run.checkpoint(model, updates=100 * ordinal)
+        key = CheckpointKey(run="ppo-1", name=PurePosixPath(artifact.uri).name)
+        saved.append(CheckpointRef(key=key, artifact=artifact))
     run.finish(timeout=30)
     return saved
 
@@ -74,7 +85,7 @@ def test_checkpoints_held_on_the_go_then_a_matchup_added_in_batch(tmp_path: Path
     checkpoints = trained(tmp_path, bucket)
     progress = anchors(tmp_path)
 
-    def on_the_go(checkpoint: ArtifactRef, measured: MeasuredStorage, machine: str) -> int:
+    def on_the_go(checkpoint: CheckpointRef, measured: MeasuredStorage, machine: str) -> int:
         # Each checkpoint's eval run starts on its own machine, with an empty disk.
         held = hold(progress, experiment=EXPERIMENT, checkpoint=checkpoint, play=play, storages=[measured],
                     directory=tmp_path / "machines" / machine)  # fmt: skip
@@ -131,7 +142,7 @@ def test_a_batch_hold_skips_what_any_eval_run_of_its_environment_delivered(tmp_p
     checkpoints = trained(tmp_path, bucket)
     for each in checkpoints:
         hold(progress, experiment=EXPERIMENT, checkpoint=each, play=play, storages=[bucket],
-             directory=tmp_path / each.uri.rsplit("/", 1)[-1])  # fmt: skip
+             directory=tmp_path / str(each.key.name))  # fmt: skip
     measured = MeasuredStorage(bucket)
     again = hold(
         progress,
@@ -340,9 +351,9 @@ def test_curves_of_checkpoints_no_training_run_recorded_follow_their_names(
     progress = anchors(tmp_path)
     saved = ["updates-1000.pt", "updates-150.pt", "updates-900.pt"]
     for name in saved:
-        checkpoint = ArtifactRef(
-            uri=f"s3://models/{name}", sha256=sha256(name.encode()).hexdigest()
-        )
+        # An outside checkpoint, keyed by its address.
+        artifact = ArtifactRef(uri=f"s3://models/{name}", sha256=sha256(name.encode()).hexdigest())
+        checkpoint = CheckpointRef(key=CheckpointKey(address=artifact.uri), artifact=artifact)
         hold(progress, experiment=EXPERIMENT, checkpoint=checkpoint, play=play, storages=[bucket],
              directory=tmp_path / name)  # fmt: skip
     for line in curves(statsdb(EXPERIMENT, bucket), "anchors", table="plays", value="won"):
@@ -359,7 +370,7 @@ def test_pairs_of_checkpoints_named_as_they_appear_are_each_played_once(tmp_path
     checkpoints = trained(tmp_path, bucket)
     heuristic = scripted(tmp_path, "heuristic", 0)
 
-    def wanted(saved: list[ArtifactRef]) -> Benchmark:
+    def wanted(saved: list[CheckpointRef]) -> Benchmark:
         """Each checkpoint against the heuristic, and each against the one before it."""
         consecutive = [
             Matchup(name=f"{DIRECT.agent(new).name} vs {DIRECT.agent(old).name}",
@@ -376,11 +387,11 @@ def test_pairs_of_checkpoints_named_as_they_appear_are_each_played_once(tmp_path
                  directory=tmp_path / "go")  # fmt: skip
     assert first.played == len(DEALS)
 
-    def held(saved: list[ArtifactRef], machine: str) -> int:
+    def held(saved: list[CheckpointRef], machine: str) -> int:
         definition = wanted(saved)
         for checkpoint in saved:  # what a training run's on-the-go holds would add
             hold(definition, experiment=EXPERIMENT, checkpoint=checkpoint, play=play, storages=[bucket],
-                 directory=tmp_path / machine / str(checkpoint.sha256)[:8])  # fmt: skip
+                 directory=tmp_path / machine / str(checkpoint.key.name))  # fmt: skip
         return hold(definition, experiment=EXPERIMENT, play=play, storages=[bucket],
                     directory=tmp_path / machine).played  # fmt: skip
 
@@ -409,3 +420,80 @@ def test_pairs_of_checkpoints_named_as_they_appear_are_each_played_once(tmp_path
         " where s.checkpoint is null and p.player = 0 group by s.matchup"
     ).fetchall()
     assert all(value > 0.5 for _, value in later)
+
+
+def test_two_keys_holding_the_same_bytes_are_two_agents_each_played(tmp_path: Path) -> None:
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    heuristic = scripted(tmp_path, "heuristic", 0)
+    vs = Matchup(name="vs heuristic", players=(DIRECT, heuristic), conditions=DEALS, games=2)
+    ladder = Benchmark(name="ladder", environment=WORLD, matchups=(vs,))
+    # Two runs warm-started from one file: the same bytes, two checkpoints.
+    file = ArtifactRef(uri="s3://models/init.pt", sha256=sha256(b"init").hexdigest())
+    starts = [
+        CheckpointRef(key=CheckpointKey(run=run, name="updates-100.pt"), artifact=file)
+        for run in ("ppo-1", "ppo-2")
+    ]
+    played = hold(ladder, experiment=EXPERIMENT, checkpoints=starts, play=play,
+                  storages=[bucket], directory=tmp_path / "batch").played  # fmt: skip
+    assert played == 2 * len(DEALS)
+    found = (
+        statsdb(EXPERIMENT, bucket)
+        .sql("select distinct checkpoint from schedule order by checkpoint")
+        .fetchall()
+    )
+    assert found == [("ppo-1/checkpoints/updates-100.pt",), ("ppo-2/checkpoints/updates-100.pt",)]
+
+
+def test_a_new_version_of_an_agents_code_reuses_what_an_older_one_played(tmp_path: Path) -> None:
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    checkpoints = trained(tmp_path, bucket)
+
+    def ladder() -> Benchmark:
+        heuristic = scripted(tmp_path, "heuristic", 0)
+        vs = Matchup(name="vs heuristic", players=(DIRECT, heuristic), conditions=DEALS, games=2)
+        return Benchmark(name="ladder", environment=WORLD, matchups=(vs,))
+
+    first = ladder()
+    assert hold(first, experiment=EXPERIMENT, checkpoints=checkpoints[:1], play=play,
+                storages=[bucket], directory=tmp_path / "v1").played == len(DEALS)  # fmt: skip
+    # The heuristic's file changes: its version, not its key, so nothing is played again
+    # and the matchup is not defined two ways.
+    (tmp_path / "players" / "heuristic.py").write_text("STRENGTH = 0  # edited\n")
+    second = ladder()
+    before, after = first.matchups[0].players[1], second.matchups[0].players[1]
+    assert isinstance(before, Agent) and isinstance(after, Agent)
+    assert (after.key, after.version.commit) == (before.key, before.version.commit)
+    assert hold(second, experiment=EXPERIMENT, checkpoints=checkpoints[:1], play=play,
+                storages=[bucket], directory=tmp_path / "v2").played == 0  # fmt: skip
+    seats = (
+        statsdb(EXPERIMENT, bucket)
+        .sql("select count(distinct source) from seats where agent like 'code:heuristic%'")
+        .fetchone()
+    )
+    assert seats == (1,)
+
+
+def test_eval_runs_from_etude_sdk_0_2_load_and_are_never_counted_as_played(
+    tmp_path: Path,
+) -> None:
+    sha = sha256(b"weights").hexdigest()
+    held = TournamentRun.model_validate(
+        {
+            "tournament": {"name": "anchors", "environment": WORLD.model_dump(mode="json")},
+            "checkpoint": {"uri": "s3://models/updates-100.pt", "sha256": sha},
+        }
+    )
+    (old,) = held.checkpoints
+    assert str(old.key) == f"etude-sdk-0.2:{sha}"
+    seated = Agent.model_validate(
+        {"name": "updates-100.pt", "kind": "checkpoint", "artifact": sha,
+         "uri": "s3://models/updates-100.pt", "config": {"search": 0}}
+    )  # fmt: skip
+    assert seated.kind == "checkpoint"
+    assert seated.key.recorded is not None and seated.key.config == {"search": 0}
+    # Its key is the digest it had, which no key since is: its matches stay its own.
+    file = ArtifactRef(uri="s3://models/updates-100.pt", sha256=sha)
+    now = DIRECT.agent(
+        CheckpointRef(key=CheckpointKey(run="ppo-1", name="updates-100.pt"), artifact=file)
+    )
+    assert now.key != seated.key

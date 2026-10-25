@@ -34,7 +34,7 @@ from pydantic import Field
 
 from etude.carriage import CHECKPOINTS
 from etude.eval.match import Tables
-from etude.eval.records import Agent, Match, Model, digest
+from etude.eval.records import Agent, CheckpointKey, CheckpointRef, Match, Model, digest
 from etude.eval.tournament import hold, unplayed
 from etude.launch import client
 from etude.launch.records import Job, Run
@@ -63,9 +63,19 @@ class Checkpoint(Record):
         """The file's name, as a model seat names it: `updates-200.pt`."""
         return PurePosixPath(self.artifact.uri).name
 
+    @property
+    def key(self) -> CheckpointKey:
+        """What identifies it: its run and file, never its bytes."""
+        return CheckpointKey(run=self.run, name=self.name)
+
+    @property
+    def ref(self) -> CheckpointRef:
+        """Its key and stored file, as a benchmark is held for it."""
+        return CheckpointRef(key=self.key, artifact=self.artifact)
+
     def agent(self, model: Model) -> Agent:
         """This checkpoint in `model`'s seat, for a matchup of chosen checkpoints."""
-        return model.agent(self.artifact)
+        return model.agent(self.ref)
 
 
 class Checkpoints(tuple[Checkpoint, ...]):
@@ -121,10 +131,10 @@ class ExperimentState:
                 return each
         raise EtudeError("run_not_found", 404) from ValueError(name)
 
-    def checkpoint(self, sha256: Digest) -> Checkpoint | None:
+    def checkpoint(self, key: CheckpointKey) -> Checkpoint | None:
         for each in self.runs:
             for saved in each.checkpoints:
-                if saved.artifact.sha256 == sha256:
+                if saved.key == key:
                     return saved
         return None
 
@@ -243,7 +253,7 @@ def advance(
             raise EtudeError("eval_job_of_another_experiment", 422) from ValueError(spec.experiment)
         spec = spec.model_copy(update={"experiment": experiment.name})
         job = given_job.model_copy(update={"config": spec.model_dump_json()})
-        checkpoints = tuple(each.artifact for each in spec.checkpoints)
+        checkpoints = tuple(each.ref for each in spec.checkpoints)
         new = unplayed(
             spec.tournament,
             experiment=experiment.name,
@@ -277,17 +287,22 @@ def advance(
     return passes
 
 
-def checkpoint_inputs(matches: Iterable[Match], state: ExperimentState) -> dict[Digest, Checkpoint]:
-    """Each checkpoint the matches seat, by digest, as `state` found it stored."""
-    found: dict[Digest, Checkpoint] = {}
+def checkpoint_inputs(matches: Iterable[Match], state: ExperimentState) -> dict[str, Checkpoint]:
+    """Each checkpoint the matches seat, by its key encoded, as `state` found it stored.
+
+    Raises `EtudeError("checkpoint_not_stored")` for a seated checkpoint no
+    training run of the experiment stored, such as one by an outside address.
+    """
+    found: dict[str, Checkpoint] = {}
     for match in matches:
         for seated in match.agents:
-            if seated.kind != "checkpoint" or seated.artifact in found:
+            key = seated.key.checkpoint
+            if key is None or str(key) in found:
                 continue
-            saved = state.checkpoint(seated.artifact)
+            saved = state.checkpoint(key)
             if saved is None:
-                raise EtudeError("checkpoint_not_stored", 404) from ValueError(seated.artifact)
-            found[seated.artifact] = saved
+                raise EtudeError("checkpoint_not_stored", 404) from ValueError(str(key))
+            found[str(key)] = saved
     return found
 
 

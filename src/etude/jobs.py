@@ -42,7 +42,15 @@ from pydantic import BaseModel, Field, ValidationError
 from etude.call import Function, config_type
 from etude.carriage import CHECKPOINTS
 from etude.eval.match import Tables
-from etude.eval.records import Agent, Benchmark, Match, RoundRobin
+from etude.eval.records import (
+    Agent,
+    Benchmark,
+    CheckpointKey,
+    CheckpointRef,
+    Match,
+    RoundRobin,
+    digest,
+)
 from etude.eval.tournament import hold
 from etude.experiment import Checkpoint, ExperimentState, checkpoint_file, checkpoint_inputs
 from etude.launch.errors import LauncherError
@@ -113,7 +121,7 @@ class Evaluation(Record):
     entrants: tuple[Agent, ...] = ()
     workers: int = Field(default=1, ge=1)
     # The matches a pass found new (`etude.experiment.advance`), and the
-    # job input holding each checkpoint they seat, by its digest.
+    # job input holding each checkpoint they seat, by its key encoded.
     matches: tuple[Match, ...] | None = None
     files: dict[str, str] = {}
 
@@ -182,17 +190,18 @@ def with_matches(job: Job, matches: Sequence[Match], state: ExperimentState) -> 
     """
     spec = evaluation_spec(job)
     saved = checkpoint_inputs(matches, state)
-    files = {sha: f"checkpoint-{sha[:16]}{PurePosixPath(each.name).suffix}"
-             for sha, each in saved.items()}  # fmt: skip
+    # One input per checkpoint key, even where two keys hold the same bytes.
+    files = {key: f"checkpoint-{digest(key)[:16]}{PurePosixPath(each.name).suffix}"
+             for key, each in saved.items()}  # fmt: skip
     inputs = tuple(
         Input(
-            name=files[sha],
+            name=files[key],
             key=checkpoint_file(each),
-            sha256=sha,
-            size_bytes=cast(int, each.artifact.size_bytes),  # observe keeps only stored files
+            sha256=cast(str, each.artifact.sha256),  # observe keeps only stored files
+            size_bytes=cast(int, each.artifact.size_bytes),
             run=each.run,
         )
-        for sha, each in sorted(saved.items())
+        for key, each in sorted(saved.items())
     )
     spec = spec.model_copy(update={"matches": tuple(matches), "files": files})
     return job.model_copy(
@@ -293,21 +302,28 @@ def _hold(evaluation: Evaluation) -> None:
     checkpoint = None
     if evaluation.checkpoint is not None:
         given = evaluation.checkpoint
-        checkpoint = ArtifactRef(
+        # A training run's file is keyed by its run and name; any other, by where it lies.
+        key = (
+            CheckpointKey(run=given.run, name=PurePosixPath(given.key).name)
+            if given.run is not None
+            else CheckpointKey(address=given.key)
+        )
+        artifact = ArtifactRef(
             uri=(Path(str(folder)) / given.name).as_uri(),
             sha256=given.sha256,
             size_bytes=given.size_bytes,
         )
+        checkpoint = CheckpointRef(key=key, artifact=artifact)
     matches = None
     if evaluation.matches is not None:
-        here = {sha: (Path(str(folder)) / name).as_uri() for sha, name in evaluation.files.items()}
+        here = {key: (Path(str(folder)) / name).as_uri() for key, name in evaluation.files.items()}
         matches = [_located(match, here) for match in evaluation.matches]
     hold(
         evaluation.tournament,
         experiment=evaluation.experiment,
         play=play,
         checkpoint=checkpoint,
-        checkpoints=tuple(each.artifact for each in evaluation.checkpoints),
+        checkpoints=tuple(each.ref for each in evaluation.checkpoints),
         enter=evaluation.entrants,
         matches=matches,
         workers=evaluation.workers,
@@ -315,14 +331,16 @@ def _hold(evaluation: Evaluation) -> None:
 
 
 def _located(match: Match, here: Mapping[str, str]) -> Match:
-    """The match with each checkpoint agent's `uri` at its file on this machine."""
-    agents = tuple(
-        seated.model_copy(update={"uri": here[seated.artifact]})
-        if seated.kind == "checkpoint" and seated.artifact in here
-        else seated
-        for seated in match.agents
-    )
-    return match.model_copy(update={"agents": agents})
+    """The match with each checkpoint agent's file where it lies on this machine."""
+    agents = []
+    for seated in match.agents:
+        key = seated.key.checkpoint
+        if key is None or seated.artifact is None or str(key) not in here:
+            agents.append(seated)
+            continue
+        moved = seated.artifact.model_copy(update={"uri": here[str(key)]})
+        agents.append(seated.model_copy(update={"artifact": moved}))
+    return match.model_copy(update={"agents": tuple(agents)})
 
 
 def _job(

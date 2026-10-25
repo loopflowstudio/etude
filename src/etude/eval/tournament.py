@@ -46,6 +46,7 @@ from etude.eval.records import (
     TOURNAMENT_FILE,
     Agent,
     Benchmark,
+    CheckpointRef,
     Environment,
     Match,
     RoundRobin,
@@ -55,7 +56,7 @@ from etude.eval.records import (
 )
 from etude.run.declaration import declare
 from etude.run.errors import EtudeError
-from etude.run.records import ArtifactRef, Digest, Record, RunFile
+from etude.run.records import Digest, Record, RunFile
 from etude.run.storage import DirectoryStorage, Storage, default_root
 
 if TYPE_CHECKING:
@@ -70,8 +71,8 @@ def hold(
     *,
     experiment: str,
     play: Callable[[Match], Tables],
-    checkpoint: ArtifactRef | None = None,
-    checkpoints: Sequence[ArtifactRef] = (),
+    checkpoint: CheckpointRef | None = None,
+    checkpoints: Sequence[CheckpointRef] = (),
     enter: Sequence[Agent] = (),
     matches: Sequence[Match] | None = None,
     workers: int = 1,
@@ -96,8 +97,8 @@ def hold(
 
     `matches` plays exactly those, as `unplayed` found them elsewhere, and
     reads nothing: each must be one the tournament calls for with what is
-    given. Their agents' `uri` may differ from the definition's, such as a
-    checkpoint copied to this machine; identity never depends on it.
+    given. Their checkpoints' files may lie elsewhere than the definition's,
+    such as copied to this machine; a key never depends on where.
 
     `share=(k, n)` deals the scheduled matches, in key order, to n parts and
     plays the kth, so n machines may split one hold with at most one match
@@ -156,7 +157,7 @@ def unplayed(
     tournament: Benchmark | RoundRobin,
     *,
     experiment: str,
-    checkpoints: Sequence[ArtifactRef] = (),
+    checkpoints: Sequence[CheckpointRef] = (),
     enter: Sequence[Agent] = (),
     directory: Path | str | None = None,
     storages: Sequence[Storage] = (),
@@ -176,7 +177,7 @@ def unplayed(
 
 def _added(
     tournament: Benchmark | RoundRobin,
-    checkpoints: tuple[ArtifactRef, ...],
+    checkpoints: tuple[CheckpointRef, ...],
     enter: Sequence[Agent],
     share: tuple[int, int],
 ) -> TournamentRun:
@@ -184,8 +185,6 @@ def _added(
         raise EtudeError("benchmark_holds_checkpoints_not_entrants", 422)
     if isinstance(tournament, RoundRobin) and checkpoints:
         raise EtudeError("round_robin_holds_entrants_not_checkpoints", 422)
-    if any(each.sha256 is None for each in checkpoints):
-        raise EtudeError("checkpoint_agent_requires_digest", 422)
     return TournamentRun(
         tournament=tournament, checkpoints=checkpoints, entrants=tuple(enter), share=share
     )
@@ -234,9 +233,11 @@ def _record(added: TournamentRun, experiment: str, run: str, directory: Path | s
 
 
 def _resumed(added: TournamentRun) -> dict[str, object]:
-    """What a resumed hold must repeat. A checkpoint is its digest: a retry on another
+    """What a resumed hold must repeat. A checkpoint is its key: a retry on another
     attempt finds the same file at another path."""
-    return added.model_dump(mode="json", exclude={"checkpoints": {"__all__": {"uri"}}})
+    return added.model_dump(
+        mode="json", exclude={"checkpoints": {"__all__": {"artifact": {"uri"}}}}
+    )
 
 
 def _stored(
@@ -333,7 +334,8 @@ def _held(db: duckdb.DuckDBPyConnection, tournament: str) -> Iterator[tuple[int,
 class CurvePoint(Record):
     """A matchup's value for one checkpoint, and where its training run stood when it was saved."""
 
-    checkpoint: Digest
+    # Its key (`etude.eval.records.CheckpointKey`), encoded.
+    checkpoint: str
     # What the checkpoint is called: the last part of its URI, as a training run names its files.
     name: str
     # None for a checkpoint no training run under the source recorded.
@@ -388,21 +390,16 @@ def curves(
                 from "{table}"
                 where player = 0 and "{value}" is not null and ({where or "true"})
             ),
-            -- A checkpoint two training runs recorded belongs to the first.
-            trained as (
-                select artifact, run, experiment, ordinal, clocks from training_checkpoints
-                qualify row_number() over (partition by artifact order by run, ordinal) = 1
-            ),
             named as (
-                select artifact, min(name) as name from agents where kind = 'checkpoint'
-                group by artifact
+                select checkpoint, min(name) as name from agents where checkpoint is not null
+                group by checkpoint
             )
             select s.matchup, t.run, t.experiment, s.checkpoint, n.name, t.ordinal, t.clocks,
                 sum(r._value), sum(r._per), count(*)
             from r join _held using (run, match)
             join schedule s on s.tournament = ? and s.match = r.match
-            join named n on n.artifact = s.checkpoint
-            left join trained t on t.artifact = s.checkpoint
+            join named n on n.checkpoint = s.checkpoint
+            left join training_checkpoints t on t.checkpoint = s.checkpoint
             group by s.matchup, t.run, t.experiment, s.checkpoint, n.name, t.ordinal, t.clocks,
                 r.match
             """,
@@ -457,9 +454,10 @@ def _training_order(point: CurvePoint) -> tuple[bool, int, list[str | int], str]
 class Standing(Record):
     """An entrant's value against one opponent in a round robin, or against the field (`opponent` None)."""
 
-    agent: Digest
+    # Its key, encoded.
+    agent: str
     name: str
-    opponent: Digest | None
+    opponent: str | None
     opponent_name: str | None
     value: float
     # A 95% interval resampling whole matches; None with fewer than two.
@@ -528,7 +526,7 @@ def standings(
     ]
     field = {e.agent: e.value for e in entries if e.opponent is None}
 
-    def rank(agent: Digest | None) -> tuple[float, str]:
+    def rank(agent: str | None) -> tuple[float, str]:
         # Against the field first, then opponents best first.
         if agent is None:
             return float("-inf"), ""

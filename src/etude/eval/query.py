@@ -7,13 +7,13 @@ beside Etude's own tables:
 | table | columns |
 |---|---|
 | `runs` | run, experiment, environment (identity), environment_name, environment_config, tournament |
-| `agents` | agent (identity), name, kind, artifact, uri, config, and `config.KEY` per scalar config key |
+| `agents` | agent (its key, encoded), name, kind, checkpoint (its key), artifact (digest), uri, config, and `config.KEY` per scalar config key |
 | `matches` | run, match, conditions, games, seed, state, error, wall_ms |
-| `seats` | run, match, player, agent |
+| `seats` | run, match, player, agent, and the version that played: commit, source (digest) |
 | `groups` | run, match, group, player |
 | `tournaments` | tournament, format (`benchmark` or `round_robin`), environment, conflict |
-| `schedule` | tournament, match, matchup, checkpoint (artifact digest) and the matchup's tags of a benchmark's match; no checkpoint for a matchup of fixed agents |
-| `training_checkpoints` | run, experiment, ordinal, artifact, wall_ms, clocks (where each stood) |
+| `schedule` | tournament, match, matchup, checkpoint (its key) and the matchup's tags of a benchmark's match; no checkpoint for a matchup of fixed agents |
+| `training_checkpoints` | run, experiment, ordinal, checkpoint (its key, `RUN/checkpoints/NAME`), artifact (digest), wall_ms, clocks (where each stood) |
 
 A tournament is assembled from the experiment's eval runs naming it in their
 `tournament.json`. `schedule` holds every match it calls for, held or not.
@@ -21,7 +21,9 @@ When its eval runs disagree, `conflict` names how (`tournament_conflict`,
 `matchup_conflict`) and it has no schedule.
 `training_checkpoints` holds every checkpoint the experiment's training runs
 recorded, read from their stored JSON, so a checkpoint agent joins to where
-its run's clocks stood (`agents.artifact = training_checkpoints.artifact`).
+its run's clocks stood by key (`agents.checkpoint = training_checkpoints.checkpoint`),
+never by its bytes. A match counts once whichever version played it: the
+latest record holding it (`seats.commit` tells which).
 
 The database is a DuckDB file under `ETUDE_HOME/statsdb`, one per experiment
 and store, derived from the store and never the authority. Opening it lists
@@ -48,7 +50,7 @@ import tempfile
 import warnings
 from bisect import bisect_left
 from collections.abc import Iterator, Sequence
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, cast
 
 import numpy as np
@@ -61,6 +63,7 @@ from etude.eval.records import (
     TOURNAMENT_FILE,
     Agent,
     Benchmark,
+    CheckpointKey,
     ColumnType,
     Environment,
     MatchRecord,
@@ -79,7 +82,7 @@ if TYPE_CHECKING:
 REPLICATES = 2000
 SEED = 0
 # A kept database of another schema is deleted and read again from its store.
-SCHEMA = 1
+SCHEMA = 2
 
 _ENVIRONMENT_FILE = "environment.json"
 
@@ -155,11 +158,14 @@ def _create(db: duckdb.DuckDBPyConnection, experiment: str, storage: Storage) ->
         "create table matches (run VARCHAR, match VARCHAR, conditions JSON, games BIGINT,"
         " seed BIGINT, state VARCHAR, error VARCHAR, wall_ms BIGINT)"
     )
-    db.execute("create table seats (run VARCHAR, match VARCHAR, player BIGINT, agent VARCHAR)")
+    db.execute(
+        "create table seats (run VARCHAR, match VARCHAR, player BIGINT, agent VARCHAR,"
+        " commit VARCHAR, source VARCHAR)"
+    )
     db.execute('create table "groups" (run VARCHAR, match VARCHAR, "group" VARCHAR, player BIGINT)')
     db.execute(
         "create table training_checkpoints (run VARCHAR, experiment VARCHAR, ordinal BIGINT,"
-        " artifact VARCHAR, wall_ms BIGINT, clocks JSON)"
+        " checkpoint VARCHAR, artifact VARCHAR, wall_ms BIGINT, clocks JSON)"
     )
 
 
@@ -278,10 +284,11 @@ def _read(
         stored = _StoredCheckpoint.model_validate_json(storage.get(place + name))
         # One run copied to several places records each checkpoint once.
         db.execute(
-            "insert into training_checkpoints select ?, ?, ?, ?, ?, ? where not exists"
+            "insert into training_checkpoints select ?, ?, ?, ?, ?, ?, ? where not exists"
             " (select 1 from training_checkpoints where run = ? and ordinal = ?)",
-            [run, experiment, stored.ordinal, stored.artifact.sha256, stored.wall_ms,
-             json.dumps(stored.at), run, stored.ordinal],
+            [run, experiment, stored.ordinal,
+             str(CheckpointKey(run=run, name=PurePosixPath(stored.artifact.uri).name)),
+             stored.artifact.sha256, stored.wall_ms, json.dumps(stored.at), run, stored.ordinal],
         )  # fmt: skip
         return True
     if name == TOURNAMENT_FILE:
@@ -313,8 +320,11 @@ def _match(db: duckdb.DuckDBPyConnection, run: str, record: MatchRecord) -> bool
     )  # fmt: skip
     _insert(
         db,
-        "insert into seats values (?, ?, ?, ?)",
-        [[run, match.key, seat, seated.identity] for seat, seated in enumerate(match.agents)],
+        "insert into seats values (?, ?, ?, ?, ?, ?)",
+        [
+            [run, match.key, seat, seated.key.encoded, seated.version.commit, seated.version.source]
+            for seat, seated in enumerate(match.agents)
+        ],  # fmt: skip
     )
     _insert(
         db,
@@ -330,7 +340,13 @@ def _remember_agents(db: duckdb.DuckDBPyConnection, agents: Sequence[Agent]) -> 
         db.execute(
             "insert into kept.agents select ?, ?, ? where not exists"
             " (select 1 from kept.agents where agent = ? and name = ?)",
-            [seated.identity, seated.name, seated.model_dump_json(), seated.identity, seated.name],
+            [
+                seated.key.encoded,
+                seated.name,
+                seated.model_dump_json(),
+                seated.key.encoded,
+                seated.name,
+            ],  # fmt: skip
         )
 
 
@@ -390,6 +406,7 @@ def _local(storage: Storage, key: str, copy: Path) -> Path:
 class _StoredArtifact(BaseModel):
     model_config = ConfigDict(extra="ignore", frozen=True)
 
+    uri: str
     sha256: str | None = None
 
 
@@ -454,21 +471,27 @@ def _summaries(db: duckdb.DuckDBPyConnection) -> None:
             db,
             "insert into schedule values (?, ?, ?, ?, ?)",
             [
-                [name, each.match.key, each.matchup, each.checkpoint, list(each.tags)]
+                [
+                    name,
+                    each.match.key,
+                    each.matchup,
+                    None if each.checkpoint is None else str(each.checkpoint),
+                    list(each.tags),
+                ]  # fmt: skip
                 for each in schedule
             ],
         )
         scheduled += schedule
     # Agents of matches not yet held, so every scheduled agent has a name.
-    agents: dict[Digest, list[Agent]] = {}
+    agents: dict[str, list[Agent]] = {}
     for _, text in db.execute(
         "select agent, agent_json from kept.agents order by rowid"
     ).fetchall():
         seated = Agent.model_validate_json(text)
-        agents.setdefault(seated.identity, []).append(seated)
+        agents.setdefault(seated.key.encoded, []).append(seated)
     for each in scheduled:
         for seated in each.match.agents:
-            agents.setdefault(seated.identity, []).append(seated)
+            agents.setdefault(seated.key.encoded, []).append(seated)
     _agents_table(db, agents)
 
 
@@ -480,8 +503,8 @@ def _insert(
         db.executemany(statement, rows)
 
 
-def _agents_table(db: duckdb.DuckDBPyConnection, agents: dict[Digest, list[Agent]]) -> None:
-    """One row per identity; each scalar config key, dotted when nested, as a column."""
+def _agents_table(db: duckdb.DuckDBPyConnection, agents: dict[str, list[Agent]]) -> None:
+    """One row per key; each scalar config key, dotted when nested, as a column."""
     flat = {identity: _flattened(given[0].config) for identity, given in agents.items()}
     kinds: dict[str, set[ColumnType]] = {}
     for values in flat.values():
@@ -498,20 +521,21 @@ def _agents_table(db: duckdb.DuckDBPyConnection, agents: dict[Digest, list[Agent
             warnings.warn(f"agent config {key!r} has types {sorted(seen)}; only in `config`")
     db.execute(
         "create or replace table agents (agent VARCHAR, name VARCHAR, kind VARCHAR,"
-        " artifact VARCHAR, uri VARCHAR, config JSON"
+        " checkpoint VARCHAR, artifact VARCHAR, uri VARCHAR, config JSON"
         + "".join(f', "config.{key}" {kind}' for key, kind in columns.items())
         + ")"
     )
     _insert(
         db,
-        f"insert into agents values ({', '.join('?' for _ in range(6 + len(columns)))})",
+        f"insert into agents values ({', '.join('?' for _ in range(7 + len(columns)))})",
         [
             [
                 identity,
                 "/".join(dict.fromkeys(each.name for each in given)),
                 given[0].kind,
-                given[0].artifact,
-                given[0].uri,
+                None if given[0].key.checkpoint is None else str(given[0].key.checkpoint),
+                None if given[0].artifact is None else given[0].artifact.sha256,
+                None if given[0].artifact is None else given[0].artifact.uri,
                 json.dumps(given[0].config),
                 *(flat[identity].get(key) for key in columns),
             ]
@@ -534,10 +558,10 @@ class Comparison(Record):
     """A subject's value against an opponent, within one environment and split."""
 
     environment: Digest
-    # Agent identities: one for a player, a group's in sorted order.
-    subject: tuple[Digest, ...]
+    # Agent keys, encoded: one for a player, a group's in sorted order.
+    subject: tuple[str, ...]
     # The same for the opponent; None means against every opponent.
-    opponent: tuple[Digest, ...] | None
+    opponent: tuple[str, ...] | None
     split: dict[str, JsonValue]
     value: float
     # None with fewer than two matches.
@@ -579,17 +603,17 @@ def compare(
             where "{value}" is not null and ({where or "true"})
         ),
         teams as (
-            select g.run, g.match, g."group", string_agg(s.agent, '+' order by s.agent) as team
+            select g.run, g.match, g."group", list(s.agent order by s.agent) as team
             from "groups" g join seats s using (run, match, player)
             group by all
         ),
         subjects as (
-            select r.*, s.agent as subject from r join seats s using (run, match, player)
+            select r.*, [s.agent] as subject from r join seats s using (run, match, player)
             union all by name
             select r.*, t.team as subject from r join teams t using (run, match, "group")
         ),
         opponents as (
-            select distinct x._row, s.agent as opponent
+            select distinct x._row, [s.agent] as opponent
             from subjects x join seats s
                 on s.run = x.run and s.match = x.match and s.player <> x.player
             union
@@ -599,7 +623,7 @@ def compare(
                 and t."group" <> x."group" and t."group" <> 'all'
         ),
         pairs as (
-            select x.*, null::VARCHAR as opponent from subjects x
+            select x.*, null::VARCHAR[] as opponent from subjects x
             union all
             select x.*, o.opponent from subjects x join opponents o using (_row)
         )
@@ -614,11 +638,12 @@ def compare(
     rows: dict[tuple[object, ...], int] = {}
     for environment, subject, opponent, *rest in found:
         values, (_, _, numerator, denominator, count) = rest[: len(by)], rest[len(by) :]
-        key = (environment, subject, opponent, *values)
+        held = None if opponent is None else tuple(opponent)
+        key = (environment, tuple(subject), held, *values)
         blocks.setdefault(key, []).append((float(numerator), float(denominator)))
         rows[key] = rows.get(key, 0) + count
     comparisons: list[Comparison] = []
-    for key in sorted(blocks, key=lambda k: tuple("" if v is None else str(v) for v in k)):
+    for key in sorted(blocks, key=lambda k: tuple("" if v is None else repr(v) for v in k)):
         estimated = estimate(blocks[key])
         if estimated is None:
             continue
@@ -626,8 +651,8 @@ def compare(
         comparisons.append(
             Comparison(
                 environment=str(environment),
-                subject=tuple(str(subject).split("+")),
-                opponent=None if opponent is None else tuple(str(opponent).split("+")),
+                subject=cast(tuple[str, ...], subject),
+                opponent=cast(tuple[str, ...] | None, opponent),
                 # DuckDB returns plain values for the author's scalar columns.
                 split=dict(zip(by, cast(list[JsonValue], values))),
                 value=estimated[0],

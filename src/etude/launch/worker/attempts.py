@@ -105,6 +105,8 @@ def _prepare(session: Path, home: Path, work: Work) -> dict[str, str]:
     )
     # The job runs here: its commit's files, without `.git`.
     environment["ETUDE_SOURCE_DIR"] = str(source)
+    if work.commit is not None:
+        environment["ETUDE_COMMIT"] = work.commit
     environment["ETUDE_OUTPUT_DIR"] = str(home / "outputs")
     environment["ETUDE_STOP_FILE"] = str(session / "stop" / work.attempt)
     # Where the job's tracking files go: one place on this machine for every

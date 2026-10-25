@@ -37,18 +37,22 @@ from pydantic import BaseModel
 from etude.eval.records import (
     COLUMN_TYPES,
     Agent,
+    AgentKey,
+    CheckpointRef,
     ColumnType,
     Environment,
     Match,
     MatchRecord,
+    Version,
     as_config,
     table_file,
+    version_of,
 )
 from etude.eval.source import digest_files
 from etude.run.declaration import declare
 from etude.run.delivery import RunFiles, StorageDestination, destinations, ship
 from etude.run.errors import EtudeError
-from etude.run.records import ArtifactRef, Record, RunCounters, RunState
+from etude.run.records import Record, RunCounters, RunState
 from etude.run.storage import DirectoryStorage, Storage, run_prefix
 
 if TYPE_CHECKING:
@@ -90,31 +94,26 @@ class EvalRun(Record):
 def agent(
     name: str,
     *,
-    checkpoint: ArtifactRef | None = None,
+    checkpoint: CheckpointRef | None = None,
     code: Sequence[Path | str] = (),
     config: Mapping[str, object] | BaseModel | None = None,
 ) -> Agent:
-    """A saved model, by its artifact's digest, or code, by its source files; and its config.
+    """A saved model, by its checkpoint's key, or code, by `name`; and its config.
 
-    A checkpoint agent should also name the code that runs it, so results
-    from changed inference code are another agent's. A directory stands for
-    every file below it; files are hashed as `etude.eval.source.digest_files`
-    says, so the identity is the same on every checkout.
+    The key is the checkpoint or name with the config (`etude.eval.records.AgentKey`).
+    `code` is the source files that play it: their commit and digest are the
+    agent's `Version`, recorded with each match it plays. A code agent must
+    name them; a checkpoint agent should name its inference code. A directory
+    stands for every file below it, hashed as `etude.eval.source.digest_files` says.
     """
     if checkpoint is None and not code:
         raise EtudeError("agent_needs_checkpoint_or_code", 422)
+    version = version_of(code) if code else Version()
     if checkpoint is None:
-        return Agent(name=name, kind="code", artifact=digest_files(code), config=as_config(config))
-    if checkpoint.sha256 is None:
-        raise EtudeError("checkpoint_agent_requires_digest", 422)
-    return Agent(
-        name=name,
-        kind="checkpoint",
-        artifact=checkpoint.sha256,
-        uri=checkpoint.uri,
-        code=digest_files(code) if code else None,
-        config=as_config(config),
-    )
+        key = AgentKey(code=name, config=as_config(config))
+        return Agent(key=key, name=name, version=version)
+    key = AgentKey(checkpoint=checkpoint.key, config=as_config(config))
+    return Agent(key=key, name=name, artifact=checkpoint.artifact, version=version)
 
 
 def environment(

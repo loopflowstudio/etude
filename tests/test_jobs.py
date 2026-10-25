@@ -62,7 +62,7 @@ from etude.eval.records import Match
 def play(match: Match) -> Tables:
     # A checkpoint seat's file is on this machine; the row says how big it is.
     sizes = [
-        len(Path(urlparse(seated.uri).path).read_bytes()) if seated.uri else 0
+        len(Path(urlparse(seated.artifact.uri).path).read_bytes()) if seated.artifact else 0
         for seated in match.agents
     ]
     return {"plays": [{"game": 0, "player": seat, "bytes": size} for seat, size in enumerate(sizes)]}

@@ -56,7 +56,8 @@ the same way, with your `play`:
 ```python
 from etude.jobs import evaluation
 
-evaluation(progress, play=play, checkpoint=weights, max_hours=0.5, max_usd=Decimal(1))
+evaluation(progress, experiment="ppo", play=play, checkpoint=weights, max_hours=0.5,
+           max_usd=Decimal(1))
 ```
 
 Everything a run records goes to your own directory or S3 bucket. There is no
