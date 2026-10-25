@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from pydantic import Field
 
-from etude.cache import Cache, Content, Corrupt, Piece
+from etude.cache import Cache, Content, Corrupt, Fetched
 from etude.cache import Mismatch as ContentMismatch
 from etude.deadline import limit_time, remaining
 from etude.launch.records import Record
@@ -37,7 +37,7 @@ class _Link:
     def __init__(self, source: Download, retries: int, send: Send) -> None:
         self.source, self.retries, self.send = source, retries, send
 
-    def read(self, start: int, end: int, etag: str | None) -> Piece:
+    def read(self, start: int, end: int, etag: str | None) -> Fetched:
         size = self.source.size_bytes
         headers = {"Range": f"bytes={start}-{end}"}
         if etag is not None:
@@ -72,7 +72,7 @@ class _Link:
             or (etag is not None and etag != found)
         ):
             raise StorageUnavailable(f"invalid download range or identity (status {reply.status})")
-        return Piece(body=reply.body, etag=found)
+        return Fetched(body=reply.body, etag=found)
 
     def reused(self, size_bytes: int, byte_range: str | None) -> None:
         emit("REUSE", self.source.url, reused=size_bytes, byte_range=byte_range, completed=True)

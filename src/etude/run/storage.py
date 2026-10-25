@@ -132,8 +132,9 @@ class S3Storage:
     client itself has no cloud dependency. Reads go through `cache` (by default
     this computer's, shared with the launcher): an immutable object is fetched
     once, any other is asked for again only by ETag, and an immutable object's
-    ranges are each fetched once, or read from the whole object when it is held. Writes carry a SHA256 that the bucket checks; nothing
-    reads an upload back.
+    ranges are each fetched once, or read from the whole object when it is
+    held. Writes carry a SHA256 that the bucket checks; nothing reads an upload
+    back.
     """
 
     def __init__(

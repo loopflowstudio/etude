@@ -79,14 +79,8 @@ class Mismatch(Exception):
 
 
 @dataclass(frozen=True)
-class Piece:
-    body: bytes
-    etag: str
-
-
-@dataclass(frozen=True)
 class Fetched:
-    """An object's bytes and the ETag storage gave them, if any."""
+    """An object's bytes, or a range of them, and the ETag storage gave them, if any."""
 
     body: bytes
     etag: str | None
@@ -95,7 +89,7 @@ class Fetched:
 class Source(Protocol):
     """Where one content's bytes are read from, a range at a time."""
 
-    def read(self, start: int, end: int, etag: str | None) -> Piece:
+    def read(self, start: int, end: int, etag: str | None) -> Fetched:
         """Bytes `start` to `end` inclusive, of the version `etag` names when given.
 
         Raises when it cannot: the acquisition keeps what it completed.
@@ -151,6 +145,13 @@ def _discard(path: Path) -> None:
     path.with_suffix(".json").unlink(missing_ok=True)
 
 
+def _admit(partial: Path, target: Path) -> None:
+    """Publish a completed acquisition as held content, under the capacity lock."""
+    with _lock(target.parent / "capacity.lock"):
+        partial.replace(target)
+        partial.with_suffix(".json").unlink(missing_ok=True)
+
+
 @contextmanager
 def _lock(path: Path) -> Iterator[None]:
     with path.open("a") as lock:
@@ -160,7 +161,7 @@ def _lock(path: Path) -> Iterator[None]:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
             except BlockingIOError:
-                time.sleep(min(0.05, remaining(0.05) or 0.05))
+                time.sleep(remaining(0.05) or 0.05)
         yield
 
 
@@ -247,9 +248,7 @@ class Cache:
                     _discard(partial)
                 raise Mismatch("download length or SHA256 mismatch")
             if cacheable:
-                with _lock(self.root / "capacity.lock"):
-                    partial.replace(target)
-                    partial.with_suffix(".json").unlink(missing_ok=True)
+                _admit(partial, target)
                 self._pin(content, pin)
                 return _publish(target, destination)
             # Staging is already beside the destination, on the same filesystem.
@@ -348,9 +347,7 @@ class Cache:
                 return False
             partial = self.root / f"{key}.partial"
             partial.write_bytes(body)
-            with _lock(self.root / "capacity.lock"):
-                partial.replace(target)
-                partial.with_suffix(".json").unlink(missing_ok=True)
+            _admit(partial, target)
             return True
 
     def _make_room(self, key: str, size: int) -> bool:

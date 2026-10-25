@@ -24,7 +24,7 @@ import pytest
 from moto import mock_aws
 
 from etude import cache as engine
-from etude.cache import Cache, Content, Piece
+from etude.cache import Cache, Content, Fetched
 from etude.deadline import limit_time, remaining
 from etude.launch.database import Database
 from etude.launch.logging import log_to
@@ -185,7 +185,7 @@ def test_cold_warm_concurrent_and_new_process_retrieval(http: HTTP, tmp_path: Pa
     assert (http.requests, http.received) == (3, 12)
     script = """from pathlib import Path
 import sys
-from etude.cache import Cache, Content, Piece
+from etude.cache import Cache
 from etude.launch.storage.download import Download, download
 download(Download.model_validate_json(sys.argv[2]), Path(sys.argv[3]), cache=Cache(Path(sys.argv[1])))
 """
@@ -814,8 +814,8 @@ class _Held:
     def __init__(self, body: bytes) -> None:
         self.body = body
 
-    def read(self, start: int, end: int, etag: str | None) -> Piece:
-        return Piece(body=self.body[start : end + 1], etag='"held"')
+    def read(self, start: int, end: int, etag: str | None) -> Fetched:
+        return Fetched(body=self.body[start : end + 1], etag='"held"')
 
     def reused(self, size_bytes: int, byte_range: str | None) -> None:
         pass
