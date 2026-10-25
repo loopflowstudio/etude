@@ -1,60 +1,28 @@
-# v0.2.5
+# v0.2.6
 
 <!-- loopflow:release-notes=narrative;gate=safe -->
 
-Etude v0.2.5 adds `etude report PATH`. It draws an experiment as one self-contained HTML page, with its evals first and its perf and ML details after. You can also point it at a folder to get a page for every experiment file in it, plus a live index of them all. Upgrading from 0.2.4 keeps existing stores working. Code that called `etude.eval.tournament.unplayed()` must move to `played()`.
+Etude v0.2.6 lets a rental run as long as your run and your storage allow, instead of cutting it off at about 12 hours. Long training no longer has to be split into segments that each pay for startup again, restart their streams and stage a continuation. The limit now comes from things you set (`max_hours`, dollar limits, the on-demand's price ceiling) and from how long your storage can give a machine access. Upgrading from 0.2.5 keeps existing stores working.
 
-## See an experiment on one page
+## Long runs stay on one machine
 
-An experiment file already holds `train()` and `eval(state)`. It can now also hold `report()`, which returns a `Report` describing the page:
+`OnDemand.max_rental_seconds` (default 43,000 s) is gone. It capped every rental at about 12 hours whatever the run asked for. Now a rental lasts until the first of these runs out: the run's `max_hours`, its dollar limits, the on-demand's price ceiling, or the longest access grant its storage can issue.
 
-```python
-# ppo.py: experiment "ppo"
-from etude.report import Anchors, Curve, HeadToHead, Matches, Matrix, Ranking, Report, Score
+| Storage | Longest grant | Mechanism |
+| --- | --- | --- |
+| R2 | 7 days | Cloudflare temporary credentials |
+| S3 | 36 hours | federation keys |
 
+- A session's storage grants, inbox link and bootstrap links last until the session's deadline. Before, they lasted a fixed 13 hours. Work added to a kept rental gets grants that last until that rental's deadline.
+- If a run's `max_hours` plus `setup_seconds` is longer than the storage's grant, the launch is refused, and so is a `rent` that asks for longer. For example, a 37-hour run or a 37-hour `rent` on S3 is refused, while a 48-hour rental on R2 is accepted.
+- A cohort's shared rental still stops at the storage's grant. The cohort's remaining runs move to a new rental.
+- `etude.launch.storage.s3.longest_grant` is now the one place that decides how long each kind of storage can grant access.
 
-def report() -> Report:
-    return Report(
-        score=Score(table="plays", value="won", reference=0.5),
-        evals=(
-            Curve(title="Win rate against the anchors", matches=Matches(tag="anchor")),
-            Matrix(rows="deal", columns="on_play", matches=Matches(tournament=LADDER.name)),
-            Ranking(by="on_play"),
-            HeadToHead(),
-            Anchors(),
-        ),
-        baseline="ppo",
-    )
-```
-
-```sh
-etude report ppo.py --source r2://bucket/runs --open   # writes ./reports/ppo.html
-etude report ppo.py --watch 5 --open                   # rewrites it; the open page reloads
-etude report ppo.py --serve                            # serves it live, writing nothing
-etude report experiments/ --serve                      # an index at /, each page at /STEM
-```
-
-- The file stem names the experiment. Its runs are read from `--source` and its evals from `statsdb(stem)`. The file is run again on every build.
-- If the file has no `report()`, the page uses `Report()` and says so at the top. A missing file, or a `report()` that returns something other than a `Report`, is refused.
-- Checkpoints are drawn per job as curves, matrices, rankings and head-to-head results across seeds, with range bands and the baseline dotted.
-- Fixed agents get one `Anchors()` panel. It shows the anchors' matrix against each other, and each anchor's strength over matches that seat none of the experiment's checkpoints. On a curve against one anchor, the other anchors' scores against it are drawn as labelled reference lines.
-- Panels choose matches with `Matches(tournament=..., matchup=...)` or `Matches(tournament=..., tag=...)`, using the names `eval(state)` gives them. Naming both a matchup and a tag is refused. Without `matches`, a section control picks a tournament or a tag within it.
-
-([#28](https://github.com/loopflowstudio/etude/pull/28))
-
-## Results are bound by checkpoint key, and each match counts once
-
-The report places each checkpoint agent by its key, not by its contents. The eval database joins `agents.checkpoint` to `training_checkpoints`, and the point is drawn where that run's clocks stood. If two runs hold checkpoints with identical bytes, they are still two agents and two points. These are drawn as fixed agents: code agents, checkpoints from outside the experiment (`CheckpointKey(address=...)`) and etude-sdk 0.2 agents.
-
-A match counts once, from the eval run that recorded it last, so each result reflects the latest version that played it.
-
-- `etude.eval.tournament.played()` replaces `unplayed()`. It reports every match a definition calls for in one of three states: `delivered` (with the eval run that last delivered it), `failed` (nothing delivered since), or `new` (never attempted).
-- `etude eval` plays the `new` matches, and also the `failed` ones when given `--retry-failed`.
-- For tournaments that `eval(state)` doesn't return, the report finds them among the experiment's eval runs with the new `tournament_runs()`.
-- The report's coverage (per checkpoint key: played, failed and not yet played) and its failed-match list both come from `played()`. A failed match's error text is still read from the eval database.
+([#46](https://github.com/loopflowstudio/etude/pull/46))
 
 ## Operational notes
 
 - Older versions keep working; this release proves no compatibility break.
-- `unplayed()` is gone. Callers should switch to `played()` and select its `new` matches, plus its `failed` ones if they want retries.
-- `etude launch` does not yet pass the experiment's stem to training runs. Until it does, training code must call `track(experiment="ppo")` itself, as the docs describe.
+- On-demands saved with `max_rental_seconds` still load. The extra key is ignored, so the database schema stays the same. Any duration you stored there no longer has an effect. Set `max_hours` on the run, or rely on dollar limits, to cap how long a rental lasts.
+- Launch and cohort asks each make one extra database query, to read the on-demand's storage. The result is cached per storage, because a storage never changes after it is added. The tests that pin query counts now expect the new numbers.
+- S3-backed runs longer than 36 hours, counting setup, are now refused at launch. Before, they ran in 12-hour segments. Move such runs to R2, or shorten `max_hours`.
