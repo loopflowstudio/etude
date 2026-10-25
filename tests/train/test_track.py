@@ -443,7 +443,7 @@ def test_tracking_commands_use_local_files_with_a_selected_controller(
 
     def serve_once(server: Server) -> None:
         # Replace the blocking server loop; inspect the page it would serve.
-        assert "rl/loss" in server.page()
+        assert "rl/loss" in (server.page() or "")
         raise KeyboardInterrupt
 
     monkeypatch.setattr(Server, "serve_forever", serve_once)

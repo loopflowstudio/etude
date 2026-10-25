@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__ · Etude</title>
+<style>
+__UPLOT_CSS__
+__PAGE_CSS__
+.filter { font: inherit; font-size: 13px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; width: min(320px, 100%); }
+.rows { display: grid; gap: 12px; margin-top: 18px; }
+.row { border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; display: grid; grid-template-columns: minmax(180px, 1.1fr) minmax(220px, 1.6fr) minmax(200px, 1.2fr); gap: 8px 24px; }
+.row.bad { border-left: 3px solid var(--bad); } .row.live { border-left: 3px solid var(--good); }
+.row h2 { margin: 0; font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
+.row h2 a { color: var(--ink); text-decoration: none; } .row h2 a:hover { text-decoration: underline; text-underline-offset: 2px; }
+.row .file { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.facts { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; font-size: 12.5px; align-content: start; }
+.facts > span { color: var(--muted); } .facts b { font-weight: 500; }
+.bad-text { color: var(--bad); font-weight: 600; } .live-text { color: var(--good); font-weight: 600; }
+.score { display: grid; grid-template-columns: minmax(80px, auto) 130px auto; gap: 4px 10px; align-items: center; font-size: 12.5px; }
+.score .v { font-weight: 600; font-size: 14px; } .score .at { color: var(--muted); font-size: 11.5px; }
+.score .spark { height: 30px; } .score .spark .chart-empty { padding: 6px 0; }
+.error { grid-column: 1 / -1; color: var(--bad); font-size: 12.5px; overflow-wrap: anywhere; }
+@media (max-width: 900px) { .row { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="head"><h1 id="title">Experiments</h1><span class="pill" id="pill"></span></div>
+  <div class="context" id="context"></div>
+  <div class="controls"><input class="filter" id="filter" type="search" placeholder="Filter experiments" aria-label="Filter experiments"></div>
+  <div class="rows" id="rows"></div>
+</div>
+<script type="application/json" id="data">__DATA__</script>
+<script>__UPLOT_JS__</script>
+<script>__CHARTS_JS__</script>
+<script>
+"use strict";
+// A row per experiment file, from its report's own page data and code (charts.js): its
+// runs, latest checkpoint, each job's latest score, evaluation progress and activity.
+const D = JSON.parse(document.getElementById("data").textContent);
+const S = Object.assign({q: "", live: "1"}, Object.fromEntries(new URLSearchParams(location.hash.slice(1))));
+const writeHash = () => history.replaceState(null, "", "#" + new URLSearchParams(S));
+
+// Failing work first, then running work, then the most recently active.
+const rows = D.entries.map(e => {
+  if (!e.page) return {e, bad: true, live: false, latest: 0};
+  const P = e.page, runs = P.training.runs;
+  const bad = runs.some(r => r.state === "failed") || P.failures.length > 0;
+  const live = runs.some(r => r.state !== "finished" && r.state !== "failed");
+  return {e, P, M: model(P), bad, live, latest: latestActivity(P) || 0};
+}).sort((a, b) => (b.bad - a.bad) || (b.live - a.live) || (b.latest - a.latest) || a.e.experiment.localeCompare(b.e.experiment));
+
+function render() {
+  writeHash(); destroyCharts();
+  const ctx = document.getElementById("context"); ctx.replaceChildren();
+  const kv = (k, v) => { const s = node("span", null, k + " "); s.appendChild(node("b", null, v)); ctx.appendChild(s); };
+  kv("Experiments", String(D.entries.length));
+  kv("Read", `${when(D.generated_ms)} from ${D.source}`);
+  document.getElementById("pill").textContent = D.refresh ? "live" : "read once";
+  if (D.refresh) {
+    const l = node("label", "chip"), box = node("input"); box.type = "checkbox"; box.checked = S.live === "1";
+    box.onchange = () => { S.live = box.checked ? "1" : "0"; writeHash(); };
+    l.append(box, `Reload every ${D.refresh} s`); ctx.appendChild(l);
+  }
+  const q = S.q.toLowerCase(), host = document.getElementById("rows"); host.replaceChildren();
+  const draws = [];
+  const shown = rows.filter(r => !q || `${r.e.experiment} ${r.e.file}`.toLowerCase().includes(q));
+  if (!shown.length) host.appendChild(node("div", "na", D.entries.length ? "No experiment matches the filter" : "No experiment file here: a .py file defining eval(state) or report()"));
+  for (const r of shown) {
+    const row = node("div", "row" + (r.bad ? " bad" : r.live ? " live" : "")), name = node("div");
+    const h = node("h2"), a = node("a", null, r.e.experiment); a.href = r.e.href; h.appendChild(a);
+    name.append(h, node("div", "file", r.e.file));
+    row.appendChild(name);
+    if (!r.P) { row.appendChild(node("div", "error", r.e.error)); host.appendChild(row); continue; }
+    const {P, M} = r, runs = P.training.runs;
+    // Runs and evaluation.
+    const facts = node("div", "facts"), fact = (k, v, cls) => { facts.append(node("span", null, k), node("b", cls, v)); };
+    const count = s => runs.filter(x => x.state === s).length, other = runs.length - count("finished") - count("failed");
+    const restarted = runs.filter(x => x.attempts.length > 1).length;
+    const states = node("b");
+    for (const [n, label, cls] of [[other, "running", "live-text"], [count("finished"), "finished", null], [count("failed"), "failed", "bad-text"], [restarted, "restarted", null]])
+      if (n) { if (states.childNodes.length) states.append(" · "); states.appendChild(node("span", cls, `${n} ${label}`)); }
+    facts.append(node("span", null, "Runs"), states);
+    const started = new Map(runs.map(x => [x.name, x.started]));
+    const last = [...P.training.checkpoints].sort((x, y) => (started.get(y.run) + y.elapsed) - (started.get(x.run) + x.elapsed))[0];
+    const clock = P.training.clocks[0]?.name;
+    fact("Latest checkpoint", last ? `${last.run} · ${clock ? `${clock} ${num(last.at[clock])}` : `#${last.ordinal}`} · ${ago((started.get(last.run) + last.elapsed) * 1000, D.generated_ms)}` : "none yet");
+    const p = progress(P);
+    facts.append(node("span", null, "Evaluated"));
+    const ev = node("b", null, `${p.evaluated} of ${p.checkpoints} checkpoints`);
+    if (p.pending) ev.append(` · ${p.pending} not yet played`);
+    if (p.failed) { ev.append(" · "); ev.appendChild(node("span", "bad-text", `${p.failed} failed match${p.failed > 1 ? "es" : ""}`)); }
+    facts.appendChild(ev);
+    fact("Trained", dur(trained(P)));
+    fact("Latest activity", r.latest ? `${when(r.latest)} (${ago(r.latest, D.generated_ms)})` : "none");
+    if (P.notes.length) fact("Note", P.notes.join(" "));
+    row.appendChild(facts);
+    // The headline: each job's latest score, as its report's first curve draws it.
+    const score = node("div", "score"), info = P.scores[0];
+    const heads = headline(P, M);
+    if (!info || !heads.some(x => x.points.length)) score.appendChild(node("span", "na", P.selections.length ? "No score yet" : "No evaluations yet"));
+    else {
+      const t = node("span", "at", `${info.table}.${info.value} vs ${heads[0].against}`); t.style.gridColumn = "1 / -1"; score.appendChild(t);
+      for (const x of heads) {
+        const color = css(x.job.color), label = node("span"), sw = node("i", "sw" + (x.job.baseline ? " dot" : ""));
+        sw.style.background = x.job.baseline ? "" : color; sw.style.color = color; label.append(sw, " ", x.job.label);
+        const spark = node("div", "spark"), v = node("span");
+        v.append(node("span", "v", x.latest ? fmt(x.latest.y) : "—"), " ", node("span", "at", x.latest && clock ? `at ${clock} ${num(x.latest.key)}` : ""));
+        score.append(label, spark, v);
+        draws.push(() => line(spark, [{label: x.job.label, color, dotted: x.job.baseline, points: x.points}], {spark: true, height: 30, ref: info.reference, band: false, empty: "—"}));
+      }
+    }
+    row.appendChild(score);
+    host.appendChild(row);
+  }
+  for (const d of draws) d();
+}
+const filter = document.getElementById("filter");
+filter.value = S.q; filter.oninput = () => { S.q = filter.value; render(); };
+render();
+let pending; addEventListener("resize", () => { clearTimeout(pending); pending = setTimeout(render, 120); });
+if (D.refresh) setInterval(() => { if (S.live === "1" && !document.hidden) location.reload(); }, D.refresh * 1000);
+</script>
+</body>
+</html>

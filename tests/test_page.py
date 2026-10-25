@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from etude.cli import main
-from etude.page import build, target
+from etude.page import Page, Server, build, build_each, experiment_files, index, render, target
 from etude.report import Anchors, Curve, Matrix, Ranking, Report
 from etude.run.errors import EtudeError
 from etude.run.storage import DirectoryStorage, storage_from_uri
@@ -103,3 +103,64 @@ def test_a_report_names_the_eval_columns_its_panels_split_by() -> None:
     )
     assert report.columns() == ("seat", "opponent_deck", "deck")
     assert "rl/entropy" in Report().keys()
+
+
+REPORTED = "from etude.report import Report\n\n\ndef report() -> Report:\n    return Report()\n"
+
+
+def test_a_folder_holds_the_files_that_define_eval_or_report_and_none_is_run(
+    tmp_path: Path,
+) -> None:
+    folder = tmp_path / "experiments"
+    experiment_file(folder, "lab", REPORTED)
+    experiment_file(folder / "more", "ladder", "def eval(state):\n    return []\n")
+    # A helper module and a job file are no experiments, and are never run to find out.
+    experiment_file(folder, "games", "raise SystemExit('run')\n\ndef play(match): ...\n")
+    experiment_file(folder, "job", "raise SystemExit('run')\n\ndef train(config): ...\n")
+    experiment_file(folder / ".venv", "vendored", REPORTED)
+    assert [f.relative_to(folder) for f in experiment_files(folder)] == [
+        Path("lab.py"),
+        Path("more/ladder.py"),
+    ]
+    experiment_file(folder / "copy", "lab", REPORTED)
+    with pytest.raises(EtudeError, match="experiment_named_twice"):
+        experiment_files(folder)
+
+
+def test_a_folders_report_is_an_index_of_its_experiments_pages(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    runs, folder = tmp_path / "runs", tmp_path / "experiments"
+    trained(runs, "lab", "a")
+    experiment_file(folder, "lab", REPORTED)
+    # One file fails as it runs, and one experiment has no runs yet: each says so on its row.
+    experiment_file(folder, "broken", "def report(): ...\n\nraise RuntimeError('typo')\n")
+    experiment_file(folder, "fresh", REPORTED)
+    built = build_each(runs, folder)
+    found = index(runs, built, href=lambda stem: f"{stem}.html")
+    rows = {entry.experiment: entry for entry in found.entries}
+    assert rows["broken"].page is None and rows["broken"].error == "RuntimeError: typo"
+    assert rows["fresh"].error is not None and "no training runs of 'fresh'" in rows["fresh"].error
+    lab, whole = rows["lab"].page, built[folder / "lab.py"]
+    assert lab is not None and isinstance(whole, Page)
+    # The index keeps the page but its line data, which it never draws.
+    assert lab.training.runs == whole.training.runs and lab.training.series == {}
+    assert rows["lab"].href == "lab.html"
+    # Written, it is an index beside a page for each experiment that has one.
+    assert main(["report", str(folder), "--source", str(runs)]) == 0
+    assert capsys.readouterr().out.strip() == str(runs / "reports/index.html")
+    assert sorted(p.name for p in (runs / "reports").iterdir()) == ["index.html", "lab.html"]
+    # Served, it is the index at / and each experiment's page at /STEM.
+    server = Server(runs, folder, ("127.0.0.1", 0))
+    try:
+        assert '"href": "/lab"' in (server.page("/") or "")
+        assert "lab.py:report" in (server.page("/lab") or "")
+        assert server.page("/elsewhere") is None
+    finally:
+        server.server_close()
+
+
+def test_a_page_carries_its_charts_and_needs_no_network(tmp_path: Path) -> None:
+    trained(tmp_path / "runs", "lab", "a")
+    html = render(build(tmp_path / "runs", experiment_file(tmp_path, "lab", REPORTED)))
+    assert "uPlot" in html and "<script src" not in html and "<link" not in html

@@ -45,6 +45,7 @@ etude launch job.py          # on this computer; --pool P for machines you own,
 etude status                 # where runs stand
 etude logs --run RUN         # preparation, every attempt, cleanup
 etude report ppo.py --open   # experiment ppo's evals, perf and ML details, as one page
+etude report . --serve       # every experiment file here, with a live index
 ```
 
 Etude decides the job's command: on the machine it imports `train` from your

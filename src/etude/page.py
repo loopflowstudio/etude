@@ -1,8 +1,10 @@
-"""An experiment's report page: built from its file and the runs under a source, written or served.
+"""An experiment's report page, and an index of every experiment in a folder: built, written or served.
 
     storage = storage_from_uri("r2://bucket/runs")
     page = build(storage, Path("experiments/ppo.py"))
     write(render(page), target(storage, "ppo"))  # ./reports/ppo.html
+    pages = build_each(storage, Path("experiments"))  # every experiment file there
+    write(render_index(index(storage, pages, href=lambda stem: f"{stem}.html")), target(storage, "index"))
 
 The file names the experiment, by its stem, and may define `report()`
 (`etude.report.Report`) and `eval(state)` (`etude.experiment`). Without
@@ -27,13 +29,19 @@ Gaps stay visible. A checkpoint nothing played is not evaluated; one that
 `eval(state)` wants and no eval run delivered is not yet played
 (`etude.eval.tournament.unplayed`); failed matches are counted and listed.
 
-The page is one HTML file with its data inlined (`page.html`): no network, no
-server. This module composes training and evaluation, which never import
-each other.
+The index (`index.html`) is a row per experiment file under a folder
+(`experiment_files`), drawn from each one's `Page` with its line data left
+out, so every fact on it, such as each job's latest score, is the report's
+own, computed by the same code (`charts.js`).
+
+Each page is one HTML file with its data and the vendored uPlot inlined: no
+network, no server. This module composes training and evaluation, which
+never import each other.
 """
 
 from __future__ import annotations
 
+import ast
 import itertools
 import json
 import runpy
@@ -148,6 +156,97 @@ class Page(Record):
     absent: tuple[str, ...]  # "TABLE.COLUMN" a panel names that its table lacks
 
 
+class Entry(Record):
+    """One experiment file on the index: its page without line data, or why it has none."""
+
+    file: str
+    experiment: str
+    href: str
+    page: Page | None
+    error: str | None
+
+
+class Index(Record):
+    source: str
+    entries: tuple[Entry, ...]
+
+
+# What makes a Python file an experiment's: a top-level eval(state) or report().
+EXPERIMENT_FUNCTIONS = ("eval", "report")
+
+
+def experiment_files(directory: Path) -> list[Path]:
+    """The experiment files at any depth below `directory`, outside hidden folders.
+
+    A file is recognised by its text, without running it; raises
+    `EtudeError("experiment_named_twice")` for two files with one stem.
+    """
+    found: dict[str, Path] = {}
+    for path in sorted(directory.rglob("*.py")):
+        parts = path.relative_to(directory).parts
+        if any(part.startswith(".") or part == "__pycache__" for part in parts):
+            continue
+        try:
+            tree = ast.parse(path.read_bytes(), filename=str(path))
+        except SyntaxError:
+            continue  # not a file `etude report` could run either
+        defined = {
+            each.name
+            for each in tree.body
+            if isinstance(each, ast.FunctionDef | ast.AsyncFunctionDef)
+        }
+        if not defined & set(EXPERIMENT_FUNCTIONS):
+            continue
+        if path.stem in found:
+            raise EtudeError("experiment_named_twice", 409) from ValueError(
+                f"{found[path.stem]} and {path}"
+            )
+        found[path.stem] = path
+    return list(found.values())
+
+
+def build_each(source: Storage | Path | str, directory: Path) -> dict[Path, Page | str]:
+    """Each experiment file's page, or why it could not be built, so one never hides the rest."""
+    storage = as_storage(source)
+    built: dict[Path, Page | str] = {}
+    for file in experiment_files(directory):
+        try:
+            built[file] = build(storage, file)
+        except Exception as error:
+            # An author's file may fail in any way; its row says how and the others go on.
+            built[file] = f"{type(error).__name__}: {error}"
+    return built
+
+
+def index(
+    source: Storage | Path | str, pages: dict[Path, Page | str], *, href: Callable[[str], str]
+) -> Index:
+    """The index of built pages. Each page keeps all but its line data, which the index never draws."""
+    storage = as_storage(source)
+    entries = []
+    for file, built in pages.items():
+        page = None
+        if isinstance(built, Page):
+            # The index draws each job's curve in the page's first view: one score, unsplit.
+            kept = tuple(c for c in built.cells if c.score == 0 and not c.split and not c.fixed)
+            lean = built.training.model_copy(update={"series": {}, "bands": {}, "timers": ()})
+            page = built.model_copy(update={"cells": kept, "training": lean})
+        entries.append(
+            Entry(
+                file=str(file),
+                experiment=file.stem,
+                href=href(file.stem),
+                page=page,
+                error=None if isinstance(built, Page) else built,
+            )
+        )
+    return Index(source=_source_name(storage), entries=tuple(entries))
+
+
+def _source_name(storage: Storage) -> str:
+    return str(storage.root) if isinstance(storage, DirectoryStorage) else storage.name
+
+
 def build(source: Storage | Path | str, file: Path) -> Page:
     """The page of the experiment `file` names, from the runs under `source`.
 
@@ -183,7 +282,7 @@ def build(source: Storage | Path | str, file: Path) -> Page:
     return Page(
         experiment=experiment,
         file=str(file),
-        source=str(storage.root) if isinstance(storage, DirectoryStorage) else storage.name,
+        source=_source_name(storage),
         report=report,
         origin=origin,
         notes=(*notes, *evals.notes),
@@ -554,14 +653,33 @@ def _failures(db: duckdb.DuckDBPyConnection, agents: Sequence[Agent]) -> tuple[F
 
 def render(page: Page, *, refresh: float | None = None) -> str:
     """The page as one HTML file; `refresh` is the seconds between the open page reloading."""
+    return _inline("page.html", page.experiment, page.model_dump(mode="json"), refresh)
+
+
+def render_index(found: Index, *, refresh: float | None = None) -> str:
+    """The index as one HTML file, like a page."""
+    return _inline("index.html", "Experiments", found.model_dump(mode="json"), refresh)
+
+
+def _inline(template: str, title: str, data: dict[str, object], refresh: float | None) -> str:
+    here = Path(__file__).parent
     stamp = {"generated_ms": time.time_ns() // 1_000_000, "refresh": refresh}
-    payload = json.dumps(page.model_dump(mode="json") | stamp, allow_nan=False)
-    return (
-        (Path(__file__).parent / "page.html")
-        .read_text()
-        .replace("__TITLE__", escape(page.experiment))
-        .replace("__DATA__", payload.replace("</", "<\\/"))
-    )
+    payload = json.dumps(data | stamp, allow_nan=False)
+    # Each placeholder is replaced once, the data last, so its text is never taken for one.
+    html = (here / template).read_text()
+    for name, text in (
+        ("__UPLOT_CSS__", (here / "vendor/uPlot.min.css").read_text()),
+        ("__PAGE_CSS__", (here / "page.css").read_text()),
+        ("__UPLOT_JS__", (here / "vendor/uPlot.iife.min.js").read_text()),
+        ("__CHARTS_JS__", (here / "charts.js").read_text()),
+        ("__TITLE__", escape(title)),
+        ("__DATA__", payload.replace("</", "<\\/")),
+    ):
+        before, found, after = html.partition(name)
+        if not found:
+            raise AssertionError(f"{template} has no {name}")
+        html = before + text + after
+    return html
 
 
 def target(storage: Storage, experiment: str, out: Path | None = None) -> Path:
@@ -582,7 +700,8 @@ def write(html: str, path: Path) -> Path:
 
 
 class Server(ThreadingHTTPServer):
-    """Serves the experiment's page at `/`, built from its file and the runs for each request.
+    """Serves an experiment file's page at `/`, or a folder's index at `/` and each of its
+    experiments at `/STEM`, built from the files for each request.
 
     It has no login: keep it on this computer unless told otherwise.
     """
@@ -590,25 +709,39 @@ class Server(ThreadingHTTPServer):
     def __init__(
         self,
         source: Storage | Path | str,
-        file: Path,
+        path: Path,
         address: tuple[str, int],
         *,
         refresh: float | None = None,
     ) -> None:
         super().__init__(address, _Handler)
-        self.source, self.file, self.refresh = source, file, refresh
+        self.source, self.path, self.refresh = source, path, refresh
 
-    def page(self) -> str:
-        return render(build(self.source, self.file), refresh=self.refresh)
+    def page(self, route: str = "/") -> str | None:
+        """The HTML served at `route`, or None where nothing is."""
+        if not self.path.is_dir():
+            return (
+                render(build(self.source, self.path), refresh=self.refresh)
+                if route == "/"
+                else None
+            )
+        if route == "/":
+            built = build_each(self.source, self.path)
+            found = index(self.source, built, href=lambda stem: f"/{stem}")
+            return render_index(found, refresh=self.refresh)
+        for file in experiment_files(self.path):
+            if route == f"/{file.stem}":
+                return render(build(self.source, file), refresh=self.refresh)
+        return None
 
 
 class _Handler(BaseHTTPRequestHandler):
     server: Server
 
     def do_GET(self) -> None:  # noqa: N802 - the name http.server calls
-        found = self.path.split("?", 1)[0] == "/"
         try:
-            body = (self.server.page() if found else "Not found.").encode()
+            served = self.server.page(self.path.split("?", 1)[0])
+            found, body = served is not None, (served or "Not found.").encode()
         except ValueError as error:  # no runs of the experiment yet
             found, body = False, str(error).encode()
         self.send_response(200 if found else 404)

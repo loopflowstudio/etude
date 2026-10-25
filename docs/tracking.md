@@ -188,6 +188,7 @@ def report() -> Report:
 uv run etude report ppo.py --source r2://bucket/runs --open   # writes ./reports/ppo.html
 uv run etude report ppo.py --watch 5 --open   # rewrite it every 5 s; the open page reloads
 uv run etude report ppo.py --serve            # serve it live, writing nothing
+uv run etude report experiments/ --serve      # every experiment there, with an index at /
 ```
 
 One HTML page per experiment, with its data inlined: no server and no network
@@ -202,6 +203,23 @@ served page reloads itself.
 
 Training runs must name the experiment for the file, `track(experiment="ppo")`,
 until `etude launch` hands it to the runs it starts.
+
+**A folder** is every experiment file in it, at any depth outside hidden
+folders: a `.py` file defining `eval(state)` or `report()` at its top level,
+recognised without running it, so helper modules and job files are left
+alone. It is drawn as a page per experiment and an index: written as
+`reports/index.html` beside the pages, or served at `/` with each page at
+`/STEM`. The index has a row per experiment showing its runs (running,
+finished, failed, restarted), its latest checkpoint, each job's latest score
+with a sparkline of its report's first curve, evaluation progress with
+failed matches, time trained and latest activity. Experiments with failures
+come first, then those with work running. A file that fails to run, or an
+experiment with no runs yet, says so on its row. A served page reloads every
+5 seconds, or every `--watch` seconds.
+
+**Charts** are uPlot, inlined into the page. Drag across a chart to zoom in
+and double-click to zoom out. The cursor is shared by every chart in a
+section.
 
 **Two parts.** Evals, then Perf and ML details, each with its own x axis (any
 declared clock, or wall hours); Perf and ML details can be smoothed. Choosing

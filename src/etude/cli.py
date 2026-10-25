@@ -27,10 +27,11 @@ app = launch_cli.app
 @app.command()
 @kind(Kind.wait)
 def report(
-    file: Annotated[
+    path: Annotated[
         Path,
         typer.Argument(
-            help="a Python file, maybe defining report(); the experiment is named for it"
+            help="an experiment's Python file, named for the experiment, or a folder: every "
+            "experiment file in it, with an index"
         ),
     ],
     source: Annotated[
@@ -52,7 +53,7 @@ def report(
         typer.Option(
             min=0.1,
             help="rewrite it every SECONDS, and the open page reloads; with --serve, how often "
-            "the page reloads",
+            "the page reloads (default 5)",
         ),
     ] = None,
     serve: Annotated[
@@ -63,18 +64,30 @@ def report(
 ) -> None:
     """Draw an experiment's evals, perf and ML details as one HTML page, from its runs' files.
 
-    The page follows the file's report(), or the default report without one.
+    The page follows the file's report(), or the default report without one. Given a folder,
+    it draws every experiment file in it (a .py file defining eval(state) or report()) and an
+    index of them all: their runs, latest checkpoints and scores, and evaluation progress.
     """
     # The report reads runs and, once the experiment has eval runs or eval(), evaluations.
     import time
     import webbrowser
 
-    from etude.page import Server, build, render, target, write
+    from etude.page import (
+        Page,
+        Server,
+        build,
+        build_each,
+        index,
+        render,
+        render_index,
+        target,
+        write,
+    )
     from etude.run.storage import default_root, storage_from_uri
 
     storage = storage_from_uri(source or default_root())
     if serve:
-        server = Server(storage, file, (host, port), refresh=watch)
+        server = Server(storage, path, (host, port), refresh=5.0 if watch is None else watch)
         address = f"http://{host}:{server.server_port}/"
         print(address, flush=True)
         if open_:
@@ -86,23 +99,37 @@ def report(
         finally:
             server.server_close()
         return
-    path = target(storage, file.stem, out)
-    shown = None
+    shown: object = None
     try:
         while True:
-            try:
-                page = build(storage, file)
-            except ValueError:
-                if watch is None:
-                    raise
-                page = None  # Watching waits for the experiment's first run.
-            if page is not None and page != shown:
-                write(render(page, refresh=watch), path)
+            current: Page | dict[Path, Page | str] | None
+            if path.is_dir():
+                current = build_each(storage, path)
+            else:
+                try:
+                    current = build(storage, path)
+                except ValueError:
+                    if watch is None:
+                        raise
+                    current = None  # Watching waits for the experiment's first run.
+            if current is not None and current != shown:
+                if isinstance(current, Page):
+                    written = write(render(current, refresh=watch), target(storage, path.stem, out))
+                else:
+                    if "index" in {file.stem for file in current}:
+                        raise EtudeError("experiment_named_index", 409)
+                    for file, built in current.items():
+                        if isinstance(built, Page):
+                            write(render(built, refresh=watch), target(storage, file.stem, out))
+                    found = index(storage, current, href=lambda stem: f"{stem}.html")
+                    written = write(
+                        render_index(found, refresh=watch), target(storage, "index", out)
+                    )
                 if shown is None:
-                    print(path, flush=True)
+                    print(written, flush=True)
                     if open_:
-                        webbrowser.open(path.resolve().as_uri())
-                shown = page
+                        webbrowser.open(written.resolve().as_uri())
+                shown = current
             if watch is None:
                 break
             time.sleep(watch)

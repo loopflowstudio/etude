@@ -48,6 +48,8 @@ class Span(Record):
 
 class RunSummary(Record):
     name: str
+    # Seconds since the epoch when it first started; every other time here is since then.
+    started: float
     job: str
     seed: int | None
     state: str
@@ -217,6 +219,7 @@ def _summary(run: RunData) -> RunSummary:
     declaration = run.file.declaration if run.file else None
     return RunSummary(
         name=run.name,
+        started=start,
         job=run.job or run.name,
         seed=declaration.seed if declaration else None,
         state=run.state.state if run.state else "running or unfinished",
