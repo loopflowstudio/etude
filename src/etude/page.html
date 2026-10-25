@@ -174,7 +174,7 @@ function render() {
   const keyName = k => `${T.clocks[0]?.name || "checkpoint"} ${num(k)}`;
   const finalKey = j => j.runs.every(r => T.runs.find(x => x.name === r)?.state === "finished") ? (marks.get(j.runs[0]) || []).at(-1)?.align ?? null : null;
   const unselected = panel => { const m = panel.matches || {}; return node("div", "na", `No eval run holds the matches this panel names (${[m.tournament && "tournament " + m.tournament, m.matchup && "matchup " + m.matchup, m.tag && "tag " + m.tag].filter(Boolean).join(", ")}).`); };
-  if (!D.selections.length) card(body, "No evaluations", "", "full").appendChild(node("div", "na", `Define eval(state) in ${D.file} and run etude eval ${D.file}; its matches appear here.`));
+  if (!D.selections.length) card(body, "No evaluations", "", "full").appendChild(node("div", "na", `${D.file} defines no eval(state) yet. Define one and run etude eval on the file; its matches appear here.`));
   else for (const panel of R.evals) {
     const sel = panelSel(E, panel), opp = oppFor(E, sel), versus = versusOf(opp), where = sel == null ? "" : selName(D.selections[sel]);
     if (panel.kind === "curve" && !panel.split) {
