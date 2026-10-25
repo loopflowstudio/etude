@@ -34,9 +34,9 @@ from uuid import uuid4
 from pydantic import Field
 
 from etude.carriage import Mismatch
+from etude.deadline import limit_time, remaining
 from etude.launch import source
 from etude.launch.database import Database
-from etude.launch.deadline import limit_time, remaining
 from etude.launch.errors import LaunchError
 from etude.launch.executor import Execution, Refused, creation_guard
 from etude.launch.logging import bounded, explain, sanitize

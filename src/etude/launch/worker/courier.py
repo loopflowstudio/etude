@@ -26,7 +26,7 @@ from etude.carriage import (
     resume_file,
     retired,
 )
-from etude.launch.deadline import limit_time
+from etude.deadline import limit_time
 from etude.launch.environment import startup_timeout
 from etude.launch.logging import CLOSED, Console, bounded, explain, log_to, publish, write_log
 from etude.launch.records import Diagnostic
@@ -39,7 +39,7 @@ from etude.launch.schemas import (
     attempt_log,
     log_piece,
 )
-from etude.launch.storage.download import Cache, Download, Mismatch
+from etude.launch.storage.download import Download, Mismatch, download
 from etude.launch.storage.files import RESULT, read_result, write
 from etude.launch.storage.s3 import (
     PART_BYTES,
@@ -218,7 +218,7 @@ class Courier:
                     for path, source in links.items():
                         kind = path.split("/")[1]
                         with attribute(purpose="source" if kind == "sources" else "input"):
-                            Cache().fetch(source, self._home.parent / path, send=self._send)
+                            download(source, self._home.parent / path, send=self._send)
             finally:
                 # Recovery evidence is outside the discretionary input allowance.
                 self._carry_usage()
@@ -266,7 +266,7 @@ class Courier:
         if wanted is None or (folder / wanted.key).exists() or wanted.key not in keys:
             return
         with attribute(run=run, purpose="checkpoint"):
-            Cache().fetch(
+            download(
                 Download(url=keys[wanted.key], sha256=wanted.sha256, size_bytes=wanted.size_bytes),
                 folder / wanted.key,
                 send=self._send,

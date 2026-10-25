@@ -789,7 +789,7 @@ def test_expired_log_read_uses_cache_without_starting_another_request(
     identity = b.scheduler.launch(job(), rent="l4")
     before = b.scheduler.logs(run=identity)
     clock = iter([0.0, 2.0, 2.0, 2.0])
-    monkeypatch.setattr("etude.launch.deadline.time.monotonic", lambda: next(clock))
+    monkeypatch.setattr("etude.deadline.time.monotonic", lambda: next(clock))
     counting = Counting(b.store, b.service)
     with counting.record():
         after = b.scheduler.logs(run=identity, timeout=1)

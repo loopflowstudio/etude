@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from moto import mock_aws
 
+from etude.carriage import checkpoint_file
 from etude.experiment import advance, read_experiment
 from etude.page import Page, build
 from etude.run.errors import EtudeError
@@ -199,6 +200,21 @@ def test_a_watched_page_reads_each_bucket_file_once_per_computer(
         for _ in range(3):
             assert build(S3Storage("lab", client=client), file) == first
         assert client.bytes == read_once
+
+
+def test_a_report_reads_no_checkpoint_bytes(lab: tuple[Path, Path], page: Page) -> None:
+    boto3 = pytest.importorskip("boto3")
+    runs, file = lab
+    with mock_aws():
+        client = CountedClient(boto3.client("s3", region_name="us-east-1"))
+        client.create_bucket(Bucket="lab")
+        local = DirectoryStorage(runs)
+        stored = [key for key in local.keys("") if checkpoint_file(key)]
+        for key in local.keys(""):
+            S3Storage("lab", client=client).put(key, local.get(key))
+        assert stored
+        assert build(S3Storage("lab", client=client), file).cells == page.cells
+        assert client.read and not [key for key in client.read if checkpoint_file(key)]
 
 
 VERSIONED = """
