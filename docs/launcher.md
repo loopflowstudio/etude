@@ -86,6 +86,11 @@ Spending is bounded by limits, not by a flag: the job's `max_usd` and
 `max_hours`, the cohort's `max_usd`, the on-demand's price ceiling and its
 limit on machines at once.
 
+A rental lasts as long as those limits allow, up to what its storage can grant
+a machine: 7 days on R2 and 36 hours on S3. A run whose `max_hours` plus the
+on-demand's `setup_seconds` exceeds that is refused at launch, as is `rent`
+for longer.
+
 The `etude-sdk` package uses Python 3.12 and one shared dependency set for launching and tracking, installed with uv. It runs on this
 computer, SSH hosts and RunPod machines, without any Etude account.
 

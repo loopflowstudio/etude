@@ -110,7 +110,7 @@ def test_ask_wait_counts(tmp_path: Path) -> None:
         with pytest.raises(TimeoutError):
             b.scheduler.wait(id, timeout=0)
         wait = counting.snapshot()
-    assert ask == Counts(database=22)  # target: ask records intent without remote effects
+    assert ask == Counts(database=23)  # target: ask records intent without remote effects
     # Creation snapshots startup policy and loads the pool's delivery/publication policy.
     assert wait == Counts(provider=4, bucket=1, database=72)  # known debt: wait advances work
 
@@ -130,7 +130,7 @@ def test_cohort_git_and_database_counts(
             parallel=3,
         )
         result = counting.snapshot()
-    assert result == Counts(git=57, database=37)  # known debt: 19 git calls per run
+    assert result == Counts(git=57, database=38)  # known debt: 19 git calls per run
 
 
 @pytest.mark.parametrize(

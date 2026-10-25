@@ -21,6 +21,7 @@ from etude.launch.records import (
     Pool,
     Run,
     Stale,
+    Storage,
     Target,
 )
 from etude.launch.scheduler import Scheduler
@@ -663,19 +664,28 @@ def test_a_retry_resumes_its_run_without_creating_a_parent_run(tmp_path: Path) -
     assert len(b.scheduler.runs(done=True)) == 1
 
 
-def test_machine_window_retries_but_run_hours_do_not_reset(tmp_path: Path) -> None:
+def test_a_rental_on_r2_lasts_as_long_as_its_run_beyond_twelve_hours(tmp_path: Path) -> None:
     b = bench(tmp_path)
+    b.scheduler.add_storage(Storage(name="r2", bucket="bucket", prefix="prefix", provider="r2"))
     b.scheduler.add_ondemand(
-        b.store.ondemand("l4").model_copy(update={"name": "short", "max_rental_seconds": 300})
+        b.store.ondemand("l4").model_copy(update={"name": "long", "storage": "r2"})
     )
-    b.service.seconds = 7200
-    run = b.scheduler.queue(job(max_hours=500 / 3600), rent="short")
+    run = b.scheduler.queue(job(max_hours=48, max_usd=Decimal(100)), rent="long")
     b.scheduler.tick()
-    b.run(300)
-    assert len(b.scheduler.attempts(run)) == 2
-    assert b.scheduler.attempts(run)[1].limit_seconds == 200
-    b.run(200)
-    assert b.scheduler.read(run).outcome == "out_of_time"
+    held = b.store.session(b.scheduler.attempts(run)[0].session)
+    rental = b.store.rental_for(held)
+    assert rental is not None
+    assert rental.deadline == b.clock.now + timedelta(hours=48)
+    assert b.scheduler.attempts(run)[0].limit_seconds == 48 * 3600
+
+
+def test_a_run_longer_than_its_storage_grants_is_refused_before_renting(tmp_path: Path) -> None:
+    b = bench(tmp_path)  # S3 federation keys last 36 hours
+    with pytest.raises(LauncherError, match="at most 36 hours"):
+        b.scheduler.queue(job(max_hours=37, max_usd=Decimal(100)), rent="l4")
+    with pytest.raises(LauncherError, match="grants last at most 36 hours"):
+        b.scheduler.rent("l4", hours=37)
+    assert b.scheduler.runs() == () and b.service.sessions == {}
 
 
 def test_retries_share_the_runs_dollar_limit(tmp_path: Path) -> None:

@@ -673,6 +673,43 @@ def test_shared_inputs_are_prepared_once(tmp_path: Path) -> None:
     assert counting.snapshot() == Counts()
 
 
+def test_a_rented_sessions_grants_last_until_its_deadline(tmp_path: Path) -> None:
+    class Federation(Storage):
+        def __init__(self) -> None:
+            super().__init__()
+            self.durations: list[int] = []
+
+        def __call__(
+            self, method: str, url: str, body: bytes | None, headers: dict[str, str]
+        ) -> Reply:
+            if urlsplit(url).netloc.startswith("sts."):
+                self.durations.append(int(parse_qs((body or b"").decode())["DurationSeconds"][0]))
+            return super().__call__(method, url, body, headers)
+
+    storage = Federation()
+    journal = BucketJournal(
+        Place(name="west", bucket="journal", prefix="test", provider="s3", region="us-west-2"),
+        Bucket("journal", "us-west-2", Keys(access_key="access", secret_key="secret"), storage),
+    )
+    work = Work(
+        attempt="a",
+        command="true",
+        limit_seconds=30 * 3600,
+        limit_kind="out_of_time",
+        seed=None,
+        until=None,
+        config=None,
+        repo=None,
+        commit=None,
+        run="one",
+    )
+    deadline = datetime.now(UTC) + timedelta(hours=30)
+    journal.prepare(Packet(session="long", deadline=deadline, work=(work,)))
+    # The session's own folder and its run's, each for the whole 30 hours.
+    assert len(storage.durations) == 2
+    assert all(30 * 3600 - 60 <= seconds <= 30 * 3600 for seconds in storage.durations)
+
+
 def test_lost_start_receipt_reply_cannot_leave_unreported_running_code(tmp_path: Path) -> None:
     class LostReceipt(Storage):
         def __call__(

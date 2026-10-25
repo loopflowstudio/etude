@@ -73,8 +73,16 @@ def _unless(kept: Version | None) -> dict[str, str]:
 Send = Callable[[str, str, bytes | None, dict[str, str]], Reply]
 _NS = "{http://s3.amazonaws.com/doc/2006-03-01/}"
 WEEK = 7 * 24 * 3600  # the longest a link or form signed with these keys may last
-GRANT_LIMIT = 36 * 3600
+GRANT_LIMIT = 36 * 3600  # the longest AWS federation keys last
 PART_BYTES = 64 * 1024**2
+
+
+def longest_grant(storage: Storage) -> int:
+    """Seconds a machine's grant on this storage can last, and so the longest rental it serves.
+
+    R2 issues temporary keys for up to a week; AWS federation keys last 36 hours.
+    """
+    return WEEK if storage.provider == "r2" else GRANT_LIMIT
 
 
 TRANSIENT_STATUSES = frozenset({429, 500, 502, 503, 504})

@@ -234,7 +234,6 @@ class OnDemand(Record):
     delivery_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     log_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     setup_seconds: int = 900  # added to a rental's life when its dollar caps allow
-    max_rental_seconds: int = 43_000  # under the 12 hour storage-session ceiling
     # Where sessions on its machines keep records. Fixed when it is added:
     # None then means the provider's storage at that moment.
     storage: str | None = None

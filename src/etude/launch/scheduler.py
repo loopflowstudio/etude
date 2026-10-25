@@ -87,7 +87,7 @@ from etude.launch.schemas import (
     Progress,
     Work,
 )
-from etude.launch.storage.s3 import StorageUnavailable
+from etude.launch.storage.s3 import StorageUnavailable, longest_grant
 from etude.launch.storage.transport import attribute, observe
 from etude.launch.usage import Usage
 
@@ -175,6 +175,7 @@ class Scheduler:
         self._services = dict(services)  # by service name: a machine kind or a provider kind
         self._reached: dict[tuple[str, str, str | None], Execution] = {}
         self._trouble: dict[str, str] = {}  # why a pool or on-demand could not place work
+        self._grants: dict[str, float] = {}  # by storage: a storage never changes once added
         self._relayed: set[str] = set()  # attempts handed their run's folder by this process
         self._clock = clock
         self._sleep = sleep
@@ -350,6 +351,11 @@ class Scheduler:
                 life = min(life, float(max_usd / price * 3600))
             if life < 1:
                 raise LauncherError("a rental needs hours, and dollars for at least a second")
+            if life > self._longest_rental(supply):
+                raise LauncherError(
+                    f"on-demand {ondemand!r} keeps records in a storage whose grants last at "
+                    f"most {self._longest_rental(supply) / 3600:g} hours"
+                )
             session, rented, rental = self._session(supply, None, price, life, now, kept=True)
             self._store.plan(session, (), rented, rental)
             self._tick_supply(supply, self._clock())
@@ -525,7 +531,7 @@ class Scheduler:
             if placement.machine is None:
                 ondemand = self._store.ondemand(placement.supply)
                 life = self._life(ondemand, records, limits, price)
-                seconds = min(life, ondemand.max_rental_seconds)
+                seconds = min(life, self._longest_rental(ondemand))
                 most = price * Decimal(seconds) / 3600
             else:
                 most = min(price * Decimal(str(record.spec.max_hours)), _limit_usd(record.spec))
@@ -1490,7 +1496,7 @@ class Scheduler:
         if owned is None:
             assert isinstance(supply, OnDemand)  # only an on-demand rents
             template = supply.template
-            life = min(life, float(supply.max_rental_seconds))
+            life = min(life, self._longest_rental(supply))
             rented = Machine(
                 name=f"{supply.name}-{id}",
                 ondemand=supply.name,
@@ -2012,11 +2018,29 @@ class Scheduler:
             self._reached[key] = self._services[service](held)
         return self._reached[key]
 
+    def _longest_rental(self, ondemand: OnDemand) -> float:
+        """Seconds a rental from this on-demand may last: as long as its storage's grants."""
+        name = ondemand.storage
+        if name is None:
+            return float("inf")  # nothing is rented without a storage
+        if name not in self._grants:
+            self._grants[name] = float(longest_grant(self._store.storage(name)))
+        return self._grants[name]
+
     def _validate_job(self, job: Job, target: Target) -> None:
         if target.pool is not None and self._store.pool(target.pool).off:
             raise LauncherError(f"pool {target.pool!r} is turned off")
         if target.rent is not None:
-            self._store.ondemand(target.rent)  # raises if no such on-demand
+            ondemand = self._store.ondemand(target.rent)  # raises if no such on-demand
+            longest = self._longest_rental(ondemand)
+            if job.max_hours * 3600 + ondemand.setup_seconds > longest:
+                # One rental holds a run from setup to its last hour; none outlasts its grant.
+                raise LauncherError(
+                    f"a job on on-demand {target.rent!r} may ask for at most "
+                    f"{(longest - ondemand.setup_seconds) / 3600:g} hours: its storage's "
+                    f"grants last {longest / 3600:g} hours, including "
+                    f"{ondemand.setup_seconds} setup seconds"
+                )
         if not job.command.strip() or job.max_hours <= 0:
             raise LauncherError("a job needs a command and hours")
         if job.max_usd is None and target.rent is not None:

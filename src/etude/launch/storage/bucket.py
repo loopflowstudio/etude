@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import wraps
 from pathlib import Path
 from typing import Concatenate
@@ -30,10 +30,20 @@ from etude.launch.storage.s3 import Bucket, Grant, Version
 from etude.launch.storage.transport import attribute
 from etude.launch.usage import Transfer
 
+# How long a link lasts where no rental bounds it: a session on a machine you
+# own, and links the launcher reads itself. A rented session's grants last
+# until its deadline instead.
 _GRANT_SECONDS = 13 * 3600
 # Sessions whose last-read versions stay in memory. Logs are the bulk; one
 # beyond this is read again, once, when it is next asked about.
 _SESSIONS_KEPT = 64
+
+
+def _seconds_until(deadline: datetime | None) -> int:
+    """How long a grant must last to reach `deadline`, or `_GRANT_SECONDS` without one."""
+    if deadline is None:
+        return _GRANT_SECONDS
+    return max(1, int((deadline - datetime.now(UTC)).total_seconds()))
 
 
 def _attribute_session[**P, R](
@@ -83,23 +93,29 @@ class BucketJournal:
     def _run(self, run: str) -> str:
         return f"{self._prefix}/{run}/"
 
-    def _access(self, run: str) -> Grant:
+    def _access(self, run: str, seconds: int) -> Grant:
         """What a machine may write for one run: everything under its folder."""
-        return self._bucket.grant(self._run(run), _GRANT_SECONDS, run)
+        return self._bucket.grant(self._run(run), seconds, run)
 
     def prepare(self, packet: Packet, *, expires_at: datetime | None = None) -> BootstrapLinks:
+        """Write a session's instructions and grants that last until `expires_at`.
+
+        `expires_at` defaults to the packet's deadline; without either, grants
+        last `_GRANT_SECONDS`.
+        """
         with attribute(session=packet.session, purpose="control"):
             root = self._session(packet.session)
+            seconds = _seconds_until(expires_at or packet.deadline)
             # Grants first: where none can be issued, nothing is written and nothing rented.
-            out = self._bucket.grant(root + "out/", _GRANT_SECONDS, packet.session)
-            runs = {work.run: self._access(work.run) for work in packet.work}
+            out = self._bucket.grant(root + "out/", seconds, packet.session)
+            runs = {work.run: self._access(work.run, seconds) for work in packet.work}
             self._bucket.put(root + "packet.json", packet.model_dump_json().encode(), once=True)
             bootstrap = Bootstrap.model_validate(
                 {
                     "packet": packet.model_dump_json(),
                     "out": out,
                     "runs": runs,
-                    "inbox_url": self._bucket.get_url(root + "inbox.json", _GRANT_SECONDS),
+                    "inbox_url": self._bucket.get_url(root + "inbox.json", seconds),
                     "fetch": self._fetches(packet.session, packet.work),
                     "restore": self._restore(packet.work),
                 }
@@ -107,14 +123,6 @@ class BucketJournal:
             self._bucket.put(root + "inbox.json", Inbox().model_dump_json().encode())
             self._bucket.put(
                 root + "bootstrap.json", bootstrap.model_dump_json(round_trip=True).encode()
-            )
-            expires_at = expires_at or packet.deadline
-            seconds = (
-                _GRANT_SECONDS
-                if expires_at is None
-                else max(
-                    1, min(_GRANT_SECONDS, int((expires_at - datetime.now(UTC)).total_seconds()))
-                )
             )
             return BootstrapLinks(
                 url=self._bucket.get_url(root + "bootstrap.json", seconds),
@@ -309,10 +317,16 @@ class BucketJournal:
     def add(self, session_id: str, work: Work) -> None:
         inbox = self._inbox(session_id)
         if all(entry.work.attempt != work.attempt for entry in inbox.work):
+            raw = self._once(self._session(session_id) + "packet.json")
+            packet = Packet.model_validate_json(raw) if raw else None
+            deadline = None
+            if packet is not None and packet.deadline is not None:
+                # The machine delivers for this long after the deadline it was given.
+                deadline = packet.deadline + timedelta(seconds=packet.delivery_seconds or 0)
             entry = Delivery.model_validate(
                 {
                     "work": work.model_dump_json(),
-                    "access": self._access(work.run),
+                    "access": self._access(work.run, _seconds_until(deadline)),
                     "fetch": self._fetches(session_id, [work]),
                     "restore": self._restore([work]),
                 }
