@@ -55,7 +55,7 @@ def _cell(found: Comparison | None) -> str:
 def _party(identities: tuple[str, ...] | None, names: dict[str, str]) -> str:
     if identities is None:
         return "all"
-    return " + ".join(names.get(identity, identity[:12]) for identity in identities)
+    return " + ".join(names.get(key, key) for key in identities)
 
 
 def _matrix(found: Sequence[Comparison], names: dict[str, str]) -> str:
@@ -106,12 +106,12 @@ def render(db: duckdb.DuckDBPyConnection, *, refresh: float | None = None) -> st
         )  # fmt: skip
         + "</p>",
         "<h2>Agents</h2><table><tr><th class=name>name</th><th class=name>kind</th>"
-        "<th class=name>identity</th><th class=name>config</th></tr>"
+        "<th class=name>key</th><th class=name>config</th></tr>"
         + "".join(
             f"<tr><td class=name>{escape(name)}</td><td class=name>{kind}</td>"
-            f"<td class=name><code>{identity[:12]}</code></td>"
+            f"<td class=name><code>{escape(key)}</code></td>"
             f"<td class=name>{escape(str(config))}</td></tr>"
-            for identity, name, kind, config in db.sql(
+            for key, name, kind, config in db.sql(
                 "select agent, name, kind, config from agents order by name"
             ).fetchall()
         )

@@ -253,10 +253,9 @@ imports nothing else of Etude before the function's own module.
   checkout with the `ETUDE_*` environment below. Python work is a typed job,
   so there is one way to run it.
 
-Not built yet: evaluating as training goes,
-`training(..., evaluations=[evaluation(progress, play=play, ...)], every=5)`,
-where the controller watches the training run's checkpoints and launches the
-evaluation for every fifth one and the last.
+To evaluate as training goes, an experiment file's `eval(state)` chooses the
+checkpoints and `etude eval` launches what is new
+([Experiments](evaluation.md#experiments)).
 
 ## Rented machines
 

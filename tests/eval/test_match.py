@@ -18,7 +18,7 @@ from pydantic import BaseModel
 
 from etude.eval.match import agent, environment, evaluate
 from etude.eval.query import compare, estimate, statsdb
-from etude.eval.records import Agent, Config, Match, Model
+from etude.eval.records import Agent, CheckpointKey, CheckpointRef, Config, Match, Model
 from etude.eval.report import render
 from etude.eval.report import write as write_report
 from etude.run.errors import EtudeError
@@ -31,7 +31,8 @@ from tests.run.storage import CountedClient, MeasuredStorage
 def roster(tmp_path: Path) -> list[Agent]:
     script = tmp_path / "scripted.py"
     script.write_text("def act(state): return 0\n")
-    model = ArtifactRef(uri="s3://models/a.pt", sha256=sha256(b"a").hexdigest())
+    file = ArtifactRef(uri="s3://models/a.pt", sha256=sha256(b"a").hexdigest())
+    model = CheckpointRef(key=CheckpointKey(address=file.uri), artifact=file)
     return [
         agent("deep", checkpoint=model, config={"strength": 3, "search": {"simulations": 64}}),
         agent("shallow", checkpoint=model, config={"strength": 2, "search": {"simulations": 8}}),
@@ -54,7 +55,7 @@ def test_matches_in_two_workers_resumes_from_storage_without_replaying(
 ) -> None:
     agents = roster(tmp_path)
     # One checkpoint at two search budgets is two agents; one script at two strengths too.
-    assert len({each.identity for each in agents}) == 4
+    assert len({each.key.encoded for each in agents}) == 4
     world = environment("duel", config={"world": "w6"})
     matches = seatings(agents, conditions=[{"deal": 0}, {"deal": 1}], games=4)
     assert len(matches) == 24
@@ -127,7 +128,7 @@ def test_compare_gives_a_rate_with_an_interval_that_resamples_matches(tmp_path: 
     )  # fmt: skip
     db = statsdb("league", tmp_path)
     found = compare(db, table="plays", value="hits", per="attacks", by=["on_play"])
-    deep, shallow = agents[0].identity, agents[1].identity
+    deep, shallow = agents[0].key.encoded, agents[1].key.encoded
     cell = next(
         c
         for c in found
@@ -200,7 +201,7 @@ def test_two_environments_are_never_pooled(tmp_path: Path) -> None:
                  directory=tmp_path)  # fmt: skip
     assert conflict.value.code == "eval_run_environment_conflict"
     found = compare(statsdb("league", tmp_path), table="plays", value="won")
-    pooled = [c for c in found if c.subject == (agents[0].identity,) and c.opponent is None]
+    pooled = [c for c in found if c.subject == (agents[0].key.encoded,) and c.opponent is None]
     assert sorted(c.environment for c in pooled) == sorted([six.identity, seven.identity])
     assert all(c.matches == 2 for c in pooled)
 
@@ -212,7 +213,10 @@ def test_group_keyed_rows_compare_teams_in_a_two_on_two(tmp_path: Path) -> None:
     evaluate(experiment="teams", environment=environment("doubles"), play=play_teams,
              matches=[match], directory=tmp_path)  # fmt: skip
     found = compare(statsdb("teams", tmp_path), table="teams", value="won")
-    north, south = tuple(sorted((a.identity, c.identity))), tuple(sorted((b.identity, d.identity)))
+    north, south = (
+        tuple(sorted((a.key.encoded, c.key.encoded))),
+        tuple(sorted((b.key.encoded, d.key.encoded))),
+    )
     by_pair = {(x.subject, x.opponent): x.value for x in found}
     assert by_pair == {
         (north, south): 0.75,
@@ -250,8 +254,8 @@ def test_an_agent_may_play_itself(tmp_path: Path) -> None:
     found = compare(statsdb("mirror", tmp_path), table="plays", value="won")
     # Equal strength: seat 1 wins the ties, and each seat its every-third games on the play.
     assert {(c.subject, c.opponent): (c.value, c.rows) for c in found} == {
-        ((deep.identity,), (deep.identity,)): (0.5, 12),
-        ((deep.identity,), None): (0.5, 12),
+        ((deep.key.encoded,), (deep.key.encoded,)): (0.5, 12),
+        ((deep.key.encoded,), None): (0.5, 12),
     }
 
 
@@ -263,24 +267,26 @@ def _git(repo: Path, *args: str) -> None:
     subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
 
 
-def test_a_checkpoint_agent_is_another_agent_when_its_inference_code_changes(
-    tmp_path: Path,
-) -> None:
-    model = ArtifactRef(uri="s3://models/updates-100.pt", sha256=sha256(b"a").hexdigest())
+def test_a_checkpoint_agents_inference_code_is_its_version_not_its_key(tmp_path: Path) -> None:
+    file = ArtifactRef(uri="s3://models/updates-100.pt", sha256=sha256(b"a").hexdigest())
+    model = CheckpointRef(key=CheckpointKey(run="ppo-1", name="updates-100.pt"), artifact=file)
     inference = tmp_path / "inference.py"
     inference.write_text("def act(state): return 0\n")
     before = agent("net", checkpoint=model, code=[inference], config=Direct())
     # A benchmark's model seat names its code the same way, typed config and all.
     seated = Model(code=[inference], config=Direct()).agent(model)
-    assert seated.identity == before.identity
-    assert agent("net", checkpoint=model, config=Direct()).identity != before.identity
+    assert (seated.key, seated.version) == (before.key, before.version)
+    assert before.key.encoded == 'checkpoint:ppo-1/checkpoints/updates-100.pt {"search":0}'
     inference.write_text("def act(state): return 1\n")
-    assert agent("net", checkpoint=model, code=[inference], config=Direct()).identity != (
-        before.identity
-    )
+    changed = agent("net", checkpoint=model, code=[inference], config=Direct())
+    assert changed.key == before.key
+    assert changed.version.source != before.version.source
+    # The same bytes under another key are another agent.
+    copied = CheckpointRef(key=CheckpointKey(run="ppo-2", name="updates-100.pt"), artifact=file)
+    assert agent("net", checkpoint=copied, config=Direct()).key != before.key
 
 
-def test_code_identity_is_its_tracked_files_alike_in_a_checkout_and_a_launched_source(
+def test_a_code_agents_version_is_its_commit_and_tracked_files_in_a_checkout_or_launched(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo = tmp_path / "repo"
@@ -307,19 +313,26 @@ def test_code_identity_is_its_tracked_files_alike_in_a_checkout_and_a_launched_s
 
     monkeypatch.setattr(subprocess, "run", counted)
     checked_out = agent("greedy", code=[repo / "players", repo / "game.py"])
-    # One `git ls-files` for the checkout, whatever number of paths are in it.
-    assert calls == 1
+    # One `git ls-files` for the checkout, whatever number of paths are in it, and its commit.
+    assert calls == 2
+    assert checked_out.key.encoded == "code:greedy"
+    assert checked_out.version.commit is not None
     monkeypatch.chdir(source)
     monkeypatch.setenv("ETUDE_SOURCE_DIR", str(source))
+    monkeypatch.setenv("ETUDE_COMMIT", checked_out.version.commit)
     launched = agent("greedy", code=["players", "game.py"])
-    assert launched.identity == checked_out.identity
+    assert (launched.key, launched.version) == (checked_out.key, checked_out.version)
     with pytest.raises(EtudeError) as refused:
         agent("cache", code=[repo / "players" / "__pycache__"])
     assert refused.value.code == "identity_path_without_files"
+    # An uncommitted edit is the same agent, at another version of the same commit.
     (repo / "players" / "greedy.py").write_text("STRENGTH = 5\n")
-    assert agent("greedy", code=[repo / "players", repo / "game.py"]).identity != (
-        checked_out.identity
-    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("ETUDE_SOURCE_DIR")
+    edited = agent("greedy", code=[repo / "players", repo / "game.py"])
+    assert edited.key == checked_out.key
+    assert edited.version.commit == checked_out.version.commit
+    assert edited.version.source != checked_out.version.source
 
 
 def test_an_interval_does_not_depend_on_the_order_matches_are_read_in() -> None:

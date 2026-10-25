@@ -36,7 +36,7 @@ import re
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import ValidationError
 
@@ -46,6 +46,7 @@ from etude.eval.records import (
     TOURNAMENT_FILE,
     Agent,
     Benchmark,
+    CheckpointRef,
     Environment,
     Match,
     RoundRobin,
@@ -55,7 +56,7 @@ from etude.eval.records import (
 )
 from etude.run.declaration import declare
 from etude.run.errors import EtudeError
-from etude.run.records import ArtifactRef, Digest, Record, RunFile
+from etude.run.records import Digest, Record, RunFile
 from etude.run.storage import DirectoryStorage, Storage, default_root
 
 if TYPE_CHECKING:
@@ -70,8 +71,10 @@ def hold(
     *,
     experiment: str,
     play: Callable[[Match], Tables],
-    checkpoint: ArtifactRef | None = None,
+    checkpoint: CheckpointRef | None = None,
+    checkpoints: Sequence[CheckpointRef] = (),
     enter: Sequence[Agent] = (),
+    matches: Sequence[Match] | None = None,
     workers: int = 1,
     directory: Path | str | None = None,
     storages: Sequence[Storage] = (),
@@ -86,10 +89,16 @@ def hold(
     A benchmark held with `checkpoint` (on the go) plays each of the given
     matchups with the checkpoint in the model's seats. Held without one
     (batch), it plays every matchup any eval run defined for every checkpoint
-    any held, skipping what any eval run of its environment delivered, so a
-    matchup added later is played for every checkpoint so far. A round robin
-    held with `enter` plays every pair of the agents given; with none, every
-    pair of every entrant so far not yet delivered.
+    any held or `checkpoints` adds, and each matchup of fixed agents once,
+    skipping what any eval run of its environment delivered, so a matchup
+    added later is played for every checkpoint so far. A round robin held
+    with `enter` plays every pair of the agents given; with none, every pair
+    of every entrant so far not yet delivered.
+
+    `matches` plays exactly those, as `unplayed` found them elsewhere, and
+    reads nothing: each must be one the tournament calls for with what is
+    given. Their checkpoints' files may lie elsewhere than the definition's,
+    such as copied to this machine; a key never depends on where.
 
     `share=(k, n)` deals the scheduled matches, in key order, to n parts and
     plays the kth, so n machines may split one hold with at most one match
@@ -106,29 +115,28 @@ def hold(
     k, n = share
     if not 0 <= k < n:
         raise EtudeError("share_out_of_range", 422)
-    if isinstance(tournament, Benchmark) and enter:
-        raise EtudeError("benchmark_holds_checkpoints_not_entrants", 422)
-    if isinstance(tournament, RoundRobin) and checkpoint is not None:
-        raise EtudeError("round_robin_holds_entrants_not_checkpoints", 422)
-    if checkpoint is not None and checkpoint.sha256 is None:
-        raise EtudeError("checkpoint_agent_requires_digest", 422)
-    added = TournamentRun(
-        tournament=tournament, checkpoint=checkpoint, entrants=tuple(enter), share=share
-    )
-    on_the_go = checkpoint is not None or bool(enter)
-    delivered: set[Digest] = set()
-    held = [added]
-    if not on_the_go:
-        base = Path(directory) if directory is not None else default_root()
-        stored, delivered = _stored(tournament, experiment, [DirectoryStorage(base), *storages])
-        held = [*stored, added]
-    # Two matchups may share a match; it is played once.
-    matches = {each.match.key: each.match for each in assemble(held).schedule()}
-    pending = [
-        match
-        for index, (key, match) in enumerate(sorted(matches.items()))
-        if index % n == k and key not in delivered
-    ]
+    if checkpoint is not None and checkpoints:
+        raise EtudeError("hold_one_checkpoint_on_the_go_or_add_checkpoints", 422)
+    given = (checkpoint,) if checkpoint is not None else tuple(checkpoints)
+    added = _added(tournament, given, enter, share)
+    if matches is not None:
+        called = {each.match.key for each in assemble([added]).schedule()}
+        if not all(each.key in called for each in matches):
+            raise EtudeError("match_not_scheduled", 422)
+        pending = list(matches)
+    else:
+        on_the_go = checkpoint is not None or bool(enter)
+        scheduled = _scheduled(
+            added,
+            experiment=experiment,
+            on_the_go=on_the_go,
+            directory=directory,
+            storages=storages,
+        )
+        pending = [
+            match for index, (match, state) in enumerate(scheduled)
+            if index % n == k and state != "delivered"
+        ]  # fmt: skip
     run = os.environ.get("ETUDE_RUN") or (
         f"{tournament.name}.{digest(added.model_dump(mode='json'))[:12]}"
     )
@@ -145,6 +153,105 @@ def hold(
     )
 
 
+class Unplayed(Record):
+    """What an experiment's pass would play for one evaluation, in key order."""
+
+    # Called for and never attempted by an eval run of the experiment.
+    new: tuple[Match, ...]
+    # Called for and failed, with no done record since; counted, not replayed.
+    failed: tuple[Match, ...]
+
+
+def unplayed(
+    tournament: Benchmark | RoundRobin,
+    *,
+    experiment: str,
+    checkpoints: Sequence[CheckpointRef] = (),
+    enter: Sequence[Agent] = (),
+    directory: Path | str | None = None,
+    storages: Sequence[Storage] = (),
+) -> Unplayed:
+    """The matches exactly this definition calls for that no eval run delivered, without playing them.
+
+    Unlike a batch hold, only what is given is wanted: a matchup an earlier
+    eval run defined and this definition leaves out is not, nor a checkpoint
+    not given. What any eval run of the experiment in its environment
+    delivered counts, whichever tournament it was held for. A match that
+    failed is kept apart, so a caller can show it rather than replay it.
+    So one place can decide what is new and another, such as a launched
+    machine that reads no other eval run, play it with `hold(matches=...)`.
+    Raises as a batch hold does, so a matchup name defined two ways is refused.
+    """
+    added = _added(tournament, tuple(checkpoints), enter, (0, 1))
+    scheduled = _scheduled(
+        added,
+        experiment=experiment,
+        on_the_go=False,
+        wanted_only=True,
+        directory=directory,
+        storages=storages,
+    )
+    return Unplayed(
+        new=tuple(match for match, state in scheduled if state == "new"),
+        failed=tuple(match for match, state in scheduled if state == "failed"),
+    )
+
+
+def _added(
+    tournament: Benchmark | RoundRobin,
+    checkpoints: tuple[CheckpointRef, ...],
+    enter: Sequence[Agent],
+    share: tuple[int, int],
+) -> TournamentRun:
+    if isinstance(tournament, Benchmark) and enter:
+        raise EtudeError("benchmark_holds_checkpoints_not_entrants", 422)
+    if isinstance(tournament, RoundRobin) and checkpoints:
+        raise EtudeError("round_robin_holds_entrants_not_checkpoints", 422)
+    return TournamentRun(
+        tournament=tournament, checkpoints=checkpoints, entrants=tuple(enter), share=share
+    )
+
+
+def _scheduled(
+    added: TournamentRun,
+    *,
+    experiment: str,
+    on_the_go: bool,
+    directory: Path | str | None,
+    storages: Sequence[Storage],
+    wanted_only: bool = False,
+) -> list[tuple[Match, Literal["new", "delivered", "failed"]]]:
+    """Each match the tournament calls for with what `added` adds, in key order, and
+    whether an eval run of the experiment in its environment delivered it or failed it.
+
+    On the go, nothing is read and a matchup of fixed agents is left to batch:
+    it is not the checkpoint's. `wanted_only` calls for what `added` defines
+    alone, still refusing a definition the stored eval runs conflict with.
+    """
+    held: list[TournamentRun] = [added]
+    delivered: set[Digest] = set()
+    failed: set[Digest] = set()
+    if not on_the_go:
+        base = Path(directory) if directory is not None else default_root()
+        stored, delivered, failed = _stored(
+            added.tournament, experiment, [DirectoryStorage(base), *storages]
+        )
+        held = [*stored, added]
+    tournament = assemble(held)
+    if wanted_only:
+        tournament = assemble([added])
+    # Two matchups may share a match; it is played once.
+    matches = {
+        each.match.key: each.match
+        for each in tournament.schedule()
+        if not on_the_go or each.checkpoint is not None or not added.checkpoints
+    }
+    return [
+        (match, "delivered" if key in delivered else "failed" if key in failed else "new")
+        for key, match in sorted(matches.items())
+    ]
+
+
 def _record(added: TournamentRun, experiment: str, run: str, directory: Path | str | None) -> None:
     """Write `tournament.json` in the eval run's folder; a resumed run must have been held alike."""
     declared = declare(experiment=experiment, clocks=(), run=run, kind=KIND, directory=directory)
@@ -158,16 +265,19 @@ def _record(added: TournamentRun, experiment: str, run: str, directory: Path | s
 
 
 def _resumed(added: TournamentRun) -> dict[str, object]:
-    """What a resumed hold must repeat. A checkpoint is its digest: a retry on another
+    """What a resumed hold must repeat. A checkpoint is its key: a retry on another
     attempt finds the same file at another path."""
-    return added.model_dump(mode="json", exclude={"checkpoint": {"uri"}})
+    return added.model_dump(
+        mode="json", exclude={"checkpoints": {"__all__": {"artifact": {"uri"}}}}
+    )
 
 
 def _stored(
     tournament: Benchmark | RoundRobin, experiment: str, places: Sequence[Storage]
-) -> tuple[list[TournamentRun], set[Digest]]:
-    """The tournament's eval runs of the experiment in every place, and every match
-    that an eval run of the experiment in its environment holds as done.
+) -> tuple[list[TournamentRun], set[Digest], set[Digest]]:
+    """The tournament's eval runs of the experiment in every place, every match
+    that an eval run of the experiment in its environment holds as done, and
+    every one that failed there with no done record anywhere.
 
     One listing per place, each eval run's `run.json`, and one more read of each
     of the experiment's: its `tournament.json`, or its `environment.json` when
@@ -175,6 +285,7 @@ def _stored(
     """
     held: dict[str, TournamentRun] = {}
     delivered: set[Digest] = set()
+    failed: set[Digest] = set()
     environment = tournament.environment.identity
     for place in {place.name: place for place in places}.values():
         keys = place.keys("")
@@ -200,9 +311,13 @@ def _stored(
                 held.setdefault(folder.rstrip("/").rsplit("/", 1)[-1], added)
         for key in keys:
             folder, _, file = key.rpartition("matches/")
-            if folder in alike and file.endswith(".json") and not file.endswith(".failed.json"):
+            if folder not in alike or not file.endswith(".json"):
+                continue
+            if file.endswith(".failed.json"):
+                failed.add(file.removesuffix(".failed.json"))
+            else:
                 delivered.add(file.removesuffix(".json"))
-    return [held[run] for run in sorted(held)], delivered
+    return [held[run] for run in sorted(held)], delivered, failed - delivered
 
 
 def _experiment(place: Storage, folder: str) -> str | None:
@@ -257,7 +372,8 @@ def _held(db: duckdb.DuckDBPyConnection, tournament: str) -> Iterator[tuple[int,
 class CurvePoint(Record):
     """A matchup's value for one checkpoint, and where its training run stood when it was saved."""
 
-    checkpoint: Digest
+    # Its key (`etude.eval.records.CheckpointKey`), encoded.
+    checkpoint: str
     # What the checkpoint is called: the last part of its URI, as a training run names its files.
     name: str
     # None for a checkpoint no training run under the source recorded.
@@ -312,21 +428,16 @@ def curves(
                 from "{table}"
                 where player = 0 and "{value}" is not null and ({where or "true"})
             ),
-            -- A checkpoint two training runs recorded belongs to the first.
-            trained as (
-                select artifact, run, experiment, ordinal, clocks from training_checkpoints
-                qualify row_number() over (partition by artifact order by run, ordinal) = 1
-            ),
             named as (
-                select artifact, min(name) as name from agents where kind = 'checkpoint'
-                group by artifact
+                select checkpoint, min(name) as name from agents where checkpoint is not null
+                group by checkpoint
             )
             select s.matchup, t.run, t.experiment, s.checkpoint, n.name, t.ordinal, t.clocks,
                 sum(r._value), sum(r._per), count(*)
             from r join _held using (run, match)
             join schedule s on s.tournament = ? and s.match = r.match
-            join named n on n.artifact = s.checkpoint
-            left join trained t on t.artifact = s.checkpoint
+            join named n on n.checkpoint = s.checkpoint
+            left join training_checkpoints t on t.checkpoint = s.checkpoint
             group by s.matchup, t.run, t.experiment, s.checkpoint, n.name, t.ordinal, t.clocks,
                 r.match
             """,
@@ -381,9 +492,10 @@ def _training_order(point: CurvePoint) -> tuple[bool, int, list[str | int], str]
 class Standing(Record):
     """An entrant's value against one opponent in a round robin, or against the field (`opponent` None)."""
 
-    agent: Digest
+    # Its key, encoded.
+    agent: str
     name: str
-    opponent: Digest | None
+    opponent: str | None
     opponent_name: str | None
     value: float
     # A 95% interval resampling whole matches; None with fewer than two.
@@ -452,7 +564,7 @@ def standings(
     ]
     field = {e.agent: e.value for e in entries if e.opponent is None}
 
-    def rank(agent: Digest | None) -> tuple[float, str]:
+    def rank(agent: str | None) -> tuple[float, str]:
         # Against the field first, then opponents best first.
         if agent is None:
             return float("-inf"), ""

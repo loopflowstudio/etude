@@ -58,3 +58,10 @@ def play_teams(match: Match) -> Tables:
             for team in ("north", "south")
         ]
     }
+
+
+def play_failing_deal_one(match: Match) -> Tables:
+    """`play`, except that deal 1 raises, as a game with a bug in one deal would."""
+    if match.conditions.get("deal") == 1:
+        raise RuntimeError("deal 1 crashed")
+    return play(match)

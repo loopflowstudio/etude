@@ -40,10 +40,14 @@ class Function(BaseModel):
     def __str__(self) -> str:
         return f"{self.module}:{self.name}"
 
-    def load(self) -> Callable[..., object]:
-        """Import the module, from `path` below the working directory, and find the function."""
-        if self.path:
-            sys.path.insert(0, str(Path(self.path).resolve()))
+    def load(self, checkout: Path | str | None = None) -> Callable[..., object]:
+        """Import the module, from `path` below the checkout, and find the function.
+
+        The checkout is the working directory unless given, as in a job.
+        """
+        if self.path or checkout is not None:
+            folder = Path(checkout or ".") / self.path
+            sys.path.insert(0, str(folder.resolve()))
         found: object = importlib.import_module(self.module)
         for part in self.name.split("."):
             found = getattr(found, part)

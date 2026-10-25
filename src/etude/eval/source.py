@@ -1,4 +1,4 @@
-"""The source files that identify an agent's code or an environment: `digest_files`.
+"""The source files that identify an environment, or version an agent's code: `digest_files`.
 
 A file is named by its path below its root, so one file has one name on every
 machine. Inside a git checkout the root is the checkout and only tracked files
@@ -19,8 +19,28 @@ from pathlib import Path
 from etude.run.errors import EtudeError
 from etude.run.records import Digest
 
-# Set by the launcher's worker to the source a job runs from.
+# Set by the launcher's worker to the source a job runs from, and the commit it is.
 SOURCE_DIR = "ETUDE_SOURCE_DIR"
+SOURCE_COMMIT = "ETUDE_COMMIT"
+
+
+def source_commit(paths: Sequence[Path | str]) -> str | None:
+    """The git commit the first path's source is at: its checkout's HEAD, or a launched
+    job's commit. None outside both.
+
+    Uncommitted edits do not change it; `digest_files` of the same paths does.
+    """
+    given_source = os.environ.get(SOURCE_DIR)
+    source = Path(given_source).resolve() if given_source else None
+    first = Path(paths[0]).resolve()
+    root = _checkout(first, source)
+    if root is None:
+        within = source is not None and first.is_relative_to(source)
+        return os.environ.get(SOURCE_COMMIT) if within else None
+    found = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True
+    )
+    return found.stdout.strip() or None if found.returncode == 0 else None
 
 
 def digest_files(paths: Sequence[Path | str]) -> Digest:

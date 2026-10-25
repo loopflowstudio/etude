@@ -13,7 +13,15 @@ uv add 'etude-sdk[eval]'   # DuckDB, for writing and querying tables
 ```python
 from etude.eval.match import Tables, agent, environment
 from etude.eval.query import statsdb
-from etude.eval.records import Benchmark, Match, Matchup, Model, RoundRobin
+from etude.eval.records import (
+    Benchmark,
+    CheckpointKey,
+    CheckpointRef,
+    Match,
+    Matchup,
+    Model,
+    RoundRobin,
+)
 from etude.eval.tournament import curves, hold, standings
 
 world = environment("allies-vs-lessons", files=["game/"], config={"world": "w6"})
@@ -73,6 +81,8 @@ progress = Benchmark(
 )
 
 # On the go: as each checkpoint is saved, one small eval run plays every matchup.
+# A checkpoint is its key, its run and file name, with the saved file to read.
+ref = CheckpointRef(key=CheckpointKey(run="ppo-1", name="updates-500.pt"), artifact=saved)
 hold(progress, experiment="ppo", checkpoint=ref, play=play, storages=[bucket])
 
 # Batch: add a matchup to the definition; holding with no checkpoint plays every
@@ -123,19 +133,28 @@ evaluate(
 )
 ```
 
-- **Agents.** A checkpoint (by artifact `sha256`) or code (by its source
-  files), plus a config: free JSON or a Pydantic model. A checkpoint agent
-  should also name the code that runs it,
-  `agent("net", checkpoint=ref, code=["players/net.py"], config=...)`. The
-  identity covers all of them, so one checkpoint at two search budgets, or
-  under changed inference code, is two agents. Names are for reading; joins
-  use identity.
+- **Agents.** An agent's key (`AgentKey`) is the checkpoint it plays, by the
+  checkpoint's own key, or a code agent's name, plus its config: free JSON or
+  a Pydantic model. One checkpoint at two search budgets is two agents. A
+  checkpoint's key (`CheckpointKey`) is its training run and file name
+  (`ppo-1/checkpoints/updates-500.pt`) or, for any other, its address; never
+  its bytes, so two runs warm-started from one file hold two checkpoints,
+  each evaluated. `agent("net", checkpoint=ref, code=["players/net.py"],
+  config=...)` also names the code that plays it: its commit and source digest
+  are the agent's `Version`, recorded with each match (`seats.commit`,
+  `seats.source`) but not part of the key, so changed code reuses what was
+  played. Joins use the key, encoded (`agents.agent`, `seats.agent`).
 - **Source files.** A directory stands for the files below it. In a git
   checkout only tracked files count, named by their path in the checkout, so
-  caches and scratch files never change an identity. A launched job's source
-  has no `.git`; there files are named by their path below `ETUDE_SOURCE_DIR`,
-  which the launcher sets, so the same commit gives the same identity on a
-  rented machine as on yours.
+  caches and scratch files never change a version; an uncommitted edit does,
+  at the same commit. A launched job's source has no `.git`; there files are
+  named by their path below `ETUDE_SOURCE_DIR` and the commit is
+  `ETUDE_COMMIT`, both of which the launcher sets, so the same commit gives the
+  same version on a rented machine as on yours.
+- **Older eval runs.** Agents recorded by etude-sdk 0.2 were identified by a
+  digest. They load with that digest as their key (`AgentKey.recorded`), which
+  no key since equals, so their results stay readable and nothing new counts
+  them as played.
 - **Matches.** A seating of agents under fixed `conditions`, played for
   `games`: the unit Etude schedules, resumes and resamples. Seat swaps belong
   inside `play`. Group `all` holds every seat; an agent may sit in two seats.
@@ -162,9 +181,17 @@ evaluate(
 - **Benchmarks.** Named matchups, each its own line over training: `players`
   in seat order, each a fixed agent or `Model(config=...)`, with its own
   `conditions` and `games`. A matchup's value is its first player's.
-  `hold(benchmark, checkpoint=ref)` puts the checkpoint (by `sha256`) in every
+  `hold(benchmark, checkpoint=ref)` puts the checkpoint (by its key) in every
   model seat and plays each given matchup; with no checkpoint it plays every
   matchup ever defined for every checkpoint held, skipping what is delivered.
+- **Pairs of checkpoints.** A matchup with no model seat is played once, not
+  per checkpoint, so chosen checkpoints can meet: seat each as
+  `Model(...).agent(ref)`, the agent a model seat would make of it. Build the
+  benchmark from the checkpoints saved so far, such as each against the one
+  before it, and hold it in batch whenever more appear; each pass plays only
+  the pairs not yet delivered. A hold on the go leaves these matchups to batch.
+  Their rows are `schedule` rows with no `checkpoint`; `curves` follows only
+  matchups with a model seat.
 - **Round robins.** `hold(round_robin, enter=agents)` plays every pair of
   the agents given once per condition; seat swaps belong inside `play`.
   `hold(round_robin)` then plays every pair of every entrant so far that no
@@ -190,7 +217,7 @@ evaluate(
   `standings`; `statsdb` reports it in the `tournaments` table.
 - **Run names.** Under `etude launch` the eval run is the launched run
   (`ETUDE_RUN`), so `etude logs` and `status` lead to it and a retry resumes
-  it, finding the same checkpoint (by digest) wherever the retry put it. Elsewhere it is named for the tournament and what is given; the same
+  it, finding the same checkpoint (by its key) wherever the retry put it. Elsewhere it is named for the tournament and what is given; the same
   call resumes it.
 - **Splitting.** `share=(k, n)` plays one of n disjoint parts, for n
   machines: the scheduled matches in key order, dealt round, so parts differ
@@ -229,9 +256,16 @@ def runs(checkpoint: str, sha256: str, size_bytes: int) -> Job:
         key=f"etude/launch/ppo-1/checkpoints/{checkpoint}",  # PREFIX/RUN/checkpoints/NAME
         sha256=sha256,
         size_bytes=size_bytes,
+        run="ppo-1",  # the checkpoint's key: its run, and the file's name
     )
     return evaluation(
-        progress, play=play, checkpoint=weights, workers=8, max_hours=0.5, max_usd=Decimal(1)
+        progress,
+        experiment="ppo",
+        play=play,
+        checkpoint=weights,
+        workers=8,
+        max_hours=0.5,
+        max_usd=Decimal(1),
     )
 ```
 
@@ -242,17 +276,100 @@ etude launch eval.py --rent cpu8 --checkpoint updates-500 --sha256 … --size-by
 An evaluation job holds a tournament on a launched machine, and nobody writes
 its command: Etude calls `hold` there with `play`, imported by name from your
 checkout, and the checkpoint, which reaches the machine as the job's input,
-verified by digest. The input's name names the checkpoint, and its file is the
-`uri` of every model seat, which `play` opens. A round robin takes `enter=`
+verified by digest. The input's run and file name are the checkpoint's key,
+and its file is every model seat's `artifact.uri`, which `play` opens. A round robin takes `enter=`
 agents instead. The eval run is the launched run, so its tables reach the
 machine's storage with the run's other files and `statsdb` finds them there.
 Holding nothing new (batch) is refused: a launched job reads no other eval
-run. The job's environment needs `etude-sdk[eval]`; the rest is as for any
+run; an experiment's pass decides what is new first ([Experiments](#experiments)).
+The job's environment needs `etude-sdk[eval]`; the rest is as for any
 [typed job](launcher.md#typed-jobs).
 
-Next: evaluating as training goes, declared on the training job as
-`training(..., evaluations=[evaluation(...)], every=5)`, with the controller
-launching one evaluation job for every fifth checkpoint.
+## Experiments
+
+An experiment file says what to evaluate given what exists, and `etude eval`
+plays whatever that calls for and no eval run has delivered. Run it while
+training goes, after it ends, or with a matchup added later: each pass looks
+again. The experiment is named for the file: `ppo.py` evaluates the training
+runs of experiment `ppo`, and its eval runs are that experiment's.
+
+```python
+# ppo.py
+from etude.eval.records import Benchmark, Matchup
+from etude.experiment import ExperimentState
+from etude.jobs import evaluation
+from etude.launch.records import Job
+
+# direct is a Model, heuristic an agent, deals the conditions
+from arena import deals, direct, heuristic, play, world
+
+
+def eval(state: ExperimentState) -> list[Job]:
+    run = state.run("ppo-1")
+    rated = run.checkpoints.every(5)  # every fifth checkpoint by ordinal
+    pairs = [
+        Matchup(
+            name=f"{new.name} vs {old.name}",
+            tags=("consecutive",),
+            players=(new.agent(direct), old.agent(direct)),
+            conditions=deals,
+            games=8,
+        )
+        for old, new in zip(rated, rated[1:])
+    ]
+    if run.final is not None:  # once training has finished
+        pairs += [
+            Matchup(
+                name=f"final vs {old.name}",
+                tags=("endpoint",),
+                players=(run.final.agent(direct), old.agent(direct)),
+                conditions=deals,
+                games=8,
+            )
+            for old in rated[:-1]
+        ]
+    anchors = Matchup(name="vs heuristic", players=(direct, heuristic), conditions=deals, games=8)
+    ladder = Benchmark(name="ladder", environment=world, matchups=(anchors, *pairs))
+    return [evaluation(ladder, play=play, checkpoints=rated, workers=8, max_hours=1)]
+```
+
+```sh
+etude eval ppo.py --source s3://bucket/etude/launch               # play here
+etude eval ppo.py --source s3://bucket/etude/launch --rent cpu8   # launch
+etude eval ppo.py --source s3://bucket/etude/launch --rent cpu8 --watch 600
+```
+
+- **State.** `state.runs` is the experiment's training runs under the
+  source: each one's name, whether it is `running`, `finished` or `failed`,
+  and the checkpoints it stored, each with its ordinal, clocks and tags.
+  `Checkpoints` is a tuple, so a slice works too; `every(n)`, `at(clock,
+  *values)` and `tagged(tag)` choose by ordinal, coordinate or tag, and
+  `final` is the last checkpoint once a run has finished.
+- **What `eval` returns.** Evaluation jobs holding a benchmark for the
+  checkpoints it chose. Seat a chosen checkpoint with `checkpoint.agent(model)`
+  to make a matchup of fixed agents, played once rather than per checkpoint.
+  `tags` mark matchups for readers, such as pairs a rating fit leaves out.
+- **A pass.** For each job, the matches exactly what `eval` returned calls
+  for, the matchups it gave for the checkpoints it gave, that no eval run of
+  the experiment in its environment delivered. Without `--pool` or `--rent`
+  they are played here and delivered to the source. With one, a job is
+  launched to play exactly those, with each checkpoint they seat as an input
+  from its training run's folder; the machine's storage must deliver to the
+  source.
+- **Not twice.** A launched pass is named for its matches and kept in
+  `ETUDE_HOME/experiments/launched.json`, so a later pass neither launches it
+  again nor plays its matches while it runs. A pass that finds one of them
+  failed stops, so a watch never spends again unattended; look, then rerun.
+- **Failures.** A match that failed is counted on every pass (`ladder: 0 new,
+  1 failed`) and not played again, so a result is never quietly replaced.
+  `--retry-failed` plays the failed matches again.
+- **Changing the design.** A new matchup or benchmark is played for every
+  checkpoint chosen, including those of finished runs, and a match another of
+  the experiment's tournaments already played is reused. A matchup `eval`
+  stops returning is no longer played; what it played stays. Redefining a
+  matchup under the same name is refused (`matchup_conflict`): give the new
+  one a new name. A match is its seats, conditions and game count, so raising
+  `games` plays every match of the matchup again.
 
 ## Querying
 
@@ -263,7 +380,7 @@ column per scalar config key, dotted when nested), `matches`, `seats`,
 `groups`, `tournaments` (with any `conflict` among its eval runs), `schedule`
 (every match a tournament calls for, with its matchup and checkpoint) and
 `training_checkpoints` (every checkpoint a training run under the source
-recorded, joined to agents by `artifact`).
+recorded, joined to agents and the schedule by `checkpoint`, its key).
 
 The database is kept in a file under `ETUDE_HOME/statsdb`, one per
 experiment and store. Opening it lists the store once and reads only what
