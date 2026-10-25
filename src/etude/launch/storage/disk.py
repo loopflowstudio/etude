@@ -92,6 +92,12 @@ class DirectoryJournal:
         stop.mkdir(exist_ok=True)
         (stop / attempt).touch()
 
+    def finish(self, session_id: str) -> datetime | None:
+        home = self._root / session_id
+        if home.is_dir():  # a session that never started has nothing to finish
+            (home / "finish").touch()
+        return self.ended(session_id)
+
     def end(self, session_id: str) -> datetime | None:
         ended = self._root / session_id / "ended"
         if self._alive(session_id):

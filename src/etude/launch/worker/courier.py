@@ -28,18 +28,17 @@ from etude.carriage import (
 )
 from etude.launch.deadline import limit_time
 from etude.launch.environment import startup_timeout
-from etude.launch.logging import (
-    CLOSED,
-    Console,
-    bounded,
-    explain,
-    log_to,
-    publish,
-    start_publication,
-    write_log,
-)
+from etude.launch.logging import CLOSED, Console, bounded, explain, log_to, publish, write_log
 from etude.launch.records import Diagnostic
-from etude.launch.schemas import AttemptRecord, Bootstrap, Inbox, log_piece
+from etude.launch.schemas import (
+    WORKER_LOG,
+    AttemptRecord,
+    Bootstrap,
+    Inbox,
+    WorkerLog,
+    attempt_log,
+    log_piece,
+)
 from etude.launch.storage.download import Cache, Download, Mismatch
 from etude.launch.storage.files import RESULT, read_result, write
 from etude.launch.storage.s3 import (
@@ -58,9 +57,9 @@ from etude.launch.storage.s3 import (
 from etude.launch.storage.transport import attribute, observe
 
 ROOT = Path("/run/etude/sessions")
-# A log piece waits about a twentieth of its attempt's age, between 15 seconds
-# and 5 minutes, before it is sealed: new output reaches storage within that,
-# and a 12-hour attempt leaves about two hundred pieces, not one per poll.
+# A log piece waits about a twentieth of its log's age, between 15 seconds and
+# 5 minutes, before it is sealed: new output reaches storage within that, and
+# a 12-hour attempt or session leaves about two hundred pieces, not one per poll.
 _PIECE_LEAST_SECONDS = 15.0
 _PIECE_MOST_SECONDS = 300.0
 
@@ -138,7 +137,7 @@ class _Folder:
 
 
 class _Log:
-    """One attempt's log as carried: where its sealed pieces end, and when."""
+    """One log as carried, an attempt's or the worker's: where its sealed pieces end, and when."""
 
     def __init__(self, now: float) -> None:
         self.ends: tuple[int, ...] = ()
@@ -163,9 +162,11 @@ class Courier:
     in appended pieces each sent once, and a record of the attempt naming them,
     under `attempts/`, and the run's tracked folder as it is, by the rules the
     tracker's own shipper follows (`etude.carriage`), so every checkpoint the
-    tracker records is in storage while the attempt still runs. Large files go
-    in parts, and replaced tracking files are deleted, where the run's grant
-    includes keys; with a form alone, neither happens.
+    tracker records is in storage while the attempt still runs. The worker's
+    own log, `worker_log`, goes to the session's `out/` the same way, named by
+    `WorkerLog`. Large files go in parts, and replaced tracking files are
+    deleted, where the run's grant includes keys; with a form alone, neither
+    happens.
     """
 
     def __init__(
@@ -175,8 +176,11 @@ class Courier:
         inbox_url: str,
         send: Send = _send,
         runs: dict[str, Grant] | None = None,
+        worker_log: Path | None = None,
     ) -> None:
         self._home, self._inbox_url, self._send = home, inbox_url, send
+        self._worker_log = worker_log
+        self._worker_log_carried: _Log | None = None  # from its first output
         self._out = _Folder(out, send)  # the session's own folder
         self._runs = {run: _Folder(grant, send) for run, grant in (runs or {}).items()}
         self._sent: dict[str, tuple[int, float]] = {}
@@ -305,7 +309,8 @@ class Courier:
         if found is None:
             return
         inbox = Inbox.model_validate_json(found.body)
-        write_log("inbox", f"{len(inbox.work)} work, {len(inbox.stop)} to stop")
+        finish = ", finish when done" if inbox.finish else ""
+        write_log("inbox", f"{len(inbox.work)} work, {len(inbox.stop)} to stop{finish}")
         for attempt in inbox.stop:
             (self._home / "stop" / str(attempt)).touch()
         for entry in inbox.work:
@@ -324,6 +329,8 @@ class Courier:
                     _diagnose("source fetch", error, attempt)
                     raise
                 write(target, entry.work.model_dump_json())
+        if inbox.finish:
+            (self._home / "finish").touch()  # after any work, so the session runs it first
 
     def _put(self, path: Path, run: str, key: str) -> None:
         stat = path.stat()
@@ -365,9 +372,13 @@ class Courier:
         self._clear(run, removed)
 
     def carry_out(self, final: bool = False) -> None:
-        """Send changed files before their attempt's completion record."""
+        """Send changed files before their attempt's completion record, and the worker's log.
+
+        `final` seals every tail now. The session's console is read only as far
+        as complete lines; its owner collects the rest once the session exits.
+        """
         with observe(self._retain_transfer), attribute(session=self._home.name):
-            self._carry_console(final)
+            self.carry_console()
             attempts = self._home / "attempts"
             for home in sorted(attempts.iterdir()) if attempts.is_dir() else []:
                 if not (home / "run").exists():
@@ -380,10 +391,31 @@ class Courier:
                 except (StorageUnavailable, OSError, ValueError) as error:
                     _diagnose("output delivery", error, home.name)
                     raise
-
+            with attribute(purpose="control"):
+                self._carry_worker_log(final)
         self._carry_usage()
 
-    def _carry_console(self, final: bool) -> None:
+    def _carry_worker_log(self, final: bool) -> None:
+        """Seal the worker's new output as pieces, then the record naming them."""
+        log = self._worker_log
+        if log is None or not log.exists():
+            return
+        carried = self._worker_log_carried = self._worker_log_carried or _Log(time.monotonic())
+        if not (final or carried.due(time.monotonic())):
+            return
+        before = carried.ends
+        self._seal(log, self._out, WORKER_LOG, carried)
+        if carried.ends != before:
+            self._out.write_bytes(
+                "worker-log.json", WorkerLog(ends=carried.ends).model_dump_json().encode()
+            )
+
+    def carry_console(self, final: bool = False) -> None:
+        """Retain the session's console in the worker's log, sanitized line by line.
+
+        `final` reads it to its end, once the session has exited: a last line
+        without a newline is kept, and a console that is gone raises.
+        """
         console = self._home / "session.log"
         if final or console.exists():
             with console.open("rb") as output:
@@ -409,7 +441,7 @@ class Courier:
         if (home / "log").exists():
             log = self._logs.setdefault(attempt, _Log(time.monotonic()))
             if done or final or log.due(time.monotonic()):
-                self._seal(home / "log", run, attempt, log)
+                self._seal(home / "log", self._runs[run], attempt_log(attempt), log)
             record = record.model_copy(update={"log_ends": log.ends})
         if done:
             for path in sorted(
@@ -431,13 +463,13 @@ class Courier:
         with attribute(purpose="control"):
             self._put(note, run, f"attempts/{attempt}.json")
 
-    def _seal(self, path: Path, run: str, attempt: str, log: _Log) -> None:
-        """Store what the job has printed since the last piece, as new pieces.
+    def _seal(self, path: Path, folder: _Folder, name: str, log: _Log) -> None:
+        """Store what was written to `path` since the last piece, as new pieces of `name`.
 
-        The job only appends to its log, so the bytes before `log.sent` are
-        stored already. A piece is at most one part, so each is one request.
-        A failed write leaves the piece unsealed; it is written again whole,
-        under the same name, and no record has named it yet.
+        A log is only appended to, so the bytes before `log.sent` are stored
+        already. A piece is at most one part, so each is one request. A failed
+        write leaves the piece unsealed; it is written again whole, under the
+        same name, and no record has named it yet.
         """
         with path.open("rb") as stream:
             # Up to what is there now: output printed during the upload waits
@@ -445,7 +477,7 @@ class Courier:
             size = os.fstat(stream.fileno()).st_size
             stream.seek(log.sent)
             while body := stream.read(min(PART_BYTES, size - log.sent)):
-                self._runs[run].write_bytes(log_piece(attempt, log.sent), body)
+                folder.write_bytes(log_piece(name, log.sent), body)
                 log.ends = (*log.ends, log.sent + len(body))
                 log.sealed = time.monotonic()
 
@@ -456,6 +488,8 @@ def _run(
     send: Send,
     sleep: Callable[[float], None],
     every: float,
+    worker_log: Path,
+    log_url: str,
 ) -> None:
     process: subprocess.Popen[bytes] | None = None
     courier: Courier | None = None
@@ -486,7 +520,9 @@ def _run(
         home.mkdir(parents=True, exist_ok=True, mode=0o700)
         with (home / "courier-claim").open("x"):
             pass  # a restarted container must not run the session again
-        courier = Courier(home, bootstrap.out, bootstrap.inbox_url, send, bootstrap.runs)
+        courier = Courier(
+            home, bootstrap.out, bootstrap.inbox_url, send, bootstrap.runs, worker_log
+        )
         for folder in ("stop", "work"):
             (home / folder).mkdir(exist_ok=True)
         write_log("source fetch", "starting")
@@ -529,34 +565,41 @@ def _run(
         raise
     finally:
         original_error = sys.exception()
+        left = _allowance(deadline, delivery_seconds)
+        collected, failure = False, None
         try:
             if process is not None:
                 assert courier is not None
-                _finish_session(courier, process, sleep, every, deadline, delivery_seconds)
+                _reap(courier, process, left)
             write_log("cleanup", "finalizing worker output before cleanup")
             write_log("worker", CLOSED)
+            collected = True
         except Exception as error:
+            failure = error
             _diagnose("final collection", error)
             if courier is not None:
                 try:
                     # Keep complete lines already available, without inventing EOF.
-                    courier._carry_console(final=False)
+                    courier.carry_console()
                 except Exception as console_error:
                     _diagnose("console collection", console_error)
             write_log("worker", "collection incomplete; final output unconfirmed")
-            if original_error is None:
-                raise
+        try:
+            if courier is not None:
+                ended = collected and process is not None  # a session ran, and its output is in
+                _deliver(courier, sleep, every, left, closed=collected, ended=ended)
+            elif log_url:
+                publish(worker_log, log_url)  # no grant was read: the log goes whole, by its link
+        except Exception as error:
+            _diagnose("final delivery", error)
+            failure = failure or error
+        if failure is not None and original_error is None:
+            raise failure
 
 
-def _finish_session(
-    courier: Courier,
-    process: subprocess.Popen[bytes],
-    sleep: Callable[[float], None],
-    every: float,
-    deadline: float | None,
-    seconds: float | None = None,
-) -> None:
-    """Reap the owned child and collect EOF before declaring this producer closed."""
+def _allowance(deadline: float | None, seconds: float | None) -> Callable[[], float | None]:
+    """Seconds left of the one monotonic allowance that shutdown and final delivery share:
+    `seconds` from now, capped by the rental's deadline."""
     if seconds is not None:
         latest = time.monotonic() + seconds
         deadline = latest if deadline is None else min(latest, deadline)
@@ -564,6 +607,13 @@ def _finish_session(
     def left() -> float | None:
         return None if deadline is None else max(0.0, deadline - time.monotonic())
 
+    return left
+
+
+def _reap(
+    courier: Courier, process: subprocess.Popen[bytes], left: Callable[[], float | None]
+) -> None:
+    """Reap the owned child and collect its console to EOF before this producer closes."""
     if process.poll() is None:
         write_log("worker stop", "requesting session shutdown")
         process.terminate()
@@ -573,8 +623,27 @@ def _finish_session(
             process.kill()
             process.wait(timeout=left())
     write_log("worker exit", f"exit status {process.returncode}")
-    courier._carry_console(final=True)
-    ended = courier._home / "ended"
+    courier.carry_console(final=True)
+
+
+def _deliver(
+    courier: Courier,
+    sleep: Callable[[float], None],
+    every: float,
+    left: Callable[[], float | None],
+    *,
+    closed: bool,
+    ended: bool,
+) -> None:
+    """Deliver the session's last files and the tail of its log, then its end receipt.
+
+    A machine may be deleted as soon as its end receipt is seen, so the
+    receipt goes last, and only for a session that ran. A failed try is
+    diagnosed in the log, which is closed again after it when its producer
+    had closed it, and tried again within the allowance; an end receipt
+    never sent leaves the end to the machine's cleanup or its deadline.
+    """
+    note = courier._home / "ended"
     for _ in range(40):
         allowance = left()
         if allowance is not None and allowance <= 0:
@@ -583,12 +652,14 @@ def _finish_session(
             # S3 transports already share this monotonic request allowance.
             with limit_time(allowance):
                 courier.carry_out(final=True)
-                note = ended.read_text() if ended.exists() else _now().isoformat()
-                courier._out.write_bytes("ended", note.encode())
-            write_log("final delivery", "completed")
+                if ended:
+                    at = note.read_text() if note.exists() else _now().isoformat()
+                    courier._out.write_bytes("ended", at.encode())
             return
-        except (StorageUnavailable, OSError) as error:
+        except (StorageUnavailable, OSError, ValueError) as error:
             _diagnose("final delivery", error)
+            if closed:
+                write_log("worker", CLOSED)
             pause = left()
             sleep(every if pause is None else min(every, pause))
     write_log("final delivery", "incomplete; final files or end receipt not confirmed")
@@ -605,15 +676,11 @@ def run(
     session = os.environ.get("ETUDE_SESSION")
     log = root / session / "worker.log" if session else root / "worker.log"
     url = os.environ.get("ETUDE_WORKER_LOG_URL", "")
-    publishing = start_publication(log, url) if url else None
     with log_to(log):
         try:
             write_log("worker entry", "client ready")
-            _run(bootstrap_url, root, send, sleep, every)
+            _run(bootstrap_url, root, send, sleep, every, log, url)
         finally:
-            if publishing is not None:
-                publishing.set()
-                publish(log, url)
             original_error = sys.exception()
             try:
                 delete_self()

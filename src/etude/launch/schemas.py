@@ -44,6 +44,7 @@ class Work(Record):
     job: str | None = None
     job_name: str | None = None
     cohort: str | None = None
+    experiment: str | None = None
     inputs: tuple[Input, ...] = ()  # delivered to SESSION/inputs/SHA256
     environment: tuple[Variable, ...] = ()
 
@@ -127,19 +128,50 @@ class AttemptRecord(Record):
 
     def log_pieces(self, attempt: str) -> tuple[str, ...]:
         """The keys, in the run's folder, of the log's pieces in order."""
-        ends = self.log_ends or ()
-        return tuple(log_piece(attempt, start) for start in (0, *ends[:-1]))
+        return log_pieces(attempt_log(attempt), self.log_ends or ())
 
 
-def log_piece(attempt: str, start: int) -> str:
-    """Where the piece of an attempt's log that starts at byte `start` is kept.
+class WorkerLog(Record):
+    """`sessions/SESSION/out/worker-log.json`: where the stored pieces of the worker's log end.
+
+    The worker's log goes to its session's folder as an attempt's goes to its
+    run's: in pieces (`log_piece`) stored before the record naming them. A
+    worker that never read its bootstrap has no grant for them, and sends its
+    log whole, once, to `out/worker.log` by the link it was started with.
+    """
+
+    ends: tuple[int, ...] = ()
+
+    def pieces(self) -> tuple[str, ...]:
+        """The keys, in the session's `out/` folder, of the log's pieces in order."""
+        return log_pieces(WORKER_LOG, self.ends)
+
+
+WORKER_LOG = "worker.log"
+
+
+def attempt_log(attempt: str) -> str:
+    """The key, in its run's folder, under which an attempt's log pieces are kept."""
+    return f"attempts/{attempt}.log"
+
+
+def log_piece(log: str, start: int) -> str:
+    """Where the piece of `log` that starts at byte `start` is kept.
 
     Pieces are sealed once and never rewritten. Named, as Kafka names log
     segments, by their first offset, zero-padded so names sort in log order.
     """
-    return f"attempts/{attempt}.log/{start:020d}"
+    return f"{log}/{start:020d}"
+
+
+def log_pieces(log: str, ends: tuple[int, ...]) -> tuple[str, ...]:
+    """The keys of `log`'s pieces in order, given where each ends."""
+    return tuple(log_piece(log, start) for start in (0, *ends[:-1]))
 
 
 class Inbox(Record):
     stop: tuple[str, ...] = ()
     work: tuple[Delivery, ...] = ()
+    # No more work will come: the session ends once its work is done, after
+    # delivering its final files and its end receipt.
+    finish: bool = False

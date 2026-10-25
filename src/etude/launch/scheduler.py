@@ -1305,11 +1305,16 @@ class Scheduler:
         self._store.check_lock(supply.name)
         self._plan(supply, now)
         for idle in self._idle_sessions(supply.name, now):
-            if not self._kept(idle):
-                try:
+            if self._kept(idle):
+                continue
+            try:
+                # A rented machine delivers its last files and end receipt before it
+                # is deleted: it is ended here once its journal says so, or at its deadline.
+                rented = self._store.rental_for(idle) is not None
+                if not rented or self._service(idle).finish(idle.id) is not None:
                     self._end_session(idle)
-                except (OSError, LauncherError, StorageUnavailable):
-                    continue  # cleanup retained its error and remains unconfirmed
+            except (OSError, LauncherError, StorageUnavailable):
+                continue  # cleanup retained its error and remains unconfirmed
         for session in self._store.unsettled_sessions():
             if session.supply == supply.name and session.claimed_at is None:
                 self._create(session, now)
@@ -1760,6 +1765,7 @@ class Scheduler:
             job=run.job,
             job_name=spec.name or None,
             cohort=run.cohort,
+            experiment=spec.experiment,
             inputs=spec.inputs,
             environment=spec.environment,
         )

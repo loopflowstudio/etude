@@ -93,6 +93,9 @@ def invoke(request: RemoteRequest) -> RemoteReply:
     if action == "end":
         at = journal.end(session)
         return RemoteReply(text=at.isoformat() if at else None)
+    if action == "finish":
+        at = journal.finish(session)
+        return RemoteReply(text=at.isoformat() if at else None)
     attempt = str(request.attempt)
     if action == "stop":
         journal.stop(session, attempt)

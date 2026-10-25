@@ -199,3 +199,52 @@ def test_a_watched_page_reads_each_bucket_file_once_per_computer(
         for _ in range(3):
             assert build(S3Storage("lab", client=client), file) == first
         assert client.bytes == read_once
+
+
+VERSIONED = """
+from etude.eval.match import agent, environment
+from etude.eval.records import Benchmark, Matchup, Model
+from etude.jobs import evaluation
+from tests.eval.games import play
+
+DIRECT = Model(config={"search": 0})
+WEAK = agent("weak", code=[__file__], config={"strength": 0})
+
+
+def eval(state):
+    rated = [each for run in state.runs for each in run.checkpoints]
+    versus = Matchup(name="vs weak", players=(DIRECT, WEAK), conditions=({"deal": 0},), games=2)
+    ladder = Benchmark(name="ladder", environment=environment("duel"), matchups=(versus,))
+    return [evaluation(ladder, play=play, checkpoints=rated, max_hours=0.1)]
+"""
+
+
+def test_a_page_offers_each_commit_its_matches_were_played_at(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = tmp_path / "runs"
+    file = experiment_file(tmp_path / "experiments", "versioned", VERSIONED)
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    # As in a launched job: the agent's code is a source extracted at a commit.
+    monkeypatch.setenv("ETUDE_SOURCE_DIR", str(file.parent))
+    run = track(experiment="versioned", run="a", clocks=CLOCKS, directory=runs)
+    for commit, updates in (("a" * 40, range(100, 300, 100)), ("b" * 40, range(300, 400, 100))):
+        save(run, tmp_path, updates)
+        monkeypatch.setenv("ETUDE_COMMIT", commit)
+        advance(read_experiment(file), source=DirectoryStorage(runs), directory=runs)
+    run.finish(timeout=30)
+    page = build(runs, file)
+    assert [(each.commit, each.matches) for each in page.commits] == [("a" * 40, 2), ("b" * 40, 1)]
+    weak = agent(page, "weak")
+    played = {
+        commit: {page.agents[c.subject].name for c in page.cells if c.commit == commit
+                 and c.opponent == weak and not c.split}
+        for commit in (None, "a" * 40, "b" * 40)
+    }  # fmt: skip
+    # Each commit's view holds the matches played at it; the latest view holds them all.
+    assert played == {
+        None: {"updates-100.pt", "updates-200.pt", "updates-300.pt"},
+        "a" * 40: {"updates-100.pt", "updates-200.pt"},
+        "b" * 40: {"updates-300.pt"},
+    }

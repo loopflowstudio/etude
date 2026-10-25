@@ -30,7 +30,16 @@ from etude.launch.providers.runpod import pod
 from etude.launch.records import Diagnostic, LogSnapshot, LogStream, Run
 from etude.launch.records import Storage as StorageRecord
 from etude.launch.scheduler import Scheduler
-from etude.launch.schemas import AttemptRecord, Bootstrap, Observation, Packet, log_piece
+from etude.launch.schemas import (
+    WORKER_LOG,
+    AttemptRecord,
+    Bootstrap,
+    Observation,
+    Packet,
+    WorkerLog,
+    attempt_log,
+    log_piece,
+)
 from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.disk import DirectoryJournal
 from etude.launch.storage.files import write
@@ -240,14 +249,14 @@ def test_bucket_completion_during_log_read_keeps_cached_output_refreshable(
     record_key = f"{folder}attempts/{attempt.id}.json"
     storage.objects[f"p/sessions/{attempt.session}/packet.json"] = packet.model_dump_json().encode()
     first, last = b"early output\n", b"final output\n"
-    storage.objects[folder + log_piece(attempt.id, 0)] = first
+    storage.objects[folder + log_piece(attempt_log(attempt.id), 0)] = first
     storage.objects[record_key] = AttemptRecord(log_ends=(len(first),)).model_dump_json().encode()
 
     def send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Reply:
         reply = storage(method, url, body, headers)
         if method == "GET" and urlsplit(url).path == f"/{record_key}":
             # The attempt finishes while its earlier record is on the way.
-            storage.objects[folder + log_piece(attempt.id, len(first))] = last
+            storage.objects[folder + log_piece(attempt_log(attempt.id), len(first))] = last
             storage.objects[record_key] = (
                 AttemptRecord(finished={}, log_ends=(len(first), len(first) + len(last)))
                 .model_dump_json()
@@ -382,7 +391,9 @@ def test_courier_redacts_across_console_refreshes_before_retention(
             output.write(b"value\nlast line without newline")
         courier.carry_out()
         assert "last line" not in retained.read_text()
-        courier.carry_out(final=True)
+        courier.carry_out(final=True)  # the session's tails, not its console's
+        assert "last line" not in retained.read_text()
+        courier.carry_console(final=True)  # once the session has exited
         courier.carry_out(final=True)
     text = retained.read_text()
     assert "fixture-sensitive" not in text and "value" not in text
@@ -875,7 +886,7 @@ def test_courier_owns_child_through_failure_cleanup_and_cached_restart(
     monkeypatch.setenv("FIXTURE_TOKEN", "fixture-sensitive-value")
     monkeypatch.delenv("ETUDE_DEADLINE", raising=False)
     uploaded: list[bytes] = []
-    receipts: list[str] = []
+    posted: dict[str, bytes] = {}
     monkeypatch.setenv("ETUDE_LOG_SECONDS", "2")
     allowances: list[float] = []
 
@@ -889,16 +900,21 @@ def test_courier_owns_child_through_failure_cleanup_and_cached_restart(
         return bootstrap.model_dump_json(round_trip=True).encode() if url == "bootstrap" else b"{}"
 
     def post(form: PostForm, key: str, body: bytes, send: object) -> None:
-        receipts.append(key)
+        posted[key] = body
+
+    def receipts() -> list[str]:
+        return [key for key in posted if not key.startswith((WORKER_LOG, "worker-log.json"))]
+
+    def worker_log() -> bytes | None:
+        """The worker's log as a reader finds it: its pieces, else the whole log uploaded."""
+        if "worker-log.json" in posted:
+            record = WorkerLog.model_validate_json(posted["worker-log.json"])
+            return b"".join(posted[piece] for piece in record.pieces())
+        return uploaded[-1] if uploaded else None
 
     def logs(session_id: str, attempt: str | None = None, *, producer: str = "job") -> LogStream:
-        return snapshot_stream(
-            session_id,
-            attempt,
-            producer,
-            uploaded[-1] if uploaded and producer == "worker" else None,
-            False,
-        )
+        raw = worker_log() if producer == "worker" else None
+        return snapshot_stream(session_id, attempt, producer, raw, False)
 
     popen = subprocess.Popen
     children: list[subprocess.Popen[bytes]] = []
@@ -955,7 +971,7 @@ signal.pause()
 
     def persist(path: Path, text: str) -> None:
         if path.name == "receipt":
-            assert receipts == ["receipt"]  # durable start intent precedes child execution
+            assert receipts() == ["receipt"]  # durable start intent precedes child execution
             logging.publish(log, "https://fixture/worker.log")
             snapshot = b.scheduler.logs(run=identity)
             assert not next(s for s in snapshot.streams if s.producer == "worker").complete
@@ -1004,8 +1020,10 @@ signal.pause()
             if child.poll() is None:
                 child.kill()
             child.wait(timeout=5)
-    assert receipts == (["receipt"] if failure == "console" else ["receipt", "ended"])
-    assert len(uploaded) == 2 and all(0 < allowance <= 2 for allowance in allowances)
+    assert receipts() == (["receipt"] if failure == "console" else ["receipt", "ended"])
+    # Its log went as pieces with the grant it read; nothing more went whole by its link.
+    assert len(uploaded) == 1 and all(0 < allowance <= 2 for allowance in allowances)
+    assert worker_log() == log.read_bytes()
     # Restart with the earlier open snapshot still cached, then refresh final output.
     b.store.close()
     store = Database(tmp_path / "launcher.db")

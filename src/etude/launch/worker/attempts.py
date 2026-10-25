@@ -6,6 +6,7 @@ Installed separately from the job environment. Run as
 
     receipt                      this process's id, written by whoever started it
     stop/<attempt>               appears when the attempt should stop
+    finish                       appears when no more work will come: end once it is done
     work/<attempt>.json          work added to a kept session after it started
     sources/<commit>.tar         the source each piece of work runs, placed by its service
     attempts/<attempt>/claim     start time; created once, so code starts at most once
@@ -16,9 +17,10 @@ Installed separately from the job environment. Run as
 
 A job is a shell command run in ETUDE_SOURCE_DIR, with its own environment
 variables. It reads ETUDE_OUTPUT_DIR, ETUDE_STOP_FILE, ETUDE_DEADLINE, ETUDE_SEED,
-ETUDE_UNTIL_CLOCK, ETUDE_UNTIL_VALUE, ETUDE_INPUTS_DIR, ETUDE_TRACK_DIR and
-ETUDE_CONFIG, and may report its progress in `etude-result.json` in its output
-directory as `{"clocks": {"steps": 63000, "wall_time_ms": 5400000}}`.
+ETUDE_UNTIL_CLOCK, ETUDE_UNTIL_VALUE, ETUDE_INPUTS_DIR, ETUDE_TRACK_DIR,
+ETUDE_EXPERIMENT and ETUDE_CONFIG, and may report its progress in
+`etude-result.json` in its output directory as
+`{"clocks": {"steps": 63000, "wall_time_ms": 5400000}}`.
 ETUDE_UNTIL_CLOCK and ETUDE_UNTIL_VALUE are the job's target.
 """
 
@@ -122,6 +124,7 @@ def _prepare(session: Path, home: Path, work: Work) -> dict[str, str]:
         ("ETUDE_JOB", work.job),
         ("ETUDE_JOB_NAME", work.job_name),
         ("ETUDE_COHORT", work.cohort),
+        ("ETUDE_EXPERIMENT", work.experiment),
     ):
         if value is not None:
             environment[name] = value
@@ -459,10 +462,14 @@ def run(directory: Path) -> int:
         for work in packet.work:
             _run(session, packet, work)
         while packet.kept and (packet.deadline is None or _now() < packet.deadline):
+            # Checked before the work, which is handed over before it: what came first runs.
+            finishing = (session / "finish").exists()
             # Work added later arrives as files, taken oldest first; each runs once.
             added = sorted((session / "work").glob("*.json"), key=lambda p: p.stat().st_mtime)
             for path in added:
                 _run(session, packet, Work.model_validate_json(path.read_text()))
+            if finishing:
+                break
             time.sleep(0.2)
     finally:
         write(session / "ended", _now().isoformat())

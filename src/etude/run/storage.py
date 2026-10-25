@@ -20,6 +20,7 @@ import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from stat import S_ISREG
 from typing import Any, Literal, Protocol
 
 from etude.carriage import immutable
@@ -34,7 +35,8 @@ def run_prefix(run: str) -> str:
 
 
 class Storage(Protocol):
-    """A flat key space. `put` replaces; `keys` lists every key under a prefix."""
+    """A flat key space. `put` replaces; `keys` lists every key under a prefix, and
+    `versions` lists them with a tag that changes whenever an object's bytes do."""
 
     name: str
 
@@ -57,6 +59,8 @@ class Storage(Protocol):
         ...
 
     def keys(self, prefix: str) -> list[str]: ...
+
+    def versions(self, prefix: str) -> dict[str, str]: ...
 
 
 class DirectoryStorage:
@@ -100,14 +104,24 @@ class DirectoryStorage:
         return self._path(key).resolve().as_uri()
 
     def keys(self, prefix: str) -> list[str]:
+        return sorted(self.versions(prefix))
+
+    def versions(self, prefix: str) -> dict[str, str]:
+        """Each file's modification time and size: a replaced file changes one or both."""
         base = self._path(prefix) if prefix else self.root
         if not base.is_dir():
-            return []
-        return sorted(
-            path.relative_to(self.root).as_posix()
-            for path in base.rglob("*")
-            if path.is_file() and not path.name.endswith(".partial")
-        )
+            return {}
+        found = {}
+        for path in base.rglob("*"):
+            if path.name.endswith(".partial"):
+                continue
+            try:
+                stat = path.stat()
+            except FileNotFoundError:
+                continue  # replaced or removed while listed
+            if S_ISREG(stat.st_mode):
+                found[path.relative_to(self.root).as_posix()] = f"{stat.st_mtime_ns}:{stat.st_size}"
+        return found
 
 
 @dataclass(frozen=True)
@@ -290,13 +304,19 @@ class S3Storage:
         return True
 
     def keys(self, prefix: str) -> list[str]:
-        found: list[str] = []
+        return sorted(self.versions(prefix))
+
+    def versions(self, prefix: str) -> dict[str, str]:
+        """Each object's ETag, size and time, from the listing alone."""
+        found: dict[str, str] = {}
         pages = self.client.get_paginator("list_objects_v2").paginate(
             Bucket=self.bucket, Prefix=self.prefix + prefix
         )
         for page in pages:
-            found += [item["Key"][len(self.prefix) :] for item in page.get("Contents", [])]
-        return sorted(found)
+            for item in page.get("Contents", []):
+                tag = f"{item.get('ETag')}:{item.get('Size')}:{item.get('LastModified')}"
+                found[item["Key"][len(self.prefix) :]] = tag
+        return found
 
 
 def _client(provider: Literal["s3", "r2"]) -> Any:

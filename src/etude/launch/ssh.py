@@ -338,6 +338,10 @@ class SSHJournal:
         raw = self.ssh.call("end", session_id).text
         return datetime.fromisoformat(raw) if raw else None
 
+    def finish(self, session_id: str) -> datetime | None:
+        raw = self.ssh.call("finish", session_id).text
+        return datetime.fromisoformat(raw) if raw else None
+
     def add(self, session_id: str, work: Work) -> None:
         self.ssh.call(
             "add",

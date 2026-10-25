@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from etude.cli import main
-from etude.page import Page, Server, build, build_each, experiment_files, index, render, target
+from etude.page import Page, Pages, Server, build, experiment_files, index, render, target
 from etude.report import Anchors, Curve, Matches, Matrix, Ranking, Report
 from etude.run.errors import EtudeError
 from etude.run.storage import DirectoryStorage, storage_from_uri
@@ -137,7 +137,7 @@ def test_a_folders_report_is_an_index_of_its_experiments_pages(
     # One file fails as it runs, and one experiment has no runs yet: each says so on its row.
     experiment_file(folder, "broken", "def report(): ...\n\nraise RuntimeError('typo')\n")
     experiment_file(folder, "fresh", REPORTED)
-    built = build_each(runs, folder)
+    built = Pages(runs).build_each(folder)
     found = index(runs, built, href=lambda stem: f"{stem}.html")
     rows = {entry.experiment: entry for entry in found.entries}
     assert rows["broken"].page is None and rows["broken"].error == "RuntimeError: typo"
@@ -157,6 +157,45 @@ def test_a_folders_report_is_an_index_of_its_experiments_pages(
         assert '"href": "/lab"' in (server.page("/") or "")
         assert "lab.py:report" in (server.page("/lab") or "")
         assert server.page("/elsewhere") is None
+    finally:
+        server.server_close()
+
+
+COUNTED = """
+from pathlib import Path
+
+from etude.report import Report
+
+with Path(__file__).with_suffix(".built").open("a") as built:
+    built.write("built\\n")
+
+
+def report() -> Report:
+    return Report()
+"""
+
+
+def test_a_served_page_is_built_again_only_once_its_files_change(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    trained(runs, "lab", "a")
+    trained(runs, "other", "c")
+    file = experiment_file(tmp_path / "experiments", "lab", COUNTED)
+    builds = file.with_suffix(".built")  # the file runs once for every page built
+    server = Server(runs, file, ("127.0.0.1", 0))
+    try:
+        assert '"name": "a"' in (server.page("/") or "")
+        server.page("/")
+        assert builds.read_text().count("built") == 1
+        # Another experiment's run is not this page's input; a run of its own is.
+        trained(runs, "other", "d")
+        server.page("/")
+        assert builds.read_text().count("built") == 1
+        trained(runs, "lab", "b")
+        assert '"name": "b"' in (server.page("/") or "")
+        assert builds.read_text().count("built") == 2
+        file.write_text(COUNTED + "# edited\n")
+        server.page("/")
+        assert builds.read_text().count("built") == 3
     finally:
         server.server_close()
 

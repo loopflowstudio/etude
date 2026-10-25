@@ -200,6 +200,20 @@ def read_experiment(path: Path) -> Experiment:
     return Experiment(name=path.stem, eval=cast(EvalFunction, found))
 
 
+def asked(function: EvalFunction, state: ExperimentState) -> list[Job]:
+    """The jobs `eval(state)` returns now: one, or a list or tuple of them.
+
+    Raises `EtudeError("eval_returns_evaluation_jobs")` for anything else;
+    which jobs evaluate is `etude.jobs.evaluation_spec`'s to say.
+    """
+    returned = function(state)
+    given: list[object] = list(returned) if isinstance(returned, list | tuple) else [returned]
+    jobs = [each for each in given if isinstance(each, Job)]
+    if len(jobs) != len(given):
+        raise EtudeError("eval_returns_evaluation_jobs", 422)
+    return jobs
+
+
 # ---------------------------------------------------------------------------
 # One pass
 
@@ -246,11 +260,7 @@ def advance(
     from etude.jobs import Evaluation, evaluation_spec, with_matches  # noqa: PLC0415
 
     state = observe(source, experiment.name)
-    returned = experiment.eval(state)
-    given: list[object] = list(returned) if isinstance(returned, list | tuple) else [returned]
-    jobs = [each for each in given if isinstance(each, Job)]
-    if len(jobs) != len(given):
-        raise EtudeError("eval_returns_evaluation_jobs", 422)
+    jobs = asked(experiment.eval, state)
     ledger = _Ledger(_ledger_root(directory)) if pool or rent else None
     running = ledger.running() if ledger is not None else set()
     passes = []
@@ -259,7 +269,9 @@ def advance(
         if spec.experiment not in (None, experiment.name):
             raise EtudeError("eval_job_of_another_experiment", 422) from ValueError(spec.experiment)
         spec = spec.model_copy(update={"experiment": experiment.name})
-        job = given_job.model_copy(update={"config": spec.model_dump_json()})
+        job = given_job.model_copy(
+            update={"config": spec.model_dump_json(), "experiment": experiment.name}
+        )
         checkpoints = tuple(each.ref for each in spec.checkpoints)
         found = played(
             spec.tournament,

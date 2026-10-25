@@ -1,4 +1,9 @@
-"""Read a Python job file and validate its runs() flags before submission."""
+"""Read a Python job file and validate its runs() flags before submission.
+
+A job file that is also an experiment file, defining `eval(state)` or
+`report()` at its top level, names the experiment its runs record under for
+its stem (`experiment_named`), so `ppo.py` launches runs of experiment `ppo`.
+"""
 
 from __future__ import annotations
 
@@ -12,12 +17,16 @@ from typing import Any
 
 import typer
 
+from etude.experiment_file import experiment_named
 from etude.launch.errors import LauncherError
 from etude.launch.records import Job, Run
 
 
 def read_job_file(path: Path, given: Sequence[str] = (), *, help: bool = False) -> list[Run]:
-    """Let Typer validate runs()'s signature, then invoke it once with typed flags."""
+    """Let Typer validate runs()'s signature, then invoke it once with typed flags.
+
+    An experiment file's runs are given its experiment; a job naming another is refused.
+    """
 
     if path.suffix != ".py":
         raise LauncherError("job files must be Python (.py), defining runs()")
@@ -97,6 +106,13 @@ def read_job_file(path: Path, given: Sequence[str] = (), *, help: bool = False) 
     params = {
         name: each for name, each in arguments.items() if isinstance(each, (str, int, float, bool))
     }
+    experiment = experiment_named(path)
+    for run in runs:
+        if experiment is not None and run.job.experiment not in (None, experiment):
+            raise LauncherError(
+                f"{path.name} is experiment {experiment!r}; its runs() returned a job of"
+                f" experiment {run.job.experiment!r}"
+            )
     return [
         run.model_copy(
             update={
@@ -104,6 +120,7 @@ def read_job_file(path: Path, given: Sequence[str] = (), *, help: bool = False) 
                 "job": run.job.model_copy(
                     update={
                         "repo": str(Path(run.job.repo).resolve()) if run.job.repo else None,
+                        "experiment": experiment or run.job.experiment,
                     }
                 ),
             }
