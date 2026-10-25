@@ -51,9 +51,10 @@ function evalState() {
 }
 // A panel's own matches, else the section's; a tag or matchup alone is looked for in the section's tournament first.
 function panelSel(E, panel) {
-  if (panel.tournament == null && panel.matchup == null && panel.tag == null) return E.sel;
+  const m = panel.matches;
+  if (!m) return E.sel;
   const here = E.sel == null ? null : D.selections[E.sel].tournament;
-  const fits = D.selections.map((s, i) => [s, i]).filter(([s]) => (panel.tournament ?? s.tournament) === s.tournament && s.matchup === panel.matchup && s.tag === panel.tag);
+  const fits = D.selections.map((s, i) => [s, i]).filter(([s]) => (m.tournament ?? s.tournament) === s.tournament && s.matchup === m.matchup && s.tag === m.tag);
   return (fits.find(([s]) => s.tournament === here) || fits[0] || [null, null])[1];
 }
 const opponents = (E, sel) => M.opponents(E.score, sel);
@@ -165,7 +166,7 @@ function render() {
   const latestKey = pts => { const ok = evaluated(pts); return ok.length ? ok[ok.length - 1].key : null; };
   const keyName = k => `${T.clocks[0]?.name || "checkpoint"} ${num(k)}`;
   const finalKey = j => j.runs.every(r => T.runs.find(x => x.name === r)?.state === "finished") ? (marks.get(j.runs[0]) || []).at(-1)?.align ?? null : null;
-  const unselected = panel => { const n = node("div", "na", `No eval run holds the matches this panel names (${[panel.tournament && "tournament " + panel.tournament, panel.matchup && "matchup " + panel.matchup, panel.tag && "tag " + panel.tag].filter(Boolean).join(", ")}).`); return n; };
+  const unselected = panel => { const m = panel.matches || {}; return node("div", "na", `No eval run holds the matches this panel names (${[m.tournament && "tournament " + m.tournament, m.matchup && "matchup " + m.matchup, m.tag && "tag " + m.tag].filter(Boolean).join(", ")}).`); };
   if (!D.selections.length) card(body, "No evaluations", "", "full").appendChild(node("div", "na", `Define eval(state) in ${D.file} and run etude eval ${D.file}; its matches appear here.`));
   else for (const panel of R.evals) {
     const sel = panelSel(E, panel), opp = oppFor(E, sel), versus = versusOf(opp), where = sel == null ? "" : selName(D.selections[sel]);

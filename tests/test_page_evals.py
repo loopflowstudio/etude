@@ -22,7 +22,7 @@ LAB = """
 from etude.eval.match import agent, environment
 from etude.eval.records import ArtifactRef, Benchmark, CheckpointKey, CheckpointRef, Matchup, Model
 from etude.jobs import evaluation
-from etude.report import Anchors, Curve, Report, Score
+from etude.report import Anchors, Curve, Matches, Report, Score
 from tests.eval.games import play, play_failing_deal_one
 
 DUEL = environment("duel")
@@ -64,7 +64,12 @@ def eval(state):
 def report():
     return Report(
         score=Score(table="plays", value="won", reference=0.5),
-        evals=(Curve(), Curve(matchup="vs outside"), Curve(matchup="vs nobody"), Anchors()),
+        evals=(
+            Curve(),
+            Curve(matches=Matches(matchup="vs outside")),
+            Curve(matches=Matches(matchup="vs nobody")),
+            Anchors(),
+        ),
     )
 """
 

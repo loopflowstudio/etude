@@ -164,7 +164,7 @@ run.tag(model, "best")  # tags can change later
 
 ```python
 # ppo.py: experiment "ppo", beside its train() and eval(state)
-from etude.report import Anchors, Curve, HeadToHead, Matrix, Ranking, Report, Score
+from etude.report import Anchors, Curve, HeadToHead, Matches, Matrix, Ranking, Report, Score
 
 from arena import LADDER  # the Benchmark eval(state) holds
 
@@ -173,9 +173,9 @@ def report() -> Report:
     return Report(
         score=Score(table="plays", value="won", reference=0.5),
         evals=(
-            Curve(title="Win rate against the anchors", tag="anchor"),
-            Curve(title="Against the checkpoint before", tag="consecutive"),
-            Matrix(rows="deal", columns="on_play", tournament=LADDER.name),
+            Curve(title="Win rate against the anchors", matches=Matches(tag="anchor")),
+            Curve(title="Against the checkpoint before", matches=Matches(tag="consecutive")),
+            Matrix(rows="deal", columns="on_play", matches=Matches(tournament=LADDER.name)),
             Ranking(by="on_play"),
             HeadToHead(),
             Anchors(),
@@ -238,7 +238,9 @@ bytes are two points. Every other agent, code or a checkpoint from outside the
 experiment, is an anchor. `score` names an eval table's value, computed as
 `etude.eval.query.compare` computes it, with its 95% interval over whole
 matches; without one, every numeric column is offered. Each match counts once,
-at the version of the code that played it last.
+from the eval run that delivered it last (`etude.eval.tournament.played`), so at
+the version of the code that played it last. A tournament `eval(state)` returns
+is drawn as it wants it now; one it no longer returns, as its eval runs held it.
 
 | Panel | Shows |
 |---|---|
@@ -250,8 +252,9 @@ at the version of the code that played it last.
 
 Eval panels name columns of the score's table, and count the matches the
 section's control selects (a tournament, or a tag within it) unless they name
-their own: `tournament=`, `matchup=` or `tag=`, by the names `eval(state)`
-gives them. A curve against one anchor draws the others' scores against it as
+their own: `matches=Matches(tournament=..., matchup=... or tag=...)`, by the
+names `eval(state)` gives them. A matchup and a tag are alternatives; naming
+both is refused. A curve against one anchor draws the others' scores against it as
 reference lines.
 
 Gaps stay visible. A checkpoint nothing played is marked not evaluated and is

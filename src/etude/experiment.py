@@ -11,7 +11,7 @@ every pass, so a design that depends on what exists, such as each checkpoint
 against the one before it, grows as checkpoints arrive.
 
 `advance` is one pass: for each job, the matches its benchmark calls for that
-no eval run delivered (`etude.eval.tournament.unplayed`), played here or
+no eval run delivered (`etude.eval.tournament.played`), played here or
 launched as a job that plays exactly those. A launched pass names its run for
 the matches it plays and remembers it in a ledger beside the launcher's
 records, so a later pass neither launches it again nor plays its matches while
@@ -35,7 +35,7 @@ from pydantic import Field
 from etude.carriage import CHECKPOINTS
 from etude.eval.match import Tables
 from etude.eval.records import Agent, CheckpointKey, CheckpointRef, Match, Model, digest
-from etude.eval.tournament import hold, unplayed
+from etude.eval.tournament import hold, played
 from etude.launch import client
 from etude.launch.records import Job, Run
 from etude.run.errors import EtudeError
@@ -229,7 +229,7 @@ def advance(
 ) -> list[Pass]:
     """One pass: observe `source`, ask the experiment's `eval`, and play or launch what is new.
 
-    What is wanted is what `eval` returns now (`etude.eval.tournament.unplayed`):
+    What is wanted is what `eval` returns now (`etude.eval.tournament.played`):
     a matchup it no longer returns is no longer played. Each job's eval run is
     the experiment's; a job naming another experiment is refused with
     `EtudeError("eval_job_of_another_experiment")`. A failed match is counted
@@ -261,7 +261,7 @@ def advance(
         spec = spec.model_copy(update={"experiment": experiment.name})
         job = given_job.model_copy(update={"config": spec.model_dump_json()})
         checkpoints = tuple(each.ref for each in spec.checkpoints)
-        found = unplayed(
+        found = played(
             spec.tournament,
             experiment=experiment.name,
             checkpoints=checkpoints,

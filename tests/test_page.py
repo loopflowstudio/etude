@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -9,7 +10,7 @@ import pytest
 
 from etude.cli import main
 from etude.page import Page, Server, build, build_each, experiment_files, index, render, target
-from etude.report import Anchors, Curve, Matrix, Ranking, Report
+from etude.report import Anchors, Curve, Matches, Matrix, Ranking, Report
 from etude.run.errors import EtudeError
 from etude.run.storage import DirectoryStorage, storage_from_uri
 from etude.train.records import Step
@@ -96,7 +97,7 @@ def test_a_bucket_report_is_written_here_and_a_directorys_beside_its_runs(
 def test_a_report_names_the_eval_columns_its_panels_split_by() -> None:
     report = Report(
         evals=(
-            Curve(split="seat", tag="anchor"),
+            Curve(split="seat", matches=Matches(tag="anchor")),
             Matrix(rows="opponent_deck", columns="deck"),
             Ranking(by="seat"),
         )
@@ -164,3 +165,16 @@ def test_a_page_carries_its_charts_and_needs_no_network(tmp_path: Path) -> None:
     trained(tmp_path / "runs", "lab", "a")
     html = render(build(tmp_path / "runs", experiment_file(tmp_path, "lab", REPORTED)))
     assert "uPlot" in html and "<script src" not in html and "<link" not in html
+
+
+def test_a_panels_matches_are_a_matchup_or_a_tag_of_a_tournament_never_both() -> None:
+    assert Curve(matches=Matches(tournament="ladder", tag="anchor")).matches is not None
+    with pytest.raises(ValueError, match="matches_name_a_matchup_or_a_tag_not_both"):
+        Matches(matchup="vs heuristic", tag="anchor")
+
+
+def test_an_absent_experiments_error_names_the_source_as_it_was_given(tmp_path: Path) -> None:
+    trained(tmp_path / "runs", "lab", "a")
+    given = re.escape(f"no training runs of 'fresh' in {tmp_path / 'runs'};")
+    with pytest.raises(ValueError, match=given):
+        build(tmp_path / "runs", experiment_file(tmp_path, "fresh"))

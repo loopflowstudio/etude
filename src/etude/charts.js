@@ -108,13 +108,17 @@ function line(host, series, o = {}) {
           else { c.strokeStyle = muted; c.lineWidth = toPx(1); c.moveTo(x, base - r); c.lineTo(x, base + r); }
           c.stroke(); c.lineWidth = toPx(1.5);
         } });
-        // Anchor labels at the right end, stacked upward so none covers another.
+        // Anchor labels at the right end, each on the page's colour and stacked upward from
+        // the lowest, so close anchors never cover one another or each other's lines.
         if (!o.compact) {
-          c.fillStyle = ink2; c.font = `${toPx(11)}px ui-sans-serif, -apple-system, sans-serif`; c.textAlign = "right";
+          c.font = `${toPx(11)}px ui-sans-serif, -apple-system, sans-serif`; c.textAlign = "right"; c.textBaseline = "bottom";
+          const right = u.bbox.left + u.bbox.width - toPx(2), step = toPx(15), surface = css("--surface");
           let above = Infinity;
           for (const r of [...(o.refs || [])].sort((a, b) => a.y - b.y)) {
-            const y = Math.min(u.valToPos(r.y, "y", true) - toPx(4), above - toPx(12)); above = y;
-            c.fillText(r.label, u.bbox.left + u.bbox.width - toPx(2), y);
+            const y = Math.min(u.valToPos(r.y, "y", true) - toPx(2), above - step); above = y;
+            const w = c.measureText(r.label).width + toPx(6);
+            c.fillStyle = surface; c.fillRect(right - w + toPx(3), y - toPx(13), w, toPx(13));
+            c.fillStyle = ink2; c.fillText(r.label, right, y - toPx(1));
           }
         }
         c.restore();

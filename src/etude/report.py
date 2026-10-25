@@ -4,7 +4,11 @@
     def report() -> Report:
         return Report(
             score=Score(table="plays", value="won", reference=0.5),
-            evals=(Curve(tag="vs-anchor"), Matrix(rows="on_play", columns="deal"), Anchors()),
+            evals=(
+                Curve(matches=Matches(tag="anchor")),
+                Matrix(rows="on_play", columns="deal", matches=Matches(tournament=LADDER.name)),
+                Anchors(),
+            ),
         )
 
 `etude report ppo.py` imports `report()` from the file (`etude.page`), and
@@ -14,19 +18,18 @@ panel shows every job; a job is its runs across seeds.
 
 Panels name data, never rendering. Eval panels name columns of the score's
 eval table (`Matrix(rows=..., columns=...)`, `Ranking(by=...)`,
-`Curve(split=...)`) and which matches they count: a tournament's, a matchup's
-or those tagged (`tournament=`, `matchup=`, `tag=`), by the names `eval(state)`
-gives them. Metric panels name logged metric keys. The defaults are
-reinforcement learning's: override `perf` or `ml` to name an experiment's own
-keys. This module imports only Pydantic and Etude's run records, so an
+`Curve(split=...)`) and which matches they count (`Matches`): a tournament's,
+or one matchup or tag of it, by the names `eval(state)` gives them. Metric
+panels name logged metric keys. The defaults are reinforcement learning's:
+override `perf` or `ml` to name an experiment's own keys. This module imports only Pydantic and Etude's run records, so an
 experiment file can import it at no cost.
 """
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from etude.run.records import Record
 
@@ -45,52 +48,63 @@ class Score(Record):
     reference: float | None = None
 
 
-class _EvalPanel(Record):
-    """Which matches an eval panel counts; by default, those the section's control selects.
+class Matches(Record):
+    """Which matches a panel counts: a tournament's, or one matchup or tag of it.
 
-    `tournament` names a benchmark or round robin, `matchup` one line of a
-    benchmark, and `tag` the matchups tagged with it (`Matchup.tags`). Give
-    the names the experiment's `eval(state)` gives, such as `LADDER.name`.
+    `tournament` names a benchmark or round robin, None leaving it to the
+    section's control; `matchup` names one line of a benchmark, and `tag` the
+    matchups tagged with it (`Matchup.tags`). Give the names the experiment's
+    `eval(state)` gives, such as `LADDER.name`.
     """
 
     tournament: str | None = None
     matchup: str | None = None
     tag: str | None = None
 
+    @model_validator(mode="after")
+    def one_part(self) -> Self:
+        if self.matchup is not None and self.tag is not None:
+            raise ValueError("matches_name_a_matchup_or_a_tag_not_both")
+        return self
 
-class Curve(_EvalPanel):
+
+class Curve(Record):
     """The score at each checkpoint, a line per job; `split` draws one chart per column value."""
 
     kind: Literal["curve"] = "curve"
     title: str = "Score"
     split: str | None = None
+    matches: Matches | None = None
 
 
-class Matrix(_EvalPanel):
+class Matrix(Record):
     """`columns` across and `rows` down, at one checkpoint of each job: its final by default."""
 
     kind: Literal["matrix"] = "matrix"
     rows: str
     columns: str
     title: str | None = None
+    matches: Matches | None = None
 
 
-class Ranking(_EvalPanel):
+class Ranking(Record):
     """The score for each value of the column `by`, one bar per job; a row filters the page."""
 
     kind: Literal["ranking"] = "ranking"
     by: str
     title: str | None = None
+    matches: Matches | None = None
 
 
-class HeadToHead(_EvalPanel):
+class HeadToHead(Record):
     """Games between checkpoints of two jobs: each job's score against the other's."""
 
     kind: Literal["head_to_head"] = "head_to_head"
     title: str = "Head to head"
+    matches: Matches | None = None
 
 
-class Anchors(_EvalPanel):
+class Anchors(Record):
     """Fixed agents (code, or checkpoints from outside the experiment) against each other.
 
     Drawn once, not per job: each anchor's score against the others, and its
@@ -101,6 +115,7 @@ class Anchors(_EvalPanel):
 
     kind: Literal["anchors"] = "anchors"
     title: str = "Anchors"
+    matches: Matches | None = None
 
 
 class Series(Record):

@@ -354,6 +354,10 @@ etude eval ppo.py --source s3://bucket/etude/launch --rent cpu8 --watch 600
 - **Failures.** A match that failed is counted on every pass (`ladder: 0 new,
   1 failed`) and not played again, so a result is never quietly replaced.
   `--retry-failed` plays the failed matches again.
+- **Without playing.** `etude.eval.tournament.played` answers what a pass
+  would find: each match the definition calls for, as delivered (with the eval
+  run that delivered it last, whose rows count), failed or new. `etude report`
+  reads it.
 - **Changing the design.** A new matchup or benchmark is played for every
   checkpoint chosen, including those of finished runs, and a match another of
   the experiment's tournaments already played is reused. A matchup `eval`
