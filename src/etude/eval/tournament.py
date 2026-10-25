@@ -49,6 +49,7 @@ from etude.eval.records import (
     CheckpointRef,
     Environment,
     Match,
+    MatchRecord,
     RoundRobin,
     TournamentRun,
     assemble,
@@ -95,7 +96,7 @@ def hold(
     with `enter` plays every pair of the agents given; with none, every pair
     of every entrant so far not yet delivered.
 
-    `matches` plays exactly those, as `unplayed` found them elsewhere, and
+    `matches` plays exactly those, as `played` found them new elsewhere, and
     reads nothing: each must be one the tournament calls for with what is
     given. Their checkpoints' files may lie elsewhere than the definition's,
     such as copied to this machine; a key never depends on where.
@@ -134,7 +135,7 @@ def hold(
             storages=storages,
         )
         pending = [
-            match for index, (match, state) in enumerate(scheduled)
+            match for index, (match, state, _) in enumerate(scheduled)
             if index % n == k and state != "delivered"
         ]  # fmt: skip
     run = os.environ.get("ETUDE_RUN") or (
@@ -153,16 +154,25 @@ def hold(
     )
 
 
-class Unplayed(Record):
-    """What an experiment's pass would play for one evaluation, in key order."""
+class Delivered(Record):
+    """A match, and the eval run that delivered it last: the one whose rows count."""
 
-    # Called for and never attempted by an eval run of the experiment.
-    new: tuple[Match, ...]
-    # Called for and failed, with no done record since; counted, not replayed.
+    match: Match
+    run: str
+
+
+class Played(Record):
+    """Every match a definition calls for with what is given, by its state, in key order."""
+
+    # Delivered by an eval run of the experiment in the tournament's environment.
+    delivered: tuple[Delivered, ...]
+    # Failed, with nothing delivered since; counted, not replayed.
     failed: tuple[Match, ...]
+    # Never attempted.
+    new: tuple[Match, ...]
 
 
-def unplayed(
+def played(
     tournament: Benchmark | RoundRobin,
     *,
     experiment: str,
@@ -170,16 +180,16 @@ def unplayed(
     enter: Sequence[Agent] = (),
     directory: Path | str | None = None,
     storages: Sequence[Storage] = (),
-) -> Unplayed:
-    """The matches exactly this definition calls for that no eval run delivered, without playing them.
+) -> Played:
+    """How far exactly this definition has been played, without playing anything.
 
-    Unlike a batch hold, only what is given is wanted: a matchup an earlier
-    eval run defined and this definition leaves out is not, nor a checkpoint
-    not given. What any eval run of the experiment in its environment
-    delivered counts, whichever tournament it was held for. A match that
-    failed is kept apart, so a caller can show it rather than replay it.
+    Only what is given is wanted: a matchup an earlier eval run defined and
+    this definition leaves out is not, nor a checkpoint not given. What any
+    eval run of the experiment in its environment delivered counts, whichever
+    tournament it was held for; of several, the one that recorded it last.
     So one place can decide what is new and another, such as a launched
-    machine that reads no other eval run, play it with `hold(matches=...)`.
+    machine that reads no other eval run, play it with `hold(matches=...)`,
+    and a reader counts each match from the run whose rows are latest.
     Raises as a batch hold does, so a matchup name defined two ways is refused.
     """
     added = _added(tournament, tuple(checkpoints), enter, (0, 1))
@@ -191,10 +201,52 @@ def unplayed(
         directory=directory,
         storages=storages,
     )
-    return Unplayed(
-        new=tuple(match for match, state in scheduled if state == "new"),
-        failed=tuple(match for match, state in scheduled if state == "failed"),
+    return Played(
+        delivered=tuple(
+            Delivered(match=match, run=_latest(match.key, where))
+            for match, state, where in scheduled
+            if state == "delivered"
+        ),
+        failed=tuple(match for match, state, _ in scheduled if state == "failed"),
+        new=tuple(match for match, state, _ in scheduled if state == "new"),
     )
+
+
+def tournament_runs(
+    experiment: str, *, directory: Path | str | None = None, storages: Sequence[Storage] = ()
+) -> dict[str, list[TournamentRun]]:
+    """What each eval run of the experiment held for a tournament added, by tournament, in
+    run order: `assemble` makes each tournament of them.
+
+    One listing per place, each eval run's `run.json` and `tournament.json`.
+    """
+    base = Path(directory) if directory is not None else default_root()
+    found: dict[str, dict[str, TournamentRun]] = {}
+    for place in {each.name: each for each in [DirectoryStorage(base), *storages]}.values():
+        keys = place.keys("")
+        for folder in sorted(_folders(keys, TOURNAMENT_FILE)):
+            if _experiment(place, folder) != experiment:
+                continue
+            added = TournamentRun.model_validate_json(place.get(folder + TOURNAMENT_FILE))
+            run = folder.rstrip("/").rsplit("/", 1)[-1]
+            found.setdefault(added.tournament.name, {}).setdefault(run, added)
+    return {name: [runs[run] for run in sorted(runs)] for name, runs in sorted(found.items())}
+
+
+def _latest(key: Digest, where: Sequence[tuple[Storage, str]]) -> str:
+    """The eval run that recorded match `key` last, of the folders delivering it.
+
+    A match one run delivered needs no read; of several runs, each one's
+    record says when it was written, and the latest wins.
+    """
+    runs = {folder.rstrip("/").rsplit("/", 1)[-1]: (place, folder) for place, folder in where}
+    if len(runs) == 1:
+        return next(iter(runs))
+    written = {
+        run: MatchRecord.model_validate_json(place.get(f"{folder}matches/{key}.json")).wall_ms
+        for run, (place, folder) in runs.items()
+    }
+    return max(written, key=lambda run: (written[run], run))
 
 
 def _added(
@@ -220,16 +272,17 @@ def _scheduled(
     directory: Path | str | None,
     storages: Sequence[Storage],
     wanted_only: bool = False,
-) -> list[tuple[Match, Literal["new", "delivered", "failed"]]]:
-    """Each match the tournament calls for with what `added` adds, in key order, and
-    whether an eval run of the experiment in its environment delivered it or failed it.
+) -> list[tuple[Match, Literal["new", "delivered", "failed"], tuple[tuple[Storage, str], ...]]]:
+    """Each match the tournament calls for with what `added` adds, in key order, whether
+    an eval run of the experiment in its environment delivered it or failed it, and the
+    run folders, by place, that delivered it.
 
     On the go, nothing is read and a matchup of fixed agents is left to batch:
     it is not the checkpoint's. `wanted_only` calls for what `added` defines
     alone, still refusing a definition the stored eval runs conflict with.
     """
     held: list[TournamentRun] = [added]
-    delivered: set[Digest] = set()
+    delivered: dict[Digest, list[tuple[Storage, str]]] = {}
     failed: set[Digest] = set()
     if not on_the_go:
         base = Path(directory) if directory is not None else default_root()
@@ -247,7 +300,11 @@ def _scheduled(
         if not on_the_go or each.checkpoint is not None or not added.checkpoints
     }
     return [
-        (match, "delivered" if key in delivered else "failed" if key in failed else "new")
+        (
+            match,
+            "delivered" if key in delivered else "failed" if key in failed else "new",
+            tuple(delivered.get(key, ())),
+        )
         for key, match in sorted(matches.items())
     ]
 
@@ -274,17 +331,18 @@ def _resumed(added: TournamentRun) -> dict[str, object]:
 
 def _stored(
     tournament: Benchmark | RoundRobin, experiment: str, places: Sequence[Storage]
-) -> tuple[list[TournamentRun], set[Digest], set[Digest]]:
+) -> tuple[list[TournamentRun], dict[Digest, list[tuple[Storage, str]]], set[Digest]]:
     """The tournament's eval runs of the experiment in every place, every match
-    that an eval run of the experiment in its environment holds as done, and
-    every one that failed there with no done record anywhere.
+    that an eval run of the experiment in its environment holds as done, with the
+    place and folder of each run holding it, and every one that failed there with
+    no done record anywhere.
 
     One listing per place, each eval run's `run.json`, and one more read of each
     of the experiment's: its `tournament.json`, or its `environment.json` when
     it has none.
     """
     held: dict[str, TournamentRun] = {}
-    delivered: set[Digest] = set()
+    delivered: dict[Digest, list[tuple[Storage, str]]] = {}
     failed: set[Digest] = set()
     environment = tournament.environment.identity
     for place in {place.name: place for place in places}.values():
@@ -316,8 +374,8 @@ def _stored(
             if file.endswith(".failed.json"):
                 failed.add(file.removesuffix(".failed.json"))
             else:
-                delivered.add(file.removesuffix(".json"))
-    return [held[run] for run in sorted(held)], delivered, failed - delivered
+                delivered.setdefault(file.removesuffix(".json"), []).append((place, folder))
+    return [held[run] for run in sorted(held)], delivered, failed - delivered.keys()
 
 
 def _experiment(place: Storage, folder: str) -> str | None:

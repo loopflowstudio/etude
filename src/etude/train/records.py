@@ -1,4 +1,4 @@
-"""File contracts for training: clock declarations, checkpoints and seed intervals.
+"""File contracts for training: clock declarations and checkpoints.
 
 Every logged row gives a value for every declared clock. There is no run-wide
 counter and no ordering rule: a repeated coordinate is kept, and readers take
@@ -7,7 +7,6 @@ the latest write.
 
 from __future__ import annotations
 
-import math
 import re
 from typing import Literal
 
@@ -24,26 +23,6 @@ def Step(name: str, meaning: str) -> Clock:  # noqa: N802 - reads as a declarati
 def Time(name: str, meaning: str) -> Clock:  # noqa: N802 - reads as a declaration
     """A clock in seconds, such as active training time. Not wall time."""
     return Clock(name=name, kind="time", meaning=meaning)
-
-
-# Two-sided 95% Student's t quantiles for 1 to 30 degrees of freedom.
-_T95 = (
-    12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228,
-    2.201, 2.179, 2.160, 2.145, 2.131, 2.120, 2.110, 2.101, 2.093, 2.086,
-    2.080, 2.074, 2.069, 2.064, 2.060, 2.056, 2.052, 2.048, 2.045, 2.042,
-)  # fmt: skip
-
-
-def interval95(mean: float, std: float, n: int) -> tuple[float, float] | None:
-    """The 95% interval for a mean of `n` seeds with sample deviation `std`.
-
-    One seed has no interval. The seeds run are a sample of those that could
-    have been, so the deviation divides by n - 1 and the width uses Student's t.
-    """
-    if n < 2:
-        return None
-    half = (_T95[n - 2] if n - 2 < len(_T95) else 1.960) * std / math.sqrt(n)
-    return mean - half, mean + half
 
 
 class CheckpointRecord(Record):

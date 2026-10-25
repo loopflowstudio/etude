@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 from moto import mock_aws
 
+from etude.page import build
 from etude.run.block_file import block_key, tail_key
 from etude.run.delivery import RunFiles, StorageDestination, sync
 from etude.run.errors import EtudeError
@@ -22,8 +23,8 @@ from etude.train.block import Builder
 from etude.train.manifest import Manifest, write_manifest
 from etude.train.read import buckets, read, read_all
 from etude.train.records import Step
-from etude.train.report import pages
 from etude.train.run import log_line, seal_runs, track, write_block
+from tests.experiments import experiment_file
 from tests.run.storage import CountedClient, MeasuredStorage
 
 
@@ -32,9 +33,7 @@ def test_reports_fetch_each_runs_metadata_once(tmp_path: Path) -> None:
         with track(experiment="e", run=name, clocks=[], directory=tmp_path):
             pass
     measured = MeasuredStorage(DirectoryStorage(tmp_path))
-    report = pages(measured)
-    records = report["e"]["runs"]
-    assert isinstance(records, list) and len(records) == 2
+    assert len(build(measured, experiment_file(tmp_path / "experiments", "e")).training.runs) == 2
     # One declaration, one attempt and one state per run; discover once, then
     # list each run. An empty run needs no metric reads.
     assert measured.requests == 6
@@ -782,12 +781,13 @@ def test_watched_reports_read_each_bucket_file_once_per_computer(tmp_path: Path)
         client.create_bucket(Bucket="etude-watched")
         assert sync(local, storages=[S3Storage("etude-watched", client=client)]) == {}
         written = client.stored("etude-watched")
-        # `etude reports write --watch` and `etude reports serve` regenerate every few seconds.
-        first = pages(S3Storage("etude-watched", client=client))
+        # `etude report --watch` and `etude report --serve` build the page every few seconds.
+        file = experiment_file(tmp_path / "experiments", "e")
+        first = build(S3Storage("etude-watched", client=client), file)
         assert 0 < client.bytes <= written
         read_once = client.bytes
         for _ in range(5):
-            assert pages(S3Storage("etude-watched", client=client)) == first
+            assert build(S3Storage("etude-watched", client=client), file) == first
         assert client.bytes == read_once
 
 

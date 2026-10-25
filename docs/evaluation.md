@@ -106,15 +106,6 @@ db.sql("""select a.name, avg(score) from plays
           where on_play and opening_lands >= 2 group by all""").show()
 ```
 
-```sh
-uv run etude reports eval --open   # a page per experiment with eval runs under ~/.etude/track
-uv run etude reports eval --watch 5 --open   # keep the page current as evals arrive
-```
-
-Watching waits for the first eval run when none exists yet, opens the page once,
-and refreshes it at the requested interval. Ctrl-C stops regeneration. It reads
-retained evaluation results; it does not launch jobs or allocate compute.
-
 ## Eval runs
 
 `etude.eval.match.evaluate` is the general eval run: it plays the matches it
@@ -363,6 +354,10 @@ etude eval ppo.py --source s3://bucket/etude/launch --rent cpu8 --watch 600
 - **Failures.** A match that failed is counted on every pass (`ladder: 0 new,
   1 failed`) and not played again, so a result is never quietly replaced.
   `--retry-failed` plays the failed matches again.
+- **Without playing.** `etude.eval.tournament.played` answers what a pass
+  would find: each match the definition calls for, as delivered (with the eval
+  run that delivered it last, whose rows count), failed or new. `etude report`
+  reads it.
 - **Changing the design.** A new matchup or benchmark is played for every
   checkpoint chosen, including those of finished runs, and a match another of
   the experiment's tournaments already played is reused. A matchup `eval`
@@ -370,6 +365,19 @@ etude eval ppo.py --source s3://bucket/etude/launch --rent cpu8 --watch 600
   matchup under the same name is refused (`matchup_conflict`): give the new
   one a new name. A match is its seats, conditions and game count, so raising
   `games` plays every match of the matchup again.
+
+`etude report ppo.py` draws the experiment's evals beside its training
+([tracking](tracking.md#reports)), following the file's `report()`. Each
+checkpoint agent is drawn where its training run stood when it saved that
+checkpoint, found by its key; code agents and checkpoints from outside the
+experiment are anchors, drawn once. A checkpoint `eval(state)` chose that no
+eval run has delivered is marked not yet played, one nothing played is marked
+not evaluated, and failed matches are listed.
+
+Until `etude launch` hands the file's name to the training runs it starts,
+training code names the experiment itself: `track(experiment="ppo")` for
+`ppo.py`. Otherwise neither `etude eval ppo.py` nor `etude report ppo.py` finds
+its runs.
 
 ## Querying
 

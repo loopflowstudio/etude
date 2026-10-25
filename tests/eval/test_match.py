@@ -19,8 +19,6 @@ from pydantic import BaseModel
 from etude.eval.match import agent, environment, evaluate
 from etude.eval.query import compare, estimate, statsdb
 from etude.eval.records import Agent, CheckpointKey, CheckpointRef, Config, Match, Model
-from etude.eval.report import render
-from etude.eval.report import write as write_report
 from etude.run.errors import EtudeError
 from etude.run.records import ArtifactRef
 from etude.run.storage import DirectoryStorage, S3Storage
@@ -226,7 +224,7 @@ def test_group_keyed_rows_compare_teams_in_a_two_on_two(tmp_path: Path) -> None:
     }
 
 
-def test_an_eval_run_delivered_to_a_bucket_is_queried_and_reported_from_it(
+def test_an_eval_run_delivered_to_a_bucket_is_queried_from_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"):
@@ -243,8 +241,10 @@ def test_an_eval_run_delivered_to_a_bucket_is_queried_and_reported_from_it(
         )  # fmt: skip
         db = statsdb("league", bucket)
         assert db.sql("select count(*) from plays").fetchone() == (12 * 4 * 2,)
-        page = render(db)
-    assert "deep" in page and "on_play" in page and "won" in page
+        split = compare(db, table="plays", value="won", by=["on_play"])
+        names = dict(db.sql("select agent, name from agents").fetchall())
+    assert {c.split["on_play"] for c in split} == {True, False}
+    assert "deep" in {names[c.subject[0]] for c in split}
 
 
 def test_an_agent_may_play_itself(tmp_path: Path) -> None:
@@ -365,7 +365,8 @@ def test_queries_reports_and_resumes_read_each_bucket_file_once_per_computer(
         first = client.bytes
         assert 0 < first <= written
         for _ in range(3):
-            write_report(S3Storage("runs", client=client), tmp_path / "reports", refresh=0.1)
+            # A watched report opens the database again every few seconds.
+            statsdb("league", S3Storage("runs", client=client)).close()
         shutil.rmtree(tmp_path / "local")
         again = evaluate(
             experiment="league", environment=environment("duel"), play=play, matches=matches,

@@ -21,12 +21,12 @@ from etude.eval.records import (
     RoundRobin,
     TournamentRun,
 )
-from etude.eval.tournament import curves, hold, standings
+from etude.eval.tournament import curves, hold, played, standings
 from etude.run.errors import EtudeError
 from etude.run.records import ArtifactRef, Clock
 from etude.run.storage import DirectoryStorage
 from etude.train.run import track
-from tests.eval.games import play
+from tests.eval.games import play, play_failing_deal_one
 from tests.run.storage import MeasuredStorage
 
 WORLD = environment("duel", config={"world": "w6"})
@@ -497,3 +497,38 @@ def test_eval_runs_from_etude_sdk_0_2_load_and_are_never_counted_as_played(
         CheckpointRef(key=CheckpointKey(run="ppo-1", name="updates-100.pt"), artifact=file)
     )
     assert now.key != seated.key
+
+
+def test_played_says_who_delivered_each_match_last_what_failed_and_what_is_new(
+    tmp_path: Path,
+) -> None:
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    progress = anchors(tmp_path)
+    checkpoints = trained(tmp_path, bucket)
+    reader = tmp_path / "reader"
+    hold(progress, experiment=EXPERIMENT, checkpoint=checkpoints[0], play=play,
+         storages=[bucket], directory=tmp_path / "first")  # fmt: skip
+    first = played(progress, experiment=EXPERIMENT, checkpoints=checkpoints[:2],
+                   storages=[bucket], directory=reader)  # fmt: skip
+    # Each checkpoint calls for 3 + 2 + 1 matches; only the first's were held.
+    assert (len(first.delivered), len(first.failed), len(first.new)) == (6, 0, 6)
+    (held,) = {each.run for each in first.delivered}
+    # The same matches played again by another eval run: its rows are the latest.
+    evaluate(experiment=EXPERIMENT, environment=WORLD, play=play, run="replayed",
+             matches=[each.match for each in first.delivered], storages=[bucket],
+             directory=tmp_path / "replayed")  # fmt: skip
+    measured = MeasuredStorage(bucket)
+    again = played(progress, experiment=EXPERIMENT, checkpoints=checkpoints[:2],
+                   storages=[measured], directory=reader)  # fmt: skip
+    assert {each.run for each in again.delivered} == {"replayed"} and held != "replayed"
+    # One listing; each eval run's run.json, the tournament's tournament.json and the
+    # other's environment.json; and both records of each match delivered twice.
+    assert (measured.listings, measured.requests) == (1, 2 + 1 + 1 + 2 * 6)
+    # A match that fails is failed, not new, until something delivers it.
+    with pytest.raises(EtudeError, match="match_failed"):
+        hold(progress, experiment=EXPERIMENT, checkpoint=checkpoints[2], play=play_failing_deal_one,
+             storages=[bucket], directory=tmp_path / "third")  # fmt: skip
+    third = played(progress, experiment=EXPERIMENT, checkpoints=checkpoints[2:],
+                   storages=[bucket], directory=reader)  # fmt: skip
+    (failed,) = third.failed
+    assert failed.conditions == {"deal": 1} and not third.delivered
