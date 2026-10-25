@@ -6,7 +6,8 @@ on its own, and the launcher's courier (`etude.launch.worker.courier`) when it
 was launched, so the job's environment never holds bucket credentials. Both
 decide here which files are ready (`listing`), their order, the transfer's
 purpose, what a writer retired (`retired`), and which objects are never sent
-twice (`immutable`). Each carrier keeps its own change detection and storage
+twice (`immutable`): Etude's own blocks, tables and checkpoints, and any
+file an author writes under a run's `artifacts/` folder. Each carrier keeps its own change detection and storage
 I/O. A later attempt on a fresh machine restores the records and the one
 checkpoint file `resume_file` names, from storage or, between owned hosts
 without one, as the `restore_set` another host's folder gives (`put_back`);
@@ -50,11 +51,17 @@ def checkpoint_file(key: str) -> bool:
     )
 
 
+ARTIFACTS = "artifacts"
+
+
 def immutable(key: str) -> bool:
-    """Whether an object never changes once written: a metric block or tail, a table, a checkpoint.
+    """Whether an object never changes once written: a metric block or tail, a
+    table, a checkpoint, or an author's file under `artifacts/`.
 
     A carrier sends it once and never again, so nothing under `checkpoints/`
-    is replaced with different bytes. The key may sit under any folders.
+    is replaced with different bytes. An author writes each file under
+    `artifacts/`, at any depth, once; naming it by its content keeps that
+    true. The key may sit under any folders.
     """
     folder, _, name = key.rpartition("/")
     kind = folder.rpartition("/")[2]
@@ -62,6 +69,7 @@ def immutable(key: str) -> bool:
         (kind == "metrics" and name.endswith((".blk", ".tail")))
         or (kind == "tables" and name.endswith(".parquet"))
         or checkpoint_file(key)
+        or ARTIFACTS in PurePosixPath(folder).parts
     )
 
 

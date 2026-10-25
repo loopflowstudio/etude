@@ -8,7 +8,17 @@ from pathlib import Path
 
 import pytest
 
-from etude.carriage import Mismatch, put_back, recorded_file, restore_set, resume_file, taken
+from etude.carriage import (
+    Mismatch,
+    immutable,
+    put_back,
+    recorded_file,
+    restore_set,
+    resume_file,
+    taken,
+)
+from etude.run.delivery import sync
+from etude.run.storage import DirectoryStorage
 from etude.train.records import Step
 from etude.train.run import track
 
@@ -71,3 +81,25 @@ def test_one_recorded_file_travels_with_only_its_record(tmp_path: Path) -> None:
     files["checkpoints/steps-1.pt"] = b"something else"
     with pytest.raises(Mismatch, match="does not match"):
         put_back(tmp_path / "three/r", files)
+
+
+def test_an_author_s_artifacts_are_sent_once_and_never_read_again(tmp_path: Path) -> None:
+    assert immutable("artifacts/evidence/ab.json.gz")
+    assert immutable("r/artifacts/x")
+    assert not immutable("evidence/ab.json.gz")
+    run = track(
+        experiment="e", clocks=[Step("steps", "steps")], run="r", directory=tmp_path / "src"
+    )
+    run.finish()
+    folder = tmp_path / "src/r"
+    (folder / "artifacts/evidence").mkdir(parents=True)
+    (folder / "artifacts/evidence/ab.json.gz").write_bytes(b"first")
+    (folder / "notes.txt").write_text("first")
+    storage = DirectoryStorage(tmp_path / "dst")
+    assert sync(tmp_path / "src", storages=[storage]) == {}
+    # Changed bytes under artifacts/ are never read or sent again; other files are.
+    (folder / "artifacts/evidence/ab.json.gz").write_bytes(b"second")
+    (folder / "notes.txt").write_text("second")
+    assert sync(tmp_path / "src", storages=[storage]) == {}
+    assert storage.get("r/artifacts/evidence/ab.json.gz") == b"first"
+    assert storage.get("r/notes.txt") == b"second"
