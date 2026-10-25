@@ -1,39 +1,52 @@
-# v0.2.2
+# v0.2.3
 
 <!-- loopflow:release-notes=narrative;gate=safe -->
 
-Etude v0.2.2 has two changes:
-- A resumed run can say where it stands when that is not its latest checkpoint.
-- A running attempt's log is sent to storage once, as appended pieces, instead of being re-uploaded whole every 15 seconds.
+Etude v0.2.3 lets an evaluation follow a training run as it goes, without you keeping track of what has already been played. An experiment file's `eval(state)` picks checkpoints and matchups from what the training runs have stored. Each `etude eval` run plays, or launches, only the matches no eval run has delivered yet. Agents and checkpoints are now identified by key rather than by a digest of their bytes and code, so results still line up after an inference-code edit. Nothing breaks on upgrade from 0.2.2, and etude-sdk 0.2 eval results stay readable.
 
-Nothing breaks on upgrade from 0.2.1.
+## Evaluate from an experiment file
 
-## A resumed run can say where it stands
+Before this release, evaluating a run while it trained meant writing out each `hold` or `evaluation` call by hand and keeping track yourself of which checkpoints and pairs had been played. Now the file states the design and `etude eval` works out what is missing:
 
-Since 0.2.1, a resumed attempt's rows replace earlier attempts' rows from the run's latest checkpoint on. A process that restored its state from somewhere else had no way to say so, and the rows between the checkpoint and its real position were dropped or doubled. Examples are a snapshot of its own taken after that checkpoint, or a later stage that continues the same run. Such a process now passes its position:
-
-```python
-run = track(
-    experiment="e",
-    run="r",
-    clocks=[Step("step", "steps")],
-    resumed_at={"step": 13},
-)
+```
+etude eval ppo.py                  # play what is missing, here
+etude eval ppo.py --pool …         # or launch it on a pool
+etude eval ppo.py --rent …         # or on a rented machine
+etude eval ppo.py --watch 600      # repeat every 600 seconds
+etude eval ppo.py --retry-failed   # play failed matches again
 ```
 
-Keys must be declared clocks; anything else raises `resumed_at_unknown_clock`. Without `resumed_at`, the latest checkpoint is used as before. ([#40](https://github.com/loopflowstudio/etude/pull/40))
+- The experiment is named by the file's stem (`ppo.py` → `ppo`). Etude reads that experiment's training runs with their checkpoints, ordinals, clocks, tags and status, then calls `eval(state)` for the evaluation jobs.
+- Choose checkpoints with `every(n)`, `at(clock, …)`, `tagged(tag)` and `final`.
+- A `Matchup` with no model seat is played once, not once per checkpoint. Seat a chosen checkpoint with `Model(...).agent(ref)`. This lets "each checkpoint against the one before it" or "final against each earlier one" grow as new checkpoints arrive.
+- Matchups can carry `tags` (for example `consecutive` or `endpoint`), and `schedule` exposes them to readers.
+- If `eval` stops returning a matchup, it is no longer played. Its results are kept.
+- Each run reports its counts, for example `ladder: 0 new, 1 failed`. Failed matches are not replayed quietly; replay them with `--retry-failed`.
 
-## Attempt logs are sent once
+See the new **Experiments** section in `docs/evaluation.md`. ([#39](https://github.com/loopflowstudio/etude/pull/39))
 
-The courier used to re-upload an attempt's whole growing log to `attempts/ATTEMPT.log` every 15 seconds, so a 12-hour run uploaded its log hundreds of times.
+## Launches are not repeated
 
-- New output is sealed into immutable pieces at `attempts/ATTEMPT.log/OFFSET`, named by their first byte offset.
-- `AttemptRecord.log_ends` lists where each piece ends, and a reader fetches only the pieces the record names.
-- The first output goes out at once. After that, a piece waits about a twentieth of the attempt's age, between 15 seconds and 5 minutes.
-- A 12-hour run now makes about 200 log uploads instead of about 2,880.
+Running the file again is safe while training is still going, after it ends, and after you add a matchup. Only new matches cost time or money.
 
-Readers see the same log text as before. ([#38](https://github.com/loopflowstudio/etude/pull/38))
+- A launched batch is named after its matches and recorded in `ETUDE_HOME/experiments/launched.json`. A later run won't launch that batch again, and won't play its matches here while it is still running.
+- If a launched run failed, the next `etude eval` stops, so nothing is spent again while nobody is watching.
+
+## Results survive code changes
+
+- A `CheckpointKey` is a training run plus a file name, or an outside address. An `AgentKey` is that checkpoint, or a code agent's name, plus its config.
+- The code's commit and source digest are a `Version`. It is recorded with each match as `seats.commit` and `seats.source` but is not part of the key. If you change inference code, matches already played still count.
+- Two runs warm-started from the same file no longer look like the same agent.
+- `CheckpointRef` pairs a key with the artifact file to read. A checkpoint `Input` names its `run=`, so the machine knows the checkpoint's key.
+- `evaluation()` leaves `experiment=` to `etude eval` for jobs an experiment returns. A job you launch directly must name it.
+
+## Operational notes
+
+- **Upgrading from etude-sdk 0.2 eval runs.** Agents in these runs load with their old digest as `AgentKey.recorded`. That value never matches a new key, so the old results stay readable but never count as played, and `etude eval` plays those matches again under the new keys.
+- **Training code must track under the file's stem.** `etude launch` does not yet pass the file's name to its training runs. `ppo.py`'s training code must call `track(experiment="ppo")`, or `etude eval ppo.py` finds no runs.
+- **`launched.json` is local.** It is what stops repeat launches. Run `etude eval` for an experiment from the same `ETUDE_HOME` each time.
 
 ## Known limits
 
-- The session's `out/worker.log`, bounded at 1 MiB, is still re-uploaded whole every 15 seconds.
+- Replaying at a chosen commit is not built. Reads default to each match's latest record; `seats.commit` selects a version.
+- Outside checkpoints can be played here but cannot be launched.
