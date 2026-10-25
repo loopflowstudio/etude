@@ -1,25 +1,28 @@
 """One cache for the bytes Etude reads from storage, shared by every reader on this computer.
 
-Content is kept once by its SHA256 and length (`Content`), whoever asked for
-it: a table a report read and a checkpoint the launcher downloaded land in the
-same place, and either reuses the other's bytes. Content is verified before it
-is published and again before it is reused whole.
+Every read names an `Artifact`: where its bytes are kept (the object's unsigned
+URL) and, when recorded, their SHA256 and length. `Cache.read` answers with its
+bytes or a range of them and `Cache.place` puts them at a path; these are views
+of one acquisition, so a checkpoint a job fetched and the same object a report
+reads are read from storage once, in either order, by any process. Content is
+kept once by SHA256 and length (`Content`), verified before it is published and
+again before it is reused whole.
 
-`Cache.fetch` places named content at a destination, reading it a range at a
-time from a `Source`. An interrupted acquisition keeps its completed ranges,
-each with its own digest, and resumes from them only under the same ETag, so
-ranges never mix object versions. `Cache.read` answers by locator, where bytes
-were read from (an endpoint, bucket and key, or a range of one): an immutable
-object's locator answers without asking storage again, and a mutable one is
-asked for again only with the ETag its bytes came with. ETags establish
-freshness, never integrity.
+Each location notes the content it holds and the ETag that came with it. A
+recorded digest names bytes outright; without one, a location's held bytes are
+reused only when it is immutable, or when storage answers by ETag that it has
+not changed. That answer is a metadata check, never a payload transfer; a
+changed object is read again, and until it arrives the last verified copy
+stays. ETags establish freshness, never integrity. An interrupted acquisition
+keeps its completed ranges, each with its own digest, and resumes from them
+only under the same ETag, so ranges never mix object versions.
 
 Transports (`etude.run.storage.S3Storage`, `etude.launch.storage.download`)
-perform the I/O and keep nothing of their own. Beyond `max_bytes` the least
-recently used unpinned content goes first; eviction removes only this
-computer's copies. Local hashing and copying share the caller's deadline
-(`etude.deadline`) on the invoking thread, so no abandoned writer publishes
-after it expires.
+are `Source`s: they perform the I/O and keep nothing of their own. Beyond
+`max_bytes` the least recently used unpinned content goes first; eviction
+removes only this computer's copies. Local hashing and copying share the
+caller's deadline (`etude.deadline`) on the invoking thread, so no abandoned
+writer publishes after it expires.
 
 Under `root` (default `ETUDE_HOME/cache`):
 
@@ -28,7 +31,7 @@ Under `root` (default `ETUDE_HOME/cache`):
     SHA256-SIZE.lock      held by whoever reads, writes or evicts it
     SHA256-SIZE.pin       kept through eviction
     capacity.lock         held while room is made
-    locators/HASH.json    where content was read from, and its ETag
+    locators/HASH.json    which content a location holds, and its ETag
 """
 
 from __future__ import annotations
@@ -38,7 +41,7 @@ import hashlib
 import os
 import tempfile
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -86,19 +89,63 @@ class Fetched:
     etag: str | None
 
 
+class Artifact(_Record):
+    """Bytes at a stable location, with whatever is recorded about which bytes they are.
+
+    `location` is the object's unsigned URL, endpoint included
+    (`https://BUCKET.HOST/KEY`), the same whoever reads it: a signed link is
+    how bytes are reached, never which. A recorded SHA256 and length name the
+    bytes outright; without them the location's held bytes are reused only
+    when `immutable` says they cannot have changed, or storage says by ETag
+    that they have not.
+    """
+
+    location: str
+    sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    size_bytes: int | None = Field(default=None, ge=0)
+    immutable: bool = False
+
+    @property
+    def content(self) -> Content | None:
+        if self.sha256 is None or self.size_bytes is None:
+            return None
+        return Content(sha256=self.sha256, size_bytes=self.size_bytes)
+
+
 class Source(Protocol):
-    """Where one content's bytes are read from, a range at a time."""
+    """How one artifact's bytes are read from storage: a transport, keeping nothing."""
 
-    def read(self, start: int, end: int, etag: str | None) -> Fetched:
-        """Bytes `start` to `end` inclusive, of the version `etag` names when given.
+    def read(self, start: int, end: int | None, etag: str | None) -> Fetched:
+        """Bytes `start` to `end` inclusive, or to the end, of the version `etag` names when given.
 
-        Raises when it cannot: the acquisition keeps what it completed.
+        Raises when it cannot: an acquisition keeps what it completed.
         """
+        ...
+
+    def changed(self, etag: str) -> Fetched | None:
+        """The whole object unless `etag` names its current version; None is a check alone."""
         ...
 
     def reused(self, size_bytes: int, byte_range: str | None) -> None:
         """Note bytes answered from this computer rather than storage."""
         ...
+
+
+class _Part:
+    """One range of a source, read as an object of its own; a range never changes version."""
+
+    def __init__(self, source: Source, start: int, end: int) -> None:
+        self.source, self.start, self.end = source, start, end
+
+    def read(self, start: int, end: int | None, etag: str | None) -> Fetched:
+        last = self.end if end is None else self.start + end
+        return self.source.read(self.start + start, last, etag)
+
+    def changed(self, etag: str) -> Fetched | None:
+        raise AssertionError("a range is immutable and never asked whether it changed")
+
+    def reused(self, size_bytes: int, byte_range: str | None) -> None:
+        self.source.reused(size_bytes, f"bytes={self.start}-{self.end}")
 
 
 class _Range(_Record):
@@ -206,18 +253,49 @@ class Cache:
         self.root = root or Path(os.environ.get("ETUDE_HOME", "~/.etude")).expanduser() / "cache"
         self.max_bytes, self.range_bytes = max_bytes, range_bytes
 
-    def fetch(
-        self, content: Content, destination: Path, source: Source, *, pin: bool = False
+    def read(
+        self, artifact: Artifact, source: Source, *, start: int = 0, length: int | None = None
+    ) -> bytes:
+        """The artifact's bytes, or `length` of them from `start`, asking storage only as needed.
+
+        Held bytes of a named or immutable artifact answer without asking; a
+        mutable one is asked for again with the ETag its held bytes came with.
+        A range is read from held bytes when the whole is held, and is
+        otherwise fetched, and kept, alone.
+        """
+        if length is not None:
+            return self._read_range(artifact, source, start, length)
+        if start:
+            raise ValueError("a read from an offset names its length")
+        content = artifact.content
+        if content is None:
+            return self._read_located(artifact, source)
+        held = self._load(content)
+        if held is not None:
+            source.reused(content.size_bytes, None)
+            self._locate(artifact.location, content, None)
+            return held
+        with tempfile.TemporaryDirectory(dir=self._made()) as scratch:
+            return self.place(artifact, Path(scratch) / content.name, source).read_bytes()
+
+    def place(
+        self, artifact: Artifact, destination: Path, source: Source, *, pin: bool = False
     ) -> Path:
-        """Place verified content at `destination`, reading only what is not held here.
+        """Put the artifact's verified bytes at `destination`, reading only what is not held.
 
         Content larger than the whole allowance is staged beside the destination
         instead, and is not read again when the destination already holds it.
         Raises `Corrupt` or `Mismatch` and leaves `destination` as it was.
         """
-        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        content = artifact.content
+        if content is None:
+            body = self.read(artifact, source)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            _replace(destination, body)
+            self._pin(Content.of(body), pin)
+            return destination
         key = content.name
-        with _lock(self.root / f"{key}.lock"):
+        with _lock(self._made() / f"{key}.lock"):
             target = self.root / key
             if target.exists():
                 if not _verify(target, content):
@@ -227,6 +305,7 @@ class Cache:
                 target.touch()
                 source.reused(content.size_bytes, None)
                 self._pin(content, pin)
+                self._locate(artifact.location, content, None)
                 return _publish(target, destination)
             destination.parent.mkdir(parents=True, exist_ok=True)
             cacheable = content.size_bytes <= self.max_bytes and self._make_room(
@@ -242,7 +321,7 @@ class Cache:
                 if cacheable
                 else destination.parent / f".{key}.partial"
             )
-            self._acquire(content, partial, source)
+            etag = self._acquire(content, partial, source)
             if not _verify(partial, content):
                 with _lock(self.root / "capacity.lock"):
                     _discard(partial)
@@ -250,6 +329,7 @@ class Cache:
             if cacheable:
                 _admit(partial, target)
                 self._pin(content, pin)
+                self._locate(artifact.location, content, etag)
                 return _publish(target, destination)
             # Staging is already beside the destination, on the same filesystem.
             partial.chmod(0o600)
@@ -258,43 +338,47 @@ class Cache:
             _discard(partial)
             return destination
 
-    def read(
-        self, locator: str, get: Callable[[str | None], Fetched | None], *, immutable: bool
-    ) -> bytes:
-        """An object's bytes by where they are read from, asking storage only when needed.
-
-        `get(etag)` reads the object, or returns None when `etag` names its
-        current version. Held bytes of an immutable object are returned without
-        asking; a mutable object is asked for with the ETag of the bytes held.
-        """
-        located = self._located(locator)
+    def _read_located(self, artifact: Artifact, source: Source) -> bytes:
+        """Bytes whose digest is not recorded: the location says which bytes are held."""
+        located = self._located(artifact.location)
         held = None if located is None else self._load(located.content)
-        if held is not None and immutable:
+        if held is not None and artifact.immutable:
+            source.reused(len(held), None)
             return held
-        fetched = get(None if held is None or located is None else located.etag)
-        if fetched is None:
-            if held is None:
-                raise ValueError("storage answered 'not modified' to an unconditional read")
-            return held
+        if held is not None and located is not None and located.etag is not None:
+            fetched = source.changed(located.etag)
+            if fetched is None:
+                source.reused(len(held), None)
+                return held
+        else:
+            fetched = source.read(0, None, None)
         content = Content.of(fetched.body)
         if self._keep(content, fetched.body):
-            self.root.joinpath("locators").mkdir(exist_ok=True)
-            _replace(
-                self._locator(locator),
-                _Located(content=content, etag=fetched.etag).model_dump_json().encode(),
-            )
+            self._locate(artifact.location, content, fetched.etag)
         return fetched.body
 
-    def read_range(self, locator: str, start: int, length: int) -> bytes | None:
-        """A range of an object held whole here, or None when it is not.
+    def _read_range(self, artifact: Artifact, source: Source, start: int, length: int) -> bytes:
+        if length == 0:
+            return b""
+        end = start + length - 1
+        if artifact.content is None and not artifact.immutable:
+            # A mutable object's range cannot be checked against what is held.
+            return source.read(start, end, None).body
+        located = self._located(artifact.location)
+        content = artifact.content or (None if located is None else located.content)
+        held = None if content is None else self._slice(content, start, length)
+        if held is not None:
+            source.reused(length, f"bytes={start}-{end}")
+            return held
+        part = Artifact(location=f"{artifact.location}\0bytes={start}-{end}", immutable=True)
+        return self._read_located(part, _Part(source, start, end))
 
-        Read from disk without the rest; the whole was verified when kept.
-        """
-        located = self._located(locator)
-        if located is None or start + length > located.content.size_bytes:
+    def _slice(self, content: Content, start: int, length: int) -> bytes | None:
+        """A range of content held whole, read without the rest; the whole was verified when kept."""
+        if start + length > content.size_bytes:
             return None
         try:
-            with (self.root / located.content.name).open("rb") as stream:
+            with (self.root / content.name).open("rb") as stream:
                 stream.seek(start)
                 body = stream.read(length)
         except FileNotFoundError:
@@ -309,14 +393,28 @@ class Cache:
         if pin:
             (self.root / f"{content.name}.pin").touch()
 
-    def _locator(self, locator: str) -> Path:
-        return self.root / "locators" / f"{hashlib.sha256(locator.encode()).hexdigest()}.json"
+    def _made(self) -> Path:
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        return self.root
 
-    def _located(self, locator: str) -> _Located | None:
+    def _locator(self, location: str) -> Path:
+        return self.root / "locators" / f"{hashlib.sha256(location.encode()).hexdigest()}.json"
+
+    def _located(self, location: str) -> _Located | None:
         try:
-            return _Located.model_validate_json(self._locator(locator).read_bytes())
+            return _Located.model_validate_json(self._locator(location).read_bytes())
         except FileNotFoundError:
             return None
+
+    def _locate(self, location: str, content: Content, etag: str | None) -> None:
+        """Note which held bytes a location holds; an unknown ETag keeps a known one of the same bytes."""
+        located = self._located(location)
+        if located is not None and located.content == content and etag is None:
+            return
+        self.root.joinpath("locators").mkdir(exist_ok=True)
+        _replace(
+            self._locator(location), _Located(content=content, etag=etag).model_dump_json().encode()
+        )
 
     def _load(self, content: Content) -> bytes | None:
         """Held content, verified; None when absent, and discarded when corrupt."""
@@ -336,9 +434,8 @@ class Cache:
         """Hold bytes already read in full; False when they do not fit."""
         if content.size_bytes > self.max_bytes:
             return False
-        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         key = content.name
-        with _lock(self.root / f"{key}.lock"):
+        with _lock(self._made() / f"{key}.lock"):
             target = self.root / key
             if target.exists():
                 target.touch()
@@ -398,7 +495,8 @@ class Cache:
             if not (self.root / located.content.name).exists():
                 path.unlink(missing_ok=True)
 
-    def _acquire(self, content: Content, path: Path, source: Source) -> None:
+    def _acquire(self, content: Content, path: Path, source: Source) -> str | None:
+        """Read what the partial lacks, a range at a time; the version's ETag, if any."""
         note = path.with_suffix(".json")
         state = _Partial.model_validate_json(note.read_bytes()) if note.exists() else _Partial()
         offset = 0
@@ -438,3 +536,4 @@ class Cache:
                 )
                 _replace(note, state.model_dump_json().encode())
                 offset = end + 1
+        return state.etag

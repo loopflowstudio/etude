@@ -1,23 +1,33 @@
 """Verified immutable downloads over presigned HTTP links, kept in Etude's one cache.
 
-The SHA256 and length identify transport bytes; `etude.cache.Cache` holds,
-verifies, resumes and publishes them. This module only reads ranges over HTTP,
-validates each reply, retries transient failures within one allowance, and
-observes transfers, reuse included.
+A link names the artifact it reads: its URL without the signature is the
+object's location, the same one a bucket reader names, so `etude.cache.Cache`
+reuses bytes either side read first. The SHA256 and length identify the bytes;
+the cache holds, verifies, resumes and publishes them. This module only reads
+over HTTP, validates each reply, retries transient failures within one
+allowance, and observes transfers, reuse included.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from pydantic import Field
 
-from etude.cache import Cache, Content, Corrupt, Fetched
+from etude.cache import Artifact, Cache, Corrupt, Fetched
 from etude.cache import Mismatch as ContentMismatch
 from etude.deadline import limit_time, remaining
 from etude.launch.records import Record
-from etude.launch.storage.s3 import TRANSIENT_STATUSES, Denied, Send, StorageUnavailable, _send
+from etude.launch.storage.s3 import (
+    TRANSIENT_STATUSES,
+    Denied,
+    Reply,
+    Send,
+    StorageUnavailable,
+    _send,
+)
 from etude.launch.storage.transport import attribute, emit
 
 
@@ -32,16 +42,40 @@ class Mismatch(StorageUnavailable):
 
 
 class _Link:
-    """One presigned link read a range at a time; `retries` is shared by every range."""
+    """One presigned link; `retries` is shared by every request through it."""
 
     def __init__(self, source: Download, retries: int, send: Send) -> None:
         self.source, self.retries, self.send = source, retries, send
 
-    def read(self, start: int, end: int, etag: str | None) -> Fetched:
+    def read(self, start: int, end: int | None, etag: str | None) -> Fetched:
         size = self.source.size_bytes
+        end = size - 1 if end is None else end
         headers = {"Range": f"bytes={start}-{end}"}
         if etag is not None:
             headers["If-Match"] = etag
+        reply = self._get(headers)
+        found = reply.headers.get("etag")
+        if (
+            reply.status != 206
+            or reply.headers.get("content-range") != f"bytes {start}-{end}/{size}"
+            or len(reply.body) != end - start + 1
+            or reply.headers.get("content-length") != str(end - start + 1)
+            or not found
+            or found.startswith("W/")
+            or (etag is not None and etag != found)
+        ):
+            raise StorageUnavailable(f"invalid download range or identity (status {reply.status})")
+        return Fetched(body=reply.body, etag=found)
+
+    def changed(self, etag: str) -> Fetched | None:
+        reply = self._get({"If-None-Match": etag})
+        if reply.status == 304:
+            return None
+        if reply.status != 200:
+            raise StorageUnavailable(f"download failed (status {reply.status})")
+        return Fetched(body=reply.body, etag=reply.headers.get("etag"))
+
+    def _get(self, headers: dict[str, str]) -> Reply:
         while True:
             remaining()
             failure = "transport interrupted"
@@ -61,18 +95,7 @@ class _Link:
                 self.retries -= 1
         if reply.status == 403:
             raise Denied("download refused (status 403)")
-        found = reply.headers.get("etag")
-        if (
-            reply.status != 206
-            or reply.headers.get("content-range") != f"bytes {start}-{end}/{size}"
-            or len(reply.body) != end - start + 1
-            or reply.headers.get("content-length") != str(end - start + 1)
-            or not found
-            or found.startswith("W/")
-            or (etag is not None and etag != found)
-        ):
-            raise StorageUnavailable(f"invalid download range or identity (status {reply.status})")
-        return Fetched(body=reply.body, etag=found)
+        return reply
 
     def reused(self, size_bytes: int, byte_range: str | None) -> None:
         emit("REUSE", self.source.url, reused=size_bytes, byte_range=byte_range, completed=True)
@@ -94,13 +117,15 @@ def download(
     """
     if retries < 0:
         raise ValueError("retry allowance must be nonnegative")
-    content = Content(sha256=source.sha256, size_bytes=source.size_bytes)
+    # The signature is how this machine may read the object, not which object it is.
+    location = urlsplit(source.url)._replace(query="", fragment="").geturl()
+    artifact = Artifact(location=location, sha256=source.sha256, size_bytes=source.size_bytes)
     with (
         limit_time(timeout),
         attribute(transfer=uuid4().hex, sha256=source.sha256, size_bytes=str(source.size_bytes)),
     ):
         try:
-            return (cache or Cache()).fetch(content, destination, _Link(source, retries, send))
+            return (cache or Cache()).place(artifact, destination, _Link(source, retries, send))
         except ContentMismatch as error:
             raise Mismatch(str(error)) from None
         except Corrupt as error:

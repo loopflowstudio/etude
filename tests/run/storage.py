@@ -65,9 +65,11 @@ class CountedClient:
     def __init__(self, client: Any) -> None:
         self.client = client
         self.bytes = 0
+        self.requests = 0  # reads asked for, a check that sent no body included
         self.read: dict[str, int] = {}  # body bytes sent, by key
 
     def get_object(self, **fields: Any) -> Any:
+        self.requests += 1
         reply = self.client.get_object(**fields)
         body = reply["Body"].read()
         self.bytes += len(body)

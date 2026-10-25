@@ -18,13 +18,14 @@ from email import policy
 from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
 import pytest
 from moto import mock_aws
 
 from etude import cache as engine
-from etude.cache import Cache, Content, Fetched
+from etude.cache import Artifact, Cache, Content, Fetched
 from etude.deadline import limit_time, remaining
 from etude.launch.database import Database
 from etude.launch.logging import log_to
@@ -277,7 +278,9 @@ def test_bounded_cache_and_oversized_download(http: HTTP, tmp_path: Path) -> Non
     download(http.source(), tmp_path / "a", cache=cache)
     http.objects["/other"] = b"mnopqrstuvwx"
     download(http.source("/other"), tmp_path / "b", cache=cache)
-    payloads = [p for p in cache.root.iterdir() if p.suffix not in {".lock", ".json"}]
+    payloads = [
+        p for p in cache.root.iterdir() if p.is_file() and p.suffix not in {".lock", ".json"}
+    ]
     assert sum(p.stat().st_size for p in payloads) <= 12
     http.objects["/large"] = b"z" * 25
     destination = tmp_path / "large"
@@ -773,22 +776,103 @@ def test_active_cache_capacity_streams_another_digest_without_overfilling(
     assert active.read_bytes() == b"reservedsize"
 
 
-def test_a_report_read_and_a_launcher_download_share_one_fetch(http: HTTP, tmp_path: Path) -> None:
+class _Bucket:
+    """Presigned reads served by a moto bucket, so a job's fetch and a report's read
+    reach the same object, counted by one client. Links are the launcher's own."""
+
+    def __init__(self, client: CountedClient) -> None:
+        self.client = client
+        self.bucket = Bucket("lab", "us-west-2", Keys(access_key="a", secret_key="s"))
+
+    def link(self, key: str) -> Download:
+        body = self.client.client.get_object(Bucket="lab", Key=key)["Body"].read()
+        return Download(
+            url=self.bucket.get_url(key, 60),
+            sha256=hashlib.sha256(body).hexdigest(),
+            size_bytes=len(body),
+        )
+
+    def send(self, method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Reply:
+        options = {}
+        if "Range" in headers:
+            options["Range"] = headers["Range"]
+        if "If-Match" in headers:
+            options["IfMatch"] = headers["If-Match"]
+        reply = self.client.get_object(Bucket="lab", Key=urlsplit(url).path[1:], **options)
+        data = reply["Body"].read()
+        fields = {"etag": reply["ETag"], "content-length": str(len(data))}
+        if "ContentRange" in reply:
+            fields["content-range"] = reply["ContentRange"]
+        return Reply(status=206 if "Range" in options else 200, body=data, headers=fields)
+
+
+@pytest.mark.parametrize("key", ["run/checkpoints/model.pt", "run/attempts/a1/model.pt"])
+@pytest.mark.parametrize("job_first", [True, False])
+def test_a_job_fetch_and_a_report_read_download_once_in_either_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key: str, job_first: bool
+) -> None:
     boto3 = pytest.importorskip("boto3")
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
     with mock_aws():
-        client = CountedClient(boto3.client("s3", region_name="us-east-1"))
+        client = CountedClient(boto3.client("s3", region_name="us-west-2"))
+        client.create_bucket(
+            Bucket="lab", CreateBucketConfiguration={"LocationConstraint": "us-west-2"}
+        )
+        client.put_object(Bucket="lab", Key=key, Body=b"abcdefghijkl")
+        bucket = _Bucket(client)
+
+        # Each reader opens this computer's cache afresh, as separate processes do.
+        def job() -> bytes:
+            return download(
+                bucket.link(key), tmp_path / "job" / "model.pt", send=bucket.send
+            ).read_bytes()
+
+        def report() -> bytes:
+            return S3Storage("lab", client=client).get(key)
+
+        first, second = (job, report) if job_first else (report, job)
+        assert first() == second() == b"abcdefghijkl"
+        # One payload; a mutable object read second by a report is only checked.
+        checked = job_first and "checkpoints" not in key
+        assert (client.bytes, client.requests) == (12, 2 if checked else 1)
+
+        client.put_object(Bucket="lab", Key=key.replace("model", "other"), Body=b"mnopqrstuvwx")
+        if "checkpoints" not in key:
+            # A changed object is read again, by either reader, once.
+            client.put_object(Bucket="lab", Key=key, Body=b"mnopqrstuvwx")
+            assert report() == job() == b"mnopqrstuvwx"
+            assert client.bytes == 24
+
+
+def test_a_failed_refresh_keeps_the_verified_copy_and_recovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    boto3 = pytest.importorskip("boto3")
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+
+    class Flaky(CountedClient):
+        failures = 0
+
+        def get_object(self, **fields: Any) -> Any:
+            if self.failures:
+                self.failures -= 1
+                raise ConnectionError("interrupted")
+            return super().get_object(**fields)
+
+    with mock_aws():
+        client = Flaky(boto3.client("s3", region_name="us-east-1"))
         client.create_bucket(Bucket="lab")
         storage = S3Storage("lab", client=client)
-        storage.put("run/artifacts/payload", b"abcdefghijkl")
-        assert storage.get("run/artifacts/payload") == b"abcdefghijkl"
-        events: list[Transfer] = []
-        with observe(lambda raw: events.append(Transfer.model_validate_json(raw))):
-            fetched = download(http.source(), tmp_path / "weights")
-        # And a report reading it again asks the bucket for nothing.
-        assert S3Storage("lab", client=client).get("run/artifacts/payload") == b"abcdefghijkl"
-    assert fetched.read_bytes() == b"abcdefghijkl"
-    assert (client.bytes, http.requests) == (12, 0)
-    assert [(e.operation, e.reused_bytes) for e in events] == [("REUSE", 12)]
+        storage.put("run/manifest.json", b"first")
+        assert storage.get("run/manifest.json") == b"first"
+        storage.put("run/manifest.json", b"second")
+        client.failures = 1
+        with limit_time(30):
+            with pytest.raises(ConnectionError):
+                storage.get("run/manifest.json")
+            assert (storage.cache.root / Content.of(b"first").name).read_bytes() == b"first"
+            assert storage.get("run/manifest.json") == b"second"
+    assert client.bytes == 5 + 6
 
 
 def test_changed_and_corrupt_bucket_objects_are_read_again(tmp_path: Path) -> None:
@@ -813,9 +897,17 @@ class _Held:
 
     def __init__(self, body: bytes) -> None:
         self.body = body
+        self.artifact = Artifact(
+            location=f"https://lab.example/{Content.of(body).name}",
+            sha256=hashlib.sha256(body).hexdigest(),
+            size_bytes=len(body),
+        )
 
-    def read(self, start: int, end: int, etag: str | None) -> Fetched:
-        return Fetched(body=self.body[start : end + 1], etag='"held"')
+    def read(self, start: int, end: int | None, etag: str | None) -> Fetched:
+        return Fetched(body=self.body[start : None if end is None else end + 1], etag='"held"')
+
+    def changed(self, etag: str) -> Fetched | None:
+        return None
 
     def reused(self, size_bytes: int, byte_range: str | None) -> None:
         pass
@@ -825,12 +917,12 @@ def test_pinned_content_survives_eviction_until_unpinned(tmp_path: Path) -> None
     cache = Cache(tmp_path / "cache", max_bytes=12)
     first, second = b"abcdefghijkl", b"mnopqrstuvwx"
     kept = Content.of(first)
-    cache.fetch(kept, tmp_path / "first", _Held(first), pin=True)
-    cache.fetch(Content.of(second), tmp_path / "second", _Held(second))
+    cache.place(_Held(first).artifact, tmp_path / "first", _Held(first), pin=True)
+    cache.place(_Held(second).artifact, tmp_path / "second", _Held(second))
     assert (cache.root / kept.name).read_bytes() == first
     assert not (cache.root / Content.of(second).name).exists()  # streamed, not kept
     cache.unpin(kept)
-    cache.fetch(Content.of(second), tmp_path / "second", _Held(second))
+    cache.place(_Held(second).artifact, tmp_path / "second", _Held(second))
     assert not (cache.root / kept.name).exists()
     assert (cache.root / Content.of(second).name).read_bytes() == second
     assert (tmp_path / "first").read_bytes() == first  # eviction removes only cached copies
