@@ -28,7 +28,17 @@ from etude.launch.logging import log_to
 from etude.launch.providers.runpod import pod
 from etude.launch.records import Job, Output, Storage
 from etude.launch.scheduler import Scheduler
-from etude.launch.schemas import AttemptRecord, Delivery, Inbox, Progress, Result, log_piece
+from etude.launch.schemas import (
+    WORKER_LOG,
+    AttemptRecord,
+    Delivery,
+    Inbox,
+    Progress,
+    Result,
+    WorkerLog,
+    attempt_log,
+    log_piece,
+)
 from etude.launch.storage import download
 from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.download import Cache, Download
@@ -819,12 +829,16 @@ def test_polling_a_session_reads_each_version_of_its_files_once(http: HTTP, tmp_
     http.objects[session + "packet.json"] = packet.model_dump_json().encode()
     http.objects[session + "inbox.json"] = Inbox().model_dump_json().encode()
     http.objects[session + "out/receipt"] = b"1234"
-    http.objects[session + "out/worker.log"] = b"worker log line\n" * 100
+    lines = b"worker log line\n" * 100
+    http.objects[session + "out/" + log_piece(WORKER_LOG, 0)] = lines
+    http.objects[session + "out/worker-log.json"] = (
+        WorkerLog(ends=(len(lines),)).model_dump_json().encode()
+    )
     http.objects[session + "out/usage.jsonl"] = b""
     record = f"/p/{run}/attempts/{attempt.id}.json"
     started = AttemptRecord(started_at=datetime.now(UTC))
     first = b"step 1\n" * 1000
-    http.objects[f"/p/{run}/" + log_piece(attempt.id, 0)] = first
+    http.objects[f"/p/{run}/" + log_piece(attempt_log(attempt.id), 0)] = first
     http.objects[record] = (
         started.model_copy(update={"log_ends": (len(first),)}).model_dump_json().encode()
     )
@@ -843,13 +857,19 @@ def test_polling_a_session_reads_each_version_of_its_files_once(http: HTTP, tmp_
     poll()
     assert http.received == written  # ten polls read each file once
     second = b"step 2\n" * 1000
-    http.objects[f"/p/{run}/" + log_piece(attempt.id, len(first))] = second
+    http.objects[f"/p/{run}/" + log_piece(attempt_log(attempt.id), len(first))] = second
     http.objects[record] = (
         started.model_copy(update={"log_ends": (len(first), len(first) + len(second))})
         .model_dump_json()
         .encode()
     )
+    more = b"worker log line\n" * 10
+    http.objects[session + "out/" + log_piece(WORKER_LOG, len(lines))] = more
+    worker_record = WorkerLog(ends=(len(lines), len(lines) + len(more))).model_dump_json()
+    http.objects[session + "out/worker-log.json"] = worker_record.encode()
     poll()
-    # Only the new record and the new piece; the first piece is never read again.
-    assert http.received == written + len(http.objects[record]) + len(second)
+    # Only the new records and the new pieces; the first pieces are never read again.
+    added = len(http.objects[record]) + len(second) + len(worker_record) + len(more)
+    assert http.received == written + added
     assert journal.logs(attempt.session, attempt.id).text == (first + second).decode()
+    assert journal.logs(attempt.session, producer="worker").text == (lines + more).decode()

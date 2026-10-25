@@ -372,7 +372,10 @@ Every rented machine takes waiting runs that fit its remaining time. The
 controller delivers each next run; keep its loop running to drain the queue.
 There is no run-count packing setting. A machine rented for queued work ends when no
 waiting run fits; a manually rented one waits until its deadline or termination. Terminate refuses
-while it still has unfinished work.
+while it still has unfinished work. Ending a machine rented for queued work is asked of it
+through its inbox: its worker delivers its last files, the tail of its log and its end
+receipt, then deletes the machine, and the launcher confirms the deletion once the receipt
+arrives, or at the rental's deadline.
 
 The launcher needs `RUNPOD_API_KEY`, `AWS_ACCESS_KEY_ID` and
 `AWS_SECRET_ACCESS_KEY` from the configured secret manager. No secrets enter
@@ -446,9 +449,11 @@ marked. Worker observations retain producer timestamps separately from controlle
 observation times; clocks on different machines do not establish a total order.
 
 Bootstrap uses a write-only capability for one log object, independent of reading
-the bootstrap packet or installing dependencies. Each startup producer publishes
+the bootstrap packet or installing dependencies. The bootstrap publishes it
 at most once every 15 seconds and once at closure, under `log_seconds` on its pool or on-demand
-(default `None`) and the remaining rental allowance. The guardian starts first and remains independent of publication.
+(default `None`) and the remaining rental allowance. The worker's own log goes,
+once it has read its bootstrap, to its session's `out/` in appended pieces like a
+job's, below; a worker that never read it sends its log whole, once, at exit. The guardian starts first and remains independent of publication.
 A storage outage or death before bootstrap runs can leave an explicit evidence
 gap. Reading logs never needs a live machine after its bucket evidence was
 published or its output cached by the controller.
@@ -783,6 +788,9 @@ PREFIX/RUN/                      everything about one run
   run.json  state.json  metrics/ the run's tracked files, as they are,
   checkpoints/                     every checkpoint tracking recorded among them
 PREFIX/sessions/SESSION/         one machine's instructions, inbox and notes
+  out/worker.log/OFFSET          the worker's own log, in pieces named by first byte
+  out/worker-log.json            where its pieces end
+  out/ended                      the end receipt, sent after everything else
 PREFIX/sources/SHA256.tar        a commit's source archive, named by its digest
 ```
 

@@ -101,6 +101,14 @@ class Execution(Protocol):
         """End the session and return when it ended, or None if that is not confirmed."""
         ...
 
+    def finish(self, session_id: str) -> datetime | None:
+        """Tell a kept session no more work will come, and return when it ended, if it has.
+
+        It ends once its work is done, after delivering its final files and
+        its end receipt; a rented machine then deletes itself. Safe to repeat.
+        """
+        ...
+
     def logs(
         self, session_id: str, attempt: str | None = None, *, producer: str = "job"
     ) -> LogStream: ...
@@ -127,6 +135,7 @@ class Journal(Protocol):
         self, packet: Packet, *, expires_at: datetime | None = None
     ) -> BootstrapLinks | None: ...
     def end(self, session_id: str) -> datetime | None: ...
+    def finish(self, session_id: str) -> datetime | None: ...
 
 
 class Starter(Protocol):
@@ -209,6 +218,9 @@ class Executor:
         note = self.journal.ended(session_id)
         gone = self.machines.end(session_id)
         return (note or gone) if gone is not None else None
+
+    def finish(self, session_id: str) -> datetime | None:
+        return self.journal.finish(session_id)
 
     def add(self, session_id: str, work: Work) -> None:
         self.journal.add(session_id, work)

@@ -160,6 +160,14 @@ class FakeService:
             held.killed_at = self.clock()
         return self._ended_at(held)
 
+    def finish(self, session_id: str) -> datetime | None:
+        # Its work is done, so it ends now, having delivered everything.
+        self._call("bucket")
+        held = self.sessions[session_id]
+        if self._alive(held):
+            held.killed_at = self.clock()
+        return self._ended_at(held)
+
     def kill(self, session_id: str) -> None:
         self.sessions[session_id].killed_at = self.clock()
 

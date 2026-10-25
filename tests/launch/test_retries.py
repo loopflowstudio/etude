@@ -114,7 +114,7 @@ def test_bootstrap_retries_cannot_renew_startup_allowance(
     monkeypatch.setenv("ETUDE_STARTUP_DEADLINE", (start + timedelta(seconds=0.2)).isoformat())
     monkeypatch.delenv("ETUDE_DEADLINE", raising=False)
     with log_to(tmp_path / "log"), pytest.raises(StorageUnavailable, match="deadline"):
-        _run("https://storage.invalid/bootstrap", tmp_path, send, sleep, 0.1)
+        _run("https://storage.invalid/bootstrap", tmp_path, send, sleep, 0.1, tmp_path / "log", "")
     assert len(requests) == 2 and max(requests) <= 0.2
     assert not list(tmp_path.glob("*/receipt"))
 
@@ -123,7 +123,15 @@ def test_bootstrap_retries_cannot_renew_startup_allowance(
 def test_bootstrap_does_not_add_an_outer_retry_loop(tmp_path: Path, status: int) -> None:
     transport = Transport([(status, b"")] * 3)
     with log_to(tmp_path / "log"), pytest.raises(StorageUnavailable, match=str(status)):
-        _run("https://storage.invalid/bootstrap", tmp_path, transport, lambda seconds: None, 0.1)
+        _run(
+            "https://storage.invalid/bootstrap",
+            tmp_path,
+            transport,
+            lambda seconds: None,
+            0.1,
+            tmp_path / "log",
+            "",
+        )
     assert transport.requests == (1 if status == 403 else 3)
 
 
