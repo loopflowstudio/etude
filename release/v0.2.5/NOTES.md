@@ -12,6 +12,7 @@ An experiment file already holds `train()` and `eval(state)`. It can now also ho
 # ppo.py: experiment "ppo"
 from etude.report import Anchors, Curve, HeadToHead, Matches, Matrix, Ranking, Report, Score
 
+
 def report() -> Report:
     return Report(
         score=Score(table="plays", value="won", reference=0.5),

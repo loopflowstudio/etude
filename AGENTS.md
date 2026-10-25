@@ -117,7 +117,8 @@ An explicit empty worker cleanup command leaves deletion to its parent; omitted
 cleanup selects the provider's command.
 
 Check before pushing: `uv run pytest`, `uv run mypy`, `uv run ruff check .` and
-`uv run ruff format --check .`. CI runs the tests with the outside network
+`uv run ruff format --check .`. The formatter also checks Python code blocks in
+Markdown, including release notes. CI runs the tests with the outside network
 denied (`scripts/test_network.py`).
 
 ## Code style
