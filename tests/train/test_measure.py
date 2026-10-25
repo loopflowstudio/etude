@@ -16,6 +16,7 @@ import numpy as np
 import pytest
 from moto import mock_aws
 
+from etude.page import build
 from etude.run.block_file import block_key
 from etude.run.records import RunDeclaration, RunFile, SourceKey
 from etude.run.storage import DirectoryStorage, S3Storage, Storage, run_prefix
@@ -23,8 +24,8 @@ from etude.train.block import Series, Table, encode
 from etude.train.manifest import write_manifest
 from etude.train.read import buckets, read
 from etude.train.records import Step, Time
-from etude.train.report import pages
 from etude.train.run import track
+from tests.experiments import experiment_file
 from tests.run.storage import MeasuredStorage
 
 pytestmark = pytest.mark.skipif(
@@ -82,7 +83,7 @@ def test_chart_read_time(tmp_path: Path) -> None:
     whole = buckets(data.points("rl/metric_3", "updates"))
     charted = time.perf_counter() - started
     started = time.perf_counter()
-    pages(tmp_path, "measure")
+    build(tmp_path, experiment_file(tmp_path / "experiments", "measure"))
     reported = time.perf_counter() - started
     print(
         f"\n{data.rows:,} rows of {METRICS} metrics ({size / 1e6:.0f} MB), "
@@ -166,7 +167,7 @@ def test_store_measurement(tmp_path: Path, rows: int, backend: str) -> None:
         )
         before_bytes, before_requests = measured.bytes, measured.requests
         started = time.perf_counter()
-        report = pages(measured, "measure")
+        report = build(measured, experiment_file(tmp_path / "experiments", "measure"))
         reported = time.perf_counter() - started
         report_bytes, report_requests = (
             measured.bytes - before_bytes,
@@ -193,4 +194,4 @@ def test_store_measurement(tmp_path: Path, rows: int, backend: str) -> None:
         assert int(zoom.count.sum()) == rows // 10 + 1
         assert zoom.x_first[0] == zoom_span[0] and zoom.x_last[-1] == zoom_span[1]
         assert zoom_bytes < rows * 16 / 4
-        assert report["measure"]["runs"][0]["rows"] == rows  # type: ignore[index]  # Report's JSON-facing boundary.
+        assert report.training.runs[0].rows == rows

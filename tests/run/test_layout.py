@@ -1,8 +1,8 @@
 """What every run shares never depends on one kind of run, and no run depends on the launcher.
 
 Eval runs depend on neither training nor the launcher, and only the top-level
-command, typed jobs (`etude.jobs`) and experiments (`etude.experiment`) compose
-them with the rest. The eval run knows nothing of the
+command, typed jobs (`etude.jobs`), experiments (`etude.experiment`) and the
+report page (`etude.page`) compose them with the rest. The eval run knows nothing of the
 tournaments arranged on top of it.
 """
 
@@ -45,7 +45,12 @@ def test_shared_run_code_imports_no_kind_of_run_and_training_imports_no_evaluati
 
 
 def test_only_the_top_level_command_and_typed_jobs_import_evaluation() -> None:
-    composers = {SOURCE / "etude/cli.py", SOURCE / "etude/jobs.py", SOURCE / "etude/experiment.py"}
+    composers = {
+        SOURCE / "etude/cli.py",
+        SOURCE / "etude/jobs.py",
+        SOURCE / "etude/experiment.py",
+        SOURCE / "etude/page.py",
+    }
     for path, names in _imports("etude").items():
         if not path.is_relative_to(SOURCE / "etude/eval") and path not in composers:
             assert not [n for n in names if _within(n, "etude.eval")], path
@@ -54,7 +59,7 @@ def test_only_the_top_level_command_and_typed_jobs_import_evaluation() -> None:
 def test_the_eval_run_imports_nothing_arranged_on_top_of_it() -> None:
     path = SOURCE / "etude/eval/match.py"
     names = _imports("etude.eval")[path]
-    above = ("etude.eval.tournament", "etude.eval.query", "etude.eval.report")
+    above = ("etude.eval.tournament", "etude.eval.query")
     assert not [n for n in names for f in above if _within(n, f)]
 
 

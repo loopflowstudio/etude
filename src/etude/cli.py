@@ -1,9 +1,9 @@
-"""The `etude` command: launcher and tracking commands, with reports under `etude reports`.
+"""The `etude` command: launcher and tracking commands, and an experiment's report.
 
 Each half registers its own commands (`etude.launch.cli`, `etude.train.cli`);
-this module joins them, adds the eval report (`etude reports eval`), sends
-launcher commands to a chosen controller, and turns expected failures into one
-line on stderr.
+this module joins them, adds `etude report` (`etude.page`), which draws
+training and evaluation together, sends launcher commands to a chosen
+controller, and turns expected failures into one line on stderr.
 """
 
 from __future__ import annotations
@@ -19,62 +19,95 @@ from etude.launch import cli as launch_cli
 from etude.launch.commands import Kind, kind
 from etude.launch.errors import LauncherError
 from etude.run.errors import EtudeError
-from etude.train.cli import app as reports_app
 from etude.train.cli import checkpoints, sync
 
 app = launch_cli.app
-app.add_typer(reports_app, name="reports")
 
 
-@reports_app.command("eval")
+@app.command()
 @kind(Kind.wait)
-def evaluations(
+def report(
+    file: Annotated[
+        Path,
+        typer.Argument(
+            help="a Python file, maybe defining report(); the experiment is named for it"
+        ),
+    ],
     source: Annotated[
         str | None,
         typer.Option(
-            help="a runs directory or s3://bucket/prefix, searched at any depth; "
-            "default: where runs are written on this computer"
+            help="a runs directory, s3://bucket/prefix or r2://bucket/prefix, searched at any "
+            "depth; default: where runs are written on this computer"
         ),
     ] = None,
-    experiment: Annotated[str | None, typer.Option(help="only this experiment")] = None,
     out: Annotated[
-        Path | None, typer.Option(help="default: SOURCE/reports, or ./reports for a bucket")
+        Path | None,
+        typer.Option(
+            help="the folder to write to; default: SOURCE/reports, or ./reports for a bucket"
+        ),
     ] = None,
     open_: Annotated[bool, typer.Option("--open", help="show it in the browser")] = False,
     watch: Annotated[
         float | None,
-        typer.Option(min=0.1, help="regenerate the report every SECONDS"),
+        typer.Option(
+            min=0.1,
+            help="rewrite it every SECONDS, and the open page reloads; with --serve, how often "
+            "the page reloads",
+        ),
     ] = None,
+    serve: Annotated[
+        bool, typer.Option(help="serve it, built afresh for each request, and write nothing")
+    ] = False,
+    host: Annotated[str, typer.Option(help="with --serve; it has no login")] = "127.0.0.1",
+    port: Annotated[int, typer.Option(help="with --serve")] = 8765,
 ) -> None:
-    """Write each experiment's report comparing its eval runs' agents to DIRECTORY/reports/eval/EXPERIMENT.html."""
-    # Eval runs are composed here, so training's reports never import `etude.eval`.
+    """Draw an experiment's evals, perf and ML details as one HTML page, from its runs' files.
+
+    The page follows the file's report(), or the default report without one.
+    """
+    # The report reads runs and, once the experiment has eval runs or eval(), evaluations.
     import time
     import webbrowser
 
-    from etude.eval.report import write
+    from etude.page import Server, build, render, target, write
     from etude.run.storage import default_root, storage_from_uri
 
-    given = source or str(default_root())
-    local = not given.startswith("s3://")
-    storage = storage_from_uri(given)
-    directory = out or (Path(given) / "reports" if local else Path("reports"))
-    written: set[Path] = set()
+    storage = storage_from_uri(source or default_root())
+    if serve:
+        server = Server(storage, file, (host, port), refresh=watch)
+        address = f"http://{host}:{server.server_port}/"
+        print(address, flush=True)
+        if open_:
+            webbrowser.open(address)
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            server.server_close()
+        return
+    path = target(storage, file.stem, out)
+    shown = None
     try:
         while True:
-            for target in write(storage, directory, experiment=experiment, refresh=watch):
-                if target not in written:
-                    print(target, flush=True)
+            try:
+                page = build(storage, file)
+            except ValueError:
+                if watch is None:
+                    raise
+                page = None  # Watching waits for the experiment's first run.
+            if page is not None and page != shown:
+                write(render(page, refresh=watch), path)
+                if shown is None:
+                    print(path, flush=True)
                     if open_:
-                        webbrowser.open(target.resolve().as_uri())
-                    written.add(target)
+                        webbrowser.open(path.resolve().as_uri())
+                shown = page
             if watch is None:
                 break
             time.sleep(watch)
     except KeyboardInterrupt:
         pass
-    if not written:
-        print("no eval runs found", file=sys.stderr)
-        raise typer.Exit(1)
 
 
 @app.command("eval")
@@ -220,7 +253,7 @@ def _main(argv: list[str]) -> int:
     try:
         if (
             argv
-            and argv[0] not in ("worker", "reports", "checkpoints", "sync")
+            and argv[0] not in ("worker", "report", "checkpoints", "sync")
             and not {"--help", "-h"} & set(argv)
         ):
             # Entry points import only the command being run (AGENTS.md).

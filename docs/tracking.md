@@ -28,22 +28,18 @@ run.finish()
 ```
 
 ```sh
-uv run etude reports write           # write a page per experiment and print where
-uv run etude reports write --watch 5  # keep regenerating; the open page reloads itself
-uv run etude reports serve           # or browse every experiment at http://127.0.0.1:8765/
+uv run etude report capacity-pilot.py --open   # the experiment's page (see Reports below)
 uv run etude sync --directory DIR --to s3://my-bucket/runs   # deliver later, or again; idempotent
 uv run etude checkpoints --source s3://my-bucket/runs
 ```
 
 Runs are written to one place per computer, `~/.etude/track` (moved by
-`ETUDE_HOME`, or named with `track(directory=...)`), and `reports write` and
-`reports serve` read that place when given no source. So writing never chooses how it will
-be read: generate a page, or run the server, over the same files.
-`reports write`, `reports serve` and `checkpoints` take `--source`, a directory or
+`ETUDE_HOME`, or named with `track(directory=...)`), and `report` reads that
+place when given no source. So writing never chooses how it will be read.
+`report` and `checkpoints` take `--source`, a directory or
 `s3://bucket/prefix` or `r2://bucket/prefix`, and find runs in it at any depth. Attempts on rented
 machines write to the same `PREFIX/RUN/` folder; pointing `--source` at the
-storage's prefix reads the whole run. The server
-has no login and listens on this computer only.
+storage's prefix reads the whole run.
 
 One `etude` command provides compute, reports, sync and checkpoints. The
 launcher (`etude.launch`) and tracking share one package and lock file; neither
@@ -99,9 +95,8 @@ Rules a caller can rely on:
   mean, count and a count of NaN or infinite values. A range with fewer points
   than buckets returns the points themselves.
 - **A job's runs across seeds are its seed sample.** A job is the launcher's
-  Job: a run without its seed. The report draws the
-  mean and a 95% interval (Student's t over the seeds present in each bucket)
-  and shows how many seeds each point has.
+  Job: a run without its seed. The report draws the mean of its seeds, banded
+  by their range, and shows how many seeds each point has.
 - **`log` cannot hurt training by default.** It is a put on a bounded queue:
   no storage or network I/O, no waiting for delivery. It warns once about bad
   coordinates or a full queue; only `strict=True` raises for bad coordinates.
@@ -164,3 +159,94 @@ run.tag(model, "best")  # tags can change later
   `etude.train.read` report each file where it is in the source read, not
   where the machine that wrote it kept it; a record whose file has not arrived
   is listed as recorded.
+
+## Reports
+
+```python
+# ppo.py: experiment "ppo", beside its train() and eval(state)
+from etude.report import Anchors, Curve, HeadToHead, Matrix, Ranking, Report, Score
+
+from arena import LADDER  # the Benchmark eval(state) holds
+
+
+def report() -> Report:
+    return Report(
+        score=Score(table="plays", value="won", reference=0.5),
+        evals=(
+            Curve(title="Win rate against the anchors", tag="anchor"),
+            Curve(title="Against the checkpoint before", tag="consecutive"),
+            Matrix(rows="deal", columns="on_play", tournament=LADDER.name),
+            Ranking(by="on_play"),
+            HeadToHead(),
+            Anchors(),
+        ),
+        baseline="ppo",
+    )
+```
+
+```sh
+uv run etude report ppo.py --source r2://bucket/runs --open   # writes ./reports/ppo.html
+uv run etude report ppo.py --watch 5 --open   # rewrite it every 5 s; the open page reloads
+uv run etude report ppo.py --serve            # serve it live, writing nothing
+```
+
+One HTML page per experiment, with its data inlined: no server and no network
+to view it. The experiment is named for the file, and the page follows the
+file's `report()`; a file without one gets `Report()`, and the page says so at
+its top. The file is run on every build, so an edited `report()` shows on the
+next. The page's top says where its runs were read from and when; it reads
+files and never launches or rents anything. From a directory the page goes to
+`reports/` beside its runs, from a bucket to `./reports`; `--out DIR` chooses.
+`--serve` has no login and listens on this computer only; with `--watch` the
+served page reloads itself.
+
+Training runs must name the experiment for the file, `track(experiment="ppo")`,
+until `etude launch` hands it to the runs it starts.
+
+**Two parts.** Evals, then Perf and ML details, each with its own x axis (any
+declared clock, or wall hours); Perf and ML details can be smoothed. Choosing
+jobs and filtering are the only controls for the whole page.
+
+**Jobs, not runs.** Every panel draws every job: its runs across seeds,
+labelled by the job's launch name and seed count ("ppo · 3 seeds"), as its
+seeds' mean banded by their range. Seeds align on where each checkpoint stood
+on the run's first declared clock. The `baseline` job is dotted everywhere; a
+job's colour follows launch order.
+
+**Evals** are the experiment's eval runs ([evaluation](evaluation.md#experiments)).
+A checkpoint agent is bound to the checkpoint its key names, `RUN/checkpoints/NAME`,
+and drawn where that run's clocks stood; two runs' checkpoints holding the same
+bytes are two points. Every other agent, code or a checkpoint from outside the
+experiment, is an anchor. `score` names an eval table's value, computed as
+`etude.eval.query.compare` computes it, with its 95% interval over whole
+matches; without one, every numeric column is offered. Each match counts once,
+at the version of the code that played it last.
+
+| Panel | Shows |
+|---|---|
+| `Curve(split=None)` | the score at each checkpoint, against one anchor; `split` draws one chart per value |
+| `Matrix(rows, columns)` | one job's score per cell at one checkpoint: a finished job's final, else its latest evaluated |
+| `Ranking(by)` | a bar per job for each value of `by`; clicking a row filters the page |
+| `HeadToHead()` | a job's score in games against another job's checkpoints |
+| `Anchors()` | the anchors against each other, and each one's strength over matches that seat no checkpoint |
+
+Eval panels name columns of the score's table, and count the matches the
+section's control selects (a tournament, or a tag within it) unless they name
+their own: `tournament=`, `matchup=` or `tag=`, by the names `eval(state)`
+gives them. A curve against one anchor draws the others' scores against it as
+reference lines.
+
+Gaps stay visible. A checkpoint nothing played is marked not evaluated and is
+no point of a line. One `eval(state)` wants that no eval run has delivered is
+marked not yet played, and failed matches are marked and listed; both break a
+line rather than bridge it. A job's point needs every seed. A column, tournament,
+matchup or tag a panel names that nothing holds is said so.
+
+**Perf** draws what Etude records for training runs: `Pace` (each step clock
+per wall second between checkpoints), `Elapsed` (wall hours to each
+checkpoint), `Attempts`, and `Flame`, an icicle of the seconds logged under
+`time/` (`time/collection`, `time/collection/inference`: seconds since the
+previous row). **ML details** default to reinforcement learning's `Counters`
+and `Series` over `rl/` keys; pass `perf=` or `ml=` to name an experiment's
+own. Keys a panel names that no run logged are listed, and metrics no panel
+names are drawn last.

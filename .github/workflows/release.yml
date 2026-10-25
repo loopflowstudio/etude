@@ -41,7 +41,7 @@ jobs:
           VIRTUAL_ENV="$RUNNER_TEMP/smoke" uv pip install dist/*.whl
           cd "$RUNNER_TEMP"
           smoke/bin/etude --help > /dev/null
-          smoke/bin/etude reports --help > /dev/null
+          smoke/bin/etude report --help > /dev/null
           smoke/bin/python -c "import etude.train.run, etude.launch.client"
       - uses: actions/upload-artifact@v4
         with:

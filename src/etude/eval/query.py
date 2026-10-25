@@ -83,6 +83,10 @@ if TYPE_CHECKING:
 
 REPLICATES = 2000
 SEED = 0
+# Column types `compare` can take as a value.
+NUMERIC = ("BOOLEAN", "BIGINT", "DOUBLE")
+# Keys and coordinates of an author table's rows: never a value.
+KEYS = ("player", "group", "game", "run", "match")
 # A kept database of another schema is deleted and read again from its store.
 SCHEMA = 2
 

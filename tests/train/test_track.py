@@ -20,6 +20,7 @@ import pytest
 from moto import mock_aws
 
 from etude.cli import main
+from etude.page import Server, build
 from etude.run.delivery import sync
 from etude.run.errors import EtudeError
 from etude.run.listing import runs
@@ -27,9 +28,9 @@ from etude.run.storage import DirectoryStorage, S3Storage, default_root
 from etude.train.block import rows
 from etude.train.read import buckets, read
 from etude.train.records import Step, Time
-from etude.train.report import page_data, pages
+from etude.train.report import training
 from etude.train.run import EtudeWarning, Run, track
-from etude.train.serve import Server
+from tests.experiments import experiment_file
 
 CLOCKS = [
     Step("progress/updates", "optimizer updates, absolute across continuation"),
@@ -206,20 +207,23 @@ def test_files_alone_read_back_and_report_with_a_seed_sample(tmp_path: Path) -> 
     assert len(reduced) == 10 and int(reduced.count.sum()) == 120
     assert reduced.max[0] == 101.0 and reduced.min[0] == 1.0  # The extreme survives bucketing.
 
-    page = page_data("pilot", [read(tmp_path, "pilot", f"seed-{seed}") for seed in range(3)])
-    jobs = page["jobs"]
-    assert isinstance(jobs, dict)
-    (band,) = jobs["progress/updates"]["rl/entropy"]
-    assert band["job"] == "arm" and band["n"][0] == 3 and band["n"][-1] == 2
-    assert main(["reports", "write", "--source", str(tmp_path)]) == 0
+    page = training([read(tmp_path, "pilot", f"seed-{seed}") for seed in range(3)])
+    (band,) = page.bands["progress/updates"]["rl/entropy"]
+    assert band.owner == "arm" and band.seeds is not None
+    assert band.seeds[0] == 3 and band.seeds[-1] == 2
+    (job,) = page.jobs
+    assert job.label == "arm · 3 seeds"
+    pilot = str(experiment_file(tmp_path / "experiments", "pilot"))
+    assert main(["report", pilot, "--source", str(tmp_path)]) == 0
     target = tmp_path / "reports/pilot.html"
     html = target.read_text()
-    assert "__DATA__" not in html and "__UPLOT_JS__" not in html
-    assert "active training time, pauses excluded" in html and '"refresh": null' in html
-    # Generating again replaces the report, and reports are not mistaken for runs.
-    assert main(["reports", "write", "--source", str(tmp_path), "--experiment", "pilot"]) == 0
+    assert "__DATA__" not in html and "active training time, pauses excluded" in html
+    assert '"refresh": null' in html
+    # Writing again replaces the page, and pages are not mistaken for runs.
+    assert main(["report", pilot, "--source", str(tmp_path)]) == 0
     assert list(target.parent.iterdir()) == [target] and len(runs(tmp_path)) == 3
-    assert main(["reports", "write", "--source", str(tmp_path), "--experiment", "absent"]) == 1
+    absent = experiment_file(tmp_path / "experiments", "absent")
+    assert main(["report", str(absent), "--source", str(tmp_path)]) == 1
 
 
 def test_checkpoint_references_read_back_and_an_incomplete_coordinate_is_not_recorded(
@@ -301,7 +305,8 @@ def test_metrics_and_checkpoints_reach_an_s3_bucket_and_read_back(
         assert data.rows == 50 and data.state is not None
         assert [c.tags for c in data.checkpoints] == [("best",), ()]
         assert data.checkpoints[0].artifact == first and data.checkpoints[0].at == AT
-        assert pages(bucket)["pilot"]["runs"] == pages(tmp_path / "local")["pilot"]["runs"]
+        pilot = experiment_file(tmp_path / "experiments", "pilot")
+        assert build(bucket, pilot).training.runs == build(tmp_path / "local", pilot).training.runs
         assert sync(tmp_path / "local", storages=[bucket]) == {}
         assert main(["checkpoints", "--source", "s3://runs/team/a"]) == 0
         listed = capsys.readouterr().out.splitlines()
@@ -375,20 +380,21 @@ def test_logging_from_training_code_imports_no_command_line_library() -> None:
     assert loaded.stdout.strip() == "[]"
 
 
-def test_the_server_lists_experiments_and_serves_each_report_from_the_files(
+def test_the_server_serves_the_experiments_page_from_the_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
     run = track(experiment="pilot", run="a", clocks=CLOCKS)  # no directory named
     run.log(manabot_row(1))
     run.finish()
-    server = Server(default_root(), ("127.0.0.1", 0))
+    experiments = tmp_path / "experiments"
+    server = Server(
+        default_root(), experiment_file(experiments, "pilot"), ("127.0.0.1", 0), refresh=5.0
+    )
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         base = f"http://127.0.0.1:{server.server_port}"
         with urlopen(base + "/") as response:
-            assert '<a href="/pilot">pilot</a></td><td>1</td>' in response.read().decode()
-        with urlopen(base + "/pilot") as response:
             page = response.read().decode()
         assert "rl/entropy" in page and '"refresh": 5.0' in page
         with pytest.raises(HTTPError) as missing:
@@ -397,6 +403,16 @@ def test_the_server_lists_experiments_and_serves_each_report_from_the_files(
     finally:
         server.shutdown()
         server.server_close()
+    absent = Server(default_root(), experiment_file(experiments, "absent"), ("127.0.0.1", 0))
+    threading.Thread(target=absent.serve_forever, daemon=True).start()
+    try:
+        # An experiment with no runs yet is not found, and says what the source holds.
+        with pytest.raises(HTTPError) as none:
+            urlopen(f"http://127.0.0.1:{absent.server_port}/")
+        assert none.value.code == 404 and "it holds pilot" in none.value.read().decode()
+    finally:
+        absent.shutdown()
+        absent.server_close()
 
 
 def test_tracking_commands_use_local_files_with_a_selected_controller(
@@ -421,16 +437,17 @@ def test_tracking_commands_use_local_files_with_a_selected_controller(
     assert main(["checkpoints", "--source", str(destination), "--experiment", "pilot"]) == 0
     assert "s3://models/one.pt" in capsys.readouterr().out
     target = tmp_path / "pages"
-    assert main(["reports", "write", "--source", str(destination), "--out", str(target)]) == 0
+    pilot = str(experiment_file(tmp_path / "experiments", "pilot"))
+    assert main(["report", pilot, "--source", str(destination), "--out", str(target)]) == 0
     assert (target / "pilot.html").is_file()
 
     def serve_once(server: Server) -> None:
-        # Replace the blocking server loop; inspect the pages it would serve.
-        assert "pilot" in server.index()
-        assert server.report("pilot") is not None
+        # Replace the blocking server loop; inspect the page it would serve.
+        assert "rl/loss" in server.page()
         raise KeyboardInterrupt
 
     monkeypatch.setattr(Server, "serve_forever", serve_once)
-    assert main(["reports", "serve", "--source", str(destination), "--port", "0"]) == 0
+    served = ["report", pilot, "--serve", "--source", str(destination), "--port", "0"]
+    assert main(served) == 0
     assert "http://127.0.0.1:" in capsys.readouterr().out
     assert not (home / "launcher.db").exists()

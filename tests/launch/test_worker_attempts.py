@@ -23,7 +23,7 @@ from etude.launch.scheduler import Scheduler
 from etude.run.listing import runs
 from etude.train.read import read
 from etude.train.records import Step
-from etude.train.report import page_data
+from etude.train.report import training
 from etude.train.run import track
 from tests.launch.counting import job_text
 
@@ -235,14 +235,14 @@ def test_a_launched_job_tracks_as_its_run_without_naming_itself(tmp_path: Path) 
         "succeeded"
     ] * 2
 
-    pages = []
+    found = []
     for record in [scheduler.record(run) for run in ids]:
         (launched,) = scheduler._store.attempts(run=record.id)
         # One place on the machine for every run; the script named no directory.
         tracked = tmp_path / "track"
         assert ("capacity", record.id) in runs(tracked)
         data = read(tracked, "capacity", record.id)
-        pages.append(data)
+        found.append(data)
         assert data.file is not None and data.rows == 3
         declared = data.file.declaration
         assert (declared.job, declared.job_name, declared.seed, declared.cohort) == (
@@ -261,6 +261,6 @@ def test_a_launched_job_tracks_as_its_run_without_naming_itself(tmp_path: Path) 
         assert stored.read_bytes() == b"weights"
         assert checkpoint.artifact.sha256 == hashlib.sha256(b"weights").hexdigest()
         assert [o.name for o in launched.outputs] == ["etude-result.json", "weights.pt"]
-    page = page_data("capacity", pages)
-    rows = page["runs"]
-    assert isinstance(rows, list) and {row["job"] for row in rows} == {"hidden256"}
+    # The report labels the job as its author named it, with its seed count.
+    (drawn,) = training(found).jobs
+    assert drawn.name == "hidden256" and drawn.label.startswith("hidden256 · ")

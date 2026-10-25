@@ -20,18 +20,22 @@ from etude.train.run import track
 @pytest.mark.parametrize(
     ("command", "count", "forbidden"),
     [
-        (["reports", "--help"], 10, ("numpy", "pydantic")),
-        (["reports", "write", "--help"], 10, ("numpy", "pydantic")),
-        (["reports", "write", "--source", "{directory}"], 20, ("boto3", "etude.train.run")),
+        (["report", "--help"], 10, ("numpy", "pydantic")),
+        # No eval run and no eval(state), so nothing of evaluation loads.
+        (
+            ["report", "{directory}/pilot.py", "--source", "{directory}"],
+            22,
+            ("boto3", "duckdb", "etude.eval", "etude.train.run"),
+        ),
         (
             ["sync", "--directory", "{directory}"],
             15,
-            ("boto3", "numpy", "etude.train.report", "etude.train.serve"),
+            ("boto3", "numpy", "etude.page", "etude.train.report"),
         ),
         (
             ["sync", "--directory", "{directory}", "--seal"],
             20,
-            ("boto3", "etude.train.report", "etude.train.serve"),
+            ("boto3", "etude.page", "etude.train.report"),
         ),
     ],
 )
@@ -40,6 +44,7 @@ def test_tracking_command_import_counts(
 ) -> None:
     directory = tmp_path / "files"
     directory.mkdir()
+    (directory / "pilot.py").write_text("")
     args = [value.format(directory=directory) for value in command]
     done = subprocess.run(
         [
@@ -53,9 +58,8 @@ def test_tracking_command_import_counts(
         text=True,
         timeout=20,
     )
-    assert done.returncode == (
-        1 if command[:2] == ["reports", "write"] and "--source" in command else 0
-    ), done.stderr
+    # The directory holds no runs, so the report says so and fails.
+    assert done.returncode == (1 if "--source" in command else 0), done.stderr
     modules = json.loads(done.stdout.splitlines()[-1])
     loaded = [name for name in modules if name.startswith("etude")]
     # Pin help and execution separately: help builds no records, sync loads no

@@ -1,0 +1,805 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__ · Etude</title>
+<style>
+:root {
+  color-scheme: light;
+  --page: #ffffff; --surface: #ffffff; --ink: #0a0a0a; --ink-2: #5f5f5f; --muted: #8a8a8a;
+  --grid: #f0f0f0; --axis: #e3e3e3; --line: #e8e8e8; --wash: #f5f6f8; --bar: #e8f0fb;
+  /* One hue, one meaning. Jobs: --j1..--j8, in declared order. Time stages: --t*.
+     Green and red: only winning/losing and passing/failing. Everything else is ink. */
+  --j1: #2a78d6; --j2: #eb6834; --j3: #1baf7a; --j4: #eda100;
+  --j5: #e87ba4; --j6: #6250d6; --j7: #7a6a55; --j8: #5aa5c9;
+  --good: #0ca30c; --warn: #b77900; --bad: #d03b3b;
+  --t1: #6250d6; --t2: #e87ba4; --t3: #5aa5c9; --t4: #b3925f; --t-rest: #e1e0d9; --t-root: #52514e;
+  --div-mid: #f0efec; --div-pos: #0a7a35; --div-neg: #b4302f; --seq-hi: #1d4f8f;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  color-scheme: dark;
+  --page: #0b0b0b; --surface: #0b0b0b; --ink: #ededed; --ink-2: #a8a8a8; --muted: #767676;
+  --grid: #1b1b1b; --axis: #2a2a2a; --line: #222222; --wash: #131518; --bar: #10233b;
+  --j1: #3987e5; --j2: #d95926; --j3: #199e70; --j4: #c98500;
+  --j5: #d55181; --j6: #9085e9; --j7: #a8957a; --j8: #4d97bb;
+  --good: #3fbf6f; --warn: #e0a33a; --bad: #f06a6a;
+  --t1: #9085e9; --t2: #d55181; --t3: #4d97bb; --t4: #a8895a; --t-rest: #2c2c2a; --t-root: #c3c2b7;
+  --div-mid: #262626; --div-pos: #3fbf6f; --div-neg: #e66767; --seq-hi: #6ea8f0;
+}}
+* { box-sizing: border-box; }
+html { scroll-padding-top: 56px; }
+body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.5 ui-sans-serif, -apple-system, "Segoe UI", sans-serif; font-variant-numeric: tabular-nums; -webkit-font-smoothing: antialiased; }
+.wrap { max-width: 1200px; margin: 0 auto; padding: 0 16px 80px; }
+code, .mono { font: 12px ui-monospace, Menlo, monospace; }
+.head { padding: 26px 0 0; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.head h1 { margin: 0; font-size: 20px; font-weight: 600; flex: 1; min-width: 240px; overflow-wrap: anywhere; }
+.pill { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--ink-2); white-space: nowrap; }
+.context { display: flex; flex-wrap: wrap; gap: 6px 20px; margin: 10px 0 0; color: var(--ink-2); font-size: 13px; align-items: center; }
+.context b { color: var(--ink); font-weight: 500; }
+.note { flex-basis: 100%; color: var(--ink); background: var(--wash); border: 1px solid var(--line); border-left: 3px solid var(--warn); border-radius: 6px; padding: 6px 10px; font-size: 13px; }
+.controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 18px 0; }
+.sec-controls { margin-left: auto; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; font-weight: 400; }
+.lbl { color: var(--muted); font-size: 13px; }
+select { font: inherit; font-size: 13px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; padding: 2px; gap: 2px; flex-wrap: wrap; }
+.seg button { font: inherit; font-size: 13px; border: 0; border-radius: 4px; background: none; color: var(--ink-2); padding: 3px 10px; cursor: pointer; }
+.seg button[aria-pressed=true] { background: var(--wash); color: var(--ink); font-weight: 500; }
+.chip { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; padding: 4px 6px 4px 10px; border-radius: 6px; background: var(--wash); border: 1px solid var(--line); }
+.chip button { border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 14px; line-height: 1; padding: 0 2px; }
+nav.tabs { position: sticky; top: 0; z-index: 5; background: color-mix(in srgb, var(--page) 92%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); margin: 8px -16px 0; padding: 0 16px; display: flex; gap: 22px; }
+nav.tabs a { color: var(--ink-2); text-decoration: none; font-size: 14px; padding: 12px 0 10px; border-bottom: 2px solid transparent; }
+nav.tabs a.on { color: var(--ink); border-bottom-color: var(--ink); font-weight: 500; }
+section.sec { padding-top: 26px; }
+section.sec > h2 { font-size: 16px; font-weight: 600; margin: 0 0 4px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+section.sec > h2 > span { color: var(--muted); font-size: 13px; font-weight: 400; }
+.grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 14px; }
+.grid.multiples { grid-template-columns: repeat(auto-fill, minmax(min(250px, 100%), 1fr)); gap: 12px; margin-top: 8px; }
+.card { border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px 10px; min-width: 0; }
+.card.full { grid-column: 1 / -1; }
+.card h3 { margin: 0; font-size: 13.5px; font-weight: 600; display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.card h3 span { color: var(--muted); font-weight: 400; font-size: 12.5px; }
+.na { color: var(--muted); font-size: 13px; padding: 14px 0; }
+.mini-title { font-size: 12.5px; color: var(--ink-2); overflow-wrap: anywhere; }
+.legend-jobs { display: flex; gap: 6px; flex-wrap: wrap; }
+.jbtn { display: inline-flex; align-items: center; gap: 8px; font: inherit; font-size: 13px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; cursor: pointer; }
+.jbtn[aria-pressed=false] { color: var(--muted); }
+.jbtn[aria-pressed=false] i { background: var(--axis) !important; color: var(--axis) !important; }
+.tabs-in { display: inline-flex; gap: 4px; margin: 6px 0 2px; flex-wrap: wrap; align-items: center; }
+.tabs-in .jbtn[aria-pressed=true] { border-color: var(--ink); font-weight: 500; }
+.tag { font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; }
+i.sw { display: inline-block; width: 14px; height: 3px; border-radius: 2px; flex: none; }
+/* The baseline job is dotted everywhere, in its own colour. */
+i.sw.dot { background: radial-gradient(circle, currentColor 1.2px, transparent 1.6px) 0 50% / 4px 3px repeat-x !important; }
+.srow { display: grid; grid-template-columns: 14px 1fr auto; gap: 8px; align-items: center; font-size: 12.5px; margin-top: 4px; }
+.srow span { color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.srow b { font-size: 16px; font-weight: 600; }
+.rk { display: grid; grid-template-columns: minmax(70px, 30%) 1fr; gap: 10px; align-items: center; padding: 5px 6px; border-radius: 5px; cursor: pointer; }
+.rk:hover { outline: 1px solid var(--axis); } .rk.on { background: var(--wash); }
+.rk > span { font-size: 13px; overflow-wrap: anywhere; }
+.rk .bars { display: grid; gap: 2px; }
+.rk .bar { display: grid; grid-template-columns: 1fr 52px; gap: 8px; align-items: center; font-size: 11.5px; }
+.rk .track { position: relative; height: 7px; background: var(--grid); border-radius: 2px; }
+.rk .track b { position: absolute; inset: 0 auto 0 0; border-radius: 2px; }
+.rk .track b.dot { background: repeating-linear-gradient(90deg, currentColor 0 2px, transparent 2px 5px) !important; }
+.rk .track em { position: absolute; top: -2px; bottom: -2px; border-left: 1px dashed var(--muted); opacity: .6; }
+.rk .bar span { text-align: right; color: var(--ink-2); }
+.mwrap { overflow-x: auto; margin-top: 8px; }
+.matrix { display: grid; gap: 2px; }
+.matrix .cl, .matrix .rl { color: var(--ink-2); font-size: 11.5px; display: flex; align-items: center; overflow-wrap: anywhere; }
+.matrix .cl { justify-content: center; text-align: center; padding-bottom: 2px; } .matrix .rl { justify-content: flex-end; text-align: right; padding-right: 8px; }
+.cell { border-radius: 3px; display: flex; align-items: center; justify-content: center; font: 500 11px/1 ui-monospace, Menlo, monospace; height: 30px; cursor: pointer; }
+.cell:hover, .cell.on { outline: 2px solid var(--ink); outline-offset: 1px; }
+.cell.none { background: repeating-linear-gradient(135deg, transparent 0 4px, var(--grid) 4px 5px); color: var(--muted); }
+.legend { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; margin-top: 10px; flex-wrap: wrap; }
+.legend .ramp { width: 140px; height: 8px; border-radius: 2px; }
+.counter { display: grid; grid-template-columns: 22px 1fr auto; gap: 10px; align-items: center; padding: 7px 0; border-top: 1px solid var(--line); font-size: 13px; }
+.counter .icon { width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center; font-size: 11px; font-weight: 700; color: #fff; }
+.counter .icon.ok { background: var(--good); } .counter .icon.bad { background: var(--bad); } .counter .icon.na { background: var(--axis); color: var(--ink-2); }
+.counter .count { font-weight: 500; text-align: right; }
+.missing { color: var(--muted); font-size: 12.5px; margin-top: 14px; }
+.missing code { color: var(--ink-2); background: var(--wash); padding: 1px 5px; border-radius: 4px; margin: 2px; display: inline-block; }
+.att { display: grid; grid-template-columns: minmax(90px, 22%) 1fr; gap: 10px; align-items: center; font-size: 12.5px; margin: 6px 0; }
+.att .lane { position: relative; height: 16px; background: var(--grid); border-radius: 3px; }
+.att .lane b { position: absolute; top: 2px; bottom: 2px; border-radius: 2px; min-width: 2px; }
+.fl-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 6px 0 10px; }
+.crumbs { display: flex; gap: 4px; align-items: center; font-size: 12.5px; color: var(--muted); flex: 1; min-width: 200px; flex-wrap: wrap; }
+.crumbs button { font: inherit; border: 0; background: none; color: var(--ink); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; padding: 0; }
+.fl-run { margin: 12px 0 4px; display: flex; justify-content: space-between; gap: 10px; font-size: 13px; flex-wrap: wrap; align-items: center; }
+.fl-run span { color: var(--muted); }
+.flame { position: relative; }
+.fn { position: absolute; height: 24px; border-radius: 3px; font-size: 11.5px; line-height: 24px; padding: 0 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--surface) 70%, transparent); }
+.fn:hover { box-shadow: inset 0 0 0 2px var(--ink); }
+.fn.untimed { background: repeating-linear-gradient(135deg, var(--wash) 0 5px, var(--grid) 5px 7px) !important; color: var(--muted) !important; font-style: italic; }
+.fn.summed { font-style: italic; }
+table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--ink-2); font-weight: 500; } td.n { text-align: right; }
+.scroll { overflow-x: auto; }
+details { margin-top: 18px; } details summary { cursor: pointer; color: var(--ink-2); }
+.chart-svg { display: block; width: 100%; height: auto; overflow: visible; }
+line.anchor { stroke: var(--ink-2); stroke-dasharray: 6 3; opacity: .55; } text.anchor-label { fill: var(--ink-2); font-size: 11px; } line.unevaluated { stroke: var(--muted); }
+line.grid { stroke: var(--grid); } line.axis { stroke: var(--axis); } line.ref { stroke: var(--muted); stroke-dasharray: 2 3; opacity: .7; } line.cross { stroke: var(--axis); }
+text.tick, text.axis-label { fill: var(--muted); font-size: 11px; } text.empty { fill: var(--muted); font-size: 13px; }
+.tip { position: fixed; display: none; pointer-events: none; z-index: 10; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; box-shadow: 0 6px 24px rgba(0,0,0,.08); font-size: 12.5px; max-width: min(420px, 90vw); }
+.tip-title { color: var(--muted); margin-bottom: 4px; font-size: 12px; }
+.tip-row { display: grid; grid-template-columns: 14px auto 1fr; gap: 8px; align-items: center; }
+.tip-label { color: var(--ink-2); }
+@media (max-width: 800px) { .grid { grid-template-columns: 1fr; } .sec-controls { margin-left: 0; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="head"><h1 id="title"></h1><span class="pill" id="pill"></span></div>
+  <div class="context" id="context"></div>
+  <div class="controls"><div class="legend-jobs" id="jobs" role="group" aria-label="Jobs"></div><span id="chips" style="display:contents"></span></div>
+  <nav class="tabs" id="tabs"><a href="#evals" data-s="evals">Evals</a><a href="#perf" data-s="perf">Perf</a><a href="#ml" data-s="ml">ML details</a></nav>
+  <section class="sec" id="evals"><h2>Evals <span id="evals-sub"></span><div class="sec-controls" id="evals-controls"></div></h2><div class="grid" id="evals-body"></div></section>
+  <section class="sec" id="perf"><h2>Perf <span id="perf-sub"></span><div class="sec-controls" id="perf-controls"></div></h2><div class="grid" id="perf-body"></div></section>
+  <section class="sec" id="ml"><h2>ML details <span id="ml-sub"></span><div class="sec-controls" id="ml-controls"></div></h2><div class="grid" id="ml-body"></div></section>
+  <details id="runs-box"><summary>Runs</summary><div class="scroll"><table id="runs"></table></div></details>
+  <details id="coverage-box"><summary>Evaluated checkpoints</summary><div class="scroll"><table id="coverage"></table></div></details>
+  <details id="failures-box" open><summary>Failed matches</summary><div class="scroll"><table id="failures"></table></div></details>
+</div>
+<script type="application/json" id="data">__DATA__</script>
+<script>
+"use strict";
+const D = JSON.parse(document.getElementById("data").textContent);
+const T = D.training, R = D.report, WALL = "wall_seconds";
+
+// ---------------------------------------------------------------- helpers
+const node = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const mean = xs => xs.reduce((a, b) => a + b, 0) / xs.length;
+const num = v => v == null ? "—" : Math.abs(v) >= 1e9 ? (v / 1e9).toPrecision(3) + "G" : Math.abs(v) >= 1e6 ? (v / 1e6).toPrecision(3) + "M" : Math.abs(v) >= 1e4 ? (v / 1e3).toPrecision(3) + "k" : String(+(+v).toPrecision(4));
+const fmt = v => v == null ? "—" : v !== 0 && Math.abs(v) < 1e-3 ? v.toExponential(2) : num(v);
+const dur = s => s >= 3600 ? (s / 3600).toFixed(2) + " h" : s >= 60 ? (s / 60).toFixed(1) + " min" : s.toFixed(s < 1 ? 2 : 1) + " s";
+const when = ms => new Date(ms).toLocaleString([], {month: "short", day: "numeric", hour: "numeric", minute: "2-digit"});
+const ago = ms => { const s = Math.max(0, (D.generated_ms - ms) / 1000); return s < 120 ? Math.round(s) + " s before" : s < 7200 ? Math.round(s / 60) + " min before" : s < 172800 ? Math.round(s / 3600) + " h before" : Math.round(s / 86400) + " d before"; };
+const splitKey = o => JSON.stringify(Object.keys(o).sort().map(k => [k, o[k]]));
+const show = v => typeof v === "boolean" ? (v ? "yes" : "no") : String(v);
+
+// The view lives in the URL, so a reload or a rewritten page shows the same thing.
+const clockNames = [...T.clocks.map(c => c.name), WALL];
+const firstClock = clockNames.includes(R.clock) ? R.clock : clockNames[0];
+const S = Object.assign({hide: "", filter: "{}", eclock: firstClock, pclock: firstClock, mlclock: firstClock, opp: "first", score: "0", sel: "", cfg: "", lines: "on", mjob: "", mkey: "", smooth: "on", fpath: "", fscale: "share", live: "1"},
+  Object.fromEntries(new URLSearchParams(location.hash.slice(1))));
+for (const k of ["eclock", "pclock", "mlclock"]) if (!clockNames.includes(S[k])) S[k] = firstClock;
+const writeHash = () => history.replaceState(null, "", "#" + new URLSearchParams(S));
+const clockLabel = c => c === WALL ? "wall hours" : c;
+const clockMeaning = c => c === WALL ? D.wall_meaning : (T.clocks.find(k => k.name === c) || {}).meaning || c;
+const stepClocks = T.clocks.filter(c => c.kind === "step").map(c => c.name);
+
+// ---------------------------------------------------------------- tooltips and line charts
+let tipNode;
+function showTip(evt, rows, title) {
+  if (!tipNode) { tipNode = node("div", "tip"); document.body.appendChild(tipNode); }
+  const t = tipNode; t.replaceChildren();
+  if (title) t.appendChild(node("div", "tip-title", title));
+  for (const r of rows) {
+    const line = node("div", "tip-row"), k = node("span");
+    if (r.color) { k.className = "sw" + (r.dotted ? " dot" : ""); k.style.cssText = `display:inline-block;width:14px;height:3px;background:${r.dotted ? "" : r.color};color:${r.color}`; }
+    line.append(k, node("strong", null, r.value), node("span", "tip-label", r.label || ""));
+    t.appendChild(line);
+  }
+  t.style.display = "block";
+  const pad = 14, w = t.offsetWidth, h = t.offsetHeight;
+  let left = evt.clientX + pad, top = evt.clientY + pad;
+  if (left + w > innerWidth - 8) left = Math.max(8, evt.clientX - w - pad);
+  if (top + h > innerHeight - 8) top = Math.max(8, evt.clientY - h - pad);
+  t.style.left = left + "px"; t.style.top = top + "px";
+}
+const hideTip = () => { if (tipNode) tipNode.style.display = "none"; };
+const NS = "http://www.w3.org/2000/svg";
+const svgEl = (tag, attrs, parent) => { const n = document.createElementNS(NS, tag); for (const k in attrs) n.setAttribute(k, attrs[k]); if (parent) parent.appendChild(n); return n; };
+function ticks(lo, hi, count) {
+  const span = hi - lo || 1, mag = 10 ** Math.floor(Math.log10(span / count));
+  const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => span / s <= count) || mag * 10;
+  const out = []; for (let v = Math.ceil(lo / step) * step; v <= hi + step * 1e-9; v += step) out.push(+v.toFixed(10)); return out;
+}
+// series: [{label, color, dotted, opacity, width, points: [{x, y, lo, hi, missing, skip, gap, meta}]}]
+// A missing point breaks its line: an evaluation that did not happen is never bridged. A
+// skipped point is no point of the line. A point with a `gap` is marked below the line:
+// ○ not yet played, × failed or some seeds only, | not evaluated. `refs`: [{y, label}].
+function line(host, series, o = {}) {
+  host.replaceChildren();
+  const width = host.clientWidth || 600, height = o.height || 200;
+  const m = o.compact ? {t: 8, r: 8, b: 22, l: 40} : {t: 12, r: 16, b: 34, l: 48};
+  const svg = svgEl("svg", {viewBox: `0 0 ${width} ${height}`, width, height, class: "chart-svg", role: "img"}, host);
+  const drawn = p => !p.missing && !p.skip && p.x != null && p.y != null;
+  const all = series.flatMap(s => s.points.filter(drawn));
+  const refs = o.refs || [];
+  if (!all.length) { svgEl("text", {x: width / 2, y: height / 2, "text-anchor": "middle", class: "empty"}, svg).textContent = o.empty || "Nothing recorded for this selection"; return; }
+  const xs = [...all, ...series.flatMap(s => s.points.filter(p => p.gap && p.x != null))].map(p => p.x);
+  let ylo = Math.min(...all.map(p => p.lo ?? p.y)), yhi = Math.max(...all.map(p => p.hi ?? p.y));
+  for (const r of [...(o.ref != null ? [o.ref] : []), ...refs.map(r => r.y)]) { ylo = Math.min(ylo, r); yhi = Math.max(yhi, r); }
+  const pad = Math.max((yhi - ylo) * 0.08, Math.abs(yhi) * 0.05, 1e-9); ylo -= pad; yhi += pad;
+  const xlo = Math.min(...xs), xhi = Math.max(...xs);
+  const X = v => m.l + (xhi > xlo ? (v - xlo) / (xhi - xlo) : 0.5) * (width - m.l - m.r);
+  const Y = v => m.t + (1 - (v - ylo) / ((yhi - ylo) || 1)) * (height - m.t - m.b);
+  const yf = o.yFormat || fmt, xf = o.xFormat || num;
+  for (const v of ticks(ylo, yhi, o.compact ? 3 : 4)) { svgEl("line", {x1: m.l, x2: width - m.r, y1: Y(v), y2: Y(v), class: "grid"}, svg); svgEl("text", {x: m.l - 6, y: Y(v) + 3.5, "text-anchor": "end", class: "tick"}, svg).textContent = yf(v); }
+  for (const v of ticks(xlo, xhi, o.compact ? 3 : 6)) svgEl("text", {x: X(v), y: height - m.b + 14, "text-anchor": "middle", class: "tick"}, svg).textContent = xf(v);
+  svgEl("line", {x1: m.l, x2: width - m.r, y1: height - m.b, y2: height - m.b, class: "axis"}, svg);
+  if (o.xLabel && !o.compact) svgEl("text", {x: width - m.r, y: height - 4, "text-anchor": "end", class: "axis-label"}, svg).textContent = o.xLabel;
+  if (o.ref != null) svgEl("line", {x1: m.l, x2: width - m.r, y1: Y(o.ref), y2: Y(o.ref), class: "ref"}, svg);
+  // Labels of close anchors are stacked upward, so none covers another.
+  let above = Infinity;
+  for (const r of [...refs].sort((a, b) => a.y - b.y)) {
+    svgEl("line", {x1: m.l, x2: width - m.r, y1: Y(r.y), y2: Y(r.y), class: "anchor"}, svg);
+    const at = Math.min(Y(r.y) - 4, above - 12); above = at;
+    if (!o.compact) svgEl("text", {x: width - m.r, y: at, "text-anchor": "end", class: "anchor-label"}, svg).textContent = r.label;
+  }
+  for (const s of series) {
+    const pts = s.points.filter(p => !p.missing && p.x != null && p.y != null);
+    const sparse = pts.length <= 5;
+    if (o.band !== false && !sparse && pts.length > 1 && pts.some(p => p.lo != null)) {
+      let d = "", open = false, back = [];
+      const flush = () => { if (back.length) d += back.reverse().map(p => `L${X(p.x)},${Y(p.lo)}`).join("") + "Z"; back = []; open = false; };
+      for (const p of s.points) {
+        if (p.skip) continue;
+        if (p.missing || p.lo == null || p.x == null) { flush(); continue; }
+        d += `${open ? "L" : "M"}${X(p.x)},${Y(p.hi)}`; back.push(p); open = true;
+      }
+      flush();
+      svgEl("path", {d, fill: s.color, opacity: 0.12, stroke: "none"}, svg);
+    }
+    if (sparse && o.band !== false) for (const p of pts) if (p.lo != null) svgEl("line", {x1: X(p.x), x2: X(p.x), y1: Y(p.lo), y2: Y(p.hi), stroke: s.color, "stroke-width": 1.5, opacity: 0.6}, svg);
+    let d = "", open = false;
+    for (const p of s.points) { if (p.skip) continue; if (p.missing || p.x == null || p.y == null) { open = false; continue; } d += `${open ? "L" : "M"}${X(p.x)},${Y(p.y)}`; open = true; }
+    svgEl("path", {d, fill: "none", stroke: s.color, "stroke-width": s.width ?? 2, "stroke-opacity": s.opacity ?? 1, "stroke-dasharray": s.dotted ? "1 4" : "none", "stroke-linecap": s.dotted ? "round" : "butt", "stroke-linejoin": "round"}, svg);
+    if (sparse || o.dots) for (const p of pts) svgEl("circle", {cx: X(p.x), cy: Y(p.y), r: sparse ? 3.5 : 2.5, fill: s.color, "fill-opacity": s.opacity ?? 1}, svg);
+    const base = height - m.b - 5;
+    for (const p of s.points) {
+      if (!p.gap || p.x == null) continue;
+      const x = X(p.x);
+      if (p.gap === "pending") svgEl("circle", {cx: x, cy: base, r: 3, fill: "none", stroke: s.color, "stroke-width": 1.5}, svg);
+      else if (p.gap === "failed" || p.gap === "partial") svgEl("path", {d: `M${x - 3},${base - 3}L${x + 3},${base + 3}M${x + 3},${base - 3}L${x - 3},${base + 3}`, stroke: p.gap === "failed" ? css("--bad") : s.color, "stroke-width": 1.5}, svg);
+      else svgEl("line", {x1: x, x2: x, y1: base - 3, y2: base + 3, class: "unevaluated"}, svg);
+    }
+  }
+  const cross = svgEl("line", {y1: m.t, y2: height - m.b, class: "cross", visibility: "hidden"}, svg);
+  const hit = svgEl("rect", {x: m.l, y: m.t, width: Math.max(1, width - m.l - m.r), height: Math.max(1, height - m.t - m.b), fill: "transparent"}, svg);
+  const uniq = [...new Set(series.flatMap(s => s.points.filter(p => p.x != null).map(p => p.x)))].sort((a, b) => a - b);
+  const near = px => uniq.reduce((b, v) => Math.abs(X(v) - px) < Math.abs(X(b) - px) ? v : b, uniq[0]);
+  hit.addEventListener("pointermove", evt => {
+    const box = svg.getBoundingClientRect(), xv = near((evt.clientX - box.left) * width / box.width);
+    cross.setAttribute("x1", X(xv)); cross.setAttribute("x2", X(xv)); cross.setAttribute("visibility", "visible");
+    const rows = series.filter(s => !s.faint).map(s => ({s, p: s.points.find(p => p.x === xv)})).filter(({p}) => p)
+      .map(({s, p}) => ({color: s.color, dotted: s.dotted, label: s.label + (p.meta ? " · " + p.meta : ""), value: !drawn(p) ? "—" : yf(p.y) + (p.lo != null ? `  [${yf(p.lo)}–${yf(p.hi)}]` : ""), y: drawn(p) ? p.y : -Infinity}))
+      .concat(refs.map(r => ({value: yf(r.y), label: r.label + " (anchor)", y: r.y})))
+      .sort((a, b) => b.y - a.y);
+    showTip(evt, rows.length ? rows : [{value: "no point here", label: ""}], (o.xLabel || "x") + " " + xf(xv));
+  });
+  hit.addEventListener("pointerleave", () => { cross.setAttribute("visibility", "hidden"); hideTip(); });
+}
+const mixHex = (a, b, t) => { const h = x => x.replace("#", "").match(/../g).map(v => parseInt(v, 16)); const pa = h(a), pb = h(b); return `rgb(${pa.map((c, i) => Math.round(c + (pb[i] - c) * t)).join(",")})`; };
+const inkOn = c => { const [r, g, b] = c.match(/\d+/g).map(Number); return 0.299 * r + 0.587 * g + 0.114 * b > 150 ? "#0b0b0b" : "#ffffff"; };
+
+// ---------------------------------------------------------------- jobs
+// A job is its runs across seeds; colour follows its declared position, never its rank.
+const JOBS = T.jobs.map((j, i) => ({...j, index: i, color: `--j${i % 8 + 1}`, baseline: R.baseline != null && (R.baseline === j.name || R.baseline === j.key)}));
+const marks = new Map(); for (const m of T.checkpoints) { if (!marks.has(m.run)) marks.set(m.run, []); marks.get(m.run).push(m); }
+const markOf = (run, ordinal) => (marks.get(run) || []).find(m => m.ordinal === ordinal);
+const xOf = (m, c) => c === WALL ? m.elapsed / 3600 : m.at[c];
+// Per checkpoint, `value(run, mark)` gives {y, lo, hi, meta}, {missing, meta}, {skip, meta}
+// for a checkpoint that is no point of this line, or nothing; `gap` says why a value is absent. A job's point needs every seed: seeds align on
+// where each checkpoint stood on the run's first clock, and average; the band is
+// their range, or a single seed's own interval.
+// `some` keeps points only some seeds have, such as direct games one seed played.
+function jobPoints(job, clock, value, some = false) {
+  const per = job.runs.map(run => new Map((marks.get(run) || []).map(m => [m.align, [m, value(run, m)]]).filter(([, [, v]]) => v)));
+  const keys = [...new Set(per.flatMap(p => [...p.keys()]))].sort((a, b) => a - b);
+  return keys.map(key => {
+    const got = per.map(p => p.get(key));
+    const xs = got.filter(Boolean).map(([m]) => xOf(m, clock)).filter(x => x != null);
+    const x = xs.length ? mean(xs) : null;
+    const short = `${got.filter(Boolean).length} of ${got.length} seeds evaluated`;
+    if (got.some(g => !g) && !some) {
+      // A seed without this checkpoint yet: the others' gap, if they have one, is still shown.
+      const present = got.filter(Boolean).map(([, v]) => v), why = present.find(v => v.missing && v.gap);
+      if (present.length && present.every(v => v.skip)) return {x, key, skip: true, gap: present[0].gap, meta: present[0].meta};
+      return {x, key, missing: true, gap: why?.gap, meta: why ? `${why.meta} · ${short}` : short};
+    }
+    if (some) { const kept = got.filter(Boolean); if (kept.length < got.length) return {...pointOf(kept, x, key), meta: short}; }
+    return pointOf(got, x, key);
+  });
+}
+function pointOf(got, x, key) {
+  const bad = got.find(([, v]) => v.missing);
+  if (bad) return {x, key, missing: true, gap: bad[1].gap, meta: bad[1].meta};
+  const skipped = got.filter(([, v]) => v.skip);
+  if (skipped.length === got.length) return {x, key, skip: true, gap: skipped[0][1].gap, meta: skipped[0][1].meta};
+  if (skipped.length) return {x, key, missing: true, gap: "partial", meta: `${got.length - skipped.length} of ${got.length} seeds evaluated`};
+  const ys = got.map(([, v]) => v.y), y = mean(ys);
+  return got.length > 1
+    ? {x, key, y, lo: Math.min(...ys), hi: Math.max(...ys), seeds: ys, meta: `mean of ${ys.length} seeds: ${ys.map(fmt).join(", ")}`}
+    : {x, key, y, lo: got[0][1].lo, hi: got[0][1].hi, meta: got[0][1].meta};
+}
+
+// ---------------------------------------------------------------- evals: what compare computed
+const cellIndex = new Map(); for (const c of D.cells) cellIndex.set(`${c.selection}|${c.score}|${c.subject}|${c.opponent ?? ""}|${+c.fixed}|${splitKey(c.split)}`, c);
+const cellOf = (sel, score, subject, opponent, fixed, split) => cellIndex.get(`${sel}|${score}|${subject}|${opponent ?? ""}|${+fixed}|${splitKey(split)}`);
+// A checkpoint agent is bound to its run's checkpoint by key; every other agent is fixed.
+const bound = new Map(); D.agents.forEach((a, i) => { if (a.run != null) bound.set(`${a.run}|${a.ordinal}|${a.config}`, i); });
+const fixedAgents = D.agents.map((a, i) => i).filter(i => D.agents[i].run == null);
+const configs = [...new Set(D.agents.filter(a => a.run != null).map(a => a.config))].sort();
+const coverage = new Map(D.coverage.map(c => [`${c.run}|${c.ordinal}|${c.tournament}`, c]));
+const jobOfRun = run => JOBS.find(j => j.runs.includes(run));
+const agentName = i => D.agents[i].run != null ? `${D.agents[i].run} ${D.agents[i].name}` : D.agents[i].name;
+const selName = s => s.matchup != null ? `${s.tournament} · ${s.matchup}` : s.tag != null ? `${s.tournament} · tagged ${s.tag}` : s.tournament;
+// The section offers each tournament and each tag within one; a matchup only where a panel names it.
+const choices = D.selections.map((s, i) => [String(i), selName(s)]).filter(([i]) => D.selections[+i].matchup == null);
+function evalState() {
+  if (!choices.some(([v]) => v === S.sel)) S.sel = choices.length ? choices[0][0] : "";
+  if (+S.score >= D.scores.length) S.score = "0";
+  if (!configs.includes(S.cfg)) S.cfg = configs[0] ?? "";
+  return {sel: S.sel === "" ? null : +S.sel, score: +S.score, info: D.scores[+S.score]};
+}
+// A panel's own matches, else the section's; a tag or matchup alone is looked for in the section's tournament first.
+function panelSel(E, panel) {
+  if (panel.tournament == null && panel.matchup == null && panel.tag == null) return E.sel;
+  const here = E.sel == null ? null : D.selections[E.sel].tournament;
+  const fits = D.selections.map((s, i) => [s, i]).filter(([s]) => (panel.tournament ?? s.tournament) === s.tournament && s.matchup === panel.matchup && s.tag === panel.tag);
+  return (fits.find(([s]) => s.tournament === here) || fits[0] || [null, null])[1];
+}
+// Opponents are the anchors checkpoints met, by name; checkpoints met are head-to-head games.
+function opponents(E, sel) {
+  const seen = new Set(D.cells.filter(c => c.selection === sel && c.score === E.score && !c.fixed && D.agents[c.subject].run != null).map(c => c.opponent));
+  const anchors = [...seen].filter(o => o != null && D.agents[o].run == null).sort((a, b) => D.agents[a].name.localeCompare(D.agents[b].name));
+  return [...anchors.map(o => [String(o), D.agents[o].name]), ...(seen.has(null) || !anchors.length ? [["", "all opponents"]] : [])];
+}
+const oppFor = (E, sel) => { const o = opponents(E, sel); return (o.find(([v]) => v === S.opp) || o[0] || [""])[0]; };
+const versusOf = opp => opp === "" ? "vs all opponents" : `vs ${D.agents[+opp].name}`;
+let F = {}; try { F = JSON.parse(S.filter) || {}; } catch { F = {}; }
+// Why a checkpoint has no value here. Not yet played and failed break a line; a checkpoint
+// nothing played, or played only outside this selection, is no point of it and is marked.
+function gapOf(sel, run, m) {
+  const c = sel == null ? null : coverage.get(`${run}|${m.ordinal}|${D.selections[sel].tournament}`);
+  const s = n => n > 1 ? "es" : "", played = c && c.played ? `, ${c.played} played` : "";
+  if (c && c.failed) return {missing: true, gap: "failed", meta: `${c.failed} match${s(c.failed)} failed${played}`};
+  if (c && c.unplayed) return {missing: true, gap: "pending", meta: `not yet played: ${c.unplayed} match${s(c.unplayed)} eval(state) wants${played}`};
+  if (c && c.played) return {skip: true, meta: "not in these matches"};
+  return {skip: true, gap: "none", meta: "not evaluated"};
+}
+function evalValue(E, sel, extra, opponent) {
+  return (run, m) => {
+    const i = bound.get(`${run}|${m.ordinal}|${S.cfg}`);
+    const c = i == null || sel == null ? null : cellOf(sel, E.score, i, opponent, false, {...F, ...extra});
+    if (!c) return gapOf(sel, run, m);
+    return {y: c.value, lo: c.interval?.[0], hi: c.interval?.[1], meta: `${c.rows} rows · ${c.matches} matches`};
+  };
+}
+// The other anchors' scores against the curve's anchor, as reference lines.
+function anchorLines(E, sel, opp, extra = {}) {
+  if (S.lines !== "on" || opp === "" || sel == null) return [];
+  return fixedAgents.filter(b => b !== +opp).map(b => cellOf(sel, E.score, b, +opp, false, {...F, ...extra})).filter(Boolean).map(c => ({y: c.value, label: D.agents[c.subject].name}));
+}
+function values(E, sel, column, extra = {}) {
+  const want = Object.keys({...F, ...extra, [column]: null}).sort().join(",");
+  const found = new Set();
+  for (const c of D.cells) if (c.selection === sel && c.score === E.score && !c.fixed && Object.keys(c.split).sort().join(",") === want
+    && Object.entries({...F, ...extra}).every(([k, v]) => k === column || c.split[k] === v)) found.add(JSON.stringify(c.split[column]));
+  return [...found].map(v => JSON.parse(v)).sort((a, b) => typeof a === "number" && typeof b === "number" ? a - b : String(a).localeCompare(String(b)));
+}
+// Diverging around the score's reference, else sequential over what is shown.
+function painter(found, ref) {
+  const lo = Math.min(...found), hi = Math.max(...found);
+  return v => ref != null
+    ? mixHex(css("--div-mid"), v >= ref ? css("--div-pos") : css("--div-neg"), Math.min(1, Math.abs(v - ref) / (Math.max(hi - ref, ref - lo) || 1)) ** 0.85)
+    : mixHex(css("--div-mid"), css("--seq-hi"), hi > lo ? (v - lo) / (hi - lo) : 0.5);
+}
+function paintCell(cell, p, ref, paint) {
+  // Faded where the band includes the reference: not distinguishable from even.
+  const fade = ref != null && p.lo != null && p.lo <= ref && p.hi >= ref ? 0.35 : 1, c = paint(ref != null ? ref + (p.y - ref) * fade : p.y);
+  cell.style.background = c; cell.style.color = inkOn(c); cell.textContent = fmt(p.y);
+}
+function rampLegend(c, ref, found, tail) {
+  const legend = node("div", "legend"), ramp = node("span", "ramp");
+  ramp.style.background = ref != null ? `linear-gradient(90deg, ${css("--div-neg")}, ${css("--div-mid")}, ${css("--div-pos")})` : `linear-gradient(90deg, ${css("--div-mid")}, ${css("--seq-hi")})`;
+  legend.append(node("span", null, ref != null ? `below ${fmt(ref)}` : fmt(Math.min(...found))), ramp, node("span", null, ref != null ? `above ${fmt(ref)}` : fmt(Math.max(...found))), node("span", null, tail));
+  c.appendChild(legend);
+}
+
+// ---------------------------------------------------------------- page
+function card(host, title, sub, cls = "") { const c = node("div", "card " + cls), h = node("h3", null, title); if (sub) h.appendChild(node("span", null, sub)); c.appendChild(h); host.appendChild(c); return c; }
+function control(host, label, options, key) {
+  if (options.length < 2) return;
+  const group = node("div", "seg"); group.setAttribute("role", "group"); group.setAttribute("aria-label", label);
+  for (const [value, text] of options) { const b = node("button", null, text); b.setAttribute("aria-pressed", String(S[key] === value)); b.onclick = () => { S[key] = value; render(); }; group.appendChild(b); }
+  host.append(node("span", "lbl", label), group);
+}
+const CLOCKS = clockNames.map(c => [c, clockLabel(c)]);
+const draws = []; const later = f => draws.push(f);
+
+function render() {
+  writeHash(); draws.length = 0;
+  const hidden = new Set(S.hide ? S.hide.split("|") : []);
+  const vis = JOBS.filter(j => !hidden.has(j.key));
+  const color = j => css(j.color);
+  const swatch = j => { const s = node("i", "sw" + (j.baseline ? " dot" : "")); s.style.background = j.baseline ? "" : color(j); s.style.color = color(j); return s; };
+  const series = (fn, clock) => vis.map(j => ({label: j.label, color: color(j), dotted: j.baseline, points: fn(j)}));
+
+  // ---- header and context
+  document.getElementById("title").textContent = D.experiment;
+  document.getElementById("pill").textContent = D.origin ? `${D.origin}()` : "default report";
+  const ctx = document.getElementById("context"); ctx.replaceChildren();
+  for (const n of D.notes) ctx.appendChild(node("div", "note", n));
+  if (R.baseline != null && !JOBS.some(j => j.baseline)) ctx.appendChild(node("div", "note", `The baseline ${JSON.stringify(R.baseline)} names no job of this experiment.`));
+  const kv = (k, v) => { const s = node("span", null, k + " "); s.appendChild(node("b", null, v)); ctx.appendChild(s); };
+  const states = {}; for (const r of T.runs) states[r.state] = (states[r.state] || 0) + 1;
+  kv("Jobs", `${JOBS.length} · ${T.runs.length} runs`);
+  kv("Runs", Object.entries(states).map(([s, n]) => `${n} ${s}`).join(", "));
+  const played = new Set(D.coverage.filter(c => c.played).map(c => `${c.run}|${c.ordinal}`));
+  const pending = new Set(D.coverage.filter(c => c.unplayed).map(c => `${c.run}|${c.ordinal}`));
+  kv("Checkpoints", [`${played.size} of ${T.checkpoints.length} evaluated`, ...(pending.size ? [`${pending.size} not yet played`] : []), ...(D.failures.length ? [`${D.failures.length} failed match${D.failures.length > 1 ? "es" : ""}`] : [])].join(", "));
+  if (D.latest_result_ms != null) kv("Latest result", `${when(D.latest_result_ms)} (${ago(D.latest_result_ms)} this page)`);
+  kv("Read", `${when(D.generated_ms)} from ${D.source}`);
+  if (D.refresh) {
+    const l = node("label", "chip"), box = node("input"); box.type = "checkbox"; box.checked = S.live === "1";
+    box.onchange = () => { S.live = box.checked ? "1" : "0"; writeHash(); };
+    l.append(box, `Reload every ${D.refresh} s`); ctx.appendChild(l);
+  }
+
+  // ---- global: job selection (at least one stays on) and filters
+  const jobsHost = document.getElementById("jobs"); jobsHost.replaceChildren();
+  for (const j of JOBS) {
+    const b = node("button", "jbtn"); b.append(swatch(j), j.label); if (j.baseline) b.appendChild(node("span", "tag", "baseline"));
+    b.setAttribute("aria-pressed", String(!hidden.has(j.key))); b.title = j.runs.join(", ");
+    b.onclick = () => { if (!hidden.has(j.key) && vis.length === 1) return; hidden.has(j.key) ? hidden.delete(j.key) : hidden.add(j.key); S.hide = [...hidden].join("|"); render(); };
+    jobsHost.appendChild(b);
+  }
+  const chips = document.getElementById("chips"); chips.replaceChildren();
+  for (const [k, v] of Object.entries(F)) {
+    const c = node("span", "chip", `${k}: ${show(v)}`), b = node("button", null, "×"); b.setAttribute("aria-label", `Remove filter ${k}`);
+    b.onclick = () => { delete F[k]; S.filter = JSON.stringify(F); render(); }; c.appendChild(b); chips.appendChild(c);
+  }
+  const setFilter = (pairs, toggle) => { const same = Object.entries(pairs).every(([k, v]) => F[k] === v); for (const [k, v] of Object.entries(pairs)) { if (toggle && same) delete F[k]; else F[k] = v; } S.filter = JSON.stringify(F); render(); };
+
+  // ---- Evals
+  const E = evalState(), ref = E.info?.reference;
+  const ec = document.getElementById("evals-controls"); ec.replaceChildren();
+  control(ec, "Matches", choices, "sel");
+  control(ec, "Score", D.scores.map((s, i) => [String(i), `${s.table}.${s.value}`]), "score");
+  S.opp = oppFor(E, E.sel);
+  control(ec, "Opponent", opponents(E, E.sel), "opp");
+  control(ec, "Config", configs.map(c => [c, c === "{}" ? "no config" : c]), "cfg");
+  control(ec, "Anchor lines", fixedAgents.length > 1 ? [["on", "On"], ["off", "Off"]] : [], "lines");
+  control(ec, "X axis", CLOCKS, "eclock");
+  const body = document.getElementById("evals-body"); body.replaceChildren();
+  const scoreName = E.info ? `${E.info.table}.${E.info.value}${E.info.per ? " per " + E.info.per : ""}` : "";
+  document.getElementById("evals-sub").textContent = E.sel == null ? "no eval run of a tournament yet" : `${selName(D.selections[E.sel])} · ${scoreName}`;
+  const eOpts = {xLabel: clockLabel(S.eclock), ref};
+  const GAPS = "○ not yet played · × failed · | not evaluated";
+  const curveOf = (j, sel, extra = {}, opp = S.opp) => jobPoints(j, S.eclock, evalValue(E, sel, extra, opp));
+  const evaluated = pts => pts.filter(p => !p.missing && !p.skip);
+  const latestKey = pts => { const ok = evaluated(pts); return ok.length ? ok[ok.length - 1].key : null; };
+  const keyName = k => `${T.clocks[0]?.name || "checkpoint"} ${num(k)}`;
+  const finalKey = j => j.runs.every(r => T.runs.find(x => x.name === r)?.state === "finished") ? (marks.get(j.runs[0]) || []).at(-1)?.align ?? null : null;
+  const unselected = panel => { const n = node("div", "na", `No eval run holds the matches this panel names (${[panel.tournament && "tournament " + panel.tournament, panel.matchup && "matchup " + panel.matchup, panel.tag && "tag " + panel.tag].filter(Boolean).join(", ")}).`); return n; };
+  if (!D.selections.length) card(body, "No evaluations", "", "full").appendChild(node("div", "na", `Define eval(state) in ${D.file} and run etude eval ${D.file}; its matches appear here.`));
+  else for (const panel of R.evals) {
+    const sel = panelSel(E, panel), opp = oppFor(E, sel), versus = versusOf(opp), where = sel == null ? "" : selName(D.selections[sel]);
+    if (panel.kind === "curve" && !panel.split) {
+      const c = card(body, panel.title, `${where} · ${scoreName} ${versus} · mean over seeds · band: seed range, or one seed's 95% interval over matches · ${GAPS}`, "full");
+      if (sel == null) { c.appendChild(unselected(panel)); continue; }
+      const host = node("div"); c.appendChild(host);
+      later(() => line(host, series(j => curveOf(j, sel, {}, opp)), {...eOpts, refs: anchorLines(E, sel, opp), height: 260}));
+    } else if (panel.kind === "curve") {
+      const c = card(body, panel.title, `${where} · one chart per ${panel.split} · ${versus}`, "full");
+      if (sel == null) { c.appendChild(unselected(panel)); continue; }
+      const vals = values(E, sel, panel.split);
+      if (!vals.length) { c.appendChild(node("div", "na", absentNote(panel.split))); continue; }
+      const grid = node("div", "grid multiples"); c.appendChild(grid);
+      for (const v of vals) { const m = node("div"), host = node("div"); m.append(node("div", "mini-title", `${panel.split} = ${show(v)}`), host); grid.appendChild(m); later(() => line(host, series(j => curveOf(j, sel, {[panel.split]: v}, opp)), {...eOpts, refs: anchorLines(E, sel, opp, {[panel.split]: v}), compact: true, height: 140})); }
+    } else if (panel.kind === "matrix") {
+      const c = card(body, panel.title || `${panel.columns} × ${panel.rows}`, `${where} · ${panel.columns} across · ${panel.rows} down · ${scoreName} ${versus}`, "full");
+      if (sel == null) { c.appendChild(unselected(panel)); continue; }
+      const both = (r, col) => ({[panel.rows]: r, [panel.columns]: col});
+      const colsAt = values2(E, sel, panel.columns, panel.rows), rowsAt = values2(E, sel, panel.rows, panel.columns);
+      if (!colsAt.length || !rowsAt.length) { c.appendChild(node("div", "na", absentNote(panel.rows, panel.columns))); continue; }
+      if (!vis.some(j => j.key === S.mjob)) S.mjob = vis[0].key;
+      const job = vis.find(j => j.key === S.mjob), done = evaluated(curveOf(job, sel, {}, opp)).map(p => p.key), last = finalKey(job);
+      // A finished job is shown at its final checkpoint, evaluated or not; a running one at its latest evaluated.
+      const keys = [...new Set([...done, ...(last != null ? [last] : [])])].sort((a, b) => a - b);
+      const fallback = last ?? done[done.length - 1];
+      const key = S.mkey !== "" && keys.includes(+S.mkey) ? +S.mkey : fallback;
+      const tabs = node("div", "tabs-in");
+      for (const j of vis) { const b = node("button", "jbtn"); b.append(swatch(j), j.label); b.setAttribute("aria-pressed", String(j === job)); b.onclick = () => { S.mjob = j.key; S.mkey = ""; render(); }; tabs.appendChild(b); }
+      const pick = node("select"); pick.setAttribute("aria-label", "Checkpoint");
+      for (const k of [...keys].reverse()) pick.appendChild(new Option(keyName(k) + (k === last ? " · final" : k === done[done.length - 1] ? " · latest evaluated" : ""), k, false, k === key));
+      pick.onchange = () => { S.mkey = pick.value; render(); }; tabs.appendChild(pick); c.appendChild(tabs);
+      if (key == null) { c.appendChild(node("div", "na", `${job.label} has no checkpoint every seed evaluated`)); continue; }
+      const whole = curveOf(job, sel, {}, opp).find(p => p.key === key);
+      if (!whole || whole.missing || whole.skip) { c.appendChild(node("div", "na", `${job.label} at ${keyName(key)}${key === last ? " (final)" : ""}: ${whole?.meta || "not evaluated"}`)); continue; }
+      const at = (r, col) => curveOf(job, sel, both(r, col), opp).find(p => p.key === key);
+      const grid = node("div", "matrix"); grid.style.gridTemplateColumns = `minmax(80px, auto) repeat(${colsAt.length}, minmax(38px, 1fr))`;
+      const wrap = node("div", "mwrap"); wrap.appendChild(grid); c.appendChild(wrap);
+      const corner = node("div", "rl", `${panel.rows} ↓ · ${panel.columns} →`); corner.style.fontSize = "10.5px"; grid.appendChild(corner);
+      for (const col of colsAt) grid.appendChild(node("div", "cl", show(col)));
+      const found = rowsAt.flatMap(r => colsAt.map(col => at(r, col))).filter(p => p && !p.missing && !p.skip).map(p => p.y);
+      const paint = painter(found, ref);
+      for (const r of rowsAt) {
+        grid.appendChild(node("div", "rl", show(r)));
+        for (const col of colsAt) {
+          const p = at(r, col), ok = p && !p.missing && !p.skip, on = F[panel.rows] === r && F[panel.columns] === col;
+          const cell = node("div", "cell" + (ok ? "" : " none") + (on ? " on" : ""));
+          if (ok) paintCell(cell, p, ref, paint); else cell.textContent = "·";
+          cell.onpointermove = evt => showTip(evt, ok ? [{value: fmt(p.y), label: p.meta}, ...(p.lo != null ? [{value: `${fmt(p.lo)}–${fmt(p.hi)}`, label: job.runs.length > 1 ? "seed range" : "95% interval"}] : [])] : [{value: "not recorded", label: p?.meta || ""}], `${job.label} · ${panel.columns} ${show(col)} · ${panel.rows} ${show(r)} · ${versus}`);
+          cell.onpointerleave = hideTip;
+          cell.onclick = () => setFilter(both(r, col), true);
+          grid.appendChild(cell);
+        }
+      }
+      rampLegend(c, ref, found, `· at ${keyName(key)}${key === last ? " (final)" : ""}${ref != null ? " · faded where the band includes " + fmt(ref) : ""} · click a cell to filter`);
+    } else if (panel.kind === "ranking") {
+      const commonKey = (() => { const sets = vis.map(j => new Set(evaluated(curveOf(j, sel, {}, opp)).map(p => p.key))); const shared = sets.length ? [...sets[0]].filter(k => sets.every(s => s.has(k))) : []; return shared.length ? Math.max(...shared) : null; })();
+      const c = card(body, panel.title || `By ${panel.by}`, `${where} · ${commonKey != null ? `at ${keyName(commonKey)}, which every job evaluated` : "each job at its latest"} · ${versus}`);
+      if (sel == null) { c.appendChild(unselected(panel)); continue; }
+      const vals = values(E, sel, panel.by);
+      if (!vals.length) { c.appendChild(node("div", "na", absentNote(panel.by))); continue; }
+      const rows = vals.map(v => {
+        const by = vis.map(j => { const pts = curveOf(j, sel, {[panel.by]: v}, opp), k = commonKey ?? latestKey(curveOf(j, sel, {}, opp)); return [j, pts.find(p => p.key === k && !p.missing && !p.skip)]; });
+        const got = by.filter(([, p]) => p); return {v, by, mean: got.length ? mean(got.map(([, p]) => p.y)) : -Infinity};
+      }).sort((a, b) => b.mean - a.mean);
+      const ys = rows.flatMap(r => r.by.filter(([, p]) => p).map(([, p]) => p.y));
+      const lo = Math.min(0, ...ys), hi = Math.max(...ys, ref ?? -Infinity, lo + 1e-9);
+      for (const r of rows) {
+        const row = node("div", "rk" + (F[panel.by] === r.v ? " on" : "")); row.tabIndex = 0; row.appendChild(node("span", null, show(r.v)));
+        const bars = node("div", "bars");
+        for (const [j, p] of r.by) {
+          const b = node("div", "bar"), track = node("div", "track"), fill = node("b");
+          fill.style.width = p ? ((p.y - lo) / (hi - lo) * 100) + "%" : "0"; fill.style.background = color(j); if (j.baseline) { fill.className = "dot"; fill.style.color = color(j); }
+          track.appendChild(fill); if (ref != null) { const e = node("em"); e.style.left = ((ref - lo) / (hi - lo) * 100) + "%"; track.appendChild(e); }
+          b.append(track, node("span", null, p ? fmt(p.y) : "n/r")); bars.appendChild(b);
+        }
+        row.appendChild(bars);
+        const click = () => setFilter({[panel.by]: r.v}, true);
+        row.onclick = click; row.onkeydown = evt => { if (evt.key === "Enter") click(); };
+        row.onpointermove = evt => showTip(evt, r.by.map(([j, p]) => ({color: color(j), dotted: j.baseline, value: p ? fmt(p.y) : "not recorded", label: j.label + (p ? " · " + p.meta : "")})), `${panel.by} = ${show(r.v)}`);
+        row.onpointerleave = hideTip; c.appendChild(row);
+      }
+    } else if (panel.kind === "head_to_head") {
+      const c = card(body, panel.title, `${where} · a job's score against another job's checkpoints`);
+      if (sel == null) { c.appendChild(unselected(panel)); continue; }
+      const pairs = [];
+      for (const a of vis) for (const b of JOBS) if (a !== b) {
+        const theirs = D.agents.map((g, i) => i).filter(i => D.agents[i].run != null && b.runs.includes(D.agents[i].run));
+        const pts = jobPoints(a, S.eclock, (run, m) => {
+          const mine = bound.get(`${run}|${m.ordinal}|${S.cfg}`);
+          const got = mine == null ? [] : theirs.map(s => cellOf(sel, E.score, mine, s, false, F)).filter(Boolean);
+          return got.length ? {y: mean(got.map(g => g.value)), meta: `against ${got.length} of ${b.label}'s checkpoints`} : null;
+        }, true);
+        if (pts.some(p => !p.missing)) pairs.push({label: `${a.label} vs ${b.label}`, color: color(a), dotted: a.baseline, points: pts});
+      }
+      if (!pairs.length) { c.appendChild(node("div", "na", "No games between checkpoints of two jobs were recorded")); continue; }
+      const host = node("div"); c.appendChild(host); later(() => line(host, pairs, {...eOpts, height: 200, ref: ref}));
+    } else if (panel.kind === "anchors") {
+      // Fixed agents are not a job's: drawn once, against each other.
+      const c = card(body, panel.title, `${where} · ${scoreName} · row against column · strength: over matches that seat no checkpoint of the experiment`, "full");
+      if (sel == null) { c.appendChild(unselected(panel)); continue; }
+      const met = fixedAgents.filter(a => D.cells.some(x => x.selection === sel && x.score === E.score && (x.subject === a || x.opponent === a) && (x.fixed || (D.agents[x.subject].run == null && x.opponent != null && D.agents[x.opponent].run == null))));
+      if (!met.length) { c.appendChild(node("div", "na", "No two fixed agents played each other in these matches")); continue; }
+      const strength = a => cellOf(sel, E.score, a, null, true, F);
+      const order = [...met].sort((a, b) => (strength(b)?.value ?? -Infinity) - (strength(a)?.value ?? -Infinity) || D.agents[a].name.localeCompare(D.agents[b].name));
+      const grid = node("div", "matrix"); grid.style.gridTemplateColumns = `minmax(110px, auto) minmax(64px, 1fr) repeat(${order.length}, minmax(48px, 1fr))`;
+      const wrap = node("div", "mwrap"); wrap.appendChild(grid); c.appendChild(wrap);
+      grid.append(node("div", "rl", ""), node("div", "cl", "strength"));
+      for (const b of order) grid.appendChild(node("div", "cl", D.agents[b].name));
+      const pointOfCell = x => x && {y: x.value, lo: x.interval?.[0], hi: x.interval?.[1], meta: `${x.rows} rows · ${x.matches} matches`};
+      const found = order.flatMap(a => [strength(a), ...order.map(b => a === b ? null : cellOf(sel, E.score, a, b, false, F))]).filter(Boolean).map(x => x.value);
+      const paint = painter(found, ref);
+      for (const a of order) {
+        grid.appendChild(node("div", "rl", D.agents[a].name));
+        for (const [b, x] of [[null, strength(a)], ...order.map(b => [b, a === b ? null : cellOf(sel, E.score, a, b, false, F)])]) {
+          const p = pointOfCell(x), cell = node("div", "cell" + (p ? "" : " none"));
+          if (p) paintCell(cell, p, ref, paint); else cell.textContent = a === b ? "" : "·";
+          cell.onpointermove = evt => showTip(evt, p ? [{value: fmt(p.y), label: p.meta}, ...(p.lo != null ? [{value: `${fmt(p.lo)}–${fmt(p.hi)}`, label: "95% interval"}] : [])] : [{value: "not recorded", label: ""}], `${D.agents[a].name} ${b == null ? "against every anchor" : "vs " + D.agents[b].name}`);
+          cell.onpointerleave = hideTip; grid.appendChild(cell);
+        }
+      }
+      rampLegend(c, ref, found, `· ${met.length} fixed agent${met.length > 1 ? "s" : ""}: code, or checkpoints from outside the experiment`);
+    } else card(body, `Unknown panel kind ${JSON.stringify(panel.kind)}`, "not drawn");
+  }
+  function values2(E, sel, column, other) {
+    const want = Object.keys({...F, [column]: 1, [other]: 1}).sort().join(","), found = new Set();
+    for (const c of D.cells) if (c.selection === sel && c.score === E.score && !c.fixed && Object.keys(c.split).sort().join(",") === want
+      && Object.entries(F).every(([k, v]) => k === column || k === other || c.split[k] === v)) found.add(JSON.stringify(c.split[column]));
+    return [...found].map(v => JSON.parse(v)).sort((a, b) => typeof a === "number" && typeof b === "number" ? a - b : String(a).localeCompare(String(b)));
+  }
+  function absentNote(...cols) {
+    const gone = cols.filter(col => D.absent.includes(`${E.info?.table}.${col}`));
+    return gone.length ? `${gone.join(", ")} ${gone.length > 1 ? "are not columns" : "is not a column"} of ${E.info.table}` : "Nothing recorded for this selection";
+  }
+
+  // ---- Perf and ML details: what the training runs logged, and what Etude recorded.
+  // Smoothed: the mean of up to seven neighbouring buckets, centred so it does not lag; gaps stay gaps.
+  const smoothed = pts => pts.map((p, i) => {
+    if (p.missing || p.y == null) return p;
+    const near = pts.slice(Math.max(0, i - 3), i + 4).filter(q => !q.missing && q.y != null);
+    return {...p, y: mean(near.map(q => q.y)), lo: null, hi: null};
+  });
+  const scaleX = (clock, x) => x == null ? null : clock === WALL ? x / 3600 : x;
+  // A several-seed job is its band (mean, seed range); a one-seed job is its run's means.
+  function metricPoints(j, key, clock) {
+    const band = ((T.bands[clock] || {})[key] || []).find(l => l.owner === j.key);
+    const l = band || (j.runs.length === 1 ? ((T.series[clock] || {})[key] || []).find(l => l.owner === j.runs[0]) : null);
+    if (!l) return null;
+    return l.x.map((x, i) => ({x: scaleX(clock, x), y: l.mean[i], lo: band ? l.low[i] : null, hi: band ? l.high[i] : null, missing: l.mean[i] == null, meta: band ? `${l.seeds[i]} seeds` : ""}));
+  }
+  const named = new Set([...(R.perf || []), ...(R.ml || [])].flatMap(p => p.keys || []));
+  const prefixes = [...(R.perf || []), ...(R.ml || [])].filter(p => p.kind === "flame").map(p => p.prefix);
+  function metricSection(section, panels, clockKey) {
+    const host = document.getElementById(section + "-body"); host.replaceChildren();
+    const ctl = document.getElementById(section + "-controls"); ctl.replaceChildren();
+    control(ctl, "X axis", CLOCKS, clockKey); control(ctl, "Lines", [["on", "Smoothed"], ["off", "Raw"]], "smooth");
+    const clock = S[clockKey], opts = {xLabel: clockLabel(clock), band: true};
+    const missing = [];
+    const prep = (pts, j) => S.smooth === "on"
+      ? [{label: j.label, color: color(j), opacity: 0.25, width: 1, faint: true, points: pts.map(p => ({...p, lo: null, hi: null}))}, {label: j.label, color: color(j), dotted: j.baseline, points: smoothed(pts)}]
+      : [{label: j.label, color: color(j), dotted: j.baseline, points: pts}];
+    const chartKey = (host_, key, scale, height, compact) => {
+      const lines = vis.map(j => [j, metricPoints(j, key, clock)]).filter(([, p]) => p);
+      const log = scale === "log";
+      later(() => line(host_, lines.flatMap(([j, pts]) => prep(log ? pts.map(p => ({...p, y: p.y > 0 ? Math.log10(p.y) : null, lo: null, hi: null, missing: p.missing || !(p.y > 0)})) : pts, j)), {...opts, compact, height, yFormat: log ? y => fmt(10 ** y) : fmt}));
+      return lines;
+    };
+    for (const panel of panels) {
+      if (panel.kind === "series") {
+        const present = panel.keys.filter(k => T.metrics.includes(k));
+        missing.push(...panel.keys.filter(k => !present.includes(k)));
+        if (!present.length) continue;
+        const c = card(host, panel.title, panel.unit + (panel.scale === "log" ? " · log scale" : ""), present.length > 1 ? "full" : "");
+        if (present.length === 1) {
+          for (const j of vis) { const p = metricPoints(j, present[0], clock); const last = p && [...p].reverse().find(q => !q.missing); if (last) { const r = node("div", "srow"); r.append(swatch(j), node("span", null, j.label), node("b", null, fmt(last.y))); c.appendChild(r); } }
+          const h = node("div"); c.appendChild(h); chartKey(h, present[0], panel.scale, 170, false);
+        } else {
+          const grid = node("div", "grid multiples"); c.appendChild(grid);
+          for (const k of present) { const m = node("div"), h = node("div"); m.append(node("div", "mini-title mono", k), h); grid.appendChild(m); chartKey(h, k, panel.scale, 140, true); }
+        }
+      } else if (panel.kind === "counters") {
+        const present = panel.keys.filter(k => T.metrics.includes(k));
+        missing.push(...panel.keys.filter(k => !present.includes(k)));
+        if (!present.length) continue;
+        const c = card(host, panel.title, "expected to stay at zero");
+        for (const k of present) {
+          c.appendChild(node("div", "mini-title mono", k));
+          for (const j of vis) {
+            const lines = j.runs.map(run => ((T.series[WALL] || {})[k] || []).find(l => l.owner === run)).filter(Boolean);
+            const row = node("div", "counter"), label = node("span", null, j.label); label.style.color = "var(--ink-2)";
+            if (!lines.length) { row.append(node("span", "icon na", "–"), label, node("span", "count", "not logged")); c.appendChild(row); continue; }
+            // Buckets keep each stretch's mean; a counter's mean is nonzero exactly where it was.
+            const hits = lines.flatMap(l => l.mean.filter(v => v != null && v !== 0)), worst = hits.length ? Math.max(...hits.map(Math.abs)) : 0;
+
+            row.append(node("span", "icon " + (hits.length ? "bad" : "ok"), hits.length ? "!" : "✓"), label, node("span", "count", hits.length ? `nonzero in ${hits.length} of its stretches, up to ${fmt(worst)} on average` : "0"));
+            c.appendChild(row);
+          }
+        }
+      } else if (panel.kind === "pace") {
+        const c = card(host, panel.title, "each step clock per wall second, between checkpoints · gaps: an attempt began", "full");
+        if (!stepClocks.length || !T.checkpoints.length) { c.appendChild(node("div", "na", "No step clock and checkpoint to measure pace between")); continue; }
+        const grid = node("div", "grid multiples"); c.appendChild(grid);
+        for (const k of stepClocks) {
+          const m = node("div"), h = node("div"); m.append(node("div", "mini-title", `${k} per second`), h); grid.appendChild(m);
+          later(() => line(h, series(j => jobPoints(j, clock, (run, mk) => mk.pace[k] == null ? {missing: true, meta: "an attempt began since the last checkpoint"} : {y: mk.pace[k]})), {...opts, compact: true, height: 140}));
+        }
+      } else if (panel.kind === "elapsed") {
+        const c = card(host, panel.title, "wall hours since the run first started");
+        if (!T.checkpoints.length) { c.appendChild(node("div", "na", "No checkpoint recorded")); continue; }
+        const h = node("div"); c.appendChild(h);
+        later(() => line(h, series(j => jobPoints(j, clock, (run, mk) => ({y: mk.elapsed / 3600}))), {...opts, height: 170, yFormat: v => v.toFixed(v < 10 ? 2 : 1) + " h"}));
+      } else if (panel.kind === "attempts") {
+        const c = card(host, panel.title, "each attempt from its start to its last row · hours since the run first started");
+        const runs = T.runs.filter(r => vis.some(j => j.runs.includes(r.name)));
+        const span = Math.max(1e-9, ...runs.flatMap(r => r.attempts.map(a => a.last_row ?? a.started)));
+        for (const r of runs) {
+          const j = jobOfRun(r.name), row = node("div", "att"), lane = node("div", "lane");
+          row.append(node("span", null, `${r.name}${r.attempts.length > 1 ? ` · ${r.attempts.length} attempts` : ""}`), lane);
+          for (const a of r.attempts) {
+            const b = node("b"); b.style.left = (a.started / span * 100) + "%"; b.style.width = (((a.last_row ?? a.started) - a.started) / span * 100) + "%"; b.style.background = color(j);
+            b.onpointermove = evt => showTip(evt, [{value: dur(Math.max(0, (a.last_row ?? a.started) - a.started)), label: a.last_row == null ? "logged no row" : "to its last row"}, {value: a.host, label: a.pod ? "pod " + a.pod : ""}], `${r.name} · from ${dur(a.started)}`);
+            b.onpointerleave = hideTip; lane.appendChild(b);
+          }
+          c.appendChild(row);
+        }
+        c.appendChild(node("div", "legend", `${dur(span)} across`));
+      } else if (panel.kind === "flame") {
+        flame(card(host, panel.title, `seconds logged under ${panel.prefix}`, "full"), panel, vis, color, swatch);
+      } else card(host, `Unknown panel kind ${JSON.stringify(panel.kind)}`, "not drawn");
+    }
+    if (section === "ml") {
+      const others = T.metrics.filter(k => !named.has(k) && !prefixes.some(p => k.startsWith(p)));
+      if (others.length) {
+        const c = card(host, "Other logged metrics", "named by no panel", "full"), grid = node("div", "grid multiples"); c.appendChild(grid);
+        for (const k of others) { const m = node("div"), h = node("div"); m.append(node("div", "mini-title mono", k), h); grid.appendChild(m); chartKey(h, k, "linear", 130, true); }
+      }
+    }
+    if (missing.length) { const m = node("div", "missing card full", "Named by a panel but not logged by these runs: "); m.style.border = "0"; m.style.padding = "0"; missing.forEach(k => m.appendChild(node("code", null, k))); host.appendChild(m); }
+    document.getElementById(section + "-sub").textContent = clockMeaning(clock);
+  }
+  metricSection("perf", R.perf, "pclock");
+  metricSection("ml", R.ml, "mlclock");
+  tables();
+  for (const d of draws) d();
+}
+
+// ---- Flame: width is seconds, rows are timer depth. The zoom path applies to every job.
+function flame(c, panel, vis, color, swatch) {
+  const path = S.fpath ? S.fpath.split("/") : [];
+  const per = stepClocks[0];
+  const scales = [["share", "Share"], ["total", "Total"], ...(per ? [["per", `Per 1M ${per}`]] : [])];
+  if (!scales.some(([v]) => v === S.fscale)) S.fscale = "share";
+  const bar = node("div", "fl-bar"), crumbs = node("div", "crumbs"), root = node("button", null, "All");
+  root.onclick = () => { S.fpath = ""; render(); }; crumbs.appendChild(root);
+  path.forEach((name, i) => { crumbs.append(" › "); const b = node("button", null, name); b.onclick = () => { S.fpath = path.slice(0, i + 1).join("/"); render(); }; crumbs.appendChild(b); });
+  const sc = node("div", "seg"); for (const [v, l] of scales) { const b = node("button", null, l); b.setAttribute("aria-pressed", String(S.fscale === v)); b.onclick = () => { S.fscale = v; render(); }; sc.appendChild(b); }
+  bar.append(crumbs, sc); c.appendChild(bar);
+  // A job's tree is its seeds' mean, node by node.
+  const meanTree = trees => ({...trees[0], seconds: mean(trees.map(t => t.seconds)),
+    children: [...new Set(trees.flatMap(t => t.children.map(ch => ch.name)))].map(name => meanTree(trees.map(t => t.children.find(ch => ch.name === name) || {name, seconds: 0, status: "recorded", children: []})))});
+  const items = vis.map(j => {
+    const trees = j.runs.map(run => T.timers.find(t => t.run === run && t.prefix === panel.prefix)).filter(Boolean);
+    const steps = j.runs.map(run => T.runs.find(r => r.name === run)?.reached[per]).filter(v => v > 0);
+    return {j, tree: trees.length === j.runs.length ? meanTree(trees.map(t => t.tree)) : null, steps: steps.length === j.runs.length ? mean(steps) : null};
+  });
+  if (!items.some(x => x.tree)) { c.appendChild(node("div", "na", `No timer logged under ${panel.prefix} for every seed of a job. Log seconds spent as ${panel.prefix}PART on each row to see where time went.`)); return; }
+  const find = (n, names) => { let cur = n; for (const name of names) { cur = (cur.children || []).find(x => x.name === name); if (!cur) return null; } return cur; };
+  const factor = x => S.fscale === "per" ? (x.steps ? 1e6 / x.steps : null) : 1;
+  const focus = items.map(x => ({...x, f: x.tree && find(x.tree, path)}));
+  const widest = Math.max(...focus.filter(x => x.f && factor(x) != null).map(x => x.f.seconds * factor(x)));
+  const tops = new Map(); (focus.find(x => x.tree)?.tree.children || []).forEach((ch, i) => tops.set(ch.name, i));
+  for (const x of focus) {
+    const head = node("div", "fl-run"), name = node("b"); name.append(swatch(x.j), " ", x.j.label); head.appendChild(name); c.appendChild(head);
+    if (!x.tree) { head.appendChild(node("span", null, "no timers for every seed")); continue; }
+    if (!x.f) { head.appendChild(node("span", null, `no ${path[path.length - 1]} timer`)); continue; }
+    const k = factor(x); if (k == null) { head.appendChild(node("span", null, `no ${per} recorded`)); continue; }
+    head.appendChild(node("span", null, S.fscale === "per" ? `${dur(x.f.seconds * k)} per 1M ${per}` : `${dur(x.f.seconds)}${path.length ? ` · ${(x.f.seconds / x.tree.seconds * 100).toFixed(1)}% of active wall time` : ""}`));
+    const fl = node("div", "flame"); c.appendChild(fl);
+    const width = fl.clientWidth || c.clientWidth - 32, span = S.fscale === "share" ? width : width * x.f.seconds * k / widest;
+    let depth = 0;
+    const place = (n, left, w, d, top) => {
+      depth = Math.max(depth, d);
+      const el = node("div", "fn " + n.status), group = top ?? tops.get(n.name);
+      const base = n.status === "unattributed" ? css("--t-rest") : d === 0 && !path.length ? css("--t-root") : css(`--t${(group ?? 0) % 4 + 1}`);
+      const fill = n.status === "unattributed" ? base : mixHex(base, css("--surface"), Math.min(0.55, Math.max(0, d - 1) * 0.16));
+      el.style.cssText = `left:${left}px;width:${Math.max(1, w - 1)}px;top:${d * 26}px;background:${fill};color:${n.status === "untimed" ? "" : inkOn(fill)}`;
+      if (w > 64) el.textContent = `${n.name} · ${dur(n.seconds * k)}`;
+      el.onpointermove = evt => showTip(evt, [{value: dur(n.seconds * k) + (S.fscale === "per" ? ` per 1M ${per}` : ""), label: `${(n.seconds / (x.f.seconds || 1) * 100).toFixed(1)}% of ${x.f.name}`}, {value: n.status, label: n.status === "summed" ? "its children's total; no timer of its own" : n.status === "untimed" ? "active wall time no timer covers" : n.status === "unattributed" ? "the parent's seconds its children leave" : panel.prefix + [...path, n.name].slice(1).join("/")}], n.name);
+      el.onpointerleave = hideTip;
+      if (n.children && n.children.length) el.onclick = () => { S.fpath = [...path, ...(n === x.f ? [] : [n.name])].join("/"); if (n !== x.f) render(); };
+      fl.appendChild(el);
+      let cx = left; for (const ch of n.children || []) { const cw = n.seconds ? w * ch.seconds / n.seconds : 0; place(ch, cx, cw, d + 1, d === 0 ? tops.get(ch.name) : group); cx += cw; }
+    };
+    place(x.f, 0, span, 0, path.length ? tops.get(path[0]) : null);
+    fl.style.height = (depth + 1) * 26 + "px";
+  }
+}
+
+function tables() {
+  const t = document.getElementById("runs"); t.replaceChildren();
+  const head = node("tr"); for (const h of ["Run", "Job", "Seed", "State", "Rows", "Attempts", "Incomplete", "Dropped"]) head.appendChild(node("th", null, h)); t.appendChild(head);
+  for (const r of T.runs) { const row = node("tr"); for (const [v, n] of [[r.name], [jobOfRun(r.name)?.label], [r.seed ?? "–", 1], [r.state], [r.rows.toLocaleString(), 1], [r.attempts.length, 1], [r.incomplete, 1], [r.dropped ?? "–", 1]]) row.appendChild(node("td", n ? "n" : "", String(v))); t.appendChild(row); }
+  const q = document.getElementById("coverage"); q.replaceChildren();
+  document.getElementById("coverage-box").hidden = !D.coverage.length;
+  const h2 = node("tr"); for (const h of ["Training run", "Checkpoint", "Where it stood", "Tournament", "Played", "Failed", "Not yet played"]) h2.appendChild(node("th", null, h)); q.appendChild(h2);
+  for (const c of D.coverage) {
+    const m = markOf(c.run, c.ordinal), row = node("tr");
+    for (const [v, n] of [[c.run], [c.ordinal, 1], [m ? Object.entries(m.at).map(([k, v]) => `${k} ${num(v)}`).join(", ") : "–"], [c.tournament], [c.played, 1], [c.failed, 1], [c.unplayed, 1]]) row.appendChild(node("td", n ? "n" : "", String(v)));
+    q.appendChild(row);
+  }
+  const f = document.getElementById("failures"); f.replaceChildren();
+  document.getElementById("failures-box").hidden = !D.failures.length;
+  const h3 = node("tr"); for (const h of ["Tournament", "Agents, by seat", "Error"]) h3.appendChild(node("th", null, h)); f.appendChild(h3);
+  for (const x of D.failures) { const row = node("tr"); for (const v of [x.tournament ?? "–", x.agents.map(agentName).join(" vs "), x.error ?? "–"]) row.appendChild(node("td", null, v)); f.appendChild(row); }
+}
+
+// Section nav highlights the section in view.
+const tabs = [...document.querySelectorAll("nav.tabs a")];
+const io = new IntersectionObserver(entries => { for (const en of entries) if (en.isIntersecting) tabs.forEach(t => t.classList.toggle("on", t.dataset.s === en.target.id)); }, {rootMargin: "-40% 0px -55% 0px"});
+["evals", "perf", "ml"].forEach(id => io.observe(document.getElementById(id)));
+render();
+let pending; addEventListener("resize", () => { clearTimeout(pending); pending = setTimeout(render, 120); });
+if (D.refresh) setInterval(() => { if (S.live === "1" && !document.hidden) location.reload(); }, D.refresh * 1000);
+</script>
+</body>
+</html>
