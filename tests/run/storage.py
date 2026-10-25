@@ -51,6 +51,10 @@ class MeasuredStorage:
         self.listings += 1
         return self.storage.keys(prefix)
 
+    def versions(self, prefix: str) -> dict[str, str]:
+        self.listings += 1
+        return self.storage.versions(prefix)
+
     def uri(self, key: str) -> str:
         return self.storage.uri(key)
 

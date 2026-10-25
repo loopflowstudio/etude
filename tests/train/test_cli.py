@@ -22,10 +22,11 @@ from tests.experiments import experiment_file
     ("command", "count", "forbidden"),
     [
         (["report", "--help"], 10, ("numpy", "pydantic")),
-        # No eval run and no eval(state), so nothing of evaluation loads.
+        # No eval run and no eval(state), so nothing of evaluation loads. The report
+        # recognises experiment files as `etude launch` does (`etude.experiment_file`).
         (
             ["report", "{directory}/pilot.py", "--source", "{directory}"],
-            22,
+            23,
             ("boto3", "duckdb", "etude.eval", "etude.train.run"),
         ),
         (
@@ -147,8 +148,9 @@ def test_serving_an_index_loads_no_evaluation_launcher_or_bucket_client(tmp_path
     assert done.returncode == 0, done.stderr
     modules = json.loads(done.stdout.splitlines()[-1])
     loaded = [name for name in modules if name.startswith("etude")]
-    # Neither experiment has eval runs or eval(): the index reads training files alone.
-    assert len(loaded) == 22, loaded
+    # Neither experiment has eval runs or eval(): the index reads training files alone,
+    # and recognises experiment files as `etude launch` does (`etude.experiment_file`).
+    assert len(loaded) == 23, loaded
     forbidden = (
         "boto3",
         "duckdb",

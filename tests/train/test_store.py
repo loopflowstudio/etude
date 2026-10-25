@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 from moto import mock_aws
 
-from etude.page import build
+from etude.page import Pages, build
 from etude.run.block_file import block_key, tail_key
 from etude.run.delivery import RunFiles, StorageDestination, sync
 from etude.run.errors import EtudeError
@@ -788,6 +788,11 @@ def test_watched_reports_read_each_bucket_file_once_per_computer(tmp_path: Path)
         read_once = client.bytes
         for _ in range(5):
             assert build(S3Storage("etude-watched", client=client), file) == first
+        assert client.bytes == read_once
+        # Kept between builds, a page is checked by listing alone while nothing changes.
+        pages = Pages(S3Storage("etude-watched", client=client))
+        for _ in range(3):
+            assert pages.build(file) == first
         assert client.bytes == read_once
 
 

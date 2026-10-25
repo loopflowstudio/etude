@@ -27,7 +27,12 @@ __PAGE_CSS__
 <script>__CHARTS_JS__</script>
 <script>
 "use strict";
-const D = JSON.parse(document.getElementById("data").textContent);
+const PAGE = JSON.parse(document.getElementById("data").textContent);
+// Each match's latest result, or a commit's view of the matches as played at it. Choosing a
+// commit reloads the page, so every panel is drawn from that view's cells alone.
+const asked = new URLSearchParams(location.hash.slice(1)).get("commit");
+const COMMIT = PAGE.commits.some(k => k.commit === asked) ? asked : "";
+const D = {...PAGE, cells: PAGE.cells.filter(c => (c.commit ?? "") === COMMIT)};
 const M = model(D);
 const {T, R, JOBS, marks, markOf, jobPoints, cellOf, bound, fixedAgents, configs, jobOfRun, agentName, selName, choices} = M;
 
@@ -35,7 +40,7 @@ const {T, R, JOBS, marks, markOf, jobPoints, cellOf, bound, fixedAgents, configs
 const clockNames = [...T.clocks.map(c => c.name), WALL];
 const firstClock = clockNames.includes(R.clock) ? R.clock : clockNames[0];
 const S = Object.assign({hide: "", filter: "{}", eclock: firstClock, pclock: firstClock, mlclock: firstClock, opp: "first", score: "0", sel: "", cfg: "", lines: "on", mjob: "", mkey: "", smooth: "on", fpath: "", fscale: "share", live: "1"},
-  Object.fromEntries(new URLSearchParams(location.hash.slice(1))));
+  Object.fromEntries(new URLSearchParams(location.hash.slice(1))), {commit: COMMIT});
 for (const k of ["eclock", "pclock", "mlclock"]) if (!clockNames.includes(S[k])) S[k] = firstClock;
 const writeHash = () => history.replaceState(null, "", "#" + new URLSearchParams(S));
 const clockLabel = c => c === WALL ? "wall hours" : c;
@@ -95,10 +100,10 @@ function rampLegend(c, ref, found, tail) {
 
 // ---------------------------------------------------------------- page
 function card(host, title, sub, cls = "") { const c = node("div", "card " + cls), h = node("h3", null, title); if (sub) h.appendChild(node("span", null, sub)); c.appendChild(h); host.appendChild(c); return c; }
-function control(host, label, options, key) {
+function control(host, label, options, key, apply = render) {
   if (options.length < 2) return;
   const group = node("div", "seg"); group.setAttribute("role", "group"); group.setAttribute("aria-label", label);
-  for (const [value, text] of options) { const b = node("button", null, text); b.setAttribute("aria-pressed", String(S[key] === value)); b.onclick = () => { S[key] = value; render(); }; group.appendChild(b); }
+  for (const [value, text] of options) { const b = node("button", null, text); b.setAttribute("aria-pressed", String(S[key] === value)); b.onclick = () => { S[key] = value; apply(); }; group.appendChild(b); }
   host.append(node("span", "lbl", label), group);
 }
 const CLOCKS = clockNames.map(c => [c, clockLabel(c)]);
@@ -150,6 +155,8 @@ function render() {
   const E = evalState(), ref = E.info?.reference;
   const ec = document.getElementById("evals-controls"); ec.replaceChildren();
   control(ec, "Matches", choices, "sel");
+  const commits = D.commits.map(k => [k.commit, `${k.commit.slice(0, 10)} · ${k.matches} match${k.matches > 1 ? "es" : ""}`]);
+  control(ec, "Played at", [["", "latest of each match"], ...commits], "commit", () => { writeHash(); location.reload(); });
   control(ec, "Score", D.scores.map((s, i) => [String(i), `${s.table}.${s.value}`]), "score");
   S.opp = oppFor(E, E.sel);
   control(ec, "Opponent", opponents(E, E.sel), "opp");

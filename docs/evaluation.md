@@ -374,7 +374,12 @@ checkpoint agent is drawn where its training run stood when it saved that
 checkpoint, found by its key; code agents and checkpoints from outside the
 experiment are anchors, drawn once. A checkpoint `eval(state)` chose that no
 eval run has delivered is marked not yet played, one nothing played is marked
-not evaluated, and failed matches are listed.
+not evaluated, and failed matches are listed. Each match counts from the eval
+run that delivered it last, whichever commit its code was at. Where the
+matches were played at several commits (`seats.commit`), "Played at" offers
+each: that commit's view counts every match as played at it. A delivered
+match is not played again for a new commit, so a commit's view holds the
+matches first played at it, and any held again there.
 
 ## Querying
 

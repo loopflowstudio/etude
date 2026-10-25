@@ -279,7 +279,13 @@ class BucketObjects:
         return f"s3://{self.bucket}/{key}"
 
     def keys(self, prefix: str) -> list[str]:
-        return sorted(key for key in self.storage.objects if key.startswith(prefix))
+        return sorted(self.versions(prefix))
+
+    def versions(self, prefix: str) -> dict[str, str]:
+        found = self.storage.objects.items()
+        return {
+            key: hashlib.sha256(body).hexdigest() for key, body in found if key.startswith(prefix)
+        }
 
 
 @dataclass

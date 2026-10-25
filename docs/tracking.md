@@ -204,8 +204,9 @@ uv run etude report experiments/ --serve      # every experiment there, with an 
 One HTML page per experiment, with its data inlined: no server and no network
 to view it. The experiment is named for the file, and the page follows the
 file's `report()`; a file without one gets `Report()`, and the page says so at
-its top. The file is run on every build, so an edited `report()` shows on the
-next. The page's top says where its runs were read from and when; it reads
+its top. `--watch` and `--serve` build a page again once its file or its runs'
+files change, so an edited `report()` shows on the next; while nothing has
+changed they list the source and build nothing. The page's top says where its runs were read from and when; it reads
 files and never launches or rents anything. From a directory the page goes to
 `reports/` beside its runs, from a bucket to `./reports`; `--out DIR` chooses.
 `--serve` has no login and listens on this computer only; with `--watch` the

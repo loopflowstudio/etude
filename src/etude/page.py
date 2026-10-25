@@ -3,7 +3,7 @@
     storage = storage_from_uri("r2://bucket/runs")
     page = build(storage, Path("experiments/ppo.py"))
     write(render(page), target(storage, "ppo"))  # ./reports/ppo.html
-    pages = build_each(storage, Path("experiments"))  # every experiment file there
+    pages = Pages(storage).build_each(Path("experiments"))  # every experiment file there
     write(render_index(index(storage, pages, href=lambda stem: f"{stem}.html")), target(storage, "index"))
 
 The file names the experiment, by its stem, and may define `report()`
@@ -48,7 +48,9 @@ import itertools
 import json
 import runpy
 import sys
+import threading
 import time
+from bisect import bisect_left
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from html import escape
@@ -58,12 +60,12 @@ from typing import TYPE_CHECKING
 
 from pydantic import JsonValue
 
-from etude.launch.job_file import experiment_named
+from etude.experiment_file import experiment_named
 from etude.report import Flame, Matches, Report, Score
 from etude.run.errors import EtudeError
-from etude.run.listing import as_storage, runs
+from etude.run.listing import as_storage, declared, run_folders, runs
 from etude.run.records import Record
-from etude.run.storage import DirectoryStorage, S3Storage, Storage
+from etude.run.storage import DirectoryStorage, S3Storage, Storage, default_root
 from etude.train.read import read_all
 from etude.train.report import WALL_MEANING, Training, training
 
@@ -96,9 +98,12 @@ class Cell(Record):
     every opponent, kept only where a subject met several. `fixed` cells
     count only matches that seat no checkpoint of the experiment: an
     anchor's strength. `split` holds exactly the columns it is split by.
+    `commit` is None for each match's latest result, whichever version
+    played it; a commit, for the matches as played at it (`Commit`).
     """
 
     selection: int
+    commit: str | None
     score: int
     subject: int
     opponent: int | None
@@ -107,6 +112,19 @@ class Cell(Record):
     value: float
     interval: tuple[float, float] | None
     rows: int
+    matches: int
+
+
+class Commit(Record):
+    """A commit the experiment's matches were played at, offered where there are several.
+
+    Its view counts each match as played at this commit, from the latest
+    eval run that played it there. `etude eval` never plays a delivered match
+    again, so a commit's matches are those first played at it, and any an
+    eval run held again at it.
+    """
+
+    commit: str
     matches: int
 
 
@@ -147,6 +165,7 @@ class Page(Record):
     scores: tuple[Score, ...]
     selections: tuple[Matches, ...]
     agents: tuple[Agent, ...]
+    commits: tuple[Commit, ...]
     cells: tuple[Cell, ...]
     coverage: tuple[Coverage, ...]
     failures: tuple[Failure, ...]
@@ -190,17 +209,98 @@ def experiment_files(directory: Path) -> list[Path]:
     return list(found.values())
 
 
-def build_each(source: Storage | Path | str, directory: Path) -> dict[Path, Page | str]:
-    """Each experiment file's page, or why it could not be built, so one never hides the rest."""
-    storage = as_storage(source)
-    built: dict[Path, Page | str] = {}
-    for file in experiment_files(directory):
+class Pages:
+    """Experiments' pages from one source, each built again only when its inputs change.
+
+    A page's inputs are its file, by modification time and size, and the
+    experiment's runs, by the version of every object in their folders
+    (`Storage.versions`): under the source, and under this computer's runs
+    directory, whose eval runs count too (`etude.eval.tournament.played`).
+    Checking them is one listing of each, plus a run's declaration the first
+    time its version is seen, so an unchanged page costs no new bucket bytes;
+    a changed one is built from the files as they are, so a page always
+    reflects them.
+    """
+
+    def __init__(self, source: Storage | Path | str) -> None:
+        self.storage = as_storage(source)
+        here = DirectoryStorage(default_root())
+        self._places = list({each.name: each for each in (self.storage, here)}.values())
+        self._built: dict[Path, tuple[_Inputs, Page]] = {}
+        # Each run's experiment by place and run, with the version of the declaration read.
+        self._declared: dict[tuple[str, str], tuple[str, str | None]] = {}
+
+    def build(self, file: Path) -> Page:
+        """`build`'s page, kept from the last call while its inputs are the same."""
+        return self._build(file, self._listings())
+
+    def build_each(self, directory: Path) -> dict[Path, Page | str]:
+        """Each experiment file's page, or why it could not be built, so one never hides the rest."""
+        listings = self._listings()
+        built: dict[Path, Page | str] = {}
+        for file in experiment_files(directory):
+            try:
+                built[file] = self._build(file, listings)
+            except Exception as error:
+                # An author's file may fail in any way; its row says how and the others go on.
+                built[file] = f"{type(error).__name__}: {error}"
+        return built
+
+    def _listings(self) -> list[dict[str, str]]:
+        return [place.versions("") for place in self._places]
+
+    def _build(self, file: Path, listings: Sequence[dict[str, str]]) -> Page:
         try:
-            built[file] = build(storage, file)
-        except Exception as error:
-            # An author's file may fail in any way; its row says how and the others go on.
-            built[file] = f"{type(error).__name__}: {error}"
-    return built
+            stat = file.stat()
+        except FileNotFoundError:
+            return build(self.storage, file)  # which says why there is no page
+        runs = tuple(
+            self._versions(place, file.stem, listed)
+            for place, listed in zip(self._places, listings, strict=True)
+        )
+        inputs = _Inputs(file=(stat.st_mtime_ns, stat.st_size), runs=runs)
+        kept = self._built.get(file)
+        if kept is not None and kept[0] == inputs:
+            return kept[1]
+        page = build(self.storage, file)
+        self._built[file] = (inputs, page)
+        return page
+
+    def _versions(
+        self, place: Storage, experiment: str, listed: dict[str, str]
+    ) -> tuple[tuple[str, str], ...]:
+        """The version of every object in the folders of the experiment's runs in one place."""
+        keys = sorted(listed)
+        found: list[tuple[str, str]] = []
+        for run, folders in sorted(run_folders(keys).items()):
+            if self._experiment(place, run, folders, listed) != experiment:
+                continue
+            for folder in folders:
+                start = bisect_left(keys, folder)
+                for key in itertools.takewhile(lambda k: k.startswith(folder), keys[start:]):
+                    found.append((key, listed[key]))
+        return tuple(found)
+
+    def _experiment(
+        self, place: Storage, run: str, folders: Sequence[str], listed: dict[str, str]
+    ) -> str | None:
+        """The run's experiment, from its declaration, read again only once it has changed."""
+        version = next((listed[f + "run.json"] for f in folders if f + "run.json" in listed), "")
+        kept = self._declared.get((place.name, run))
+        if kept is None or kept[0] != version:
+            file = declared(place, folders)
+            kept = (version, None if file is None else file.experiment)
+            self._declared[place.name, run] = kept
+        return kept[1]
+
+
+@dataclass(frozen=True)
+class _Inputs:
+    """What a page is built from, as `Pages` compares it."""
+
+    file: tuple[int, int]  # modification time in nanoseconds, and size in bytes
+    # Per place: (key, version) of each object in the experiment's runs' folders.
+    runs: tuple[tuple[tuple[str, str], ...], ...]
 
 
 def index(
@@ -213,7 +313,11 @@ def index(
         page = None
         if isinstance(built, Page):
             # The index draws each job's curve in the page's first view: one score, unsplit.
-            kept = tuple(c for c in built.cells if c.score == 0 and not c.split and not c.fixed)
+            kept = tuple(
+                c
+                for c in built.cells
+                if c.score == 0 and not c.split and not c.fixed and c.commit is None
+            )
             lean = built.training.model_copy(update={"series": {}, "bands": {}, "timers": ()})
             page = built.model_copy(update={"cells": kept, "training": lean})
         entries.append(
@@ -280,6 +384,7 @@ def build(source: Storage | Path | str, file: Path) -> Page:
         scores=evals.scores or ((report.score,) if report.score is not None else ()),
         selections=evals.selections,
         agents=evals.agents,
+        commits=evals.commits,
         cells=evals.cells,
         coverage=evals.coverage,
         failures=evals.failures,
@@ -320,6 +425,7 @@ class _Evals:
     scores: tuple[Score, ...] = ()
     selections: tuple[Matches, ...] = ()
     agents: tuple[Agent, ...] = ()
+    commits: tuple[Commit, ...] = ()
     cells: tuple[Cell, ...] = ()
     coverage: tuple[Coverage, ...] = ()
     failures: tuple[Failure, ...] = ()
@@ -331,21 +437,23 @@ class _Evals:
 def _read_evals(
     storage: Storage, experiment: str, report: Report, want: Callable[..., object] | None
 ) -> _Evals:
-    # Evaluation is read only once the experiment has some: DuckDB is the optional `eval` extra.
+    # The optional `eval` extra (DuckDB, and etude.eval over it), imported where it is
+    # used: only an experiment with evaluations reads it, so a report without loads none.
     from etude.eval.query import statsdb  # noqa: PLC0415
 
     standing, refused = _standing(want, storage, experiment)
     db = statsdb(experiment, storage)
     try:
         agents = _agents(db)
-        _load(db, standing, agents)
+        commits = _load(db, standing, agents)
         selections, notes = _selections(standing, report)
-        scores, cells, absent = _cells(db, selections, agents, report)
+        scores, cells, absent = _cells(db, selections, agents, commits, report)
         latest = db.sql("select max(wall_ms) from matches").fetchone()
         return _Evals(
             scores=scores,
             selections=tuple(selections),
             agents=tuple(agents),
+            commits=commits,
             cells=tuple(cells),
             coverage=_coverage(db, standing),
             failures=_failures(db, standing, agents),
@@ -374,7 +482,7 @@ def _standing(
     A tournament `eval(state)` returns is what it wants now; any other the
     experiment's eval runs hold is everything they were held for.
     """
-    # Imported once the experiment has evaluations: tournaments are the `eval` extra's.
+    # The optional `eval` extra, imported where it is used (`_read_evals`).
     from etude.eval.records import assemble  # noqa: PLC0415
     from etude.eval.tournament import played, tournament_runs  # noqa: PLC0415
 
@@ -411,18 +519,14 @@ def _standing(
 
 def _wanted(want: Callable[..., object], storage: Storage, experiment: str) -> list[Tournament]:
     """The tournaments `eval(state)` returns, each with the checkpoints or entrants it holds."""
-    # Imported for a file that defines eval(state): experiments join the launcher's records.
+    # The optional `eval` extra, imported where it is used (`_read_evals`): eval(state)
+    # and its evaluation jobs are built on etude.eval.
     from etude.eval.records import Tournament  # noqa: PLC0415
-    from etude.experiment import observe  # noqa: PLC0415
+    from etude.experiment import asked, observe  # noqa: PLC0415
     from etude.jobs import evaluation_spec  # noqa: PLC0415
-    from etude.launch.records import Job  # noqa: PLC0415
 
-    returned = want(observe(storage, experiment))
-    given: list[object] = list(returned) if isinstance(returned, list | tuple) else [returned]
     wanted = []
-    for job in given:
-        if not isinstance(job, Job):
-            raise EtudeError("eval_returns_evaluation_jobs", 422)
+    for job in asked(want, observe(storage, experiment)):
         spec = evaluation_spec(job)
         wanted.append(
             Tournament(
@@ -464,20 +568,25 @@ def _checkpoints(db: duckdb.DuckDBPyConnection) -> dict[str, tuple[str, int]]:
 
 def _load(
     db: duckdb.DuckDBPyConnection, standing: Sequence[_Standing], agents: Sequence[Agent]
-) -> None:
-    """Temp tables `compare` selects rows by: `_page_held` (tournament, run, match), each
-    delivered match and the eval run whose rows count; `_page_scheduled` (tournament, match,
-    matchup, tag), what each match was called for as; and `_page_checkpoints` (agent), the
-    agents bound to a checkpoint of the experiment."""
+) -> tuple[Commit, ...]:
+    """Temp tables `compare` selects rows by, and the commits offered.
+
+    `_page_held` (view, tournament, run, match): for view '', each delivered
+    match and the eval run whose rows count; for a commit, each match as
+    played at it. `_page_scheduled` (tournament, match, matchup, tag): what
+    each match was called for as. `_page_checkpoints` (agent): the agents
+    bound to a checkpoint of the experiment.
+    """
     db.execute(
-        "create or replace temp table _page_held (tournament VARCHAR, run VARCHAR, match VARCHAR)"
+        "create or replace temp table _page_held"
+        " (view VARCHAR, tournament VARCHAR, run VARCHAR, match VARCHAR)"
     )
     db.execute(
         "create or replace temp table _page_scheduled"
         " (tournament VARCHAR, match VARCHAR, matchup VARCHAR, tag VARCHAR)"
     )
     db.execute("create or replace temp table _page_checkpoints (agent VARCHAR)")
-    held = [[each.name, d.run, d.match.key] for each in standing for d in each.played.delivered]
+    held = [["", each.name, d.run, d.match.key] for each in standing for d in each.played.delivered]
     scheduled = [
         [each.name, called.match.key, called.matchup, tag]
         for each in standing
@@ -492,16 +601,54 @@ def _load(
     ):
         if rows:  # DuckDB refuses an empty batch
             db.executemany(f"insert into {table} values ({', '.join('?' * len(rows[0]))})", rows)
+    return _commits(db)
+
+
+def _commits(db: duckdb.DuckDBPyConnection) -> tuple[Commit, ...]:
+    """Each commit's view in `_page_held`, where the delivered matches were played at several.
+
+    A commit's view holds each delivered match some done record seats it
+    in, from the latest such eval run in the environment the match's latest
+    result is in, so it never pools environments the latest view keeps apart.
+    """
+    db.execute(
+        """
+        insert into _page_held
+        select commit, tournament, run, match from (
+            select s.commit, h.tournament, m.run, m.match, row_number() over (
+                partition by s.commit, h.tournament, m.match order by m.wall_ms desc, m.run desc
+            ) as latest
+            from (select h.tournament, h.match, r.environment
+                  from _page_held h join runs r using (run) where h.view = '') h
+            join matches m on m.match = h.match and m.state = 'done'
+            join runs r on r.run = m.run and r.environment = h.environment
+            join (select distinct run, match, commit from seats where commit is not null) s
+              on s.run = m.run and s.match = m.match
+        ) where latest = 1
+        """
+    )
+    found = db.sql(
+        "select view, count(distinct (tournament, match)) from _page_held"
+        " where view != '' group by view order by view"
+    ).fetchall()
+    if len(found) < 2:
+        db.execute("delete from _page_held where view != ''")
+        return ()
+    return tuple(Commit(commit=commit, matches=matches) for commit, matches in found)
 
 
 def _literal(text: str) -> str:
     return "'" + text.replace("'", "''") + "'"
 
 
-def _where(selection: Matches, *, fixed: bool) -> str:
-    """The rows of a selection's matches, as a condition `compare` applies to an author table."""
+def _where(selection: Matches, *, fixed: bool, view: str = "") -> str:
+    """The rows of a selection's matches in a view of `_page_held`, as a condition
+    `compare` applies to an author table."""
     tournament = _literal(selection.tournament or "")
-    held = f"(run, match) in (select run, match from _page_held where tournament = {tournament})"
+    held = (
+        "(run, match) in (select run, match from _page_held"
+        f" where view = {_literal(view)} and tournament = {tournament})"
+    )
     scheduled = f"select match from _page_scheduled where tournament = {tournament}"
     if selection.matchup is not None:
         held += f" and match in ({scheduled} and matchup = {_literal(selection.matchup)})"
@@ -552,9 +699,11 @@ def _cells(
     db: duckdb.DuckDBPyConnection,
     selections: Sequence[Matches],
     agents: Sequence[Agent],
+    commits: Sequence[Commit],
     report: Report,
 ) -> tuple[tuple[Score, ...], list[Cell], tuple[str, ...]]:
     """Every value the eval panels may show, the scores offered, and absent columns."""
+    # The optional `eval` extra, imported where it is used (`_read_evals`).
     from etude.eval.match import ETUDE_TABLES  # noqa: PLC0415
     from etude.eval.query import KEYS, NUMERIC, compare  # noqa: PLC0415
 
@@ -584,55 +733,53 @@ def _cells(
             continue
         named = [c for c in report.columns() if c in held]
         absent += [f"{score.table}.{c}" for c in report.columns() if c not in held]
-        for chosen, selection in enumerate(selections):
-            # An anchor's strength needs two anchors to have met.
-            for fixed in (False, True) if anchors > 1 else (False,):
-                for size in range(len(named) + 1):
-                    for by in itertools.combinations(named, size):
-                        for found in compare(
-                            db,
-                            table=score.table,
-                            value=score.value,
-                            per=score.per,
-                            where=_where(selection, fixed=fixed),
-                            by=by,
-                        ):
-                            if len(found.subject) != 1 or (
-                                found.opponent and len(found.opponent) != 1
-                            ):
-                                continue  # a team
-                            subject = index[found.subject[0]]
-                            if fixed and found.opponent is not None:
-                                continue  # pairs of anchors are in the unrestricted cells
-                            cells.append(
-                                Cell(
-                                    selection=chosen,
-                                    score=number,
-                                    subject=subject,
-                                    opponent=None
-                                    if found.opponent is None
-                                    else index[found.opponent[0]],
-                                    fixed=fixed,
-                                    split=found.split,
-                                    value=found.value,
-                                    interval=found.interval,
-                                    rows=found.rows,
-                                    matches=found.matches,
-                                )
-                            )
+        # An anchor's strength needs two anchors to have met.
+        views = itertools.product(
+            (None, *(each.commit for each in commits)),
+            enumerate(selections),
+            (False, True) if anchors > 1 else (False,),
+            (by for size in range(len(named) + 1) for by in itertools.combinations(named, size)),
+        )
+        for commit, (chosen, selection), fixed, by in views:
+            for found in compare(
+                db,
+                table=score.table,
+                value=score.value,
+                per=score.per,
+                where=_where(selection, fixed=fixed, view=commit or ""),
+                by=by,
+            ):
+                if len(found.subject) != 1 or (found.opponent and len(found.opponent) != 1):
+                    continue  # a team
+                if fixed and found.opponent is not None:
+                    continue  # pairs of anchors are in the unrestricted cells
+                cells.append(
+                    Cell(
+                        selection=chosen,
+                        commit=commit,
+                        score=number,
+                        subject=index[found.subject[0]],
+                        opponent=None if found.opponent is None else index[found.opponent[0]],
+                        fixed=fixed,
+                        split=found.split,
+                        value=found.value,
+                        interval=found.interval,
+                        rows=found.rows,
+                        matches=found.matches,
+                    )
+                )
     # "Against all" repeats the only opponent a subject met.
-    met: dict[tuple[int, int, int], set[int]] = {}
+    met: dict[tuple[int, str | None, int, int], set[int]] = {}
     for cell in cells:
         if cell.opponent is not None:
-            met.setdefault((cell.selection, cell.score, cell.subject), set()).add(cell.opponent)
-    kept = [
-        c
-        for c in cells
-        if c.opponent is not None
-        or c.fixed
-        or len(met.get((c.selection, c.score, c.subject), ())) != 1
-    ]
+            met.setdefault(_met(cell), set()).add(cell.opponent)
+    kept = [c for c in cells if c.opponent is not None or c.fixed or len(met.get(_met(c), ())) != 1]
     return scores, kept, tuple(dict.fromkeys(absent))
+
+
+def _met(cell: Cell) -> tuple[int, str | None, int, int]:
+    """The opponents a subject met are counted within one selection, view and score."""
+    return (cell.selection, cell.commit, cell.score, cell.subject)
 
 
 def _coverage(db: duckdb.DuckDBPyConnection, standing: Sequence[_Standing]) -> tuple[Coverage, ...]:
@@ -728,7 +875,7 @@ def write(html: str, path: Path) -> Path:
 
 class Server(ThreadingHTTPServer):
     """Serves an experiment file's page at `/`, or a folder's index at `/` and each of its
-    experiments at `/STEM`, built from the files for each request.
+    experiments at `/STEM`, from the files as they are at each request (`Pages`).
 
     It has no login: keep it on this computer unless told otherwise.
     """
@@ -742,24 +889,25 @@ class Server(ThreadingHTTPServer):
         refresh: float | None = None,
     ) -> None:
         super().__init__(address, _Handler)
-        self.source, self.path, self.refresh = source, path, refresh
+        self.pages, self.path, self.refresh = Pages(source), path, refresh
+        # Requests are handled on threads; a page is built by one at a time.
+        self._building = threading.Lock()
 
     def page(self, route: str = "/") -> str | None:
         """The HTML served at `route`, or None where nothing is."""
-        if not self.path.is_dir():
-            return (
-                render(build(self.source, self.path), refresh=self.refresh)
-                if route == "/"
-                else None
-            )
-        if route == "/":
-            built = build_each(self.source, self.path)
-            found = index(self.source, built, href=lambda stem: f"/{stem}")
-            return render_index(found, refresh=self.refresh)
-        for file in experiment_files(self.path):
-            if route == f"/{file.stem}":
-                return render(build(self.source, file), refresh=self.refresh)
-        return None
+        with self._building:
+            if not self.path.is_dir():
+                if route != "/":
+                    return None
+                return render(self.pages.build(self.path), refresh=self.refresh)
+            if route == "/":
+                built = self.pages.build_each(self.path)
+                found = index(self.pages.storage, built, href=lambda stem: f"/{stem}")
+                return render_index(found, refresh=self.refresh)
+            for file in experiment_files(self.path):
+                if route == f"/{file.stem}":
+                    return render(self.pages.build(file), refresh=self.refresh)
+            return None
 
 
 class _Handler(BaseHTTPRequestHandler):
