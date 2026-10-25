@@ -14,7 +14,13 @@ uv add 'etude-sdk[eval]'   # DuckDB, for writing and querying tables
 from etude.eval.match import Tables, agent, environment
 from etude.eval.query import statsdb
 from etude.eval.records import (
-    Benchmark, CheckpointKey, CheckpointRef, Match, Matchup, Model, RoundRobin,
+    Benchmark,
+    CheckpointKey,
+    CheckpointRef,
+    Match,
+    Matchup,
+    Model,
+    RoundRobin,
 )
 from etude.eval.tournament import curves, hold, standings
 
@@ -252,8 +258,15 @@ def runs(checkpoint: str, sha256: str, size_bytes: int) -> Job:
         size_bytes=size_bytes,
         run="ppo-1",  # the checkpoint's key: its run, and the file's name
     )
-    return evaluation(progress, experiment="ppo", play=play, checkpoint=weights, workers=8,
-                      max_hours=0.5, max_usd=Decimal(1))
+    return evaluation(
+        progress,
+        experiment="ppo",
+        play=play,
+        checkpoint=weights,
+        workers=8,
+        max_hours=0.5,
+        max_usd=Decimal(1),
+    )
 ```
 
 ```sh
