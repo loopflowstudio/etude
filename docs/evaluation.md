@@ -336,19 +336,27 @@ etude eval ppo.py --source s3://bucket/etude/launch --rent cpu8 --watch 600
   checkpoints it chose. Seat a chosen checkpoint with `checkpoint.agent(model)`
   to make a matchup of fixed agents, played once rather than per checkpoint.
   `tags` mark matchups for readers, such as pairs a rating fit leaves out.
-- **A pass.** For each job, the matches its benchmark calls for that no eval
-  run of its experiment in its environment delivered. Without `--pool` or `--rent` they are
-  played here and delivered to the source. With one, a job is launched to play
-  exactly those, with each checkpoint they seat as an input from its training
-  run's folder; the machine's storage must deliver to the source.
+- **A pass.** For each job, the matches exactly what `eval` returned calls
+  for, the matchups it gave for the checkpoints it gave, that no eval run of
+  the experiment in its environment delivered. Without `--pool` or `--rent`
+  they are played here and delivered to the source. With one, a job is
+  launched to play exactly those, with each checkpoint they seat as an input
+  from its training run's folder; the machine's storage must deliver to the
+  source.
 - **Not twice.** A launched pass is named for its matches and kept in
   `ETUDE_HOME/experiments/launched.json`, so a later pass neither launches it
   again nor plays its matches while it runs. A pass that finds one of them
   failed stops, so a watch never spends again unattended; look, then rerun.
+- **Failures.** A match that failed is counted on every pass (`ladder: 0 new,
+  1 failed`) and not played again, so a result is never quietly replaced.
+  `--retry-failed` plays the failed matches again.
 - **Changing the design.** A new matchup or benchmark is played for every
   checkpoint chosen, including those of finished runs, and a match another of
-  the experiment's tournaments already played is reused. Redefining a matchup under the same
-  name is refused (`matchup_conflict`): give the new one a new name.
+  the experiment's tournaments already played is reused. A matchup `eval`
+  stops returning is no longer played; what it played stays. Redefining a
+  matchup under the same name is refused (`matchup_conflict`): give the new
+  one a new name. A match is its seats, conditions and game count, so raising
+  `games` plays every match of the matchup again.
 
 ## Querying
 

@@ -208,10 +208,12 @@ class Pass(Record):
     """What one pass did for one evaluation job."""
 
     tournament: str
-    # Matches it called for that no eval run delivered, before this pass.
+    # Matches it called for that no eval run attempted, before this pass.
     new: int
     # Of those, already being played by a run an earlier pass launched.
     running: int
+    # Matches it called for that failed, with no done record since: shown, not replayed.
+    failed: int = 0
     played: int = 0
     launched: str | None = None
 
@@ -223,17 +225,22 @@ def advance(
     pool: str | None = None,
     rent: str | None = None,
     directory: Path | str | None = None,
+    retry_failed: bool = False,
 ) -> list[Pass]:
     """One pass: observe `source`, ask the experiment's `eval`, and play or launch what is new.
 
-    Each job's eval run is the experiment's; a job naming another experiment is
-    refused with `EtudeError("eval_job_of_another_experiment")`.
+    What is wanted is what `eval` returns now (`etude.eval.tournament.unplayed`):
+    a matchup it no longer returns is no longer played. Each job's eval run is
+    the experiment's; a job naming another experiment is refused with
+    `EtudeError("eval_job_of_another_experiment")`. A failed match is counted
+    and left alone, so a result is never quietly replaced; `retry_failed`
+    plays it again.
 
-        Without `pool` or `rent` the matches are played here, as one eval run per
-        job delivered to `source`. With one, each job with new matches is launched
-        to play exactly those; the machine's storage must deliver to `source`, or
-        the next pass will find them still new. Raises `EtudeError("launched_pass_failed")`
-        when a run an earlier pass launched failed.
+    Without `pool` or `rent` the matches are played here, as one eval run per
+    job delivered to `source`. With one, each job with new matches is launched
+    to play exactly those; the machine's storage must deliver to `source`, or
+    the next pass will find them still new. Raises `EtudeError("launched_pass_failed")`
+    when a run an earlier pass launched failed.
     """
     # Imported here: typed jobs import this module for `Checkpoint`.
     from etude.jobs import Evaluation, evaluation_spec, with_matches  # noqa: PLC0415
@@ -254,15 +261,21 @@ def advance(
         spec = spec.model_copy(update={"experiment": experiment.name})
         job = given_job.model_copy(update={"config": spec.model_dump_json()})
         checkpoints = tuple(each.ref for each in spec.checkpoints)
-        new = unplayed(
+        found = unplayed(
             spec.tournament,
             experiment=experiment.name,
             checkpoints=checkpoints,
             directory=directory,
             storages=[source],
         )
+        new = [*found.new, *(found.failed if retry_failed else ())]
         pending = [match for match in new if match.key not in running]
-        done = Pass(tournament=spec.tournament.name, new=len(new), running=len(new) - len(pending))
+        done = Pass(
+            tournament=spec.tournament.name,
+            new=len(new),
+            running=len(new) - len(pending),
+            failed=0 if retry_failed else len(found.failed),
+        )
         if not pending:
             passes.append(done)
             continue

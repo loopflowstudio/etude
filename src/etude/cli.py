@@ -100,6 +100,9 @@ def eval_experiment(
     watch: Annotated[
         float | None, typer.Option(min=1, help="pass again every SECONDS until Ctrl-C")
     ] = None,
+    retry_failed: Annotated[
+        bool, typer.Option(help="play again the matches that failed, rather than count them")
+    ] = False,
 ) -> None:
     """Play, or with --pool or --rent launch, the matches eval(state) wants that no run delivered."""
     # Experiments join tracking, evaluation and the launcher.
@@ -112,8 +115,12 @@ def eval_experiment(
     storage = storage_from_uri(source or default_root())
     try:
         while True:
-            for done in advance(experiment, source=storage, pool=pool, rent=rent):
+            for done in advance(
+                experiment, source=storage, pool=pool, rent=rent, retry_failed=retry_failed
+            ):
                 line = f"{done.tournament}: {done.new} new"
+                if done.failed:
+                    line += f", {done.failed} failed (--retry-failed plays them again)"
                 if done.running:
                     line += f", {done.running} already running"
                 if done.launched:

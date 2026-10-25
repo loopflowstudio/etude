@@ -29,7 +29,7 @@ from etude.run.records import Clock
 from etude.run.storage import DirectoryStorage
 from etude.train.run import Run as Run_
 from etude.train.run import track
-from tests.eval.games import play
+from tests.eval.games import play, play_failing_deal_one
 
 WORLD = environment("duel", config={"world": "w6"})
 DEALS = tuple({"deal": deal} for deal in range(2))
@@ -152,6 +152,58 @@ def test_each_pass_plays_what_the_checkpoints_saved_so_far_call_for(tmp_path: Pa
     with statsdb("ppo", bucket) as db:
         (swept,) = curves(db, "sweep", table="plays", value="won")
     assert [p.ordinal for p in swept.points] == [1, 2, 3, 4, 5]
+
+
+def test_a_pass_plays_only_what_eval_returns_now(tmp_path: Path) -> None:
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    training = trainer(bucket, tmp_path)
+    save(training, bucket, tmp_path, range(1, 2))
+    anchor = heuristic(tmp_path)
+    greedy = agent("greedy", code=[tmp_path / "players" / "heuristic.py"], config={"strength": 4})
+    both = (
+        Matchup(name="vs heuristic", players=(DIRECT, anchor), conditions=DEALS, games=2),
+        Matchup(name="vs greedy", players=(DIRECT, greedy), conditions=DEALS, games=2),
+    )
+
+    def design(matchups: tuple[Matchup, ...]) -> Experiment:
+        def eval_(state: ExperimentState) -> Job:
+            ladder = Benchmark(name="ladder", environment=WORLD, matchups=matchups)
+            return evaluation(ladder, play=play, checkpoints=state.run("ppo-1").checkpoints,
+                              max_hours=0.1)  # fmt: skip
+
+        return Experiment(name="ppo", eval=eval_)
+
+    local = tmp_path / "evaluator"
+    (first,) = advance(design(both), source=bucket, directory=local)
+    assert first.played == 2 * len(DEALS)
+    # Greedy is dropped: a new checkpoint plays only against the heuristic.
+    save(training, bucket, tmp_path, range(2, 3))
+    (second,) = advance(design(both[:1]), source=bucket, directory=local)
+    assert (second.new, second.played) == (len(DEALS), len(DEALS))
+
+
+def test_a_failed_match_is_counted_and_not_replayed_unless_asked(tmp_path: Path) -> None:
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    training = trainer(bucket, tmp_path)
+    save(training, bucket, tmp_path, range(1, 2))
+    anchor = heuristic(tmp_path)
+
+    def eval_(state: ExperimentState) -> Job:
+        vs = Matchup(name="vs heuristic", players=(DIRECT, anchor), conditions=DEALS, games=2)
+        ladder = Benchmark(name="ladder", environment=WORLD, matchups=(vs,))
+        return evaluation(ladder, play=play_failing_deal_one,
+                          checkpoints=state.run("ppo-1").checkpoints, max_hours=0.1)  # fmt: skip
+
+    ppo, local = Experiment(name="ppo", eval=eval_), tmp_path / "evaluator"
+    with pytest.raises(EtudeError, match="match_failed"):
+        advance(ppo, source=bucket, directory=local)
+    # Deal 1 is counted as failed and left alone; the rest is played.
+    (counted,) = advance(ppo, source=bucket, directory=local)
+    assert counted.failed == 1 and counted.played == counted.new
+    (settled,) = advance(ppo, source=bucket, directory=local)
+    assert (settled.new, settled.failed, settled.played) == (0, 1, 0)
+    with pytest.raises(EtudeError, match="match_failed"):
+        advance(ppo, source=bucket, directory=local, retry_failed=True)
 
 
 def test_an_eval_job_belongs_to_the_experiment_of_its_file(tmp_path: Path) -> None:
