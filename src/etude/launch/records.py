@@ -373,6 +373,9 @@ class Job(Record):
     inputs: tuple[Input, ...] = ()  # files at ETUDE_INPUTS_DIR/NAME when the job starts
     # Set in the job's environment; Etude's own ETUDE_* settings take precedence.
     environment: tuple[Variable, ...] = ()
+    # The experiment its runs record under, handed to them as ETUDE_EXPERIMENT:
+    # the experiment file `etude launch` read it from names it for its stem.
+    experiment: str | None = None
 
     _check_inputs = field_validator("inputs")(_distinct)
 
@@ -393,6 +396,8 @@ def job_identity(job: Job) -> dict[str, str | int | None]:
     for name, value in (("setup", job.setup), ("cleanup", job.cleanup)):
         if value is not None:
             identity[name] = value
+    if job.experiment is not None:
+        identity["experiment"] = job.experiment
     if job.runtime is not None:
         identity["runtime"] = json.dumps(job.runtime.model_dump(mode="json"), sort_keys=True)
     if job.environment:

@@ -1760,6 +1760,7 @@ class Scheduler:
             job=run.job,
             job_name=spec.name or None,
             cohort=run.cohort,
+            experiment=spec.experiment,
             inputs=spec.inputs,
             environment=spec.environment,
         )

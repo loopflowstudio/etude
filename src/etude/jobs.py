@@ -73,7 +73,11 @@ from etude.train.records import ParentCheckpoint
 
 
 class JobOptions(TypedDict, total=False):
-    """How a typed job is launched: every `Job` field except the command and config it derives."""
+    """How a typed job is launched: every `Job` field except those it derives.
+
+    It derives the command and config, and the experiment: an evaluation's
+    own, else the one `etude launch` reads from an experiment file's name.
+    """
 
     max_hours: Required[float]
     max_usd: Decimal | None
@@ -171,7 +175,7 @@ def evaluation(
         entrants=tuple(enter),
         workers=workers,
     )
-    return _job(_hold, spec, origin=play, options=options)
+    return _job(_hold, spec, origin=play, options=options, experiment=experiment)
 
 
 def evaluation_spec(job: Job) -> Evaluation:
@@ -349,6 +353,7 @@ def _job(
     *,
     origin: Callable[..., object],
     options: JobOptions,
+    experiment: str | None = None,
 ) -> Job:
     """The job that calls `function(config)`; `origin` is the author's function it brings."""
     try:
@@ -374,7 +379,7 @@ def _job(
     if called.path:
         command += f" --path {shlex.quote(called.path)}"
     sourced: JobOptions = {**options, "repo": None if repo is None else str(repo)}
-    return Job(**sourced, command=command, config=text)
+    return Job(**sourced, command=command, config=text, experiment=experiment)
 
 
 def _repo(origin: Callable[..., object], options: JobOptions) -> Path | None:

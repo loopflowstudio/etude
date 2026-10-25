@@ -282,7 +282,9 @@ An experiment file says what to evaluate given what exists, and `etude eval`
 plays whatever that calls for and no eval run has delivered. Run it while
 training goes, after it ends, or with a matchup added later: each pass looks
 again. The experiment is named for the file: `ppo.py` evaluates the training
-runs of experiment `ppo`, and its eval runs are that experiment's.
+runs of experiment `ppo`, and its eval runs are that experiment's. Define
+`runs()` in it too and `etude launch ppo.py` starts training runs of `ppo`, so
+`track()` in the training code needs no `experiment`.
 
 ```python
 # ppo.py
@@ -373,11 +375,6 @@ checkpoint, found by its key; code agents and checkpoints from outside the
 experiment are anchors, drawn once. A checkpoint `eval(state)` chose that no
 eval run has delivered is marked not yet played, one nothing played is marked
 not evaluated, and failed matches are listed.
-
-Until `etude launch` hands the file's name to the training runs it starts,
-training code names the experiment itself: `track(experiment="ppo")` for
-`ppo.py`. Otherwise neither `etude eval ppo.py` nor `etude report ppo.py` finds
-its runs.
 
 ## Querying
 

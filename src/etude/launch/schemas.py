@@ -44,6 +44,7 @@ class Work(Record):
     job: str | None = None
     job_name: str | None = None
     cohort: str | None = None
+    experiment: str | None = None
     inputs: tuple[Input, ...] = ()  # delivered to SESSION/inputs/SHA256
     environment: tuple[Variable, ...] = ()
 

@@ -44,7 +44,6 @@ never import each other.
 
 from __future__ import annotations
 
-import ast
 import itertools
 import json
 import runpy
@@ -59,6 +58,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import JsonValue
 
+from etude.launch.job_file import experiment_named
 from etude.report import Flame, Matches, Report, Score
 from etude.run.errors import EtudeError
 from etude.run.listing import as_storage, runs
@@ -169,31 +169,18 @@ class Index(Record):
     entries: tuple[Entry, ...]
 
 
-# What makes a Python file an experiment's: a top-level eval(state) or report().
-EXPERIMENT_FUNCTIONS = ("eval", "report")
-
-
 def experiment_files(directory: Path) -> list[Path]:
     """The experiment files at any depth below `directory`, outside hidden folders.
 
-    A file is recognised by its text, without running it; raises
-    `EtudeError("experiment_named_twice")` for two files with one stem.
+    A file is recognised by its text, without running it (`experiment_named`);
+    raises `EtudeError("experiment_named_twice")` for two files with one stem.
     """
     found: dict[str, Path] = {}
     for path in sorted(directory.rglob("*.py")):
         parts = path.relative_to(directory).parts
         if any(part.startswith(".") or part == "__pycache__" for part in parts):
             continue
-        try:
-            tree = ast.parse(path.read_bytes(), filename=str(path))
-        except SyntaxError:
-            continue  # not a file `etude report` could run either
-        defined = {
-            each.name
-            for each in tree.body
-            if isinstance(each, ast.FunctionDef | ast.AsyncFunctionDef)
-        }
-        if not defined & set(EXPERIMENT_FUNCTIONS):
+        if experiment_named(path) is None:
             continue
         if path.stem in found:
             raise EtudeError("experiment_named_twice", 409) from ValueError(

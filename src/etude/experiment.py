@@ -259,7 +259,9 @@ def advance(
         if spec.experiment not in (None, experiment.name):
             raise EtudeError("eval_job_of_another_experiment", 422) from ValueError(spec.experiment)
         spec = spec.model_copy(update={"experiment": experiment.name})
-        job = given_job.model_copy(update={"config": spec.model_dump_json()})
+        job = given_job.model_copy(
+            update={"config": spec.model_dump_json(), "experiment": experiment.name}
+        )
         checkpoints = tuple(each.ref for each in spec.checkpoints)
         found = played(
             spec.tournament,

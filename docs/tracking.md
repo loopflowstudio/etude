@@ -62,7 +62,11 @@ run = track(experiment="capacity-pilot", clocks=[Step("updates", "optimizer upda
 
 The run, job, seed and cohort come from the launcher (`ETUDE_RUN`,
 `ETUDE_JOB`, `ETUDE_SEED`, `ETUDE_COHORT`); an argument passed to `track` wins.
-The experiment is always named in the script: the launcher does not know it.
+Launched from an experiment file, the run is that experiment's
+(`ETUDE_EXPERIMENT`): `etude launch ppo.py` starts runs of experiment `ppo`,
+so `track(clocks=...)` needs no `experiment`, and one naming another
+experiment is refused (`experiment_differs_from_launch`). Launched from a
+plain job file, the script names its experiment.
 The files are written to `ETUDE_TRACK_DIR`, one place on the machine for every
 run and attempt, and the launcher carries them to the machine's bucket as each
 file is finished, by the same rules as `sync` (`etude.carriage`): every
@@ -206,9 +210,6 @@ files and never launches or rents anything. From a directory the page goes to
 `reports/` beside its runs, from a bucket to `./reports`; `--out DIR` chooses.
 `--serve` has no login and listens on this computer only; with `--watch` the
 served page reloads itself.
-
-Training runs must name the experiment for the file, `track(experiment="ppo")`,
-until `etude launch` hands it to the runs it starts.
 
 **A folder** is every experiment file in it, at any depth outside hidden
 folders: a `.py` file defining `eval(state)` or `report()` at its top level,

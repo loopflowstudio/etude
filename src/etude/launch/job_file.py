@@ -1,7 +1,13 @@
-"""Read a Python job file and validate its runs() flags before submission."""
+"""Read a Python job file and validate its runs() flags before submission.
+
+A job file that is also an experiment file, defining `eval(state)` or
+`report()` at its top level, names the experiment its runs record under for
+its stem (`experiment_named`), so `ppo.py` launches runs of experiment `ppo`.
+"""
 
 from __future__ import annotations
 
+import ast
 import inspect
 import runpy
 import sys
@@ -15,9 +21,30 @@ import typer
 from etude.launch.errors import LauncherError
 from etude.launch.records import Job, Run
 
+# What makes a Python file an experiment's: a top-level eval(state) or report().
+EXPERIMENT_FUNCTIONS = ("eval", "report")
+
+
+def experiment_named(path: Path) -> str | None:
+    """The experiment a file is, its stem, when it defines one of `EXPERIMENT_FUNCTIONS`.
+
+    Recognised by its text, without running it; a file that does not parse is no experiment.
+    """
+    try:
+        tree = ast.parse(path.read_bytes(), filename=str(path))
+    except SyntaxError:
+        return None
+    defined = {
+        each.name for each in tree.body if isinstance(each, ast.FunctionDef | ast.AsyncFunctionDef)
+    }
+    return path.stem if defined & set(EXPERIMENT_FUNCTIONS) else None
+
 
 def read_job_file(path: Path, given: Sequence[str] = (), *, help: bool = False) -> list[Run]:
-    """Let Typer validate runs()'s signature, then invoke it once with typed flags."""
+    """Let Typer validate runs()'s signature, then invoke it once with typed flags.
+
+    An experiment file's runs are given its experiment; a job naming another is refused.
+    """
 
     if path.suffix != ".py":
         raise LauncherError("job files must be Python (.py), defining runs()")
@@ -97,6 +124,13 @@ def read_job_file(path: Path, given: Sequence[str] = (), *, help: bool = False) 
     params = {
         name: each for name, each in arguments.items() if isinstance(each, (str, int, float, bool))
     }
+    experiment = experiment_named(path)
+    for run in runs:
+        if experiment is not None and run.job.experiment not in (None, experiment):
+            raise LauncherError(
+                f"{path.name} is experiment {experiment!r}; its runs() returned a job of"
+                f" experiment {run.job.experiment!r}"
+            )
     return [
         run.model_copy(
             update={
@@ -104,6 +138,7 @@ def read_job_file(path: Path, given: Sequence[str] = (), *, help: bool = False) 
                 "job": run.job.model_copy(
                     update={
                         "repo": str(Path(run.job.repo).resolve()) if run.job.repo else None,
+                        "experiment": experiment or run.job.experiment,
                     }
                 ),
             }

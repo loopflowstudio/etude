@@ -765,9 +765,12 @@ The job is also told who it is: `ETUDE_RUN` (the run's id), `ETUDE_JOB` (the
 digest its job's runs share), `ETUDE_JOB_NAME` when the job has a name,
 `ETUDE_ATTEMPT`, and `ETUDE_COHORT` when the run has one. It runs in
 `ETUDE_SOURCE_DIR`, its commit's files without `.git`; [evaluation](evaluation.md)
-hashes identity files relative to it. [Tracking](tracking.md) reads these, so a launched job names only
-its experiment and clocks. The launcher has no experiment; the script names it. A tracked
-script does not write `etude-result.json` itself: tracking reports its clocks.
+hashes identity files relative to it. A job launched from an experiment file
+(one defining `eval(state)` or `report()`) is that experiment's, named for the
+file's stem, and is told so in `ETUDE_EXPERIMENT`; the experiment is part of
+its identity. [Tracking](tracking.md) reads these, so a launched job names
+only its clocks, and its experiment when its file is not one. A tracked script
+does not write `etude-result.json` itself: tracking reports its clocks.
 
 A storage holds one folder per run, shared by every attempt on every machine,
 and the machines' own working files apart:

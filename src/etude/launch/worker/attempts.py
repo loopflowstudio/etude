@@ -16,9 +16,10 @@ Installed separately from the job environment. Run as
 
 A job is a shell command run in ETUDE_SOURCE_DIR, with its own environment
 variables. It reads ETUDE_OUTPUT_DIR, ETUDE_STOP_FILE, ETUDE_DEADLINE, ETUDE_SEED,
-ETUDE_UNTIL_CLOCK, ETUDE_UNTIL_VALUE, ETUDE_INPUTS_DIR, ETUDE_TRACK_DIR and
-ETUDE_CONFIG, and may report its progress in `etude-result.json` in its output
-directory as `{"clocks": {"steps": 63000, "wall_time_ms": 5400000}}`.
+ETUDE_UNTIL_CLOCK, ETUDE_UNTIL_VALUE, ETUDE_INPUTS_DIR, ETUDE_TRACK_DIR,
+ETUDE_EXPERIMENT and ETUDE_CONFIG, and may report its progress in
+`etude-result.json` in its output directory as
+`{"clocks": {"steps": 63000, "wall_time_ms": 5400000}}`.
 ETUDE_UNTIL_CLOCK and ETUDE_UNTIL_VALUE are the job's target.
 """
 
@@ -122,6 +123,7 @@ def _prepare(session: Path, home: Path, work: Work) -> dict[str, str]:
         ("ETUDE_JOB", work.job),
         ("ETUDE_JOB_NAME", work.job_name),
         ("ETUDE_COHORT", work.cohort),
+        ("ETUDE_EXPERIMENT", work.experiment),
     ):
         if value is not None:
             environment[name] = value
