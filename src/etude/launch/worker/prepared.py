@@ -32,7 +32,7 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import IO
+from typing import IO, Literal
 
 from etude.launch.records import Input, Preparation, Record, Variable
 from etude.launch.schemas import Prepared
@@ -66,8 +66,6 @@ class Key(Record):
 class Receipt(Record):
     key: Key
     size_bytes: int
-    files: int
-    build_seconds: float
     manifest: tuple[Entry, ...]
 
 
@@ -173,10 +171,6 @@ def _seal(directory: Path) -> None:
             path.chmod(path.stat().st_mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
 
 
-def _size(directory: Path) -> int:
-    return sum(p.stat().st_size for p in directory.rglob("*") if p.is_file() and not p.is_symlink())
-
-
 @contextmanager
 def _lock(path: Path, waiting: Callable[[], bool]) -> Iterator[IO[str] | None]:
     """An exclusive lock, or None once `waiting` says to give up."""
@@ -237,15 +231,11 @@ def prepare(
             receipt.unlink()
         _remove(directory)  # an interrupted or rejected build's leftovers
         directory.mkdir()
+        outcome: Literal["built", "rejected"] = "rejected" if cause else "built"
         began = time.monotonic()
         if not build(directory):
             _remove(directory)
-            yield (
-                directory,
-                Prepared(
-                    key=name, outcome="rejected" if cause else "built", seconds=0, cause=cause
-                ),
-            )
+            yield directory, Prepared(key=name, outcome=outcome, seconds=0, cause=cause)
             return
         _seal(directory)
         manifest = _manifest(directory)
@@ -253,26 +243,14 @@ def prepare(
         seconds = time.monotonic() - began
         write(
             receipt,
-            Receipt(
-                key=found,
-                size_bytes=size,
-                files=len(manifest),
-                build_seconds=seconds,
-                manifest=manifest,
-            ).model_dump_json(),
+            Receipt(key=found, size_bytes=size, manifest=manifest).model_dump_json(),
         )
         log(f"prepare: built {name[:12]} ({seconds:.1f} s, {size} bytes)")
         fcntl.flock(lock, fcntl.LOCK_SH)
         evict(root, shutil.disk_usage(root).free // 2 + _kept(root) // 2, log)
         yield (
             directory,
-            Prepared(
-                key=name,
-                outcome="rejected" if cause else "built",
-                seconds=seconds,
-                size_bytes=size,
-                cause=cause,
-            ),
+            Prepared(key=name, outcome=outcome, seconds=seconds, size_bytes=size, cause=cause),
         )
 
 

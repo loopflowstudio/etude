@@ -529,15 +529,13 @@ def _run(session: Path, packet: Packet, work: Work) -> None:
     if packet.deadline is not None:
         limit = min(limit, packet.deadline)
     environment["ETUDE_DEADLINE"] = limit.isoformat()
-    result = Exit(code=None)
+    result = Exit(code=0)
     with (home / "log").open("ab") as log:
         try:
             if work.runtime is not None and work.prepare is None:
                 # Nothing to prepare: the interpreter is checked before code is claimed.
                 result = _runtime(home, work, environment, log, stop, limit)
-            if result.stopped is None and (
-                work.runtime is None or work.prepare is not None or result.code == 0
-            ):
+            if result.code == 0 and result.stopped is None:
                 # The claim denotes user code, not the read-only runtime probe.
                 with tempfile.NamedTemporaryFile(mode="w", dir=home) as claim:
                     claim.write(_now().isoformat())
