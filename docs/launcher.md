@@ -1313,6 +1313,36 @@ is still checked against its pins. Least recently used directories are deleted
 beyond half the disk available to them; one an attempt is using is kept.
 Everything kept ends with a rental.
 
+With `carry=True`, a build also writes `$ETUDE_CARRIED_DIR`, kept in the
+machine's storage so the next rental starts warm. Point uv's cache at it:
+
+```python
+Preparation(
+    command='UV_CACHE_DIR="$ETUDE_CARRIED_DIR" UV_PROJECT_ENVIRONMENT="$ETUDE_PREPARED_DIR/.venv"'
+    " uv sync --frozen",
+    paths=("pyproject.toml", "uv.lock"),
+    carry=True,
+)
+```
+
+It is keyed by `paths` and the platform alone, so a new command or input still
+finds it. A build on a machine that does not have it reads `prepared/CARRY.json`
+in storage and restores the archive it names, verified like any input; a build
+that restored nothing is archived to `prepared/SHA256-SIZE.tar` by the worker,
+alongside the job, and the locator is written after its archive:
+
+```text
+prepare: restored 9a1e5c07f2d3 (1103626240 bytes)
+prepare: built 3f9c0e21d4b7 (3.0 s, 1203841024 bytes)
+carry: refused 9a1e5c07f2d3 (Mismatch: download length or SHA256 mismatch)
+```
+
+The command always runs and must check what it finds; uv checks every wheel
+against `uv.lock`. uv still rebuilds the project itself in a new checkout, so
+install a prebuilt native package as a named input, as above. A machine without
+storage keeps the directory locally. Archives stay in storage until you delete
+them.
+
 The pinned official PyTorch example has a repeatable CPU check:
 `uv run python scripts/test_pytorch_image.py`. It pulls the image, then checks
 runtime versions, a CPU tensor operation and guardian imports with site packages

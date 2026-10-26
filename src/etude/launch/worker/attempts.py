@@ -38,7 +38,7 @@ import tarfile
 import tempfile
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import FrameType
@@ -50,7 +50,10 @@ from etude.launch.records import Cause, Input, Outcome, Output, Record
 from etude.launch.runtime import PROBE, find_python, select_runtime
 from etude.launch.schemas import Packet, Prepared, Progress, Work
 from etude.launch.storage.files import digest, read_result, write
-from etude.launch.worker.prepared import key, prepare
+from etude.launch.storage.s3 import Grant
+from etude.launch.storage.transport import attribute, observe
+from etude.launch.worker.carried import GRANT, REQUEST, restore
+from etude.launch.worker.prepared import carry, key, prepare
 
 
 def _now() -> datetime:
@@ -377,6 +380,12 @@ def _phase(
     return result
 
 
+def _retain(session: Path, raw: str) -> None:
+    """Keep a transfer in the session's usage journal, which its courier delivers."""
+    with (session / "usage.jsonl").open("a") as stream:
+        stream.write(raw + "\n")
+
+
 @contextmanager
 def _prepared(
     home: Path,
@@ -403,32 +412,66 @@ def _prepared(
     declared = {name: held[name] for name in preparation.inputs}
     inputs = _link(home / "prepared-inputs", declared)
     found = key(preparation, home / "src", work.inputs, work.environment)
+    session = home.parent.parent
+    grant = (
+        Grant.model_validate_json((session / GRANT).read_text())
+        if (session / GRANT).exists()
+        else None
+    )
     built = Exit(code=0)
+    restored: int | None = None
+
+    def waiting() -> bool:
+        return not stop.exists() and _now() < limit
+
+    def fetch(directory: Path) -> int | None:
+        if grant is None:
+            return None  # this machine has no bucket: the directory stays here
+        with (
+            observe(lambda raw: _retain(session, raw)),
+            attribute(session=session.name, run=work.run, attempt=work.attempt, purpose="runtime"),
+        ):
+            return restore(grant, found.carry, directory, holder=f"carry-{work.attempt}")
 
     def build(directory: Path) -> bool:
-        nonlocal built
-        built = _phase(
-            "prepare",
-            preparation.command,
-            home=home,
-            environment={
-                **environment,
-                "ETUDE_PREPARED_DIR": str(directory),
-                "ETUDE_PREPARED_INPUTS": str(inputs),
-            },
-            log=log,
-            stop=stop,
-            deadline=limit,
-            labelled=True,
-            stop_seconds=work.stop_seconds,
-        )
-        return built.code == 0 and built.stopped is None
+        nonlocal built, restored
+        variables = {
+            **environment,
+            "ETUDE_PREPARED_DIR": str(directory),
+            "ETUDE_PREPARED_INPUTS": str(inputs),
+        }
+        with ExitStack() as using:
+            carried = None
+            if preparation.carry:
+                carried = using.enter_context(carry(found.carry, fetch, waiting, note))
+                if carried is None:
+                    built = Exit(code=None, stopped="cancelled" if stop.exists() else "deadline")
+                    return False
+                variables["ETUDE_CARRIED_DIR"] = str(carried.directory)
+                restored = carried.restored_bytes
+            built = _phase(
+                "prepare",
+                preparation.command,
+                home=home,
+                environment=variables,
+                log=log,
+                stop=stop,
+                deadline=limit,
+                labelled=True,
+                stop_seconds=work.stop_seconds,
+            )
+            ready = built.code == 0 and built.stopped is None
+            fresh = carried is not None and not carried.kept and carried.restored_bytes is None
+            if ready and fresh and grant is not None:
+                (home / REQUEST).write_text(found.carry)  # the courier saves it
+            return ready
 
-    with prepare(found, build, lambda: not stop.exists() and _now() < limit, note) as ready:
+    with prepare(found, build, waiting, note) as ready:
         if ready is None:
             yield Exit(code=None, stopped="cancelled" if stop.exists() else "deadline")
             return
         directory, done = ready
+        done = done.model_copy(update={"restored_bytes": restored})
         write(home / "prepared.json", done.model_dump_json())
         if done.size_bytes is None:
             yield built

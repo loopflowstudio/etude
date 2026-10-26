@@ -387,17 +387,17 @@ class Bucket:
                 pass  # the bucket's own rule for unfinished uploads is the backstop
             raise
 
-    def grant(self, prefix: str, seconds: int, name: str) -> Grant:
+    def grant(self, prefix: str, seconds: int, name: str, *, read: bool = False) -> Grant:
         """What a machine may write under `prefix` for `seconds`, and nowhere else.
 
-        On S3, a form, and keys too where AWS issues them. On R2, keys from
-        Cloudflare's API; raises StorageUnavailable when they cannot be had,
-        since R2 has nothing to fall back on. The keys can do no more than the
-        caller's own.
+        On S3, a form, and keys too where AWS issues them; with `read`, the keys
+        also read what is there. On R2, keys from Cloudflare's API, which always
+        read too; raises StorageUnavailable when they cannot be had, since R2
+        has nothing to fall back on. The keys can do no more than the caller's own.
         """
         if self.account is not None:
             return Grant(prefix=prefix, bucket=self._access(self._r2_keys(prefix, seconds)))
-        keys = self._federation_keys(prefix, seconds, name)
+        keys = self._federation_keys(prefix, seconds, name, read)
         return Grant(
             prefix=prefix,
             bucket=None if keys is None else self._access(keys),
@@ -444,8 +444,9 @@ class Bucket:
         except (ValueError, KeyError, TypeError):
             raise StorageUnavailable("R2 grant: unreadable reply") from None
 
-    def _federation_keys(self, prefix: str, seconds: int, name: str) -> Keys | None:
-        """Temporary S3 keys that can write, send in parts and delete under `prefix` only.
+    def _federation_keys(self, prefix: str, seconds: int, name: str, read: bool) -> Keys | None:
+        """Temporary S3 keys that can write, send in parts and delete under `prefix` only,
+        and read there with `read`.
 
         None when AWS will not issue them: the caller is not an IAM user (keys
         that are themselves temporary cannot ask), or lacks
@@ -462,6 +463,7 @@ class Bucket:
                         "s3:PutObject",
                         "s3:DeleteObject",
                         "s3:AbortMultipartUpload",
+                        *(["s3:GetObject"] if read else []),
                     ],
                     "Resource": f"arn:aws:s3:::{self.name}/{prefix}*",
                 }

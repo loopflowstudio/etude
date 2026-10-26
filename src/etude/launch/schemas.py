@@ -84,6 +84,7 @@ class Prepared(Record):
     seconds: float = Field(ge=0)  # verifying a reused directory, or building one
     size_bytes: int | None = None
     cause: str | None = None  # why a kept directory was rejected
+    restored_bytes: int | None = None  # the carried archive restored before the build
 
 
 class Progress(Record):
@@ -127,6 +128,7 @@ class Bootstrap(Record):
     inbox_url: str
     fetch: dict[str, Download] = Field(default_factory=dict)
     restore: dict[str, str] = Field(default_factory=dict)  # see Delivery
+    prepared: Grant | None = None  # see Delivery
 
 
 class Delivery(Record):
@@ -135,6 +137,10 @@ class Delivery(Record):
     fetch: dict[str, Download] = Field(default_factory=dict)
     # Read links to what storage holds of a resumed run's folder, by RUN/KEY.
     restore: dict[str, str] = Field(default_factory=dict)
+    # The storage's prepared/ folder, read and written, for work whose preparation
+    # carries a directory (`etude.launch.worker.carried`). Kept apart from `work`,
+    # so its keys never reach a packet or the launcher's database.
+    prepared: Grant | None = None
 
 
 class AttemptRecord(Record):

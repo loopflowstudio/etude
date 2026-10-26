@@ -10,13 +10,21 @@ machine's platform. Beside it:
     KEY.json    the `Receipt`, written last and atomically: the only "prepared" fact
     KEY.lock    exclusive while building or evicting; shared while an attempt uses it
 
+With `Preparation.carry`, a build also gets `ETUDE_HOME/carried/CARRY/`
+($ETUDE_CARRIED_DIR), keyed by the declared paths and the platform alone
+(`Key.carry`), so a new command or input still finds it. It has no receipt:
+it is a cache the command checks, such as uv's. Kept here, it is used as it
+is; otherwise it is restored from the bucket (`etude.launch.worker.carried`)
+or starts empty. `CARRY.lock` is exclusive while a build uses it.
+
 An attempt finds one of three things. With a receipt whose every manifest entry
 verifies, the directory is *reused* and the command does not run. Without a
 receipt, anything left by an interrupted build is deleted and it is *built*.
 A manifest mismatch is *rejected*: the directory is deleted and built again.
 Files the manifest does not list, such as bytecode a run writes, are ignored.
 The shared lock pins the directory for the attempt, so eviction, least recently
-used first beyond half the disk available to preparations, skips it.
+used first beyond half the disk available to preparations and carried
+directories together, skips it.
 """
 
 from __future__ import annotations
@@ -28,15 +36,18 @@ import os
 import platform
 import shutil
 import stat
+import tarfile
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import IO, Literal
+from typing import IO, Literal, NamedTuple
 
+from etude.launch.logging import explain
 from etude.launch.records import Input, Preparation, Record, Variable
 from etude.launch.schemas import Prepared
 from etude.launch.storage.files import digest, write
+from etude.launch.storage.s3 import StorageUnavailable
 
 
 class Entry(Record):
@@ -59,8 +70,17 @@ class Key(Record):
 
     @property
     def digest(self) -> str:
-        canonical = json.dumps(self.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
-        return hashlib.sha256(canonical.encode()).hexdigest()
+        return _digest(self.model_dump(mode="json"))
+
+    @property
+    def carry(self) -> str:
+        """The key of the carried directory: the declared paths and the platform alone."""
+        return _digest({"paths": self.paths, "machine": self.machine})
+
+
+def _digest(fields: dict[str, object]) -> str:
+    canonical = json.dumps(fields, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 class Receipt(Record):
@@ -70,7 +90,15 @@ class Receipt(Record):
 
 
 def home() -> Path:
-    return Path(os.environ.get("ETUDE_HOME") or Path.home() / ".etude") / "prepared"
+    return _etude() / "prepared"
+
+
+def carried_home() -> Path:
+    return _etude() / "carried"
+
+
+def _etude() -> Path:
+    return Path(os.environ.get("ETUDE_HOME") or Path.home() / ".etude")
 
 
 def key(
@@ -172,7 +200,7 @@ def _seal(directory: Path) -> None:
 
 
 @contextmanager
-def _lock(path: Path, waiting: Callable[[], bool]) -> Iterator[IO[str] | None]:
+def lock(path: Path, waiting: Callable[[], bool]) -> Iterator[IO[str] | None]:
     """An exclusive lock, or None once `waiting` says to give up."""
     with path.open("a") as lock:
         while True:
@@ -203,8 +231,8 @@ def prepare(
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     name = found.digest
     directory, receipt = root / name, root / f"{name}.json"
-    with _lock(root / f"{name}.lock", waiting) as lock:
-        if lock is None:
+    with lock(root / f"{name}.lock", waiting) as held:
+        if held is None:
             yield None
             return
         began = time.monotonic()
@@ -224,7 +252,7 @@ def prepare(
                     size_bytes=kept.size_bytes,
                 )
                 log(f"prepare: reused {name[:12]} (verified {done.seconds:.1f} s)")
-                fcntl.flock(lock, fcntl.LOCK_SH)
+                fcntl.flock(held, fcntl.LOCK_SH)
                 yield directory, done
                 return
             log(f"prepare: rejected {name[:12]} ({cause})")
@@ -246,38 +274,108 @@ def prepare(
             Receipt(key=found, size_bytes=size, manifest=manifest).model_dump_json(),
         )
         log(f"prepare: built {name[:12]} ({seconds:.1f} s, {size} bytes)")
-        fcntl.flock(lock, fcntl.LOCK_SH)
-        evict(root, shutil.disk_usage(root).free // 2 + _kept(root) // 2, log)
+        fcntl.flock(held, fcntl.LOCK_SH)
+        held_bytes = sum(entry.size_bytes for entry in _kept())
+        evict(shutil.disk_usage(root).free // 2 + held_bytes // 2, log)
         yield (
             directory,
             Prepared(key=name, outcome=outcome, seconds=seconds, size_bytes=size, cause=cause),
         )
 
 
-def _kept(root: Path) -> int:
-    return sum(Receipt.model_validate_json(p.read_text()).size_bytes for p in root.glob("*.json"))
+class Carried(NamedTuple):
+    """The carried directory a build uses, and where its contents came from."""
+
+    directory: Path
+    kept: bool  # already on this machine, used as it was
+    restored_bytes: int | None  # the bucket's archive, restored into it
 
 
-def evict(root: Path, allowance: int, log: Callable[[str], None]) -> None:
-    """Delete least recently used prepared directories beyond `allowance` bytes.
+Restore = Callable[[Path], int | None]  # fills a directory; the bytes restored, or None
 
-    A directory an attempt is using holds its lock shared, and is kept.
+
+@contextmanager
+def carry(
+    key: str, restore: Restore, waiting: Callable[[], bool], log: Callable[[str], None]
+) -> Iterator[Carried | None]:
+    """The carried directory for `key`, held exclusively while the caller builds with it.
+
+    Kept on this machine, it is used as it is; otherwise `restore` fills it. A
+    restore that fails is logged and the directory starts empty, as the build
+    does not depend on it. Yields None when the wait for another build was given up.
     """
-    receipts = sorted(root.glob("*.json"), key=lambda p: p.stat().st_mtime)
-    sizes = {p: Receipt.model_validate_json(p.read_text()).size_bytes for p in receipts}
-    used = sum(sizes.values())
-    for receipt in receipts:
+    root = carried_home()
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    directory = root / key
+    with lock(root / f"{key}.lock", waiting) as held:
+        if held is None:
+            yield None
+            return
+        os.utime(root / f"{key}.lock")  # recently used
+        if directory.is_dir():
+            yield Carried(directory, kept=True, restored_bytes=None)
+            return
+        restored = None
+        try:
+            restored = restore(directory)
+        except (StorageUnavailable, OSError, ValueError, tarfile.TarError) as error:
+            log(f"carry: refused {key[:12]} ({explain(error).splitlines()[0]})")
+            _remove(directory)
+        if restored is not None:
+            log(f"prepare: restored {key[:12]} ({restored} bytes)")
+        directory.mkdir(exist_ok=True)
+        yield Carried(directory, kept=False, restored_bytes=restored)
+
+
+class _Kept(NamedTuple):
+    """A prepared or carried directory on this machine, as eviction sees it."""
+
+    directory: Path
+    lock: Path
+    receipt: Path | None  # a prepared directory's; a carried one has none
+    size_bytes: int
+    used: float  # when last used, as a file modification time
+
+
+def _kept() -> list[_Kept]:
+    kept = []
+    root = home()
+    for receipt in root.glob("*.json"):
+        name = receipt.name.removesuffix(".json")
+        size = Receipt.model_validate_json(receipt.read_text()).size_bytes
+        kept.append(
+            _Kept(root / name, root / f"{name}.lock", receipt, size, receipt.stat().st_mtime)
+        )
+    carried = carried_home()
+    for directory in (p for p in carried.glob("*") if p.is_dir()):
+        size = sum(
+            p.stat().st_size for p in directory.rglob("*") if p.is_file() and not p.is_symlink()
+        )
+        lock_file = carried / f"{directory.name}.lock"
+        used = lock_file.stat().st_mtime if lock_file.exists() else directory.stat().st_mtime
+        kept.append(_Kept(directory, lock_file, None, size, used))
+    return kept
+
+
+def evict(allowance: int, log: Callable[[str], None]) -> None:
+    """Delete least recently used prepared and carried directories beyond `allowance` bytes.
+
+    A directory an attempt is using holds its lock, and is kept.
+    """
+    kept = sorted(_kept(), key=lambda entry: entry.used)
+    used = sum(entry.size_bytes for entry in kept)
+    for entry in kept:
         if used <= allowance:
             return
-        name = receipt.name.removesuffix(".json")
-        with (root / f"{name}.lock").open("a") as lock:
+        with entry.lock.open("a") as held:
             try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 continue  # in use
-            receipt.unlink()
-            _remove(root / name)
-            used -= sizes[receipt]
-            log(f"prepare: evicted {name[:12]} ({sizes[receipt]} bytes)")
+            if entry.receipt is not None:
+                entry.receipt.unlink()
+            _remove(entry.directory)
+            used -= entry.size_bytes
+            log(f"prepare: evicted {entry.directory.name[:12]} ({entry.size_bytes} bytes)")
     if used > allowance:
         log(f"prepare: {used - allowance} bytes over allowance; the rest is in use")

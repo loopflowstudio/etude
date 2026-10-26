@@ -39,6 +39,7 @@ from etude.launch.records import (
     LauncherError,
     MachineTemplate,
     OnDemand,
+    Preparation,
     Provider,
     Run,
     Status,
@@ -447,7 +448,9 @@ def test_inputs_reach_the_job_by_name_once_and_wrong_bytes_are_refused(tmp_path:
     run = c.scheduler.launch(job, rent="l4")
     (status,) = c.scheduler.wait(run, every=0.05, timeout=30)
     assert status.outcome == "succeeded"
-    assert job_text(c.scheduler.logs(run=run)) == weights.decode()
+    verified, said = job_text(c.scheduler.logs(run=run)).split("\n", 1)
+    assert verified.startswith(f"inputs: verified weights.pt ({len(weights)} bytes, ")
+    assert said == weights.decode()
     reads = [k for m, k in c.storage.asked if m == "GET" and k.startswith("shared/weights.pt")]
     assert len(reads) == 1  # one verified download, by the worker, through a scoped link
 
@@ -501,7 +504,9 @@ def test_a_run_from_a_commit_runs_in_a_pod_and_continues_in_another(
     c.scheduler.wait(second, every=0.05, timeout=30)
     status = released(c.scheduler, second)
     assert (status.outcome, status.clocks) == ("succeeded", {"steps": 7})
-    assert job_text(c.scheduler.logs(run=second)) == "seed 7 from 3 to 7\n"
+    verified, said = job_text(c.scheduler.logs(run=second)).split("\n", 1)
+    assert verified.startswith("inputs: verified parent-checkpoint.pt (13 bytes, ")
+    assert said == "seed 7 from 3 to 7\n"
     copy = c.scheduler.fetch(second, "weights.pt", tmp_path / "out")
     assert copy.read_text() == "trained to 3\ntrained to 7\n"
     assert c.provider.creates == 2 and c.provider.pods == {}
@@ -1376,3 +1381,35 @@ def test_a_retry_on_a_fresh_machine_never_reuses_a_name_storage_holds(tmp_path: 
     assert not (there / "checkpoints/steps-3.pt").exists()  # listed, never read
     _retrained(fresh, there, tmp_path / "one" / "weights.pt")
     _intact(storage)
+
+
+def test_only_work_that_carries_a_prepared_directory_may_read_and_write_prepared(
+    tmp_path: Path,
+) -> None:
+    storage = Storage()
+    journal = BucketJournal(
+        Place(name="east", bucket="b", prefix="etude", provider="s3", region="us-east-1"),
+        Bucket("b", "us-east-1", Keys(access_key="AKIA", secret_key="secret"), storage),
+    )
+    plain = Work(
+        attempt="a1",
+        command="true",
+        limit_seconds=30,
+        limit_kind="out_of_time",
+        seed=None,
+        until=None,
+        config=None,
+        repo=None,
+        commit=None,
+        run="run1",
+    )
+    journal.prepare(Packet(session="s1", deadline=None, work=(plain,)))
+    bootstrap = Bootstrap.model_validate_json(storage.objects["etude/sessions/s1/bootstrap.json"])
+    assert bootstrap.prepared is None
+
+    carrying = plain.model_copy(
+        update={"prepare": Preparation(command="true", paths=("uv.lock",), carry=True)}
+    )
+    journal.prepare(Packet(session="s2", deadline=None, work=(carrying,)))
+    bootstrap = Bootstrap.model_validate_json(storage.objects["etude/sessions/s2/bootstrap.json"])
+    assert bootstrap.prepared is not None and bootstrap.prepared.prefix == "etude/prepared/"

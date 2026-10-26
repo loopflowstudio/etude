@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tarfile
 import time
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
@@ -57,6 +58,7 @@ from etude.launch.storage.s3 import (
     read_version,
 )
 from etude.launch.storage.transport import attribute, observe
+from etude.launch.worker.carried import GRANT, REQUEST, save
 
 ROOT = Path("/run/etude/sessions")
 # A log piece waits about a twentieth of its log's age, between 15 seconds and
@@ -192,6 +194,8 @@ class Courier:
         self._inbox: Version | None = None  # the inbox as last read
         self._usage_sent = -1  # bytes of the usage journal last delivered
         self._cache = _cache()
+        self._prepared: Grant | None = None  # see `allow_carry`
+        self._carried: set[str] = set()  # attempts whose carried directory was handled
 
     def _retain_transfer(self, raw: str) -> None:
         """Keep a transfer in the session's usage journal, not the worker log.
@@ -236,6 +240,29 @@ class Courier:
     def release(self) -> None:
         """Let the cache evict this session's inputs; attempts' links keep their bytes."""
         self._cache.release(self._home.name)
+
+    def allow_carry(self, grant: Grant) -> None:
+        """Keep the grant to the storage's `prepared/` folder, for attempts to restore from
+        and this courier to save to (`etude.launch.worker.carried`)."""
+        self._prepared = grant
+        write(self._home / GRANT, grant.model_dump_json())
+
+    def _save_carried(self, home: Path) -> None:
+        """Store the directory an attempt's build filled, once, after it asks."""
+        request = home / REQUEST
+        if self._prepared is None or home.name in self._carried or not request.exists():
+            return
+        key = request.read_text()
+        try:
+            with attribute(purpose="runtime"):
+                saved = save(self._prepared, key, self._send)
+        except (StorageUnavailable, OSError, ValueError, tarfile.TarError) as error:
+            write_log("carry", f"not saved ({explain(error).splitlines()[0]})")
+        else:
+            if saved is None:
+                return  # a build is using it; the next pass tries again
+            write_log("carry", f"saved {key[:12]} ({saved.size_bytes} bytes)")
+        self._carried.add(home.name)
 
     def restore(self, links: dict[str, str]) -> None:
         """Put back what storage holds of a resumed run's folder, before its job starts.
@@ -332,6 +359,8 @@ class Courier:
             target = self._home / "work" / f"{attempt}.json"
             if not target.exists():
                 self._runs.setdefault(entry.work.run, _Folder(entry.access, self._send))
+                if entry.prepared is not None:
+                    self.allow_carry(entry.prepared)
                 try:
                     self.fetch(entry.fetch)  # files precede executable work
                     self.restore(entry.restore)
@@ -402,6 +431,7 @@ class Courier:
                         run=(home / "run").read_text(), attempt=home.name, purpose="result"
                     ):
                         self._carry_attempt(home, final)
+                        self._save_carried(home)
                 except (StorageUnavailable, OSError, ValueError) as error:
                     _diagnose("output delivery", error, home.name)
                     raise
@@ -537,6 +567,8 @@ def _run(
         courier = Courier(
             home, bootstrap.out, bootstrap.inbox_url, send, bootstrap.runs, worker_log
         )
+        if bootstrap.prepared is not None:
+            courier.allow_carry(bootstrap.prepared)
         for folder in ("stop", "work"):
             (home / folder).mkdir(exist_ok=True)
         write_log("source fetch", "starting")

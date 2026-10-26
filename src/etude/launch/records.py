@@ -343,11 +343,17 @@ class Preparation(Record):
     attempt on the machine reuses the verified directory and the command
     does not run. A relative `Runtime.python` containing `/` names an
     interpreter inside it, such as `.venv/bin/python`.
+
+    With `carry`, the command also writes `$ETUDE_CARRIED_DIR`, such as uv's
+    cache, kept in the bucket across rentals and keyed by `paths` and the
+    platform alone (`etude.launch.worker.carried`). It only speeds a build up:
+    the command always runs, and must check what it finds there.
     """
 
     command: str = Field(min_length=1)
     paths: tuple[str, ...] = Field(min_length=1)  # source paths whose content decides the result
     inputs: tuple[str, ...] = ()  # names of the job's inputs the command reads
+    carry: bool = False
 
     @field_validator("paths")
     @classmethod
