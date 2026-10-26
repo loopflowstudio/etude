@@ -152,8 +152,9 @@ evaluate(
 - **Order.** Matches start, `workers` at a time, in the order
   `etude.eval.schedule.ordered` gives, so consecutive matches reuse the
   checkpoints your inference runtime keeps loaded: first those loading the
-  fewest checkpoints not yet used, then those reusing the most recently used. Ties, and queues of code agents only, keep your order. Order
-  changes no result. Your runtime counts its loads; Etude does not.
+  fewest checkpoints not yet used, then those reusing the most recently used.
+  Ties, and queues of code agents only, keep your order. Order changes no
+  result. Your runtime counts its loads; Etude does not.
 - **Rows are yours.** `play` returns any tables. Each row names a `player`
   (a seat) or a `group` of its match; Etude adds `run` and `match`. Values are
   numbers, text, booleans or nulls.
