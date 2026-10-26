@@ -1325,7 +1325,7 @@ automatic replay from this policy.
 ### Timeout ownership
 
 ```python
-from etude.launch.deadline import limit_time
+from etude.deadline import limit_time
 
 # An optional total allowance for synchronous remote operations in this block.
 with limit_time(900):
@@ -1428,10 +1428,16 @@ combining scopes. Upload counts are body bytes supplied to urllib, including
 multipart form framing, not confirmed socket bytes. Response counts are actual
 body reads, including partial responses and failures; object length is separate.
 
-The persistent cache is `$ETUDE_HOME/downloads` (default `~/.etude/downloads`),
-keyed by transport SHA256 and length, with a 20 GiB payload allowance. Both
-completed-output reads and worker source/checkpoint reads use it. The first
-cold acquisition still transfers every byte. For cache-admitted artifacts, verified warm reuse transfers no
+Downloads use Etude's one cache, `$ETUDE_HOME/cache` (default `~/.etude/cache`,
+`etude.cache.Cache`), keyed by transport SHA256 and length, with a 20 GiB payload
+allowance. Completed-output reads, worker source/checkpoint reads and tracking's
+bucket reads (`S3Storage`) share it, so bytes one of them read are reused by the
+others. The first cold acquisition still transfers every byte. A range of an artifact with a recorded SHA256 and length
+is no exception: a whole-file digest cannot authenticate a range, so the whole
+artifact is acquired and verified, streamed to disk even beyond the allowance,
+before any range is returned, and held bytes are verified again before a range
+is read from them. Immutable objects without a recorded digest fetch and keep
+individual ranges. For cache-admitted artifacts, verified warm reuse transfers no
 payload bytes, including from a new process or to another destination; control
 metadata reads still cost requests and bytes. Sequential 8 MiB ranges retain
 completed chunks across interruption and require exact ranges and a stable
@@ -1444,7 +1450,7 @@ rental deadline. Local digest verification and copying check that allowance
 between chunks and before atomic publication; expiry preserves an existing
 destination. Two transport retries, including HTTP 429/500/502/503/504, share
 one budget across all ranges and the caller's deadline. Python callers can
-set an allowance with `Cache.fetch(Download(...), destination, timeout=..., retries=...)`
+set an allowance with `download(Download(...), destination, timeout=..., retries=...)`
 from `etude.launch.storage.download`.
 
 A local HTTP fixture completes two synthetic runs on one kept machine. It

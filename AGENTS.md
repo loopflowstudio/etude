@@ -121,6 +121,12 @@ leaves the stream incomplete while parent cleanup still runs.
 An explicit empty worker cleanup command leaves deletion to its parent; omitted
 cleanup selects the provider's command.
 
+Etude has one cache of storage reads, `etude/cache.py`, keyed by content
+SHA256 and length with locators for where bytes came from. Tracking, reports and
+the launcher all read an `Artifact` named by the object's unsigned URL (never a
+signed link) through transports that perform I/O and keep nothing of their own; it and `deadline.py` sit at the top level because neither `etude.run`
+nor `etude.launch` may import the other.
+
 Check before pushing: `uv run pytest`, `uv run mypy`, `uv run ruff check .` and
 `uv run ruff format --check .`. The formatter also checks Python code blocks in
 Markdown, including release notes. CI runs the tests with the outside network

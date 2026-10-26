@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-from etude.launch.deadline import call, limit_time, remaining
+from etude.deadline import call, limit_time, remaining
 
 LIMIT = 1024 * 1024
 OPENING = 4096

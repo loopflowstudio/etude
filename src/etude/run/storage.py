@@ -5,24 +5,24 @@ Metric blocks, table files, stored checkpoints and files under a run's
 changed. Small manifests
 and records are replaced atomically. Covered blocks
 may be deleted only after their permanent replacement arrives. A bucket's
-reader keeps what it reads in an `ObjectCache`, so no computer reads the same
-bytes from a bucket twice.
+reader keeps what it reads in Etude's one cache (`etude.cache`), so no computer
+reads the same bytes from a bucket twice, whether tracking, a report or a job
+read them first.
 Keys are relative, slash-separated and never leave the configured root. A run's
 folder is named for the run (`run_directory`).
 """
 
 from __future__ import annotations
 
-import hashlib
 import os
 import re
 import shutil
-import tempfile
-from dataclasses import dataclass
 from pathlib import Path
 from stat import S_ISREG
 from typing import Any, Literal, Protocol
+from urllib.parse import quote, urlsplit
 
+from etude.cache import Artifact, Cache, Fetched
 from etude.carriage import immutable
 from etude.run.errors import EtudeError
 
@@ -124,76 +124,6 @@ class DirectoryStorage:
         return found
 
 
-@dataclass(frozen=True)
-class Kept:
-    body: bytes
-    etag: str | None
-
-
-class ObjectCache:
-    """Objects this computer has already read from one bucket, by key, on its disk.
-
-    A bucket bills every byte it sends, so a reader asks for an object's bytes
-    at most once per computer: an immutable object is never asked for again, and
-    any other is asked for with the ETag of the bytes kept, which storage
-    answers without a body while they are current. Each entry is one file,
-    replaced whole, so concurrent readers see an old entry or a new one and
-    never half of one. The least recently used go first beyond `max_bytes`.
-    The default `root` is `ETUDE_HOME/objects`.
-    """
-
-    def __init__(
-        self, bucket: str, root: Path | None = None, max_bytes: int = 20 * 1024**3
-    ) -> None:
-        self.bucket = bucket
-        self.root = root or Path(os.environ.get("ETUDE_HOME", "~/.etude")).expanduser() / "objects"
-        self.max_bytes = max_bytes
-        self._used: int | None = None  # bytes held, counted once and then kept up to date
-
-    def _path(self, name: str) -> Path:
-        return self.root / hashlib.sha256(f"{self.bucket}\0{name}".encode()).hexdigest()
-
-    def load(self, name: str) -> Kept | None:
-        path = self._path(name)
-        try:
-            raw = path.read_bytes()
-            os.utime(path)  # recently used
-        except FileNotFoundError:
-            return None
-        # One line of ETag ("" when storage gave none), then the body.
-        etag, _, body = raw.partition(b"\n")
-        return Kept(body=body, etag=etag.decode() or None)
-
-    def keep(self, name: str, body: bytes, etag: str | None) -> None:
-        if len(body) > self.max_bytes:
-            return
-        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        with tempfile.NamedTemporaryFile(dir=self.root, suffix=".tmp", delete=False) as partial:
-            partial.write((etag or "").encode() + b"\n" + body)
-        Path(partial.name).replace(self._path(name))
-        if self._used is not None:
-            self._used += len(body)
-        if self._used is None or self._used > self.max_bytes:
-            self._evict()
-
-    def _evict(self) -> None:
-        entries: list[tuple[float, int, Path]] = []
-        for path in self.root.iterdir():
-            try:
-                stat = path.stat()
-            except FileNotFoundError:
-                continue  # another process evicted it
-            if path.suffix != ".tmp":
-                entries.append((stat.st_mtime, stat.st_size, path))
-        used = sum(size for _, size, _ in entries)
-        for _, size, path in sorted(entries):
-            if used <= self.max_bytes:
-                break
-            path.unlink(missing_ok=True)
-            used -= size
-        self._used = used
-
-
 class S3Storage:
     """An S3 or R2 bucket reached with the author's own credentials.
 
@@ -201,11 +131,12 @@ class S3Storage:
     configured from the environment: for S3 as boto3 itself is, and for R2 at
     `https://R2_ACCOUNT_ID.r2.cloudflarestorage.com` with `R2_ACCESS_KEY_ID`
     and `R2_SECRET_ACCESS_KEY`, as DuckDB's `r2://` reads them. So the logging
-    client itself has no cloud dependency. Reads go through
-    `cache` (by default this computer's): an immutable object is fetched once, any
-    other is asked for again only by ETag, and an immutable object's ranges are
-    each fetched once. Writes carry a SHA256 that the bucket checks; nothing
-    reads an upload back.
+    client itself has no cloud dependency. Reads go through `cache` (by default
+    this computer's, shared with the launcher): an immutable object is fetched
+    once, any other is asked for again only by ETag, and an immutable object's
+    ranges are each fetched once, or read from the whole object when it is
+    held. Writes carry a SHA256 that the bucket checks; nothing reads an upload
+    back.
     """
 
     def __init__(
@@ -214,15 +145,24 @@ class S3Storage:
         prefix: str = "",
         *,
         client: Any = None,
-        cache: ObjectCache | None = None,
+        cache: Cache | None = None,
         provider: Literal["s3", "r2"] = "s3",
     ) -> None:
         self.client = client or _client(provider)
         self.bucket, self.provider = bucket, provider
         self.prefix = prefix.strip("/") + "/" if prefix.strip("/") else ""
         self.name = f"{provider}-{bucket}-{self.prefix.strip('/').replace('/', '-')}".rstrip("-")
-        # The same bucket name may exist at several S3-compatible endpoints.
-        self.cache = cache or ObjectCache(f"{self.client.meta.endpoint_url}/{bucket}")
+        self.cache = cache or Cache()
+        # An object's location is its virtual-hosted URL, as a presigned link
+        # names it (`etude.launch.storage.s3.Bucket`), so either reader reuses
+        # the other's bytes; the endpoint keeps same-named buckets apart.
+        # boto3 reaches us-east-1 at the legacy global host, which names the
+        # same buckets as the regional host the launcher signs.
+        endpoint = urlsplit(self.client.meta.endpoint_url)
+        host = endpoint.netloc
+        if host == "s3.amazonaws.com":
+            host = f"s3.{self.client.meta.region_name or 'us-east-1'}.amazonaws.com"
+        self._where = f"{endpoint.scheme}://{bucket}.{host}/"
 
     def put(self, key: str, data: bytes) -> None:
         self.client.put_object(
@@ -239,59 +179,14 @@ class S3Storage:
         return f"{self.provider}://{self.bucket}/{self.prefix}{key}"
 
     def get(self, key: str) -> bytes:
-        name = self.prefix + key
-        kept = self.cache.load(name)
-        if kept is not None and immutable(key):
-            return kept.body
-        found = self._get(key, unless=None if kept is None else kept.etag)
-        if found is None:
-            assert kept is not None  # only a conditional read is answered "not modified"
-            return kept.body
-        body, etag = found
-        self.cache.keep(name, body, etag)
-        return body
+        return self.cache.read(self._artifact(key), _Object(self, key))
 
     def get_range(self, key: str, start: int, length: int) -> bytes:
-        if length == 0:
-            return b""
-        byte_range = f"bytes={start}-{start + length - 1}"
-        if not immutable(key):
-            found = self._get(key, byte_range)
-            assert found is not None
-            return found[0]
-        name = f"{self.prefix}{key}\0{byte_range}"
-        whole = self.cache.load(self.prefix + key)
-        if whole is not None:
-            return whole.body[start : start + length]
-        kept = self.cache.load(name)
-        if kept is not None:
-            return kept.body
-        found = self._get(key, byte_range)
-        assert found is not None
-        self.cache.keep(name, found[0], found[1])
-        return found[0]
+        return self.cache.read(self._artifact(key), _Object(self, key), start=start, length=length)
 
-    def _get(
-        self, key: str, byte_range: str | None = None, *, unless: str | None = None
-    ) -> tuple[bytes, str | None] | None:
-        """The body and its ETag; None when `unless` names the current version."""
-        # Cloud exceptions are untyped; normalize only expected missing objects.
-        options = {} if byte_range is None else {"Range": byte_range}
-        if unless is not None:
-            options["IfNoneMatch"] = unless
-        try:
-            reply = self.client.get_object(Bucket=self.bucket, Key=self.prefix + key, **options)
-        except Exception as error:
-            response = getattr(error, "response", {})
-            code = response.get("Error", {}).get("Code")
-            if code in ("NoSuchKey", "404"):
-                raise FileNotFoundError(key) from error
-            if unless is not None and code in ("304", "NotModified"):
-                return None
-            raise
-        body: bytes = reply["Body"].read()
-        etag: str | None = reply.get("ETag")
-        return body, etag
+    def _artifact(self, key: str) -> Artifact:
+        location = self._where + quote(self.prefix + key, safe="-_.~/")
+        return Artifact(location=location, immutable=immutable(key))
 
     def delete(self, key: str) -> bool:
         try:
@@ -317,6 +212,47 @@ class S3Storage:
                 tag = f"{item.get('ETag')}:{item.get('Size')}:{item.get('LastModified')}"
                 found[item["Key"][len(self.prefix) :]] = tag
         return found
+
+
+class _Object:
+    """One bucket object, read for the cache; reads reused from it go unrecorded."""
+
+    def __init__(self, storage: S3Storage, key: str) -> None:
+        self.storage, self.key = storage, key
+
+    def read(self, start: int, end: int | None, etag: str | None) -> Fetched:
+        options = {}
+        if start or end is not None:
+            options["Range"] = f"bytes={start}-{'' if end is None else end}"
+        if etag is not None:
+            options["IfMatch"] = etag
+        found = self._get(options)
+        assert found is not None  # only a conditional read answers "not modified"
+        return found
+
+    def changed(self, etag: str) -> Fetched | None:
+        return self._get({"IfNoneMatch": etag})
+
+    def reused(self, size_bytes: int, byte_range: str | None) -> None:
+        pass
+
+    def _get(self, options: dict[str, str]) -> Fetched | None:
+        """The body and its ETag; None when `IfNoneMatch` names the current version."""
+        storage = self.storage
+        # Cloud exceptions are untyped; normalize only expected missing objects.
+        try:
+            reply = storage.client.get_object(
+                Bucket=storage.bucket, Key=storage.prefix + self.key, **options
+            )
+        except Exception as error:
+            response = getattr(error, "response", {})
+            code = response.get("Error", {}).get("Code")
+            if code in ("NoSuchKey", "404"):
+                raise FileNotFoundError(self.key) from error
+            if "IfNoneMatch" in options and code in ("304", "NotModified"):
+                return None
+            raise
+        return Fetched(body=reply["Body"].read(), etag=reply.get("ETag"))
 
 
 def _client(provider: Literal["s3", "r2"]) -> Any:

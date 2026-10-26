@@ -26,17 +26,17 @@ from tests.experiments import experiment_file
         # recognises experiment files as `etude launch` does (`etude.experiment_file`).
         (
             ["report", "{directory}/pilot.py", "--source", "{directory}"],
-            23,
+            25,
             ("boto3", "duckdb", "etude.eval", "etude.train.run"),
         ),
         (
             ["sync", "--directory", "{directory}"],
-            15,
+            17,
             ("boto3", "numpy", "etude.page", "etude.train.report"),
         ),
         (
             ["sync", "--directory", "{directory}", "--seal"],
-            20,
+            22,
             ("boto3", "etude.page", "etude.train.report"),
         ),
     ],
@@ -150,7 +150,7 @@ def test_serving_an_index_loads_no_evaluation_launcher_or_bucket_client(tmp_path
     loaded = [name for name in modules if name.startswith("etude")]
     # Neither experiment has eval runs or eval(): the index reads training files alone,
     # and recognises experiment files as `etude launch` does (`etude.experiment_file`).
-    assert len(loaded) == 23, loaded
+    assert len(loaded) == 25, loaded
     forbidden = (
         "boto3",
         "duckdb",

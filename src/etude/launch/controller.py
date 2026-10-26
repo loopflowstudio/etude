@@ -25,7 +25,7 @@ from typing import Any, Literal
 
 from pydantic import RootModel, TypeAdapter
 
-from etude.launch.deadline import limit_time, remaining
+from etude.deadline import limit_time, remaining
 from etude.launch.errors import LaunchError
 from etude.launch.listing import show_runs
 from etude.launch.logging import explain

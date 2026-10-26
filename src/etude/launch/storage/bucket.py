@@ -26,7 +26,7 @@ from etude.launch.schemas import (
     progress_from_json,
 )
 from etude.launch.source import source_archive
-from etude.launch.storage.download import Cache, Download
+from etude.launch.storage.download import Download, download
 from etude.launch.storage.s3 import Bucket, Grant, Version
 from etude.launch.storage.transport import attribute
 from etude.launch.usage import Transfer
@@ -398,7 +398,7 @@ class BucketJournal:
             raise LauncherError(f"attempt {attempt} recorded no output {name!r}")
         key = f"{self._run(run)}attempts/{attempt}/{name}"
         with attribute(run=run, attempt=attempt, purpose="result"):
-            return Cache().fetch(
+            return download(
                 Download(
                     url=self._bucket.get_url(key, _GRANT_SECONDS),
                     sha256=expected.sha256,

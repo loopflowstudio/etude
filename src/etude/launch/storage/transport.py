@@ -19,7 +19,7 @@ from contextvars import ContextVar
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from etude.launch.deadline import call, remaining
+from etude.deadline import call, remaining
 from etude.launch.logging import sanitize, write_log
 
 _sink: ContextVar[Callable[[str], None] | None] = ContextVar("transfer_sink", default=None)
