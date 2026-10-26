@@ -13,9 +13,10 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import contextmanager
-from contextvars import ContextVar
+from contextvars import ContextVar, copy_context
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -110,6 +111,31 @@ def emit(
         write_log("transfer", raw)
     else:
         sink(raw)
+
+
+def concurrently[T](operations: Sequence[Callable[[], T]]) -> list[T]:
+    """Run `operations` at once, each in a copy of this context; their results, in order.
+
+    Their transfer observations are emitted afterwards on this thread, so a sink
+    that owns a SQLite connection keeps it. Raises the first failure, once every
+    operation has ended and been observed.
+    """
+    gathered: list[list[str]] = [[] for _ in operations]
+
+    def run(index: int) -> T:
+        _sink.set(gathered[index].append)
+        return operations[index]()
+
+    with ThreadPoolExecutor(max_workers=max(1, len(operations))) as pool:
+        futures = [pool.submit(copy_context().run, run, i) for i in range(len(operations))]
+        wait(futures)
+    sink = _sink.get()
+    for raw in (raw for raws in gathered for raw in raws):
+        if sink is None:
+            write_log("transfer", raw)
+        else:
+            sink(raw)
+    return [future.result() for future in futures]
 
 
 def request(

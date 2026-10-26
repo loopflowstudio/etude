@@ -43,6 +43,7 @@ from etude.launch.schemas import (
     attempt_log,
     log_piece,
 )
+from etude.launch.storage import download as downloads
 from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.download import Download, download
 from etude.launch.storage.files import RESULT
@@ -176,6 +177,19 @@ def http(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[HTTP]:
         fixture.thread.join()
 
 
+def test_a_range_is_read_as_concurrent_parts_observed_on_the_calling_thread(
+    http: HTTP, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(downloads, "PART_BYTES", 4)
+    observed: list[tuple[int, str]] = []
+    with observe(lambda raw: observed.append((threading.get_ident(), raw))):
+        result = download(http.source(), tmp_path / "result", cache=Cache(tmp_path / "cache"))
+    assert result.read_bytes() == b"abcdefghijkl"
+    assert sorted(http.ranges) == ["bytes=0-3", "bytes=4-7", "bytes=8-11"]
+    assert {thread for thread, _ in observed} == {threading.get_ident()}
+    assert sum(Transfer.model_validate_json(raw).received_bytes for _, raw in observed) == 12
+
+
 def test_cold_warm_concurrent_and_new_process_retrieval(http: HTTP, tmp_path: Path) -> None:
     cache = Cache(tmp_path / "cache", range_bytes=4)
     events: list[Transfer] = []
@@ -187,6 +201,7 @@ def test_cold_warm_concurrent_and_new_process_retrieval(http: HTTP, tmp_path: Pa
     script = """from pathlib import Path
 import sys
 from etude.cache import Cache
+from etude.launch.storage import download as downloads
 from etude.launch.storage.download import Download, download
 download(Download.model_validate_json(sys.argv[2]), Path(sys.argv[3]), cache=Cache(Path(sys.argv[1])))
 """
@@ -667,7 +682,7 @@ def test_completed_workload_before_and_after(
         events=tuple(e for e in cold.events if e.id not in replayed_ids),
     )
     # The payload alone: the records fetch consults are already held, and unchanged.
-    assert (cold_reads.received_bytes, cold_reads.requests) == (len(payload), 7)
+    assert (cold_reads.received_bytes, cold_reads.requests) == (len(payload), 6)
     assert cold_reads.reused_bytes == len(payload)
     for index, run in enumerate(runs):
         assert (
@@ -704,7 +719,7 @@ def test_completed_workload_before_and_after(
     }
     assert sum(e.status == 403 for e in after.events) == 1
     assert control.requests > 0 and control.supplied_bytes > 0
-    assert bulk.requests == 9  # runtime, failed source, source, input, 2 uploads, 3 ranges
+    assert bulk.requests == 8  # runtime, failed source, source, input, 2 uploads, 2 parts
     # Worker publication, scheduler collection and public fetches; a start receipt is read once.
     assert control.requests == 40
 
@@ -729,9 +744,9 @@ def test_completed_workload_before_and_after(
     assert before.received_bytes - after.received_bytes == len(
         http.objects["/source"]
     ) + 1024**2 + 3 * len(payload)
-    assert (before.requests, after.requests) == (52, 49)
+    assert (before.requests, after.requests) == (52, 48)
     saved = before.estimate(S3_US_WEST_2) - after.estimate(S3_US_WEST_2)
-    assert saved == Decimal("0.00707908782")
+    assert saved == Decimal("0.00707948782")
     assert after.requests == control.requests + bulk.requests
     own = [b.scheduler.usage(run=run) for run in runs]
     shared = {e.id: e for report in own for e in report.shared_events}

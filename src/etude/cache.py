@@ -252,7 +252,7 @@ class Cache:
         root: Path | None = None,
         *,
         max_bytes: int = 20 * 1024**3,
-        range_bytes: int = 8 * 1024**2,
+        range_bytes: int = 256 * 1024**2,  # one resume step; a transport may read it in parts
     ) -> None:
         if max_bytes < 0 or range_bytes <= 0:
             raise ValueError("cache allowance must be nonnegative and range size positive")
