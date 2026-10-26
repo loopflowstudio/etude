@@ -28,7 +28,7 @@ import secrets
 import sys
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, NoReturn
 
@@ -48,6 +48,7 @@ from etude.eval.records import (
     table_file,
     version_of,
 )
+from etude.eval.schedule import Queue
 from etude.eval.source import digest_files
 from etude.run.declaration import declare
 from etude.run.delivery import RunFiles, StorageDestination, destinations, ship
@@ -139,6 +140,9 @@ def evaluate(
 ) -> EvalRun:
     """Play every match not already stored in this eval run, `workers` at a time.
 
+    Matches start in the order `etude.eval.schedule.ordered` gives, so
+    consecutive matches reuse the checkpoints the author's runtime keeps loaded.
+
     The eval run is named `run` (see `etude.run.declaration.declare` for its
     defaults); resuming it requires the same environment. Prints one line to
     stderr as each match is stored: how many of the pending are, and since
@@ -191,9 +195,14 @@ def evaluate(
 def _played(
     pending: Sequence[Match], play: Callable[[Match], Tables], workers: int
 ) -> Iterator[tuple[Match, Tables | BaseException]]:
-    """Each match with its tables or what it raised, in the order they finish."""
+    """Each match with its tables or what it raised, in the order they finish.
+
+    Matches start in `etude.eval.schedule` order, at most `workers` at once, so
+    the order they start in is the order an author's runtime loads policies in.
+    """
+    queue = Queue(pending)
     if workers == 1:
-        for scheduled in pending:
+        for scheduled in queue:
             try:
                 yield scheduled, play(scheduled)
             except Exception as error:  # noqa: BLE001 - recorded with the match, then raised
@@ -202,13 +211,24 @@ def _played(
     # Fresh processes everywhere, so an eval run behaves alike on Linux and macOS.
     context = multiprocessing.get_context("spawn")
     with ProcessPoolExecutor(min(workers, len(pending) or 1), mp_context=context) as pool:
-        futures = {pool.submit(play, scheduled): scheduled for scheduled in pending}
+        running: dict[Future[Tables], Match] = {}
+
+        def start() -> None:
+            scheduled = next(queue, None)
+            if scheduled is not None:
+                running[pool.submit(play, scheduled)] = scheduled
+
+        for _ in range(workers):
+            start()
         try:
-            for future in as_completed(futures):
-                raised = future.exception()
-                yield futures[future], raised if raised is not None else future.result()
+            while running:
+                finished, _ = wait(running, return_when=FIRST_COMPLETED)
+                for future in finished:
+                    raised = future.exception()
+                    yield running.pop(future), raised if raised is not None else future.result()
+                    # Started only once the last is stored: a failure stops the run.
+                    start()
         finally:
-            # A failure stops the run: matches not yet started never start.
             pool.shutdown(cancel_futures=True)
 
 
