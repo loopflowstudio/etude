@@ -7,11 +7,13 @@ import fcntl
 import hashlib
 import os
 import re
+import shutil
 import signal
 import subprocess
 import time
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 import pytest
@@ -247,7 +249,7 @@ def test_a_reused_runtime_is_still_checked_against_its_pins(tmp_path: Path) -> N
 
 
 def test_eviction_removes_the_least_recently_used_directory_not_one_in_use(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo, count = _repo(tmp_path), tmp_path / "count"
     scheduler = local(tmp_path)
@@ -261,7 +263,9 @@ def test_eviction_removes_the_least_recently_used_directory_not_one_in_use(
     with (home() / f"{middle.stem}.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_SH)  # an attempt is using it
         lines: list[str] = []
-        evict(0, lines.append)  # a full disk: keep half of what is held
+        # A full disk: keep half of what is held.
+        monkeypatch.setattr(shutil, "disk_usage", lambda _: SimpleNamespace(free=0))
+        evict(lines.append)
     assert [p.name for p in home().glob("*.json")] == [middle.name]
     assert not (home() / oldest.stem).exists() and not (home() / newest.stem).exists()
     assert [line.split()[1] for line in lines] == ["evicted", "evicted"]

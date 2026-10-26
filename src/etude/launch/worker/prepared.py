@@ -231,12 +231,25 @@ def prepare(
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     name = found.digest
     directory, receipt = root / name, root / f"{name}.json"
+    cause: str | None = None
+
+    def done(
+        outcome: Literal["reused", "built", "rejected"], seconds: float, size: int | None
+    ) -> Prepared:
+        return Prepared(
+            key=name,
+            outcome=outcome,
+            finished_at=datetime.now(UTC),
+            seconds=seconds,
+            size_bytes=size,
+            cause=cause,
+        )
+
     with lock(root / f"{name}.lock", waiting) as held:
         if held is None:
             yield None
             return
         began = time.monotonic()
-        cause = None
         if receipt.exists():
             try:
                 kept: Receipt | None = Receipt.model_validate_json(receipt.read_text())
@@ -245,16 +258,10 @@ def prepare(
             cause = "receipt unreadable" if kept is None else _mismatch(directory, kept.manifest)
             if kept is not None and cause is None:
                 os.utime(receipt)  # recently used
-                done = Prepared(
-                    key=name,
-                    outcome="reused",
-                    finished_at=datetime.now(UTC),
-                    seconds=time.monotonic() - began,
-                    size_bytes=kept.size_bytes,
-                )
-                log(f"prepare: reused {name[:12]} (verified {done.seconds:.1f} s)")
+                seconds = time.monotonic() - began
+                log(f"prepare: reused {name[:12]} (verified {seconds:.1f} s)")
                 fcntl.flock(held, fcntl.LOCK_SH)
-                yield directory, done
+                yield directory, done("reused", seconds, kept.size_bytes)
                 return
             log(f"prepare: rejected {name[:12]} ({cause})")
             receipt.unlink()
@@ -264,16 +271,7 @@ def prepare(
         began = time.monotonic()
         if not build(directory):
             _remove(directory)
-            yield (
-                directory,
-                Prepared(
-                    key=name,
-                    outcome=outcome,
-                    finished_at=datetime.now(UTC),
-                    seconds=0,
-                    cause=cause,
-                ),
-            )
+            yield directory, done(outcome, 0, None)
             return
         _seal(directory)
         manifest = _manifest(directory)
@@ -285,18 +283,8 @@ def prepare(
         )
         log(f"prepare: built {name[:12]} ({seconds:.1f} s, {size} bytes)")
         fcntl.flock(held, fcntl.LOCK_SH)
-        evict(shutil.disk_usage(root).free, log)
-        yield (
-            directory,
-            Prepared(
-                key=name,
-                outcome=outcome,
-                finished_at=datetime.now(UTC),
-                seconds=seconds,
-                size_bytes=size,
-                cause=cause,
-            ),
-        )
+        evict(log)
+        yield directory, done(outcome, seconds, size)
 
 
 class Carried(NamedTuple):
@@ -373,15 +361,15 @@ def _kept() -> list[_Kept]:
     return kept
 
 
-def evict(free_bytes: int, log: Callable[[str], None]) -> None:
+def evict(log: Callable[[str], None]) -> None:
     """Delete least recently used prepared and carried directories beyond half of what
-    they and the disk's `free_bytes` together hold.
+    they and the disk's free space together hold.
 
     A directory an attempt is using holds its lock, and is kept.
     """
     kept = sorted(_kept(), key=lambda entry: entry.used)
     used = sum(entry.size_bytes for entry in kept)
-    allowance = (free_bytes + used) // 2
+    allowance = (shutil.disk_usage(home()).free + used) // 2
     for entry in kept:
         if used <= allowance:
             return
