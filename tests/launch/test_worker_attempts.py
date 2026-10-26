@@ -15,10 +15,20 @@ from urllib.parse import urlparse
 
 import pytest
 
+from etude.cache import Artifact, Cache, Fetched
 from etude.jobs import continue_from
 from etude.launch.database import Database
 from etude.launch.executor import local as local_service
-from etude.launch.records import Job, LauncherError, Machine, Pool, Run, Status, job_identity
+from etude.launch.records import (
+    Input,
+    Job,
+    LauncherError,
+    Machine,
+    Pool,
+    Run,
+    Status,
+    job_identity,
+)
 from etude.launch.scheduler import Scheduler
 from etude.run.listing import runs
 from etude.train.read import read
@@ -264,3 +274,66 @@ def test_a_launched_job_tracks_as_its_run_without_naming_itself(tmp_path: Path) 
     # The report labels the job as its author named it, with its seed count.
     (drawn,) = training(found).jobs
     assert drawn.name == "hidden256" and drawn.label.startswith("hidden256 · ")
+
+
+class _Weights:
+    """Bytes already on this machine, so a test needs no storage."""
+
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+        sha256 = hashlib.sha256(body).hexdigest()
+        self.artifact = Artifact(
+            location="https://lab.example/weights", sha256=sha256, size_bytes=len(body)
+        )
+        self.input = Input(name="weights", key="weights", sha256=sha256, size_bytes=len(body))
+
+    def read(self, start: int, end: int | None, etag: str | None) -> Fetched:
+        return Fetched(body=self.body[start : None if end is None else end + 1], etag=None)
+
+    def changed(self, etag: str) -> Fetched | None:
+        return None
+
+    def reused(self, size_bytes: int, byte_range: str | None) -> None:
+        pass
+
+
+def test_an_attempt_links_its_held_inputs_read_only_without_copying(tmp_path: Path) -> None:
+    weights = _Weights(b"weights " * 1000)
+    held = Cache().hold(weights.artifact, weights, holder="session", staging=tmp_path / "x")
+    scheduler = local(tmp_path)
+    one = scheduler.launch(
+        Job(
+            command='cat "$ETUDE_INPUTS_DIR/weights" | wc -c',
+            inputs=(weights.input,),
+            max_hours=0.1,
+            max_usd=Decimal(1),
+        )
+    )
+    (status,) = scheduler.wait(one, every=0.05, timeout=30)
+    assert status.outcome == "succeeded"
+    assert job_text(scheduler.logs(run=one)).split()[-1] == "8000"
+    attempt = scheduler.attempts(one)[0]
+    given = tmp_path / "sessions" / attempt.session / "attempts" / attempt.id / "inputs/weights"
+    assert given.stat().st_ino == held.stat().st_ino  # one copy on this machine
+    assert given.stat().st_mode & 0o777 == 0o444
+
+
+def test_a_corrupted_held_input_is_refused_before_the_job_starts(tmp_path: Path) -> None:
+    weights = _Weights(b"weights " * 1000)
+    held = Cache().hold(weights.artifact, weights, holder="session", staging=tmp_path / "x")
+    held.chmod(0o644)
+    held.write_bytes(b"W" + weights.body[1:])
+    scheduler = local(tmp_path)
+    one = scheduler.launch(
+        Job(
+            command="touch started",
+            inputs=(weights.input,),
+            max_hours=0.1,
+            max_usd=Decimal(1),
+            max_attempts=1,
+        )
+    )
+    (status,) = scheduler.wait(one, every=0.05, timeout=30)
+    assert (status.outcome, status.cause) == ("lost", "setup_failed")
+    assert scheduler.attempts(one)[0].started_at is None
+    assert not held.exists()  # the corrupt copy is discarded, not trusted again

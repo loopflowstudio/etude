@@ -2,7 +2,8 @@
 
 Every read names an `Artifact`: where its bytes are kept (the object's unsigned
 URL) and, when recorded, their SHA256 and length. `Cache.read` answers with its
-bytes or a range of them and `Cache.place` puts them at a path; these are views
+bytes or a range of them, `Cache.place` copies them to a path and `Cache.hold`
+keeps them in place for a holder until it releases them; these are views
 of one acquisition, so a checkpoint a job fetched and the same object a report
 reads are read from storage once, in either order, by any process. Content is
 kept once by SHA256 and length (`Content`), verified before it is published and
@@ -21,19 +22,20 @@ only under the same ETag, so ranges never mix object versions.
 
 Transports (`etude.run.storage.S3Storage`, `etude.launch.storage.download`)
 are `Source`s: they perform the I/O and keep nothing of their own. Beyond
-`max_bytes` the least recently used unpinned content goes first; eviction
-removes only this computer's copies. Local hashing and copying share the
+`max_bytes` the least recently used content no holder pins goes first;
+eviction removes only this computer's copies. Held content is read-only
+(0444), so a holder may link it rather than copy it. Local hashing and copying share the
 caller's deadline (`etude.deadline`) on the invoking thread, so no abandoned
 writer publishes after it expires.
 
 Under `root` (default `ETUDE_HOME/cache`):
 
-    SHA256-SIZE           verified content
-    SHA256-SIZE.partial   an acquisition in progress; .json notes its ranges
-    SHA256-SIZE.lock      held by whoever reads, writes or evicts it
-    SHA256-SIZE.pin       kept through eviction
-    capacity.lock         held while room is made
-    locators/HASH.json    which content a location holds, and its ETag
+    SHA256-SIZE             verified content, read-only
+    SHA256-SIZE.partial     an acquisition in progress; .json notes its ranges
+    SHA256-SIZE.lock        held by whoever reads, writes or evicts it
+    SHA256-SIZE.HOLDER.pin  kept through eviction until HOLDER releases it
+    capacity.lock           held while room is made
+    locators/HASH.json      which content a location holds, and its ETag
 """
 
 from __future__ import annotations
@@ -41,6 +43,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import os
+import re
 import tempfile
 import time
 from collections.abc import Iterator
@@ -197,6 +200,7 @@ def _discard(path: Path) -> None:
 def _admit(partial: Path, target: Path) -> None:
     """Publish a completed acquisition as held content, under the capacity lock."""
     with _lock(target.parent / "capacity.lock"):
+        partial.chmod(0o444)  # verified content never changes; holders may link it
         partial.replace(target)
         partial.with_suffix(".json").unlink(missing_ok=True)
 
@@ -280,10 +284,8 @@ class Cache:
         with tempfile.TemporaryDirectory(dir=self._made()) as scratch:
             return self.place(artifact, Path(scratch) / content.name, source).read_bytes()
 
-    def place(
-        self, artifact: Artifact, destination: Path, source: Source, *, pin: bool = False
-    ) -> Path:
-        """Put the artifact's verified bytes at `destination`, reading only what is not held.
+    def place(self, artifact: Artifact, destination: Path, source: Source) -> Path:
+        """Copy the artifact's verified bytes to `destination`, reading only what is not held.
 
         Content larger than the whole allowance is staged beside the destination
         instead, and is not read again when the destination already holds it.
@@ -294,8 +296,55 @@ class Cache:
             body = self.read(artifact, source)
             destination.parent.mkdir(parents=True, exist_ok=True)
             _replace(destination, body)
-            self._pin(Content.of(body), pin)
             return destination
+        with self._holding(artifact, content, destination, source, None) as held:
+            return held if held == destination else _publish(held, destination)
+
+    def hold(self, artifact: Artifact, source: Source, *, holder: str, staging: Path) -> Path:
+        """The artifact's verified, read-only bytes in this cache, kept until `holder` releases them.
+
+        Nothing is copied: the caller links the returned path. Content larger
+        than the whole allowance is staged at `staging` instead, as `place` does.
+        """
+        content = artifact.content
+        if content is None:
+            raise ValueError("only content named by its digest can be held")
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", holder):
+            raise ValueError(f"holder {holder!r} must be a plain name")
+        with self._holding(artifact, content, staging, source, holder) as held:
+            return held
+
+    def held(self, content: Content) -> Path | None:
+        """Where held content is, verified now; None when absent, and discarded when corrupt."""
+        path = self.root / content.name
+        if not path.exists():
+            return None
+        with _lock(self._made() / f"{content.name}.lock"):
+            if _verify(path, content):
+                return path
+            with _lock(self.root / "capacity.lock"):
+                path.unlink(missing_ok=True)
+        return None
+
+    def release(self, holder: str) -> None:
+        """Let eviction remove what `holder` kept; its bytes stay until it does."""
+        for pin in self.root.glob(f"*.{holder}.pin"):
+            pin.unlink(missing_ok=True)
+
+    @contextmanager
+    def _holding(
+        self,
+        artifact: Artifact,
+        content: Content,
+        destination: Path,
+        source: Source,
+        holder: str | None,
+    ) -> Iterator[Path]:
+        """Verified bytes, held under their lock while the caller uses them.
+
+        The cache's own copy, pinned for `holder` when given; or, for content
+        larger than the whole allowance, `destination` itself.
+        """
         key = content.name
         with _lock(self._made() / f"{key}.lock"):
             target = self.root / key
@@ -306,9 +355,10 @@ class Cache:
                     raise Corrupt("cached download digest mismatch")
                 target.touch()
                 source.reused(content.size_bytes, None)
-                self._pin(content, pin)
+                self._pin(content, holder)
                 self._locate(artifact.location, content, None)
-                return _publish(target, destination)
+                yield target
+                return
             destination.parent.mkdir(parents=True, exist_ok=True)
             cacheable = content.size_bytes <= self.max_bytes and self._make_room(
                 key, content.size_bytes
@@ -317,7 +367,8 @@ class Cache:
                 # Too large to cache, but a retried attempt or another job on
                 # this machine already holds it where it goes.
                 source.reused(content.size_bytes, None)
-                return destination
+                yield destination
+                return
             partial = (
                 self.root / f"{key}.partial"
                 if cacheable
@@ -330,15 +381,16 @@ class Cache:
                 raise Mismatch("download length or SHA256 mismatch")
             if cacheable:
                 _admit(partial, target)
-                self._pin(content, pin)
+                self._pin(content, holder)
                 self._locate(artifact.location, content, etag)
-                return _publish(target, destination)
+                yield target
+                return
             # Staging is already beside the destination, on the same filesystem.
             partial.chmod(0o600)
             remaining()
             partial.replace(destination)
             _discard(partial)
-            return destination
+            yield destination
 
     def _read_located(self, artifact: Artifact, source: Source) -> bytes:
         """Bytes whose digest is not recorded: the location says which bytes are held."""
@@ -406,13 +458,9 @@ class Cache:
                 body = stream.read(length)
         return body if len(body) == length else None
 
-    def unpin(self, content: Content) -> None:
-        """Let eviction remove this content again; its bytes stay until it does."""
-        (self.root / f"{content.name}.pin").unlink(missing_ok=True)
-
-    def _pin(self, content: Content, pin: bool) -> None:
-        if pin:
-            (self.root / f"{content.name}.pin").touch()
+    def _pin(self, content: Content, holder: str | None) -> None:
+        if holder is not None:
+            (self.root / f"{content.name}.{holder}.pin").touch()
 
     def _made(self) -> Path:
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -472,7 +520,7 @@ class Cache:
         # Reserve capacity under the cache-wide lock. Other acquisitions hold
         # their content lock, so eviction never removes an active reader/writer.
         with _lock(self.root / "capacity.lock"):
-            pinned = {p.stem for p in self.root.glob("*.pin")}
+            pinned = {p.name.partition(".")[0] for p in self.root.glob("*.pin")}
             candidates = sorted(
                 (
                     p

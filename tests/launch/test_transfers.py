@@ -610,11 +610,12 @@ def test_completed_workload_before_and_after(
             }
         )
         assert (home / "sources/shared.tar").read_bytes() == http.objects["/source"]
-        assert (home / f"attempts/{a.id}/inputs/checkpoint.pt").read_bytes() == http.objects[
-            "/checkpoint"
-        ]
+        # Held in the cache for the session's attempts to link, not copied beside it.
+        assert not (home / f"attempts/{a.id}/inputs/checkpoint.pt").exists()
+        held = Cache().held(Content.of(http.objects["/checkpoint"]))
+        assert held is not None and held.read_bytes() == http.objects["/checkpoint"]
         outputs = home / "attempts" / a.id / "outputs"
-        outputs.mkdir()
+        outputs.mkdir(parents=True)
         (outputs.parent / "run").write_text(a.run)
         (outputs.parent / "claim").write_text(b.clock().isoformat())
         (outputs / "checkpoint.pt").write_bytes(payload)
@@ -892,6 +893,7 @@ def test_changed_and_corrupt_bucket_objects_are_read_again(tmp_path: Path) -> No
         storage.put("run/manifest.json", b"second")
         assert storage.get("run/manifest.json") == b"second"
         held = storage.cache.root / Content.of(b"second").name
+        held.chmod(0o644)
         held.write_bytes(b"secoNd")
         assert storage.get("run/manifest.json") == b"second"
     assert client.bytes == 5 + 6 + 6
@@ -960,7 +962,9 @@ def test_a_range_never_exposes_corrupted_cached_content(tmp_path: Path) -> None:
     source = _Held(b"abcdef")
     cache = Cache(tmp_path / "cache")
     assert cache.read(source.artifact, source) == source.body
-    (cache.root / Content.of(source.body).name).write_bytes(b"aXXdef")
+    held = cache.root / Content.of(source.body).name
+    held.chmod(0o644)
+    held.write_bytes(b"aXXdef")
     assert cache.read(source.artifact, source, start=1, length=2) == b"bc"
     assert source.read_bytes == 2 * len(source.body)
 
@@ -981,19 +985,34 @@ def test_one_artifact_at_two_locations_is_read_once(tmp_path: Path) -> None:
     assert source.read_bytes == len(source.body)
 
 
-def test_pinned_content_survives_eviction_until_unpinned(tmp_path: Path) -> None:
+def test_held_content_survives_eviction_until_its_holder_releases_it(tmp_path: Path) -> None:
     cache = Cache(tmp_path / "cache", max_bytes=12)
     first, second = b"abcdefghijkl", b"mnopqrstuvwx"
     kept = Content.of(first)
-    cache.place(_Held(first).artifact, tmp_path / "first", _Held(first), pin=True)
+    held = cache.hold(_Held(first).artifact, _Held(first), holder="s1", staging=tmp_path / "a")
+    assert held == cache.root / kept.name and held.stat().st_mode & 0o777 == 0o444
     cache.place(_Held(second).artifact, tmp_path / "second", _Held(second))
-    assert (cache.root / kept.name).read_bytes() == first
+    assert held.read_bytes() == first
     assert not (cache.root / Content.of(second).name).exists()  # streamed, not kept
-    cache.unpin(kept)
+    cache.release("s1")
     cache.place(_Held(second).artifact, tmp_path / "second", _Held(second))
-    assert not (cache.root / kept.name).exists()
+    assert not held.exists()
     assert (cache.root / Content.of(second).name).read_bytes() == second
-    assert (tmp_path / "first").read_bytes() == first  # eviction removes only cached copies
+    assert not (tmp_path / "a").exists()  # held in place: nothing was copied
+
+
+def test_held_content_is_verified_when_asked_for_and_discarded_when_corrupt(
+    tmp_path: Path,
+) -> None:
+    cache = Cache(tmp_path / "cache")
+    source = _Held(b"abcdef")
+    held = cache.hold(source.artifact, source, holder="s1", staging=tmp_path / "a")
+    content = Content.of(source.body)
+    assert cache.held(content) == held
+    held.chmod(0o644)
+    held.write_bytes(b"aXXdef")
+    assert cache.held(content) is None
+    assert not held.exists()
 
 
 def test_worker_source_and_input_share_verified_transport_bytes(
@@ -1014,7 +1033,9 @@ def test_worker_source_and_input_share_verified_transport_bytes(
         }
     )
     assert target.read_bytes() == b"abcdefghijkl"
-    assert (home / "inputs/weights").read_bytes() == b"abcdefghijkl"
+    assert not (home / "inputs/weights").exists()  # held in the cache, not copied
+    held = Cache().held(Content.of(b"abcdefghijkl"))
+    assert held is not None and held.read_bytes() == b"abcdefghijkl"
     events = [
         Transfer.model_validate_json(line)
         for line in (home / "usage.jsonl").read_text().splitlines()

@@ -109,9 +109,13 @@ def download(
     retries: int = 2,
     send: Send = _send,
     cache: Cache | None = None,
+    holder: str | None = None,
 ) -> Path:
     """Place `source`'s verified bytes at `destination`, through this computer's cache.
 
+    With `holder`, nothing is copied: the bytes stay in the cache, kept for
+    `holder` (`Cache.hold`), and their path is returned; `destination` is used
+    only for content larger than the cache's whole allowance.
     Raises `Mismatch` when storage holds other bytes, and `StorageUnavailable`
     when it cannot be read; `destination` is left as it was.
     """
@@ -124,8 +128,12 @@ def download(
         limit_time(timeout),
         attribute(transfer=uuid4().hex, sha256=source.sha256, size_bytes=str(source.size_bytes)),
     ):
+        cache = cache or Cache()
+        link = _Link(source, retries, send)
         try:
-            return (cache or Cache()).place(artifact, destination, _Link(source, retries, send))
+            if holder is not None:
+                return cache.hold(artifact, link, holder=holder, staging=destination)
+            return cache.place(artifact, destination, link)
         except ContentMismatch as error:
             raise Mismatch(str(error)) from None
         except Corrupt as error:

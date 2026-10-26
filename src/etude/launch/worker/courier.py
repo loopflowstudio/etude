@@ -7,6 +7,7 @@ import io
 import json
 import math
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -17,6 +18,7 @@ from typing import IO
 
 from pydantic import JsonValue
 
+from etude.cache import Cache
 from etude.carriage import (
     checkpoint_file,
     immutable,
@@ -189,6 +191,7 @@ class Courier:
         self._console = Console("worker output")
         self._inbox: Version | None = None  # the inbox as last read
         self._usage_sent = -1  # bytes of the usage journal last delivered
+        self._cache = _cache()
 
     def _retain_transfer(self, raw: str) -> None:
         """Keep a transfer in the session's usage journal, not the worker log.
@@ -218,10 +221,21 @@ class Courier:
                     for path, source in links.items():
                         kind = path.split("/")[1]
                         with attribute(purpose="source" if kind == "sources" else "input"):
-                            download(source, self._home.parent / path, send=self._send)
+                            download(
+                                source,
+                                self._home.parent / path,
+                                send=self._send,
+                                cache=self._cache,
+                                # Inputs stay in the cache for this session's attempts to link.
+                                holder=None if kind == "sources" else self._home.name,
+                            )
             finally:
                 # Recovery evidence is outside the discretionary input allowance.
                 self._carry_usage()
+
+    def release(self) -> None:
+        """Let the cache evict this session's inputs; attempts' links keep their bytes."""
+        self._cache.release(self._home.name)
 
     def restore(self, links: dict[str, str]) -> None:
         """Put back what storage holds of a resumed run's folder, before its job starts.
@@ -571,6 +585,7 @@ def _run(
             if process is not None:
                 assert courier is not None
                 _reap(courier, process, left)
+                courier.release()
             write_log("cleanup", "finalizing worker output before cleanup")
             write_log("worker", CLOSED)
             collected = True
@@ -595,6 +610,18 @@ def _run(
             failure = failure or error
         if failure is not None and original_error is None:
             raise failure
+
+
+def _cache() -> Cache:
+    """This machine's cache: what it holds plus half the disk free when the session began.
+
+    A rental's disk, not a fixed size, decides what fits, so its weights are
+    held once rather than staged beside every session.
+    """
+    root = Cache().root
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    held = sum(p.stat().st_size for p in root.iterdir() if p.is_file())
+    return Cache(root, max_bytes=held + shutil.disk_usage(root).free // 2)
 
 
 def _allowance(deadline: float | None, seconds: float | None) -> Callable[[], float | None]:

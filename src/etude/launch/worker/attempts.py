@@ -26,6 +26,7 @@ ETUDE_UNTIL_CLOCK and ETUDE_UNTIL_VALUE are the job's target.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import signal
@@ -39,6 +40,7 @@ from pathlib import Path
 from types import FrameType
 from typing import BinaryIO, Literal
 
+from etude.cache import Cache, Content
 from etude.launch.logging import Console, explain, log_to, sanitize
 from etude.launch.records import Cause, Input, Outcome, Output, Record
 from etude.launch.runtime import PROBE, find_python, select_runtime
@@ -138,18 +140,21 @@ def _prepare(session: Path, home: Path, work: Work) -> dict[str, str]:
     if work.inputs:
         folder = home / "inputs"
         folder.mkdir()
-        for given in work.inputs:
-            held = session / "inputs" / given.sha256  # the courier verified it on arrival
-            if not held.is_file() and given.run is not None:
-                # This machine's folder for that run: its own, or relayed to it.
-                kept = shared / given.run / given.key
-                held = kept if _matches(kept, given) else held
-            if not held.is_file():
-                raise ValueError(
-                    f"input {given.name} was not delivered: its bytes did not match its digest,"
-                    " or this machine has neither storage nor the file"
+        with (home / "log").open("a") as log:
+            for given in work.inputs:
+                began = time.monotonic()
+                held = _held(session, shared, given)
+                linked = folder / given.name
+                try:
+                    os.link(held, linked)  # one copy, whoever holds it
+                except OSError as error:
+                    if error.errno != errno.EXDEV:
+                        raise
+                    linked.symlink_to(held)  # the cache is on another filesystem
+                log.write(
+                    f"inputs: verified {given.name} ({given.size_bytes} bytes,"
+                    f" {time.monotonic() - began:.1f} s)\n"
                 )
-            os.link(held, folder / given.name)
         environment["ETUDE_INPUTS_DIR"] = str(folder)
     if work.seed is not None:
         environment["ETUDE_SEED"] = str(work.seed)
@@ -158,6 +163,29 @@ def _prepare(session: Path, home: Path, work: Work) -> dict[str, str]:
         environment["ETUDE_UNTIL_CLOCK"] = clock
         environment["ETUDE_UNTIL_VALUE"] = target
     return environment
+
+
+def _held(session: Path, shared: Path, given: Input) -> Path:
+    """Where this machine holds the input's bytes, verified for this attempt before it starts.
+
+    The cache's read-only copy, which the courier holds for the session; else
+    content too large for the cache, staged beside the session; else this
+    machine's folder for the input's run, its own or relayed to it.
+    """
+    content = Content(sha256=given.sha256, size_bytes=given.size_bytes)
+    held = Cache().held(content)
+    if held is not None:
+        return held
+    places = [session / "inputs" / given.sha256]
+    if given.run is not None:
+        places.append(shared / given.run / given.key)
+    for path in places:
+        if _matches(path, given):
+            return path
+    raise ValueError(
+        f"input {given.name} was not delivered: its bytes did not match its digest,"
+        " or this machine has neither storage nor the file"
+    )
 
 
 def _matches(path: Path, given: Input) -> bool:
@@ -411,7 +439,8 @@ def _run(session: Path, packet: Packet, work: Work) -> None:
     try:
         environment = _prepare(session, home, work)
     except (OSError, ValueError, subprocess.CalledProcessError, tarfile.TarError) as error:
-        (home / "log").write_text("source preparation failed: " + explain(error) + "\n")
+        with (home / "log").open("a") as log:
+            log.write("source preparation failed: " + explain(error) + "\n")
         return _finish(home, "lost", "setup_failed")
     started = _now()
     limit = started + timedelta(seconds=work.limit_seconds)
@@ -419,7 +448,7 @@ def _run(session: Path, packet: Packet, work: Work) -> None:
         limit = min(limit, packet.deadline)
     environment["ETUDE_DEADLINE"] = limit.isoformat()
     result = Exit(code=None)
-    with (home / "log").open("wb") as log:
+    with (home / "log").open("ab") as log:
         try:
             if work.runtime is not None:
                 result = _runtime(home, work, environment, log, stop, limit)
