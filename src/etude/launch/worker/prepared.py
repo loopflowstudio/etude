@@ -275,8 +275,7 @@ def prepare(
         )
         log(f"prepare: built {name[:12]} ({seconds:.1f} s, {size} bytes)")
         fcntl.flock(held, fcntl.LOCK_SH)
-        held_bytes = sum(entry.size_bytes for entry in _kept())
-        evict(shutil.disk_usage(root).free // 2 + held_bytes // 2, log)
+        evict(shutil.disk_usage(root).free, log)
         yield (
             directory,
             Prepared(key=name, outcome=outcome, seconds=seconds, size_bytes=size, cause=cause),
@@ -357,13 +356,15 @@ def _kept() -> list[_Kept]:
     return kept
 
 
-def evict(allowance: int, log: Callable[[str], None]) -> None:
-    """Delete least recently used prepared and carried directories beyond `allowance` bytes.
+def evict(free_bytes: int, log: Callable[[str], None]) -> None:
+    """Delete least recently used prepared and carried directories beyond half of what
+    they and the disk's `free_bytes` together hold.
 
     A directory an attempt is using holds its lock, and is kept.
     """
     kept = sorted(_kept(), key=lambda entry: entry.used)
     used = sum(entry.size_bytes for entry in kept)
+    allowance = (free_bytes + used) // 2
     for entry in kept:
         if used <= allowance:
             return

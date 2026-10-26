@@ -230,10 +230,10 @@ def test_eviction_removes_the_least_recently_used_directory_not_one_in_use(
     with (home() / f"{middle.stem}.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_SH)  # an attempt is using it
         lines: list[str] = []
-        evict(0, lines.append)
+        evict(0, lines.append)  # a full disk: keep half of what is held
     assert [p.name for p in home().glob("*.json")] == [middle.name]
     assert not (home() / oldest.stem).exists() and not (home() / newest.stem).exists()
-    assert lines[-1].endswith("bytes over allowance; the rest is in use")
+    assert [line.split()[1] for line in lines] == ["evicted", "evicted"]
 
 
 CARRY = """
