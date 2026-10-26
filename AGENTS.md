@@ -67,6 +67,11 @@ tables are for lookup, not teaching.
 
 ## Tests
 
+**NEVER intentionally induce load for testing**, including debugging,
+benchmarks or demos, on local, CI or remote hosts. No CPU burners (`yes`),
+busy loops, stress tools or artificial resource pressure. Use controlled
+fixtures and injected measurements; see [TESTING.md](TESTING.md).
+
 Test behaviour a user would care about, and assert on results. Mock side
 effects (network, subprocesses, paid services) but never assert on how a mock
 was called. Do not reshape production code for a test: no interface, factory
