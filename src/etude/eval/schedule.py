@@ -1,12 +1,12 @@
-"""The order an eval run plays its matches in, so consecutive matches reuse policies.
+"""The order an eval run plays its matches in, so consecutive matches reuse checkpoints.
 
-A policy is a seated checkpoint, by its `CheckpointKey` (`policies`); code
+A match seats checkpoints, by their `CheckpointKey` (`checkpoints`); code
 agents need none. An author's inference runtime, such as Manabot's
-`PolicyStore`, keeps the policies used most recently loaded and evicts the
-least recently used. `ordered` lists matches in the order `evaluate` plays
-them: next, the match that loads the fewest policies not yet used, then the one
-reusing the most, then the one whose policies were used most recently. That
-ranking by recency (stack distance) suits a runtime of any size, so Etude
+`PolicyStore`, keeps the checkpoints used most recently loaded and evicts the
+least recently used. `ordered` yields matches in the order `evaluate` plays
+them: next, the match that loads the fewest checkpoints not yet used, then the
+one reusing the most, then the one whose checkpoints were used most recently.
+That ranking by recency (stack distance) suits a runtime of any size, so Etude
 models no byte allowance and counts no loads: the runtime owns those.
 
 Ties keep the caller's order, so a queue of code agents plays as given. The
@@ -21,52 +21,43 @@ from collections.abc import Iterator, Sequence
 from etude.eval.records import CheckpointKey, Match
 
 
-def policies(match: Match) -> frozenset[CheckpointKey]:
-    """The checkpoints a match seats; one checkpoint at two configs is one policy."""
+def checkpoints(match: Match) -> frozenset[CheckpointKey]:
+    """The checkpoints a match seats; one checkpoint at two configs is one checkpoint."""
     return frozenset(
         seated.key.checkpoint for seated in match.agents if seated.key.checkpoint is not None
     )
 
 
-def ordered(matches: Sequence[Match]) -> list[Match]:
-    """The matches in the order `evaluate` plays them, one worker at a time.
+def ordered(matches: Sequence[Match]) -> Iterator[Match]:
+    """The matches in the order `evaluate` plays them, one as each worker frees up.
 
-    A caller cutting its own batches should cut contiguous runs of this order.
+    Each match counts as using its checkpoints once it is yielded. A caller
+    cutting its own batches should cut contiguous runs of this order.
     """
-    return list(Queue(matches))
+    # Matches seating the same checkpoints, each group in the caller's order.
+    groups: dict[frozenset[CheckpointKey], deque[tuple[int, Match]]] = {}
+    for index, match in enumerate(matches):
+        groups.setdefault(checkpoints(match), deque()).append((index, match))
+    # Checkpoints by when they were last used, least recent first.
+    used: dict[CheckpointKey, None] = {}
+    while groups:
+        # How many checkpoints were used since each one: its stack distance.
+        since = {key: len(used) - 1 - at for at, key in enumerate(used)}
 
+        def cost(group: frozenset[CheckpointKey]) -> tuple[int, ...]:
+            warm = [since[key] for key in group if key in since]
+            first = groups[group][0][0]
+            return (len(group) - len(warm), -len(warm), max(warm, default=0), first)
 
-class Queue(Iterator[Match]):
-    """The matches `ordered` lists, taken one at a time as workers free up."""
-
-    def __init__(self, matches: Sequence[Match]) -> None:
-        # Matches seating the same policies, each group in the caller's order.
-        self._groups: dict[frozenset[CheckpointKey], deque[tuple[int, Match]]] = {}
-        for index, match in enumerate(matches):
-            self._groups.setdefault(policies(match), deque()).append((index, match))
-        self._used: list[CheckpointKey] = []
-
-    def __next__(self) -> Match:
-        """The next match to play, counted as using its policies now."""
-        if not self._groups:
-            raise StopIteration
-        # How many policies were used since each one: its stack distance.
-        since = {policy: len(self._used) - 1 - at for at, policy in enumerate(self._used)}
-
-        def cost(
-            item: tuple[frozenset[CheckpointKey], deque[tuple[int, Match]]],
-        ) -> tuple[int, ...]:
-            group, waiting = item
-            warm = [since[policy] for policy in group if policy in since]
-            return (len(group) - len(warm), -len(warm), max(warm, default=0), waiting[0][0])
-
-        group, waiting = min(self._groups.items(), key=cost)
+        group = min(groups, key=cost)
+        waiting = groups[group]
         _, match = waiting.popleft()
         if not waiting:
-            del self._groups[group]
-        seated = [each.key.checkpoint for each in match.agents if each.key.checkpoint is not None]
-        for policy in dict.fromkeys(seated):
-            if policy in since:
-                self._used.remove(policy)
-            self._used.append(policy)
-        return match
+            del groups[group]
+        # Seat order, not the `checkpoints` set, whose iteration follows string
+        # hashing: every process, and so every share of a hold, sees one order.
+        for seated in match.agents:
+            if seated.key.checkpoint is not None:
+                used.pop(seated.key.checkpoint, None)
+                used[seated.key.checkpoint] = None
+        yield match

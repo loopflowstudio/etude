@@ -151,7 +151,7 @@ evaluate(
   inside `play`. Group `all` holds every seat; an agent may sit in two seats.
 - **Order.** Matches start, `workers` at a time, in the order
   `etude.eval.schedule.ordered` gives, so consecutive matches reuse the
-  checkpoints (policies) your inference runtime keeps loaded: first those
+  checkpoints your inference runtime keeps loaded: first those
   loading the fewest checkpoints not yet used, then those reusing the most
   recently used. Ties, and queues of code agents only, keep your order. Order
   changes no result. Your runtime counts its loads; Etude does not.
@@ -218,8 +218,8 @@ evaluate(
   call resumes it.
 - **Splitting.** `share=(k, n)` plays one of n disjoint parts, for n
   machines: contiguous runs of the scheduled matches in play order, so parts
-  differ by at most one match and each seats only some of the checkpoints. Delivered matches are dealt too, so a retried share
-  keeps its part.
+  differ by at most one match and each seats only some of the checkpoints.
+  Delivered matches are dealt too, so a retried share keeps its part.
 - **Cost.** Holding a checkpoint or entrants reads nothing of the
   tournament: it plays their matches. Holding nothing new (batch) lists each
   place once and reads each eval run's `run.json` and, for the experiment's,

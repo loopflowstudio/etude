@@ -48,7 +48,7 @@ from etude.eval.records import (
     table_file,
     version_of,
 )
-from etude.eval.schedule import Queue
+from etude.eval.schedule import ordered
 from etude.eval.source import digest_files
 from etude.run.declaration import declare
 from etude.run.delivery import RunFiles, StorageDestination, destinations, ship
@@ -198,11 +198,11 @@ def _played(
     """Each match with its tables or what it raised, in the order they finish.
 
     Matches start in `etude.eval.schedule` order, at most `workers` at once, so
-    the order they start in is the order an author's runtime loads policies in.
+    the order they start in is the order an author's runtime loads checkpoints in.
     """
-    queue = Queue(pending)
+    order = ordered(pending)
     if workers == 1:
-        for scheduled in queue:
+        for scheduled in order:
             try:
                 yield scheduled, play(scheduled)
             except Exception as error:  # noqa: BLE001 - recorded with the match, then raised
@@ -214,7 +214,7 @@ def _played(
         running: dict[Future[Tables], Match] = {}
 
         def start() -> None:
-            scheduled = next(queue, None)
+            scheduled = next(order, None)
             if scheduled is not None:
                 running[pool.submit(play, scheduled)] = scheduled
 

@@ -106,12 +106,13 @@ def hold(
     `etude.eval.schedule.ordered` plays them, into n contiguous parts and plays
     the kth, so n machines may split one hold with at most one match between
     their shares, each seating (and fetching) only some of the checkpoints.
-    The deal covers delivered matches too, so a resumed share keeps its part. Under `etude launch` the eval run is the
-    launched run (`ETUDE_RUN`); elsewhere it is named for what is given, so
-    the same call resumes it. A batch hold raises
-    `EtudeError("tournament_conflict")` when the tournament's eval runs or
-    this definition disagree on its format, environment or rules, and
-    `EtudeError("matchup_conflict")` when they define a matchup name two ways;
+    The deal covers delivered matches too, so a resumed share keeps its part.
+    Under `etude launch` the eval run is the launched run (`ETUDE_RUN`);
+    elsewhere it is named for what is given, so the same call resumes it. A
+    batch hold raises `EtudeError("tournament_conflict")` when the
+    tournament's eval runs or this definition disagree on its format,
+    environment or rules, and `EtudeError("matchup_conflict")` when they
+    define a matchup name two ways;
     an on-the-go hold leaves those to be found on read. Raises whatever
     `evaluate` raises.
     """
@@ -137,7 +138,7 @@ def hold(
             storages=storages,
         )
         # Contiguous runs of the play order, so each share seats fewer checkpoints.
-        dealt = ordered([match for match, _, _ in scheduled])
+        dealt = list(ordered([match for match, _, _ in scheduled]))
         size, larger = divmod(len(dealt), n)
         start = k * size + min(k, larger)
         delivered = {match.key for match, state, _ in scheduled if state == "delivered"}

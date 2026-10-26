@@ -1,8 +1,8 @@
-"""Scheduled play order: fewer policy loads for the same matches, and the same results."""
+"""Scheduled play order: fewer checkpoint loads for the same matches, and the same results."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from hashlib import sha256
 from pathlib import Path
 
@@ -10,7 +10,7 @@ import duckdb
 
 from etude.eval.match import Tables, agent, environment, evaluate
 from etude.eval.records import Agent, CheckpointKey, CheckpointRef, Match
-from etude.eval.schedule import ordered, policies
+from etude.eval.schedule import checkpoints, ordered
 from etude.run.records import ArtifactRef
 from tests.eval.games import play
 
@@ -20,7 +20,7 @@ GAMES = Path(__file__).with_name("games.py")
 
 
 class Runtime:
-    """An author's inference runtime: the two policies used last stay loaded."""
+    """An author's inference runtime: the two checkpoints used last stay loaded."""
 
     def __init__(self) -> None:
         self.resident: list[CheckpointKey] = []
@@ -28,14 +28,14 @@ class Runtime:
         self.played: list[str] = []
 
     def play(self, match: Match) -> Tables:
-        for policy in dict.fromkeys(
+        for key in dict.fromkeys(
             seated.key.checkpoint for seated in match.agents if seated.key.checkpoint is not None
         ):
-            if policy in self.resident:
-                self.resident.remove(policy)
+            if key in self.resident:
+                self.resident.remove(key)
             else:
                 self.loads += 1
-            self.resident = [*self.resident, policy][-2:]
+            self.resident = [*self.resident, key][-2:]
         self.played.append(match.key)
         return play(match)
 
@@ -69,7 +69,7 @@ def rating(checkpoints: int, deals: int, paired: int) -> list[Match]:
     return sorted(grid + pairs, key=lambda match: match.key)
 
 
-def loads(matches: Sequence[Match]) -> int:
+def loads(matches: Iterable[Match]) -> int:
     runtime = Runtime()
     for match in matches:
         runtime.play(match)
@@ -120,11 +120,11 @@ def test_a_queue_of_code_agents_plays_in_the_callers_order(tmp_path: Path) -> No
     assert runtime.played == [match.key for match in given]
 
 
-def test_two_checkpoint_keys_holding_the_same_bytes_are_two_policies() -> None:
+def test_two_checkpoint_keys_holding_the_same_bytes_are_two_checkpoints() -> None:
     file = ArtifactRef(uri="s3://models/init.pt", sha256=sha256(b"init").hexdigest())
     starts = [
         agent(run, checkpoint=CheckpointRef(
             key=CheckpointKey(run=run, name="updates-100.pt"), artifact=file))
         for run in ("ppo-1", "ppo-2")
     ]  # fmt: skip
-    assert len(policies(Match(agents=(starts[0], starts[1])))) == 2
+    assert len(checkpoints(Match(agents=(starts[0], starts[1])))) == 2
