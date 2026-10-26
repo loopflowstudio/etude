@@ -760,10 +760,14 @@ An evaluation job's `checkpoint` is an input like this one.
 `key` names an object in the bucket of the storage the machine keeps its
 records in (the on-demand's, or an owned host's `--storage`). The launcher gives
 the worker a scoped read link; the worker downloads it with the same verified,
-resumable download as source and checkpoints, before the job starts, and puts it
-at `ETUDE_INPUTS_DIR/NAME`. Bytes that do not match the digest are refused: the
+resumable download as source and checkpoints, into the machine's cache, which
+keeps it for the session. Each attempt verifies its length and SHA256 again
+before the job starts (`inputs: verified NAME (BYTES bytes, SECONDS s)` in its
+log) and links it, read-only and without a copy, at `ETUDE_INPUTS_DIR/NAME`.
+Bytes that do not match the digest are refused: the
 job's command never runs and the attempt ends `lost (setup_failed)` with the
-reason in its log. Inputs are part of the job's identity. A machine with no
+reason in its log. A worker's cache may use what it holds plus half the disk
+free when its session began. Inputs are part of the job's identity. A machine with no
 storage can be given only a run's file (`Input.run`, as continuation does).
 
 The job is also told who it is: `ETUDE_RUN` (the run's id), `ETUDE_JOB` (the
@@ -1262,6 +1266,53 @@ explicit setup command. Vendor entrypoint scripts are not activated implicitly.
 Without `runtime`, a typed job runs `uv run python` in the checkout and a
 command runs in the shell's environment.
 
+### Prepare a job environment once per machine
+
+```python
+from etude.launch.records import Preparation, Runtime
+
+job = training(
+    train,
+    config=TrainConfig(),
+    max_hours=1,
+    inputs=(engine_wheel, *weight_shards),
+    prepare=Preparation(
+        command=(
+            'UV_PROJECT_ENVIRONMENT="$ETUDE_PREPARED_DIR/.venv"'
+            " uv sync --frozen --no-install-project"
+            ' && uv pip install --python "$ETUDE_PREPARED_DIR/.venv/bin/python"'
+            ' --no-deps "$ETUDE_PREPARED_INPUTS/engine.whl"'
+        ),
+        paths=("pyproject.toml", "uv.lock"),
+        inputs=("engine.whl",),
+    ),
+    runtime=Runtime(python=".venv/bin/python", packages={"engine": "1.4.0"}),
+)
+```
+
+After the attempt is claimed, the command runs in the source checkout and writes
+`$ETUDE_PREPARED_DIR`; it sees only the inputs it names, at
+`$ETUDE_PREPARED_INPUTS/NAME`. The directory is kept under
+`ETUDE_HOME/prepared/` with a receipt listing the size and SHA256 of every file
+it wrote. A later attempt on the same machine whose key is unchanged (the
+content of `paths`, the command, the named inputs' digests, the job environment
+and the machine's platform) verifies the directory and reuses it without running
+the command. The attempt log says which happened:
+
+```text
+prepare: built 3f9c0e21d4b7 (41.2 s, 1203841024 bytes)
+prepare: reused 3f9c0e21d4b7 (verified 2.1 s)
+prepare: rejected 3f9c0e21d4b7 (.venv/lib/python3.12/site-packages/engine/x.so digest mismatch)
+```
+
+A rejected directory is deleted and built again; one left by an interrupted
+build has no receipt and is deleted before the next build. A failed command fails
+the attempt. A relative `Runtime.python` containing `/` is inside the prepared
+directory, and the runtime check runs after preparation, so a reused environment
+is still checked against its pins. Least recently used directories are deleted
+beyond half the disk available to them; one an attempt is using is kept.
+Everything kept ends with a rental.
+
 The pinned official PyTorch example has a repeatable CPU check:
 `uv run python scripts/test_pytorch_image.py`. It pulls the image, then checks
 runtime versions, a CPU tensor operation and guardian imports with site packages
@@ -1288,8 +1339,8 @@ Setup runs once for each attempt, after source preparation and runtime validatio
 It shares the attempt's hours with training. Both run in the same source directory
 with the same selected runtime and outputs directory, in separate shell processes;
 shell exports and `cd` in setup do not alter the training shell. Use files for
-prepared state. Setup is not a cache: infrastructure recovery may allocate another
-attempt and run it again. A nonzero setup or training exit is terminal and is not
+prepared state. Setup runs again on every attempt, including one that
+infrastructure recovery allocates; work to keep and reuse belongs in `prepare`. A nonzero setup or training exit is terminal and is not
 replayed automatically.
 
 When hooks are configured, logs label setup, run and cleanup, including exit or

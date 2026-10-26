@@ -145,7 +145,7 @@ def test_cohort_git_and_database_counts(
         (["pools"], 42, ("numpy", "boto3", "etude.launch.worker")),
         (
             ["worker", "{directory}"],
-            31,
+            32,
             (
                 "numpy",
                 "boto3",

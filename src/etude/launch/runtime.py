@@ -35,7 +35,12 @@ class RuntimeInfo(Record):
 
 
 def find_python(runtime: Runtime, environment: dict[str, str]) -> str:
-    executable = shutil.which(runtime.python, path=environment.get("PATH", os.defpath))
+    """The interpreter's absolute path; a relative path with `/` is inside ETUDE_PREPARED_DIR."""
+    python = runtime.python
+    prepared = environment.get("ETUDE_PREPARED_DIR")
+    if prepared and "/" in python and not Path(python).is_absolute():
+        python = str(Path(prepared) / python)
+    executable = shutil.which(python, path=environment.get("PATH", os.defpath))
     if executable is None:
         raise ValueError(f"job interpreter {runtime.python!r} is unavailable")
     return str(Path(executable).absolute())

@@ -57,6 +57,7 @@ from etude.launch.errors import LauncherError
 from etude.launch.records import (
     Input,
     Job,
+    Preparation,
     Run,
     RunRecord,
     Runtime,
@@ -90,6 +91,7 @@ class JobOptions(TypedDict, total=False):
     inputs: tuple[Input, ...]
     environment: tuple[Variable, ...]
     runtime: Runtime | None
+    prepare: Preparation | None
     setup: str | None
     cleanup: str | None
     stop_seconds: float | None

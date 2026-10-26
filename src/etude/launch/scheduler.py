@@ -1749,6 +1749,7 @@ class Scheduler:
             attempt=attempt.id,
             command=spec.command,
             runtime=spec.runtime,
+            prepare=spec.prepare,
             setup=spec.setup,
             cleanup=spec.cleanup,
             cleanup_seconds=spec.cleanup_seconds,

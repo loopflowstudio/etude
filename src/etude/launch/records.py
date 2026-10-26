@@ -332,6 +332,32 @@ class Input(Record):
         return self
 
 
+class Preparation(Record):
+    """Work a machine keeps and reuses while its key is unchanged, such as a job's venv.
+
+    `command` runs by sh in the source checkout, after the claim and before
+    the runtime check, and writes `$ETUDE_PREPARED_DIR`. It sees only the
+    inputs it names, at `$ETUDE_PREPARED_INPUTS/NAME`. Its key is the content
+    of `paths` in the source, the command, the named inputs' digests, the job
+    environment and the machine's platform; while that is unchanged a later
+    attempt on the machine reuses the verified directory and the command
+    does not run. A relative `Runtime.python` containing `/` names an
+    interpreter inside it, such as `.venv/bin/python`.
+    """
+
+    command: str = Field(min_length=1)
+    paths: tuple[str, ...] = Field(min_length=1)  # source paths whose content decides the result
+    inputs: tuple[str, ...] = ()  # names of the job's inputs the command reads
+
+    @field_validator("paths")
+    @classmethod
+    def _within_source(cls, paths: tuple[str, ...]) -> tuple[str, ...]:
+        for path in paths:
+            if path.startswith("/") or {"", ".", ".."} & set(path.rstrip("/").split("/")):
+                raise ValueError(f"prepare path {path!r} must be a path within the source")
+        return paths
+
+
 class Variable(Record):
     """One environment variable a job is given."""
 
@@ -349,7 +375,7 @@ class Job(Record):
     """What to run, without a seed. Launching freezes it: `revision` becomes a commit.
 
     What makes a job itself is what decides the result: the command, the config, the
-    source, its inputs, setup/cleanup, runtime and the target. Two launches that agree on those are the same job, so
+    source, its inputs, setup/cleanup, preparation, runtime and the target. Two launches that agree on those are the same job, so
     their runs can be found together. The name, the hours, the dollars and the
     attempts are how it is launched; they bound each run and can differ between runs.
     """
@@ -359,6 +385,7 @@ class Job(Record):
     stop_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     cleanup_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     runtime: Runtime | None = None
+    prepare: Preparation | None = None
     # Run by sh in the source checkout; reads the ETUDE_* environment. A typed job's
     # (`etude.jobs`) is Etude's own; written by hand only for work that is not Python.
     command: str
@@ -378,6 +405,14 @@ class Job(Record):
     experiment: str | None = None
 
     _check_inputs = field_validator("inputs")(_distinct)
+
+    @model_validator(mode="after")
+    def _prepared_from_inputs(self) -> Job:
+        if self.prepare is not None:
+            unknown = set(self.prepare.inputs) - {given.name for given in self.inputs}
+            if unknown:
+                raise ValueError(f"prepare reads inputs the job is not given: {sorted(unknown)}")
+        return self
 
     def runs(self, *seeds: int, params: dict[str, Param] | None = None) -> list[Run]:
         """This job once per seed, each recording the parameters that led to it."""
@@ -400,6 +435,8 @@ def job_identity(job: Job) -> dict[str, str | int | None]:
         identity["experiment"] = job.experiment
     if job.runtime is not None:
         identity["runtime"] = json.dumps(job.runtime.model_dump(mode="json"), sort_keys=True)
+    if job.prepare is not None:
+        identity["prepare"] = json.dumps(job.prepare.model_dump(mode="json"), sort_keys=True)
     if job.environment:
         identity["environment"] = json.dumps(
             sorted([v.name, v.value] for v in job.environment), sort_keys=True

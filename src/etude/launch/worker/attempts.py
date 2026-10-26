@@ -12,13 +12,15 @@ Installed separately from the job environment. Run as
     attempts/<attempt>/claim     start time; created once, so code starts at most once
     attempts/<attempt>/log       everything the job printed
     attempts/<attempt>/outputs/  what the job wrote to ETUDE_OUTPUT_DIR
+    attempts/<attempt>/prepared.json  what its preparation found and did
     attempts/<attempt>/finished.json
     ended                        when this session ended; nothing is written after it
 
 A job is a shell command run in ETUDE_SOURCE_DIR, with its own environment
 variables. It reads ETUDE_OUTPUT_DIR, ETUDE_STOP_FILE, ETUDE_DEADLINE, ETUDE_SEED,
 ETUDE_UNTIL_CLOCK, ETUDE_UNTIL_VALUE, ETUDE_INPUTS_DIR, ETUDE_TRACK_DIR,
-ETUDE_EXPERIMENT and ETUDE_CONFIG, and may report its progress in
+ETUDE_EXPERIMENT, ETUDE_CONFIG and, after a preparation (`etude.launch.worker.prepared`),
+ETUDE_PREPARED_DIR, and may report its progress in
 `etude-result.json` in its output directory as
 `{"clocks": {"steps": 63000, "wall_time_ms": 5400000}}`.
 ETUDE_UNTIL_CLOCK and ETUDE_UNTIL_VALUE are the job's target.
@@ -35,6 +37,8 @@ import sys
 import tarfile
 import tempfile
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import FrameType
@@ -44,8 +48,9 @@ from etude.cache import Cache, Content
 from etude.launch.logging import Console, explain, log_to, sanitize
 from etude.launch.records import Cause, Input, Outcome, Output, Record
 from etude.launch.runtime import PROBE, find_python, select_runtime
-from etude.launch.schemas import Packet, Progress, Work
+from etude.launch.schemas import Packet, Prepared, Progress, Work
 from etude.launch.storage.files import digest, read_result, write
+from etude.launch.worker.prepared import key, prepare
 
 
 def _now() -> datetime:
@@ -66,6 +71,7 @@ def _finish(
         else []
     )
     result = read_result(outputs)
+    prepared = home / "prepared.json"
     record = Progress(
         attempt=home.name,
         started_at=None,
@@ -74,6 +80,7 @@ def _finish(
         cause=cause,
         clocks=result.clocks,
         exit_code=code,
+        prepared=Prepared.model_validate_json(prepared.read_text()) if prepared.exists() else None,
         outputs=tuple(
             Output(
                 name=p.relative_to(outputs).as_posix(),
@@ -86,8 +93,12 @@ def _finish(
     write(home / "finished.json", record.model_dump_json(exclude={"attempt", "started_at"}))
 
 
-def _prepare(session: Path, home: Path, work: Work) -> dict[str, str]:
-    """Lay out source, config and inputs; return the job's environment."""
+def _lay_out(session: Path, home: Path, work: Work) -> tuple[dict[str, str], dict[str, Path]]:
+    """Lay out source and config, and verify inputs; the job's environment and where inputs are.
+
+    Inputs are linked into ETUDE_INPUTS_DIR here, unless a preparation runs
+    first: it sees only the inputs it names.
+    """
     source = home / "src"
     source.mkdir()
     (home / "outputs").mkdir()
@@ -137,32 +148,38 @@ def _prepare(session: Path, home: Path, work: Work) -> dict[str, str]:
     if work.config is not None:
         (home / "config").write_text(work.config)
         environment["ETUDE_CONFIG"] = str(home / "config")
-    if work.inputs:
-        folder = home / "inputs"
-        folder.mkdir()
-        with (home / "log").open("a") as log:
-            for given in work.inputs:
-                began = time.monotonic()
-                held = _held(session, shared, given)
-                linked = folder / given.name
-                try:
-                    os.link(held, linked)  # one copy, whoever holds it
-                except OSError as error:
-                    if error.errno != errno.EXDEV:
-                        raise
-                    linked.symlink_to(held)  # the cache is on another filesystem
-                log.write(
-                    f"inputs: verified {given.name} ({given.size_bytes} bytes,"
-                    f" {time.monotonic() - began:.1f} s)\n"
-                )
-        environment["ETUDE_INPUTS_DIR"] = str(folder)
+    held: dict[str, Path] = {}
+    with (home / "log").open("a") as log:
+        for given in work.inputs:
+            began = time.monotonic()
+            held[given.name] = _held(session, shared, given)
+            log.write(
+                f"inputs: verified {given.name} ({given.size_bytes} bytes,"
+                f" {time.monotonic() - began:.1f} s)\n"
+            )
+    if held and work.prepare is None:
+        environment["ETUDE_INPUTS_DIR"] = str(_link(home / "inputs", held))
     if work.seed is not None:
         environment["ETUDE_SEED"] = str(work.seed)
     if work.until is not None:
         clock, _, target = work.until.partition("=")
         environment["ETUDE_UNTIL_CLOCK"] = clock
         environment["ETUDE_UNTIL_VALUE"] = target
-    return environment
+    return environment, held
+
+
+def _link(folder: Path, held: dict[str, Path]) -> Path:
+    """A folder of inputs by name, each a link to the one copy this machine holds."""
+    folder.mkdir()
+    for name, path in held.items():
+        linked = folder / name
+        try:
+            os.link(path, linked)
+        except OSError as error:
+            if error.errno != errno.EXDEV:
+                raise
+            linked.symlink_to(path)  # the cache is on another filesystem
+    return folder
 
 
 def _held(session: Path, shared: Path, given: Input) -> Path:
@@ -360,6 +377,71 @@ def _phase(
     return result
 
 
+@contextmanager
+def _prepared(
+    home: Path,
+    work: Work,
+    environment: dict[str, str],
+    held: dict[str, Path],
+    log: BinaryIO,
+    stop: Path,
+    limit: datetime,
+) -> Iterator[Exit]:
+    """Make the job ready: its preparation, reused or built, then its runtime and inputs.
+
+    The prepared directory stays pinned on this machine while the caller runs.
+    """
+    preparation = work.prepare
+    if preparation is None:
+        yield Exit(code=0)
+        return
+
+    def note(line: str) -> None:
+        log.write(sanitize(line + "\n").encode())
+        log.flush()
+
+    declared = {name: held[name] for name in preparation.inputs}
+    inputs = _link(home / "prepared-inputs", declared)
+    found = key(preparation, home / "src", work.inputs, work.environment)
+    built = Exit(code=0)
+
+    def build(directory: Path) -> bool:
+        nonlocal built
+        built = _phase(
+            "prepare",
+            preparation.command,
+            home=home,
+            environment={
+                **environment,
+                "ETUDE_PREPARED_DIR": str(directory),
+                "ETUDE_PREPARED_INPUTS": str(inputs),
+            },
+            log=log,
+            stop=stop,
+            deadline=limit,
+            labelled=True,
+            stop_seconds=work.stop_seconds,
+        )
+        return built.code == 0 and built.stopped is None
+
+    with prepare(found, build, lambda: not stop.exists() and _now() < limit, note) as ready:
+        if ready is None:
+            yield Exit(code=None, stopped="cancelled" if stop.exists() else "deadline")
+            return
+        directory, done = ready
+        write(home / "prepared.json", done.model_dump_json())
+        if done.size_bytes is None:
+            yield built
+            return
+        environment["ETUDE_PREPARED_DIR"] = str(directory)
+        result = Exit(code=0)
+        if work.runtime is not None:
+            result = _runtime(home, work, environment, log, stop, limit)
+        if held and result.code == 0 and result.stopped is None:
+            environment["ETUDE_INPUTS_DIR"] = str(_link(home / "inputs", held))
+        yield result
+
+
 def _commands(
     home: Path,
     packet: Packet,
@@ -437,10 +519,10 @@ def _run(session: Path, packet: Packet, work: Work) -> None:
     if stop.exists():
         return _finish(home, "cancelled")
     try:
-        environment = _prepare(session, home, work)
+        environment, held = _lay_out(session, home, work)
     except (OSError, ValueError, subprocess.CalledProcessError, tarfile.TarError) as error:
-        with (home / "log").open("a") as log:
-            log.write("source preparation failed: " + explain(error) + "\n")
+        with (home / "log").open("a") as failed:
+            failed.write("source preparation failed: " + explain(error) + "\n")
         return _finish(home, "lost", "setup_failed")
     started = _now()
     limit = started + timedelta(seconds=work.limit_seconds)
@@ -450,15 +532,20 @@ def _run(session: Path, packet: Packet, work: Work) -> None:
     result = Exit(code=None)
     with (home / "log").open("ab") as log:
         try:
-            if work.runtime is not None:
+            if work.runtime is not None and work.prepare is None:
+                # Nothing to prepare: the interpreter is checked before code is claimed.
                 result = _runtime(home, work, environment, log, stop, limit)
-            if result.stopped is None and (work.runtime is None or result.code == 0):
+            if result.stopped is None and (
+                work.runtime is None or work.prepare is not None or result.code == 0
+            ):
                 # The claim denotes user code, not the read-only runtime probe.
                 with tempfile.NamedTemporaryFile(mode="w", dir=home) as claim:
                     claim.write(_now().isoformat())
                     claim.flush()
                     os.link(claim.name, home / "claim")
-                result = _commands(home, packet, work, environment, log, stop, limit)
+                with _prepared(home, work, environment, held, log, stop, limit) as result:
+                    if result.code == 0 and result.stopped is None:
+                        result = _commands(home, packet, work, environment, log, stop, limit)
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             log.write(("runtime failed: " + explain(error) + "\n").encode())
             result = Exit(code=1)

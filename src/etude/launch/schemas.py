@@ -10,11 +10,21 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field, FiniteFloat, Json, JsonValue
 
-from etude.launch.records import Cause, Input, Limit, Outcome, Output, Record, Runtime, Variable
+from etude.launch.records import (
+    Cause,
+    Input,
+    Limit,
+    Outcome,
+    Output,
+    Preparation,
+    Record,
+    Runtime,
+    Variable,
+)
 from etude.launch.storage.download import Download
 from etude.launch.storage.s3 import Grant
 from etude.launch.usage import Transfer
@@ -28,6 +38,7 @@ class Work(Record):
     stop_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     cleanup_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     runtime: Runtime | None = None
+    prepare: Preparation | None = None
     attempt: str
     command: str
     limit_seconds: int
@@ -61,6 +72,20 @@ class Packet(Record):
     cap_usd: Decimal = Decimal(0)
 
 
+class Prepared(Record):
+    """What an attempt's preparation found and did (`etude.launch.worker.prepared`).
+
+    `rejected` is always followed by a build; `size_bytes` is None when the
+    build failed.
+    """
+
+    key: str
+    outcome: Literal["reused", "built", "rejected"]
+    seconds: float = Field(ge=0)  # verifying a reused directory, or building one
+    size_bytes: int | None = None
+    cause: str | None = None  # why a kept directory was rejected
+
+
 class Progress(Record):
     """The journal for one attempt, as far as it has been written."""
 
@@ -72,6 +97,7 @@ class Progress(Record):
     clocks: dict[str, float]
     outputs: tuple[Output, ...]
     exit_code: int | None
+    prepared: Prepared | None = None
 
 
 class Observation(Record):
