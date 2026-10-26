@@ -6,7 +6,9 @@ bytes or a range of them and `Cache.place` puts them at a path; these are views
 of one acquisition, so a checkpoint a job fetched and the same object a report
 reads are read from storage once, in either order, by any process. Content is
 kept once by SHA256 and length (`Content`), verified before it is published and
-again before it is reused whole.
+again before it, or a range of it, is reused. A whole-file digest cannot
+authenticate a range, so a range of a recorded digest is read from verified
+whole content, acquired first when not held.
 
 Each location notes the content it holds and the ETag that came with it. A
 recorded digest names bytes outright; without one, a location's held bytes are
@@ -260,8 +262,8 @@ class Cache:
 
         Held bytes of a named or immutable artifact answer without asking; a
         mutable one is asked for again with the ETag its held bytes came with.
-        A range is read from held bytes when the whole is held, and is
-        otherwise fetched, and kept, alone.
+        A recorded digest requires verifying the whole artifact before exposing
+        a range. Location-only immutable objects can fetch and keep ranges alone.
         """
         if length is not None:
             return self._read_range(artifact, source, start, length)
@@ -358,9 +360,13 @@ class Cache:
         return fetched.body
 
     def _read_range(self, artifact: Artifact, source: Source, start: int, length: int) -> bytes:
+        if start < 0 or length < 0:
+            raise ValueError("a range starts and runs forward from a nonnegative offset")
         if length == 0:
             return b""
         end = start + length - 1
+        if artifact.content is not None and end >= artifact.content.size_bytes:
+            raise ValueError("a range ends past the artifact's recorded length")
         if artifact.content is None and not artifact.immutable:
             # A mutable object's range cannot be checked against what is held.
             return source.read(start, end, None).body
@@ -370,19 +376,34 @@ class Cache:
         if held is not None:
             source.reused(length, f"bytes={start}-{end}")
             return held
+        if artifact.content is not None:
+            # A whole-file digest cannot authenticate an isolated range. Use the
+            # same verified acquisition as a whole read, including when too large
+            # to retain, and expose only the requested bytes after it succeeds.
+            with tempfile.TemporaryDirectory(dir=self._made()) as scratch:
+                path = self.place(artifact, Path(scratch) / artifact.content.name, source)
+                with path.open("rb") as stream:
+                    stream.seek(start)
+                    return stream.read(length)
         part = Artifact(location=f"{artifact.location}\0bytes={start}-{end}", immutable=True)
         return self._read_located(part, _Part(source, start, end))
 
     def _slice(self, content: Content, start: int, length: int) -> bytes | None:
-        """A range of content held whole, read without the rest; the whole was verified when kept."""
+        """A range of held content, verified and locked against eviction while read."""
         if start + length > content.size_bytes:
             return None
-        try:
-            with (self.root / content.name).open("rb") as stream:
+        path = self.root / content.name
+        with _lock(self._made() / f"{content.name}.lock"):
+            if not path.exists():
+                return None
+            if not _verify(path, content):
+                with _lock(self.root / "capacity.lock"):
+                    path.unlink(missing_ok=True)
+                return None
+            path.touch()
+            with path.open("rb") as stream:
                 stream.seek(start)
                 body = stream.read(length)
-        except FileNotFoundError:
-            return None
         return body if len(body) == length else None
 
     def unpin(self, content: Content) -> None:

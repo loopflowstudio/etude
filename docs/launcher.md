@@ -1432,8 +1432,12 @@ Downloads use Etude's one cache, `$ETUDE_HOME/cache` (default `~/.etude/cache`,
 `etude.cache.Cache`), keyed by transport SHA256 and length, with a 20 GiB payload
 allowance. Completed-output reads, worker source/checkpoint reads and tracking's
 bucket reads (`S3Storage`) share it, so bytes one of them read are reused by the
-others. The first cold acquisition still transfers every byte. For
-cache-admitted artifacts, verified warm reuse transfers no
+others. The first cold acquisition still transfers every byte. A range of an artifact with a recorded SHA256 and length
+is no exception: a whole-file digest cannot authenticate a range, so the whole
+artifact is acquired and verified, streamed to disk even beyond the allowance,
+before any range is returned, and held bytes are verified again before a range
+is read from them. Immutable objects without a recorded digest fetch and keep
+individual ranges. For cache-admitted artifacts, verified warm reuse transfers no
 payload bytes, including from a new process or to another destination; control
 metadata reads still cost requests and bytes. Sequential 8 MiB ranges retain
 completed chunks across interruption and require exact ranges and a stable

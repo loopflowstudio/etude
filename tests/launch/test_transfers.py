@@ -780,9 +780,9 @@ class _Bucket:
     """Presigned reads served by a moto bucket, so a job's fetch and a report's read
     reach the same object, counted by one client. Links are the launcher's own."""
 
-    def __init__(self, client: CountedClient) -> None:
+    def __init__(self, client: CountedClient, region: str) -> None:
         self.client = client
-        self.bucket = Bucket("lab", "us-west-2", Keys(access_key="a", secret_key="s"))
+        self.bucket = Bucket("lab", region, Keys(access_key="a", secret_key="s"))
 
     def link(self, key: str) -> Download:
         body = self.client.client.get_object(Bucket="lab", Key=key)["Body"].read()
@@ -808,18 +808,23 @@ class _Bucket:
 
 @pytest.mark.parametrize("key", ["run/checkpoints/model.pt", "run/attempts/a1/model.pt"])
 @pytest.mark.parametrize("job_first", [True, False])
+# boto3 reaches us-east-1 at its legacy global host; the launcher signs regional hosts.
+@pytest.mark.parametrize("region", ["us-west-2", "us-east-1"])
 def test_a_job_fetch_and_a_report_read_download_once_in_either_order(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key: str, job_first: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key: str, job_first: bool, region: str
 ) -> None:
     boto3 = pytest.importorskip("boto3")
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
     with mock_aws():
-        client = CountedClient(boto3.client("s3", region_name="us-west-2"))
-        client.create_bucket(
-            Bucket="lab", CreateBucketConfiguration={"LocationConstraint": "us-west-2"}
-        )
+        client = CountedClient(boto3.client("s3", region_name=region))
+        if region == "us-east-1":
+            client.create_bucket(Bucket="lab")
+        else:
+            client.create_bucket(
+                Bucket="lab", CreateBucketConfiguration={"LocationConstraint": region}
+            )
         client.put_object(Bucket="lab", Key=key, Body=b"abcdefghijkl")
-        bucket = _Bucket(client)
+        bucket = _Bucket(client, region)
 
         # Each reader opens this computer's cache afresh, as separate processes do.
         def job() -> bytes:
@@ -897,6 +902,7 @@ class _Held:
 
     def __init__(self, body: bytes) -> None:
         self.body = body
+        self.read_bytes = 0
         self.artifact = Artifact(
             location=f"https://lab.example/{Content.of(body).name}",
             sha256=hashlib.sha256(body).hexdigest(),
@@ -904,13 +910,75 @@ class _Held:
         )
 
     def read(self, start: int, end: int | None, etag: str | None) -> Fetched:
-        return Fetched(body=self.body[start : None if end is None else end + 1], etag='"held"')
+        body = self.body[start : None if end is None else end + 1]
+        self.read_bytes += len(body)
+        return Fetched(body=body, etag=hashlib.sha256(self.body).hexdigest())
 
     def changed(self, etag: str) -> Fetched | None:
         return None
 
     def reused(self, size_bytes: int, byte_range: str | None) -> None:
         pass
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("max_bytes", [0, 64])
+def test_ranges_preserve_requested_versions_at_one_location(
+    tmp_path: Path, reverse: bool, max_bytes: int
+) -> None:
+    sources = [_Held(b"abcdef"), _Held(b"UVWXYZ")]
+    if reverse:
+        sources.reverse()
+    artifacts = [
+        source.artifact.model_copy(update={"location": "https://lab.example/result"})
+        for source in sources
+    ]
+    root = tmp_path / "cache"
+    for source, artifact in zip(sources, artifacts, strict=True):
+        cache = Cache(root, max_bytes=max_bytes, range_bytes=2)
+        assert cache.read(artifact, source, start=1, length=2) == source.body[1:3]
+
+    # Reopening the cache must preserve each version, including for whole reads.
+    for source, artifact in zip(sources, artifacts, strict=True):
+        cache = Cache(root, max_bytes=max_bytes, range_bytes=2)
+        assert cache.read(artifact, source) == source.body
+        assert cache.read(artifact, source, start=2, length=3) == source.body[2:5]
+        if max_bytes:
+            assert source.read_bytes == len(source.body)
+
+
+def test_a_range_verifies_the_requested_digest_before_exposing_bytes(tmp_path: Path) -> None:
+    expected, wrong = _Held(b"abcdef"), _Held(b"abcdeX")
+    cache = Cache(tmp_path / "cache", range_bytes=2)
+    # The requested range matches; corruption elsewhere still invalidates the version.
+    with pytest.raises(engine.Mismatch):
+        cache.read(expected.artifact, wrong, start=1, length=2)
+    assert cache.read(expected.artifact, expected, start=1, length=2) == b"bc"
+
+
+def test_a_range_never_exposes_corrupted_cached_content(tmp_path: Path) -> None:
+    source = _Held(b"abcdef")
+    cache = Cache(tmp_path / "cache")
+    assert cache.read(source.artifact, source) == source.body
+    (cache.root / Content.of(source.body).name).write_bytes(b"aXXdef")
+    assert cache.read(source.artifact, source, start=1, length=2) == b"bc"
+    assert source.read_bytes == 2 * len(source.body)
+
+
+def test_a_range_past_the_recorded_length_is_refused_before_reading(tmp_path: Path) -> None:
+    source = _Held(b"abcdef")
+    with pytest.raises(ValueError, match="past"):
+        Cache(tmp_path / "cache").read(source.artifact, source, start=4, length=3)
+    assert source.read_bytes == 0
+
+
+def test_one_artifact_at_two_locations_is_read_once(tmp_path: Path) -> None:
+    source = _Held(b"abcdef")
+    cache = Cache(tmp_path / "cache")
+    elsewhere = source.artifact.model_copy(update={"location": "https://mirror.example/result"})
+    assert cache.read(source.artifact, source) == cache.read(elsewhere, source) == source.body
+    assert cache.read(elsewhere, source, start=1, length=2) == b"bc"
+    assert source.read_bytes == len(source.body)
 
 
 def test_pinned_content_survives_eviction_until_unpinned(tmp_path: Path) -> None:

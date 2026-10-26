@@ -156,8 +156,13 @@ class S3Storage:
         # An object's location is its virtual-hosted URL, as a presigned link
         # names it (`etude.launch.storage.s3.Bucket`), so either reader reuses
         # the other's bytes; the endpoint keeps same-named buckets apart.
+        # boto3 reaches us-east-1 at the legacy global host, which names the
+        # same buckets as the regional host the launcher signs.
         endpoint = urlsplit(self.client.meta.endpoint_url)
-        self._where = f"{endpoint.scheme}://{bucket}.{endpoint.netloc}/"
+        host = endpoint.netloc
+        if host == "s3.amazonaws.com":
+            host = f"s3.{self.client.meta.region_name or 'us-east-1'}.amazonaws.com"
+        self._where = f"{endpoint.scheme}://{bucket}.{host}/"
 
     def put(self, key: str, data: bytes) -> None:
         self.client.put_object(
