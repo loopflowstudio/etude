@@ -106,7 +106,7 @@ def hold(
     `etude.eval.schedule.ordered` plays them, into n contiguous parts and plays
     the kth, so n machines may split one hold with at most one match between
     their shares, each seating (and fetching) only some of the checkpoints.
-    The deal covers delivered matches too, so a resumed share keeps its part.
+    The cut covers delivered matches too, so a resumed share keeps its part.
     Under `etude launch` the eval run is the launched run (`ETUDE_RUN`);
     elsewhere it is named for what is given, so the same call resumes it. A
     batch hold raises `EtudeError("tournament_conflict")` when the
@@ -138,13 +138,13 @@ def hold(
             storages=storages,
         )
         # Contiguous runs of the play order, so each share seats fewer checkpoints.
-        dealt = list(ordered([match for match, _, _ in scheduled]))
-        size, larger = divmod(len(dealt), n)
+        order = list(ordered([match for match, _, _ in scheduled]))
+        size, larger = divmod(len(order), n)
         start = k * size + min(k, larger)
         delivered = {match.key for match, state, _ in scheduled if state == "delivered"}
         pending = [
             match
-            for match in dealt[start : start + size + (k < larger)]
+            for match in order[start : start + size + (k < larger)]
             if match.key not in delivered
         ]
     run = os.environ.get("ETUDE_RUN") or (
