@@ -6,6 +6,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import os
+import re
 import signal
 import subprocess
 import time
@@ -15,6 +16,8 @@ from urllib.parse import urlsplit
 
 import pytest
 
+from etude.cli import main
+from etude.launch.client import default
 from etude.launch.logging import log_to
 from etude.launch.records import Input, Job, Preparation, Runtime, Status
 from etude.launch.scheduler import Scheduler
@@ -96,6 +99,34 @@ def test_a_second_attempt_reuses_the_prepared_directory(tmp_path: Path) -> None:
     second, log = _launch(scheduler, _job(repo, count))
     assert second.outcome == "succeeded" and _outcomes(log) == ["reused"]
     assert log.endswith("lock 1\n")
+    assert count.read_text() == "built\n"  # the command ran once
+
+
+def test_status_and_usage_say_what_a_second_attempt_reused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    repo, count = _repo(tmp_path), tmp_path / "count"
+    weights = _input(tmp_path / "home", "weights", b"w" * 1000)
+    job = _job(repo, count, inputs=(weights,))
+    scheduler = default()
+    runs = []
+    for _ in range(2):
+        status, _log = _launch(scheduler, job)
+        assert status.outcome == "succeeded"
+        runs.append(status.run)
+    capsys.readouterr()
+
+    for run, outcome in zip(runs, ("built", "reused"), strict=True):
+        assert main(["status", run, "--phases"]) == 0
+        # Each line is "RUN NAME AT (EVIDENCE) attempt=ID"; keep the names, in order.
+        lines = capsys.readouterr().out.splitlines()
+        said = [re.split(r" \d{4}-\d\d-\d\dT", line)[0] for line in lines]
+        prepared = f"{run} prepared ({outcome})"
+        assert said[-3:] == [f"{run} code started", prepared, f"{run} finished"]
+
+    assert main(["usage", "--run", runs[1]]) == 0
+    assert "input: received 0 bytes, reused 1000 bytes" in capsys.readouterr().out.splitlines()
     assert count.read_text() == "built\n"  # the command ran once
 
 

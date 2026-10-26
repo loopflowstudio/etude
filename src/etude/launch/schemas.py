@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import Field, FiniteFloat, Json, JsonValue
 
@@ -21,6 +21,7 @@ from etude.launch.records import (
     Outcome,
     Output,
     Preparation,
+    Prepared,
     Record,
     Runtime,
     Variable,
@@ -70,21 +71,6 @@ class Packet(Record):
     kept: bool = False  # stay until the deadline and take work as it is added
     autorun: bool = False
     cap_usd: Decimal = Decimal(0)
-
-
-class Prepared(Record):
-    """What an attempt's preparation found and did (`etude.launch.worker.prepared`).
-
-    `rejected` is always followed by a build; `size_bytes` is None when the
-    build failed.
-    """
-
-    key: str
-    outcome: Literal["reused", "built", "rejected"]
-    seconds: float = Field(ge=0)  # verifying a reused directory, or building one
-    size_bytes: int | None = None
-    cause: str | None = None  # why a kept directory was rejected
-    restored_bytes: int | None = None  # the carried archive restored before the build
 
 
 class Progress(Record):

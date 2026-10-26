@@ -46,12 +46,12 @@ from typing import BinaryIO, Literal
 
 from etude.cache import Cache, Content
 from etude.launch.logging import Console, explain, log_to, sanitize
-from etude.launch.records import Cause, Input, Outcome, Output, Record
+from etude.launch.records import Cause, Input, Outcome, Output, Prepared, Record
 from etude.launch.runtime import PROBE, find_python, select_runtime
-from etude.launch.schemas import Packet, Prepared, Progress, Work
+from etude.launch.schemas import Packet, Progress, Work
 from etude.launch.storage.files import digest, read_result, write
 from etude.launch.storage.s3 import Grant
-from etude.launch.storage.transport import attribute, observe
+from etude.launch.storage.transport import attribute, emit, observe
 from etude.launch.worker.carried import GRANT, REQUEST, restore
 from etude.launch.worker.prepared import carry, key, prepare
 
@@ -155,7 +155,18 @@ def _lay_out(session: Path, home: Path, work: Work) -> tuple[dict[str, str], dic
     with (home / "log").open("a") as log:
         for given in work.inputs:
             began = time.monotonic()
-            held[given.name] = _held(session, shared, given)
+            with (
+                observe(lambda raw: _retain(session, raw)),
+                attribute(
+                    session=session.name,
+                    run=work.run,
+                    attempt=work.attempt,
+                    purpose="input",
+                    key=given.key,
+                    sha256=given.sha256,
+                ),
+            ):
+                held[given.name] = _held(session, shared, given)
             log.write(
                 f"inputs: verified {given.name} ({given.size_bytes} bytes,"
                 f" {time.monotonic() - began:.1f} s)\n"
@@ -201,6 +212,9 @@ def _held(session: Path, shared: Path, given: Input) -> Path:
         places.append(shared / given.run / given.key)
     for path in places:
         if _matches(path, given):
+            if path.is_relative_to(shared):
+                # Nothing was received for it: this machine already held the run's file.
+                emit("REUSE", path.as_uri(), reused=given.size_bytes, completed=True)
             return path
     raise ValueError(
         f"input {given.name} was not delivered: its bytes did not match its digest,"

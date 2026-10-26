@@ -362,7 +362,9 @@ class Courier:
                 if entry.prepared is not None:
                     self.allow_carry(entry.prepared)
                 try:
-                    self.fetch(entry.fetch)  # files precede executable work
+                    # One work's files, so its run's usage counts them.
+                    with attribute(run=entry.work.run, attempt=attempt):
+                        self.fetch(entry.fetch)  # files precede executable work
                     self.restore(entry.restore)
                 except Mismatch as error:
                     # Permanent: hand the work over so its setup fails and says why,
@@ -572,8 +574,14 @@ def _run(
         for folder in ("stop", "work"):
             (home / folder).mkdir(exist_ok=True)
         write_log("source fetch", "starting")
+        # A packet of one work's files is that run's usage; a cohort's stay shared.
+        only = packet.work[0] if len(packet.work) == 1 else None
         with limit_time(startup_timeout()):
-            courier.fetch(bootstrap.fetch)
+            with attribute(
+                run=None if only is None else only.run,
+                attempt=None if only is None else only.attempt,
+            ):
+                courier.fetch(bootstrap.fetch)
             courier.restore(bootstrap.restore)
         write_log("source fetch", "completed")
         write(home / "packet.json", packet.model_dump_json())

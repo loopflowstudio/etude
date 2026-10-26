@@ -27,6 +27,7 @@ from etude.launch.schemas import (
 )
 from etude.launch.source import source_archive
 from etude.launch.storage.files import digest, read_result, write
+from etude.launch.usage import Transfer
 
 
 class DirectoryJournal:
@@ -84,8 +85,22 @@ class DirectoryJournal:
         attempts = home / "attempts"
         names = sorted(p.name for p in attempts.iterdir()) if attempts.is_dir() else []
         return Observation(
-            alive=alive, progress=tuple(self._progress(attempts / name) for name in names)
+            alive=alive,
+            progress=tuple(self._progress(attempts / name) for name in names),
+            transfers=self._transfers(home),
         )
+
+    @staticmethod
+    def _transfers(home: Path) -> tuple[Transfer, ...]:
+        """What the session's attempts recorded in its usage journal."""
+        path = home / "usage.jsonl"
+        events = []
+        for line in path.read_text().splitlines() if path.exists() else []:
+            try:
+                events.append(Transfer.model_validate_json(line))
+            except ValueError:
+                continue  # a line still being written; read again next time
+        return tuple(events)
 
     def stop(self, session_id: str, attempt: str) -> None:
         stop = self._root / session_id / "stop"

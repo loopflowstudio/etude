@@ -771,3 +771,9 @@ def usage(
         f"reused_bytes={report.reused_bytes} retransferred_bytes={report.retransferred_bytes} "
         f"requests={report.requests}"
     )
+    # One line per purpose, so what was reused reads apart from what was received.
+    for purpose in sorted({event.purpose for event in report.events}):
+        these = [event for event in report.events if event.purpose == purpose]
+        received = sum(event.received_bytes for event in these)
+        reused = sum(event.reused_bytes for event in these)
+        print(f"{purpose}: received {received} bytes, reused {reused} bytes")

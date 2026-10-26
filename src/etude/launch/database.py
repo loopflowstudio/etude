@@ -33,6 +33,7 @@ from etude.launch.records import (
     Outcome,
     Output,
     Pool,
+    Prepared,
     Provider,
     Rental,
     RunAttempt,
@@ -106,7 +107,8 @@ CREATE TABLE IF NOT EXISTS attempts(
   number INTEGER NOT NULL, position INTEGER NOT NULL, limit_seconds INTEGER NOT NULL,
   limit_kind TEXT NOT NULL, started_at TEXT, finished_at TEXT, outcome TEXT, cause TEXT,
   clocks TEXT NOT NULL DEFAULT '{}', outputs TEXT NOT NULL DEFAULT '[]', exit_code INTEGER,
-  version INTEGER NOT NULL DEFAULT 1, planned_at TEXT, added INTEGER NOT NULL DEFAULT 0);
+  version INTEGER NOT NULL DEFAULT 1, planned_at TEXT, added INTEGER NOT NULL DEFAULT 0,
+  prepared TEXT);
 CREATE INDEX IF NOT EXISTS runs_job ON runs(job);
 CREATE INDEX IF NOT EXISTS attempts_run ON attempts(run);
 CREATE INDEX IF NOT EXISTS attempts_session ON attempts(session);
@@ -114,7 +116,7 @@ CREATE INDEX IF NOT EXISTS attempts_session ON attempts(session);
 
 Fact = str | int | None
 # Changes with the schema. There are no migrations: a file from another version is refused.
-_VERSION = 10
+_VERSION = 11
 
 
 def _text(at: datetime | None) -> str | None:
@@ -174,6 +176,7 @@ def _attempt(row: sqlite3.Row) -> RunAttempt:
             **dict(row),
             "clocks": json.loads(row["clocks"]),
             "outputs": json.loads(row["outputs"]),
+            "prepared": None if row["prepared"] is None else json.loads(row["prepared"]),
         }
     )
 
@@ -915,6 +918,7 @@ class Database:
         clocks: dict[str, float] | None = None,
         outputs: Sequence[Output] = (),
         exit_code: int | None = None,
+        prepared: Prepared | None = None,
     ) -> None:
         self._change(
             "attempts",
@@ -926,6 +930,7 @@ class Database:
             clocks=json.dumps(clocks or {}),
             outputs=json.dumps([o.model_dump(mode="json") for o in outputs]),
             exit_code=exit_code,
+            prepared=None if prepared is None else prepared.model_dump_json(),
         )
 
     def fail_before_start(self, attempt: RunAttempt, cause: Cause, at: datetime) -> None:

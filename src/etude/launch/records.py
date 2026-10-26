@@ -559,6 +559,22 @@ class Session(Record):
     hardware: Hardware | None = None
 
 
+class Prepared(Record):
+    """What an attempt's preparation found and did (`etude.launch.worker.prepared`).
+
+    `rejected` is always followed by a build; `size_bytes` is None when the
+    build failed.
+    """
+
+    key: str
+    outcome: Literal["reused", "built", "rejected"]
+    finished_at: datetime  # when the directory was ready, or the build failed
+    seconds: float = Field(ge=0)  # verifying a reused directory, or building one
+    size_bytes: int | None = None
+    cause: str | None = None  # why a kept directory was rejected
+    restored_bytes: int | None = None  # the carried archive restored before the build
+
+
 class RunAttempt(Record):
     """Allocation of one run to one machine for a bounded execution window.
 
@@ -585,6 +601,7 @@ class RunAttempt(Record):
     # When it was placed. Its share of the cost starts no earlier.
     planned_at: datetime | None = None
     added: bool = False  # placed on a session that already existed
+    prepared: Prepared | None = None  # from the finished journal, when the job prepares
 
 
 class Status(Record):

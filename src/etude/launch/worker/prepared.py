@@ -40,12 +40,12 @@ import tarfile
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, Literal, NamedTuple
 
 from etude.launch.logging import explain
-from etude.launch.records import Input, Preparation, Record, Variable
-from etude.launch.schemas import Prepared
+from etude.launch.records import Input, Preparation, Prepared, Record, Variable
 from etude.launch.storage.files import digest, write
 from etude.launch.storage.s3 import StorageUnavailable
 
@@ -248,6 +248,7 @@ def prepare(
                 done = Prepared(
                     key=name,
                     outcome="reused",
+                    finished_at=datetime.now(UTC),
                     seconds=time.monotonic() - began,
                     size_bytes=kept.size_bytes,
                 )
@@ -263,7 +264,16 @@ def prepare(
         began = time.monotonic()
         if not build(directory):
             _remove(directory)
-            yield directory, Prepared(key=name, outcome=outcome, seconds=0, cause=cause)
+            yield (
+                directory,
+                Prepared(
+                    key=name,
+                    outcome=outcome,
+                    finished_at=datetime.now(UTC),
+                    seconds=0,
+                    cause=cause,
+                ),
+            )
             return
         _seal(directory)
         manifest = _manifest(directory)
@@ -278,7 +288,14 @@ def prepare(
         evict(shutil.disk_usage(root).free, log)
         yield (
             directory,
-            Prepared(key=name, outcome=outcome, seconds=seconds, size_bytes=size, cause=cause),
+            Prepared(
+                key=name,
+                outcome=outcome,
+                finished_at=datetime.now(UTC),
+                seconds=seconds,
+                size_bytes=size,
+                cause=cause,
+            ),
         )
 
 

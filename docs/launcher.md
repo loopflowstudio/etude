@@ -1046,8 +1046,10 @@ etude status RUN_ID --phases
 ```
 
 This opt-in view reads the database without a scheduling pass or machine refresh.
-It shows queued, machine asked for, machine confirmed, worker up, code started and
-finished, for every retained attempt. Missing timestamps say `not recorded`.
+It shows queued, machine asked for, machine confirmed, worker up, code started,
+`prepared (built|reused|rejected)` for a job with `prepare`, and finished, for every
+retained attempt. The preparation's evidence is its key, time and size, and any
+restored carried archive or rejection cause. Missing timestamps say `not recorded`.
 The existing database has a provider receipt but no timestamp for its confirmation;
 the confirmation phase therefore has no timestamp and says `receipt retained`
 when that evidence exists. It never borrows another phase's
@@ -1503,6 +1505,13 @@ truncated operational logs leave unknown intervals.
 
 Run totals include that run's events. Shared source/runtime traffic appears in
 `shared_events`, outside run totals; it has no fabricated per-run allocation.
+A session's files fetched for one run count as that run's. After its totals the
+command prints one line per purpose, so an input this machine already held reads
+apart from one it downloaded:
+
+```text
+input: received 0 bytes, reused 19300000000 bytes
+```
 Use `usage()` or `usage(machine=...)` for totals that include shared and
 unattributed controller traffic once. Deduplicate exports by `Transfer.id` when
 combining scopes. Upload counts are body bytes supplied to urllib, including
