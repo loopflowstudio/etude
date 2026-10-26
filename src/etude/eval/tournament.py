@@ -55,6 +55,7 @@ from etude.eval.records import (
     assemble,
     digest,
 )
+from etude.eval.schedule import ordered
 from etude.run.declaration import declare
 from etude.run.errors import EtudeError
 from etude.run.records import Digest, Record, RunFile
@@ -101,15 +102,17 @@ def hold(
     given. Their checkpoints' files may lie elsewhere than the definition's,
     such as copied to this machine; a key never depends on where.
 
-    `share=(k, n)` deals the scheduled matches, in key order, to n parts and
-    plays the kth, so n machines may split one hold with at most one match
-    between their shares. The deal covers delivered matches too, so a resumed
-    share keeps its part. Under `etude launch` the eval run is the
-    launched run (`ETUDE_RUN`); elsewhere it is named for what is given, so
-    the same call resumes it. A batch hold raises
-    `EtudeError("tournament_conflict")` when the tournament's eval runs or
-    this definition disagree on its format, environment or rules, and
-    `EtudeError("matchup_conflict")` when they define a matchup name two ways;
+    `share=(k, n)` cuts the scheduled matches, in the order
+    `etude.eval.schedule.ordered` plays them, into n contiguous parts and plays
+    the kth, so n machines may split one hold with at most one match between
+    their shares, each seating (and fetching) only some of the checkpoints.
+    The cut covers delivered matches too, so a resumed share keeps its part.
+    Under `etude launch` the eval run is the launched run (`ETUDE_RUN`);
+    elsewhere it is named for what is given, so the same call resumes it. A
+    batch hold raises `EtudeError("tournament_conflict")` when the
+    tournament's eval runs or this definition disagree on its format,
+    environment or rules, and `EtudeError("matchup_conflict")` when they
+    define a matchup name two ways;
     an on-the-go hold leaves those to be found on read. Raises whatever
     `evaluate` raises.
     """
@@ -134,10 +137,16 @@ def hold(
             directory=directory,
             storages=storages,
         )
+        # Contiguous runs of the play order, so each share seats fewer checkpoints.
+        order = list(ordered([match for match, _, _ in scheduled]))
+        size, larger = divmod(len(order), n)
+        start = k * size + min(k, larger)
+        delivered = {match.key for match, state, _ in scheduled if state == "delivered"}
         pending = [
-            match for index, (match, state, _) in enumerate(scheduled)
-            if index % n == k and state != "delivered"
-        ]  # fmt: skip
+            match
+            for match in order[start : start + size + (k < larger)]
+            if match.key not in delivered
+        ]
     run = os.environ.get("ETUDE_RUN") or (
         f"{tournament.name}.{digest(added.model_dump(mode='json'))[:12]}"
     )

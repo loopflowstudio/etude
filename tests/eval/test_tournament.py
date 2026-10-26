@@ -3,19 +3,21 @@
 from __future__ import annotations
 
 import shutil
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 
 import pytest
 
-from etude.eval.match import agent, environment, evaluate
+from etude.eval.match import Tables, agent, environment, evaluate
 from etude.eval.query import statsdb
 from etude.eval.records import (
     Agent,
     Benchmark,
     CheckpointKey,
     CheckpointRef,
+    Match,
     Matchup,
     Model,
     RoundRobin,
@@ -342,6 +344,31 @@ def test_round_robin_shares_differ_by_at_most_one_and_count_matches_any_run_held
     found = standings(statsdb(EXPERIMENT, bucket), "finals", table="plays", value="won")
     assert (found.complete, found.scheduled) == (True, 18)
     assert {e.matches for e in found.entries if e.opponent is not None} == {len(DEALS)}
+
+
+def test_each_share_of_a_checkpoint_benchmark_seats_fewer_checkpoints_than_a_round_deal(
+    tmp_path: Path,
+) -> None:
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    checkpoints = trained(tmp_path, bucket)
+    shares: list[list[Match]] = [[], []]
+    for k, share in enumerate(shares):
+
+        def seen(match: Match, share: list[Match] = share) -> Tables:
+            share.append(match)
+            return play(match)
+
+        hold(anchors(tmp_path), experiment=EXPERIMENT, checkpoints=checkpoints, play=seen,
+             share=(k, 2), storages=[bucket], directory=tmp_path / f"machine-{k}")  # fmt: skip
+
+    def seated(matches: Sequence[Match]) -> int:
+        return len({each.key.checkpoint for match in matches for each in match.agents} - {None})
+
+    # Each checkpoint calls for 3 + 2 + 1 matches.
+    assert [len(share) for share in shares] == [9, 9]
+    every = sorted((match for share in shares for match in share), key=lambda match: match.key)
+    round_deal = [seated(every[k::2]) for k in (0, 1)]
+    assert [seated(share) for share in shares] == [2, 2] and round_deal == [3, 3]
 
 
 def test_curves_of_checkpoints_no_training_run_recorded_follow_their_names(
