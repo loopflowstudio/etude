@@ -18,7 +18,7 @@ A model is placed where its seat says it stood (`players.at`, from
 experiment recorded, where that run's clocks stood (`players.checkpoint`
 joined to `training_checkpoints`). Where both give a clock and differ, the
 seat's value is drawn and noted. Its line, the learner whose other
-checkpoints `Earlier`, `At` and `Crosstable` compare it with, is its seat's
+checkpoints `Earlier`, `Fraction`, `At` and `Crosstable` compare it with, is its seat's
 `line`, else its training run's name. A bound model is drawn in its run's
 job; every other placed model is drawn in its line's curve, or in the one
 curve of checkpoints with no line. Two keys holding the same bytes are two

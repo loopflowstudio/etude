@@ -94,3 +94,35 @@ test("a dense line marks the points it has no segment for", () => {
   assert.deepEqual([...context.isolated(ys)], [3, 9]);
   assert.deepEqual([...context.isolated([0.5])], [0]);
 });
+
+test("a fraction of each checkpoint's position plays it against its own line's checkpoint exactly there", () => {
+  const m = context.model(page([
+    player("u100", "learner", 100), player("u200", "learner", 200),
+    player("u3000", "learner", 3000), player("u5950", "learner", 5950), player("u6000", "learner", 6000),
+  ], [[1, 0, 0.6], [4, 2, 0.55]]));
+  const drawn = points(m, m.JOBS[0], {kind: "fraction", clock: "updates", value: 0.5});
+  const at = Object.fromEntries(drawn.map(p => [p.x, p]));
+  assert.equal(at[200].y, 0.6);
+  assert.equal(at[6000].y, 0.55);
+  assert.match(at[6000].meta, /vs .*u3000/);
+  // No checkpoint stood at exactly half of 5,950: a gap that says where it looked.
+  assert.equal(at[5950].missing, true);
+  assert.match(at[5950].meta, /no checkpoint at updates 2,?975/);
+});
+
+test("a computed position matches a checkpoint by value, not by binary float", () => {
+  const m = context.model(page([player("u63", "learner", 63), player("u90", "learner", 90)], [[1, 0, 0.4]]));
+  const at90 = points(m, m.JOBS[0], {kind: "fraction", clock: "updates", value: 0.7}).find(p => p.x === 90);
+  assert.equal(at90.y, 0.4);
+  assert.match(at90.meta, /vs .*u63/);
+});
+
+test("a checkpoint never resolves to itself as its own opponent", () => {
+  const m = context.model(page([player("u0", "learner", 0), player("u400", "learner", 400)], [[1, 0, 0.5]]));
+  const first = points(m, m.JOBS[0], {kind: "fraction", clock: "updates", value: 0.5}).find(p => p.x === 0);
+  assert.equal(first.missing, true);
+  assert.match(first.meta, /no checkpoint at updates 0/);
+  const own = points(m, m.JOBS[0], {kind: "at", clock: "updates", value: 400}).find(p => p.x === 400);
+  assert.equal(own.missing, true);
+  assert.match(own.meta, /no checkpoint at updates 400/);
+});

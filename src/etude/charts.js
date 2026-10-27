@@ -152,7 +152,7 @@ function line(host, series, o = {}) {
 // ---------------------------------------------------------------- an experiment's page data
 // Curves are jobs, runs across seeds, and one per line of placed checkpoints no training run
 // saved, with one more for those of no line. A line (`Player.line`) is a learner: `Earlier`,
-// `At` and the crosstable compare a checkpoint only with its own line's. A model is
+// `Fraction`, `At` and the crosstable compare a checkpoint only with its own line's. A model is
 // bound to its run's checkpoint by key, and drawn where `Player.at` says, which the page
 // computed (its seat's position, else its run's).
 const lineRun = line => "\u0001" + line;  // a line curve's one member, where a job has runs; no run is so named
@@ -273,7 +273,9 @@ function model(D) {
   }
   // A curve's own opponent for subject `i` (`etude.report.Curve.opponent`): {index} or {gap}.
   // By name, whoever of that name the subject met; by position, the checkpoint of the same
-  // line and config standing exactly there.
+  // line and config standing exactly there, other than the subject itself. Positions match by
+  // value in the clock's units, so 90 × 0.7 (62.99999999999999 in binary) finds 63.
+  const exactly = v => +v.toPrecision(12);
   function opponentAt(i, spec, played) {
     if (spec.kind === "name") {
       const met = indices.filter(k => D.players[k].name === spec.name && played(k));
@@ -282,13 +284,13 @@ function model(D) {
     }
     const me = D.players[i], here = me.at[spec.clock];
     if (here == null) return {gap: `no position on ${spec.clock}`};
-    const want = spec.kind === "earlier" ? here - spec.by : spec.value;
-    const found = lineMembers(lineOf(i)).filter(k => D.players[k].config === me.config && D.players[k].at[spec.clock] === want);
+    const want = exactly({earlier: here - spec.by, fraction: here * spec.value, at: spec.value}[spec.kind]);
+    const found = lineMembers(lineOf(i)).filter(k => k !== i && D.players[k].config === me.config && D.players[k].at[spec.clock] != null && exactly(D.players[k].at[spec.clock]) === want);
     if (found.length > 1) return {gap: `${found.map(playerName).join(" and ")} both stood at ${spec.clock} ${num(want)}`};
     return found.length ? {index: found[0]} : {gap: `no checkpoint at ${spec.clock} ${num(want)}`};
   }
   // The value of each checkpoint of `config` against `opponent`, split by `split`: "" for all,
-  // a player's index as a string, or a curve's own opponent ({kind: "name" | "earlier" | "at"}).
+  // a player's index as a string, or a curve's own opponent ({kind: "name" | "earlier" | "fraction" | "at"}).
   const evalValue = (score, sel, split, opponent, config) => (run, m) => {
     const i = bound.get(`${run}|${m.ordinal}|${config}`);
     if (i == null || sel == null) return gapOf(sel, run, m);

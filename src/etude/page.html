@@ -69,7 +69,7 @@ const oppFor = (E, sel) => { const o = opponents(E, sel); return (o.find(([v]) =
 const versusOf = opp => opp === "" ? "vs all opponents" : typeof opp === "object" ? ownVersus(opp) : `vs ${D.players[+opp].name}`;
 // A curve's own opponent, as the evals model takes it, and as its subtitle names it.
 const ownOpponent = panel => panel.opponent == null ? null : typeof panel.opponent === "string" ? {kind: "name", name: panel.opponent} : panel.opponent;
-const ownVersus = o => o.kind === "name" ? `vs ${o.name}` : o.kind === "earlier" ? `vs the checkpoint ${num(o.by)} ${o.clock} earlier` : `vs the checkpoint at ${o.clock} ${num(o.value)}`;
+const ownVersus = o => o.kind === "name" ? `vs ${o.name}` : o.kind === "earlier" ? `vs the checkpoint ${num(o.by)} ${o.clock} earlier` : o.kind === "fraction" ? `vs the checkpoint at ${num(o.value)} × its ${o.clock}` : `vs the checkpoint at ${o.clock} ${num(o.value)}`;
 let F = {}; try { F = JSON.parse(S.filter) || {}; } catch { F = {}; }
 const evalValue = (E, sel, extra, opponent) => M.evalValue(E.score, sel, {...F, ...extra}, opponent, S.cfg);
 // The other anchors' scores against the curve's anchor, as reference lines.
