@@ -40,7 +40,15 @@ from typing import TYPE_CHECKING, Literal, NoReturn
 
 from pydantic import BaseModel
 
-from etude.eval.block import Block, Staging, partial_totals, quote, run_blocks, seal_abandoned
+from etude.eval.block import (
+    Block,
+    Staging,
+    partial_totals,
+    quote,
+    run_blocks,
+    seal_abandoned,
+    unnest,
+)
 from etude.eval.records import (
     ADDED,
     COLUMN_TYPES,
@@ -353,18 +361,12 @@ class _Writer:
         self, target: Path, columns: dict[str, ColumnType], rows: Sequence[Row], match: str
     ) -> None:
         """Write one match's rows of a table to `target` as Parquet; readers never see half a file."""
-        names = list(columns)
-        self.db.execute(
-            "create or replace table _rows ("
-            + ", ".join(f'"{name}" {kind}' for name, kind in columns.items())
-            + ', "run" VARCHAR, "match" VARCHAR)'
-        )
-        self.db.executemany(
-            f"insert into _rows values ({', '.join('?' for _ in range(len(names) + 2))})",
-            [[row.get(name) for name in names] + [self.name, match] for row in rows],
+        select, values = unnest(
+            {**columns, "run": "VARCHAR", "match": "VARCHAR"},
+            [[row.get(name) for name in columns] + [self.name, match] for row in rows],
         )
         partial = target.with_name(target.name + ".partial")
-        self.db.execute(f"copy (select * from _rows) to {quote(partial)} (format parquet)")
+        self.db.execute(f"copy ({select}) to {quote(partial)} (format parquet)", values)
         partial.replace(target)
 
     def _seal(self) -> None:
