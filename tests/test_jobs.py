@@ -12,9 +12,9 @@ from pathlib import Path
 
 import pytest
 
-from etude.eval.match import agent, environment
+from etude.eval.match import environment
 from etude.eval.query import statsdb
-from etude.eval.records import Benchmark, Matchup, Model, RoundRobin
+from etude.eval.records import Benchmark, Code, Inference, Matchup, RoundRobin
 from etude.jobs import JobOptions, evaluation
 from etude.launch.errors import LauncherError
 from etude.launch.job_file import read_job_file
@@ -56,16 +56,18 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from etude.eval.match import Tables
-from etude.eval.records import Match
+from etude.eval.records import Match, Model
 
 
 def play(match: Match) -> Tables:
-    # A checkpoint seat's file is on this machine; the row says how big it is.
+    # A model's checkpoint file is on this machine; the row says how big it is.
     sizes = [
-        len(Path(urlparse(seated.artifact.uri).path).read_bytes()) if seated.artifact else 0
-        for seated in match.agents
+        len(Path(urlparse(seated.checkpoint.artifact.uri).path).read_bytes())
+        if isinstance(seated, Model)
+        else 0
+        for seated in match.players
     ]
-    return {"plays": [{"game": 0, "player": seat, "bytes": size} for seat, size in enumerate(sizes)]}
+    return {"plays": [{"game": 0, "seat": seat, "bytes": size} for seat, size in enumerate(sizes)]}
 """
 
 
@@ -226,8 +228,8 @@ def test_an_evaluation_job_holds_a_benchmark_for_the_checkpoint_it_is_given(
             Matchup(
                 name="model vs fixed",
                 players=(
-                    Model(config={"search": 0}),
-                    agent("fixed", code=[repo / "arena_duel.py"]),
+                    Inference(config={"search": 0}),
+                    Code(name="fixed", source=[repo / "arena_duel.py"]),
                 ),
                 conditions=({"deal": 1}, {"deal": 2}),
                 games=2,
@@ -270,8 +272,8 @@ def test_an_evaluation_job_holds_a_benchmark_for_the_checkpoint_it_is_given(
     db = statsdb("ppo", delivered)
     assert (
         db.sql(
-            "select a.name, p.bytes from plays p join seats s using (run, match, player)"
-            " join agents a using (agent) where p.player = 0"
+            "select a.name, p.bytes from plays p join seats s using (run, match, seat)"
+            " join players a using (player) where p.seat = 0"
         ).fetchall()
         == [("updates-100", len(weights))] * 2
     )
@@ -279,7 +281,7 @@ def test_an_evaluation_job_holds_a_benchmark_for_the_checkpoint_it_is_given(
 
 def test_an_evaluation_holds_what_its_tournament_takes() -> None:
     progress = Benchmark(name="anchors", environment=environment("duel"))
-    entrant = agent("fixed", code=[Path(__file__)])
+    entrant = Code(name="fixed", source=[Path(__file__)])
     with pytest.raises(LauncherError, match="give it checkpoints, no entrants"):
         evaluation(
             progress,

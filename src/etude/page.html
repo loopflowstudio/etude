@@ -34,7 +34,7 @@ const asked = new URLSearchParams(location.hash.slice(1)).get("commit");
 const COMMIT = PAGE.commits.some(k => k.commit === asked) ? asked : "";
 const D = {...PAGE, cells: PAGE.cells.filter(c => (c.commit ?? "") === COMMIT)};
 const M = model(D);
-const {T, R, JOBS, marks, markOf, jobPoints, cellOf, bound, fixedAgents, configs, jobOfRun, agentName, selName, choices} = M;
+const {T, R, JOBS, marks, markOf, jobPoints, cellOf, bound, fixedPlayers, configs, jobOfRun, playerName, selName, choices} = M;
 
 // The view lives in the URL, so a reload or a rewritten page shows the same thing.
 const clockNames = [...T.clocks.map(c => c.name), WALL];
@@ -64,13 +64,13 @@ function panelSel(E, panel) {
 }
 const opponents = (E, sel) => M.opponents(E.score, sel);
 const oppFor = (E, sel) => { const o = opponents(E, sel); return (o.find(([v]) => v === S.opp) || o[0] || [""])[0]; };
-const versusOf = opp => opp === "" ? "vs all opponents" : `vs ${D.agents[+opp].name}`;
+const versusOf = opp => opp === "" ? "vs all opponents" : `vs ${D.players[+opp].name}`;
 let F = {}; try { F = JSON.parse(S.filter) || {}; } catch { F = {}; }
 const evalValue = (E, sel, extra, opponent) => M.evalValue(E.score, sel, {...F, ...extra}, opponent, S.cfg);
 // The other anchors' scores against the curve's anchor, as reference lines.
 function anchorLines(E, sel, opp, extra = {}) {
   if (S.lines !== "on" || opp === "" || sel == null) return [];
-  return fixedAgents.filter(b => b !== +opp).map(b => cellOf(sel, E.score, b, +opp, false, {...F, ...extra})).filter(Boolean).map(c => ({y: c.value, label: D.agents[c.subject].name}));
+  return fixedPlayers.filter(b => b !== +opp).map(b => cellOf(sel, E.score, b, +opp, false, {...F, ...extra})).filter(Boolean).map(c => ({y: c.value, label: D.players[c.subject].name}));
 }
 function values(E, sel, column, extra = {}) {
   const want = Object.keys({...F, ...extra, [column]: null}).sort().join(",");
@@ -161,7 +161,7 @@ function render() {
   S.opp = oppFor(E, E.sel);
   control(ec, "Opponent", opponents(E, E.sel), "opp");
   control(ec, "Config", configs.map(c => [c, c === "{}" ? "no config" : c]), "cfg");
-  control(ec, "Anchor lines", fixedAgents.length > 1 ? [["on", "On"], ["off", "Off"]] : [], "lines");
+  control(ec, "Anchor lines", fixedPlayers.length > 1 ? [["on", "On"], ["off", "Off"]] : [], "lines");
   control(ec, "X axis", CLOCKS, "eclock");
   const body = document.getElementById("evals-body"); body.replaceChildren();
   const scoreName = E.info ? `${E.info.table}.${E.info.value}${E.info.per ? " per " + E.info.per : ""}` : "";
@@ -261,7 +261,7 @@ function render() {
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
       const pairs = [];
       for (const a of vis) for (const b of JOBS) if (a !== b) {
-        const theirs = D.agents.map((g, i) => i).filter(i => D.agents[i].run != null && b.runs.includes(D.agents[i].run));
+        const theirs = D.players.map((g, i) => i).filter(i => D.players[i].run != null && b.runs.includes(D.players[i].run));
         const pts = jobPoints(a, S.eclock, (run, m) => {
           const mine = bound.get(`${run}|${m.ordinal}|${S.cfg}`);
           const got = mine == null ? [] : theirs.map(s => cellOf(sel, E.score, mine, s, false, F)).filter(Boolean);
@@ -272,30 +272,30 @@ function render() {
       if (!pairs.length) { c.appendChild(node("div", "na", "No games between checkpoints of two jobs were recorded")); continue; }
       const host = node("div"); c.appendChild(host); later(() => line(host, pairs, {...eOpts, height: 200, ref: ref}));
     } else if (panel.kind === "anchors") {
-      // Fixed agents are not a job's: drawn once, against each other.
+      // Fixed players are not a job's: drawn once, against each other.
       const c = card(body, panel.title, `${where} · ${scoreName} · row against column · strength: over matches that seat no checkpoint of the experiment`, "full");
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
-      const met = fixedAgents.filter(a => D.cells.some(x => x.selection === sel && x.score === E.score && (x.subject === a || x.opponent === a) && (x.fixed || (D.agents[x.subject].run == null && x.opponent != null && D.agents[x.opponent].run == null))));
-      if (!met.length) { c.appendChild(node("div", "na", "No two fixed agents played each other in these matches")); continue; }
+      const met = fixedPlayers.filter(a => D.cells.some(x => x.selection === sel && x.score === E.score && (x.subject === a || x.opponent === a) && (x.fixed || (D.players[x.subject].run == null && x.opponent != null && D.players[x.opponent].run == null))));
+      if (!met.length) { c.appendChild(node("div", "na", "No two fixed players played each other in these matches")); continue; }
       const strength = a => cellOf(sel, E.score, a, null, true, F);
-      const order = [...met].sort((a, b) => (strength(b)?.value ?? -Infinity) - (strength(a)?.value ?? -Infinity) || D.agents[a].name.localeCompare(D.agents[b].name));
+      const order = [...met].sort((a, b) => (strength(b)?.value ?? -Infinity) - (strength(a)?.value ?? -Infinity) || D.players[a].name.localeCompare(D.players[b].name));
       const grid = node("div", "matrix"); grid.style.gridTemplateColumns = `minmax(110px, auto) minmax(64px, 1fr) repeat(${order.length}, minmax(48px, 1fr))`;
       const wrap = node("div", "mwrap"); wrap.appendChild(grid); c.appendChild(wrap);
       grid.append(node("div", "rl", ""), node("div", "cl", "strength"));
-      for (const b of order) grid.appendChild(node("div", "cl", D.agents[b].name));
+      for (const b of order) grid.appendChild(node("div", "cl", D.players[b].name));
       const pointOfCell = x => x && {y: x.value, lo: x.interval?.[0], hi: x.interval?.[1], meta: `${x.rows} rows · ${x.matches} matches`};
       const found = order.flatMap(a => [strength(a), ...order.map(b => a === b ? null : cellOf(sel, E.score, a, b, false, F))]).filter(Boolean).map(x => x.value);
       const paint = painter(found, ref);
       for (const a of order) {
-        grid.appendChild(node("div", "rl", D.agents[a].name));
+        grid.appendChild(node("div", "rl", D.players[a].name));
         for (const [b, x] of [[null, strength(a)], ...order.map(b => [b, a === b ? null : cellOf(sel, E.score, a, b, false, F)])]) {
           const p = pointOfCell(x), cell = node("div", "cell" + (p ? "" : " none"));
           if (p) paintCell(cell, p, ref, paint); else cell.textContent = a === b ? "" : "·";
-          cell.onpointermove = evt => showTip(evt, p ? [{value: fmt(p.y), label: p.meta}, ...(p.lo != null ? [{value: `${fmt(p.lo)}–${fmt(p.hi)}`, label: "95% interval"}] : [])] : [{value: "not recorded", label: ""}], `${D.agents[a].name} ${b == null ? "against every anchor" : "vs " + D.agents[b].name}`);
+          cell.onpointermove = evt => showTip(evt, p ? [{value: fmt(p.y), label: p.meta}, ...(p.lo != null ? [{value: `${fmt(p.lo)}–${fmt(p.hi)}`, label: "95% interval"}] : [])] : [{value: "not recorded", label: ""}], `${D.players[a].name} ${b == null ? "against every anchor" : "vs " + D.players[b].name}`);
           cell.onpointerleave = hideTip; grid.appendChild(cell);
         }
       }
-      rampLegend(c, ref, found, `· ${met.length} fixed agent${met.length > 1 ? "s" : ""}: code, or checkpoints from outside the experiment`);
+      rampLegend(c, ref, found, `· ${met.length} fixed player${met.length > 1 ? "s" : ""}: code, or checkpoints from outside the experiment`);
     } else card(body, `Unknown panel kind ${JSON.stringify(panel.kind)}`, "not drawn");
   }
   function values2(E, sel, column, other) {
@@ -486,8 +486,8 @@ function tables() {
   }
   const f = document.getElementById("failures"); f.replaceChildren();
   document.getElementById("failures-box").hidden = !D.failures.length;
-  const h3 = node("tr"); for (const h of ["Tournament", "Agents, by seat", "Error"]) h3.appendChild(node("th", null, h)); f.appendChild(h3);
-  for (const x of D.failures) { const row = node("tr"); for (const v of [x.tournament ?? "–", x.agents.map(agentName).join(" vs "), x.error ?? "–"]) row.appendChild(node("td", null, v)); f.appendChild(row); }
+  const h3 = node("tr"); for (const h of ["Tournament", "Players, by seat", "Error"]) h3.appendChild(node("th", null, h)); f.appendChild(h3);
+  for (const x of D.failures) { const row = node("tr"); for (const v of [x.tournament ?? "–", x.players.map(playerName).join(" vs "), x.error ?? "–"]) row.appendChild(node("td", null, v)); f.appendChild(row); }
 }
 
 // Section nav highlights the section in view.

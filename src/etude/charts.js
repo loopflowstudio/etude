@@ -141,7 +141,7 @@ function line(host, series, o = {}) {
 }
 
 // ---------------------------------------------------------------- an experiment's page data
-// Jobs are runs across seeds; a checkpoint agent is bound to its run's checkpoint by key.
+// Jobs are runs across seeds; a model is bound to its run's checkpoint by key.
 function model(D) {
   const T = D.training, R = D.report;
   // A job's colour follows its declared position, never its rank.
@@ -187,20 +187,20 @@ function model(D) {
   // ---- evals: what compare computed
   const cellIndex = new Map(); for (const c of D.cells) cellIndex.set(`${c.selection}|${c.score}|${c.subject}|${c.opponent ?? ""}|${+c.fixed}|${splitKey(c.split)}`, c);
   const cellOf = (sel, score, subject, opponent, fixed, split) => cellIndex.get(`${sel}|${score}|${subject}|${opponent ?? ""}|${+fixed}|${splitKey(split)}`);
-  const bound = new Map(); D.agents.forEach((a, i) => { if (a.run != null) bound.set(`${a.run}|${a.ordinal}|${a.config}`, i); });
-  const fixedAgents = D.agents.map((a, i) => i).filter(i => D.agents[i].run == null);
-  const configs = [...new Set(D.agents.filter(a => a.run != null).map(a => a.config))].sort();
+  const bound = new Map(); D.players.forEach((a, i) => { if (a.run != null) bound.set(`${a.run}|${a.ordinal}|${a.config}`, i); });
+  const fixedPlayers = D.players.map((a, i) => i).filter(i => D.players[i].run == null);
+  const configs = [...new Set(D.players.filter(a => a.run != null).map(a => a.config))].sort();
   const coverage = new Map(D.coverage.map(c => [`${c.run}|${c.ordinal}|${c.tournament}`, c]));
   const jobOfRun = run => JOBS.find(j => j.runs.includes(run));
-  const agentName = i => D.agents[i].run != null ? `${D.agents[i].run} ${D.agents[i].name}` : D.agents[i].name;
+  const playerName = i => D.players[i].run != null ? `${D.players[i].run} ${D.players[i].name}` : D.players[i].name;
   const selName = s => s.matchup != null ? `${s.tournament} · ${s.matchup}` : s.tag != null ? `${s.tournament} · tagged ${s.tag}` : s.tournament;
   // A page offers each tournament and each tag within one; a matchup only where a panel names it.
   const choices = D.selections.map((s, i) => [String(i), selName(s)]).filter(([i]) => D.selections[+i].matchup == null);
   // Opponents are the anchors checkpoints met, by name; checkpoints met are head-to-head games.
   function opponents(score, sel) {
-    const seen = new Set(D.cells.filter(c => c.selection === sel && c.score === score && !c.fixed && D.agents[c.subject].run != null).map(c => c.opponent));
-    const anchors = [...seen].filter(o => o != null && D.agents[o].run == null).sort((a, b) => D.agents[a].name.localeCompare(D.agents[b].name));
-    return [...anchors.map(o => [String(o), D.agents[o].name]), ...(seen.has(null) || !anchors.length ? [["", "all opponents"]] : [])];
+    const seen = new Set(D.cells.filter(c => c.selection === sel && c.score === score && !c.fixed && D.players[c.subject].run != null).map(c => c.opponent));
+    const anchors = [...seen].filter(o => o != null && D.players[o].run == null).sort((a, b) => D.players[a].name.localeCompare(D.players[b].name));
+    return [...anchors.map(o => [String(o), D.players[o].name]), ...(seen.has(null) || !anchors.length ? [["", "all opponents"]] : [])];
   }
   // Why a checkpoint has no value here. Failed and not yet played break a line; a checkpoint
   // nothing played, or played only outside this selection, is no point of it and is marked.
@@ -220,7 +220,7 @@ function model(D) {
     return {y: c.value, lo: c.interval?.[0], hi: c.interval?.[1], meta: `${c.rows} rows · ${c.matches} matches`};
   };
   const evaluated = pts => pts.filter(p => !p.missing && !p.skip);
-  return {T, R, JOBS, marks, markOf, xOf, jobPoints, cellOf, bound, fixedAgents, configs, coverage, jobOfRun, agentName, selName, choices, opponents, evalValue, evaluated};
+  return {T, R, JOBS, marks, markOf, xOf, jobPoints, cellOf, bound, fixedPlayers, configs, coverage, jobOfRun, playerName, selName, choices, opponents, evalValue, evaluated};
 }
 
 // The report's own headline for each job: its score curve in the page's first view (the
@@ -232,7 +232,7 @@ function headline(D, M) {
   return M.JOBS.map(j => {
     const pts = sel == null || !D.scores.length ? [] : M.jobPoints(j, clock, M.evalValue(0, sel, {}, opp, M.configs[0] ?? ""));
     const done = M.evaluated(pts);
-    return {job: j, points: pts, latest: done.length ? done[done.length - 1] : null, against: opp === "" ? "all opponents" : D.agents[+opp].name};
+    return {job: j, points: pts, latest: done.length ? done[done.length - 1] : null, against: opp === "" ? "all opponents" : D.players[+opp].name};
   });
 }
 
