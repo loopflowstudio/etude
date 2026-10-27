@@ -25,9 +25,11 @@ from etude.experiment import (
 )
 from etude.jobs import _hold, evaluation, evaluation_spec
 from etude.launch.records import Job, Outcome, Run, Status
+from etude.run.block_file import block_key
 from etude.run.errors import EtudeError
 from etude.run.records import Clock
 from etude.run.storage import DirectoryStorage
+from etude.train.read import read_all
 from etude.train.run import Run as Run_
 from etude.train.run import track
 from tests.eval.games import play, play_failing_deal_one
@@ -102,6 +104,18 @@ def design(tmp_path: Path) -> Experiment:
         return evaluation(progress, play=play, checkpoints=rated, max_hours=0.1)
 
     return Experiment(name="ppo", eval=eval_)
+
+
+def test_observation_does_not_read_another_experiments_incomplete_metrics(tmp_path: Path) -> None:
+    for experiment, run in (("ppo", "good"), ("other", "broken")):
+        with track(experiment=experiment, run=run, clocks=[], directory=tmp_path):
+            pass
+    missing_prefix = tmp_path / "broken" / block_key(1, 1, 1, "0123456789ab")
+    missing_prefix.parent.mkdir(parents=True, exist_ok=True)
+    missing_prefix.write_bytes(b"Never read: sequence zero is missing")
+    with pytest.raises(FileNotFoundError, match="block sequence gap"):
+        read_all(tmp_path)
+    assert [run.name for run in observe(tmp_path, "ppo").runs] == ["good"]
 
 
 def test_each_pass_plays_what_the_checkpoints_saved_so_far_call_for(tmp_path: Path) -> None:
