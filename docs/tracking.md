@@ -279,3 +279,8 @@ previous row). **ML details** default to reinforcement learning's `Counters`
 and `Series` over `rl/` keys; pass `perf=` or `ml=` to name an experiment's
 own. Keys a panel names that no run logged are listed, and metrics no panel
 names are drawn last.
+
+For a curated report, use `Report(metrics="named", ml=(...))`. Only keys named
+by `Series` and `Counters` panels are read as metric curves; `Flame` timer trees
+still use their prefixes. Other logged metrics remain in the run. The default
+`metrics="all"` also draws unlisted metrics under ML details.
