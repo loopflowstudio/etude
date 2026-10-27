@@ -74,6 +74,8 @@ IDENTIFIER = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,62}$")
 ADDED = ("run", "match")
 # A rollup's count of the rows it summarizes.
 ROLLUP_ROWS = "rows"
+# Rollup `by` columns Etude fills from a row's seat: its player's key, and the others'.
+ROLLUP_SEATED = ("player", "opponents")
 
 # An eval run held for a tournament keeps this file in its folder (`TournamentRun`).
 TOURNAMENT_FILE = "tournament.json"
@@ -415,25 +417,40 @@ class MatchRecord(Record):
 
 
 class Rollup(Record):
-    """An additive summary of an author table, taken once per block as it is sealed.
+    """An additive summary of an author table, taken once per match as it is stored.
 
     `statsdb` keeps table `name`: for each run and each value of the `by`
-    columns, how many rows there were (`rows`) and the total of each column in
-    `sums`, a null counting as 0; a mean is a total over `rows`. Each block
-    keeps its matches' partial totals in `NAME.parquet`, so `statsdb` adds a
-    block's totals and never reads an earlier block or a raw row again.
+    columns, how many rows there were (`rows`) and the total of each of
+    `sums`, a DuckDB expression over a row (`"deck_copies > 0"`,
+    `"opening_copies * win"`) in which a boolean counts as 1 and a null as 0;
+    a mean is a total over `rows`. Only rows for which `where` holds count.
+
+    A row is `table`'s, joined to each table in `join` on whichever of run,
+    match, seat and game both have; a column of both is `table`'s. `by` may
+    name `player`, the key of the player in the row's seat, and `opponents`,
+    the other seats' player keys in seat order, comma-joined. A column no
+    row of a match gave reads as null there.
+
+    Each block keeps its matches' partial totals in `NAME.parquet`, so
+    `statsdb` adds a block's totals and never reads an earlier block or a raw
+    row again.
     """
 
     name: str = Field(pattern=IDENTIFIER.pattern)
     table: str = Field(pattern=IDENTIFIER.pattern)
+    join: tuple[Annotated[str, Field(pattern=IDENTIFIER.pattern)], ...] = ()
     by: tuple[Annotated[str, Field(pattern=IDENTIFIER.pattern)], ...]
-    sums: tuple[Annotated[str, Field(pattern=IDENTIFIER.pattern)], ...] = ()
+    sums: dict[Annotated[str, Field(pattern=IDENTIFIER.pattern)], str] = {}
+    where: str | None = None
 
     @model_validator(mode="after")
     def distinct_columns(self) -> Self:
         columns = [*self.by, *self.sums]
         if len(set(columns)) != len(columns) or {*ADDED, ROLLUP_ROWS} & set(columns):
             raise ValueError("rollup_columns_must_be_distinct_author_columns")
+        tables = [self.table, *self.join]
+        if len(set(tables)) != len(tables):
+            raise ValueError("rollup_tables_must_be_distinct")
         return self
 
 

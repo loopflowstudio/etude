@@ -5,7 +5,7 @@ describe what `evaluate` plays; it knows nothing of tournaments
 (`etude.eval.tournament` arranges eval runs). The author's `play(match)`
 returns tables of rows, or a `Result` that also keeps blobs: bytes such as a
 game's replay evidence, which rows name by SHA256. A `Rollup` declared by the
-run is summed once per block as it is sealed. Etude checks that every row
+run is summed once per match as it is stored. Etude checks that every row
 names a `seat` or a `group` of its match and that a column keeps one type
 through the run, adds `run` and `match`, and stages the match
 (`etude.eval.block.Staging`). A refused or raising match is recorded as
@@ -40,7 +40,7 @@ from typing import TYPE_CHECKING, Literal, NoReturn
 
 from pydantic import BaseModel
 
-from etude.eval.block import Block, Staging, quote, run_blocks, seal_abandoned
+from etude.eval.block import Block, Staging, partial_totals, quote, run_blocks, seal_abandoned
 from etude.eval.records import (
     ADDED,
     COLUMN_TYPES,
@@ -325,17 +325,21 @@ class _Writer:
                 for table, rows in checked.items()
                 if rows
             }
-            for rollup in self.rollups:
-                if any(types.get(rollup.table, {}).get(c) == "VARCHAR" for c in rollup.sums):
-                    raise EtudeError("rollup_sum_not_numeric", 422) from ValueError(rollup.name)
             if not all(isinstance(blob, bytes) for blob in result.blobs):
                 raise EtudeError("blob_must_be_bytes", 422)
         except EtudeError as refused:
             self.fail(scheduled, refused)
+        staged = {table: [self.staging.table(table, scheduled.key)] for table in types}
         for table, columns in types.items():
-            self._write(
-                self.staging.table(table, scheduled.key), columns, checked[table], scheduled.key
-            )
+            self._write(staged[table][0], columns, checked[table], scheduled.key)
+        # A match's partial totals are taken now, so a rollup that cannot sum it refuses it.
+        try:
+            for rollup in self.rollups:
+                target = self.staging.partial(rollup.name, scheduled.key)
+                partial_totals(self.db, rollup, staged, [scheduled], target)
+        except EtudeError as refused:
+            self.fail(scheduled, refused)
+        for table, columns in types.items():
             self.columns.setdefault(table, {}).update(columns)
         digests = tuple(dict.fromkeys(sha256(blob).hexdigest() for blob in result.blobs))
         record = MatchRecord(

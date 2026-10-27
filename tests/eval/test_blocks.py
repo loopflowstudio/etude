@@ -20,7 +20,7 @@ from etude.eval.query import read_blobs, statsdb
 from etude.eval.records import Code, Match, MatchRecord, Rollup
 from etude.run.errors import EtudeError
 from etude.run.storage import DirectoryStorage, S3Storage
-from tests.eval.games import play, play_with_evidence
+from tests.eval.games import play, play_cards, play_with_evidence
 from tests.run.storage import CountedClient, MeasuredStorage
 
 DUEL = environment("duel")
@@ -168,7 +168,7 @@ def test_a_per_file_run_converts_to_blocks_with_the_same_rows_and_blobs(tmp_path
 
     local = DirectoryStorage(tmp_path / "local")
     shutil.copytree(old.root, local.root)
-    done = convert("a", local)
+    done = convert("a", local, rollups=[WINS])
     assert (done.blocks, done.matches, done.blobs) == (1, 6, 12)
     assert done.replaced == len(old_keys) - 3
     # A second pass finds nothing new.
@@ -176,6 +176,7 @@ def test_a_per_file_run_converts_to_blocks_with_the_same_rows_and_blobs(tmp_path
     db = statsdb("cards", local)
     converted = rows(db)
     assert converted == expected
+    assert totals(db) == from_rows(db)
     named = {digest for (digest,) in db.sql("select evidence_sha256 from games").fetchall()}
     held = dict(read_blobs(db, local, named))
     assert set(held) == named
@@ -237,7 +238,9 @@ def test_a_long_eval_run_seals_a_block_whenever_its_segment_is_old_enough(
     assert bucket.uploads == 3 + 3 * 3
 
 
-WINS = Rollup(name="wins", table="plays", by=("seat", "on_play"), sums=("won", "hits"))
+WINS = Rollup(
+    name="wins", table="plays", by=("seat", "on_play"), sums={"won": "won", "hits": "hits"}
+)
 
 
 class ReadStorage(MeasuredStorage):
@@ -300,6 +303,7 @@ def test_a_match_two_blocks_hold_counts_once_in_its_rollup(tmp_path: Path) -> No
     held = Block.model_validate_json((sealed / "block.json").read_bytes())
     staging = Staging(root, "0123456789ab", [WINS])
     shutil.copy(sealed / "plays.parquet", staging.table("plays", held.matches[0].match.key))
+    shutil.copy(sealed / "wins.parquet", staging.partial("wins", held.matches[0].match.key))
     staging.stage(held.matches[0])
     staging.close()
     evaluate(experiment="cards", environment=DUEL, play=play, matches=matches, run="a",
@@ -318,3 +322,95 @@ def test_a_resume_with_other_rollups_is_refused(tmp_path: Path) -> None:
         evaluate(experiment="cards", environment=DUEL, play=play, matches=matches, run="a",
                  directory=tmp_path)  # fmt: skip
     assert refused.value.code == "eval_run_rollups_conflict"
+
+
+# manabot's card page (`manabot.eval.card_query.card_data`): each card's counts and
+# winning counts, by deal and the filters the page offers, over eligible games.
+CARDS = Rollup(
+    name="card_deals",
+    table="card_counts",
+    join=("card_plays",),
+    by=("card", "deal", "on_play", "deck", "opponent_deck", "player", "opponents"),
+    sums={
+        "gp": "deck_copies > 0",
+        "gp_wins": "if(deck_copies > 0, win, 0)",
+        "oh": "opening_copies",
+        "oh_wins": "opening_copies * win",
+        "gd": "drawn_copies",
+        "gd_wins": "drawn_copies * win",
+        "gih": "gih_copies",
+        "gih_wins": "gih_copies * win",
+        "gns": "deck_copies > 0 and gih_copies = 0",
+        "gns_wins": "if(deck_copies > 0 and gih_copies = 0, win, 0)",
+    },
+    where="eligible",
+)
+
+
+def card_page(db: duckdb.DuckDBPyConnection, where: str = "true") -> list[tuple[object, ...]]:
+    """`card_data`'s per-card-and-deal sums, from raw rows."""
+    return db.sql(
+        "select c.card, p.deal,"
+        " count(*) filter (where c.deck_copies > 0),"
+        " coalesce(sum(p.win) filter (where c.deck_copies > 0), 0),"
+        " sum(c.opening_copies), sum(c.opening_copies * p.win),"
+        " sum(c.drawn_copies), sum(c.drawn_copies * p.win),"
+        " sum(c.gih_copies), sum(c.gih_copies * p.win),"
+        " count(*) filter (where c.deck_copies > 0 and c.gih_copies = 0),"
+        " coalesce(sum(p.win) filter (where c.deck_copies > 0 and c.gih_copies = 0), 0)"
+        " from card_counts c join card_plays p using (run, match, seat, game)"
+        " join seats s on s.run = p.run and s.match = p.match and s.seat = p.seat"
+        " join seats o on o.run = p.run and o.match = p.match and o.seat = 1 - p.seat"
+        f" where p.eligible and {where} group by all order by all"
+    ).fetchall()
+
+
+def card_rollup(db: duckdb.DuckDBPyConnection, where: str = "true") -> list[tuple[object, ...]]:
+    sums = ", ".join(f"sum({column})" for column in CARDS.sums)
+    return db.sql(
+        f"select card, deal, {sums} from card_deals where {where} group by all order by all"
+    ).fetchall()
+
+
+def test_a_rollup_holds_the_card_page_and_a_catch_up_reads_only_the_new_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(block, "SEAL_SECONDS", 0.0)
+    strong, weak = pair(tmp_path)
+    matches = deals((strong, weak), 4)
+    evaluate(experiment="cards", environment=DUEL, play=play_cards, matches=matches[:3],
+             run="a", directory=tmp_path / "a", storages=[DirectoryStorage(tmp_path / "bucket")],
+             rollups=[CARDS])  # fmt: skip
+    db = statsdb("cards", tmp_path / "bucket")
+    assert card_rollup(db) == card_page(db) and len(card_page(db)) == 3 * 2
+    # The page's filters select the same games from the rollup alone.
+    assert card_rollup(db, f"player = '{strong.key}' and on_play and deck = 'red'") == card_page(
+        db, f"s.player = '{strong.key}' and p.on_play and p.deck = 'red'"
+    )
+    assert card_rollup(db, f"opponents = '{weak.key}'") == card_page(db, f"o.player = '{weak.key}'")
+    db.close()
+
+    evaluate(experiment="cards", environment=DUEL, play=play_cards, matches=matches,
+             run="a", directory=tmp_path / "a", storages=[DirectoryStorage(tmp_path / "bucket")],
+             rollups=[CARDS])  # fmt: skip
+    reading = ReadStorage(DirectoryStorage(tmp_path / "bucket"))
+    db = statsdb("cards", reading)
+    # The new block's index, two tables and partial totals: nothing of an earlier block.
+    assert (reading.listings, reading.requests) == (1, 4)
+    assert card_rollup(db) == card_page(db)
+    db.close()
+
+
+def test_a_rollup_that_cannot_sum_a_match_refuses_it(tmp_path: Path) -> None:
+    text = Rollup(name="named", table="card_counts", by=("card",), sums={"cards": "card"})
+    with pytest.raises(EtudeError) as refused:
+        evaluate(experiment="cards", environment=DUEL, play=play_cards,
+                 matches=deals(pair(tmp_path), 1), run="a", directory=tmp_path,
+                 rollups=[text])  # fmt: skip
+    assert refused.value.code == "match_failed"
+    assert "rollup_sum_not_numeric" in repr(refused.value.__cause__)
+    # The failed match's block keeps its record and none of its rows.
+    (sealed,) = (tmp_path / "a" / "blocks").glob("[0-9]*")
+    kept = Block.model_validate_json((sealed / "block.json").read_bytes())
+    assert [record.state for record in kept.matches] == ["failed"]
+    assert (kept.tables, kept.totals) == ((), ())

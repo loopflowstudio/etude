@@ -19,9 +19,11 @@ A table's rows are sorted by match, and by game where rows name one, in small
 row groups, so a read filtered to a few matches skips most of a file, locally
 or by range reads from a bucket.
 
-A rollup's partial totals are taken when its block is sealed, per match, so
-a reader adds them up without the raw rows, and a match held by two blocks
-(a block sealed again after a crash) counts once, from the later.
+A rollup's partial totals are taken per match as it is stored (`partial_totals`,
+so a rollup that cannot be summed refuses the match) and merged into the
+block's file when it is sealed, so a reader adds them up without the raw
+rows, and a match held by two blocks (a block sealed again after a crash)
+counts once, from the later.
 
 A staging folder holds a lock while its writer lives. One whose writer died
 is sealed by the next writer in the run's folder (`seal_abandoned`), so a
@@ -32,6 +34,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -41,11 +44,19 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from pydantic import Field, TypeAdapter
+from pydantic import Field, JsonValue, TypeAdapter
 
 from etude.cache import Content
 from etude.carriage import EVAL_BLOCK_INDEX, EVAL_BLOCK_PACK, EVAL_BLOCKS
-from etude.eval.records import ROLLUP_ROWS, TABLE_FILE, MatchRecord, Rollup
+from etude.eval.records import (
+    ADDED,
+    ROLLUP_ROWS,
+    ROLLUP_SEATED,
+    TABLE_FILE,
+    Match,
+    MatchRecord,
+    Rollup,
+)
 from etude.run.errors import EtudeError
 from etude.run.records import Digest, Name, Record
 from etude.run.storage import Storage
@@ -63,6 +74,15 @@ ROW_GROUP_ROWS = 8192
 # A staging folder's rollups, so a dead writer's matches are sealed with its own.
 _ROLLUPS = "rollups.json"
 _ROLLUP_LIST: TypeAdapter[tuple[Rollup, ...]] = TypeAdapter(tuple[Rollup, ...])
+# What a staging folder holds, each in its own folder.
+_PARTS = ("tables", "rollups", "blobs", "records")
+# Columns a rollup joins tables on, where both have them.
+_JOINED = ("run", "match", "seat", "game")
+# Types a sum totals as whole numbers. A column no row gave is a null, INTEGER.
+_WHOLE = frozenset(
+    ["BOOLEAN", "TINYINT", "SMALLINT", "INTEGER", "BIGINT",
+     "UTINYINT", "USMALLINT", "UINTEGER", "UBIGINT", "HUGEINT", "UHUGEINT"]
+)  # fmt: skip
 # A ZIP local file header's fixed part, before the member's name and extra field.
 _LOCAL_HEADER = 30
 
@@ -87,8 +107,9 @@ class Block(Record):
     blobs: dict[Digest, Span] = {}
     # Keys of the per-file layout (relative to the run) a converted block holds.
     replaces: tuple[str, ...] = ()
-    # The run's rollups; each whose table the block holds has a `ROLLUP.parquet`.
+    # The run's rollups, and those with a `ROLLUP.parquet` of partial totals in the block.
     rollups: tuple[Rollup, ...] = ()
+    totals: tuple[Name, ...] = ()
 
     @property
     def name(self) -> str:
@@ -97,7 +118,7 @@ class Block(Record):
     @property
     def summed(self) -> tuple[Rollup, ...]:
         """The rollups with partial totals in this block."""
-        return tuple(rollup for rollup in self.rollups if rollup.table in self.tables)
+        return tuple(rollup for rollup in self.rollups if rollup.name in self.totals)
 
     @property
     def files(self) -> list[str]:
@@ -168,7 +189,7 @@ class Staging:
     def __init__(self, root: Path, writer: str, rollups: Sequence[Rollup] = ()) -> None:
         self.root, self.writer, self.rollups = root, writer, tuple(rollups)
         self.path = root / EVAL_BLOCKS / f".{writer}"
-        for part in ("tables", "blobs", "records"):
+        for part in _PARTS:
             (self.path / part).mkdir(parents=True, exist_ok=True)
         # When the open segment's first match was staged here, and its blob bytes.
         self._opened: float | None = None
@@ -184,6 +205,12 @@ class Staging:
     def table(self, table: str, match: Digest) -> Path:
         """Where a match's rows of `table` are written, as Parquet."""
         folder = self.path / "tables" / table
+        folder.mkdir(exist_ok=True)
+        return folder / f"{match}.parquet"
+
+    def partial(self, rollup: str, match: Digest) -> Path:
+        """Where a match's partial totals of a rollup are written, as Parquet."""
+        folder = self.path / "rollups" / rollup
         folder.mkdir(exist_ok=True)
         return folder / f"{match}.parquet"
 
@@ -218,19 +245,32 @@ class Staging:
         )
         if not records:
             return None
-        staged = {record.match.key for record in records}
-        tables = {
-            folder.name: paths
-            for folder in sorted((self.path / "tables").iterdir())
-            if (paths := [path for path in sorted(folder.iterdir()) if path.stem in staged])
-        }
+        # A failed match keeps no rows, though a rollup that refused it found them staged.
+        staged = {record.match.key for record in records if record.state == "done"}
+        tables, partials = (
+            {
+                folder.name: paths
+                for folder in sorted((self.path / part).iterdir())
+                if (paths := [path for path in sorted(folder.iterdir()) if path.stem in staged])
+            }
+            for part in ("tables", "rollups")
+        )
         blobs = {
             digest: self.path / "blobs" / digest
             for record in records
             for digest in record.blobs
         }  # fmt: skip
-        block = write(self.root, self.writer, records, tables, blobs, db, rollups=self.rollups)
-        for part in ("tables", "blobs", "records"):
+        block = write(
+            self.root,
+            self.writer,
+            records,
+            tables,
+            blobs,
+            db,
+            rollups=self.rollups,
+            partials=partials,
+        )
+        for part in _PARTS:
             shutil.rmtree(self.path / part)
             (self.path / part).mkdir()
         self._opened, self._bytes = None, 0
@@ -271,9 +311,10 @@ def write(
     *,
     replaces: Sequence[str] = (),
     rollups: Sequence[Rollup] = (),
+    partials: Mapping[str, Sequence[Path]] = {},
 ) -> Block:
     """Write one block to the run's folder `root`: its pack, each table merged, each
-    rollup's partial totals, then its index.
+    rollup's partial totals (`partial_totals` files, by rollup) merged, then its index.
 
     Each table's Parquet files are merged into one; a column given whole
     numbers in one file and fractions in another becomes fractions.
@@ -284,13 +325,14 @@ def write(
     folder.mkdir(parents=True)
     pack, spans = (None, {}) if not blobs else _pack(folder / EVAL_BLOCK_PACK, blobs)
     for table, paths in tables.items():
-        files = ", ".join(quote(path) for path in paths)
-        merged = f"read_parquet([{files}], union_by_name = true)"
-        order = ", ".join(f'"{c}"' for c in ("match", "game") if c in _columns(db, merged))
+        merged = _parquet(paths)
+        order = ", ".join(_quoted(c for c in ("match", "game") if c in _columns(db, merged)))
         _copy(db, f"select * from {merged} order by {order}", folder / f"{table}.parquet")
-    for rollup in rollups:
-        if rollup.table in tables:
-            _sum(db, rollup, folder / f"{rollup.table}.parquet", folder / f"{rollup.name}.parquet")
+    totals = [rollup for rollup in rollups if partials.get(rollup.name)]
+    for rollup in totals:
+        order = ", ".join(_quoted(["run", "match", *rollup.by]))
+        merged = _parquet(partials[rollup.name])
+        _copy(db, f"select * from {merged} order by {order}", folder / f"{rollup.name}.parquet")
     block = Block(
         writer=writer,
         written_ns=written,
@@ -300,36 +342,143 @@ def write(
         blobs=spans,
         replaces=tuple(replaces),
         rollups=tuple(rollups),
+        totals=tuple(rollup.name for rollup in totals),
     )
     _write(folder / EVAL_BLOCK_INDEX, block.model_dump_json().encode())
     return block
 
 
-def _sum(db: duckdb.DuckDBPyConnection, rollup: Rollup, table: Path, target: Path) -> None:
-    """Write each match's partial totals of `rollup` over a block's rows of its table.
+def partial_totals(
+    db: duckdb.DuckDBPyConnection,
+    rollup: Rollup,
+    tables: Mapping[str, Sequence[Path]],
+    matches: Sequence[Match],
+    target: Path,
+) -> bool:
+    """Write each match's partial totals of `rollup` over `tables`' rows to `target`.
 
-    A column the block's rows never gave reads as nulls. Whole numbers and
-    booleans sum to whole numbers, fractions to fractions.
+    False, writing nothing, when the rollup's table or one it joins has no
+    rows here. Whole numbers and booleans sum to whole numbers, fractions to
+    fractions. Raises `rollup_refused` for an expression DuckDB cannot
+    evaluate here, `rollup_sum_not_numeric` for a sum of text, and
+    `rollup_needs_seat` for `player` or `opponents` over rows naming no seat.
     """
-    source = f"read_parquet({quote(table)})"
-    columns = _columns(db, source)
-    by = [f'"{c}"' if c in columns else f'cast(null as VARCHAR) as "{c}"' for c in rollup.by]
-    sums = []
-    for column in rollup.sums:
-        kind = "DOUBLE" if columns.get(column) == "DOUBLE" else "BIGINT"
-        if columns.get(column) == "VARCHAR":
-            raise EtudeError("rollup_sum_not_numeric", 422) from ValueError(
-                f"rollup {rollup.name!r}: column {column!r} of {rollup.table!r} holds text"
-            )
-        total = f'sum(cast("{column}" as {kind}))' if column in columns else "0"
-        sums.append(f'cast(coalesce({total}, 0) as {kind}) as "{column}"')
-    keys = ", ".join(["run", "match", *(f'"{c}"' for c in rollup.by)])
-    _copy(
-        db,
-        f"select run, match, {', '.join(by)}, count(*) as {ROLLUP_ROWS}"
-        f"{''.join(', ' + each for each in sums)} from {source} group by {keys} order by {keys}",
-        target,
+    # Imported here: DuckDB is the optional `eval` extra.
+    import duckdb  # noqa: PLC0415
+
+    if not all(tables.get(table) for table in (rollup.table, *rollup.join)):
+        return False
+    try:
+        source = _joined(db, rollup, tables, matches)
+        held = _columns(db, source)
+        expressions = [*rollup.sums.values(), *([rollup.where] if rollup.where else [])]
+        named = {c for each in expressions for c in _referenced(db, rollup, each)}
+        if absent := sorted(c for c in {*rollup.by, *named} if c not in held):
+            nulls = ", ".join(f"null as {c}" for c in _quoted(absent))
+            source = f"(select *, {nulls} from {source})"
+        sums = []
+        for column, expression in rollup.sums.items():
+            kind = _sum_type(db, rollup, column, f"select ({expression}) from {source}")
+            total = f"coalesce(sum(cast(({expression}) as {kind})), 0)"
+            sums.append(f'cast({total} as {kind}) as "{column}"')
+        where = f" where ({rollup.where})" if rollup.where else ""
+        keys = ", ".join(_quoted(["run", "match", *rollup.by]))
+        _copy(
+            db,
+            f"select {keys}, count(*) as {ROLLUP_ROWS}{''.join(', ' + each for each in sums)}"
+            f" from {source}{where} group by {keys} order by {keys}",
+            target,
+        )
+    except duckdb.Error as error:
+        raise EtudeError("rollup_refused", 422) from ValueError(f"rollup {rollup.name!r}: {error}")
+    return True
+
+
+def _joined(
+    db: duckdb.DuckDBPyConnection,
+    rollup: Rollup,
+    tables: Mapping[str, Sequence[Path]],
+    matches: Sequence[Match],
+) -> str:
+    """A rollup's rows: its table joined to the others, with each seat's players when `by` names them."""
+    source = _parquet(tables[rollup.table])
+    for table in rollup.join:
+        held, other = _columns(db, source), _columns(db, _parquet(tables[table]))
+        keys = [c for c in _JOINED if c in held and c in other]
+        shared = [c for c in other if c in held and c not in keys]
+        dropped = f" exclude ({', '.join(_quoted(shared))})" if shared else ""
+        source = (
+            f"(select * from {source} join (select *{dropped} from {_parquet(tables[table])})"
+            f" using ({', '.join(_quoted(keys))}))"
+        )
+    if not set(rollup.by) & set(ROLLUP_SEATED):
+        return source
+    held = _columns(db, source)
+    if "seat" not in held:
+        raise EtudeError("rollup_needs_seat", 422) from ValueError(rollup.name)
+    if set(held) & set(ROLLUP_SEATED):
+        raise EtudeError("rollup_column_reserved", 422) from ValueError(rollup.name)
+    db.execute(
+        "create or replace temp table _seated"
+        " (match VARCHAR, seat BIGINT, player VARCHAR, opponents VARCHAR)"
     )
+    db.executemany(
+        "insert into _seated values (?, ?, ?, ?)",
+        [
+            [match.key, seat, player.key,
+             ",".join(other.key for at, other in enumerate(match.players) if at != seat)]
+            for match in matches
+            for seat, player in enumerate(match.players)
+        ],
+    )  # fmt: skip
+    return f"(select * from {source} left join _seated using (match, seat))"
+
+
+def _parquet(paths: Sequence[Path]) -> str:
+    files = ", ".join(quote(path) for path in paths)
+    return f"read_parquet([{files}], union_by_name = true)"
+
+
+def _quoted(columns: Iterable[str]) -> list[str]:
+    return [f'"{c}"' for c in columns]
+
+
+def _sum_type(db: duckdb.DuckDBPyConnection, rollup: Rollup, column: str, query: str) -> str:
+    """BIGINT or DOUBLE: what a sum's expression totals as."""
+    ((_, kind, *_),) = db.execute(f"describe {query}").fetchall()
+    if kind in ("FLOAT", "DOUBLE") or str(kind).startswith("DECIMAL"):
+        return "DOUBLE"
+    if kind in _WHOLE:
+        return "BIGINT"
+    raise EtudeError("rollup_sum_not_numeric", 422) from ValueError(
+        f"rollup {rollup.name!r}: sum {column!r} is {kind}"
+    )
+
+
+def _referenced(db: duckdb.DuckDBPyConnection, rollup: Rollup, expression: str) -> set[str]:
+    """The columns an expression names; raises `rollup_refused` unless it is one expression."""
+    found = db.execute("select json_serialize_sql(?)", [f"select ({expression})"]).fetchone()
+    tree = json.loads(found[0]) if found else {}
+    statements = tree.get("statements", [])
+    if tree.get("error") or len(statements) != 1 or len(statements[0]["node"]["select_list"]) != 1:
+        raise EtudeError("rollup_refused", 422) from ValueError(
+            f"rollup {rollup.name!r}: {expression!r} is not one expression"
+        )
+    columns: set[str] = set()
+
+    def walk(node: JsonValue) -> None:
+        if isinstance(node, dict):
+            names = node.get("column_names")
+            if node.get("class") == "COLUMN_REF" and isinstance(names, list):
+                columns.add(str(names[-1]))
+            for each in node.values():
+                walk(each)
+        elif isinstance(node, list):
+            for each in node:
+                walk(each)
+
+    walk(statements[0]["node"]["select_list"])
+    return columns - set(ADDED)
 
 
 def _columns(db: duckdb.DuckDBPyConnection, source: str) -> dict[str, str]:

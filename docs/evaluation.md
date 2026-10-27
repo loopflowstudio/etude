@@ -187,21 +187,35 @@ evaluate(
   and name each blob in a row by `hashlib.sha256(blob).hexdigest()`.
   `read_blobs(db, store, digests)` gives them back, verified.
 - **Rollups.** A summary you will query often is declared once and summed
-  as each block is sealed, never from raw rows again:
+  as each match is stored, never from raw rows again:
 
   ```python
   from etude.eval.records import Rollup
 
-  wins = Rollup(name="wins", table="plays", by=("seat", "on_play"), sums=("won", "hits"))
-  evaluate(..., rollups=[wins])
+  cards = Rollup(
+      name="card_deals",
+      table="card_counts",
+      join=("card_plays",),
+      by=("card", "deal", "on_play", "player", "opponents"),
+      sums={"gih": "gih_copies", "gih_wins": "gih_copies * win"},
+      where="eligible",
+  )
+  evaluate(..., rollups=[cards])
   ```
 
-  `statsdb` then has table `wins`: per run and value of `by`, `rows` and
-  the total of each of `sums` (a null counts as 0; a mean is a total over
-  `rows`). Each block keeps its matches' partial totals in `wins.parquet`;
-  `statsdb` adds a new block's to the totals it holds, and a match two blocks
-  hold counts once, from the later. A run keeps the rollups its first block
-  had: resuming with others is refused (`eval_run_rollups_conflict`).
+  `statsdb` then has table `card_deals`: per run and value of `by`, `rows`
+  and the total of each of `sums`, a DuckDB expression over a row (a
+  boolean counts as 1, a null as 0; a mean is a total over `rows`), over
+  the rows for which `where` holds. A row is `table`'s joined to each of
+  `join` on whichever of run, match, seat and game both have. `by` may name
+  `player`, the key of the row's seat's player, and `opponents`, the other
+  seats' keys in seat order, comma-joined. A column a match's rows never
+  gave reads as null. A rollup that cannot sum a match (a sum of text, an
+  expression DuckDB rejects) fails the match. Each block keeps its matches'
+  partial totals in `card_deals.parquet`; `statsdb` adds a new block's to the
+  totals it holds, and a match two blocks hold counts once, from the later.
+  A run keeps the rollups its first block had: resuming with others is
+  refused (`eval_run_rollups_conflict`).
 - **Strict.** A row with neither or both of `seat` and `group`, a seat or
   group the match lacks, a column named `player`, or a column whose type
   changes during a run is refused. A refused or raising match is recorded as failed with its error,

@@ -27,6 +27,7 @@ from etude.eval.block import (
     SEAL_BYTES,
     Block,
     file_key,
+    partial_totals,
     per_file,
     quote,
     read,
@@ -174,22 +175,30 @@ def _convert(
     latest: dict[str, Sequence[Path]] = {
         table: [_latest(db, table, paths, scratch)] for table, paths in tables.items()
     }
+    held = sorted(records.values(), key=lambda r: (r.wall_ms, r.match.key))
+    partials: dict[str, Sequence[Path]] = {}
+    for rollup in rollups:
+        target = scratch / "rollups" / f"{rollup.name}.parquet"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if partial_totals(db, rollup, latest, [r.match for r in held], target):
+            partials[rollup.name] = [target]
     artifacts = [name for name in old if name.startswith("artifacts/")]
     packs = _packs(copies, artifacts)
     root = scratch / "run"
     blocks: list[Block] = []
-    for index, (blobs, held) in enumerate(packs or [({}, [])]):
+    for index, (blobs, packed) in enumerate(packs or [({}, [])]):
         first = index == 0
         replaces = [name for name in old if not name.startswith("artifacts/")] if first else []
         block = write(
             root,
             secrets.token_hex(6),
-            sorted(records.values(), key=lambda r: (r.wall_ms, r.match.key)) if first else [],
+            held if first else [],
             latest if first else {},
             blobs,
             db,
-            replaces=[*replaces, *held],
+            replaces=[*replaces, *packed],
             rollups=rollups,
+            partials=partials if first else {},
         )
         _deliver(storage, folder, root, block)
         blocks.append(block)
