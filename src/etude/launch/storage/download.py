@@ -17,7 +17,9 @@ idle every connection. At most two ranges are held in memory.
 from __future__ import annotations
 
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextvars import copy_context
 from functools import partial
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -37,10 +39,48 @@ from etude.launch.storage.s3 import (
     StorageUnavailable,
     _send,
 )
-from etude.launch.storage.transport import Pending, attribute, emit, submit
+from etude.launch.storage.transport import attribute, deliver, emit, observe
 
 PART_BYTES = 16 * 1024**2
 CONNECTIONS = 32
+
+
+class _Pending[T]:
+    """An operation running on a worker thread; its observations wait for its result."""
+
+    def __init__(self, future: Future[T], events: list[str]) -> None:
+        self._future, self._events = future, events
+
+    def result(self) -> T:
+        """Wait for the operation, then emit what it observed on this thread.
+
+        A sink that owns a SQLite connection so keeps it.
+        """
+        try:
+            return self._future.result()
+        finally:
+            events, self._events = self._events, []
+            for raw in events:
+                deliver(raw)
+
+    def abandon(self) -> None:
+        """Stop it if it has not begun, else wait for it; either way emit what it observed."""
+        if not self._future.cancel():
+            try:
+                self.result()
+            except Exception:  # noqa: S110 - abandoned: its outcome no longer matters
+                pass
+
+
+def _submit[T](pool: ThreadPoolExecutor, operation: Callable[[], T]) -> _Pending[T]:
+    """Run `operation` on `pool` in a copy of this context: its deadline and attribution."""
+    events: list[str] = []
+
+    def run() -> T:
+        with observe(events.append):
+            return operation()
+
+    return _Pending(pool.submit(copy_context().run, run), events)
 
 
 class Download(Record):
@@ -60,7 +100,7 @@ class _Link:
         self.source, self.retries, self.send = source, retries, send
         self._retrying = threading.Lock()
         self._pool = ThreadPoolExecutor(CONNECTIONS)
-        self._parts: dict[int, Pending[Fetched]] = {}  # by first byte, running or read
+        self._parts: dict[int, _Pending[Fetched]] = {}  # by first byte, running or read
 
     def read(self, start: int, end: int | None, etag: str | None) -> Fetched:
         size = self.source.size_bytes
@@ -71,7 +111,7 @@ class _Link:
         # The cache asks next for the range after this one, of the same length.
         for first, last in (*bounds, *self._bounds(end + 1, min(size - 1, 2 * end - start + 1))):
             if first not in self._parts:
-                self._parts[first] = submit(self._pool, partial(self._part, first, last, etag))
+                self._parts[first] = _submit(self._pool, partial(self._part, first, last, etag))
         pieces = [self._parts.pop(first).result() for first, _ in bounds]
         if any(piece.etag != (etag or pieces[0].etag) for piece in pieces):
             raise StorageUnavailable("download parts came from different object versions")

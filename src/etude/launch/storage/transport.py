@@ -14,9 +14,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterator, Mapping
-from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
-from contextvars import ContextVar, copy_context
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -105,54 +104,16 @@ def emit(
         "completed": completed,
         "reused_bytes": reused,
     }
-    _deliver(json.dumps(event, separators=(",", ":")))
+    deliver(json.dumps(event, separators=(",", ":")))
 
 
-def _deliver(raw: str) -> None:
+def deliver(raw: str) -> None:
     """Hand one observation to this thread's sink, or the worker log without one."""
     sink = _sink.get()
     if sink is None:
         write_log("transfer", raw)
     else:
         sink(raw)
-
-
-class Pending[T]:
-    """An operation running on a worker thread; its observations wait for its result."""
-
-    def __init__(self, future: Future[T], events: list[str]) -> None:
-        self._future, self._events = future, events
-
-    def result(self) -> T:
-        """Wait for the operation, then emit what it observed on this thread.
-
-        A sink that owns a SQLite connection so keeps it.
-        """
-        try:
-            return self._future.result()
-        finally:
-            events, self._events = self._events, []
-            for raw in events:
-                _deliver(raw)
-
-    def abandon(self) -> None:
-        """Stop it if it has not begun, else wait for it; either way emit what it observed."""
-        if not self._future.cancel():
-            try:
-                self.result()
-            except Exception:  # noqa: S110 - abandoned: its outcome no longer matters
-                pass
-
-
-def submit[T](pool: ThreadPoolExecutor, operation: Callable[[], T]) -> Pending[T]:
-    """Run `operation` on `pool` in a copy of this context: its deadline and attribution."""
-    events: list[str] = []
-
-    def run() -> T:
-        _sink.set(events.append)
-        return operation()
-
-    return Pending(pool.submit(copy_context().run, run), events)
 
 
 def request(
