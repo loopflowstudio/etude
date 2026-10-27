@@ -44,11 +44,12 @@ from etude.call import Function, config_type
 from etude.carriage import CHECKPOINTS
 from etude.eval.match import Tables
 from etude.eval.records import (
-    Agent,
     Benchmark,
     CheckpointKey,
     CheckpointRef,
     Match,
+    Model,
+    Player,
     RoundRobin,
     digest,
 )
@@ -125,7 +126,7 @@ class Evaluation(Record):
     # Checkpoints an experiment's eval chose to hold the benchmark for.
     checkpoints: tuple[Checkpoint, ...] = ()
     # A round robin's entrants.
-    entrants: tuple[Agent, ...] = ()
+    entrants: tuple[Player, ...] = ()
     workers: int = Field(default=1, ge=1)
     # The matches a pass found new (`etude.experiment.advance`), and the
     # job input holding each checkpoint they seat, by its key encoded.
@@ -140,17 +141,18 @@ def evaluation(
     experiment: str | None = None,
     checkpoint: Input | None = None,
     checkpoints: Sequence[Checkpoint] = (),
-    enter: Sequence[Agent] = (),
+    enter: Sequence[Player] = (),
     workers: int = 1,
     **options: Unpack[JobOptions],
 ) -> Job:
     """A job that holds `tournament` with the author's `play`, as one eval run of `experiment`.
 
     A benchmark is held for `checkpoint`, which reaches the machine as the
-    job's input and fills every model seat; a round robin plays every pair of
-    `enter`. Each model's config is in its seat (`etude.eval.records.Model`),
-    so the tournament is the whole of what is evaluated. The eval run is the
-    launched run, so `etude logs` and `status` lead to it and a retry resumes it.
+    job's input and fills every inference seat; a round robin plays every pair
+    of `enter`. Each inference seat's config is in its matchup
+    (`etude.eval.records.Inference`), so the tournament is the whole of what is
+    evaluated. The eval run is the launched run, so `etude logs` and `status`
+    lead to it and a retry resumes it.
 
     An experiment's `eval(state)` returns one with `checkpoints` instead, the
     ones it chose, or none for matchups of chosen checkpoints alone, and no
@@ -338,16 +340,20 @@ def _hold(evaluation: Evaluation) -> None:
 
 
 def _located(match: Match, here: Mapping[str, str]) -> Match:
-    """The match with each checkpoint agent's file where it lies on this machine."""
-    agents = []
-    for seated in match.agents:
-        key = seated.key.checkpoint
-        if key is None or seated.artifact is None or str(key) not in here:
-            agents.append(seated)
+    """The match with each model's checkpoint file where it lies on this machine."""
+    players: list[Player] = []
+    for player in match.players:
+        if not isinstance(player, Model) or str(player.checkpoint.key) not in here:
+            players.append(player)
             continue
-        moved = seated.artifact.model_copy(update={"uri": here[str(key)]})
-        agents.append(seated.model_copy(update={"artifact": moved}))
-    return match.model_copy(update={"agents": tuple(agents)})
+        checkpoint = player.checkpoint
+        moved = checkpoint.artifact.model_copy(update={"uri": here[str(checkpoint.key)]})
+        players.append(
+            player.model_copy(
+                update={"checkpoint": checkpoint.model_copy(update={"artifact": moved})}
+            )
+        )
+    return match.model_copy(update={"players": tuple(players)})
 
 
 def _job(

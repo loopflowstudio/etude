@@ -253,9 +253,9 @@ imports nothing else of Etude before the function's own module.
   from the project's environment: `uv run etude launch job.py`.
 - **An evaluation** holds a [tournament](evaluation.md#tournaments) as one eval
   run, which is the launched run. A benchmark's `checkpoint` is an `Input`: it
-  reaches the machine verified by digest and fills every model seat, where
-  `play` finds the file at the agent's `uri`. A round robin takes `enter=`
-  agents. Holding nothing new (batch) is refused, since a launched job reads no
+  reaches the machine verified by digest and fills every inference seat, where
+  `play` finds the file at the model's `checkpoint.artifact.uri`. A round robin
+  takes `enter=` players. Holding nothing new (batch) is refused, since a launched job reads no
   other eval run. `workers=` plays matches in parallel processes. The job's
   environment needs `etude-sdk[eval]`.
 - **Commands are for work that is not Python**:

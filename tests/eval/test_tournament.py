@@ -2,21 +2,24 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 
+import duckdb
 import pytest
 
-from etude.eval.match import Tables, agent, environment, evaluate
+from etude.eval.match import Tables, environment, evaluate
 from etude.eval.query import statsdb
 from etude.eval.records import (
-    Agent,
     Benchmark,
     CheckpointKey,
     CheckpointRef,
+    Code,
+    Inference,
     Match,
     Matchup,
     Model,
@@ -34,16 +37,16 @@ from tests.run.storage import MeasuredStorage
 WORLD = environment("duel", config={"world": "w6"})
 OTHER = environment("duel", config={"world": "w7"})
 DEALS = tuple({"deal": deal} for deal in range(3))
-DIRECT, SEARCH = Model(config={"search": 0}), Model(config={"search": 2})
+DIRECT, SEARCH = Inference(config={"search": 0}), Inference(config={"search": 2})
 # The experiment trains the model and evaluates it.
 EXPERIMENT = "ppo"
 
 
-def scripted(tmp_path: Path, name: str, strength: int) -> Agent:
+def scripted(tmp_path: Path, name: str, strength: int) -> Code:
     script = tmp_path / "players" / f"{name}.py"
     script.parent.mkdir(exist_ok=True)
     script.write_text(f"STRENGTH = {strength}\n")
-    return agent(name, code=[script], config={"strength": strength})
+    return Code(name=name, source=[script], config={"strength": strength})
 
 
 def trained(tmp_path: Path, bucket: DirectoryStorage) -> list[CheckpointRef]:
@@ -182,6 +185,76 @@ def test_a_batch_hold_skips_what_any_eval_run_of_its_environment_delivered(tmp_p
     lines = {line.matchup: line for line in curves(statsdb(EXPERIMENT, bucket), "anchors", table="plays",
                                                    value="won")}  # fmt: skip
     assert [p.matches for p in lines["search vs greedy"].points] == [len(DEALS)] * 3
+
+
+def _agent(player: object) -> object:
+    """A player as published etude-sdk stored it: an `Agent` keyed by checkpoint or code."""
+    if not isinstance(player, dict):
+        return player
+    if player.get("kind") == "model":
+        key = {
+            "checkpoint": player["checkpoint"]["key"],
+            "code": None,
+            "recorded": None,
+            "config": player["inference"]["config"],
+        }
+        return {
+            "key": key,
+            "name": player["name"],
+            "artifact": player["checkpoint"]["artifact"],
+            "version": player["inference"]["version"],
+        }
+    if player.get("kind") == "code":
+        key = {
+            "checkpoint": None,
+            "code": player["name"],
+            "recorded": None,
+            "config": player["config"],
+        }
+        return {"key": key, "name": player["name"], "artifact": None, "version": player["version"]}
+    return {name: _published(value) for name, value in player.items()}
+
+
+def _published(value: object) -> object:
+    if isinstance(value, list):
+        return [_agent(each) for each in value]
+    return _agent(value)
+
+
+def _as_published(bucket: Path) -> None:
+    """Rewrite every eval run as published etude-sdk stored it: agents, and seats as `player`."""
+    for file in bucket.rglob("tournament.json"):
+        file.write_text(json.dumps(_published(json.loads(file.read_text()))))
+    for file in bucket.rglob("matches/*.json"):
+        record = json.loads(file.read_text())
+        record["match"]["agents"] = _published(record["match"].pop("players"))
+        file.write_text(json.dumps(record))
+    for file in bucket.rglob("tables/*.parquet"):
+        duckdb.sql(
+            f"copy (select * rename (seat as player) from read_parquet('{file}'))"
+            f" to '{file}' (format parquet)"
+        )
+
+
+def test_a_batch_hold_over_eval_runs_stored_with_agents_replays_nothing(tmp_path: Path) -> None:
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    progress = anchors(tmp_path)
+    for each in trained(tmp_path, bucket):
+        hold(progress, experiment=EXPERIMENT, checkpoint=each, play=play, storages=[bucket],
+             directory=tmp_path / str(each.key.name))  # fmt: skip
+    before = curves(statsdb(EXPERIMENT, bucket), "anchors", table="plays", value="won")
+    _as_published(tmp_path / "bucket")
+    assert all(
+        '"agents"' in file.read_text() for file in (tmp_path / "bucket").rglob("matches/*.json")
+    )
+
+    again = hold(
+        progress, experiment=EXPERIMENT, play=play, storages=[bucket], directory=tmp_path / "batch"
+    )
+    # The stored keys and matchup definitions are unchanged: nothing replays, nothing conflicts.
+    assert again.played == 0
+    db = statsdb(EXPERIMENT, bucket, rebuild=True)
+    assert curves(db, "anchors", table="plays", value="won") == before
 
 
 def test_a_matchup_name_redefined_is_refused_by_a_batch_hold_and_on_read(
@@ -362,7 +435,14 @@ def test_each_share_of_a_checkpoint_benchmark_seats_fewer_checkpoints_than_a_rou
              share=(k, 2), storages=[bucket], directory=tmp_path / f"machine-{k}")  # fmt: skip
 
     def seated(matches: Sequence[Match]) -> int:
-        return len({each.key.checkpoint for match in matches for each in match.agents} - {None})
+        return len(
+            {
+                each.checkpoint.key
+                for match in matches
+                for each in match.players
+                if isinstance(each, Model)
+            }
+        )
 
     # Each checkpoint calls for 3 + 2 + 1 matches.
     assert [len(share) for share in shares] == [9, 9]
@@ -400,8 +480,8 @@ def test_pairs_of_checkpoints_named_as_they_appear_are_each_played_once(tmp_path
     def wanted(saved: list[CheckpointRef]) -> Benchmark:
         """Each checkpoint against the heuristic, and each against the one before it."""
         consecutive = [
-            Matchup(name=f"{DIRECT.agent(new).name} vs {DIRECT.agent(old).name}",
-                    players=(DIRECT.agent(new), DIRECT.agent(old)), conditions=DEALS, games=2)
+            Matchup(name=f"{DIRECT.model(new).name} vs {DIRECT.model(old).name}",
+                    players=(DIRECT.model(new), DIRECT.model(old)), conditions=DEALS, games=2)
             for old, new in zip(saved, saved[1:])
         ]  # fmt: skip
         anchor = Matchup(name="vs heuristic", players=(DIRECT, heuristic), conditions=DEALS,
@@ -444,12 +524,12 @@ def test_pairs_of_checkpoints_named_as_they_appear_are_each_played_once(tmp_path
     later = db.sql(
         "select s.matchup, avg(p.won::int) from plays p"
         " join schedule s on s.match = p.match and s.tournament = 'ladder'"
-        " where s.checkpoint is null and p.player = 0 group by s.matchup"
+        " where s.checkpoint is null and p.seat = 0 group by s.matchup"
     ).fetchall()
     assert all(value > 0.5 for _, value in later)
 
 
-def test_two_keys_holding_the_same_bytes_are_two_agents_each_played(tmp_path: Path) -> None:
+def test_two_keys_holding_the_same_bytes_are_two_models_each_played(tmp_path: Path) -> None:
     bucket = DirectoryStorage(tmp_path / "bucket")
     heuristic = scripted(tmp_path, "heuristic", 0)
     vs = Matchup(name="vs heuristic", players=(DIRECT, heuristic), conditions=DEALS, games=2)
@@ -471,7 +551,7 @@ def test_two_keys_holding_the_same_bytes_are_two_agents_each_played(tmp_path: Pa
     assert found == [("ppo-1/checkpoints/updates-100.pt",), ("ppo-2/checkpoints/updates-100.pt",)]
 
 
-def test_a_new_version_of_an_agents_code_reuses_what_an_older_one_played(tmp_path: Path) -> None:
+def test_a_new_version_of_a_players_code_reuses_what_an_older_one_played(tmp_path: Path) -> None:
     bucket = DirectoryStorage(tmp_path / "bucket")
     checkpoints = trained(tmp_path, bucket)
 
@@ -488,13 +568,13 @@ def test_a_new_version_of_an_agents_code_reuses_what_an_older_one_played(tmp_pat
     (tmp_path / "players" / "heuristic.py").write_text("STRENGTH = 0  # edited\n")
     second = ladder()
     before, after = first.matchups[0].players[1], second.matchups[0].players[1]
-    assert isinstance(before, Agent) and isinstance(after, Agent)
+    assert isinstance(before, Code) and isinstance(after, Code)
     assert (after.key, after.version.commit) == (before.key, before.version.commit)
     assert hold(second, experiment=EXPERIMENT, checkpoints=checkpoints[:1], play=play,
                 storages=[bucket], directory=tmp_path / "v2").played == 0  # fmt: skip
     seats = (
         statsdb(EXPERIMENT, bucket)
-        .sql("select count(distinct source) from seats where agent like 'code:heuristic%'")
+        .sql("select count(distinct source) from seats where player like 'code:heuristic%'")
         .fetchone()
     )
     assert seats == (1,)
@@ -511,19 +591,8 @@ def test_eval_runs_from_etude_sdk_0_2_load_and_are_never_counted_as_played(
         }
     )
     (old,) = held.checkpoints
-    assert str(old.key) == f"etude-sdk-0.2:{sha}"
-    seated = Agent.model_validate(
-        {"name": "updates-100.pt", "kind": "checkpoint", "artifact": sha,
-         "uri": "s3://models/updates-100.pt", "config": {"search": 0}}
-    )  # fmt: skip
-    assert seated.kind == "checkpoint"
-    assert seated.key.recorded is not None and seated.key.config == {"search": 0}
     # Its key is the digest it had, which no key since is: its matches stay its own.
-    file = ArtifactRef(uri="s3://models/updates-100.pt", sha256=sha)
-    now = DIRECT.agent(
-        CheckpointRef(key=CheckpointKey(run="ppo-1", name="updates-100.pt"), artifact=file)
-    )
-    assert now.key != seated.key
+    assert str(old.key) == f"etude-sdk-0.2:{sha}"
 
 
 def test_played_says_who_delivered_each_match_last_what_failed_and_what_is_new(

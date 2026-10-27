@@ -34,7 +34,7 @@ from pydantic import Field
 
 from etude.carriage import CHECKPOINTS
 from etude.eval.match import Tables
-from etude.eval.records import Agent, CheckpointKey, CheckpointRef, Match, Model, digest
+from etude.eval.records import CheckpointKey, CheckpointRef, Inference, Match, Model, digest
 from etude.eval.tournament import hold, played
 from etude.launch import client
 from etude.launch.records import Job, Run
@@ -73,9 +73,9 @@ class Checkpoint(Record):
         """Its key, stored file and where it stood, as a benchmark is held for it."""
         return CheckpointRef(key=self.key, artifact=self.artifact, at=self.clocks)
 
-    def agent(self, model: Model) -> Agent:
-        """This checkpoint in `model`'s seat, for a matchup of chosen checkpoints."""
-        return model.agent(self.ref)
+    def model(self, inference: Inference) -> Model:
+        """This checkpoint playing as `inference`, for a matchup of chosen checkpoints."""
+        return inference.model(self.ref)
 
 
 class Checkpoints(tuple[Checkpoint, ...]):
@@ -320,10 +320,10 @@ def checkpoint_inputs(matches: Iterable[Match], state: ExperimentState) -> dict[
     """
     found: dict[str, Checkpoint] = {}
     for match in matches:
-        for seated in match.agents:
-            key = seated.key.checkpoint
-            if key is None or str(key) in found:
+        for player in match.players:
+            if not isinstance(player, Model) or str(player.checkpoint.key) in found:
                 continue
+            key = player.checkpoint.key
             saved = state.checkpoint(key)
             if saved is None:
                 raise EtudeError("checkpoint_not_stored", 404) from ValueError(str(key))

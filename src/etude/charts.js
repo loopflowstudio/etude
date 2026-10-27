@@ -142,14 +142,14 @@ function line(host, series, o = {}) {
 
 // ---------------------------------------------------------------- an experiment's page data
 // Lines are jobs, runs across seeds, and the eval-only line: every placed checkpoint no
-// training run saved. A checkpoint agent is bound to its run's checkpoint by key, and drawn
-// where `Agent.at` says, which the page computed (its seat's position, else its run's).
+// training run saved. A model is bound to its run's checkpoint by key, and drawn
+// where `Player.at` says, which the page computed (its seat's position, else its run's).
 const SEATED = "";  // the eval-only line's one member, where a job has runs; no run is so named
 function model(D) {
   const T = D.training, R = D.report;
-  const placed = i => D.agents[i].run != null || Object.keys(D.agents[i].at).length > 0;
-  const positioned = D.agents.map((a, i) => i).filter(i => D.agents[i].run == null && placed(i));
-  const posClocks = [...new Set(positioned.flatMap(i => Object.keys(D.agents[i].at)))];
+  const placed = i => D.players[i].run != null || Object.keys(D.players[i].at).length > 0;
+  const positioned = D.players.map((a, i) => i).filter(i => D.players[i].run == null && placed(i));
+  const posClocks = [...new Set(positioned.flatMap(i => Object.keys(D.players[i].at)))];
   // The clock a line's checkpoints are keyed by: a job's first, else the one the report names.
   const alignClock = T.clocks[0]?.name ?? (posClocks.includes(R.clock) ? R.clock : posClocks[0]);
   // A job's colour follows its declared position, never its rank.
@@ -159,11 +159,11 @@ function model(D) {
   // The eval-only line has a mark per position, as a run has one per checkpoint.
   const posKey = at => JSON.stringify(Object.keys(at).sort().map(k => [k, at[k]]));
   const seatedMarks = new Map();
-  for (const i of positioned) { const at = D.agents[i].at; if (at[alignClock] != null) seatedMarks.set(posKey(at), {run: SEATED, ordinal: posKey(at), at, align: at[alignClock], elapsed: null, pace: {}}); }
+  for (const i of positioned) { const at = D.players[i].at; if (at[alignClock] != null) seatedMarks.set(posKey(at), {run: SEATED, ordinal: posKey(at), at, align: at[alignClock], elapsed: null, pace: {}}); }
   if (seatedMarks.size) marks.set(SEATED, [...seatedMarks.values()].sort((a, b) => a.align - b.align));
   const markOf = (run, ordinal) => (marks.get(run) || []).find(m => m.ordinal === ordinal);
   const xOf = (m, c) => c === WALL ? (m.elapsed == null ? null : m.elapsed / 3600) : m.at[c];
-  // A value's own position (`at`, from `Agent.at`) wins over its mark's, so no point disagrees with the page.
+  // A value's own position (`at`, from `Player.at`) wins over its mark's, so no point disagrees with the page.
   const xAt = (m, v, c) => c !== WALL && v.at?.[c] != null ? v.at[c] : xOf(m, c);
   // Per checkpoint, `value(run, mark)` gives {y, lo, hi, meta}, {missing, meta}, {skip, meta}
   // for a checkpoint that is no point of this line, or nothing; `gap` says why a value is absent.
@@ -206,23 +206,23 @@ function model(D) {
   for (const c of D.cells) if (c.opponent != null) cellIndex.set(`${c.selection}|${c.score}|${c.subject}||${+c.fixed}|${splitKey(c.split)}`, c);
   for (const c of D.cells) cellIndex.set(`${c.selection}|${c.score}|${c.subject}|${c.opponent ?? ""}|${+c.fixed}|${splitKey(c.split)}`, c);
   const cellOf = (sel, score, subject, opponent, fixed, split) => cellIndex.get(`${sel}|${score}|${subject}|${opponent ?? ""}|${+fixed}|${splitKey(split)}`);
-  const bound = new Map(); D.agents.forEach((a, i) => { if (a.run != null) bound.set(`${a.run}|${a.ordinal}|${a.config}`, i); });
-  for (const i of positioned) bound.set(`${SEATED}|${posKey(D.agents[i].at)}|${D.agents[i].config}`, i);
-  const fixedAgents = D.agents.map((a, i) => i).filter(i => !placed(i));
-  const configs = [...new Set(D.agents.filter((a, i) => placed(i)).map(a => a.config))].sort();
+  const bound = new Map(); D.players.forEach((a, i) => { if (a.run != null) bound.set(`${a.run}|${a.ordinal}|${a.config}`, i); });
+  for (const i of positioned) bound.set(`${SEATED}|${posKey(D.players[i].at)}|${D.players[i].config}`, i);
+  const fixedPlayers = D.players.map((a, i) => i).filter(i => !placed(i));
+  const configs = [...new Set(D.players.filter((a, i) => placed(i)).map(a => a.config))].sort();
   const coverage = new Map(D.coverage.map(c => [`${c.run}|${c.ordinal}|${c.tournament}`, c]));
   const jobOfRun = run => JOBS.find(j => j.runs.includes(run));
-  // The agents a line draws: its runs' checkpoints, or every positioned one.
-  const members = j => j.seated ? positioned : D.agents.map((a, i) => i).filter(i => j.runs.includes(D.agents[i].run));
-  const agentName = i => D.agents[i].run != null ? `${D.agents[i].run} ${D.agents[i].name}` : D.agents[i].name;
+  // The players a line draws: its runs' checkpoints, or every positioned one.
+  const members = j => j.seated ? positioned : D.players.map((a, i) => i).filter(i => j.runs.includes(D.players[i].run));
+  const playerName = i => D.players[i].run != null ? `${D.players[i].run} ${D.players[i].name}` : D.players[i].name;
   const selName = s => s.tournament == null ? "matches outside a tournament" : s.matchup != null ? `${s.tournament} · ${s.matchup}` : s.tag != null ? `${s.tournament} · tagged ${s.tag}` : s.tournament;
   // A page offers each tournament and each tag within one; a matchup only where a panel names it.
   const choices = D.selections.map((s, i) => [String(i), selName(s)]).filter(([i]) => D.selections[+i].matchup == null);
   // Opponents are the anchors checkpoints met, by name; checkpoints met are head-to-head games.
   function opponents(score, sel) {
     const seen = new Set(D.cells.filter(c => c.selection === sel && c.score === score && !c.fixed && placed(c.subject)).map(c => c.opponent));
-    const anchors = [...seen].filter(o => o != null && !placed(o)).sort((a, b) => D.agents[a].name.localeCompare(D.agents[b].name));
-    return [...anchors.map(o => [String(o), D.agents[o].name]), ...(seen.has(null) || !anchors.length ? [["", "all opponents"]] : [])];
+    const anchors = [...seen].filter(o => o != null && !placed(o)).sort((a, b) => D.players[a].name.localeCompare(D.players[b].name));
+    return [...anchors.map(o => [String(o), D.players[o].name]), ...(seen.has(null) || !anchors.length ? [["", "all opponents"]] : [])];
   }
   // Why a checkpoint has no value here. Failed and not yet played break a line; a checkpoint
   // nothing played, or played only outside this selection, is no point of it and is marked.
@@ -239,19 +239,19 @@ function model(D) {
   // line and config standing exactly there: of the same run for a job, else of the eval-only line.
   function opponentAt(i, spec, played) {
     if (spec.kind === "name") {
-      const met = D.agents.map((a, k) => k).filter(k => D.agents[k].name === spec.name && played(k));
-      if (met.length > 1) return {gap: `met ${met.map(agentName).join(" and ")}, each called ${spec.name}`};
+      const met = D.players.map((a, k) => k).filter(k => D.players[k].name === spec.name && played(k));
+      if (met.length > 1) return {gap: `met ${met.map(playerName).join(" and ")}, each called ${spec.name}`};
       return met.length ? {index: met[0]} : {gap: `not played against ${spec.name}`};
     }
-    const me = D.agents[i], here = me.at[spec.clock];
+    const me = D.players[i], here = me.at[spec.clock];
     if (here == null) return {gap: `no position on ${spec.clock}`};
     const want = spec.kind === "earlier" ? here - spec.by : spec.value;
-    const line = me.run != null ? k => D.agents[k].run === me.run : k => positioned.includes(k);
-    const found = D.agents.map((a, k) => k).filter(k => line(k) && D.agents[k].config === me.config && D.agents[k].at[spec.clock] === want);
+    const line = me.run != null ? k => D.players[k].run === me.run : k => positioned.includes(k);
+    const found = D.players.map((a, k) => k).filter(k => line(k) && D.players[k].config === me.config && D.players[k].at[spec.clock] === want);
     return found.length ? {index: found[found.length - 1]} : {gap: `no checkpoint at ${spec.clock} ${num(want)}`};
   }
   // The value of each checkpoint of `config` against `opponent`, split by `split`: "" for all,
-  // an agent's index as a string, or a curve's own opponent ({kind: "name" | "earlier" | "at"}).
+  // a player's index as a string, or a curve's own opponent ({kind: "name" | "earlier" | "at"}).
   const evalValue = (score, sel, split, opponent, config) => (run, m) => {
     const i = bound.get(`${run}|${m.ordinal}|${config}`);
     if (i == null || sel == null) return gapOf(sel, run, m);
@@ -263,11 +263,11 @@ function model(D) {
       o = found.index;
     }
     const c = cellOf(sel, score, i, o, false, split);
-    if (!c) return own ? {skip: true, gap: "none", meta: `not played against ${agentName(o)}`} : gapOf(sel, run, m);
-    return {y: c.value, lo: c.interval?.[0], hi: c.interval?.[1], at: D.agents[i].at, meta: `${c.rows} rows · ${c.matches} matches${own ? " · vs " + agentName(o) : ""}`};
+    if (!c) return own ? {skip: true, gap: "none", meta: `not played against ${playerName(o)}`} : gapOf(sel, run, m);
+    return {y: c.value, lo: c.interval?.[0], hi: c.interval?.[1], at: D.players[i].at, meta: `${c.rows} rows · ${c.matches} matches${own ? " · vs " + playerName(o) : ""}`};
   };
   const evaluated = pts => pts.filter(p => !p.missing && !p.skip);
-  return {T, R, JOBS, marks, markOf, xOf, jobPoints, cellOf, bound, placed, positioned, posClocks, alignClock, fixedAgents, configs, coverage, jobOfRun, members, agentName, selName, choices, opponents, evalValue, evaluated};
+  return {T, R, JOBS, marks, markOf, xOf, jobPoints, cellOf, bound, placed, positioned, posClocks, alignClock, fixedPlayers, configs, coverage, jobOfRun, members, playerName, selName, choices, opponents, evalValue, evaluated};
 }
 
 // The report's own headline for each job: its score curve in the page's first view (the
@@ -279,7 +279,7 @@ function headline(D, M) {
   return M.JOBS.map(j => {
     const pts = sel == null || !D.scores.length ? [] : M.jobPoints(j, clock, M.evalValue(0, sel, {}, opp, M.configs[0] ?? ""));
     const done = M.evaluated(pts);
-    return {job: j, points: pts, latest: done.length ? done[done.length - 1] : null, against: opp === "" ? "all opponents" : D.agents[+opp].name};
+    return {job: j, points: pts, latest: done.length ? done[done.length - 1] : null, against: opp === "" ? "all opponents" : D.players[+opp].name};
   });
 }
 

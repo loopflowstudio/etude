@@ -10,9 +10,9 @@ from urllib.parse import urlparse
 
 import pytest
 
-from etude.eval.match import agent, environment
+from etude.eval.match import environment
 from etude.eval.query import statsdb
-from etude.eval.records import Agent, Benchmark, Matchup, Model
+from etude.eval.records import Benchmark, Code, Inference, Matchup
 from etude.eval.tournament import curves
 from etude.experiment import (
     Checkpoint,
@@ -33,14 +33,14 @@ from tests.eval.games import play, play_failing_deal_one
 
 WORLD = environment("duel", config={"world": "w6"})
 DEALS = tuple({"deal": deal} for deal in range(2))
-DIRECT = Model(config={"search": 0})
+DIRECT = Inference(config={"search": 0})
 
 
-def heuristic(tmp_path: Path) -> Agent:
+def heuristic(tmp_path: Path) -> Code:
     script = tmp_path / "players" / "heuristic.py"
     script.parent.mkdir(exist_ok=True)
     script.write_text("STRENGTH = 0\n")
-    return agent("heuristic", code=[script], config={"strength": 0})
+    return Code(name="heuristic", source=[script], config={"strength": 0})
 
 
 def trainer(bucket: DirectoryStorage, tmp_path: Path) -> Run_:
@@ -82,7 +82,7 @@ def design(tmp_path: Path) -> Experiment:
         rated = run.checkpoints.every(2)
         pairs = [
             Matchup(name=f"{new.name} vs {old.name}", tags=("consecutive",),
-                    players=(new.agent(DIRECT), old.agent(DIRECT)), conditions=DEALS, games=2)
+                    players=(new.model(DIRECT), old.model(DIRECT)), conditions=DEALS, games=2)
             for old, new in zip(rated, rated[1:])
         ]  # fmt: skip
         if run.final is not None and run.checkpoints:
@@ -90,7 +90,7 @@ def design(tmp_path: Path) -> Experiment:
             pairs.append(
                 Matchup(
                     name="final vs first",
-                    players=(run.final.agent(DIRECT), first.agent(DIRECT)),
+                    players=(run.final.model(DIRECT), first.model(DIRECT)),
                     conditions=DEALS,
                     games=2,
                 )  # fmt: skip
@@ -159,7 +159,9 @@ def test_a_pass_plays_only_what_eval_returns_now(tmp_path: Path) -> None:
     training = trainer(bucket, tmp_path)
     save(training, bucket, tmp_path, range(1, 2))
     anchor = heuristic(tmp_path)
-    greedy = agent("greedy", code=[tmp_path / "players" / "heuristic.py"], config={"strength": 4})
+    greedy = Code(
+        name="greedy", source=[tmp_path / "players" / "heuristic.py"], config={"strength": 4}
+    )
     both = (
         Matchup(name="vs heuristic", players=(DIRECT, anchor), conditions=DEALS, games=2),
         Matchup(name="vs greedy", players=(DIRECT, greedy), conditions=DEALS, games=2),
@@ -292,7 +294,7 @@ def test_a_launched_pass_ships_its_checkpoints_and_is_not_launched_twice(
     _hold(spec)
     shutil.copytree(tmp_path / "machine" / "track", tmp_path / "bucket" / "delivered")
     db = statsdb("ppo", bucket)
-    uris = {urlparse(u).path for (u,) in db.sql("select uri from agents where uri is not null")
+    uris = {urlparse(u).path for (u,) in db.sql("select uri from players where uri is not null")
             .fetchall()}  # fmt: skip
     assert any(u.startswith(str(inputs)) for u in uris)
 
@@ -326,7 +328,7 @@ def test_a_tracked_checkpoints_seat_says_where_its_run_stood(tmp_path: Path) -> 
     run.finish(timeout=30)
     (saved,) = observe(bucket, "ppo").run("ppo-1").checkpoints
     assert saved.ref.at == saved.clocks == {"updates": 100}
-    assert saved.agent(DIRECT).at == {"updates": 100}
+    assert saved.model(DIRECT).checkpoint.at == {"updates": 100}
 
 
 def test_a_finished_run_without_checkpoints_has_no_final(tmp_path: Path) -> None:

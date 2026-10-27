@@ -1,4 +1,4 @@
-"""The source files that identify an environment, or version an agent's code: `digest_files`.
+"""The source files that identify an environment, or version a player's code: `digest_files`.
 
 A file is named by its path below its root, so one file has one name on every
 machine. Inside a git checkout the root is the checkout and only tracked files

@@ -1,9 +1,10 @@
 """The eval run: `evaluate` plays matches in worker processes and stores their tables.
 
-`agent`, `environment` and `Match` describe what `evaluate` plays; it knows
-nothing of tournaments (`etude.eval.tournament` arranges eval runs). The
-author's `play(match)` returns tables of rows. Etude checks that every row
-names a `player` (a seat) or a `group` of its match and that a column keeps
+Players (`etude.eval.records.Model` and `Code`), `environment` and `Match`
+describe what `evaluate` plays; it knows nothing of tournaments
+(`etude.eval.tournament` arranges eval runs). The author's `play(match)`
+returns tables of rows. Etude checks that every row names a `seat` or a
+`group` of its match and that a column keeps
 one type through the run, adds `run` and `match`, and writes each table as one
 Parquet file per match, then the match's record; both are offered to every
 destination after each match. A refused or raising match is recorded as
@@ -36,17 +37,12 @@ from pydantic import BaseModel
 
 from etude.eval.records import (
     COLUMN_TYPES,
-    Agent,
-    AgentKey,
-    CheckpointRef,
     ColumnType,
     Environment,
     Match,
     MatchRecord,
-    Version,
     as_config,
     table_file,
-    version_of,
 )
 from etude.eval.schedule import ordered
 from etude.eval.source import digest_files
@@ -65,7 +61,7 @@ IDENTIFIER = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,62}$")
 # Etude's own tables, which `etude.eval.query.statsdb` keeps beside the author's.
 ETUDE_TABLES = (
     "runs",
-    "agents",
+    "players",
     "matches",
     "seats",
     "groups",
@@ -90,34 +86,6 @@ class EvalRun(Record):
     played: int
     # Matches already stored by an earlier attempt.
     skipped: int
-
-
-def agent(
-    name: str,
-    *,
-    checkpoint: CheckpointRef | None = None,
-    code: Sequence[Path | str] = (),
-    config: Mapping[str, object] | BaseModel | None = None,
-) -> Agent:
-    """A saved model, by its checkpoint's key, or code, by `name`; and its config.
-
-    The key is the checkpoint or name with the config (`etude.eval.records.AgentKey`);
-    a checkpoint agent carries the checkpoint's `at`, which is not part of it.
-    `code` is the source files that play it: their commit and digest are the
-    agent's `Version`, recorded with each match it plays. A code agent must
-    name them; a checkpoint agent should name its inference code. A directory
-    stands for every file below it, hashed as `etude.eval.source.digest_files` says.
-    """
-    if checkpoint is None and not code:
-        raise EtudeError("agent_needs_checkpoint_or_code", 422)
-    version = version_of(code) if code else Version()
-    if checkpoint is None:
-        key = AgentKey(code=name, config=as_config(config))
-        return Agent(key=key, name=name, version=version)
-    key = AgentKey(checkpoint=checkpoint.key, config=as_config(config))
-    return Agent(
-        key=key, name=name, artifact=checkpoint.artifact, version=version, at=checkpoint.at
-    )
 
 
 def environment(
@@ -384,14 +352,12 @@ def _checked(scheduled: Match, table: str, rows: Sequence[Row]) -> list[Row]:
     if not IDENTIFIER.match(table) or table in ETUDE_TABLES:
         raise EtudeError("table_name_refused", 422) from ValueError(table)
     for row in rows:
-        player, group = row.get("player"), row.get("group")
+        seat, group = row.get("seat"), row.get("group")
         where = ValueError(f"table {table!r}: {dict(row)!r}")
-        if (player is None) == (group is None):
-            raise EtudeError("row_needs_player_or_group", 422) from where
-        if player is not None and (
-            type(player) is not int or not 0 <= player < len(scheduled.agents)
-        ):
-            raise EtudeError("row_player_not_seated", 422) from where
+        if (seat is None) == (group is None):
+            raise EtudeError("row_needs_seat_or_group", 422) from where
+        if seat is not None and (type(seat) is not int or not 0 <= seat < len(scheduled.players)):
+            raise EtudeError("row_seat_not_seated", 422) from where
         if group is not None and group not in scheduled.groups:
             raise EtudeError("row_group_not_in_match", 422) from where
         for column in row:
@@ -404,7 +370,7 @@ def _types(
     table: str, rows: Sequence[Row], known: Mapping[str, ColumnType]
 ) -> dict[str, ColumnType]:
     """Each column's type in this write. Whole numbers may join a column of fractions."""
-    found: dict[str, ColumnType] = {"player": "BIGINT", "group": "VARCHAR"}
+    found: dict[str, ColumnType] = {"seat": "BIGINT", "group": "VARCHAR"}
     for row in rows:
         for column, value in row.items():
             if value is None:

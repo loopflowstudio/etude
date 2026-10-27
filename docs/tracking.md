@@ -246,7 +246,7 @@ where that run's clocks stood; where both give a clock and differ, the seat's
 value is drawn and the page notes it. Two runs' checkpoints holding the same
 bytes are two points. A checkpoint a training run saved joins that run's job;
 every other placed checkpoint joins one line, "positioned by their seats".
-Every unplaced agent, code or a checkpoint seated without a position, is an
+Every unplaced player, code or a checkpoint seated without a position, is an
 anchor, and the page names the unplaced checkpoints.
 
 **Evaluation only.** An experiment with eval runs and no training runs draws
@@ -265,7 +265,7 @@ is drawn as it wants it now; one it no longer returns, as its eval runs held it.
 | Panel | Shows |
 |---|---|
 | `Curve(split=None, opponent=None)` | the score at each checkpoint, against one anchor; `split` draws one chart per value |
-| `Curve(opponent="heuristic")` | against the agent of that name, whatever the Opponent control says |
+| `Curve(opponent="heuristic")` | against the player of that name, whatever the Opponent control says |
 | `Curve(opponent=Earlier(clock="updates", by=400))` | each checkpoint against the one of its line exactly 400 updates earlier; none there is a gap that says so |
 | `Curve(opponent=At(clock="updates", value=200))` | each checkpoint against the one of its line at update 200 |
 | `Crosstable()` | one line's checkpoints against each other, both axes ordered by the clock; an unplayed pair shows `·` |

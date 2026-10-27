@@ -10,10 +10,9 @@ import pytest
 from moto import mock_aws
 
 from etude.carriage import checkpoint_file
-from etude.eval.match import agent as eval_agent
 from etude.eval.match import environment, evaluate
 from etude.eval.query import compare, statsdb
-from etude.eval.records import Agent, CheckpointKey, CheckpointRef, Match
+from etude.eval.records import CheckpointKey, CheckpointRef, Code, Inference, Match, Model, Player
 from etude.experiment import advance, observe, read_experiment
 from etude.page import Page, build
 from etude.report import Matches
@@ -26,24 +25,26 @@ from tests.experiments import experiment_file
 from tests.run.storage import CountedClient
 
 LAB = """
-from etude.eval.match import agent, environment
-from etude.eval.records import ArtifactRef, Benchmark, CheckpointKey, CheckpointRef, Matchup, Model
+from etude.eval.match import environment
+from etude.eval.records import (
+    ArtifactRef, Benchmark, CheckpointKey, CheckpointRef, Code, Inference, Matchup, Model,
+)
 from etude.jobs import evaluation
 from etude.report import Anchors, Curve, Matches, Report, Score
 from tests.eval.games import play, play_failing_deal_one
 
 DUEL = environment("duel")
-DIRECT = Model(config={"search": 0})
+DIRECT = Inference(config={"search": 0})
 DEALS = ({"deal": 0}, {"deal": 1})
-WEAK = agent("weak", code=[__file__], config={"strength": 0})
-STRONG = agent("strong", code=[__file__], config={"strength": 9})
-OUTSIDE = agent(
-    "outside",
+WEAK = Code(name="weak", source=[__file__], config={"strength": 0})
+STRONG = Code(name="strong", source=[__file__], config={"strength": 9})
+OUTSIDE = Model(
+    name="outside",
     checkpoint=CheckpointRef(
         key=CheckpointKey(address="hf://lab/outside.pt"),
         artifact=ArtifactRef(uri="hf://lab/outside.pt", sha256="ab" * 32),
     ),
-    config={"strength": 5},
+    inference=Inference(config={"strength": 5}),
 )
 
 
@@ -119,8 +120,8 @@ def page(lab: tuple[Path, Path]) -> Page:
     return build(*lab)
 
 
-def agent(page: Page, name: str, run: str | None = None) -> int:
-    (found,) = [i for i, each in enumerate(page.agents) if each.name == name and each.run == run]
+def player(page: Page, name: str, run: str | None = None) -> int:
+    (found,) = [i for i, each in enumerate(page.players) if each.name == name and each.run == run]
     return found
 
 
@@ -132,17 +133,17 @@ def selection(page: Page, tournament: str | None, *, matchup: str | None = None)
     )
 
 
-def test_checkpoints_are_bound_by_key_and_fixed_agents_are_anchors(page: Page) -> None:
-    # Identical bytes under two keys are two agents, each where its own run stood.
-    bound = {(each.run, each.ordinal) for each in page.agents if each.run is not None}
+def test_checkpoints_are_bound_by_key_and_fixed_players_are_anchors(page: Page) -> None:
+    # Identical bytes under two keys are two models, each where its own run stood.
+    bound = {(each.run, each.ordinal) for each in page.players if each.run is not None}
     assert bound == {("a", 2), ("a", 4), ("b", 2), ("b", 4)}
     marks = {(m.run, m.ordinal): m.at for m in page.training.checkpoints}
     assert marks[("a", 2)] == marks[("b", 2)] == {"updates": 200}
     # Code and an outside checkpoint are fixed: no run, no ordinal.
-    assert {each.name for each in page.agents if each.run is None} == {"weak", "strong", "outside"}
+    assert {each.name for each in page.players if each.run is None} == {"weak", "strong", "outside"}
     ladder = selection(page, "ladder")
-    a2, b2 = agent(page, "updates-200.pt", "a"), agent(page, "updates-200.pt", "b")
-    weak, strong = agent(page, "weak"), agent(page, "strong")
+    a2, b2 = player(page, "updates-200.pt", "a"), player(page, "updates-200.pt", "b")
+    weak, strong = player(page, "weak"), player(page, "strong")
     against = {
         (c.subject, c.opponent): c
         for c in page.cells
@@ -168,7 +169,7 @@ def test_a_page_shows_what_was_not_evaluated_not_yet_played_and_failed(page: Pag
     failed = coverage[("a", 2, "corrupt")]
     assert (failed.played, failed.failed, failed.unplayed) == (0, 1, 0)
     (failure,) = page.failures
-    assert [page.agents[i].name for i in failure.agents] == ["updates-200.pt", "weak"]
+    assert [page.players[i].name for i in failure.players] == ["updates-200.pt", "weak"]
     assert "deal 1 crashed" in (failure.error or "")
 
 
@@ -178,11 +179,11 @@ def test_panels_select_matches_by_tournament_matchup_or_tag(page: Page) -> None:
     outside = selection(page, "ladder", matchup="vs outside")
     # The checkpoints' opponents in that matchup's matches are the outside anchor alone.
     opponents = {
-        page.agents[c.opponent].name
+        page.players[c.opponent].name
         for c in page.cells
         if c.selection == outside
         and c.opponent is not None
-        and page.agents[c.subject].run is not None
+        and page.players[c.subject].run is not None
     }
     assert opponents == {"outside"}
     assert any("matchup 'vs nobody'" in note for note in page.notes)
@@ -224,13 +225,13 @@ def test_a_report_reads_no_checkpoint_bytes(lab: tuple[Path, Path], page: Page) 
 
 
 VERSIONED = """
-from etude.eval.match import agent, environment
-from etude.eval.records import Benchmark, Matchup, Model
+from etude.eval.match import environment
+from etude.eval.records import Benchmark, Code, Inference, Matchup
 from etude.jobs import evaluation
 from tests.eval.games import play
 
-DIRECT = Model(config={"search": 0})
-WEAK = agent("weak", code=[__file__], config={"strength": 0})
+DIRECT = Inference(config={"search": 0})
+WEAK = Code(name="weak", source=[__file__], config={"strength": 0})
 
 
 def eval(state):
@@ -248,7 +249,7 @@ def test_a_page_offers_each_commit_its_matches_were_played_at(
     file = experiment_file(tmp_path / "experiments", "versioned", VERSIONED)
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
     monkeypatch.setattr(sys, "path", list(sys.path))
-    # As in a launched job: the agent's code is a source extracted at a commit.
+    # As in a launched job: the player's code is a source extracted at a commit.
     monkeypatch.setenv("ETUDE_SOURCE_DIR", str(file.parent))
     for commit, updates in (("a" * 40, range(100, 300, 100)), ("b" * 40, range(300, 400, 100))):
         # Each pass sees exactly the checkpoints delivered before it: the run
@@ -260,9 +261,9 @@ def test_a_page_offers_each_commit_its_matches_were_played_at(
         advance(read_experiment(file), source=DirectoryStorage(runs), directory=runs)
     page = build(runs, file)
     assert [(each.commit, each.matches) for each in page.commits] == [("a" * 40, 2), ("b" * 40, 1)]
-    weak = agent(page, "weak")
+    weak = player(page, "weak")
     played = {
-        commit: {page.agents[c.subject].name for c in page.cells if c.commit == commit
+        commit: {page.players[c.subject].name for c in page.cells if c.commit == commit
                  and c.opponent == weak and not c.split}
         for commit in (None, "a" * 40, "b" * 40)
     }  # fmt: skip
@@ -292,10 +293,10 @@ def report():
 """
 
 DUEL = environment("duel")
-HEURISTIC = eval_agent("heuristic", code=[__file__], config={"strength": 5})
+HEURISTIC = Code(name="heuristic", source=[__file__], config={"strength": 5})
 
 
-def outside(name: str, at: dict[str, float], **config: int) -> Agent:
+def outside(name: str, at: dict[str, float], **config: int) -> Model:
     """A checkpoint no Etude run recorded, keyed by its address, seated where `at` says."""
     address = f"hf://lab/{name}.pt"
     ref = CheckpointRef(
@@ -303,11 +304,11 @@ def outside(name: str, at: dict[str, float], **config: int) -> Agent:
         artifact=ArtifactRef(uri=address, sha256="cd" * 32),
         at=at,
     )
-    return eval_agent(name, checkpoint=ref, config=config or None)
+    return Model(name=name, checkpoint=ref, inference=Inference(config=config))
 
 
-def duel(first: Agent, second: Agent, deal: int = 0) -> Match:
-    return Match(agents=(first, second), conditions={"deal": deal}, games=2)
+def duel(first: Player, second: Player, deal: int = 0) -> Match:
+    return Match(players=(first, second), conditions={"deal": deal}, games=2)
 
 
 @pytest.fixture(scope="module")
@@ -349,13 +350,13 @@ def test_an_evaluation_only_experiment_draws_checkpoints_where_their_seats_say(
     assert page.training.runs == ()
     outside_tournaments = selection(page, None)
     assert page.selections[outside_tournaments] == Matches()
-    at = {each.name: each.at for each in page.agents}
+    at = {each.name: each.at for each in page.players}
     assert {name: at[name] for name in ("u0", "u200", "u400", "u600")} == {
         f"u{n}": {"updates": n} for n in (0, 200, 400, 600)
     }
     # Unplaced: code, and a checkpoint seated without `at`.
     assert at["heuristic"] == at["loose"] == {}
-    assert all(each.run is None for each in page.agents)
+    assert all(each.run is None for each in page.players)
     assert any("loose" in note and "anchors" in note for note in page.notes)
     # Seats that disagree: the latest is drawn, and the earlier is named.
     assert at["drift"] == {"updates": 350}
@@ -364,7 +365,7 @@ def test_an_evaluation_only_experiment_draws_checkpoints_where_their_seats_say(
         in page.notes
     )
     pair = {
-        (page.agents[c.subject].name, page.agents[c.opponent].name): c
+        (page.players[c.subject].name, page.players[c.opponent].name): c
         for c in page.cells
         if c.selection == outside_tournaments and c.opponent is not None and not c.split
     }
@@ -377,7 +378,7 @@ def test_an_evaluation_only_experiment_draws_checkpoints_where_their_seats_say(
         }
     finally:
         db.close()
-    keys = {each.name: each.key for each in page.agents}
+    keys = {each.name: each.key for each in page.players}
     for (subject, opponent), cell in pair.items():
         found = direct[((keys[subject],), (keys[opponent],))]
         if {subject, opponent} == {"u600", "u400"}:
@@ -439,15 +440,15 @@ def test_a_tracked_checkpoint_is_placed_by_its_seat_first_and_its_training_recor
         experiment="seated",
         environment=DUEL,
         matches=[
-            duel(eval_agent("updates-100.pt", checkpoint=bare), HEURISTIC),
-            duel(eval_agent("updates-200.pt", checkpoint=moved), HEURISTIC),
+            duel(Inference().model(bare), HEURISTIC),
+            duel(Inference().model(moved), HEURISTIC),
         ],
         play=play,
         run="plain",
         directory=runs,
     )
     page = build(runs, file)
-    placed = {each.name: (each.run, each.at) for each in page.agents if each.run is not None}
+    placed = {each.name: (each.run, each.at) for each in page.players if each.run is not None}
     assert placed == {
         "updates-100.pt": ("a", {"updates": 100}),
         "updates-200.pt": ("a", {"updates": 250}),
@@ -483,5 +484,5 @@ def test_a_failure_outside_a_tournament_is_kept_until_its_environment_plays_it(
     page = build(runs, file)
     (failure,) = page.failures
     assert failure.tournament is None
-    assert [page.agents[i].name for i in failure.agents] == ["u0", "heuristic"]
+    assert [page.players[i].name for i in failure.players] == ["u0", "heuristic"]
     assert failure.error is not None and "deal 1 crashed" in failure.error
