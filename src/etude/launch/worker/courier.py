@@ -90,7 +90,6 @@ class _Uploaded:
     error: BaseException | None
 
 
-
 def _diagnose(operation: str, error: BaseException, attempt: str | None = None) -> None:
     message = bounded(explain(error))
     session = os.environ.get("ETUDE_SESSION")

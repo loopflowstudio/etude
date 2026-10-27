@@ -13,8 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from etude.launch.deadline import limit_time, remaining
 from etude.launch.database import Database
+from etude.launch.deadline import limit_time, remaining
 from etude.launch.records import Output
 from etude.launch.schemas import AttemptRecord, Progress
 from etude.launch.storage.s3 import Grant, PostForm, Reply, StorageUnavailable
