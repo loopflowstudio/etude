@@ -10,6 +10,8 @@ On a machine the directory is `ETUDE_HOME/carried/CARRY/`
 A build that does not find the directory on its machine reads the locator,
 one bucket read, and `restore`s the archive it names through this machine's
 cache (`etude.cache`), verified like any input, with tarfile's `data` filter.
+That filter refuses absolute links, and uv's cache links into itself by
+absolute path, so `save` stores a link to within the directory as relative.
 After a build that restored nothing, the attempt asks its courier to `save`
 the directory (`attempts/ATTEMPT/carry` names its key); the courier stores
 the archive, then the locator, so a locator never names an archive that is
@@ -20,9 +22,10 @@ wins. Nothing here expires: archives stay until deleted.
 from __future__ import annotations
 
 import hashlib
+import os
 import tarfile
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import IO
 
@@ -93,7 +96,7 @@ def save(grant: Grant, key: str, send: Send = _send) -> Locator | None:
         with tempfile.TemporaryFile(dir=carried_home()) as archive:
             with tarfile.open(fileobj=archive, mode="w") as tar:
                 for path in sorted(directory.iterdir()):
-                    tar.add(path, arcname=path.name)
+                    tar.add(path, arcname=path.name, filter=_relative(directory))
             size = archive.tell()
             archive.seek(0)
             locator = Locator(
@@ -102,6 +105,17 @@ def save(grant: Grant, key: str, send: Send = _send) -> Locator | None:
             bucket.put_parts(grant.prefix + locator.archive, _chunks(archive))
     bucket.put(grant.prefix + f"{key}.json", locator.model_dump_json().encode())
     return locator
+
+
+def _relative(directory: Path) -> Callable[[tarfile.TarInfo], tarfile.TarInfo]:
+    """Rewrite an absolute link to within `directory` relative to the link itself."""
+
+    def member(info: tarfile.TarInfo) -> tarfile.TarInfo:
+        if info.issym() and Path(info.linkname).is_relative_to(directory):
+            info.linkname = os.path.relpath(info.linkname, (directory / info.name).parent)
+        return info
+
+    return member
 
 
 def _chunks(stream: IO[bytes]) -> Iterator[bytes]:

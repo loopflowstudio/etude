@@ -361,9 +361,13 @@ def build_on(machine: Path, shelf: Shelf, monkeypatch: pytest.MonkeyPatch) -> tu
         nonlocal found
         with carry(KEY.carry, fetch, lambda: True, lines.append) as carried:
             assert carried is not None
-            wheel = carried.directory / "wheel"
+            # As uv's cache does, it links into itself by absolute path.
+            wheel = carried.directory / "link" / "wheel"
             found = wheel.read_text() if wheel.exists() else ""
-            wheel.write_text("wheel 1")
+            (carried.directory / "archive").mkdir(exist_ok=True)
+            (carried.directory / "archive" / "wheel").write_text("wheel 1")
+            if not (carried.directory / "link").is_symlink():
+                (carried.directory / "link").symlink_to(carried.directory / "archive")
             (directory / "python").write_text("stub")
             if not carried.kept and carried.restored_bytes is None:
                 (machine / REQUEST).write_text(KEY.carry)
