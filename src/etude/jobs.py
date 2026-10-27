@@ -42,7 +42,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from etude.call import Function, config_type
 from etude.carriage import CHECKPOINTS
-from etude.eval.match import Tables
+from etude.eval.match import Result, Tables
 from etude.eval.records import (
     Benchmark,
     CheckpointKey,
@@ -137,7 +137,7 @@ class Evaluation(Record):
 def evaluation(
     tournament: Benchmark | RoundRobin,
     *,
-    play: Callable[[Match], Tables],
+    play: Callable[[Match], Tables | Result],
     experiment: str | None = None,
     checkpoint: Input | None = None,
     checkpoints: Sequence[Checkpoint] = (),
@@ -302,7 +302,7 @@ def continue_from(
 def _hold(evaluation: Evaluation) -> None:
     """On the machine: hold the tournament, with the checkpoint inputs in their seats."""
     # Loaded by import path: the function `evaluation` was given, typed there.
-    play = cast(Callable[[Match], Tables], evaluation.play.load())
+    play = cast(Callable[[Match], Tables | Result], evaluation.play.load())
     if evaluation.experiment is None or (evaluation.checkpoints and evaluation.matches is None):
         raise SystemExit("etude: an experiment's evaluation job is launched by `etude eval`")
     folder = os.environ.get("ETUDE_INPUTS_DIR")

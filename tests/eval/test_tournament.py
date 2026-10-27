@@ -157,9 +157,9 @@ def test_a_batch_hold_skips_what_any_eval_run_of_its_environment_delivered(tmp_p
         directory=tmp_path / "batch",
     )
     assert again.played == 0
-    # One listing of the bucket and one of its own matches; each eval run's run.json and
-    # tournament.json.
-    assert (measured.listings, measured.requests) == (1 + 1, 3 + 3)
+    # One listing of the bucket and one of its own run; each eval run's run.json,
+    # tournament.json and its one block's index.
+    assert (measured.listings, measured.requests) == (1 + 1, 3 + 3 + 3)
 
     # Eval runs held for no tournament already played a matchup about to be added:
     # two checkpoints' matches in this environment, the third's in another.
@@ -180,8 +180,8 @@ def test_a_batch_hold_skips_what_any_eval_run_of_its_environment_delivered(tmp_p
     # Only the third checkpoint's: a match is reused by key within one environment.
     assert batch.played == len(DEALS)
     # Each eval run's run.json; the four held for the tournament by tournament.json, the
-    # two held for none by environment.json.
-    assert (measured.listings, measured.requests) == (1 + 1, 6 + 4 + 2)
+    # two held for none by environment.json; the index of each block in this environment.
+    assert (measured.listings, measured.requests) == (1 + 1, 6 + 4 + 2 + 4)
     lines = {line.matchup: line for line in curves(statsdb(EXPERIMENT, bucket), "anchors", table="plays",
                                                    value="won")}  # fmt: skip
     assert [p.matches for p in lines["search vs greedy"].points] == [len(DEALS)] * 3
@@ -618,8 +618,8 @@ def test_played_says_who_delivered_each_match_last_what_failed_and_what_is_new(
                    storages=[measured], directory=reader)  # fmt: skip
     assert {each.run for each in again.delivered} == {"replayed"} and held != "replayed"
     # One listing; each eval run's run.json, the tournament's tournament.json and the
-    # other's environment.json; and both records of each match delivered twice.
-    assert (measured.listings, measured.requests) == (1, 2 + 1 + 1 + 2 * 6)
+    # other's environment.json; and each run's one block index, wherever it delivers.
+    assert (measured.listings, measured.requests) == (1, 2 + 1 + 1 + 2)
     # A match that fails is failed, not new, until something delivers it.
     with pytest.raises(EtudeError, match="match_failed"):
         hold(progress, experiment=EXPERIMENT, checkpoint=checkpoints[2], play=play_failing_deal_one,

@@ -187,6 +187,36 @@ def eval_experiment(
         pass
 
 
+@app.command("convert-eval")
+@kind(Kind.wait)
+def convert_eval(
+    run: Annotated[str, typer.Argument(help="the eval run, by name")],
+    source: Annotated[str, typer.Option(help="s3://bucket/prefix or a runs directory")],
+) -> None:
+    """Write blocks holding an eval run's per-file records, beside them; nothing is deleted."""
+    from etude.eval.convert import convert
+    from etude.run.storage import storage_from_uri
+
+    done = convert(run, storage_from_uri(source))
+    print(
+        f"{run}: {done.blocks} blocks, {done.matches} matches, {done.blobs} blobs,"
+        f" replacing {done.replaced} files"
+    )
+
+
+@app.command("delete-eval-files")
+@kind(Kind.wait)
+def delete_eval_files(
+    run: Annotated[str, typer.Argument(help="the eval run, by name")],
+    source: Annotated[str, typer.Option(help="s3://bucket/prefix or a runs directory")],
+) -> None:
+    """Delete an eval run's per-file records that its blocks in SOURCE replace; refuses before."""
+    from etude.eval.convert import delete_files
+    from etude.run.storage import storage_from_uri
+
+    print(f"{run}: deleted {delete_files(run, storage_from_uri(source))} files")
+
+
 @app.command("continue")
 @kind(Kind.wait)
 def continue_run(
@@ -272,7 +302,8 @@ def _main(argv: list[str]) -> int:
     try:
         if (
             argv
-            and argv[0] not in ("worker", "report", "checkpoints", "sync")
+            and argv[0]
+            not in ("worker", "report", "checkpoints", "sync", "convert-eval", "delete-eval-files")
             and not {"--help", "-h"} & set(argv)
         ):
             # Entry points import only the command being run (AGENTS.md).

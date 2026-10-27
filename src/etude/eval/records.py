@@ -1,9 +1,11 @@
 """File contracts for evaluation: players, environments, matches and tournaments.
 
 An eval run is a run with kind "evaluation" and no clocks: `run.json`, then
-`environment.json`, then for each match the author's tables as Parquet under
-`tables/` and Etude's record of the match, `matches/KEY.json` (or
-`matches/KEY.failed.json`).
+`environment.json`, then sealed blocks of matches (`etude.eval.block`), each
+holding the author's tables as Parquet, the blobs its matches kept and
+Etude's record of each match (`MatchRecord`). Older eval runs kept a file per
+fact (`matches/KEY.json`, `tables/TABLE_FILE`); `etude convert-eval` makes
+blocks of them.
 
 An eval run held for a tournament (`Benchmark` or `RoundRobin`) also stores
 `tournament.json` (`TournamentRun`): the definition it was held with and what
@@ -66,14 +68,24 @@ COLUMN_TYPES: dict[type, ColumnType] = {
     str: "VARCHAR",
 }
 
+# Author table and column names: plain SQL identifiers. A leading underscore is Etude's.
+IDENTIFIER = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,62}$")
+# Columns Etude adds to every row.
+ADDED = ("run", "match")
+# A rollup's count of the rows it summarizes.
+ROLLUP_ROWS = "rows"
+# Rollup `by` columns Etude fills from a row's seat: its player's key, and the others'.
+ROLLUP_SEATED = ("player", "opponents")
+
 # An eval run held for a tournament keeps this file in its folder (`TournamentRun`).
 TOURNAMENT_FILE = "tournament.json"
 
 # Every match has this group, holding every seat.
 EVERYONE = "all"
 
-# `tables/TABLE.WRITTEN.WRITER.parquet`: WRITTEN is zero-padded nanoseconds, so a
-# table's file names order by write time; WRITER is a match key or a merging process.
+# The per-file layout's `tables/TABLE.WRITTEN.WRITER.parquet`: WRITTEN is zero-padded
+# nanoseconds, so a table's file names order by write time; WRITER is a match key or
+# a merging process. Only `etude convert-eval` reads it.
 TABLE_FILE = re.compile(r"^tables/([A-Za-z][A-Za-z0-9_]*)\.(\d{20})\.([0-9a-f]+)\.parquet$")
 
 
@@ -89,10 +101,6 @@ def as_config(config: Mapping[str, object] | BaseModel | None) -> Config:
         return _CONFIG.validate_python(data)
     except ValidationError as error:
         raise EtudeError("config_is_not_json", 422) from error
-
-
-def table_file(table: str, written_ns: int, writer: str) -> str:
-    return f"tables/{table}.{written_ns:020d}.{writer}.parquet"
 
 
 def digest(value: object) -> Digest:
@@ -392,10 +400,9 @@ class Match(Record):
 
 
 class MatchRecord(Record):
-    """How one match went, written after its tables: `matches/KEY.json` when done.
+    """How one match went, kept in its block's index after its tables and blobs.
 
-    A failed match is `matches/KEY.failed.json`, so a listing alone tells which
-    matches are done; a later success sits beside it and wins.
+    A failed match's record is replaced by a later done one, wherever it is kept.
     """
 
     match: Match
@@ -405,11 +412,51 @@ class MatchRecord(Record):
     columns: dict[Name, dict[Name, ColumnType]] = {}
     # When it was recorded: of two runs holding one match, a tournament takes the later.
     wall_ms: int = Field(ge=0)
+    # The SHA256 of each blob the match kept, which its rows may name.
+    blobs: tuple[Digest, ...] = ()
+
+
+class Rollup(Record):
+    """An additive summary of an author table, taken once per match as it is stored.
+
+    `statsdb` keeps table `name`: for each run and each value of the `by`
+    columns, how many rows there were (`rows`) and the total of each of
+    `sums`, a DuckDB expression over a row (`"deck_copies > 0"`,
+    `"opening_copies * win"`) in which a boolean counts as 1 and a null as 0;
+    a mean is a total over `rows`. Only rows for which `where` holds count.
+
+    A row is `table`'s, joined to each table in `join` on whichever of run,
+    match, seat and game both have; a column of both is `table`'s. `by` may
+    name `player`, the key of the player in the row's seat, and `opponents`,
+    the other seats' player keys in seat order, comma-joined. A column no
+    row of a match gave reads as null there.
+
+    Each block keeps its matches' partial totals in `NAME.parquet`, so
+    `statsdb` adds a block's totals and never reads an earlier block or a raw
+    row again.
+    """
+
+    name: str = Field(pattern=IDENTIFIER.pattern)
+    table: str = Field(pattern=IDENTIFIER.pattern)
+    join: tuple[Annotated[str, Field(pattern=IDENTIFIER.pattern)], ...] = ()
+    by: tuple[Annotated[str, Field(pattern=IDENTIFIER.pattern)], ...]
+    sums: dict[Annotated[str, Field(pattern=IDENTIFIER.pattern)], str] = {}
+    where: str | None = None
 
     @property
-    def file(self) -> str:
-        suffix = "json" if self.state == "done" else "failed.json"
-        return f"matches/{self.match.key}.{suffix}"
+    def digest(self) -> Digest:
+        """The digest of its definition: beside its name, what makes it this rollup."""
+        return digest(self.model_dump(mode="json"))
+
+    @model_validator(mode="after")
+    def distinct_columns(self) -> Self:
+        columns = [*self.by, *self.sums]
+        if len(set(columns)) != len(columns) or {*ADDED, ROLLUP_ROWS} & set(columns):
+            raise ValueError("rollup_columns_must_be_distinct_author_columns")
+        tables = [self.table, *self.join]
+        if len(set(tables)) != len(tables):
+            raise ValueError("rollup_tables_must_be_distinct")
+        return self
 
 
 class Matchup(Record):

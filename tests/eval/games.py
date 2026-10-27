@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import re
+from hashlib import sha256
 
-from etude.eval.match import Tables
+from etude.eval.match import Result, Tables
 from etude.eval.records import Match, Player
 
 type Rows = list[dict[str, bool | int | float | str | None]]
@@ -82,3 +83,55 @@ def play_failing_deal_one(match: Match) -> Tables:
     if match.conditions.get("deal") == 1:
         raise RuntimeError("deal 1 crashed")
     return play(match)
+
+
+def play_with_evidence(match: Match) -> Result:
+    """`play`, keeping each game's evidence as a blob that its `games` row names."""
+    tables = play(match)
+    evidence = [f"{match.key} game {row['game']}".encode() * 40 for row in tables["games"]]
+    games = [
+        {**row, "evidence_sha256": sha256(blob).hexdigest()}
+        for row, blob in zip(tables["games"], evidence, strict=True)
+    ]
+    return Result(tables={"plays": tables["plays"], "games": games}, blobs=evidence)
+
+
+def play_cards(match: Match) -> Tables:
+    """manabot's card tables: one `card_plays` row per game and seat, `card_counts` per card.
+
+    Deal 2's games have no winner, so no row of that match gives `win`.
+    """
+    deal = int(str(match.conditions["deal"]))
+    plays: Rows = []
+    counts: Rows = []
+    for game in range(match.games):
+        name = f"{deal}-{game}"
+        eligible = deal != 2
+        for seat in (0, 1):
+            plays.append(
+                {
+                    "game": name,
+                    "seat": seat,
+                    "deal": deal,
+                    "deck": ("red", "blue")[(seat + game) % 2],
+                    "opponent_deck": ("red", "blue")[(seat + game + 1) % 2],
+                    "on_play": seat == game % 2,
+                    "eligible": eligible,
+                    "outcome": "win" if seat == (deal + game) % 2 else "loss",
+                    "win": int(seat == (deal + game) % 2) if eligible else None,
+                }
+            )
+            for card in range(3):
+                vary = deal + game + seat + card
+                counts.append(
+                    {
+                        "game": name,
+                        "seat": seat,
+                        "card": f"card{card}",
+                        "deck_copies": vary % 3,
+                        "opening_copies": vary % 2,
+                        "drawn_copies": (vary + 1) % 2,
+                        "gih_copies": vary % 2 if vary % 3 else 0,
+                    }
+                )
+    return {"card_plays": plays, "card_counts": counts}

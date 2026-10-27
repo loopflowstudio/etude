@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 
-from etude.carriage import checkpoint_file, immutable, listing, retired
+from etude.carriage import EVAL_BLOCK_PACK, checkpoint_file, immutable, listing, retired
 from etude.run.block_file import parse
 from etude.run.records import RunFile
 from etude.run.storage import DirectoryStorage, Storage, run_prefix
@@ -96,7 +96,10 @@ class StorageDestination:
                 block = parse(key)
                 body = (
                     files.root / key
-                    if checkpoint_file(key) or block is not None and block.level >= 2
+                    if checkpoint_file(key)
+                    or key.endswith("/" + EVAL_BLOCK_PACK)
+                    or block is not None
+                    and block.level >= 2
                     else (files.root / key).read_bytes()
                 )
                 deliveries.append(Delivery(key, fingerprint, body))

@@ -90,13 +90,11 @@ def test_matches_in_two_workers_resumes_from_storage_without_replaying(
     progress = [line for line in capsys.readouterr().err.splitlines() if "matches played" in line]
     assert len(progress) == 24
     assert progress[-1].startswith("etude: league-1: 24/24 matches played, ")
-    # Each table's per-match files were merged into one, and the merged file replaced them.
-    tables = bucket.keys("league-1/tables/")
-    assert sorted(
-        key.split("/")[-1].split(".")[0] for key in tables if key.endswith(".parquet")
-    ) == [
-        "games",
-        "plays",
+    # One block: each table merged into one file, then the index; nothing per match.
+    (index,) = (key for key in bucket.keys("league-1/blocks/") if key.endswith("block.json"))
+    folder = index.removesuffix("block.json")
+    assert sorted(bucket.keys(folder)) == [
+        folder + name for name in ("block.json", "games.parquet", "plays.parquet")
     ]
 
     shutil.rmtree(tmp_path / "local")
@@ -106,8 +104,8 @@ def test_matches_in_two_workers_resumes_from_storage_without_replaying(
         run="league-1", directory=tmp_path / "local", storages=[measured],
     )  # fmt: skip
     assert (again.played, again.skipped) == (0, 24)
-    # One listing of the delivered match records and one read of each.
-    assert (measured.listings, measured.requests) == (1, 24)
+    # One listing of the run and one read of its block's index.
+    assert (measured.listings, measured.requests) == (1, 1)
 
     db = statsdb("league", bucket)
     assert db.sql("select count(*) from plays").fetchone() == (24 * 4 * 2,)
