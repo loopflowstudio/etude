@@ -52,6 +52,7 @@ import os
 import tempfile
 import warnings
 from bisect import bisect_left
+from collections import defaultdict
 from collections.abc import Iterator, Sequence
 from functools import cache
 from pathlib import Path, PurePosixPath
@@ -542,14 +543,13 @@ def _agents_table(db: duckdb.DuckDBPyConnection, agents: dict[str, list[Agent]])
         else:
             warnings.warn(f"agent config {key!r} has types {sorted(seen)}; only in `config`")
     # Each agent's positions as its seats give them, the latest record's first.
-    positions: dict[str, list[str]] = {}
+    positions: defaultdict[str, list[str]] = defaultdict(list)
     for identity, at in db.execute(
         'select s.agent, s."at" from seats s join matches m using (run, match)'
         ' where s."at" is not null order by m.wall_ms desc, s.run desc'
     ).fetchall():
-        given = positions.setdefault(identity, [])
-        if at not in given:
-            given.append(at)
+        if at not in positions[identity]:
+            positions[identity].append(at)
     db.execute(
         "create or replace table agents (agent VARCHAR, name VARCHAR, kind VARCHAR,"
         ' checkpoint VARCHAR, artifact VARCHAR, uri VARCHAR, config JSON, "at" JSON,'
@@ -569,9 +569,9 @@ def _agents_table(db: duckdb.DuckDBPyConnection, agents: dict[str, list[Agent]])
                 None if given[0].artifact is None else given[0].artifact.sha256,
                 None if given[0].artifact is None else given[0].artifact.uri,
                 json.dumps(given[0].config),
-                next(iter(positions.get(identity, ())), None),
-                "[" + ",".join(sorted(positions[identity])) + "]"
-                if len(positions.get(identity, ())) > 1
+                positions[identity][0] if positions[identity] else None,
+                f"[{','.join(sorted(positions[identity]))}]"
+                if len(positions[identity]) > 1
                 else None,
                 *(flat[identity].get(key) for key in columns),
             ]

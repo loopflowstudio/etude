@@ -227,7 +227,7 @@ VERSIONED = """
 from etude.eval.match import agent, environment
 from etude.eval.records import Benchmark, Matchup, Model
 from etude.jobs import evaluation
-from tests.eval.games import play, play_failing_deal_one
+from tests.eval.games import play
 
 DIRECT = Model(config={"search": 0})
 WEAK = agent("weak", code=[__file__], config={"strength": 0})
@@ -377,8 +377,8 @@ def test_an_evaluation_only_experiment_draws_checkpoints_where_their_seats_say(
         }
     finally:
         db.close()
+    keys = {each.name: each.key for each in page.agents}
     for (subject, opponent), cell in pair.items():
-        keys = {each.name: each.key for each in page.agents}
         found = direct[((keys[subject],), (keys[opponent],))]
         if {subject, opponent} == {"u600", "u400"}:
             assert found.matches == 2

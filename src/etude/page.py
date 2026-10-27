@@ -60,6 +60,7 @@ import sys
 import threading
 import time
 from bisect import bisect_left
+from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from html import escape
@@ -913,26 +914,25 @@ def _newest_environment(
 ) -> tuple[list[Cell], tuple[str, ...]]:
     """Of one comparison's cells in several environments, the newest environment's; and a
     note per environment that loses any. Environments are never pooled."""
-    chosen: dict[tuple[object, ...], Cell] = {}
+    # A lower index is a newer environment.
+    newest: dict[tuple[object, ...], int] = {}
     for cell in cells:
-        same = (
-            cell.selection, cell.commit, cell.score, cell.subject, cell.opponent, cell.fixed,
-            json.dumps(cell.split, sort_keys=True),
-        )  # fmt: skip
-        held = chosen.get(same)
-        # A lower index is a newer environment.
-        if held is None or cell.environment < held.environment:
-            chosen[same] = cell
-    kept = set(map(id, chosen.values()))
-    hidden: dict[int, int] = {}
-    for cell in cells:
-        if id(cell) not in kept:
-            hidden[cell.environment] = hidden.get(cell.environment, 0) + 1
-    return [c for c in cells if id(c) in kept], tuple(
+        same = _comparison(cell)
+        newest[same] = min(cell.environment, newest.get(same, cell.environment))
+    hidden = Counter(c.environment for c in cells if c.environment != newest[_comparison(c)])
+    return [c for c in cells if c.environment == newest[_comparison(c)]], tuple(
         f"{count} values were also played in {_environment_name(environments[number])};"
         " the page shows each from the environment whose latest match is newest."
         for number, count in sorted(hidden.items())
     )
+
+
+def _comparison(cell: Cell) -> tuple[object, ...]:
+    """What a cell compares, whatever environment it was played in."""
+    return (
+        cell.selection, cell.commit, cell.score, cell.subject, cell.opponent, cell.fixed,
+        json.dumps(cell.split, sort_keys=True),
+    )  # fmt: skip
 
 
 def _environment_name(environment: Environment) -> str:

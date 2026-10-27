@@ -289,7 +289,7 @@ function render() {
       const tabs = node("div", "tabs-in");
       for (const j of vis) { const b = node("button", "jbtn"); b.append(swatch(j), j.label); b.setAttribute("aria-pressed", String(j === job)); b.onclick = () => { S.mjob = j.key; render(); }; tabs.appendChild(b); }
       c.appendChild(tabs);
-            const at = i => D.agents[i].at[S.eclock] ?? D.agents[i].at[M.alignClock];
+      const at = i => D.agents[i].at[S.eclock] ?? D.agents[i].at[M.alignClock];
       const order = members(job).filter(i => D.agents[i].config === S.cfg && at(i) != null).sort((a, b) => at(a) - at(b) || agentName(a).localeCompare(agentName(b)));
       const label = i => `${job.runs.length > 1 ? D.agents[i].run + " " : ""}${S.eclock in D.agents[i].at ? clockLabel(S.eclock) : M.alignClock} ${num(at(i))}`;
       if (order.length < 2) { c.appendChild(node("div", "na", `${job.label} has fewer than two checkpoints with a position`)); continue; }
