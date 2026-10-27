@@ -240,8 +240,9 @@ def advance(
     rent: str | None = None,
     directory: Path | str | None = None,
     retry_failed: bool = False,
+    queue: bool = False,
 ) -> list[Pass]:
-    """One pass: observe `source`, ask the experiment's `eval`, and play or launch what is new.
+    """One pass: observe `source`, ask `eval`, and play, launch or queue what is new.
 
     What is wanted is what `eval` returns now (`etude.eval.tournament.played`):
     a matchup it no longer returns is no longer played. Each job's eval run is
@@ -255,7 +256,13 @@ def advance(
     to play exactly those; the machine's storage must deliver to `source`, or
     the next pass will find them still new. Raises `EtudeError("launched_pass_failed")`
     when a run an earlier pass launched failed.
+
+    With `queue=True`, record jobs even when the chosen pool or on-demand is
+    busy. Queued matches stay in flight and are not submitted again. A launcher
+    controller or `etude wait` moves them when capacity becomes available.
     """
+    if queue and pool is None and rent is None:
+        raise EtudeError("queued_evals_need_a_pool_or_rent", 422)
     # Imported here: typed jobs import this module for `Checkpoint`.
     from etude.jobs import Evaluation, evaluation_spec, with_matches  # noqa: PLC0415
 
@@ -307,7 +314,7 @@ def advance(
             continue
         run = f"{spec.tournament.name}-{digest(sorted(m.key for m in pending))[:12]}"
         launched = with_matches(job, pending, state)
-        ledger.launch(run, launched, pending, pool=pool, rent=rent)
+        ledger.launch(run, launched, pending, pool=pool, rent=rent, queue=queue)
         passes.append(done.model_copy(update={"launched": run}))
     return passes
 
@@ -377,8 +384,10 @@ class _Ledger:
         *,
         pool: str | None,
         rent: str | None,
+        queue: bool,
     ) -> None:
-        client.launch(Run(id=run, job=job), pool, rent=rent)
+        submit = client.queue if queue else client.launch
+        submit(Run(id=run, job=job), pool, rent=rent)
         launched = [*self._read(), _Launched(run=run, matches=tuple(m.key for m in matches))]
         self.path.parent.mkdir(parents=True, exist_ok=True)
         staged = self.path.with_suffix(".tmp")
