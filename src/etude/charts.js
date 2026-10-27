@@ -209,6 +209,8 @@ function model(D) {
   const configs = [...new Set(D.agents.filter((a, i) => placed(i)).map(a => a.config))].sort();
   const coverage = new Map(D.coverage.map(c => [`${c.run}|${c.ordinal}|${c.tournament}`, c]));
   const jobOfRun = run => JOBS.find(j => j.runs.includes(run));
+  // The agents a line draws: its runs' checkpoints, or every positioned one.
+  const members = j => j.seated ? positioned : D.agents.map((a, i) => i).filter(i => j.runs.includes(D.agents[i].run));
   const agentName = i => D.agents[i].run != null ? `${D.agents[i].run} ${D.agents[i].name}` : D.agents[i].name;
   const selName = s => s.tournament == null ? "matches outside a tournament" : s.matchup != null ? `${s.tournament} · ${s.matchup}` : s.tag != null ? `${s.tournament} · tagged ${s.tag}` : s.tournament;
   // A page offers each tournament and each tag within one; a matchup only where a panel names it.
@@ -262,7 +264,7 @@ function model(D) {
     return {y: c.value, lo: c.interval?.[0], hi: c.interval?.[1], at: D.agents[i].at, meta: `${c.rows} rows · ${c.matches} matches${own ? " · vs " + agentName(o) : ""}`};
   };
   const evaluated = pts => pts.filter(p => !p.missing && !p.skip);
-  return {T, R, JOBS, marks, markOf, xOf, jobPoints, cellOf, bound, placed, positioned, posClocks, alignClock, fixedAgents, configs, coverage, jobOfRun, agentName, selName, choices, opponents, evalValue, evaluated};
+  return {T, R, JOBS, marks, markOf, xOf, jobPoints, cellOf, bound, placed, positioned, posClocks, alignClock, fixedAgents, configs, coverage, jobOfRun, members, agentName, selName, choices, opponents, evalValue, evaluated};
 }
 
 // The report's own headline for each job: its score curve in the page's first view (the
@@ -280,11 +282,10 @@ function headline(D, M) {
 
 // How far an experiment's evaluation has got, by checkpoint, and its failed matches. Without
 // training runs, the checkpoints are those placed by their seats, each evaluated once played.
-function progress(D) {
+function progress(D, M) {
   if (!D.training.runs.length) {
-    const seated = new Set(D.agents.map((a, i) => i).filter(i => D.agents[i].run == null && Object.keys(D.agents[i].at).length));
-    const played = new Set(D.cells.filter(c => seated.has(c.subject)).map(c => c.subject));
-    return {checkpoints: seated.size, evaluated: played.size, pending: 0, failed: D.failures.length};
+    const played = new Set(D.cells.filter(c => M.positioned.includes(c.subject)).map(c => c.subject));
+    return {checkpoints: M.positioned.length, evaluated: played.size, pending: 0, failed: D.failures.length};
   }
   const played = new Set(D.coverage.filter(c => c.played).map(c => `${c.run}|${c.ordinal}`));
   const pending = new Set(D.coverage.filter(c => c.unplayed).map(c => `${c.run}|${c.ordinal}`));

@@ -617,16 +617,14 @@ def _agents(db: duckdb.DuckDBPyConnection) -> tuple[list[Agent], tuple[str, ...]
             f" experiment: {', '.join(unplaced)}."
         )
     # The eval-only line holds one checkpoint per position and config.
-    shared: dict[tuple[str, str], list[str]] = {}
+    shared: dict[tuple[str, tuple[tuple[str, float], ...]], list[str]] = {}
     for each in agents:
         if each.run is None and each.at:
-            shared.setdefault((each.config, json.dumps(each.at, sort_keys=True)), []).append(
-                each.name
-            )
+            shared.setdefault((each.config, tuple(sorted(each.at.items()))), []).append(each.name)
     for (_, at), names in sorted(shared.items()):
         if len(names) > 1:
             notes.append(
-                f"{' and '.join(names)} stood at {_position(json.loads(at))} with one config;"
+                f"{' and '.join(names)} stood at {_position(dict(at))} with one config;"
                 " the eval-only line draws only the last."
             )
     return agents, tuple(notes)

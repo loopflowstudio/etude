@@ -87,7 +87,7 @@ function render() {
     const last = [...P.training.checkpoints].sort((x, y) => (started.get(y.run) + y.elapsed) - (started.get(x.run) + x.elapsed))[0];
     const clock = M.alignClock;
     fact("Latest checkpoint", last ? `${last.run} · ${clock ? `${clock} ${num(last.at[clock])}` : `#${last.ordinal}`} · ${ago((started.get(last.run) + last.elapsed) * 1000, D.generated_ms)}` : "none yet");
-    const p = progress(P);
+    const p = progress(P, M);
     facts.append(node("span", null, "Evaluated"));
     const ev = node("b", null, `${p.evaluated} of ${p.checkpoints} checkpoints`);
     if (p.pending) ev.append(` · ${p.pending} not yet played`);

@@ -34,7 +34,7 @@ const asked = new URLSearchParams(location.hash.slice(1)).get("commit");
 const COMMIT = PAGE.commits.some(k => k.commit === asked) ? asked : "";
 const D = {...PAGE, cells: PAGE.cells.filter(c => (c.commit ?? "") === COMMIT)};
 const M = model(D);
-const {T, R, JOBS, marks, markOf, jobPoints, cellOf, bound, placed, positioned, fixedAgents, configs, jobOfRun, agentName, selName, choices} = M;
+const {T, R, JOBS, marks, markOf, jobPoints, cellOf, bound, placed, members, fixedAgents, configs, jobOfRun, agentName, selName, choices} = M;
 const TRAINED = T.runs.length > 0;
 
 // The view lives in the URL, so a reload or a rewritten page shows the same thing. The x axis
@@ -134,7 +134,7 @@ function render() {
     kv("Jobs", `${T.jobs.length} · ${T.runs.length} runs`);
     kv("Runs", Object.entries(states).map(([s, n]) => `${n} ${s}`).join(", "));
   } else kv("Evaluation only", "no training runs");
-  kv("Checkpoints", progressText(progress(D)));
+  kv("Checkpoints", progressText(progress(D, M)));
   if (D.environments.length > 1) kv("Environments", D.environments.map(e => e.name + (Object.keys(e.config).length ? " " + JSON.stringify(e.config) : "")).join(", "));
   if (D.latest_result_ms != null) kv("Latest result", `${when(D.latest_result_ms)} (${ago(D.latest_result_ms, D.generated_ms)} this page)`);
   kv("Read", `${when(D.generated_ms)} from ${D.source}`);
@@ -270,7 +270,7 @@ function render() {
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
       const pairs = [];
       for (const a of vis) for (const b of JOBS) if (a !== b) {
-        const theirs = b.seated ? positioned : D.agents.map((g, i) => i).filter(i => D.agents[i].run != null && b.runs.includes(D.agents[i].run));
+        const theirs = members(b);
         const pts = jobPoints(a, S.eclock, (run, m) => {
           const mine = bound.get(`${run}|${m.ordinal}|${S.cfg}`);
           const got = mine == null ? [] : theirs.map(s => cellOf(sel, E.score, mine, s, false, F)).filter(Boolean);
@@ -289,9 +289,8 @@ function render() {
       const tabs = node("div", "tabs-in");
       for (const j of vis) { const b = node("button", "jbtn"); b.append(swatch(j), j.label); b.setAttribute("aria-pressed", String(j === job)); b.onclick = () => { S.mjob = j.key; render(); }; tabs.appendChild(b); }
       c.appendChild(tabs);
-      const members = job.seated ? positioned : D.agents.map((a, i) => i).filter(i => job.runs.includes(D.agents[i].run));
-      const at = i => D.agents[i].at[S.eclock] ?? D.agents[i].at[M.alignClock];
-      const order = members.filter(i => D.agents[i].config === S.cfg && at(i) != null).sort((a, b) => at(a) - at(b) || agentName(a).localeCompare(agentName(b)));
+            const at = i => D.agents[i].at[S.eclock] ?? D.agents[i].at[M.alignClock];
+      const order = members(job).filter(i => D.agents[i].config === S.cfg && at(i) != null).sort((a, b) => at(a) - at(b) || agentName(a).localeCompare(agentName(b)));
       const label = i => `${job.runs.length > 1 ? D.agents[i].run + " " : ""}${S.eclock in D.agents[i].at ? clockLabel(S.eclock) : M.alignClock} ${num(at(i))}`;
       if (order.length < 2) { c.appendChild(node("div", "na", `${job.label} has fewer than two checkpoints with a position`)); continue; }
       const grid = node("div", "matrix"); grid.style.gridTemplateColumns = `minmax(110px, auto) repeat(${order.length}, minmax(44px, 1fr))`;
