@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 const {test} = require("node:test");
 const context = vm.createContext({});
-vm.runInContext(fs.readFileSync("src/etude/charts.js", "utf8") + "\nthis.model = model;", context);
+vm.runInContext(fs.readFileSync("src/etude/charts.js", "utf8") + "\nthis.model = model; this.isolated = isolated;", context);
 
 function player(name, line, updates, run = null, ordinal = null) {
   return {name, line, at: {updates}, config: "{}", run, ordinal};
@@ -87,4 +87,10 @@ test("an ambiguous relative opponent breaks the curve and names both candidates"
   const gap = points(m, m.JOBS[0]).find(p => p.x === 400);
   assert.equal(gap.missing, true);
   assert.match(gap.meta, /first.*second.*both stood at updates 0/);
+});
+
+test("a dense line marks the points it has no segment for", () => {
+  const ys = [0.5, 0.6, null, 0.7, null, undefined, 0.8, 0.9, null, 0.4];
+  assert.deepEqual([...context.isolated(ys)], [3, 9]);
+  assert.deepEqual([...context.isolated([0.5])], [0]);
 });

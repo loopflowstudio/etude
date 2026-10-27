@@ -41,6 +41,14 @@ function showTip(evt, rows, title) {
 const hideTip = () => { if (tipNode) tipNode.style.display = "none"; };
 
 // ---------------------------------------------------------------- line charts (uPlot)
+// The indices of `ys` holding a value with no value beside it on either side: a line draws
+// nothing for them, so they need a marker.
+function isolated(ys) {
+  const found = [];
+  for (let i = 0; i < ys.length; i++) if (ys[i] != null && ys[i - 1] == null && ys[i + 1] == null) found.push(i);
+  return found;
+}
+
 // series: [{label, color, dotted, opacity, width, faint, points: [{x, y, lo, hi, missing, skip, gap, meta}]}]
 // A missing point is null to uPlot, so its line breaks: an evaluation that did not happen is
 // never bridged. A skipped point is no point of the line (undefined, which uPlot joins over).
@@ -65,7 +73,8 @@ function line(host, series, o = {}) {
     const color = s.opacity != null && s.opacity < 1 ? alpha(s.color, s.opacity) : s.color;
     data.push(column(maps[i], p => p.y));
     spec.push({label: s.label, stroke: color, width: s.width ?? (o.spark ? 1.5 : 2), dash: s.dotted ? [1, 4] : undefined, cap: s.dotted ? "round" : "butt",
-      points: {show: sparse || !!o.dots, size: sparse ? 7 : 5, fill: color, stroke: color}});
+      // A dense line marks only its isolated points, which have no segment to show them.
+      points: {show: true, size: sparse ? 7 : 5, fill: color, stroke: color, filter: sparse || o.dots ? null : (u, k) => isolated(u.data[k])}});
     const banded = o.band !== false && pts.some(p => p.lo != null);
     if (banded && !sparse) {
       data.push(column(maps[i], p => p.hi ?? p.y), column(maps[i], p => p.lo ?? p.y));
