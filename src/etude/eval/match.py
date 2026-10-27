@@ -71,6 +71,9 @@ ETUDE_TABLES = (
 )
 # Columns Etude adds to every row.
 ADDED = ("run", "match")
+# The seat's name before etude-sdk 0.2.7. Refused in rows, so a stored table with
+# a `player` column is an older one (`etude.eval.query` reads it as such).
+OLD_SEAT = "player"
 
 type Value = bool | int | float | str | None
 type Row = Mapping[str, Value]
@@ -361,7 +364,7 @@ def _checked(scheduled: Match, table: str, rows: Sequence[Row]) -> list[Row]:
         if group is not None and group not in scheduled.groups:
             raise EtudeError("row_group_not_in_match", 422) from where
         for column in row:
-            if column in ADDED or not IDENTIFIER.match(column):
+            if column in ADDED or column == OLD_SEAT or not IDENTIFIER.match(column):
                 raise EtudeError("column_name_refused", 422) from where
     return list(rows)
 

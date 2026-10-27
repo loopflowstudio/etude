@@ -68,7 +68,7 @@ import numpy as np
 import numpy.typing as npt
 from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationError
 
-from etude.eval.match import ETUDE_TABLES, IDENTIFIER, KIND, quote
+from etude.eval.match import ETUDE_TABLES, IDENTIFIER, KIND, OLD_SEAT, quote
 from etude.eval.records import (
     COLUMN_TYPES,
     TABLE_FILE,
@@ -394,11 +394,16 @@ def _table(db: duckdb.DuckDBPyConnection, run: str, table: str, name: str, path:
         [table, file],
     )
     arrived = {column: kind for column, kind, *_ in db.execute("describe _arrived").fetchall()}
-    if "player" in arrived and "seat" not in arrived:
-        db.execute("alter table _arrived rename column player to seat")
-        arrived = {
-            ("seat" if column == "player" else column): kind for column, kind in arrived.items()
-        }
+    if OLD_SEAT in arrived:
+        # Written before rows named the seat `seat`: `player` is the seat, and a
+        # `seat` beside it is the game's own, which rows now call `game_seat`.
+        renamed = {OLD_SEAT: "seat", "seat": "game_seat"}
+        if "game_seat" in arrived and "seat" in arrived:
+            raise EtudeError("old_table_has_seat_and_game_seat", 422) from ValueError(name)
+        for column in ("seat", OLD_SEAT):
+            if column in arrived:
+                db.execute(f'alter table _arrived rename column "{column}" to {renamed[column]}')
+        arrived = {renamed.get(column, column): kind for column, kind in arrived.items()}
     exists = db.execute(
         "select 1 from information_schema.tables where table_schema = 'main' and table_name = ?",
         [table],
