@@ -101,7 +101,8 @@ def agent(
 ) -> Agent:
     """A saved model, by its checkpoint's key, or code, by `name`; and its config.
 
-    The key is the checkpoint or name with the config (`etude.eval.records.AgentKey`).
+    The key is the checkpoint or name with the config (`etude.eval.records.AgentKey`);
+    a checkpoint agent carries the checkpoint's `at`, which is not part of it.
     `code` is the source files that play it: their commit and digest are the
     agent's `Version`, recorded with each match it plays. A code agent must
     name them; a checkpoint agent should name its inference code. A directory
@@ -114,7 +115,9 @@ def agent(
         key = AgentKey(code=name, config=as_config(config))
         return Agent(key=key, name=name, version=version)
     key = AgentKey(checkpoint=checkpoint.key, config=as_config(config))
-    return Agent(key=key, name=name, artifact=checkpoint.artifact, version=version)
+    return Agent(
+        key=key, name=name, artifact=checkpoint.artifact, version=version, at=checkpoint.at
+    )
 
 
 def environment(

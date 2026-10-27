@@ -16,8 +16,8 @@ the checkpoint's own key (`CheckpointKey`), or the name of the code that plays
 it, together with its config. One checkpoint at two search budgets is two
 agents; two checkpoint keys holding the same bytes are two agents too, since
 where a checkpoint's bytes came from is not part of what it is. The code's
-commit and source digest are its `Version`, recorded with each match but not
-part of the key: a match one version played counts as played for every
+commit and source digest are its `Version`, and a checkpoint's position on
+its clocks is `at`; both are recorded with each match but not part of the key: a match one version played counts as played for every
 version, and reads can select a version. A match seats agents by position
 (`player`), names groups of seats and fixes the conditions it is played under.
 A match's key is the digest of its seats' keys, its groups and conditions.
@@ -133,10 +133,17 @@ class CheckpointKey(Record):
 
 
 class CheckpointRef(Record):
-    """A checkpoint to seat: its key, and the file holding it, which must carry its digest."""
+    """A checkpoint to seat: its key, and the file holding it, which must carry its digest.
+
+    `at` is where it stood on each clock, such as `{"updates": 600}`: a
+    declared fact the seat carries to its matches so a report can place it,
+    and part of no key. A tracked checkpoint's ref fills it from its run's
+    clocks; give it yourself for a checkpoint no Etude run recorded.
+    """
 
     key: CheckpointKey
     artifact: ArtifactRef
+    at: dict[str, float] = {}
 
     @model_validator(mode="after")
     def verifiable(self) -> Self:
@@ -194,6 +201,15 @@ class Agent(Record):
     # A checkpoint's file: where it lies here, and the digest it must have.
     artifact: ArtifactRef | None = None
     version: Version = Version()
+    # Where its checkpoint stood by clock (`CheckpointRef.at`); empty for code or unknown.
+    # Like the version, recorded with each match and not part of the key.
+    at: dict[str, float] = {}
+
+    @model_validator(mode="after")
+    def placed(self) -> Self:
+        if self.at and self.key.checkpoint is None:
+            raise ValueError("only_a_checkpoint_has_a_position")
+        return self
 
     @model_validator(mode="before")
     @classmethod
@@ -348,6 +364,7 @@ class Model(Record):
             name=re.sub(r"\s", "_", checkpoint.key.label),
             artifact=checkpoint.artifact,
             version=self.version,
+            at=checkpoint.at,
         )
 
 

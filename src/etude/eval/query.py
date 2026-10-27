@@ -7,9 +7,9 @@ beside Etude's own tables:
 | table | columns |
 |---|---|
 | `runs` | run, experiment, environment (identity), environment_name, environment_config, tournament |
-| `agents` | agent (its key, encoded), name, kind, checkpoint (its key), artifact (digest), uri, config, and `config.KEY` per scalar config key |
+| `agents` | agent (its key, encoded), name, kind, checkpoint (its key), artifact (digest), uri, config, at, at_conflict, and `config.KEY` per scalar config key |
 | `matches` | run, match, conditions, games, seed, state, error, wall_ms |
-| `seats` | run, match, player, agent, and the version that played: commit, source (digest) |
+| `seats` | run, match, player, agent, the version that played: commit, source (digest), and at (where its checkpoint stood, or null) |
 | `groups` | run, match, group, player |
 | `tournaments` | tournament, format (`benchmark` or `round_robin`), environment, conflict |
 | `schedule` | tournament, match, matchup, checkpoint (its key) and the matchup's tags of a benchmark's match; no checkpoint for a matchup of fixed agents |
@@ -22,7 +22,10 @@ When its eval runs disagree, `conflict` names how (`tournament_conflict`,
 `training_checkpoints` holds every checkpoint the experiment's training runs
 recorded, read from their stored JSON, so a checkpoint agent joins to where
 its run's clocks stood by key (`agents.checkpoint = training_checkpoints.checkpoint`),
-never by its bytes. A match counts once whichever version played it: the
+never by its bytes. A seat may say where its checkpoint stood itself
+(`etude.eval.records.CheckpointRef.at`): `agents.at` is the position from the
+latest match record giving one, and `agents.at_conflict` lists every position
+given when they differ, else null. A match counts once whichever version played it: the
 latest record holding it (`seats.commit` tells which).
 
 The database is a DuckDB file under `ETUDE_HOME/statsdb`, one per experiment
@@ -88,7 +91,7 @@ NUMERIC = ("BOOLEAN", "BIGINT", "DOUBLE")
 # Keys and coordinates of an author table's rows: never a value.
 KEYS = ("player", "group", "game", "run", "match")
 # A kept database of another schema is deleted and read again from its store.
-SCHEMA = 2
+SCHEMA = 3
 
 _ENVIRONMENT_FILE = "environment.json"
 
@@ -166,7 +169,7 @@ def _create(db: duckdb.DuckDBPyConnection, experiment: str, storage: Storage) ->
     )
     db.execute(
         "create table seats (run VARCHAR, match VARCHAR, player BIGINT, agent VARCHAR,"
-        " commit VARCHAR, source VARCHAR)"
+        ' commit VARCHAR, source VARCHAR, "at" JSON)'
     )
     db.execute('create table "groups" (run VARCHAR, match VARCHAR, "group" VARCHAR, player BIGINT)')
     db.execute(
@@ -326,9 +329,17 @@ def _match(db: duckdb.DuckDBPyConnection, run: str, record: MatchRecord) -> bool
     )  # fmt: skip
     _insert(
         db,
-        "insert into seats values (?, ?, ?, ?, ?, ?)",
+        "insert into seats values (?, ?, ?, ?, ?, ?, ?)",
         [
-            [run, match.key, seat, seated.key.encoded, seated.version.commit, seated.version.source]
+            [
+                run,
+                match.key,
+                seat,
+                seated.key.encoded,
+                seated.version.commit,
+                seated.version.source,
+                _canonical(seated.at) if seated.at else None,
+            ]
             for seat, seated in enumerate(match.agents)
         ],  # fmt: skip
     )
@@ -339,6 +350,11 @@ def _match(db: duckdb.DuckDBPyConnection, run: str, record: MatchRecord) -> bool
     )
     _remember_agents(db, match.agents)
     return True
+
+
+def _canonical(value: object) -> str:
+    """JSON with sorted keys, so equal positions compare equal as text."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
 def _remember_agents(db: duckdb.DuckDBPyConnection, agents: Sequence[Agent]) -> None:
@@ -525,15 +541,25 @@ def _agents_table(db: duckdb.DuckDBPyConnection, agents: dict[str, list[Agent]])
             columns[key] = seen.pop()
         else:
             warnings.warn(f"agent config {key!r} has types {sorted(seen)}; only in `config`")
+    # Each agent's positions as its seats give them, the latest record's first.
+    positions: dict[str, list[str]] = {}
+    for identity, at in db.execute(
+        'select s.agent, s."at" from seats s join matches m using (run, match)'
+        ' where s."at" is not null order by m.wall_ms desc, s.run desc'
+    ).fetchall():
+        given = positions.setdefault(identity, [])
+        if at not in given:
+            given.append(at)
     db.execute(
         "create or replace table agents (agent VARCHAR, name VARCHAR, kind VARCHAR,"
-        " checkpoint VARCHAR, artifact VARCHAR, uri VARCHAR, config JSON"
+        ' checkpoint VARCHAR, artifact VARCHAR, uri VARCHAR, config JSON, "at" JSON,'
+        " at_conflict JSON"
         + "".join(f', "config.{key}" {kind}' for key, kind in columns.items())
         + ")"
     )
     _insert(
         db,
-        f"insert into agents values ({', '.join('?' for _ in range(7 + len(columns)))})",
+        f"insert into agents values ({', '.join('?' for _ in range(9 + len(columns)))})",
         [
             [
                 identity,
@@ -543,6 +569,10 @@ def _agents_table(db: duckdb.DuckDBPyConnection, agents: dict[str, list[Agent]])
                 None if given[0].artifact is None else given[0].artifact.sha256,
                 None if given[0].artifact is None else given[0].artifact.uri,
                 json.dumps(given[0].config),
+                next(iter(positions.get(identity, ())), None),
+                "[" + ",".join(sorted(positions[identity])) + "]"
+                if len(positions.get(identity, ())) > 1
+                else None,
                 *(flat[identity].get(key) for key in columns),
             ]
             for identity, given in agents.items()

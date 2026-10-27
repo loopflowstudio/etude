@@ -18,8 +18,11 @@ panel shows every job; a job is its runs across seeds.
 
 Panels name data, never rendering. Eval panels name columns of the score's
 eval table (`Matrix(rows=..., columns=...)`, `Ranking(by=...)`,
-`Curve(split=...)`) and which matches they count (`Matches`): a tournament's,
-or one matchup or tag of it, by the names `eval(state)` gives them. Metric
+`Curve(split=...)`), whom a curve is scored against (`Curve(opponent=...)`:
+an agent's name, or a checkpoint of the same line by its position, `Earlier`
+or `At`), and which matches they count (`Matches`): a tournament's, or one
+matchup or tag of it, by the names `eval(state)` gives them. Matches held
+outside any tournament are offered by the Evals section's Matches control. Metric
 panels name logged metric keys. The defaults are reinforcement learning's:
 override `perf` or `ml` to name an experiment's own keys. This module imports only Pydantic and Etude's run records, so an
 experiment file can import it at no cost.
@@ -68,13 +71,39 @@ class Matches(Record):
         return self
 
 
+class Earlier(Record):
+    """Each point's opponent is the checkpoint of its line that stood `by` earlier on `clock`.
+
+    Only an exact position counts: with no checkpoint there, the point is a gap
+    that says so.
+    """
+
+    kind: Literal["earlier"] = "earlier"
+    clock: str
+    by: float
+
+
+class At(Record):
+    """Each point's opponent is the checkpoint of its line that stood at `value` on `clock`."""
+
+    kind: Literal["at"] = "at"
+    clock: str
+    value: float
+
+
 class Curve(Record):
-    """The score at each checkpoint, a line per job; `split` draws one chart per column value."""
+    """The score at each checkpoint, a line per job; `split` draws one chart per column value.
+
+    `opponent` fixes whom each point is scored against, overriding the
+    section's Opponent control: an agent's name, or a checkpoint of the same
+    line (`Earlier`, `At`). None leaves it to the control.
+    """
 
     kind: Literal["curve"] = "curve"
     title: str = "Score"
     split: str | None = None
     matches: Matches | None = None
+    opponent: str | Earlier | At | None = None
 
 
 class Matrix(Record):
@@ -104,12 +133,23 @@ class HeadToHead(Record):
     matches: Matches | None = None
 
 
+class Crosstable(Record):
+    """Each checkpoint of one line against each other checkpoint of it, ordered by the clock.
+
+    A row's score against a column; the diagonal is empty and an unplayed pair
+    shows as such. Tabbed by line, like `Matrix`.
+    """
+
+    kind: Literal["crosstable"] = "crosstable"
+    title: str = "Head to head between checkpoints"
+    matches: Matches | None = None
+
+
 class Anchors(Record):
-    """Fixed agents (code, or checkpoints from outside the experiment) against each other.
+    """Fixed agents (code, or checkpoints with no position) against each other.
 
     Drawn once, not per job: each anchor's score against the others, and its
-    strength, the score over its matches that seat no checkpoint of the
-    experiment. A curve against one anchor draws the others' scores against it
+    strength, the score over its matches that seat no placed checkpoint. A curve against one anchor draws the others' scores against it
     as reference lines.
     """
 
@@ -172,7 +212,7 @@ class Attempts(Record):
 
 
 type EvalPanel = Annotated[
-    Curve | Matrix | Ranking | HeadToHead | Anchors, Field(discriminator="kind")
+    Curve | Matrix | Ranking | HeadToHead | Crosstable | Anchors, Field(discriminator="kind")
 ]
 type MetricPanel = Annotated[
     Series | Counters | Flame | Pace | Elapsed | Attempts, Field(discriminator="kind")

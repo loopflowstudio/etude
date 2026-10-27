@@ -135,6 +135,13 @@ evaluate(
   are the agent's `Version`, recorded with each match (`seats.commit`,
   `seats.source`) but not part of the key, so changed code reuses what was
   played. Joins use the key, encoded (`agents.agent`, `seats.agent`).
+- **Where a checkpoint stood.** A seated checkpoint may say where it stood on
+  its clocks: `CheckpointRef(key=..., artifact=..., at={"updates": 600})`.
+  A tracked checkpoint's `ref` fills `at` from its run's clocks; give it
+  yourself for a checkpoint no Etude run recorded. It is carried to each
+  match's seats (`seats.at`, `agents.at`) so a report can place the point,
+  and is part of no key: correcting it never forks an agent or replays a
+  match. Seats that disagree are listed in `agents.at_conflict`.
 - **Source files.** A directory stands for the files below it. In a git
   checkout only tracked files count, named by their path in the checkout, so
   caches and scratch files never change a version; an uncommitted edit does,

@@ -70,8 +70,8 @@ class Checkpoint(Record):
 
     @property
     def ref(self) -> CheckpointRef:
-        """Its key and stored file, as a benchmark is held for it."""
-        return CheckpointRef(key=self.key, artifact=self.artifact)
+        """Its key, stored file and where it stood, as a benchmark is held for it."""
+        return CheckpointRef(key=self.key, artifact=self.artifact, at=self.clocks)
 
     def agent(self, model: Model) -> Agent:
         """This checkpoint in `model`'s seat, for a matchup of chosen checkpoints."""

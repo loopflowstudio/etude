@@ -18,7 +18,15 @@ from pydantic import BaseModel
 
 from etude.eval.match import agent, environment, evaluate
 from etude.eval.query import compare, estimate, statsdb
-from etude.eval.records import Agent, CheckpointKey, CheckpointRef, Config, Match, Model
+from etude.eval.records import (
+    Agent,
+    AgentKey,
+    CheckpointKey,
+    CheckpointRef,
+    Config,
+    Match,
+    Model,
+)
 from etude.run.errors import EtudeError
 from etude.run.records import ArtifactRef
 from etude.run.storage import DirectoryStorage, S3Storage
@@ -284,6 +292,22 @@ def test_a_checkpoint_agents_inference_code_is_its_version_not_its_key(tmp_path:
     # The same bytes under another key are another agent.
     copied = CheckpointRef(key=CheckpointKey(run="ppo-2", name="updates-100.pt"), artifact=file)
     assert agent("net", checkpoint=copied, config=Direct()).key != before.key
+
+
+def test_where_a_checkpoint_stood_is_carried_by_its_seat_and_is_not_its_identity() -> None:
+    file = ArtifactRef(uri="hf://lab/u600.pt", sha256=sha256(b"a").hexdigest())
+    key = CheckpointKey(address=file.uri)
+    seated = agent("u600", checkpoint=CheckpointRef(key=key, artifact=file, at={"updates": 600}))
+    corrected = Model().agent(CheckpointRef(key=key, artifact=file, at={"updates": 612}))
+    rival = agent(
+        "rival", checkpoint=CheckpointRef(key=CheckpointKey(address="hf://b"), artifact=file)
+    )
+    assert (seated.at, corrected.at) == ({"updates": 600}, {"updates": 612})
+    # Correcting a position neither forks the agent nor replays its match.
+    assert seated.key == corrected.key
+    assert Match(agents=(seated, rival)).key == Match(agents=(corrected, rival)).key
+    with pytest.raises(ValueError, match="only_a_checkpoint_has_a_position"):
+        Agent(key=AgentKey(code="heuristic"), name="heuristic", at={"updates": 0})
 
 
 def test_a_code_agents_version_is_its_commit_and_tracked_files_in_a_checkout_or_launched(

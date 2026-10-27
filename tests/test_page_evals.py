@@ -1,4 +1,4 @@
-"""An experiment's evals on its page: checkpoints bound by key, anchors drawn once, gaps kept."""
+"""An experiment's evals on its page: checkpoints placed by seat or key, anchors drawn once, gaps kept."""
 
 from __future__ import annotations
 
@@ -10,12 +10,18 @@ import pytest
 from moto import mock_aws
 
 from etude.carriage import checkpoint_file
-from etude.experiment import advance, read_experiment
+from etude.eval.match import agent as eval_agent
+from etude.eval.match import environment, evaluate
+from etude.eval.query import compare, statsdb
+from etude.eval.records import Agent, CheckpointKey, CheckpointRef, Match
+from etude.experiment import advance, observe, read_experiment
 from etude.page import Page, build
+from etude.report import Matches
 from etude.run.errors import EtudeError
-from etude.run.records import Clock
+from etude.run.records import ArtifactRef, Clock
 from etude.run.storage import DirectoryStorage, S3Storage
 from etude.train.run import Run, track
+from tests.eval.games import play
 from tests.experiments import experiment_file
 from tests.run.storage import CountedClient
 
@@ -118,7 +124,7 @@ def agent(page: Page, name: str, run: str | None = None) -> int:
     return found
 
 
-def selection(page: Page, tournament: str, *, matchup: str | None = None) -> int:
+def selection(page: Page, tournament: str | None, *, matchup: str | None = None) -> int:
     return next(
         i
         for i, each in enumerate(page.selections)
@@ -266,3 +272,179 @@ def test_a_page_offers_each_commit_its_matches_were_played_at(
         "a" * 40: {"updates-100.pt", "updates-200.pt"},
         "b" * 40: {"updates-300.pt"},
     }
+
+
+EVALUATION_ONLY = """
+from etude.report import At, Crosstable, Curve, Earlier, Report, Score
+
+
+def report():
+    return Report(
+        score=Score(table="plays", value="won", reference=0.5),
+        clock="updates",
+        evals=(
+            Curve(title="Score against the heuristic", opponent="heuristic"),
+            Curve(title="Against 400 updates earlier", opponent=Earlier(clock="updates", by=400)),
+            Curve(title="Against update 200", opponent=At(clock="updates", value=200)),
+            Crosstable(),
+        ),
+    )
+"""
+
+DUEL = environment("duel")
+HEURISTIC = eval_agent("heuristic", code=[__file__], config={"strength": 5})
+
+
+def outside(name: str, at: dict[str, float], **config: int) -> Agent:
+    """A checkpoint no Etude run recorded, keyed by its address, seated where `at` says."""
+    address = f"hf://lab/{name}.pt"
+    ref = CheckpointRef(
+        key=CheckpointKey(address=address),
+        artifact=ArtifactRef(uri=address, sha256="cd" * 32),
+        at=at,
+    )
+    return eval_agent(name, checkpoint=ref, config=config or None)
+
+
+def duel(first: Agent, second: Agent, deal: int = 0) -> Match:
+    return Match(agents=(first, second), conditions={"deal": deal}, games=2)
+
+
+@pytest.fixture(scope="module")
+def evaluation_only(tmp_path_factory: pytest.TempPathFactory) -> Iterator[tuple[Path, Path]]:
+    """Two plain eval runs of `lab`, and no training run: checkpoints placed by their seats."""
+    tmp_path = tmp_path_factory.mktemp("evaluation_only")
+    runs = tmp_path / "runs"
+    file = experiment_file(tmp_path / "experiments", "lab", EVALUATION_ONLY)
+    u = {n: outside(f"u{n}", {"updates": n}) for n in (0, 200, 400, 600)}
+    loose = outside("loose", {}, strength=4)
+    grids = [duel(each, HEURISTIC, deal) for each in u.values() for deal in (0, 1)]
+    pairs = [duel(u[600], u[200]), duel(u[400], u[0]), duel(u[600], u[400])]
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+        patch.setattr(sys, "path", list(sys.path))
+        # (600, 400) is delivered by both runs; "drift" is seated at two positions.
+        for run, matches in (
+            ("plain-a", [*grids[:4], *pairs, duel(loose, HEURISTIC)]),
+            ("plain-b", [*grids[4:], pairs[2]]),
+        ):
+            drift = outside("drift", {"updates": 300 if run == "plain-a" else 350}, strength=6)
+            evaluate(
+                experiment="lab",
+                environment=DUEL,
+                matches=[*matches, duel(drift, HEURISTIC, deal=int(run == "plain-b"))],
+                play=play,
+                run=run,
+                directory=runs,
+            )
+        yield runs, file
+
+
+def test_an_evaluation_only_experiment_draws_checkpoints_where_their_seats_say(
+    evaluation_only: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs, file = evaluation_only
+    monkeypatch.setenv("ETUDE_HOME", str(runs.parent / "home"))
+    page = build(runs, file)
+    assert page.training.runs == ()
+    outside_tournaments = selection(page, None)
+    assert page.selections[outside_tournaments] == Matches()
+    at = {each.name: each.at for each in page.agents}
+    assert {name: at[name] for name in ("u0", "u200", "u400", "u600")} == {
+        f"u{n}": {"updates": n} for n in (0, 200, 400, 600)
+    }
+    # Unplaced: code, a checkpoint seated without `at`, and one whose seats disagree.
+    assert at["heuristic"] == at["loose"] == at["drift"] == {}
+    assert all(each.run is None for each in page.agents)
+    assert any("loose" in note and "anchors" in note for note in page.notes)
+    assert any("drift" in note and "updates 300; updates 350" in note for note in page.notes)
+    pair = {
+        (page.agents[c.subject].name, page.agents[c.opponent].name): c
+        for c in page.cells
+        if c.selection == outside_tournaments and c.opponent is not None and not c.split
+    }
+    # The match both runs delivered counts once, where reading every row counts it twice.
+    assert pair[("u600", "u400")].matches == pair[("u400", "u600")].matches == 1
+    db = statsdb("lab", runs)
+    try:
+        direct = {
+            (each.subject, each.opponent): each for each in compare(db, table="plays", value="won")
+        }
+    finally:
+        db.close()
+    for (subject, opponent), cell in pair.items():
+        keys = {each.name: each.key for each in page.agents}
+        found = direct[((keys[subject],), (keys[opponent],))]
+        if {subject, opponent} == {"u600", "u400"}:
+            assert found.matches == 2
+            continue
+        assert (cell.value, cell.interval, cell.matches) == (
+            found.value,
+            found.interval,
+            found.matches,
+        )
+    assert {"u0", "u200", "u400", "u600"} <= {s for s, o in pair if o == "heuristic"}
+
+
+def test_an_evaluation_only_page_reads_each_bucket_object_once(
+    evaluation_only: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    boto3 = pytest.importorskip("boto3")
+    runs, file = evaluation_only
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    with mock_aws():
+        client = CountedClient(boto3.client("s3", region_name="us-east-1"))
+        client.create_bucket(Bucket="lab")
+        local = DirectoryStorage(runs)
+        for key in local.keys(""):
+            S3Storage("lab", client=client).put(key, local.get(key))
+        first = build(S3Storage("lab", client=client), file)
+        assert first.training.runs == () and first.cells
+        sizes = {key: len(local.get(key)) for key in local.keys("")}
+        assert all(read <= sizes[key] for key, read in client.read.items())
+        read_once = client.bytes
+        assert build(S3Storage("lab", client=client), file) == first
+        assert client.bytes == read_once
+
+
+SEATED = """
+from etude.report import Report, Score
+
+
+def report():
+    return Report(score=Score(table="plays", value="won", reference=0.5))
+"""
+
+
+def test_a_tracked_checkpoint_is_placed_by_its_seat_first_and_its_training_record_else(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = tmp_path / "runs"
+    file = experiment_file(tmp_path / "experiments", "seated", SEATED)
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    run = track(experiment="seated", run="a", job="a", clocks=CLOCKS, directory=runs)
+    save(run, tmp_path, range(100, 300, 100))
+    run.finish(timeout=30)
+    first, second = observe(DirectoryStorage(runs), "seated").runs[0].checkpoints
+    # Seated as stored matches were: without `at`, and once where the seat says otherwise.
+    bare = first.ref.model_copy(update={"at": {}})
+    moved = second.ref.model_copy(update={"at": {"updates": 250}})
+    evaluate(
+        experiment="seated",
+        environment=DUEL,
+        matches=[
+            duel(eval_agent("updates-100.pt", checkpoint=bare), HEURISTIC),
+            duel(eval_agent("updates-200.pt", checkpoint=moved), HEURISTIC),
+        ],
+        play=play,
+        run="plain",
+        directory=runs,
+    )
+    page = build(runs, file)
+    placed = {each.name: (each.run, each.at) for each in page.agents if each.run is not None}
+    assert placed == {
+        "updates-100.pt": ("a", {"updates": 100}),
+        "updates-200.pt": ("a", {"updates": 250}),
+    }
+    assert "updates-200.pt: seated at updates 250; its training record says 200." in page.notes

@@ -81,10 +81,11 @@ function render() {
     const states = node("b");
     for (const [n, label, cls] of [[other, "running", "live-text"], [count("finished"), "finished", null], [count("failed"), "failed", "bad-text"], [restarted, "restarted", null]])
       if (n) { if (states.childNodes.length) states.append(" · "); states.appendChild(node("span", cls, `${n} ${label}`)); }
+    if (!runs.length) states.append("evaluation only");
     facts.append(node("span", null, "Runs"), states);
     const started = new Map(runs.map(x => [x.name, x.started]));
     const last = [...P.training.checkpoints].sort((x, y) => (started.get(y.run) + y.elapsed) - (started.get(x.run) + x.elapsed))[0];
-    const clock = P.training.clocks[0]?.name;
+    const clock = M.alignClock;
     fact("Latest checkpoint", last ? `${last.run} · ${clock ? `${clock} ${num(last.at[clock])}` : `#${last.ordinal}`} · ${ago((started.get(last.run) + last.elapsed) * 1000, D.generated_ms)}` : "none yet");
     const p = progress(P);
     facts.append(node("span", null, "Evaluated"));

@@ -240,10 +240,22 @@ on the run's first declared clock. The `baseline` job is dotted everywhere; a
 job's colour follows launch order.
 
 **Evals** are the experiment's eval runs ([evaluation](evaluation.md#experiments)).
-A checkpoint agent is bound to the checkpoint its key names, `RUN/checkpoints/NAME`,
-and drawn where that run's clocks stood; two runs' checkpoints holding the same
-bytes are two points. Every other agent, code or a checkpoint from outside the
-experiment, is an anchor. `score` names an eval table's value, computed as
+A checkpoint is drawn where its seat says it stood (`CheckpointRef.at`), else,
+for a key a training run of the experiment saved (`RUN/checkpoints/NAME`),
+where that run's clocks stood; where both give a clock and differ, the seat's
+value is drawn and the page notes it. Two runs' checkpoints holding the same
+bytes are two points. A checkpoint a training run saved joins that run's job;
+every other placed checkpoint joins one line, "positioned by their seats".
+Every unplaced agent, code or a checkpoint seated without a position, is an
+anchor, and the page names the unplaced checkpoints.
+
+**Evaluation only.** An experiment with eval runs and no training runs draws
+too: the page says "Evaluation only", Perf and ML details say there are no
+training runs, and the x axis offers the clocks the seats' positions use.
+Matches of eval runs held for no tournament are offered as "matches outside a
+tournament", each counting once per environment from its latest record. One
+comparison played in several environments shows the environment whose latest
+match is newest, and the page notes the rest. `score` names an eval table's value, computed as
 `etude.eval.query.compare` computes it, with its 95% interval over whole
 matches; without one, every numeric column is offered. Each match counts once,
 from the eval run that delivered it last (`etude.eval.tournament.played`), so at
@@ -252,7 +264,11 @@ is drawn as it wants it now; one it no longer returns, as its eval runs held it.
 
 | Panel | Shows |
 |---|---|
-| `Curve(split=None)` | the score at each checkpoint, against one anchor; `split` draws one chart per value |
+| `Curve(split=None, opponent=None)` | the score at each checkpoint, against one anchor; `split` draws one chart per value |
+| `Curve(opponent="heuristic")` | against the agent of that name, whatever the Opponent control says |
+| `Curve(opponent=Earlier(clock="updates", by=400))` | each checkpoint against the one of its line exactly 400 updates earlier; none there is a gap that says so |
+| `Curve(opponent=At(clock="updates", value=200))` | each checkpoint against the one of its line at update 200 |
+| `Crosstable()` | one line's checkpoints against each other, both axes ordered by the clock; an unplayed pair shows `·` |
 | `Matrix(rows, columns)` | one job's score per cell at one checkpoint: a finished job's final, else its latest evaluated |
 | `Ranking(by)` | a bar per job for each value of `by`; clicking a row filters the page |
 | `HeadToHead()` | a job's score in games against another job's checkpoints |
