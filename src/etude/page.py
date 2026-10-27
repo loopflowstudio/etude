@@ -188,6 +188,8 @@ class Page(Record):
     wall_meaning: str = WALL_MEANING
     training: Training
     scores: tuple[Score, ...]
+    # Here Matches(tournament=None) means the matches played outside any tournament,
+    # not a report panel's "the section's control".
     selections: tuple[Matches, ...]
     agents: tuple[Agent, ...]
     environments: tuple[Environment, ...]
