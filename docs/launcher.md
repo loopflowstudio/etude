@@ -5,7 +5,7 @@ etude pool add lab                                   # machines you own
 etude machine add mini me@mini.local --pool lab      # cost $0, never expires
 etude ondemand add runpod-cpu8 --provider runpod --vcpus 8 --memory-gb 16 \
     --max 2 --max-usd-per-hour 0.40                  # a template and a budget
-etude availability --rent runpod-cpu8                # what it would rent, at what price
+etude availability runpod-cpu8                       # what it would rent, at what price
 etude launch job.py --rent runpod-cpu8 --quote       # machines and maximum spend; rents nothing
 etude launch job.py --pool lab --rent runpod-cpu8    # the Mini first, then rent
 etude machines --all                                 # owned: cost, expiry; rented: hardware, cost
@@ -22,8 +22,8 @@ before renting from R. A run that cannot start yet waits.
 | `etude queue FILE.py [--pool P] [--rent R]` | Add runs. They start when a machine is free or can be rented; lack of capacity leaves them waiting. |
 | `etude launch FILE.py [--pool P] [--rent R]` | Acquire machines for the first runs (up to cohort parallelism), then record the runs. Failure records no runs. |
 | `etude launch FILE.py ... --quote` | Print the machines the first wave would take and the most they could cost. Rents nothing. |
-| `etude availability --rent R` | Ask R's provider what it would rent now, at what price. Rents nothing. |
-| `etude rent --ondemand R --hours H` | Rent a machine for a window of time; it takes queued runs. |
+| `etude availability R` | Ask R's provider what it would rent now, at what price. Rents nothing. |
+| `etude rent R --hours H` | Rent a machine for a window of time; it takes queued runs. |
 
 Pools and on-demands share one namespace: a name refers to one of them.
 Launch claims free machines and asks the provider to confirm any new machines
@@ -126,7 +126,7 @@ on-demand is an error that says so.
 etude launch job.py
 etude status
 etude wait
-etude logs --run RUN
+etude logs --run RUN --follow
 etude fetch RUN checkpoint.pt out
 ```
 
@@ -286,7 +286,7 @@ On a CPU pod `os.cpu_count()` reports the host's CPUs; size worker pools from
 
 ```sh
 etude ondemand add cpu --provider runpod --vcpus 8 --memory-gb 16 --max 2 --max-usd-per-hour 0.40
-etude availability --rent cpu
+etude availability cpu
 etude launch job.py --rent cpu --cohort evals --parallel 2 --max-usd 1 --quote
 etude launch job.py --rent cpu --cohort evals --parallel 2 --max-usd 1
 ```
@@ -355,10 +355,10 @@ storage when renting is needed.
 A rental made by hand starts itself with an empty inbox:
 
 ```sh
-etude rent --ondemand l4 --hours 0.5 --max-usd 0.40
+etude rent l4 --hours 0.5 --max-usd 0.40
 etude launch job.py --rent l4
 etude machines
-etude terminate --machine MACHINE
+etude terminate MACHINE
 ```
 
 `etude machines` is the one list. Each owned machine shows its pool, its
@@ -415,7 +415,7 @@ that outlive its disk. Only Amazon S3 is supported.
 ## Retained launch evidence
 
 ```sh
-etude logs --run baseline-seed-7
+etude logs --run baseline-seed-7                     # retained evidence, from the database
 etude logs --run baseline-seed-7 --follow --timeout 60
 etude logs --run baseline-seed-7 --job-only     # the job's output alone
 etude logs --machine MACHINE
@@ -439,10 +439,14 @@ refused or deleted. A new launch ID cannot bypass that fence. `LaunchError.launc
 and `.runs` identify the retained evidence when admission fails. Cohort admission
 remains atomic.
 
-Snapshots refresh journals with no timeout by default; pass `timeout=30` in Python
-or `--timeout 30` on the CLI to bound the complete read. Follow
-uses the same selection and absolute positions in each sanitized producer, stops
-at its time limit, and never schedules or retries work. It prints new evidence
+`etude logs` is a read: it shows what the database retains, with each stream's
+collection time, and needs no provider key or network. A rented machine's final
+output is retained when its session ends. `--follow` is the wait: it collects new
+evidence from machines and buckets until the snapshot is complete, with no time
+limit unless `--timeout 30` bounds it; in Python, `logs(run=..., refresh=True,
+timeout=30)` takes one such snapshot. Follow uses the same selection and absolute
+positions in each sanitized producer, stops at its time limit, and never
+schedules or retries work. It prints new evidence
 without replaying already seen output. Job exit alone does not close startup or
 cleanup producers. A queued run or a missing final stream is incomplete.
 
@@ -472,7 +476,7 @@ hundred pieces. The last piece goes with the attempt's ending.
 ```python
 from etude.launch.client import diagnostics, logs
 
-snapshot = logs(run="baseline-seed-7", timeout=30)
+snapshot = logs(run="baseline-seed-7", refresh=True, timeout=30)
 for stream in snapshot.streams:
     print(stream.producer, stream.attempt, stream.received, stream.complete)
     print(stream.text)
@@ -945,15 +949,17 @@ bucket keys are named by its session id.
 ## Command expectations
 
 Each command declares `Kind.read`, `Kind.ask` or `Kind.wait` beside its definition
-in `cli.py`. These are the intended expectations; declarations do not change
-execution. Normal `status` still advances the loop, and other current deviations
-remain pinned in counting tests.
+in `cli.py`. Declarations do not change execution; every read is pinned at zero
+provider, bucket, SSH and git calls with no provider key set, and other current
+deviations remain pinned in counting tests. `status` answers as of the controller
+loop's last pass and prints when that was (`last loop: ...`); run `etude wait` or
+`etude controller run` to move work along.
 
 | Kind | Commands | Allowed dependency | Expected result |
 | --- | --- | --- | --- |
-| Read | `status`, `runs`, `pools`, `ondemands`, `machines`, `providers`, `storages`, `controller` | database only | immediate answer with freshness |
+| Read | `status`, `runs`, `logs`, `pools`, `ondemands`, `machines`, `providers`, `storages`, `controller`, `usage` | database only | immediate answer with freshness |
 | Ask | `queue`, `cancel`, `terminate`, `rent`, `pool` and `ondemand` mutations, `default`, `machine add`, `provider set`, `storage add` | database only | recorded intent and an id where applicable |
-| Wait | `wait`, `launch` (with or without `--quote`), `availability`, `fetch`, `logs`, `source`, `continue` | other machines with a time limit | completion or the limit |
+| Wait | `wait`, `launch` (with or without `--quote`), `availability`, `fetch`, `logs --follow`, `source`, `continue` | other machines with a time limit | completion or the limit |
 
 Controller selection mutations are asks. `worker` and `controller run` are waits
 because they deliberately execute long-lived loops; they retain their existing
@@ -962,10 +968,10 @@ lifetime rules. Job-file `runs()` is an input function, not a launcher command.
 The full expectation also gives external work to the controller loop, makes asks
 safe to repeat with caller-chosen identities, restricts waits to watching, bounds
 lists, states answer freshness and prevents one supply's trouble delaying another.
-Commands require only dependencies implied by their kind: reads must work without
-provider keys or a network. These are documented expectations for the follow-up;
-this foundation does not enforce them, add ids or deadlines, remove refreshes,
-or change controller forwarding.
+Commands require only dependencies implied by their kind: reads work without
+provider keys or a network. The rest are documented expectations for the follow-up;
+this foundation does not enforce them, add ids or deadlines, or change controller
+forwarding.
 
 ## Measurement and profiling
 
@@ -982,9 +988,8 @@ The normal suite pins read/ask/wait costs, live-worker scaling at 1 and 10 worke
 one controller pass, a three-run git-backed cohort, and five Etude modules loaded
 by help. The help check excludes platform-dependent standard-library module totals.
 The physical transport test checks provider, bucket and SSH counts with local replies.
-Zero external effects for queue and the phase read are targets; normal status,
-wait advancing work, repeated SQL scans and repeated cohort git preparation are
-known debt.
+Zero external effects for queue are a target; wait advancing work, repeated SQL
+scans and repeated cohort git preparation are known debt.
 
 Scale cases are excluded by default. Run them explicitly:
 
@@ -992,19 +997,20 @@ Scale cases are excluded by default. Run them explicitly:
 uv run pytest tests/launch/test_measurement.py -m scale -s
 ```
 
-Records-pass baseline on 2026-10-13, same active workers and runs; no paid
-machines or network. Counts at 1 and 10 are measured; 100 and 1000 use the pinned
-coefficients and await the opt-in scale check at gate:
+Records-pass baseline on 2026-10-13 (status re-measured 2026-10-27 as a database-only
+read), same active workers and runs; no paid machines or network. Counts at 1 and
+10 are measured; 100 and 1000 use the pinned coefficients and await the opt-in
+scale check at gate:
 
 | Workers | Operation | Provider calls | Journal calls | SSH | Git | SQL statements |
 | ---: | --- | ---: | ---: | ---: | ---: | ---: |
-| 10 | status | 20 | 10 | 0 | 0 | 653 |
+| 10 | status | 0 | 0 | 0 | 0 | 381 |
 | 10 | runs | 0 | 0 | 0 | 0 | 131 |
 | 10 | controller pass | 20 | 10 | 0 | 0 | 272 |
-| 100 | status | 200 | 100 | 0 | 0 | 6413 |
+| 100 | status | 0 | 0 | 0 | 0 | 3801 |
 | 100 | runs | 0 | 0 | 0 | 0 | 1301 |
 | 100 | controller pass | 200 | 100 | 0 | 0 | 2612 |
-| 1000 | status | 2000 | 1000 | 0 | 0 | 64013 |
+| 1000 | status | 0 | 0 | 0 | 0 | 38001 |
 | 1000 | runs | 0 | 0 | 0 | 0 | 13001 |
 | 1000 | controller pass | 2000 | 1000 | 0 | 0 | 26012 |
 
@@ -1399,7 +1405,7 @@ from etude.deadline import limit_time
 
 # An optional total allowance for synchronous remote operations in this block.
 with limit_time(900):
-    snapshot = scheduler.logs(run="baseline", timeout=None)
+    snapshot = scheduler.logs(run="baseline", refresh=True, timeout=None)
 ```
 
 Startup and log retrieval default to no timeout. `None` adds no deadline; nested

@@ -181,9 +181,14 @@ def diagnostics(*, run: str | None = None, machine: str | None = None) -> tuple[
 
 
 def logs(
-    *, run: str | None = None, machine: str | None = None, timeout: float | None = None
+    *,
+    run: str | None = None,
+    machine: str | None = None,
+    refresh: bool = False,
+    timeout: float | None = None,
 ) -> LogSnapshot:
-    return _client().logs(run=run, machine=machine, timeout=timeout)
+    """Retained evidence; `refresh` first collects from machines within `timeout`."""
+    return _client().logs(run=run, machine=machine, refresh=refresh, timeout=timeout)
 
 
 def fetch(run: str, name: str, destination: Path) -> Path:

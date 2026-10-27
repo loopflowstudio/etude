@@ -112,6 +112,7 @@ class Request(Record):
     name: str = ""
     runs: tuple[str, ...] = ()
     every: float = 1.0
+    refresh: bool = False
     timeout: float | None = None
     rent: str = ""  # the on-demand to rent from or ask about
     machine: str = ""
@@ -517,19 +518,23 @@ class PythonClient:
         )
 
     def logs(
-        self, *, run: str | None = None, machine: str | None = None, timeout: float | None = None
+        self,
+        *,
+        run: str | None = None,
+        machine: str | None = None,
+        refresh: bool = False,
+        timeout: float | None = None,
     ) -> LogSnapshot:
+        if timeout is not None and not refresh:
+            raise ValueError("a log timeout bounds a refresh")
         if timeout is not None and timeout <= 0:
             raise ValueError("log timeout must be positive")
+        request = Request(
+            operation="logs", run=run or "", machine=machine or "", refresh=refresh, timeout=timeout
+        )
         try:
             with limit_time(timeout):
-                return LogSnapshot.model_validate_json(
-                    self._request(
-                        Request(
-                            operation="logs", run=run or "", machine=machine or "", timeout=timeout
-                        )
-                    )
-                )
+                return LogSnapshot.model_validate_json(self._request(request))
         except (subprocess.TimeoutExpired, TimeoutError):
             raise LauncherError(
                 "controller log retrieval time limit reached; evidence remains on controller"
@@ -612,7 +617,10 @@ def receive(scheduler: Scheduler) -> int:
         response = scheduler.cohort_runs(raw.name)
     elif operation == "logs":
         response = scheduler.logs(
-            run=raw.run or None, machine=raw.machine or None, timeout=raw.timeout
+            run=raw.run or None,
+            machine=raw.machine or None,
+            refresh=raw.refresh,
+            timeout=raw.timeout,
         )
     elif operation == "rent":
         if not raw.rent:
@@ -653,9 +661,8 @@ def warning(scheduler: Scheduler) -> str | None:
     return None
 
 
-def show(scheduler: Scheduler) -> None:
-    if not os.environ.get("ETUDE_CONTROLLER_LOCAL"):
-        print("controller: this machine")  # a client has already named the controller
+def show_freshness(scheduler: Scheduler) -> None:
+    """Print when the controller loop last passed: how fresh the database's answers are."""
     try:
         at = datetime.fromisoformat((home() / "controller-heartbeat").read_text().strip())
         age = int((datetime.now(UTC) - at).total_seconds())
@@ -665,3 +672,9 @@ def show(scheduler: Scheduler) -> None:
     print("last loop: " + said)
     if problem := warning(scheduler):
         print("warning: " + problem, file=sys.stderr)
+
+
+def show(scheduler: Scheduler) -> None:
+    if not os.environ.get("ETUDE_CONTROLLER_LOCAL"):
+        print("controller: this machine")  # a client has already named the controller
+    show_freshness(scheduler)

@@ -260,7 +260,7 @@ def test_python_api_uses_controller_and_preserves_checkpoint_ancestry(
     first = launch(job)
     assert wait(first, every=0.02, timeout=10)[0].outcome == "succeeded"
     assert status(first).clocks == {"steps": 10}
-    assert job_text(logs(run=first)) == "to 10\n"
+    assert job_text(logs(run=first, refresh=True)) == "to 10\n"
     assert fetch(first, "weights", tmp_path / "out").read_text() == "weights\n"
     pair = launch_cohort("python-pair", job.runs(1, 2))
     assert all(s.outcome == "succeeded" for s in wait(*pair, every=0.02, timeout=10))
@@ -305,7 +305,7 @@ def test_log_deadline_includes_missing_controller_installation(
     monkeypatch.setattr(time, "monotonic", lambda: elapsed)
     monkeypatch.setattr(subprocess, "run", transport)
     with pytest.raises(LauncherError, match="did not answer|time limit reached"):
-        PythonClient("fixture-controller").logs(run="chosen", timeout=5)
+        PythonClient("fixture-controller").logs(run="chosen", refresh=True, timeout=5)
     assert elapsed == 5
     assert calls == expected_calls
 

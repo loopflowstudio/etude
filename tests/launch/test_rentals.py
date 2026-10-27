@@ -34,7 +34,7 @@ def test_commands_rent_and_terminate_by_machine_name(
 ) -> None:
     b = bench(tmp_path)
     monkeypatch.setattr(cli, "default", lambda: b.scheduler)
-    assert main(["rent", "--ondemand", "l4", "--hours", "1"]) == 0
+    assert main(["rent", "l4", "--hours", "1"]) == 0
     assert "rented until" in capsys.readouterr().out
     machine = b.scheduler.machines("l4")[0]
     assert machine.kind == "rented" and machine.provider == "fake"
@@ -45,11 +45,11 @@ def test_commands_rent_and_terminate_by_machine_name(
     run = b.scheduler.queue(Job(command="train", max_hours=1, max_usd=Decimal(1)), rent="l4")
     b.scheduler.tick()
     assert b.store.machine_busy(machine.name)
-    assert main(["terminate", "--machine", machine.name]) == 1
+    assert main(["terminate", machine.name]) == 1
     assert "still has a run on it" in capsys.readouterr().err
     b.run(601)
     assert b.scheduler.read(run).outcome == "succeeded"
-    assert main(["terminate", "--machine", machine.name]) == 0
+    assert main(["terminate", machine.name]) == 0
     capsys.readouterr()
     assert b.store.machine(machine.name).deleted_at is not None
     assert b.store.rentals()[0].deadline > b.clock.now

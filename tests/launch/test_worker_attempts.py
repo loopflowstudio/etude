@@ -94,7 +94,10 @@ def test_a_run_from_a_commit_reports_progress_and_keeps_its_outputs(
     assert (status.outcome, status.rental_ended) == ("succeeded", None)
     assert status.clocks == {"agent_steps": 26_000, "wall_time_ms": 1500}
     suffix = "" if revision else "snapshot\n"
-    assert job_text(scheduler.logs(run=first)) == "seed 3 to 26000 with arm = large\n" + suffix
+    assert (
+        job_text(scheduler.logs(refresh=True, run=first))
+        == "seed 3 to 26000 with arm = large\n" + suffix
+    )
     copy = scheduler.fetch(first, "weights.pt", tmp_path / "out")
     assert copy.read_text() == "trained to 26000\n"
 
@@ -174,7 +177,7 @@ def test_runs_queue_through_one_machine_and_cancel_stops_the_running_one(tmp_pat
     scheduler.cancel(running)
     done = scheduler.wait(running, queued, every=0.05, timeout=30)
     assert [s.outcome for s in done] == ["cancelled", "succeeded"]
-    assert job_text(scheduler.logs(run=queued)) == "next\n"
+    assert job_text(scheduler.logs(refresh=True, run=queued)) == "next\n"
 
 
 def test_a_run_past_its_hours_is_ended_on_the_machine_with_nobody_watching(tmp_path: Path) -> None:
@@ -211,7 +214,7 @@ def test_added_work_has_a_session_but_no_rental_or_session_deadline(tmp_path: Pa
     assert packet["deadline"] is None
     assert scheduler.rentals() == ()
     assert scheduler.wait(first, every=0.05, timeout=10)[0].outcome == "succeeded"
-    assert job_text(scheduler.logs(run=first)) == "one\n"
+    assert job_text(scheduler.logs(refresh=True, run=first)) == "one\n"
     with pytest.raises(LauncherError, match="no on-demand named 'local'"):
         scheduler.rent("local", hours=1)
 
@@ -311,7 +314,7 @@ def test_an_attempt_links_its_held_inputs_read_only_without_copying(tmp_path: Pa
     )
     (status,) = scheduler.wait(one, every=0.05, timeout=30)
     assert status.outcome == "succeeded"
-    assert job_text(scheduler.logs(run=one)).split()[-1] == "8000"
+    assert job_text(scheduler.logs(refresh=True, run=one)).split()[-1] == "8000"
     attempt = scheduler.attempts(one)[0]
     given = tmp_path / "sessions" / attempt.session / "attempts" / attempt.id / "inputs/weights"
     assert given.stat().st_ino == held.stat().st_ino  # one copy on this machine

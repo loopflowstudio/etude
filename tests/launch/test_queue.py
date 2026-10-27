@@ -378,13 +378,13 @@ def test_machines_lists_rented_windows_and_terminate_takes_the_machine_name(
 ) -> None:
     b = bench(tmp_path)
     monkeypatch.setattr(import_module("etude.launch.cli"), "default", lambda: b.scheduler)
-    assert main(["rent", "--ondemand", "l4", "--hours", "1"]) == 0
+    assert main(["rent", "l4", "--hours", "1"]) == 0
     (line,) = capsys.readouterr().out.splitlines()
     name, ondemand, state = line.split("  ", 2)
     assert ondemand == "l4" and name.startswith("l4-") and state.startswith("rented until ")
     assert main(["ondemands"]) == 0
     assert f"rented: {name}" in capsys.readouterr().out
-    assert main(["terminate", "--machine", name]) == 0
+    assert main(["terminate", name]) == 0
     assert capsys.readouterr().out == ""  # nothing is rented now
     assert main(["machines", "--all"]) == 0
     assert f"{name}  l4  rented, ended " in capsys.readouterr().out

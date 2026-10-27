@@ -36,7 +36,7 @@ def test_phases_keep_original_failure_and_never_replay_user_errors(
     scheduler = local(tmp_path)
     run = scheduler.launch(Job(setup=setup, command=command, cleanup=cleanup, max_hours=0.01))
     status = scheduler.wait(run, every=0.05, timeout=10)[0]
-    text = job_text(scheduler.logs(run=run))
+    text = job_text(scheduler.logs(refresh=True, run=run))
     assert status.outcome == outcome
     attempts = scheduler.attempts(run)
     assert len(attempts) == 1 and attempts[0].exit_code == code
@@ -66,7 +66,7 @@ def test_cancellation_runs_cleanup_without_restarting_setup(tmp_path: Path) -> N
     status = scheduler.wait(run, every=0.05, timeout=10)[0]
     assert status.outcome == "cancelled"
     assert scheduler.fetch(run, "cleanup.txt", tmp_path / "out").read_text() == "cleaned\n"
-    assert job_text(scheduler.logs(run=run)).count("prepared\n") == 1
+    assert job_text(scheduler.logs(refresh=True, run=run)).count("prepared\n") == 1
 
 
 def test_cleanup_can_follow_job_limit_but_cannot_run_unbounded(tmp_path: Path) -> None:
@@ -81,7 +81,7 @@ def test_cleanup_can_follow_job_limit_but_cannot_run_unbounded(tmp_path: Path) -
     )
     status = scheduler.wait(run, every=0.05, timeout=10)[0]
     assert status.outcome == "out_of_time"
-    text = job_text(scheduler.logs(run=run))
+    text = job_text(scheduler.logs(refresh=True, run=run))
     assert "cleanup-began\n" in text and "too-late" not in text
     assert "phase cleanup: deadline" in text
 

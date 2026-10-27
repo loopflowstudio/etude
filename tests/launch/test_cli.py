@@ -92,12 +92,12 @@ def test_a_job_file_launches_a_cohort_and_each_verb_reads_it_back(
     done = run(capsys, "wait", *ids)
     assert all("done: succeeded, steps 26000" in line for line in done)
     assert "arm = large seed 2 from 0 to 26000" in run(
-        capsys, "logs", "--run", ids[3], "--job-only"
+        capsys, "logs", "--run", ids[3], "--job-only", "--follow"
     )
 
-    assert run(capsys, "status") == []
+    assert run(capsys, "status") == ["last loop: never"]
     assert len(run(capsys, "runs")) == 4
-    assert [line.split()[0] for line in run(capsys, "status", "capacity-26k")] == ids
+    assert [line.split()[0] for line in run(capsys, "status", "capacity-26k")[:-1]] == ids
     assert main(["continue", "--run", "capacity-26k", "--until", "steps=40000"]) == 1
     assert "needs --cohort" in capsys.readouterr().err
     stage = run(
@@ -113,13 +113,13 @@ def test_a_job_file_launches_a_cohort_and_each_verb_reads_it_back(
     assert len(stage) == 4 and all("queued (waiting for local)" in line for line in stage)
     assert all("steps 40000" in line for line in run(capsys, "wait"))  # none named: all of them
     assert "arm = small seed 1 from 26000 to 40000" in run(
-        capsys, "logs", "--cohort", "capacity-40k", "--job-only"
+        capsys, "logs", "--cohort", "capacity-40k", "--job-only", "--follow"
     )
     (continued,) = run(capsys, "continue", "--run", ids[3], "--until", "steps=63000")
     next_id = continued.split()[0]
     assert "steps 63000" in run(capsys, "wait", next_id)[0]
     assert "arm = large seed 2 from 26000 to 63000" in run(
-        capsys, "logs", "--run", next_id, "--job-only"
+        capsys, "logs", "--run", next_id, "--job-only", "--follow"
     )
     (copy,) = run(capsys, "fetch", next_id, "weights.pt", str(tmp_path / "out"))
     assert Path(copy).read_text() == "weights\n"
@@ -330,7 +330,7 @@ def test_explicit_rent_uses_the_same_startup_rule(
 ) -> None:
     b = bench(tmp_path)
     monkeypatch.setattr(import_module("etude.launch.cli"), "default", lambda: b.scheduler)
-    run(capsys, "rent", "--ondemand", "l4", "--hours", "1")
+    run(capsys, "rent", "l4", "--hours", "1")
     assert all(held.packet.autorun is True for held in b.service.sessions.values())
     assert all(not held.packet.work for held in b.service.sessions.values())
 

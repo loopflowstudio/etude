@@ -447,7 +447,7 @@ def test_inputs_reach_the_job_by_name_once_and_wrong_bytes_are_refused(tmp_path:
     run = c.scheduler.launch(job, rent="l4")
     (status,) = c.scheduler.wait(run, every=0.05, timeout=30)
     assert status.outcome == "succeeded"
-    verified, said = job_text(c.scheduler.logs(run=run)).split("\n", 1)
+    verified, said = job_text(c.scheduler.logs(refresh=True, run=run)).split("\n", 1)
     assert verified.startswith(f"inputs: verified weights.pt ({len(weights)} bytes, ")
     assert said == weights.decode()
     reads = [k for m, k in c.storage.asked if m == "GET" and k.startswith("shared/weights.pt")]
@@ -457,7 +457,7 @@ def test_inputs_reach_the_job_by_name_once_and_wrong_bytes_are_refused(tmp_path:
     refused = c.scheduler.launch(job.model_copy(update={"inputs": (wrong,)}), rent="l4")
     (status,) = c.scheduler.wait(refused, every=0.05, timeout=30)
     assert (status.outcome, status.cause) == ("lost", "setup_failed")
-    said = job_text(c.scheduler.logs(run=refused))  # the job's command never started
+    said = job_text(c.scheduler.logs(refresh=True, run=refused))  # the job's command never started
     assert said.startswith("source preparation failed: ValueError: input weights.pt was not")
     assert c.scheduler.record(refused).job != c.scheduler.record(run).job  # inputs are identity
     released(c.scheduler, refused)
@@ -492,7 +492,7 @@ def test_a_run_from_a_commit_runs_in_a_pod_and_continues_in_another(
     c.scheduler.wait(first, every=0.05, timeout=30)
     status = released(c.scheduler, first)
     assert (status.outcome, status.clocks) == ("succeeded", {"steps": 3})
-    assert job_text(c.scheduler.logs(run=first)) == "seed 7 from 0 to 3\n"
+    assert job_text(c.scheduler.logs(refresh=True, run=first)) == "seed 7 from 0 to 3\n"
     assert c.provider.pods == {}  # the pod deleted itself once its work was delivered
 
     # The parent's checkpoint, resolved from the bucket, reaches the next pod as an input.
@@ -503,7 +503,7 @@ def test_a_run_from_a_commit_runs_in_a_pod_and_continues_in_another(
     c.scheduler.wait(second, every=0.05, timeout=30)
     status = released(c.scheduler, second)
     assert (status.outcome, status.clocks) == ("succeeded", {"steps": 7})
-    verified, said = job_text(c.scheduler.logs(run=second)).split("\n", 1)
+    verified, said = job_text(c.scheduler.logs(refresh=True, run=second)).split("\n", 1)
     assert verified.startswith("inputs: verified parent-checkpoint.pt (13 bytes, ")
     assert said == "seed 7 from 3 to 7\n"
     copy = c.scheduler.fetch(second, "weights.pt", tmp_path / "out")
@@ -621,7 +621,10 @@ def test_a_kept_session_takes_work_through_its_inbox(tmp_path: Path) -> None:
     (again,) = c.scheduler.wait(second, every=0.05, timeout=30)
     assert (status.outcome, again.outcome) == ("succeeded", "succeeded")
     assert status.machine == again.machine == machine and c.provider.creates == 1
-    assert job_text(c.scheduler.logs(run=second)) == "two\n" and len(c.provider.pods) == 1
+    assert (
+        job_text(c.scheduler.logs(refresh=True, run=second)) == "two\n"
+        and len(c.provider.pods) == 1
+    )
     assert c.scheduler.terminate(machine).deleted_at is not None and c.provider.pods == {}
 
 
@@ -928,7 +931,9 @@ def test_a_finished_rental_delivers_its_end_and_log_tail_before_it_is_deleted(
     # and the machine is deleted only after that.
     named = max(i for i in sent if timeline[i][1] == out + "worker-log.json")
     assert tail < named < ended < terminated
-    worker = next(s for s in c.scheduler.logs(run=run).streams if s.producer == "worker")
+    worker = next(
+        s for s in c.scheduler.logs(refresh=True, run=run).streams if s.producer == "worker"
+    )
     assert worker.complete and worker.text.rstrip().endswith(CLOSED)
 
 
