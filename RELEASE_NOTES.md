@@ -1,19 +1,37 @@
-# v0.2.8
+# v0.2.9
 
 <!-- loopflow:release-notes=narrative;gate=safe -->
 
-Etude v0.2.8 fixes how v0.2.7 read some older evaluation tables. Some of those tables had a game-specific `seat` column next to Etude's `player` column, and v0.2.7 swapped the two players' results. If you read eval results written before v0.2.7, upgrade. manabot's Elemental tables are one affected case. This patch changes nothing else.
+Etude v0.2.9 lets a report show checkpoints that were trained outside Etude. Before this release, a report needed a training run, and an external checkpoint could only be drawn as a fixed anchor. Now you can tell Etude where each checkpoint sits in its own training and which learner produced it. `etude report` then draws an evaluation-only experiment as one learning curve per learner. Upgrade if you evaluate checkpoints from another trainer, or if you want to compare a learner against its own earlier checkpoints.
 
-## Older eval tables credit the right player again
+## Evaluation-only experiments draw learning curves
 
-v0.2.7 renamed `player` to `seat` everywhere in evaluation. To keep older stored tables readable, it renamed a stored `player` column to `seat`, but only when the table had no `seat` column already. Some tables written by earlier releases have both columns. In those tables, `player` is Etude's seat and `seat` is the game's own seat number. v0.2.7 read the game's seat as Etude's seat. So whenever the players sat the other way round, each player got the other's results. ([#61](https://github.com/loopflowstudio/etude/pull/61))
+A checkpoint reference can now say where the checkpoint sits and which learner it belongs to. That is enough for a report to place external checkpoints on a curve. Neither field changes the identity of a player or a match, so matches you have already recorded still count. ([#55](https://github.com/loopflowstudio/etude/pull/55))
 
-- A stored table's `player` column is always read as Etude's `seat`. A `seat` column next to it is read as `game_seat`.
-- This rule is exact because rows written now can no longer contain a `player` column. A table with a `player` column must be an older one.
-- manabot reproduced the bug across versions. It wrote a table with the published 0.2.5 and read it with this release. The scores were challenger 1.0 and heuristic 0.0, the same as 0.2.5 reports. v0.2.7 had reversed them.
+- `CheckpointRef.at` records the checkpoint's clock positions, for example `at={"updates": ...}`. `CheckpointRef.line` names the learner it came from. Checkpoints tracked by Etude fill in both fields automatically.
+- External checkpoints draw one curve per learner line. A report with no training runs is labelled "Evaluation only". A checkpoint with no position is still drawn as an anchor.
+- Reports use the most recent seat metadata you supplied and fall back to training clocks. If two declarations for one checkpoint disagree, the report says so.
+
+## Compare a learner with its own earlier checkpoints
+
+Curves and crosstables can now compare checkpoints inside one learner, even across training continuations.
+
+- `Curve(opponent=...)` accepts a player name, or a position on the same learner line given with `Earlier` or `At`. For example, `Curve(opponent=Earlier(clock="updates", by=400))` plays each checkpoint against the one 400 updates earlier.
+- `Crosstable()` compares checkpoints within each learner. Pairs that were never played show `·`.
+- If an opponent is missing or ambiguous, the curve leaves a gap and explains why.
+
+## Matches in several environments count once each
+
+- A match played outside a tournament counts once per environment, using its latest delivery. Commit views keep that environment scope, and failures are still reported per environment.
+- If one comparison was played in several environments, the report shows the environment whose latest match is newest and notes the values it left out.
 
 ## Operational notes
 
-- The release lists no compatibility break. Stored eval records from every earlier etude-sdk version still load, and delivered matches are not played again.
-- **A `play` that returns a column named `player` is now refused** with `column_name_refused`. In v0.2.7, such a row was accepted if it also named `seat` or `group`. Return Etude's seat as `seat`. If your game has its own seat number, return it as `game_seat`.
-- Results that v0.2.7 computed from affected tables were wrong. Look again at any comparison you made with v0.2.7, such as a report page or a statsdb query. Read with v0.2.8, it shows the correct per-player rows. The stored data was never wrong, so nothing needs to be played again.
+- The release lists no compatibility break. Earlier stored eval records still load, and nothing needs to be played again.
+- The derived stats database moves to schema 4 and is rebuilt from the stored records.
+- Contributors: CI now runs the headless chart tests (`tests/test_charts.cjs`) on Node 22.
+
+## Small changes
+
+- `docs/evaluation.md` and `docs/tracking.md` describe checkpoint positions, learner lines and the new curve opponents.
+- An unused type-check suppression that failed CI under a clean `mypy` run has been removed.
