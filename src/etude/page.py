@@ -289,7 +289,11 @@ def build(source: Storage | Path | str, file: Path) -> Page:
         report=report,
         origin=origin,
         notes=(*notes, *evals.notes),
-        training=training(trained, prefixes=flames),
+        training=training(
+            trained,
+            prefixes=flames,
+            keys=report.keys() if report.metrics == "named" else None,
+        ),
         scores=evals.scores or ((report.score,) if report.score is not None else ()),
         selections=evals.selections,
         agents=evals.agents,

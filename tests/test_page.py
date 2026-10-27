@@ -63,6 +63,36 @@ def test_without_a_report_the_page_is_the_default_and_says_so(tmp_path: Path) ->
     assert page.report.evals == (Curve(), Anchors())
 
 
+def test_named_metrics_keep_panel_curves_and_timers_without_unlisted_details(
+    tmp_path: Path,
+) -> None:
+    runs = tmp_path / "runs"
+    with track(
+        experiment="lab", run="a", clocks=[Step("updates", "updates")], directory=runs
+    ) as run:
+        run.log({"loss": 0.25, "game/unique/event": 7.0, "time/collection": 0.5}, updates=1)
+    source = """
+from etude.report import Flame, Report, Series
+
+
+def report() -> Report:
+    return Report(metrics="named", ml=(Series(title="Loss", keys=("loss", "missing")),),
+                  perf=(Flame(),))
+"""
+    file = experiment_file(tmp_path, "lab", source)
+    page = build(runs, file)
+    assert page.training.metrics == ("loss",)
+    assert tuple(page.training.series["updates"]) == ("loss",)
+    assert len(page.training.timers) == 1
+    assert "game/unique/event" not in render(page)
+    file.write_text(source.replace('metrics="named", ', ""))
+    assert set(build(runs, file).training.metrics) == {
+        "loss",
+        "game/unique/event",
+        "time/collection",
+    }
+
+
 def test_a_file_that_is_not_an_experiments_is_refused(tmp_path: Path) -> None:
     runs = tmp_path / "runs"
     trained(runs, "lab", "a")
