@@ -11,7 +11,7 @@ import hashlib
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from etude.launch.deadline import limit_time
+from etude.deadline import limit_time
 from etude.launch.executor import Refused, check_creation
 from etude.launch.machines import Allocation, Bill, MachineRequest, Safeguards
 from etude.launch.providers.package import program_archive

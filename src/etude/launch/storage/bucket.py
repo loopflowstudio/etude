@@ -22,10 +22,11 @@ from etude.launch.schemas import (
     Packet,
     Progress,
     Work,
+    WorkerLog,
     progress_from_json,
 )
 from etude.launch.source import source_archive
-from etude.launch.storage.download import Cache, Download
+from etude.launch.storage.download import Download, download
 from etude.launch.storage.s3 import Bucket, Grant, Version
 from etude.launch.storage.transport import attribute
 from etude.launch.usage import Transfer
@@ -67,6 +68,8 @@ class BucketJournal:
           run.json  checkpoints/  ...   the run's tracked folder, as the tracker keeps it
         PREFIX/sessions/SESSION/        one machine's instructions, inbox and notes
           out/receipt, out/ended        written by the machine
+          out/worker.log/OFFSET         the worker's log, in pieces by first byte
+          out/worker-log.json           where they end (`WorkerLog`)
         PREFIX/sources/SHA256.tar       a commit's source archive, named by its digest
 
     A machine may write only under the folders of the runs it is given, and
@@ -142,6 +145,17 @@ class BucketJournal:
     @_attribute_session
     def end(self, session_id: str) -> datetime | None:
         # Provider cleanup owns deletion; a bucket alone cannot stop a machine.
+        return self.ended(session_id)
+
+    @_attribute_session
+    def finish(self, session_id: str) -> datetime | None:
+        """Tell the session no more work will come; it ends once its work is done."""
+        inbox = self._inbox(session_id)
+        if not inbox.finish:
+            self._bucket.put(
+                self._session(session_id) + "inbox.json",
+                inbox.model_copy(update={"finish": True}).model_dump_json(round_trip=True).encode(),
+            )
         return self.ended(session_id)
 
     def stage(self, repo: str, commit: str) -> None:
@@ -239,18 +253,28 @@ class BucketJournal:
             self._kept[key] = raw
         return self._kept[key]
 
-    def _log(self, session_id: str, run: str, attempt: str, record: AttemptRecord) -> bytes:
-        """The pieces of an attempt's log its record names, joined; each is read once."""
+    def _pieces(self, session_id: str, keys: Sequence[str]) -> bytes:
+        """The pieces of a log its record names, joined; each is read once."""
         versions = self._held(session_id)
-        keys = [self._run(run) + piece for piece in record.log_pieces(attempt)]
         for key in keys:
             if key not in versions:
-                with attribute(run=run, attempt=attempt, purpose="result"):
-                    found = self._bucket.get_version(key)
+                found = self._bucket.get_version(key)
                 if found is None:
                     raise LauncherError(f"log piece {key} is named by its record but missing")
                 versions[key] = found
         return b"".join(versions[key].body for key in keys)
+
+    def _worker_log(self, session_id: str) -> bytes | None:
+        """The worker's log: the pieces its record names, else the whole log a worker that
+        never read its bootstrap, so wrote no receipt, sent by its link."""
+        out = self._session(session_id) + "out/"
+        raw = self._current(session_id, out + "worker-log.json")
+        if raw is None:
+            return (
+                None if self.started(session_id) else self._current(session_id, out + "worker.log")
+            )
+        record = WorkerLog.model_validate_json(raw)
+        return self._pieces(session_id, [out + piece for piece in record.pieces()])
 
     def _runs(self, session_id: str) -> dict[str, str]:
         """Each attempt this session was given, to its run."""
@@ -342,17 +366,22 @@ class BucketJournal:
         self, session_id: str, attempt: str | None = None, *, producer: str = "job"
     ) -> LogStream:
         if attempt is None:
-            raw = self._current(session_id, self._session(session_id) + f"out/{producer}.log")
+            raw = (
+                self._worker_log(session_id)
+                if producer == "worker"
+                else self._current(session_id, self._session(session_id) + f"out/{producer}.log")
+            )
             return snapshot_stream(session_id, None, producer, raw, False)
         run = self._runs(session_id).get(attempt)
         # The record names the pieces stored before it, finished or not, so the
         # text and its completion are from one moment.
         record = None if run is None else self._record(session_id, run, attempt)
-        raw = (
-            None
-            if run is None or record is None or record.log_ends is None
-            else self._log(session_id, run, attempt, record)
-        )
+        if run is None or record is None or record.log_ends is None:
+            raw = None
+        else:
+            with attribute(run=run, attempt=attempt, purpose="result"):
+                pieces = [self._run(run) + piece for piece in record.log_pieces(attempt)]
+                raw = self._pieces(session_id, pieces)
         return snapshot_stream(
             session_id, attempt, producer, raw, record is not None and record.finished is not None
         )
@@ -369,7 +398,7 @@ class BucketJournal:
             raise LauncherError(f"attempt {attempt} recorded no output {name!r}")
         key = f"{self._run(run)}attempts/{attempt}/{name}"
         with attribute(run=run, attempt=attempt, purpose="result"):
-            return Cache().fetch(
+            return download(
                 Download(
                     url=self._bucket.get_url(key, _GRANT_SECONDS),
                     sha256=expected.sha256,
@@ -385,8 +414,10 @@ class BucketJournal:
         raw = self._current(session_id, root + "usage.jsonl")
         sources = [] if raw is None else raw.decode().splitlines()
         # Bootstrap/early-worker failures precede the courier's usage journal.
-        for producer in ("bootstrap", "worker"):
-            log = self._current(session_id, root + producer + ".log")
+        for log in (
+            self._current(session_id, root + "bootstrap.log"),
+            self._worker_log(session_id),
+        ):
             if log is not None:
                 sources.extend(
                     line.partition(" ")[2].removeprefix("transfer: ")

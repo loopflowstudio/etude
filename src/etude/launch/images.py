@@ -13,7 +13,7 @@ from typing import Literal
 
 from pydantic import Field
 
-from etude.launch.deadline import limit_time, remaining
+from etude.deadline import limit_time, remaining
 from etude.launch.logging import explain
 from etude.launch.records import Image, LauncherError, Record, Runtime
 

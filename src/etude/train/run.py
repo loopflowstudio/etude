@@ -705,7 +705,7 @@ class Run:
 
 def track(
     *,
-    experiment: str,
+    experiment: str | None = None,
     clocks: Sequence[Clock],
     run: str | None = None,
     job: str | None = None,
@@ -725,7 +725,10 @@ def track(
 ) -> Run:
     """Declare or resume a run. Strict: a bad declaration raises here, not later.
 
-    The experiment is always named here; the launcher does not know it. The
+    The experiment is the one `etude launch` started the run for
+    (`ETUDE_EXPERIMENT`, the experiment file's stem) unless named here. Naming
+    another raises `EtudeError("experiment_differs_from_launch")`; naming none
+    outside such a launch raises `EtudeError("experiment_not_named")`. The
     run's identity, and whether it resumes, is settled by
     `etude.run.declaration.declare`. Under `etude launch` the files are
     written to `ETUDE_TRACK_DIR`, which the launcher carries to storage as they
@@ -739,6 +742,14 @@ def track(
     snapshot of its own taken after that checkpoint, passes where it stands
     as `resumed_at`, keyed by declared clocks.
     """
+    launched = os.environ.get("ETUDE_EXPERIMENT") or None
+    if experiment is not None and launched not in (None, experiment):
+        raise EtudeError("experiment_differs_from_launch", 409) from ValueError(
+            f"track(experiment={experiment!r}) in a run etude launch started for {launched!r}"
+        )
+    experiment = experiment or launched
+    if experiment is None:
+        raise EtudeError("experiment_not_named", 422)
     if resumed_at is not None and any(
         clock not in {c.name for c in clocks} or not math.isfinite(value)
         for clock, value in resumed_at.items()

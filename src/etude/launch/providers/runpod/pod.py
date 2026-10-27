@@ -31,7 +31,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
-from etude.launch.deadline import call, limit_time
+from etude.deadline import call, limit_time
 from etude.launch.environment import install, startup_timeout
 from etude.launch.logging import (
     CLOSED,

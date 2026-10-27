@@ -85,6 +85,9 @@ uv add 'etude-sdk[s3]'             # with S3 or R2 storage
 
 ## Develop
 
+Read [TESTING.md](TESTING.md) before running checks. Never intentionally induce
+load for testing.
+
 ```sh
 uv sync
 uv run pytest

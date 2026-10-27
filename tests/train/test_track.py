@@ -51,6 +51,20 @@ def manabot_row(update: int) -> dict[str, object]:
     }
 
 
+def test_a_launched_run_is_its_experiment_files_and_refuses_another(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with pytest.raises(EtudeError, match="experiment_not_named"):
+        track(clocks=CLOCKS, directory=tmp_path)
+    monkeypatch.setenv("ETUDE_EXPERIMENT", "ppo")
+    with pytest.raises(EtudeError, match="experiment_differs_from_launch"):
+        track(experiment="capacity", clocks=CLOCKS, directory=tmp_path)
+    run = track(clocks=CLOCKS, run="r", directory=tmp_path)
+    run.finish()
+    assert run.experiment == "ppo"
+    assert read(DirectoryStorage(tmp_path), "ppo", "r").name == "r"
+
+
 def test_rows_round_trip_through_files_and_a_bucket_directory(tmp_path: Path) -> None:
     bucket = DirectoryStorage(tmp_path / "bucket")
     run = track(

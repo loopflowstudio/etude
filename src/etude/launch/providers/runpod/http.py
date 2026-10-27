@@ -11,7 +11,7 @@ from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
 
-from etude.launch.deadline import call, remaining
+from etude.deadline import call, remaining
 from etude.launch.errors import LauncherError
 from etude.launch.measurement import timed
 

@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-from etude.launch.deadline import call, limit_time, remaining
+from etude.deadline import call, limit_time, remaining
 
 LIMIT = 1024 * 1024
 OPENING = 4096
@@ -138,17 +138,17 @@ def bounded(text: str) -> str:
 
 
 def write_log(operation: str, message: str) -> None:
-    line = sanitize(f"{datetime.now(UTC).isoformat()} {operation}: {message}\n")
+    """Append one sanitized line. A log is only appended to, so it can be carried in
+    pieces each sent once; what is retained or shown of it is `bounded`."""
+    line = bounded(sanitize(f"{datetime.now(UTC).isoformat()} {operation}: {message}\n"))
     path = _path.get() or os.environ.get("ETUDE_LOG_PATH")
     try:
         if path:
             with _lock:
                 target = Path(path)
                 target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                previous = target.read_text() if target.exists() else ""
-                partial = target.with_suffix(".partial")
-                partial.write_text(bounded(previous + line))
-                partial.replace(target)
+                with target.open("a") as log:
+                    log.write(line)
         else:
             print(line, end="", file=sys.stderr, flush=True)
     except (OSError, UnicodeError):

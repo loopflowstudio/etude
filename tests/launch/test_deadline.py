@@ -6,13 +6,13 @@ from threading import Event
 
 import pytest
 
-from etude.launch.deadline import call, limit_time, remaining
+from etude.deadline import call, limit_time, remaining
 from etude.launch.providers.runpod.pod import GuardianAPI, guard
 
 
 def test_nested_operations_spend_one_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     elapsed = 0.0
-    monkeypatch.setattr("etude.launch.deadline.time.monotonic", lambda: elapsed)
+    monkeypatch.setattr("etude.deadline.time.monotonic", lambda: elapsed)
     assert remaining() is None
     with limit_time(900):
         elapsed = 125

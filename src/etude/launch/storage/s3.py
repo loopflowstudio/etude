@@ -31,7 +31,7 @@ from typing import Literal
 
 from pydantic import model_validator
 
-from etude.launch.deadline import remaining
+from etude.deadline import remaining
 from etude.launch.logging import write_log
 from etude.launch.measurement import timed
 from etude.launch.records import Record, Storage

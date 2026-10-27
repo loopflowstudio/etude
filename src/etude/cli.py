@@ -57,7 +57,8 @@ def report(
         ),
     ] = None,
     serve: Annotated[
-        bool, typer.Option(help="serve it, built afresh for each request, and write nothing")
+        bool,
+        typer.Option(help="serve it from the files as they are at each request, and write nothing"),
     ] = False,
     host: Annotated[str, typer.Option(help="with --serve; it has no login")] = "127.0.0.1",
     port: Annotated[int, typer.Option(help="with --serve")] = 8765,
@@ -72,17 +73,7 @@ def report(
     import time
     import webbrowser
 
-    from etude.page import (
-        Page,
-        Server,
-        build,
-        build_each,
-        index,
-        render,
-        render_index,
-        target,
-        write,
-    )
+    from etude.page import Page, Pages, Server, index, render, render_index, target, write
     from etude.run.storage import default_root, storage_from_uri
 
     storage = storage_from_uri(source or default_root())
@@ -100,14 +91,15 @@ def report(
             server.server_close()
         return
     shown: object = None
+    pages = Pages(storage)  # a watched page is built again only once its files change
     try:
         while True:
             current: Page | dict[Path, Page | str] | None
             if path.is_dir():
-                current = build_each(storage, path)
+                current = pages.build_each(path)
             else:
                 try:
-                    current = build(storage, path)
+                    current = pages.build(path)
                 except ValueError:
                     if watch is None:
                         raise

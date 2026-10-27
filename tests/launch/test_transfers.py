@@ -18,20 +18,33 @@ from email import policy
 from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
 import pytest
+from moto import mock_aws
 
+from etude import cache as engine
+from etude.cache import Artifact, Cache, Content, Fetched
+from etude.deadline import limit_time, remaining
 from etude.launch.database import Database
-from etude.launch.deadline import limit_time, remaining
 from etude.launch.logging import log_to
 from etude.launch.providers.runpod import pod
 from etude.launch.records import Job, Output, Storage
 from etude.launch.scheduler import Scheduler
-from etude.launch.schemas import AttemptRecord, Delivery, Inbox, Progress, Result, log_piece
-from etude.launch.storage import download
+from etude.launch.schemas import (
+    WORKER_LOG,
+    AttemptRecord,
+    Delivery,
+    Inbox,
+    Progress,
+    Result,
+    WorkerLog,
+    attempt_log,
+    log_piece,
+)
 from etude.launch.storage.bucket import BucketJournal
-from etude.launch.storage.download import Cache, Download
+from etude.launch.storage.download import Download, download
 from etude.launch.storage.files import RESULT
 from etude.launch.storage.s3 import (
     Bucket,
@@ -45,8 +58,10 @@ from etude.launch.storage.s3 import (
 from etude.launch.storage.transport import attribute, observe
 from etude.launch.usage import R2, S3_US_WEST_2, Access, Transfer, Usage, reconcile
 from etude.launch.worker.courier import Courier
+from etude.run.storage import S3Storage
 from tests.launch.counting import Counting, Counts
 from tests.launch.fake import bench
+from tests.run.storage import CountedClient
 
 
 class HTTP:
@@ -165,14 +180,15 @@ def test_cold_warm_concurrent_and_new_process_retrieval(http: HTTP, tmp_path: Pa
     cache = Cache(tmp_path / "cache", range_bytes=4)
     events: list[Transfer] = []
     with observe(lambda raw: events.append(Transfer.model_validate_json(raw))):
-        cache.fetch(http.source(), tmp_path / "first")
-        cache.fetch(http.source(), tmp_path / "second")
+        download(http.source(), tmp_path / "first", cache=cache)
+        download(http.source(), tmp_path / "second", cache=cache)
     assert (sum(e.received_bytes for e in events), sum(e.reused_bytes for e in events)) == (12, 12)
     assert (http.requests, http.received) == (3, 12)
     script = """from pathlib import Path
 import sys
-from etude.launch.storage.download import Cache, Download
-Cache(Path(sys.argv[1])).fetch(Download.model_validate_json(sys.argv[2]), Path(sys.argv[3]))
+from etude.cache import Cache
+from etude.launch.storage.download import Download, download
+download(Download.model_validate_json(sys.argv[2]), Path(sys.argv[3]), cache=Cache(Path(sys.argv[1])))
 """
     subprocess.run(
         [
@@ -194,7 +210,9 @@ Cache(Path(sys.argv[1])).fetch(Download.model_validate_json(sys.argv[2]), Path(s
     assert (http.requests, http.received) == (3, 12)
     another = Cache(tmp_path / "concurrent", range_bytes=4)
     with ThreadPoolExecutor(max_workers=2) as pool:
-        paths = list(pool.map(lambda n: another.fetch(http.source(), tmp_path / str(n)), [1, 2]))
+        paths = list(
+            pool.map(lambda n: download(http.source(), tmp_path / str(n), cache=another), [1, 2])
+        )
     assert [p.read_bytes() for p in paths] == [b"abcdefghijkl"] * 2
     assert (http.requests, http.received) == (6, 24)
     assert (
@@ -209,12 +227,12 @@ def test_interrupted_ranges_count_partial_bytes_and_resume(http: HTTP, tmp_path:
     http.fault = "interrupted"
     with observe(lambda raw: events.append(Transfer.model_validate_json(raw))):
         with pytest.raises(StorageUnavailable):
-            cache.fetch(http.source(), tmp_path / "result", retries=0)
+            download(http.source(), tmp_path / "result", retries=0, cache=cache)
         assert not (tmp_path / "result").exists()
         assert sum(e.received_bytes for e in events) == 6
         assert not events[-1].completed
         http.fault = ""
-        cache.fetch(http.source(), tmp_path / "result")
+        download(http.source(), tmp_path / "result", cache=cache)
     assert (tmp_path / "result").read_bytes() == b"abcdefghijkl"
     assert http.ranges == ["bytes=0-3", "bytes=4-7", "bytes=4-7", "bytes=8-11"]
     assert sum(e.received_bytes for e in events) == 14
@@ -232,7 +250,9 @@ def test_failures_preserve_existing_destination(http: HTTP, tmp_path: Path, faul
     if fault == "digest":
         source = source.model_copy(update={"sha256": "0" * 64})
     with pytest.raises((StorageUnavailable, TimeoutError)):
-        Cache(tmp_path / "cache", range_bytes=4).fetch(source, target, timeout=0.05, retries=0)
+        download(
+            source, target, timeout=0.05, retries=0, cache=Cache(tmp_path / "cache", range_bytes=4)
+        )
     assert target.read_bytes() == b"previous verified result"
 
 
@@ -240,34 +260,36 @@ def test_changed_identity_and_corrupt_retained_range_fail(http: HTTP, tmp_path: 
     cache = Cache(tmp_path / "cache", range_bytes=4)
     http.fault = "interrupted"
     with pytest.raises(StorageUnavailable):
-        cache.fetch(http.source(), tmp_path / "result", retries=0)
+        download(http.source(), tmp_path / "result", retries=0, cache=cache)
     http.fault = ""
     http.etag = '"version-two"'
     with pytest.raises(StorageUnavailable, match="identity"):
-        cache.fetch(http.source(), tmp_path / "result")
+        download(http.source(), tmp_path / "result", cache=cache)
     partial = next(cache.root.glob("*.partial"))
     with partial.open("r+b") as stream:
         stream.write(b"corrupt")
     with pytest.raises(StorageUnavailable, match="corrupt"):
-        cache.fetch(http.source(), tmp_path / "result")
+        download(http.source(), tmp_path / "result", cache=cache)
     assert not (tmp_path / "result").exists()
 
 
 def test_bounded_cache_and_oversized_download(http: HTTP, tmp_path: Path) -> None:
     cache = Cache(tmp_path / "cache", max_bytes=12, range_bytes=4)
-    cache.fetch(http.source(), tmp_path / "a")
+    download(http.source(), tmp_path / "a", cache=cache)
     http.objects["/other"] = b"mnopqrstuvwx"
-    cache.fetch(http.source("/other"), tmp_path / "b")
-    payloads = [p for p in cache.root.iterdir() if p.suffix not in {".lock", ".json"}]
+    download(http.source("/other"), tmp_path / "b", cache=cache)
+    payloads = [
+        p for p in cache.root.iterdir() if p.is_file() and p.suffix not in {".lock", ".json"}
+    ]
     assert sum(p.stat().st_size for p in payloads) <= 12
     http.objects["/large"] = b"z" * 25
     destination = tmp_path / "large"
     destination.write_bytes(b"previous verified result")
-    assert cache.fetch(http.source("/large"), destination).read_bytes() == b"z" * 25
+    assert download(http.source("/large"), destination, cache=cache).read_bytes() == b"z" * 25
     assert destination.stat().st_mode & 0o777 == 0o600
     # Uncacheable, yet fetched again to where it already is, it is not downloaded again.
     received = http.received
-    assert cache.fetch(http.source("/large"), destination).read_bytes() == b"z" * 25
+    assert download(http.source("/large"), destination, cache=cache).read_bytes() == b"z" * 25
     assert http.received == received
     assert not list(tmp_path.glob(".*.partial"))
     assert not list(tmp_path.glob(".*.json"))
@@ -282,7 +304,7 @@ def test_download_inherits_caller_allowance(http: HTTP, tmp_path: Path) -> None:
 
     cache = Cache(tmp_path / "cache")
     assert (
-        cache.fetch(http.source(), tmp_path / "unlimited", send=send).read_bytes()
+        download(http.source(), tmp_path / "unlimited", send=send, cache=cache).read_bytes()
         == b"abcdefghijkl"
     )
     home = tmp_path / "sessions" / "session-one"
@@ -302,7 +324,7 @@ def test_download_inherits_caller_allowance(http: HTTP, tmp_path: Path) -> None:
 def test_outer_deadline_cannot_be_extended(http: HTTP, tmp_path: Path) -> None:
     http.fault = "timeout"
     with limit_time(0.02), pytest.raises((StorageUnavailable, TimeoutError)):
-        Cache(tmp_path / "cache").fetch(http.source(), tmp_path / "result", timeout=30)
+        download(http.source(), tmp_path / "result", timeout=30, cache=Cache(tmp_path / "cache"))
     assert not (tmp_path / "result").exists()
 
 
@@ -331,20 +353,20 @@ def test_local_expiry_preserves_destination(
         )
 
     if warm:
-        cache.fetch(source, tmp_path / "first", send=send)
+        download(source, tmp_path / "first", send=send, cache=cache)
     target = tmp_path / "result"
     target.write_bytes(b"previous result")
     clock = [0.0]
     monkeypatch.setattr(time, "monotonic", lambda: clock[0])
     if phase == "digest":
-        digest = download._digest
+        digest = engine._digest
 
         def expire_digest(path: Path) -> str:
             result = digest(path)
             clock[0] = 2.0
             return result
 
-        monkeypatch.setattr(download, "_digest", expire_digest)
+        monkeypatch.setattr(engine, "_digest", expire_digest)
     else:
         fsync = os.fsync
 
@@ -357,7 +379,7 @@ def test_local_expiry_preserves_destination(
 
         monkeypatch.setattr(os, "fsync", expire_copy)
     with pytest.raises(TimeoutError):
-        cache.fetch(source, target, timeout=1, send=send)
+        download(source, target, timeout=1, send=send, cache=cache)
     assert target.read_bytes() == b"previous result"
     assert {p.name for p in tmp_path.iterdir()} == (
         {"cache", "result", "first"} if warm else {"cache", "result"}
@@ -368,7 +390,7 @@ def test_transient_range_http_retains_both_attempts(http: HTTP, tmp_path: Path) 
     http.fault = "transient"
     events: list[Transfer] = []
     with observe(lambda raw: events.append(Transfer.model_validate_json(raw))):
-        result = Cache(tmp_path / "cache").fetch(http.source(), tmp_path / "result")
+        result = download(http.source(), tmp_path / "result", cache=Cache(tmp_path / "cache"))
     assert result.read_bytes() == b"abcdefghijkl"
     assert (http.requests, http.received) == (2, 16)
     assert [(e.status, e.received_bytes, e.request_id) for e in events] == [
@@ -402,7 +424,9 @@ def test_transient_range_retries_share_one_budget(tmp_path: Path, status: int) -
 
     target = tmp_path / "result"
     with pytest.raises(StorageUnavailable):
-        Cache(tmp_path / "cache", range_bytes=4).fetch(source, target, send=send, retries=2)
+        download(
+            source, target, send=send, retries=2, cache=Cache(tmp_path / "cache", range_bytes=4)
+        )
     assert ranges == ["bytes=0-3", "bytes=0-3", "bytes=4-7", "bytes=4-7", "bytes=8-11"]
     assert not target.exists()
 
@@ -414,10 +438,10 @@ def test_cost_scenario_and_safe_access_reconciliation(http: HTTP, tmp_path: Path
         observe(lambda raw: events.append(Transfer.model_validate_json(raw))),
         attribute(purpose="result"),
     ):
-        cache.fetch(http.source(), tmp_path / "cold")
+        download(http.source(), tmp_path / "cold", cache=cache)
         cold = Usage(events=tuple(events), observed_at=datetime.now(UTC))
         events.clear()
-        cache.fetch(http.source(), tmp_path / "warm")
+        download(http.source(), tmp_path / "warm", cache=cache)
     warm = Usage(events=tuple(events), observed_at=datetime.now(UTC))
     assert (cold.received_bytes, cold.requests, warm.received_bytes, warm.requests) == (12, 3, 0, 0)
     # Three reads and 12 bytes out: S3 bills the egress, R2 only the reads.
@@ -746,10 +770,230 @@ def test_active_cache_capacity_streams_another_digest_without_overfilling(
     active.write_bytes(b"reservedsize")
     with active.with_suffix(".lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        result = cache.fetch(http.source(), tmp_path / "result")
+        result = download(http.source(), tmp_path / "result", cache=cache)
         assert result.read_bytes() == b"abcdefghijkl"
         assert list(cache.root.glob("*.partial")) == [active]
     assert active.read_bytes() == b"reservedsize"
+
+
+class _Bucket:
+    """Presigned reads served by a moto bucket, so a job's fetch and a report's read
+    reach the same object, counted by one client. Links are the launcher's own."""
+
+    def __init__(self, client: CountedClient, region: str) -> None:
+        self.client = client
+        self.bucket = Bucket("lab", region, Keys(access_key="a", secret_key="s"))
+
+    def link(self, key: str) -> Download:
+        body = self.client.client.get_object(Bucket="lab", Key=key)["Body"].read()
+        return Download(
+            url=self.bucket.get_url(key, 60),
+            sha256=hashlib.sha256(body).hexdigest(),
+            size_bytes=len(body),
+        )
+
+    def send(self, method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Reply:
+        options = {}
+        if "Range" in headers:
+            options["Range"] = headers["Range"]
+        if "If-Match" in headers:
+            options["IfMatch"] = headers["If-Match"]
+        reply = self.client.get_object(Bucket="lab", Key=urlsplit(url).path[1:], **options)
+        data = reply["Body"].read()
+        fields = {"etag": reply["ETag"], "content-length": str(len(data))}
+        if "ContentRange" in reply:
+            fields["content-range"] = reply["ContentRange"]
+        return Reply(status=206 if "Range" in options else 200, body=data, headers=fields)
+
+
+@pytest.mark.parametrize("key", ["run/checkpoints/model.pt", "run/attempts/a1/model.pt"])
+@pytest.mark.parametrize("job_first", [True, False])
+# boto3 reaches us-east-1 at its legacy global host; the launcher signs regional hosts.
+@pytest.mark.parametrize("region", ["us-west-2", "us-east-1"])
+def test_a_job_fetch_and_a_report_read_download_once_in_either_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key: str, job_first: bool, region: str
+) -> None:
+    boto3 = pytest.importorskip("boto3")
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    with mock_aws():
+        client = CountedClient(boto3.client("s3", region_name=region))
+        if region == "us-east-1":
+            client.create_bucket(Bucket="lab")
+        else:
+            client.create_bucket(
+                Bucket="lab", CreateBucketConfiguration={"LocationConstraint": region}
+            )
+        client.put_object(Bucket="lab", Key=key, Body=b"abcdefghijkl")
+        bucket = _Bucket(client, region)
+
+        # Each reader opens this computer's cache afresh, as separate processes do.
+        def job() -> bytes:
+            return download(
+                bucket.link(key), tmp_path / "job" / "model.pt", send=bucket.send
+            ).read_bytes()
+
+        def report() -> bytes:
+            return S3Storage("lab", client=client).get(key)
+
+        first, second = (job, report) if job_first else (report, job)
+        assert first() == second() == b"abcdefghijkl"
+        # One payload; a mutable object read second by a report is only checked.
+        checked = job_first and "checkpoints" not in key
+        assert (client.bytes, client.requests) == (12, 2 if checked else 1)
+
+        client.put_object(Bucket="lab", Key=key.replace("model", "other"), Body=b"mnopqrstuvwx")
+        if "checkpoints" not in key:
+            # A changed object is read again, by either reader, once.
+            client.put_object(Bucket="lab", Key=key, Body=b"mnopqrstuvwx")
+            assert report() == job() == b"mnopqrstuvwx"
+            assert client.bytes == 24
+
+
+def test_a_failed_refresh_keeps_the_verified_copy_and_recovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    boto3 = pytest.importorskip("boto3")
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+
+    class Flaky(CountedClient):
+        failures = 0
+
+        def get_object(self, **fields: Any) -> Any:
+            if self.failures:
+                self.failures -= 1
+                raise ConnectionError("interrupted")
+            return super().get_object(**fields)
+
+    with mock_aws():
+        client = Flaky(boto3.client("s3", region_name="us-east-1"))
+        client.create_bucket(Bucket="lab")
+        storage = S3Storage("lab", client=client)
+        storage.put("run/manifest.json", b"first")
+        assert storage.get("run/manifest.json") == b"first"
+        storage.put("run/manifest.json", b"second")
+        client.failures = 1
+        with limit_time(30):
+            with pytest.raises(ConnectionError):
+                storage.get("run/manifest.json")
+            assert (storage.cache.root / Content.of(b"first").name).read_bytes() == b"first"
+            assert storage.get("run/manifest.json") == b"second"
+    assert client.bytes == 5 + 6
+
+
+def test_changed_and_corrupt_bucket_objects_are_read_again(tmp_path: Path) -> None:
+    boto3 = pytest.importorskip("boto3")
+    with mock_aws():
+        client = CountedClient(boto3.client("s3", region_name="us-east-1"))
+        client.create_bucket(Bucket="lab")
+        storage = S3Storage("lab", client=client)
+        storage.put("run/manifest.json", b"first")
+        assert [storage.get("run/manifest.json") for _ in range(2)] == [b"first"] * 2
+        assert client.bytes == 5  # the second read asked only whether it changed
+        storage.put("run/manifest.json", b"second")
+        assert storage.get("run/manifest.json") == b"second"
+        held = storage.cache.root / Content.of(b"second").name
+        held.write_bytes(b"secoNd")
+        assert storage.get("run/manifest.json") == b"second"
+    assert client.bytes == 5 + 6 + 6
+
+
+class _Held:
+    """Content a test already has, read without a network."""
+
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+        self.read_bytes = 0
+        self.artifact = Artifact(
+            location=f"https://lab.example/{Content.of(body).name}",
+            sha256=hashlib.sha256(body).hexdigest(),
+            size_bytes=len(body),
+        )
+
+    def read(self, start: int, end: int | None, etag: str | None) -> Fetched:
+        body = self.body[start : None if end is None else end + 1]
+        self.read_bytes += len(body)
+        return Fetched(body=body, etag=hashlib.sha256(self.body).hexdigest())
+
+    def changed(self, etag: str) -> Fetched | None:
+        return None
+
+    def reused(self, size_bytes: int, byte_range: str | None) -> None:
+        pass
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("max_bytes", [0, 64])
+def test_ranges_preserve_requested_versions_at_one_location(
+    tmp_path: Path, reverse: bool, max_bytes: int
+) -> None:
+    sources = [_Held(b"abcdef"), _Held(b"UVWXYZ")]
+    if reverse:
+        sources.reverse()
+    artifacts = [
+        source.artifact.model_copy(update={"location": "https://lab.example/result"})
+        for source in sources
+    ]
+    root = tmp_path / "cache"
+    for source, artifact in zip(sources, artifacts, strict=True):
+        cache = Cache(root, max_bytes=max_bytes, range_bytes=2)
+        assert cache.read(artifact, source, start=1, length=2) == source.body[1:3]
+
+    # Reopening the cache must preserve each version, including for whole reads.
+    for source, artifact in zip(sources, artifacts, strict=True):
+        cache = Cache(root, max_bytes=max_bytes, range_bytes=2)
+        assert cache.read(artifact, source) == source.body
+        assert cache.read(artifact, source, start=2, length=3) == source.body[2:5]
+        if max_bytes:
+            assert source.read_bytes == len(source.body)
+
+
+def test_a_range_verifies_the_requested_digest_before_exposing_bytes(tmp_path: Path) -> None:
+    expected, wrong = _Held(b"abcdef"), _Held(b"abcdeX")
+    cache = Cache(tmp_path / "cache", range_bytes=2)
+    # The requested range matches; corruption elsewhere still invalidates the version.
+    with pytest.raises(engine.Mismatch):
+        cache.read(expected.artifact, wrong, start=1, length=2)
+    assert cache.read(expected.artifact, expected, start=1, length=2) == b"bc"
+
+
+def test_a_range_never_exposes_corrupted_cached_content(tmp_path: Path) -> None:
+    source = _Held(b"abcdef")
+    cache = Cache(tmp_path / "cache")
+    assert cache.read(source.artifact, source) == source.body
+    (cache.root / Content.of(source.body).name).write_bytes(b"aXXdef")
+    assert cache.read(source.artifact, source, start=1, length=2) == b"bc"
+    assert source.read_bytes == 2 * len(source.body)
+
+
+def test_a_range_past_the_recorded_length_is_refused_before_reading(tmp_path: Path) -> None:
+    source = _Held(b"abcdef")
+    with pytest.raises(ValueError, match="past"):
+        Cache(tmp_path / "cache").read(source.artifact, source, start=4, length=3)
+    assert source.read_bytes == 0
+
+
+def test_one_artifact_at_two_locations_is_read_once(tmp_path: Path) -> None:
+    source = _Held(b"abcdef")
+    cache = Cache(tmp_path / "cache")
+    elsewhere = source.artifact.model_copy(update={"location": "https://mirror.example/result"})
+    assert cache.read(source.artifact, source) == cache.read(elsewhere, source) == source.body
+    assert cache.read(elsewhere, source, start=1, length=2) == b"bc"
+    assert source.read_bytes == len(source.body)
+
+
+def test_pinned_content_survives_eviction_until_unpinned(tmp_path: Path) -> None:
+    cache = Cache(tmp_path / "cache", max_bytes=12)
+    first, second = b"abcdefghijkl", b"mnopqrstuvwx"
+    kept = Content.of(first)
+    cache.place(_Held(first).artifact, tmp_path / "first", _Held(first), pin=True)
+    cache.place(_Held(second).artifact, tmp_path / "second", _Held(second))
+    assert (cache.root / kept.name).read_bytes() == first
+    assert not (cache.root / Content.of(second).name).exists()  # streamed, not kept
+    cache.unpin(kept)
+    cache.place(_Held(second).artifact, tmp_path / "second", _Held(second))
+    assert not (cache.root / kept.name).exists()
+    assert (cache.root / Content.of(second).name).read_bytes() == second
+    assert (tmp_path / "first").read_bytes() == first  # eviction removes only cached copies
 
 
 def test_worker_source_and_input_share_verified_transport_bytes(
@@ -819,12 +1063,16 @@ def test_polling_a_session_reads_each_version_of_its_files_once(http: HTTP, tmp_
     http.objects[session + "packet.json"] = packet.model_dump_json().encode()
     http.objects[session + "inbox.json"] = Inbox().model_dump_json().encode()
     http.objects[session + "out/receipt"] = b"1234"
-    http.objects[session + "out/worker.log"] = b"worker log line\n" * 100
+    lines = b"worker log line\n" * 100
+    http.objects[session + "out/" + log_piece(WORKER_LOG, 0)] = lines
+    http.objects[session + "out/worker-log.json"] = (
+        WorkerLog(ends=(len(lines),)).model_dump_json().encode()
+    )
     http.objects[session + "out/usage.jsonl"] = b""
     record = f"/p/{run}/attempts/{attempt.id}.json"
     started = AttemptRecord(started_at=datetime.now(UTC))
     first = b"step 1\n" * 1000
-    http.objects[f"/p/{run}/" + log_piece(attempt.id, 0)] = first
+    http.objects[f"/p/{run}/" + log_piece(attempt_log(attempt.id), 0)] = first
     http.objects[record] = (
         started.model_copy(update={"log_ends": (len(first),)}).model_dump_json().encode()
     )
@@ -843,13 +1091,19 @@ def test_polling_a_session_reads_each_version_of_its_files_once(http: HTTP, tmp_
     poll()
     assert http.received == written  # ten polls read each file once
     second = b"step 2\n" * 1000
-    http.objects[f"/p/{run}/" + log_piece(attempt.id, len(first))] = second
+    http.objects[f"/p/{run}/" + log_piece(attempt_log(attempt.id), len(first))] = second
     http.objects[record] = (
         started.model_copy(update={"log_ends": (len(first), len(first) + len(second))})
         .model_dump_json()
         .encode()
     )
+    more = b"worker log line\n" * 10
+    http.objects[session + "out/" + log_piece(WORKER_LOG, len(lines))] = more
+    worker_record = WorkerLog(ends=(len(lines), len(lines) + len(more))).model_dump_json()
+    http.objects[session + "out/worker-log.json"] = worker_record.encode()
     poll()
-    # Only the new record and the new piece; the first piece is never read again.
-    assert http.received == written + len(http.objects[record]) + len(second)
+    # Only the new records and the new pieces; the first pieces are never read again.
+    added = len(http.objects[record]) + len(second) + len(worker_record) + len(more)
+    assert http.received == written + added
     assert journal.logs(attempt.session, attempt.id).text == (first + second).decode()
+    assert journal.logs(attempt.session, producer="worker").text == (lines + more).decode()

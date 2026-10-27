@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -27,6 +28,7 @@ from etude.jobs import continue_from
 from etude.launch.database import Database
 from etude.launch.executor import Executor
 from etude.launch.listing import show_machines, show_runs
+from etude.launch.logging import CLOSED, log_to, write_log
 from etude.launch.providers.runpod.api import RunPodAPI
 from etude.launch.providers.runpod.machines import RunPodMachines
 from etude.launch.providers.runpod.pod import GuardianAPI, guard
@@ -43,7 +45,16 @@ from etude.launch.records import (
 )
 from etude.launch.records import Storage as Place
 from etude.launch.scheduler import Scheduler
-from etude.launch.schemas import AttemptRecord, Bootstrap, Packet, Work, log_piece
+from etude.launch.schemas import (
+    WORKER_LOG,
+    AttemptRecord,
+    Bootstrap,
+    Packet,
+    Work,
+    WorkerLog,
+    attempt_log,
+    log_piece,
+)
 from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.s3 import Bucket, Grant, Keys, Reply, StorageUnavailable
 from etude.launch.storage.transport import emit
@@ -197,6 +208,11 @@ class RunPod:
     def _delete(self, id: str) -> None:
         with self.lock:
             self.pods.pop(id, None)
+            self._deleted(id)
+
+    def _deleted(self, id: str) -> None:
+        with self.storage.lock:  # on the same timeline as storage requests and creates
+            self.storage.asked.append(("TERMINATE", id))
 
     def _answer(self, method: str, url: str, body: bytes | None) -> tuple[int, bytes]:
         path = urlsplit(url).path.removeprefix("/v2/")
@@ -247,6 +263,7 @@ class RunPod:
         id = path.removeprefix("pods/")
         if method == "DELETE":
             self.pods.pop(id, None)
+            self._deleted(id)
             return 200, b""
         return (200, json.dumps(self.pods[id]).encode()) if id in self.pods else (404, b"")
 
@@ -279,7 +296,13 @@ class BucketObjects:
         return f"s3://{self.bucket}/{key}"
 
     def keys(self, prefix: str) -> list[str]:
-        return sorted(key for key in self.storage.objects if key.startswith(prefix))
+        return sorted(self.versions(prefix))
+
+    def versions(self, prefix: str) -> dict[str, str]:
+        found = self.storage.objects.items()
+        return {
+            key: hashlib.sha256(body).hexdigest() for key, body in found if key.startswith(prefix)
+        }
 
 
 @dataclass
@@ -353,6 +376,17 @@ def until(scheduler: Scheduler, run: str, phase: str) -> Status:
     raise AssertionError(f"run never reached {phase}: {status}")
 
 
+def released(scheduler: Scheduler, run: str) -> Status:
+    """The done run's status once its pod has delivered its last files and deleted itself."""
+    for _ in range(400):
+        scheduler.tick()
+        status = scheduler.status(run)
+        if status.rental_ended:
+            return status
+        time.sleep(0.05)
+    raise AssertionError(f"the rental never ended: {status}")
+
+
 def repository(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -424,6 +458,7 @@ def test_inputs_reach_the_job_by_name_once_and_wrong_bytes_are_refused(tmp_path:
     said = job_text(c.scheduler.logs(run=refused))  # the job's command never started
     assert said.startswith("source preparation failed: ValueError: input weights.pt was not")
     assert c.scheduler.record(refused).job != c.scheduler.record(run).job  # inputs are identity
+    released(c.scheduler, refused)
     assert c.provider.pods == {}
     with pytest.raises(ValidationError, match="plain file name"):
         given.model_validate({**given.model_dump(), "name": "../weights.pt"})
@@ -452,12 +487,9 @@ def test_a_run_from_a_commit_runs_in_a_pod_and_continues_in_another(
         max_usd=Decimal(1),
     )
     first = c.scheduler.launch(Run(job=job, seed=7), rent="l4")
-    (status,) = c.scheduler.wait(first, every=0.05, timeout=30)
-    assert (status.outcome, status.clocks, status.rental_ended) == (
-        "succeeded",
-        {"steps": 3},
-        True,
-    )
+    c.scheduler.wait(first, every=0.05, timeout=30)
+    status = released(c.scheduler, first)
+    assert (status.outcome, status.clocks) == ("succeeded", {"steps": 3})
     assert job_text(c.scheduler.logs(run=first)) == "seed 7 from 0 to 3\n"
     assert c.provider.pods == {}  # the pod deleted itself once its work was delivered
 
@@ -466,7 +498,8 @@ def test_a_run_from_a_commit_runs_in_a_pod_and_continues_in_another(
     second = c.scheduler.launch(
         continue_from(parent, "steps=7", source=BucketObjects(c.storage, "journals")), rent="l4"
     )
-    (status,) = c.scheduler.wait(second, every=0.05, timeout=30)
+    c.scheduler.wait(second, every=0.05, timeout=30)
+    status = released(c.scheduler, second)
     assert (status.outcome, status.clocks) == ("succeeded", {"steps": 7})
     assert job_text(c.scheduler.logs(run=second)) == "seed 7 from 3 to 7\n"
     copy = c.scheduler.fetch(second, "weights.pt", tmp_path / "out")
@@ -491,13 +524,14 @@ def test_a_run_from_a_commit_runs_in_a_pod_and_continues_in_another(
     )
     folder = f"etude/t/sessions/{session}/"
     keys = [k.removeprefix(folder) for k in c.storage.objects if k.startswith(folder)]
-    # The launcher can confirm deletion after completion before the courier writes its end note.
+    # The pod was deleted after its end note and the tail of its log arrived.
     assert {"packet.json", "bootstrap.json", "inbox.json", "receipt.json"} <= set(keys)
+    assert {"out/ended", "out/worker-log.json"} <= set(keys)
     # Everything about the run is in its own folder, whichever machine wrote it.
     attempt = c.scheduler.attempts(second)[0].id
     folder = f"etude/t/{second}/"
     keys = [k.removeprefix(folder) for k in c.storage.objects if k.startswith(folder)]
-    assert {f"attempts/{attempt}.json", log_piece(attempt, 0)} <= set(keys)
+    assert {f"attempts/{attempt}.json", log_piece(attempt_log(attempt), 0)} <= set(keys)
     assert {"run.json", "checkpoints/steps-7.json", "checkpoints/steps-7.pt"} <= set(keys)
 
 
@@ -789,7 +823,7 @@ def machine(tmp_path: Path, storage: Storage) -> tuple[Courier, Path, Path]:
     session = Grant(
         prefix="etude/sessions/r/out/", form=held.post_form("etude/sessions/r/out/", 3600)
     )
-    courier = Courier(home, session, "unused", storage, {"run1": access})
+    courier = Courier(home, session, "unused", storage, {"run1": access}, home / "worker.log")
     return courier, attempt, track
 
 
@@ -823,6 +857,75 @@ def test_a_twelve_hour_log_is_sent_once_in_a_few_hundred_pieces(
     assert (len(pieces), puts.count(folder + "a1.json")) == (197, 197)
     record = AttemptRecord.model_validate_json(storage.objects[folder + "a1.json"])
     assert ["etude/run1/" + key for key in record.log_pieces("a1")] == pieces
+
+
+def test_a_growing_worker_log_is_sent_once_in_appended_pieces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Writes(Storage):
+        """Counts the times each object is written, whether by PUT or by form."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.writes: Counter[str] = Counter()
+
+        def __call__(
+            self, method: str, url: str, body: bytes | None, headers: dict[str, str]
+        ) -> Reply:
+            before = dict(self.objects)
+            reply = super().__call__(method, url, body, headers)
+            self.writes.update(k for k, v in self.objects.items() if before.get(k) is not v)
+            return reply
+
+    storage = Writes()
+    courier, _, _ = machine(tmp_path, storage)
+    now = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    log = courier._home / "worker.log"
+    # A line every ten seconds for two hours, carried every fifteen.
+    with log_to(log):
+        for second in range(0, 2 * 3600, 5):
+            if second % 10 == 0:
+                write_log("inbox", f"{second} work, 0 to stop")
+            if second % 15 == 0:
+                now[0] = float(second)
+                courier.carry_out()
+        write_log("worker", CLOSED)
+        courier.carry_out(final=True)
+    out = "etude/sessions/r/out/"
+    pieces = sorted(k for k in storage.objects if k.startswith(out + WORKER_LOG + "/"))
+    # Each piece is sent once, so the bytes sent are the log's new bytes, each once,
+    # where a whole upload every fifteen seconds sent the log hundreds of times over.
+    assert all(storage.writes[key] == 1 for key in pieces)
+    assert b"".join(storage.objects[key] for key in pieces) == log.read_bytes()
+    # The record is rewritten only to name a new piece.
+    assert (len(pieces), storage.writes[out + "worker-log.json"]) == (77, 77)
+    record = WorkerLog.model_validate_json(storage.objects[out + "worker-log.json"])
+    assert [out + key for key in record.pieces()] == pieces
+
+
+def test_a_finished_rental_delivers_its_end_and_log_tail_before_it_is_deleted(
+    tmp_path: Path,
+) -> None:
+    c = cloud(tmp_path)
+    run = c.scheduler.launch(
+        Job(command="echo done", max_hours=0.05, max_usd=Decimal(1)), rent="l4"
+    )
+    c.scheduler.wait(run, every=0.05, timeout=30)
+    released(c.scheduler, run)
+    timeline = [(method, key.partition("?")[0]) for method, key in c.storage.asked]
+    session = c.scheduler.attempts(run)[0].session
+    out = f"etude/t/sessions/{session}/out/"
+    sent = [i for i, (method, key) in enumerate(timeline) if method in ("PUT", "POST")]
+    (terminated,) = [i for i, (method, _) in enumerate(timeline) if method == "TERMINATE"]
+    (ended,) = [i for i in sent if timeline[i][1] == out + "ended"]
+    tail = max(i for i in sent if timeline[i][1].startswith(out + WORKER_LOG + "/"))
+    # The log's last piece, and the record naming it, arrive before the end receipt,
+    # and the machine is deleted only after that.
+    named = max(i for i in sent if timeline[i][1] == out + "worker-log.json")
+    assert tail < named < ended < terminated
+    worker = next(s for s in c.scheduler.logs(run=run).streams if s.producer == "worker")
+    assert worker.complete and worker.text.rstrip().endswith(CLOSED)
 
 
 def test_output_printed_during_an_upload_waits_for_the_next_piece(tmp_path: Path) -> None:

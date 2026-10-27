@@ -372,7 +372,10 @@ Every rented machine takes waiting runs that fit its remaining time. The
 controller delivers each next run; keep its loop running to drain the queue.
 There is no run-count packing setting. A machine rented for queued work ends when no
 waiting run fits; a manually rented one waits until its deadline or termination. Terminate refuses
-while it still has unfinished work.
+while it still has unfinished work. Ending a machine rented for queued work is asked of it
+through its inbox: its worker delivers its last files, the tail of its log and its end
+receipt, then deletes the machine, and the launcher confirms the deletion once the receipt
+arrives, or at the rental's deadline.
 
 The launcher needs `RUNPOD_API_KEY`, `AWS_ACCESS_KEY_ID` and
 `AWS_SECRET_ACCESS_KEY` from the configured secret manager. No secrets enter
@@ -446,9 +449,11 @@ marked. Worker observations retain producer timestamps separately from controlle
 observation times; clocks on different machines do not establish a total order.
 
 Bootstrap uses a write-only capability for one log object, independent of reading
-the bootstrap packet or installing dependencies. Each startup producer publishes
+the bootstrap packet or installing dependencies. The bootstrap publishes it
 at most once every 15 seconds and once at closure, under `log_seconds` on its pool or on-demand
-(default `None`) and the remaining rental allowance. The guardian starts first and remains independent of publication.
+(default `None`) and the remaining rental allowance. The worker's own log goes,
+once it has read its bootstrap, to its session's `out/` in appended pieces like a
+job's, below; a worker that never read it sends its log whole, once, at exit. The guardian starts first and remains independent of publication.
 A storage outage or death before bootstrap runs can leave an explicit evidence
 gap. Reading logs never needs a live machine after its bucket evidence was
 published or its output cached by the controller.
@@ -765,9 +770,12 @@ The job is also told who it is: `ETUDE_RUN` (the run's id), `ETUDE_JOB` (the
 digest its job's runs share), `ETUDE_JOB_NAME` when the job has a name,
 `ETUDE_ATTEMPT`, and `ETUDE_COHORT` when the run has one. It runs in
 `ETUDE_SOURCE_DIR`, its commit's files without `.git`; [evaluation](evaluation.md)
-hashes identity files relative to it. [Tracking](tracking.md) reads these, so a launched job names only
-its experiment and clocks. The launcher has no experiment; the script names it. A tracked
-script does not write `etude-result.json` itself: tracking reports its clocks.
+hashes identity files relative to it. A job launched from an experiment file
+(one defining `eval(state)` or `report()`) is that experiment's, named for the
+file's stem, and is told so in `ETUDE_EXPERIMENT`; the experiment is part of
+its identity. [Tracking](tracking.md) reads these, so a launched job names
+only its clocks, and its experiment when its file is not one. A tracked script
+does not write `etude-result.json` itself: tracking reports its clocks.
 
 A storage holds one folder per run, shared by every attempt on every machine,
 and the machines' own working files apart:
@@ -780,6 +788,9 @@ PREFIX/RUN/                      everything about one run
   run.json  state.json  metrics/ the run's tracked files, as they are,
   checkpoints/                     every checkpoint tracking recorded among them
 PREFIX/sessions/SESSION/         one machine's instructions, inbox and notes
+  out/worker.log/OFFSET          the worker's own log, in pieces named by first byte
+  out/worker-log.json            where its pieces end
+  out/ended                      the end receipt, sent after everything else
 PREFIX/sources/SHA256.tar        a commit's source archive, named by its digest
 ```
 
@@ -1314,7 +1325,7 @@ automatic replay from this policy.
 ### Timeout ownership
 
 ```python
-from etude.launch.deadline import limit_time
+from etude.deadline import limit_time
 
 # An optional total allowance for synchronous remote operations in this block.
 with limit_time(900):
@@ -1417,10 +1428,16 @@ combining scopes. Upload counts are body bytes supplied to urllib, including
 multipart form framing, not confirmed socket bytes. Response counts are actual
 body reads, including partial responses and failures; object length is separate.
 
-The persistent cache is `$ETUDE_HOME/downloads` (default `~/.etude/downloads`),
-keyed by transport SHA256 and length, with a 20 GiB payload allowance. Both
-completed-output reads and worker source/checkpoint reads use it. The first
-cold acquisition still transfers every byte. For cache-admitted artifacts, verified warm reuse transfers no
+Downloads use Etude's one cache, `$ETUDE_HOME/cache` (default `~/.etude/cache`,
+`etude.cache.Cache`), keyed by transport SHA256 and length, with a 20 GiB payload
+allowance. Completed-output reads, worker source/checkpoint reads and tracking's
+bucket reads (`S3Storage`) share it, so bytes one of them read are reused by the
+others. The first cold acquisition still transfers every byte. A range of an artifact with a recorded SHA256 and length
+is no exception: a whole-file digest cannot authenticate a range, so the whole
+artifact is acquired and verified, streamed to disk even beyond the allowance,
+before any range is returned, and held bytes are verified again before a range
+is read from them. Immutable objects without a recorded digest fetch and keep
+individual ranges. For cache-admitted artifacts, verified warm reuse transfers no
 payload bytes, including from a new process or to another destination; control
 metadata reads still cost requests and bytes. Sequential 8 MiB ranges retain
 completed chunks across interruption and require exact ranges and a stable
@@ -1433,7 +1450,7 @@ rental deadline. Local digest verification and copying check that allowance
 between chunks and before atomic publication; expiry preserves an existing
 destination. Two transport retries, including HTTP 429/500/502/503/504, share
 one budget across all ranges and the caller's deadline. Python callers can
-set an allowance with `Cache.fetch(Download(...), destination, timeout=..., retries=...)`
+set an allowance with `download(Download(...), destination, timeout=..., retries=...)`
 from `etude.launch.storage.download`.
 
 A local HTTP fixture completes two synthetic runs on one kept machine. It

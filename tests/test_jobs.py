@@ -159,8 +159,10 @@ def test_a_function_the_job_cannot_import_by_name_is_refused(tmp_path: Path) -> 
         read_job_file(repo / "job.py")
 
 
-def test_typed_jobs_take_every_job_field_but_the_command_and_config() -> None:
-    assert set(JobOptions.__annotations__) == set(Job.model_fields) - {"command", "config"}
+def test_typed_jobs_take_every_job_field_but_what_they_derive() -> None:
+    # The experiment is the launched file's, or an evaluation's own `experiment`.
+    derived = {"command", "config", "experiment"}
+    assert set(JobOptions.__annotations__) == set(Job.model_fields) - derived
 
 
 def test_an_evaluation_job_holds_a_benchmark_for_the_checkpoint_it_is_given(

@@ -142,10 +142,10 @@ def test_cohort_git_and_database_counts(
             10,
             ("numpy", "pydantic", "etude.launch.worker", "etude.launch.scheduler"),
         ),
-        (["pools"], 41, ("numpy", "boto3", "etude.launch.worker")),
+        (["pools"], 42, ("numpy", "boto3", "etude.launch.worker")),
         (
             ["worker", "{directory}"],
-            30,
+            31,
             (
                 "numpy",
                 "boto3",

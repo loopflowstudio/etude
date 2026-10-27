@@ -15,8 +15,10 @@ from threading import Thread
 import pytest
 
 from etude.cli import main
+from etude.experiment import observe
 from etude.launch.client import default
 from etude.launch.schemas import Packet
+from etude.run.storage import default_root
 from tests.launch.fake import bench
 
 JOB_FILE = r"""
@@ -121,6 +123,40 @@ def test_a_job_file_launches_a_cohort_and_each_verb_reads_it_back(
     )
     (copy,) = run(capsys, "fetch", next_id, "weights.pt", str(tmp_path / "out"))
     assert Path(copy).read_text() == "weights\n"
+
+
+def test_an_experiment_file_launches_runs_of_its_experiment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    (tmp_path / "train.py").write_text(
+        "from etude.train.records import Step\n"
+        "from etude.train.run import track\n"
+        'run = track(clocks=[Step("steps", "training steps")])\n'
+        'run.log({"loss": 0.5}, steps=1)\n'
+        "run.finish()\n"
+    )
+    (tmp_path / "ppo.py").write_text(
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from etude.launch.records import Job\n"
+        "def runs() -> Job:\n"
+        "    train = Path(__file__).parent / 'train.py'\n"
+        "    return Job(command=f'{sys.executable} {train}', max_hours=0.1)\n"
+        "def eval(state):\n"
+        "    return []\n"
+    )
+    (launched,) = run(capsys, "launch", str(tmp_path / "ppo.py"))
+    identity = launched.split()[0]
+    assert "done: succeeded" in run(capsys, "wait", identity)[0]
+    # What `etude eval ppo.py` and `etude report ppo.py` read: the runs of experiment ppo.
+    assert [each.name for each in observe(default_root(), "ppo").runs] == [identity]
+    # A job of another experiment, such as an evaluation naming one, is refused before launch.
+    other = tmp_path / "league.py"
+    named = (tmp_path / "ppo.py").read_text().replace(")\n", ", experiment='ppo')\n", 1)
+    other.write_text(named)
+    assert main(["launch", str(other)]) == 1
+    assert "league.py is experiment 'league'" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(

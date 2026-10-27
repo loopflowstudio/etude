@@ -149,6 +149,12 @@ evaluate(
 - **Matches.** A seating of agents under fixed `conditions`, played for
   `games`: the unit Etude schedules, resumes and resamples. Seat swaps belong
   inside `play`. Group `all` holds every seat; an agent may sit in two seats.
+- **Order.** Matches start, `workers` at a time, in the order
+  `etude.eval.schedule.ordered` gives, so consecutive matches reuse the
+  checkpoints your inference runtime keeps loaded: first those loading the
+  fewest checkpoints not yet used, then those reusing the most recently used.
+  Ties, and queues of code agents only, keep your order. Order changes no
+  result. Your runtime counts its loads; Etude does not.
 - **Rows are yours.** `play` returns any tables. Each row names a `player`
   (a seat) or a `group` of its match; Etude adds `run` and `match`. Values are
   numbers, text, booleans or nulls.
@@ -211,9 +217,9 @@ evaluate(
   it, finding the same checkpoint (by its key) wherever the retry put it. Elsewhere it is named for the tournament and what is given; the same
   call resumes it.
 - **Splitting.** `share=(k, n)` plays one of n disjoint parts, for n
-  machines: the scheduled matches in key order, dealt round, so parts differ
-  by at most one match. Delivered matches are dealt too, so a retried share
-  keeps its part.
+  machines: contiguous runs of the scheduled matches in play order, so parts
+  differ by at most one match and each seats only some of the checkpoints.
+  The cut covers delivered matches too, so a retried share keeps its part.
 - **Cost.** Holding a checkpoint or entrants reads nothing of the
   tournament: it plays their matches. Holding nothing new (batch) lists each
   place once and reads each eval run's `run.json` and, for the experiment's,
@@ -282,7 +288,9 @@ An experiment file says what to evaluate given what exists, and `etude eval`
 plays whatever that calls for and no eval run has delivered. Run it while
 training goes, after it ends, or with a matchup added later: each pass looks
 again. The experiment is named for the file: `ppo.py` evaluates the training
-runs of experiment `ppo`, and its eval runs are that experiment's.
+runs of experiment `ppo`, and its eval runs are that experiment's. Define
+`runs()` in it too and `etude launch ppo.py` starts training runs of `ppo`, so
+`track()` in the training code needs no `experiment`.
 
 ```python
 # ppo.py
@@ -372,12 +380,12 @@ checkpoint agent is drawn where its training run stood when it saved that
 checkpoint, found by its key; code agents and checkpoints from outside the
 experiment are anchors, drawn once. A checkpoint `eval(state)` chose that no
 eval run has delivered is marked not yet played, one nothing played is marked
-not evaluated, and failed matches are listed.
-
-Until `etude launch` hands the file's name to the training runs it starts,
-training code names the experiment itself: `track(experiment="ppo")` for
-`ppo.py`. Otherwise neither `etude eval ppo.py` nor `etude report ppo.py` finds
-its runs.
+not evaluated, and failed matches are listed. Each match counts from the eval
+run that delivered it last, whichever commit its code was at. Where the
+matches were played at several commits (`seats.commit`), "Played at" offers
+each: that commit's view counts every match as played at it. A delivered
+match is not played again for a new commit, so a commit's view holds the
+matches first played at it, and any held again there.
 
 ## Querying
 

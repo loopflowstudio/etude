@@ -18,7 +18,7 @@ from pathlib import Path
 
 from pydantic import Field
 
-from etude.launch.deadline import remaining
+from etude.deadline import remaining
 from etude.launch.logs import snapshot_stream
 from etude.launch.machines import Allocation
 from etude.launch.measurement import timed
@@ -71,8 +71,8 @@ with zipfile.ZipFile(io.BytesIO(code)) as archive:
     import types
     for name in ("etude", "etude.launch"):
         sys.modules.setdefault(name, types.ModuleType(name))
-    deadline=types.ModuleType("etude.launch.deadline")
-    exec(compile(archive.read("etude/launch/deadline.py"),"deadline.py","exec"),deadline.__dict__)
+    deadline=types.ModuleType("etude.deadline")
+    exec(compile(archive.read("etude/deadline.py"),"deadline.py","exec"),deadline.__dict__)
     sys.modules[deadline.__name__]=deadline
     logging=types.ModuleType("etude.launch.logging")
     exec(compile(archive.read("etude/launch/logging.py"),"logging.py","exec"),logging.__dict__)
@@ -336,6 +336,10 @@ class SSHJournal:
 
     def end(self, session_id: str) -> datetime | None:
         raw = self.ssh.call("end", session_id).text
+        return datetime.fromisoformat(raw) if raw else None
+
+    def finish(self, session_id: str) -> datetime | None:
+        raw = self.ssh.call("finish", session_id).text
         return datetime.fromisoformat(raw) if raw else None
 
     def add(self, session_id: str, work: Work) -> None:
