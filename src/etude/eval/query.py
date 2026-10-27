@@ -124,7 +124,8 @@ KEYS = ("seat", "group", "game", "run", "match")
 SCHEMA = 7
 
 _ENVIRONMENT_FILE = "environment.json"
-_PLAYER: TypeAdapter[Player] = TypeAdapter(Player)
+# Pydantic validates a `type` alias at runtime; its stubs accept only classes.
+_PLAYER: TypeAdapter[Player] = TypeAdapter(Player)  # type: ignore[arg-type]
 
 
 def statsdb(
