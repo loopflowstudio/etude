@@ -42,7 +42,7 @@ from etude.launch.schemas import (
     log_piece,
 )
 from etude.launch.storage.download import Download, Mismatch, download
-from etude.launch.storage.files import RESULT, read_result, write
+from etude.launch.storage.files import RESULT, append_usage, read_result, write
 from etude.launch.storage.s3 import (
     PART_BYTES,
     Bucket,
@@ -198,10 +198,7 @@ class Courier:
 
         The log says what changed; usage and diagnostics read this journal.
         """
-        with (self._home / "usage.jsonl").open("a") as stream:
-            stream.write(raw + "\n")
-            stream.flush()
-            os.fsync(stream.fileno())
+        append_usage(self._home, raw)
 
     def _carry_usage(self) -> None:
         path = self._home / "usage.jsonl"

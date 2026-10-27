@@ -40,6 +40,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from types import FrameType
 from typing import BinaryIO, Literal
@@ -49,7 +50,7 @@ from etude.launch.logging import Console, explain, log_to, sanitize
 from etude.launch.records import Cause, Input, Outcome, Output, Prepared, Record
 from etude.launch.runtime import PROBE, find_python, select_runtime
 from etude.launch.schemas import Packet, Progress, Work
-from etude.launch.storage.files import digest, read_result, write
+from etude.launch.storage.files import append_usage, digest, read_result, write
 from etude.launch.storage.transport import attribute, emit, observe
 from etude.launch.worker.prepared import key, prepare
 
@@ -150,7 +151,7 @@ def _lay_out(session: Path, home: Path, work: Work) -> tuple[dict[str, str], dic
         for given in work.inputs:
             began = time.monotonic()
             with (
-                observe(lambda raw: _retain(session, raw)),
+                observe(partial(append_usage, session)),
                 attribute(
                     session=session.name,
                     run=work.run,
@@ -384,12 +385,6 @@ def _phase(
         log.write(f"phase {name}: {result.stopped or ('exit ' + str(result.code))}\n".encode())
         log.flush()
     return result
-
-
-def _retain(session: Path, raw: str) -> None:
-    """Keep a transfer in the session's usage journal, which its courier delivers."""
-    with (session / "usage.jsonl").open("a") as stream:
-        stream.write(raw + "\n")
 
 
 @contextmanager

@@ -5,6 +5,7 @@ loads the process that executes attempts.
 """
 
 import hashlib
+import os
 from pathlib import Path
 
 from etude.launch.schemas import Result
@@ -17,6 +18,17 @@ def write(path: Path, text: str) -> None:
     partial = path.with_name(path.name + ".partial")
     partial.write_text(text)
     partial.replace(path)
+
+
+def append_usage(session: Path, raw: str) -> None:
+    """Keep one transfer in the session's usage journal, which its courier delivers.
+
+    The courier and the session's attempts both append; each line is written whole.
+    """
+    with (session / "usage.jsonl").open("a") as stream:
+        stream.write(raw + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
 
 
 def digest(path: Path) -> str:
