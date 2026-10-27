@@ -95,11 +95,7 @@ def _finish(
 
 
 def _lay_out(session: Path, home: Path, work: Work) -> tuple[dict[str, str], dict[str, Path]]:
-    """Lay out source and config, and verify inputs; the job's environment and where inputs are.
-
-    Inputs are linked into ETUDE_INPUTS_DIR here, unless a preparation runs
-    first: it sees only the inputs it names.
-    """
+    """Lay out source and config, and verify inputs; the job's environment and where inputs are."""
     source = home / "src"
     source.mkdir()
     (home / "outputs").mkdir()
@@ -169,8 +165,6 @@ def _lay_out(session: Path, home: Path, work: Work) -> tuple[dict[str, str], dic
                 f"inputs: verified {given.name} ({given.size_bytes} bytes,"
                 f" {time.monotonic() - began:.1f} s)\n"
             )
-    if held and work.prepare is None:
-        environment["ETUDE_INPUTS_DIR"] = str(_link(home / "inputs", held))
     if work.seed is not None:
         environment["ETUDE_SEED"] = str(work.seed)
     if work.until is not None:
@@ -408,8 +402,9 @@ def _prepared(
     stop: Path,
     limit: datetime,
 ) -> Iterator[Exit]:
-    """Make the job ready: its preparation, reused or built, then its runtime and inputs.
+    """Make the job ready: its preparation, reused or built, then its runtime.
 
+    The command sees only the inputs it names; the job's are linked after it.
     The prepared directory stays pinned on this machine while the caller runs.
     """
     preparation = work.prepare
@@ -455,12 +450,10 @@ def _prepared(
             yield built
             return
         environment["ETUDE_PREPARED_DIR"] = str(directory)
-        result = Exit(code=0)
-        if work.runtime is not None:
-            result = _runtime(home, work, environment, log, stop, limit)
-        if held and result.code == 0 and result.stopped is None:
-            environment["ETUDE_INPUTS_DIR"] = str(_link(home / "inputs", held))
-        yield result
+        if work.runtime is None:
+            yield Exit(code=0)
+        else:
+            yield _runtime(home, work, environment, log, stop, limit)
 
 
 def _commands(
@@ -564,6 +557,8 @@ def _run(session: Path, packet: Packet, work: Work) -> None:
                     os.link(claim.name, home / "claim")
                 with _prepared(home, work, environment, held, log, stop, limit) as result:
                     if result.code == 0 and result.stopped is None:
+                        if held:
+                            environment["ETUDE_INPUTS_DIR"] = str(_link(home / "inputs", held))
                         result = _commands(home, packet, work, environment, log, stop, limit)
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             log.write(("runtime failed: " + explain(error) + "\n").encode())

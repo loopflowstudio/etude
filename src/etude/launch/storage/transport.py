@@ -105,7 +105,11 @@ def emit(
         "completed": completed,
         "reused_bytes": reused,
     }
-    raw = json.dumps(event, separators=(",", ":"))
+    _deliver(json.dumps(event, separators=(",", ":")))
+
+
+def _deliver(raw: str) -> None:
+    """Hand one observation to this thread's sink, or the worker log without one."""
     sink = _sink.get()
     if sink is None:
         write_log("transfer", raw)
@@ -127,13 +131,9 @@ class Pending[T]:
         try:
             return self._future.result()
         finally:
-            sink, events = _sink.get(), self._events
-            self._events = []
+            events, self._events = self._events, []
             for raw in events:
-                if sink is None:
-                    write_log("transfer", raw)
-                else:
-                    sink(raw)
+                _deliver(raw)
 
     def abandon(self) -> None:
         """Stop it if it has not begun, else wait for it; either way emit what it observed."""
