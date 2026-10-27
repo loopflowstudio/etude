@@ -43,9 +43,24 @@ def play(match: Match) -> Tables:
     return {"plays": plays, "games": games}
 
 
+def play_game_seats(match: Match) -> Tables:
+    """`play`, with the game's own seat: the players sit the other way round in odd games."""
+    tables = play(match)
+    plays = [
+        {**row, "game_seat": (int(str(row["seat"])) + int(str(row["game"]))) % 2}
+        for row in tables["plays"]
+    ]
+    return {**tables, "plays": plays}
+
+
 def play_unkeyed(match: Match) -> Tables:
     """A row naming its seat as published etude-sdk did, `player`, names no seat."""
     return {"plays": [{"game": 0, "seat": 0, "won": True}, {"game": 0, "player": 1, "won": False}]}
+
+
+def play_seat_and_player(match: Match) -> Tables:
+    """A row with a column `player`, the seat's name in older stored tables."""
+    return {"plays": [{"game": 0, "seat": 0, "player": 1, "won": True}]}
 
 
 def play_text_hits(match: Match) -> Tables:

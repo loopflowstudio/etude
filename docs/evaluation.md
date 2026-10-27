@@ -149,7 +149,8 @@ evaluate(
   same version on a rented machine as on yours.
 - **Older eval runs.** Records earlier etude-sdk releases wrote, with
   `agents` and a seat column named `player`, read as players and `seat`, with
-  the same keys, so nothing is played again. Players recorded by etude-sdk
+  the same keys, so nothing is played again. A `seat` column beside `player`
+  in such a table was the game's own, and reads as `game_seat`. Players recorded by etude-sdk
   0.2 were identified by a digest; they load as `etude-sdk-0.2:DIGEST`, which
   no key since equals, so their results stay readable and nothing new counts
   them as played.
@@ -164,10 +165,11 @@ evaluate(
   result. Your runtime counts its loads; Etude does not.
 - **Rows are yours.** `play` returns any tables. Each row names a `seat`
   (its position in `match.players`) or a `group` of its match; Etude adds `run` and `match`. Values are
-  numbers, text, booleans or nulls.
+  numbers, text, booleans or nulls. A game's own seat numbering, when it
+  differs from the match's, goes in `game_seat`.
 - **Strict.** A row with neither or both of `seat` and `group`, a seat or
-  group the match lacks, or a column whose type changes during a run is
-  refused. A refused or raising match is recorded as failed with its error,
+  group the match lacks, a column named `player`, or a column whose type
+  changes during a run is refused. A refused or raising match is recorded as failed with its error,
   nothing else of it is stored, and the run stops.
 - **Environments are never pooled.** An eval run has one environment;
   resuming with another is refused, and comparisons keep environments apart.
