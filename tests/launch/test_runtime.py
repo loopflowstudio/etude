@@ -33,7 +33,7 @@ def test_selected_runtime_runs_without_dependency_installation(tmp_path: Path, p
         Job(command=command, max_hours=0.01, runtime=Runtime(python=python, python_version="3.12"))
     )
     status = scheduler.wait(run, every=0.05, timeout=10)[0]
-    text = job_text(scheduler.logs(run=run))
+    text = job_text(scheduler.logs(refresh=True, run=run))
     assert status.outcome == "succeeded"
     assert "selected=" + python in text
     assert "environment=" + str(Path(python).parent.parent) in text
@@ -56,7 +56,7 @@ def test_runtime_failure_does_not_start_or_retry_training(
     assert status.outcome == "failed" and not marker.exists()
     attempts = scheduler.attempts(run)
     assert len(attempts) == 1 and attempts[0].started_at is None
-    assert "runtime" in job_text(scheduler.logs(run=run))
+    assert "runtime" in job_text(scheduler.logs(refresh=True, run=run))
 
 
 def test_runtime_is_part_of_job_identity_and_package_order_is_not() -> None:

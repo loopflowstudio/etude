@@ -61,7 +61,7 @@ def test_one_run_finishes_and_its_session_is_confirmed_ended(tmp_path: Path) -> 
     assert status.rental_ended is True and status.attempts == 1
     assert abs(status.usd - USD_PER_RUN) < Decimal("0.001")
     assert str(status) == "done: succeeded, steps 26000, ~$0.10"
-    assert job_text(b.scheduler.logs(run=one)).startswith("log of ")
+    assert job_text(b.scheduler.logs(refresh=True, run=one)).startswith("log of ")
 
 
 def test_a_lost_create_reply_is_looked_up_and_never_asked_twice(tmp_path: Path) -> None:
@@ -450,7 +450,7 @@ def test_availability_asks_the_provider_once_and_rents_nothing(
     monkeypatch.setattr(import_module("etude.launch.cli"), "default", lambda: b.scheduler)
     counting = Counting(b.store, b.service)
     with counting.record():
-        assert main(["availability", "--rent", "l4"]) == 0
+        assert main(["availability", "l4"]) == 0
     assert counting.snapshot().provider == 1
     assert b.service.creates == 1
     (line,) = capsys.readouterr().out.splitlines()

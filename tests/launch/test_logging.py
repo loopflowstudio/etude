@@ -73,14 +73,16 @@ def test_failed_preparation_survives_restart_and_does_not_consume_id(
     b.store.close()
     store = Database(tmp_path / "launcher.db")
     scheduler = Scheduler(store, {"runpod": lambda held: b.service}, clock=b.clock)
-    snapshot = scheduler.logs(run="baseline-seed-7")
+    snapshot = scheduler.logs(refresh=True, run="baseline-seed-7")
     assert "source publication refused" in render(snapshot)
     assert snapshot.launches[0].id == caught.value.launch
     assert snapshot.streams == ()
     monkeypatch.setattr(source, "freeze", original)
     assert scheduler.launch(requested, rent="l4") == "baseline-seed-7"
     assert len(store.runs()) == 1
-    assert [launch.state for launch in scheduler.logs(run="baseline-seed-7").launches] == [
+    assert [
+        launch.state for launch in scheduler.logs(refresh=True, run="baseline-seed-7").launches
+    ] == [
         "failed",
         "admitted",
     ]
@@ -99,7 +101,7 @@ def test_uncertain_creation_blocks_reusing_id_until_confirmed_cleanup(tmp_path: 
         with pytest.raises(LauncherError, match="reconciling existing request"):
             b.scheduler.launch(requested, rent="l4")
     assert b.service.creates == 1 and b.store.runs() == ()
-    assert "reply never arrived" in render(b.scheduler.logs(run="chosen"))
+    assert "reply never arrived" in render(b.scheduler.logs(refresh=True, run="chosen"))
     b.run(1)
     b.run(1)
     b.scheduler.launch(requested, rent="l4")
@@ -128,7 +130,10 @@ def test_partial_cohort_retains_shared_failure_without_admitting_members(
         )
     assert b.store.runs() == ()
     assert not b.store.cohort_exists("pair")
-    first, second = b.scheduler.logs(run="one"), b.scheduler.logs(run="two")
+    first, second = (
+        b.scheduler.logs(refresh=True, run="one"),
+        b.scheduler.logs(refresh=True, run="two"),
+    )
     assert first.launches == second.launches
     assert "no capacity" in render(first)
     assert all(s.ended_at or s.refused_at for s in b.store.sessions())
@@ -142,23 +147,23 @@ def test_all_attempts_retained_after_cleanup_and_storage_failure(
     b = bench(tmp_path)
     run = b.scheduler.queue(job(), rent="l4")
     cursor = LogCursor()
-    snapshots = [b.scheduler.logs(run=run)]
+    snapshots = [b.scheduler.logs(refresh=True, run=run)]
     followed = [cursor.render(snapshots[-1])]
     assert not snapshots[-1].complete and not snapshots[-1].streams
     b.scheduler.tick()
-    snapshots.append(b.scheduler.logs(run=run))
+    snapshots.append(b.scheduler.logs(refresh=True, run=run))
     followed.append(cursor.render(snapshots[-1]))
     b.run(1)
     assert b.scheduler.read(run).phase == "running"
-    snapshots.append(b.scheduler.logs(run=run))
+    snapshots.append(b.scheduler.logs(refresh=True, run=run))
     followed.append(cursor.render(snapshots[-1]))
     b.service.kill(b.scheduler.attempts(run)[0].session)
     b.run(1)
-    snapshots.append(b.scheduler.logs(run=run))
+    snapshots.append(b.scheduler.logs(refresh=True, run=run))
     followed.append(cursor.render(snapshots[-1]))
     b.run(700)
     assert len(b.scheduler.attempts(run)) == 2
-    before = b.scheduler.logs(run=run)
+    before = b.scheduler.logs(refresh=True, run=run)
     snapshots.append(before)
     followed.append(cursor.render(before))
     assert before.complete
@@ -171,7 +176,7 @@ def test_all_attempts_retained_after_cleanup_and_storage_failure(
         raise OSError("storage denied")
 
     monkeypatch.setattr(b.service, "logs", unavailable)
-    after = scheduler.logs(run=run)
+    after = scheduler.logs(refresh=True, run=run)
     snapshots.append(after)
     followed.append(cursor.render(after))
     assert job_text(after) == job_text(before)
@@ -278,16 +283,16 @@ def test_bucket_completion_during_log_read_keeps_cached_output_refreshable(
         return original(session_id, attempt, producer=producer)
 
     monkeypatch.setattr(b.service, "logs", read)
-    early = b.scheduler.logs(run=run)
+    early = b.scheduler.logs(refresh=True, run=run)
     assert job_text(early) == "early output\n"
     assert not next(s for s in early.streams if s.producer == "job").complete
-    final = b.scheduler.logs(run=run)
+    final = b.scheduler.logs(refresh=True, run=run)
     assert job_text(final) == "early output\nfinal output\n"
     assert next(s for s in final.streams if s.producer == "job").complete
     # Four reads, then three: the packet and the first piece are never read again.
     assert len(storage.asked) == 7
     storage.objects.clear()
-    assert job_text(b.scheduler.logs(run=run)) == job_text(final)
+    assert job_text(b.scheduler.logs(refresh=True, run=run)) == job_text(final)
     assert len(storage.asked) == 7  # Final evidence needs no further bucket reads.
 
 
@@ -451,7 +456,7 @@ def test_log_reads_and_phases_never_drive_execution(tmp_path: Path) -> None:
     run = b.scheduler.launch(job(), rent="l4")
     counting = Counting(b.store, b.service)
     with counting.record():
-        b.scheduler.logs(run=run)
+        b.scheduler.logs(refresh=True, run=run)
         count = counting.snapshot()
     assert count == Counts(bucket=3, database=17)
     with counting.record():
@@ -471,9 +476,13 @@ def test_machine_view_excludes_job_output(tmp_path: Path) -> None:
     first = b.scheduler.launch(Run(id="first", job=job()), rent="l4")
     b.run(601)
     second = b.scheduler.launch(Run(id="second", job=job()), rent="l4")
-    assert "log of" not in render(b.scheduler.logs(machine=machine))
-    assert b.scheduler.attempts(first)[0].id not in job_text(b.scheduler.logs(run=second))
-    assert b.scheduler.attempts(second)[0].id not in job_text(b.scheduler.logs(run=first))
+    assert "log of" not in render(b.scheduler.logs(refresh=True, machine=machine))
+    assert b.scheduler.attempts(first)[0].id not in job_text(
+        b.scheduler.logs(refresh=True, run=second)
+    )
+    assert b.scheduler.attempts(second)[0].id not in job_text(
+        b.scheduler.logs(refresh=True, run=first)
+    )
 
 
 def test_closed_bootstrap_is_final_even_without_receipt() -> None:
@@ -502,13 +511,13 @@ def test_cached_partial_output_and_refresh_error_are_both_visible(
 ) -> None:
     b = bench(tmp_path)
     identity = b.scheduler.launch(job(), rent="l4")
-    before = b.scheduler.logs(run=identity)
+    before = b.scheduler.logs(refresh=True, run=identity)
 
     def unavailable(*args: object, **kwargs: object) -> LogStream:
         raise OSError("storage denied")
 
     monkeypatch.setattr(b.service, "logs", unavailable)
-    after = b.scheduler.logs(run=identity)
+    after = b.scheduler.logs(refresh=True, run=identity)
     assert job_text(after) == job_text(before)
     assert all(stream.retrieval_error == "OSError: storage denied" for stream in after.streams)
     assert [stream.observed_at for stream in after.streams] == [
@@ -520,7 +529,7 @@ def test_cached_partial_output_and_refresh_error_are_both_visible(
 def test_queue_is_not_mistaken_for_complete_logs(tmp_path: Path) -> None:
     b = bench(tmp_path)
     identity = b.scheduler.queue(job(), rent="l4")
-    snapshot = b.scheduler.logs(run=identity)
+    snapshot = b.scheduler.logs(refresh=True, run=identity)
     assert snapshot.streams == () and not snapshot.complete
     assert b.service.creates == 0
 
@@ -555,19 +564,19 @@ def test_diagnostics_use_positions_without_showing_another_attempts_error(
 
     monkeypatch.setattr(b.service, "logs", read)
     b.clock.advance(1)
-    snapshot = b.scheduler.logs(run=second)
+    snapshot = b.scheduler.logs(refresh=True, run=second)
     assert "other job" not in render(snapshot)
     assert all(error.id != d.id for d in snapshot.diagnostics)
     assert all(not stream.diagnostics for stream in snapshot.streams)
     b.store.close()
     store = Database(tmp_path / "launcher.db")
     scheduler = Scheduler(store, {"runpod": lambda held: b.service}, clock=b.clock)
-    after = scheduler.logs(run=first)
+    after = scheduler.logs(refresh=True, run=first)
     assert "other job" in render(after)
     (retained,) = (d for d in after.diagnostics if d.id == error.id)
     assert retained.produced_at == error.observed_at
     assert retained.observed_at == b.clock()
-    assert "other job" not in render(scheduler.logs(run=second))
+    assert "other job" not in render(scheduler.logs(refresh=True, run=second))
 
 
 def test_bootstrap_publication_is_one_bounded_request_and_keeps_local_evidence(
@@ -613,7 +622,7 @@ def test_remote_preparation_failure_keeps_controller_evidence(
     b = bench(tmp_path)
     launch = b.scheduler.prepare_launch((Run(id="remote-id", job=job()),), rent="l4")
     b.scheduler.fail_launch(launch.id, "source publication failed: denied")
-    assert "source publication failed" in render(b.scheduler.logs(run="remote-id"))
+    assert "source publication failed" in render(b.scheduler.logs(refresh=True, run="remote-id"))
     assert b.store.runs() == () and b.service.creates == 0
     assert b.scheduler.launch(Run(id="remote-id", job=job()), rent="l4") == "remote-id"
 
@@ -694,7 +703,7 @@ def test_bootstrap_failure_remains_readable_after_deletion_and_restart(
             return Timer()
         log = marker.parent / "sessions" / session.id / "bootstrap.log"
         logging.publish(log, "https://fixture/bootstrap.log")
-        snapshot = b.scheduler.logs(run=identity)
+        snapshot = b.scheduler.logs(refresh=True, run=identity)
         assert not snapshot.streams[0].complete
         earlier = cursor.render(snapshot)
         if failure == "spawn":
@@ -735,7 +744,7 @@ def test_bootstrap_failure_remains_readable_after_deletion_and_restart(
         raise OSError("storage now unavailable")
 
     monkeypatch.setattr(b.service, "logs", unavailable)
-    snapshot = scheduler.logs(run=identity)
+    snapshot = scheduler.logs(refresh=True, run=identity)
     output = render(snapshot)
     expected = {
         "install": "fixture dependency unavailable",
@@ -775,7 +784,7 @@ def test_cleanup_failure_retains_reason_and_never_claims_deletion(
 
     monkeypatch.setattr(b.service, "end", unavailable)
     b.run(601)
-    snapshot = b.scheduler.logs(run=identity)
+    snapshot = b.scheduler.logs(refresh=True, run=identity)
     assert "deletion endpoint unavailable" in render(snapshot)
     assert all(session.ended_at is None for session in b.store.sessions())
     assert b.service.creates == 1
@@ -787,12 +796,12 @@ def test_expired_log_read_uses_cache_without_starting_another_request(
 ) -> None:
     b = bench(tmp_path)
     identity = b.scheduler.launch(job(), rent="l4")
-    before = b.scheduler.logs(run=identity)
+    before = b.scheduler.logs(refresh=True, run=identity)
     clock = iter([0.0, 2.0, 2.0, 2.0])
     monkeypatch.setattr("etude.deadline.time.monotonic", lambda: next(clock))
     counting = Counting(b.store, b.service)
     with counting.record():
-        after = b.scheduler.logs(run=identity, timeout=1)
+        after = b.scheduler.logs(refresh=True, run=identity, timeout=1)
         count = counting.snapshot()
     assert job_text(before) == job_text(after)
     assert all(
@@ -973,7 +982,7 @@ signal.pause()
         if path.name == "receipt":
             assert receipts() == ["receipt"]  # durable start intent precedes child execution
             logging.publish(log, "https://fixture/worker.log")
-            snapshot = b.scheduler.logs(run=identity)
+            snapshot = b.scheduler.logs(refresh=True, run=identity)
             assert not next(s for s in snapshot.streams if s.producer == "worker").complete
             earlier.append(cursor.render(snapshot))
             if failure in {"receipt", "console"}:
@@ -1028,7 +1037,7 @@ signal.pause()
     b.store.close()
     store = Database(tmp_path / "launcher.db")
     scheduler = Scheduler(store, {"runpod": lambda held: b.service}, clock=b.clock)
-    after = scheduler.logs(run=identity)
+    after = scheduler.logs(refresh=True, run=identity)
     worker = next(s for s in after.streams if s.producer == "worker")
     assert worker.complete is (failure != "console")
     output = render(after)
@@ -1054,7 +1063,7 @@ signal.pause()
         raise OSError("storage unavailable after cleanup")
 
     monkeypatch.setattr(b.service, "logs", unavailable)
-    retained = scheduler.logs(run=identity)
+    retained = scheduler.logs(refresh=True, run=identity)
     assert "exit status 23" in render(retained)
     assert next(s for s in retained.streams if s.producer == "worker").complete is (
         failure != "console"

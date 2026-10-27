@@ -24,7 +24,7 @@ import hashlib
 import json
 import subprocess
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -396,8 +396,7 @@ class Scheduler:
         return self._store.session(id)
 
     def rentals(self) -> tuple[tuple[Rental, Decimal], ...]:
-        """Paid windows and their current cost, including terminated machines."""
-        self.tick()
+        """Paid windows and their cost from retained bills, including terminated machines."""
         now = self._clock()
         return tuple(
             (r, _rental_usd(r, self._store.machine(r.machine), now)) for r in self._store.rentals()
@@ -1084,11 +1083,26 @@ class Scheduler:
         )
 
     def logs(
-        self, *, run: str | None = None, machine: str | None = None, timeout: float | None = None
+        self,
+        *,
+        run: str | None = None,
+        machine: str | None = None,
+        refresh: bool = False,
+        timeout: float | None = None,
     ) -> LogSnapshot:
-        """All retained stages and attempts, with bounded refresh and explicit gaps."""
+        """All stages and attempts with explicit gaps, as retained in the database.
+
+        `refresh` first collects new evidence from machines and buckets, within
+        `timeout`; without it, nothing outside the database is touched.
+        """
+        if timeout is not None and not refresh:
+            raise ValueError("a log timeout bounds a refresh")
         selection = self._log_selection(run, machine)
-        streams = self._collect_logs(selection.sessions, selection.attempts, timeout)
+        streams = (
+            self._collect_logs(selection.sessions, selection.attempts, timeout)
+            if refresh
+            else self._retained_logs(selection.sessions, selection.attempts)
+        )
         settled = all(
             session.ended_at is not None or session.refused_at is not None
             for session in selection.sessions
@@ -1111,26 +1125,50 @@ class Scheduler:
     def _collect_logs(
         self, sessions: Sequence[Session], attempts: Sequence[RunAttempt], timeout: float | None
     ) -> tuple[LogStream, ...]:
-        streams: list[LogStream] = []
         with limit_time(timeout):
-            for session in sessions:
-                if session.refused_at is not None:
-                    continue
-                selected: list[tuple[str | None, LogProducer]] = [
-                    (None, "bootstrap"),
-                    (None, "worker"),
-                ]
-                selected.extend((a.id, "job") for a in attempts if a.session == session.id)
-                for attempt, producer in selected:
-                    streams.append(self._collect_log(session, attempt, producer))
-        return tuple(streams)
+            return tuple(
+                self._collect_log(session, attempt, producer)
+                for session, attempt, producer in self._producers(sessions, attempts)
+            )
+
+    def _retained_logs(
+        self, sessions: Sequence[Session], attempts: Sequence[RunAttempt]
+    ) -> tuple[LogStream, ...]:
+        return tuple(
+            self._store.log(f"{session.id}/{attempt or producer}")
+            or self._unreceived(session, attempt, producer)
+            for session, attempt, producer in self._producers(sessions, attempts)
+        )
+
+    @staticmethod
+    def _producers(
+        sessions: Sequence[Session], attempts: Sequence[RunAttempt]
+    ) -> Iterator[tuple[Session, str | None, LogProducer]]:
+        """Each started session's bootstrap and worker, then its attempts' jobs."""
+        for session in sessions:
+            if session.refused_at is not None:
+                continue
+            yield session, None, "bootstrap"
+            yield session, None, "worker"
+            for attempt in attempts:
+                if attempt.session == session.id:
+                    yield session, attempt.id, "job"
+
+    @staticmethod
+    def _unreceived(session: Session, attempt: str | None, producer: LogProducer) -> LogStream:
+        return LogStream(
+            id=f"{session.id}/{attempt or producer}",
+            producer=producer,
+            session=session.id,
+            attempt=attempt,
+            machine=session.machine,
+        )
 
     def _collect_log(
         self, session: Session, attempt: str | None, producer: LogProducer
     ) -> LogStream:
         """Refresh one producer under the caller's deadline, preserving its cached evidence."""
-        identity = f"{session.id}/{attempt or producer}"
-        cached = self._store.log(identity)
+        cached = self._store.log(f"{session.id}/{attempt or producer}")
         if cached is not None and cached.complete:
             return cached
         try:
@@ -1155,16 +1193,9 @@ class Scheduler:
             stream = stream.model_copy(update={"machine": session.machine, "diagnostics": ()})
             self._store.retain_log(stream)
         except Exception as error:
-            stream = (
-                cached
-                or LogStream(
-                    id=identity,
-                    producer=producer,
-                    session=session.id,
-                    attempt=attempt,
-                    machine=session.machine,
-                )
-            ).model_copy(update={"retrieval_error": explain(error)})
+            stream = (cached or self._unreceived(session, attempt, producer)).model_copy(
+                update={"retrieval_error": explain(error)}
+            )
         return stream
 
     def fetch(self, run: str, name: str, destination: Path) -> Path:

@@ -1,7 +1,7 @@
 """Operation baselines, not speed targets. Never assert wall-clock durations.
 
-Known debt belongs to task_b8992fd2036f4cbd89ffdfc195361e91: reads refreshing
-machines, repeated SQL scans and per-run git preparation remain unchanged here.
+Known debt belongs to task_b8992fd2036f4cbd89ffdfc195361e91: waits and asks
+refreshing machines, repeated SQL scans and per-run git preparation remain unchanged here.
 """
 
 from __future__ import annotations
@@ -19,11 +19,14 @@ from typing import Any
 import pytest
 
 from etude.cli import main
-from etude.launch import cli
+from etude.launch import cli, client
 from etude.launch.commands import Kind
+from etude.launch.errors import LauncherError
+from etude.launch.executor import Execution
 from etude.launch.measurement import span
 from etude.launch.providers.runpod.http import PodHTTP
-from etude.launch.records import Job
+from etude.launch.records import Job, Machine, OnDemand
+from etude.launch.scheduler import Scheduler
 from etude.launch.schemas import Packet
 from etude.launch.ssh import SSH
 from etude.launch.storage.s3 import Bucket, Keys, Reply
@@ -33,13 +36,13 @@ from tests.launch.test_source import repository  # noqa: F401
 
 
 def baseline(count: int) -> dict[str, Counts]:
-    """Observed 2026-10-13 at 1, 10, 100 and 1000 active sessions and runs.
+    """Observed 2026-10-13 (status 2026-10-27) at 1, 10, 100 and 1000 active sessions and runs.
 
-    Status refreshes sessions; runs is already a database-only read. These fixed
+    Status and runs are database-only reads; tick refreshes sessions. These fixed
     coefficients pin known debt, not a target or a model of physical HTTP calls.
     """
     return {
-        "status": Counts(provider=2 * count, bucket=count, database=63 * count + 14),
+        "status": Counts(database=38 * count + 1),
         "runs": Counts(database=13 * count + 1),
         "tick": Counts(provider=2 * count, bucket=count, database=25 * count + 13),
     }
@@ -221,6 +224,53 @@ def test_phases_reads_only_retained_records(
     assert "finished not recorded" in output
     assert "machine confirmed not recorded (receipt retained)" in output
     assert result == Counts(database=8)  # one evidence selection; no external calls
+
+
+def test_reads_need_no_provider_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    b, ids, counting = sessions(tmp_path, 1)
+    b.scheduler.logs(run=ids[0], refresh=True)  # evidence a read can show
+    reached: list[str] = []
+
+    def no_key(held: Machine | OnDemand) -> Execution:
+        reached.append(held.name)
+        raise LauncherError("RUNPOD_API_KEY is not set")
+
+    keyless = Scheduler(b.store, {"runpod": no_key, "ssh": no_key}, clock=b.clock)
+    monkeypatch.delenv("RUNPOD_API_KEY", raising=False)
+    monkeypatch.setattr(cli, "default", lambda: keyless)
+    monkeypatch.setattr(client, "default", lambda: keyless)
+    machine = b.store.sessions()[0].machine
+    reads = {
+        "status": ["status", ids[0]],
+        "history": ["runs"],
+        "pools": ["pools"],
+        "ondemands": ["ondemands"],
+        "machines": ["machines", "--all", "--images"],
+        "providers": ["providers"],
+        "storages": ["storages"],
+        "controller_show": ["controller"],
+        "usage": ["usage", "--machine", machine],
+        "logs": ["logs", "--run", ids[0]],
+    }
+    declared = {
+        command.callback.__name__
+        for app in (cli.app, cli.pool_app, cli.ondemand_app, cli.machine_app, cli.storage_app)
+        for command in app.registered_commands
+        if command.callback is not None
+        and getattr(command.callback, "command_kind", None) == Kind.read
+    } | {"controller_show"}
+    assert set(reads) == declared
+    with counting.record():
+        for argv in reads.values():
+            assert main(argv) == 0, argv
+        result = counting.snapshot()
+    output = capsys.readouterr().out
+    assert reached == []
+    assert (result.provider, result.bucket, result.ssh, result.git) == (0, 0, 0, 0)
+    assert "last loop: never" in output and "[job machine=" in output
+    assert "--follow collects new evidence from machines" in output
 
 
 def test_profile_and_opt_in_spans(

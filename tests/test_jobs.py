@@ -122,7 +122,7 @@ def test_a_training_job_calls_its_function_with_its_typed_config(
     scheduler = local(tmp_path)
     launched = scheduler.launch(run)
     (status,) = scheduler.wait(launched, every=0.05, timeout=60)
-    text = job_text(scheduler.logs(run=launched))
+    text = job_text(scheduler.logs(refresh=True, run=launched))
     assert status.outcome == "succeeded", text
     # The tuple crossed as JSON and arrived as the function's own type again.
     assert "TrainConfig lr=0.25 layers=(64, 64)" in text
@@ -257,7 +257,7 @@ def test_an_evaluation_job_holds_a_benchmark_for_the_checkpoint_it_is_given(
     )
     run = c.scheduler.launch(job, rent="l4")
     (status,) = c.scheduler.wait(run, every=0.05, timeout=60)
-    assert status.outcome == "succeeded", job_text(c.scheduler.logs(run=run))
+    assert status.outcome == "succeeded", job_text(c.scheduler.logs(refresh=True, run=run))
     assert c.provider.creates == 1
     reads = [k for m, k in c.storage.asked if m == "GET" and k.startswith(given.key)]
     assert len(reads) == 1  # the checkpoint reached the machine once, as the job's input

@@ -197,25 +197,22 @@ def status(
         typer.Option(help="show when each stage of a run's start happened, from saved records"),
     ] = False,
 ) -> None:
-    """Show where runs stand."""
+    """Show where runs stand, as of the controller loop's last pass."""
     from etude.launch import controller
     from etude.launch.listing import resolve_runs, show_runs
 
     scheduler = default()
+    selected = resolve_runs(scheduler, runs or []) or [r.id for r in scheduler.runs()]
     if phases:
-        for run in resolve_runs(scheduler, runs or []) or [r.id for r in scheduler.runs()]:
+        for run in selected:
             for phase in scheduler.start_phases(run):
                 at = phase.at.isoformat() if phase.at else "not recorded"
                 attempt = f" attempt={phase.attempt}" if phase.attempt else ""
                 evidence = f" ({phase.evidence})" if phase.evidence else ""
                 print(f"{run} {phase.name} {at}{evidence}{attempt}")
         return
-    scheduler.tick()
-    show_runs(
-        scheduler, resolve_runs(scheduler, runs or []) or [run.id for run in scheduler.runs()]
-    )
-    if problem := controller.warning(scheduler):
-        print("warning: " + problem, file=sys.stderr)
+    show_runs(scheduler, selected)
+    controller.show_freshness(scheduler)
 
 
 @app.command("runs")
@@ -297,7 +294,7 @@ def cancel(
 
 
 @app.command()
-@kind(Kind.wait)
+@kind(Kind.read)
 def logs(
     run: Annotated[
         str | None, typer.Option(help="requested run ID, including failed admission")
@@ -306,9 +303,14 @@ def logs(
     cohort: Annotated[str | None, typer.Option(help="all runs in a cohort")] = None,
     job_only: Annotated[bool, typer.Option(help="only job stdout/stderr")] = False,
     follow: Annotated[
-        bool, typer.Option(help="follow newly retained evidence, without scheduling")
+        bool,
+        typer.Option(
+            help="wait on machines and buckets for new evidence until complete, without scheduling"
+        ),
     ] = False,
-    timeout: Annotated[float, typer.Option(min=0, help="total seconds; 0 means no timeout")] = 0,
+    timeout: Annotated[
+        float, typer.Option(min=0, help="total seconds to --follow; 0 means no timeout")
+    ] = 0,
 ) -> None:
     """Read retained preparation, startup, execution and cleanup evidence."""
     import time
@@ -318,8 +320,16 @@ def logs(
 
     if sum(value is not None for value in (run, machine, cohort)) != 1:
         raise typer.BadParameter("name exactly one --run, --machine or --cohort")
+    if timeout and not follow:
+        raise typer.BadParameter("--timeout bounds --follow")
     scheduler = _client()
     runs = [r.id for r in scheduler.cohort_runs(cohort)] if cohort else [run]
+    if not follow:
+        snapshots = [scheduler.logs(run=identity, machine=machine) for identity in runs]
+        sys.stdout.write("".join(render(snapshot, job_only=job_only) for snapshot in snapshots))
+        if not all(snapshot.complete for snapshot in snapshots):
+            print("retained evidence only; --follow collects new evidence from machines")
+        return
     cursors = {identity: LogCursor() for identity in runs}
     deadline = time.monotonic() + timeout if timeout else None
     while True:
@@ -329,15 +339,11 @@ def logs(
             if left is not None and left <= 0:
                 print("log time limit reached; incomplete")
                 return
-            snapshot = scheduler.logs(run=identity, machine=machine, timeout=left)
+            snapshot = scheduler.logs(run=identity, machine=machine, refresh=True, timeout=left)
             complete = complete and snapshot.complete
-            sys.stdout.write(
-                cursors[identity].render(snapshot, job_only=job_only)
-                if follow
-                else render(snapshot, job_only=job_only)
-            )
+            sys.stdout.write(cursors[identity].render(snapshot, job_only=job_only))
         sys.stdout.flush()
-        if not follow or complete:
+        if complete:
             return
         if deadline is not None and time.monotonic() >= deadline:
             print("log time limit reached; incomplete")
@@ -370,7 +376,7 @@ def fetch(
 @app.command()
 @kind(Kind.ask)
 def rent(
-    ondemand: Annotated[str, typer.Option(help="the on-demand to rent from")],
+    ondemand: Annotated[str, typer.Argument(help="the on-demand to rent from")],
     hours: Annotated[float, typer.Option(help="how long to hold the machine")],
     max_usd: Annotated[
         str | None, typer.Option(help="end the window sooner if it would cost more than this")
@@ -387,7 +393,7 @@ def rent(
 @app.command()
 @kind(Kind.ask)
 def terminate(
-    machine: Annotated[str, typer.Option(help="rented machine to delete")],
+    machine: Annotated[str, typer.Argument(help="rented machine to delete")],
 ) -> None:
     """End a rented machine's window now. Refused while a run is on it."""
     from etude.launch.listing import show_machines
@@ -418,7 +424,7 @@ def ondemands() -> None:
 @app.command()
 @kind(Kind.wait)
 def availability(
-    rent: Annotated[str, typer.Option(help="the on-demand to ask about")],
+    ondemand: Annotated[str, typer.Argument(help="the on-demand to ask about")],
     timeout: Annotated[
         float, typer.Option(min=0, help="total seconds; 0 disables the timeout")
     ] = 0,
@@ -426,7 +432,7 @@ def availability(
     """Ask the provider what an on-demand would rent now, and at what price. Rents nothing."""
     from etude.launch.listing import show_availability
 
-    show_availability(default().availability(rent, timeout=timeout or None))
+    show_availability(default().availability(ondemand, timeout=timeout or None))
 
 
 @app.command("default")

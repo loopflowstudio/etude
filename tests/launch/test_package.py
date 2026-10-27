@@ -87,7 +87,7 @@ def test_job_uses_its_own_python_path(tmp_path: Path, monkeypatch: pytest.Monkey
     scheduler = _open(tmp_path / "launcher")
     id = scheduler.launch(Job(command="python", max_hours=0.01))
     assert scheduler.wait(id, every=0.05, timeout=10)[0].outcome == "succeeded"
-    assert job_text(scheduler.logs(run=id)) == "job-python\n"
+    assert job_text(scheduler.logs(refresh=True, run=id)) == "job-python\n"
 
 
 def test_runpod_guardian_payload_is_small_and_independent(tmp_path: Path) -> None:

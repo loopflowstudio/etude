@@ -80,7 +80,7 @@ def _job(repo: Path, count: Path, **changes: object) -> Job:
 def _launch(scheduler: Scheduler, job: Job) -> tuple[Status, str]:
     run = scheduler.launch(job)
     (status,) = scheduler.wait(run, every=0.05, timeout=60)
-    return status, job_text(scheduler.logs(run=run))
+    return status, job_text(scheduler.logs(refresh=True, run=run))
 
 
 def _outcomes(log: str) -> list[str]:
@@ -222,7 +222,7 @@ def test_a_killed_build_leaves_no_receipt_and_is_built_again(tmp_path: Path) -> 
     os.kill(int((tmp_path / "sessions" / session / "receipt").read_text()), signal.SIGKILL)
     (status,) = scheduler.wait(run, every=0.05, timeout=60)
     assert (status.outcome, status.attempts) == ("succeeded", 2)
-    assert _outcomes(job_text(scheduler.logs(run=run))) == ["built"]
+    assert _outcomes(job_text(scheduler.logs(refresh=True, run=run))) == ["built"]
     assert sorted(p.name for p in leftover.iterdir()) == ["done"]
 
 

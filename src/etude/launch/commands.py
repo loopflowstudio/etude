@@ -1,7 +1,7 @@
 """Declared command expectations; current costs are pinned by counting tests.
 
 These declarations describe the intended interface, not enforced execution policy.
-The performance Task owns moving today's remote refreshes out of reads and asks.
+Reads are pinned at zero remote calls; the performance Task owns asks' refreshes.
 """
 
 from collections.abc import Callable
