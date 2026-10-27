@@ -68,6 +68,13 @@ COLUMN_TYPES: dict[type, ColumnType] = {
     str: "VARCHAR",
 }
 
+# Author table and column names: plain SQL identifiers. A leading underscore is Etude's.
+IDENTIFIER = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,62}$")
+# Columns Etude adds to every row.
+ADDED = ("run", "match")
+# A rollup's count of the rows it summarizes.
+ROLLUP_ROWS = "rows"
+
 # An eval run held for a tournament keeps this file in its folder (`TournamentRun`).
 TOURNAMENT_FILE = "tournament.json"
 
@@ -405,6 +412,29 @@ class MatchRecord(Record):
     wall_ms: int = Field(ge=0)
     # The SHA256 of each blob the match kept, which its rows may name.
     blobs: tuple[Digest, ...] = ()
+
+
+class Rollup(Record):
+    """An additive summary of an author table, taken once per block as it is sealed.
+
+    `statsdb` keeps table `name`: for each run and each value of the `by`
+    columns, how many rows there were (`rows`) and the total of each column in
+    `sums`, a null counting as 0; a mean is a total over `rows`. Each block
+    keeps its matches' partial totals in `NAME.parquet`, so `statsdb` adds a
+    block's totals and never reads an earlier block or a raw row again.
+    """
+
+    name: str = Field(pattern=IDENTIFIER.pattern)
+    table: str = Field(pattern=IDENTIFIER.pattern)
+    by: tuple[Annotated[str, Field(pattern=IDENTIFIER.pattern)], ...]
+    sums: tuple[Annotated[str, Field(pattern=IDENTIFIER.pattern)], ...] = ()
+
+    @model_validator(mode="after")
+    def distinct_columns(self) -> Self:
+        columns = [*self.by, *self.sums]
+        if len(set(columns)) != len(columns) or {*ADDED, ROLLUP_ROWS} & set(columns):
+            raise ValueError("rollup_columns_must_be_distinct_author_columns")
+        return self
 
 
 class Matchup(Record):

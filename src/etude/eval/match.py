@@ -4,7 +4,8 @@ Players (`etude.eval.records.Model` and `Code`), `environment` and `Match`
 describe what `evaluate` plays; it knows nothing of tournaments
 (`etude.eval.tournament` arranges eval runs). The author's `play(match)`
 returns tables of rows, or a `Result` that also keeps blobs: bytes such as a
-game's replay evidence, which rows name by SHA256. Etude checks that every row
+game's replay evidence, which rows name by SHA256. A `Rollup` declared by the
+run is summed once per block as it is sealed. Etude checks that every row
 names a `seat` or a `group` of its match and that a column keeps one type
 through the run, adds `run` and `match`, and stages the match
 (`etude.eval.block.Staging`). A refused or raising match is recorded as
@@ -23,7 +24,6 @@ processes (`spawn`), so `play` must be importable by name.
 from __future__ import annotations
 
 import multiprocessing
-import re
 import secrets
 import signal
 import sys
@@ -42,11 +42,14 @@ from pydantic import BaseModel
 
 from etude.eval.block import Block, Staging, quote, run_blocks, seal_abandoned
 from etude.eval.records import (
+    ADDED,
     COLUMN_TYPES,
+    IDENTIFIER,
     ColumnType,
     Environment,
     Match,
     MatchRecord,
+    Rollup,
     as_config,
 )
 from etude.eval.schedule import ordered
@@ -61,8 +64,6 @@ if TYPE_CHECKING:
     import duckdb
 
 KIND = "evaluation"
-# Author table and column names: plain SQL identifiers. A leading underscore is Etude's.
-IDENTIFIER = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,62}$")
 # Etude's own tables, which `etude.eval.query.statsdb` keeps beside the author's.
 ETUDE_TABLES = (
     "runs",
@@ -75,8 +76,6 @@ ETUDE_TABLES = (
     "training_checkpoints",
     "blobs",
 )
-# Columns Etude adds to every row.
-ADDED = ("run", "match")
 # The seat's name before etude-sdk 0.2.7. Refused in rows, so a stored table with
 # a `player` column is an older one (`etude.eval.query` reads it as such).
 OLD_SEAT = "player"
@@ -129,6 +128,7 @@ def evaluate(
     run: str | None = None,
     directory: Path | str | None = None,
     storages: Sequence[Storage] = (),
+    rollups: Sequence[Rollup] = (),
 ) -> EvalRun:
     """Play every match not already stored in this eval run, `workers` at a time.
 
@@ -136,7 +136,9 @@ def evaluate(
     consecutive matches reuse the checkpoints the author's runtime keeps loaded.
 
     The eval run is named `run` (see `etude.run.declaration.declare` for its
-    defaults); resuming it requires the same environment. Prints one line to
+    defaults); resuming it requires the same environment and `rollups`
+    (`EtudeError("eval_run_rollups_conflict")`): a sealed block's partial
+    totals are never taken again. Prints one line to
     stderr as each match is stored: how many of the pending are, and since
     when. Raises
     `EtudeError("match_failed")` after recording the first match that raised
@@ -147,6 +149,9 @@ def evaluate(
         raise EtudeError("workers_must_be_positive", 422)
     if len({scheduled.key for scheduled in matches}) != len(matches):
         raise EtudeError("duplicate_match", 422)
+    names = [rollup.name for rollup in rollups]
+    if len(set(names)) != len(names) or set(names) & set(ETUDE_TABLES):
+        raise EtudeError("rollup_name_refused", 422) from ValueError(names)
     declared = declare(experiment=experiment, clocks=(), run=run, kind=KIND, directory=directory)
     if declared.declaration.kind != KIND:
         raise EtudeError("run_is_not_an_eval_run", 409)
@@ -157,7 +162,9 @@ def evaluate(
         )
     elif Environment.model_validate_json(path.read_bytes()) != environment:
         raise EtudeError("eval_run_environment_conflict", 409)
-    writer = _Writer(declared.root, declared.name, destinations(declared.base, storages))
+    writer = _Writer(
+        declared.root, declared.name, destinations(declared.base, storages), tuple(rollups)
+    )
     pending = [scheduled for scheduled in matches if scheduled.key not in writer.done]
     started = time.monotonic()
     try:
@@ -249,18 +256,25 @@ def _played(
 class _Writer:
     """One process's matches of an eval run: staged, sealed into blocks and delivered."""
 
-    def __init__(self, root: Path, name: str, targets: Sequence[StorageDestination]) -> None:
+    def __init__(
+        self,
+        root: Path,
+        name: str,
+        targets: Sequence[StorageDestination],
+        rollups: tuple[Rollup, ...],
+    ) -> None:
         # Imported here: DuckDB is the optional `eval` extra.
         import duckdb  # noqa: PLC0415
 
         self.files = RunFiles(root)
         self.name = name
         self.targets = list(targets)
+        self.rollups = rollups
         self.id = secrets.token_hex(6)
         self.problems: dict[str, str] = {}
         self.db: duckdb.DuckDBPyConnection = duckdb.connect()
         seal_abandoned(root, self.db)
-        self.staging = Staging(root, self.id)
+        self.staging = Staging(root, self.id, rollups)
         stored = self._stored()
         self.done = {key for key, record in stored.items() if record.state == "done"}
         self.columns: dict[str, dict[str, ColumnType]] = {}
@@ -280,6 +294,11 @@ class _Writer:
         for storage, prefix in places:
             names = (key[len(prefix) :] for key in storage.keys(prefix))
             for block in run_blocks(storage, prefix, self.name, names, known):
+                if block.tables and block.rollups != self.rollups:
+                    raise EtudeError("eval_run_rollups_conflict", 409) from ValueError(
+                        f"block {block.name} keeps rollups"
+                        f" {[rollup.name for rollup in block.rollups]}"
+                    )
                 for record in block.matches:
                     if found.get(record.match.key) is None or record.state == "done":
                         found[record.match.key] = record
@@ -298,13 +317,17 @@ class _Writer:
         result = outcome if isinstance(outcome, Result) else Result(tables=outcome)
         try:
             checked = {
-                table: _checked(scheduled, table, rows) for table, rows in result.tables.items()
+                table: _checked(scheduled, table, rows, self.rollups)
+                for table, rows in result.tables.items()
             }
             types = {
                 table: _types(table, rows, self.columns.get(table, {}))
                 for table, rows in checked.items()
                 if rows
             }
+            for rollup in self.rollups:
+                if any(types.get(rollup.table, {}).get(c) == "VARCHAR" for c in rollup.sums):
+                    raise EtudeError("rollup_sum_not_numeric", 422) from ValueError(rollup.name)
             if not all(isinstance(blob, bytes) for blob in result.blobs):
                 raise EtudeError("blob_must_be_bytes", 422)
         except EtudeError as refused:
@@ -378,9 +401,15 @@ def _now_ms() -> int:
     return time.time_ns() // 1_000_000
 
 
-def _checked(scheduled: Match, table: str, rows: Sequence[Row]) -> list[Row]:
+def _checked(
+    scheduled: Match, table: str, rows: Sequence[Row], rollups: Sequence[Rollup]
+) -> list[Row]:
     """The rows, refused unless each names exactly one seat or group of this match."""
-    if not IDENTIFIER.match(table) or table in ETUDE_TABLES:
+    if (
+        not IDENTIFIER.match(table)
+        or table in ETUDE_TABLES
+        or table in (rollup.name for rollup in rollups)
+    ):
         raise EtudeError("table_name_refused", 422) from ValueError(table)
     for row in rows:
         seat, group = row.get("seat"), row.get("group")

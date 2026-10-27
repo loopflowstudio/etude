@@ -126,6 +126,9 @@ Rules a caller can rely on:
   sent once and never read again, so write each one once and name it by its
   content (such as `artifacts/evidence/SHA256.json.gz`); a later change to
   it is never delivered.
+  An eval run keeps a match's bytes as blobs instead (`Result(blobs=...)`,
+  [Evaluation](evaluation.md)); its `artifacts/` files are the old layout,
+  which `etude convert-eval` packs into blobs.
 - **Completion belongs to an attempt.** Resuming a run makes its previous
   completion inapplicable. Until the new writer finishes, the report says
   “running or unfinished.” Older completion records without a writer remain

@@ -853,10 +853,12 @@ def _cells(
     from etude.eval.match import ETUDE_TABLES  # noqa: PLC0415
     from etude.eval.query import KEYS, NUMERIC, compare  # noqa: PLC0415
 
+    # A rollup's totals have no matches to compare over.
+    rollups = {name for (name,) in db.sql("select name from kept.rollups").fetchall()}
     columns: dict[str, dict[str, str]] = {
         table: {name: kind for name, kind, *_ in db.sql(f'describe "{table}"').fetchall()}
         for (table,) in db.sql("show tables").fetchall()
-        if table not in ETUDE_TABLES
+        if table not in ETUDE_TABLES and table not in rollups
     }
     scores = (
         (report.score,)

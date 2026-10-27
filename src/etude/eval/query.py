@@ -15,6 +15,7 @@ beside Etude's own tables:
 | `schedule` | tournament, match, matchup, checkpoint (its key) and the matchup's tags of a benchmark's match; no checkpoint for a matchup of fixed players |
 | `training_checkpoints` | run, experiment, ordinal, checkpoint (its key, `RUN/checkpoints/NAME`), artifact (digest), wall_ms, clocks (where each stood) |
 | `blobs` | run, match (none for a converted run's other files), sha256, size_bytes |
+| ROLLUP (one per `etude.eval.records.Rollup`) | run, the rollup's `by` columns, rows, and its `sums` |
 
 A tournament is assembled from the experiment's eval runs naming it in their
 `tournament.json`. `schedule` holds every match it calls for, held or not.
@@ -36,7 +37,9 @@ and store, derived from the store and never the authority. Opening it lists
 the store once and reads only the files it has not read before: an eval
 run's blocks (`etude.eval.block`), tournament and checkpoint files are
 written once, so nothing already held is read again. A block costs one read
-of its index and one of each table; its blobs are read only by `read_blobs`.
+of its index and one of each table and rollup; its blobs are read only by
+`read_blobs`. A rollup's totals are added to as blocks arrive (`_rollup`),
+never summed again from earlier blocks or raw rows.
 A failed match's record is replaced by the done record that follows it. An
 eval run still kept a file per match raises `eval_run_not_converted`. The few tables that summarize the rest
 (`runs`, `players`, `tournaments`, `schedule`) are rebuilt from what the
@@ -81,9 +84,11 @@ from etude.eval.block import (
     read,
     refuse_unconverted,
 )
-from etude.eval.match import ETUDE_TABLES, IDENTIFIER, KIND, OLD_SEAT
+from etude.eval.match import ETUDE_TABLES, KIND, OLD_SEAT
 from etude.eval.records import (
     COLUMN_TYPES,
+    IDENTIFIER,
+    ROLLUP_ROWS,
     TOURNAMENT_FILE,
     Benchmark,
     CheckpointKey,
@@ -92,6 +97,7 @@ from etude.eval.records import (
     MatchRecord,
     Model,
     Player,
+    Rollup,
     Scheduled,
     TournamentRun,
     assemble,
@@ -113,7 +119,7 @@ NUMERIC = ("BOOLEAN", "BIGINT", "DOUBLE")
 # Keys and coordinates of an author table's rows: never a value.
 KEYS = ("seat", "group", "game", "run", "match")
 # A kept database of another schema is deleted and read again from its store.
-SCHEMA = 5
+SCHEMA = 6
 
 _ENVIRONMENT_FILE = "environment.json"
 _PLAYER: TypeAdapter[Player] = TypeAdapter(Player)
@@ -193,6 +199,8 @@ def _create(db: duckdb.DuckDBPyConnection, experiment: str, storage: Storage) ->
     )
     # Per-file names of eval runs a converted block holds.
     db.execute("create table kept.replaced (run VARCHAR, name VARCHAR)")
+    # Each rollup held, as declared; its per-match partial totals are `kept.NAME`.
+    db.execute("create table kept.rollups (name VARCHAR, rollup JSON)")
     db.execute("create table blobs (run VARCHAR, match VARCHAR, sha256 VARCHAR, size_bytes BIGINT)")
     db.execute(
         "create table matches (run VARCHAR, match VARCHAR, conditions JSON, games BIGINT,"
@@ -378,6 +386,9 @@ def _block(
     for table in block.tables:
         file = file_key(name, f"{table}.parquet")
         _table(db, run, table, name, _local(storage, place + file, copies / run / file))
+    for rollup in block.summed:
+        file = file_key(name, f"{rollup.name}.parquet")
+        _rollup(db, run, rollup, name, _local(storage, place + file, copies / run / file))
 
 
 def _match(db: duckdb.DuckDBPyConnection, run: str, record: MatchRecord, block: Block) -> bool:
@@ -467,19 +478,12 @@ def _table(db: duckdb.DuckDBPyConnection, run: str, table: str, file: str, path:
             if column in arrived:
                 db.execute(f'alter table _arrived rename column "{column}" to {renamed[column]}')
         arrived = {renamed.get(column, column): kind for column, kind in arrived.items()}
-    exists = db.execute(
-        "select 1 from information_schema.tables where table_schema = 'main' and table_name = ?",
-        [table],
-    ).fetchone()
-    if exists is None:
+    if db.execute("select 1 from kept.rollups where name = ?", [table]).fetchone():
+        raise EtudeError("rollup_name_conflict", 409) from ValueError(table)
+    if not _exists(db, "main", table):
         db.execute(f'create table "{table}" as select * from _arrived')
     else:
-        held = {column: kind for column, kind, *_ in db.execute(f'describe "{table}"').fetchall()}
-        for column, kind in arrived.items():
-            if column not in held:
-                db.execute(f'alter table "{table}" add column "{column}" {kind}')
-            elif (held[column], kind) == ("BIGINT", "DOUBLE"):
-                db.execute(f'alter table "{table}" alter "{column}" type DOUBLE')
+        _widen(db, f'"{table}"', arrived)
         db.execute(
             f'delete from "{table}" t using (select distinct run, match from _arrived) a'
             " where t.run = a.run and t.match = a.match"
@@ -494,6 +498,101 @@ def _table(db: duckdb.DuckDBPyConnection, run: str, table: str, file: str, path:
         "insert into kept.table_files select distinct ?, run, match, ? from _arrived", [table, file]
     )
     db.execute("drop table _arrived")
+
+
+def _rollup(db: duckdb.DuckDBPyConnection, run: str, rollup: Rollup, file: str, path: Path) -> None:
+    """Add one block's partial totals of a rollup into its held totals, table `rollup.name`.
+
+    Partials are held per match (`kept.NAME`), so a match an earlier block
+    also holds has that block's partials taken off as the later's are added:
+    it counts once, from the latest block. Nothing earlier is summed again.
+    """
+    name = rollup.name
+    db.execute(
+        f"create or replace temp table _arrived as select * from read_parquet({quote(path)})"
+    )
+    db.execute(
+        'delete from _arrived using kept.table_files f where f."table" = ? and f.run = _arrived.run'
+        " and f.match = _arrived.match and f.file > ?",
+        [name, file],
+    )
+    arrived = {column: kind for column, kind, *_ in db.execute("describe _arrived").fetchall()}
+    held = db.execute("select rollup from kept.rollups where name = ?", [name]).fetchone()
+    if held is None:
+        if _exists(db, "main", name):
+            raise EtudeError("rollup_name_conflict", 409) from ValueError(name)
+        db.execute("insert into kept.rollups values (?, ?)", [name, rollup.model_dump_json()])
+        db.execute(f'create table kept."{name}" as select * from _arrived where false')
+        db.execute(f'create table "{name}" as select * exclude (match) from _arrived where false')
+    elif Rollup.model_validate_json(held[0]) != rollup:
+        raise EtudeError("rollup_conflict", 409) from ValueError(name)
+    _widen(db, f'kept."{name}"', arrived)
+    _widen(db, f'"{name}"', {c: kind for c, kind in arrived.items() if c != "match"})
+    keys = ["run", *rollup.by]
+    totals = [ROLLUP_ROWS, *rollup.sums]
+    matched = " and ".join(f't."{c}" is not distinct from d."{c}"' for c in keys)
+    listed = ", ".join(f'"{c}"' for c in keys)
+    db.execute(
+        f"create or replace temp table _delta as select {listed},"
+        + ", ".join(f'sum("{c}") as "{c}"' for c in totals)
+        + f" from (select * exclude (match) from _arrived union all by name"
+        f" select {listed}, "
+        + ", ".join(f'-p."{c}" as "{c}"' for c in totals)
+        + f' from kept."{name}" p semi join (select distinct run, match from _arrived) a'
+        f" on p.run = a.run and p.match = a.match) group by {listed}"
+    )
+    db.execute(
+        f'update "{name}" t set '
+        + ", ".join(f'"{c}" = t."{c}" + d."{c}"' for c in totals)
+        + f" from _delta d where {matched}"
+    )
+    db.execute(
+        f'insert into "{name}" by name select * from _delta d'
+        f' where not exists (select 1 from "{name}" t where {matched})'
+    )
+    db.execute(f'delete from "{name}" where {ROLLUP_ROWS} = 0')
+    db.execute(
+        f'delete from kept."{name}" p using (select distinct run, match from _arrived) a'
+        " where p.run = a.run and p.match = a.match"
+    )
+    db.execute(f'insert into kept."{name}" by name select * from _arrived')
+    db.execute(
+        "delete from kept.table_files f using (select distinct run, match from _arrived) a"
+        ' where f."table" = ? and f.run = a.run and f.match = a.match',
+        [name],
+    )
+    db.execute(
+        "insert into kept.table_files select distinct ?, run, match, ? from _arrived", [name, file]
+    )
+    db.execute("drop table _arrived")
+    db.execute("drop table _delta")
+
+
+def _exists(db: duckdb.DuckDBPyConnection, schema: str, table: str) -> bool:
+    return bool(
+        db.execute(
+            "select 1 from information_schema.tables where table_schema = ? and table_name = ?",
+            [schema, table],
+        ).fetchone()
+    )
+
+
+def _widen(db: duckdb.DuckDBPyConnection, table: str, arrived: dict[str, str]) -> None:
+    """Make a held table take arrived rows: add their new columns, and widen whole
+    numbers to fractions. A column holding only nulls takes the arrived type."""
+    held = {column: kind for column, kind, *_ in db.execute(f"describe {table}").fetchall()}
+    for column, kind in arrived.items():
+        if column not in held:
+            db.execute(f'alter table {table} add column "{column}" {kind}')
+        elif (held[column], kind) == ("BIGINT", "DOUBLE"):
+            db.execute(f'alter table {table} alter "{column}" type DOUBLE')
+        elif (
+            held[column] != kind
+            and not db.execute(
+                f'select 1 from {table} where "{column}" is not null limit 1'
+            ).fetchone()
+        ):
+            db.execute(f'alter table {table} alter "{column}" type {kind}')
 
 
 def _local(storage: Storage, key: str, copy: Path) -> Path:

@@ -43,15 +43,17 @@ from typing import TYPE_CHECKING, Literal
 from pydantic import ValidationError
 
 from etude.eval.block import Block, run_blocks
-from etude.eval.match import ETUDE_TABLES, IDENTIFIER, KIND, EvalRun, Result, Tables, evaluate
+from etude.eval.match import ETUDE_TABLES, KIND, EvalRun, Result, Tables, evaluate
 from etude.eval.query import compare, estimate
 from etude.eval.records import (
+    IDENTIFIER,
     TOURNAMENT_FILE,
     Benchmark,
     CheckpointRef,
     Environment,
     Match,
     Player,
+    Rollup,
     RoundRobin,
     TournamentRun,
     assemble,
@@ -83,6 +85,7 @@ def hold(
     directory: Path | str | None = None,
     storages: Sequence[Storage] = (),
     share: tuple[int, int] = (0, 1),
+    rollups: Sequence[Rollup] = (),
 ) -> EvalRun:
     """Play, as one eval run of `experiment`, the matches the tournament adds; the run records what was given.
 
@@ -162,6 +165,7 @@ def hold(
         run=run,
         directory=directory,
         storages=storages,
+        rollups=rollups,
     )
 
 

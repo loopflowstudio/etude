@@ -186,6 +186,22 @@ evaluate(
   evidence: return `Result(tables=..., blobs=[...])` (`etude.eval.match`)
   and name each blob in a row by `hashlib.sha256(blob).hexdigest()`.
   `read_blobs(db, store, digests)` gives them back, verified.
+- **Rollups.** A summary you will query often is declared once and summed
+  as each block is sealed, never from raw rows again:
+
+  ```python
+  from etude.eval.records import Rollup
+
+  wins = Rollup(name="wins", table="plays", by=("seat", "on_play"), sums=("won", "hits"))
+  evaluate(..., rollups=[wins])
+  ```
+
+  `statsdb` then has table `wins`: per run and value of `by`, `rows` and
+  the total of each of `sums` (a null counts as 0; a mean is a total over
+  `rows`). Each block keeps its matches' partial totals in `wins.parquet`;
+  `statsdb` adds a new block's to the totals it holds, and a match two blocks
+  hold counts once, from the later. A run keeps the rollups its first block
+  had: resuming with others is refused (`eval_run_rollups_conflict`).
 - **Strict.** A row with neither or both of `seat` and `group`, a seat or
   group the match lacks, a column named `player`, or a column whose type
   changes during a run is refused. A refused or raising match is recorded as failed with its error,
@@ -200,15 +216,19 @@ evaluate(
   256 MiB of blobs), on a failure and on finish, and each block is delivered
   once sealed; `etude sync` finishes delivery later. A block is a folder
   written once, `RUN/blocks/WRITTEN.WRITER/`: `blobs.zip` (uncompressed
-  members named by SHA256), `TABLE.parquet` per table, then `block.json`
-  with each match's record. Plain DuckDB reads a run's tables without Etude:
+  members named by SHA256), `TABLE.parquet` per table, `ROLLUP.parquet` per
+  rollup, then `block.json` with each match's record. A table's rows are
+  sorted by match, and by `game` where rows have one, in row groups of 8192
+  rows, so a read filtered to a few matches skips most of a file. Plain
+  DuckDB reads a run's tables without Etude:
   `read_parquet('RUN/blocks/*/plays.parquet')`. A process killed before it
   seals leaves its matches staged on disk; the next `evaluate` in the folder
   seals them. SIGTERM seals before the run ends.
 - **Older eval runs.** Runs written before blocks kept a file per match,
   table and artifact. Readers refuse them (`eval_run_not_converted`) until
   `etude convert-eval RUN --source URI` writes blocks beside the old files,
-  each artifact becoming a blob. It converts only what no block holds yet,
+  each artifact becoming a blob; `etude.eval.convert.convert(RUN, URI,
+  rollups=[...])` also sums rollups into them. It converts only what no block holds yet,
   so it may run again. `etude delete-eval-files RUN --source URI` then
   deletes exactly the files delivered blocks replace, and deletes nothing
   while any old file there is unconverted. Convert where the run is written,
@@ -442,7 +462,7 @@ column per scalar config key, dotted when nested), `matches`, `seats`,
 `training_checkpoints` (every checkpoint a training run under the source
 recorded, joined to players and the schedule by `checkpoint`, its key) and
 `blobs` (each blob's `sha256` and size, by run and match; a converted run's
-artifacts name no match).
+artifacts name no match), and one table per rollup.
 
 ```python
 from etude.eval.query import read_blobs, statsdb
@@ -458,8 +478,9 @@ for digest, evidence in read_blobs(db, bucket, named):
 The database is kept in a file under `ETUDE_HOME/statsdb`, one per
 experiment and store. Opening it lists the store once and reads only what
 arrived since it was last opened, so a query never waits on every result
-being read again: a new block costs its index and one file per table, and
-never its blobs. `read_blobs` reads each pack's adjacent blobs in one range,
+being read again: a new block costs its index and one file per table and
+rollup, and never its blobs. A rollup's totals are added to, never summed
+again from earlier blocks. `read_blobs` reads each pack's adjacent blobs in one range,
 kept on this computer, so asking again reads nothing. The store stays the authority: `statsdb(..., rebuild=True)`
 reads everything again, and a database from another Etude schema is rebuilt
 on its own. One process opens it at a time; another gets `statsdb_in_use`.

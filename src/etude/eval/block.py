@@ -6,6 +6,7 @@ folder that is never rewritten:
 
     blocks/WRITTEN.WRITER/blobs.zip      the matches' blobs, stored members named SHA256
     blocks/WRITTEN.WRITER/TABLE.parquet  one table's rows of the block's matches
+    blocks/WRITTEN.WRITER/ROLLUP.parquet each match's partial totals of a `Rollup`
     blocks/WRITTEN.WRITER/block.json     the `Block`: its match records, tables and blobs
 
 They are written and delivered in that order (`etude.carriage._rank`), so a
@@ -14,6 +15,13 @@ zero-padded nanoseconds, so block names order by when they were sealed and a
 match's rows come from the latest block holding them. Plain DuckDB reads a
 run's tables without Etude (`read_parquet('RUN/blocks/*/plays.parquet')`), and
 any unzip tool yields its blobs; a blob's stored bytes are one range of its pack.
+A table's rows are sorted by match, and by game where rows name one, in small
+row groups, so a read filtered to a few matches skips most of a file, locally
+or by range reads from a bucket.
+
+A rollup's partial totals are taken when its block is sealed, per match, so
+a reader adds them up without the raw rows, and a match held by two blocks
+(a block sealed again after a crash) counts once, from the later.
 
 A staging folder holds a lock while its writer lives. One whose writer died
 is sealed by the next writer in the run's folder (`seal_abandoned`), so a
@@ -33,11 +41,11 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from pydantic import Field
+from pydantic import Field, TypeAdapter
 
 from etude.cache import Content
 from etude.carriage import EVAL_BLOCK_INDEX, EVAL_BLOCK_PACK, EVAL_BLOCKS
-from etude.eval.records import TABLE_FILE, MatchRecord
+from etude.eval.records import ROLLUP_ROWS, TABLE_FILE, MatchRecord, Rollup
 from etude.run.errors import EtudeError
 from etude.run.records import Digest, Name, Record
 from etude.run.storage import Storage
@@ -50,6 +58,11 @@ BLOCK_FILE = re.compile(rf"^{EVAL_BLOCKS}/(\d{{20}}\.[0-9a-f]+)/block\.json$")
 # A staged segment is sealed once this old or holding this many blob bytes.
 SEAL_SECONDS = 300.0
 SEAL_BYTES = 256 * 2**20
+# Rows per Parquet row group: the unit a filtered read keeps or skips.
+ROW_GROUP_ROWS = 8192
+# A staging folder's rollups, so a dead writer's matches are sealed with its own.
+_ROLLUPS = "rollups.json"
+_ROLLUP_LIST: TypeAdapter[tuple[Rollup, ...]] = TypeAdapter(tuple[Rollup, ...])
 # A ZIP local file header's fixed part, before the member's name and extra field.
 _LOCAL_HEADER = 30
 
@@ -74,10 +87,25 @@ class Block(Record):
     blobs: dict[Digest, Span] = {}
     # Keys of the per-file layout (relative to the run) a converted block holds.
     replaces: tuple[str, ...] = ()
+    # The run's rollups; each whose table the block holds has a `ROLLUP.parquet`.
+    rollups: tuple[Rollup, ...] = ()
 
     @property
     def name(self) -> str:
         return f"{self.written_ns:020d}.{self.writer}"
+
+    @property
+    def summed(self) -> tuple[Rollup, ...]:
+        """The rollups with partial totals in this block."""
+        return tuple(rollup for rollup in self.rollups if rollup.table in self.tables)
+
+    @property
+    def files(self) -> list[str]:
+        """The block's files before its index, in the order they are delivered."""
+        return [
+            *([EVAL_BLOCK_PACK] if self.pack else []),
+            *(f"{name}.parquet" for name in [*self.tables, *(r.name for r in self.summed)]),
+        ]
 
 
 def file_key(name: str, file: str) -> str:
@@ -137,8 +165,8 @@ class Staging:
     Raises `BlockingIOError` when another live process holds the folder.
     """
 
-    def __init__(self, root: Path, writer: str) -> None:
-        self.root, self.writer = root, writer
+    def __init__(self, root: Path, writer: str, rollups: Sequence[Rollup] = ()) -> None:
+        self.root, self.writer, self.rollups = root, writer, tuple(rollups)
         self.path = root / EVAL_BLOCKS / f".{writer}"
         for part in ("tables", "blobs", "records"):
             (self.path / part).mkdir(parents=True, exist_ok=True)
@@ -151,6 +179,7 @@ class Staging:
         except BlockingIOError:
             os.close(self._lock)
             raise
+        _write(self.path / _ROLLUPS, _ROLLUP_LIST.dump_json(self.rollups))
 
     def table(self, table: str, match: Digest) -> Path:
         """Where a match's rows of `table` are written, as Parquet."""
@@ -200,7 +229,7 @@ class Staging:
             for record in records
             for digest in record.blobs
         }  # fmt: skip
-        block = write(self.root, self.writer, records, tables, blobs, db)
+        block = write(self.root, self.writer, records, tables, blobs, db, rollups=self.rollups)
         for part in ("tables", "blobs", "records"):
             shutil.rmtree(self.path / part)
             (self.path / part).mkdir()
@@ -222,8 +251,10 @@ def seal_abandoned(root: Path, db: duckdb.DuckDBPyConnection) -> None:
     for path in sorted(folder.iterdir()):
         if not (path.is_dir() and path.name.startswith(".")):
             continue
+        kept = path / _ROLLUPS
+        rollups = _ROLLUP_LIST.validate_json(kept.read_bytes()) if kept.is_file() else ()
         try:
-            staging = Staging(root, path.name[1:])
+            staging = Staging(root, path.name[1:], rollups)
         except BlockingIOError:
             continue  # its writer lives
         staging.seal(db)
@@ -239,8 +270,10 @@ def write(
     db: duckdb.DuckDBPyConnection,
     *,
     replaces: Sequence[str] = (),
+    rollups: Sequence[Rollup] = (),
 ) -> Block:
-    """Write one block to the run's folder `root`: its pack, each table merged, then its index.
+    """Write one block to the run's folder `root`: its pack, each table merged, each
+    rollup's partial totals, then its index.
 
     Each table's Parquet files are merged into one; a column given whole
     numbers in one file and fractions in another becomes fractions.
@@ -252,13 +285,12 @@ def write(
     pack, spans = (None, {}) if not blobs else _pack(folder / EVAL_BLOCK_PACK, blobs)
     for table, paths in tables.items():
         files = ", ".join(quote(path) for path in paths)
-        target = folder / f"{table}.parquet"
-        partial = target.with_name(target.name + ".partial")
-        db.execute(
-            f"copy (select * from read_parquet([{files}], union_by_name = true))"
-            f" to {quote(partial)} (format parquet)"
-        )
-        partial.replace(target)
+        merged = f"read_parquet([{files}], union_by_name = true)"
+        order = ", ".join(f'"{c}"' for c in ("match", "game") if c in _columns(db, merged))
+        _copy(db, f"select * from {merged} order by {order}", folder / f"{table}.parquet")
+    for rollup in rollups:
+        if rollup.table in tables:
+            _sum(db, rollup, folder / f"{rollup.table}.parquet", folder / f"{rollup.name}.parquet")
     block = Block(
         writer=writer,
         written_ns=written,
@@ -267,9 +299,53 @@ def write(
         pack=pack,
         blobs=spans,
         replaces=tuple(replaces),
+        rollups=tuple(rollups),
     )
     _write(folder / EVAL_BLOCK_INDEX, block.model_dump_json().encode())
     return block
+
+
+def _sum(db: duckdb.DuckDBPyConnection, rollup: Rollup, table: Path, target: Path) -> None:
+    """Write each match's partial totals of `rollup` over a block's rows of its table.
+
+    A column the block's rows never gave reads as nulls. Whole numbers and
+    booleans sum to whole numbers, fractions to fractions.
+    """
+    source = f"read_parquet({quote(table)})"
+    columns = _columns(db, source)
+    by = [f'"{c}"' if c in columns else f'cast(null as VARCHAR) as "{c}"' for c in rollup.by]
+    sums = []
+    for column in rollup.sums:
+        kind = "DOUBLE" if columns.get(column) == "DOUBLE" else "BIGINT"
+        if columns.get(column) == "VARCHAR":
+            raise EtudeError("rollup_sum_not_numeric", 422) from ValueError(
+                f"rollup {rollup.name!r}: column {column!r} of {rollup.table!r} holds text"
+            )
+        total = f'sum(cast("{column}" as {kind}))' if column in columns else "0"
+        sums.append(f'cast(coalesce({total}, 0) as {kind}) as "{column}"')
+    keys = ", ".join(["run", "match", *(f'"{c}"' for c in rollup.by)])
+    _copy(
+        db,
+        f"select run, match, {', '.join(by)}, count(*) as {ROLLUP_ROWS}"
+        f"{''.join(', ' + each for each in sums)} from {source} group by {keys} order by {keys}",
+        target,
+    )
+
+
+def _columns(db: duckdb.DuckDBPyConnection, source: str) -> dict[str, str]:
+    """Each column of a relation and its type."""
+    return {
+        name: kind for name, kind, *_ in db.execute(f"describe select * from {source}").fetchall()
+    }
+
+
+def _copy(db: duckdb.DuckDBPyConnection, query: str, target: Path) -> None:
+    """Write a query's rows to `target` as Parquet in small row groups; readers never see half a file."""
+    partial = target.with_name(target.name + ".partial")
+    db.execute(
+        f"copy ({query}) to {quote(partial)} (format parquet, row_group_size {ROW_GROUP_ROWS})"
+    )
+    partial.replace(target)
 
 
 def _pack(target: Path, blobs: Mapping[Digest, Path]) -> tuple[Content, dict[Digest, Span]]:

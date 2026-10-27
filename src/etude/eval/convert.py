@@ -22,7 +22,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from etude.carriage import EVAL_BLOCK_INDEX, EVAL_BLOCK_PACK
+from etude.carriage import EVAL_BLOCK_INDEX
 from etude.eval.block import (
     SEAL_BYTES,
     Block,
@@ -33,7 +33,7 @@ from etude.eval.block import (
     sealed,
     write,
 )
-from etude.eval.records import TABLE_FILE, MatchRecord
+from etude.eval.records import TABLE_FILE, MatchRecord, Rollup
 from etude.run.errors import EtudeError
 from etude.run.listing import as_storage, run_folders
 from etude.run.records import Digest, Record
@@ -57,11 +57,14 @@ class Conversion(Record):
     replaced: int
 
 
-def convert(run: str, source: Storage | Path | str) -> Conversion:
+def convert(
+    run: str, source: Storage | Path | str, *, rollups: Sequence[Rollup] = ()
+) -> Conversion:
     """Write blocks holding every per-file record of eval run `run` in `source` not yet held.
 
     Every folder of the run in `source` (a runs directory or bucket) is
-    converted in place; the old files stay until `delete_files`.
+    converted in place; the old files stay until `delete_files`. The blocks
+    keep `rollups`' partial totals, as `evaluate` resuming the run with them would.
     """
     # Imported here: DuckDB is the optional `eval` extra.
     import duckdb  # noqa: PLC0415
@@ -72,7 +75,7 @@ def convert(run: str, source: Storage | Path | str) -> Conversion:
     try:
         for folder, names in _folders(storage, run).items():
             with tempfile.TemporaryDirectory(prefix="etude-convert-") as scratch:
-                blocks += _convert(storage, folder, names, db, Path(scratch))
+                blocks += _convert(storage, folder, names, db, Path(scratch), rollups)
     finally:
         db.close()
     return Conversion(
@@ -135,6 +138,7 @@ def _convert(
     names: Sequence[str],
     db: duckdb.DuckDBPyConnection,
     scratch: Path,
+    rollups: Sequence[Rollup],
 ) -> list[Block]:
     """Blocks for the folder's old files no block replaces yet, delivered to it."""
     replaced = _replaced(storage, folder, names)
@@ -185,6 +189,7 @@ def _convert(
             blobs,
             db,
             replaces=[*replaces, *held],
+            rollups=rollups,
         )
         _deliver(storage, folder, root, block)
         blocks.append(block)
@@ -228,10 +233,6 @@ def _packs(copies: Path, artifacts: Sequence[str]) -> list[tuple[dict[Digest, Pa
 
 
 def _deliver(storage: Storage, folder: str, root: Path, block: Block) -> None:
-    """Send a written block to the run's folder: its pack, its tables, then its index."""
-    files = [
-        *([EVAL_BLOCK_PACK] if block.pack else []),
-        *(f"{table}.parquet" for table in block.tables),
-    ]
-    for file in [*files, EVAL_BLOCK_INDEX]:
+    """Send a written block to the run's folder: its data, then its index."""
+    for file in [*block.files, EVAL_BLOCK_INDEX]:
         storage.put_file(folder + file_key(block.name, file), root / file_key(block.name, file))
