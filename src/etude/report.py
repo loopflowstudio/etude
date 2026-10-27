@@ -196,6 +196,8 @@ class Report(Record):
     names the x axis each section starts on (default: the first declared
     clock). `baseline` names the job drawn dotted, by its name or key.
     Metrics logged but named by no panel are drawn last, under ML details.
+    `metrics="named"` limits metric curves to panel keys without reading or
+    serializing curves for other logged metrics; timer trees remain available.
     """
 
     evals: tuple[EvalPanel, ...] = (Curve(), Anchors())
@@ -204,6 +206,7 @@ class Report(Record):
     baseline: str | None = None
     perf: tuple[MetricPanel, ...] = PERF
     ml: tuple[MetricPanel, ...] = ML
+    metrics: Literal["all", "named"] = "all"
 
     def columns(self) -> tuple[str, ...]:
         """Every eval table column a panel names, in first-named order."""

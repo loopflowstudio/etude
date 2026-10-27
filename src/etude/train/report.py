@@ -331,15 +331,23 @@ def _timers(run: RunData, prefix: str) -> Timers | None:
     return Timers(run=run.name, prefix=prefix, tree=tree)
 
 
-def training(data: Sequence[RunData], *, prefixes: Sequence[str] = ()) -> Training:
-    """What the page draws from these runs; `prefixes` name the timer trees to sum."""
+def training(
+    data: Sequence[RunData],
+    *,
+    prefixes: Sequence[str] = (),
+    keys: Sequence[str] | None = None,
+) -> Training:
+    """Metric curves, optionally restricted to `keys`, and named timer trees."""
     clocks: dict[str, Clock] = {}
     for run in data:
         for declared in run.clocks:
             clocks.setdefault(declared.name, declared)
     metrics: dict[str, None] = {}
+    wanted = None if keys is None else set(keys)
     for run in data:
-        metrics.update(dict.fromkeys(run.metrics()))
+        metrics.update(
+            dict.fromkeys(key for key in run.metrics() if wanted is None or key in wanted)
+        )
     jobs = _jobs(data)
     members = {job.key: [run for run in data if run.name in job.runs] for job in jobs}
     series: dict[str, dict[str, tuple[Line, ...]]] = {}

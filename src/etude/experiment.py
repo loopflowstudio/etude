@@ -146,7 +146,7 @@ def observe(source: Storage | Path | str, experiment: str) -> ExperimentState:
     nothing can be evaluated without its bytes.
     """
     runs = []
-    for data in read_all(source):
+    for data in read_all(source, experiment, metrics=False):
         if (
             data.file is None
             or data.experiment != experiment
