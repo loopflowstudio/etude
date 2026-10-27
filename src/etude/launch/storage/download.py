@@ -8,13 +8,16 @@ over HTTP, validates each reply, retries transient failures within one
 allowance, and observes transfers, reuse included.
 
 One connection from a rented pod to R2 measured 4–12 MB/s, and sixteen at once
-about 205 MB/s (eb2edc, 2026-10-26), so each range the cache asks for is read
-as concurrent parts of `PART_BYTES`.
+about 205 MB/s, with an occasional part taking 35 s (eb2edc, 2026-10-26). So a
+range the cache asks for is read as concurrent parts of `PART_BYTES`, and the
+next range of the same length is read ahead, so that one slow part does not
+idle every connection. At most two ranges are held in memory.
 """
 
 from __future__ import annotations
 
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -34,9 +37,10 @@ from etude.launch.storage.s3 import (
     StorageUnavailable,
     _send,
 )
-from etude.launch.storage.transport import attribute, concurrently, emit
+from etude.launch.storage.transport import Pending, attribute, emit, submit
 
 PART_BYTES = 16 * 1024**2
+CONNECTIONS = 32
 
 
 class Download(Record):
@@ -55,18 +59,36 @@ class _Link:
     def __init__(self, source: Download, retries: int, send: Send) -> None:
         self.source, self.retries, self.send = source, retries, send
         self._retrying = threading.Lock()
+        self._pool = ThreadPoolExecutor(CONNECTIONS)
+        self._parts: dict[int, Pending[Fetched]] = {}  # by first byte, running or read
 
     def read(self, start: int, end: int | None, etag: str | None) -> Fetched:
         size = self.source.size_bytes
         end = size - 1 if end is None else end
-        parts = [
-            partial(self._part, first, min(end, first + PART_BYTES - 1), etag)
-            for first in range(start, end + 1, PART_BYTES)
-        ]
-        pieces = [parts[0]()] if len(parts) == 1 else concurrently(parts)
-        if len({piece.etag for piece in pieces}) != 1:
+        if end - start < PART_BYTES and not self._parts:
+            return self._part(start, end, etag)
+        bounds = self._bounds(start, end)
+        # The cache asks next for the range after this one, of the same length.
+        for first, last in (*bounds, *self._bounds(end + 1, min(size - 1, 2 * end - start + 1))):
+            if first not in self._parts:
+                self._parts[first] = submit(self._pool, partial(self._part, first, last, etag))
+        pieces = [self._parts.pop(first).result() for first, _ in bounds]
+        if any(piece.etag != (etag or pieces[0].etag) for piece in pieces):
             raise StorageUnavailable("download parts came from different object versions")
         return Fetched(body=b"".join(piece.body for piece in pieces), etag=pieces[0].etag)
+
+    def close(self) -> None:
+        """Abandon parts read ahead that no range asked for, observing what they read."""
+        for part in self._parts.values():
+            part.abandon()
+        self._parts.clear()
+        self._pool.shutdown()
+
+    @staticmethod
+    def _bounds(start: int, end: int) -> list[tuple[int, int]]:
+        return [
+            (first, min(end, first + PART_BYTES - 1)) for first in range(start, end + 1, PART_BYTES)
+        ]
 
     def _part(self, start: int, end: int, etag: str | None) -> Fetched:
         size = self.source.size_bytes
@@ -159,3 +181,5 @@ def download(
             raise Mismatch(str(error)) from None
         except Corrupt as error:
             raise StorageUnavailable(str(error)) from None
+        finally:
+            link.close()

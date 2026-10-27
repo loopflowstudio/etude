@@ -177,13 +177,14 @@ def http(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[HTTP]:
         fixture.thread.join()
 
 
-def test_a_range_is_read_as_concurrent_parts_observed_on_the_calling_thread(
+def test_ranges_are_read_as_concurrent_parts_and_ahead_observed_on_the_calling_thread(
     http: HTTP, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(downloads, "PART_BYTES", 4)
     observed: list[tuple[int, str]] = []
+    cache = Cache(tmp_path / "cache", range_bytes=8)  # the second range is read ahead
     with observe(lambda raw: observed.append((threading.get_ident(), raw))):
-        result = download(http.source(), tmp_path / "result", cache=Cache(tmp_path / "cache"))
+        result = download(http.source(), tmp_path / "result", cache=cache)
     assert result.read_bytes() == b"abcdefghijkl"
     assert sorted(http.ranges) == ["bytes=0-3", "bytes=4-7", "bytes=8-11"]
     assert {thread for thread, _ in observed} == {threading.get_ident()}

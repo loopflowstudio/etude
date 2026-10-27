@@ -13,8 +13,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Iterator, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor, wait
+from collections.abc import Callable, Iterator, Mapping
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import ContextVar, copy_context
 from datetime import UTC, datetime
@@ -113,29 +113,46 @@ def emit(
         sink(raw)
 
 
-def concurrently[T](operations: Sequence[Callable[[], T]]) -> list[T]:
-    """Run `operations` at once, each in a copy of this context; their results, in order.
+class Pending[T]:
+    """An operation running on a worker thread; its observations wait for its result."""
 
-    Their transfer observations are emitted afterwards on this thread, so a sink
-    that owns a SQLite connection keeps it. Raises the first failure, once every
-    operation has ended and been observed.
-    """
-    gathered: list[list[str]] = [[] for _ in operations]
+    def __init__(self, future: Future[T], events: list[str]) -> None:
+        self._future, self._events = future, events
 
-    def run(index: int) -> T:
-        _sink.set(gathered[index].append)
-        return operations[index]()
+    def result(self) -> T:
+        """Wait for the operation, then emit what it observed on this thread.
 
-    with ThreadPoolExecutor(max_workers=max(1, len(operations))) as pool:
-        futures = [pool.submit(copy_context().run, run, i) for i in range(len(operations))]
-        wait(futures)
-    sink = _sink.get()
-    for raw in (raw for raws in gathered for raw in raws):
-        if sink is None:
-            write_log("transfer", raw)
-        else:
-            sink(raw)
-    return [future.result() for future in futures]
+        A sink that owns a SQLite connection so keeps it.
+        """
+        try:
+            return self._future.result()
+        finally:
+            sink, events = _sink.get(), self._events
+            self._events = []
+            for raw in events:
+                if sink is None:
+                    write_log("transfer", raw)
+                else:
+                    sink(raw)
+
+    def abandon(self) -> None:
+        """Stop it if it has not begun, else wait for it; either way emit what it observed."""
+        if not self._future.cancel():
+            try:
+                self.result()
+            except Exception:  # noqa: S110 - abandoned: its outcome no longer matters
+                pass
+
+
+def submit[T](pool: ThreadPoolExecutor, operation: Callable[[], T]) -> Pending[T]:
+    """Run `operation` on `pool` in a copy of this context: its deadline and attribution."""
+    events: list[str] = []
+
+    def run() -> T:
+        _sink.set(events.append)
+        return operation()
+
+    return Pending(pool.submit(copy_context().run, run), events)
 
 
 def request(
