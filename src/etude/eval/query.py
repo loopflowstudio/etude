@@ -67,7 +67,7 @@ import warnings
 from bisect import bisect_left
 from collections import defaultdict
 from collections.abc import Iterable, Iterator, Sequence
-from functools import cache
+from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, cast
 
@@ -942,24 +942,19 @@ def compare(
     return comparisons
 
 
+@lru_cache(maxsize=1)
 def _weights(n: int) -> npt.NDArray[np.int64]:
     """How often each of `n` blocks is drawn in each replicate: fixed by the seed and `n` alone.
 
-    A report asks for thousands of estimates over a few matches each, so small
-    counts are drawn once per process (at most 33 MB for every count to 64).
+    Each replicate draws `n` blocks uniformly with replacement, counted with
+    one `bincount` (a multinomial draw, linear in `n`). A report's estimates
+    over one selection share `n`, so the latest draw is kept.
     """
-    return _kept_weights(n) if n <= 64 else _draw(n)
-
-
-def _draw(n: int) -> npt.NDArray[np.int64]:
-    return np.random.default_rng(SEED).multinomial(n, np.full(n, 1 / n), size=REPLICATES)
-
-
-@cache
-def _kept_weights(n: int) -> npt.NDArray[np.int64]:
-    drawn = _draw(n)
-    drawn.setflags(write=False)
-    return drawn
+    drawn = np.random.default_rng(SEED).integers(0, n, size=(REPLICATES, n))
+    drawn += np.arange(REPLICATES)[:, None] * n
+    weights = np.bincount(drawn.ravel(), minlength=REPLICATES * n).reshape(REPLICATES, n)
+    weights.setflags(write=False)
+    return weights
 
 
 def estimate(
