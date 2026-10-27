@@ -384,9 +384,10 @@ etude eval ppo.py --source s3://bucket/etude/launch --rent cpu8 --watch 600
 
 `etude report ppo.py` draws the experiment's evals beside its training
 ([tracking](tracking.md#reports)), following the file's `report()`. Each
-checkpoint agent is drawn where its training run stood when it saved that
-checkpoint, found by its key; code agents and checkpoints from outside the
-experiment are anchors, drawn once. A checkpoint `eval(state)` chose that no
+checkpoint agent is drawn where its latest seat says it stood, else, found by
+its key, where its training run stood when it saved it; a checkpoint no
+training run recorded is drawn on one evaluation-only line. Code agents and
+checkpoints with no position are anchors, drawn once. A checkpoint `eval(state)` chose that no
 eval run has delivered is marked not yet played, one nothing played is marked
 not evaluated, and failed matches are listed. Each match counts from the eval
 run that delivered it last, whichever commit its code was at. Where the
