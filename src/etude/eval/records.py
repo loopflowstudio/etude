@@ -1,9 +1,11 @@
 """File contracts for evaluation: players, environments, matches and tournaments.
 
 An eval run is a run with kind "evaluation" and no clocks: `run.json`, then
-`environment.json`, then for each match the author's tables as Parquet under
-`tables/` and Etude's record of the match, `matches/KEY.json` (or
-`matches/KEY.failed.json`).
+`environment.json`, then sealed blocks of matches (`etude.eval.block`), each
+holding the author's tables as Parquet, the blobs its matches kept and
+Etude's record of each match (`MatchRecord`). Older eval runs kept a file per
+fact (`matches/KEY.json`, `tables/TABLE_FILE`); `etude convert-eval` makes
+blocks of them.
 
 An eval run held for a tournament (`Benchmark` or `RoundRobin`) also stores
 `tournament.json` (`TournamentRun`): the definition it was held with and what
@@ -72,8 +74,9 @@ TOURNAMENT_FILE = "tournament.json"
 # Every match has this group, holding every seat.
 EVERYONE = "all"
 
-# `tables/TABLE.WRITTEN.WRITER.parquet`: WRITTEN is zero-padded nanoseconds, so a
-# table's file names order by write time; WRITER is a match key or a merging process.
+# The per-file layout's `tables/TABLE.WRITTEN.WRITER.parquet`: WRITTEN is zero-padded
+# nanoseconds, so a table's file names order by write time; WRITER is a match key or
+# a merging process. Only `etude convert-eval` reads it.
 TABLE_FILE = re.compile(r"^tables/([A-Za-z][A-Za-z0-9_]*)\.(\d{20})\.([0-9a-f]+)\.parquet$")
 
 
@@ -89,10 +92,6 @@ def as_config(config: Mapping[str, object] | BaseModel | None) -> Config:
         return _CONFIG.validate_python(data)
     except ValidationError as error:
         raise EtudeError("config_is_not_json", 422) from error
-
-
-def table_file(table: str, written_ns: int, writer: str) -> str:
-    return f"tables/{table}.{written_ns:020d}.{writer}.parquet"
 
 
 def digest(value: object) -> Digest:
@@ -392,10 +391,9 @@ class Match(Record):
 
 
 class MatchRecord(Record):
-    """How one match went, written after its tables: `matches/KEY.json` when done.
+    """How one match went, kept in its block's index after its tables and blobs.
 
-    A failed match is `matches/KEY.failed.json`, so a listing alone tells which
-    matches are done; a later success sits beside it and wins.
+    A failed match's record is replaced by a later done one, wherever it is kept.
     """
 
     match: Match
@@ -405,11 +403,8 @@ class MatchRecord(Record):
     columns: dict[Name, dict[Name, ColumnType]] = {}
     # When it was recorded: of two runs holding one match, a tournament takes the later.
     wall_ms: int = Field(ge=0)
-
-    @property
-    def file(self) -> str:
-        suffix = "json" if self.state == "done" else "failed.json"
-        return f"matches/{self.match.key}.{suffix}"
+    # The SHA256 of each blob the match kept, which its rows may name.
+    blobs: tuple[Digest, ...] = ()
 
 
 class Matchup(Record):

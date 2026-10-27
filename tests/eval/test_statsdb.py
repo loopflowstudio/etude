@@ -93,19 +93,18 @@ def test_opening_again_reads_only_what_arrived(tmp_path: Path) -> None:
     db.close()
 
 
-def test_a_match_counts_once_from_the_latest_file_holding_it(tmp_path: Path) -> None:
+def test_a_match_counts_once_from_the_latest_block_holding_it(tmp_path: Path) -> None:
     bucket = DirectoryStorage(tmp_path / "bucket")
     evaluate(experiment="cards", environment=DUEL, play=play, matches=deals(pair(tmp_path), 0, 1),
              run="a", directory=tmp_path / "a", storages=[bucket])  # fmt: skip
     assert held("cards", bucket) == (1, 2, 2 * 2 * 2)
-    # The same rows arrive again, in a later file and in an earlier one, as a merged
-    # file and those it replaced may: the match's rows come from the latest.
-    (merged,) = (key for key in bucket.keys("a/tables/") if key.startswith("a/tables/plays."))
-    table, written, writer, suffix = merged.rsplit("/", 1)[-1].split(".")
+    # The same matches arrive again, in a later block and in an earlier one, as a
+    # replayed run's may: each match's rows come from one block.
+    (index,) = (key for key in bucket.keys("a/blocks/") if key.endswith("/block.json"))
+    folder = bucket.root / index.removesuffix("/block.json")
+    written, writer = folder.name.split(".")
     for at in (int(written) + 1, int(written) - 1):
-        shutil.copy(
-            bucket.root / merged, bucket.root / f"a/tables/{table}.{at:020d}.{writer}.{suffix}"
-        )
+        shutil.copytree(folder, folder.with_name(f"{at:020d}.{writer}"))
         assert held("cards", bucket) == (1, 2, 2 * 2 * 2)
 
 

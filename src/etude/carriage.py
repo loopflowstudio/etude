@@ -7,7 +7,8 @@ was launched, so the job's environment never holds bucket credentials. Both
 decide here which files are ready (`listing`), their order, the transfer's
 purpose, what a writer retired (`retired`), and which objects are never sent
 twice (`immutable`): Etude's own blocks, tables and checkpoints, and any
-file an author writes under a run's `artifacts/` folder. Each carrier keeps its own change detection and storage
+file an author writes under a run's `artifacts/` folder. An eval run's
+block (`etude.eval.block`) is sent data first and index last. Each carrier keeps its own change detection and storage
 I/O. A later attempt on a fresh machine restores the records and the one
 checkpoint file `resume_file` names, from storage or, between owned hosts
 without one, as the `restore_set` another host's folder gives (`put_back`);
@@ -52,11 +53,21 @@ def checkpoint_file(key: str) -> bool:
 
 
 ARTIFACTS = "artifacts"
+# An eval run's sealed block is a folder `blocks/WRITTEN.WRITER/`; its index is written last.
+EVAL_BLOCKS = "blocks"
+EVAL_BLOCK_INDEX = "block.json"
+# Its blobs, in one pack sent as a file: it may be hundreds of megabytes.
+EVAL_BLOCK_PACK = "blobs.zip"
+
+
+def _eval_block(folder: str) -> bool:
+    parent, _, name = folder.rpartition("/")
+    return parent.rpartition("/")[2] == EVAL_BLOCKS and not name.startswith(".")
 
 
 def immutable(key: str) -> bool:
     """Whether an object never changes once written: a metric block or tail, a
-    table, a checkpoint, or an author's file under `artifacts/`.
+    table, a checkpoint, an eval run's block, or an author's file under `artifacts/`.
 
     A carrier sends it once and never again, so nothing under `checkpoints/`
     is replaced with different bytes. An author writes each file under
@@ -69,6 +80,7 @@ def immutable(key: str) -> bool:
         (kind == "metrics" and name.endswith((".blk", ".tail")))
         or (kind == "tables" and name.endswith(".parquet"))
         or checkpoint_file(key)
+        or _eval_block(folder)
         or ARTIFACTS in PurePosixPath(folder).parts
     )
 
@@ -83,9 +95,11 @@ def _rank(key: str) -> int:
     # records that describe it, so a reader never finds a record first.
     if checkpoint_file(key):
         return 0
+    if key.endswith("/" + EVAL_BLOCK_INDEX) and _eval_block(key.rpartition("/")[0]):
+        return 2
     if immutable(key):
         return 1
-    return 2
+    return 3
 
 
 def listing(root: Path, *, tail_seconds: float) -> list[str]:

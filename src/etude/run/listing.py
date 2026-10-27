@@ -17,10 +17,9 @@ def as_storage(source: Storage | Path | str) -> Storage:
 
 
 # A folder is a run's when it holds one of these directly: its name is the run's.
-# `environment.json`, `tournament.json`, `tables` and `matches` are an eval run's
-# (`etude.eval`).
-# Delivery sends folders in this order, so a match's tables precede its record.
-RUN_FOLDERS = ("metrics", "checkpoints", "tables", "matches")
+# `environment.json`, `tournament.json` and `blocks` are an eval run's (`etude.eval`);
+# `tables` and `matches` an eval run's of the per-file layout, kept until converted.
+RUN_FOLDERS = ("metrics", "checkpoints", "blocks", "tables", "matches")
 RUN_FILES = ("run.json", "environment.json", "tournament.json", "state.json")
 
 

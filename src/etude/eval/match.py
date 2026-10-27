@@ -3,19 +3,19 @@
 Players (`etude.eval.records.Model` and `Code`), `environment` and `Match`
 describe what `evaluate` plays; it knows nothing of tournaments
 (`etude.eval.tournament` arranges eval runs). The author's `play(match)`
-returns tables of rows. Etude checks that every row names a `seat` or a
-`group` of its match and that a column keeps
-one type through the run, adds `run` and `match`, and writes each table as one
-Parquet file per match, then the match's record; both are offered to every
-destination after each match. A refused or raising match is recorded as
+returns tables of rows, or a `Result` that also keeps blobs: bytes such as a
+game's replay evidence, which rows name by SHA256. Etude checks that every row
+names a `seat` or a `group` of its match and that a column keeps one type
+through the run, adds `run` and `match`, and stages the match
+(`etude.eval.block.Staging`). A refused or raising match is recorded as
 failed, nothing else of it is stored, and the run stops.
 
-On finish, each table's files from this process are merged into one, which
-replaces them once delivered. File names carry their write time, and a reader
-takes a match's rows from the latest file holding them, so a match is never
-counted twice.
+Staged matches are sealed into a block every few minutes, on a failure and on
+finish, and each block is offered to every destination once sealed: a run
+delivers a few objects per block, never one per match or blob. SIGTERM, as
+the launcher's termination sends, seals what is staged before the run ends.
 
-A resume reads the match records already delivered to any destination, so a
+A resume reads the blocks already delivered to any destination, so a
 machine with an empty disk skips what was delivered. Workers are fresh
 processes (`spawn`), so `play` must be importable by name.
 """
@@ -23,18 +23,24 @@ processes (`spawn`), so `play` must be importable by name.
 from __future__ import annotations
 
 import multiprocessing
-import os
 import re
 import secrets
+import signal
 import sys
+import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from hashlib import sha256
 from pathlib import Path
+from types import FrameType
 from typing import TYPE_CHECKING, Literal, NoReturn
 
 from pydantic import BaseModel
 
+from etude.eval.block import Block, Staging, quote, run_blocks, seal_abandoned
 from etude.eval.records import (
     COLUMN_TYPES,
     ColumnType,
@@ -42,7 +48,6 @@ from etude.eval.records import (
     Match,
     MatchRecord,
     as_config,
-    table_file,
 )
 from etude.eval.schedule import ordered
 from etude.eval.source import digest_files
@@ -68,6 +73,7 @@ ETUDE_TABLES = (
     "tournaments",
     "schedule",
     "training_checkpoints",
+    "blobs",
 )
 # Columns Etude adds to every row.
 ADDED = ("run", "match")
@@ -78,6 +84,18 @@ OLD_SEAT = "player"
 type Value = bool | int | float | str | None
 type Row = Mapping[str, Value]
 type Tables = Mapping[str, Sequence[Row]]
+
+
+@dataclass(frozen=True)
+class Result:
+    """What `play` returns when a match keeps blobs beside its tables.
+
+    Rows name a blob by its SHA256 (`hashlib.sha256(blob).hexdigest()`);
+    `etude.eval.query.read_blobs` gives its bytes back.
+    """
+
+    tables: Tables = field(default_factory=dict)
+    blobs: Sequence[bytes] = ()
 
 
 class EvalRun(Record):
@@ -106,7 +124,7 @@ def evaluate(
     experiment: str,
     environment: Environment,
     matches: Sequence[Match],
-    play: Callable[[Match], Tables],
+    play: Callable[[Match], Tables | Result],
     workers: int = 1,
     run: str | None = None,
     directory: Path | str | None = None,
@@ -143,16 +161,17 @@ def evaluate(
     pending = [scheduled for scheduled in matches if scheduled.key not in writer.done]
     started = time.monotonic()
     try:
-        for count, (scheduled, outcome) in enumerate(_played(pending, play, workers), 1):
-            if isinstance(outcome, BaseException):
-                writer.fail(scheduled, outcome)
-            writer.store(scheduled, outcome)
-            print(
-                f"etude: {declared.name}: {count}/{len(pending)} matches played,"
-                f" {time.monotonic() - started:.0f}s elapsed",
-                file=sys.stderr,
-                flush=True,
-            )
+        with _terminable():
+            for count, (scheduled, outcome) in enumerate(_played(pending, play, workers), 1):
+                if isinstance(outcome, BaseException):
+                    writer.fail(scheduled, outcome)
+                writer.store(scheduled, outcome)
+                print(
+                    f"etude: {declared.name}: {count}/{len(pending)} matches played,"
+                    f" {time.monotonic() - started:.0f}s elapsed",
+                    file=sys.stderr,
+                    flush=True,
+                )
     except BaseException:
         writer.finish("failed")
         raise
@@ -166,9 +185,30 @@ def evaluate(
     )
 
 
+class Terminated(Exception):
+    """SIGTERM reached an eval run: what is staged is sealed before it ends."""
+
+
+@contextmanager
+def _terminable() -> Iterator[None]:
+    """Turn SIGTERM into `Terminated` while matches are played, on the main thread only."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def terminated(signum: int, frame: FrameType | None) -> NoReturn:
+        raise Terminated()
+
+    before = signal.signal(signal.SIGTERM, terminated)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, before)
+
+
 def _played(
-    pending: Sequence[Match], play: Callable[[Match], Tables], workers: int
-) -> Iterator[tuple[Match, Tables | BaseException]]:
+    pending: Sequence[Match], play: Callable[[Match], Tables | Result], workers: int
+) -> Iterator[tuple[Match, Tables | Result | BaseException]]:
     """Each match with its tables or what it raised, in the order they finish.
 
     Matches start in `etude.eval.schedule` order, at most `workers` at once, so
@@ -185,7 +225,7 @@ def _played(
     # Fresh processes everywhere, so an eval run behaves alike on Linux and macOS.
     context = multiprocessing.get_context("spawn")
     with ProcessPoolExecutor(min(workers, len(pending) or 1), mp_context=context) as pool:
-        running: dict[Future[Tables], Match] = {}
+        running: dict[Future[Tables | Result], Match] = {}
 
         def start() -> None:
             scheduled = next(order, None)
@@ -207,7 +247,7 @@ def _played(
 
 
 class _Writer:
-    """One process's writes to an eval run's folder, and their delivery."""
+    """One process's matches of an eval run: staged, sealed into blocks and delivered."""
 
     def __init__(self, root: Path, name: str, targets: Sequence[StorageDestination]) -> None:
         # Imported here: DuckDB is the optional `eval` extra.
@@ -218,8 +258,9 @@ class _Writer:
         self.targets = list(targets)
         self.id = secrets.token_hex(6)
         self.problems: dict[str, str] = {}
-        self.written: dict[str, list[str]] = {}
         self.db: duckdb.DuckDBPyConnection = duckdb.connect()
+        seal_abandoned(root, self.db)
+        self.staging = Staging(root, self.id)
         stored = self._stored()
         self.done = {key for key, record in stored.items() if record.state == "done"}
         self.columns: dict[str, dict[str, ColumnType]] = {}
@@ -228,48 +269,63 @@ class _Writer:
                 self.columns.setdefault(table, {}).update(columns)
 
     def _stored(self) -> dict[str, MatchRecord]:
-        """Match records here and at every destination; a done one wins."""
+        """Match records of the blocks here and at every destination; a done one wins.
+
+        One listing per place and one read of each block not already read here.
+        """
         places: list[tuple[Storage, str]] = [(DirectoryStorage(self.files.root), "")]
         places += [(target.storage, run_prefix(self.name)) for target in self.targets]
         found: dict[str, MatchRecord] = {}
+        known: dict[str, Block] = {}
         for storage, prefix in places:
-            for key in storage.keys(prefix + "matches/"):
-                if not key.endswith(".json"):
-                    continue
-                record = MatchRecord.model_validate_json(storage.get(key))
-                if found.get(record.match.key) is None or record.state == "done":
-                    found[record.match.key] = record
+            names = (key[len(prefix) :] for key in storage.keys(prefix))
+            for block in run_blocks(storage, prefix, self.name, names, known):
+                for record in block.matches:
+                    if found.get(record.match.key) is None or record.state == "done":
+                        found[record.match.key] = record
         return found
 
     def fail(self, scheduled: Match, error: BaseException) -> NoReturn:
         detail = f"{type(error).__name__}: {error}"[:2000]
-        self._record(MatchRecord(match=scheduled, state="failed", error=detail, wall_ms=_now_ms()))
-        self._ship()
+        self.staging.stage(
+            MatchRecord(match=scheduled, state="failed", error=detail, wall_ms=_now_ms())
+        )
+        self._seal()
         raise EtudeError("match_failed", 500) from error
 
-    def store(self, scheduled: Match, tables: Tables) -> None:
-        """Check every table, then write them and the match's record; nothing on refusal."""
+    def store(self, scheduled: Match, outcome: Tables | Result) -> None:
+        """Check every table, then stage them, the blobs and the match's record; nothing on refusal."""
+        result = outcome if isinstance(outcome, Result) else Result(tables=outcome)
         try:
-            checked = {table: _checked(scheduled, table, rows) for table, rows in tables.items()}
+            checked = {
+                table: _checked(scheduled, table, rows) for table, rows in result.tables.items()
+            }
             types = {
                 table: _types(table, rows, self.columns.get(table, {}))
                 for table, rows in checked.items()
                 if rows
             }
+            if not all(isinstance(blob, bytes) for blob in result.blobs):
+                raise EtudeError("blob_must_be_bytes", 422)
         except EtudeError as refused:
             self.fail(scheduled, refused)
-        written = time.time_ns()
         for table, columns in types.items():
-            key = table_file(table, written, scheduled.key)
-            self._write(key, columns, checked[table], scheduled.key)
-            self.written.setdefault(table, []).append(key)
+            self._write(
+                self.staging.table(table, scheduled.key), columns, checked[table], scheduled.key
+            )
             self.columns.setdefault(table, {}).update(columns)
-        self._record(MatchRecord(match=scheduled, state="done", columns=types, wall_ms=_now_ms()))
-        self._ship()
+        digests = tuple(dict.fromkeys(sha256(blob).hexdigest() for blob in result.blobs))
+        record = MatchRecord(
+            match=scheduled, state="done", columns=types, wall_ms=_now_ms(), blobs=digests
+        )
+        self.staging.stage(record, result.blobs)
+        if self.staging.due():
+            self._seal()
 
     def _write(
-        self, key: str, columns: dict[str, ColumnType], rows: Sequence[Row], match: str
+        self, target: Path, columns: dict[str, ColumnType], rows: Sequence[Row], match: str
     ) -> None:
+        """Write one match's rows of a table to `target` as Parquet; readers never see half a file."""
         names = list(columns)
         self.db.execute(
             "create or replace table _rows ("
@@ -280,40 +336,15 @@ class _Writer:
             f"insert into _rows values ({', '.join('?' for _ in range(len(names) + 2))})",
             [[row.get(name) for name in names] + [self.name, match] for row in rows],
         )
-        self._copy("select * from _rows", key)
-
-    def _copy(self, query: str, key: str) -> None:
-        """Write a query's result to `key` as Parquet; readers never see half a file."""
-        target = self.files.root / key
-        target.parent.mkdir(parents=True, exist_ok=True)
         partial = target.with_name(target.name + ".partial")
-        self.db.execute(f"copy ({query}) to {quote(partial)} (format parquet)")
+        self.db.execute(f"copy (select * from _rows) to {quote(partial)} (format parquet)")
         partial.replace(target)
 
-    def _record(self, record: MatchRecord) -> None:
+    def _seal(self) -> None:
+        """Seal what is staged into a block and offer it to every destination."""
         with self.files.lock:
-            DirectoryStorage(self.files.root).put(record.file, record.model_dump_json().encode())
-
-    def _merge(self) -> None:
-        """Replace each table's files from this process with one, once that one is delivered."""
-        retired: list[str] = []
-        for table, keys in self.written.items():
-            if len(keys) < 2:
-                continue
-            files = ", ".join(quote(self.files.root / key) for key in keys)
-            self._copy(
-                f"select * from read_parquet([{files}], union_by_name = true)",
-                table_file(table, time.time_ns(), self.id),
-            )
-            retired += keys
-        if not retired:
-            return
-        with self.files.lock:
-            with (self.files.root / "tables" / f"{self.id}.removed").open("a") as note:
-                note.write("".join(key + "\n" for key in retired))
-            for key in retired:
-                (self.files.root / key).unlink()
-        self.written.clear()
+            self.staging.seal(self.db)
+        self._ship()
 
     def _ship(self) -> bool:
         for target in self.targets:
@@ -325,7 +356,9 @@ class _Writer:
         return not self.problems
 
     def finish(self, state: Literal["finished", "failed"]) -> None:
-        self._merge()
+        with self.files.lock:
+            self.staging.seal(self.db)
+        self.staging.close()
         DirectoryStorage(self.files.root).put(
             "state.json",
             RunState(state=state, counters=RunCounters(), writer=self.id)
@@ -343,11 +376,6 @@ class _Writer:
 
 def _now_ms() -> int:
     return time.time_ns() // 1_000_000
-
-
-def quote(path: Path) -> str:
-    """A path as a DuckDB string literal."""
-    return "'" + os.fspath(path).replace("'", "''") + "'"
 
 
 def _checked(scheduled: Match, table: str, rows: Sequence[Row]) -> list[Row]:

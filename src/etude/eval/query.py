@@ -14,6 +14,7 @@ beside Etude's own tables:
 | `tournaments` | tournament, format (`benchmark` or `round_robin`), environment, conflict |
 | `schedule` | tournament, match, matchup, checkpoint (its key) and the matchup's tags of a benchmark's match; no checkpoint for a matchup of fixed players |
 | `training_checkpoints` | run, experiment, ordinal, checkpoint (its key, `RUN/checkpoints/NAME`), artifact (digest), wall_ms, clocks (where each stood) |
+| `blobs` | run, match (none for a converted run's other files), sha256, size_bytes |
 
 A tournament is assembled from the experiment's eval runs naming it in their
 `tournament.json`. `schedule` holds every match it calls for, held or not.
@@ -32,10 +33,12 @@ counts once whichever version played it: the latest record holding it
 
 The database is a DuckDB file under `ETUDE_HOME/statsdb`, one per experiment
 and store, derived from the store and never the authority. Opening it lists
-the store once and reads only the files it has not read before: match
-records, table files, tournament and checkpoint files are written once, so
-nothing already held is read again. A failed match's record is replaced by
-the done record that follows it. The few tables that summarize the rest
+the store once and reads only the files it has not read before: an eval
+run's blocks (`etude.eval.block`), tournament and checkpoint files are
+written once, so nothing already held is read again. A block costs one read
+of its index and one of each table; its blobs are read only by `read_blobs`.
+A failed match's record is replaced by the done record that follows it. An
+eval run still kept a file per match raises `eval_run_not_converted`. The few tables that summarize the rest
 (`runs`, `players`, `tournaments`, `schedule`) are rebuilt from what the
 database holds whenever something arrives. Etude's bookkeeping lives in the
 `kept` schema, out of `show tables`.
@@ -53,13 +56,14 @@ reads as `seat`. Results from different environments are never pooled.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import os
 import tempfile
 import warnings
 from bisect import bisect_left
 from collections import defaultdict
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from functools import cache
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, cast
@@ -68,10 +72,19 @@ import numpy as np
 import numpy.typing as npt
 from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationError
 
-from etude.eval.match import ETUDE_TABLES, IDENTIFIER, KIND, OLD_SEAT, quote
+from etude.carriage import EVAL_BLOCK_PACK
+from etude.eval.block import (
+    BLOCK_FILE,
+    Block,
+    file_key,
+    quote,
+    read,
+    refuse_unconverted,
+    table_key,
+)
+from etude.eval.match import ETUDE_TABLES, IDENTIFIER, KIND, OLD_SEAT
 from etude.eval.records import (
     COLUMN_TYPES,
-    TABLE_FILE,
     TOURNAMENT_FILE,
     Benchmark,
     CheckpointKey,
@@ -93,13 +106,15 @@ if TYPE_CHECKING:
     import duckdb
 
 REPLICATES = 2000
+# Blobs this close together in a pack are read in one range: a member's header lies between.
+ADJACENT_BYTES = 1024
 SEED = 0
 # Column types `compare` can take as a value.
 NUMERIC = ("BOOLEAN", "BIGINT", "DOUBLE")
 # Keys and coordinates of an author table's rows: never a value.
 KEYS = ("seat", "group", "game", "run", "match")
 # A kept database of another schema is deleted and read again from its store.
-SCHEMA = 4
+SCHEMA = 5
 
 _ENVIRONMENT_FILE = "environment.json"
 _PLAYER: TypeAdapter[Player] = TypeAdapter(Player)
@@ -168,10 +183,18 @@ def _create(db: duckdb.DuckDBPyConnection, experiment: str, storage: Storage) ->
     db.execute("create table kept.environments (run VARCHAR, environment JSON)")
     db.execute("create table kept.tournament_runs (run VARCHAR, held JSON)")
     db.execute("create table kept.players (player VARCHAR, name VARCHAR, player_json JSON)")
-    # The file each author table's rows of a match came from: the latest holding them.
+    # The block each author table's rows of a match came from: the latest holding them.
     db.execute(
         'create table kept.table_files ("table" VARCHAR, run VARCHAR, match VARCHAR, file VARCHAR)'
     )
+    # Where each blob's bytes lie: its pack's key in the store, and their range.
+    db.execute(
+        "create table kept.blobs (run VARCHAR, sha256 VARCHAR, pack VARCHAR, start BIGINT,"
+        " size_bytes BIGINT)"
+    )
+    # Per-file names of eval runs a converted block holds.
+    db.execute("create table kept.replaced (run VARCHAR, name VARCHAR)")
+    db.execute("create table blobs (run VARCHAR, match VARCHAR, sha256 VARCHAR, size_bytes BIGINT)")
     db.execute(
         "create table matches (run VARCHAR, match VARCHAR, conditions JSON, games BIGINT,"
         " seed BIGINT, state VARCHAR, error VARCHAR, wall_ms BIGINT)"
@@ -216,6 +239,7 @@ def _catch_up(db: duckdb.DuckDBPyConnection, experiment: str, storage: Storage) 
                     if _read(db, storage, run, experiment, located[name], name, Path(copies)):
                         changed = True
                     db.execute("insert into kept.seen values (?, ?)", [run, name])
+                _refuse_unconverted(db, run, located)
         if changed:
             _summaries(db)
         db.execute("commit")
@@ -243,6 +267,11 @@ def _ours(
         )
         return declaration.experiment == experiment
     return bool(found[0] == experiment)
+
+
+def _refuse_unconverted(db: duckdb.DuckDBPyConnection, run: str, names: Iterable[str]) -> None:
+    replaced = db.execute("select name from kept.replaced where run = ?", [run]).fetchall()
+    refuse_unconverted(run, names, (name for (name,) in replaced))
 
 
 def _under(keys: Sequence[str], prefix: str) -> Iterator[str]:
@@ -313,15 +342,46 @@ def _read(
         held = TournamentRun.model_validate_json(storage.get(place + name))
         db.execute("insert into kept.tournament_runs values (?, ?)", [run, held.model_dump_json()])
         return True
-    if name.startswith("matches/") and name.endswith(".json"):
-        return _match(db, run, MatchRecord.model_validate_json(storage.get(place + name)))
-    if parsed := TABLE_FILE.match(name):
-        _table(db, run, parsed[1], name, _local(storage, place + name, copies / run / name))
+    if found := BLOCK_FILE.match(name):
+        _block(db, storage, run, place, found[1], copies)
         return True
     return False
 
 
-def _match(db: duckdb.DuckDBPyConnection, run: str, record: MatchRecord) -> bool:
+def _block(
+    db: duckdb.DuckDBPyConnection,
+    storage: Storage,
+    run: str,
+    place: str,
+    name: str,
+    copies: Path,
+) -> None:
+    """Take in block `name`: its match records, where its blobs lie, then its tables."""
+    block = read(storage, place, name)
+    pack = place + file_key(name, EVAL_BLOCK_PACK)
+    _insert(
+        db,
+        "insert into kept.blobs values (?, ?, ?, ?, ?)",
+        [[run, digest, pack, span.offset, span.size_bytes] for digest, span in block.blobs.items()],
+    )
+    for record in block.matches:
+        _match(db, run, record, block)
+    # A converted run's files that no match named.
+    named = {digest for record in block.matches for digest in record.blobs}
+    _insert(
+        db,
+        "insert into blobs select ?, null, ?, ? where not exists"
+        " (select 1 from blobs where run = ? and match is null and sha256 = ?)",
+        [[run, digest, span.size_bytes, run, digest]
+         for digest, span in block.blobs.items() if digest not in named],
+    )  # fmt: skip
+    _insert(db, "insert into kept.replaced values (?, ?)", [[run, name] for name in block.replaces])
+    for table in block.tables:
+        file = table_key(name, table)
+        _table(db, run, table, name, _local(storage, place + file, copies / run / file))
+
+
+def _match(db: duckdb.DuckDBPyConnection, run: str, record: MatchRecord, block: Block) -> bool:
     """Hold a match's record unless a done one is already held; a done one replaces a failure."""
     match = record.match
     found = db.execute(
@@ -329,7 +389,7 @@ def _match(db: duckdb.DuckDBPyConnection, run: str, record: MatchRecord) -> bool
     ).fetchone()
     if found is not None and (found[0] == "done" or record.state != "done"):
         return False
-    for table in ("matches", "seats", '"groups"'):
+    for table in ("matches", "seats", '"groups"', "blobs"):
         db.execute(f"delete from {table} where run = ? and match = ?", [run, match.key])
     db.execute(
         "insert into matches values (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -360,6 +420,11 @@ def _match(db: duckdb.DuckDBPyConnection, run: str, record: MatchRecord) -> bool
         'insert into "groups" values (?, ?, ?, ?)',
         [[run, match.key, name, seat] for name, seats in match.groups.items() for seat in seats],
     )
+    _insert(
+        db,
+        "insert into blobs values (?, ?, ?, ?)",
+        [[run, match.key, digest, block.blobs[digest].size_bytes] for digest in record.blobs],
+    )
     _remember_players(db, match.players)
     return True
 
@@ -378,13 +443,12 @@ def _remember_players(db: duckdb.DuckDBPyConnection, players: Sequence[Player]) 
         )
 
 
-def _table(db: duckdb.DuckDBPyConnection, run: str, table: str, name: str, path: Path) -> None:
-    """Add one table file's rows, keeping each match's rows from the latest file holding them.
+def _table(db: duckdb.DuckDBPyConnection, run: str, table: str, file: str, path: Path) -> None:
+    """Add one block's rows of a table, keeping each match's rows from the latest block holding them.
 
-    A merged file and the files it replaces may both arrive, in either order.
-    Within a table, file names order by their zero-padded write time.
+    Blocks holding one match may arrive in either order; their names order by
+    their zero-padded seal time.
     """
-    file = name.removeprefix("tables/")
     db.execute(
         f"create or replace temp table _arrived as select * from read_parquet({quote(path)})"
     )
@@ -399,7 +463,7 @@ def _table(db: duckdb.DuckDBPyConnection, run: str, table: str, name: str, path:
         # `seat` beside it is the game's own, which rows now call `game_seat`.
         renamed = {OLD_SEAT: "seat", "seat": "game_seat"}
         if "game_seat" in arrived and "seat" in arrived:
-            raise EtudeError("old_table_has_seat_and_game_seat", 422) from ValueError(name)
+            raise EtudeError("old_table_has_seat_and_game_seat", 422) from ValueError(file)
         for column in ("seat", OLD_SEAT):
             if column in arrived:
                 db.execute(f'alter table _arrived rename column "{column}" to {renamed[column]}')
@@ -439,6 +503,59 @@ def _local(storage: Storage, key: str, copy: Path) -> Path:
     copy.parent.mkdir(parents=True, exist_ok=True)
     copy.write_bytes(storage.get(key))
     return copy
+
+
+def read_blobs(
+    db: duckdb.DuckDBPyConnection, store: Storage | Path | str, digests: Iterable[str]
+) -> Iterator[tuple[str, bytes]]:
+    """Each blob's SHA256 and verified bytes, for the blobs `db` holds, read from `store`.
+
+    `store` is the one `statsdb` opened `db` from. Blobs of one pack are read
+    in pack order, one range per run of adjacent members; a bucket keeps each
+    range on this computer (`etude.cache`), so reading them again reads
+    nothing from storage. Raises `EtudeError("blob_unknown")` before reading
+    when `db` holds no such blob, `blob_unavailable` when its pack has not
+    arrived, and `blob_mismatch` when bytes are not what the block recorded.
+    """
+    storage = as_storage(store)
+    wanted = list(dict.fromkeys(digests))
+    located = {
+        digest: (pack, int(start), int(size))
+        for digest, pack, start, size in db.execute(
+            "select sha256, min(pack), min_by(start, pack), min_by(size_bytes, pack)"
+            " from kept.blobs where sha256 in (select unnest(?::VARCHAR[])) group by sha256",
+            [wanted],
+        ).fetchall()
+    }
+    unknown = [digest for digest in wanted if digest not in located]
+    if unknown:
+        raise EtudeError("blob_unknown", 404) from ValueError(", ".join(unknown[:5]))
+    by_pack = sorted(wanted, key=lambda digest: (located[digest][0], located[digest][1]))
+    for pack, members in itertools.groupby(by_pack, key=lambda digest: located[digest][0]):
+        for adjacent in _adjacent([(digest, *located[digest][1:]) for digest in members]):
+            start = adjacent[0][1]
+            length = adjacent[-1][1] + adjacent[-1][2] - start
+            try:
+                body = storage.get_range(pack, start, length)
+            except FileNotFoundError as missing:
+                raise EtudeError("blob_unavailable", 404) from missing
+            for digest, offset, size in adjacent:
+                blob = body[offset - start : offset - start + size]
+                if len(blob) != size or hashlib.sha256(blob).hexdigest() != digest:
+                    raise EtudeError("blob_mismatch", 502) from ValueError(f"{pack}: {digest}")
+                yield digest, blob
+
+
+def _adjacent(members: Sequence[tuple[str, int, int]]) -> Iterator[list[tuple[str, int, int]]]:
+    """Members (digest, offset, size) in offset order, grouped where each starts near the last's end."""
+    group: list[tuple[str, int, int]] = []
+    for member in members:
+        if group and member[1] - (group[-1][1] + group[-1][2]) > ADJACENT_BYTES:
+            yield group
+            group = []
+        group.append(member)
+    if group:
+        yield group
 
 
 class _StoredArtifact(BaseModel):

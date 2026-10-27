@@ -33,7 +33,7 @@ from typing import Literal, cast
 from pydantic import Field
 
 from etude.carriage import CHECKPOINTS
-from etude.eval.match import Tables
+from etude.eval.match import Result, Tables
 from etude.eval.records import CheckpointKey, CheckpointRef, Inference, Match, Model, digest
 from etude.eval.tournament import hold, played
 from etude.launch import client
@@ -311,7 +311,7 @@ def advance(
             passes.append(done)
             continue
         if ledger is None:
-            play = cast(Callable[[Match], Tables], spec.play.load(job.repo))
+            play = cast(Callable[[Match], Tables | Result], spec.play.load(job.repo))
             held = hold(
                 spec.tournament,
                 experiment=experiment.name,

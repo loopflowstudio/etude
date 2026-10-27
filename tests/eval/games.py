@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import re
+from hashlib import sha256
 
-from etude.eval.match import Tables
+from etude.eval.match import Result, Tables
 from etude.eval.records import Match, Player
 
 type Rows = list[dict[str, bool | int | float | str | None]]
@@ -82,3 +83,14 @@ def play_failing_deal_one(match: Match) -> Tables:
     if match.conditions.get("deal") == 1:
         raise RuntimeError("deal 1 crashed")
     return play(match)
+
+
+def play_with_evidence(match: Match) -> Result:
+    """`play`, keeping each game's evidence as a blob that its `games` row names."""
+    tables = play(match)
+    evidence = [f"{match.key} game {row['game']}".encode() * 40 for row in tables["games"]]
+    games = [
+        {**row, "evidence_sha256": sha256(blob).hexdigest()}
+        for row, blob in zip(tables["games"], evidence, strict=True)
+    ]
+    return Result(tables={"plays": tables["plays"], "games": games}, blobs=evidence)
