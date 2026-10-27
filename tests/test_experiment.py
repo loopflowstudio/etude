@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 import pytest
 
+import etude.launch.client as client
 from etude.eval.match import agent, environment
 from etude.eval.query import statsdb
 from etude.eval.records import Agent, Benchmark, Matchup, Model
@@ -236,15 +237,21 @@ class _Launcher:
     def __init__(self) -> None:
         self.launched: list[Run] = []
         self.outcome: Outcome | None = None
+        self.queued = False
 
     def launch(self, run: Run, pool: str | None = None, *, rent: str | None = None) -> str:
+        self.launched.append(run)
+        return str(run.id)
+
+    def queue(self, run: Run, pool: str | None = None, *, rent: str | None = None) -> str:
+        self.queued = True
         self.launched.append(run)
         return str(run.id)
 
     def status(self, run: str) -> Status:
         done = self.outcome is not None
         return Status(
-            run=run, phase="done" if done else "running", reason=None,
+            run=run, phase="done" if done else "queued" if self.queued else "running", reason=None,
             outcome=self.outcome, cause=None, until=None, clocks={}, usd=Decimal(0), attempts=1,
             rental_ended=None,
         )  # fmt: skip
@@ -306,6 +313,41 @@ def test_a_launched_pass_ships_its_checkpoints_and_is_not_launched_twice(
     launcher.outcome = "failed"
     with pytest.raises(EtudeError, match="launched_pass_failed"):
         advance(eval_, source=bucket, rent="cpu8", directory=local)
+
+
+def test_queued_passes_retain_every_job_while_capacity_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    launcher = _Launcher()
+    monkeypatch.setattr(client, "queue", launcher.queue)
+    monkeypatch.setattr(client, "status", launcher.status)
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    training = trainer(bucket, tmp_path)
+    save(training, bucket, tmp_path, range(1, 3))
+    anchor = heuristic(tmp_path)
+    benchmark = Benchmark(
+        name="queued",
+        environment=WORLD,
+        matchups=(Matchup(name="anchor", players=(DIRECT, anchor), conditions=DEALS, games=2),),
+    )
+
+    def choose(state: ExperimentState) -> list[Job]:
+        return [
+            evaluation(benchmark, play=play, checkpoints=[cp], max_hours=0.1)
+            for cp in state.run("ppo-1").checkpoints
+        ]
+
+    experiment = Experiment(name="ppo", eval=choose)
+    local = tmp_path / "evaluator"
+    first = advance(experiment, source=bucket, pool="occupied", directory=local, queue=True)
+    assert len(first) == 2 and all(p.launched is not None for p in first)
+    assert all(launcher.status(str(run.id)).phase == "queued" for run in launcher.launched)
+    again = advance(experiment, source=bucket, pool="occupied", directory=local, queue=True)
+    assert all((p.running, p.launched) == (len(DEALS), None) for p in again)
+    assert len(launcher.launched) == 2
+    with pytest.raises(EtudeError, match="queued_evals_need_a_pool_or_rent"):
+        advance(experiment, source=bucket, queue=True)
+    training.finish(timeout=30)
 
 
 def test_a_pass_job_launched_as_given_is_refused_on_the_machine(tmp_path: Path) -> None:

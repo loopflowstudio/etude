@@ -155,6 +155,9 @@ def eval_experiment(
     retry_failed: Annotated[
         bool, typer.Option(help="play again the matches that failed, rather than count them")
     ] = False,
+    queue: Annotated[
+        bool, typer.Option(help="queue jobs until the chosen pool or on-demand has capacity")
+    ] = False,
 ) -> None:
     """Play, or with --pool or --rent launch, the matches eval(state) wants that no run delivered."""
     # Experiments join tracking, evaluation and the launcher.
@@ -168,7 +171,12 @@ def eval_experiment(
     try:
         while True:
             for done in advance(
-                experiment, source=storage, pool=pool, rent=rent, retry_failed=retry_failed
+                experiment,
+                source=storage,
+                pool=pool,
+                rent=rent,
+                retry_failed=retry_failed,
+                queue=queue,
             ):
                 line = f"{done.tournament}: {done.new} new"
                 if done.failed:

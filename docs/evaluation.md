@@ -336,7 +336,13 @@ def eval(state: ExperimentState) -> list[Job]:
 etude eval ppo.py --source s3://bucket/etude/launch               # play here
 etude eval ppo.py --source s3://bucket/etude/launch --rent cpu8   # launch
 etude eval ppo.py --source s3://bucket/etude/launch --rent cpu8 --watch 600
+uv run etude eval ppo.py --source s3://bucket/etude/launch --pool lab --queue --watch 60
 ```
+
+`--queue` records evaluation jobs even when the selected pool or on-demand is
+busy. Queued matches stay in flight, so later passes do not submit them again.
+Keep a launcher controller or `etude wait` running to move them when capacity
+is available. A failed evaluation still stops the next pass for inspection.
 
 - **State.** `state.runs` is the experiment's training runs under the
   source: each one's name, whether it is `running`, `finished` or `failed`,
