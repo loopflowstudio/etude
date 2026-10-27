@@ -230,16 +230,36 @@ def test_a_reused_runtime_is_still_checked_against_its_pins(tmp_path: Path) -> N
     repo, count = _repo(tmp_path), tmp_path / "count"
     scheduler = local(tmp_path)
     venv = Preparation(
-        command='python3 -m venv --without-pip "$ETUDE_PREPARED_DIR/.venv"', paths=("lock.txt",)
+        command='python3 -m venv --without-pip "$ETUDE_PREPARED_DIR/.venv"',
+        paths=("lock.txt",),
+        python=".venv/bin/python",
     )
-    runtime = Runtime(python=".venv/bin/python")
-    job = _job(repo, count, prepare=venv, runtime=runtime, command='"$ETUDE_PYTHON" -c "print(7)"')
+    job = _job(repo, count, prepare=venv, command='"$ETUDE_PYTHON" -c "print(7)"')
     status, log = _launch(scheduler, job)
     assert status.outcome == "succeeded" and log.endswith("7\n")
-    pinned = runtime.model_copy(update={"packages": {"etude-sdk": "0.0.0"}})
+    pinned = Runtime(packages={"etude-sdk": "0.0.0"})
     status, log = _launch(scheduler, job.model_copy(update={"runtime": pinned}))
     assert status.outcome == "failed" and _outcomes(log) == ["reused"]
     assert "No package metadata was found for etude-sdk" in log
+
+
+def test_reading_an_undeclared_source_file_fails_the_build(tmp_path: Path) -> None:
+    repo, count = _repo(tmp_path), tmp_path / "count"
+    prepare = Preparation(
+        command='cat lock.txt other.txt > "$ETUDE_PREPARED_DIR/both"', paths=("lock.txt",)
+    )
+    status, log = _launch(local(tmp_path), _job(repo, count, prepare=prepare))
+    assert status.outcome == "failed"
+    assert "other.txt" in log and "phase prepare: exit 1" in log
+    assert not list(home().glob("*.json"))  # no receipt
+
+
+def test_the_interpreter_is_named_once() -> None:
+    prepare = Preparation(command="true", paths=("lock.txt",), python=".venv/bin/python")
+    with pytest.raises(ValueError, match="name the job interpreter once"):
+        Job(command="true", max_hours=1, prepare=prepare, runtime=Runtime(python="python3"))
+    with pytest.raises(ValueError, match="name the job interpreter once"):
+        Job(command="true", max_hours=1, runtime=Runtime(packages={"torch": "2.9.0"}))
 
 
 def test_eviction_removes_the_least_recently_used_directory_not_one_in_use(

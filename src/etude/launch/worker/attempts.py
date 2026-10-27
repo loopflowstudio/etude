@@ -31,6 +31,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -47,7 +48,7 @@ from typing import BinaryIO, Literal
 
 from etude.cache import Cache, Content
 from etude.launch.logging import Console, explain, log_to, sanitize
-from etude.launch.records import Cause, Input, Outcome, Output, Prepared, Record
+from etude.launch.records import Cause, Input, Outcome, Output, Prepared, Record, Runtime
 from etude.launch.runtime import PROBE, find_python, select_runtime
 from etude.launch.schemas import Packet, Progress, Work
 from etude.launch.storage.files import append_usage, digest, read_result, write
@@ -254,7 +255,7 @@ class Exit(Record):
 def _execute(
     command: list[str],
     *,
-    home: Path,
+    cwd: Path,
     environment: dict[str, str],
     output: BinaryIO,
     errors: BinaryIO,
@@ -270,7 +271,7 @@ def _execute(
         return Exit(code=None, stopped="cancelled" if cancelled else "deadline")
     process = subprocess.Popen(
         command,
-        cwd=home / "src",
+        cwd=cwd,
         env=environment,
         stdin=subprocess.DEVNULL,
         stdout=output,
@@ -297,14 +298,14 @@ def _execute(
 def _runtime(
     home: Path,
     work: Work,
+    runtime: Runtime,
+    python: str,
     environment: dict[str, str],
     log: BinaryIO,
     stop: Path,
     deadline: datetime,
 ) -> Exit:
-    assert work.runtime is not None
-    runtime = work.runtime
-    executable = find_python(runtime, environment)
+    executable = find_python(python, environment)
     log.write(sanitize(f"runtime: inspecting {executable}\n").encode())
     log.flush()
     with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
@@ -317,7 +318,7 @@ def _runtime(
                 json.dumps(sorted(runtime.packages)),
                 "cuda" if runtime.cuda is not None else "",
             ],
-            home=home,
+            cwd=home / "src",
             environment=environment,
             output=output,
             errors=errors,
@@ -349,7 +350,7 @@ def _phase(
     name: str,
     command: str,
     *,
-    home: Path,
+    cwd: Path,
     environment: dict[str, str],
     log: BinaryIO,
     stop: Path | None,
@@ -366,7 +367,7 @@ def _phase(
     try:
         result = _execute(
             ["sh", "-c", command],
-            home=home,
+            cwd=cwd,
             environment={
                 **environment,
                 "ETUDE_PHASE": name,
@@ -414,6 +415,7 @@ def _prepared(
     declared = {name: held[name] for name in preparation.inputs}
     inputs = _link(home / "prepared-inputs", declared)
     found = key(preparation, home / "src", work.inputs, work.environment)
+    source = _keyed_source(home / "src", home / "prepared-source", preparation.paths)
     built = Exit(code=0)
 
     def build(directory: Path) -> bool:
@@ -421,7 +423,7 @@ def _prepared(
         built = _phase(
             "prepare",
             preparation.command,
-            home=home,
+            cwd=source,
             environment={
                 **environment,
                 "ETUDE_PREPARED_DIR": str(directory),
@@ -445,10 +447,30 @@ def _prepared(
             yield built
             return
         environment["ETUDE_PREPARED_DIR"] = str(directory)
-        if work.runtime is None:
-            yield Exit(code=0)
+        if preparation.python is not None:
+            python = str(directory / preparation.python)
+            yield _runtime(
+                home, work, work.runtime or Runtime(), python, environment, log, stop, limit
+            )
+        elif work.runtime is not None and work.runtime.python is not None:
+            yield _runtime(
+                home, work, work.runtime, work.runtime.python, environment, log, stop, limit
+            )
         else:
-            yield _runtime(home, work, environment, log, stop, limit)
+            yield Exit(code=0)
+
+
+def _keyed_source(source: Path, destination: Path, paths: tuple[str, ...]) -> Path:
+    """A copy of `source` holding only `paths`, where a preparation runs, so it reads only its key."""
+    destination.mkdir()
+    for path in paths:
+        given, copy = source / path, destination / path
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        if given.is_dir() and not given.is_symlink():
+            shutil.copytree(given, copy, symlinks=True)
+        else:
+            shutil.copy2(given, copy, follow_symlinks=False)
+    return destination
 
 
 def _commands(
@@ -467,7 +489,7 @@ def _commands(
             result = _phase(
                 "setup",
                 work.setup,
-                home=home,
+                cwd=home / "src",
                 environment=environment,
                 log=log,
                 stop=stop,
@@ -479,7 +501,7 @@ def _commands(
             result = _phase(
                 "run",
                 work.command,
-                home=home,
+                cwd=home / "src",
                 environment=environment,
                 log=log,
                 stop=stop,
@@ -499,7 +521,7 @@ def _commands(
             cleanup = _phase(
                 "cleanup",
                 work.cleanup,
-                home=home,
+                cwd=home / "src",
                 environment=environment,
                 log=log,
                 stop=None,
@@ -543,7 +565,10 @@ def _run(session: Path, packet: Packet, work: Work) -> None:
         try:
             if work.runtime is not None and work.prepare is None:
                 # Nothing to prepare: the interpreter is checked before code is claimed.
-                result = _runtime(home, work, environment, log, stop, limit)
+                assert work.runtime.python is not None  # Job requires it without prepare.python
+                result = _runtime(
+                    home, work, work.runtime, work.runtime.python, environment, log, stop, limit
+                )
             if result.code == 0 and result.stopped is None:
                 # The claim denotes user code, not the read-only runtime probe.
                 with tempfile.NamedTemporaryFile(mode="w", dir=home) as claim:

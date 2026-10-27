@@ -289,9 +289,13 @@ class Machine(Record):
 
 
 class Runtime(Record):
-    """A preinstalled job interpreter and the versions it must already contain."""
+    """A job interpreter and the versions it must contain.
 
-    python: str = Field(min_length=1)
+    `python` names a preinstalled interpreter. Leave it unset when the job's
+    `Preparation.python` provides one; the pins are then checked against that.
+    """
+
+    python: str | None = Field(default=None, min_length=1)
     python_version: str | None = None  # exact version or a dotted prefix, e.g. 3.12
     packages: dict[str, str] = Field(default_factory=dict)  # exact distribution versions
     cuda: str | None = None  # PyTorch's compiled CUDA version, not host driver version
@@ -335,19 +339,21 @@ class Input(Record):
 class Preparation(Record):
     """Work a machine keeps and reuses while its key is unchanged, such as a job's venv.
 
-    `command` runs by sh in the source checkout, after the claim and before
-    the runtime check, and writes `$ETUDE_PREPARED_DIR`. It sees only the
-    inputs it names, at `$ETUDE_PREPARED_INPUTS/NAME`. Its key is the content
-    of `paths` in the source, the command, the named inputs' digests, the job
-    environment and the machine's platform; while that is unchanged a later
-    attempt on the machine reuses the verified directory and the command
-    does not run. A relative `Runtime.python` containing `/` names an
-    interpreter inside it, such as `.venv/bin/python`.
+    `command` runs by sh after the claim and before the runtime check, and
+    writes `$ETUDE_PREPARED_DIR`. It sees exactly what its key covers: it runs
+    in a copy of the source holding only `paths`, and finds only the inputs it
+    names, at `$ETUDE_PREPARED_INPUTS/NAME`, so reading anything else fails the
+    build rather than going stale. Its key is the content of `paths`, the
+    command, the named inputs' digests, the job environment and the machine's
+    platform; while that is unchanged a later attempt on the machine reuses
+    the verified directory and the command does not run. `python` names the
+    job's interpreter inside the directory, such as `.venv/bin/python`.
     """
 
     command: str = Field(min_length=1)
     paths: tuple[str, ...] = Field(min_length=1)  # source paths whose content decides the result
     inputs: tuple[str, ...] = ()  # names of the job's inputs the command reads
+    python: str | None = None  # the job's interpreter, relative to $ETUDE_PREPARED_DIR
 
     @field_validator("paths")
     @classmethod
@@ -356,6 +362,15 @@ class Preparation(Record):
             if path.startswith("/") or {"", ".", ".."} & set(path.rstrip("/").split("/")):
                 raise ValueError(f"prepare path {path!r} must be a path within the source")
         return paths
+
+    @field_validator("python")
+    @classmethod
+    def _within_prepared(cls, python: str | None) -> str | None:
+        if python is not None and (
+            python.startswith("/") or {"", ".", ".."} & set(python.split("/"))
+        ):
+            raise ValueError(f"prepared python {python!r} must be a path within the directory")
+        return python
 
 
 class Variable(Record):
@@ -412,6 +427,11 @@ class Job(Record):
             unknown = set(self.prepare.inputs) - {given.name for given in self.inputs}
             if unknown:
                 raise ValueError(f"prepare reads inputs the job is not given: {sorted(unknown)}")
+        prepared = self.prepare is not None and self.prepare.python is not None
+        if self.runtime is not None and (self.runtime.python is None) != prepared:
+            raise ValueError(
+                "name the job interpreter once: in runtime.python, or in prepare.python"
+            )
         return self
 
     def runs(self, *seeds: int, params: dict[str, Param] | None = None) -> list[Run]:

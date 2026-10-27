@@ -32,6 +32,7 @@ import inspect
 import os
 import shlex
 import sys
+import tomllib
 from collections.abc import Callable, Mapping, Sequence
 from decimal import Decimal
 from pathlib import Path, PurePosixPath
@@ -375,13 +376,59 @@ def _job(
         ) from None
     repo = _repo(origin, options)
     called = _function(function, repo)
-    # A preinstalled runtime names its interpreter; otherwise the checkout is a uv project.
-    python = '"$ETUDE_PYTHON"' if options.get("runtime") is not None else "uv run python"
+    sourced: JobOptions = {**options, "repo": None if repo is None else str(repo)}
+    if "prepare" not in options and options.get("runtime") is None and repo is not None:
+        derived = _uv_preparation(repo)
+        if derived is not None:
+            sourced["prepare"] = derived
+    prepared = sourced.get("prepare")
+    # A named interpreter is selected as ETUDE_PYTHON; otherwise the checkout is a uv project.
+    named = options.get("runtime") is not None or (
+        prepared is not None and prepared.python is not None
+    )
+    python = '"$ETUDE_PYTHON"' if named else "uv run python"
     command = f"{python} -m etude.call --function {shlex.quote(str(called))}"
     if called.path:
         command += f" --path {shlex.quote(called.path)}"
-    sourced: JobOptions = {**options, "repo": None if repo is None else str(repo)}
     return Job(**sourced, command=command, config=text, experiment=experiment)
+
+
+def _uv_preparation(repo: Path) -> Preparation | None:
+    """The dependency environment of an unpackaged uv project, prepared once per lock.
+
+    uv installs only the dependencies of a project it does not package (no build
+    system, or `tool.uv.package = false`), so a venv keyed by `pyproject.toml`
+    and `uv.lock` (and `.python-version`) is exactly what `uv run` would use,
+    and the job imports its own code from the checkout as before. A packaged
+    project, a workspace or a path source needs more of the source, so it keeps
+    `uv run` unless the job declares its own `prepare`. Reads the working tree's
+    `pyproject.toml`; the key covers the launched commit's content.
+    """
+    project, lock = repo / "pyproject.toml", repo / "uv.lock"
+    if not (project.is_file() and lock.is_file()):
+        return None
+    data = tomllib.loads(project.read_text())
+    uv = data.get("tool", {}).get("uv", {})
+    package = uv.get("package")
+    if (package if package is not None else "build-system" in data) or "workspace" in uv:
+        return None
+    for source in uv.get("sources", {}).values():
+        given = source if isinstance(source, list) else [source]
+        if any("path" in entry or "workspace" in entry for entry in given):
+            return None
+    return Preparation(
+        command=(
+            'UV_PROJECT_ENVIRONMENT="$ETUDE_PREPARED_DIR/.venv"'
+            " uv sync --frozen --no-install-project"
+        ),
+        # uv chooses the interpreter from .python-version, so it decides the result too.
+        paths=("pyproject.toml", "uv.lock", *_present(repo, ".python-version")),
+        python=".venv/bin/python",
+    )
+
+
+def _present(repo: Path, *names: str) -> tuple[str, ...]:
+    return tuple(name for name in names if (repo / name).is_file())
 
 
 def _repo(origin: Callable[..., object], options: JobOptions) -> Path | None:

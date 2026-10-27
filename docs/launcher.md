@@ -224,8 +224,13 @@ The job type decides the command. Both return a `Job` whose command imports
 the function in the job's own environment and calls it with the config:
 `uv run python -m etude.call --function MODULE:NAME` in the checkout, which is
 then a uv project depending on `etude-sdk`, or `"$ETUDE_PYTHON" -m etude.call ...`
-with a `runtime`, whose interpreter must already hold `etude-sdk` and the
-project's dependencies. `etude.call` reads `ETUDE_CONFIG`, validates it into the
+with a `runtime` or a preparation that names an interpreter, which must already
+hold `etude-sdk` and the project's dependencies. A uv project that uv does not
+package (no build system, or `tool.uv.package = false`), and that has no workspace
+or path sources, gets a preparation automatically: its dependencies are synced
+once per `pyproject.toml` and `uv.lock` on each machine, and later attempts reuse
+them (see [Prepare a job environment](#prepare-a-job-environment-once-per-machine)).
+Pass `prepare=None` to keep `uv run`. `etude.call` reads `ETUDE_CONFIG`, validates it into the
 type of the function's one parameter and calls it in `ETUDE_SOURCE_DIR`. It
 imports nothing else of Etude before the function's own module.
 
@@ -1265,8 +1270,8 @@ actual virtual environment also sets `VIRTUAL_ENV`. These settings apply only to
 the job. Etude refuses its own client environment and never installs or upgrades
 job dependencies. Missing project dependencies belong in a prepared image or your
 explicit setup command. Vendor entrypoint scripts are not activated implicitly.
-Without `runtime`, a typed job runs `uv run python` in the checkout and a
-command runs in the shell's environment.
+Without `runtime` or a preparation's interpreter, a typed job runs `uv run python`
+in the checkout and a command runs in the shell's environment.
 
 ### Prepare a job environment once per machine
 
@@ -1287,14 +1292,17 @@ job = training(
         ),
         paths=("pyproject.toml", "uv.lock"),
         inputs=("engine.whl",),
+        python=".venv/bin/python",
     ),
-    runtime=Runtime(python=".venv/bin/python", packages={"engine": "1.4.0"}),
+    runtime=Runtime(packages={"engine": "1.4.0"}),
 )
 ```
 
-After the attempt is claimed, the command runs in the source checkout and writes
-`$ETUDE_PREPARED_DIR`; it sees only the inputs it names, at
-`$ETUDE_PREPARED_INPUTS/NAME`. The directory is kept under
+After the attempt is claimed, the command runs and writes `$ETUDE_PREPARED_DIR`.
+It sees exactly what its key covers: it runs in a copy of the source holding only
+`paths`, and finds only the inputs it names, at `$ETUDE_PREPARED_INPUTS/NAME`.
+Reading anything else fails the build rather than reusing a stale result, so
+declare every file the command reads, such as native source it compiles. The directory is kept under
 `ETUDE_HOME/prepared/` with a receipt listing the size and SHA256 of every file
 it wrote. A later attempt on the same machine whose key is unchanged (the
 content of `paths`, the command, the named inputs' digests, the job environment
@@ -1309,9 +1317,11 @@ prepare: rejected 3f9c0e21d4b7 (.venv/lib/python3.12/site-packages/engine/x.so d
 
 A rejected directory is deleted and built again; one left by an interrupted
 build has no receipt and is deleted before the next build. A failed command fails
-the attempt. A relative `Runtime.python` containing `/` is inside the prepared
-directory, and the runtime check runs after preparation, so a reused environment
-is still checked against its pins. Least recently used directories are deleted
+the attempt. `python` names the job's interpreter inside the prepared directory;
+it becomes `ETUDE_PYTHON`. A `runtime` given beside it only pins versions, and the
+runtime check runs after preparation, so a reused environment is still checked
+against its pins. Name the interpreter once: in `runtime.python` for a
+preinstalled one, or in `prepare.python`. Least recently used directories are deleted
 beyond half the disk available to them; one an attempt is using is kept.
 Everything kept ends with a rental.
 
