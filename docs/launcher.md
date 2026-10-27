@@ -1529,9 +1529,11 @@ before any range is returned, and held bytes are verified again before a range
 is read from them. Immutable objects without a recorded digest fetch and keep
 individual ranges. For cache-admitted artifacts, verified warm reuse transfers no
 payload bytes, including from a new process or to another destination; control
-metadata reads still cost requests and bytes. Sequential 8 MiB ranges retain
+metadata reads still cost requests and bytes. 256 MiB ranges retain
 completed chunks across interruption and require exact ranges and a stable
-strong ETag. Invalid ranges, authentication failures, changed identity or digest
+strong ETag. A presigned download reads each range as 16 MiB parts on up to 32
+connections and reads the next range ahead: one connection from a RunPod L4 to R2
+measured 4–12 MB/s, and this reads 19.3 GB at 48–81 MB/s. Invalid ranges, authentication failures, changed identity or digest
 mismatch fail explicitly. Files larger than the allowance, or acquired while
 other digests occupy it, stream through destination-side staging. Oversized and destination-staged downloads do not retain a reusable cache copy.
 Only verified bytes replace the destination. Downloads add no timeout by default;

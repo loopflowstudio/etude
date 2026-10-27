@@ -565,7 +565,10 @@ class Cache:
                 path.unlink(missing_ok=True)
 
     def _acquire(self, content: Content, path: Path, source: Source) -> str | None:
-        """Read what the partial lacks, a range at a time; the version's ETag, if any."""
+        """Read what the partial lacks, a range at a time; the version's ETag, if any.
+
+        A source may read a range as concurrent parts, and read ahead.
+        """
         note = path.with_suffix(".json")
         state = _Partial.model_validate_json(note.read_bytes()) if note.exists() else _Partial()
         offset = 0
