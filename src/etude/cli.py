@@ -362,6 +362,9 @@ def eval_experiment(
             "and launch nothing if it fails"
         ),
     ] = False,
+    queue: Annotated[
+        bool, typer.Option(help="queue jobs until the chosen pool or on-demand has capacity")
+    ] = False,
 ) -> None:
     """Play, or with --pool or --rent launch, the matches eval(state) wants that no run delivered."""
     # Experiments join tracking, evaluation and the launcher.
@@ -387,6 +390,7 @@ def eval_experiment(
                 rent=rent,
                 retry_failed=retry_failed,
                 smoke=before,
+                queue=queue,
             ):
                 line = f"{done.tournament}: {done.new} new"
                 if done.failed:
