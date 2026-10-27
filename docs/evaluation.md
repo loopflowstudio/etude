@@ -1,9 +1,9 @@
 # Evaluation
 
-Play agents against each other in parallel workers, hand Etude whatever tables
+Play players against each other in parallel workers, hand Etude whatever tables
 your game code produces, and query each experiment's results as one DuckDB
 database. Tournaments decide which matches to play: each checkpoint of a model
-through a benchmark's matchups as it trains, or hand-picked models in a round
+through a benchmark's matchups as it trains, or hand-picked players in a round
 robin. Evaluation is independent of training.
 
 ```sh
@@ -11,34 +11,35 @@ uv add 'etude-sdk[eval]'   # DuckDB, for writing and querying tables
 ```
 
 ```python
-from etude.eval.match import Tables, agent, environment
+from etude.eval.match import Tables, environment
 from etude.eval.query import statsdb
 from etude.eval.records import (
     Benchmark,
     CheckpointKey,
     CheckpointRef,
+    Code,
+    Inference,
     Match,
     Matchup,
-    Model,
     RoundRobin,
 )
 from etude.eval.tournament import curves, hold, standings
 
 world = environment("allies-vs-lessons", files=["game/"], config={"world": "w6"})
 deals = tuple({"deal": 1_910_101_000 + d} for d in range(25))
-heuristic = agent("heuristic", code=["players/heuristic.py"])
-greedy = agent("greedy", code=["players/greedy.py"])
+heuristic = Code(name="heuristic", source=["players/heuristic.py"])
+greedy = Code(name="greedy", source=["players/greedy.py"])
 
 
 def play(match: Match) -> Tables:  # importable by name: workers are fresh processes
     results = play_deal(
-        match.agents, deal=match.conditions["deal"], games=match.games, seed=match.seed
+        match.players, deal=match.conditions["deal"], games=match.games, seed=match.seed
     )
     return {
         "plays": [
             {
                 "game": r.game,
-                "player": r.seat,
+                "seat": r.seat,
                 "score": r.score,
                 "on_play": r.on_play,
                 "opening_lands": r.lands,
@@ -49,8 +50,8 @@ def play(match: Match) -> Tables:  # importable by name: workers are fresh proce
     }
 
 
-# Model is the checkpoint being held, run by your inference code and playing with
-# your config (a Pydantic model or JSON). Name the code, so a change to it is a new agent.
+# An Inference seat is filled by the checkpoint being held, run by your inference code
+# and playing with your config (a Pydantic model or JSON): together, a Model.
 net = ["players/net.py"]
 progress = Benchmark(
     name="anchors",
@@ -58,21 +59,21 @@ progress = Benchmark(
     matchups=(
         Matchup(
             name="no search vs heuristic",
-            players=(Model(code=net, config=Direct()), heuristic),
+            players=(Inference(source=net, config=Direct()), heuristic),
             conditions=deals,
             games=8,
         ),
         Matchup(
             name="no search vs greedy",
-            players=(Model(code=net, config=Direct()), greedy),
+            players=(Inference(source=net, config=Direct()), greedy),
             conditions=deals,
             games=8,
         ),
         Matchup(
             name="search vs no search",
             players=(
-                Model(code=net, config=PUCT(simulations=64)),
-                Model(code=net, config=Direct()),
+                Inference(source=net, config=PUCT(simulations=64)),
+                Inference(source=net, config=Direct()),
             ),
             conditions=deals[:10],
             games=4,
@@ -89,7 +90,7 @@ hold(progress, experiment="ppo", checkpoint=ref, play=play, storages=[bucket])
 # missing match, so the new line is played for every checkpoint held so far.
 hold(progress, experiment="ppo", play=play, workers=8, storages=[bucket])
 
-# Batch: hand-picked models, each against every other.
+# Batch: hand-picked players, each against every other.
 league = RoundRobin(name="finals-1", environment=world, conditions=deals, games=8)
 hold(league, experiment="ppo", enter=finals, play=play, workers=8, storages=[bucket])
 
@@ -102,7 +103,7 @@ for entry in standings(db, "finals-1", table="plays", value="score").entries:
 
 ```python
 db.sql("""select a.name, avg(score) from plays
-          join seats using (run, match, player) join agents a using (agent)
+          join seats using (run, match, seat) join players a using (player)
           where on_play and opening_lands >= 2 group by all""").show()
 ```
 
@@ -118,23 +119,42 @@ evaluate(
     experiment="mirror",
     environment=world,
     play=play,
-    matches=[Match(agents=(a, b, c, d), groups={"north": (0, 2), "south": (1, 3)}, games=4)],
+    matches=[Match(players=(a, b, c, d), groups={"north": (0, 2), "south": (1, 3)}, games=4)],
     workers=4,
     storages=[bucket],
 )
 ```
 
-- **Agents.** An agent's key (`AgentKey`) is the checkpoint it plays, by the
-  checkpoint's own key, or a code agent's name, plus its config: free JSON or
-  a Pydantic model. One checkpoint at two search budgets is two agents. A
-  checkpoint's key (`CheckpointKey`) is its training run and file name
+- **Players.** A player is whatever takes a seat: a `Model`, a checkpoint
+  and how it plays (`Inference`), or `Code`, such as a heuristic. A model's
+  key is the checkpoint's own key plus its inference config; code's is its
+  name plus its config. A config is free JSON or a Pydantic model. One
+  checkpoint at two search budgets is two models. A checkpoint's key
+  (`CheckpointKey`) is its training run and file name
   (`ppo-1/checkpoints/updates-500.pt`) or, for any other, its address; never
   its bytes, so two runs warm-started from one file hold two checkpoints,
-  each evaluated. `agent("net", checkpoint=ref, code=["players/net.py"],
-  config=...)` also names the code that plays it: its commit and source digest
-  are the agent's `Version`, recorded with each match (`seats.commit`,
-  `seats.source`) but not part of the key, so changed code reuses what was
-  played. Joins use the key, encoded (`agents.agent`, `seats.agent`).
+  each evaluated. An outside model is a `Model` whose checkpoint is an
+  address. `Inference(source=["players/net.py"], config=...).model(ref)` and
+  `Code(name="heuristic", source=[...])` name the code that plays: its commit
+  and source digest are its `Version`, recorded with each match
+  (`seats.commit`, `seats.source`) but not part of the key, so changed code
+  reuses what was played. Joins use the key, encoded (`players.player`,
+  `seats.player`).
+- **Where a checkpoint stood.** A seated checkpoint may say where it stood on
+  its clocks: `CheckpointRef(key=..., artifact=..., at={"updates": 600})`.
+  A tracked checkpoint's `ref` fills `at` from its run's clocks; give it
+  yourself for a checkpoint no Etude run recorded. It is carried to each
+  match's seats (`seats.at`, `players.at`) so a report can place the point,
+  and is part of no key: correcting it never forks a model or replays a
+  match. Seats that disagree are listed in `players.at_conflict`; a report
+  draws the latest and notes the earlier.
+- **Which learner it is.** `line` names the learner a checkpoint belongs
+  to, such as a seed or a recipe: `CheckpointRef(..., at={"updates": 600},
+  line="seed-1")`. A report compares a checkpoint with earlier ones, and
+  draws its curve, only within its line. A tracked checkpoint's `ref` fills
+  `line` with the first run of its run's chain of continuations, so a
+  continued learner is one line. Like `at`, it is carried to the seats
+  (`seats.line`, `players.line`, `players.line_conflict`) and is part of no key.
 - **Source files.** A directory stands for the files below it. In a git
   checkout only tracked files count, named by their path in the checkout, so
   caches and scratch files never change a version; an uncommitted edit does,
@@ -142,25 +162,29 @@ evaluate(
   named by their path below `ETUDE_SOURCE_DIR` and the commit is
   `ETUDE_COMMIT`, both of which the launcher sets, so the same commit gives the
   same version on a rented machine as on yours.
-- **Older eval runs.** Agents recorded by etude-sdk 0.2 were identified by a
-  digest. They load with that digest as their key (`AgentKey.recorded`), which
+- **Older eval runs.** Records earlier etude-sdk releases wrote, with
+  `agents` and a seat column named `player`, read as players and `seat`, with
+  the same keys, so nothing is played again. A `seat` column beside `player`
+  in such a table was the game's own, and reads as `game_seat`. Players recorded by etude-sdk
+  0.2 were identified by a digest; they load as `etude-sdk-0.2:DIGEST`, which
   no key since equals, so their results stay readable and nothing new counts
   them as played.
-- **Matches.** A seating of agents under fixed `conditions`, played for
+- **Matches.** A seating of players under fixed `conditions`, played for
   `games`: the unit Etude schedules, resumes and resamples. Seat swaps belong
-  inside `play`. Group `all` holds every seat; an agent may sit in two seats.
+  inside `play`. Group `all` holds every seat; a player may sit in two seats.
 - **Order.** Matches start, `workers` at a time, in the order
   `etude.eval.schedule.ordered` gives, so consecutive matches reuse the
   checkpoints your inference runtime keeps loaded: first those loading the
   fewest checkpoints not yet used, then those reusing the most recently used.
-  Ties, and queues of code agents only, keep your order. Order changes no
+  Ties, and queues of code players only, keep your order. Order changes no
   result. Your runtime counts its loads; Etude does not.
-- **Rows are yours.** `play` returns any tables. Each row names a `player`
-  (a seat) or a `group` of its match; Etude adds `run` and `match`. Values are
-  numbers, text, booleans or nulls.
-- **Strict.** A row with neither or both of `player` and `group`, a seat or
-  group the match lacks, or a column whose type changes during a run is
-  refused. A refused or raising match is recorded as failed with its error,
+- **Rows are yours.** `play` returns any tables. Each row names a `seat`
+  (its position in `match.players`) or a `group` of its match; Etude adds `run` and `match`. Values are
+  numbers, text, booleans or nulls. A game's own seat numbering, when it
+  differs from the match's, goes in `game_seat`.
+- **Strict.** A row with neither or both of `seat` and `group`, a seat or
+  group the match lacks, a column named `player`, or a column whose type
+  changes during a run is refused. A refused or raising match is recorded as failed with its error,
   nothing else of it is stored, and the run stops.
 - **Environments are never pooled.** An eval run has one environment;
   resuming with another is refused, and comparisons keep environments apart.
@@ -176,21 +200,21 @@ evaluate(
 ## Tournaments
 
 - **Benchmarks.** Named matchups, each its own line over training: `players`
-  in seat order, each a fixed agent or `Model(config=...)`, with its own
+  in seat order, each a fixed player or `Inference(config=...)`, with its own
   `conditions` and `games`. A matchup's value is its first player's.
   `hold(benchmark, checkpoint=ref)` puts the checkpoint (by its key) in every
-  model seat and plays each given matchup; with no checkpoint it plays every
+  inference seat and plays each given matchup; with no checkpoint it plays every
   matchup ever defined for every checkpoint held, skipping what is delivered.
-- **Pairs of checkpoints.** A matchup with no model seat is played once, not
-  per checkpoint, so chosen checkpoints can meet: seat each as
-  `Model(...).agent(ref)`, the agent a model seat would make of it. Build the
+- **Pairs of checkpoints.** A matchup with no inference seat is played once,
+  not per checkpoint, so chosen checkpoints can meet: seat each as
+  `Inference(...).model(ref)`, the model an inference seat would make of it. Build the
   benchmark from the checkpoints saved so far, such as each against the one
   before it, and hold it in batch whenever more appear; each pass plays only
   the pairs not yet delivered. A hold on the go leaves these matchups to batch.
   Their rows are `schedule` rows with no `checkpoint`; `curves` follows only
-  matchups with a model seat.
-- **Round robins.** `hold(round_robin, enter=agents)` plays every pair of
-  the agents given once per condition; seat swaps belong inside `play`.
+  matchups with an inference seat.
+- **Round robins.** `hold(round_robin, enter=players)` plays every pair of
+  the players given once per condition; seat swaps belong inside `play`.
   `hold(round_robin)` then plays every pair of every entrant so far that no
   eval run delivered, such as a late entrant against the earlier ones.
 - **Held for an experiment.** A tournament only decides which matches to
@@ -232,7 +256,7 @@ evaluate(
   no training run under the source recorded make one line per matchup,
   ordered by name, numbers in order (`updates-900` before `updates-1000`).
 - **`standings`** gives a round robin's payoff matrix, best first, each entry
-  naming its agent and opponent; `complete` says whether every scheduled
+  naming its player and opponent; `complete` says whether every scheduled
   match is held.
 
 ## Evaluation jobs
@@ -274,8 +298,8 @@ An evaluation job holds a tournament on a launched machine, and nobody writes
 its command: Etude calls `hold` there with `play`, imported by name from your
 checkout, and the checkpoint, which reaches the machine as the job's input,
 verified by digest. The input's run and file name are the checkpoint's key,
-and its file is every model seat's `artifact.uri`, which `play` opens. A round robin takes `enter=`
-agents instead. The eval run is the launched run, so its tables reach the
+and its file is each model's `checkpoint.artifact.uri`, which `play` opens. A
+round robin takes `enter=` players instead. The eval run is the launched run, so its tables reach the
 machine's storage with the run's other files and `statsdb` finds them there.
 Holding nothing new (batch) is refused: a launched job reads no other eval
 run; an experiment's pass decides what is new first ([Experiments](#experiments)).
@@ -299,7 +323,7 @@ from etude.experiment import ExperimentState
 from etude.jobs import evaluation
 from etude.launch.records import Job
 
-# direct is a Model, heuristic an agent, deals the conditions
+# direct is an Inference, heuristic Code, deals the conditions
 from arena import deals, direct, heuristic, play, world
 
 
@@ -310,7 +334,7 @@ def eval(state: ExperimentState) -> list[Job]:
         Matchup(
             name=f"{new.name} vs {old.name}",
             tags=("consecutive",),
-            players=(new.agent(direct), old.agent(direct)),
+            players=(new.model(direct), old.model(direct)),
             conditions=deals,
             games=8,
         )
@@ -321,7 +345,7 @@ def eval(state: ExperimentState) -> list[Job]:
             Matchup(
                 name=f"final vs {old.name}",
                 tags=("endpoint",),
-                players=(run.final.agent(direct), old.agent(direct)),
+                players=(run.final.model(direct), old.model(direct)),
                 conditions=deals,
                 games=8,
             )
@@ -345,8 +369,8 @@ etude eval ppo.py --source s3://bucket/etude/launch --rent cpu8 --watch 600
   *values)` and `tagged(tag)` choose by ordinal, coordinate or tag, and
   `final` is the last checkpoint once a run has finished.
 - **What `eval` returns.** Evaluation jobs holding a benchmark for the
-  checkpoints it chose. Seat a chosen checkpoint with `checkpoint.agent(model)`
-  to make a matchup of fixed agents, played once rather than per checkpoint.
+  checkpoints it chose. Seat a chosen checkpoint with `checkpoint.model(inference)`
+  to make a matchup of fixed players, played once rather than per checkpoint.
   `tags` mark matchups for readers, such as pairs a rating fit leaves out.
 - **A pass.** For each job, the matches exactly what `eval` returned calls
   for, the matchups it gave for the checkpoints it gave, that no eval run of
@@ -376,9 +400,10 @@ etude eval ppo.py --source s3://bucket/etude/launch --rent cpu8 --watch 600
 
 `etude report ppo.py` draws the experiment's evals beside its training
 ([tracking](tracking.md#reports)), following the file's `report()`. Each
-checkpoint agent is drawn where its training run stood when it saved that
-checkpoint, found by its key; code agents and checkpoints from outside the
-experiment are anchors, drawn once. A checkpoint `eval(state)` chose that no
+model is drawn where its latest seat says it stood, else, found by its
+checkpoint's key, where its training run stood when it saved it; a checkpoint
+no training run recorded is drawn in its line's curve. Code and checkpoints
+with no position are anchors, drawn once. A checkpoint `eval(state)` chose that no
 eval run has delivered is marked not yet played, one nothing played is marked
 not evaluated, and failed matches are listed. Each match counts from the eval
 run that delivered it last, whichever commit its code was at. Where the
@@ -391,12 +416,13 @@ matches first played at it, and any held again there.
 
 `statsdb(experiment, store)` gives each of your tables across every eval run of
 the experiment, beside Etude's own:
-`runs` (with the tournament each was held for), `agents` (with a `config.KEY`
+`runs` (with the tournament each was held for), `players` (`kind` `model` or
+`code`, with a `config.KEY`
 column per scalar config key, dotted when nested), `matches`, `seats`,
 `groups`, `tournaments` (with any `conflict` among its eval runs), `schedule`
 (every match a tournament calls for, with its matchup and checkpoint) and
 `training_checkpoints` (every checkpoint a training run under the source
-recorded, joined to agents and the schedule by `checkpoint`, its key).
+recorded, joined to players and the schedule by `checkpoint`, its key).
 
 The database is kept in a file under `ETUDE_HOME/statsdb`, one per
 experiment and store. Opening it lists the store once and reads only what
@@ -407,8 +433,8 @@ on its own. One process opens it at a time; another gets `statsdb_in_use`.
 Experiments are never joined: each has its own database.
 
 `compare(db, table=, value=, per=, where=, by=)` sets each subject against
-each opponent and against all: a seat's agent against the other seats'
-agents, or a group against the match's other groups. The value is
+each opponent and against all: a seat's player against the other seats'
+players, or a group against the match's other groups. The value is
 `sum(value) / sum(per)`, or the mean without `per`. The 95% interval is a
 percentile bootstrap over whole matches with a fixed seed, independent of
 the order rows are read in; fewer than two matches have none.

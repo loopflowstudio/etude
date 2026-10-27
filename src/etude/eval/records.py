@@ -1,4 +1,4 @@
-"""File contracts for evaluation: agents, environments, matches and tournaments.
+"""File contracts for evaluation: players, environments, matches and tournaments.
 
 An eval run is a run with kind "evaluation" and no clocks: `run.json`, then
 `environment.json`, then for each match the author's tables as Parquet under
@@ -11,20 +11,23 @@ it added. A tournament is nothing more than the eval runs naming it;
 `assemble` makes one from them, and its schedule follows by
 `Matchup.matches` and `RoundRobin.matches` wherever it is read.
 
-An agent is identified by its key (`AgentKey`): the checkpoint it plays, by
-the checkpoint's own key (`CheckpointKey`), or the name of the code that plays
-it, together with its config. One checkpoint at two search budgets is two
-agents; two checkpoint keys holding the same bytes are two agents too, since
-where a checkpoint's bytes came from is not part of what it is. The code's
-commit and source digest are its `Version`, recorded with each match but not
-part of the key: a match one version played counts as played for every
-version, and reads can select a version. A match seats agents by position
-(`player`), names groups of seats and fixes the conditions it is played under.
-A match's key is the digest of its seats' keys, its groups and conditions.
+A `Player` is whatever takes a seat: a `Model`, a checkpoint and how it plays
+(`Inference`), or `Code`. A player is identified by its key: the checkpoint's
+own key (`CheckpointKey`) or the code's name, together with its config. One
+checkpoint at two search budgets is two models; two checkpoint keys holding
+the same bytes are two models too, since where a checkpoint's bytes came from
+is not part of what it is. The code's commit and source digest are its
+`Version`, a checkpoint's position on its clocks is `CheckpointRef.at` and
+the learner it belongs to is `CheckpointRef.line`; all are recorded with each
+match but not part of the key: a match one
+version played counts as played for every version, and reads can select a
+version. A match seats players by position (`seat`), names groups of seats
+and fixes the conditions it is played under. A match's key is the digest of
+its players' keys, its groups and conditions.
 
-Agents recorded by etude-sdk 0.2 were identified by a digest; they load with
-that digest as their key (`AgentKey.recorded`), equal to no key since, so their
-matches stay readable and are never counted as played again.
+Records published etude-sdk wrote, with `agents` and etude-sdk 0.2's digest
+identities, load as players (`_player`); a 0.2 player's key equals no key
+since, so its matches stay readable and are never counted as played again.
 """
 
 from __future__ import annotations
@@ -35,15 +38,15 @@ from collections.abc import Iterable, Mapping, Sequence
 from hashlib import sha256
 from itertools import combinations
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Self
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Self
 
 from pydantic import (
     BaseModel,
+    BeforeValidator,
     Field,
     JsonValue,
     TypeAdapter,
     ValidationError,
-    field_validator,
     model_validator,
 )
 
@@ -133,51 +136,30 @@ class CheckpointKey(Record):
 
 
 class CheckpointRef(Record):
-    """A checkpoint to seat: its key, and the file holding it, which must carry its digest."""
+    """A checkpoint to seat: its key, and the file holding it, which must carry its digest.
+
+    `at` is where it stood on each clock, such as `{"updates": 600}`: a
+    declared fact the seat carries to its matches so a report can place it,
+    and part of no key. `line` names the learner it belongs to, such as a
+    seed or a recipe, so a report compares it with that learner's other
+    checkpoints; also part of no key. A tracked checkpoint's ref fills both
+    from its run; give them yourself for a checkpoint no Etude run recorded.
+    """
 
     key: CheckpointKey
     artifact: ArtifactRef
+    at: dict[str, float] = {}
+    line: str | None = None
 
     @model_validator(mode="after")
     def verifiable(self) -> Self:
         if self.artifact.sha256 is None:
-            raise ValueError("checkpoint_agent_requires_digest")
+            raise ValueError("model_checkpoint_requires_digest")
         return self
-
-
-class AgentKey(Record):
-    """What identifies an agent: the checkpoint or code that plays, and its config."""
-
-    checkpoint: CheckpointKey | None = None
-    # A code agent's name, as its author calls it, such as "heuristic".
-    code: Name | None = None
-    # An etude-sdk 0.2 agent's digest identity.
-    recorded: Digest | None = None
-    config: Config = {}
-
-    @model_validator(mode="after")
-    def one_player(self) -> Self:
-        given = [self.checkpoint is not None, self.code is not None, self.recorded is not None]
-        if sum(given) != 1:
-            raise ValueError("agent_key_is_a_checkpoint_or_code")
-        return self
-
-    @property
-    def encoded(self) -> str:
-        """The key as one string, for files, columns and indexes."""
-        if self.checkpoint is not None:
-            player = f"checkpoint:{self.checkpoint}"
-        elif self.code is not None:
-            player = f"code:{self.code}"
-        else:
-            player = f"etude-sdk-0.2:{self.recorded}"
-        if not self.config:
-            return player
-        return player + " " + json.dumps(self.config, sort_keys=True, separators=(",", ":"))
 
 
 class Version(Record):
-    """Which version of an agent's code played: provenance, not identity."""
+    """Which version of a player's code played: provenance, not identity."""
 
     # The git commit its source was at; None outside a checkout or launched job.
     commit: str | None = None
@@ -185,41 +167,167 @@ class Version(Record):
     source: Digest | None = None
 
 
-class Agent(Record):
-    """A saved model or code, and the configuration it plays with: its key, and how it ran."""
+def _versioned(data: Any) -> Any:
+    """Source files given as `source` become their `Version`; a stored record holds that."""
+    if isinstance(data, dict) and "source" in data:
+        data = dict(data)
+        source = data.pop("source")
+        if source:
+            data["version"] = version_of(source)
+    return data
 
-    key: AgentKey
-    # What a report calls it.
-    name: Name
-    # A checkpoint's file: where it lies here, and the digest it must have.
-    artifact: ArtifactRef | None = None
+
+def _config(value: object) -> object:
+    return as_config(value) if value is None or isinstance(value, BaseModel) else value
+
+
+# A config as an author gives it: a Pydantic model or None becomes stored JSON.
+type _GivenConfig = Annotated[Config, BeforeValidator(_config)]
+
+
+def _encoded(player: str, config: Config) -> str:
+    if not config:
+        return player
+    return player + " " + json.dumps(config, sort_keys=True, separators=(",", ":"))
+
+
+class Inference(Record):
+    """How a checkpoint plays: the author's `config` and the inference code's `Version`.
+
+    `config` is the author's typed model or JSON, such as whether search runs
+    on top of the network and how; it is part of each model's key. `source`
+    is the inference code's files: their `Version`, recorded with each match
+    but not part of the key, so changed inference code reuses what was played.
+    In a matchup it is a seat each checkpoint the benchmark is held for fills.
+    """
+
+    config: _GivenConfig = {}
     version: Version = Version()
+
+    if TYPE_CHECKING:
+        # What a person writes; the validators below make the stored fields of it.
+        def __init__(
+            self,
+            *,
+            source: Sequence[Path | str] = (),
+            config: Mapping[str, object] | BaseModel | None = None,
+        ) -> None: ...
 
     @model_validator(mode="before")
     @classmethod
-    def recorded(cls, data: Any) -> Any:
-        # etude-sdk 0.2 stored `kind`, a digest `artifact`, `uri`, `code` and `config`.
-        if not isinstance(data, dict) or "kind" not in data:
-            return data
-        old = {key: data.get(key) for key in ("kind", "artifact", "code")}
-        config = data.get("config") or {}
-        parts = [old["kind"], old["artifact"], *([old["code"]] if old["code"] else []), config]
-        uri = data.get("uri")
-        return {
-            "key": {"recorded": digest(parts), "config": config},
-            "name": data["name"],
-            "artifact": {"uri": uri, "sha256": old["artifact"]}
-            if old["kind"] == "checkpoint" and uri
-            else None,
-        }
+    def versioned(cls, data: Any) -> Any:
+        if isinstance(data, dict) and isinstance(data.get("code"), str):
+            # etude-sdk 0.2 stored the inference files' digest as `code`.
+            data = dict(data)
+            data["version"] = {"source": data.pop("code")}
+        return _versioned(data)
+
+    def model(self, checkpoint: CheckpointRef) -> Model:
+        """The model `checkpoint` is when it plays this way, named for its file."""
+        return Model(
+            name=re.sub(r"\s", "_", checkpoint.key.label), checkpoint=checkpoint, inference=self
+        )
+
+
+class Model(Record):
+    """A checkpoint and how it plays (`Inference`). One checkpoint at two configs is two models."""
+
+    kind: Literal["model"] = "model"
+    # What a report calls it.
+    name: Name
+    checkpoint: CheckpointRef
+    inference: Inference
 
     @property
-    def kind(self) -> Literal["checkpoint", "code"]:
-        return "checkpoint" if self.key.checkpoint is not None or self.artifact else "code"
+    def key(self) -> str:
+        """Its identity as one string, for files, columns and indexes."""
+        return _encoded(f"checkpoint:{self.checkpoint.key}", self.config)
 
+    # A player's config and version, as `Code` has them; `inference` holds both.
     @property
     def config(self) -> Config:
-        return self.key.config
+        return self.inference.config
+
+    @property
+    def version(self) -> Version:
+        return self.inference.version
+
+
+class Code(Record):
+    """Code that plays, such as a heuristic, by its author's `name`, with its config."""
+
+    kind: Literal["code"] = "code"
+    name: Name
+    config: _GivenConfig = {}
+    version: Version = Version()
+
+    if TYPE_CHECKING:
+        # What a person writes; the validators below make the stored fields of it.
+        def __init__(
+            self,
+            *,
+            name: str,
+            source: Sequence[Path | str] = (),
+            config: Mapping[str, object] | BaseModel | None = None,
+        ) -> None: ...
+
+    @model_validator(mode="before")
+    @classmethod
+    def versioned(cls, data: Any) -> Any:
+        return _versioned(data)
+
+    @property
+    def key(self) -> str:
+        """Its identity as one string, for files, columns and indexes."""
+        return _encoded(f"code:{self.name}", self.config)
+
+
+def _player(data: Any) -> Any:
+    """A player as published etude-sdk stored it (an `Agent`), as a `Model` or `Code`.
+
+    An Agent was keyed by `key.checkpoint` or `key.code` with its config; an
+    etude-sdk 0.2 agent by a digest of `kind`, `artifact`, `code` and `config`,
+    which becomes the checkpoint address or code name `etude-sdk-0.2:DIGEST`,
+    equal to no key since, so its matches are never counted as played again.
+    """
+    if not isinstance(data, dict) or data.get("kind") == "model":
+        return data
+    if "key" in data:
+        key, version = data["key"], data.get("version") or {}
+        config = key.get("config") or {}
+        if key.get("checkpoint") is not None:
+            ref = {"key": key["checkpoint"], "artifact": data.get("artifact")}
+            inference = {"config": config, "version": version}
+            return {
+                "kind": "model",
+                "name": data["name"],
+                "checkpoint": ref,
+                "inference": inference,
+            }
+        if key.get("code") is not None:
+            return {"kind": "code", "name": key["code"], "config": config, "version": version}
+        return data
+    if data.get("kind") == "checkpoint" or (
+        data.get("kind") == "code" and {"artifact", "uri", "code"} & data.keys()
+    ):
+        # etude-sdk 0.2 stored `kind`, a digest `artifact`, `uri`, `code` and `config`.
+        config = data.get("config") or {}
+        code = data.get("code")
+        parts = [data["kind"], data.get("artifact"), *([code] if code else []), config]
+        recorded = f"etude-sdk-0.2:{digest(parts)}"
+        if data["kind"] == "code":
+            return {"kind": "code", "name": recorded, "config": config}
+        ref = {
+            "key": {"address": recorded},
+            "artifact": {"uri": data.get("uri") or recorded, "sha256": data.get("artifact")},
+        }
+        inference = {"config": config}
+        return {"kind": "model", "name": data["name"], "checkpoint": ref, "inference": inference}
+    return data
+
+
+# What takes a seat: a checkpoint playing some way, or code.
+type Player = Annotated[Model | Code, Field(discriminator="kind"), BeforeValidator(_player)]
 
 
 class Environment(Record):
@@ -236,14 +344,14 @@ class Environment(Record):
 
 
 class Match(Record):
-    """A seating of agents under fixed conditions, played for some games.
+    """A seating of players under fixed conditions, played for some games.
 
     The unit Etude schedules, resumes and resamples. Group `all` holds every
     seat and is added when not given.
     """
 
-    # By seat: `player` in a row is a position here.
-    agents: tuple[Agent, ...] = Field(min_length=1)
+    # By seat: `seat` in a row is a position here.
+    players: tuple[Player, ...] = Field(min_length=1)
     groups: dict[Name, tuple[int, ...]] = {}
     conditions: Config = {}
     games: int = Field(default=1, ge=1)
@@ -251,26 +359,29 @@ class Match(Record):
     @model_validator(mode="before")
     @classmethod
     def everyone(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "agents" in data:
+            # Published etude-sdk stores the players as `agents`.
+            data = {("players" if key == "agents" else key): value for key, value in data.items()}
         if isinstance(data, dict) and EVERYONE not in data.get("groups", {}):
-            seats = tuple(range(len(data.get("agents", ()))))
+            seats = tuple(range(len(data.get("players", ()))))
             data = {**data, "groups": {EVERYONE: seats, **data.get("groups", {})}}
         return data
 
     @model_validator(mode="after")
     def seated(self) -> Self:
-        if self.groups[EVERYONE] != tuple(range(len(self.agents))):
+        if self.groups[EVERYONE] != tuple(range(len(self.players))):
             raise ValueError("group_all_is_every_seat")
         for seats in self.groups.values():
             if not seats or len(set(seats)) != len(seats):
                 raise ValueError("group_seats_empty_or_repeated")
-            if not all(0 <= seat < len(self.agents) for seat in seats):
+            if not all(0 <= seat < len(self.players) for seat in seats):
                 raise ValueError("group_seat_out_of_range")
         return self
 
     @property
     def key(self) -> Digest:
         """Identifies the match wherever it is played."""
-        seating = [agent.key.encoded for agent in self.agents]
+        seating = [player.key for player in self.players]
         groups = {name: list(seats) for name, seats in self.groups.items()}
         return digest([seating, groups, self.conditions, self.games])
 
@@ -301,67 +412,18 @@ class MatchRecord(Record):
         return f"matches/{self.match.key}.{suffix}"
 
 
-class Model(Record):
-    """The checkpoint a benchmark is held for, run by `code` and playing with `config`.
-
-    `config` is the author's typed model or JSON, such as whether search runs
-    on top of the network and how; it is part of each agent's key. `code` is
-    the inference code's source files: its `Version`, recorded with each match
-    but not part of the key, so changed inference code reuses what was played.
-    """
-
-    config: Config = {}
-    version: Version = Version()
-
-    if TYPE_CHECKING:
-        # What a person writes; the validators below make the stored fields of it.
-        def __init__(
-            self,
-            *,
-            code: Sequence[Path | str] = (),
-            config: Mapping[str, object] | BaseModel | None = None,
-        ) -> None: ...
-
-    @model_validator(mode="before")
-    @classmethod
-    def versioned(cls, data: Any) -> Any:
-        # Source files given as `code`; a stored record holds their version.
-        if isinstance(data, dict) and "code" in data:
-            data = dict(data)
-            code = data.pop("code")
-            if isinstance(code, list | tuple):
-                if code:
-                    data["version"] = version_of(code)
-            elif isinstance(code, str):
-                data["version"] = {"source": code}  # etude-sdk 0.2: the files' digest
-        return data
-
-    @field_validator("config", mode="before")
-    @classmethod
-    def dumped(cls, value: object) -> object:
-        return as_config(value) if value is None or isinstance(value, BaseModel) else value
-
-    def agent(self, checkpoint: CheckpointRef) -> Agent:
-        """The agent this side is once `checkpoint` fills it."""
-        return Agent(
-            key=AgentKey(checkpoint=checkpoint.key, config=self.config),
-            name=re.sub(r"\s", "_", checkpoint.key.label),
-            artifact=checkpoint.artifact,
-            version=self.version,
-        )
-
-
 class Matchup(Record):
-    """A named line of a benchmark: `players` in seat order, each a fixed agent or the model.
+    """A named line of a benchmark: `players` in seat order, each a fixed player or an `Inference`.
 
-    Its value is the first player's against the second. Both may be the model,
-    such as search against no search. With no model seat it is played once,
-    not for each checkpoint, so two chosen checkpoints can meet:
-    `Model.agent(checkpoint)` seats one as the benchmark's model would be.
+    An `Inference` seat is filled by each checkpoint the benchmark is held
+    for. Its value is the first player's against the second. Both may be
+    inference seats, such as search against no search. With no inference seat
+    it is played once, not for each checkpoint, so two chosen checkpoints can
+    meet: `Inference.model(checkpoint)` seats one as the benchmark would.
     """
 
     name: str = Field(min_length=1, max_length=200)
-    players: tuple[Agent | Model, Agent | Model]
+    players: tuple[Player | Inference, Player | Inference]
     # Mapping, so a literal like `{"deal": 1}` type-checks as a condition.
     conditions: tuple[Mapping[str, JsonValue], ...] = Field(min_length=1)
     games: int = Field(ge=1)
@@ -371,30 +433,32 @@ class Matchup(Record):
 
     @property
     def fixed(self) -> bool:
-        """Whether every seat is a fixed agent, so no checkpoint changes its matches."""
-        return not any(isinstance(each, Model) for each in self.players)
+        """Whether every seat is a fixed player, so no checkpoint changes its matches."""
+        return not any(isinstance(each, Inference) for each in self.players)
 
     @property
     def definition(self) -> Digest:
         """What two eval runs must agree on to share the name: keys, not versions."""
+        # An inference seat's literal "model" predates the name `Inference`; it stays, so
+        # every matchup keeps the definition it was first held with.
         players = [
-            each.key.encoded if isinstance(each, Agent) else ["model", each.config]
+            ["model", each.config] if isinstance(each, Inference) else each.key
             for each in self.players
         ]
         return digest([self.name, players, self.conditions, self.games, self.tags])
 
     def matches(self, checkpoint: CheckpointRef | None = None) -> list[Match]:
-        """One match per condition, with `checkpoint` in every model's seat."""
-        seated: list[Agent] = []
+        """One match per condition, with `checkpoint` in every inference seat."""
+        seated: list[Player] = []
         for each in self.players:
-            if isinstance(each, Agent):
+            if not isinstance(each, Inference):
                 seated.append(each)
             elif checkpoint is None:
-                raise ValueError("model_seat_needs_a_checkpoint")
+                raise ValueError("inference_seat_needs_a_checkpoint")
             else:
-                seated.append(each.agent(checkpoint))
+                seated.append(each.model(checkpoint))
         return [
-            Match(agents=tuple(seated), conditions=dict(given), games=self.games)
+            Match(players=tuple(seated), conditions=dict(given), games=self.games)
             for given in self.conditions
         ]
 
@@ -403,7 +467,7 @@ class Benchmark(Record):
     """Matchups a model's checkpoints are each held for, to follow it through training.
 
     Its matchups are every matchup any of its eval runs was held with. A
-    matchup of fixed agents is held once, such as one checkpoint against an
+    matchup of fixed players is held once, such as one checkpoint against an
     earlier one, so an experiment can name the pairs it wants as checkpoints
     appear and a batch hold plays those not yet played.
     """
@@ -422,9 +486,9 @@ class Benchmark(Record):
 
 
 class RoundRobin(Record):
-    """Hand-picked agents, every two of them once per condition.
+    """Hand-picked players, every two of them once per condition.
 
-    Its entrants are every agent any of its eval runs entered. Seat swaps
+    Its entrants are every player any of its eval runs entered. Seat swaps
     belong inside the author's match.
     """
 
@@ -440,11 +504,11 @@ class RoundRobin(Record):
             raise ValueError("unsafe_tournament_name")
         return self
 
-    def matches(self, entrants: Iterable[Agent]) -> list[Match]:
+    def matches(self, entrants: Iterable[Player]) -> list[Match]:
         """Each pair once per condition, in key order; of two entrants with one key, the later."""
-        ordered = sorted({each.key.encoded: each for each in entrants}.items())
+        ordered = sorted({each.key: each for each in entrants}.items())
         return [
-            Match(agents=(a, b), conditions=dict(given), games=self.games)
+            Match(players=(a, b), conditions=dict(given), games=self.games)
             for (_, a), (_, b) in combinations(ordered, 2)
             for given in self.conditions
         ]
@@ -455,7 +519,7 @@ class TournamentRun(Record):
 
     tournament: Benchmark | RoundRobin
     checkpoints: tuple[CheckpointRef, ...] = ()
-    entrants: tuple[Agent, ...] = ()
+    entrants: tuple[Player, ...] = ()
     # (k, n): of the schedule's keys in sorted order, the run plays every nth from the kth.
     share: tuple[int, int] = (0, 1)
 
@@ -480,7 +544,7 @@ class TournamentRun(Record):
 
 class Scheduled(Record):
     """A match a tournament calls for; a benchmark's also names its matchup and, for a
-    matchup with a model seat, its checkpoint."""
+    matchup with an inference seat, its checkpoint."""
 
     match: Match
     matchup: str | None = None
@@ -493,7 +557,7 @@ class Tournament(Record):
 
     definition: Benchmark | RoundRobin
     checkpoints: tuple[CheckpointRef, ...] = ()
-    entrants: tuple[Agent, ...] = ()
+    entrants: tuple[Player, ...] = ()
 
     def schedule(self) -> list[Scheduled]:
         """Each matchup for each checkpoint, or once when fixed, or each pair of entrants;
@@ -531,7 +595,7 @@ def assemble(held: Iterable[TournamentRun]) -> Tournament:
     first = runs[0].tournament
     matchups: dict[str, Matchup] = {}
     checkpoints: dict[str, CheckpointRef] = {}
-    entrants: dict[str, Agent] = {}
+    entrants: dict[str, Player] = {}
     for run in runs:
         given = run.tournament
         if type(given) is not type(first) or given.environment != first.environment:
@@ -544,7 +608,7 @@ def assemble(held: Iterable[TournamentRun]) -> Tournament:
                     raise EtudeError("matchup_conflict", 409) from ValueError(each.name)
                 matchups[each.name] = each
         checkpoints.update((str(each.key), each) for each in run.checkpoints)
-        entrants.update((each.key.encoded, each) for each in run.entrants)
+        entrants.update((each.key, each) for each in run.entrants)
     definition = (
         first.model_copy(update={"matchups": tuple(matchups[name] for name in sorted(matchups))})
         if isinstance(first, Benchmark)

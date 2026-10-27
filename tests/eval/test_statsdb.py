@@ -2,34 +2,36 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
+import duckdb
 import pytest
 
 from etude.eval import query
-from etude.eval.match import Tables, agent, environment, evaluate
-from etude.eval.query import statsdb
-from etude.eval.records import Agent, Match
+from etude.eval.match import Tables, environment, evaluate
+from etude.eval.query import compare, statsdb
+from etude.eval.records import Code, Match
 from etude.run.errors import EtudeError
 from etude.run.storage import DirectoryStorage
-from tests.eval.games import play
+from tests.eval.games import play, play_game_seats
 from tests.run.storage import MeasuredStorage
 
 DUEL = environment("duel")
 
 
-def pair(tmp_path: Path) -> tuple[Agent, Agent]:
+def pair(tmp_path: Path) -> tuple[Code, Code]:
     script = tmp_path / "scripted.py"
     script.write_text("def act(state): return 0\n")
     return (
-        agent("strong", code=[script], config={"strength": 2}),
-        agent("weak", code=[script], config={"strength": 1}),
+        Code(name="strong", source=[script], config={"strength": 2}),
+        Code(name="weak", source=[script], config={"strength": 1}),
     )
 
 
-def deals(agents: tuple[Agent, Agent], *numbers: int) -> list[Match]:
-    return [Match(agents=agents, conditions={"deal": deal}, games=2) for deal in numbers]
+def deals(players: tuple[Code, Code], *numbers: int) -> list[Match]:
+    return [Match(players=players, conditions={"deal": deal}, games=2) for deal in numbers]
 
 
 def held(experiment: str, bucket: DirectoryStorage) -> tuple[int, int, int]:
@@ -48,13 +50,13 @@ def held(experiment: str, bucket: DirectoryStorage) -> tuple[int, int, int]:
 
 def test_an_experiment_holds_its_own_eval_runs_only(tmp_path: Path) -> None:
     bucket = DirectoryStorage(tmp_path / "bucket")
-    agents = pair(tmp_path)
+    players = pair(tmp_path)
     for experiment, run, numbers in (
         ("cards", "a", (0, 1)),
         ("cards", "b", (2,)),
         ("other", "c", (3,)),
     ):
-        evaluate(experiment=experiment, environment=DUEL, play=play, matches=deals(agents, *numbers),
+        evaluate(experiment=experiment, environment=DUEL, play=play, matches=deals(players, *numbers),
                  run=run, directory=tmp_path / run, storages=[bucket])  # fmt: skip
     # Every run of the experiment, joined; another experiment's run is not.
     assert held("cards", bucket) == (2, 3, 3 * 2 * 2)
@@ -66,8 +68,8 @@ def test_an_experiment_holds_its_own_eval_runs_only(tmp_path: Path) -> None:
 
 def test_opening_again_reads_only_what_arrived(tmp_path: Path) -> None:
     bucket = DirectoryStorage(tmp_path / "bucket")
-    agents = pair(tmp_path)
-    evaluate(experiment="cards", environment=DUEL, play=play, matches=deals(agents, 0, 1, 2),
+    players = pair(tmp_path)
+    evaluate(experiment="cards", environment=DUEL, play=play, matches=deals(players, 0, 1, 2),
              run="a", directory=tmp_path / "a", storages=[bucket])  # fmt: skip
     first = MeasuredStorage(bucket)
     statsdb("cards", first).close()
@@ -81,7 +83,7 @@ def test_opening_again_reads_only_what_arrived(tmp_path: Path) -> None:
     db.close()
 
     # One match more, in a run of its own: its declaration, environment, record and two tables.
-    evaluate(experiment="cards", environment=DUEL, play=play, matches=deals(agents, 3),
+    evaluate(experiment="cards", environment=DUEL, play=play, matches=deals(players, 3),
              run="b", directory=tmp_path / "b", storages=[bucket])  # fmt: skip
     grown = MeasuredStorage(bucket)
     db = statsdb("cards", grown)
@@ -146,3 +148,66 @@ def test_a_kept_database_is_rebuilt_on_request_or_for_another_schema(
         assert measured.requests > 0
         assert db.sql("select count(*) from plays").fetchone() == (2 * 2,)
         db.close()
+
+
+def _as_published(folder: Path) -> None:
+    """Rewrite an eval run as published etude-sdk stored it: `agents`, and seats as `player`."""
+    for file in folder.glob("matches/*.json"):
+        record = json.loads(file.read_text())
+        players = record["match"].pop("players")
+        record["match"]["agents"] = [
+            {"key": {"checkpoint": None, "code": each["name"], "recorded": None,
+                     "config": each["config"]},
+             "name": each["name"], "artifact": None, "version": each["version"]}
+            for each in players
+        ]  # fmt: skip
+        file.write_text(json.dumps(record))
+    for file in folder.glob("tables/*.parquet"):
+        # Its rows named the game's own seat, if any, `seat`.
+        columns = [name for name, *_ in duckdb.sql(f"describe from '{file}'").fetchall()]
+        renamed = "seat as player" + (", game_seat as seat" if "game_seat" in columns else "")
+        duckdb.sql(
+            f"copy (select * rename ({renamed}) from read_parquet('{file}'))"
+            f" to '{file}' (format parquet)"
+        )
+
+
+def test_eval_runs_published_etude_sdk_stored_read_as_players_and_seats(tmp_path: Path) -> None:
+    players = pair(tmp_path)
+    for name in ("now", "mixed"):
+        bucket = DirectoryStorage(tmp_path / name / "bucket")
+        for run, numbers in (("a", (0, 1)), ("b", (2,))):
+            evaluate(experiment="cards", environment=DUEL, play=play, run=run,
+                     matches=deals(players, *numbers), directory=tmp_path / name / run,
+                     storages=[bucket])  # fmt: skip
+    _as_published(tmp_path / "mixed" / "bucket" / "a")
+    stored = (tmp_path / "mixed" / "bucket" / "a" / "matches").glob("*.json")
+    assert all('"agents"' in file.read_text() for file in stored)
+    now = statsdb("cards", DirectoryStorage(tmp_path / "now" / "bucket"))
+    mixed = statsdb("cards", DirectoryStorage(tmp_path / "mixed" / "bucket"))
+    assert mixed.sql("select count(*) from plays where seat is not null").fetchone() == (3 * 2 * 2,)
+    assert mixed.sql("select name, kind from players order by name").fetchall() == [
+        ("strong", "code"),
+        ("weak", "code"),
+    ]
+    assert compare(mixed, table="plays", value="won") == compare(now, table="plays", value="won")
+
+
+def test_a_published_table_with_the_games_own_seat_keeps_each_players_rows(tmp_path: Path) -> None:
+    players = pair(tmp_path)
+    for name in ("now", "published"):
+        evaluate(experiment="cards", environment=DUEL, play=play_game_seats, run="a",
+                 matches=deals(players, 0, 1), directory=tmp_path / name / "a",
+                 storages=[DirectoryStorage(tmp_path / name / "bucket")])  # fmt: skip
+    _as_published(tmp_path / "published" / "bucket" / "a")
+    rows = (
+        "select p.name, x.game, x.game_seat, x.won from plays x join seats s"
+        " using (run, match, seat) join players p using (player) order by all"
+    )
+    now = statsdb("cards", DirectoryStorage(tmp_path / "now" / "bucket"))
+    published = statsdb("cards", DirectoryStorage(tmp_path / "published" / "bucket"))
+    assert published.sql(rows).fetchall() == now.sql(rows).fetchall()
+    assert {seat for (seat,) in now.sql("select distinct game_seat from plays").fetchall()} == {
+        0,
+        1,
+    }
