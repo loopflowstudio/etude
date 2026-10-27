@@ -39,7 +39,6 @@ from etude.launch.records import (
     LauncherError,
     MachineTemplate,
     OnDemand,
-    Preparation,
     Provider,
     Run,
     Status,
@@ -1381,35 +1380,3 @@ def test_a_retry_on_a_fresh_machine_never_reuses_a_name_storage_holds(tmp_path: 
     assert not (there / "checkpoints/steps-3.pt").exists()  # listed, never read
     _retrained(fresh, there, tmp_path / "one" / "weights.pt")
     _intact(storage)
-
-
-def test_only_work_that_carries_a_prepared_directory_may_read_and_write_prepared(
-    tmp_path: Path,
-) -> None:
-    storage = Storage()
-    journal = BucketJournal(
-        Place(name="east", bucket="b", prefix="etude", provider="s3", region="us-east-1"),
-        Bucket("b", "us-east-1", Keys(access_key="AKIA", secret_key="secret"), storage),
-    )
-    plain = Work(
-        attempt="a1",
-        command="true",
-        limit_seconds=30,
-        limit_kind="out_of_time",
-        seed=None,
-        until=None,
-        config=None,
-        repo=None,
-        commit=None,
-        run="run1",
-    )
-    journal.prepare(Packet(session="s1", deadline=None, work=(plain,)))
-    bootstrap = Bootstrap.model_validate_json(storage.objects["etude/sessions/s1/bootstrap.json"])
-    assert bootstrap.prepared is None
-
-    carrying = plain.model_copy(
-        update={"prepare": Preparation(command="true", paths=("uv.lock",), carry=True)}
-    )
-    journal.prepare(Packet(session="s2", deadline=None, work=(carrying,)))
-    bootstrap = Bootstrap.model_validate_json(storage.objects["etude/sessions/s2/bootstrap.json"])
-    assert bootstrap.prepared is not None and bootstrap.prepared.prefix == "etude/prepared/"

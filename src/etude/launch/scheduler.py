@@ -111,8 +111,6 @@ def _preparation(prepared: Prepared) -> str:
     said = [prepared.key[:12], f"{prepared.seconds:.1f} s"]
     if prepared.size_bytes is not None:
         said.append(f"{prepared.size_bytes} bytes")
-    if prepared.restored_bytes is not None:
-        said.append(f"restored {prepared.restored_bytes} bytes")
     if prepared.cause is not None:
         said.append(prepared.cause)
     return ", ".join(said)

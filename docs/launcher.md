@@ -1049,7 +1049,7 @@ This opt-in view reads the database without a scheduling pass or machine refresh
 It shows queued, machine asked for, machine confirmed, worker up, code started,
 `prepared (built|reused|rejected)` for a job with `prepare`, and finished, for every
 retained attempt. The preparation's evidence is its key, time and size, and any
-restored carried archive or rejection cause. Missing timestamps say `not recorded`.
+rejection cause. Missing timestamps say `not recorded`.
 The existing database has a provider receipt but no timestamp for its confirmation;
 the confirmation phase therefore has no timestamp and says `receipt retained`
 when that evidence exists. It never borrows another phase's
@@ -1315,35 +1315,12 @@ is still checked against its pins. Least recently used directories are deleted
 beyond half the disk available to them; one an attempt is using is kept.
 Everything kept ends with a rental.
 
-With `carry=True`, a build also writes `$ETUDE_CARRIED_DIR`, kept in the
-machine's storage so the next rental starts warm. Point uv's cache at it:
-
-```python
-Preparation(
-    command='UV_CACHE_DIR="$ETUDE_CARRIED_DIR" UV_PROJECT_ENVIRONMENT="$ETUDE_PREPARED_DIR/.venv"'
-    " uv sync --frozen",
-    paths=("pyproject.toml", "uv.lock"),
-    carry=True,
-)
-```
-
-It is keyed by `paths` and the platform alone, so a new command or input still
-finds it. A build on a machine that does not have it reads `prepared/CARRY.json`
-in storage and restores the archive it names, verified like any input; a build
-that restored nothing is archived to `prepared/SHA256-SIZE.tar` by the worker,
-alongside the job, and the locator is written after its archive:
-
-```text
-prepare: restored 9a1e5c07f2d3 (1103626240 bytes)
-prepare: built 3f9c0e21d4b7 (3.0 s, 1203841024 bytes)
-carry: refused 9a1e5c07f2d3 (Mismatch: download length or SHA256 mismatch)
-```
-
-The command always runs and must check what it finds; uv checks every wheel
-against `uv.lock`. uv still rebuilds the project itself in a new checkout, so
-install a prebuilt native package as a named input, as above. A machine without
-storage keeps the directory locally. Archives stay in storage until you delete
-them.
+A new rental builds again. To keep that build short, install a prebuilt native
+package as a named input, as above, rather than compiling it, and let the input
+arrive through the cache's concurrent download. Carrying uv's cache to the next
+rental through storage was measured and dropped: on a RunPod L4 a 7 GB cache of
+wheels took 124 s to restore, against 45–150 s for a fresh `uv sync` from PyPI,
+and every new lock file uploaded another 7 GB.
 
 The pinned official PyTorch example has a repeatable CPU check:
 `uv run python scripts/test_pytorch_image.py`. It pulls the image, then checks

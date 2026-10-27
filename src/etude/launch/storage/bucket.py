@@ -71,11 +71,9 @@ class BucketJournal:
           out/worker.log/OFFSET         the worker's log, in pieces by first byte
           out/worker-log.json           where they end (`WorkerLog`)
         PREFIX/sources/SHA256.tar       a commit's source archive, named by its digest
-        PREFIX/prepared/                carried directories (`etude.launch.worker.carried`)
 
-    A machine may write only under the folders of the runs it is given, under
-    its own `out/`, and, for work that carries a prepared directory, read and
-    write under `prepared/`, which every machine shares.
+    A machine may write only under the folders of the runs it is given, and
+    under its own `out/`.
 
     Polling never re-reads bytes this journal holds: an object that cannot
     change (a log piece, a packet) is read once, and a changing one (records,
@@ -102,12 +100,6 @@ class BucketJournal:
         """What a machine may write for one run: everything under its folder."""
         return self._bucket.grant(self._run(run), seconds, run)
 
-    def _prepared(self, works: Sequence[Work], seconds: int) -> Grant | None:
-        """Read and write under `prepared/`, only for work whose preparation carries."""
-        if not any(work.prepare is not None and work.prepare.carry for work in works):
-            return None
-        return self._bucket.grant(f"{self._prefix}/prepared/", seconds, "prepared", read=True)
-
     def prepare(self, packet: Packet, *, expires_at: datetime | None = None) -> BootstrapLinks:
         """Write a session's instructions and grants that last until `expires_at`.
 
@@ -129,7 +121,6 @@ class BucketJournal:
                     "inbox_url": self._bucket.get_url(root + "inbox.json", seconds),
                     "fetch": self._fetches(packet.session, packet.work),
                     "restore": self._restore(packet.work),
-                    "prepared": self._prepared(packet.work, seconds),
                 }
             )
             self._bucket.put(root + "inbox.json", Inbox().model_dump_json().encode())
@@ -362,7 +353,6 @@ class BucketJournal:
                     "access": self._access(work.run, _seconds_until(deadline)),
                     "fetch": self._fetches(session_id, [work]),
                     "restore": self._restore([work]),
-                    "prepared": self._prepared([work], _seconds_until(deadline)),
                 }
             )
             inbox = inbox.model_copy(update={"work": (*inbox.work, entry)})

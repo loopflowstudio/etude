@@ -29,7 +29,6 @@ from etude.launch.ssh import SSH
 from etude.launch.storage.s3 import Bucket, Keys, Reply
 from tests.launch.counting import Counting, Counts
 from tests.launch.fake import Bench, bench
-from tests.launch.test_prepare import Shelf, build_on, save_from
 from tests.launch.test_source import repository  # noqa: F401
 
 
@@ -146,7 +145,7 @@ def test_cohort_git_and_database_counts(
         (["pools"], 42, ("numpy", "boto3", "etude.launch.worker")),
         (
             ["worker", "{directory}"],
-            33,  # the worker loads etude.launch.worker.carried
+            32,
             (
                 "numpy",
                 "boto3",
@@ -285,23 +284,3 @@ def test_counting_covers_physical_transports(
         assert bucket.get("key") == b""
         assert SSH("fixture").call("observe", "worker").observation is None
         assert counting.snapshot() == Counts(provider=1, bucket=2, ssh=1)
-
-
-def test_a_carried_build_reads_the_bucket_once_for_its_locator(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """+1 bucket read per build without the directory on its machine; reuse reads nothing."""
-    shelf = Shelf()
-    counting = Counting(bench(tmp_path).store)
-    send = shelf.send
-    monkeypatch.setattr(shelf, "send", counting.transport("bucket", send))
-    with counting.record():
-        build_on(tmp_path / "a", shelf, monkeypatch)  # no locator yet
-        assert counting.snapshot().bucket == 1
-    save_from(tmp_path / "a", shelf)
-    with counting.record():
-        build_on(tmp_path / "b", shelf, monkeypatch)  # the locator, then its archive
-        assert counting.snapshot().bucket == 2
-    with counting.record():
-        build_on(tmp_path / "b", shelf, monkeypatch)  # prepared and carried here: reused
-        assert counting.snapshot().bucket == 0

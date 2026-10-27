@@ -1,5 +1,4 @@
-"""A job's preparation on a real local pool: kept, reused, rejected and rebuilt;
-and its carried directory, restored on a new machine from a bucket held in memory."""
+"""A job's preparation on a real local pool: kept, reused, rejected and rebuilt."""
 
 from __future__ import annotations
 
@@ -14,19 +13,14 @@ import time
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.parse import urlsplit
 
 import pytest
 
 from etude.cli import main
 from etude.launch.client import default
-from etude.launch.logging import log_to
 from etude.launch.records import Input, Job, Preparation, Runtime, Status
 from etude.launch.scheduler import Scheduler
-from etude.launch.storage.s3 import BucketAccess, Grant, Keys, PostForm, Reply, StorageUnavailable
-from etude.launch.worker.carried import REQUEST, Locator, restore
-from etude.launch.worker.courier import Courier
-from etude.launch.worker.prepared import Key, Receipt, carried_home, carry, evict, home, prepare
+from etude.launch.worker.prepared import Receipt, evict, home
 from tests.launch.counting import job_text
 from tests.launch.test_worker_attempts import local
 
@@ -269,185 +263,3 @@ def test_eviction_removes_the_least_recently_used_directory_not_one_in_use(
     assert [p.name for p in home().glob("*.json")] == [middle.name]
     assert not (home() / oldest.stem).exists() and not (home() / newest.stem).exists()
     assert [line.split()[1] for line in lines] == ["evicted", "evicted"]
-
-
-CARRY = """
-test -f "$ETUDE_CARRIED_DIR/wheel" && echo "found wheel" >> "{count}"
-echo wheel > "$ETUDE_CARRIED_DIR/wheel"
-cp lock.txt "$ETUDE_PREPARED_DIR/lock"
-"""
-
-
-def test_a_changed_declared_input_rebuilds_with_the_same_carried_directory(
-    tmp_path: Path,
-) -> None:
-    repo, count = _repo(tmp_path), tmp_path / "count"
-    scheduler = local(tmp_path)
-    prepare = Preparation(
-        command=CARRY.format(count=count), paths=("lock.txt",), inputs=("engine",), carry=True
-    )
-    engine = _input(tmp_path, "engine", b"engine 1")
-    job = _job(repo, count, prepare=prepare, inputs=(engine,))
-    assert _outcomes(_launch(scheduler, job)[1]) == ["built"]
-    assert not count.exists()  # nothing carried yet
-
-    new_engine = _input(tmp_path, "engine2", b"engine 2").model_copy(update={"name": "engine"})
-    status, log = _launch(scheduler, job.model_copy(update={"inputs": (new_engine,)}))
-    assert status.outcome == "succeeded" and _outcomes(log) == ["built"]
-    assert count.read_text() == "found wheel\n"
-    assert len([p for p in carried_home().iterdir() if p.is_dir()]) == 1
-
-    (repo / "lock.txt").write_text("lock 2\n")  # a declared path: a new carry key too
-    _commit(repo)
-    assert _outcomes(_launch(scheduler, job)[1]) == ["built"]
-    assert count.read_text() == "found wheel\n"
-    assert len([p for p in carried_home().iterdir() if p.is_dir()]) == 2
-
-
-class Shelf:
-    """A bucket's `prepared/` folder, held in memory and reached as S3 is."""
-
-    def __init__(self) -> None:
-        self.objects: dict[str, bytes] = {}
-        self.refused = ""  # PUTs of keys ending in this are refused
-        self.grant = Grant(
-            prefix="p/prepared/",
-            bucket=BucketAccess(
-                name="lab",
-                region="r",
-                host="lab.example",
-                keys=Keys(access_key="a", secret_key="s"),
-            ),
-        )
-
-    def send(self, method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Reply:
-        key = urlsplit(url).path[1:]
-        if method == "PUT":
-            if self.refused and key.endswith(self.refused):
-                return Reply(status=403, body=b"")
-            self.objects[key] = body or b""
-            return Reply(status=200, body=b"", headers={"etag": '"stored"'})
-        found = self.objects.get(key)
-        if found is None:
-            return Reply(status=404, body=b"")
-        etag = f'"{hashlib.md5(found).hexdigest()}"'
-        start, _, end = headers.get("Range", "bytes=0-").removeprefix("bytes=").partition("-")
-        part = found[int(start) : int(end or len(found) - 1) + 1]
-        fields = {"etag": etag, "content-length": str(len(part))}
-        if "Range" not in headers:
-            return Reply(status=200, body=part, headers=fields)
-        fields["content-range"] = f"bytes {start}-{end}/{len(found)}"
-        return Reply(status=206, body=part, headers=fields)
-
-    def locator(self, key: str) -> Locator | None:
-        raw = self.objects.get(f"p/prepared/{key}.json")
-        return None if raw is None else Locator.model_validate_json(raw)
-
-
-KEY = Key(command="stub", paths={"uv.lock": "1"}, inputs={}, environment="", machine={"os": "t"})
-
-
-def build_on(machine: Path, shelf: Shelf, monkeypatch: pytest.MonkeyPatch) -> tuple[list[str], str]:
-    """One attempt's preparation on `machine`, as a worker composes it; its log and what
-    its command found carried. A build that restored nothing asks to be saved."""
-    monkeypatch.setenv("ETUDE_HOME", str(machine))
-    lines: list[str] = []
-    found = ""
-
-    def fetch(directory: Path) -> int | None:
-        return restore(shelf.grant, KEY.carry, directory, "attempt", shelf.send)
-
-    def build(directory: Path) -> bool:
-        nonlocal found
-        with carry(KEY.carry, fetch, lambda: True, lines.append) as carried:
-            assert carried is not None
-            # As uv's cache does, it links into itself by absolute path.
-            wheel = carried.directory / "link" / "wheel"
-            found = wheel.read_text() if wheel.exists() else ""
-            (carried.directory / "archive").mkdir(exist_ok=True)
-            (carried.directory / "archive" / "wheel").write_text("wheel 1")
-            if not (carried.directory / "link").is_symlink():
-                (carried.directory / "link").symlink_to(carried.directory / "archive")
-            (directory / "python").write_text("stub")
-            if not carried.kept and carried.restored_bytes is None:
-                (machine / REQUEST).write_text(KEY.carry)
-        return True
-
-    with prepare(KEY, build, lambda: True, lines.append) as ready:
-        assert ready is not None
-    return lines, found
-
-
-def save_from(machine: Path, shelf: Shelf) -> str:
-    """What the machine's courier logs as it carries out an attempt that asked to be saved."""
-    session = machine / "sessions" / "s1"
-    attempt = session / "attempts" / "a1"
-    attempt.mkdir(parents=True)
-    (attempt / "run").write_text("r1")
-    if (machine / REQUEST).exists():
-        (machine / REQUEST).replace(attempt / REQUEST)
-    form = PostForm(url="https://lab.example/", fields={})
-    courier = Courier(
-        session,
-        Grant(prefix="p/sessions/s1/out/", form=form),
-        "https://lab.example/inbox",
-        shelf.send,
-        runs={"r1": Grant(prefix="p/r1/", bucket=shelf.grant.bucket)},
-    )
-    courier.allow_carry(shelf.grant)
-    with log_to(machine / "worker.log"):
-        courier.carry_out()
-        courier.carry_out()  # saved once
-    return (machine / "worker.log").read_text()
-
-
-def test_a_new_machine_restores_the_carried_directory_then_builds(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    shelf = Shelf()
-    lines, found = build_on(tmp_path / "a", shelf, monkeypatch)
-    assert _outcomes("\n".join(lines)) == ["built"] and found == ""
-    log = save_from(tmp_path / "a", shelf)
-    locator = shelf.locator(KEY.carry)
-    assert locator is not None and f"p/prepared/{locator.archive}" in shelf.objects
-    assert log.count(f"saved {KEY.carry[:12]} ({locator.size_bytes} bytes)") == 1
-
-    lines, found = build_on(tmp_path / "b", shelf, monkeypatch)  # a new rental
-    assert _outcomes("\n".join(lines)) == ["restored", "built"] and found == "wheel 1"
-    assert not (tmp_path / "b" / REQUEST).exists()  # restored, so not saved again
-
-
-def test_a_corrupted_carried_archive_is_refused_and_the_build_starts_cold(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    shelf = Shelf()
-    build_on(tmp_path / "a", shelf, monkeypatch)
-    save_from(tmp_path / "a", shelf)
-    locator = shelf.locator(KEY.carry)
-    assert locator is not None
-    archive = f"p/prepared/{locator.archive}"
-    shelf.objects[archive] = b"X" + shelf.objects[archive][1:]
-
-    lines, found = build_on(tmp_path / "b", shelf, monkeypatch)
-    assert _outcomes("\n".join(lines)) == ["built"] and found == ""
-    assert (
-        f"carry: refused {KEY.carry[:12]} (Mismatch: download length or SHA256 mismatch)" in lines
-    )
-    assert (tmp_path / "b" / REQUEST).exists()  # a cold build is saved again
-
-
-def test_a_locator_is_written_only_after_its_archive_is_stored(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    shelf = Shelf()
-    build_on(tmp_path / "a", shelf, monkeypatch)
-    shelf.refused = ".tar"
-    log = save_from(tmp_path / "a", shelf)
-    assert "carry: not saved (Denied: PUT p/prepared/" in log
-    assert not [key for key in shelf.objects if key.startswith("p/prepared/")]
-
-
-def test_a_grant_without_keys_cannot_restore(tmp_path: Path) -> None:
-    form_only = Grant(prefix="p/prepared/", form=PostForm(url="https://lab.example/", fields={}))
-    with pytest.raises(StorageUnavailable, match="no keys"):
-        restore(form_only, KEY.carry, tmp_path / "carried", "attempt")

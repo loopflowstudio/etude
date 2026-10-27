@@ -148,17 +148,6 @@ def test_an_s3_grant_asks_sts_for_keys_to_one_folder_and_brings_a_form() -> None
     assert "s3:DeleteObject" in statement["Action"] and "s3:GetObject" not in statement["Action"]
 
 
-def test_a_reading_s3_grant_asks_sts_for_keys_that_also_read_its_folder() -> None:
-    storage = Storage([Reply(status=200, body=GRANTED)])
-    bucket(storage).grant("etude/prepared/", 3600, "prepared", read=True)
-    form = {
-        name: values[0] for name, values in parse_qs((storage.asked[0][2] or b"").decode()).items()
-    }
-    (statement,) = json.loads(form["Policy"])["Statement"]
-    assert statement["Resource"] == "arn:aws:s3:::examplebucket/etude/prepared/*"
-    assert "s3:GetObject" in statement["Action"] and "s3:PutObject" in statement["Action"]
-
-
 def test_an_s3_grant_is_a_form_alone_when_sts_refuses_or_the_caller_holds_temporary_keys() -> None:
     refused = bucket(Storage([Reply(status=403, body=b"<ErrorResponse/>")])).grant("p/", 3600, "r")
     assert refused.bucket is None and refused.form is not None
