@@ -104,7 +104,11 @@ def emit(
         "completed": completed,
         "reused_bytes": reused,
     }
-    raw = json.dumps(event, separators=(",", ":"))
+    deliver(json.dumps(event, separators=(",", ":")))
+
+
+def deliver(raw: str) -> None:
+    """Hand one observation to this thread's sink, or the worker log without one."""
     sink = _sink.get()
     if sink is None:
         write_log("transfer", raw)

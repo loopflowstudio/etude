@@ -1,4 +1,8 @@
-"""Copy a session's inbox and evidence, independent of who supplies its machine."""
+"""Copy a session's inbox and evidence, independent of its machine supplier.
+
+Courier publishes tracked files in order and final outputs with bounded parallel
+I/O. Its invoking thread owns transfer retention, the sent cache and completion.
+"""
 
 from __future__ import annotations
 
@@ -11,6 +15,9 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Iterator
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from contextvars import copy_context
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO
@@ -55,7 +62,7 @@ from etude.launch.storage.s3 import (
     read,
     read_version,
 )
-from etude.launch.storage.transport import attribute, observe
+from etude.launch.storage.transport import attribute, deliver, observe
 
 ROOT = Path("/run/etude/sessions")
 # A log piece waits about a twentieth of its attempt's age, between 15 seconds
@@ -63,6 +70,25 @@ ROOT = Path("/run/etude/sessions")
 # and a 12-hour attempt leaves about two hundred pieces, not one per poll.
 _PIECE_LEAST_SECONDS = 15.0
 _PIECE_MOST_SECONDS = 300.0
+# Small independent evidence objects are latency-bound; cap in-flight files.
+_OUTPUT_UPLOADS = 8
+
+
+@dataclass(frozen=True)
+class _Upload:
+    path: Path
+    run: str
+    key: str
+    size: int
+    modified: float
+
+
+@dataclass(frozen=True)
+class _Uploaded:
+    file: _Upload
+    transfers: tuple[str, ...]
+    error: BaseException | None
+
 
 
 def _diagnose(operation: str, error: BaseException, attempt: str | None = None) -> None:
@@ -110,9 +136,10 @@ class _Folder:
 
     def write(self, key: str, stream: IO[bytes]) -> None:
         """Store one object from an open file, read from its start: in parts with keys."""
-        if self.bucket is not None:
+        bucket = self.bucket
+        if bucket is not None:
             try:
-                self.bucket.put_parts(self.prefix + key, _chunks(stream))
+                bucket.put_parts(self.prefix + key, _chunks(stream))
                 return
             except Denied:
                 if self.form is None:
@@ -325,16 +352,88 @@ class Courier:
                     raise
                 write(target, entry.work.model_dump_json())
 
-    def _put(self, path: Path, run: str, key: str) -> None:
+    def _pending(self, path: Path, run: str, key: str) -> _Upload | None:
         stat = path.stat()
-        seen = (stat.st_size, stat.st_mtime)
         sent = self._sent.get(f"{run}/{key}")
-        if sent is not None and immutable(key):
-            return  # never replaced, so never sent again
-        if sent != seen:
-            with path.open("rb") as stream:
-                self._runs[run].write(key, stream)
-            self._sent[f"{run}/{key}"] = seen
+        if sent is not None and (immutable(key) or sent == (stat.st_size, stat.st_mtime)):
+            return None
+        return _Upload(path, run, key, stat.st_size, stat.st_mtime)
+
+    def _upload(self, file: _Upload) -> _Uploaded:
+        # Network work may run in a thread. The retaining owner receives its
+        # observations later, on the thread that invoked output delivery.
+        transfers: list[str] = []
+        try:
+            with observe(transfers.append), file.path.open("rb") as stream:
+                self._runs[file.run].write(file.key, stream)
+        except BaseException as error:
+            return _Uploaded(file, tuple(transfers), error)
+        return _Uploaded(file, tuple(transfers), None)
+
+    def _accept(self, uploaded: _Uploaded) -> None:
+        for raw in uploaded.transfers:
+            deliver(raw)
+        if uploaded.error is not None:
+            raise uploaded.error
+        file = uploaded.file
+        self._sent[f"{file.run}/{file.key}"] = (file.size, file.modified)
+
+    def _put(self, path: Path, run: str, key: str) -> None:
+        if file := self._pending(path, run, key):
+            self._accept(self._upload(file))
+
+    def _put_outputs(self, outputs: Path, run: str, attempt: str) -> None:
+        paths = iter(
+            sorted(
+                p
+                for p in outputs.rglob("*")
+                if p.is_file()
+                and not p.is_symlink()
+                and p.resolve().is_relative_to(outputs.resolve())
+                and p.relative_to(outputs).as_posix() != RESULT
+            )
+        )
+        error: BaseException | None = None
+        with ThreadPoolExecutor(max_workers=_OUTPUT_UPLOADS) as pool:
+
+            def submit() -> Future[_Uploaded] | None:
+                nonlocal error
+                if error is not None:
+                    return None
+                try:
+                    for path in paths:
+                        name = path.relative_to(outputs).as_posix()
+                        if file := self._pending(path, run, f"attempts/{attempt}/{name}"):
+                            return pool.submit(copy_context().run, self._upload, file)
+                except BaseException as raised:
+                    error = raised
+                return None
+
+            pending = {future for _ in range(_OUTPUT_UPLOADS) if (future := submit()) is not None}
+            try:
+                while pending:
+                    completed, pending = wait(pending, return_when=FIRST_COMPLETED)
+                    for future in completed:
+                        try:
+                            self._accept(future.result())
+                        except BaseException as raised:
+                            error = error or raised
+                    if error is None:
+                        pending.update(
+                            future for _ in completed if (future := submit()) is not None
+                        )
+            except BaseException as raised:
+                error = error or raised
+            finally:
+                # A caller interruption must also retain in-flight observations.
+                # Workers share its deadline; no new work starts after failure.
+                for future in pending:
+                    try:
+                        self._accept(future.result())
+                    except BaseException as raised:
+                        error = error or raised
+        if error is not None:
+            raise error
 
     def _clear(self, run: str, removed: list[str]) -> None:
         """Delete what the job retired, but only what this courier uploaded."""
@@ -412,16 +511,7 @@ class Courier:
                 self._seal(home / "log", run, attempt, log)
             record = record.model_copy(update={"log_ends": log.ends})
         if done:
-            for path in sorted(
-                p
-                for p in outputs.rglob("*")
-                if p.is_file()
-                and not p.is_symlink()
-                and p.resolve().is_relative_to(outputs.resolve())
-            ):
-                name = path.relative_to(outputs).as_posix()
-                if name != RESULT:  # the record carries it
-                    self._put(path, run, f"attempts/{attempt}/{name}")
+            self._put_outputs(outputs, run, attempt)
             finished: dict[str, JsonValue] = json.loads((home / "finished.json").read_text())
             record = record.model_copy(update={"finished": finished})
         note = home / "record.json"
