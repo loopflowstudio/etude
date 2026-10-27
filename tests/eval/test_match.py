@@ -318,6 +318,21 @@ def test_a_models_inference_code_is_its_version_not_its_key(tmp_path: Path) -> N
     assert Inference(config=Direct()).model(copied).key != before.key
 
 
+def test_where_a_checkpoint_stood_is_carried_by_its_seat_and_is_not_its_identity() -> None:
+    file = ArtifactRef(uri="hf://lab/u600.pt", sha256=sha256(b"a").hexdigest())
+    key = CheckpointKey(address=file.uri)
+    seated = Inference().model(CheckpointRef(key=key, artifact=file, at={"updates": 600}))
+    corrected = Inference().model(
+        CheckpointRef(key=key, artifact=file, at={"updates": 612}, line="seed-2")
+    )
+    rival = Code(name="rival", source=[__file__])
+    assert (seated.checkpoint.at, corrected.checkpoint.at) == ({"updates": 600}, {"updates": 612})
+    assert (seated.checkpoint.line, corrected.checkpoint.line) == (None, "seed-2")
+    # Correcting a position or a line neither forks the model nor replays its match.
+    assert seated.key == corrected.key
+    assert Match(players=(seated, rival)).key == Match(players=(corrected, rival)).key
+
+
 def test_a_code_players_version_is_its_commit_and_tracked_files_in_a_checkout_or_launched(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

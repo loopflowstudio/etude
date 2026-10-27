@@ -141,7 +141,7 @@ def test_a_folders_report_is_an_index_of_its_experiments_pages(
     found = index(runs, built, href=lambda stem: f"{stem}.html")
     rows = {entry.experiment: entry for entry in found.entries}
     assert rows["broken"].page is None and rows["broken"].error == "RuntimeError: typo"
-    assert rows["fresh"].error is not None and "no training runs of 'fresh'" in rows["fresh"].error
+    assert rows["fresh"].error is not None and "no runs of 'fresh'" in rows["fresh"].error
     lab, whole = rows["lab"].page, built[folder / "lab.py"]
     assert lab is not None and isinstance(whole, Page)
     # The index keeps the page but its line data, which it never draws.
@@ -214,6 +214,6 @@ def test_a_panels_matches_are_a_matchup_or_a_tag_of_a_tournament_never_both() ->
 
 def test_an_absent_experiments_error_names_the_source_as_it_was_given(tmp_path: Path) -> None:
     trained(tmp_path / "runs", "lab", "a")
-    given = re.escape(f"no training runs of 'fresh' in {tmp_path / 'runs'};")
+    given = re.escape(f"no runs of 'fresh' in {tmp_path / 'runs'};")
     with pytest.raises(ValueError, match=given):
         build(tmp_path / "runs", experiment_file(tmp_path, "fresh"))

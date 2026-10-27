@@ -14,3 +14,6 @@ timeout and cancellation.
 
 See [README.md](README.md#develop) for check commands and
 [AGENTS.md](AGENTS.md) for repository conventions.
+
+Run `node --test tests/test_charts.cjs` for headless report chart checks (Node 22).
+These exercise the chart model without a browser; CI runs them with the client tests.

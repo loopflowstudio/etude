@@ -7,9 +7,9 @@ beside Etude's own tables:
 | table | columns |
 |---|---|
 | `runs` | run, experiment, environment (identity), environment_name, environment_config, tournament |
-| `players` | player (its key, encoded), name, kind (`model` or `code`), checkpoint (its key), artifact (digest), uri, config, and `config.KEY` per scalar config key |
+| `players` | player (its key, encoded), name, kind (`model` or `code`), checkpoint (its key), artifact (digest), uri, config, at, at_conflict, line, line_conflict, and `config.KEY` per scalar config key |
 | `matches` | run, match, conditions, games, seed, state, error, wall_ms |
-| `seats` | run, match, seat, player, and the version that played: commit, source (digest) |
+| `seats` | run, match, seat, player, the version that played: commit, source (digest), at (where its checkpoint stood, or null) and line (the learner it belongs to, or null) |
 | `groups` | run, match, group, seat |
 | `tournaments` | tournament, format (`benchmark` or `round_robin`), environment, conflict |
 | `schedule` | tournament, match, matchup, checkpoint (its key) and the matchup's tags of a benchmark's match; no checkpoint for a matchup of fixed players |
@@ -22,8 +22,13 @@ When its eval runs disagree, `conflict` names how (`tournament_conflict`,
 `training_checkpoints` holds every checkpoint the experiment's training runs
 recorded, read from their stored JSON, so a model joins to where its
 run's clocks stood by key (`players.checkpoint = training_checkpoints.checkpoint`),
-never by its bytes. A match counts once whichever version played it: the
-latest record holding it (`seats.commit` tells which).
+never by its bytes. A seat may say where its checkpoint stood itself
+(`etude.eval.records.CheckpointRef.at`): `players.at` is the position from the
+latest match record giving one, and `players.at_conflict` lists every position
+given when they differ, else null; `players.line` and `players.line_conflict`
+are the same for the learner it belongs to (`CheckpointRef.line`). A match
+counts once whichever version played it: the latest record holding it
+(`seats.commit` tells which).
 
 The database is a DuckDB file under `ETUDE_HOME/statsdb`, one per experiment
 and store, derived from the store and never the authority. Opening it lists
@@ -53,6 +58,7 @@ import os
 import tempfile
 import warnings
 from bisect import bisect_left
+from collections import defaultdict
 from collections.abc import Iterator, Sequence
 from functools import cache
 from pathlib import Path, PurePosixPath
@@ -93,7 +99,7 @@ NUMERIC = ("BOOLEAN", "BIGINT", "DOUBLE")
 # Keys and coordinates of an author table's rows: never a value.
 KEYS = ("seat", "group", "game", "run", "match")
 # A kept database of another schema is deleted and read again from its store.
-SCHEMA = 3
+SCHEMA = 4
 
 _ENVIRONMENT_FILE = "environment.json"
 _PLAYER: TypeAdapter[Player] = TypeAdapter(Player)
@@ -172,7 +178,7 @@ def _create(db: duckdb.DuckDBPyConnection, experiment: str, storage: Storage) ->
     )
     db.execute(
         "create table seats (run VARCHAR, match VARCHAR, seat BIGINT, player VARCHAR,"
-        " commit VARCHAR, source VARCHAR)"
+        ' commit VARCHAR, source VARCHAR, "at" JSON, line VARCHAR)'
     )
     db.execute('create table "groups" (run VARCHAR, match VARCHAR, "group" VARCHAR, seat BIGINT)')
     db.execute(
@@ -332,9 +338,20 @@ def _match(db: duckdb.DuckDBPyConnection, run: str, record: MatchRecord) -> bool
     )  # fmt: skip
     _insert(
         db,
-        "insert into seats values (?, ?, ?, ?, ?, ?)",
+        "insert into seats values (?, ?, ?, ?, ?, ?, ?, ?)",
         [
-            [run, match.key, seat, player.key, player.version.commit, player.version.source]
+            [
+                run,
+                match.key,
+                seat,
+                player.key,
+                player.version.commit,
+                player.version.source,
+                _canonical(player.checkpoint.at)
+                if isinstance(player, Model) and player.checkpoint.at
+                else None,
+                player.checkpoint.line if isinstance(player, Model) else None,
+            ]
             for seat, player in enumerate(match.players)
         ],  # fmt: skip
     )
@@ -345,6 +362,11 @@ def _match(db: duckdb.DuckDBPyConnection, run: str, record: MatchRecord) -> bool
     )
     _remember_players(db, match.players)
     return True
+
+
+def _canonical(value: object) -> str:
+    """JSON with sorted keys, so equal positions compare equal as text."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
 def _remember_players(db: duckdb.DuckDBPyConnection, players: Sequence[Player]) -> None:
@@ -533,15 +555,18 @@ def _players_table(db: duckdb.DuckDBPyConnection, players: dict[str, list[Player
             columns[key] = seen.pop()
         else:
             warnings.warn(f"player config {key!r} has types {sorted(seen)}; only in `config`")
+    positions = _seated(db, '"at"')
+    lines = _seated(db, "line")
     db.execute(
         "create or replace table players (player VARCHAR, name VARCHAR, kind VARCHAR,"
-        " checkpoint VARCHAR, artifact VARCHAR, uri VARCHAR, config JSON"
+        ' checkpoint VARCHAR, artifact VARCHAR, uri VARCHAR, config JSON, "at" JSON,'
+        " at_conflict JSON, line VARCHAR, line_conflict JSON"
         + "".join(f', "config.{key}" {kind}' for key, kind in columns.items())
         + ")"
     )
     _insert(
         db,
-        f"insert into players values ({', '.join('?' for _ in range(7 + len(columns)))})",
+        f"insert into players values ({', '.join('?' for _ in range(11 + len(columns)))})",
         [
             [
                 identity,
@@ -549,6 +574,12 @@ def _players_table(db: duckdb.DuckDBPyConnection, players: dict[str, list[Player
                 given[0].kind,
                 *_checkpoint(given[0]),
                 json.dumps(given[0].config),
+                positions[identity][0] if positions[identity] else None,
+                f"[{','.join(sorted(positions[identity]))}]"
+                if len(positions[identity]) > 1
+                else None,
+                lines[identity][0] if lines[identity] else None,
+                json.dumps(sorted(lines[identity])) if len(lines[identity]) > 1 else None,
                 *(flat[identity].get(key) for key in columns),
             ]
             for identity, given in players.items()
@@ -562,6 +593,18 @@ def _checkpoint(player: Player) -> tuple[str | None, str | None, str | None]:
         return None, None, None
     checkpoint = player.checkpoint
     return str(checkpoint.key), checkpoint.artifact.sha256, checkpoint.artifact.uri
+
+
+def _seated(db: duckdb.DuckDBPyConnection, column: str) -> defaultdict[str, list[str]]:
+    """Each player's distinct values of a seats column, the latest match record's first."""
+    found: defaultdict[str, list[str]] = defaultdict(list)
+    for identity, value in db.execute(
+        f"select s.player, s.{column} from seats s join matches m using (run, match)"
+        f" where s.{column} is not null order by m.wall_ms desc, s.run desc"
+    ).fetchall():
+        if value not in found[identity]:
+            found[identity].append(value)
+    return found
 
 
 def _flattened(config: dict[str, JsonValue], prefix: str = "") -> dict[str, JsonValue]:

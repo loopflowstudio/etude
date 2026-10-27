@@ -140,6 +140,21 @@ evaluate(
   (`seats.commit`, `seats.source`) but not part of the key, so changed code
   reuses what was played. Joins use the key, encoded (`players.player`,
   `seats.player`).
+- **Where a checkpoint stood.** A seated checkpoint may say where it stood on
+  its clocks: `CheckpointRef(key=..., artifact=..., at={"updates": 600})`.
+  A tracked checkpoint's `ref` fills `at` from its run's clocks; give it
+  yourself for a checkpoint no Etude run recorded. It is carried to each
+  match's seats (`seats.at`, `players.at`) so a report can place the point,
+  and is part of no key: correcting it never forks a model or replays a
+  match. Seats that disagree are listed in `players.at_conflict`; a report
+  draws the latest and notes the earlier.
+- **Which learner it is.** `line` names the learner a checkpoint belongs
+  to, such as a seed or a recipe: `CheckpointRef(..., at={"updates": 600},
+  line="seed-1")`. A report compares a checkpoint with earlier ones, and
+  draws its curve, only within its line. A tracked checkpoint's `ref` fills
+  `line` with the first run of its run's chain of continuations, so a
+  continued learner is one line. Like `at`, it is carried to the seats
+  (`seats.line`, `players.line`, `players.line_conflict`) and is part of no key.
 - **Source files.** A directory stands for the files below it. In a git
   checkout only tracked files count, named by their path in the checkout, so
   caches and scratch files never change a version; an uncommitted edit does,
@@ -385,9 +400,10 @@ etude eval ppo.py --source s3://bucket/etude/launch --rent cpu8 --watch 600
 
 `etude report ppo.py` draws the experiment's evals beside its training
 ([tracking](tracking.md#reports)), following the file's `report()`. Each
-model is drawn where its training run stood when it saved its checkpoint,
-found by its key; code and checkpoints from outside the experiment are
-anchors, drawn once. A checkpoint `eval(state)` chose that no
+model is drawn where its latest seat says it stood, else, found by its
+checkpoint's key, where its training run stood when it saved it; a checkpoint
+no training run recorded is drawn in its line's curve. Code and checkpoints
+with no position are anchors, drawn once. A checkpoint `eval(state)` chose that no
 eval run has delivered is marked not yet played, one nothing played is marked
 not evaluated, and failed matches are listed. Each match counts from the eval
 run that delivered it last, whichever commit its code was at. Where the
