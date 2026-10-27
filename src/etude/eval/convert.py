@@ -67,23 +67,21 @@ def convert(run: str, source: Storage | Path | str) -> Conversion:
     import duckdb  # noqa: PLC0415
 
     storage = as_storage(source)
-    done = Conversion(run=run, blocks=0, matches=0, blobs=0, replaced=0)
+    blocks: list[Block] = []
     db = duckdb.connect()
     try:
         for folder, names in _folders(storage, run).items():
             with tempfile.TemporaryDirectory(prefix="etude-convert-") as scratch:
-                for block in _convert(storage, run, folder, names, db, Path(scratch)):
-                    done = done.model_copy(
-                        update={
-                            "blocks": done.blocks + 1,
-                            "matches": done.matches + len(block.matches),
-                            "blobs": done.blobs + len(block.blobs),
-                            "replaced": done.replaced + len(block.replaces),
-                        }
-                    )
+                blocks += _convert(storage, folder, names, db, Path(scratch))
     finally:
         db.close()
-    return done
+    return Conversion(
+        run=run,
+        blocks=len(blocks),
+        matches=sum(len(block.matches) for block in blocks),
+        blobs=sum(len(block.blobs) for block in blocks),
+        replaced=sum(len(block.replaces) for block in blocks),
+    )
 
 
 def delete_files(run: str, source: Storage | Path | str) -> int:
@@ -133,7 +131,6 @@ def _old(name: str) -> bool:
 
 def _convert(
     storage: Storage,
-    run: str,
     folder: str,
     names: Sequence[str],
     db: duckdb.DuckDBPyConnection,

@@ -80,7 +80,6 @@ from etude.eval.block import (
     quote,
     read,
     refuse_unconverted,
-    table_key,
 )
 from etude.eval.match import ETUDE_TABLES, IDENTIFIER, KIND, OLD_SEAT
 from etude.eval.records import (
@@ -377,7 +376,7 @@ def _block(
     )  # fmt: skip
     _insert(db, "insert into kept.replaced values (?, ?)", [[run, name] for name in block.replaces])
     for table in block.tables:
-        file = table_key(name, table)
+        file = file_key(name, f"{table}.parquet")
         _table(db, run, table, name, _local(storage, place + file, copies / run / file))
 
 

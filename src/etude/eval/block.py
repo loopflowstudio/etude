@@ -85,10 +85,6 @@ def file_key(name: str, file: str) -> str:
     return f"{EVAL_BLOCKS}/{name}/{file}"
 
 
-def table_key(name: str, table: str) -> str:
-    return file_key(name, f"{table}.parquet")
-
-
 def sealed(names: Iterable[str]) -> list[str]:
     """The sealed blocks among a run's file names, oldest first."""
     return sorted(found[1] for name in names if (found := BLOCK_FILE.match(name)))
@@ -195,22 +191,16 @@ class Staging:
             return None
         staged = {record.match.key for record in records}
         tables = {
-            folder.name: [path for path in sorted(folder.iterdir()) if path.stem in staged]
+            folder.name: paths
             for folder in sorted((self.path / "tables").iterdir())
+            if (paths := [path for path in sorted(folder.iterdir()) if path.stem in staged])
         }
         blobs = {
             digest: self.path / "blobs" / digest
             for record in records
             for digest in record.blobs
         }  # fmt: skip
-        block = write(
-            self.root,
-            self.writer,
-            records,
-            {table: paths for table, paths in tables.items() if paths},
-            blobs,
-            db,
-        )
+        block = write(self.root, self.writer, records, tables, blobs, db)
         for part in ("tables", "blobs", "records"):
             shutil.rmtree(self.path / part)
             (self.path / part).mkdir()
@@ -224,12 +214,11 @@ class Staging:
         os.close(self._lock)
 
 
-def seal_abandoned(root: Path, db: duckdb.DuckDBPyConnection) -> list[Block]:
+def seal_abandoned(root: Path, db: duckdb.DuckDBPyConnection) -> None:
     """Seal and remove every staging folder in the run's folder whose writer has died."""
-    sealed_now: list[Block] = []
     folder = root / EVAL_BLOCKS
     if not folder.is_dir():
-        return sealed_now
+        return
     for path in sorted(folder.iterdir()):
         if not (path.is_dir() and path.name.startswith(".")):
             continue
@@ -237,11 +226,8 @@ def seal_abandoned(root: Path, db: duckdb.DuckDBPyConnection) -> list[Block]:
             staging = Staging(root, path.name[1:])
         except BlockingIOError:
             continue  # its writer lives
-        block = staging.seal(db)
+        staging.seal(db)
         staging.close()
-        if block is not None:
-            sealed_now.append(block)
-    return sealed_now
 
 
 def write(
