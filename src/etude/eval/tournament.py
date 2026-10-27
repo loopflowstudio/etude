@@ -1,7 +1,8 @@
 """Tournaments: structures that arrange eval runs to produce a set of matches.
 
-A `Benchmark` (`etude.eval.records`) is named matchups a model's checkpoints
-are held for; a `RoundRobin` is hand-picked agents, every two of them once.
+A `Benchmark` (`etude.eval.records`) is named matchups a training run's
+checkpoints are held for; a `RoundRobin` is hand-picked players, every two of
+them once.
 `hold` plays, as one eval run (`etude.eval.match.evaluate`), the matches a
 tournament adds. `curves` follows each matchup over training; `standings`
 ranks a round robin. Both read an experiment's database (`etude.eval.query.statsdb`).
@@ -44,12 +45,12 @@ from etude.eval.match import ETUDE_TABLES, IDENTIFIER, KIND, EvalRun, Tables, ev
 from etude.eval.query import compare, estimate
 from etude.eval.records import (
     TOURNAMENT_FILE,
-    Agent,
     Benchmark,
     CheckpointRef,
     Environment,
     Match,
     MatchRecord,
+    Player,
     RoundRobin,
     TournamentRun,
     assemble,
@@ -75,7 +76,7 @@ def hold(
     play: Callable[[Match], Tables],
     checkpoint: CheckpointRef | None = None,
     checkpoints: Sequence[CheckpointRef] = (),
-    enter: Sequence[Agent] = (),
+    enter: Sequence[Player] = (),
     matches: Sequence[Match] | None = None,
     workers: int = 1,
     directory: Path | str | None = None,
@@ -89,12 +90,12 @@ def hold(
     database (`etude.eval.query.statsdb`) reads them.
 
     A benchmark held with `checkpoint` (on the go) plays each of the given
-    matchups with the checkpoint in the model's seats. Held without one
+    matchups with the checkpoint in their inference seats. Held without one
     (batch), it plays every matchup any eval run defined for every checkpoint
-    any held or `checkpoints` adds, and each matchup of fixed agents once,
+    any held or `checkpoints` adds, and each matchup of fixed players once,
     skipping what any eval run of its environment delivered, so a matchup
     added later is played for every checkpoint so far. A round robin held
-    with `enter` plays every pair of the agents given; with none, every pair
+    with `enter` plays every pair of the players given; with none, every pair
     of every entrant so far not yet delivered.
 
     `matches` plays exactly those, as `played` found them new elsewhere, and
@@ -186,7 +187,7 @@ def played(
     *,
     experiment: str,
     checkpoints: Sequence[CheckpointRef] = (),
-    enter: Sequence[Agent] = (),
+    enter: Sequence[Player] = (),
     directory: Path | str | None = None,
     storages: Sequence[Storage] = (),
 ) -> Played:
@@ -261,7 +262,7 @@ def _latest(key: Digest, where: Sequence[tuple[Storage, str]]) -> str:
 def _added(
     tournament: Benchmark | RoundRobin,
     checkpoints: tuple[CheckpointRef, ...],
-    enter: Sequence[Agent],
+    enter: Sequence[Player],
     share: tuple[int, int],
 ) -> TournamentRun:
     if isinstance(tournament, Benchmark) and enter:
@@ -286,7 +287,7 @@ def _scheduled(
     an eval run of the experiment in its environment delivered it or failed it, and the
     run folders, by place, that delivered it.
 
-    On the go, nothing is read and a matchup of fixed agents is left to batch:
+    On the go, nothing is read and a matchup of fixed players is left to batch:
     it is not the checkpoint's. `wanted_only` calls for what `added` defines
     alone, still refusing a definition the stored eval runs conflict with.
     """
@@ -478,7 +479,7 @@ def curves(
     """Each matchup's first player on `table`'s `value`, per checkpoint, as `compare` measures it.
 
     Only the first player's (seat 0's) rows of the benchmark's scheduled
-    matches count, so a matchup of the model against itself reads alike.
+    matches count, so a matchup of a checkpoint against itself reads alike.
     `per` and `where` are as in `etude.eval.query.compare`.
     """
     for name in (table, value, *([per] if per else [])):
@@ -493,10 +494,10 @@ def curves(
                 select run, match, cast("{value}" as DOUBLE) as _value,
                     cast({f'"{per}"' if per else 1} as DOUBLE) as _per
                 from "{table}"
-                where player = 0 and "{value}" is not null and ({where or "true"})
+                where seat = 0 and "{value}" is not null and ({where or "true"})
             ),
             named as (
-                select checkpoint, min(name) as name from agents where checkpoint is not null
+                select checkpoint, min(name) as name from players where checkpoint is not null
                 group by checkpoint
             )
             select s.matchup, t.run, t.experiment, s.checkpoint, n.name, t.ordinal, t.clocks,
@@ -560,7 +561,7 @@ class Standing(Record):
     """An entrant's value against one opponent in a round robin, or against the field (`opponent` None)."""
 
     # Its key, encoded.
-    agent: str
+    player: str
     name: str
     opponent: str | None
     opponent_name: str | None
@@ -613,11 +614,11 @@ def standings(
             where="run || '/' || match in (select run || '/' || match from _held)"
             + (f" and ({where})" if where else ""),
         )
-    names: dict[str, str] = dict(db.sql("select agent, name from agents").fetchall())
+    names: dict[str, str] = dict(db.sql("select player, name from players").fetchall())
     # Seats only: a group's row has a team for its subject.
     entries = [
         Standing(
-            agent=c.subject[0],
+            player=c.subject[0],
             name=names[c.subject[0]],
             opponent=None if c.opponent is None else c.opponent[0],
             opponent_name=None if c.opponent is None else names[c.opponent[0]],
@@ -629,17 +630,17 @@ def standings(
         for c in compared
         if len(c.subject) == 1 and (c.opponent is None or len(c.opponent) == 1)
     ]
-    field = {e.agent: e.value for e in entries if e.opponent is None}
+    field = {e.player: e.value for e in entries if e.opponent is None}
 
-    def rank(agent: str | None) -> tuple[float, str]:
+    def rank(player: str | None) -> tuple[float, str]:
         # Against the field first, then opponents best first.
-        if agent is None:
+        if player is None:
             return float("-inf"), ""
-        return -field.get(agent, float("-inf")), names[agent]
+        return -field.get(player, float("-inf")), names[player]
 
     return Standings(
         tournament=round_robin,
         scheduled=scheduled,
         held=held,
-        entries=tuple(sorted(entries, key=lambda e: (rank(e.agent), rank(e.opponent)))),
+        entries=tuple(sorted(entries, key=lambda e: (rank(e.player), rank(e.opponent)))),
     )

@@ -7,12 +7,12 @@ beside Etude's own tables:
 | table | columns |
 |---|---|
 | `runs` | run, experiment, environment (identity), environment_name, environment_config, tournament |
-| `agents` | agent (its key, encoded), name, kind, checkpoint (its key), artifact (digest), uri, config, and `config.KEY` per scalar config key |
+| `players` | player (its key, encoded), name, kind (`model` or `code`), checkpoint (its key), artifact (digest), uri, config, and `config.KEY` per scalar config key |
 | `matches` | run, match, conditions, games, seed, state, error, wall_ms |
-| `seats` | run, match, player, agent, and the version that played: commit, source (digest) |
-| `groups` | run, match, group, player |
+| `seats` | run, match, seat, player, and the version that played: commit, source (digest) |
+| `groups` | run, match, group, seat |
 | `tournaments` | tournament, format (`benchmark` or `round_robin`), environment, conflict |
-| `schedule` | tournament, match, matchup, checkpoint (its key) and the matchup's tags of a benchmark's match; no checkpoint for a matchup of fixed agents |
+| `schedule` | tournament, match, matchup, checkpoint (its key) and the matchup's tags of a benchmark's match; no checkpoint for a matchup of fixed players |
 | `training_checkpoints` | run, experiment, ordinal, checkpoint (its key, `RUN/checkpoints/NAME`), artifact (digest), wall_ms, clocks (where each stood) |
 
 A tournament is assembled from the experiment's eval runs naming it in their
@@ -20,8 +20,8 @@ A tournament is assembled from the experiment's eval runs naming it in their
 When its eval runs disagree, `conflict` names how (`tournament_conflict`,
 `matchup_conflict`) and it has no schedule.
 `training_checkpoints` holds every checkpoint the experiment's training runs
-recorded, read from their stored JSON, so a checkpoint agent joins to where
-its run's clocks stood by key (`agents.checkpoint = training_checkpoints.checkpoint`),
+recorded, read from their stored JSON, so a model joins to where its
+run's clocks stood by key (`players.checkpoint = training_checkpoints.checkpoint`),
 never by its bytes. A match counts once whichever version played it: the
 latest record holding it (`seats.commit` tells which).
 
@@ -31,14 +31,18 @@ the store once and reads only the files it has not read before: match
 records, table files, tournament and checkpoint files are written once, so
 nothing already held is read again. A failed match's record is replaced by
 the done record that follows it. The few tables that summarize the rest
-(`runs`, `agents`, `tournaments`, `schedule`) are rebuilt from what the
+(`runs`, `players`, `tournaments`, `schedule`) are rebuilt from what the
 database holds whenever something arrives. Etude's bookkeeping lives in the
 `kept` schema, out of `show tables`.
 
 `compare` sets a subject against each opponent and against all of them. The
-subject of a `player` row is its seat's agent; of a `group` row, the group's
-agents. Opponents are the other seats' agents, or the match's other groups
-except `all`. Results from different environments are never pooled.
+subject of a `seat` row is its seat's player; of a `group` row, the group's
+players. Opponents are the other seats' players, or the match's other groups
+except `all`.
+
+Table files published etude-sdk wrote name the seat `player`; such a file has
+no `seat` column, since every file written since has one, and its `player`
+reads as `seat`. Results from different environments are never pooled.
 """
 
 from __future__ import annotations
@@ -56,19 +60,20 @@ from typing import TYPE_CHECKING, cast
 
 import numpy as np
 import numpy.typing as npt
-from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
+from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationError
 
 from etude.eval.match import ETUDE_TABLES, IDENTIFIER, KIND, quote
 from etude.eval.records import (
     COLUMN_TYPES,
     TABLE_FILE,
     TOURNAMENT_FILE,
-    Agent,
     Benchmark,
     CheckpointKey,
     ColumnType,
     Environment,
     MatchRecord,
+    Model,
+    Player,
     Scheduled,
     TournamentRun,
     assemble,
@@ -86,11 +91,13 @@ SEED = 0
 # Column types `compare` can take as a value.
 NUMERIC = ("BOOLEAN", "BIGINT", "DOUBLE")
 # Keys and coordinates of an author table's rows: never a value.
-KEYS = ("player", "group", "game", "run", "match")
+KEYS = ("seat", "group", "game", "run", "match")
 # A kept database of another schema is deleted and read again from its store.
-SCHEMA = 2
+SCHEMA = 3
 
 _ENVIRONMENT_FILE = "environment.json"
+# mypy takes no `type` alias as a TypeAdapter's argument; pydantic validates it as `Player`.
+_PLAYER: TypeAdapter[Player] = TypeAdapter(Player)  # type: ignore[arg-type]
 
 
 def statsdb(
@@ -155,7 +162,7 @@ def _create(db: duckdb.DuckDBPyConnection, experiment: str, storage: Storage) ->
     db.execute("create table kept.seen (run VARCHAR, name VARCHAR)")
     db.execute("create table kept.environments (run VARCHAR, environment JSON)")
     db.execute("create table kept.tournament_runs (run VARCHAR, held JSON)")
-    db.execute("create table kept.agents (agent VARCHAR, name VARCHAR, agent_json JSON)")
+    db.execute("create table kept.players (player VARCHAR, name VARCHAR, player_json JSON)")
     # The file each author table's rows of a match came from: the latest holding them.
     db.execute(
         'create table kept.table_files ("table" VARCHAR, run VARCHAR, match VARCHAR, file VARCHAR)'
@@ -165,10 +172,10 @@ def _create(db: duckdb.DuckDBPyConnection, experiment: str, storage: Storage) ->
         " seed BIGINT, state VARCHAR, error VARCHAR, wall_ms BIGINT)"
     )
     db.execute(
-        "create table seats (run VARCHAR, match VARCHAR, player BIGINT, agent VARCHAR,"
+        "create table seats (run VARCHAR, match VARCHAR, seat BIGINT, player VARCHAR,"
         " commit VARCHAR, source VARCHAR)"
     )
-    db.execute('create table "groups" (run VARCHAR, match VARCHAR, "group" VARCHAR, player BIGINT)')
+    db.execute('create table "groups" (run VARCHAR, match VARCHAR, "group" VARCHAR, seat BIGINT)')
     db.execute(
         "create table training_checkpoints (run VARCHAR, experiment VARCHAR, ordinal BIGINT,"
         " checkpoint VARCHAR, artifact VARCHAR, wall_ms BIGINT, clocks JSON)"
@@ -328,8 +335,8 @@ def _match(db: duckdb.DuckDBPyConnection, run: str, record: MatchRecord) -> bool
         db,
         "insert into seats values (?, ?, ?, ?, ?, ?)",
         [
-            [run, match.key, seat, seated.key.encoded, seated.version.commit, seated.version.source]
-            for seat, seated in enumerate(match.agents)
+            [run, match.key, seat, player.key, player.version.commit, player.version.source]
+            for seat, player in enumerate(match.players)
         ],  # fmt: skip
     )
     _insert(
@@ -337,22 +344,16 @@ def _match(db: duckdb.DuckDBPyConnection, run: str, record: MatchRecord) -> bool
         'insert into "groups" values (?, ?, ?, ?)',
         [[run, match.key, name, seat] for name, seats in match.groups.items() for seat in seats],
     )
-    _remember_agents(db, match.agents)
+    _remember_players(db, match.players)
     return True
 
 
-def _remember_agents(db: duckdb.DuckDBPyConnection, agents: Sequence[Agent]) -> None:
-    for seated in agents:
+def _remember_players(db: duckdb.DuckDBPyConnection, players: Sequence[Player]) -> None:
+    for player in players:
         db.execute(
-            "insert into kept.agents select ?, ?, ? where not exists"
-            " (select 1 from kept.agents where agent = ? and name = ?)",
-            [
-                seated.key.encoded,
-                seated.name,
-                seated.model_dump_json(),
-                seated.key.encoded,
-                seated.name,
-            ],  # fmt: skip
+            "insert into kept.players select ?, ?, ? where not exists"
+            " (select 1 from kept.players where player = ? and name = ?)",
+            [player.key, player.name, player.model_dump_json(), player.key, player.name],
         )
 
 
@@ -372,6 +373,11 @@ def _table(db: duckdb.DuckDBPyConnection, run: str, table: str, name: str, path:
         [table, file],
     )
     arrived = {column: kind for column, kind, *_ in db.execute("describe _arrived").fetchall()}
+    if "player" in arrived and "seat" not in arrived:
+        db.execute("alter table _arrived rename column player to seat")
+        arrived = {
+            ("seat" if column == "player" else column): kind for column, kind in arrived.items()
+        }
     exists = db.execute(
         "select 1 from information_schema.tables where table_schema = 'main' and table_name = ?",
         [table],
@@ -428,7 +434,7 @@ class _StoredCheckpoint(BaseModel):
 
 
 def _summaries(db: duckdb.DuckDBPyConnection) -> None:
-    """Rebuild `runs`, `tournaments`, `schedule` and `agents` from what the database holds."""
+    """Rebuild `runs`, `tournaments`, `schedule` and `players` from what the database holds."""
     held = {
         run: TournamentRun.model_validate_json(text)
         for run, text in db.execute("select run, held from kept.tournament_runs").fetchall()
@@ -488,17 +494,15 @@ def _summaries(db: duckdb.DuckDBPyConnection) -> None:
             ],
         )
         scheduled += schedule
-    # Agents of matches not yet held, so every scheduled agent has a name.
-    agents: dict[str, list[Agent]] = {}
-    for _, text in db.execute(
-        "select agent, agent_json from kept.agents order by rowid"
-    ).fetchall():
-        seated = Agent.model_validate_json(text)
-        agents.setdefault(seated.key.encoded, []).append(seated)
+    # Players of matches not yet held, so every scheduled player has a name.
+    players: dict[str, list[Player]] = {}
+    for (text,) in db.execute("select player_json from kept.players order by rowid").fetchall():
+        player = _PLAYER.validate_json(text)
+        players.setdefault(player.key, []).append(player)
     for each in scheduled:
-        for seated in each.match.agents:
-            agents.setdefault(seated.key.encoded, []).append(seated)
-    _agents_table(db, agents)
+        for player in each.match.players:
+            players.setdefault(player.key, []).append(player)
+    _players_table(db, players)
 
 
 def _insert(
@@ -509,9 +513,9 @@ def _insert(
         db.executemany(statement, rows)
 
 
-def _agents_table(db: duckdb.DuckDBPyConnection, agents: dict[str, list[Agent]]) -> None:
+def _players_table(db: duckdb.DuckDBPyConnection, players: dict[str, list[Player]]) -> None:
     """One row per key; each scalar config key, dotted when nested, as a column."""
-    flat = {identity: _flattened(given[0].config) for identity, given in agents.items()}
+    flat = {identity: _flattened(given[0].config) for identity, given in players.items()}
     kinds: dict[str, set[ColumnType]] = {}
     for values in flat.values():
         for key, value in values.items():
@@ -524,30 +528,36 @@ def _agents_table(db: duckdb.DuckDBPyConnection, agents: dict[str, list[Agent]])
         if len(seen) == 1:
             columns[key] = seen.pop()
         else:
-            warnings.warn(f"agent config {key!r} has types {sorted(seen)}; only in `config`")
+            warnings.warn(f"player config {key!r} has types {sorted(seen)}; only in `config`")
     db.execute(
-        "create or replace table agents (agent VARCHAR, name VARCHAR, kind VARCHAR,"
+        "create or replace table players (player VARCHAR, name VARCHAR, kind VARCHAR,"
         " checkpoint VARCHAR, artifact VARCHAR, uri VARCHAR, config JSON"
         + "".join(f', "config.{key}" {kind}' for key, kind in columns.items())
         + ")"
     )
     _insert(
         db,
-        f"insert into agents values ({', '.join('?' for _ in range(7 + len(columns)))})",
+        f"insert into players values ({', '.join('?' for _ in range(7 + len(columns)))})",
         [
             [
                 identity,
                 "/".join(dict.fromkeys(each.name for each in given)),
                 given[0].kind,
-                None if given[0].key.checkpoint is None else str(given[0].key.checkpoint),
-                None if given[0].artifact is None else given[0].artifact.sha256,
-                None if given[0].artifact is None else given[0].artifact.uri,
+                *_checkpoint(given[0]),
                 json.dumps(given[0].config),
                 *(flat[identity].get(key) for key in columns),
             ]
-            for identity, given in agents.items()
+            for identity, given in players.items()
         ],
     )
+
+
+def _checkpoint(player: Player) -> tuple[str | None, str | None, str | None]:
+    """A model's checkpoint key, digest and file; nothing for code."""
+    if not isinstance(player, Model):
+        return None, None, None
+    checkpoint = player.checkpoint
+    return str(checkpoint.key), checkpoint.artifact.sha256, checkpoint.artifact.uri
 
 
 def _flattened(config: dict[str, JsonValue], prefix: str = "") -> dict[str, JsonValue]:
@@ -564,7 +574,7 @@ class Comparison(Record):
     """A subject's value against an opponent, within one environment and split."""
 
     environment: Digest
-    # Agent keys, encoded: one for a player, a group's in sorted order.
+    # Player keys, encoded: one for a seat, a group's in sorted order.
     subject: tuple[str, ...]
     # The same for the opponent; None means against every opponent.
     opponent: tuple[str, ...] | None
@@ -601,7 +611,7 @@ def compare(
     found = db.execute(
         f"""
         with r as (
-            select row_number() over () as _row, run, match, player, "group",
+            select row_number() over () as _row, run, match, seat, "group",
                 cast("{value}" as DOUBLE) as _value,
                 cast({f'"{per}"' if per else 1} as DOUBLE) as _per
                 {"".join(f', "{name}"' for name in by)}
@@ -609,19 +619,19 @@ def compare(
             where "{value}" is not null and ({where or "true"})
         ),
         teams as (
-            select g.run, g.match, g."group", list(s.agent order by s.agent) as team
-            from "groups" g join seats s using (run, match, player)
+            select g.run, g.match, g."group", list(s.player order by s.player) as team
+            from "groups" g join seats s using (run, match, seat)
             group by all
         ),
         subjects as (
-            select r.*, [s.agent] as subject from r join seats s using (run, match, player)
+            select r.*, [s.player] as subject from r join seats s using (run, match, seat)
             union all by name
             select r.*, t.team as subject from r join teams t using (run, match, "group")
         ),
         opponents as (
-            select distinct x._row, [s.agent] as opponent
+            select distinct x._row, [s.player] as opponent
             from subjects x join seats s
-                on s.run = x.run and s.match = x.match and s.player <> x.player
+                on s.run = x.run and s.match = x.match and s.seat <> x.seat
             union
             select distinct x._row, t.team
             from subjects x join teams t

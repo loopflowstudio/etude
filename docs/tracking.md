@@ -240,9 +240,9 @@ on the run's first declared clock. The `baseline` job is dotted everywhere; a
 job's colour follows launch order.
 
 **Evals** are the experiment's eval runs ([evaluation](evaluation.md#experiments)).
-A checkpoint agent is bound to the checkpoint its key names, `RUN/checkpoints/NAME`,
+A model is bound to the checkpoint its key names, `RUN/checkpoints/NAME`,
 and drawn where that run's clocks stood; two runs' checkpoints holding the same
-bytes are two points. Every other agent, code or a checkpoint from outside the
+bytes are two points. Every other player, code or a checkpoint from outside the
 experiment, is an anchor. `score` names an eval table's value, computed as
 `etude.eval.query.compare` computes it, with its 95% interval over whole
 matches; without one, every numeric column is offered. Each match counts once,
