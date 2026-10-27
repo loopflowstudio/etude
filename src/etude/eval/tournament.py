@@ -493,7 +493,7 @@ def curves(
                 group by checkpoint
             )
             select s.matchup, t.run, t.experiment, s.checkpoint, n.name, t.ordinal, t.clocks,
-                sum(r._value), sum(r._per), count(*)
+                r.match, sum(r._value), sum(r._per), count(*)
             from r join _held using (run, match)
             join schedule s on s.tournament = ? and s.match = r.match
             join named n on n.checkpoint = s.checkpoint
@@ -506,16 +506,20 @@ def curves(
     # Per point, where its checkpoint stood: each match's totals and rows.
     blocks: dict[
         tuple[str, str | None, str | None, str, str, int | None, str | None],
-        list[tuple[float, float, int]],
+        dict[str, tuple[float, float, int]],
     ] = {}
-    for *point, total, per_total, rows in found:
+    for *point, match, total, per_total, rows in found:
         matchup, run, experiment, checkpoint, name, ordinal, clocks = point
-        blocks.setdefault((matchup, run, experiment, checkpoint, name, ordinal, clocks), []).append(
-            (float(total), float(per_total), int(rows))
-        )
+        blocks.setdefault((matchup, run, experiment, checkpoint, name, ordinal, clocks), {})[
+            match
+        ] = (float(total), float(per_total), int(rows))
     lines: dict[tuple[str, str | None, str | None], list[CurvePoint]] = {}
     for (matchup, run, experiment, checkpoint, name, ordinal, clocks), totals in blocks.items():
-        estimated = estimate([(total, opportunities) for total, opportunities, _ in totals])
+        [estimated] = estimate(
+            list(totals),
+            [[total] for total, _, _ in totals.values()],
+            [[opportunities] for _, opportunities, _ in totals.values()],
+        )
         if estimated is None:
             continue
         lines.setdefault((matchup, run, experiment), []).append(
@@ -524,9 +528,9 @@ def curves(
                 name=name,
                 ordinal=ordinal,
                 clocks=json.loads(clocks) if clocks else {},
-                value=estimated[0],
-                interval=estimated[1],
-                rows=sum(rows for *_, rows in totals),
+                value=estimated.value,
+                interval=estimated.interval,
+                rows=sum(rows for *_, rows in totals.values()),
                 matches=len(totals),
             )
         )
