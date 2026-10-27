@@ -17,11 +17,14 @@ A model is placed where its seat says it stood (`players.at`, from
 `etude.eval.records.CheckpointRef.at`), else, for a key a training run of the
 experiment recorded, where that run's clocks stood (`players.checkpoint`
 joined to `training_checkpoints`). Where both give a clock and differ, the
-seat's value is drawn and noted. A bound model joins its run's job; every
-other placed model joins the page's one eval-only line. Two keys holding the
-same bytes are two models. Every unplaced player (code, a checkpoint seated
-without `at` from outside the experiment, an etude-sdk 0.2 digest) is fixed,
-and drawn once as an anchor.
+seat's value is drawn and noted. Its line, the learner whose other
+checkpoints `Earlier`, `At` and `Crosstable` compare it with, is its seat's
+`line`, else its training run's name. A bound model is drawn in its run's
+job; every other placed model is drawn in its line's curve, or in the one
+curve of checkpoints with no line. Two keys holding the same bytes are two
+models. Every unplaced player (code, a checkpoint seated without `at` from
+outside the experiment, an etude-sdk 0.2 digest) is fixed, and drawn once as
+an anchor.
 
 What each tournament has played is `etude.eval.tournament.played`: for a
 tournament `eval(state)` returns, what it wants now; for any other the
@@ -92,6 +95,8 @@ class Player(Record):
     `run` and `ordinal` name the training run's checkpoint its key binds it
     to, None for any other. `at` is where it is drawn, by clock: its latest
     seat's position, else its training record's; empty for a fixed player.
+    `line` is the learner it belongs to: its latest seat's, else its training
+    run's name; None for a fixed player or a checkpoint of no line.
     """
 
     key: str  # its key (`etude.eval.records.Model.key` or `Code.key`), as the database holds it
@@ -101,10 +106,11 @@ class Player(Record):
     # Canonical JSON: one checkpoint at two configs is two models.
     config: str
     at: dict[str, float] = {}
+    line: str | None = None
 
     @property
     def placed(self) -> bool:
-        """Whether it is drawn on a line: a job's, or the eval-only line."""
+        """Whether it is drawn on a curve: a job's, or one of checkpoints no run saved."""
         return self.run is not None or bool(self.at)
 
 
@@ -474,7 +480,7 @@ def _read_evals(
     standing, refused = _standing(want, storage, experiment)
     db = statsdb(experiment, storage)
     try:
-        players, placed = _players(db)
+        players, placement = _players(db)
         outside = _load(db, standing, players)
         commits = _commits(db)
         selections, notes = _selections(standing, report, outside=outside)
@@ -494,7 +500,7 @@ def _read_evals(
             failures=_failures(db, standing, players),
             latest_result_ms=None if latest is None else latest[0],
             absent=absent,
-            notes=(*refused, *placed, *_opponents_named(report, players), *notes, *mixed),
+            notes=(*refused, *placement, *_opponents_named(report, players), *notes, *mixed),
         )
     finally:
         db.close()
@@ -578,20 +584,21 @@ def _players(db: duckdb.DuckDBPyConnection) -> tuple[list[Player], tuple[str, ..
     and notes on what could not be placed as recorded.
 
     Where seat and training record differ on a clock, the seat's value is
-    drawn: it is what the evaluation declared. Where seats disagree, the
-    latest is drawn, so a later evaluation corrects a wrong position.
+    drawn: it is what the evaluation declared. Where seats disagree, on a
+    position or a line, the latest is drawn, so a later evaluation corrects a
+    wrong one.
     """
     bound = _checkpoints(db)
     found = db.sql(
-        'select player, name, kind, config, checkpoint, "at", at_conflict from players'
-        " order by player"
+        'select player, name, kind, config, checkpoint, "at", at_conflict, line, line_conflict'
+        " from players order by player"
     ).fetchall()
     players: list[Player] = []
     notes: list[str] = []
     unplaced: list[str] = []
-    for key, name, kind, config, checkpoint, at, conflict in found:
-        place = bound.get(checkpoint)
-        recorded = {} if place is None else place[2]
+    for key, name, kind, config, checkpoint, at, conflict, line, lines in found:
+        saved = bound.get(checkpoint)
+        recorded = {} if saved is None else saved.clocks
         seated: dict[str, float] = json.loads(at) if at else {}
         if conflict:
             earlier = "; ".join(_position(each) for each in json.loads(conflict) if each != seated)
@@ -599,22 +606,28 @@ def _players(db: duckdb.DuckDBPyConnection) -> tuple[list[Player], tuple[str, ..
                 f"{name} is drawn at {_position(seated)}, as its latest seat says;"
                 f" earlier seats said {earlier}."
             )
+        if lines:
+            earlier = ", ".join(each for each in json.loads(lines) if each != line)
+            notes.append(
+                f"{name} is in line {line}, as its latest seat says; earlier seats said {earlier}."
+            )
         for clock in sorted(seated.keys() & recorded.keys()):
             if seated[clock] != recorded[clock]:
                 notes.append(
                     f"{name}: seated at {clock} {seated[clock]:g};"
                     f" its training record says {recorded[clock]:g}."
                 )
-        if kind == "model" and place is None and not seated:
+        if kind == "model" and saved is None and not seated:
             unplaced.append(name)
         players.append(
             Player(
                 key=key,
                 name=name,
-                run=None if place is None else place[0],
-                ordinal=None if place is None else place[1],
+                run=None if saved is None else saved.run,
+                ordinal=None if saved is None else saved.ordinal,
                 config=json.dumps(json.loads(config or "{}"), sort_keys=True),
                 at=recorded | seated,
+                line=line if line is not None else None if saved is None else saved.run,
             )
         )
     if unplaced:
@@ -622,17 +635,6 @@ def _players(db: duckdb.DuckDBPyConnection) -> tuple[list[Player], tuple[str, ..
             f"Drawn as anchors, seated without a position and saved by no training run of the"
             f" experiment: {', '.join(unplaced)}."
         )
-    # The eval-only line holds one checkpoint per position and config.
-    shared: dict[tuple[str, tuple[tuple[str, float], ...]], list[str]] = {}
-    for each in players:
-        if each.run is None and each.at:
-            shared.setdefault((each.config, tuple(sorted(each.at.items()))), []).append(each.name)
-    for (_, at), names in sorted(shared.items()):
-        if len(names) > 1:
-            notes.append(
-                f"{' and '.join(names)} stood at {_position(dict(at))} with one config;"
-                " the eval-only line draws only the last."
-            )
     return players, tuple(notes)
 
 
@@ -640,9 +642,17 @@ def _position(at: dict[str, float]) -> str:
     return ", ".join(f"{clock} {value:g}" for clock, value in sorted(at.items()))
 
 
-def _checkpoints(db: duckdb.DuckDBPyConnection) -> dict[str, tuple[str, int, dict[str, float]]]:
-    """Each checkpoint key, encoded, to the training run and ordinal that saved it, and where
-    its clocks stood.
+@dataclass(frozen=True)
+class _Saved:
+    """The training run's checkpoint a key names, and where the run's clocks stood."""
+
+    run: str
+    ordinal: int
+    clocks: dict[str, float]
+
+
+def _checkpoints(db: duckdb.DuckDBPyConnection) -> dict[str, _Saved]:
+    """Each checkpoint key, encoded, to the training run's checkpoint that saved it.
 
     A run that saved two ordinals under one file name holds one key; it is
     bound to the later.
@@ -651,7 +661,7 @@ def _checkpoints(db: duckdb.DuckDBPyConnection) -> dict[str, tuple[str, int, dic
         "select checkpoint, run, max(ordinal), arg_max(clocks, ordinal) from training_checkpoints"
         " group by checkpoint, run"
     ).fetchall()
-    return {key: (run, ordinal, json.loads(clocks)) for key, run, ordinal, clocks in found}
+    return {key: _Saved(run, ordinal, json.loads(clocks)) for key, run, ordinal, clocks in found}
 
 
 def _opponents_named(report: Report, players: Sequence[Player]) -> tuple[str, ...]:
@@ -965,8 +975,8 @@ def _coverage(db: duckdb.DuckDBPyConnection, standing: Sequence[_Standing]) -> t
             for match in matches:
                 keys = {str(s.checkpoint.key) for s in match.players if s.kind == "model"}
                 for key in keys & bound.keys():
-                    run, ordinal, _ = bound[key]
-                    counts.setdefault((run, ordinal, each.name), [0, 0, 0])[state] += 1
+                    saved = bound[key]
+                    counts.setdefault((saved.run, saved.ordinal, each.name), [0, 0, 0])[state] += 1
     return tuple(
         Coverage(run=run, ordinal=ordinal, tournament=name, played=n[0], failed=n[1], unplayed=n[2])
         for (run, ordinal, name), n in sorted(counts.items())

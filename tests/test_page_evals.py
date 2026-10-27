@@ -1,4 +1,4 @@
-"""An experiment's evals on its page: checkpoints placed by seat or key, anchors drawn once, gaps kept."""
+"""An experiment's evals on its page: checkpoints placed by seat or key, anchors once, gaps kept."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from etude.experiment import advance, observe, read_experiment
 from etude.page import Page, build
 from etude.report import Matches
 from etude.run.errors import EtudeError
-from etude.run.records import ArtifactRef, Clock
+from etude.run.records import ArtifactRef, Clock, Continuation, SourceKey
 from etude.run.storage import DirectoryStorage, S3Storage
 from etude.train.run import Run, track
 from tests.eval.games import play, play_failing_deal_one
@@ -296,13 +296,14 @@ DUEL = environment("duel")
 HEURISTIC = Code(name="heuristic", source=[__file__], config={"strength": 5})
 
 
-def outside(name: str, at: dict[str, float], **config: int) -> Model:
+def outside(name: str, at: dict[str, float], line: str | None = None, **config: int) -> Model:
     """A checkpoint no Etude run recorded, keyed by its address, seated where `at` says."""
-    address = f"hf://lab/{name}.pt"
+    address = f"hf://lab/{name}.pt" if line is None else f"hf://lab/{line}/{name}.pt"
     ref = CheckpointRef(
         key=CheckpointKey(address=address),
         artifact=ArtifactRef(uri=address, sha256="cd" * 32),
         at=at,
+        line=line,
     )
     return Model(name=name, checkpoint=ref, inference=Inference(config=config))
 
@@ -330,6 +331,9 @@ def evaluation_only(tmp_path_factory: pytest.TempPathFactory) -> Iterator[tuple[
             ("plain-b", [*grids[4:], pairs[2]]),
         ):
             drift = outside("drift", {"updates": 300 if run == "plain-a" else 350}, strength=6)
+            drift = drift.model_copy(
+                update={"checkpoint": drift.checkpoint.model_copy(update={"line": run})}
+            )
             evaluate(
                 experiment="lab",
                 environment=DUEL,
@@ -360,6 +364,11 @@ def test_an_evaluation_only_experiment_draws_checkpoints_where_their_seats_say(
     assert any("loose" in note and "anchors" in note for note in page.notes)
     # Seats that disagree: the latest is drawn, and the earlier is named.
     assert at["drift"] == {"updates": 350}
+    assert next(each.line for each in page.players if each.name == "drift") == "plain-b"
+    assert (
+        "drift is in line plain-b, as its latest seat says; earlier seats said plain-a."
+        in page.notes
+    )
     assert (
         "drift is drawn at updates 350, as its latest seat says; earlier seats said updates 300."
         in page.notes
@@ -411,6 +420,43 @@ def test_an_evaluation_only_page_reads_each_bucket_object_once(
         read_once = client.bytes
         assert build(S3Storage("lab", client=client), file) == first
         assert client.bytes == read_once
+
+
+def test_checkpoints_of_two_named_lines_at_the_same_positions_are_two_lines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = tmp_path / "runs"
+    file = experiment_file(tmp_path / "experiments", "lab", EVALUATION_ONLY)
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    seeds = {
+        line: {n: outside(f"u{n}", {"updates": n}, line) for n in (0, 400)}
+        for line in ("seed-1", "seed-2")
+    }
+    evaluate(
+        experiment="lab",
+        environment=DUEL,
+        matches=[duel(u[400], u[0]) for u in seeds.values()],
+        play=play,
+        run="plain",
+        directory=runs,
+    )
+    page = build(runs, file)
+    placed = sorted((each.line, each.name, each.at["updates"]) for each in page.players)
+    assert placed == [
+        ("seed-1", "u0", 0),
+        ("seed-1", "u400", 400),
+        ("seed-2", "u0", 0),
+        ("seed-2", "u400", 400),
+    ]
+    # Each line's 400 met its own 0, and nothing says one hides the other.
+    met = {
+        (page.players[c.subject].line, page.players[c.opponent].line)
+        for c in page.cells
+        if c.opponent is not None
+    }
+    assert met == {("seed-1", "seed-1"), ("seed-2", "seed-2")}
+    assert not any("stood at" in note for note in page.notes)
 
 
 SEATED = """
@@ -486,3 +532,41 @@ def test_a_failure_outside_a_tournament_is_kept_until_its_environment_plays_it(
     assert failure.tournament is None
     assert [page.players[i].name for i in failure.players] == ["u0", "heuristic"]
     assert failure.error is not None and "deal 1 crashed" in failure.error
+
+
+def test_a_continued_run_is_one_line_with_the_run_it_continues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = tmp_path / "runs"
+    file = experiment_file(tmp_path / "experiments", "seated", SEATED)
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    first = track(experiment="seated", run="a", job="a", clocks=CLOCKS, directory=runs)
+    save(first, tmp_path, range(100, 300, 100))
+    first.finish(timeout=30)
+    parent = SourceKey(namespace="local", kind="run", source_id="a")
+    continued = track(
+        experiment="seated",
+        run="b",
+        job="b",
+        clocks=CLOCKS,
+        directory=runs,
+        continues=Continuation(parent=parent, clock="updates", value=200),
+    )
+    save(continued, tmp_path, range(600, 700, 100))
+    continued.finish(timeout=30)
+    state = observe(DirectoryStorage(runs), "seated")
+    saved = [each for run in state.runs for each in run.checkpoints]
+    assert {(each.run, each.ref.line) for each in saved} == {("a", "a"), ("b", "a")}
+    evaluate(
+        experiment="seated",
+        environment=DUEL,
+        matches=[duel(saved[-1].model(Inference()), saved[0].model(Inference()))],
+        play=play,
+        run="plain",
+        directory=runs,
+    )
+    page = build(runs, file)
+    lines = {(each.run, each.line, each.at["updates"]) for each in page.players}
+    # Drawn in their own runs' jobs; `Earlier` by 500 reaches from b's 600 back to a's 100.
+    assert lines == {("a", "a", 100), ("b", "a", 600)}

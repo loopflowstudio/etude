@@ -34,14 +34,14 @@ const asked = new URLSearchParams(location.hash.slice(1)).get("commit");
 const COMMIT = PAGE.commits.some(k => k.commit === asked) ? asked : "";
 const D = {...PAGE, cells: PAGE.cells.filter(c => (c.commit ?? "") === COMMIT)};
 const M = model(D);
-const {T, R, JOBS, marks, markOf, jobPoints, cellOf, bound, placed, members, fixedPlayers, configs, jobOfRun, playerName, selName, choices} = M;
+const {T, R, JOBS, marks, markOf, jobPoints, cellOf, bound, placed, members, fixedPlayers, configs, jobOfRun, playerName, selName, choices, evaluated} = M;
 const TRAINED = T.runs.length > 0;
 
 // The view lives in the URL, so a reload or a rewritten page shows the same thing. The x axis
 // offers the clocks training declared or positions use, and wall time where training marks exist.
 const clockNames = [...new Set([...T.clocks.map(c => c.name), ...M.posClocks]), ...(T.checkpoints.length || !M.posClocks.length ? [WALL] : [])];
 const firstClock = clockNames.includes(R.clock) ? R.clock : clockNames[0];
-const S = Object.assign({hide: "", filter: "{}", eclock: firstClock, pclock: firstClock, mlclock: firstClock, opp: "first", score: "0", sel: "", cfg: "", lines: "on", mjob: "", mkey: "", smooth: "on", fpath: "", fscale: "share", live: "1"},
+const S = Object.assign({hide: "", filter: "{}", eclock: firstClock, pclock: firstClock, mlclock: firstClock, opp: "first", score: "0", sel: "", cfg: "", lines: "on", mjob: "", mkey: "", xline: "", smooth: "on", fpath: "", fscale: "share", live: "1"},
   Object.fromEntries(new URLSearchParams(location.hash.slice(1))), {commit: COMMIT});
 for (const k of ["eclock", "pclock", "mlclock"]) if (!clockNames.includes(S[k])) S[k] = firstClock;
 const writeHash = () => history.replaceState(null, "", "#" + new URLSearchParams(S));
@@ -148,7 +148,7 @@ function render() {
   const jobsHost = document.getElementById("jobs"); jobsHost.replaceChildren();
   for (const j of JOBS) {
     const b = node("button", "jbtn"); b.append(swatch(j), j.label); if (j.baseline) b.appendChild(node("span", "tag", "baseline"));
-    b.setAttribute("aria-pressed", String(!hidden.has(j.key))); b.title = j.seated ? "checkpoints no training run saved, where their seats say they stood" : j.runs.join(", ");
+    b.setAttribute("aria-pressed", String(!hidden.has(j.key))); b.title = j.line == null ? j.runs.join(", ") : j.line ? `line ${j.line}: checkpoints no training run saved, where their seats say they stood` : "checkpoints no training run saved and seated with no line, where their seats say they stood";
     b.onclick = () => { if (!hidden.has(j.key) && vis.length === 1) return; hidden.has(j.key) ? hidden.delete(j.key) : hidden.add(j.key); S.hide = [...hidden].join("|"); render(); };
     jobsHost.appendChild(b);
   }
@@ -176,8 +176,9 @@ function render() {
   document.getElementById("evals-sub").textContent = E.sel == null ? "no eval run yet" : `${selName(D.selections[E.sel])} · ${scoreName}`;
   const eOpts = {xLabel: clockLabel(S.eclock), ref, sync: "evals"};
   const GAPS = "○ not yet played · × failed · | not evaluated";
+  // Only a job averages seeds; a line's curve is its checkpoints' own values.
+  const BAND = vis.some(j => j.line == null) ? "mean over seeds · band: seed range, or one seed's 95% interval over matches" : "band: 95% interval over matches";
   const curveOf = (j, sel, extra = {}, opp = S.opp) => jobPoints(j, S.eclock, evalValue(E, sel, extra, opp));
-  const evaluated = pts => pts.filter(p => !p.missing && !p.skip);
   const latestKey = pts => { const ok = evaluated(pts); return ok.length ? ok[ok.length - 1].key : null; };
   const keyName = k => `${M.alignClock || "checkpoint"} ${num(k)}`;
   const finalKey = j => j.runs.every(r => T.runs.find(x => x.name === r)?.state === "finished") ? (marks.get(j.runs[0]) || []).at(-1)?.align ?? null : null;
@@ -187,7 +188,7 @@ function render() {
     const own = panel.kind === "curve" ? ownOpponent(panel) : null;
     const sel = panelSel(E, panel), opp = own ?? oppFor(E, sel), versus = versusOf(opp), where = sel == null ? "" : selName(D.selections[sel]);
     if (panel.kind === "curve" && !panel.split) {
-      const c = card(body, panel.title, `${where} · ${scoreName} ${versus} · mean over seeds · band: seed range, or one seed's 95% interval over matches · ${GAPS}`, "full");
+      const c = card(body, panel.title, `${where} · ${scoreName} ${versus} · ${BAND} · ${GAPS}`, "full");
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
       const host = node("div"); c.appendChild(host);
       later(() => line(host, series(j => curveOf(j, sel, {}, opp)), {...eOpts, refs: anchorLines(E, sel, opp), height: 260}));
@@ -281,18 +282,21 @@ function render() {
       if (!pairs.length) { c.appendChild(node("div", "na", "No games between checkpoints of two jobs were recorded")); continue; }
       const host = node("div"); c.appendChild(host); later(() => line(host, pairs, {...eOpts, height: 200, ref: ref}));
     } else if (panel.kind === "crosstable") {
-      // One line's checkpoints against each other, both axes ordered by the clock.
+      // One line's checkpoints against each other, both axes ordered by the clock: a tab per
+      // line of the curves shown, so a job's seeds are each their own.
       const c = card(body, panel.title, `${where} · ${scoreName} · row against column · ordered by ${clockLabel(S.eclock)}`, "full");
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
-      if (!vis.some(j => j.key === S.mjob)) S.mjob = vis[0].key;
-      const job = vis.find(j => j.key === S.mjob);
+      const tabsOf = [...new Map(vis.flatMap(j => M.linesOf(j).map(key => [key, {job: j, key, label: key || "checkpoints with no line"}]))).values()];
+      if (!tabsOf.length) { c.appendChild(node("div", "na", "No checkpoint has a position")); continue; }
+      if (!tabsOf.some(t => t.key === S.xline)) S.xline = tabsOf[0].key;
+      const chosen = tabsOf.find(t => t.key === S.xline);
       const tabs = node("div", "tabs-in");
-      for (const j of vis) { const b = node("button", "jbtn"); b.append(swatch(j), j.label); b.setAttribute("aria-pressed", String(j === job)); b.onclick = () => { S.mjob = j.key; render(); }; tabs.appendChild(b); }
+      for (const t of tabsOf) { const b = node("button", "jbtn"); b.append(swatch(t.job), t.label); b.setAttribute("aria-pressed", String(t === chosen)); b.onclick = () => { S.xline = t.key; render(); }; tabs.appendChild(b); }
       c.appendChild(tabs);
       const at = i => D.players[i].at[S.eclock] ?? D.players[i].at[M.alignClock];
-      const order = members(job).filter(i => D.players[i].config === S.cfg && at(i) != null).sort((a, b) => at(a) - at(b) || playerName(a).localeCompare(playerName(b)));
-      const label = i => `${job.runs.length > 1 ? D.players[i].run + " " : ""}${S.eclock in D.players[i].at ? clockLabel(S.eclock) : M.alignClock} ${num(at(i))}`;
-      if (order.length < 2) { c.appendChild(node("div", "na", `${job.label} has fewer than two checkpoints with a position`)); continue; }
+      const order = M.lineMembers(chosen.key).filter(i => D.players[i].config === S.cfg && at(i) != null).sort((a, b) => at(a) - at(b) || playerName(a).localeCompare(playerName(b)));
+      const label = i => `${S.eclock in D.players[i].at ? clockLabel(S.eclock) : M.alignClock} ${num(at(i))}`;
+      if (order.length < 2) { c.appendChild(node("div", "na", `${chosen.label} has fewer than two checkpoints with a position`)); continue; }
       const grid = node("div", "matrix"); grid.style.gridTemplateColumns = `minmax(110px, auto) repeat(${order.length}, minmax(44px, 1fr))`;
       const wrap = node("div", "mwrap"); wrap.appendChild(grid); c.appendChild(wrap);
       grid.appendChild(node("div", "rl", "row ↓ · column →"));
@@ -309,7 +313,7 @@ function render() {
           cell.onpointerleave = hideTip; grid.appendChild(cell);
         }
       }
-      if (found.length) rampLegend(c, ref, found, `· ${job.label} · · not played`);
+      if (found.length) rampLegend(c, ref, found, `· ${chosen.label} · · not played`);
     } else if (panel.kind === "anchors") {
       // Fixed players are not a job's: drawn once, against each other.
       const c = card(body, panel.title, `${where} · ${scoreName} · row against column · strength: over matches that seat no checkpoint of the experiment`, "full");

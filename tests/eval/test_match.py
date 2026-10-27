@@ -305,10 +305,13 @@ def test_where_a_checkpoint_stood_is_carried_by_its_seat_and_is_not_its_identity
     file = ArtifactRef(uri="hf://lab/u600.pt", sha256=sha256(b"a").hexdigest())
     key = CheckpointKey(address=file.uri)
     seated = Inference().model(CheckpointRef(key=key, artifact=file, at={"updates": 600}))
-    corrected = Inference().model(CheckpointRef(key=key, artifact=file, at={"updates": 612}))
+    corrected = Inference().model(
+        CheckpointRef(key=key, artifact=file, at={"updates": 612}, line="seed-2")
+    )
     rival = Code(name="rival", source=[__file__])
     assert (seated.checkpoint.at, corrected.checkpoint.at) == ({"updates": 600}, {"updates": 612})
-    # Correcting a position neither forks the model nor replays its match.
+    assert (seated.checkpoint.line, corrected.checkpoint.line) == (None, "seed-2")
+    # Correcting a position or a line neither forks the model nor replays its match.
     assert seated.key == corrected.key
     assert Match(players=(seated, rival)).key == Match(players=(corrected, rival)).key
 

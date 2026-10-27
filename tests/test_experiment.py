@@ -321,7 +321,7 @@ def test_a_pass_job_launched_as_given_is_refused_on_the_machine(tmp_path: Path) 
         _hold(evaluation_spec(job))
 
 
-def test_a_tracked_checkpoints_seat_says_where_its_run_stood(tmp_path: Path) -> None:
+def test_a_tracked_checkpoints_seat_says_where_its_run_stood_and_its_line(tmp_path: Path) -> None:
     bucket = DirectoryStorage(tmp_path / "bucket")
     run = trainer(bucket, tmp_path)
     save(run, bucket, tmp_path, range(1, 2))
@@ -329,6 +329,7 @@ def test_a_tracked_checkpoints_seat_says_where_its_run_stood(tmp_path: Path) -> 
     (saved,) = observe(bucket, "ppo").run("ppo-1").checkpoints
     assert saved.ref.at == saved.clocks == {"updates": 100}
     assert saved.model(DIRECT).checkpoint.at == {"updates": 100}
+    assert saved.ref.line == saved.model(DIRECT).checkpoint.line == "ppo-1"
 
 
 def test_a_finished_run_without_checkpoints_has_no_final(tmp_path: Path) -> None:

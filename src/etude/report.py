@@ -13,17 +13,18 @@
 
 `etude report ppo.py` imports `report()` from the file (`etude.page`), and
 draws the page in two parts: Evals, over the experiment's eval runs, then Perf
-and ML details over what the training runs logged and Etude recorded. Every
-panel shows every job; a job is its runs across seeds.
+and ML details over what the training runs logged and Etude recorded. A job
+groups its runs across seeds; evaluated checkpoints no training run saved
+draw a curve per learner line, including on pages with no training runs.
 
 Panels name data, never rendering. Eval panels name columns of the score's
 eval table (`Matrix(rows=..., columns=...)`, `Ranking(by=...)`,
 `Curve(split=...)`), whom a curve is scored against (`Curve(opponent=...)`:
-an agent's name, or a checkpoint of the same line by its position, `Earlier`
+a player's name, or a checkpoint of the same line by its position, `Earlier`
 or `At`), and which matches they count (`Matches`): a tournament's, or one
 matchup or tag of it, by the names `eval(state)` gives them. Matches held
-outside any tournament are offered by the Evals section's Matches control. Metric
-panels name logged metric keys. The defaults are reinforcement learning's:
+outside any tournament are offered by the Evals section's Matches control.
+Metric panels name logged metric keys. The defaults are reinforcement learning's:
 override `perf` or `ml` to name an experiment's own keys. This module imports only Pydantic and Etude's run records, so an
 experiment file can import it at no cost.
 """
@@ -92,10 +93,10 @@ class At(Record):
 
 
 class Curve(Record):
-    """The score at each checkpoint, a line per job; `split` draws one chart per column value.
+    """Scores per job or external learner line; `split` draws one chart per column value.
 
     `opponent` fixes whom each point is scored against, overriding the
-    section's Opponent control: an agent's name, or a checkpoint of the same
+    section's Opponent control: a player's name, or a checkpoint of the same
     line (`Earlier`, `At`). None leaves it to the control.
     """
 
@@ -137,7 +138,7 @@ class Crosstable(Record):
     """Each checkpoint of one line against each other checkpoint of it, ordered by the clock.
 
     A row's score against a column; the diagonal is empty and an unplayed pair
-    shows as such. Tabbed by line, like `Matrix`.
+    shows as such. Tabbed by learner line.
     """
 
     kind: Literal["crosstable"] = "crosstable"
@@ -149,8 +150,9 @@ class Anchors(Record):
     """Fixed players (code, or checkpoints with no position) against each other.
 
     Drawn once, not per job: each anchor's score against the others, and its
-    strength, the score over its matches that seat no placed checkpoint. A curve against one anchor draws the others' scores against it
-    as reference lines.
+    strength, the score over its matches that seat no placed checkpoint. A
+    curve against one anchor draws the others' scores against it as reference
+    lines.
     """
 
     kind: Literal["anchors"] = "anchors"

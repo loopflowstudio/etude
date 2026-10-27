@@ -17,8 +17,9 @@ own key (`CheckpointKey`) or the code's name, together with its config. One
 checkpoint at two search budgets is two models; two checkpoint keys holding
 the same bytes are two models too, since where a checkpoint's bytes came from
 is not part of what it is. The code's commit and source digest are its
-`Version`, and a checkpoint's position on its clocks is `CheckpointRef.at`;
-both are recorded with each match but not part of the key: a match one
+`Version`, a checkpoint's position on its clocks is `CheckpointRef.at` and
+the learner it belongs to is `CheckpointRef.line`; all are recorded with each
+match but not part of the key: a match one
 version played counts as played for every version, and reads can select a
 version. A match seats players by position (`seat`), names groups of seats
 and fixes the conditions it is played under. A match's key is the digest of
@@ -139,13 +140,16 @@ class CheckpointRef(Record):
 
     `at` is where it stood on each clock, such as `{"updates": 600}`: a
     declared fact the seat carries to its matches so a report can place it,
-    and part of no key. A tracked checkpoint's ref fills it from its run's
-    clocks; give it yourself for a checkpoint no Etude run recorded.
+    and part of no key. `line` names the learner it belongs to, such as a
+    seed or a recipe, so a report compares it with that learner's other
+    checkpoints; also part of no key. A tracked checkpoint's ref fills both
+    from its run; give them yourself for a checkpoint no Etude run recorded.
     """
 
     key: CheckpointKey
     artifact: ArtifactRef
     at: dict[str, float] = {}
+    line: str | None = None
 
     @model_validator(mode="after")
     def verifiable(self) -> Self:

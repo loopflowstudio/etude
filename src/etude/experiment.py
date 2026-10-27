@@ -56,6 +56,8 @@ class Checkpoint(Record):
     artifact: ArtifactRef
     # Where each of the run's clocks stood when it was saved.
     clocks: dict[str, float]
+    # The learner it belongs to: the first run of the chain of continuations that led to its run.
+    line: str
     tags: tuple[str, ...] = ()
 
     @property
@@ -70,8 +72,8 @@ class Checkpoint(Record):
 
     @property
     def ref(self) -> CheckpointRef:
-        """Its key, stored file and where it stood, as a benchmark is held for it."""
-        return CheckpointRef(key=self.key, artifact=self.artifact, at=self.clocks)
+        """Its key, stored file, where it stood and its line, as a benchmark is held for it."""
+        return CheckpointRef(key=self.key, artifact=self.artifact, at=self.clocks, line=self.line)
 
     def model(self, inference: Inference) -> Model:
         """This checkpoint playing as `inference`, for a matchup of chosen checkpoints."""
@@ -145,14 +147,21 @@ def observe(source: Storage | Path | str, experiment: str) -> ExperimentState:
     A checkpoint whose file Etude did not store, so no digest, is left out:
     nothing can be evaluated without its bytes.
     """
+    every = read_all(source)
+    parents = {
+        data.name: data.file.declaration.continues.parent.source_id
+        for data in every
+        if data.file is not None and data.file.declaration.continues is not None
+    }
     runs = []
-    for data in read_all(source):
+    for data in every:
         if (
             data.file is None
             or data.experiment != experiment
             or data.file.declaration.kind == "evaluation"
         ):
             continue
+        line = _first_run(data.name, parents)
         saved = Checkpoints(
             Checkpoint(
                 run=data.name,
@@ -160,6 +169,7 @@ def observe(source: Storage | Path | str, experiment: str) -> ExperimentState:
                 ordinal=record.ordinal,
                 artifact=record.artifact,
                 clocks=record.at,
+                line=line,
                 tags=record.tags,
             )
             for record in sorted(data.checkpoints, key=lambda one: one.ordinal)
@@ -170,6 +180,15 @@ def observe(source: Storage | Path | str, experiment: str) -> ExperimentState:
             TrainingRun(name=data.name, experiment=data.experiment, state=state, checkpoints=saved)
         )
     return ExperimentState(experiment=experiment, runs=tuple(runs))
+
+
+def _first_run(run: str, parents: dict[str, str]) -> str:
+    """The run a chain of continuations ending at `run` started from, as far as `parents` knows."""
+    seen = {run}
+    while run in parents and parents[run] not in seen:
+        run = parents[run]
+        seen.add(run)
+    return run
 
 
 # ---------------------------------------------------------------------------

@@ -141,26 +141,40 @@ function line(host, series, o = {}) {
 }
 
 // ---------------------------------------------------------------- an experiment's page data
-// Lines are jobs, runs across seeds, and the eval-only line: every placed checkpoint no
-// training run saved. A model is bound to its run's checkpoint by key, and drawn
-// where `Player.at` says, which the page computed (its seat's position, else its run's).
-const SEATED = "";  // the eval-only line's one member, where a job has runs; no run is so named
+// Curves are jobs, runs across seeds, and one per line of placed checkpoints no training run
+// saved, with one more for those of no line. A line (`Player.line`) is a learner: `Earlier`,
+// `At` and the crosstable compare a checkpoint only with its own line's. A model is
+// bound to its run's checkpoint by key, and drawn where `Player.at` says, which the page
+// computed (its seat's position, else its run's).
+const lineRun = line => "\u0001" + line;  // a line curve's one member, where a job has runs; no run is so named
 function model(D) {
   const T = D.training, R = D.report;
+  const indices = D.players.map((a, i) => i);
   const placed = i => D.players[i].run != null || Object.keys(D.players[i].at).length > 0;
-  const positioned = D.players.map((a, i) => i).filter(i => D.players[i].run == null && placed(i));
+  const lineOf = i => D.players[i].line ?? "";
+  const positioned = indices.filter(i => D.players[i].run == null && placed(i));
   const posClocks = [...new Set(positioned.flatMap(i => Object.keys(D.players[i].at)))];
   // The clock a line's checkpoints are keyed by: a job's first, else the one the report names.
   const alignClock = T.clocks[0]?.name ?? (posClocks.includes(R.clock) ? R.clock : posClocks[0]);
-  // A job's colour follows its declared position, never its rank.
-  const lines = [...T.jobs, ...(positioned.length ? [{key: "~seated", name: "positioned by their seats", label: "positioned by their seats", runs: [SEATED], seated: true}] : [])];
-  const JOBS = lines.map((j, i) => ({...j, index: i, color: `--j${i % 8 + 1}`, baseline: R.baseline != null && (R.baseline === j.name || R.baseline === j.key)}));
+  // Named lines in order, then the checkpoints of no line. A colour follows the curve's position, never its rank.
+  const named = [...new Set(positioned.map(lineOf))].sort((a, b) => (a === "") - (b === "") || a.localeCompare(b));
+  // Only external curves carry a line; the empty string is the unnamed learner.
+  const curves = [...T.jobs, ...named.map(line => {
+    const name = line || "checkpoints with no line";
+    return {key: "~line:" + line, name, label: name, runs: [lineRun(line)], line};
+  })];
+  const JOBS = curves.map((j, i) => ({...j, index: i, color: `--j${i % 8 + 1}`, baseline: R.baseline != null && (R.baseline === j.name || R.baseline === j.key)}));
   const marks = new Map(); for (const m of T.checkpoints) { if (!marks.has(m.run)) marks.set(m.run, []); marks.get(m.run).push(m); }
-  // The eval-only line has a mark per position, as a run has one per checkpoint.
-  const posKey = at => JSON.stringify(Object.keys(at).sort().map(k => [k, at[k]]));
-  const seatedMarks = new Map();
-  for (const i of positioned) { const at = D.players[i].at; if (at[alignClock] != null) seatedMarks.set(posKey(at), {run: SEATED, ordinal: posKey(at), at, align: at[alignClock], elapsed: null, pace: {}}); }
-  if (seatedMarks.size) marks.set(SEATED, [...seatedMarks.values()].sort((a, b) => a.align - b.align));
+  // A line curve has a mark per position, as a run has one per checkpoint.
+  const lineMarks = new Map();
+  for (const i of positioned) {
+    const at = D.players[i].at, run = lineRun(lineOf(i));
+    if (at[alignClock] == null) continue;
+    const ordinal = splitKey(at);
+    if (!lineMarks.has(run)) lineMarks.set(run, new Map());
+    lineMarks.get(run).set(ordinal, {run, ordinal, at, align: at[alignClock], elapsed: null, pace: {}});
+  }
+  for (const [run, got] of lineMarks) marks.set(run, [...got.values()].sort((a, b) => a.align - b.align));
   const markOf = (run, ordinal) => (marks.get(run) || []).find(m => m.ordinal === ordinal);
   const xOf = (m, c) => c === WALL ? (m.elapsed == null ? null : m.elapsed / 3600) : m.at[c];
   // A value's own position (`at`, from `Player.at`) wins over its mark's, so no point disagrees with the page.
@@ -207,14 +221,28 @@ function model(D) {
   for (const c of D.cells) cellIndex.set(`${c.selection}|${c.score}|${c.subject}|${c.opponent ?? ""}|${+c.fixed}|${splitKey(c.split)}`, c);
   const cellOf = (sel, score, subject, opponent, fixed, split) => cellIndex.get(`${sel}|${score}|${subject}|${opponent ?? ""}|${+fixed}|${splitKey(split)}`);
   const bound = new Map(); D.players.forEach((a, i) => { if (a.run != null) bound.set(`${a.run}|${a.ordinal}|${a.config}`, i); });
-  for (const i of positioned) bound.set(`${SEATED}|${posKey(D.players[i].at)}|${D.players[i].config}`, i);
-  const fixedPlayers = D.players.map((a, i) => i).filter(i => !placed(i));
-  const configs = [...new Set(D.players.filter((a, i) => placed(i)).map(a => a.config))].sort();
+  for (const i of positioned) {
+    const k = `${lineRun(lineOf(i))}|${splitKey(D.players[i].at)}|${D.players[i].config}`;
+    bound.set(k, i);
+  }
+  const fixedPlayers = indices.filter(i => !placed(i));
+  const configs = [...new Set(indices.filter(placed).map(i => D.players[i].config))].sort();
   const coverage = new Map(D.coverage.map(c => [`${c.run}|${c.ordinal}|${c.tournament}`, c]));
   const jobOfRun = run => JOBS.find(j => j.runs.includes(run));
-  // The players a line draws: its runs' checkpoints, or every positioned one.
-  const members = j => j.seated ? positioned : D.players.map((a, i) => i).filter(i => j.runs.includes(D.players[i].run));
-  const playerName = i => D.players[i].run != null ? `${D.players[i].run} ${D.players[i].name}` : D.players[i].name;
+  // The players a curve draws: its runs' checkpoints, or its line's.
+  const members = j => j.line != null ? positioned.filter(i => lineOf(i) === j.line) : indices.filter(i => j.runs.includes(D.players[i].run));
+  // The lines a curve's checkpoints belong to: a job's seeds, or a line curve's own.
+  const linesOf = j => [...new Set(members(j).map(lineOf))].sort();
+  const lineMembers = line => indices.filter(i => placed(i) && lineOf(i) === line);
+  // A position must identify one checkpoint within its learner and config, even across jobs.
+  const positions = new Map();
+  D.players.forEach((a, i) => {
+    if (!placed(i) || a.at[alignClock] == null) return;
+    const key = JSON.stringify([lineOf(i), a.config, a.at[alignClock]]);
+    if (!positions.has(key)) positions.set(key, []);
+    positions.get(key).push(i);
+  });
+  const playerName = i => { const a = D.players[i]; return a.run != null ? `${a.run} ${a.name}` : a.line != null ? `${a.line} ${a.name}` : a.name; };
   const selName = s => s.tournament == null ? "matches outside a tournament" : s.matchup != null ? `${s.tournament} · ${s.matchup}` : s.tag != null ? `${s.tournament} · tagged ${s.tag}` : s.tournament;
   // A page offers each tournament and each tag within one; a matchup only where a panel names it.
   const choices = D.selections.map((s, i) => [String(i), selName(s)]).filter(([i]) => D.selections[+i].matchup == null);
@@ -236,38 +264,41 @@ function model(D) {
   }
   // A curve's own opponent for subject `i` (`etude.report.Curve.opponent`): {index} or {gap}.
   // By name, whoever of that name the subject met; by position, the checkpoint of the same
-  // line and config standing exactly there: of the same run for a job, else of the eval-only line.
+  // line and config standing exactly there.
   function opponentAt(i, spec, played) {
     if (spec.kind === "name") {
-      const met = D.players.map((a, k) => k).filter(k => D.players[k].name === spec.name && played(k));
+      const met = indices.filter(k => D.players[k].name === spec.name && played(k));
       if (met.length > 1) return {gap: `met ${met.map(playerName).join(" and ")}, each called ${spec.name}`};
       return met.length ? {index: met[0]} : {gap: `not played against ${spec.name}`};
     }
     const me = D.players[i], here = me.at[spec.clock];
     if (here == null) return {gap: `no position on ${spec.clock}`};
     const want = spec.kind === "earlier" ? here - spec.by : spec.value;
-    const line = me.run != null ? k => D.players[k].run === me.run : k => positioned.includes(k);
-    const found = D.players.map((a, k) => k).filter(k => line(k) && D.players[k].config === me.config && D.players[k].at[spec.clock] === want);
-    return found.length ? {index: found[found.length - 1]} : {gap: `no checkpoint at ${spec.clock} ${num(want)}`};
+    const found = lineMembers(lineOf(i)).filter(k => D.players[k].config === me.config && D.players[k].at[spec.clock] === want);
+    if (found.length > 1) return {gap: `${found.map(playerName).join(" and ")} both stood at ${spec.clock} ${num(want)}`};
+    return found.length ? {index: found[0]} : {gap: `no checkpoint at ${spec.clock} ${num(want)}`};
   }
   // The value of each checkpoint of `config` against `opponent`, split by `split`: "" for all,
   // a player's index as a string, or a curve's own opponent ({kind: "name" | "earlier" | "at"}).
   const evalValue = (score, sel, split, opponent, config) => (run, m) => {
     const i = bound.get(`${run}|${m.ordinal}|${config}`);
     if (i == null || sel == null) return gapOf(sel, run, m);
+    const a = D.players[i], both = positions.get(JSON.stringify([lineOf(i), config, a.at[alignClock]]));
+    const missing = meta => ({missing: true, gap: "none", at: a.at, meta});
+    if (both?.length > 1) return missing(`${both.map(playerName).join(" and ")} stood at ${alignClock} ${num(a.at[alignClock])}`);
     const own = typeof opponent === "object";
     let o = opponent === "" ? null : own ? null : +opponent;
     if (own) {
       const found = opponentAt(i, opponent, k => !!cellOf(sel, score, i, k, false, split));
-      if (found.gap) return {skip: true, gap: "none", meta: found.gap};
+      if (found.gap) return missing(found.gap);
       o = found.index;
     }
     const c = cellOf(sel, score, i, o, false, split);
-    if (!c) return own ? {skip: true, gap: "none", meta: `not played against ${playerName(o)}`} : gapOf(sel, run, m);
-    return {y: c.value, lo: c.interval?.[0], hi: c.interval?.[1], at: D.players[i].at, meta: `${c.rows} rows · ${c.matches} matches${own ? " · vs " + playerName(o) : ""}`};
+    if (!c) return own ? missing(`not played against ${playerName(o)}`) : gapOf(sel, run, m);
+    return {y: c.value, lo: c.interval?.[0], hi: c.interval?.[1], at: a.at, meta: `${c.rows} rows · ${c.matches} matches${own ? " · vs " + playerName(o) : ""}`};
   };
   const evaluated = pts => pts.filter(p => !p.missing && !p.skip);
-  return {T, R, JOBS, marks, markOf, xOf, jobPoints, cellOf, bound, placed, positioned, posClocks, alignClock, fixedPlayers, configs, coverage, jobOfRun, members, playerName, selName, choices, opponents, evalValue, evaluated};
+  return {T, R, JOBS, marks, markOf, xOf, jobPoints, cellOf, bound, placed, positioned, posClocks, alignClock, fixedPlayers, configs, coverage, jobOfRun, members, linesOf, lineMembers, playerName, selName, choices, opponents, evalValue, evaluated};
 }
 
 // The report's own headline for each job: its score curve in the page's first view (the

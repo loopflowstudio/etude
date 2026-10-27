@@ -233,7 +233,7 @@ section.
 declared clock, or wall hours); Perf and ML details can be smoothed. Choosing
 jobs and filtering are the only controls for the whole page.
 
-**Jobs, not runs.** Every panel draws every job: its runs across seeds,
+**Training jobs.** Training curves group a job's runs across seeds,
 labelled by the job's launch name and seed count ("ppo · 3 seeds"), as its
 seeds' mean banded by their range. Seeds align on where each checkpoint stood
 on the run's first declared clock. The `baseline` job is dotted everywhere; a
@@ -244,8 +244,11 @@ A checkpoint is drawn where its seat says it stood (`CheckpointRef.at`), else,
 for a key a training run of the experiment saved (`RUN/checkpoints/NAME`),
 where that run's clocks stood; where both give a clock and differ, the seat's
 value is drawn and the page notes it. Two runs' checkpoints holding the same
-bytes are two points. A checkpoint a training run saved joins that run's job;
-every other placed checkpoint joins one line, "positioned by their seats".
+bytes are two points. A checkpoint's line, the learner it belongs to, is
+its seat's `line`, else its training run. A checkpoint a training run saved
+is drawn in that run's job; every other placed checkpoint is drawn in its
+line's curve, labelled by the line's name, or in one curve of "checkpoints
+with no line". `Earlier`, `At` and `Crosstable` look only within a line.
 Every unplaced player, code or a checkpoint seated without a position, is an
 anchor, and the page names the unplaced checkpoints.
 
@@ -268,7 +271,7 @@ is drawn as it wants it now; one it no longer returns, as its eval runs held it.
 | `Curve(opponent="heuristic")` | against the player of that name, whatever the Opponent control says |
 | `Curve(opponent=Earlier(clock="updates", by=400))` | each checkpoint against the one of its line exactly 400 updates earlier; none there is a gap that says so |
 | `Curve(opponent=At(clock="updates", value=200))` | each checkpoint against the one of its line at update 200 |
-| `Crosstable()` | one line's checkpoints against each other, both axes ordered by the clock; an unplayed pair shows `·` |
+| `Crosstable()` | one line's checkpoints against each other, a tab per line, both axes ordered by the clock; an unplayed pair shows `·` |
 | `Matrix(rows, columns)` | one job's score per cell at one checkpoint: a finished job's final, else its latest evaluated |
 | `Ranking(by)` | a bar per job for each value of `by`; clicking a row filters the page |
 | `HeadToHead()` | a job's score in games against another job's checkpoints |
