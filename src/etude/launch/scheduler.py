@@ -362,10 +362,11 @@ class Scheduler:
                 life = min(life, float(max_usd / price * 3600))
             if life < 1:
                 raise LauncherError("a rental needs hours, and dollars for at least a second")
-            if life > self._longest_rental(supply):
+            longest = self._longest_rental(supply)
+            if life > longest:
                 raise LauncherError(
                     f"on-demand {ondemand!r} keeps records in a storage whose grants last at "
-                    f"most {self._longest_rental(supply) / 3600:g} hours"
+                    f"most {longest / 3600:g} hours"
                 )
             session, rented, rental = self._session(supply, None, price, life, now, kept=True)
             self._store.plan(session, (), rented, rental)
