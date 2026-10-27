@@ -12,13 +12,15 @@ Installed separately from the job environment. Run as
     attempts/<attempt>/claim     start time; created once, so code starts at most once
     attempts/<attempt>/log       everything the job printed
     attempts/<attempt>/outputs/  what the job wrote to ETUDE_OUTPUT_DIR
+    attempts/<attempt>/prepared.json  what its preparation found and did
     attempts/<attempt>/finished.json
     ended                        when this session ended; nothing is written after it
 
 A job is a shell command run in ETUDE_SOURCE_DIR, with its own environment
 variables. It reads ETUDE_OUTPUT_DIR, ETUDE_STOP_FILE, ETUDE_DEADLINE, ETUDE_SEED,
 ETUDE_UNTIL_CLOCK, ETUDE_UNTIL_VALUE, ETUDE_INPUTS_DIR, ETUDE_TRACK_DIR,
-ETUDE_EXPERIMENT and ETUDE_CONFIG, and may report its progress in
+ETUDE_EXPERIMENT, ETUDE_CONFIG and, after a preparation (`etude.launch.worker.prepared`),
+ETUDE_PREPARED_DIR, and may report its progress in
 `etude-result.json` in its output directory as
 `{"clocks": {"steps": 63000, "wall_time_ms": 5400000}}`.
 ETUDE_UNTIL_CLOCK and ETUDE_UNTIL_VALUE are the job's target.
@@ -26,24 +28,32 @@ ETUDE_UNTIL_CLOCK and ETUDE_UNTIL_VALUE are the job's target.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
 import tarfile
 import tempfile
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from types import FrameType
 from typing import BinaryIO, Literal
 
+from etude.cache import Cache, Content
 from etude.launch.logging import Console, explain, log_to, sanitize
-from etude.launch.records import Cause, Input, Outcome, Output, Record
+from etude.launch.records import Cause, Input, Outcome, Output, Prepared, Record, Runtime
 from etude.launch.runtime import PROBE, find_python, select_runtime
 from etude.launch.schemas import Packet, Progress, Work
-from etude.launch.storage.files import digest, read_result, write
+from etude.launch.storage.files import append_usage, digest, read_result, write
+from etude.launch.storage.transport import attribute, emit, observe
+from etude.launch.worker.prepared import key, prepare
 
 
 def _now() -> datetime:
@@ -64,6 +74,7 @@ def _finish(
         else []
     )
     result = read_result(outputs)
+    prepared = home / "prepared.json"
     record = Progress(
         attempt=home.name,
         started_at=None,
@@ -72,6 +83,7 @@ def _finish(
         cause=cause,
         clocks=result.clocks,
         exit_code=code,
+        prepared=Prepared.model_validate_json(prepared.read_text()) if prepared.exists() else None,
         outputs=tuple(
             Output(
                 name=p.relative_to(outputs).as_posix(),
@@ -84,8 +96,8 @@ def _finish(
     write(home / "finished.json", record.model_dump_json(exclude={"attempt", "started_at"}))
 
 
-def _prepare(session: Path, home: Path, work: Work) -> dict[str, str]:
-    """Lay out source, config and inputs; return the job's environment."""
+def _lay_out(session: Path, home: Path, work: Work) -> tuple[dict[str, str], dict[str, Path]]:
+    """Lay out source and config, and verify inputs; the job's environment and where inputs are."""
     source = home / "src"
     source.mkdir()
     (home / "outputs").mkdir()
@@ -135,29 +147,73 @@ def _prepare(session: Path, home: Path, work: Work) -> dict[str, str]:
     if work.config is not None:
         (home / "config").write_text(work.config)
         environment["ETUDE_CONFIG"] = str(home / "config")
-    if work.inputs:
-        folder = home / "inputs"
-        folder.mkdir()
+    held: dict[str, Path] = {}
+    with (home / "log").open("a") as log:
         for given in work.inputs:
-            held = session / "inputs" / given.sha256  # the courier verified it on arrival
-            if not held.is_file() and given.run is not None:
-                # This machine's folder for that run: its own, or relayed to it.
-                kept = shared / given.run / given.key
-                held = kept if _matches(kept, given) else held
-            if not held.is_file():
-                raise ValueError(
-                    f"input {given.name} was not delivered: its bytes did not match its digest,"
-                    " or this machine has neither storage nor the file"
-                )
-            os.link(held, folder / given.name)
-        environment["ETUDE_INPUTS_DIR"] = str(folder)
+            began = time.monotonic()
+            with (
+                observe(partial(append_usage, session)),
+                attribute(
+                    session=session.name,
+                    run=work.run,
+                    attempt=work.attempt,
+                    purpose="input",
+                    key=given.key,
+                    sha256=given.sha256,
+                ),
+            ):
+                held[given.name] = _held(session, shared, given)
+            log.write(
+                f"inputs: verified {given.name} ({given.size_bytes} bytes,"
+                f" {time.monotonic() - began:.1f} s)\n"
+            )
     if work.seed is not None:
         environment["ETUDE_SEED"] = str(work.seed)
     if work.until is not None:
         clock, _, target = work.until.partition("=")
         environment["ETUDE_UNTIL_CLOCK"] = clock
         environment["ETUDE_UNTIL_VALUE"] = target
-    return environment
+    return environment, held
+
+
+def _link(folder: Path, held: dict[str, Path]) -> Path:
+    """A folder of inputs by name, each a link to the one copy this machine holds."""
+    folder.mkdir()
+    for name, path in held.items():
+        linked = folder / name
+        try:
+            os.link(path, linked)
+        except OSError as error:
+            if error.errno != errno.EXDEV:
+                raise
+            linked.symlink_to(path)  # the cache is on another filesystem
+    return folder
+
+
+def _held(session: Path, shared: Path, given: Input) -> Path:
+    """Where this machine holds the input's bytes, verified for this attempt before it starts.
+
+    The cache's read-only copy, which the courier holds for the session; else
+    content too large for the cache, staged beside the session; else this
+    machine's folder for the input's run, its own or relayed to it.
+    """
+    content = Content(sha256=given.sha256, size_bytes=given.size_bytes)
+    held = Cache().held(content)
+    if held is not None:
+        return held
+    places = [session / "inputs" / given.sha256]
+    if given.run is not None:
+        places.append(shared / given.run / given.key)
+    for path in places:
+        if _matches(path, given):
+            if path.is_relative_to(shared):
+                # Nothing was received for it: this machine already held the run's file.
+                emit("REUSE", path.as_uri(), reused=given.size_bytes, completed=True)
+            return path
+    raise ValueError(
+        f"input {given.name} was not delivered: its bytes did not match its digest,"
+        " or this machine has neither storage nor the file"
+    )
 
 
 def _matches(path: Path, given: Input) -> bool:
@@ -199,7 +255,7 @@ class Exit(Record):
 def _execute(
     command: list[str],
     *,
-    home: Path,
+    cwd: Path,
     environment: dict[str, str],
     output: BinaryIO,
     errors: BinaryIO,
@@ -215,7 +271,7 @@ def _execute(
         return Exit(code=None, stopped="cancelled" if cancelled else "deadline")
     process = subprocess.Popen(
         command,
-        cwd=home / "src",
+        cwd=cwd,
         env=environment,
         stdin=subprocess.DEVNULL,
         stdout=output,
@@ -242,14 +298,14 @@ def _execute(
 def _runtime(
     home: Path,
     work: Work,
+    runtime: Runtime,
+    python: str,
     environment: dict[str, str],
     log: BinaryIO,
     stop: Path,
     deadline: datetime,
 ) -> Exit:
-    assert work.runtime is not None
-    runtime = work.runtime
-    executable = find_python(runtime, environment)
+    executable = find_python(python, environment)
     log.write(sanitize(f"runtime: inspecting {executable}\n").encode())
     log.flush()
     with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
@@ -262,7 +318,7 @@ def _runtime(
                 json.dumps(sorted(runtime.packages)),
                 "cuda" if runtime.cuda is not None else "",
             ],
-            home=home,
+            cwd=home / "src",
             environment=environment,
             output=output,
             errors=errors,
@@ -294,7 +350,7 @@ def _phase(
     name: str,
     command: str,
     *,
-    home: Path,
+    cwd: Path,
     environment: dict[str, str],
     log: BinaryIO,
     stop: Path | None,
@@ -311,7 +367,7 @@ def _phase(
     try:
         result = _execute(
             ["sh", "-c", command],
-            home=home,
+            cwd=cwd,
             environment={
                 **environment,
                 "ETUDE_PHASE": name,
@@ -332,6 +388,91 @@ def _phase(
     return result
 
 
+@contextmanager
+def _prepared(
+    home: Path,
+    work: Work,
+    environment: dict[str, str],
+    held: dict[str, Path],
+    log: BinaryIO,
+    stop: Path,
+    limit: datetime,
+) -> Iterator[Exit]:
+    """Make the job ready: its preparation, reused or built, then its runtime.
+
+    The command sees only the inputs it names; the job's are linked after it.
+    The prepared directory stays pinned on this machine while the caller runs.
+    """
+    preparation = work.prepare
+    if preparation is None:
+        yield Exit(code=0)
+        return
+
+    def note(line: str) -> None:
+        log.write(sanitize(line + "\n").encode())
+        log.flush()
+
+    declared = {name: held[name] for name in preparation.inputs}
+    inputs = _link(home / "prepared-inputs", declared)
+    found = key(preparation, home / "src", work.inputs, work.environment)
+    source = _keyed_source(home / "src", home / "prepared-source", preparation.paths)
+    built = Exit(code=0)
+
+    def build(directory: Path) -> bool:
+        nonlocal built
+        built = _phase(
+            "prepare",
+            preparation.command,
+            cwd=source,
+            environment={
+                **environment,
+                "ETUDE_PREPARED_DIR": str(directory),
+                "ETUDE_PREPARED_INPUTS": str(inputs),
+            },
+            log=log,
+            stop=stop,
+            deadline=limit,
+            labelled=True,
+            stop_seconds=work.stop_seconds,
+        )
+        return built.code == 0 and built.stopped is None
+
+    with prepare(found, build, lambda: not stop.exists() and _now() < limit, note) as ready:
+        if ready is None:
+            yield Exit(code=None, stopped="cancelled" if stop.exists() else "deadline")
+            return
+        directory, done = ready
+        write(home / "prepared.json", done.model_dump_json())
+        if done.size_bytes is None:
+            yield built
+            return
+        environment["ETUDE_PREPARED_DIR"] = str(directory)
+        if preparation.python is not None:
+            python = str(directory / preparation.python)
+            yield _runtime(
+                home, work, work.runtime or Runtime(), python, environment, log, stop, limit
+            )
+        elif work.runtime is not None and work.runtime.python is not None:
+            yield _runtime(
+                home, work, work.runtime, work.runtime.python, environment, log, stop, limit
+            )
+        else:
+            yield Exit(code=0)
+
+
+def _keyed_source(source: Path, destination: Path, paths: tuple[str, ...]) -> Path:
+    """A copy of `source` holding only `paths`, where a preparation runs, so it reads only its key."""
+    destination.mkdir()
+    for path in paths:
+        given, copy = source / path, destination / path
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        if given.is_dir() and not given.is_symlink():
+            shutil.copytree(given, copy, symlinks=True)
+        else:
+            shutil.copy2(given, copy, follow_symlinks=False)
+    return destination
+
+
 def _commands(
     home: Path,
     packet: Packet,
@@ -348,7 +489,7 @@ def _commands(
             result = _phase(
                 "setup",
                 work.setup,
-                home=home,
+                cwd=home / "src",
                 environment=environment,
                 log=log,
                 stop=stop,
@@ -360,7 +501,7 @@ def _commands(
             result = _phase(
                 "run",
                 work.command,
-                home=home,
+                cwd=home / "src",
                 environment=environment,
                 log=log,
                 stop=stop,
@@ -380,7 +521,7 @@ def _commands(
             cleanup = _phase(
                 "cleanup",
                 work.cleanup,
-                home=home,
+                cwd=home / "src",
                 environment=environment,
                 log=log,
                 stop=None,
@@ -409,27 +550,36 @@ def _run(session: Path, packet: Packet, work: Work) -> None:
     if stop.exists():
         return _finish(home, "cancelled")
     try:
-        environment = _prepare(session, home, work)
+        environment, held = _lay_out(session, home, work)
     except (OSError, ValueError, subprocess.CalledProcessError, tarfile.TarError) as error:
-        (home / "log").write_text("source preparation failed: " + explain(error) + "\n")
+        with (home / "log").open("a") as failed:
+            failed.write("source preparation failed: " + explain(error) + "\n")
         return _finish(home, "lost", "setup_failed")
     started = _now()
     limit = started + timedelta(seconds=work.limit_seconds)
     if packet.deadline is not None:
         limit = min(limit, packet.deadline)
     environment["ETUDE_DEADLINE"] = limit.isoformat()
-    result = Exit(code=None)
-    with (home / "log").open("wb") as log:
+    result = Exit(code=0)
+    with (home / "log").open("ab") as log:
         try:
-            if work.runtime is not None:
-                result = _runtime(home, work, environment, log, stop, limit)
-            if result.stopped is None and (work.runtime is None or result.code == 0):
+            if work.runtime is not None and work.prepare is None:
+                # Nothing to prepare: the interpreter is checked before code is claimed.
+                assert work.runtime.python is not None  # Job requires it without prepare.python
+                result = _runtime(
+                    home, work, work.runtime, work.runtime.python, environment, log, stop, limit
+                )
+            if result.code == 0 and result.stopped is None:
                 # The claim denotes user code, not the read-only runtime probe.
                 with tempfile.NamedTemporaryFile(mode="w", dir=home) as claim:
                     claim.write(_now().isoformat())
                     claim.flush()
                     os.link(claim.name, home / "claim")
-                result = _commands(home, packet, work, environment, log, stop, limit)
+                with _prepared(home, work, environment, held, log, stop, limit) as result:
+                    if result.code == 0 and result.stopped is None:
+                        if held:
+                            environment["ETUDE_INPUTS_DIR"] = str(_link(home / "inputs", held))
+                        result = _commands(home, packet, work, environment, log, stop, limit)
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             log.write(("runtime failed: " + explain(error) + "\n").encode())
             result = Exit(code=1)
