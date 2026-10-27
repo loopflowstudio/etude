@@ -14,7 +14,18 @@ from typing import Any
 
 from pydantic import Field, FiniteFloat, Json, JsonValue
 
-from etude.launch.records import Cause, Input, Limit, Outcome, Output, Record, Runtime, Variable
+from etude.launch.records import (
+    Cause,
+    Input,
+    Limit,
+    Outcome,
+    Output,
+    Preparation,
+    Prepared,
+    Record,
+    Runtime,
+    Variable,
+)
 from etude.launch.storage.download import Download
 from etude.launch.storage.s3 import Grant
 from etude.launch.usage import Transfer
@@ -28,6 +39,7 @@ class Work(Record):
     stop_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     cleanup_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     runtime: Runtime | None = None
+    prepare: Preparation | None = None
     attempt: str
     command: str
     limit_seconds: int
@@ -72,6 +84,7 @@ class Progress(Record):
     clocks: dict[str, float]
     outputs: tuple[Output, ...]
     exit_code: int | None
+    prepared: Prepared | None = None
 
 
 class Observation(Record):

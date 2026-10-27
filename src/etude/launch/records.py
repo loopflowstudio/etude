@@ -289,9 +289,13 @@ class Machine(Record):
 
 
 class Runtime(Record):
-    """A preinstalled job interpreter and the versions it must already contain."""
+    """A job interpreter and the versions it must contain.
 
-    python: str = Field(min_length=1)
+    `python` names a preinstalled interpreter. Leave it unset when the job's
+    `Preparation.python` provides one; the pins are then checked against that.
+    """
+
+    python: str | None = Field(default=None, min_length=1)
     python_version: str | None = None  # exact version or a dotted prefix, e.g. 3.12
     packages: dict[str, str] = Field(default_factory=dict)  # exact distribution versions
     cuda: str | None = None  # PyTorch's compiled CUDA version, not host driver version
@@ -332,6 +336,43 @@ class Input(Record):
         return self
 
 
+class Preparation(Record):
+    """Work a machine keeps and reuses while its key is unchanged, such as a job's venv.
+
+    `command` runs by sh after the claim and before the runtime check, and
+    writes `$ETUDE_PREPARED_DIR`. It sees exactly what its key covers: it runs
+    in a copy of the source holding only `paths`, and finds only the inputs it
+    names, at `$ETUDE_PREPARED_INPUTS/NAME`, so reading anything else fails the
+    build rather than going stale. Its key is the content of `paths`, the
+    command, the named inputs' digests, the job environment and the machine's
+    platform; while that is unchanged a later attempt on the machine reuses
+    the verified directory and the command does not run. `python` names the
+    job's interpreter inside the directory, such as `.venv/bin/python`.
+    """
+
+    command: str = Field(min_length=1)
+    paths: tuple[str, ...] = Field(min_length=1)  # source paths whose content decides the result
+    inputs: tuple[str, ...] = ()  # names of the job's inputs the command reads
+    python: str | None = None  # the job's interpreter, relative to $ETUDE_PREPARED_DIR
+
+    @field_validator("paths")
+    @classmethod
+    def _within_source(cls, paths: tuple[str, ...]) -> tuple[str, ...]:
+        for path in paths:
+            if path.startswith("/") or {"", ".", ".."} & set(path.rstrip("/").split("/")):
+                raise ValueError(f"prepare path {path!r} must be a path within the source")
+        return paths
+
+    @field_validator("python")
+    @classmethod
+    def _within_prepared(cls, python: str | None) -> str | None:
+        if python is not None and (
+            python.startswith("/") or {"", ".", ".."} & set(python.split("/"))
+        ):
+            raise ValueError(f"prepared python {python!r} must be a path within the directory")
+        return python
+
+
 class Variable(Record):
     """One environment variable a job is given."""
 
@@ -349,7 +390,7 @@ class Job(Record):
     """What to run, without a seed. Launching freezes it: `revision` becomes a commit.
 
     What makes a job itself is what decides the result: the command, the config, the
-    source, its inputs, setup/cleanup, runtime and the target. Two launches that agree on those are the same job, so
+    source, its inputs, setup/cleanup, preparation, runtime and the target. Two launches that agree on those are the same job, so
     their runs can be found together. The name, the hours, the dollars and the
     attempts are how it is launched; they bound each run and can differ between runs.
     """
@@ -359,6 +400,7 @@ class Job(Record):
     stop_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     cleanup_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     runtime: Runtime | None = None
+    prepare: Preparation | None = None
     # Run by sh in the source checkout; reads the ETUDE_* environment. A typed job's
     # (`etude.jobs`) is Etude's own; written by hand only for work that is not Python.
     command: str
@@ -378,6 +420,19 @@ class Job(Record):
     experiment: str | None = None
 
     _check_inputs = field_validator("inputs")(_distinct)
+
+    @model_validator(mode="after")
+    def _prepared_from_inputs(self) -> Job:
+        if self.prepare is not None:
+            unknown = set(self.prepare.inputs) - {given.name for given in self.inputs}
+            if unknown:
+                raise ValueError(f"prepare reads inputs the job is not given: {sorted(unknown)}")
+        prepared = self.prepare is not None and self.prepare.python is not None
+        if self.runtime is not None and (self.runtime.python is None) != prepared:
+            raise ValueError(
+                "name the job interpreter once: in runtime.python, or in prepare.python"
+            )
+        return self
 
     def runs(self, *seeds: int, params: dict[str, Param] | None = None) -> list[Run]:
         """This job once per seed, each recording the parameters that led to it."""
@@ -400,6 +455,8 @@ def job_identity(job: Job) -> dict[str, str | int | None]:
         identity["experiment"] = job.experiment
     if job.runtime is not None:
         identity["runtime"] = json.dumps(job.runtime.model_dump(mode="json"), sort_keys=True)
+    if job.prepare is not None:
+        identity["prepare"] = json.dumps(job.prepare.model_dump(mode="json"), sort_keys=True)
     if job.environment:
         identity["environment"] = json.dumps(
             sorted([v.name, v.value] for v in job.environment), sort_keys=True
@@ -516,6 +573,21 @@ class Session(Record):
     hardware: Hardware | None = None
 
 
+class Prepared(Record):
+    """What an attempt's preparation found and did (`etude.launch.worker.prepared`).
+
+    `rejected` is always followed by a build; `size_bytes` is None when the
+    build failed.
+    """
+
+    key: str
+    outcome: Literal["reused", "built", "rejected"]
+    finished_at: datetime  # when the directory was ready, or the build failed
+    seconds: float = Field(ge=0)  # verifying a reused directory, or building one
+    size_bytes: int | None = None
+    cause: str | None = None  # why a kept directory was rejected
+
+
 class RunAttempt(Record):
     """Allocation of one run to one machine for a bounded execution window.
 
@@ -542,6 +614,7 @@ class RunAttempt(Record):
     # When it was placed. Its share of the cost starts no earlier.
     planned_at: datetime | None = None
     added: bool = False  # placed on a session that already existed
+    prepared: Prepared | None = None  # from the finished journal, when the job prepares
 
 
 class Status(Record):

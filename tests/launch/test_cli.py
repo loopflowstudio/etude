@@ -413,7 +413,8 @@ def test_bootstrap_session_carries_records_without_a_launcher(
         assert (tmp_path / "sessions/r/ended").exists()
         assert any(b"out/receipt" in upload for upload in uploads)
         assert any(b"out/ended" in upload for upload in uploads)
-        assert not (tmp_path / "launcher").exists()
+        # The worker keeps its cache under ETUDE_HOME, but no launcher records.
+        assert not (tmp_path / "launcher" / "launcher.db").exists()
     finally:
         server.shutdown()
         server.server_close()

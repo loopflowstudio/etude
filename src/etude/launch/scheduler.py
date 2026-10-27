@@ -62,6 +62,7 @@ from etude.launch.records import (
     Offer,
     OnDemand,
     Pool,
+    Prepared,
     Provider,
     Quote,
     QuotedMachine,
@@ -103,6 +104,16 @@ def _limit_usd(job: Job) -> Decimal:
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _preparation(prepared: Prepared) -> str:
+    """The `--phases` evidence for a preparation: its key, time, size and why."""
+    said = [prepared.key[:12], f"{prepared.seconds:.1f} s"]
+    if prepared.size_bytes is not None:
+        said.append(f"{prepared.size_bytes} bytes")
+    if prepared.cause is not None:
+        said.append(prepared.cause)
+    return ", ".join(said)
 
 
 def _id() -> str:
@@ -351,10 +362,11 @@ class Scheduler:
                 life = min(life, float(max_usd / price * 3600))
             if life < 1:
                 raise LauncherError("a rental needs hours, and dollars for at least a second")
-            if life > self._longest_rental(supply):
+            longest = self._longest_rental(supply)
+            if life > longest:
                 raise LauncherError(
                     f"on-demand {ondemand!r} keeps records in a storage whose grants last at "
-                    f"most {self._longest_rental(supply) / 3600:g} hours"
+                    f"most {longest / 3600:g} hours"
                 )
             session, rented, rental = self._session(supply, None, price, life, now, kept=True)
             self._store.plan(session, (), rented, rental)
@@ -972,9 +984,18 @@ class Scheduler:
                     ("machine confirmed", None, "receipt retained" if session.receipt else None),
                     ("worker up", session.started_at, None),
                     ("code started", attempt.started_at, None),
-                    ("finished", attempt.finished_at, None),
                 )
             )
+            if (prepared := attempt.prepared) is not None:
+                phases.append(
+                    StartPhase(
+                        name=f"prepared ({prepared.outcome})",
+                        at=prepared.finished_at,
+                        attempt=attempt.id,
+                        evidence=_preparation(prepared),
+                    )
+                )
+            phases.append(StartPhase(name="finished", at=attempt.finished_at, attempt=attempt.id))
         return tuple(phases)
 
     def status(self, run: str) -> Status:
@@ -1749,6 +1770,7 @@ class Scheduler:
             attempt=attempt.id,
             command=spec.command,
             runtime=spec.runtime,
+            prepare=spec.prepare,
             setup=spec.setup,
             cleanup=spec.cleanup,
             cleanup_seconds=spec.cleanup_seconds,
@@ -1950,6 +1972,7 @@ class Scheduler:
                 clocks=seen.clocks,
                 outputs=seen.outputs,
                 exit_code=seen.exit_code,
+                prepared=seen.prepared,
             )
             self._diagnose(
                 "execution",
@@ -1974,6 +1997,7 @@ class Scheduler:
                 cause=cause,
                 clocks=seen.clocks if seen else attempt.clocks,
                 outputs=seen.outputs if seen else attempt.outputs,
+                prepared=seen.prepared if seen else None,
             )
             self._diagnose(
                 "execution",

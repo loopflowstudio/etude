@@ -43,6 +43,7 @@ from etude.launch.schemas import (
     attempt_log,
     log_piece,
 )
+from etude.launch.storage import download as downloads
 from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.download import Download, download
 from etude.launch.storage.files import RESULT
@@ -176,6 +177,20 @@ def http(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[HTTP]:
         fixture.thread.join()
 
 
+def test_ranges_are_read_as_concurrent_parts_and_ahead_observed_on_the_calling_thread(
+    http: HTTP, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(downloads, "PART_BYTES", 4)
+    observed: list[tuple[int, str]] = []
+    cache = Cache(tmp_path / "cache", range_bytes=8)  # the second range is read ahead
+    with observe(lambda raw: observed.append((threading.get_ident(), raw))):
+        result = download(http.source(), tmp_path / "result", cache=cache)
+    assert result.read_bytes() == b"abcdefghijkl"
+    assert sorted(http.ranges) == ["bytes=0-3", "bytes=4-7", "bytes=8-11"]
+    assert {thread for thread, _ in observed} == {threading.get_ident()}
+    assert sum(Transfer.model_validate_json(raw).received_bytes for _, raw in observed) == 12
+
+
 def test_cold_warm_concurrent_and_new_process_retrieval(http: HTTP, tmp_path: Path) -> None:
     cache = Cache(tmp_path / "cache", range_bytes=4)
     events: list[Transfer] = []
@@ -187,6 +202,7 @@ def test_cold_warm_concurrent_and_new_process_retrieval(http: HTTP, tmp_path: Pa
     script = """from pathlib import Path
 import sys
 from etude.cache import Cache
+from etude.launch.storage import download as downloads
 from etude.launch.storage.download import Download, download
 download(Download.model_validate_json(sys.argv[2]), Path(sys.argv[3]), cache=Cache(Path(sys.argv[1])))
 """
@@ -610,11 +626,12 @@ def test_completed_workload_before_and_after(
             }
         )
         assert (home / "sources/shared.tar").read_bytes() == http.objects["/source"]
-        assert (home / f"attempts/{a.id}/inputs/checkpoint.pt").read_bytes() == http.objects[
-            "/checkpoint"
-        ]
+        # Held in the cache for the session's attempts to link, not copied beside it.
+        assert not (home / f"attempts/{a.id}/inputs/checkpoint.pt").exists()
+        held = Cache().held(Content.of(http.objects["/checkpoint"]))
+        assert held is not None and held.read_bytes() == http.objects["/checkpoint"]
         outputs = home / "attempts" / a.id / "outputs"
-        outputs.mkdir()
+        outputs.mkdir(parents=True)
         (outputs.parent / "run").write_text(a.run)
         (outputs.parent / "claim").write_text(b.clock().isoformat())
         (outputs / "checkpoint.pt").write_bytes(payload)
@@ -666,7 +683,7 @@ def test_completed_workload_before_and_after(
         events=tuple(e for e in cold.events if e.id not in replayed_ids),
     )
     # The payload alone: the records fetch consults are already held, and unchanged.
-    assert (cold_reads.received_bytes, cold_reads.requests) == (len(payload), 7)
+    assert (cold_reads.received_bytes, cold_reads.requests) == (len(payload), 6)
     assert cold_reads.reused_bytes == len(payload)
     for index, run in enumerate(runs):
         assert (
@@ -703,7 +720,7 @@ def test_completed_workload_before_and_after(
     }
     assert sum(e.status == 403 for e in after.events) == 1
     assert control.requests > 0 and control.supplied_bytes > 0
-    assert bulk.requests == 9  # runtime, failed source, source, input, 2 uploads, 3 ranges
+    assert bulk.requests == 8  # runtime, failed source, source, input, 2 uploads, 2 parts
     # Worker publication, scheduler collection and public fetches; a start receipt is read once.
     assert control.requests == 40
 
@@ -728,9 +745,9 @@ def test_completed_workload_before_and_after(
     assert before.received_bytes - after.received_bytes == len(
         http.objects["/source"]
     ) + 1024**2 + 3 * len(payload)
-    assert (before.requests, after.requests) == (52, 49)
+    assert (before.requests, after.requests) == (52, 48)
     saved = before.estimate(S3_US_WEST_2) - after.estimate(S3_US_WEST_2)
-    assert saved == Decimal("0.00707908782")
+    assert saved == Decimal("0.00707948782")
     assert after.requests == control.requests + bulk.requests
     own = [b.scheduler.usage(run=run) for run in runs]
     shared = {e.id: e for report in own for e in report.shared_events}
@@ -892,6 +909,7 @@ def test_changed_and_corrupt_bucket_objects_are_read_again(tmp_path: Path) -> No
         storage.put("run/manifest.json", b"second")
         assert storage.get("run/manifest.json") == b"second"
         held = storage.cache.root / Content.of(b"second").name
+        held.chmod(0o644)
         held.write_bytes(b"secoNd")
         assert storage.get("run/manifest.json") == b"second"
     assert client.bytes == 5 + 6 + 6
@@ -960,7 +978,9 @@ def test_a_range_never_exposes_corrupted_cached_content(tmp_path: Path) -> None:
     source = _Held(b"abcdef")
     cache = Cache(tmp_path / "cache")
     assert cache.read(source.artifact, source) == source.body
-    (cache.root / Content.of(source.body).name).write_bytes(b"aXXdef")
+    held = cache.root / Content.of(source.body).name
+    held.chmod(0o644)
+    held.write_bytes(b"aXXdef")
     assert cache.read(source.artifact, source, start=1, length=2) == b"bc"
     assert source.read_bytes == 2 * len(source.body)
 
@@ -981,19 +1001,34 @@ def test_one_artifact_at_two_locations_is_read_once(tmp_path: Path) -> None:
     assert source.read_bytes == len(source.body)
 
 
-def test_pinned_content_survives_eviction_until_unpinned(tmp_path: Path) -> None:
+def test_held_content_survives_eviction_until_its_holder_releases_it(tmp_path: Path) -> None:
     cache = Cache(tmp_path / "cache", max_bytes=12)
     first, second = b"abcdefghijkl", b"mnopqrstuvwx"
     kept = Content.of(first)
-    cache.place(_Held(first).artifact, tmp_path / "first", _Held(first), pin=True)
+    held = cache.hold(_Held(first).artifact, _Held(first), holder="s1", staging=tmp_path / "a")
+    assert held == cache.root / kept.name and held.stat().st_mode & 0o777 == 0o444
     cache.place(_Held(second).artifact, tmp_path / "second", _Held(second))
-    assert (cache.root / kept.name).read_bytes() == first
+    assert held.read_bytes() == first
     assert not (cache.root / Content.of(second).name).exists()  # streamed, not kept
-    cache.unpin(kept)
+    cache.release("s1")
     cache.place(_Held(second).artifact, tmp_path / "second", _Held(second))
-    assert not (cache.root / kept.name).exists()
+    assert not held.exists()
     assert (cache.root / Content.of(second).name).read_bytes() == second
-    assert (tmp_path / "first").read_bytes() == first  # eviction removes only cached copies
+    assert not (tmp_path / "a").exists()  # held in place: nothing was copied
+
+
+def test_held_content_is_verified_when_asked_for_and_discarded_when_corrupt(
+    tmp_path: Path,
+) -> None:
+    cache = Cache(tmp_path / "cache")
+    source = _Held(b"abcdef")
+    held = cache.hold(source.artifact, source, holder="s1", staging=tmp_path / "a")
+    content = Content.of(source.body)
+    assert cache.held(content) == held
+    held.chmod(0o644)
+    held.write_bytes(b"aXXdef")
+    assert cache.held(content) is None
+    assert not held.exists()
 
 
 def test_worker_source_and_input_share_verified_transport_bytes(
@@ -1014,7 +1049,9 @@ def test_worker_source_and_input_share_verified_transport_bytes(
         }
     )
     assert target.read_bytes() == b"abcdefghijkl"
-    assert (home / "inputs/weights").read_bytes() == b"abcdefghijkl"
+    assert not (home / "inputs/weights").exists()  # held in the cache, not copied
+    held = Cache().held(Content.of(b"abcdefghijkl"))
+    assert held is not None and held.read_bytes() == b"abcdefghijkl"
     events = [
         Transfer.model_validate_json(line)
         for line in (home / "usage.jsonl").read_text().splitlines()

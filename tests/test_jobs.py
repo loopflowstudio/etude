@@ -159,6 +159,54 @@ def test_a_function_the_job_cannot_import_by_name_is_refused(tmp_path: Path) -> 
         read_job_file(repo / "job.py")
 
 
+UNPACKAGED = '[project]\nname = "lab"\nversion = "0"\ndependencies = []\n'
+PACKAGED = (
+    UNPACKAGED + '[build-system]\nrequires = ["hatchling"]\nbuild-backend = "hatchling.build"\n'
+)
+TYPED = """
+from etude.jobs import training
+
+from {module} import TrainConfig, train
+
+
+def runs() -> object:
+    return training(train, config=TrainConfig(lr=1), max_hours=0.1{options})
+"""
+
+
+@pytest.mark.parametrize(
+    ("project", "options", "derived"),
+    [
+        (UNPACKAGED, "", True),
+        (PACKAGED, "", False),  # building the project needs more than its lock
+        (UNPACKAGED, ", prepare=None", False),  # an explicit None opts out
+    ],
+)
+def test_an_unpackaged_uv_project_prepares_its_environment_once_per_lock(
+    tmp_path: Path, project: str, options: str, derived: bool
+) -> None:
+    module = f"uv_lab_{tmp_path.name}".replace("-", "_")  # each checkout's own import
+    repo = checkout(
+        tmp_path / "lab",
+        {
+            "pyproject.toml": project,
+            "uv.lock": "version = 1\n",
+            ".python-version": "3.12\n",
+            f"{module}.py": TRAIN,
+            "job.py": TYPED.format(module=module, options=options),
+        },
+    )
+    (run,) = read_job_file(repo / "job.py")
+    prepare = run.job.prepare
+    if derived:
+        assert prepare is not None
+        assert prepare.paths == ("pyproject.toml", "uv.lock", ".python-version")
+        assert prepare.python == ".venv/bin/python"
+        assert run.job.command.startswith('"$ETUDE_PYTHON" -m etude.call')
+    else:
+        assert prepare is None and run.job.command.startswith("uv run python -m etude.call")
+
+
 def test_typed_jobs_take_every_job_field_but_what_they_derive() -> None:
     # The experiment is the launched file's, or an evaluation's own `experiment`.
     derived = {"command", "config", "experiment"}
