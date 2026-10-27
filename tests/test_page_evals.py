@@ -21,7 +21,7 @@ from etude.run.errors import EtudeError
 from etude.run.records import ArtifactRef, Clock
 from etude.run.storage import DirectoryStorage, S3Storage
 from etude.train.run import Run, track
-from tests.eval.games import play
+from tests.eval.games import play, play_failing_deal_one
 from tests.experiments import experiment_file
 from tests.run.storage import CountedClient
 
@@ -227,7 +227,7 @@ VERSIONED = """
 from etude.eval.match import agent, environment
 from etude.eval.records import Benchmark, Matchup, Model
 from etude.jobs import evaluation
-from tests.eval.games import play
+from tests.eval.games import play, play_failing_deal_one
 
 DIRECT = Model(config={"search": 0})
 WEAK = agent("weak", code=[__file__], config={"strength": 0})
@@ -353,11 +353,16 @@ def test_an_evaluation_only_experiment_draws_checkpoints_where_their_seats_say(
     assert {name: at[name] for name in ("u0", "u200", "u400", "u600")} == {
         f"u{n}": {"updates": n} for n in (0, 200, 400, 600)
     }
-    # Unplaced: code, a checkpoint seated without `at`, and one whose seats disagree.
-    assert at["heuristic"] == at["loose"] == at["drift"] == {}
+    # Unplaced: code, and a checkpoint seated without `at`.
+    assert at["heuristic"] == at["loose"] == {}
     assert all(each.run is None for each in page.agents)
     assert any("loose" in note and "anchors" in note for note in page.notes)
-    assert any("drift" in note and "updates 300; updates 350" in note for note in page.notes)
+    # Seats that disagree: the latest is drawn, and the earlier is named.
+    assert at["drift"] == {"updates": 350}
+    assert (
+        "drift is drawn at updates 350, as its latest seat says; earlier seats said updates 300."
+        in page.notes
+    )
     pair = {
         (page.agents[c.subject].name, page.agents[c.opponent].name): c
         for c in page.cells
@@ -448,3 +453,35 @@ def test_a_tracked_checkpoint_is_placed_by_its_seat_first_and_its_training_recor
         "updates-200.pt": ("a", {"updates": 250}),
     }
     assert "updates-200.pt: seated at updates 250; its training record says 200." in page.notes
+
+
+def test_a_failure_outside_a_tournament_is_kept_until_its_environment_plays_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = tmp_path / "runs"
+    file = experiment_file(tmp_path / "experiments", "lab", SEATED)
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    crashing = duel(outside("u0", {"updates": 0}), HEURISTIC, deal=1)
+    with pytest.raises(EtudeError, match="match_failed"):
+        evaluate(
+            experiment="lab",
+            environment=DUEL,
+            matches=[crashing],
+            play=play_failing_deal_one,
+            run="failed-in-duel",
+            directory=runs,
+        )
+    evaluate(
+        experiment="lab",
+        environment=environment("other"),
+        matches=[crashing],
+        play=play,
+        run="done-in-other",
+        directory=runs,
+    )
+    page = build(runs, file)
+    (failure,) = page.failures
+    assert failure.tournament is None
+    assert [page.agents[i].name for i in failure.agents] == ["u0", "heuristic"]
+    assert failure.error is not None and "deal 1 crashed" in failure.error

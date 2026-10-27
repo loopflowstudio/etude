@@ -201,7 +201,10 @@ function model(D) {
   }
 
   // ---- evals: what compare computed
-  const cellIndex = new Map(); for (const c of D.cells) cellIndex.set(`${c.selection}|${c.score}|${c.subject}|${c.opponent ?? ""}|${+c.fixed}|${splitKey(c.split)}`, c);
+  const cellIndex = new Map();
+  // "Against all" is left out where it repeats a subject's only opponent: that opponent's cell stands in.
+  for (const c of D.cells) if (c.opponent != null) cellIndex.set(`${c.selection}|${c.score}|${c.subject}||${+c.fixed}|${splitKey(c.split)}`, c);
+  for (const c of D.cells) cellIndex.set(`${c.selection}|${c.score}|${c.subject}|${c.opponent ?? ""}|${+c.fixed}|${splitKey(c.split)}`, c);
   const cellOf = (sel, score, subject, opponent, fixed, split) => cellIndex.get(`${sel}|${score}|${subject}|${opponent ?? ""}|${+fixed}|${splitKey(split)}`);
   const bound = new Map(); D.agents.forEach((a, i) => { if (a.run != null) bound.set(`${a.run}|${a.ordinal}|${a.config}`, i); });
   for (const i of positioned) bound.set(`${SEATED}|${posKey(D.agents[i].at)}|${D.agents[i].config}`, i);

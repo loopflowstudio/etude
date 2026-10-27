@@ -89,8 +89,8 @@ class Agent(Record):
     """An agent the eval runs seated: a placed checkpoint, or else a fixed one.
 
     `run` and `ordinal` name the training run's checkpoint its key binds it
-    to, None for any other. `at` is where it is drawn, by clock: its seat's
-    position, else its training record's; empty for a fixed agent.
+    to, None for any other. `at` is where it is drawn, by clock: its latest
+    seat's position, else its training record's; empty for a fixed agent.
     """
 
     key: str  # its `etude.eval.records.AgentKey`, encoded, as the database holds it
@@ -573,8 +573,8 @@ def _agents(db: duckdb.DuckDBPyConnection) -> tuple[list[Agent], tuple[str, ...]
     and notes on what could not be placed as recorded.
 
     Where seat and training record differ on a clock, the seat's value is
-    drawn: it is what the evaluation declared. An agent whose seats disagree
-    is not placed.
+    drawn: it is what the evaluation declared. Where seats disagree, the
+    latest is drawn, so a later evaluation corrects a wrong position.
     """
     bound = _checkpoints(db)
     found = db.sql(
@@ -588,18 +588,18 @@ def _agents(db: duckdb.DuckDBPyConnection) -> tuple[list[Agent], tuple[str, ...]
         recorded = {} if place is None else place[2]
         seated: dict[str, float] = json.loads(at) if at else {}
         if conflict:
-            given = "; ".join(_position(each) for each in json.loads(conflict))
+            earlier = "; ".join(_position(each) for each in json.loads(conflict) if each != seated)
             notes.append(
-                f"{name} is drawn as an anchor: its seats disagree on where it stood ({given})."
+                f"{name} is drawn at {_position(seated)}, as its latest seat says;"
+                f" earlier seats said {earlier}."
             )
-            place, recorded, seated = None, {}, {}
         for clock in sorted(seated.keys() & recorded.keys()):
             if seated[clock] != recorded[clock]:
                 notes.append(
                     f"{name}: seated at {clock} {seated[clock]:g};"
                     f" its training record says {recorded[clock]:g}."
                 )
-        if kind == "checkpoint" and place is None and not seated and not conflict:
+        if kind == "checkpoint" and place is None and not seated:
             unplaced.append(name)
         agents.append(
             Agent(
@@ -972,7 +972,7 @@ def _failures(
     db: duckdb.DuckDBPyConnection, standing: Sequence[_Standing], agents: Sequence[Agent]
 ) -> tuple[Failure, ...]:
     """Each failed match `played` counts, and each outside a tournament that no eval run has
-    played since, with the error its eval run recorded."""
+    played since in its environment, with the error its eval run recorded."""
     index = {each.key: number for number, each in enumerate(agents)}
     errors = dict(
         db.sql(
@@ -990,15 +990,21 @@ def _failures(
     )
     outside = db.sql(
         """
-        select m.match, list(s.agent order by s.player), max(m.error)
+        select r.environment, m.match, list(s.agent order by s.player), max(m.error)
         from matches m join runs r using (run)
         join seats s on s.run = m.run and s.match = m.match
         where m.state = 'failed' and r.tournament is null
-            and m.match not in (select match from matches where state = 'done')
-        group by m.run, m.match order by m.match
+            and not exists (
+                select 1 from matches d join runs e using (run)
+                where d.state = 'done' and d.match = m.match and e.environment = r.environment
+            )
+        group by r.environment, m.run, m.match order by m.match
         """
     ).fetchall()
-    unique = {match: (seated, error) for match, seated, error in outside}
+    # A match is one failure per environment, however many eval runs failed it there.
+    unique = {
+        (environment, match): (seated, error) for environment, match, seated, error in outside
+    }
     return held + tuple(
         Failure(tournament=None, agents=tuple(index[key] for key in seated), error=error)
         for seated, error in unique.values()

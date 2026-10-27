@@ -141,7 +141,8 @@ evaluate(
   yourself for a checkpoint no Etude run recorded. It is carried to each
   match's seats (`seats.at`, `agents.at`) so a report can place the point,
   and is part of no key: correcting it never forks an agent or replays a
-  match. Seats that disagree are listed in `agents.at_conflict`.
+  match. Seats that disagree are listed in `agents.at_conflict`; a report
+  draws the latest and notes the earlier.
 - **Source files.** A directory stands for the files below it. In a git
   checkout only tracked files count, named by their path in the checkout, so
   caches and scratch files never change a version; an uncommitted edit does,
