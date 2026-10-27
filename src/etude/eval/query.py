@@ -102,8 +102,7 @@ KEYS = ("seat", "group", "game", "run", "match")
 SCHEMA = 4
 
 _ENVIRONMENT_FILE = "environment.json"
-# mypy rejects a `type` alias as TypeAdapter's argument; Pydantic resolves it.
-_PLAYER: TypeAdapter[Player] = TypeAdapter(Player)  # type: ignore[arg-type]
+_PLAYER: TypeAdapter[Player] = TypeAdapter(Player)
 
 
 def statsdb(
