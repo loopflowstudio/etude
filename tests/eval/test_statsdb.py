@@ -15,7 +15,7 @@ from etude.eval.query import compare, statsdb
 from etude.eval.records import Code, Match
 from etude.run.errors import EtudeError
 from etude.run.storage import DirectoryStorage
-from tests.eval.games import play
+from tests.eval.games import play, play_game_seats
 from tests.run.storage import MeasuredStorage
 
 DUEL = environment("duel")
@@ -163,8 +163,11 @@ def _as_published(folder: Path) -> None:
         ]  # fmt: skip
         file.write_text(json.dumps(record))
     for file in folder.glob("tables/*.parquet"):
+        # Its rows named the game's own seat, if any, `seat`.
+        columns = [name for name, *_ in duckdb.sql(f"describe from '{file}'").fetchall()]
+        renamed = "seat as player" + (", game_seat as seat" if "game_seat" in columns else "")
         duckdb.sql(
-            f"copy (select * rename (seat as player) from read_parquet('{file}'))"
+            f"copy (select * rename ({renamed}) from read_parquet('{file}'))"
             f" to '{file}' (format parquet)"
         )
 
@@ -188,3 +191,23 @@ def test_eval_runs_published_etude_sdk_stored_read_as_players_and_seats(tmp_path
         ("weak", "code"),
     ]
     assert compare(mixed, table="plays", value="won") == compare(now, table="plays", value="won")
+
+
+def test_a_published_table_with_the_games_own_seat_keeps_each_players_rows(tmp_path: Path) -> None:
+    players = pair(tmp_path)
+    for name in ("now", "published"):
+        evaluate(experiment="cards", environment=DUEL, play=play_game_seats, run="a",
+                 matches=deals(players, 0, 1), directory=tmp_path / name / "a",
+                 storages=[DirectoryStorage(tmp_path / name / "bucket")])  # fmt: skip
+    _as_published(tmp_path / "published" / "bucket" / "a")
+    rows = (
+        "select p.name, x.game, x.game_seat, x.won from plays x join seats s"
+        " using (run, match, seat) join players p using (player) order by all"
+    )
+    now = statsdb("cards", DirectoryStorage(tmp_path / "now" / "bucket"))
+    published = statsdb("cards", DirectoryStorage(tmp_path / "published" / "bucket"))
+    assert published.sql(rows).fetchall() == now.sql(rows).fetchall()
+    assert {seat for (seat,) in now.sql("select distinct game_seat from plays").fetchall()} == {
+        0,
+        1,
+    }

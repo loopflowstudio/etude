@@ -31,7 +31,13 @@ from etude.eval.records import (
 from etude.run.errors import EtudeError
 from etude.run.records import ArtifactRef
 from etude.run.storage import DirectoryStorage, S3Storage
-from tests.eval.games import play, play_teams, play_text_hits, play_unkeyed
+from tests.eval.games import (
+    play,
+    play_seat_and_player,
+    play_teams,
+    play_text_hits,
+    play_unkeyed,
+)
 from tests.run.storage import CountedClient, MeasuredStorage
 
 
@@ -186,6 +192,17 @@ def test_a_row_without_seat_or_group_is_refused_and_nothing_of_its_match_is_stor
         ("failed", "EtudeError: row_needs_seat_or_group")
     ]
     assert "plays" not in {name for (name,) in db.sql("show tables").fetchall()}
+
+
+def test_a_row_naming_a_player_column_is_refused(tmp_path: Path) -> None:
+    # Older stored tables named the seat `player`; refusing it keeps them recognisable.
+    with pytest.raises(EtudeError) as refused:
+        evaluate(
+            experiment="league", environment=environment("duel"), play=play_seat_and_player,
+            matches=seatings(roster(tmp_path)[:2], conditions=[{}], games=1), directory=tmp_path,
+        )  # fmt: skip
+    cause = refused.value.__cause__
+    assert isinstance(cause, EtudeError) and cause.code == "column_name_refused"
 
 
 def test_a_column_keeps_its_type_through_an_eval_run(tmp_path: Path) -> None:
