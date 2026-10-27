@@ -263,3 +263,11 @@ def test_eviction_removes_the_least_recently_used_directory_not_one_in_use(
     assert [p.name for p in home().glob("*.json")] == [middle.name]
     assert not (home() / oldest.stem).exists() and not (home() / newest.stem).exists()
     assert [line.split()[1] for line in lines] == ["evicted", "evicted"]
+
+
+def test_an_unreadable_receipt_does_not_fail_another_build(tmp_path: Path) -> None:
+    repo, count = _repo(tmp_path), tmp_path / "count"
+    home().mkdir(parents=True)
+    (home() / f"{'0' * 64}.json").write_text("{not json")
+    status, log = _launch(local(tmp_path), _job(repo, count))
+    assert status.outcome == "succeeded" and _outcomes(log) == ["built"]

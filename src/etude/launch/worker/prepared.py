@@ -270,7 +270,10 @@ class _Kept(NamedTuple):
 def _kept(root: Path) -> list[_Kept]:
     kept = []
     for receipt in root.glob("*.json"):
-        size = Receipt.model_validate_json(receipt.read_text()).size_bytes
+        try:
+            size = Receipt.model_validate_json(receipt.read_text()).size_bytes
+        except ValueError:
+            size = 0  # unreadable: its next use rejects and rebuilds it
         kept.append(_Kept(receipt.name.removesuffix(".json"), size, receipt.stat().st_mtime))
     return kept
 
