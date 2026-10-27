@@ -34,10 +34,11 @@ class RuntimeInfo(Record):
     cuda: str | None
 
 
-def find_python(runtime: Runtime, environment: dict[str, str]) -> str:
-    executable = shutil.which(runtime.python, path=environment.get("PATH", os.defpath))
+def find_python(python: str, environment: dict[str, str]) -> str:
+    """The interpreter's absolute path, found on the job's PATH when not a path itself."""
+    executable = shutil.which(python, path=environment.get("PATH", os.defpath))
     if executable is None:
-        raise ValueError(f"job interpreter {runtime.python!r} is unavailable")
+        raise ValueError(f"job interpreter {python!r} is unavailable")
     return str(Path(executable).absolute())
 
 
