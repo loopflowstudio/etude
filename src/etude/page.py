@@ -732,15 +732,16 @@ def _commits(db: duckdb.DuckDBPyConnection) -> tuple[Commit, ...]:
     """Each commit's view in `_page_held`, where the delivered matches were played at several.
 
     A commit's view holds each delivered match some done record seats it
-    in, from the latest such eval run in the environment the match's latest
-    result is in, so it never pools environments the latest view keeps apart.
+    in, from the latest such eval run in each environment the latest view
+    holds, so it never pools environments the latest view keeps apart.
     """
     db.execute(
         """
         insert into _page_held
         select commit, tournament, run, match from (
             select s.commit, h.tournament, m.run, m.match, row_number() over (
-                partition by s.commit, h.tournament, m.match order by m.wall_ms desc, m.run desc
+                partition by s.commit, h.tournament, r.environment, m.match
+                order by m.wall_ms desc, m.run desc
             ) as latest
             from (select h.tournament, h.match, r.environment
                   from _page_held h join runs r using (run) where h.view = '') h
@@ -752,7 +753,8 @@ def _commits(db: duckdb.DuckDBPyConnection) -> tuple[Commit, ...]:
         """
     )
     found = db.sql(
-        "select view, count(distinct (tournament, match)) from _page_held"
+        "select view, count(distinct (h.tournament, r.environment, h.match))"
+        " from _page_held h join runs r using (run)"
         " where view != '' group by view order by view"
     ).fetchall()
     if len(found) < 2:

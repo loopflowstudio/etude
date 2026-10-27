@@ -316,7 +316,7 @@ function render() {
       if (found.length) rampLegend(c, ref, found, `· ${chosen.label} · · not played`);
     } else if (panel.kind === "anchors") {
       // Fixed players are not a job's: drawn once, against each other.
-      const c = card(body, panel.title, `${where} · ${scoreName} · row against column · strength: over matches that seat no checkpoint of the experiment`, "full");
+      const c = card(body, panel.title, `${where} · ${scoreName} · row against column · strength: over matches that seat no placed checkpoint`, "full");
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
       const met = fixedPlayers.filter(a => D.cells.some(x => x.selection === sel && x.score === E.score && (x.subject === a || x.opponent === a) && (x.fixed || (!placed(x.subject) && x.opponent != null && !placed(x.opponent)))));
       if (!met.length) { c.appendChild(node("div", "na", "No two fixed players played each other in these matches")); continue; }

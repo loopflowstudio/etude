@@ -401,6 +401,35 @@ def test_an_evaluation_only_experiment_draws_checkpoints_where_their_seats_say(
     assert {"u0", "u200", "u400", "u600"} <= {s for s, o in pair if o == "heuristic"}
 
 
+def test_commit_views_keep_each_environment_of_a_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = tmp_path / "runs"
+    file = experiment_file(tmp_path / "experiments", "lab", EVALUATION_ONLY)
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("ETUDE_SOURCE_DIR", str(file.parent))
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    for commit in ("a" * 40, "b" * 40):
+        monkeypatch.setenv("ETUDE_COMMIT", commit)
+        for name in ("first", "second"):
+            rival = Code(name="heuristic", source=[str(file)], config={"strength": 5})
+            evaluate(
+                experiment="lab",
+                environment=environment(name),
+                matches=[duel(outside("u0", {"updates": 0}), rival)],
+                play=play,
+                run=f"{commit[0]}-{name}",
+                directory=runs,
+            )
+    page = build(runs, file)
+    # A commit view counts the match once in each environment, just like the latest view.
+    assert [(each.commit, each.matches) for each in page.commits] == [
+        ("a" * 40, 2),
+        ("b" * 40, 2),
+    ]
+    assert {cell.commit for cell in page.cells} == {None, "a" * 40, "b" * 40}
+
+
 def test_an_evaluation_only_page_reads_each_bucket_object_once(
     evaluation_only: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
