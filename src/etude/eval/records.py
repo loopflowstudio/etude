@@ -443,6 +443,11 @@ class Rollup(Record):
     sums: dict[Annotated[str, Field(pattern=IDENTIFIER.pattern)], str] = {}
     where: str | None = None
 
+    @property
+    def digest(self) -> Digest:
+        """The digest of its definition: beside its name, what makes it this rollup."""
+        return digest(self.model_dump(mode="json"))
+
     @model_validator(mode="after")
     def distinct_columns(self) -> Self:
         columns = [*self.by, *self.sums]

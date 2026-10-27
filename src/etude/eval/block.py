@@ -418,12 +418,8 @@ def _joined(
         raise EtudeError("rollup_needs_seat", 422) from ValueError(rollup.name)
     if set(held) & set(ROLLUP_SEATED):
         raise EtudeError("rollup_column_reserved", 422) from ValueError(rollup.name)
-    db.execute(
-        "create or replace temp table _seated"
-        " (match VARCHAR, seat BIGINT, player VARCHAR, opponents VARCHAR)"
-    )
-    db.executemany(
-        "insert into _seated values (?, ?, ?, ?)",
+    seated, values = unnest(
+        {"match": "VARCHAR", "seat": "BIGINT", "player": "VARCHAR", "opponents": "VARCHAR"},
         [
             [match.key, seat, player.key,
              ",".join(other.key for at, other in enumerate(match.players) if at != seat)]
@@ -431,7 +427,20 @@ def _joined(
             for seat, player in enumerate(match.players)
         ],
     )  # fmt: skip
+    db.execute(f"create or replace temp table _seated as {seated}", values)
     return f"(select * from {source} left join _seated using (match, seat))"
+
+
+def unnest(
+    columns: Mapping[str, str], rows: Sequence[Sequence[object]]
+) -> tuple[str, list[list[object]]]:
+    """A select of `rows` with `columns` (name: DuckDB type), and its parameters.
+
+    Each column is one list parameter, unnested beside the others, so any
+    number of rows, none included, is one statement.
+    """
+    select = ", ".join(f'unnest(?::{kind}[]) as "{name}"' for name, kind in columns.items())
+    return f"select {select}", [[row[at] for row in rows] for at in range(len(columns))]
 
 
 def _parquet(paths: Sequence[Path]) -> str:

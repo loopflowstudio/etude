@@ -414,3 +414,88 @@ def test_a_rollup_that_cannot_sum_a_match_refuses_it(tmp_path: Path) -> None:
     kept = Block.model_validate_json((sealed / "block.json").read_bytes())
     assert [record.state for record in kept.matches] == ["failed"]
     assert (kept.tables, kept.totals) == ((), ())
+
+
+class CountedConnection:
+    """A DuckDB connection counting the statements it runs; each row of a batch is one."""
+
+    def __init__(self, db: duckdb.DuckDBPyConnection) -> None:
+        self.db, self.statements = db, 0
+
+    def execute(self, query: str, parameters: object = None) -> duckdb.DuckDBPyConnection:
+        self.statements += 1
+        return self.db.execute(query, parameters)
+
+    def executemany(self, query: str, rows: list[object]) -> duckdb.DuckDBPyConnection:
+        self.statements += len(rows)
+        return self.db.executemany(query, rows)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self.db, name)
+
+
+def test_taking_in_a_block_runs_the_same_statements_however_many_matches_and_blobs_it_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    opened: list[CountedConnection] = []
+    connect = duckdb.connect
+
+    def counted(path: Path) -> CountedConnection:
+        opened.append(CountedConnection(connect(path)))
+        return opened[-1]
+
+    players = pair(tmp_path)
+    statements = []
+    for count in (2, 12):
+        bucket = tmp_path / f"bucket-{count}"
+        evaluate(experiment="cards", environment=DUEL, play=play_with_evidence,
+                 matches=deals(players, count), run="a", directory=tmp_path / str(count),
+                 storages=[DirectoryStorage(bucket)])  # fmt: skip
+        with monkeypatch.context() as patched:
+            patched.setattr(duckdb, "connect", counted)
+            db = statsdb("cards", bucket)
+        assert db.sql("select count(*) from blobs").fetchone() == (count * 2,)
+        db.close()
+        statements.append(opened[-1].statements)
+    assert statements[0] == statements[1]
+
+
+def test_a_rollup_given_to_statsdb_sums_each_block_once_as_sealing_would(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(block, "SEAL_SECONDS", 0.0)
+    matches = deals(pair(tmp_path), 4)
+    for run, rollups in (("sealed", [CARDS]), ("later", [])):
+        evaluate(experiment="cards", environment=DUEL, play=play_cards, matches=matches[:3],
+                 run=run, directory=tmp_path / run,
+                 storages=[DirectoryStorage(tmp_path / f"{run}-bucket")],
+                 rollups=rollups)  # fmt: skip
+    db = statsdb("cards", tmp_path / "sealed-bucket")
+    sealed = db.sql("select * exclude (run) from card_deals order by all").fetchall()
+    db.close()
+
+    reading = ReadStorage(DirectoryStorage(tmp_path / "later-bucket"))
+    db = statsdb("cards", reading, rollups=[CARDS])
+    assert db.sql("select * exclude (run) from card_deals order by all").fetchall() == sealed
+    # Each block's two tables are read once, for its rows and its partial totals alike.
+    assert sum(key.endswith(".parquet") for key in reading.read) == 3 * 2
+    assert not list((tmp_path / "later-bucket").rglob("card_deals*"))
+    db.close()
+
+    # Held from now on: reopening reads nothing, and a new block is summed from its tables.
+    reading.read.clear()
+    db = statsdb("cards", reading)
+    assert reading.read == []
+    db.close()
+    evaluate(experiment="cards", environment=DUEL, play=play_cards, matches=matches,
+             run="later", directory=tmp_path / "later",
+             storages=[DirectoryStorage(tmp_path / "later-bucket")])  # fmt: skip
+    db = statsdb("cards", reading)
+    assert sum(key.endswith(".parquet") for key in reading.read) == 2
+    assert card_rollup(db) == card_page(db)
+    db.close()
+
+    changed = CARDS.model_copy(update={"where": None})
+    with pytest.raises(EtudeError) as refused:
+        statsdb("cards", reading, rollups=[changed])
+    assert refused.value.code == "rollup_conflict"

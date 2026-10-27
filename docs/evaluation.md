@@ -216,6 +216,13 @@ evaluate(
   totals it holds, and a match two blocks hold counts once, from the later.
   A run keeps the rollups its first block had: resuming with others is
   refused (`eval_run_rollups_conflict`).
+
+  A rollup thought of later is given to the query instead:
+  `statsdb("cards", bucket, rollups=[cards])` sums each block's partial
+  totals once from its tables and keeps them on this computer, never in the
+  store, and keeps adding new blocks' on every later open. A rollup is its
+  name and its definition: another definition under a held name raises
+  `rollup_conflict`, so a changed rollup takes a new name.
 - **Strict.** A row with neither or both of `seat` and `group`, a seat or
   group the match lacks, a column named `player`, or a column whose type
   changes during a run is refused. A refused or raising match is recorded as failed with its error,
