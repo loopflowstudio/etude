@@ -87,7 +87,7 @@ from etude.eval.block import (
     refuse_unconverted,
     unnest,
 )
-from etude.eval.match import ETUDE_TABLES, KIND, OLD_SEAT
+from etude.eval.match import ETUDE_TABLES, KIND
 from etude.eval.records import (
     COLUMN_TYPES,
     IDENTIFIER,
@@ -124,7 +124,8 @@ KEYS = ("seat", "group", "game", "run", "match")
 SCHEMA = 7
 
 _ENVIRONMENT_FILE = "environment.json"
-_PLAYER: TypeAdapter[Player] = TypeAdapter(Player)
+# mypy reports this alias as an arg-type error or not depending on its cache; pydantic accepts it.
+_PLAYER: TypeAdapter[Player] = TypeAdapter(Player)  # type: ignore[arg-type, unused-ignore]
 
 
 def statsdb(
@@ -572,16 +573,6 @@ def _table(db: duckdb.DuckDBPyConnection, run: str, table: str, file: str, path:
         [table, file],
     )
     arrived = {column: kind for column, kind, *_ in db.execute("describe _arrived").fetchall()}
-    if OLD_SEAT in arrived:
-        # Written before rows named the seat `seat`: `player` is the seat, and a
-        # `seat` beside it is the game's own, which rows now call `game_seat`.
-        renamed = {OLD_SEAT: "seat", "seat": "game_seat"}
-        if "game_seat" in arrived and "seat" in arrived:
-            raise EtudeError("old_table_has_seat_and_game_seat", 422) from ValueError(file)
-        for column in ("seat", OLD_SEAT):
-            if column in arrived:
-                db.execute(f'alter table _arrived rename column "{column}" to {renamed[column]}')
-        arrived = {renamed.get(column, column): kind for column, kind in arrived.items()}
     if db.execute("select 1 from kept.rollups where name = ?", [table]).fetchone():
         raise EtudeError("rollup_name_conflict", 409) from ValueError(table)
     if not _exists(db, "main", table):

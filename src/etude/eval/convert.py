@@ -34,6 +34,7 @@ from etude.eval.block import (
     sealed,
     write,
 )
+from etude.eval.match import OLD_SEAT
 from etude.eval.records import TABLE_FILE, MatchRecord, Rollup
 from etude.run.errors import EtudeError
 from etude.run.listing import as_storage, run_folders
@@ -208,17 +209,27 @@ def _convert(
 def _latest(
     db: duckdb.DuckDBPyConnection, table: str, paths: Sequence[Path], scratch: Path
 ) -> Path:
-    """One file of a table's rows, each match's from the latest file holding it.
+    """One file of a table's rows, each match's from the latest file holding it, in today's columns.
 
     Every file of a table lies in one folder, so their paths order as their
-    names do: by write time.
+    names do: by write time. Rows written before the seat was called `seat`
+    name it `player`, and a `seat` beside it is the game's own, now `game_seat`.
     """
     target = scratch / "latest" / f"{table}.parquet"
     target.parent.mkdir(parents=True, exist_ok=True)
     files = ", ".join(quote(path) for path in paths)
+    rows = f"read_parquet([{files}], union_by_name = true, filename = true)"
+    columns = {column for column, *_ in db.execute(f"describe select * from {rows}").fetchall()}
+    renamed = ""
+    if OLD_SEAT in columns:
+        if {"seat", "game_seat"} <= columns:
+            raise EtudeError("old_table_has_seat_and_game_seat", 422) from ValueError(table)
+        moves = {OLD_SEAT: "seat", "seat": "game_seat"}
+        renamed = " rename (" + ", ".join(
+            f'"{old}" as {new}' for old, new in moves.items() if old in columns) + ")"  # fmt: skip
     db.execute(
-        f"copy (select * exclude (filename) from read_parquet([{files}], union_by_name = true,"
-        " filename = true) qualify filename = max(filename) over (partition by match))"
+        f"copy (select * exclude (filename){renamed} from {rows}"
+        " qualify filename = max(filename) over (partition by match))"
         f" to {quote(target)} (format parquet)"
     )
     return target

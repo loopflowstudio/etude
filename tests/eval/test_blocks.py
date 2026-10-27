@@ -21,6 +21,7 @@ from etude.eval.records import Code, Match, MatchRecord, Rollup
 from etude.run.errors import EtudeError
 from etude.run.storage import DirectoryStorage, S3Storage
 from tests.eval.games import play, play_cards, play_with_evidence
+from tests.eval.per_file import write_per_file
 from tests.run.storage import CountedClient, MeasuredStorage
 
 DUEL = environment("duel")
@@ -122,34 +123,7 @@ def per_file(
     evaluate(experiment="cards", environment=DUEL, play=play_with_evidence,
              matches=deals(players, 6), run="a", directory=made)  # fmt: skip
     root = tmp_path / "old"
-    folder = root / "a"
-    folder.mkdir(parents=True)
-    for name in ("run.json", "environment.json", "state.json"):
-        shutil.copy(made / "a" / name, folder / name)
-    (blocks,) = (made / "a" / "blocks").glob("[0-9]*")
-    kept = Block.model_validate_json((blocks / "block.json").read_bytes())
-    (folder / "matches").mkdir()
-    (folder / "tables").mkdir()
-    (folder / "artifacts" / "evidence").mkdir(parents=True)
-    for written, record in enumerate(kept.matches, 1):
-        old = record.model_copy(update={"blobs": ()})
-        (folder / "matches" / f"{record.match.key}.json").write_text(old.model_dump_json())
-        for table in kept.tables:
-            target = folder / "tables" / f"{table}.{written:020d}.{record.match.key}.parquet"
-            duckdb.execute(
-                f"copy (select * from read_parquet({quote(blocks / f'{table}.parquet')})"
-                f" where match = '{record.match.key}') to {quote(target)} (format parquet)"
-            )
-    for table in kept.tables:
-        merged = folder / "tables" / f"{table}.{99:020d}.abcdef.parquet"
-        shutil.copy(blocks / f"{table}.parquet", merged)
-    pack = blocks / "blobs.zip"
-    with pack.open("rb") as stream:
-        for digest, span in kept.blobs.items():
-            stream.seek(span.offset)
-            (folder / "artifacts" / "evidence" / f"{digest}.json.gz").write_bytes(
-                stream.read(span.size_bytes)
-            )
+    write_per_file(made / "a", root / "a")
     db = statsdb("cards", made)
     expected = rows(db)
     db.close()
