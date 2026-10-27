@@ -449,14 +449,25 @@ def _here(
     return record.model_copy(update={"artifact": artifact})
 
 
-def read_all(source: Storage | Path | str, experiment: str | None = None) -> list[RunData]:
-    """Every run under a source, or every run of one experiment, listing the source once."""
+def read_all(
+    source: Storage | Path | str,
+    experiment: str | None = None,
+    *,
+    metrics: bool = True,
+) -> list[RunData]:
+    """Read runs, optionally scoped to one experiment or without metric blocks.
+
+    `metrics=False` reads declarations, attempts, state and checkpoints only;
+    it does not validate metric history and returns no metric blocks.
+    """
     storage = as_storage(source)
     data = []
     for run, folders in sorted(places(storage).items()):
         file = declared(storage, folders)
         if file is not None and experiment in (None, file.experiment):
-            data.append(_read(storage, file.experiment, run, folders, run_file=file))
+            data.append(
+                _read(storage, file.experiment, run, folders, run_file=file, metrics=metrics)
+            )
     return sorted(data, key=lambda one: (one.experiment, one.name))
 
 
@@ -473,6 +484,7 @@ def _read(
     folders: Sequence[str],
     *,
     run_file: RunFile | None = None,
+    metrics: bool = True,
 ) -> RunData:
     def listing() -> list[tuple[str, str]]:
         """Every (folder, name under it), first folder first."""
@@ -500,7 +512,7 @@ def _read(
             continue
     attempts.sort(key=lambda pair: pair[0].started_ms)
     blocks: list[StoredBlock] = []
-    for retry in range(3):
+    for retry in range(3 if metrics else 0):
         try:
             descriptions: dict[str, BlockDescription] = {}
             # A writer is one process on one machine, so a block's name is in one folder.

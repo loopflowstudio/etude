@@ -115,6 +115,10 @@ def test_observation_does_not_read_another_experiments_incomplete_metrics(tmp_pa
     with pytest.raises(FileNotFoundError, match="block sequence gap"):
         read_all(tmp_path)
     assert [run.name for run in observe(tmp_path, "ppo").runs] == ["good"]
+    # Checkpoint planning does not consume metric history, even for its own run.
+    state = observe(tmp_path, "other")
+    assert [run.name for run in state.runs] == ["broken"]
+    assert state.runs[0].state == "finished"
 
 
 def test_each_pass_plays_what_the_checkpoints_saved_so_far_call_for(tmp_path: Path) -> None:
