@@ -51,6 +51,9 @@ subject of a `seat` row is its seat's player; of a `group` row, the group's
 players. Opponents are the other seats' players, or the match's other groups
 except `all`.
 
+`estimate` gives many ratios of totals over the same blocks, each with an
+interval from one shared bootstrap; `compare` and the tournament's curves use it.
+
 Table files published etude-sdk wrote name the seat `player`; such a file has
 no `seat` column, since every file written since has one, and its `player`
 reads as `seat`. Results from different environments are never pooled.
@@ -67,6 +70,7 @@ import warnings
 from bisect import bisect_left
 from collections import defaultdict
 from collections.abc import Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, cast
@@ -111,6 +115,7 @@ from etude.run.storage import SAFE_NAME, DirectoryStorage, Storage, default_root
 
 if TYPE_CHECKING:
     import duckdb
+    from _typeshed import SupportsRichComparison
 
 REPLICATES = 2000
 # Blobs this close together in a pack are read in one range: a member's header lies between.
@@ -1081,18 +1086,23 @@ def compare(
         group by all
         """
     ).fetchall()
-    # Per comparison, per match: [numerator, denominator], and the rows counted.
-    blocks: dict[tuple[object, ...], list[tuple[float, float]]] = {}
+    # Per comparison, per match (run, match): [numerator, denominator], and the rows counted.
+    blocks: dict[tuple[object, ...], dict[tuple[str, str], tuple[float, float]]] = {}
     rows: dict[tuple[object, ...], int] = {}
     for environment, subject, opponent, *rest in found:
-        values, (_, _, numerator, denominator, count) = rest[: len(by)], rest[len(by) :]
+        values, (run, match, numerator, denominator, count) = rest[: len(by)], rest[len(by) :]
         held = None if opponent is None else tuple(opponent)
         key = (environment, tuple(subject), held, *values)
-        blocks.setdefault(key, []).append((float(numerator), float(denominator)))
+        blocks.setdefault(key, {})[(run, match)] = (float(numerator), float(denominator))
         rows[key] = rows.get(key, 0) + count
     comparisons: list[Comparison] = []
     for key in sorted(blocks, key=lambda k: tuple("" if v is None else repr(v) for v in k)):
-        estimated = estimate(blocks[key])
+        matches = blocks[key]
+        [estimated] = estimate(
+            list(matches),
+            [[numerator] for numerator, _ in matches.values()],
+            [[denominator] for _, denominator in matches.values()],
+        )
         if estimated is None:
             continue
         environment, subject, opponent, *values = key
@@ -1103,8 +1113,8 @@ def compare(
                 opponent=cast(tuple[str, ...] | None, opponent),
                 # DuckDB returns plain values for the author's scalar columns.
                 split=dict(zip(by, cast(list[JsonValue], values))),
-                value=estimated[0],
-                interval=estimated[1],
+                value=estimated.value,
+                interval=estimated.interval,
                 rows=rows[key],
                 matches=len(blocks[key]),
             )
@@ -1113,41 +1123,67 @@ def compare(
 
 
 @lru_cache(maxsize=1)
-def _weights(n: int) -> npt.NDArray[np.int64]:
+def _weights(n: int) -> npt.NDArray[np.float64]:
     """How often each of `n` blocks is drawn in each replicate: fixed by the seed and `n` alone.
 
     Each replicate draws `n` blocks uniformly with replacement, counted with
     one `bincount` (a multinomial draw, linear in `n`). A report's estimates
-    over one selection share `n`, so the latest draw is kept.
+    over one selection share `n`, so the latest draw is kept. Counts are held
+    as floats, exact at any `n`, so a matrix product needs no conversion.
     """
     drawn = np.random.default_rng(SEED).integers(0, n, size=(REPLICATES, n))
     drawn += np.arange(REPLICATES)[:, None] * n
-    weights = np.bincount(drawn.ravel(), minlength=REPLICATES * n).reshape(REPLICATES, n)
+    counts = np.bincount(drawn.ravel(), minlength=REPLICATES * n).reshape(REPLICATES, n)
+    weights = counts.astype(np.float64)
     weights.setflags(write=False)
     return weights
 
 
-def estimate(
-    blocks: Sequence[tuple[float, float]],
-) -> tuple[float, tuple[float, float] | None] | None:
-    """The ratio of totals over (numerator, denominator) blocks, and its 95% interval.
+@dataclass(frozen=True)
+class Estimate:
+    """A ratio of totals and its 95% interval, None with fewer than two blocks."""
 
-    The interval is a percentile bootstrap resampling whole blocks, None with
-    fewer than two. None overall when there are no opportunities: a rate
-    without them has no value. Blocks are sorted before resampling, so the
-    interval does not depend on the order they were read in.
+    value: float
+    interval: tuple[float, float] | None
+
+
+def estimate(
+    keys: Sequence[SupportsRichComparison],
+    numerators: npt.ArrayLike,
+    denominators: npt.ArrayLike,
+) -> list[Estimate | None]:
+    """Each column's ratio of totals over blocks × columns `numerators` and `denominators`.
+
+    Every column shares one bootstrap: one draw of block weights, resampling
+    whole blocks, gives each column's 95% percentile interval. Blocks are
+    ordered by their `keys` (a match, a deal) before resampling, so the
+    result does not depend on the order they were read in; keys must be
+    distinct. A column without opportunities is None: a rate without them
+    has no value.
     """
-    totals = np.array(sorted(blocks), dtype=np.float64).reshape(-1, 2)
-    numerators, denominators = totals[:, 0], totals[:, 1]
-    if denominators.sum() == 0:
-        return None
-    value = float(numerators.sum() / denominators.sum())
-    n = len(totals)
-    if n < 2:
-        return value, None
-    weights = _weights(n)
-    resampled = weights @ denominators
-    kept = resampled > 0
-    ratios = (weights @ numerators)[kept] / resampled[kept]
-    low, high = np.percentile(ratios, [2.5, 97.5])
-    return value, (float(low), float(high))
+    numerators = np.asarray(numerators, dtype=np.float64)
+    denominators = np.asarray(denominators, dtype=np.float64)
+    if numerators.ndim != 2 or numerators.shape != denominators.shape:
+        raise ValueError(f"blocks × columns {numerators.shape} and {denominators.shape}")
+    if len(numerators) != len(keys):
+        raise ValueError(f"{len(keys)} keys for {len(numerators)} blocks")
+    order = sorted(range(len(keys)), key=keys.__getitem__)
+    if any(keys[a] == keys[b] for a, b in itertools.pairwise(order)):
+        raise ValueError("block keys repeat")
+    opportunities = denominators.sum(axis=0)
+    held = np.flatnonzero(opportunities)
+    numerators, denominators = numerators[order][:, held], denominators[order][:, held]
+    values = numerators.sum(axis=0) / opportunities[held]
+    intervals: list[tuple[float, float] | None] = [None] * len(held)
+    if len(order) >= 2 and len(held):
+        weights = _weights(len(order))
+        resampled = weights @ denominators
+        # A replicate drawing no opportunities for a column has no ratio in it.
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratios = np.where(resampled > 0, (weights @ numerators) / resampled, np.nan)
+        lows, highs = np.nanpercentile(ratios, [2.5, 97.5], axis=0)
+        intervals = [(float(low), float(high)) for low, high in zip(lows, highs, strict=True)]
+    estimates: list[Estimate | None] = [None] * len(opportunities)
+    for column, value, interval in zip(held, values, intervals, strict=True):
+        estimates[column] = Estimate(float(value), interval)
+    return estimates

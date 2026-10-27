@@ -380,14 +380,36 @@ def test_a_code_players_version_is_its_commit_and_tracked_files_in_a_checkout_or
     assert edited.version.source != checked_out.version.source
 
 
-def test_an_interval_does_not_depend_on_the_order_matches_are_read_in() -> None:
+def test_an_interval_does_not_depend_on_the_order_blocks_are_read_in() -> None:
     hits = (0, 1, 1, 2, 3, 3, 4, 4, 2, 0, 1, 3)
-    # Matches of unequal length, so the order of resampled blocks would show.
-    blocks = [(float(each), float(4 + each % 3)) for each in hits]
+    # Blocks of unequal length, so the order of resampled blocks would show.
+    blocks = [
+        (f"deal-{each:02}", [float(hit)], [float(4 + hit % 3)]) for each, hit in enumerate(hits)
+    ]
     shuffled = blocks[:]
     random.Random(7).shuffle(shuffled)
     assert shuffled != blocks
-    assert estimate(shuffled) == estimate(blocks)
+    assert estimate(*zip(*shuffled)) == estimate(*zip(*blocks))
+
+
+def test_one_bootstrap_estimates_every_column_as_one_column_alone() -> None:
+    keys = [f"deal-{each:02}" for each in range(12)]
+    # Counts per deal: wins, games, and a column of a card nobody drew.
+    wins = [[float(each % 3), float(each % 2), 0.0] for each in range(12)]
+    games = [[float(2 + each % 4), float(1 + each % 3), 0.0] for each in range(12)]
+    batched = estimate(keys, wins, games)
+    alone = [
+        estimate(keys, [[row[column]] for row in wins], [[row[column]] for row in games])[0]
+        for column in range(3)
+    ]
+    assert batched == alone
+    first, second, undrawn = batched
+    assert first is not None and first.value == sum(r[0] for r in wins) / sum(r[0] for r in games)
+    assert first.interval is not None and first.interval[0] < first.value < first.interval[1]
+    assert second is not None and second.interval != first.interval
+    assert undrawn is None
+    single, _, _ = estimate(keys[:1], wins[:1], games[:1])
+    assert single is not None and single.interval is None
 
 
 def test_queries_reports_and_resumes_read_each_bucket_file_once_per_computer(
