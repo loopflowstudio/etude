@@ -27,6 +27,7 @@ from moto import mock_aws
 from etude import cache as engine
 from etude.cache import Artifact, Cache, Content, Fetched
 from etude.deadline import limit_time, remaining
+from etude.launch import client
 from etude.launch.database import Database
 from etude.launch.logging import log_to
 from etude.launch.providers.runpod import pod
@@ -775,6 +776,78 @@ def test_completed_workload_before_and_after(
     assert offline == after
     assert "unobserved" in " ".join(offline.coverage)
     assert "fixture-private-query" not in offline.model_dump_json()
+
+
+def test_the_launcher_fetches_a_multipart_output_and_retains_each_part(
+    http: HTTP, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The launcher a command opens, with its own bucket send and database; only
+    # provisioning, job execution and the bucket's host are fixtures.
+    monkeypatch.setattr(downloads, "PART_BYTES", 16)
+    b = bench(tmp_path)
+    b.scheduler.rent("l4", 1)
+    run = b.scheduler.queue(Job(command="true", max_hours=0.25, max_usd=Decimal(1)), rent="l4")
+    b.scheduler.tick()
+    attempt = b.scheduler.attempts(run)[0]
+    session = attempt.session
+    root = f"prefix/sessions/{session}/"
+    given = b.service.sessions[session]
+    packet = given.packet.model_copy(update={"work": tuple(w for w, _ in given.work())})
+    http.objects["/" + root + "packet.json"] = packet.model_dump_json().encode()
+    http.objects["/" + root + "out/receipt"] = b"started"
+    upload = PostForm(url=http.url + "/upload", fields={})
+    home = tmp_path / "worker" / session
+    courier = Courier(
+        home,
+        Grant(prefix=root + "out/", form=upload),
+        http.url + "/inbox",
+        runs={run: Grant(prefix=f"prefix/{run}/", form=upload)},
+    )
+    payload = b"0123456789" * 4  # three parts
+    outputs = home / "attempts" / attempt.id / "outputs"
+    outputs.mkdir(parents=True)
+    (outputs.parent / "run").write_text(run)
+    (outputs.parent / "claim").write_text(b.clock().isoformat())
+    (outputs / "checkpoint.pt").write_bytes(payload)
+    (outputs / RESULT).write_text(Result().model_dump_json())
+    output = Output(
+        name="checkpoint.pt", sha256=hashlib.sha256(payload).hexdigest(), size_bytes=len(payload)
+    )
+    finished = Progress(
+        attempt=attempt.id,
+        started_at=b.clock(),
+        finished_at=b.clock(),
+        outcome="succeeded",
+        cause=None,
+        clocks={},
+        outputs=(output,),
+        exit_code=0,
+    )
+    (outputs.parent / "finished.json").write_text(finished.model_dump_json())
+    courier.carry_out()
+    journal = BucketJournal(
+        Storage(name="test", bucket="bucket", prefix="prefix", provider="s3", region="us-west-2"),
+        Bucket("bucket", "us-west-2", Keys(access_key="a", secret_key="s"), http.send),
+    )
+    monkeypatch.setattr(b.service, "observe", journal.observe)
+    b.run(1)
+    assert b.scheduler.read(run).outcome == "succeeded"
+
+    monkeypatch.setenv("RUNPOD_API_KEY", "fixture")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "a")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "s")
+    monkeypatch.setattr(client, "_send", http.send)
+    before = {e.id for e in b.store.transfers()}
+    fetched = client._open(tmp_path).fetch(run, "checkpoint.pt", tmp_path / "fetched")
+    assert fetched.read_bytes() == payload
+    parts = [e for e in b.store.transfers() if e.id not in before and e.purpose == "result"]
+    assert sorted(e.byte_range or "" for e in parts) == [
+        "bytes=0-15",
+        "bytes=16-31",
+        "bytes=32-39",
+    ]
+    assert sum(e.received_bytes for e in parts) == len(payload)
+    assert {(e.run, e.attempt) for e in parts} == {(run, attempt.id)}
 
 
 def test_active_cache_capacity_streams_another_digest_without_overfilling(
