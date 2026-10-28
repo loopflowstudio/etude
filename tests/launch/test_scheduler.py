@@ -77,16 +77,18 @@ def test_a_lost_create_reply_is_looked_up_and_never_asked_twice(tmp_path: Path) 
     assert b.service.creates == 1
 
 
-def test_a_create_that_never_appears_is_lost_only_after_the_rental_deadline(
+def test_a_create_that_never_appears_is_lost_after_the_rental_deadline_and_frees_the_pool(
     tmp_path: Path,
 ) -> None:
-    b = bench(tmp_path)
+    b = bench(tmp_path, max_machines=1)
     b.service.lose_reply = 1
     one = b.scheduler.queue(job(), rent="l4")
     b.scheduler.tick()
-    del b.service.sessions[b.scheduler.attempts(one)[0].session]  # the provider has no such session
+    held = b.scheduler.attempts(one)[0].session
+    del b.service.sessions[held]  # the provider has no such session
     b.run(3599)
     assert b.scheduler.read(one).phase == "renting"
+    two = b.scheduler.queue(job(), rent="l4")
     b.run(1)
     status = b.scheduler.read(one)
     assert (status.outcome, status.cause, status.rental_ended) == (
@@ -94,7 +96,23 @@ def test_a_create_that_never_appears_is_lost_only_after_the_rental_deadline(
         "create_unconfirmed",
         False,
     )
-    assert b.service.creates == 1 and status.attempts == 1
+    assert status.attempts == 1 and status.usd == 0  # no machine existed, so none was paid for
+    assert held not in {s.id for s in b.store.unsettled_sessions()}
+    b.run(1)
+    assert b.scheduler.read(two).phase == "running" and b.service.creates == 2
+
+
+def test_terminate_releases_a_rental_whose_lost_create_left_no_machine(tmp_path: Path) -> None:
+    b = bench(tmp_path, max_machines=1)
+    b.service.lose_reply = 1
+    machine = b.scheduler.rent("l4", hours=1)
+    held = b.store.rented_session(machine).id
+    del b.service.sessions[held]  # the provider has no such session
+    ended = b.scheduler.terminate(machine)
+    assert ended.refused_at is not None and ended.deleted_at is None
+    assert b.scheduler.rentals()[0][1] == 0
+    b.scheduler.rent("l4", hours=1)  # the pool's one machine is free again
+    assert b.service.creates == 2
 
 
 def test_refused_capacity_is_retried_up_to_the_jobs_allowed_attempts(tmp_path: Path) -> None:

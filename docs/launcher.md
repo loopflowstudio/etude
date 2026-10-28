@@ -884,11 +884,14 @@ The code has three layers:
 
 The SQLite file is `$ETUDE_HOME/launcher.db` (default `~/.etude`). Versioned
 writes claim each session once. A lost create reply is looked up, never
-repeated. A remote start has an exclusive claim; a lost SSH reply cannot start
-another process. An unreachable machine is unknown. A lost attempt requires
-evidence that its process or provider machine is gone. Infrastructure losses
-retry up to `max_attempts`, including confirmed loss after code started. If startup intent reached storage but an attempt claim did not,
-its start is uncertain and it is not retried.
+repeated; if the provider still has no such machine at the rental's deadline,
+or when it is terminated, it is recorded as never acquired: it costs nothing and
+no longer counts toward the on-demand's machine limit. A remote start has an
+exclusive claim; a lost SSH reply cannot start another process. An unreachable
+machine is unknown. A lost attempt requires evidence that its process or
+provider machine is gone. Infrastructure losses retry up to `max_attempts`,
+including confirmed loss after code started. If startup intent reached storage
+but an attempt claim did not, its start is uncertain and it is not retried.
 
 The database has no migrations while the launcher is a prototype. The file
 carries a schema version; a file written by another version is refused with a
