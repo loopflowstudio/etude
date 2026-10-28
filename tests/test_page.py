@@ -10,7 +10,7 @@ import pytest
 
 from etude.cli import main
 from etude.page import Page, Pages, Server, build, experiment_files, index, render, target
-from etude.report import Anchors, Curve, Matches, Matrix, Ranking, Report
+from etude.report import Anchors, Curve, Fraction, Matches, Matrix, Ranking, Report
 from etude.run.errors import EtudeError
 from etude.run.storage import DirectoryStorage, storage_from_uri
 from etude.train.records import Step
@@ -210,6 +210,16 @@ def test_a_panels_matches_are_a_matchup_or_a_tag_of_a_tournament_never_both() ->
     assert Curve(matches=Matches(tournament="ladder", tag="anchor")).matches is not None
     with pytest.raises(ValueError, match="matches_name_a_matchup_or_a_tag_not_both"):
         Matches(matchup="vs heuristic", tag="anchor")
+
+
+def test_a_curve_against_a_fraction_of_its_position_keeps_that_opponent_through_json() -> None:
+    report = Report(evals=(Curve(opponent=Fraction(clock="updates", value=0.5)),))
+    (curve,) = Report.model_validate_json(report.model_dump_json()).evals
+    assert isinstance(curve, Curve)
+    assert curve.opponent == Fraction(clock="updates", value=0.5)
+    for outside in (0.0, 1.0, 2.0):
+        with pytest.raises(ValueError):
+            Fraction(clock="updates", value=outside)
 
 
 def test_an_absent_experiments_error_names_the_source_as_it_was_given(tmp_path: Path) -> None:

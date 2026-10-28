@@ -251,7 +251,7 @@ bytes are two points. A checkpoint's line, the learner it belongs to, is
 its seat's `line`, else its training run. A checkpoint a training run saved
 is drawn in that run's job; every other placed checkpoint is drawn in its
 line's curve, labelled by the line's name, or in one curve of "checkpoints
-with no line". `Earlier`, `At` and `Crosstable` look only within a line.
+with no line". `Earlier`, `Fraction`, `At` and `Crosstable` look only within a line.
 Every unplaced player, code or a checkpoint seated without a position, is an
 anchor, and the page names the unplaced checkpoints.
 
@@ -273,6 +273,7 @@ is drawn as it wants it now; one it no longer returns, as its eval runs held it.
 | `Curve(split=None, opponent=None)` | the score at each checkpoint, against one anchor; `split` draws one chart per value |
 | `Curve(opponent="heuristic")` | against the player of that name, whatever the Opponent control says |
 | `Curve(opponent=Earlier(clock="updates", by=400))` | each checkpoint against the one of its line exactly 400 updates earlier; none there is a gap that says so |
+| `Curve(opponent=Fraction(clock="updates", value=0.5))` | each checkpoint against the one of its line at exactly half its updates (6,000 v 3,000); none there is a gap |
 | `Curve(opponent=At(clock="updates", value=200))` | each checkpoint against the one of its line at update 200 |
 | `Crosstable()` | one line's checkpoints against each other, a tab per line, both axes ordered by the clock; an unplayed pair shows `·` |
 | `Matrix(rows, columns)` | one job's score per cell at one checkpoint: a finished job's final, else its latest evaluated |

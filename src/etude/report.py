@@ -20,8 +20,8 @@ draw a curve per learner line, including on pages with no training runs.
 Panels name data, never rendering. Eval panels name columns of the score's
 eval table (`Matrix(rows=..., columns=...)`, `Ranking(by=...)`,
 `Curve(split=...)`), whom a curve is scored against (`Curve(opponent=...)`:
-a player's name, or a checkpoint of the same line by its position, `Earlier`
-or `At`), and which matches they count (`Matches`): a tournament's, or one
+a player's name, or a checkpoint of the same line by its position, `Earlier`,
+`Fraction` or `At`), and which matches they count (`Matches`): a tournament's, or one
 matchup or tag of it, by the names `eval(state)` gives them. Matches held
 outside any tournament are offered by the Evals section's Matches control.
 Metric panels name logged metric keys. The defaults are reinforcement learning's:
@@ -84,6 +84,18 @@ class Earlier(Record):
     by: float
 
 
+class Fraction(Record):
+    """Each point's opponent is the checkpoint of its line that stood at `value` × its position on `clock`.
+
+    `Fraction(clock="updates", value=0.5)` plays 6,000 against 3,000 and 400
+    against 200. Only an exact position counts, as with `Earlier`.
+    """
+
+    kind: Literal["fraction"] = "fraction"
+    clock: str
+    value: float = Field(gt=0, lt=1)
+
+
 class At(Record):
     """Each point's opponent is the checkpoint of its line that stood at `value` on `clock`."""
 
@@ -97,14 +109,14 @@ class Curve(Record):
 
     `opponent` fixes whom each point is scored against, overriding the
     section's Opponent control: a player's name, or a checkpoint of the same
-    line (`Earlier`, `At`). None leaves it to the control.
+    line (`Earlier`, `Fraction`, `At`). None leaves it to the control.
     """
 
     kind: Literal["curve"] = "curve"
     title: str = "Score"
     split: str | None = None
     matches: Matches | None = None
-    opponent: str | Earlier | At | None = None
+    opponent: str | Earlier | Fraction | At | None = None
 
 
 class Matrix(Record):
