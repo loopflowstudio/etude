@@ -833,7 +833,6 @@ def test_the_launcher_fetches_a_multipart_output_and_retains_each_part(
     b.run(1)
     assert b.scheduler.read(run).outcome == "succeeded"
 
-    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "controller"))
     monkeypatch.setenv("RUNPOD_API_KEY", "fixture")
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "a")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "s")
