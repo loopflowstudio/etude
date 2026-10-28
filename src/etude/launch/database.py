@@ -115,8 +115,14 @@ CREATE INDEX IF NOT EXISTS attempts_session ON attempts(session);
 """
 
 Fact = str | int | None
-# Changes with the schema. There are no migrations: a file from another version is refused.
+# Changes with the schema. A file from another version is refused, except those
+# `_UPGRADES` brings up to this one in place.
 _VERSION = 11
+# Statements that bring a file at a version key to the next version.
+_UPGRADES = {
+    # Attempts record the environment their machine prepared (#54).
+    10: ("ALTER TABLE attempts ADD COLUMN prepared TEXT",),
+}
 
 
 def _text(at: datetime | None) -> str | None:
@@ -194,6 +200,10 @@ class Database:
         with self._together():
             made = self._db.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone() is not None
             version = int(self._db.execute("PRAGMA user_version").fetchone()[0])
+            while made and version in _UPGRADES:
+                for statement in _UPGRADES[version]:
+                    self._db.execute(statement)
+                version += 1
             if made and version != _VERSION:
                 raise LauncherError(
                     f"{path} was written by another version of etude; move or delete it to start again"
