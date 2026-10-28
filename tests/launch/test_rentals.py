@@ -116,6 +116,22 @@ def test_added_session_reuses_capacity_without_a_paid_window(tmp_path: Path) -> 
     assert b.service.creates == 0
 
 
+def test_a_version_10_database_is_upgraded_in_place_keeping_its_rows(tmp_path: Path) -> None:
+    path = tmp_path / "launcher.db"
+    Database(path).close()
+    with sqlite3.connect(path) as db:
+        db.execute("ALTER TABLE attempts DROP COLUMN prepared")
+        db.execute("INSERT INTO settings VALUES ('kept', 'from version 10')")
+        db.execute("PRAGMA user_version = 10")
+    Database(path).close()
+    with sqlite3.connect(path) as db:
+        assert db.execute("PRAGMA user_version").fetchone() == (11,)
+        assert "prepared" in {row[1] for row in db.execute("PRAGMA table_info(attempts)")}
+        assert db.execute("SELECT value FROM settings WHERE name = 'kept'").fetchone() == (
+            "from version 10",
+        )
+
+
 def test_a_database_from_another_version_is_refused_and_left_alone(tmp_path: Path) -> None:
     path = tmp_path / "launcher.db"
     Database(path).close()
