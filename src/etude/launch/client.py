@@ -17,6 +17,7 @@ call names a pool (`pool=`), an on-demand to rent from (`rent=`), or both.
 from __future__ import annotations
 
 import os
+import threading
 from decimal import Decimal
 from functools import cache
 from pathlib import Path
@@ -54,8 +55,13 @@ def _open(home: Path) -> Scheduler:
     fresh = not (home / "launcher.db").exists()
     store = Database(home / "launcher.db")
     here = local(home / "sessions")
+    owner = threading.get_ident()
 
     def send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Reply:
+        # The store's SQLite connection belongs to the opening thread. A request on
+        # another thread, such as a download part, keeps the sink its caller set there.
+        if threading.get_ident() != owner:
+            return _send(method, url, body, headers)
         with observe(store.retain_transfer_json):
             return _send(method, url, body, headers)
 
