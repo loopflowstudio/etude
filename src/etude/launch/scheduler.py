@@ -385,11 +385,23 @@ class Scheduler:
             if self._store.machine_busy(machine):
                 raise LauncherError(f"machine {machine!r} still has a run on it")
             held = self._store.rented_session(machine)
-            if held.ended_at is None and held.refused_at is None and held.receipt is not None:
-                self._end_session(held)
-                if self._store.session(held.id).ended_at is None:
-                    raise LauncherError(f"machine {machine!r} did not confirm it ended")
+            if held.ended_at is None and held.refused_at is None:
+                self._terminate(held)
             return self._store.machine(machine)
+
+    def _terminate(self, held: Session) -> None:
+        if held.receipt is None:
+            # Its create reply was lost: delete what the provider holds under its
+            # identity, or record that it holds nothing.
+            receipt = self._service(held).find(held.id)
+            if receipt is None:
+                self._store.record_refusal(held, self._clock())
+                return
+            self._store.record_receipt(held, receipt)
+            held = self._store.session(held.id)
+        self._end_session(held)
+        if self._store.session(held.id).ended_at is None:
+            raise LauncherError(f"machine {held.machine!r} did not confirm it ended")
 
     def session(self, id: str) -> Session:
         """Internal journal session named in a run attempt."""
@@ -1896,9 +1908,12 @@ class Scheduler:
                     session=session.id,
                 )
             elif deadline is not None and now >= deadline:
+                # The provider confirmed no machine on every pass of the paid
+                # window: none was made, so none is paid for or holds the pool.
                 for attempt in attempts:
                     if attempt.outcome is None:
                         self._store.finish(attempt, now, "lost", cause="create_unconfirmed")
+                self._store.record_refusal(session, now)
             return
         if not attempts and (rental is None or not rental.kept):
             self._end_session(session)
