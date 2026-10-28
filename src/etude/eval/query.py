@@ -66,12 +66,12 @@ import itertools
 import json
 import os
 import tempfile
+import threading
 import warnings
 from bisect import bisect_left
 from collections import defaultdict
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, cast
 
@@ -121,6 +121,8 @@ REPLICATES = 2000
 # Blobs this close together in a pack are read in one range: a member's header lies between.
 ADJACENT_BYTES = 1024
 SEED = 0
+# Floats of bootstrap weights `_weights` keeps across calls: 256 MiB.
+WEIGHTS_KEPT = 2**25
 # Column types `compare` can take as a value.
 NUMERIC = ("BOOLEAN", "BIGINT", "DOUBLE")
 # Keys and coordinates of an author table's rows: never a value.
@@ -1122,14 +1124,35 @@ def compare(
     return comparisons
 
 
-@lru_cache(maxsize=1)
+# Draws by block count, least recently used first.
+_drawn: dict[int, npt.NDArray[np.float64]] = {}
+_drawn_lock = threading.Lock()
+
+
 def _weights(n: int) -> npt.NDArray[np.float64]:
-    """How often each of `n` blocks is drawn in each replicate: fixed by the seed and `n` alone.
+    """How often each of `n` blocks is drawn in each replicate, kept for the next call with `n`.
+
+    A page of estimates over many selections asks for a few block counts again
+    and again. Each kept draw holds REPLICATES × n floats (16 kB per block);
+    the least recently used go once the kept draws pass `WEIGHTS_KEPT` floats,
+    though the latest is always kept.
+    """
+    with _drawn_lock:
+        weights = _drawn.pop(n, None)
+        if weights is None:
+            weights = _draw(n)
+        _drawn[n] = weights
+        while len(_drawn) > 1 and sum(kept.size for kept in _drawn.values()) > WEIGHTS_KEPT:
+            del _drawn[next(iter(_drawn))]
+    return weights
+
+
+def _draw(n: int) -> npt.NDArray[np.float64]:
+    """Draw how often each of `n` blocks is drawn in each replicate: fixed by the seed and `n` alone.
 
     Each replicate draws `n` blocks uniformly with replacement, counted with
-    one `bincount` (a multinomial draw, linear in `n`). A report's estimates
-    over one selection share `n`, so the latest draw is kept. Counts are held
-    as floats, exact at any `n`, so a matrix product needs no conversion.
+    one `bincount` (a multinomial draw, linear in `n`). Counts are held as
+    floats, exact at any `n`, so a matrix product needs no conversion.
     """
     drawn = np.random.default_rng(SEED).integers(0, n, size=(REPLICATES, n))
     drawn += np.arange(REPLICATES)[:, None] * n
@@ -1137,6 +1160,35 @@ def _weights(n: int) -> npt.NDArray[np.float64]:
     weights = counts.astype(np.float64)
     weights.setflags(write=False)
     return weights
+
+
+def _percentiles(
+    samples: npt.NDArray[np.float64], percents: Sequence[float]
+) -> npt.NDArray[np.float64]:
+    """Percents × columns of `samples`' columns ignoring NaN, equal to `np.nanpercentile(axis=0)`.
+
+    Once any value is NaN, numpy takes a 1-D quantile per column; this sorts
+    every column at once (NaN sorts last) and interpolates each
+    at numpy's default "linear" position, (count - 1) × percent / 100,
+    with the same arithmetic. A column of only NaN gives NaN.
+    """
+    ordered = np.sort(samples, axis=0)
+    counts = np.count_nonzero(~np.isnan(samples), axis=0)
+    positions = (counts - 1) * (np.asarray(percents, dtype=np.float64) / 100)[:, None]
+    below = np.floor(positions)
+    gamma = positions - below
+    # A position never passes the last value; an empty column's floors to -1, also its last.
+    previous = below.astype(np.intp)
+    following = np.minimum(previous + 1, counts - 1)
+    low = np.take_along_axis(ordered, previous, axis=0)
+    high = np.take_along_axis(ordered, following, axis=0)
+    step = high - low
+    # numpy's `_lerp`: from the nearer end, so an exact neighbour stays exact.
+    found: npt.NDArray[np.float64] = np.where(
+        gamma >= 0.5, high - step * (1 - gamma), low + step * gamma
+    )
+    found[:, counts == 0] = np.nan
+    return found
 
 
 @dataclass(frozen=True)
@@ -1181,7 +1233,7 @@ def estimate(
         # A replicate drawing no opportunities for a column has no ratio in it.
         with np.errstate(divide="ignore", invalid="ignore"):
             ratios = np.where(resampled > 0, (weights @ numerators) / resampled, np.nan)
-        lows, highs = np.nanpercentile(ratios, [2.5, 97.5], axis=0)
+        lows, highs = _percentiles(ratios, (2.5, 97.5))
         intervals = [(float(low), float(high)) for low, high in zip(lows, highs, strict=True)]
     estimates: list[Estimate | None] = [None] * len(opportunities)
     for column, value, interval in zip(held, values, intervals, strict=True):

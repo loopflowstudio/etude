@@ -12,12 +12,15 @@ from pathlib import Path
 from typing import Any
 
 import boto3  # type: ignore[import-untyped]
+import numpy as np
+import numpy.typing as npt
 import pytest
 from moto import mock_aws
 from pydantic import BaseModel
 
+from etude.eval import query
 from etude.eval.match import environment, evaluate
-from etude.eval.query import compare, estimate, statsdb
+from etude.eval.query import Estimate, compare, estimate, statsdb
 from etude.eval.records import (
     CheckpointKey,
     CheckpointRef,
@@ -410,6 +413,49 @@ def test_one_bootstrap_estimates_every_column_as_one_column_alone() -> None:
     assert undrawn is None
     single, _, _ = estimate(keys[:1], wins[:1], games[:1])
     assert single is not None and single.interval is None
+
+
+def test_intervals_take_numpys_percentiles_of_replicates_missing_a_ratio() -> None:
+    rng = np.random.default_rng(5)
+    samples = rng.normal(size=(2000, 8))
+    samples[rng.random(samples.shape) < 0.3] = np.nan
+    samples[:, 1] = np.nan
+    samples[17, 1] = 0.25  # one replicate holds a ratio
+    samples[:, 2] = rng.normal(size=2000)  # no replicate misses one
+    samples[:3, 3] = [0.5, -1.0, 2.0]
+    samples[3:, 3] = np.nan
+    samples[:, 4] = np.nan  # no replicate holds one
+    samples[::2, 5] = 1.5  # ties
+    small = samples[:5].copy()
+    for each in (samples, small):
+        with pytest.warns(RuntimeWarning, match="All-NaN slice"):
+            expected = np.nanpercentile(each, [2.5, 97.5], axis=0)
+        np.testing.assert_array_equal(query._percentiles(each, (2.5, 97.5)), expected)
+
+
+def test_estimates_over_a_few_block_counts_draw_each_counts_weights_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    drawn: list[int] = []
+    draw = query._draw
+
+    def counted(n: int) -> npt.NDArray[np.float64]:
+        drawn.append(n)
+        return draw(n)
+
+    monkeypatch.setattr(query, "_drawn", {})
+    monkeypatch.setattr(query, "_draw", counted)
+
+    def estimates() -> list[list[Estimate | None]]:
+        return [
+            estimate([f"deal-{each:02}" for each in range(n)], [[1.0]] * n, [[2.0]] * n)
+            for n in (3, 5, 8)
+        ]
+
+    first = estimates()
+    for _ in range(4):
+        assert estimates() == first
+    assert sorted(drawn) == [3, 5, 8]
 
 
 def test_queries_reports_and_resumes_read_each_bucket_file_once_per_computer(
