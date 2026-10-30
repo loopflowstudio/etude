@@ -95,6 +95,9 @@ from etude.launch.usage import Usage
 Clock = Callable[[], datetime]
 # How the scheduler reaches a machine you own, or the provider behind an on-demand.
 Reach = Callable[[Machine | OnDemand], Execution]
+# What a run folder's relay raises while its holder cannot give it; the work waits.
+# A file that is gone (FileNotFoundError) ends the attempt instead, in `_relay`.
+_RELAY_WAITS = (OSError, Mismatch, LauncherError, StorageUnavailable)
 
 
 def _limit_usd(job: Job) -> Decimal:
@@ -1685,7 +1688,7 @@ class Scheduler:
         self._store.check_lock(session.supply)
         try:
             packet = self._packet(session)
-        except (OSError, Mismatch, LauncherError, StorageUnavailable) as error:
+        except _RELAY_WAITS as error:
             self._await_relay(session, error)
             return
         if not packet.work and not packet.kept:
@@ -1871,7 +1874,7 @@ class Scheduler:
         """
         try:
             work = self._work(attempt)
-        except (OSError, Mismatch, LauncherError, StorageUnavailable) as error:
+        except _RELAY_WAITS as error:
             self._await_relay(session, error, attempt=attempt.id)
             return
         if work is not None:
