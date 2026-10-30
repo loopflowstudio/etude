@@ -1685,7 +1685,7 @@ class Scheduler:
         self._store.check_lock(session.supply)
         try:
             packet = self._packet(session)
-        except (OSError, Mismatch, LauncherError) as error:
+        except (OSError, Mismatch, LauncherError, StorageUnavailable) as error:
             self._await_relay(session, error)
             return
         try:
@@ -1758,9 +1758,11 @@ class Scheduler:
 
         A later attempt gets its own run's records, declaration and latest
         checkpoint file, so ordinals continue; an input that is a run's file
-        (`Input.run`) gets just that file. Only between machines without shared
-        storage (`Execution.held`). Raises while a holding machine cannot be
-        reached, and the attempt waits: nothing is silently left behind.
+        (`Input.run`) gets just that file. A machine that keeps records in
+        storage reads them from there; one without storage is given them from
+        the holding machine's storage, or else its disk (`Execution.held`).
+        Raises while those cannot be read, and the attempt waits: nothing is
+        silently left behind.
         """
         if attempt.id in self._relayed:
             return
@@ -1780,10 +1782,18 @@ class Scheduler:
     ) -> None:
         """Copy a run's folder, or one `key` of it, from its latest started attempt's machine."""
         holder = self._holder(run, before)
-        if holder is not None and holder.machine != session.machine:
-            files = self._service(holder).held(run, key)
-            if files is not None:
-                self._service(session).hold(run, files)
+        if holder is None or holder.machine == session.machine:
+            return
+        if self._storage(session) is not None and self._storage(holder) is not None:
+            return  # the session's machine reads the run from storage
+        self._service(session).hold(run, self._service(holder).held(run, key))
+
+    def _storage(self, session: Session) -> str | None:
+        """The storage the session's machine keeps records in; None where only its disk does."""
+        machine = self._store.machine(session.machine)
+        if machine.kind == "rented":
+            return self._store.ondemand(session.supply).storage
+        return machine.storage
 
     def _holder(self, run: str, before: int | None = None) -> Session | None:
         """The session of the run's latest started attempt (numbered below `before`)."""
@@ -1803,7 +1813,9 @@ class Scheduler:
         reaches that machine, and raises while the machine cannot be reached.
         """
         holder = self._holder(run)
-        return None if holder is None else self._service(holder).held(run)
+        if holder is None or self._storage(holder) is not None:
+            return None
+        return self._service(holder).held(run)
 
     def _work(self, attempt: RunAttempt) -> Work:
         run = self._store.run(attempt.run)
@@ -1843,7 +1855,7 @@ class Scheduler:
         """
         try:
             work = self._work(attempt)
-        except (OSError, Mismatch, LauncherError) as error:
+        except (OSError, Mismatch, LauncherError, StorageUnavailable) as error:
             self._await_relay(session, error, attempt=attempt.id)
             return
         self._service(session).add(session.id, work)
@@ -1851,7 +1863,7 @@ class Scheduler:
     def _await_relay(
         self, session: Session, error: Exception, *, attempt: str | None = None
     ) -> None:
-        """Note why work for `session` waits: the machine holding a run's folder did not answer."""
+        """Note why work for `session` waits: what holds a run's folder did not give it."""
         self._diagnose(
             "run folder relay",
             "waiting for its host",
@@ -1859,7 +1871,7 @@ class Scheduler:
             session=None if attempt else session.id,
             attempt=attempt,
         )
-        self._trouble[session.supply] = "waiting for the machine holding a run's folder"
+        self._trouble[session.supply] = "waiting for the machine or storage holding a run's folder"
 
     def _packet(self, session: Session) -> Packet:
         """What one session is sent: its deadline, its work and where its records go."""

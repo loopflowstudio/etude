@@ -749,7 +749,7 @@ class Host(FakeService):
         self.track = root / "track"
         self.reachable = True
 
-    def held(self, run: str, key: str | None = None) -> dict[str, bytes] | None:
+    def held(self, run: str, key: str | None = None) -> dict[str, bytes]:
         self._call("ssh")
         if not self.reachable:
             raise Unreachable("SSH transport failed; remote outcome unconfirmed")

@@ -39,11 +39,13 @@ Outcome = Literal["succeeded", "failed", "cancelled", "over_budget", "out_of_tim
 Cause = Literal[
     "capacity_refused",
     "setup_failed",
+    "input_undelivered",
     "machine_lost_before_start",
     "machine_lost",
     "create_unconfirmed",
 ]
-# Confirmed machine loss permits a new attempt; an uncertain start does not.
+# Confirmed machine loss permits a new attempt; an uncertain start does not, nor
+# an input the machine was not given, which a retry would not be given either.
 RETRYABLE: frozenset[str] = frozenset(
     {"capacity_refused", "setup_failed", "machine_lost_before_start", "machine_lost"}
 )

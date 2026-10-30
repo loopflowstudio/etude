@@ -14,6 +14,7 @@ import sys
 import threading
 import time
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -24,9 +25,10 @@ from urllib.parse import parse_qs, unquote, urlsplit
 import pytest
 from pydantic import ValidationError
 
+from etude.carriage import restore_set
 from etude.jobs import continue_from
 from etude.launch.database import Database
-from etude.launch.executor import Executor
+from etude.launch.executor import Execution, Executor, local
 from etude.launch.listing import show_machines, show_runs
 from etude.launch.logging import CLOSED, log_to, write_log
 from etude.launch.providers.runpod.api import RunPodAPI
@@ -37,6 +39,7 @@ from etude.launch.records import (
     Input,
     Job,
     LauncherError,
+    Machine,
     MachineTemplate,
     OnDemand,
     Provider,
@@ -311,6 +314,7 @@ class Cloud:
     storage: Storage
     provider: RunPod
     store: Database
+    service: Executor
 
 
 def cloud(
@@ -319,8 +323,12 @@ def cloud(
     delivery_seconds: float | None = None,
     gpu: str | None = "NVIDIA L4",
     r2: bool = False,
+    owned: Executor | None = None,
 ) -> Cloud:
-    """A RunPod account and its storage: S3, or with `r2` an R2 bucket that has no API token."""
+    """A RunPod account and its storage: S3, or with `r2` an R2 bucket that has no API token.
+
+    `owned` serves the SSH machines added to it.
+    """
     storage = Storage()
     provider = RunPod(storage, tmp_path / "pod")
     store = Database(tmp_path / "launcher.db")
@@ -352,7 +360,12 @@ def cloud(
         None,
         BucketJournal(place, bucket),
     )
-    scheduler = Scheduler(store, {"runpod": lambda held: service})
+    services: dict[str, Callable[[Machine | OnDemand], Execution]] = {
+        "runpod": lambda held: service
+    }
+    if owned is not None:
+        services["ssh"] = lambda held: owned
+    scheduler = Scheduler(store, services)
     scheduler.add_storage(place)
     scheduler.set_provider(account)
     scheduler.add_ondemand(
@@ -364,7 +377,7 @@ def cloud(
             delivery_seconds=delivery_seconds,
         )
     )
-    return Cloud(scheduler, storage, provider, store)
+    return Cloud(scheduler, storage, provider, store, service)
 
 
 def until(scheduler: Scheduler, run: str, phase: str) -> Status:
@@ -454,11 +467,14 @@ def test_inputs_reach_the_job_by_name_once_and_wrong_bytes_are_refused(tmp_path:
     assert len(reads) == 1  # one verified download, by the worker, through a scoped link
 
     wrong = given.model_copy(update={"sha256": hashlib.sha256(b"other").hexdigest()})
-    refused = c.scheduler.launch(job.model_copy(update={"inputs": (wrong,)}), rent="l4")
+    refused = c.scheduler.launch(
+        job.model_copy(update={"inputs": (wrong,), "max_attempts": 3}), rent="l4"
+    )
     (status,) = c.scheduler.wait(refused, every=0.05, timeout=30)
-    assert (status.outcome, status.cause) == ("lost", "setup_failed")
+    assert (status.outcome, status.cause) == ("lost", "input_undelivered")
+    assert len(c.scheduler.attempts(refused)) == 1  # a retry would be given the same bytes
     said = job_text(c.scheduler.logs(refresh=True, run=refused))  # the job's command never started
-    assert said.startswith("source preparation failed: ValueError: input weights.pt was not")
+    assert said.startswith("source preparation failed: Undelivered: input weights.pt was not")
     assert c.scheduler.record(refused).job != c.scheduler.record(run).job  # inputs are identity
     released(c.scheduler, refused)
     assert c.provider.pods == {}
@@ -468,11 +484,8 @@ def test_inputs_reach_the_job_by_name_once_and_wrong_bytes_are_refused(tmp_path:
         job.model_validate({**job.model_dump(), "inputs": [given.model_dump()] * 2})
 
 
-@pytest.mark.parametrize("delivery_seconds", [None, 60])
-def test_a_run_from_a_commit_runs_in_a_pod_and_continues_in_another(
-    tmp_path: Path, delivery_seconds: float | None
-) -> None:
-    c = cloud(tmp_path, delivery_seconds=delivery_seconds)
+def tracked_repository(tmp_path: Path) -> Path:
+    """A repository whose `train.py` is the `TRACKED` job."""
     repo = repository(tmp_path)
     (repo / "train.py").write_text(TRACKED)
     subprocess.run(["git", "-C", str(repo), "add", "train.py"], check=True)
@@ -481,6 +494,15 @@ def test_a_run_from_a_commit_runs_in_a_pod_and_continues_in_another(
         + ["commit", "-qm", "track"],
         check=True,
     )
+    return repo
+
+
+@pytest.mark.parametrize("delivery_seconds", [None, 60])
+def test_a_run_from_a_commit_runs_in_a_pod_and_continues_in_another(
+    tmp_path: Path, delivery_seconds: float | None
+) -> None:
+    c = cloud(tmp_path, delivery_seconds=delivery_seconds)
+    repo = tracked_repository(tmp_path)
     job = Job(
         command=f"{sys.executable} train.py",
         repo=str(repo),
@@ -537,6 +559,52 @@ def test_a_run_from_a_commit_runs_in_a_pod_and_continues_in_another(
     keys = [k.removeprefix(folder) for k in c.storage.objects if k.startswith(folder)]
     assert {f"attempts/{attempt}.json", log_piece(attempt_log(attempt), 0)} <= set(keys)
     assert {"run.json", "checkpoints/steps-7.json", "checkpoints/steps-7.pt"} <= set(keys)
+
+
+def test_a_pods_checkpoint_reaches_an_owned_host_without_storage_from_the_bucket(
+    tmp_path: Path,
+) -> None:
+    mini = local(tmp_path / "mini" / "sessions")  # its own disk, and no storage
+    c = cloud(tmp_path, owned=mini)
+    c.scheduler.add_machine("mini", "mini.lan")
+    job = Job(
+        command=f"{sys.executable} train.py",
+        repo=str(tracked_repository(tmp_path)),
+        until="steps=3",
+        max_hours=0.05,
+        max_usd=Decimal(1),
+    )
+    first = c.scheduler.launch(Run(job=job, seed=7), rent="l4")
+    assert released(c.scheduler, first).outcome == "succeeded"
+    assert c.provider.pods == {}  # nothing holds the parent's folder but the bucket
+
+    # A retry there would be given what a host holding the folder gives.
+    folder = f"etude/t/{first}/"
+    copy = tmp_path / "copy"
+    for key, body in c.storage.objects.items():
+        if key.startswith(folder + "checkpoints/") or key == folder + "run.json":
+            (copy / key.removeprefix(folder)).parent.mkdir(parents=True, exist_ok=True)
+            (copy / key.removeprefix(folder)).write_bytes(body)
+    assert c.service.held(first) == restore_set(copy)
+
+    parent = c.scheduler.record(first)
+    source = BucketObjects(c.storage, "journals")
+    for until in ("steps=7", "steps=5"):
+        run = c.scheduler.launch(continue_from(parent, until, source=source), "mini")
+        (status,) = c.scheduler.wait(run, every=0.05, timeout=30)
+        assert (status.outcome, status.clocks) == ("succeeded", {"steps": int(until[6:])})
+        verified, said = job_text(c.scheduler.logs(refresh=True, run=run)).split("\n", 1)
+        assert verified.startswith("inputs: verified parent-checkpoint.pt (13 bytes, ")
+        assert said == f"seed 7 from 3 to {until[6:]}\n"
+    relayed = tmp_path / "mini" / "track" / first / "checkpoints"
+    assert (relayed / "steps-3.pt").read_text() == "trained to 3\n"
+    # The controller read the parent's file from storage once, through its cache.
+    reads = [
+        k
+        for m, k in c.storage.asked
+        if m == "GET" and k.startswith(folder + "checkpoints/steps-3.pt")
+    ]
+    assert len(reads) == 1
 
 
 def test_a_lost_create_reply_finds_the_pod_by_name_and_never_asks_twice(tmp_path: Path) -> None:

@@ -10,9 +10,10 @@ twice (`immutable`): Etude's own blocks, tables and checkpoints, and any
 file an author writes under a run's `artifacts/` folder. An eval run's
 block (`etude.eval.block`) is sent data first and index last. Each carrier keeps its own change detection and storage
 I/O. A later attempt on a fresh machine restores the records and the one
-checkpoint file `resume_file` names, from storage or, between owned hosts
-without one, as the `restore_set` another host's folder gives (`put_back`);
-a continuation's machine is given its parent's one file (`recorded_file`).
+checkpoint file `resume_file` names, from storage or, on a host without one,
+as the `restore_set` another host's folder gives (`put_back`), or the same
+files the launcher read from storage (`recorded`); a continuation's machine is
+given its parent's one file (`recorded_file`).
 A checkpoint file's name is never used twice (`taken`), so no key under
 `checkpoints/` ever holds two different files.
 
@@ -152,24 +153,35 @@ class RecordedFile:
     size_bytes: int
 
 
-def _recorded(root: Path) -> dict[int, tuple[str, RecordedFile]]:
+def recorded(records: Mapping[str, bytes]) -> dict[int, tuple[str, RecordedFile]]:
     """By ordinal: each checkpoint record's key and the file it names, where Etude stored one.
 
-    Reads the records (`etude.train.records.CheckpointRecord`) as plain JSON.
-    A record that only references a model elsewhere names no file here.
+    `records` are the bytes of `checkpoints/*.json` by key, from a folder or a
+    storage, read as plain JSON (`etude.train.records.CheckpointRecord`). A
+    record that only references a model elsewhere names no file.
     """
-    recorded: dict[int, tuple[str, RecordedFile]] = {}
-    for path in (root / CHECKPOINTS).glob("*.json"):
+    found: dict[int, tuple[str, RecordedFile]] = {}
+    for record, raw in records.items():
         try:
-            record = json.loads(path.read_bytes())
-            ordinal, artifact = int(record["ordinal"]), dict(record["artifact"])
-        except (OSError, ValueError, KeyError, TypeError):
+            fields = json.loads(raw)
+            ordinal, artifact = int(fields["ordinal"]), dict(fields["artifact"])
+        except (ValueError, KeyError, TypeError):
             continue
         key = f"{CHECKPOINTS}/{PurePosixPath(str(artifact.get('uri', ''))).name}"
         sha256, size = artifact.get("sha256"), artifact.get("size_bytes")
         if isinstance(sha256, str) and isinstance(size, int) and checkpoint_file(key):
-            recorded[ordinal] = (f"{CHECKPOINTS}/{path.name}", RecordedFile(key, sha256, size))
-    return recorded
+            found[ordinal] = (record, RecordedFile(key, sha256, size))
+    return found
+
+
+def _recorded(root: Path) -> dict[int, tuple[str, RecordedFile]]:
+    records: dict[str, bytes] = {}
+    for path in (root / CHECKPOINTS).glob("*.json"):
+        try:
+            records[f"{CHECKPOINTS}/{path.name}"] = path.read_bytes()
+        except OSError:
+            continue
+    return recorded(records)
 
 
 def resume_file(root: Path) -> RecordedFile | None:

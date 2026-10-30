@@ -190,6 +190,10 @@ def _link(folder: Path, held: dict[str, Path]) -> Path:
     return folder
 
 
+class Undelivered(ValueError):
+    """An input this machine does not hold; another attempt is given it the same way."""
+
+
 def _held(session: Path, shared: Path, given: Input) -> Path:
     """Where this machine holds the input's bytes, verified for this attempt before it starts.
 
@@ -210,7 +214,7 @@ def _held(session: Path, shared: Path, given: Input) -> Path:
                 # Nothing was received for it: this machine already held the run's file.
                 emit("REUSE", path.as_uri(), reused=given.size_bytes, completed=True)
             return path
-    raise ValueError(
+    raise Undelivered(
         f"input {given.name} was not delivered: its bytes did not match its digest,"
         " or this machine has neither storage nor the file"
     )
@@ -554,7 +558,9 @@ def _run(session: Path, packet: Packet, work: Work) -> None:
     except (OSError, ValueError, subprocess.CalledProcessError, tarfile.TarError) as error:
         with (home / "log").open("a") as failed:
             failed.write("source preparation failed: " + explain(error) + "\n")
-        return _finish(home, "lost", "setup_failed")
+        return _finish(
+            home, "lost", "input_undelivered" if isinstance(error, Undelivered) else "setup_failed"
+        )
     started = _now()
     limit = started + timedelta(seconds=work.limit_seconds)
     if packet.deadline is not None:

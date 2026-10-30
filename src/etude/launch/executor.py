@@ -79,13 +79,13 @@ class Execution(Protocol):
 
     def observe(self, session_id: str) -> Observation: ...
 
-    def held(self, run: str, key: str | None = None) -> dict[str, bytes] | None:
-        """What another machine needs of a run's folder on this one, by key.
+    def held(self, run: str, key: str | None = None) -> dict[str, bytes]:
+        """What a machine without this one's storage needs of a run's folder, by key.
 
         A retry elsewhere: `etude.carriage.restore_set`. With `key`, just that
         recorded file and its record (`etude.carriage.recorded_file`), as a
-        job's input. None where storage holds the run and other machines read
-        it from there. Raises while the machine cannot be reached.
+        job's input. Read from the storage this machine keeps records in, else
+        from its disk. Raises while neither can be reached.
         """
         ...
 
@@ -122,7 +122,7 @@ class Journal(Protocol):
     def add(self, session_id: str, work: Work) -> None: ...
     def stage(self, repo: str, commit: str) -> None: ...
     def observe(self, session_id: str) -> Observation: ...
-    def held(self, run: str, key: str | None = None) -> dict[str, bytes] | None: ...
+    def held(self, run: str, key: str | None = None) -> dict[str, bytes]: ...
     def hold(self, run: str, files: dict[str, bytes]) -> None: ...
     def stop(self, session_id: str, attempt: str) -> None: ...
     def logs(
@@ -228,7 +228,7 @@ class Executor:
     def stage(self, repo: str, commit: str) -> None:
         self.journal.stage(repo, commit)
 
-    def held(self, run: str, key: str | None = None) -> dict[str, bytes] | None:
+    def held(self, run: str, key: str | None = None) -> dict[str, bytes]:
         return self.journal.held(run, key)
 
     def hold(self, run: str, files: dict[str, bytes]) -> None:
