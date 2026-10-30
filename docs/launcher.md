@@ -778,9 +778,11 @@ job's command never runs and the attempt ends `lost (input_undelivered)` with th
 reason in its log, and is not retried, since a retry would be given the same bytes.
 A worker's cache may use what it holds plus half the disk
 free when its session began. Inputs are part of the job's identity. A machine with no
-storage can be given only a run's file (`Input.run`, as continuation does): the
-launcher relays it, verified, from the storage or the disk of the machine that
-ran that run, and the attempt waits while neither can be read.
+storage can be given only a run's file (`Input.run`, as continuation does). Unless
+the machine keeps records in the same storage as the machine that ran that run,
+the launcher relays the file, verified, from that storage or that machine's disk.
+The attempt waits while neither can be reached, and ends
+`lost (input_undelivered)` when the file or its record is gone.
 
 The job is also told who it is: `ETUDE_RUN` (the run's id), `ETUDE_JOB` (the
 digest its job's runs share), `ETUDE_JOB_NAME` when the job has a name,

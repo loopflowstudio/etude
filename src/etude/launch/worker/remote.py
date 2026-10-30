@@ -81,7 +81,10 @@ def invoke(request: RemoteRequest) -> RemoteReply:
         at = journal.ended(session)
         return RemoteReply(text=at.isoformat() if at else None)
     if action == "held":
-        held = journal.held(request.name, request.key or None)
+        try:
+            held = journal.held(request.name, request.key or None)
+        except FileNotFoundError as error:
+            return RemoteReply(missing=str(error))
         return RemoteReply(folder={key: base64.b64encode(b).decode() for key, b in held.items()})
     if action == "hold":
         journal.hold(

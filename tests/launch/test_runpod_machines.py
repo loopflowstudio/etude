@@ -20,7 +20,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import pytest
 from pydantic import ValidationError
@@ -561,12 +561,17 @@ def test_a_run_from_a_commit_runs_in_a_pod_and_continues_in_another(
     assert {"run.json", "checkpoints/steps-7.json", "checkpoints/steps-7.pt"} <= set(keys)
 
 
-def test_a_pods_checkpoint_reaches_an_owned_host_without_storage_from_the_bucket(
-    tmp_path: Path,
+@pytest.mark.parametrize("storage", [None, "east"])
+def test_a_pods_checkpoint_reaches_an_owned_host_without_its_storage_from_the_bucket(
+    tmp_path: Path, storage: str | None
 ) -> None:
-    mini = local(tmp_path / "mini" / "sessions")  # its own disk, and no storage
+    # The host keeps records on its own disk, or in a storage other than the pod's.
+    mini = local(tmp_path / "mini" / "sessions")
     c = cloud(tmp_path, owned=mini)
-    c.scheduler.add_machine("mini", "mini.lan")
+    c.scheduler.add_storage(
+        Place(name="east", bucket="other", prefix="etude/e", provider="s3", region="us-east-1")
+    )
+    c.scheduler.add_machine("mini", "mini.lan", storage=storage)
     job = Job(
         command=f"{sys.executable} train.py",
         repo=str(tracked_repository(tmp_path)),
@@ -605,6 +610,41 @@ def test_a_pods_checkpoint_reaches_an_owned_host_without_storage_from_the_bucket
         if m == "GET" and k.startswith(folder + "checkpoints/steps-3.pt")
     ]
     assert len(reads) == 1
+
+
+def test_a_checkpoint_gone_from_the_bucket_ends_the_attempt_undelivered_without_retrying(
+    tmp_path: Path,
+) -> None:
+    mini = local(tmp_path / "mini" / "sessions")  # its own disk, and no storage
+    c = cloud(tmp_path, owned=mini)
+    c.scheduler.add_machine("mini", "mini.lan")
+    job = Job(
+        command=f"{sys.executable} train.py",
+        repo=str(tracked_repository(tmp_path)),
+        until="steps=3",
+        max_hours=0.05,
+        max_usd=Decimal(1),
+        max_attempts=3,
+    )
+    first = c.scheduler.launch(Run(job=job, seed=7), rent="l4")
+    assert released(c.scheduler, first).outcome == "succeeded"
+    folder = f"etude/t/{first}/"
+    child = continue_from(
+        c.scheduler.record(first), "steps=5", source=BucketObjects(c.storage, "journals")
+    )
+    del c.storage.objects[folder + "checkpoints/steps-3.pt"]
+
+    run = c.scheduler.queue(child, "mini")
+    (status,) = c.scheduler.wait(run, every=0.05, timeout=30)
+    assert (status.outcome, status.cause, status.attempts) == ("lost", "input_undelivered", 1)
+
+    def relayed() -> list[tuple[str, str]]:
+        return [(m, k) for m, k in c.storage.asked if quote(folder, safe="") in k or folder in k]
+
+    asked = relayed()
+    for _ in range(3):
+        c.scheduler.tick()
+    assert relayed() == asked  # nothing waits on the missing file
 
 
 def test_a_lost_create_reply_finds_the_pod_by_name_and_never_asks_twice(tmp_path: Path) -> None:

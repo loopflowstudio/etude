@@ -244,3 +244,6 @@ def test_a_runs_folder_relays_between_hosts_over_ssh(tmp_path: Path) -> None:
         "steps-1.pt",
     ]
     assert (there / "run.json").read_bytes() == (tmp_path / "a/track/r/run.json").read_bytes()
+    # A file the host does not hold is absent, not unreachable.
+    with pytest.raises(FileNotFoundError, match="steps-9.pt"):
+        hosts[0].held("r", "checkpoints/steps-9.pt")

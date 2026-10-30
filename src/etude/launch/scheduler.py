@@ -1688,6 +1688,9 @@ class Scheduler:
         except (OSError, Mismatch, LauncherError, StorageUnavailable) as error:
             self._await_relay(session, error)
             return
+        if not packet.work and not packet.kept:
+            self._store.confirm_ended(session, now)  # every attempt ended undelivered
+            return
         try:
             self._store.claim(session, self._clock())
         except Stale:
@@ -1753,29 +1756,39 @@ class Scheduler:
             session = self._store.session(session.id)
         return session
 
-    def _relay(self, attempt: RunAttempt, run: RunRecord) -> None:
+    def _relay(self, attempt: RunAttempt, run: RunRecord) -> bool:
         """Hand an attempt what it needs of runs' folders from the machines that last ran them.
 
         A later attempt gets its own run's records, declaration and latest
         checkpoint file, so ordinals continue; an input that is a run's file
-        (`Input.run`) gets just that file. A machine that keeps records in
-        storage reads them from there; one without storage is given them from
-        the holding machine's storage, or else its disk (`Execution.held`).
-        Raises while those cannot be read, and the attempt waits: nothing is
-        silently left behind.
+        (`Input.run`) gets just that file. A machine that reads the holder's
+        storage reads them from there; any other is given them from the
+        holder's storage, or else its disk (`Execution.held`). Raises while
+        those cannot be reached, and the attempt waits: nothing is silently
+        left behind. An input whose record or file is gone ends the attempt
+        `input_undelivered` and returns False.
         """
         if attempt.id in self._relayed:
-            return
-        carried: list[tuple[str, int | None, str | None]] = [
-            (given.run, None, given.key) for given in run.spec.inputs if given.run is not None
-        ]
+            return True
+        session = self._store.session(attempt.session)
         if attempt.number > 1:
-            carried.insert(0, (attempt.run, attempt.number, None))
-        if carried:
-            session = self._store.session(attempt.session)
-            for source, before, key in carried:
-                self._carry(source, session, before=before, key=key)
+            self._carry(attempt.run, session, before=attempt.number)
+        for given in run.spec.inputs:
+            if given.run is None:
+                continue
+            try:
+                self._carry(given.run, session, key=given.key)
+            except FileNotFoundError as error:
+                self._diagnose(
+                    "run folder relay",
+                    f"run {given.run} holds no {given.key}",
+                    error,
+                    attempt=attempt.id,
+                )
+                self._store.fail_before_start(attempt, "input_undelivered", self._clock())
+                return False
         self._relayed.add(attempt.id)
+        return True
 
     def _carry(
         self, run: str, session: Session, *, before: int | None = None, key: str | None = None
@@ -1784,8 +1797,9 @@ class Scheduler:
         holder = self._holder(run, before)
         if holder is None or holder.machine == session.machine:
             return
-        if self._storage(session) is not None and self._storage(holder) is not None:
-            return  # the session's machine reads the run from storage
+        storage = self._storage(session)
+        if storage is not None and storage == self._storage(holder):
+            return  # the session's machine reads the run from the holder's storage
         self._service(session).hold(run, self._service(holder).held(run, key))
 
     def _storage(self, session: Session) -> str | None:
@@ -1817,9 +1831,11 @@ class Scheduler:
             return None
         return self._service(holder).held(run)
 
-    def _work(self, attempt: RunAttempt) -> Work:
+    def _work(self, attempt: RunAttempt) -> Work | None:
+        """What the attempt's machine is sent; None when the attempt ended undelivered."""
         run = self._store.run(attempt.run)
-        self._relay(attempt, run)
+        if not self._relay(attempt, run):
+            return None
         spec = run.spec
         return Work(
             attempt=attempt.id,
@@ -1858,7 +1874,8 @@ class Scheduler:
         except (OSError, Mismatch, LauncherError, StorageUnavailable) as error:
             self._await_relay(session, error, attempt=attempt.id)
             return
-        self._service(session).add(session.id, work)
+        if work is not None:
+            self._service(session).add(session.id, work)
 
     def _await_relay(
         self, session: Session, error: Exception, *, attempt: str | None = None
@@ -1877,8 +1894,8 @@ class Scheduler:
         """What one session is sent: its deadline, its work and where its records go."""
         rental = self._store.rental_for(session)
         attempts = self._store.attempts(session=session.id)
-        first = [a for a in attempts if not a.added]
-        work = tuple(self._work(attempt) for attempt in first)
+        first = [a for a in attempts if not a.added and a.outcome is None]
+        work = tuple(w for w in map(self._work, first) if w is not None)
         supply = self._store.supply(session.supply)
         return Packet(
             delivery_seconds=supply.delivery_seconds,
