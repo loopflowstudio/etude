@@ -1785,12 +1785,10 @@ class Scheduler:
             try:
                 self._carry(given.run, session, key=given.key)
             except (FileNotFoundError, StoredMismatch, Mismatch) as error:
-                gone = isinstance(error, FileNotFoundError)
+                # The error says whether the file is gone or differs from its record.
                 self._diagnose(
                     "run folder relay",
-                    f"run {given.run} holds no {given.key}"
-                    if gone
-                    else f"run {given.run}'s {given.key} does not match its record",
+                    f"run {given.run} cannot give its recorded {given.key}",
                     error,
                     attempt=attempt.id,
                 )
