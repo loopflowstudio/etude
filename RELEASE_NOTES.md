@@ -1,42 +1,34 @@
-# v0.2.12
+# v0.2.13
 
 <!-- loopflow:release-notes=narrative;gate=safe -->
 
-Etude v0.2.12 lets you upgrade from 0.2.6 without losing your launcher history. It also adds a new way to read a learning curve. Before this release, every Etude from 0.2.7 on refused a launcher database written by 0.2.6, so you had to delete your record of runs, rentals and settings or stay on the old version. Now that file is upgraded in place. Learning curves can also score each checkpoint against the same line at a fraction of its own training, which answers "does this checkpoint beat itself at half its updates?". This range also includes a fix for `etude fetch` on large outputs, which shipped in v0.2.11 but was not described in its notes.
+Etude v0.2.13 lets a run move from a RunPod pod to an SSH host that has no storage. Before this release, if a pod left a run's checkpoint in its bucket and you continued or retried that run on an SSH host registered without storage, the host never received the checkpoint. Every attempt ended `setup_failed` until the retries ran out. Now the controller relays the checkpoint to the host from the bucket. An input that can never arrive ends its attempt once, as `input_undelivered`, and the log says why, so retries are no longer spent on it.
 
-## Keep your 0.2.6 launcher database
+## Continue bucket-held runs on any machine
 
-A launcher database records every run, rental and setting. A shared one, such as Manabot's `~/.etude/launcher.db`, can still have a 0.2.6 controller running on it, and newer launches had to go through a 0.2.6 checkout. Etude now upgrades that file instead of refusing it. ([#73](https://github.com/loopflowstudio/etude/pull/73))
+A machine that does not keep records in the storage holding a run's folder now gets the run's file from the controller. This covers an SSH host with no storage and a host with a different storage. A machine that shares the holder's storage still reads the file there directly. ([#77](https://github.com/loopflowstudio/etude/pull/77))
 
-- **Version 10 becomes version 11 in place.** When Etude opens a version-10 file (written by 0.2.6), it adds `attempts.prepared`, the only schema change since then, in the same transaction that checks the version. Existing rows keep their values. Attempts recorded before the upgrade have `NULL` in the new column.
-- **Each upgrade is declared per version.** `_UPGRADES` in `etude.launch.database` maps each version to the statements that bring it to the next one. A version with no path to the current schema is still refused and left untouched.
+- **The controller stages the file from the bucket.** `BucketJournal.held` makes one listing of the run's folder, reads the declaration and checkpoint records, and reads one checkpoint file through `etude/cache.py`. It checks the file against its record and hands it over the same way a host's disk would.
+- **The first relay downloads the checkpoint once.** Later relays of the same checkpoint read the controller's cached copy and download nothing more.
+- **SSH reports missing files as absent.** When a file is missing, an SSH host now reports it as absent (`FileNotFoundError`) instead of failing the call. This lets the relay tell a file that is gone from a host that cannot be reached.
+- **No extra queries while waiting.** The relay loads a session only when the attempt has a run folder to carry. A wait that relays nothing makes no extra database queries.
 
-## Compare a checkpoint with its own earlier self
+## Stop retrying inputs that cannot arrive
 
-Before this release, a curve could score each checkpoint against a fixed checkpoint (`At`) or one a fixed distance back (`Earlier`). The new `Fraction` opponent picks the checkpoint at a fraction of each checkpoint's own position. ([#65](https://github.com/loopflowstudio/etude/pull/65))
+`input_undelivered` is a new cause for an attempt's end, and the launcher does not retry it. A retry would get the same missing or wrong bytes, so it would only spend attempts. ([#77](https://github.com/loopflowstudio/etude/pull/77))
 
-```python
-Curve(opponent=Fraction(clock="updates", value=0.5))
-```
-
-With this opponent, the checkpoint at 6,000 updates plays its line's checkpoint at 3,000, and the one at 400 plays the one at 200.
-
-- **`Fraction` lives in `etude.report`**, next to `Earlier` and `At`. `value` must be strictly between 0 and 1. The opponent must be in the same line and config, at exactly that position. If no checkpoint stands there, the curve shows a gap that says where it looked, for example `no checkpoint at updates 2,975`. The page subtitle reads `vs the checkpoint at 0.5 × its updates`.
-- **Positions match by value.** `Earlier`, `Fraction` and `At` now round both the computed and the stored positions to 12 significant digits before comparing them. For example, 90 × 0.7 (`62.99999999999999`) now finds the checkpoint at 63.
-- **A checkpoint never plays itself.** `At(value=400)` used to score the checkpoint at 400 against itself. That point is now a gap. `Fraction` at position 0 is also a gap.
-
-## Fetch large outputs
-
-`etude fetch` used to fail on any output large enough to download in parts, such as a real checkpoint. Each part ran on another thread, and the launcher tried to record that part's transfer through a SQLite connection that only its opening thread may use. Large outputs now download intact. Each part still appears in the launcher's transfer history as its own `result` transfer, with its own byte range. This fix first shipped in v0.2.11. ([#70](https://github.com/loopflowstudio/etude/pull/70))
+- **When an attempt ends `input_undelivered`:** the input's record or file is gone from the holder's storage or disk; the bytes do not match the record; or a worker refuses an input digest. The digest case used to end as `setup_failed`.
+- **A stored object whose length differs from its record is a mismatch.** It used to be reported as a bad range. It now ends the attempt as `input_undelivered`, like any other mismatch.
+- **A session whose first work fails this way is not claimed.** If every attempt in a session's first packet ends `input_undelivered`, the session is confirmed ended.
+- **Temporary failures still wait.** `OSError`, a mismatch, `LauncherError` and `StorageUnavailable` make a relay wait instead of ending. These are now listed once in the scheduler (`_RELAY_WAITS`). Creating a session and handing work to a kept session therefore wait on the same failures. While it waits, the supply's trouble note reads "waiting for the machine or storage holding a run's folder".
 
 ## Operational notes
 
-- **The database upgrade is one way.** After a newer Etude opens a version-10 `launcher.db`, the file is version 11 and 0.2.6 can no longer open it. On a shared file, upgrade only when every process that uses it can move to the new version. To try it safely, copy the file into a scratch `ETUDE_HOME` and run `etude runs`. It should list the file's runs, and `PRAGMA user_version` should then read 11.
-- **Existing `At` curves look slightly different.** The point at the anchor's own position used to show a self-play score. It is now a gap. This is deliberate, but you may notice it if you compare old and new pages.
-- **Bucket requests on other threads.** The launcher records a transfer directly only for requests made on the thread that opened its database. A request on any other thread is recorded only if its caller sets a sink for observations. The multipart download sets one, and it is the only path that runs bucket requests on other threads today.
+- **Only a run input ends early.** When a retry's full restore set has a missing or mismatched file, the attempt still waits instead of ending. Only an `Input.run` ends the attempt as `input_undelivered`.
+- **Bucket relays read through the controller.** The controller downloads each relayed checkpoint once into its cache, so it needs room for those files.
+- **Not yet run live.** To confirm it, let a RunPod run leave a checkpoint in its bucket. Then run `etude continue` (or a retry) onto an SSH host registered without storage. The host's attempt log should show `inputs: verified checkpoints/NAME …`, and the job should start from that checkpoint.
 - The release lists no compatibility break.
 
 ## Small changes
 
-- Bootstrap estimates over many selections are faster, and the numbers are unchanged. This shipped in v0.2.11, which describes it in full. Processes that run estimates can hold up to about 256 MiB of cached weights. ([#71](https://github.com/loopflowstudio/etude/pull/71))
-- `docs/tracking.md`, `report.py` and `page.py` now list `Fraction` alongside the other line-scoped opponents.
+- `docs/launcher.md` describes the new relay sources and the `input_undelivered` outcome.
