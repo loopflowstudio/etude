@@ -1776,6 +1776,9 @@ class Scheduler:
         """
         if attempt.id in self._relayed:
             return True
+        if attempt.number == 1 and all(given.run is None for given in run.spec.inputs):
+            self._relayed.add(attempt.id)
+            return True
         session = self._store.session(attempt.session)
         if attempt.number > 1:
             self._carry(attempt.run, session, before=attempt.number)
