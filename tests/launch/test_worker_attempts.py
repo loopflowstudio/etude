@@ -337,6 +337,6 @@ def test_a_corrupted_held_input_is_refused_before_the_job_starts(tmp_path: Path)
         )
     )
     (status,) = scheduler.wait(one, every=0.05, timeout=30)
-    assert (status.outcome, status.cause) == ("lost", "setup_failed")
+    assert (status.outcome, status.cause) == ("lost", "input_undelivered")
     assert scheduler.attempts(one)[0].started_at is None
     assert not held.exists()  # the corrupt copy is discarded, not trusted again

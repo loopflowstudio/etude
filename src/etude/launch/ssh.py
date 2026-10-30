@@ -57,6 +57,7 @@ class RemoteReply(Record):
     observation: Observation | None = None
     output: EncodedOutput | None = None
     folder: dict[str, str] | None = None
+    missing: str | None = None  # why "held" found no such record or file on the host
 
 
 class Unreachable(LauncherError):
@@ -351,7 +352,10 @@ class SSHJournal:
         )
 
     def held(self, run: str, key: str | None = None) -> dict[str, bytes]:
-        folder = self.ssh.call("held", "", name=run, key=key or "").folder
+        reply = self.ssh.call("held", "", name=run, key=key or "")
+        if reply.missing is not None:
+            raise FileNotFoundError(reply.missing)
+        folder = reply.folder
         if folder is None:
             raise Unreachable("SSH returned no run folder")
         return {key: base64.b64decode(body) for key, body in folder.items()}

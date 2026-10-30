@@ -7,10 +7,19 @@ from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from functools import wraps
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from tempfile import TemporaryDirectory
 from typing import Concatenate
 
-from etude.carriage import CHECKPOINTS
+from etude.carriage import (
+    CHECKPOINTS,
+    checkpoint_file,
+    named_file,
+    note_stored,
+    recorded_file,
+    restore_set,
+    resume_file,
+)
 from etude.launch.logs import snapshot_stream
 from etude.launch.records import BootstrapLinks, LauncherError, LogStream, Storage
 from etude.launch.schemas import (
@@ -220,8 +229,45 @@ class BucketJournal:
                 )
         return links
 
-    def held(self, run: str, key: str | None = None) -> None:
-        """Nothing to hand over: storage holds the run, and a later machine restores from it."""
+    def held(self, run: str, key: str | None = None) -> dict[str, bytes]:
+        """What a machine without storage needs of a run's folder kept here, by key.
+
+        Staged in a folder on this computer, then given as a host holding it
+        gives it (`etude.carriage.restore_set`, or with `key` `recorded_file`):
+        one listing, the declaration and each checkpoint record read whole, and
+        one checkpoint file through this computer's cache, verified against its
+        record, so relaying it again reads no more of it. Raises
+        `FileNotFoundError` when no record here names `key` or its file is gone.
+        """
+        folder = self._run(run)
+        with TemporaryDirectory() as staging, attribute(run=run, purpose="control"):
+            root = Path(staging)
+            (root / CHECKPOINTS).mkdir()
+            listed = [name[len(folder) :] for name in self._bucket.list(f"{folder}{CHECKPOINTS}/")]
+            note_stored(
+                root, [PurePosixPath(name).name for name in listed if checkpoint_file(name)]
+            )
+            records = [
+                name
+                for name in listed
+                if name.rpartition("/")[0] == CHECKPOINTS and name.endswith(".json")
+            ]
+            for name in records if key is not None else [*records, "run.json"]:
+                if (raw := self._bucket.get(folder + name)) is not None:
+                    (root / name).write_bytes(raw)
+            wanted = resume_file(root) if key is None else named_file(root, key)
+            if wanted is not None and wanted.key in listed:
+                with attribute(purpose="checkpoint"):
+                    download(
+                        Download(
+                            url=self._bucket.get_url(folder + wanted.key, _GRANT_SECONDS),
+                            sha256=wanted.sha256,
+                            size_bytes=wanted.size_bytes,
+                        ),
+                        root / wanted.key,
+                        send=self._bucket.send,
+                    )
+            return restore_set(root) if key is None else recorded_file(root, key)
 
     def hold(self, run: str, files: dict[str, bytes]) -> None:
         """Nothing to keep: a machine of this journal restores the run from storage."""

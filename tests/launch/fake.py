@@ -143,8 +143,8 @@ class FakeService:
         held = self.sessions[session_id]
         return Observation(alive=self._alive(held), progress=self._progress(held))
 
-    def held(self, run: str, key: str | None = None) -> dict[str, bytes] | None:
-        return None  # storage holds every run
+    def held(self, run: str, key: str | None = None) -> dict[str, bytes]:
+        return {}  # nothing of any run's folder is kept
 
     def hold(self, run: str, files: dict[str, bytes]) -> None:
         pass

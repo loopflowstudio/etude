@@ -10,9 +10,10 @@ twice (`immutable`): Etude's own blocks, tables and checkpoints, and any
 file an author writes under a run's `artifacts/` folder. An eval run's
 block (`etude.eval.block`) is sent data first and index last. Each carrier keeps its own change detection and storage
 I/O. A later attempt on a fresh machine restores the records and the one
-checkpoint file `resume_file` names, from storage or, between owned hosts
-without one, as the `restore_set` another host's folder gives (`put_back`);
-a continuation's machine is given its parent's one file (`recorded_file`).
+checkpoint file `resume_file` names, from storage or, on a host without one,
+as the `restore_set` another host's folder, or the launcher's copy of a
+storage, gives (`put_back`); a continuation's machine is given its parent's
+one file (`recorded_file`).
 A checkpoint file's name is never used twice (`taken`), so no key under
 `checkpoints/` ever holds two different files.
 
@@ -178,6 +179,11 @@ def resume_file(root: Path) -> RecordedFile | None:
     return recorded[max(recorded)][1] if recorded else None
 
 
+def named_file(root: Path, key: str) -> RecordedFile | None:
+    """The checkpoint file `key` as the record in `root` naming it describes it, when one does."""
+    return next((file for _, file in _recorded(root).values() if file.key == key), None)
+
+
 def _stored(root: Path) -> set[str]:
     note = root / STORED
     return set(note.read_text().split("\n")[:-1]) if note.is_file() else set()
@@ -258,8 +264,8 @@ def put_back(root: Path, files: Mapping[str, bytes]) -> None:
         if target.exists():
             continue
         if checkpoint_file(key):
-            named = {file.key: file.sha256 for _, file in _recorded(root).values()}
-            if named.get(key) != sha256(files[key]).hexdigest():
+            named = named_file(root, key)
+            if named is None or named.sha256 != sha256(files[key]).hexdigest():
                 raise Mismatch(f"{key} does not match the checkpoint record that names it")
         target.parent.mkdir(parents=True, exist_ok=True)
         partial = target.with_name(target.name + ".partial")

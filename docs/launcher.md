@@ -729,9 +729,9 @@ The launcher has no checkpoints of its own: a run's checkpoints are its tracked
 files. They are carried to the bucket as they are recorded, so they survive pod
 deletion, and a later attempt on a fresh machine with a bucket is given back
 the run's records and its latest checkpoint file before the job starts, and
-nothing else. Between owned hosts without a bucket, the controller relays the
-same from the host that last ran the run; while that host cannot be reached,
-the retry waits. Either way its ordinals continue. Automatic recovery retains the run ID and seed. `etude continue` instead goes further than the target
+nothing else. To an owned host without a bucket, the controller relays the
+same from the bucket or the host that last ran the run; while neither can be
+read, the retry waits. Either way its ordinals continue. Automatic recovery retains the run ID and seed. `etude continue` instead goes further than the target
 or branches from a completed run, making a new run with a parent.
 
 There is no `retry` flag; `max_attempts=1` bounds a job to one attempt.
@@ -774,10 +774,16 @@ keeps it for the session. Each attempt verifies its length and SHA256 again
 before the job starts (`inputs: verified NAME (BYTES bytes, SECONDS s)` in its
 log) and links it, read-only and without a copy, at `ETUDE_INPUTS_DIR/NAME`.
 Bytes that do not match the digest are refused: the
-job's command never runs and the attempt ends `lost (setup_failed)` with the
-reason in its log. A worker's cache may use what it holds plus half the disk
+job's command never runs and the attempt ends `lost (input_undelivered)` with the
+reason in its log, and is not retried, since a retry would be given the same bytes.
+A worker's cache may use what it holds plus half the disk
 free when its session began. Inputs are part of the job's identity. A machine with no
-storage can be given only a run's file (`Input.run`, as continuation does).
+storage can be given only a run's file (`Input.run`, as continuation does). Unless
+the machine keeps records in the same storage as the machine that ran that run,
+the launcher relays the file, verified, from that storage or that machine's disk.
+The attempt waits while neither can be reached, and ends
+`lost (input_undelivered)` when the file or its record is gone, or its bytes do not
+match the record.
 
 The job is also told who it is: `ETUDE_RUN` (the run's id), `ETUDE_JOB` (the
 digest its job's runs share), `ETUDE_JOB_NAME` when the job has a name,
@@ -853,9 +859,9 @@ computer's runs directory, else the records on the owned host that last ran
 the parent. The file reaches the machine as an input of the parent run
 (`Input(run=PARENT, key="checkpoints/NAME")`), verified by digest: from the
 bucket where the parent's folder was carried, or, without one, from that
-host's folder for the parent. Between owned hosts the controller relays just
-that file to the new run's host before it starts, and the run waits while the
-parent's host cannot be reached. Tracking is handed the record in
+host's folder for the parent. To an owned host without a bucket the controller
+relays just that file before the run starts, from the parent's bucket or host,
+and the run waits while neither can be read. Tracking is handed the record in
 `ETUDE_CONTINUES`. The `continue` command retains the parent's pool and
 on-demand. Its target must exceed the checkpoint's position on the named
 clock.
