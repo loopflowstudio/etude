@@ -88,6 +88,7 @@ from etude.launch.schemas import (
     Progress,
     Work,
 )
+from etude.launch.storage.download import Mismatch as StoredMismatch
 from etude.launch.storage.s3 import StorageUnavailable, longest_grant
 from etude.launch.storage.transport import attribute, observe
 from etude.launch.usage import Usage
@@ -96,7 +97,8 @@ Clock = Callable[[], datetime]
 # How the scheduler reaches a machine you own, or the provider behind an on-demand.
 Reach = Callable[[Machine | OnDemand], Execution]
 # What a run folder's relay raises while its holder cannot give it; the work waits.
-# A file that is gone (FileNotFoundError) ends the attempt instead, in `_relay`.
+# An input's file that is gone or does not match its record ends the attempt
+# instead, in `_relay`; a retry's restore set waits on either.
 _RELAY_WAITS = (OSError, Mismatch, LauncherError, StorageUnavailable)
 
 
@@ -1768,8 +1770,9 @@ class Scheduler:
         storage reads them from there; any other is given them from the
         holder's storage, or else its disk (`Execution.held`). Raises while
         those cannot be reached, and the attempt waits: nothing is silently
-        left behind. An input whose record or file is gone ends the attempt
-        `input_undelivered` and returns False.
+        left behind. An input whose record or file is gone, or whose bytes do
+        not match its record, ends the attempt `input_undelivered` and returns
+        False: asking again would find the same.
         """
         if attempt.id in self._relayed:
             return True
@@ -1781,10 +1784,13 @@ class Scheduler:
                 continue
             try:
                 self._carry(given.run, session, key=given.key)
-            except FileNotFoundError as error:
+            except (FileNotFoundError, StoredMismatch, Mismatch) as error:
+                gone = isinstance(error, FileNotFoundError)
                 self._diagnose(
                     "run folder relay",
-                    f"run {given.run} holds no {given.key}",
+                    f"run {given.run} holds no {given.key}"
+                    if gone
+                    else f"run {given.run}'s {given.key} does not match its record",
                     error,
                     attempt=attempt.id,
                 )

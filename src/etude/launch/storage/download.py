@@ -137,6 +137,9 @@ class _Link:
             headers["If-Match"] = etag
         reply = self._get(headers)
         found = reply.headers.get("etag")
+        stored = (reply.headers.get("content-range") or "").rpartition("/")[2]
+        if reply.status == 206 and stored.isdigit() and int(stored) != size:
+            raise Mismatch(f"storage holds {stored} bytes, not the {size} named")
         if (
             reply.status != 206
             or reply.headers.get("content-range") != f"bytes {start}-{end}/{size}"

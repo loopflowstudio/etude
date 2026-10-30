@@ -782,7 +782,8 @@ storage can be given only a run's file (`Input.run`, as continuation does). Unle
 the machine keeps records in the same storage as the machine that ran that run,
 the launcher relays the file, verified, from that storage or that machine's disk.
 The attempt waits while neither can be reached, and ends
-`lost (input_undelivered)` when the file or its record is gone.
+`lost (input_undelivered)` when the file or its record is gone, or its bytes do not
+match the record.
 
 The job is also told who it is: `ETUDE_RUN` (the run's id), `ETUDE_JOB` (the
 digest its job's runs share), `ETUDE_JOB_NAME` when the job has a name,

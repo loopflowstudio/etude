@@ -612,8 +612,10 @@ def test_a_pods_checkpoint_reaches_an_owned_host_without_its_storage_from_the_bu
     assert len(reads) == 1
 
 
-def test_a_checkpoint_gone_from_the_bucket_ends_the_attempt_undelivered_without_retrying(
-    tmp_path: Path,
+# Replaced by other bytes of another length, or of the same length.
+@pytest.mark.parametrize("change", [None, b"other bytes\n", b"trained to 9\n"])
+def test_a_checkpoint_gone_or_changed_in_the_bucket_ends_the_attempt_undelivered_without_retrying(
+    tmp_path: Path, change: bytes | None
 ) -> None:
     mini = local(tmp_path / "mini" / "sessions")  # its own disk, and no storage
     c = cloud(tmp_path, owned=mini)
@@ -632,7 +634,10 @@ def test_a_checkpoint_gone_from_the_bucket_ends_the_attempt_undelivered_without_
     child = continue_from(
         c.scheduler.record(first), "steps=5", source=BucketObjects(c.storage, "journals")
     )
-    del c.storage.objects[folder + "checkpoints/steps-3.pt"]
+    if change is None:
+        del c.storage.objects[folder + "checkpoints/steps-3.pt"]
+    else:
+        c.storage.objects[folder + "checkpoints/steps-3.pt"] = change
 
     run = c.scheduler.queue(child, "mini")
     (status,) = c.scheduler.wait(run, every=0.05, timeout=30)
