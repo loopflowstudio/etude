@@ -11,9 +11,9 @@ file an author writes under a run's `artifacts/` folder. An eval run's
 block (`etude.eval.block`) is sent data first and index last. Each carrier keeps its own change detection and storage
 I/O. A later attempt on a fresh machine restores the records and the one
 checkpoint file `resume_file` names, from storage or, on a host without one,
-as the `restore_set` another host's folder gives (`put_back`), or the same
-files the launcher read from storage (`recorded`); a continuation's machine is
-given its parent's one file (`recorded_file`).
+as the `restore_set` another host's folder, or the launcher's copy of a
+storage, gives (`put_back`); a continuation's machine is given its parent's
+one file (`recorded_file`).
 A checkpoint file's name is never used twice (`taken`), so no key under
 `checkpoints/` ever holds two different files.
 
@@ -153,41 +153,35 @@ class RecordedFile:
     size_bytes: int
 
 
-def recorded(records: Mapping[str, bytes]) -> dict[int, tuple[str, RecordedFile]]:
+def _recorded(root: Path) -> dict[int, tuple[str, RecordedFile]]:
     """By ordinal: each checkpoint record's key and the file it names, where Etude stored one.
 
-    `records` are the bytes of `checkpoints/*.json` by key, from a folder or a
-    storage, read as plain JSON (`etude.train.records.CheckpointRecord`). A
-    record that only references a model elsewhere names no file.
+    Reads the records (`etude.train.records.CheckpointRecord`) as plain JSON.
+    A record that only references a model elsewhere names no file here.
     """
-    found: dict[int, tuple[str, RecordedFile]] = {}
-    for record, raw in records.items():
+    recorded: dict[int, tuple[str, RecordedFile]] = {}
+    for path in (root / CHECKPOINTS).glob("*.json"):
         try:
-            fields = json.loads(raw)
-            ordinal, artifact = int(fields["ordinal"]), dict(fields["artifact"])
-        except (ValueError, KeyError, TypeError):
+            record = json.loads(path.read_bytes())
+            ordinal, artifact = int(record["ordinal"]), dict(record["artifact"])
+        except (OSError, ValueError, KeyError, TypeError):
             continue
         key = f"{CHECKPOINTS}/{PurePosixPath(str(artifact.get('uri', ''))).name}"
         sha256, size = artifact.get("sha256"), artifact.get("size_bytes")
         if isinstance(sha256, str) and isinstance(size, int) and checkpoint_file(key):
-            found[ordinal] = (record, RecordedFile(key, sha256, size))
-    return found
-
-
-def _recorded(root: Path) -> dict[int, tuple[str, RecordedFile]]:
-    records: dict[str, bytes] = {}
-    for path in (root / CHECKPOINTS).glob("*.json"):
-        try:
-            records[f"{CHECKPOINTS}/{path.name}"] = path.read_bytes()
-        except OSError:
-            continue
-    return recorded(records)
+            recorded[ordinal] = (f"{CHECKPOINTS}/{path.name}", RecordedFile(key, sha256, size))
+    return recorded
 
 
 def resume_file(root: Path) -> RecordedFile | None:
     """The file of the highest-ordinal checkpoint record in `root`, when Etude stored one."""
     recorded = _recorded(root)
     return recorded[max(recorded)][1] if recorded else None
+
+
+def named_file(root: Path, key: str) -> RecordedFile | None:
+    """The checkpoint file `key` as the record in `root` naming it describes it, when one does."""
+    return next((file for _, file in _recorded(root).values() if file.key == key), None)
 
 
 def _stored(root: Path) -> set[str]:
@@ -270,8 +264,8 @@ def put_back(root: Path, files: Mapping[str, bytes]) -> None:
         if target.exists():
             continue
         if checkpoint_file(key):
-            named = {file.key: file.sha256 for _, file in _recorded(root).values()}
-            if named.get(key) != sha256(files[key]).hexdigest():
+            named = named_file(root, key)
+            if named is None or named.sha256 != sha256(files[key]).hexdigest():
                 raise Mismatch(f"{key} does not match the checkpoint record that names it")
         target.parent.mkdir(parents=True, exist_ok=True)
         partial = target.with_name(target.name + ".partial")
