@@ -25,6 +25,7 @@ from etude.launch.environment import install
 from etude.launch.errors import LauncherError, LaunchError
 from etude.launch.logging import CLOSED, LIMIT, bounded, portions
 from etude.launch.logs import LogCursor, render, snapshot_stream
+from etude.launch.providers import bootstrap
 from etude.launch.providers.package import program_archive
 from etude.launch.providers.runpod import pod
 from etude.launch.records import Diagnostic, LogSnapshot, LogStream, Run
@@ -639,7 +640,7 @@ def test_bootstrap_failure_remains_readable_after_deletion_and_restart(
     identity = b.scheduler.launch(Run(id="install-failure", job=job(max_attempts=1)), rent="l4")
     session = b.scheduler.session(b.scheduler.attempts(identity)[0].session)
     marker = tmp_path / "guardian-started"
-    monkeypatch.setattr(pod, "GUARDIAN_MARKER", marker)
+    monkeypatch.setattr(bootstrap, "GUARDIAN_MARKER", marker)
     for name, value in {
         "RUNPOD_POD_ID": "fixture-pod",
         "RUNPOD_API_KEY": "fixture-key",
@@ -724,11 +725,13 @@ def test_bootstrap_failure_remains_readable_after_deletion_and_restart(
     monkeypatch.setattr(b.service, "logs", read)
     monkeypatch.setattr(subprocess, "Popen", start)
     monkeypatch.setattr(pod, "_start_ssh", lambda: None)
-    monkeypatch.setattr(pod, "ensure_uv", lambda: None)
+    monkeypatch.setattr(bootstrap, "ensure_uv", lambda: None)
     monkeypatch.setattr(
-        pod, "send", lambda method, url, body, headers: (200, download(url, timeout=60).read())
+        bootstrap,
+        "send",
+        lambda method, url, body, headers: (200, download(url, timeout=60).read()),
     )
-    monkeypatch.setattr(pod, "install", install)
+    monkeypatch.setattr(bootstrap, "install", install)
     monkeypatch.setattr(pod.GuardianAPI, "delete_self", delete)
     monkeypatch.setattr(logging, "urlopen", upload)
     assert pod.main(["pod", "boot"]) == (23 if failure == "entry" else 1)

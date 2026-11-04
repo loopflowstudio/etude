@@ -11,9 +11,8 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from etude.launch.errors import LauncherError
+from etude.launch.errors import LauncherError, ProviderUnavailable
 from etude.launch.providers.runpod.http import _ID, PodHTTP
-from etude.launch.providers.runpod.http import ProviderUnavailable as ProviderUnavailable
 from etude.launch.records import CPU, GPU, Hardware, Record
 
 

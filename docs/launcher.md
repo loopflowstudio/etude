@@ -92,7 +92,7 @@ on-demand's `setup_seconds` exceeds that is refused at launch, as is `rent`
 for longer.
 
 The `etude-sdk` package uses Python 3.12 and one shared dependency set for launching and tracking, installed with uv. It runs on this
-computer, SSH hosts and RunPod machines, without any Etude account.
+computer, SSH hosts, RunPod pods and Vast.ai instances, without any Etude account.
 
 A **Job** specifies what runs, source commit, config, target and limits. It has
 no seed or machine settings. A **Run** pairs a job with a seed and goes to a
@@ -158,7 +158,7 @@ Etude's dependencies do not constrain it. Records default to
 
 A machine you own is reached by SSH. A machine you rent starts itself.
 The standard-library guardian starts first, using bare Python; its deadline and
-pod deletion do not depend on installing or importing client dependencies.
+machine deletion do not depend on installing or importing client dependencies.
 
 Owned hosts keep records on their disk unless `--storage` is supplied. A
 storage is an S3 or a Cloudflare R2 bucket, with keys from the launcher's
@@ -196,7 +196,7 @@ and metric blocks that a larger block has replaced are deleted.
   Without keys, or once they expire, the form alone is used: files up to 5 GB,
   read whole into memory, and nothing deleted.
 
-RunPod supplies a separate self key for deletion. Job environments exclude all
+RunPod and Vast supply separate instance-scoped keys for deletion. Job environments exclude all
 of these keys; jobs currently run under the same account as the worker, so the
 temporary keys are kept in the courier's memory and never written to disk.
 
@@ -277,6 +277,68 @@ etude ondemand add l4 --provider runpod --gpu "NVIDIA L4" \
 etude launch job.py --rent l4
 ```
 
+For Vast.ai, inject `VAST_API_KEY` in the launcher's environment (RunPod uses
+`RUNPOD_API_KEY`). Register an SSH public key in the Vast account before renting.
+Use the same job file and storage, with an explicit provider:
+
+```sh
+etude provider set vast --kind vast --storage west
+etude ondemand add rtx4090 --provider vast --gpu "RTX 4090" \
+    --vcpus 4 --memory-gb 16 --disk-gb 40 --max 1 --max-usd-per-hour 0.80
+etude availability rtx4090 --timeout 30
+etude launch job.py --rent rtx4090 --quote
+etude launch job.py --rent rtx4090
+etude wait
+etude fetch RUN checkpoint.pt out
+```
+
+The equivalent Python path uses the same scheduler and ordinary runs:
+
+```python
+from decimal import Decimal
+
+from etude.launch.client import default, launch_cohort, wait
+from etude.launch.records import Job, MachineTemplate, OnDemand, Provider
+
+launcher = default()
+launcher.set_provider(Provider(name="vast", kind="vast", registry="", storage="west"))
+launcher.add_ondemand(
+    OnDemand(
+        name="rtx4090",
+        template=MachineTemplate(provider="vast", gpu="RTX 4090", disk_gb=40),
+        max_machines=1,
+        max_usd_per_hour=Decimal("0.80"),
+    )
+)
+job = Job(command="./train.sh", repo=".", max_hours=0.5, max_usd=Decimal("0.50"))
+runs = launch_cohort("trial", job.runs(1, 2), rent="rtx4090", max_usd=Decimal("1.00"))
+print(wait(*runs))
+```
+
+Vast currently selects verified, on-demand, single-GPU Linux amd64 offers with
+free upload **and** download. Its quoted hourly rate includes the requested disk
+(default 40 GB); offers with metered transfer are excluded because an arbitrary
+job's traffic cannot be bounded from its runtime alone. `--data-center US` means
+a country code for Vast; RunPod uses its data center IDs. Public images are
+supported; a custom image must contain Python 3.12. There is no cross-provider
+fallback. No compatible offer leaves queued work waiting.
+
+The controller retains the selected offer and instance receipt in the session
+folder. Creation is sent once; uncertain replies reconcile by the session label
+across inventory pages. Destruction requires that retained ownership and matching
+provider identity. Charge reconciliation reads Vast's GPU, disk and bandwidth
+total only through the interval the provider reports; missing bills stay unknown.
+
+Vast's `CONTAINER_API_KEY` and `CONTAINER_ID` start a standard-library guardian
+before any client download or install. The account key is never sent to the
+instance. Completion, cancellation and bootstrap failure delete the instance;
+caller loss leaves the guardian active until the rental deadline. Stopping an
+instance alone does not stop storage billing. A host that never boots or a provider
+API outage can delay deletion: the rental quote is not a provider-enforced total
+cost guarantee and excludes charges from external storage services. Keep the
+controller running to reconcile uncertain creation and deletion. Inspect SSH via
+Vast's instance **Connect** tab.
+
 A template without `--gpu` rents RunPod CPU pods: the cheapest secure-cloud CPU
 flavor with at least `--vcpus` (rounded up to a power of two, RunPod's sizes)
 and `--memory-gb`, priced per vCPU and capped like a GPU pod. CPU pods boot the
@@ -307,7 +369,7 @@ allows only machines rented by hand.
 A zero limit still permits an explicit `rent`; a positive limit bounds
 concurrent rented windows. Lowering the limit leaves current windows intact.
 The limit and ceiling belong to the on-demand, so every launch that names it shares them.
-The default RunPod image is pinned stock
+Both providers default to the pinned stock image
 `runpod/pytorch@sha256:4d1721e62b56d345c83b4fd6090664be6daf9312caab5b2e76f23d8231941851`.
 It needs Python 3.12 on PATH. uv must also be available; when absent, boot
 fetches uv 0.8.22 for Linux x86_64 and verifies its SHA-256
@@ -324,7 +386,7 @@ standard-library bootstrap; no Etude files need to be present in the image.
 
 An on-demand's `--image` or `etude ondemand image` selects a user's own pinned image for
 training dependencies installed ahead of time. It must meet the same Python
-and uv requirements and needs nothing of Etude. `--registry` still supplies a
+and uv requirements and needs nothing of Etude. For RunPod, `--registry` supplies a
 provider pull credential for a user's private image. The stock image needs no
 registry credential.
 

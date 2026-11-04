@@ -16,34 +16,14 @@ from pydantic import ValidationError
 
 from etude.launch.client import _open
 from etude.launch.environment import install
-from etude.launch.providers import package
+from etude.launch.providers import bootstrap, package
 from etude.launch.providers.package import program_archive
 from etude.launch.providers.runpod import pod
+from etude.launch.providers.vast import instance
 from etude.launch.records import Job
 from etude.launch.schemas import Packet, Result
 from etude.launch.storage.files import read_result
 from tests.launch.counting import job_text
-
-
-def test_guardian_runs_without_site_packages() -> None:
-    source = Path(__file__).resolve().parents[2] / "src"
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-S",
-            "-c",
-            "import sys; from etude.launch.providers.runpod.pod import GuardianAPI, guard; "
-            "from datetime import datetime, UTC; from decimal import Decimal; "
-            'calls=[]; api=GuardianAPI("fixture", lambda method, *args: '
-            '(calls.append(method) or (404,b"")) if method=="GET" else (204,b"")); '
-            'guard(api,"pod",datetime.now(UTC),Decimal(0)); '
-            'assert "pydantic" not in sys.modules and "typer" not in sys.modules',
-        ],
-        env={**os.environ, "PYTHONPATH": str(source)},
-        capture_output=True,
-        timeout=5,
-    )
-    assert result.returncode == 0, result.stderr
 
 
 def test_old_packet_loads_and_frozen_models_validate() -> None:
@@ -90,13 +70,39 @@ def test_job_uses_its_own_python_path(tmp_path: Path, monkeypatch: pytest.Monkey
     assert job_text(scheduler.logs(refresh=True, run=id)) == "job-python\n"
 
 
-def test_runpod_guardian_payload_is_small_and_independent(tmp_path: Path) -> None:
+@pytest.mark.parametrize("module", ["runpod.pod", "vast.instance"])
+def test_guardian_payload_runs_without_site_packages(tmp_path: Path, module: str) -> None:
     code = program_archive(guardian=True)
-    assert len(code) < 16_000  # startup environment must stay below Linux per-value limits
+    assert len(code) < 32_000  # startup environment must stay below Linux per-value limits
     with zipfile.ZipFile(io.BytesIO(code)) as archive:
         archive.extractall(tmp_path)
     result = subprocess.run(
-        [sys.executable, "-S", "-c", "import etude.launch.providers.runpod.pod"],
+        [
+            sys.executable,
+            "-S",
+            "-c",
+            f"""import os, sys
+from datetime import UTC, datetime
+from pathlib import Path
+from etude.launch.providers import bootstrap
+import etude.launch.providers.{module} as provider
+
+calls = []
+api = provider.GuardianAPI("fixture", lambda method, *args:
+    (calls.append(method) or (200, b'{{"success":true}}')))
+provider.GuardianAPI = lambda key: api
+bootstrap.GUARDIAN_MARKER = Path("guardian-started")
+os.environ.update(
+    RUNPOD_POD_ID="12", RUNPOD_API_KEY="fixture",
+    CONTAINER_ID="12", CONTAINER_API_KEY="fixture",
+    ETUDE_DEADLINE=datetime.now(UTC).isoformat(), ETUDE_MAX_USD="0",
+)
+assert provider.main(["rental", "guard"]) == 0
+assert bootstrap.GUARDIAN_MARKER.exists()
+assert calls == ["DELETE"]
+assert "pydantic" not in sys.modules and "typer" not in sys.modules
+""",
+        ],
         cwd=tmp_path,
         env={**os.environ, "PYTHONPATH": str(tmp_path)},
         capture_output=True,
@@ -119,16 +125,20 @@ def test_transferred_package_keeps_its_digest_when_forwarded(
     assert package.program_archive() == original
 
 
-@pytest.mark.parametrize("failure", ["", "guardian", "digest", "install"])
+@pytest.mark.parametrize("provider", ["runpod", "vast"])
+@pytest.mark.parametrize("failure", ["", "guardian", "digest", "install", "spawn"])
 def test_stock_boot_requires_guardian_before_download_and_install(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str, provider: str
 ) -> None:
+    rental = pod if provider == "runpod" else instance
     events: list[str] = []
     marker = tmp_path / "guardian-started"
     code = b"client archive"
-    monkeypatch.setattr(pod, "GUARDIAN_MARKER", marker)
+    monkeypatch.setattr(bootstrap, "GUARDIAN_MARKER", marker)
     monkeypatch.setenv("RUNPOD_POD_ID", "own-pod")
     monkeypatch.setenv("RUNPOD_API_KEY", "self-key")
+    monkeypatch.setenv("CONTAINER_ID", "own-pod")
+    monkeypatch.setenv("CONTAINER_API_KEY", "self-key")
     monkeypatch.setenv("ETUDE_PACKAGE_URL", "https://fixture/package")
     monkeypatch.setenv(
         "ETUDE_PACKAGE_SHA256", "wrong" if failure == "digest" else hashlib.sha256(code).hexdigest()
@@ -138,6 +148,8 @@ def test_stock_boot_requires_guardian_before_download_and_install(
     class Timer:
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             events.append("guardian spawned")
+            if failure == "spawn":
+                raise OSError("guardian process unavailable")
 
         def poll(self) -> int | None:
             if failure == "guardian":
@@ -186,16 +198,18 @@ def test_stock_boot_requires_guardian_before_download_and_install(
         events.append("delete")
 
     monkeypatch.setattr(subprocess, "Popen", start)
-    monkeypatch.setattr(pod, "_start_ssh", start_ssh)
-    monkeypatch.setattr(pod, "ensure_uv", lambda: None)
+    monkeypatch.setattr(rental, "_start_ssh" if provider == "runpod" else "_ssh_ready", start_ssh)
+    monkeypatch.setattr(bootstrap, "ensure_uv", lambda: None)
     monkeypatch.setattr(
-        pod, "send", lambda method, url, body, headers: (200, download(url, timeout=60).read())
+        bootstrap,
+        "send",
+        lambda method, url, body, headers: (200, download(url, timeout=60).read()),
     )
-    monkeypatch.setattr(pod, "install", install)
-    monkeypatch.setattr(pod.GuardianAPI, "delete_self", delete)
-    assert pod.main(["pod", "boot"]) == (1 if failure else 0)
+    monkeypatch.setattr(bootstrap, "install", install)
+    monkeypatch.setattr(rental.GuardianAPI, "delete_self", delete)
+    assert rental.main(["rental", "boot"]) == (1 if failure else 0)
     expected = ["guardian spawned"]
-    if failure != "guardian":
+    if failure not in {"guardian", "spawn"}:
         expected += ["guardian started", "ssh", "download"]
         if failure != "digest":
             expected += ["install"]
@@ -260,6 +274,8 @@ def test_ssh_without_account_keys_explains_setup_without_touching_disk(
 
 def test_pinned_uv_checksum_is_checked_before_install(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("shutil.which", lambda name: None)
-    monkeypatch.setattr(pod, "send", lambda method, url, body, headers: (200, b"changed artifact"))
+    monkeypatch.setattr(
+        bootstrap, "send", lambda method, url, body, headers: (200, b"changed artifact")
+    )
     with pytest.raises(ValueError, match="checksum"):
-        pod.ensure_uv()
+        bootstrap.ensure_uv()

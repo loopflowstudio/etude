@@ -29,7 +29,7 @@ class Allocation(Record):
 
 class Bill(Record):
     usd: Decimal
-    through: datetime  # end of the last contiguous billed clock hour
+    through: datetime  # end of the contiguous interval covered by provider charges
 
 
 class MachineRequest(Record):

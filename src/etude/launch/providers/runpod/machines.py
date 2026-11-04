@@ -12,10 +12,11 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from etude.deadline import limit_time
+from etude.launch.errors import ProviderUnavailable
 from etude.launch.executor import Refused, check_creation
 from etude.launch.machines import Allocation, Bill, MachineRequest, Safeguards
 from etude.launch.providers.package import program_archive
-from etude.launch.providers.runpod.api import PodFact, ProviderUnavailable, Quote, RunPodAPI
+from etude.launch.providers.runpod.api import PodFact, Quote, RunPodAPI
 from etude.launch.records import GPU, Hardware, LauncherError, MachineTemplate, Offer, Provider
 from etude.launch.records import STOCK_IMAGE as DEFAULT_IMAGE
 from etude.launch.storage.s3 import Bucket

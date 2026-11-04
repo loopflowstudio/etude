@@ -44,11 +44,19 @@ def test_folder_rules() -> None:
                 "etude.launch.client",  # the only composition of provider implementations
             }
         ):
-            assert not any(".runpod" in name for name in imports), path
+            assert not any(".runpod" in name or ".vast" in name for name in imports), path
             assert not any(
                 isinstance(node, ast.Constant)
                 and isinstance(node.value, str)
-                and ("RUNPOD_" in node.value or "etude.launch.providers.runpod" in node.value)
+                and any(
+                    part in node.value
+                    for part in (
+                        "RUNPOD_",
+                        "VAST_API_KEY",
+                        "etude.launch.providers.runpod",
+                        "etude.launch.providers.vast",
+                    )
+                )
                 for node in ast.walk(tree)
             ), path
 
@@ -73,8 +81,18 @@ def test_folder_rules() -> None:
                 "etude.launch.startup",
                 "etude.launch.machines",
             }, module
+    for provider in ("runpod", "vast"):
+        other = "vast" if provider == "runpod" else "runpod"
+        for module in modules:
+            if module.startswith(f"etude.launch.providers.{provider}."):
+                assert not any(
+                    name.startswith(f"etude.launch.providers.{other}.")
+                    for name in reachable(module)
+                ), module
     for entry in (
         "etude.launch.providers.runpod.pod",
+        "etude.launch.providers.vast.instance",
+        "etude.launch.providers.bootstrap",
         "etude.launch.providers.package",
         "etude.launch.environment",
     ):

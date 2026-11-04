@@ -1577,7 +1577,11 @@ class Scheduler:
                 kind="rented",
                 provider=template.provider,
                 image=template.image
-                or (STOCK_IMAGE if self._provider_service(template.provider) == "runpod" else None),
+                or (
+                    STOCK_IMAGE
+                    if self._provider_service(template.provider) in {"runpod", "vast"}
+                    else None
+                ),
             )
             machine = rented
             rental = Rental(

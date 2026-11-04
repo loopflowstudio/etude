@@ -85,9 +85,15 @@ class Provider(Record):
     """
 
     name: str  # what a machine template's `provider` names
-    kind: Literal["runpod"]
+    kind: Literal["runpod", "vast"]
     registry: str  # the provider's id for the credential that pulls private images
     storage: str  # the storage a new pool uses unless it names another
+
+    @model_validator(mode="after")
+    def _registry_supported(self) -> Provider:
+        if self.kind == "vast" and self.registry:
+            raise ValueError("Vast supports public images; registry credentials are not stored")
+        return self
 
 
 class Storage(Record):
@@ -143,7 +149,7 @@ class MachineTemplate(Record):
     image: Image | None = None
 
     _parse_image = field_validator("image", mode="before")(_image)
-    data_center: str | None = None  # the provider's name for the place; None: wherever it has one
+    data_center: str | None = None  # RunPod data center id; Vast country code; None: anywhere
 
 
 class GPU(Record):

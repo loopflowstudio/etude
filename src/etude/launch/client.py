@@ -25,9 +25,11 @@ from pathlib import Path
 from etude.launch.controller import PythonClient, selected
 from etude.launch.database import Database
 from etude.launch.executor import Execution, Executor, local
-from etude.launch.machines import OwnedMachine, Safeguards
+from etude.launch.machines import Machines, OwnedMachine, Safeguards
 from etude.launch.providers.runpod.api import RunPodAPI
 from etude.launch.providers.runpod.machines import RunPodMachines
+from etude.launch.providers.vast.api import VastAPI
+from etude.launch.providers.vast.machines import VastMachines
 from etude.launch.records import (
     Availability,
     Diagnostic,
@@ -65,24 +67,34 @@ def _open(home: Path) -> Scheduler:
         with observe(store.retain_transfer_json):
             return _send(method, url, body, headers)
 
-    def runpod(held: Machine | OnDemand) -> Execution:
-        """Built when first needed, so only RunPod use needs RunPod's keys in the environment."""
-
+    def rented(held: Machine | OnDemand) -> Execution:
+        """Construct only the selected provider, when a remote operation needs it."""
         if not isinstance(held, OnDemand):
-            raise LauncherError("RunPod reaches machines rented from an on-demand")
-        if "RUNPOD_API_KEY" not in os.environ:
-            raise LauncherError("RUNPOD_API_KEY is not set")
+            raise LauncherError("rentals need an on-demand")
+        provider = store.provider(held.template.provider)
+        key_name = "RUNPOD_API_KEY" if provider.kind == "runpod" else "VAST_API_KEY"
+        if key_name not in os.environ:
+            raise LauncherError(f"{key_name} is not set")
         if held.storage is None:
             raise LauncherError(f"on-demand {held.name!r} has no storage")
         storage = store.storage(held.storage)
         bucket = open_bucket(storage, send)
-        machines = RunPodMachines(
-            store.provider(held.template.provider),
-            held.template,
-            RunPodAPI(os.environ["RUNPOD_API_KEY"]),
-            bucket,
-            storage.prefix,
-        )
+        machines: Machines
+        if provider.kind == "runpod":
+            machines = RunPodMachines(
+                provider,
+                held.template,
+                RunPodAPI(os.environ[key_name]),
+                bucket,
+                storage.prefix,
+            )
+        else:
+            machines = VastMachines(
+                held.template,
+                VastAPI(os.environ[key_name]),
+                bucket,
+                storage.prefix,
+            )
         return Executor(machines, None, BucketJournal(storage, bucket))
 
     def ssh(machine: Machine | OnDemand) -> Execution:
@@ -101,8 +113,10 @@ def _open(home: Path) -> Scheduler:
             )
         return Executor(OwnedMachine(machine.address), SSHStart(connection), journal)
 
-    runpod.safeguards = Safeguards(start_command=True)  # type: ignore[attr-defined]
-    scheduler = Scheduler(store, {"local": lambda machine: here, "ssh": ssh, "runpod": runpod})
+    rented.safeguards = Safeguards(start_command=True)  # type: ignore[attr-defined]
+    scheduler = Scheduler(
+        store, {"local": lambda machine: here, "ssh": ssh, "runpod": rented, "vast": rented}
+    )
     if fresh:  # this computer is offered once; `etude pool off local` withdraws it
         scheduler.add_pool(Pool(name="local"))
         store.add_machine(Machine(name="local", pool="local", kind="local"))

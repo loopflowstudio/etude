@@ -10,3 +10,7 @@ class LaunchError(LauncherError):
         super().__init__(
             f"launch {launch} for {', '.join(runs)}: {message}; inspect etude logs --run {runs[0]}"
         )
+
+
+class ProviderUnavailable(LauncherError):
+    """No usable provider answer. This never means the requested thing is absent."""
