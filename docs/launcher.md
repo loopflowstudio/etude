@@ -317,7 +317,8 @@ runs = launch_cohort("trial", job.runs(1, 2), rent="rtx4090", max_usd=Decimal("1
 print(wait(*runs))
 ```
 
-Vast currently selects verified, on-demand, single-GPU Linux amd64 offers with
+Vast selects verified, on-demand Linux amd64 offers with the requested GPU count
+(`--gpu-count`, default 1) and
 free upload **and** download. Its quoted hourly rate includes the requested disk
 (default 40 GB); offers with metered transfer are excluded because an arbitrary
 job's traffic cannot be bounded from its runtime alone. `--data-center US` means
@@ -344,6 +345,83 @@ API outage can delay deletion: the rental quote is not a provider-enforced total
 cost guarantee and excludes charges from external storage services. Keep the
 controller running to reconcile uncertain creation and deletion. Inspect SSH via
 Vast's instance **Connect** tab.
+
+### Lium
+
+```sh
+# Inject LIUM_API_KEY into the controller's environment through your secret store.
+export LIUM_SSH_PUBLIC_KEY="$(cat ~/.ssh/id_ed25519.pub)"
+etude provider set lium --kind lium --storage west
+etude ondemand add rtx5090 --provider lium --gpu "RTX 5090" --gpu-count 1 \
+    --vcpus 4 --memory-gb 16 --disk-gb 40 --max 1 --max-usd-per-hour 0.80
+etude availability rtx5090 --timeout 30
+etude launch job.py --rent rtx5090 --quote
+etude launch job.py --rent rtx5090
+etude wait
+etude fetch RUN checkpoint.pt out
+```
+
+Use a funded Lium account with `read` and `rent` permissions. Keep the private SSH
+key in the controller's OpenSSH agent/configuration, and configure host trust
+there. Etude keeps normal host-key checking enabled. Configuration and retained
+status reads work without keys or network; availability and rental operations
+need the controller's credentials.
+
+```python
+from decimal import Decimal
+
+from etude.launch.client import default
+from etude.launch.records import MachineTemplate, OnDemand, Provider
+
+launcher = default()
+launcher.set_provider(Provider(name="lium", kind="lium", registry="", storage="west"))
+launcher.add_ondemand(
+    OnDemand(
+        name="rtx5090",
+        template=MachineTemplate(provider="lium", gpu="RTX 5090", gpu_count=1),
+        max_machines=1,
+        max_usd_per_hour=Decimal("0.80"),
+    )
+)
+```
+
+Lium selects **secure** nodes only, respects the node's minimum rental count,
+and quotes CPU, RAM and disk allocated to that GPU count. Public feed resources
+describe the whole node; Etude uses the [allocation quote](https://lium.io/api/openapi.json)
+instead. `--data-center US` selects a country code. Missing allocation facts are
+an unavailable observation, not a report of empty stock. Backups are explicitly
+disabled and no separate volume is created, so there is no ongoing Lium storage
+or volume-egress charge in this path. Journal bucket charges remain separate.
+
+Hourly admission includes Lium's one-cent-per-GPU price-change tolerance. Rental
+budgets reserve whole hours for the initial `termination_hours` timer, even for
+a shorter job. This is a reserve, not Lium's billing minimum: billing is per
+second. A five-minute rental at a quoted $0.76/hour requires a $0.76 reservation.
+The controller rechecks stock, allocation and price before sending one create;
+lost replies reconcile by session name without creating another pod.
+
+Etude supplies its public pinned image through a Dockerfile, then bootstraps over
+SSH after RUNNING and acknowledged exact scheduled removal. Custom public images
+need Python 3.12 and OpenSSH support. Signed bootstrap links travel over SSH;
+`LIUM_API_KEY` never goes to the pod. The client and job keep separate environments.
+
+Lium shutdown is **best effort**. Creation includes a whole-hour timer from boot;
+the controller immediately schedules the absolute rental deadline and verifies
+readback. A local standard-library watchdog starts before client installation and
+stops bootstrap/work at the deadline. Unlike RunPod/Vast's self-scoped guardians,
+it cannot delete the pod or end billing: Lium exposes no documented pod-scoped
+self-deletion key. Completion, failure and cancellation rely on controller deletion;
+controller loss relies on the provider timer. Boot delays, the gap before exact
+scheduling, and undocumented removal processing delays can exceed the reservation.
+Keep the controller running for reconciliation and cleanup retries. Optional
+per-key spending caps are operator-managed additional protection; Etude never
+changes account settings.
+
+Deletion is complete only after confirmed absence. The provider's ledger statement
+survives pod deletion; Etude reports actual costs only through its validated
+`billed_until` watermark. A settled final removal also establishes zero compute
+charges afterward. Missing or contradictory accounting stays estimated.
+Offline fixtures verify this integration; no paid Lium lifecycle is claimed here.
 
 A template without `--gpu` rents RunPod CPU pods: the cheapest secure-cloud CPU
 flavor with at least `--vcpus` (rounded up to a power of two, RunPod's sizes)

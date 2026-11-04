@@ -105,6 +105,7 @@ and flag it for rotation without quoting it again.
 Launcher records use frozen Pydantic models with named constructor fields and
 model-owned JSON serialization. Keep `providers/runpod/http.py`,
 `providers/runpod/pod.py`, `providers/vast/http.py`, `providers/vast/instance.py`,
+`providers/lium/pod.py`,
 `providers/bootstrap.py`, `providers/package.py` and `environment.py`
 standard-library-only: each rental guardian must start before
 client dependency installation. The client and each job use separate environments.

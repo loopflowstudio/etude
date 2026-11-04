@@ -26,6 +26,8 @@ from etude.launch.controller import PythonClient, selected
 from etude.launch.database import Database
 from etude.launch.executor import Execution, Executor, local
 from etude.launch.machines import Machines, OwnedMachine, Safeguards
+from etude.launch.providers.lium.api import LiumAPI
+from etude.launch.providers.lium.machines import LiumMachines
 from etude.launch.providers.runpod.api import RunPodAPI
 from etude.launch.providers.runpod.machines import RunPodMachines
 from etude.launch.providers.vast.api import VastAPI
@@ -72,7 +74,9 @@ def _open(home: Path) -> Scheduler:
         if not isinstance(held, OnDemand):
             raise LauncherError("rentals need an on-demand")
         provider = store.provider(held.template.provider)
-        key_name = "RUNPOD_API_KEY" if provider.kind == "runpod" else "VAST_API_KEY"
+        key_name = {"runpod": "RUNPOD_API_KEY", "vast": "VAST_API_KEY", "lium": "LIUM_API_KEY"}[
+            provider.kind
+        ]
         if key_name not in os.environ:
             raise LauncherError(f"{key_name} is not set")
         if held.storage is None:
@@ -88,12 +92,16 @@ def _open(home: Path) -> Scheduler:
                 bucket,
                 storage.prefix,
             )
-        else:
+        elif provider.kind == "vast":
             machines = VastMachines(
                 held.template,
                 VastAPI(os.environ[key_name]),
                 bucket,
                 storage.prefix,
+            )
+        else:
+            machines = LiumMachines(
+                held.template, LiumAPI(os.environ[key_name]), bucket, storage.prefix
             )
         return Executor(machines, None, BucketJournal(storage, bucket))
 
@@ -113,9 +121,14 @@ def _open(home: Path) -> Scheduler:
             )
         return Executor(OwnedMachine(machine.address), SSHStart(connection), journal)
 
+    def lium(held: Machine | OnDemand) -> Execution:
+        return rented(held)
+
+    lium.safeguards = LiumMachines.safeguards  # type: ignore[attr-defined]
     rented.safeguards = Safeguards(start_command=True)  # type: ignore[attr-defined]
     scheduler = Scheduler(
-        store, {"local": lambda machine: here, "ssh": ssh, "runpod": rented, "vast": rented}
+        store,
+        {"local": lambda machine: here, "ssh": ssh, "runpod": rented, "vast": rented, "lium": lium},
     )
     if fresh:  # this computer is offered once; `etude pool off local` withdraws it
         scheduler.add_pool(Pool(name="local"))

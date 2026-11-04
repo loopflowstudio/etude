@@ -54,15 +54,16 @@ class Provider:
         return status, b"" if value is None else json.dumps(value).encode()
 
 
-def test_a_quote_reads_price_and_positive_absence_of_stock() -> None:
+@pytest.mark.parametrize("count", [1, 2])
+def test_a_quote_reads_price_and_positive_absence_of_stock(count: int) -> None:
     gpus = [
         {"id": "NVIDIA L4", "price": {"secure": 0.59}, "availability": "HIGH"},
         {"id": "NVIDIA A40", "price": {"secure": 0.4}, "availability": "NONE"},
     ]
     api = RunPodAPI("key", Provider(replies={"GET catalog/gpus": (200, {"gpus": gpus})}))
-    l4 = api.quote(gpu="NVIDIA L4", vcpus=6, memory_gb=48)
-    assert l4.usd_per_hour == Decimal("0.59") and l4.available
-    assert l4.hardware == GPU(id="NVIDIA L4", min_vcpus=6, min_memory_gb=48)
+    l4 = api.quote(gpu="NVIDIA L4", vcpus=6, memory_gb=48, gpu_count=count)
+    assert l4.usd_per_hour == Decimal("0.59") * count and l4.available
+    assert l4.hardware == GPU(id="NVIDIA L4", count=count, min_vcpus=6, min_memory_gb=48)
     assert not api.quote(gpu="NVIDIA A40", vcpus=6, memory_gb=48).available
     with pytest.raises(ProviderUnavailable):
         api.quote(gpu="NVIDIA H100", vcpus=6, memory_gb=48)

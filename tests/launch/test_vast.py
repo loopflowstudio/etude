@@ -65,6 +65,7 @@ OFFER: dict[str, object] = {
 }
 INSTANCE: dict[str, object] = {
     "id": 12,
+    "num_gpus": 1,
     "label": "etude-session",
     "actual_status": "running",
     "start_date": 1793770000,
@@ -700,3 +701,13 @@ def test_equal_price_offer_with_sufficient_lifetime_is_selected() -> None:
     ]
     allocation = machines(market, Storage()).create(request())
     assert allocation.id == "12" and market.counts["PUT"] == 1
+
+
+def test_vast_multi_gpu_offer_preserves_allocation_count() -> None:
+    market = Marketplace()
+    market.offers[0]["num_gpus"] = 2
+    offer = VastAPI("fixture-account-key", market).offers(
+        TEMPLATE.model_copy(update={"gpu_count": 2})
+    )[0]
+    assert offer.hardware.count == 2 and offer.hardware.min_vcpus == 8
+    assert market.counts == {"POST": 1}

@@ -141,7 +141,11 @@ def run(
     return 0
 
 
-def boot(module: str, delete_self: Callable[[], None], start_ssh: Callable[[], None]) -> int:
+def boot(
+    module: str,
+    delete_self: Callable[[], None] | None,
+    start_ssh: Callable[[], None] | None,
+) -> int:
     # A readiness handshake makes the guardian precede every download/install.
     env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[3])}
     marker = GUARDIAN_MARKER
@@ -166,7 +170,8 @@ def boot(module: str, delete_self: Callable[[], None], start_ssh: Callable[[], N
             write_log("guardian", "ready; independent deadline active")
             write_log("image", os.environ.get("ETUDE_IMAGE", "image metadata unavailable"))
             startup_timeout()
-            start_ssh()
+            if start_ssh is not None:
+                start_ssh()
             write_log("package download", "ensuring uv")
             ensure_uv()
             write_log("package download", "fetching client")
@@ -211,11 +216,17 @@ def boot(module: str, delete_self: Callable[[], None], start_ssh: Callable[[], N
             write_log("bootstrap exit", "exit status 1")
             return 1
         finally:
-            write_log("cleanup", "requesting machine deletion")
+            write_log(
+                "cleanup",
+                "requesting machine deletion"
+                if delete_self is not None
+                else "provider timer and controller own machine deletion",
+            )
             write_log("bootstrap", CLOSED)
             publishing.set()
             # Publication inherits the explicit log/rental allowance.
             try:
                 publish(log, url)
             finally:
-                delete_self()
+                if delete_self is not None:
+                    delete_self()
