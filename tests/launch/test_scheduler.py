@@ -427,7 +427,7 @@ def test_an_owned_machine_leaves_its_pool_at_expiry_and_its_run_retries_elsewher
     assert b.store.machine("window").deleted_at is None  # owned machines are never deleted
 
 
-def test_quote_prints_the_first_wave_and_its_most_spend_and_rents_nothing(
+def test_quote_prints_planned_first_wave_costs_and_rents_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     b = bench(tmp_path, max_machines=1)
@@ -448,10 +448,12 @@ def test_quote_prints_the_first_wave_and_its_most_spend_and_rents_nothing(
     assert code == 0
     assert counting.snapshot().provider == 1  # one price; nothing created
     assert capsys.readouterr().out.splitlines() == [
-        "seed1  machine mini  at most $0.00",
-        "seed2  rent NVIDIA L4 with at least 6 vCPUs, 48 GB at $0.59/hour  at most $0.88",
-        "maximum spend: $0.88; nothing rented",
-        "the whole launch is capped at $6.00 by its job and cohort limits",
+        "seed1  machine mini  planned rental cost $0.00",
+        "seed2  rent NVIDIA L4 with at least 6 vCPUs, 48 GB at $0.59/hour  planned rental cost $0.88",
+        "planned first-wave rental cost: $0.88; nothing rented",
+        "job/cohort rental budget: $6.00",
+        "Rental costs assume deletion on time. Provider delays can exceed the budget; "
+        "external storage charges are excluded.",
     ]
     assert b.service.creates == 0 and not b.store.runs() and not b.store.sessions()
     assert not b.store.cohort_exists("three")

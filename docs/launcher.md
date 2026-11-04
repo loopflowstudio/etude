@@ -6,7 +6,7 @@ etude machine add mini me@mini.local --pool lab      # cost $0, never expires
 etude ondemand add runpod-cpu8 --provider runpod --vcpus 8 --memory-gb 16 \
     --max 2 --max-usd-per-hour 0.40                  # a template and a budget
 etude availability runpod-cpu8                       # what it would rent, at what price
-etude launch job.py --rent runpod-cpu8 --quote       # machines and maximum spend; rents nothing
+etude launch job.py --rent runpod-cpu8 --quote       # machines and planned rental costs; rents nothing
 etude launch job.py --pool lab --rent runpod-cpu8    # the Mini first, then rent
 etude machines --all                                 # owned: cost, expiry; rented: hardware, cost
 ```
@@ -21,7 +21,7 @@ before renting from R. A run that cannot start yet waits.
 | --- | --- |
 | `etude queue FILE.py [--pool P] [--rent R]` | Add runs. They start when a machine is free or can be rented; lack of capacity leaves them waiting. |
 | `etude launch FILE.py [--pool P] [--rent R]` | Acquire machines for the first runs (up to cohort parallelism), then record the runs. Failure records no runs. |
-| `etude launch FILE.py ... --quote` | Print the machines the first wave would take and the most they could cost. Rents nothing. |
+| `etude launch FILE.py ... --quote` | Print the machines the first wave would take and their planned rental costs. Rents nothing. |
 | `etude availability R` | Ask R's provider what it would rent now, at what price. Rents nothing. |
 | `etude rent R --hours H` | Rent a machine for a window of time; it takes queued runs. |
 
@@ -82,9 +82,11 @@ launch, plus `quote(...)` and `availability(rent)`. All use the configured SSH
 controller. With neither a pool nor an on-demand named, a launch uses the
 configured default, initially the pool `local`.
 
-Spending is bounded by limits, not by a flag: the job's `max_usd` and
+Rental admission is bounded by the job's `max_usd` and
 `max_hours`, the cohort's `max_usd`, the on-demand's price ceiling and its
-limit on machines at once.
+limit on machines at once. Quoted costs assume the quoted rate and deletion
+on time. Provider delays can exceed these budgets; external storage charges
+are excluded. These limits bound admitted rental allocations, not provider bills.
 
 A rental lasts as long as those limits allow, up to what its storage can grant
 a machine: 7 days on R2 and 36 hours on S3. A run whose `max_hours` plus the
@@ -358,8 +360,10 @@ rented, the price and ceiling, how many of the on-demand's machines are in use
 and when the provider answered; `--timeout` bounds it. `--quote` places the
 first wave as launch would, asking the provider for prices, and prints one line
 per run: an owned or already rented machine it would use, or the hardware it
-would rent and the most that window could cost. It then prints the maximum
-spend of those machines and the job and cohort caps on the whole launch. It
+would rent and that window's planned rental cost. It then prints the planned
+first-wave rental cost and the job/cohort rental budget for the whole launch.
+These amounts assume timely deletion at the quoted rate, not a guaranteed
+total bill; provider delays can exceed the budget and external storage is excluded. It
 records nothing and rents nothing; without capacity it fails as launch would.
 
 Free existing machines are used before renting another. With `--pool` and

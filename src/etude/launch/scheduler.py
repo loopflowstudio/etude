@@ -526,10 +526,12 @@ class Scheduler:
         parallel: int = 1,
         max_usd: Decimal | None = None,
     ) -> Quote:
-        """The machines a launch would take now and the most they could cost. Rents nothing.
+        """The machines a launch would take now and planned rental costs. Rents nothing.
 
         It asks the on-demand's provider for its price, so it waits on the provider.
-        Without capacity it raises, as the launch would.
+        Without capacity it raises, as the launch would. Costs assume the quoted
+        rate and timely deletion, and exclude external storage. Provider delays
+        can exceed the admitted rental budget.
         """
         target = self._target(pool, rent)
         limits = None if cohort is None else self._new_cohort(cohort, runs, parallel, max_usd)

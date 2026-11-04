@@ -143,6 +143,9 @@ class VastAPI(InstanceHTTP):
     def offers(self, template: MachineTemplate) -> tuple[VastOffer, ...]:
         if template.gpu is None:
             raise ValueError("Vast rentals need a GPU model")
+        vcpus = template.vcpus or 4
+        memory_mb = (template.memory_gb or 16) * 1000
+        disk_gb = template.disk_gb or 40
         # Search includes disk in dph_total. Zero transfer rates keep arbitrary
         # training traffic within the quoted rental rate, without a guessed byte cap.
         query = {
@@ -154,10 +157,10 @@ class VastAPI(InstanceHTTP):
             "verified": {"eq": True},
             "rentable": {"eq": True},
             "rented": {"eq": False},
-            "cpu_cores_effective": {"gte": template.vcpus or 4},
-            "cpu_ram": {"gte": (template.memory_gb or 16) * 1000},
-            "disk_space": {"gte": template.disk_gb or 40},
-            "allocated_storage": template.disk_gb or 40,
+            "cpu_cores_effective": {"gte": vcpus},
+            "cpu_ram": {"gte": memory_mb},
+            "disk_space": {"gte": disk_gb},
+            "allocated_storage": disk_gb,
             "inet_up_cost": {"eq": 0},
             "inet_down_cost": {"eq": 0},
             "direct_port_count": {"gte": 1},
@@ -176,9 +179,9 @@ class VastAPI(InstanceHTTP):
             and offer.verification == "verified"
             and offer.rentable
             and not offer.rented
-            and offer.cpu_cores_effective >= (template.vcpus or 4)
-            and offer.cpu_ram >= (template.memory_gb or 16) * 1000
-            and offer.disk_space >= (template.disk_gb or 40)
+            and offer.cpu_cores_effective >= vcpus
+            and offer.cpu_ram >= memory_mb
+            and offer.disk_space >= disk_gb
             and offer.dph_total >= offer.storage_total_cost
             and offer.inet_up_cost == 0
             and offer.inet_down_cost == 0

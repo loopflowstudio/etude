@@ -15,6 +15,7 @@ from etude.launch.database import Database
 from etude.launch.environment import install, startup_timeout
 from etude.launch.errors import LaunchError
 from etude.launch.logging import Console
+from etude.launch.providers import program
 from etude.launch.providers.package import program_archive
 from etude.launch.providers.runpod import machines
 from etude.launch.records import Job, Pool
@@ -179,7 +180,7 @@ def test_delayed_preparation_cannot_create_after_authority_or_startup_expires(
         elapsed = elapsed_seconds
         return code
 
-    monkeypatch.setattr(machines, "program_archive", prepare)
+    monkeypatch.setattr(program, "program_archive", prepare)
     monkeypatch.setattr(machines, "datetime", Clock)
     monkeypatch.setattr(b.scheduler, "_clock", Clock.now)
     with pytest.raises(LaunchError):

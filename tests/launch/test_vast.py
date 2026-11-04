@@ -9,6 +9,7 @@ import sys
 import threading
 import zipfile
 from collections import Counter
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -19,7 +20,7 @@ import pytest
 from etude.cli import main
 from etude.launch.client import _open
 from etude.launch.database import Database
-from etude.launch.errors import ProviderUnavailable
+from etude.launch.errors import LauncherError, ProviderUnavailable
 from etude.launch.executor import Executor, Refused
 from etude.launch.machines import MachineRequest
 from etude.launch.providers.bootstrap import guard
@@ -41,6 +42,7 @@ from etude.launch.scheduler import Scheduler
 from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.s3 import Bucket, Keys
 from etude.launch.worker.courier import run as run_courier
+from tests.launch.fake import Clock
 from tests.launch.test_runpod_machines import Storage, released, repository, until
 
 OFFER: dict[str, object] = {
@@ -85,6 +87,7 @@ class Marketplace:
         self.counts: Counter[str] = Counter()
         self.created: Create | None = None
         self.lost_reply = False
+        self.inventory_visible = True
         self.offline = False
         self.delete_pending = False
         self.charge: dict[str, object] | None = None
@@ -113,7 +116,11 @@ class Marketplace:
         elif path == "/api/v1/instances/":
             # A full account can put the owned instance on a later page.
             query = parse_qs(urlsplit(url).query)
-            rows = list(self.instances.values()) if "after_token" in query else []
+            rows = (
+                list(self.instances.values())
+                if "after_token" in query and self.inventory_visible
+                else []
+            )
             reply = {
                 "instances": rows,
                 "next_token": None if rows or "after_token" in query else "second",
@@ -238,6 +245,103 @@ def test_unconfirmed_create_and_foreign_labels_never_trigger_paid_retries_or_del
     assert market.counts["DELETE"] == 0 and 12 in market.instances
 
 
+def _scheduler(
+    store: Database, market: Marketplace, storage: Storage, clock: Callable[[], datetime]
+) -> Scheduler:
+    bucket = Bucket(
+        "journal", "us-west-2", Keys(access_key="fixture", secret_key="fixture"), storage
+    )
+    place = Place(
+        name="evidence", bucket="journal", prefix="test", provider="s3", region="us-west-2"
+    )
+    executor = Executor(machines(market, storage), None, BucketJournal(place, bucket))
+    scheduler = Scheduler(store, {"vast": lambda held: executor}, clock=clock)
+    scheduler.add_storage(place)
+    scheduler.set_provider(Provider(name="vast", kind="vast", registry="", storage="evidence"))
+    scheduler.add_ondemand(
+        OnDemand(name="4090", template=TEMPLATE, setup_seconds=60, max_machines=1)
+    )
+    return scheduler
+
+
+@pytest.mark.parametrize("action", ["terminate", "deadline"])
+def test_scheduler_retains_uncertain_acquisition_until_owned_deletion(
+    tmp_path: Path, action: str
+) -> None:
+    market, storage, clock = Marketplace(), Storage(), Clock()
+    clock.now = datetime.now(UTC)
+    market.lost_reply = True
+    market.inventory_visible = False
+    store = Database(tmp_path / "launcher.db")
+    try:
+        scheduler = _scheduler(store, market, storage, clock)
+        name = scheduler.rent("4090", hours=1)
+        held = store.rented_session(name)
+        rental = store.rental_for(held)
+        assert rental is not None
+        intent = storage.objects[f"test/sessions/{held.id}/offer.json"]
+        assert 12 in market.instances and market.counts == {"POST": 1, "PUT": 1}
+
+        # Rebuild the controller from retained evidence; process-local state cannot
+        # prove ownership or preserve the reservation after a lost create reply.
+        store.close()
+        store = Database(tmp_path / "launcher.db")
+        scheduler = _scheduler(store, market, storage, clock)
+        clock.advance(60 if action == "terminate" else 3601)
+        if action == "terminate":
+            with pytest.raises(ProviderUnavailable, match="awaiting reconciliation"):
+                scheduler.terminate(name)
+        else:
+            scheduler.tick()
+            scheduler.tick()
+        assert market.counts == {"POST": 1, "PUT": 1, "GET": 4}
+        pending = store.rented_session(name)
+        assert pending.receipt is None and pending.refused_at is None and pending.ended_at is None
+        assert [s.id for s in store.unsettled_sessions()] == [held.id]
+        assert store.rental_for(pending) == rental
+        assert scheduler.rentals()[0][1] > 0
+        assert storage.objects[f"test/sessions/{held.id}/offer.json"] == intent
+        with pytest.raises(LauncherError, match="at its machine limit"):
+            scheduler.rent("4090", hours=1)
+        assert market.counts["PUT"] == 1 and market.counts["DELETE"] == 0
+
+        market.inventory_visible = True
+        if action == "terminate":
+            scheduler.terminate(name)
+        else:
+            scheduler.tick()  # recover the receipt
+            scheduler.tick()  # enforce the elapsed deadline
+        ended = store.rented_session(name)
+        assert ended.id == held.id and ended.receipt == "12"
+        assert ended.ended_at is not None and ended.refused_at is None
+        assert not store.unsettled_sessions() and market.instances == {}
+        assert market.counts["PUT"] == 1 and market.counts["DELETE"] == 1
+        assert scheduler.rentals()[0][1] > 0
+    finally:
+        store.close()
+
+
+def test_scheduler_releases_confirmed_vast_refusal(tmp_path: Path) -> None:
+    market, storage, clock = Marketplace(), Storage(), Clock()
+    clock.now = datetime.now(UTC)
+    market.offers = [{**OFFER, "end_date": clock.now.timestamp() + 5}]
+    store = Database(tmp_path / "launcher.db")
+    try:
+        scheduler = _scheduler(store, market, storage, clock)
+        refused = scheduler.rent("4090", hours=1)
+        assert store.machine(refused).refused_at is not None
+        assert not store.unsettled_sessions()
+        assert scheduler.rentals()[0][1] == 0
+        assert market.counts == {"POST": 1}
+        market.offers = [OFFER.copy()]
+        acquired = scheduler.rent("4090", hours=1)
+        assert acquired != refused and store.rented_session(acquired).receipt == "12"
+        scheduler.terminate(acquired)
+        assert market.instances == {} and market.counts["PUT"] == market.counts["DELETE"] == 1
+    finally:
+        store.close()
+
+
 @pytest.mark.parametrize("change", ["expired", "budget", "capacity", "lifetime"])
 def test_refusal_has_no_paid_effect(change: str) -> None:
     market, storage = Marketplace(), Storage()
@@ -253,6 +357,7 @@ def test_refusal_has_no_paid_effect(change: str) -> None:
         market.offers = [{**OFFER, "end_date": datetime.now(UTC).timestamp() + 5}]
     with pytest.raises(Refused):
         machine.create(wanted)
+    assert machine.find(wanted.session) is None
     assert market.counts["PUT"] == 0 and market.instances == {}
 
 
@@ -348,18 +453,7 @@ def test_vast_cohort_uses_the_worker_and_retains_outputs_before_deletion(
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "client"))
     market, storage = Marketplace(), Storage()
     store = Database(tmp_path / "launcher.db")
-    bucket = Bucket(
-        "journal", "us-west-2", Keys(access_key="fixture", secret_key="fixture"), storage
-    )
-    place = Place(
-        name="evidence", bucket="journal", prefix="test", provider="s3", region="us-west-2"
-    )
-    machine = machines(market, storage)
-    executor = Executor(machine, None, BucketJournal(place, bucket))
-    scheduler = Scheduler(store, {"vast": lambda held: executor})
-    scheduler.add_storage(place)
-    scheduler.set_provider(Provider(name="vast", kind="vast", registry="", storage="evidence"))
-    scheduler.add_ondemand(OnDemand(name="4090", template=TEMPLATE, setup_seconds=60))
+    scheduler = _scheduler(store, market, storage, lambda: datetime.now(UTC))
     # Only the remote host boundary is replaced; the scheduler, journal, courier,
     # worker, job subprocess and output retention all use their production paths.
     worker: threading.Thread | None = None

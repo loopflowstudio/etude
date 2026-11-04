@@ -6,8 +6,6 @@ by label; a retained intent never authorizes a second paid create.
 
 from __future__ import annotations
 
-import base64
-import hashlib
 import shlex
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -16,7 +14,7 @@ from etude.deadline import limit_time
 from etude.launch.errors import ProviderUnavailable
 from etude.launch.executor import Refused, check_creation
 from etude.launch.machines import Allocation, Bill, MachineRequest, Safeguards
-from etude.launch.providers.package import program_archive
+from etude.launch.providers.program import Program, boot_source
 from etude.launch.providers.vast.api import Create, Instance, VastAPI, VastOffer
 from etude.launch.records import STOCK_IMAGE, MachineTemplate, Offer
 from etude.launch.storage.s3 import Bucket
@@ -31,8 +29,7 @@ class VastMachines:
     ) -> None:
         self._template, self._api, self._bucket, self._prefix = template, api, bucket, prefix
         self._offers: tuple[VastOffer, ...] | None = None
-        self._package_key: str | None = None
-        self._package_digest = ""
+        self._program = Program(bucket, prefix)
 
     def offer(self) -> Offer:
         self._offers = self._api.offers(self._template)
@@ -84,30 +81,8 @@ class VastMachines:
         )
         if offer is None:
             raise Refused("no quoted Vast offer covers the requested rental deadline")
-        if self._package_key is None:
-            code = program_archive()
-            digest = hashlib.sha256(code).hexdigest()
-            key = f"{self._prefix}/programs/{digest}.zip"
-            if self._bucket.get(key) is None:
-                self._bucket.put(key, code, once=True)
-            self._package_key, self._package_digest = key, digest
         image = self._template.image or STOCK_IMAGE
-        env = {
-            "ETUDE_LOG_SECONDS": "" if request.log_seconds is None else str(request.log_seconds),
-            "ETUDE_IMAGE": image.model_dump_json(),
-            "ETUDE_SESSION": request.session,
-            "ETUDE_STARTUP_DEADLINE": request.startup_deadline.isoformat()
-            if request.startup_deadline
-            else "",
-            "ETUDE_DEADLINE": request.deadline.isoformat(),
-            "ETUDE_MAX_USD": str(request.cap_usd),
-            "ETUDE_BOOTSTRAP_URL": request.bootstrap.url,
-            "ETUDE_BOOTSTRAP_LOG_URL": request.bootstrap.log_url,
-            "ETUDE_WORKER_LOG_URL": request.bootstrap.worker_log_url,
-            "ETUDE_PACKAGE_URL": self._bucket.get_url(self._package_key, 13 * 3600),
-            "ETUDE_PACKAGE_SHA256": self._package_digest,
-            "ETUDE_PROGRAM": base64.b64encode(program_archive(guardian=True)).decode(),
-        }
+        env = self._program.prepare(request, image)
         limits = [d for d in (request.deadline, request.startup_deadline) if d is not None]
         now = datetime.now(UTC)
         if now >= min(limits):
@@ -129,7 +104,8 @@ class VastMachines:
                     disk=self._template.disk_gb or 40,
                     label=f"etude-{request.session}",
                     env=env,
-                    onstart="exec python3.12 -c " + shlex.quote(_BOOT),
+                    onstart="exec python3.12 -c "
+                    + shlex.quote(boot_source("etude.launch.providers.vast.instance")),
                 ),
             )
             instance = self._api.instance(id)
@@ -159,9 +135,15 @@ class VastMachines:
             if self._bucket.get(self._key(session_id, "offer")) is None:
                 return None
             instance = self._api.named(f"etude-{session_id}")
-            if instance is not None:
-                self._keep(session_id, instance)
-        return None if instance is None else self._allocation(instance)
+            if instance is None:
+                # Inventory can lag creation, even beyond the local rental deadline.
+                # Retain reconciliation duty until the paid outcome is known.
+                raise ProviderUnavailable(
+                    "Vast create already attempted; instance not yet visible; "
+                    "awaiting reconciliation"
+                )
+            self._keep(session_id, instance)
+        return self._allocation(instance)
 
     def alive(self, session_id: str) -> bool:
         instance = self._receipt(session_id)
@@ -202,14 +184,3 @@ class VastMachines:
     def bill(self, session_id: str, now: datetime) -> Bill | None:
         instance = self._receipt(session_id)
         return None if instance is None else self._api.bill(instance, now)
-
-
-_BOOT = """import base64,io,os,pathlib,sys,zipfile
-root=pathlib.Path('/opt/etude/src')
-root.mkdir(parents=True,exist_ok=True)
-with zipfile.ZipFile(io.BytesIO(base64.b64decode(os.environ.pop('ETUDE_PROGRAM')))) as z:
-    z.extractall(root)
-sys.path.insert(0,str(root))
-from etude.launch.providers.vast.instance import main
-raise SystemExit(main(['instance','boot']))
-"""

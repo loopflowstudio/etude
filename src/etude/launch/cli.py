@@ -142,7 +142,7 @@ def launch(
     parallel: ParallelOption = 1,
     max_usd: CohortUsd = None,
     quote: Annotated[
-        bool, typer.Option(help="print the machines and the most they could cost; rent nothing")
+        bool, typer.Option(help="print the machines and planned rental costs; rent nothing")
     ] = False,
     help: FileHelp = False,
 ) -> None:
@@ -478,7 +478,7 @@ def providers() -> None:
 @kind(Kind.ask)
 def provider_set(
     name: str,
-    kind: Annotated[str, typer.Option(help="which provider this is, runpod or vast")],
+    kind: Annotated[Literal["runpod", "vast"], typer.Option(help="which provider this is")],
     storage: Annotated[str, typer.Option(help="the storage new pools on this provider use")],
     registry: Annotated[
         str, typer.Option(help="the provider's id for the credential that pulls private images")
@@ -487,16 +487,7 @@ def provider_set(
     """Record or replace an account that supplies machines. No secret is stored."""
     from etude.launch.records import Provider
 
-    if kind not in {"runpod", "vast"}:
-        raise ValueError(f"unsupported provider kind {kind!r}")
-    default().set_provider(
-        Provider(
-            name=name,
-            kind="runpod" if kind == "runpod" else "vast",
-            registry=registry,
-            storage=storage,
-        )
-    )
+    default().set_provider(Provider(name=name, kind=kind, registry=registry, storage=storage))
     providers()
 
 

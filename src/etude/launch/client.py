@@ -175,7 +175,11 @@ def quote(
     parallel: int = 1,
     max_usd: Decimal | None = None,
 ) -> Quote:
-    """The machines a launch would take now and the most they could cost; rents nothing."""
+    """The machines a launch would take now and planned rental costs; rents nothing.
+
+    Costs assume the quoted rate and timely deletion, and exclude external storage.
+    Provider delays can exceed the admitted rental budget.
+    """
     return _client().quote(runs, pool, rent=rent, cohort=cohort, parallel=parallel, max_usd=max_usd)
 
 

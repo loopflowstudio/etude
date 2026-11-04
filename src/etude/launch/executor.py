@@ -74,7 +74,10 @@ class Execution(Protocol):
         ...
 
     def find(self, session_id: str) -> str | None:
-        """The provider's name for a session whose create reply was lost, if it exists."""
+        """Recover the provider's name after a lost create reply.
+
+        None confirms non-acquisition; uncertain lookup raises an operational error.
+        """
         ...
 
     def observe(self, session_id: str) -> Observation: ...

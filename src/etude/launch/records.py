@@ -531,7 +531,7 @@ class RunRecord(Record):
 class Cohort(Record):
     name: str
     parallel: int  # rentals at once
-    max_usd: Decimal | None  # ceiling on what its rentals can cost in total
+    max_usd: Decimal | None  # shared budget for admitting rental allocations
     created_at: datetime
 
 
@@ -668,24 +668,28 @@ class CohortSpec(Record):
 
 
 class QuotedMachine(Record):
-    """Where one run of a launch's first wave would start, and the most it could cost."""
+    """One first-wave placement and its maximum admitted rental allocation.
+
+    Cost assumes the quoted rate and timely deletion, and excludes external storage.
+    Provider delays can exceed the admitted budget.
+    """
 
     run: str  # the run's name
     machine: str | None  # an existing machine; None means one would be rented
     hardware: Hardware | None  # for a rental, what the provider would be asked for
     usd_per_hour: Decimal
-    max_usd: Decimal  # a new rental's whole window; an existing machine's share for the run
+    max_usd: Decimal  # planned cost: new rental's whole window or existing machine's run share
 
 
 class Quote(Record):
     """What a launch would take now, without taking it."""
 
     machines: tuple[QuotedMachine, ...]  # the first wave, as a launch would place it
-    limit_usd: Decimal | None  # job and cohort caps on the whole launch; None: it cannot rent
+    limit_usd: Decimal | None  # job/cohort rental admission budget; None: it cannot rent
 
     @property
     def max_usd(self) -> Decimal:
-        """The most the first wave's machines can cost."""
+        """Maximum admitted first-wave rental allocation, not a provider-enforced bill cap."""
         return sum((machine.max_usd for machine in self.machines), Decimal(0))
 
 
