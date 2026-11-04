@@ -1,7 +1,7 @@
 """CPU-only, offline-runtime proof for the documented official PyTorch image.
 
 Run with uv run python scripts/test_pytorch_image.py on a Docker host. Pulling the
-pinned image needs registry access; both containers then run without networking.
+pinned image needs registry access; all containers then run without networking.
 """
 
 import json
@@ -53,7 +53,7 @@ def main() -> None:
             "-S",
             "-c",
             "import sys; sys.path.insert(0,'/source'); "
-            "from etude.launch.providers.runpod.pod import guard; "
+            "from etude.launch.providers.bootstrap import guard; "
             "assert not any(m in sys.modules for m in ('pydantic','numpy','torch')); "
             "print('guardian imports without site packages')",
         ],

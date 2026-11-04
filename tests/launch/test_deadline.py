@@ -7,7 +7,8 @@ from threading import Event
 import pytest
 
 from etude.deadline import call, limit_time, remaining
-from etude.launch.providers.runpod.pod import GuardianAPI, guard
+from etude.launch.providers.bootstrap import guard
+from etude.launch.providers.runpod.pod import GuardianAPI
 
 
 def test_nested_operations_spend_one_budget(monkeypatch: pytest.MonkeyPatch) -> None:

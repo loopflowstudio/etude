@@ -31,9 +31,10 @@ from etude.launch.database import Database
 from etude.launch.executor import Execution, Executor, local
 from etude.launch.listing import show_machines, show_runs
 from etude.launch.logging import CLOSED, log_to, write_log
+from etude.launch.providers.bootstrap import guard
 from etude.launch.providers.runpod.api import RunPodAPI
 from etude.launch.providers.runpod.machines import RunPodMachines
-from etude.launch.providers.runpod.pod import GuardianAPI, guard
+from etude.launch.providers.runpod.pod import GuardianAPI
 from etude.launch.records import (
     Image,
     Input,

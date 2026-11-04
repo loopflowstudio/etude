@@ -121,7 +121,7 @@ def show_machines(scheduler: Scheduler, *, ended: bool, images: bool = False) ->
 
 
 def show_quote(quote: Quote) -> None:
-    """One line per machine the first wave would take, then the most it could cost."""
+    """First-wave placements and planned rental costs under the quoted windows."""
     for each in quote.machines:
         if each.machine is not None:
             where = f"machine {each.machine}" + (
@@ -129,10 +129,14 @@ def show_quote(quote: Quote) -> None:
             )
         else:
             where = f"rent {each.hardware or 'a machine'} at ${each.usd_per_hour}/hour"
-        print(each.run, where, f"at most ${each.max_usd:.2f}", sep="  ")
-    print(f"maximum spend: ${quote.max_usd:.2f}; nothing rented")
+        print(each.run, where, f"planned rental cost ${each.max_usd:.2f}", sep="  ")
+    print(f"planned first-wave rental cost: ${quote.max_usd:.2f}; nothing rented")
     if quote.limit_usd is not None:
-        print(f"the whole launch is capped at ${quote.limit_usd:.2f} by its job and cohort limits")
+        print(f"job/cohort rental budget: ${quote.limit_usd:.2f}")
+    print(
+        "Rental costs assume deletion on time. Provider delays can exceed the budget; "
+        "external storage charges are excluded."
+    )
 
 
 def show_availability(answer: Availability) -> None:

@@ -12,7 +12,7 @@ from decimal import Decimal
 from typing import Any
 
 from etude.deadline import call, remaining
-from etude.launch.errors import LauncherError
+from etude.launch.errors import ProviderUnavailable
 from etude.launch.measurement import timed
 
 BASE = "https://api.runpod.io/v2/"
@@ -21,10 +21,6 @@ _MAX_REPLY_BYTES = 8 * 1024 * 1024
 
 # Sends one request and returns the status and body. Raises OSError when no reply came.
 Send = Callable[[str, str, bytes | None, dict[str, str]], tuple[int, bytes]]
-
-
-class ProviderUnavailable(LauncherError):
-    """No usable answer. This never means the thing asked about is absent."""
 
 
 def _send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> tuple[int, bytes]:

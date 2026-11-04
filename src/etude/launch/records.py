@@ -85,9 +85,15 @@ class Provider(Record):
     """
 
     name: str  # what a machine template's `provider` names
-    kind: Literal["runpod"]
+    kind: Literal["runpod", "vast"]
     registry: str  # the provider's id for the credential that pulls private images
     storage: str  # the storage a new pool uses unless it names another
+
+    @model_validator(mode="after")
+    def _registry_supported(self) -> Provider:
+        if self.kind == "vast" and self.registry:
+            raise ValueError("Vast supports public images; registry credentials are not stored")
+        return self
 
 
 class Storage(Record):
@@ -143,7 +149,7 @@ class MachineTemplate(Record):
     image: Image | None = None
 
     _parse_image = field_validator("image", mode="before")(_image)
-    data_center: str | None = None  # the provider's name for the place; None: wherever it has one
+    data_center: str | None = None  # RunPod data center id; Vast country code; None: anywhere
 
 
 class GPU(Record):
@@ -525,7 +531,7 @@ class RunRecord(Record):
 class Cohort(Record):
     name: str
     parallel: int  # rentals at once
-    max_usd: Decimal | None  # ceiling on what its rentals can cost in total
+    max_usd: Decimal | None  # shared budget for admitting rental allocations
     created_at: datetime
 
 
@@ -662,24 +668,28 @@ class CohortSpec(Record):
 
 
 class QuotedMachine(Record):
-    """Where one run of a launch's first wave would start, and the most it could cost."""
+    """One first-wave placement and its maximum admitted rental allocation.
+
+    Cost assumes the quoted rate and timely deletion, and excludes external storage.
+    Provider delays can exceed the admitted budget.
+    """
 
     run: str  # the run's name
     machine: str | None  # an existing machine; None means one would be rented
     hardware: Hardware | None  # for a rental, what the provider would be asked for
     usd_per_hour: Decimal
-    max_usd: Decimal  # a new rental's whole window; an existing machine's share for the run
+    max_usd: Decimal  # planned cost: new rental's whole window or existing machine's run share
 
 
 class Quote(Record):
     """What a launch would take now, without taking it."""
 
     machines: tuple[QuotedMachine, ...]  # the first wave, as a launch would place it
-    limit_usd: Decimal | None  # job and cohort caps on the whole launch; None: it cannot rent
+    limit_usd: Decimal | None  # job/cohort rental admission budget; None: it cannot rent
 
     @property
     def max_usd(self) -> Decimal:
-        """The most the first wave's machines can cost."""
+        """Maximum admitted first-wave rental allocation, not a provider-enforced bill cap."""
         return sum((machine.max_usd for machine in self.machines), Decimal(0))
 
 

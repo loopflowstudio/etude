@@ -6,16 +6,15 @@ CPU pod with its vCPUs and memory. Both share create, receipts, bills and deleti
 
 from __future__ import annotations
 
-import base64
-import hashlib
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from etude.deadline import limit_time
+from etude.launch.errors import ProviderUnavailable
 from etude.launch.executor import Refused, check_creation
 from etude.launch.machines import Allocation, Bill, MachineRequest, Safeguards
-from etude.launch.providers.package import program_archive
-from etude.launch.providers.runpod.api import PodFact, ProviderUnavailable, Quote, RunPodAPI
+from etude.launch.providers.program import Program, boot_source
+from etude.launch.providers.runpod.api import PodFact, Quote, RunPodAPI
 from etude.launch.records import GPU, Hardware, LauncherError, MachineTemplate, Offer, Provider
 from etude.launch.records import STOCK_IMAGE as DEFAULT_IMAGE
 from etude.launch.storage.s3 import Bucket
@@ -35,8 +34,7 @@ class RunPodMachines:
     ) -> None:
         self._provider, self._template, self._api = provider, template, api
         self._bucket, self._prefix = bucket, prefix
-        self._package_key: str | None = None
-        self._package_digest = ""
+        self._program = Program(bucket, prefix)
 
     def _quote(self) -> Quote:
         template = self._template
@@ -74,48 +72,23 @@ class RunPodMachines:
             )
         if request.bootstrap is None:
             raise LauncherError("a rented machine needs a storage bootstrap link")
-        if self._package_key is None:
-            code = program_archive()
-            digest = hashlib.sha256(code).hexdigest()
-            key = f"{self._prefix}/programs/{digest}.zip"
-            if self._bucket.get(key) is None:
-                self._bucket.put(key, code, once=True)
-            self._package_key, self._package_digest = key, digest
-        env = {
-            "ETUDE_LOG_SECONDS": str(request.log_seconds)
-            if request.log_seconds is not None
-            else "",
-            "ETUDE_IMAGE": (template.image or DEFAULT_IMAGE).model_dump_json(),
-            "ETUDE_BOOTSTRAP_LOG_URL": request.bootstrap.log_url,
-            "ETUDE_WORKER_LOG_URL": request.bootstrap.worker_log_url,
-            "ETUDE_BOOTSTRAP_URL": request.bootstrap.url,
-            "ETUDE_SESSION": request.session,
-            "ETUDE_STARTUP_DEADLINE": request.startup_deadline.isoformat()
-            if request.startup_deadline
-            else "",
-            "ETUDE_DEADLINE": request.deadline.isoformat(),
-            "ETUDE_MAX_USD": str(request.cap_usd),
-            "ETUDE_PACKAGE_URL": self._bucket.get_url(self._package_key, 13 * 3600),
-            "ETUDE_PACKAGE_SHA256": self._package_digest,
-            "ETUDE_PROGRAM": base64.b64encode(program_archive(guardian=True)).decode(),
-        }
-        limits = [d for d in (request.deadline, request.startup_deadline) if d is not None]
-        if limits and datetime.now(UTC) >= min(limits):
+        image = template.image or DEFAULT_IMAGE
+        env = self._program.prepare(request, image)
+        creation_deadline = min(request.deadline, request.startup_deadline or request.deadline)
+        if datetime.now(UTC) >= creation_deadline:
             raise Refused(
                 "startup or rental deadline expired during preparation; no machine created"
             )
         check_creation()
-        seconds = (min(limits) - datetime.now(UTC)).total_seconds() if limits else None
+        seconds = (creation_deadline - datetime.now(UTC)).total_seconds()
         with limit_time(seconds):
             pod = self._api.create(
                 name=f"etude-{request.session}",
                 hardware=quote.hardware,
-                image=template.image.resolved if template.image else STOCK_IMAGE,
-                registry=self._provider.registry
-                if template.image and template.image.resolved != STOCK_IMAGE
-                else "",
+                image=image.resolved,
+                registry=self._provider.registry if image.resolved != STOCK_IMAGE else "",
                 env=env,
-                entrypoint=("python3.12", "-c", _BOOT),
+                entrypoint=("python3.12", "-c", boot_source("etude.launch.providers.runpod.pod")),
                 disk_gb=template.disk_gb or _disk_gb(quote.hardware),
                 data_center=template.data_center,
             )
@@ -182,12 +155,3 @@ def _disk_gb(hardware: Hardware) -> int:
 
 # Published import retained; the domain record owns the default and its provenance.
 STOCK_IMAGE = DEFAULT_IMAGE.resolved
-_BOOT = """import base64,io,os,pathlib,sys,zipfile
-root=pathlib.Path('/opt/etude/src')
-root.mkdir(parents=True,exist_ok=True)
-with zipfile.ZipFile(io.BytesIO(base64.b64decode(os.environ.pop('ETUDE_PROGRAM')))) as z:
-    z.extractall(root)
-sys.path.insert(0,str(root))
-from etude.launch.providers.runpod.pod import main
-raise SystemExit(main(['pod','boot']))
-"""

@@ -30,7 +30,7 @@ from etude.deadline import limit_time, remaining
 from etude.launch import client
 from etude.launch.database import Database
 from etude.launch.logging import log_to
-from etude.launch.providers.runpod import pod
+from etude.launch.providers import bootstrap
 from etude.launch.records import Job, Output, Storage
 from etude.launch.scheduler import Scheduler
 from etude.launch.schemas import (
@@ -506,10 +506,10 @@ def test_runtime_bootstrap_failure_reaches_retained_session_usage(
     run = b.scheduler.launch(Job(command="true", max_hours=1, max_usd=Decimal(1)), rent="l4")
     session = b.scheduler.attempts(run)[0].session
     monkeypatch.setattr("shutil.which", lambda name: None)
-    monkeypatch.setattr(pod, "UV_URL", http.url + "/payload")
+    monkeypatch.setattr(bootstrap, "UV_URL", http.url + "/payload")
     log = tmp_path / "bootstrap.log"
     with log_to(log), attribute(session=session), pytest.raises(ValueError, match="checksum"):
-        pod.ensure_uv()
+        bootstrap.ensure_uv()
     http.objects[f"/p/sessions/{session}/out/bootstrap.log"] = log.read_bytes()
     journal = BucketJournal(
         Storage(name="test", bucket="test", provider="s3", region="r", prefix="p"),
@@ -557,11 +557,11 @@ def test_completed_workload_before_and_after(
     bootstrap_log = tmp_path / "bootstrap.log"
     with monkeypatch.context() as runtime:
         runtime.setattr("shutil.which", lambda name: None)
-        runtime.setattr(pod, "UV_URL", http.url + "/runtime")
-        runtime.setattr(pod, "UV_SHA256", hashlib.sha256(archive.getvalue()).hexdigest())
-        runtime.setattr(pod, "Path", lambda name: tmp_path / "uv")
+        runtime.setattr(bootstrap, "UV_URL", http.url + "/runtime")
+        runtime.setattr(bootstrap, "UV_SHA256", hashlib.sha256(archive.getvalue()).hexdigest())
+        runtime.setattr(bootstrap, "Path", lambda name: tmp_path / "uv")
         with log_to(bootstrap_log), attribute(session=session):
-            pod.ensure_uv()
+            bootstrap.ensure_uv()
     assert (tmp_path / "uv").read_bytes() == executable
     http.objects["/" + root + "out/bootstrap.log"] = bootstrap_log.read_bytes()
 

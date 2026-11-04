@@ -12,9 +12,11 @@ from typing import Any
 import pytest
 
 from etude.launch.database import Database
+from etude.launch.errors import ProviderUnavailable
 from etude.launch.machines import MachineRequest
-from etude.launch.providers.runpod.api import PodFact, ProviderUnavailable, RunPodAPI
-from etude.launch.providers.runpod.machines import _BOOT, STOCK_IMAGE, RunPodMachines
+from etude.launch.providers.program import boot_source
+from etude.launch.providers.runpod.api import PodFact, RunPodAPI
+from etude.launch.providers.runpod.machines import STOCK_IMAGE, RunPodMachines
 from etude.launch.records import CPU, GPU, BootstrapLinks, LauncherError, MachineTemplate
 from etude.launch.records import Provider as Account
 from etude.launch.storage.s3 import Bucket, Keys
@@ -303,9 +305,10 @@ def test_stock_create_counts_package_reuse_without_waiting_for_ssh(tmp_path: Pat
         assert payload["image"] == STOCK_IMAGE and payload["registry"] == ""
         assert payload["ports"] == ["22/tcp"] and payload["startSsh"] is True
         assert "PUBLIC_KEY" not in payload["env"]  # RunPod injects the account's keys.
-        assert payload["entrypoint"] == ["python3.12", "-c", _BOOT]
-        assert len(_BOOT.encode()) < 512  # below the previously accepted small bootstrap
-        assert len(base64.b64decode(payload["env"]["ETUDE_PROGRAM"])) < 16_000
+        boot = boot_source("etude.launch.providers.runpod.pod")
+        assert payload["entrypoint"] == ["python3.12", "-c", boot]
+        assert len(boot.encode()) < 512  # below the previously accepted small bootstrap
+        assert len(base64.b64decode(payload["env"]["ETUDE_PROGRAM"])) < 32_000
 
 
 def test_one_cpu_rental_quotes_creates_and_deletes_with_pinned_provider_calls(
