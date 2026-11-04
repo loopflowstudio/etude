@@ -14,6 +14,7 @@ from etude.launch.records import BootstrapLinks, Hardware, Offer, Record
 
 
 class Safeguards(Record):
+    reservation_hours: int = 0  # round fallback-timer budget to this many hours
     lifetime: bool = False
     start_command: bool = False
 

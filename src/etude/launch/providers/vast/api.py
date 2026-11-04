@@ -41,6 +41,7 @@ class VastOffer(Record):
     def hardware(self) -> GPU:
         return GPU(
             id=self.gpu_name,
+            count=self.num_gpus,
             min_vcpus=int(self.cpu_cores_effective),
             min_memory_gb=int(self.cpu_ram / 1000),
         )
@@ -53,6 +54,7 @@ class Instance(Record):
     start_date: float = Field(gt=0, allow_inf_nan=False)
     dph_total: Decimal = Field(ge=0, allow_inf_nan=False)
     gpu_name: str
+    num_gpus: int = 1  # previously published receipts represented exactly one GPU
     cpu_cores_effective: Decimal = Field(ge=0, allow_inf_nan=False)
     cpu_ram: Decimal = Field(ge=0, allow_inf_nan=False)
     ssh_host: str | None = None
@@ -62,6 +64,7 @@ class Instance(Record):
     def hardware(self) -> GPU:
         return GPU(
             id=self.gpu_name,
+            count=self.num_gpus,
             min_vcpus=int(self.cpu_cores_effective),
             min_memory_gb=int(self.cpu_ram / 1000),
         )
@@ -174,7 +177,7 @@ class VastAPI(InstanceHTTP):
             "type": "ondemand",
             "order": [["dph_total", "asc"]],
             "gpu_name": {"eq": template.gpu},
-            "num_gpus": {"eq": 1},
+            "num_gpus": {"eq": template.gpu_count},
             "cpu_arch": {"eq": "amd64"},
             "verified": {"eq": True},
             "rentable": {"eq": True},
@@ -196,7 +199,7 @@ class VastAPI(InstanceHTTP):
             offer
             for offer in page.offers
             if offer.gpu_name == template.gpu
-            and offer.num_gpus == 1
+            and offer.num_gpus == template.gpu_count
             and offer.cpu_arch == "amd64"
             and offer.verification == "verified"
             and offer.rentable

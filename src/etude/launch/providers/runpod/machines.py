@@ -40,6 +40,7 @@ class RunPodMachines:
         template = self._template
         return self._api.quote(
             gpu=template.gpu,
+            gpu_count=template.gpu_count,
             vcpus=template.vcpus or 4,
             memory_gb=template.memory_gb or 16,
             data_center=template.data_center,

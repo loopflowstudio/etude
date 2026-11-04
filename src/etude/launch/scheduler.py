@@ -10,7 +10,7 @@ Four rules hold whatever fails:
 
 1. A rental's identity is stored and claimed before the provider is asked for it.
    Only the claimer asks, once. A lost reply is looked up, never asked again.
-2. A rental carries its own deadline and ends itself there with nobody watching.
+2. A rental carries its own deadline and independent best-effort shutdown.
 3. A run's code starts at most once per attempt; its session enforces it.
 4. A rental has ended only on a dated confirmation, never on an empty listing.
 
@@ -27,7 +27,7 @@ import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from pathlib import Path
 from uuid import uuid4
 
@@ -364,7 +364,7 @@ class Scheduler:
             price = offer.usd_per_hour
             life = hours * 3600
             if price > 0 and max_usd is not None:
-                life = min(life, float(max_usd / price * 3600))
+                life = min(life, self._affordable_seconds(supply, price, max_usd))
             if life < 1:
                 raise LauncherError("a rental needs hours, and dollars for at least a second")
             longest = self._longest_rental(supply)
@@ -428,10 +428,7 @@ class Scheduler:
 
     def safeguards(self, ondemand: str) -> tuple[str, ...]:
         """What ends an on-demand's machines if the launcher stops watching."""
-        template = self._store.ondemand(ondemand).template
-        declared = getattr(
-            self._services[self._provider_service(template.provider)], "safeguards", Safeguards()
-        )
+        declared = self._safeguards(self._store.ondemand(ondemand))
         return tuple(
             name
             for enabled, name in (
@@ -562,7 +559,7 @@ class Scheduler:
                 ondemand = self._store.ondemand(placement.supply)
                 life = self._life(ondemand, records, limits, price)
                 seconds = min(life, self._longest_rental(ondemand))
-                most = price * Decimal(seconds) / 3600
+                most = self._rental_cost(ondemand, price, seconds)
             else:
                 most = min(price * Decimal(str(record.spec.max_hours)), _limit_usd(record.spec))
             quoted.append(
@@ -750,7 +747,7 @@ class Scheduler:
         ) / slots
         return min(
             hours * 3600 + ondemand.setup_seconds,
-            float(cap / price * 3600) if price else float("inf"),
+            self._affordable_seconds(ondemand, price, cap),
         )
 
     def _stage(self, ondemand: OnDemand, runs: Sequence[RunRecord]) -> None:
@@ -950,7 +947,9 @@ class Scheduler:
                 hours = Decimal(str(run.spec.max_hours))
                 if held.machine is None and ondemand is not None:
                     hours += Decimal(ondemand.setup_seconds) / 3600
-                cost = held.price * hours
+                    cost = self._rental_cost(ondemand, held.price, hours * 3600)
+                else:
+                    cost = held.price * hours
                 if cost > _limit_usd(run.spec):
                     reason = "job dollars do not cover the hours"
                     held = None
@@ -1483,12 +1482,17 @@ class Scheduler:
                     pending = [r for r in waiting if r.cohort == cohort.name]
                     hours = sum(r.spec.max_hours for r in pending)
                     cap = sum((_limit_usd(r.spec) for r in pending), Decimal(0))
-                    remaining = self._cohort_left(cohort, now)
+                    remaining = self._cohort_left(
+                        cohort, now, renting=bool(self._safeguards(supply).reservation_hours)
+                    )
                     if remaining is not None:
                         cap = min(cap, remaining)
                 life = hours * 3600 / slots + supply.setup_seconds
                 if price > 0:
-                    life = min(life, float(cap / slots / price * 3600))
+                    life = min(life, self._affordable_seconds(supply, price, cap / slots))
+                if life < 1:
+                    self._trouble[supply.name] = "budget cannot cover the provider fallback timer"
+                    return
                 session, rented, rental = self._session(supply, None, price, life, now, kept=False)
             try:
                 self._store.plan(
@@ -1555,6 +1559,30 @@ class Scheduler:
         self._trouble.pop(ondemand.name, None)
         return offer
 
+    def _safeguards(self, supply: OnDemand) -> Safeguards:
+        declared: Safeguards = getattr(
+            self._services[self._provider_service(supply.template.provider)],
+            "safeguards",
+            Safeguards(),
+        )
+        return declared
+
+    def _rental_cost(self, supply: OnDemand, price: Decimal, seconds: float | Decimal) -> Decimal:
+        increment = self._safeguards(supply).reservation_hours
+        hours = (Decimal(str(seconds)) if increment else Decimal(seconds)) / 3600
+        if increment:
+            hours = (hours / increment).to_integral_value(rounding=ROUND_CEILING) * increment
+        return price * hours
+
+    def _affordable_seconds(self, supply: OnDemand, price: Decimal, cap: Decimal) -> float:
+        if not price:
+            return float("inf")
+        hours = cap / price
+        increment = self._safeguards(supply).reservation_hours
+        if increment and hours.is_finite():
+            hours = (hours / increment).to_integral_value(rounding=ROUND_FLOOR) * increment
+        return float(hours * 3600)
+
     def _session(
         self,
         supply: Supply,
@@ -1581,7 +1609,7 @@ class Scheduler:
                 image=template.image
                 or (
                     STOCK_IMAGE
-                    if self._provider_service(template.provider) in {"runpod", "vast"}
+                    if self._provider_service(template.provider) in {"runpod", "vast", "lium"}
                     else None
                 ),
             )
@@ -1589,7 +1617,7 @@ class Scheduler:
             rental = Rental(
                 machine=machine.name,
                 usd_per_hour=price,
-                cap_usd=price * Decimal(life) / 3600,
+                cap_usd=self._rental_cost(supply, price, life),
                 deadline=now + timedelta(seconds=life),
                 kept=kept,
             )
@@ -2251,18 +2279,35 @@ class Scheduler:
         held = {a.session for a in self._store.cohort_attempts(name) if a.outcome is None}
         return sum(1 for id in held if self._live(self._store.session(id), now))
 
-    def _cohort_left(self, cohort: Cohort, now: datetime) -> Decimal | None:
+    def _cohort_left(
+        self, cohort: Cohort, now: datetime, *, renting: bool = False
+    ) -> Decimal | None:
         """Dollars a new attempt may still use: unfinished ones count at their full limit."""
         if cohort.max_usd is None:
             return None
         used = Decimal(0)
+        by_session: dict[str, Decimal] = {}
         for attempt in self._store.cohort_attempts(cohort.name):
+            amount = Decimal(0)
             if attempt.outcome is not None:
-                used += self._attempt_usd(attempt, now, billed=False)
+                amount = self._attempt_usd(attempt, now, billed=False)
+            else:
+                session = self._store.session(attempt.session)
+                if session.refused_at is None:
+                    amount = self._usd_per_hour(session) * attempt.limit_seconds / 3600
+            used += amount
+            if renting:
+                by_session[attempt.session] = by_session.get(attempt.session, Decimal(0)) + amount
+        for id, amount in by_session.items():
+            session = self._store.session(id)
+            rental = self._store.rental_for(session)
+            if rental is None or session.refused_at is not None or session.ended_at is not None:
                 continue
-            session = self._store.session(attempt.session)
-            if session.refused_at is None:
-                used += self._usd_per_hour(session) * attempt.limit_seconds / 3600
+            supply = self._store.ondemand(session.supply)
+            if self._safeguards(supply).reservation_hours:
+                # New rentals cannot spend a short job's fallback reserve while
+                # its machine still exists or its create remains unknown.
+                used += max(Decimal(0), rental.cap_usd - amount)
         return cohort.max_usd - used
 
     def _cohort_spent(self, name: str, now: datetime) -> bool:

@@ -85,14 +85,16 @@ class Provider(Record):
     """
 
     name: str  # what a machine template's `provider` names
-    kind: Literal["runpod", "vast"]
+    kind: Literal["runpod", "vast", "lium"]
     registry: str  # the provider's id for the credential that pulls private images
     storage: str  # the storage a new pool uses unless it names another
 
     @model_validator(mode="after")
     def _registry_supported(self) -> Provider:
-        if self.kind == "vast" and self.registry:
-            raise ValueError("Vast supports public images; registry credentials are not stored")
+        if self.kind in {"vast", "lium"} and self.registry:
+            raise ValueError(
+                f"{self.kind.title()} supports public images; registry credentials are not stored"
+            )
         return self
 
 
@@ -143,25 +145,29 @@ class MachineTemplate(Record):
 
     provider: str  # the name of the provider that supplies them
     gpu: str | None = None  # the provider's name for the GPU, such as "NVIDIA L4"
+    gpu_count: int = Field(default=1, ge=1)
     vcpus: int | None = None
     memory_gb: int | None = None
     disk_gb: int | None = None
     image: Image | None = None
 
     _parse_image = field_validator("image", mode="before")(_image)
-    data_center: str | None = None  # RunPod data center id; Vast country code; None: anywhere
+    data_center: str | None = None  # RunPod data center id; Vast/Lium country code; None: anywhere
 
 
 class GPU(Record):
-    """One GPU of a type, on a host with at least this much CPU and memory."""
+    """An allocation of GPUs with at least this much CPU, memory and known disk."""
 
     id: str  # the provider's GPU type id, such as "NVIDIA L4"
+    count: int = Field(default=1, ge=1)
     min_vcpus: int
     min_memory_gb: int
+    disk_gb: int | None = None
 
     def __str__(self) -> str:
         # The host's CPU and memory are only known as the minimums asked for.
-        return f"{self.id} with at least {self.min_vcpus} vCPUs, {self.min_memory_gb} GB"
+        name = self.id if self.count == 1 else f"{self.count} × {self.id}"
+        return f"{name} with at least {self.min_vcpus} vCPUs, {self.min_memory_gb} GB"
 
 
 class CPU(Record):

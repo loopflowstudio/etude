@@ -478,7 +478,7 @@ def providers() -> None:
 @kind(Kind.ask)
 def provider_set(
     name: str,
-    kind: Annotated[Literal["runpod", "vast"], typer.Option(help="which provider this is")],
+    kind: Annotated[Literal["runpod", "vast", "lium"], typer.Option(help="which provider this is")],
     storage: Annotated[str, typer.Option(help="the storage new pools on this provider use")],
     registry: Annotated[
         str, typer.Option(help="the provider's id for the credential that pulls private images")
@@ -573,6 +573,7 @@ def ondemand_add(
     gpu: Annotated[
         str | None, typer.Option(help="the provider's name for the GPU; omit for CPU machines")
     ] = None,
+    gpu_count: Annotated[int, typer.Option(help="GPUs per machine", min=1)] = 1,
     vcpus: Annotated[int | None, typer.Option(help="minimum virtual CPUs")] = None,
     memory_gb: Annotated[int | None, typer.Option(help="minimum memory")] = None,
     disk_gb: Annotated[int | None, typer.Option(help="disk size")] = None,
@@ -599,6 +600,7 @@ def ondemand_add(
             template=MachineTemplate(
                 provider=provider,
                 gpu=gpu,
+                gpu_count=gpu_count,
                 vcpus=vcpus,
                 memory_gb=memory_gb,
                 disk_gb=disk_gb,

@@ -12,6 +12,7 @@ def test_folder_rules() -> None:
         for path in root.rglob("*.py")
     }
     edges: dict[str, set[str]] = {}
+    providers = {"runpod", "vast", "lium"}
     for module, path in modules.items():
         tree = ast.parse(path.read_text())
         imports: set[str] = set()
@@ -44,7 +45,9 @@ def test_folder_rules() -> None:
                 "etude.launch.client",  # the only composition of provider implementations
             }
         ):
-            assert not any(".runpod" in name or ".vast" in name for name in imports), path
+            assert not any(f".{provider}" in name for name in imports for provider in providers), (
+                path
+            )
             assert not any(
                 isinstance(node, ast.Constant)
                 and isinstance(node.value, str)
@@ -53,8 +56,10 @@ def test_folder_rules() -> None:
                     for part in (
                         "RUNPOD_",
                         "VAST_API_KEY",
+                        "LIUM_API_KEY",
                         "etude.launch.providers.runpod",
                         "etude.launch.providers.vast",
+                        "etude.launch.providers.lium",
                     )
                 )
                 for node in ast.walk(tree)
@@ -81,16 +86,17 @@ def test_folder_rules() -> None:
                 "etude.launch.startup",
                 "etude.launch.machines",
             }, module
-    for provider in ("runpod", "vast"):
-        other = "vast" if provider == "runpod" else "runpod"
+    for provider in providers:
         for module in modules:
             if module.startswith(f"etude.launch.providers.{provider}."):
                 assert not any(
                     name.startswith(f"etude.launch.providers.{other}.")
                     for name in reachable(module)
+                    for other in providers - {provider}
                 ), module
     for entry in (
         "etude.launch.providers.runpod.pod",
+        "etude.launch.providers.lium.pod",
         "etude.launch.providers.vast.instance",
         "etude.launch.providers.bootstrap",
         "etude.launch.providers.package",

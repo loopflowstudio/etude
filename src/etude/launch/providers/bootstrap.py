@@ -1,7 +1,8 @@
 """Standard-library rental bootstrap and independent deadline guardian.
 
-Providers supply self-scoped deletion, budget facts and SSH startup. run() owns
-command dispatch, client installation, console publication and final cleanup.
+RunPod/Vast supply self-scoped deletion, budget facts and SSH startup; Lium uses
+a local watchdog and leaves deletion to provider timers and the controller.
+run() dispatches commands; boot() owns installation, console publication and cleanup.
 """
 
 from __future__ import annotations
@@ -53,7 +54,7 @@ def guard(
     now: Callable[[], datetime] = _now,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> None:
-    """Wait for the deadline, then delete this machine, for as long as that takes."""
+    """Wait for the deadline, then retry the provider's deletion or local stop action."""
     latest = monotonic() + max(0.0, (deadline - now()).total_seconds())
     try:
         left = (deadline - now()).total_seconds()
@@ -141,7 +142,11 @@ def run(
     return 0
 
 
-def boot(module: str, delete_self: Callable[[], None], start_ssh: Callable[[], None]) -> int:
+def boot(
+    module: str,
+    delete_self: Callable[[], None] | None,
+    start_ssh: Callable[[], None] | None,
+) -> int:
     # A readiness handshake makes the guardian precede every download/install.
     env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[3])}
     marker = GUARDIAN_MARKER
@@ -166,7 +171,8 @@ def boot(module: str, delete_self: Callable[[], None], start_ssh: Callable[[], N
             write_log("guardian", "ready; independent deadline active")
             write_log("image", os.environ.get("ETUDE_IMAGE", "image metadata unavailable"))
             startup_timeout()
-            start_ssh()
+            if start_ssh is not None:
+                start_ssh()
             write_log("package download", "ensuring uv")
             ensure_uv()
             write_log("package download", "fetching client")
@@ -211,11 +217,17 @@ def boot(module: str, delete_self: Callable[[], None], start_ssh: Callable[[], N
             write_log("bootstrap exit", "exit status 1")
             return 1
         finally:
-            write_log("cleanup", "requesting machine deletion")
+            write_log(
+                "cleanup",
+                "requesting machine deletion"
+                if delete_self is not None
+                else "provider timer and controller own machine deletion",
+            )
             write_log("bootstrap", CLOSED)
             publishing.set()
             # Publication inherits the explicit log/rental allowance.
             try:
                 publish(log, url)
             finally:
-                delete_self()
+                if delete_self is not None:
+                    delete_self()

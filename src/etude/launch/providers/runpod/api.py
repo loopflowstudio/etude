@@ -55,11 +55,17 @@ class RunPodAPI(PodHTTP):
         return fact
 
     def quote(
-        self, *, gpu: str | None, vcpus: int, memory_gb: int, data_center: str | None = None
+        self,
+        *,
+        gpu: str | None,
+        vcpus: int,
+        memory_gb: int,
+        data_center: str | None = None,
+        gpu_count: int = 1,
     ) -> Quote:
         """The secure-cloud hourly price for one machine, and whether any can be had.
 
-        With a GPU named, one of that type on a host with at least `vcpus` and
+        With a GPU named, `gpu_count` of that type with at least `vcpus` and
         `memory_gb`. Without, the cheapest CPU pod with at least both, preferring
         flavors in stock. With a data center named, only stock there counts.
         """
@@ -78,8 +84,8 @@ class RunPodAPI(PodHTTP):
             raise ProviderUnavailable(f"no price for {gpu}") from None
         if price <= 0:
             raise ProviderUnavailable(f"no price for {gpu}")
-        hardware = GPU(id=gpu, min_vcpus=vcpus, min_memory_gb=memory_gb)
-        return Quote(hardware=hardware, usd_per_hour=price, available=available)
+        hardware = GPU(id=gpu, count=gpu_count, min_vcpus=vcpus, min_memory_gb=memory_gb)
+        return Quote(hardware=hardware, usd_per_hour=price * gpu_count, available=available)
 
     def _cpu_quote(self, vcpus: int, memory_gb: int, data_center: str | None) -> Quote:
         # RunPod rents CPU pods in power-of-two vCPU counts, with memory a fixed
@@ -174,9 +180,9 @@ class RunPodAPI(PodHTTP):
         if isinstance(hardware, GPU):
             payload["gpu"] = {
                 "id": hardware.id,
-                "count": 1,
-                "minRamPerGpu": hardware.min_memory_gb,
-                "minVcpuCountPerGpu": hardware.min_vcpus,
+                "count": hardware.count,
+                "minRamPerGpu": (hardware.min_memory_gb + hardware.count - 1) // hardware.count,
+                "minVcpuCountPerGpu": (hardware.min_vcpus + hardware.count - 1) // hardware.count,
             }
         else:
             payload["cpu"] = {"id": hardware.flavor, "vcpuCount": hardware.vcpus}
