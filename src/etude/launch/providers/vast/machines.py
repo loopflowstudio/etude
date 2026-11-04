@@ -60,10 +60,10 @@ class VastMachines:
             if existing is not None:
                 return existing
             raise ProviderUnavailable("Vast create already attempted; awaiting reconciliation")
-        if self._offers is None:
-            self.offer()
         offers = self._offers
         self._offers = None  # the next acquisition needs current capacity
+        if offers is None:
+            offers = self._api.offers(self._template)
         if not offers:
             raise Refused("no compatible Vast offer with free upload and download")
         # Equivalent offers can have different contract expiry dates. Select one
@@ -83,9 +83,9 @@ class VastMachines:
             raise Refused("no quoted Vast offer covers the requested rental deadline")
         image = self._template.image or STOCK_IMAGE
         env = self._program.prepare(request, image)
-        limits = [d for d in (request.deadline, request.startup_deadline) if d is not None]
+        creation_deadline = min(request.deadline, request.startup_deadline or request.deadline)
         now = datetime.now(UTC)
-        if now >= min(limits):
+        if now >= creation_deadline:
             raise Refused("startup or rental deadline expired; no Vast instance created")
         cost = offer.dph_total * Decimal(str((request.deadline - now).total_seconds())) / 3600
         if cost > request.cap_usd:
@@ -96,7 +96,7 @@ class VastMachines:
             self._key(request.session, "offer"), offer.model_dump_json().encode(), once=True
         )
         check_creation()
-        with limit_time((min(limits) - datetime.now(UTC)).total_seconds()):
+        with limit_time((creation_deadline - datetime.now(UTC)).total_seconds()):
             id = self._api.create(
                 offer,
                 Create(

@@ -74,21 +74,19 @@ class RunPodMachines:
             raise LauncherError("a rented machine needs a storage bootstrap link")
         image = template.image or DEFAULT_IMAGE
         env = self._program.prepare(request, image)
-        limits = [d for d in (request.deadline, request.startup_deadline) if d is not None]
-        if datetime.now(UTC) >= min(limits):
+        creation_deadline = min(request.deadline, request.startup_deadline or request.deadline)
+        if datetime.now(UTC) >= creation_deadline:
             raise Refused(
                 "startup or rental deadline expired during preparation; no machine created"
             )
         check_creation()
-        seconds = (min(limits) - datetime.now(UTC)).total_seconds()
+        seconds = (creation_deadline - datetime.now(UTC)).total_seconds()
         with limit_time(seconds):
             pod = self._api.create(
                 name=f"etude-{request.session}",
                 hardware=quote.hardware,
                 image=image.resolved,
-                registry=self._provider.registry
-                if template.image and template.image.resolved != STOCK_IMAGE
-                else "",
+                registry=self._provider.registry if image.resolved != STOCK_IMAGE else "",
                 env=env,
                 entrypoint=("python3.12", "-c", boot_source("etude.launch.providers.runpod.pod")),
                 disk_gb=template.disk_gb or _disk_gb(quote.hardware),
