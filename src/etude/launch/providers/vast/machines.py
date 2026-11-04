@@ -182,5 +182,7 @@ class VastMachines:
         return datetime.now(UTC) if self._api.instance(current.id) is None else None
 
     def bill(self, session_id: str, now: datetime) -> Bill | None:
-        instance = self._receipt(session_id)
-        return None if instance is None else self._api.bill(instance, now)
+        # Vast's daily charge totals do not establish contiguous settled
+        # coverage. Keep estimates until the provider supplies that evidence;
+        # even confirmed deletion cannot turn a daily date into a watermark.
+        return None

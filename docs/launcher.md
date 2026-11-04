@@ -328,8 +328,12 @@ fallback. No compatible offer leaves queued work waiting.
 The controller retains the selected offer and instance receipt in the session
 folder. Creation is sent once; uncertain replies reconcile by the session label
 across inventory pages. Destruction requires that retained ownership and matching
-provider identity. Charge reconciliation reads Vast's GPU, disk and bandwidth
-total only through the interval the provider reports; missing bills stay unknown.
+provider identity. `VastAPI.charges(instance, now)` reads the reported GPU, disk
+and bandwidth total from the contract's creation day, with inclusive UTC dates.
+Vast's daily aggregates can change and supply no settled-through watermark.
+They never become a `Bill`, even after confirmed deletion; rental cost remains
+estimated until authoritative coverage is available. Reported charges and final
+settlement are distinct.
 
 Vast's `CONTAINER_API_KEY` and `CONTAINER_ID` start a standard-library guardian
 before any client download or install. The account key is never sent to the
