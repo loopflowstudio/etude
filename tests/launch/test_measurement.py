@@ -114,8 +114,8 @@ def test_ask_wait_counts(tmp_path: Path) -> None:
             b.scheduler.wait(id, timeout=0)
         wait = counting.snapshot()
     assert ask == Counts(database=23)  # target: ask records intent without remote effects
-    # Creation snapshots startup policy and loads the pool's delivery/publication policy.
-    assert wait == Counts(provider=4, bucket=1, database=72)  # known debt: wait advances work
+    # Creation also reads provider safeguards for affordable time and the reserved budget.
+    assert wait == Counts(provider=4, bucket=1, database=74)  # known debt: wait advances work
 
 
 def test_cohort_git_and_database_counts(
@@ -145,8 +145,8 @@ def test_cohort_git_and_database_counts(
             10,
             ("numpy", "pydantic", "etude.launch.worker", "etude.launch.scheduler"),
         ),
-        # Client composition includes four Vast modules and shared program preparation.
-        (["pools"], 47, ("numpy", "boto3", "etude.launch.worker")),
+        # Client composition includes four modules each for Vast and Lium.
+        (["pools"], 51, ("numpy", "boto3", "etude.launch.worker")),
         (
             ["worker", "{directory}"],
             32,
