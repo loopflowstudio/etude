@@ -8,14 +8,13 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Literal
 
 from pydantic import Field
 
 from etude.launch.errors import ProviderUnavailable
-from etude.launch.machines import Bill
 from etude.launch.providers.vast.http import InstanceHTTP
 from etude.launch.records import GPU, MachineTemplate, Record
 
@@ -115,6 +114,29 @@ class _Charge(Record):
 
 class _Charges(_Page):
     results: tuple[_Charge, ...]
+
+
+class Charges(Record):
+    """Reported contract total over inclusive UTC dates, not settled coverage.
+
+    Vast can revise a day's aggregate. Neither its last date nor the time we
+    read it establishes that all charges through teardown have been posted.
+    """
+
+    usd: Decimal
+    first_day: date
+    last_day: date
+    observed_at: datetime
+
+
+def _charge_day(timestamp: float) -> date:
+    try:
+        value = datetime.fromtimestamp(timestamp, UTC)
+    except (ValueError, OverflowError, OSError):
+        raise ProviderUnavailable("Vast charge date is outside the supported range") from None
+    if value.time() != datetime.min.time():
+        raise ProviderUnavailable("Vast charge date is not UTC midnight")
+    return value.date()
 
 
 def _read[T: Record](model: type[T], raw: bytes | None) -> T:
@@ -217,11 +239,20 @@ class VastAPI(InstanceHTTP):
             raise ProviderUnavailable("multiple Vast instances have the session label")
         return found[0] if found else None
 
-    def bill(self, instance: Instance, now: datetime) -> Bill | None:
+    def charges(self, instance: Instance, now: datetime) -> Charges | None:
+        """Read all reported charges since the contract's creation day.
+
+        The provider's `day` filter and `start`/`end` fields name UTC dates,
+        including the current, incomplete day. They are not billing watermarks.
+        """
+        if now.tzinfo is None or now < instance.created_at:
+            raise ValueError("charge observation must be aware and after creation")
+        first = instance.created_at.replace(hour=0, minute=0, second=0, microsecond=0)
+        last = now.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
         params = {
             "select_filters": json.dumps(
                 {
-                    "day": {"gte": int(instance.start_date), "lte": int(now.timestamp())},
+                    "day": {"gte": int(first.timestamp()), "lte": int(last.timestamp())},
                     "type": {"in": ["instance"]},
                 }
             ),
@@ -239,8 +270,7 @@ class VastAPI(InstanceHTTP):
         if len(found) != 1:
             raise ProviderUnavailable("duplicate Vast contract charge totals")
         row = found[0]
-        # A partial period must never overwrite earlier unbilled cost. The API's
-        # aggregate reports its coverage; nothing is extrapolated to 'now'.
-        if row.start > instance.start_date or not instance.start_date < row.end <= now.timestamp():
-            return None
-        return Bill(usd=row.amount, through=datetime.fromtimestamp(row.end, UTC))
+        first_day, last_day = _charge_day(row.start), _charge_day(row.end)
+        if not first.date() <= first_day <= last_day <= last.date():
+            raise ProviderUnavailable("Vast charge dates are outside the requested range")
+        return Charges(usd=row.amount, first_day=first_day, last_day=last_day, observed_at=now)
