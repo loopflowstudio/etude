@@ -1,7 +1,8 @@
 """Standard-library rental bootstrap and independent deadline guardian.
 
-Providers supply self-scoped deletion, budget facts and SSH startup. run() owns
-command dispatch, client installation, console publication and final cleanup.
+RunPod/Vast supply self-scoped deletion, budget facts and SSH startup; Lium uses
+a local watchdog and leaves deletion to provider timers and the controller.
+run() dispatches commands; boot() owns installation, console publication and cleanup.
 """
 
 from __future__ import annotations
@@ -53,7 +54,7 @@ def guard(
     now: Callable[[], datetime] = _now,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> None:
-    """Wait for the deadline, then delete this machine, for as long as that takes."""
+    """Wait for the deadline, then retry the provider's deletion or local stop action."""
     latest = monotonic() + max(0.0, (deadline - now()).total_seconds())
     try:
         left = (deadline - now()).total_seconds()
