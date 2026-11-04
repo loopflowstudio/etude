@@ -136,12 +136,13 @@ def test_a_cpu_pod_is_asked_for_by_flavor_and_size_without_a_gpu() -> None:
     assert asked["cpu"] == {"id": "cpu3c", "vcpuCount": 8} and "gpu" not in asked
 
 
-def test_create_sends_one_pinned_request_and_keeps_only_checked_facts() -> None:
+@pytest.mark.parametrize("count", [1, 2, 4])
+def test_create_sends_one_pinned_request_and_keeps_only_checked_facts(count: int) -> None:
     provider = Provider(replies={"POST pods": (200, POD)})
     api = RunPodAPI("key", provider)
     wanted: dict[str, Any] = {
         "name": "etude-7f3a",
-        "hardware": GPU(id="NVIDIA L4", min_vcpus=6, min_memory_gb=48),
+        "hardware": GPU(id="NVIDIA L4", count=count, min_vcpus=6, min_memory_gb=48),
         "registry": "reg1",
         "env": {"ETUDE_SESSION": "etude-7f3a"},
         "disk_gb": 40,
@@ -159,9 +160,9 @@ def test_create_sends_one_pinned_request_and_keeps_only_checked_facts() -> None:
     (asked,) = provider.asked
     assert asked[2]["gpu"] == {
         "id": "NVIDIA L4",
-        "count": 1,
-        "minRamPerGpu": 48,
-        "minVcpuCountPerGpu": 6,
+        "count": count,
+        "minRamPerGpu": {1: 48, 2: 24, 4: 12}[count],
+        "minVcpuCountPerGpu": {1: 6, 2: 3, 4: 2}[count],
     }
     assert asked[2]["cloud"] == "SECURE" and asked[2]["ports"] == ["22/tcp"]
     assert asked[2]["startSsh"] is True

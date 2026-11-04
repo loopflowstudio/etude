@@ -94,7 +94,7 @@ on-demand's `setup_seconds` exceeds that is refused at launch, as is `rent`
 for longer.
 
 The `etude-sdk` package uses Python 3.12 and one shared dependency set for launching and tracking, installed with uv. It runs on this
-computer, SSH hosts, RunPod pods and Vast.ai instances, without any Etude account.
+computer, SSH hosts, RunPod and Lium pods, and Vast.ai instances, without any Etude account.
 
 A **Job** specifies what runs, source commit, config, target and limits. It has
 no seed or machine settings. A **Run** pairs a job with a seed and goes to a
@@ -455,7 +455,7 @@ allows only machines rented by hand.
 A zero limit still permits an explicit `rent`; a positive limit bounds
 concurrent rented windows. Lowering the limit leaves current windows intact.
 The limit and ceiling belong to the on-demand, so every launch that names it shares them.
-Both providers default to the pinned stock image
+All three providers default to the pinned stock image
 `runpod/pytorch@sha256:4d1721e62b56d345c83b4fd6090664be6daf9312caab5b2e76f23d8231941851`.
 It needs Python 3.12 on PATH. uv must also be available; when absent, boot
 fetches uv 0.8.22 for Linux x86_64 and verifies its SHA-256
@@ -467,8 +467,8 @@ The launcher stores its private package in the on-demand's storage under
 checks its digest, installs with `uv sync --frozen` into
 `~/.etude/programs/DIGEST/.venv`, then runs `etude worker --bootstrap URL`.
 Etude is never fetched by package name from an index. The client and each job
-use separate environments. The provider start command contains only a small
-standard-library bootstrap; no Etude files need to be present in the image.
+use separate environments. RunPod/Vast start commands and Lium's SSH start carry
+a small standard-library bootstrap; no Etude files need to be present in the image.
 
 An on-demand's `--image` or `etude ondemand image` selects a user's own pinned image for
 training dependencies installed ahead of time. It must meet the same Python
