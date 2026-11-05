@@ -27,7 +27,7 @@ from etude.launch.providers.bootstrap import guard
 from etude.launch.providers.cleanup import command
 from etude.launch.providers.vast.api import Create, Instance, VastAPI
 from etude.launch.providers.vast.instance import GuardianAPI
-from etude.launch.providers.vast.machines import VastMachines
+from etude.launch.providers.vast.machines import OUTAGE_SECONDS, Outage, VastMachines
 from etude.launch.records import (
     GPU,
     STOCK_IMAGE,
@@ -145,11 +145,13 @@ class Marketplace:
         return 200, json.dumps(reply).encode()
 
 
-def machines(market: Marketplace, storage: Storage) -> VastMachines:
+def machines(
+    market: Marketplace, storage: Storage, now: Callable[[], datetime] = lambda: datetime.now(UTC)
+) -> VastMachines:
     bucket = Bucket(
         "journal", "us-west-2", Keys(access_key="fixture", secret_key="fixture"), storage
     )
-    return VastMachines(TEMPLATE, VastAPI("fixture-account-key", market), bucket, "test")
+    return VastMachines(TEMPLATE, VastAPI("fixture-account-key", market), bucket, "test", now)
 
 
 def request() -> MachineRequest:
@@ -572,6 +574,69 @@ def test_vast_cohort_uses_the_worker_and_retains_outputs_before_deletion(
             assert not worker.is_alive(), "fixture worker did not terminate"
         store.close()
     assert errors == []
+
+
+def rented(market: Marketplace, storage: Storage, clock: Clock) -> VastMachines:
+    market.instances[12] = INSTANCE.copy()
+    machine = machines(market, storage, clock)
+    machine._keep("session", Instance.model_validate(INSTANCE))
+    return machine
+
+
+@pytest.mark.parametrize("status", ["offline", "exited", "stopped", "error"])
+def test_one_unhealthy_read_keeps_a_rental_and_its_disk(status: str) -> None:
+    market, clock = Marketplace(), Clock()
+    machine = rented(market, Storage(), clock)
+    market.instances[12]["actual_status"] = status
+    assert machine.alive("session")
+    clock.advance(OUTAGE_SECONDS - 1)
+    assert machine.alive("session")
+    market.instances[12]["actual_status"] = "running"
+    assert machine.alive("session")
+    assert 12 in market.instances
+
+
+def test_a_transient_missing_read_keeps_a_rental() -> None:
+    market, clock = Marketplace(), Clock()
+    machine = rented(market, Storage(), clock)
+    held = market.instances.pop(12)
+    assert machine.alive("session")
+    market.instances[12] = held
+    assert machine.alive("session")
+
+
+def test_a_rental_is_lost_once_its_outage_lasts_and_retains_the_cause() -> None:
+    market, clock, storage = Marketplace(), Clock(), Storage()
+    machine = rented(market, storage, clock)
+    market.instances[12]["actual_status"] = "offline"
+    assert machine.alive("session")
+    clock.advance(OUTAGE_SECONDS)
+    assert not machine.alive("session")
+    outage = Outage.model_validate_json(storage.objects["test/sessions/session/outage.json"])
+    assert outage.status == "offline"
+    assert outage.first_seen == clock.now - timedelta(seconds=OUTAGE_SECONDS)
+
+
+def test_recovery_restarts_the_outage_allowance() -> None:
+    market, clock = Marketplace(), Clock()
+    machine = rented(market, Storage(), clock)
+    market.instances[12]["actual_status"] = "offline"
+    assert machine.alive("session")
+    clock.advance(OUTAGE_SECONDS - 1)
+    market.instances[12]["actual_status"] = "running"
+    assert machine.alive("session")
+    market.instances[12]["actual_status"] = "offline"
+    clock.advance(OUTAGE_SECONDS - 1)
+    assert machine.alive("session")
+    clock.advance(1)
+    assert machine.alive("session")
+
+
+def test_a_destroyed_rental_is_lost_at_once() -> None:
+    market, clock = Marketplace(), Clock()
+    machine = rented(market, Storage(), clock)
+    market.instances[12]["actual_status"] = "destroyed"
+    assert not machine.alive("session")
 
 
 def test_a_matching_label_without_an_etude_acquisition_is_not_owned() -> None:
