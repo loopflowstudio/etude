@@ -345,17 +345,14 @@ class BucketJournal:
             record = self._record(session_id, run, attempt)
             if record is None:
                 continue  # not started, or its first report has not arrived
-            if record.exited is not None and record.delivered:
-                done = progress_from_json(record.exited, attempt, record.started_at)
-                self._finished[attempt] = done
-                progress.append(done)
-                continue
             log_bytes = record.log_ends[-1] if record.log_ends else 0
             if record.exited is not None:
-                exited = progress_from_json(record.exited, attempt, record.started_at)
-                progress.append(
-                    exited.model_copy(update={"delivered": False, "log_bytes": log_bytes})
-                )
+                done = progress_from_json(record.exited, attempt, record.started_at)
+                if record.delivered:
+                    self._finished[attempt] = done  # complete: never read again
+                else:
+                    done = done.model_copy(update={"delivered": False, "log_bytes": log_bytes})
+                progress.append(done)
                 continue
             progress.append(
                 Progress(
