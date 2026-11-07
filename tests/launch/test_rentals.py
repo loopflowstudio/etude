@@ -91,9 +91,10 @@ def test_machine_allocation_outlives_its_session(tmp_path: Path) -> None:
         (b.clock.now.isoformat(), attempt.session),
     )
     b.store._db.execute("UPDATE attempts SET session='earlier' WHERE id=?", (attempt.id,))
+    ondemand = b.store.ondemand("l4")
     counting = Counting(b.store, b.service)
     with counting.record():
-        assert b.scheduler._idle_sessions("l4", b.clock.now) == []
+        assert b.scheduler._idle_sessions(ondemand, b.clock.now) == []
     assert counting.snapshot() == Counts(database=3)
     assert b.store.machine_busy(machine)
 
@@ -121,12 +122,14 @@ def test_a_version_10_database_is_upgraded_in_place_keeping_its_rows(tmp_path: P
     Database(path).close()
     with sqlite3.connect(path) as db:
         db.execute("ALTER TABLE attempts DROP COLUMN prepared")
+        db.execute("ALTER TABLE pools DROP COLUMN slots")
         db.execute("INSERT INTO settings VALUES ('kept', 'from version 10')")
         db.execute("PRAGMA user_version = 10")
     Database(path).close()
     with sqlite3.connect(path) as db:
-        assert db.execute("PRAGMA user_version").fetchone() == (11,)
+        assert db.execute("PRAGMA user_version").fetchone() == (12,)
         assert "prepared" in {row[1] for row in db.execute("PRAGMA table_info(attempts)")}
+        assert "slots" in {row[1] for row in db.execute("PRAGMA table_info(pools)")}
         assert db.execute("SELECT value FROM settings WHERE name = 'kept'").fetchone() == (
             "from version 10",
         )

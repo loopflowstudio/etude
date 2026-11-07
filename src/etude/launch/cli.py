@@ -529,6 +529,9 @@ DeliverySeconds = Annotated[
     float, typer.Option(min=0, help="final delivery allowance; 0 disables it")
 ]
 LogSeconds = Annotated[float, typer.Option(min=0, help="log publication allowance; 0 disables it")]
+Slots = Annotated[
+    int, typer.Option(min=1, help="runs at once on each machine, sharing its GPUs and CPUs")
+]
 
 
 @pool_app.command("add")
@@ -538,6 +541,7 @@ def pool_add(
     startup_seconds: StartupSeconds = 0,
     delivery_seconds: DeliverySeconds = 0,
     log_seconds: LogSeconds = 0,
+    slots: Slots = 1,
 ) -> None:
     """Add a pool: a named set of machines you own that runs are sent to."""
     from etude.launch.records import Pool
@@ -548,6 +552,7 @@ def pool_add(
             startup_seconds=startup_seconds or None,
             delivery_seconds=delivery_seconds or None,
             log_seconds=log_seconds or None,
+            slots=slots,
         )
     )
     pools()
@@ -590,6 +595,7 @@ def ondemand_add(
     startup_seconds: StartupSeconds = 0,
     delivery_seconds: DeliverySeconds = 0,
     log_seconds: LogSeconds = 0,
+    slots: Slots = 1,
 ) -> None:
     """Add an on-demand: a machine template to rent and a budget for renting it."""
     from etude.launch.records import Image, MachineTemplate, OnDemand
@@ -613,6 +619,7 @@ def ondemand_add(
             delivery_seconds=delivery_seconds or None,
             log_seconds=log_seconds or None,
             storage=storage,
+            slots=slots,
         )
     )
     ondemands()

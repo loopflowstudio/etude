@@ -51,7 +51,8 @@ def show_pools(scheduler: Scheduler) -> None:
     for each in scheduler.pools():
         owned = ", ".join(_machine_name(m) for m in scheduler.machines(each.name))
         marks = _marks(scheduler, each.name) + (" (off)" if each.off else "")
-        print(each.name, (owned or "no machines") + marks, sep="  ")
+        slots = f"; {each.slots} runs at once on each" if each.slots > 1 else ""
+        print(each.name, (owned or "no machines") + slots + marks, sep="  ")
 
 
 def show_ondemands(scheduler: Scheduler) -> None:
@@ -66,6 +67,8 @@ def show_ondemands(scheduler: Scheduler) -> None:
             f" under ${each.max_usd_per_hour}/hour" if each.max_usd_per_hour is not None else ""
         )
         parts = [f"{kind} on {source}", f"up to {each.max_machines} at once{ceiling}"]
+        if each.slots > 1:
+            parts.append(f"{each.slots} runs at once on each")
         rented = [m.name for m in scheduler.machines(each.name) if m.deleted_at is None]
         if rented:
             parts.append("rented: " + ", ".join(rented))
@@ -129,6 +132,10 @@ def show_quote(quote: Quote) -> None:
             )
         else:
             where = f"rent {each.hardware or 'a machine'} at ${each.usd_per_hour}/hour"
+        if each.slots > 1:
+            where += f", {each.slots} slots"
+            if each.alongside:
+                where += " with " + ", ".join(each.alongside)
         print(each.run, where, f"planned rental cost ${each.max_usd:.2f}", sep="  ")
     print(f"planned first-wave rental cost: ${quote.max_usd:.2f}; nothing rented")
     if quote.limit_usd is not None:
