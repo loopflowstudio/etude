@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import time
 from decimal import Decimal
@@ -309,6 +310,37 @@ def test_a_launched_pass_ships_its_checkpoints_and_is_not_launched_twice(
     launcher.outcome = "failed"
     with pytest.raises(EtudeError, match="launched_pass_failed"):
         advance(eval_, source=bucket, rent="cpu8", directory=local)
+
+
+def test_a_failed_launched_pass_stops_only_a_pass_wanting_its_matches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import etude.launch.client as client  # noqa: PLC0415
+
+    launcher = _Launcher()
+    monkeypatch.setattr(client, "launch", launcher.launch)
+    monkeypatch.setattr(client, "status", launcher.status)
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    local = tmp_path / "evaluator"
+    (local / "experiments").mkdir(parents=True)
+    # Another experiment's failed pass shares this computer's ledger.
+    (local / "experiments" / "launched.json").write_text(
+        json.dumps([{"run": "other-experiment", "matches": ["0" * 64]}])
+    )
+    launcher.outcome = "failed"
+    eval_ = design(tmp_path)
+    training = trainer(bucket, tmp_path)
+    save(training, bucket, tmp_path, range(1, 5))
+
+    (first,) = advance(eval_, source=bucket, rent="cpu8", directory=local)
+    assert first.launched is not None
+
+    # Now that pass failed too, and what it was given is still wanted.
+    with pytest.raises(EtudeError, match="launched_pass_failed"):
+        advance(eval_, source=bucket, rent="cpu8", directory=local)
+    (again,) = advance(eval_, source=bucket, rent="cpu8", directory=local, retry_failed=True)
+    assert again.launched == f"{first.launched}-2"
+    assert [str(run.id) for run in launcher.launched] == [first.launched, again.launched]
 
 
 def test_a_pass_job_launched_as_given_is_refused_on_the_machine(tmp_path: Path) -> None:

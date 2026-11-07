@@ -100,6 +100,11 @@ Reach = Callable[[Machine | OnDemand], Execution]
 # An input's file that is gone or does not match its record ends the attempt
 # instead, in `_relay`; a retry's restore set waits on either.
 _RELAY_WAITS = (OSError, Mismatch, LauncherError, StorageUnavailable)
+# How often a pass may fetch a running job's log. Reading it over SSH sends it all.
+_JOB_LOG_SECONDS = 30.0
+# A session's last log read without a supply's `log_seconds`: one stalled bucket
+# must not hold the pass that ends every other machine.
+_FINAL_LOG_SECONDS = 30.0
 
 
 def _limit_usd(job: Job) -> Decimal:
@@ -195,6 +200,8 @@ class Scheduler:
         self._services = dict(services)  # by service name: a machine kind or a provider kind
         self._reached: dict[tuple[str, str, str | None], Execution] = {}
         self._trouble: dict[str, str] = {}  # why a pool or on-demand could not place work
+        # By attempt: how much of a running job's log was stored when last fetched, and when.
+        self._job_logs: dict[str, tuple[int, datetime]] = {}
         self._grants: dict[str, float] = {}  # by storage: a storage never changes once added
         self._relayed: set[str] = set()  # attempts handed their run's folder by this process
         self._clock = clock
@@ -1326,6 +1333,7 @@ class Scheduler:
             cause=None,
             until=record.spec.until,
             clocks={} if last is None else last.clocks,
+            tally=None if last is None else last.tally,
             usd=sum((self._attempt_usd(a, now) for a in attempts), Decimal(0)),
             attempts=len(attempts),
             machine=None if last is None else last.machine,
@@ -1363,8 +1371,13 @@ class Scheduler:
             return seen.model_copy(update={"phase": "done", "outcome": "over_budget"})
         hours, dollars = self._remaining(record, now)
         if hours < 1 or dollars <= 0:
+            # A retry cannot fit: say what ended the last attempt beside why no other follows.
             return seen.model_copy(
-                update={"phase": "done", "outcome": "out_of_time" if hours < 1 else "over_budget"}
+                update={
+                    "phase": "done",
+                    "outcome": "out_of_time" if hours < 1 else "over_budget",
+                    "cause": None if last is None else last.cause,
+                }
             )
         if last is not None:
             return seen.model_copy(update={"reason": f"retrying after {last.cause}"})
@@ -2131,10 +2144,31 @@ class Scheduler:
                     now,
                     unknown_start=seen.start_unknown,
                 )
+        for entry in seen.progress:
+            self._retain_job_log(session, entry, now)
         open_attempts = any(a.outcome is None for a in self._store.attempts(session=session.id))
         finished = not open_attempts and rental is None
         if finished or (deadline is not None and now >= deadline):
             self._end_session(session)
+
+    def _retain_job_log(self, session: Session, seen: Progress, now: datetime) -> None:
+        """Keep what a running job has printed, so `etude logs`, a read, can show it.
+
+        Fetches only when more of the log is stored, at most every
+        `_JOB_LOG_SECONDS`. Each stored piece is read once per controller.
+        """
+        size, at = self._job_logs.get(seen.attempt, (0, None))
+        if seen.log_bytes == size:
+            return
+        if at is not None and (now - at).total_seconds() < _JOB_LOG_SECONDS:
+            return
+        self._job_logs[seen.attempt] = (seen.log_bytes, now)
+        self._collect_log(session, seen.attempt, "job")
+
+    def _final_logs(self, session: Session) -> None:
+        """Retain each producer's last output, within the supply's `log_seconds`."""
+        allowance = self._store.supply(session.supply).log_seconds or _FINAL_LOG_SECONDS
+        self._collect_logs((session,), self._store.attempts(session=session.id), allowance)
 
     def _end_session(self, session: Session) -> None:
         """Confirm shutdown, retain final evidence, then settle any unfinished attempts."""
@@ -2146,7 +2180,7 @@ class Scheduler:
                 gone = service.end(session.id)
             except Exception as error:
                 self._diagnose("cleanup", "machine deletion unconfirmed", error, session=session.id)
-                self._collect_logs((session,), self._store.attempts(session=session.id), 2)
+                self._final_logs(session)
                 raise
             if gone is None:
                 self._diagnose("cleanup", "machine deletion unconfirmed", session=session.id)
@@ -2155,7 +2189,7 @@ class Scheduler:
             self._diagnose("cleanup", "machine deletion confirmed", session=session.id)
         # Nothing more will be written. Take what the journal holds now, and
         # count any attempt still open as lost with the machine.
-        self._collect_logs((session,), self._store.attempts(session=session.id), 2)
+        self._final_logs(session)
         final = self._read_journal(session, service)
         progress = {entry.attempt: entry for entry in final.progress}
         for attempt in self._store.attempts(session=session.id):
@@ -2186,7 +2220,12 @@ class Scheduler:
                 update={"started_at": started, "version": attempt.version + 1}
             )
         run = self._store.run(attempt.run)
-        if seen is not None and seen.finished_at is not None and seen.outcome is not None:
+        if (
+            seen is not None
+            and seen.finished_at is not None
+            and seen.outcome is not None
+            and (seen.delivered or not alive)
+        ):
             outcome = seen.outcome
             if outcome == "cancelled" and run.cancel_requested_at is None:
                 outcome = "over_budget"
@@ -2199,10 +2238,12 @@ class Scheduler:
                 outputs=seen.outputs,
                 exit_code=seen.exit_code,
                 prepared=seen.prepared,
+                tally=seen.tally,
             )
             self._diagnose(
                 "execution",
-                f"attempt finished: {outcome}; exit status {seen.exit_code if seen.exit_code is not None else 'not received'}",
+                f"attempt finished: {outcome}; exit status {seen.exit_code if seen.exit_code is not None else 'not received'}"
+                + ("" if seen.delivered else "; its files were not confirmed stored"),
                 session=session.id,
                 attempt=attempt.id,
                 exit_code=seen.exit_code,
@@ -2224,6 +2265,7 @@ class Scheduler:
                 clocks=seen.clocks if seen else attempt.clocks,
                 outputs=seen.outputs if seen else attempt.outputs,
                 prepared=seen.prepared if seen else None,
+                tally=seen.tally if seen else attempt.tally,
             )
             self._diagnose(
                 "execution",
@@ -2233,7 +2275,7 @@ class Scheduler:
             )
         else:
             if seen is not None:
-                self._store.record_progress(attempt, seen.clocks)
+                self._store.record_progress(attempt, seen.clocks, seen.tally)
             if run.cancel_requested_at is not None or self._remaining(run, now)[1] <= 0:
                 self._service(session).stop(session.id, attempt.id)
 

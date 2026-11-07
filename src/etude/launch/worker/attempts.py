@@ -25,7 +25,8 @@ ETUDE_UNTIL_CLOCK, ETUDE_UNTIL_VALUE, ETUDE_INPUTS_DIR, ETUDE_TRACK_DIR,
 ETUDE_EXPERIMENT, ETUDE_CONFIG and, after a preparation (`etude.launch.worker.prepared`),
 ETUDE_PREPARED_DIR, and may report its progress in
 `etude-result.json` in its output directory as
-`{"clocks": {"steps": 63000, "wall_time_ms": 5400000}}`.
+`{"clocks": {"steps": 63000, "wall_time_ms": 5400000}}`, with a `tally`
+(`etude.launch.records.Tally`) when it counts its work.
 ETUDE_UNTIL_CLOCK and ETUDE_UNTIL_VALUE are the job's target.
 """
 
@@ -90,6 +91,7 @@ def _finish(
         outcome=outcome,
         cause=cause,
         clocks=result.clocks,
+        tally=result.tally,
         exit_code=code,
         prepared=Prepared.model_validate_json(prepared.read_text()) if prepared.exists() else None,
         outputs=tuple(

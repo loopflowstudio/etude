@@ -15,6 +15,8 @@ Staged matches are sealed into a block every few minutes, on a failure and on
 finish, and each block is offered to every destination once sealed: a run
 delivers a few objects per block, never one per match or blob. SIGTERM, as
 the launcher's termination sends, seals what is staged before the run ends.
+Under `etude launch` a run also says how far it has got (`_Report`), for
+`etude status`.
 
 A resume reads the blocks already delivered to any destination, so a
 machine with an empty disk skips what was delivered. Workers are fresh
@@ -23,12 +25,15 @@ processes (`spawn`), so `play` must be importable by name.
 
 from __future__ import annotations
 
+import json
 import multiprocessing
+import os
 import secrets
 import signal
 import sys
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from contextlib import contextmanager
@@ -72,6 +77,11 @@ if TYPE_CHECKING:
     import duckdb
 
 KIND = "evaluation"
+# A running eval run says how far it has got at most this often: each report
+# becomes one write to the run's attempt record in storage.
+_REPORT_SECONDS = 15.0
+# Matches a recent pace is taken over.
+_PACE_MATCHES = 50
 # Etude's own tables, which `etude.eval.query.statsdb` keeps beside the author's.
 ETUDE_TABLES = (
     "runs",
@@ -175,12 +185,15 @@ def evaluate(
     )
     pending = [scheduled for scheduled in matches if scheduled.key not in writer.done]
     started = time.monotonic()
+    report = _Report(total=len(matches), done=len(matches) - len(pending))
+    report.write()
     try:
         with _terminable():
             for count, (scheduled, outcome) in enumerate(_played(pending, play, workers), 1):
                 if isinstance(outcome, BaseException):
                     writer.fail(scheduled, outcome)
                 writer.store(scheduled, outcome)
+                report.played()
                 print(
                     f"etude: {declared.name}: {count}/{len(pending)} matches played,"
                     f" {time.monotonic() - started:.0f}s elapsed",
@@ -189,8 +202,10 @@ def evaluate(
                 )
     except BaseException:
         writer.finish("failed")
+        report.write(failed=writer.failed)
         raise
     writer.finish("finished")
+    report.write()
     return EvalRun(
         experiment=experiment,
         name=declared.name,
@@ -198,6 +213,45 @@ def evaluate(
         played=len(pending),
         skipped=len(matches) - len(pending),
     )
+
+
+class _Report:
+    """Under `etude launch`, how far the eval run has got, for the launcher's status.
+
+    `etude-result.json` in `ETUDE_OUTPUT_DIR` holds a tally, the shape of
+    `etude.launch.records.Tally`; evaluation does not import the launcher.
+    It is progress only: results are the run's blocks.
+    """
+
+    def __init__(self, *, total: int, done: int) -> None:
+        self.total, self.done = total, done
+        self.outputs = os.environ.get("ETUDE_OUTPUT_DIR")
+        self.recent: deque[float] = deque(maxlen=_PACE_MATCHES)
+        self.written = time.monotonic()
+
+    def played(self) -> None:
+        """Count one stored match, and report when the last report is old enough."""
+        self.done += 1
+        now = time.monotonic()
+        self.recent.append(now)
+        if now - self.written >= _REPORT_SECONDS:
+            self.write()
+
+    def write(self, *, failed: int = 0) -> None:
+        if self.outputs is None:
+            return
+        elapsed = self.recent[-1] - self.recent[0] if self.recent else 0.0
+        tally = {
+            "unit": "matches",
+            "done": self.done,
+            "total": self.total,
+            "failed": failed,
+            "per_hour": (len(self.recent) - 1) / elapsed * 3600 if elapsed > 0 else None,
+        }
+        DirectoryStorage(Path(self.outputs)).put(
+            "etude-result.json", json.dumps({"tally": tally}).encode()
+        )
+        self.written = time.monotonic()
 
 
 class Terminated(Exception):
@@ -280,6 +334,7 @@ class _Writer:
         self.rollups = rollups
         self.id = secrets.token_hex(6)
         self.problems: dict[str, str] = {}
+        self.failed = 0  # `fail` is also how `store` refuses a match
         self.db: duckdb.DuckDBPyConnection = duckdb.connect()
         seal_abandoned(root, self.db)
         self.staging = Staging(root, self.id, rollups)
@@ -314,6 +369,7 @@ class _Writer:
 
     def fail(self, scheduled: Match, error: BaseException) -> NoReturn:
         detail = f"{type(error).__name__}: {error}"[:2000]
+        self.failed += 1
         self.staging.stage(
             MatchRecord(match=scheduled, state="failed", error=detail, wall_ms=_now_ms())
         )

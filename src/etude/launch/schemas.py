@@ -24,6 +24,7 @@ from etude.launch.records import (
     Prepared,
     Record,
     Runtime,
+    Tally,
     Variable,
 )
 from etude.launch.storage.download import Download
@@ -86,6 +87,12 @@ class Progress(Record):
     outputs: tuple[Output, ...]
     exit_code: int | None
     prepared: Prepared | None = None
+    tally: Tally | None = None
+    # False when the job's end is known but its files are not confirmed stored:
+    # the launcher waits for them while the machine lives, and settles without them after.
+    delivered: bool = True
+    # Bytes of the job's log stored so far, so a reader fetches only when it grew.
+    log_bytes: int = 0
 
 
 class Observation(Record):
@@ -106,6 +113,7 @@ class Result(Record):
     """`etude-result.json`: the progress a job reports, where each of its clocks stands."""
 
     clocks: dict[str, FiniteFloat] = Field(default_factory=dict)
+    tally: Tally | None = None
 
 
 class Bootstrap(Record):
@@ -129,7 +137,10 @@ class AttemptRecord(Record):
     """`<run>/attempts/<attempt>.json`: one attempt as far as it has got.
 
     Rewritten as it moves: started, reporting progress, then finished, with
-    `finished` holding the worker's final journal entry. `log_ends` names the
+    `finished` holding the worker's final journal entry once the attempt's
+    files are stored. `exited` holds the same entry from the moment it exists,
+    before any file is sent, so a delivery that never completes cannot hide
+    how the job ended. `log_ends` names the
     stored pieces of what the job printed (`log_piece`) by where each ends, in
     bytes; it is None until the job's log exists. A piece is stored before the
     record that names it, so a reader of the record finds every piece it names.
@@ -137,6 +148,7 @@ class AttemptRecord(Record):
 
     started_at: datetime | None = None
     result: Result = Field(default_factory=Result)
+    exited: dict[str, JsonValue] | None = None
     finished: dict[str, JsonValue] | None = None
     log_ends: tuple[int, ...] | None = None
 

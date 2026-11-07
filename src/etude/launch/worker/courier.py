@@ -187,6 +187,7 @@ class Courier:
         self._runs = {run: _Folder(grant, send) for run, grant in (runs or {}).items()}
         self._sent: dict[str, tuple[int, float]] = {}
         self._logs: dict[str, _Log] = {}
+        self._delivered: set[str] = set()  # attempts whose completion record is stored
         self._console_position = 0
         self._console = Console("worker output")
         self._inbox: Version | None = None  # the inbox as last read
@@ -389,7 +390,10 @@ class Courier:
 
         `final` seals every tail now. The session's console is read only as far
         as complete lines; its owner collects the rest once the session exits.
+        An attempt that cannot be carried raises after the others, the worker's
+        log and usage are: that log is where its failure is told.
         """
+        failure: Exception | None = None
         with observe(self._retain_transfer), attribute(session=self._home.name):
             self.carry_console()
             attempts = self._home / "attempts"
@@ -403,10 +407,12 @@ class Courier:
                         self._carry_attempt(home, final)
                 except (StorageUnavailable, OSError, ValueError) as error:
                     _diagnose("output delivery", error, home.name)
-                    raise
+                    failure = failure or error
             with attribute(purpose="control"):
                 self._carry_worker_log(final)
         self._carry_usage()
+        if failure is not None:
+            raise failure
 
     def _carry_worker_log(self, final: bool) -> None:
         """Seal the worker's new output as pieces, then the record naming them."""
@@ -440,16 +446,23 @@ class Courier:
                 self._console.write(b"", final=True)
 
     def _carry_attempt(self, home: Path, final: bool) -> None:
-        """Publish an attempt's files before its completion record."""
+        """Publish how an attempt ended, then its files, then its completion record."""
         run, attempt = (home / "run").read_text(), home.name
         done = (home / "finished.json").exists()
-        claim = home / "claim"
-        record = AttemptRecord(
-            started_at=datetime.fromisoformat(claim.read_text()) if claim.exists() else None
+        claim, outputs = home / "claim", home / "outputs"
+        entry: dict[str, JsonValue] | None = (
+            json.loads((home / "finished.json").read_text()) if done else None
         )
-        outputs = home / "outputs"
-        if (outputs / RESULT).exists():
-            record = record.model_copy(update={"result": read_result(outputs)})
+        carried = self._logs.get(attempt)
+        record = AttemptRecord(
+            started_at=datetime.fromisoformat(claim.read_text()) if claim.exists() else None,
+            result=read_result(outputs),
+            exited=entry,
+            log_ends=None if carried is None else carried.ends,
+        )
+        if done and attempt not in self._delivered:
+            # Before any file: what fails below must not hide how the job ended.
+            self._note(home, run, attempt, record)
         self._track(run, done or final)
         if (home / "log").exists():
             log = self._logs.setdefault(attempt, _Log(time.monotonic()))
@@ -467,8 +480,13 @@ class Courier:
                 name = path.relative_to(outputs).as_posix()
                 if name != RESULT:  # the record carries it
                     self._put(path, run, f"attempts/{attempt}/{name}")
-            finished: dict[str, JsonValue] = json.loads((home / "finished.json").read_text())
-            record = record.model_copy(update={"finished": finished})
+            record = record.model_copy(update={"finished": entry})
+        self._note(home, run, attempt, record)
+        if done:
+            self._delivered.add(attempt)
+
+    def _note(self, home: Path, run: str, attempt: str, record: AttemptRecord) -> None:
+        """Store the attempt's record, when it changed."""
         note = home / "record.json"
         content = record.model_dump_json()
         if not note.exists() or note.read_text() != content:

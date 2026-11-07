@@ -350,6 +350,13 @@ class BucketJournal:
                 self._finished[attempt] = done
                 progress.append(done)
                 continue
+            log_bytes = record.log_ends[-1] if record.log_ends else 0
+            if record.exited is not None:
+                exited = progress_from_json(record.exited, attempt, record.started_at)
+                progress.append(
+                    exited.model_copy(update={"delivered": False, "log_bytes": log_bytes})
+                )
+                continue
             progress.append(
                 Progress(
                     attempt=attempt,
@@ -360,6 +367,8 @@ class BucketJournal:
                     clocks=record.result.clocks,
                     outputs=(),
                     exit_code=None,
+                    tally=record.result.tally,
+                    log_bytes=log_bytes,
                 )
             )
         return Observation(

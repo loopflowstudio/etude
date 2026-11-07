@@ -606,6 +606,32 @@ class Prepared(Record):
     cause: str | None = None  # why a kept directory was rejected
 
 
+class Tally(Record):
+    """How far a job has got through work it counted, as the job last reported it.
+
+    A clock says where a job stands; a tally also says how much there is, so
+    it gives a fraction and, with a recent pace, a time left.
+    """
+
+    unit: str  # what is counted, plural: "matches"
+    done: int = Field(ge=0)
+    total: int = Field(ge=0)
+    failed: int = Field(default=0, ge=0)
+    # Recent pace, in `unit` per hour; None until the job has seen enough to say.
+    per_hour: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+
+    def __str__(self) -> str:
+        said = f"{self.done}/{self.total} {self.unit}"
+        if self.failed:
+            said += f" ({self.failed} failed)"
+        left = self.total - self.done - self.failed
+        if self.per_hour is not None and left > 0:
+            hours = left / self.per_hour
+            when = f"{hours:.1f} hours" if hours >= 1 else f"{max(1, round(hours * 60))} minutes"
+            said += f", {self.per_hour:.0f}/hour, ~{when} left"
+        return said
+
+
 class RunAttempt(Record):
     """Allocation of one run to one machine for a bounded execution window.
 
@@ -633,6 +659,7 @@ class RunAttempt(Record):
     planned_at: datetime | None = None
     added: bool = False  # placed on a session that already existed
     prepared: Prepared | None = None  # from the finished journal, when the job prepares
+    tally: Tally | None = None  # where the job last said its counted work stood
 
 
 class Status(Record):
@@ -653,6 +680,7 @@ class Status(Record):
     hardware: Hardware | None = None
     estimated: bool = False
     shared: int = 1  # most runs on the latest attempt's machine at once during it
+    tally: Tally | None = None
 
     @property
     def done(self) -> bool:
@@ -667,6 +695,10 @@ class Status(Record):
             head = self.phase
         clock = parse_target(self.until)[0] if self.until else next(iter(self.clocks), None)
         at = f", {clock} {number(self.clocks[clock])}" if clock in self.clocks else ""
+        if self.tally is not None:
+            # A finished job has no time left to give, whatever its last pace.
+            shown = self.tally.model_copy(update={"per_hour": None}) if self.done else self.tally
+            at += f", {shown}"
         shared = f", shared by {self.shared} runs" if self.shared > 1 else ""
         return f"{head}{at}{shared}, {'~' if self.estimated else ''}${self.usd:.2f}"
 

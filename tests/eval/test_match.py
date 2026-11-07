@@ -31,6 +31,7 @@ from etude.eval.records import (
     Model,
     Player,
 )
+from etude.launch.storage.files import read_result
 from etude.run.errors import EtudeError
 from etude.run.records import ArtifactRef
 from etude.run.storage import DirectoryStorage, S3Storage
@@ -488,3 +489,45 @@ def test_queries_reports_and_resumes_read_each_bucket_file_once_per_computer(
         assert again.skipped == 12
         # Later queries and the resume ask only by ETag, and storage sends no body.
         assert client.bytes == first
+
+
+def test_a_launched_eval_run_reports_its_tally_a_few_times_not_once_per_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    monkeypatch.setenv("ETUDE_OUTPUT_DIR", str(outputs))
+    put = DirectoryStorage.put
+    reports = 0
+
+    def counted(self: DirectoryStorage, key: str, body: bytes) -> None:
+        nonlocal reports
+        reports += key == "etude-result.json"
+        put(self, key, body)
+
+    monkeypatch.setattr(DirectoryStorage, "put", counted)
+    matches = seatings(roster(tmp_path), conditions=[{"deal": d} for d in range(3)], games=1)
+    evaluate(
+        experiment="league", environment=environment("duel"), play=play,
+        matches=matches, directory=tmp_path,
+    )  # fmt: skip
+    tally = read_result(outputs).tally
+    assert tally is not None
+    assert (tally.done, tally.total, tally.failed) == (len(matches), len(matches), 0)
+    assert len(matches) > 10 and reports == 2  # at the start and at the end
+
+
+def test_a_launched_eval_run_that_fails_reports_what_it_played_and_what_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    monkeypatch.setenv("ETUDE_OUTPUT_DIR", str(outputs))
+    matches = seatings(roster(tmp_path)[:2], conditions=[{}], games=1)
+    with pytest.raises(EtudeError):
+        evaluate(
+            experiment="league", environment=environment("duel"), play=play_unkeyed,
+            matches=matches, directory=tmp_path,
+        )  # fmt: skip
+    tally = read_result(outputs).tally
+    assert tally is not None and (tally.done, tally.failed) == (0, 1)
