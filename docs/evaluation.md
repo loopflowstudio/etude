@@ -423,7 +423,8 @@ etude eval ppo.py --source s3://bucket/etude/launch --rent cpu8 --watch 600
 
 - **State.** `state.runs` is the experiment's training runs under the
   source: each one's name, whether it is `running`, `finished` or `failed`,
-  and the checkpoints it stored, each with its ordinal, clocks and tags.
+  and the checkpoints it stored, each with its ordinal, clocks, tags and
+  `wall_ms`, when it was saved in milliseconds since the epoch.
   `Checkpoints` is a tuple, so a slice works too; `every(n)`, `at(clock,
   *values)` and `tagged(tag)` choose by ordinal, coordinate or tag, and
   `final` is the last checkpoint once a run has finished.

@@ -56,6 +56,9 @@ class Checkpoint(Record):
     artifact: ArtifactRef
     # Where each of the run's clocks stood when it was saved.
     clocks: dict[str, float]
+    # When it was saved, in milliseconds since the epoch.
+    # None only in a checkpoint serialized before this field existed.
+    wall_ms: int | None = None
     # The learner it belongs to: the first run of the chain of continuations that led to its run.
     line: str
     tags: tuple[str, ...] = ()
@@ -169,6 +172,7 @@ def observe(source: Storage | Path | str, experiment: str) -> ExperimentState:
                 ordinal=record.ordinal,
                 artifact=record.artifact,
                 clocks=record.at,
+                wall_ms=record.wall_ms,
                 line=line,
                 tags=record.tags,
             )

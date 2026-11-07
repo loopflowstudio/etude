@@ -27,6 +27,7 @@ from etude.launch.records import Job, Outcome, Run, Status
 from etude.run.errors import EtudeError
 from etude.run.records import Clock
 from etude.run.storage import DirectoryStorage
+from etude.train.read import read
 from etude.train.run import Run as Run_
 from etude.train.run import track
 from tests.eval.games import play, play_failing_deal_one
@@ -330,6 +331,29 @@ def test_a_tracked_checkpoints_seat_says_where_its_run_stood_and_its_line(tmp_pa
     assert saved.ref.at == saved.clocks == {"updates": 100}
     assert saved.model(DIRECT).checkpoint.at == {"updates": 100}
     assert saved.ref.line == saved.model(DIRECT).checkpoint.line == "ppo-1"
+
+
+def test_a_checkpoint_carries_the_wall_time_its_record_stored(tmp_path: Path) -> None:
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    run = trainer(bucket, tmp_path)
+    save(run, bucket, tmp_path, range(1, 3))
+    # Still running: a design pairs checkpoints by training hours before either run ends.
+    observed = observe(bucket, "ppo").run("ppo-1")
+    assert not observed.ended
+    stored = {each.ordinal: each.wall_ms for each in read(bucket, "ppo", "ppo-1").checkpoints}
+    assert {each.ordinal: each.wall_ms for each in observed.checkpoints} == stored
+    run.finish(timeout=30)
+
+
+def test_a_checkpoint_serialized_before_wall_time_still_loads(tmp_path: Path) -> None:
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    run = trainer(bucket, tmp_path)
+    save(run, bucket, tmp_path, range(1, 2))
+    run.finish(timeout=30)
+    (saved,) = observe(bucket, "ppo").run("ppo-1").checkpoints
+    assert Checkpoint.model_validate_json(saved.model_dump_json()) == saved
+    older = saved.model_dump(mode="json", exclude={"wall_ms"})
+    assert Checkpoint.model_validate(older).wall_ms is None
 
 
 def test_a_finished_run_without_checkpoints_has_no_final(tmp_path: Path) -> None:
