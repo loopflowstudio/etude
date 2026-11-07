@@ -40,10 +40,12 @@ def baseline(count: int) -> dict[str, Counts]:
 
     Status and runs are database-only reads; tick refreshes sessions. These fixed
     coefficients pin known debt, not a target or a model of physical HTTP calls.
+    Each read of a run also reads its machine's attempts once, for how many
+    shared it (2026-11-06).
     """
     return {
-        "status": Counts(database=38 * count + 1),
-        "runs": Counts(database=13 * count + 1),
+        "status": Counts(database=41 * count + 1),
+        "runs": Counts(database=14 * count + 1),
         "tick": Counts(provider=2 * count, bucket=count, database=25 * count + 13),
     }
 
@@ -114,8 +116,9 @@ def test_ask_wait_counts(tmp_path: Path) -> None:
             b.scheduler.wait(id, timeout=0)
         wait = counting.snapshot()
     assert ask == Counts(database=23)  # target: ask records intent without remote effects
-    # Creation also reads provider safeguards for affordable time and the reserved budget.
-    assert wait == Counts(provider=4, bucket=1, database=74)  # known debt: wait advances work
+    # Creation also reads provider safeguards for affordable time and the reserved budget,
+    # and the status it returns reads the machine's attempts for how many shared it.
+    assert wait == Counts(provider=4, bucket=1, database=75)  # known debt: wait advances work
 
 
 def test_cohort_git_and_database_counts(

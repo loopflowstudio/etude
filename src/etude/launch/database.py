@@ -73,7 +73,8 @@ CREATE TABLE IF NOT EXISTS storages(
   region TEXT);
 CREATE TABLE IF NOT EXISTS pools(
   name TEXT PRIMARY KEY, off INTEGER NOT NULL DEFAULT 0,
-  startup_seconds REAL, delivery_seconds REAL, log_seconds REAL);
+  startup_seconds REAL, delivery_seconds REAL, log_seconds REAL,
+  slots INTEGER NOT NULL DEFAULT 1);
 CREATE TABLE IF NOT EXISTS ondemands(name TEXT PRIMARY KEY, body TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS machines(
   name TEXT PRIMARY KEY, kind TEXT NOT NULL,
@@ -117,11 +118,13 @@ CREATE INDEX IF NOT EXISTS attempts_session ON attempts(session);
 Fact = str | int | None
 # Changes with the schema. A file from another version is refused, except those
 # `_UPGRADES` brings up to this one in place.
-_VERSION = 11
+_VERSION = 12
 # Statements that bring a file at a version key to the next version.
 _UPGRADES = {
     # Attempts record the environment their machine prepared (#54).
     10: ("ALTER TABLE attempts ADD COLUMN prepared TEXT",),
+    # A pool's machines each take this many runs at once (#84).
+    11: ("ALTER TABLE pools ADD COLUMN slots INTEGER NOT NULL DEFAULT 1",),
 }
 
 
@@ -436,13 +439,14 @@ class Database:
             if not self._db.execute("SELECT 1 FROM pools WHERE name=?", (pool.name,)).fetchone():
                 self._unnamed(pool.name)
                 self._db.execute(
-                    "INSERT INTO pools VALUES (?,?,?,?,?)",
+                    "INSERT INTO pools VALUES (?,?,?,?,?,?)",
                     (
                         pool.name,
                         int(pool.off),
                         pool.startup_seconds,
                         pool.delivery_seconds,
                         pool.log_seconds,
+                        pool.slots,
                     ),
                 )
         if self.pool(pool.name) != pool:
@@ -743,22 +747,30 @@ class Database:
             self._place(attempts)
 
     def place(self, session: Session, attempts: Sequence[RunAttempt]) -> None:
-        """Put more attempts on a session that already exists."""
+        """Put more attempts on a session that already exists, within its supply's slots."""
         with self._together():
             self.check_lock(session.supply)
             self._change("sessions", session.id, session.version)
-            if self.machine_busy(session.machine):
-                raise Stale(f"session {session.id!r} already has work")
             self._place(attempts)
 
     def _place(self, attempts: Sequence[RunAttempt]) -> None:
+        """Insert attempts; each run has one in hand, and each machine its supply's slots."""
         for a in attempts:
-            busy = self._db.execute(
-                "SELECT 1 FROM attempts WHERE (run = ? OR machine = ?) AND outcome IS NULL",
-                (a.run, a.machine),
+            # One read: the run's open attempts, the machine's, and its supply's slots.
+            # An on-demand stored before slots existed takes one run at a time.
+            running, held, slots = self._db.execute(
+                """SELECT
+                     (SELECT count(*) FROM attempts WHERE run = ? AND outcome IS NULL),
+                     (SELECT count(*) FROM attempts WHERE machine = ? AND outcome IS NULL),
+                     (SELECT coalesce(p.slots, json_extract(o.body, '$.slots'), 1)
+                      FROM machines m LEFT JOIN pools p ON p.name = m.pool
+                      LEFT JOIN ondemands o ON o.name = m.ondemand WHERE m.name = ?)""",
+                (a.run, a.machine, a.machine),
             ).fetchone()
-            if busy is not None:
+            if running:
                 raise Stale(f"run {a.run} already has an attempt in hand")
+            if held >= slots:
+                raise Stale(f"machine {a.machine!r} has no free slot")
             self._db.execute(
                 """INSERT INTO attempts(id, run, session, machine, number, position, limit_seconds,
                    limit_kind, planned_at, added) VALUES (?,?,?,?,?,?,?,?,?,?)""",
@@ -849,12 +861,14 @@ class Database:
 
     def machine_busy(self, machine: str) -> bool:
         """Allocation authority: any unfinished attempt holds its machine."""
-        return (
-            self._db.execute(
-                "SELECT 1 FROM attempts WHERE machine=? AND outcome IS NULL", (machine,)
-            ).fetchone()
-            is not None
-        )
+        return self.open_attempts(machine) > 0
+
+    def open_attempts(self, machine: str) -> int:
+        """Unfinished attempts on a machine, whichever session placed them: its taken slots."""
+        (count,) = self._db.execute(
+            "SELECT count(*) FROM attempts WHERE machine=? AND outcome IS NULL", (machine,)
+        ).fetchone()
+        return int(count)
 
     def sessions(self) -> tuple[Session, ...]:
         return tuple(_session(row) for row in self._db.execute(f"{_SESSIONS} ORDER BY w.seq"))

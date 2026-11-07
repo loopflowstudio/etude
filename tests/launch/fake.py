@@ -1,7 +1,8 @@
 """A provider that exists only in memory and runs on a clock the test moves.
 
-Every attempt takes `seconds` of clock time, one after another, from the moment
-its session was created. The session ends at its deadline whether or not anyone looks.
+Every attempt takes `seconds` of clock time from the moment its session was
+created, as many at once as its packet's slots, in the order they were given.
+The session ends at its deadline whether or not anyone looks.
 """
 
 from __future__ import annotations
@@ -207,10 +208,13 @@ class FakeService:
     def _progress(self, session: FakeSession, at: datetime | None = None) -> tuple[Progress, ...]:
         now = min(at or self.clock(), self._limit(session))
         at_deadline = session.packet.deadline is not None and now >= session.packet.deadline
-        cursor = session.created_at
+        # When each slot is next free; a running attempt holds its slot past now.
+        free = [session.created_at] * session.packet.slots
+        busy = datetime.max.replace(tzinfo=UTC)
         progress: list[Progress] = []
         for work, arrived in session.work():
-            cursor = max(cursor, arrived)
+            slot = min(range(len(free)), key=free.__getitem__)
+            cursor = max(free[slot], arrived)
             stop = session.stops.get(work.attempt)
             if stop is not None and stop <= cursor:
                 progress.append(self._finished(work, None, cursor, "cancelled"))
@@ -232,7 +236,8 @@ class FakeService:
                         exit_code=None,
                     )
                 )
-                break
+                free[slot] = busy
+                continue
             if end > now:
                 outcome: Outcome = "lost"
                 end = now
@@ -243,7 +248,7 @@ class FakeService:
             else:
                 outcome = self.outcome(work)
             progress.append(self._finished(work, cursor, end, outcome))
-            cursor = end
+            free[slot] = end
         return tuple(progress)
 
     @staticmethod
@@ -289,7 +294,9 @@ class Bench:
         self.scheduler.tick()
 
 
-def bench(tmp_path: Path, *, max_machines: int = 4, usd_per_hour: str = "0.59") -> Bench:
+def bench(
+    tmp_path: Path, *, max_machines: int = 4, usd_per_hour: str = "0.59", slots: int = 1
+) -> Bench:
     clock = Clock()
     service = FakeService(clock, usd_per_hour)
     store = Database(tmp_path / "launcher.db")
@@ -305,6 +312,6 @@ def bench(tmp_path: Path, *, max_machines: int = 4, usd_per_hour: str = "0.59") 
     )
     scheduler.set_provider(Provider(name="fake", kind="runpod", registry="", storage="test"))
     scheduler.add_ondemand(
-        OnDemand(name="l4", template=L4, max_machines=max_machines, setup_seconds=0)
+        OnDemand(name="l4", template=L4, max_machines=max_machines, setup_seconds=0, slots=slots)
     )
     return Bench(clock, service, scheduler, store)

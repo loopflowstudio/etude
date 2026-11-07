@@ -60,7 +60,8 @@ capacity does not reject continuation.
 | **Rental** | How long is the paid window, at what price and cap, and what has it cost? | Rented machines only |
 | **RunAttempt** | Which run is allocated to which machine, for what window, and how did it go? | Every machine |
 
-Unfinished RunAttempts make a machine busy. A rental contains no run or startup
+Unfinished RunAttempts fill a machine's slots (one unless its pool or on-demand
+says more); a machine with no free slot is busy. A rental contains no run or startup
 facts. Machine.kind is `local`, `ssh` or `rented`, with the provider account in
 a separate field; an owned machine names its pool and a rented one names the
 on-demand it came from. A Session is internal:
@@ -523,8 +524,8 @@ inbox. There is one rental record and execution path. A window made by hand stay
 until its deadline or termination; one rented for queued work ends when no work is left.
 Every rented machine takes waiting runs that fit its remaining time. The
 controller delivers each next run; keep its loop running to drain the queue.
-There is no run-count packing setting. A machine rented for queued work ends when no
-waiting run fits; a manually rented one waits until its deadline or termination. Terminate refuses
+A machine rented for queued work ends when no waiting run fits any free slot; a
+manually rented one waits until its deadline or termination. Terminate refuses
 while it still has unfinished work. Ending a machine rented for queued work is asked of it
 through its inbox: its worker delivers its last files, the tail of its log and its end
 receipt, then deletes the machine, and the launcher confirms the deletion once the receipt
@@ -535,6 +536,34 @@ The launcher needs `RUNPOD_API_KEY`, `AWS_ACCESS_KEY_ID` and
 SQLite. An on-demand takes its provider's storage when added and keeps it. A storage
 cannot change; add another name. `--data-center` selects a RunPod data center;
 omitting it lets RunPod place the machine. `ondemand image` affects future machines.
+
+### Several runs on one machine
+
+```sh
+etude ondemand add l4x2 --provider runpod --gpu "NVIDIA L4" --vcpus 6 --memory-gb 48 \
+    --max 1 --max-usd-per-hour 0.80 --slots 2
+etude launch sweep.py --rent l4x2 --quote   # seed1  rent ... , 2 slots with seed2  ...
+etude status                                # running, steps 1200, shared by 2 runs, ~$0.03
+```
+
+`--slots N` on `ondemand add` or `pool add` lets each of its machines run up to N
+runs at once (default 1: one after another). The runs share the machine's GPUs
+and CPUs whole; nothing is partitioned, so pick N for what the job leaves idle.
+Each run keeps its own attempt folder, outputs, log, record and delivery, and
+cancelling or failing one leaves the others running.
+
+A new machine is given up to N waiting runs at once, and takes more as slots
+free while its window has time for them. Its window covers the longest run it
+was given, or its share of a cohort's hours when that is longer, within the
+runs' dollars. A launch fills a machine's slots before taking another;
+a cohort's `parallel` still counts machines.
+
+Cost is split by placed time: each moment of a rental is shared equally among
+the runs on it then, and run budgets and cohort spend charge that share.
+Admission and a run's own time limit still price it as if it had the machine
+alone, so a run never outspends its `max_usd`. `status` says `shared by K runs`
+when K ran together, and `--quote` lists each run's machine, its slots and the
+runs placed with it, splitting a new rental's planned cost among them.
 
 ## The worker and its bucket
 

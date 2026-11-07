@@ -1,4 +1,7 @@
-"""The session side: runs one packet's attempts in turn and journals each one.
+"""The session side: runs one packet's attempts and journals each one.
+
+Attempts start in the order given, up to `Packet.slots` at once, each in its
+own thread with its own folder; they share the machine whole.
 
 Installed separately from the job environment. Run as
 `etude session DIRECTORY`. The directory holds
@@ -37,8 +40,10 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 from collections.abc import Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -54,6 +59,9 @@ from etude.launch.schemas import Packet, Progress, Work
 from etude.launch.storage.files import append_usage, digest, read_result, write
 from etude.launch.storage.transport import attribute, emit, observe
 from etude.launch.worker.prepared import key, prepare
+
+# Set when the worker is told to end: running phases stop as they would at SIGTERM.
+_halt = threading.Event()
 
 
 def _now() -> datetime:
@@ -270,6 +278,7 @@ def _execute(
     latest = (
         None if deadline is None else time.monotonic() + max(0, (deadline - _now()).total_seconds())
     )
+    _check_halt(stop)
     cancelled = stop is not None and stop.exists()
     if cancelled or (deadline is not None and _now() >= deadline):
         return Exit(code=None, stopped="cancelled" if cancelled else "deadline")
@@ -285,6 +294,7 @@ def _execute(
     stopped: Literal["cancelled", "deadline"] | None = None
     try:
         while process.poll() is None:
+            _check_halt(stop)
             if stop is not None and stop.exists():
                 stopped = "cancelled"
             elif deadline is not None and (
@@ -604,6 +614,12 @@ def _run(session: Path, packet: Packet, work: Work) -> None:
     _finish(home, outcome, "machine_lost" if outcome == "lost" else None, code=result.code)
 
 
+def _check_halt(stop: Path | None) -> None:
+    """End a stoppable phase once the worker is told to end; cleanup (no stop file) still runs."""
+    if stop is not None and _halt.is_set():
+        raise SystemExit(128 + signal.SIGTERM)
+
+
 def _terminate(signum: int, frame: FrameType | None) -> None:
     raise SystemExit(128 + signum)
 
@@ -614,19 +630,43 @@ def run(directory: Path) -> int:
     packet = Packet.model_validate_json((session / "packet.json").read_text())
     (session / "stop").mkdir(exist_ok=True)
     (session / "work").mkdir(exist_ok=True)
+    _halt.clear()
+    running: dict[str, Future[None]] = {}  # by attempt: each is given to a thread once
+
+    def check() -> None:
+        for future in running.values():
+            if future.done() and (error := future.exception()) is not None:
+                raise error  # what would have ended a sequential worker ends this one
+
     try:
-        for work in packet.work:
-            _run(session, packet, work)
-        while packet.kept and (packet.deadline is None or _now() < packet.deadline):
-            # Checked before the work, which is handed over before it: what came first runs.
-            finishing = (session / "finish").exists()
-            # Work added later arrives as files, taken oldest first; each runs once.
-            added = sorted((session / "work").glob("*.json"), key=lambda p: p.stat().st_mtime)
-            for path in added:
-                _run(session, packet, Work.model_validate_json(path.read_text()))
-            if finishing:
-                break
-            time.sleep(0.2)
+        with ThreadPoolExecutor(packet.slots, thread_name_prefix="attempt") as pool:
+            try:
+                for work in packet.work:
+                    running[work.attempt] = pool.submit(_run, session, packet, work)
+                while packet.kept and (packet.deadline is None or _now() < packet.deadline):
+                    # Checked before the work, which is handed over before it: what came first runs.
+                    finishing = (session / "finish").exists()
+                    # Work added later arrives as files, taken oldest first; each runs once.
+                    added = sorted(
+                        (session / "work").glob("*.json"), key=lambda p: p.stat().st_mtime
+                    )
+                    for path in added:
+                        if path.stem not in running:
+                            work = Work.model_validate_json(path.read_text())
+                            running[work.attempt] = pool.submit(_run, session, packet, work)
+                    check()
+                    if finishing:
+                        break
+                    time.sleep(0.2)
+                while not all(future.done() for future in running.values()):
+                    check()
+                    time.sleep(0.2)
+                check()
+            except BaseException:
+                # Nothing more starts; what runs stops, keeping its cleanup, before `ended`.
+                _halt.set()
+                pool.shutdown(wait=False, cancel_futures=True)
+                raise
     finally:
         write(session / "ended", _now().isoformat())
     return 0

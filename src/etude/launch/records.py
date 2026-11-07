@@ -231,6 +231,7 @@ class Pool(Record):
     delivery_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     log_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     off: bool = False  # takes no new runs; what it already holds finishes and stays readable
+    slots: int = Field(default=1, ge=1)  # runs at once on each machine, sharing it whole
 
 
 class OnDemand(Record):
@@ -244,6 +245,9 @@ class OnDemand(Record):
     template: MachineTemplate
     max_machines: int = Field(default=1, ge=0)  # rented machines in use at once
     max_usd_per_hour: Decimal | None = None  # above this price, no machine is rented
+    # Runs at once on each machine. They share its GPUs and CPUs, not partitioned,
+    # and split its cost by the time they occupy it together.
+    slots: int = Field(default=1, ge=1)
     startup_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     delivery_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     log_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
@@ -648,6 +652,7 @@ class Status(Record):
     machine: str | None = None
     hardware: Hardware | None = None
     estimated: bool = False
+    shared: int = 1  # most runs on the latest attempt's machine at once during it
 
     @property
     def done(self) -> bool:
@@ -662,7 +667,8 @@ class Status(Record):
             head = self.phase
         clock = parse_target(self.until)[0] if self.until else next(iter(self.clocks), None)
         at = f", {clock} {number(self.clocks[clock])}" if clock in self.clocks else ""
-        return f"{head}{at}, {'~' if self.estimated else ''}${self.usd:.2f}"
+        shared = f", shared by {self.shared} runs" if self.shared > 1 else ""
+        return f"{head}{at}{shared}, {'~' if self.estimated else ''}${self.usd:.2f}"
 
 
 class CohortSpec(Record):
@@ -674,7 +680,7 @@ class CohortSpec(Record):
 
 
 class QuotedMachine(Record):
-    """One first-wave placement and its maximum admitted rental allocation.
+    """One first-wave run's placement and its maximum admitted rental allocation.
 
     Cost assumes the quoted rate and timely deletion, and excludes external storage.
     Provider delays can exceed the admitted budget.
@@ -684,7 +690,11 @@ class QuotedMachine(Record):
     machine: str | None  # an existing machine; None means one would be rented
     hardware: Hardware | None  # for a rental, what the provider would be asked for
     usd_per_hour: Decimal
-    max_usd: Decimal  # planned cost: new rental's whole window or existing machine's run share
+    # Planned cost: an equal share of a new rental's whole window among the first-wave
+    # runs placed on it, or this run's share of an existing machine.
+    max_usd: Decimal
+    slots: int = 1  # runs the machine takes at once
+    alongside: tuple[str, ...] = ()  # the other first-wave runs placed on the same machine
 
 
 class Quote(Record):
