@@ -618,9 +618,9 @@ remains atomic.
 
 `etude logs` is a read: it shows what the database retains, with each stream's
 collection time, and needs no provider key or network. Each controller pass
-retains a running job's new output, at most every 30 seconds; a stream's last
-output is retained when its session ends, within the supply's `log_seconds`, or
-30 seconds without one. `--follow` is the wait: it collects new
+retains a running job's new output, at most every 30 seconds, and a stream's last
+output when its session ends; each read takes at most the supply's `log_seconds`,
+or 30 seconds without one. `--follow` is the wait: it collects new
 evidence from machines and buckets until the snapshot is complete, with no time
 limit unless `--timeout 30` bounds it; in Python, `logs(run=..., refresh=True,
 timeout=30)` takes one such snapshot. Follow uses the same selection and absolute

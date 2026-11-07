@@ -264,7 +264,9 @@ def test_bucket_completion_during_log_read_keeps_cached_output_refreshable(
             # The attempt finishes while its earlier record is on the way.
             storage.objects[folder + log_piece(attempt_log(attempt.id), len(first))] = last
             storage.objects[record_key] = (
-                AttemptRecord(finished={}, log_ends=(len(first), len(first) + len(last)))
+                AttemptRecord(
+                    exited={}, delivered=True, log_ends=(len(first), len(first) + len(last))
+                )
                 .model_dump_json()
                 .encode()
             )

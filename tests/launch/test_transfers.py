@@ -1252,7 +1252,7 @@ def test_a_failed_delivery_leaves_how_the_job_ended_and_says_why(
     with log_to(worker_log), pytest.raises(StorageUnavailable):
         courier.carry_out()
     record = AttemptRecord.model_validate_json(http.objects["/pass/attempts/a1.json"])
-    assert record.finished is None and record.exited is not None
+    assert not record.delivered and record.exited is not None
     assert record.exited["exit_code"] == 0
     # The worker's log and usage still go out, carrying the reason.
     told = b"".join(
@@ -1267,7 +1267,7 @@ def test_a_failed_delivery_leaves_how_the_job_ended_and_says_why(
     monkeypatch.undo()
     courier.carry_out()
     delivered = http.objects["/pass/attempts/a1.json"]
-    assert AttemptRecord.model_validate_json(delivered).finished is not None
+    assert AttemptRecord.model_validate_json(delivered).delivered
     sent = http.requests
     courier.carry_out()
     assert http.requests == sent

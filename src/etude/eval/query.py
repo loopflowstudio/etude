@@ -6,7 +6,7 @@ beside Etude's own tables:
 
 | table | columns |
 |---|---|
-| `runs` | run, experiment, environment (identity), environment_name, environment_config, tournament |
+| `runs` | run, experiment, environment (identity), environment_name, environment_config, tournament, state (`finished` or `failed` from its `state.json`; null while it has not ended, so its results are partial) |
 | `players` | player (its key, encoded), name, kind (`model` or `code`), checkpoint (its key), artifact (digest), uri, config, at, at_conflict, line, line_conflict, and `config.KEY` per scalar config key |
 | `matches` | run, match, conditions, games, seed, state, error, wall_ms |
 | `seats` | run, match, seat, player, the version that played: commit, source (digest), at (where its checkpoint stood, or null) and line (the learner it belongs to, or null) |
@@ -110,7 +110,7 @@ from etude.eval.records import (
 )
 from etude.run.errors import EtudeError
 from etude.run.listing import as_storage, run_folders
-from etude.run.records import Digest, Record, RunFile
+from etude.run.records import Digest, Record, RunFile, RunState
 from etude.run.storage import SAFE_NAME, DirectoryStorage, Storage, default_root
 
 if TYPE_CHECKING:
@@ -128,9 +128,10 @@ NUMERIC = ("BOOLEAN", "BIGINT", "DOUBLE")
 # Keys and coordinates of an author table's rows: never a value.
 KEYS = ("seat", "group", "game", "run", "match")
 # A kept database of another schema is deleted and read again from its store.
-SCHEMA = 7
+SCHEMA = 8
 
 _ENVIRONMENT_FILE = "environment.json"
+_STATE_FILE = "state.json"
 # mypy reports this alias as an arg-type error or not depending on its cache; pydantic accepts it.
 _PLAYER: TypeAdapter[Player] = TypeAdapter(Player)  # type: ignore[arg-type, unused-ignore]
 
@@ -200,8 +201,11 @@ def _create(db: duckdb.DuckDBPyConnection, experiment: str, storage: Storage) ->
     db.execute("create schema kept")
     db.execute("create table kept.statsdb (schema BIGINT, experiment VARCHAR, store VARCHAR)")
     db.execute("insert into kept.statsdb values (?, ?, ?)", [SCHEMA, experiment, storage.name])
-    # Every declared run of any experiment, so each `run.json` is read once.
-    db.execute("create table kept.runs (run VARCHAR, experiment VARCHAR, kind VARCHAR)")
+    # Every declared run of any experiment, so each `run.json` is read once; an
+    # eval run's `state.json` state once it arrives.
+    db.execute(
+        "create table kept.runs (run VARCHAR, experiment VARCHAR, kind VARCHAR, state VARCHAR)"
+    )
     # Files of the experiment's runs already read, by run and name within its folder.
     db.execute("create table kept.seen (run VARCHAR, name VARCHAR)")
     db.execute("create table kept.environments (run VARCHAR, environment JSON)")
@@ -277,6 +281,9 @@ def _catch_up(
                 if eval_run:
                     for name in new:
                         changed |= _read(db, storage, run, located[name], name, Path(copies))
+                    if _STATE_FILE in new:
+                        _ended(db, storage, run, located[_STATE_FILE])
+                        changed = True
                     _sum_missing(db, storage, run, located, Path(copies))
                 else:
                     changed |= _checkpoints(db, storage, run, experiment, located, new)
@@ -307,11 +314,17 @@ def _ours(
         if declaration is None:
             return False  # its `run.json` has not arrived yet
         db.execute(
-            "insert into kept.runs values (?, ?, ?)",
+            "insert into kept.runs values (?, ?, ?, null)",
             [run, declaration.experiment, declaration.declaration.kind],
         )
         return declaration.experiment == experiment
     return bool(found[0] == experiment)
+
+
+def _ended(db: duckdb.DuckDBPyConnection, storage: Storage, run: str, place: str) -> None:
+    """Record how the eval run ended, from its `state.json`: written once, so read once."""
+    ended = RunState.model_validate_json(storage.get(place + _STATE_FILE))
+    db.execute("update kept.runs set state = ? where run = ?", [ended.state, run])
 
 
 def _refuse_unconverted(db: duckdb.DuckDBPyConnection, run: str, names: Sequence[str]) -> None:
@@ -839,24 +852,25 @@ def _summaries(db: duckdb.DuckDBPyConnection) -> None:
     }
     db.execute(
         "create or replace table runs (run VARCHAR, experiment VARCHAR, environment VARCHAR,"
-        " environment_name VARCHAR, environment_config JSON, tournament VARCHAR)"
+        " environment_name VARCHAR, environment_config JSON, tournament VARCHAR, state VARCHAR)"
     )
     described: list[list[object]] = []
-    for run, experiment, text in db.execute(
-        "select r.run, r.experiment, e.environment from kept.runs r"
+    for run, experiment, state, text in db.execute(
+        "select r.run, r.experiment, r.state, e.environment from kept.runs r"
         " join kept.environments e using (run) order by r.run"
     ).fetchall():
         environment = Environment.model_validate_json(text)
         described.append(
             [run, experiment, environment.identity, environment.name,
              json.dumps(environment.config),
-             held[run].tournament.name if run in held else None]
+             held[run].tournament.name if run in held else None, state]
         )  # fmt: skip
     _put(
         db,
         "runs",
         {"run": "VARCHAR", "experiment": "VARCHAR", "environment": "VARCHAR",
-         "environment_name": "VARCHAR", "environment_config": "VARCHAR", "tournament": "VARCHAR"},
+         "environment_name": "VARCHAR", "environment_config": "VARCHAR", "tournament": "VARCHAR",
+         "state": "VARCHAR"},
         described,
     )  # fmt: skip
     db.execute(

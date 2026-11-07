@@ -480,7 +480,7 @@ class Courier:
                 name = path.relative_to(outputs).as_posix()
                 if name != RESULT:  # the record carries it
                     self._put(path, run, f"attempts/{attempt}/{name}")
-            record = record.model_copy(update={"finished": entry})
+            record = record.model_copy(update={"delivered": True})
         self._note(home, run, attempt, record)
         if done:
             self._delivered.add(attempt)

@@ -289,7 +289,7 @@ def advance(
     state = observe(source, experiment.name)
     jobs = asked(experiment.eval, state)
     ledger = _Ledger(_ledger_root(directory)) if pool or rent else None
-    flights = ledger.flights() if ledger is not None else _Flights()
+    standing = ledger.standing() if ledger is not None else _Standing()
     passes = []
     for given_job in jobs:
         spec: Evaluation = evaluation_spec(given_job)
@@ -308,7 +308,7 @@ def advance(
             storages=[source],
         )
         new = [*found.new, *(found.failed if retry_failed else ())]
-        pending = [match for match in new if match.key not in flights.running]
+        pending = [match for match in new if match.key not in standing.running]
         done = Pass(
             tournament=spec.tournament.name,
             new=len(new),
@@ -332,7 +332,7 @@ def advance(
             )
             passes.append(done.model_copy(update={"played": held.played}))
             continue
-        stopped = {flights.failed[m.key] for m in pending if m.key in flights.failed}
+        stopped = {standing.failed[m.key] for m in pending if m.key in standing.failed}
         if stopped and not retry_failed:
             raise EtudeError("launched_pass_failed", 409) from ValueError(sorted(stopped))
         run = ledger.unused(f"{spec.tournament.name}-{digest(sorted(m.key for m in pending))[:12]}")
@@ -372,7 +372,7 @@ class _Launched(Record):
 
 
 @dataclass(frozen=True)
-class _Flights:
+class _Standing:
     """What the ledger's runs mean for this pass."""
 
     # Matches of runs not yet done.
@@ -396,16 +396,16 @@ class _Ledger:
             return []
         return [_Launched.model_validate(each) for each in json.loads(self.path.read_text())]
 
-    def flights(self) -> _Flights:
+    def standing(self) -> _Standing:
         """Where every launched run stands. One ledger serves all of a computer's experiments."""
-        flights = _Flights()
+        standing = _Standing()
         for each in self._read():
             found = client.status(each.run)
             if not found.done:
-                flights.running.update(each.matches)
+                standing.running.update(each.matches)
             elif found.outcome != "succeeded":
-                flights.failed.update(dict.fromkeys(each.matches, f"{each.run}: {found}"))
-        return flights
+                standing.failed.update(dict.fromkeys(each.matches, f"{each.run}: {found}"))
+        return standing
 
     def unused(self, run: str) -> str:
         """`run`, or the next `run-N` no pass launched: a retry may be given the same matches."""

@@ -102,9 +102,9 @@ Reach = Callable[[Machine | OnDemand], Execution]
 _RELAY_WAITS = (OSError, Mismatch, LauncherError, StorageUnavailable)
 # How often a pass may fetch a running job's log. Reading it over SSH sends it all.
 _JOB_LOG_SECONDS = 30.0
-# A session's last log read without a supply's `log_seconds`: one stalled bucket
-# must not hold the pass that ends every other machine.
-_FINAL_LOG_SECONDS = 30.0
+# A log read without a supply's `log_seconds`: one stalled bucket must not hold
+# the pass that ends every other machine at its deadline.
+_LOG_SECONDS = 30.0
 
 
 def _limit_usd(job: Job) -> Decimal:
@@ -2163,12 +2163,16 @@ class Scheduler:
         if at is not None and (now - at).total_seconds() < _JOB_LOG_SECONDS:
             return
         self._job_logs[seen.attempt] = (seen.log_bytes, now)
-        self._collect_log(session, seen.attempt, "job")
+        with limit_time(self._log_seconds(session)):
+            self._collect_log(session, seen.attempt, "job")
 
     def _final_logs(self, session: Session) -> None:
         """Retain each producer's last output, within the supply's `log_seconds`."""
-        allowance = self._store.supply(session.supply).log_seconds or _FINAL_LOG_SECONDS
-        self._collect_logs((session,), self._store.attempts(session=session.id), allowance)
+        attempts = self._store.attempts(session=session.id)
+        self._collect_logs((session,), attempts, self._log_seconds(session))
+
+    def _log_seconds(self, session: Session) -> float:
+        return self._store.supply(session.supply).log_seconds or _LOG_SECONDS
 
     def _end_session(self, session: Session) -> None:
         """Confirm shutdown, retain final evidence, then settle any unfinished attempts."""

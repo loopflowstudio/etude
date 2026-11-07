@@ -85,14 +85,32 @@ def test_opening_again_reads_only_what_arrived(tmp_path: Path) -> None:
     assert db.sql("select count(*) from matches").fetchone() == (3,)
     db.close()
 
-    # One match more, in a run of its own: its declaration, environment, record and two tables.
+    # One match more, in a run of its own: its declaration, environment, record, two
+    # tables and how it ended.
     evaluate(experiment="cards", environment=DUEL, play=play, matches=deals(players, 3),
              run="b", directory=tmp_path / "b", storages=[bucket])  # fmt: skip
     grown = MeasuredStorage(bucket)
     db = statsdb("cards", grown)
-    assert (grown.listings, grown.requests) == (1, 1 + 1 + 1 + 2)
+    assert (grown.listings, grown.requests) == (1, 1 + 1 + 1 + 2 + 1)
     assert db.sql("select count(*), count(distinct run) from matches").fetchone() == (4, 2)
     assert db.sql("select count(*) from plays").fetchone() == (4 * 2 * 2,)
+    db.close()
+
+
+def test_a_run_that_has_not_ended_is_partial(tmp_path: Path) -> None:
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    players = pair(tmp_path)
+    for run, numbers in (("a", (0,)), ("b", (1, 2))):
+        evaluate(experiment="cards", environment=DUEL, play=play, matches=deals(players, *numbers),
+                 run=run, directory=tmp_path / run, storages=[bucket])  # fmt: skip
+    # Killed mid-pass, `b` delivered its blocks but never wrote how it ended.
+    (bucket.root / "b" / "state.json").unlink()
+    db = statsdb("cards", bucket)
+    assert db.sql("select run, state from runs order by run").fetchall() == [
+        ("a", "finished"),
+        ("b", None),
+    ]
+    assert db.sql("select count(*) from matches where run = 'b'").fetchone() == (2,)
     db.close()
 
 
