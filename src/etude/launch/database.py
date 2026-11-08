@@ -933,7 +933,7 @@ class Database:
         self._change("attempts", attempt.id, attempt.version, started_at=at.isoformat())
 
     def record_progress(
-        self, attempt: RunAttempt, clocks: dict[str, float], tally: Tally | None = None
+        self, attempt: RunAttempt, clocks: dict[str, float], tally: Tally | None
     ) -> None:
         """Retain where the job last said its clocks and counted work stood."""
         self._change(
