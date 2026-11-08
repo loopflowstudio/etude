@@ -859,6 +859,8 @@ def test_status_says_how_far_a_running_job_has_got_through_its_work(tmp_path: Pa
 def test_a_tally_under_an_hour_left_is_in_minutes_and_a_finished_one_has_no_pace() -> None:
     left = Tally(unit="matches", done=1700, total=1800, per_hour=1200.0)
     assert str(left) == "1700/1800 matches, 1200/hour, ~5 minutes left"
+    last = left.model_copy(update={"done": 1790})
+    assert str(last) == "1790/1800 matches, 1200/hour, ~1 minute left"
     assert str(left.model_copy(update={"done": 1800})) == "1800/1800 matches"
 
 

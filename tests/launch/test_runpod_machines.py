@@ -974,8 +974,9 @@ def test_a_twelve_hour_log_is_sent_once_in_a_few_hundred_pieces(
     # Each piece is written once, so the bytes sent are the log's bytes, once.
     assert sorted(key for key in puts if key in pieces) == pieces
     assert b"".join(storage.objects[key] for key in pieces) == log.read_bytes()
-    # The record is rewritten only to name a new piece, the last with its ending.
-    assert (len(pieces), puts.count(folder + "a1.json")) == (197, 197)
+    # The record is rewritten only to name a new piece, the last with its ending,
+    # plus once when the job exits, so its exit is stored before its files.
+    assert (len(pieces), puts.count(folder + "a1.json")) == (197, 198)
     record = AttemptRecord.model_validate_json(storage.objects[folder + "a1.json"])
     assert ["etude/run1/" + key for key in record.log_pieces("a1")] == pieces
 
@@ -1251,7 +1252,7 @@ def test_finished_outputs_go_under_the_attempt_and_checkpoints_under_the_run(
     stored = sorted(key.removeprefix("etude/run1/") for key in storage.objects)
     assert stored == ["attempts/a1.json", "attempts/a1/weights.pt", "checkpoints/steps-10.pt"]
     recorded = json.loads(storage.objects["etude/run1/attempts/a1.json"])
-    assert recorded["result"] == {"clocks": {"steps": 10.0}}
+    assert recorded["result"] == {"clocks": {"steps": 10.0}, "tally": None}
     courier.carry_out()
     assert storage.asked.count(("PUT", "etude/run1/checkpoints/steps-10.pt")) == 1
 

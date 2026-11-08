@@ -627,7 +627,8 @@ class Tally(Record):
         left = self.total - self.done - self.failed
         if self.per_hour is not None and left > 0:
             hours = left / self.per_hour
-            when = f"{hours:.1f} hours" if hours >= 1 else f"{max(1, round(hours * 60))} minutes"
+            minutes = max(1, round(hours * 60))
+            when = f"{hours:.1f} hours" if hours >= 1 else f"{minutes} minute{'s' * (minutes > 1)}"
             said += f", {self.per_hour:.0f}/hour, ~{when} left"
         return said
 

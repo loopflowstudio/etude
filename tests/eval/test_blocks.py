@@ -70,8 +70,9 @@ def test_an_eval_run_delivers_a_few_objects_per_block_not_one_per_match_or_blob(
 
     reading = MeasuredStorage(DirectoryStorage(tmp_path / "bucket"))
     db = statsdb("cards", reading)
-    # run.json, environment.json, the index and two tables; not one byte of the pack.
-    assert (reading.listings, reading.requests, reading.ranges) == (1, 5, 0)
+    # run.json, environment.json, state.json (read once, so the run is marked ended),
+    # the index and two tables; not one byte of the pack.
+    assert (reading.listings, reading.requests, reading.ranges) == (1, 6, 0)
     assert kept.pack is not None and reading.bytes < kept.pack.size_bytes
     assert db.sql("select count(*), count(distinct match) from blobs").fetchone() == (80, 40)
     # Rows name their blobs, and each blob's bytes come back verified.
