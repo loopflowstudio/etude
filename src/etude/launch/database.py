@@ -98,7 +98,8 @@ CREATE TABLE IF NOT EXISTS sessions(
   seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
   machine TEXT NOT NULL REFERENCES machines(name), planned_at TEXT NOT NULL,
   claimed_at TEXT, startup_deadline TEXT, receipt TEXT, started_at TEXT, refused_at TEXT, ended_at TEXT,
-  version INTEGER NOT NULL DEFAULT 1, autorun INTEGER NOT NULL DEFAULT 0, hardware TEXT);
+  version INTEGER NOT NULL DEFAULT 1, autorun INTEGER NOT NULL DEFAULT 0, hardware TEXT,
+  finish_requested_at TEXT);
 CREATE TABLE IF NOT EXISTS rentals(
   machine TEXT PRIMARY KEY REFERENCES machines(name), usd_per_hour TEXT NOT NULL,
   cap_usd TEXT NOT NULL, deadline TEXT NOT NULL, kept INTEGER NOT NULL DEFAULT 0,
@@ -126,8 +127,12 @@ _UPGRADES = {
     10: ("ALTER TABLE attempts ADD COLUMN prepared TEXT",),
     # A pool's machines each take this many runs at once (#84).
     11: ("ALTER TABLE pools ADD COLUMN slots INTEGER NOT NULL DEFAULT 1",),
-    # Attempts keep how far a job got through the work it counted.
-    12: ("ALTER TABLE attempts ADD COLUMN tally TEXT",),
+    # Attempts keep how far a job got through the work it counted; a session
+    # told to finish is given no more work.
+    12: (
+        "ALTER TABLE attempts ADD COLUMN tally TEXT",
+        "ALTER TABLE sessions ADD COLUMN finish_requested_at TEXT",
+    ),
 }
 
 
@@ -879,6 +884,9 @@ class Database:
 
     def record_refusal(self, session: Session, at: datetime) -> None:
         self._change("sessions", session.id, session.version, refused_at=at.isoformat())
+
+    def record_finish(self, session: Session, at: datetime) -> None:
+        self._change("sessions", session.id, session.version, finish_requested_at=at.isoformat())
 
     def confirm_ended(self, session: Session, at: datetime) -> None:
         self._change("sessions", session.id, session.version, ended_at=at.isoformat())

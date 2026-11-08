@@ -586,6 +586,8 @@ class Session(Record):
     started_at: datetime | None
     refused_at: datetime | None
     ended_at: datetime | None
+    # When it was told no more work will come; it is given none after.
+    finish_requested_at: datetime | None = None
     version: int
     autorun: bool = False
     hardware: Hardware | None = None

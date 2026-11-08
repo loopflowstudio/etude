@@ -466,6 +466,7 @@ def test_inputs_reach_the_job_by_name_once_and_wrong_bytes_are_refused(tmp_path:
     assert said == weights.decode()
     reads = [k for m, k in c.storage.asked if m == "GET" and k.startswith("shared/weights.pt")]
     assert len(reads) == 1  # one verified download, by the worker, through a scoped link
+    released(c.scheduler, run)  # a machine told to finish is given no more work
 
     wrong = given.model_copy(update={"sha256": hashlib.sha256(b"other").hexdigest()})
     refused = c.scheduler.launch(

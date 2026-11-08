@@ -1454,6 +1454,11 @@ class Scheduler:
                 # A rented machine delivers its last files and end receipt before it
                 # is deleted: it is ended here once its journal says so, or at its deadline.
                 rented = self._store.rental_for(idle) is not None
+                if rented and idle.finish_requested_at is None:
+                    # Recorded before it is sent: a session that may have read it
+                    # might end at any moment, so it is placed no more work.
+                    self._store.record_finish(idle, now)
+                    idle = self._store.session(idle.id)
                 if not rented or self._service(idle).finish(idle.id) is not None:
                     self._end_session(idle)
             except (OSError, LauncherError, StorageUnavailable):
@@ -1771,11 +1776,17 @@ class Scheduler:
 
     def _idle_sessions(self, supply: Supply, now: datetime) -> list[Session]:
         """Sessions of a pool or on-demand that are up and have nothing left to run."""
-        return [
-            session for session, free in self._open_sessions(supply, now) if free == supply.slots
-        ]
+        return [session for session, free in self._free_slots(supply, now) if free == supply.slots]
 
     def _open_sessions(self, supply: Supply, now: datetime) -> list[tuple[Session, int]]:
+        """Sessions that may be given work, each with its free slots: up, and not told to finish."""
+        return [
+            (session, free)
+            for session, free in self._free_slots(supply, now)
+            if session.finish_requested_at is None
+        ]
+
+    def _free_slots(self, supply: Supply, now: datetime) -> list[tuple[Session, int]]:
         """Sessions of a pool or on-demand that are up, each with its free slots."""
         opened = []
         for session in self._store.unsettled_sessions():

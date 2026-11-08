@@ -241,6 +241,20 @@ def test_several_runs_share_one_session_and_split_its_cost(tmp_path: Path) -> No
     assert all(s.rental_ended for s in statuses)
 
 
+def test_a_machine_told_to_finish_is_given_no_more_work(tmp_path: Path) -> None:
+    b = bench(tmp_path, max_machines=1)
+    b.service.finish_seconds = 60  # delivering its last files
+    one = b.scheduler.queue(job(), rent="l4")
+    b.scheduler.tick()
+    b.run(600)
+    assert b.scheduler.read(one).outcome == "succeeded"  # and its idle machine was told to finish
+    two = b.scheduler.queue(job(max_hours=0.5), rent="l4")  # it fits what is left of that rental
+    b.run(1)
+    assert b.scheduler.read(two).phase == "queued"  # the one machine allowed is still ending
+    (status,) = b.scheduler.wait(two, every=60)
+    assert (status.outcome, status.attempts, b.service.creates) == ("succeeded", 1, 2)
+
+
 def test_a_write_from_an_old_read_is_refused(tmp_path: Path) -> None:
     b = bench(tmp_path)
     one = b.scheduler.queue(job(), rent="l4")
