@@ -15,6 +15,7 @@ from etude.launch.database import Database
 from etude.launch.records import (
     Job,
     LauncherError,
+    LogStream,
     MachineTemplate,
     Offer,
     OnDemand,
@@ -22,6 +23,7 @@ from etude.launch.records import (
     Run,
     Stale,
     Storage,
+    Tally,
     Target,
 )
 from etude.launch.scheduler import Scheduler
@@ -237,6 +239,20 @@ def test_several_runs_share_one_session_and_split_its_cost(tmp_path: Path) -> No
     assert b.service.creates == 1 and len({s.machine for s in statuses}) == 1
     assert all(abs(s.usd - USD_PER_RUN) < Decimal("0.001") for s in statuses)
     assert all(s.rental_ended for s in statuses)
+
+
+def test_a_machine_told_to_finish_is_given_no_more_work(tmp_path: Path) -> None:
+    b = bench(tmp_path, max_machines=1)
+    b.service.finish_seconds = 60  # delivering its last files
+    one = b.scheduler.queue(job(), rent="l4")
+    b.scheduler.tick()
+    b.run(600)
+    assert b.scheduler.read(one).outcome == "succeeded"  # and its idle machine was told to finish
+    two = b.scheduler.queue(job(max_hours=0.5), rent="l4")  # it fits what is left of that rental
+    b.run(1)
+    assert b.scheduler.read(two).phase == "queued"  # the one machine allowed is still ending
+    (status,) = b.scheduler.wait(two, every=60)
+    assert (status.outcome, status.attempts, b.service.creates) == ("succeeded", 1, 2)
 
 
 def test_a_write_from_an_old_read_is_refused(tmp_path: Path) -> None:
@@ -822,3 +838,107 @@ def test_a_retry_on_another_owned_host_waits_for_and_continues_the_runs_folder(
     resumed.finish()
     record = json.loads((relayed / "steps-3.json").read_text())
     assert record["ordinal"] == 3
+
+
+def _reporting(b: Bench, **changes: object) -> None:
+    """Every running attempt's journal also says `changes`."""
+    observe = b.service.observe
+
+    def reported(session_id: str) -> Observation:
+        seen = observe(session_id)
+        return seen.model_copy(
+            update={
+                "progress": tuple(
+                    entry.model_copy(update=changes) if entry.finished_at is None else entry
+                    for entry in seen.progress
+                )
+            }
+        )
+
+    b.service.observe = reported  # type: ignore[method-assign]
+
+
+def test_status_says_how_far_a_running_job_has_got_through_its_work(tmp_path: Path) -> None:
+    b = bench(tmp_path)
+    one = b.scheduler.queue(job(), rent="l4")
+    b.scheduler.tick()
+    tally = Tally(unit="matches", done=412, total=1800, failed=1, per_hour=940.0)
+    _reporting(b, tally=tally)
+    b.run(1)
+    said = str(b.scheduler.read(one))
+    assert said.startswith("running, 412/1800 matches (1 failed), 940/hour, ~1.5 hours left")
+    assert b.scheduler.read(one).tally == tally
+
+
+def test_a_tally_under_an_hour_left_is_in_minutes_and_a_finished_one_has_no_pace() -> None:
+    left = Tally(unit="matches", done=1700, total=1800, per_hour=1200.0)
+    assert str(left) == "1700/1800 matches, 1200/hour, ~5 minutes left"
+    last = left.model_copy(update={"done": 1790})
+    assert str(last) == "1790/1800 matches, 1200/hour, ~1 minute left"
+    assert str(left.model_copy(update={"done": 1800})) == "1800/1800 matches"
+
+
+def test_a_job_that_exited_is_not_lost_when_its_files_never_arrive(tmp_path: Path) -> None:
+    """The machine outlives the job, its completion record never lands, and it ends at last."""
+    b = bench(tmp_path)
+    one = b.scheduler.queue(job(), rent="l4")
+    b.scheduler.tick()
+    b.run(1)
+    _reporting(
+        b, finished_at=b.clock(), outcome="succeeded", exit_code=0, delivered=False, outputs=()
+    )
+    b.run(1)
+    attempt = b.scheduler.attempts(one)[0]
+    assert attempt.outcome is None  # its files may still come while the machine lives
+    b.service.kill(attempt.session)
+    b.run(1)
+    status = b.scheduler.read(one)
+    assert (status.phase, status.outcome, status.attempts) == ("done", "succeeded", 1)
+    assert any("not confirmed stored" in d.message for d in b.scheduler.diagnostics(run=one))
+
+
+def test_a_lost_run_with_no_time_to_retry_says_what_ended_it(tmp_path: Path) -> None:
+    b = bench(tmp_path)
+    one = b.scheduler.queue(job(max_hours=0.1), rent="l4")
+    b.scheduler.tick()
+    b.run(1)
+    observe = b.service.observe
+
+    def silent(session_id: str) -> Observation:
+        return observe(session_id).model_copy(update={"progress": ()})
+
+    b.service.observe = silent  # type: ignore[method-assign]
+    b.clock.advance(400)  # past its hours, with nothing more heard of it
+    b.service.kill(b.scheduler.attempts(one)[0].session)
+    b.run(1)
+    assert str(b.scheduler.read(one)).startswith("done: out_of_time (machine_lost)")
+
+
+def test_a_read_shows_a_running_jobs_output_and_a_pass_fetches_it_only_as_it_grows(
+    tmp_path: Path,
+) -> None:
+    b = bench(tmp_path)
+    one = b.scheduler.queue(job(), rent="l4")
+    b.scheduler.tick()
+    b.run(1)
+    attempt = b.scheduler.attempts(one)[0]
+    assert not any(s.received for s in b.scheduler.logs(run=one).streams if s.producer == "job")
+
+    logs = b.service.logs
+    fetched = 0
+
+    def counted(session_id: str, attempt: str | None = None, *, producer: str = "job") -> LogStream:
+        nonlocal fetched
+        fetched += 1
+        return logs(session_id, attempt, producer=producer)
+
+    b.service.logs = counted  # type: ignore[method-assign]
+    _reporting(b, log_bytes=100)
+    b.run(1)
+    assert f"log of {attempt.id}" in job_text(b.scheduler.logs(run=one))
+    assert fetched == 1
+    b.run(40)  # nothing new stored
+    assert fetched == 1
+    _reporting(b, log_bytes=200)
+    b.run(1)
+    assert fetched == 2

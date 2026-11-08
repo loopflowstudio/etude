@@ -153,7 +153,11 @@ def eval_experiment(
         float | None, typer.Option(min=1, help="pass again every SECONDS until Ctrl-C")
     ] = None,
     retry_failed: Annotated[
-        bool, typer.Option(help="play again the matches that failed, rather than count them")
+        bool,
+        typer.Option(
+            help="play again the matches that failed, rather than count them, and launch again "
+            "what a failed launched pass left unplayed"
+        ),
     ] = False,
 ) -> None:
     """Play, or with --pool or --rent launch, the matches eval(state) wants that no run delivered."""

@@ -15,8 +15,10 @@ no eval run delivered (`etude.eval.tournament.played`), played here or
 launched as a job that plays exactly those. A launched pass names its run for
 the matches it plays and remembers it in a ledger beside the launcher's
 records, so a later pass neither launches it again nor plays its matches while
-it runs. A pass that finds one of its launched runs failed stops: rerun it
-after looking, rather than spend again unattended.
+it runs. A pass that would launch matches a failed run was given stops: rerun
+them after looking, rather than spend again unattended. What a failed run
+delivered is not wanted again, and another experiment's run is none of its
+business.
 """
 
 from __future__ import annotations
@@ -26,7 +28,8 @@ import os
 import runpy
 import sys
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from itertools import count
 from pathlib import Path, PurePosixPath
 from typing import Literal, cast
 
@@ -271,13 +274,14 @@ def advance(
     the experiment's; a job naming another experiment is refused with
     `EtudeError("eval_job_of_another_experiment")`. A failed match is counted
     and left alone, so a result is never quietly replaced; `retry_failed`
-    plays it again.
+    plays it again, and launches again what a failed launched run left unplayed.
 
     Without `pool` or `rent` the matches are played here, as one eval run per
     job delivered to `source`. With one, each job with new matches is launched
     to play exactly those; the machine's storage must deliver to `source`, or
     the next pass will find them still new. Raises `EtudeError("launched_pass_failed")`
-    when a run an earlier pass launched failed.
+    when a run an earlier pass launched failed with matches this pass wants,
+    unless `retry_failed`.
     """
     # Imported here: typed jobs import this module for `Checkpoint`.
     from etude.jobs import Evaluation, evaluation_spec, with_matches  # noqa: PLC0415
@@ -285,7 +289,7 @@ def advance(
     state = observe(source, experiment.name)
     jobs = asked(experiment.eval, state)
     ledger = _Ledger(_ledger_root(directory)) if pool or rent else None
-    running = ledger.running() if ledger is not None else set()
+    standing = ledger.standing() if ledger is not None else _Standing()
     passes = []
     for given_job in jobs:
         spec: Evaluation = evaluation_spec(given_job)
@@ -304,7 +308,7 @@ def advance(
             storages=[source],
         )
         new = [*found.new, *(found.failed if retry_failed else ())]
-        pending = [match for match in new if match.key not in running]
+        pending = [match for match in new if match.key not in standing.running]
         done = Pass(
             tournament=spec.tournament.name,
             new=len(new),
@@ -328,7 +332,10 @@ def advance(
             )
             passes.append(done.model_copy(update={"played": held.played}))
             continue
-        run = f"{spec.tournament.name}-{digest(sorted(m.key for m in pending))[:12]}"
+        stopped = {standing.failed[m.key] for m in pending if m.key in standing.failed}
+        if stopped and not retry_failed:
+            raise EtudeError("launched_pass_failed", 409) from ValueError(sorted(stopped))
+        run = ledger.unused(f"{spec.tournament.name}-{digest(sorted(m.key for m in pending))[:12]}")
         launched = with_matches(job, pending, state)
         ledger.launch(run, launched, pending, pool=pool, rent=rent)
         passes.append(done.model_copy(update={"launched": run}))
@@ -364,6 +371,16 @@ class _Launched(Record):
     matches: tuple[Digest, ...]
 
 
+@dataclass(frozen=True)
+class _Standing:
+    """What the ledger's runs mean for this pass."""
+
+    # Matches of runs not yet done.
+    running: set[Digest] = field(default_factory=set)
+    # Matches of runs that ended without succeeding, to what `status` said of the run.
+    failed: dict[Digest, str] = field(default_factory=dict)
+
+
 class _Ledger:
     """The runs passes launched, kept in one JSON file per computer.
 
@@ -379,18 +396,23 @@ class _Ledger:
             return []
         return [_Launched.model_validate(each) for each in json.loads(self.path.read_text())]
 
-    def running(self) -> set[Digest]:
-        """Matches of launched runs not yet done. Raises when one failed."""
-        keys: set[Digest] = set()
+    def standing(self) -> _Standing:
+        """Where every launched run stands. One ledger serves all of a computer's experiments."""
+        standing = _Standing()
         for each in self._read():
             found = client.status(each.run)
             if not found.done:
-                keys.update(each.matches)
+                standing.running.update(each.matches)
             elif found.outcome != "succeeded":
-                raise EtudeError("launched_pass_failed", 409) from ValueError(
-                    f"{each.run}: {found}"
-                )
-        return keys
+                standing.failed.update(dict.fromkeys(each.matches, f"{each.run}: {found}"))
+        return standing
+
+    def unused(self, run: str) -> str:
+        """`run`, or the next `run-N` no pass launched: a retry may be given the same matches."""
+        taken = {each.run for each in self._read()}
+        if run not in taken:
+            return run
+        return next(f"{run}-{n}" for n in count(2) if f"{run}-{n}" not in taken)
 
     def launch(
         self,

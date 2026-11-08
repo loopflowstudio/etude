@@ -61,6 +61,7 @@ class FakeSession:
     packet: Packet
     created_at: datetime
     killed_at: datetime | None = None
+    told_to_finish: bool = False
     stops: dict[str, datetime] = field(default_factory=dict)
     added: list[tuple[Work, datetime]] = field(default_factory=list)
 
@@ -83,6 +84,8 @@ class FakeService:
         self.outcome: Callable[[Work], Outcome] = lambda work: "succeeded"
         self.refuse = 0  # how many of the next creates the provider turns down
         self.lose_reply = 0  # how many of the next creates succeed but never answer
+        # A session told to finish ends this long after, running nothing added since.
+        self.finish_seconds = 0.0
         self.creates = 0
         self.sessions: dict[str, FakeSession] = {}
         self.most_live = 0
@@ -132,6 +135,8 @@ class FakeService:
     def add(self, session_id: str, work: Work) -> None:
         self._call("bucket")
         held = self.sessions[session_id]
+        if held.told_to_finish:
+            return  # its worker has stopped taking work
         if all(work.attempt != known.attempt for known, _ in held.work()):
             held.added.append((work, self.clock()))
 
@@ -162,12 +167,13 @@ class FakeService:
         return self._ended_at(held)
 
     def finish(self, session_id: str) -> datetime | None:
-        # Its work is done, so it ends now, having delivered everything.
+        # Its work is done, so it ends once it has delivered everything.
         self._call("bucket")
         held = self.sessions[session_id]
-        if self._alive(held):
-            held.killed_at = self.clock()
-        return self._ended_at(held)
+        if self._alive(held) and not held.told_to_finish:
+            held.told_to_finish = True
+            held.killed_at = self.clock() + timedelta(seconds=self.finish_seconds)
+        return self._ended_at(held) if not self._alive(held) else None
 
     def kill(self, session_id: str) -> None:
         self.sessions[session_id].killed_at = self.clock()

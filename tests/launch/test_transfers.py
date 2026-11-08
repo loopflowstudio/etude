@@ -722,8 +722,9 @@ def test_completed_workload_before_and_after(
     assert sum(e.status == 403 for e in after.events) == 1
     assert control.requests > 0 and control.supplied_bytes > 0
     assert bulk.requests == 8  # runtime, failed source, source, input, 2 uploads, 2 parts
-    # Worker publication, scheduler collection and public fetches; a start receipt is read once.
-    assert control.requests == 40
+    # Worker publication (each attempt says how it ended before its files), scheduler
+    # collection, a running log and public fetches; a start receipt is read once.
+    assert control.requests == 42
 
     assert sum(e.operation == "GET" for e in after.events) == http.requests
     assert after.received_bytes == http.received
@@ -746,7 +747,7 @@ def test_completed_workload_before_and_after(
     assert before.received_bytes - after.received_bytes == len(
         http.objects["/source"]
     ) + 1024**2 + 3 * len(payload)
-    assert (before.requests, after.requests) == (52, 48)
+    assert (before.requests, after.requests) == (54, 50)
     saved = before.estimate(S3_US_WEST_2) - after.estimate(S3_US_WEST_2)
     assert saved == Decimal("0.00707948782")
     assert after.requests == control.requests + bulk.requests
@@ -1217,3 +1218,56 @@ def test_polling_a_session_reads_each_version_of_its_files_once(http: HTTP, tmp_
     assert http.received == written + added
     assert journal.logs(attempt.session, attempt.id).text == (first + second).decode()
     assert journal.logs(attempt.session, producer="worker").text == (lines + more).decode()
+
+
+def test_a_failed_delivery_leaves_how_the_job_ended_and_says_why(
+    http: HTTP, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A delivery that never completes must not hide the job's exit, nor its own failure."""
+    home = tmp_path / "sessions" / "stuck"
+    attempt = home / "attempts" / "a1"
+    (attempt / "outputs").mkdir(parents=True)
+    (attempt / "run").write_text("pass")
+    (attempt / "log").write_text("1800/1800 matches played\n")
+    (attempt / "finished.json").write_text(
+        Progress(
+            attempt="a1", started_at=None, finished_at=datetime.now(UTC), outcome="succeeded",
+            cause=None, clocks={}, outputs=(), exit_code=0,
+        ).model_dump_json(exclude={"attempt", "started_at"})
+    )  # fmt: skip
+    worker_log = tmp_path / "worker.log"
+    upload = http.url + "/upload"
+    courier = Courier(
+        home,
+        Grant(prefix="sessions/stuck/out/", form=PostForm(url=upload, fields={})),
+        "unused",
+        runs={"pass": Grant(prefix="pass/", form=PostForm(url=upload, fields={}))},
+        worker_log=worker_log,
+    )
+
+    def stalled(run: str, done: bool) -> None:
+        raise StorageUnavailable("PUT: no reply")
+
+    monkeypatch.setattr(courier, "_track", stalled)
+    with log_to(worker_log), pytest.raises(StorageUnavailable):
+        courier.carry_out()
+    record = AttemptRecord.model_validate_json(http.objects["/pass/attempts/a1.json"])
+    assert not record.delivered and record.exited is not None
+    assert record.exited["exit_code"] == 0
+    # The worker's log and usage still go out, carrying the reason.
+    told = b"".join(
+        body
+        for key, body in http.objects.items()
+        if key.startswith("/sessions/stuck/out/worker.log/")
+    )
+    assert b"output delivery" in told
+    assert "/sessions/stuck/out/usage.jsonl" in http.objects
+
+    # Delivered at last, its record stays delivered: no later pass sends it again.
+    monkeypatch.undo()
+    courier.carry_out()
+    delivered = http.objects["/pass/attempts/a1.json"]
+    assert AttemptRecord.model_validate_json(delivered).delivered
+    sent = http.requests
+    courier.carry_out()
+    assert http.requests == sent

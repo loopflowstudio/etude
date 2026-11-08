@@ -183,7 +183,7 @@ class DirectoryJournal:
 
     @staticmethod
     def _progress(home: Path) -> Progress:
-        claim, finished = home / "claim", home / "finished.json"
+        claim, finished, log = home / "claim", home / "finished.json", home / "log"
         started = datetime.fromisoformat(claim.read_text()) if claim.exists() else None
         if not finished.exists():
             result = read_result(home / "outputs")
@@ -196,6 +196,8 @@ class DirectoryJournal:
                 clocks=result.clocks,
                 outputs=(),
                 exit_code=None,
+                tally=result.tally,
+                log_bytes=log.stat().st_size if log.exists() else 0,
             )
         raw: dict[str, Any] = json.loads(finished.read_text())
         return progress_from_json(raw, home.name, started)

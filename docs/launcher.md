@@ -617,8 +617,10 @@ and `.runs` identify the retained evidence when admission fails. Cohort admissio
 remains atomic.
 
 `etude logs` is a read: it shows what the database retains, with each stream's
-collection time, and needs no provider key or network. A rented machine's final
-output is retained when its session ends. `--follow` is the wait: it collects new
+collection time, and needs no provider key or network. Each controller pass
+retains a running job's new output, at most every 30 seconds, and a stream's last
+output when its session ends; each read takes at most the supply's `log_seconds`,
+or 30 seconds without one. `--follow` is the wait: it collects new
 evidence from machines and buckets until the snapshot is complete, with no time
 limit unless `--timeout 30` bounds it; in Python, `logs(run=..., refresh=True,
 timeout=30)` takes one such snapshot. Follow uses the same selection and absolute
@@ -1009,7 +1011,21 @@ output directory; `etude status` shows it:
 {"clocks":{"steps":26000,"learner_transitions":52000}}
 ```
 
-The courier uploads final outputs before the completion note.
+A job that counts its work adds a `tally`, and `status` gives the fraction, the
+recent pace and the time left. An eval run reports one by itself:
+
+```json
+{"tally":{"unit":"matches","done":412,"total":1800,"failed":0,"per_hour":940.0}}
+```
+
+```text
+running, 412/1800 matches, 940/hour, ~1.5 hours left, ~$0.31
+```
+
+The courier publishes how the job ended as soon as it knows, then final outputs,
+then the completion note. A machine that ends before the note arrives leaves the
+run with the outcome the job reported, and a diagnostic that its files were not
+confirmed stored, rather than a lost attempt.
 
 The other job-written handoff is any file ending `.removed` in the run's
 tracking folder, such as `metrics/0123456789ab.removed`, listing paths

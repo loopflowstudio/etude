@@ -599,3 +599,24 @@ def test_a_continued_run_is_one_line_with_the_run_it_continues(
     lines = {(each.run, each.line, each.at["updates"]) for each in page.players}
     # Drawn in their own runs' jobs; `Earlier` by 500 reaches from b's 600 back to a's 100.
     assert lines == {("a", "a", 100), ("b", "a", 600)}
+
+
+def test_a_running_eval_runs_results_show_and_are_marked_partial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Blocks delivered before a run ends count; a killed pass keeps them."""
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    runs = tmp_path / "runs"
+    file = experiment_file(tmp_path / "experiments", "lab", LAB)
+    players = tuple(
+        Code(name=name, source=[__file__], config={"strength": n}) for n, name in enumerate("ab")
+    )
+    evaluate(
+        experiment="lab", environment=environment("duel"), play=play, run="killed",
+        matches=[Match(players=players, conditions={"deal": 0}, games=1)],
+        directory=runs,
+    )  # fmt: skip
+    (runs / "killed" / "state.json").unlink()  # as a machine lost before it ended
+    built = build(DirectoryStorage(runs), file)
+    assert any("Partial results" in note and "killed" in note for note in built.notes)
+    assert built.latest_result_ms is not None

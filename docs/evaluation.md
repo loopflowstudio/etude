@@ -441,8 +441,16 @@ etude eval ppo.py --source s3://bucket/etude/launch --rent cpu8 --watch 600
   source.
 - **Not twice.** A launched pass is named for its matches and kept in
   `ETUDE_HOME/experiments/launched.json`, so a later pass neither launches it
-  again nor plays its matches while it runs. A pass that finds one of them
-  failed stops, so a watch never spends again unattended; look, then rerun.
+  again nor plays its matches while it runs. A pass that would launch matches
+  a failed run was given stops with `launched_pass_failed`, so a watch never
+  spends again unattended; look, then `--retry-failed`. What the failed run
+  delivered is kept, and other experiments' passes are unaffected.
+- **While it runs.** `etude status RUN` gives the matches played, the recent
+  pace and the time left; `etude logs --run RUN` the job's recent output.
+  Sealed blocks reach storage every few minutes, so `etude report` and
+  `statsdb` read what a running pass has played and mark it partial (the
+  report says so; `statsdb`'s `runs.state` is null until the run ends). A
+  killed pass keeps every block it delivered and stays partial.
 - **Failures.** A match that failed is counted on every pass (`ladder: 0 new,
   1 failed`) and not played again, so a result is never quietly replaced.
   `--retry-failed` plays the failed matches again.

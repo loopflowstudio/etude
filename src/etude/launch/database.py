@@ -43,6 +43,7 @@ from etude.launch.records import (
     Stale,
     Storage,
     Supply,
+    Tally,
     Target,
     job_identity,
 )
@@ -97,7 +98,8 @@ CREATE TABLE IF NOT EXISTS sessions(
   seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
   machine TEXT NOT NULL REFERENCES machines(name), planned_at TEXT NOT NULL,
   claimed_at TEXT, startup_deadline TEXT, receipt TEXT, started_at TEXT, refused_at TEXT, ended_at TEXT,
-  version INTEGER NOT NULL DEFAULT 1, autorun INTEGER NOT NULL DEFAULT 0, hardware TEXT);
+  version INTEGER NOT NULL DEFAULT 1, autorun INTEGER NOT NULL DEFAULT 0, hardware TEXT,
+  finish_requested_at TEXT);
 CREATE TABLE IF NOT EXISTS rentals(
   machine TEXT PRIMARY KEY REFERENCES machines(name), usd_per_hour TEXT NOT NULL,
   cap_usd TEXT NOT NULL, deadline TEXT NOT NULL, kept INTEGER NOT NULL DEFAULT 0,
@@ -109,7 +111,7 @@ CREATE TABLE IF NOT EXISTS attempts(
   limit_kind TEXT NOT NULL, started_at TEXT, finished_at TEXT, outcome TEXT, cause TEXT,
   clocks TEXT NOT NULL DEFAULT '{}', outputs TEXT NOT NULL DEFAULT '[]', exit_code INTEGER,
   version INTEGER NOT NULL DEFAULT 1, planned_at TEXT, added INTEGER NOT NULL DEFAULT 0,
-  prepared TEXT);
+  prepared TEXT, tally TEXT);
 CREATE INDEX IF NOT EXISTS runs_job ON runs(job);
 CREATE INDEX IF NOT EXISTS attempts_run ON attempts(run);
 CREATE INDEX IF NOT EXISTS attempts_session ON attempts(session);
@@ -118,13 +120,19 @@ CREATE INDEX IF NOT EXISTS attempts_session ON attempts(session);
 Fact = str | int | None
 # Changes with the schema. A file from another version is refused, except those
 # `_UPGRADES` brings up to this one in place.
-_VERSION = 12
+_VERSION = 13
 # Statements that bring a file at a version key to the next version.
 _UPGRADES = {
     # Attempts record the environment their machine prepared (#54).
     10: ("ALTER TABLE attempts ADD COLUMN prepared TEXT",),
     # A pool's machines each take this many runs at once (#84).
     11: ("ALTER TABLE pools ADD COLUMN slots INTEGER NOT NULL DEFAULT 1",),
+    # Attempts keep how far a job got through the work it counted; a session
+    # told to finish is given no more work.
+    12: (
+        "ALTER TABLE attempts ADD COLUMN tally TEXT",
+        "ALTER TABLE sessions ADD COLUMN finish_requested_at TEXT",
+    ),
 }
 
 
@@ -186,6 +194,7 @@ def _attempt(row: sqlite3.Row) -> RunAttempt:
             "clocks": json.loads(row["clocks"]),
             "outputs": json.loads(row["outputs"]),
             "prepared": None if row["prepared"] is None else json.loads(row["prepared"]),
+            "tally": None if row["tally"] is None else json.loads(row["tally"]),
         }
     )
 
@@ -876,6 +885,9 @@ class Database:
     def record_refusal(self, session: Session, at: datetime) -> None:
         self._change("sessions", session.id, session.version, refused_at=at.isoformat())
 
+    def record_finish(self, session: Session, at: datetime) -> None:
+        self._change("sessions", session.id, session.version, finish_requested_at=at.isoformat())
+
     def confirm_ended(self, session: Session, at: datetime) -> None:
         self._change("sessions", session.id, session.version, ended_at=at.isoformat())
         self._db.execute(  # a rented machine is gone with it; one you added remains
@@ -928,9 +940,17 @@ class Database:
     def start(self, attempt: RunAttempt, at: datetime) -> None:
         self._change("attempts", attempt.id, attempt.version, started_at=at.isoformat())
 
-    def record_progress(self, attempt: RunAttempt, clocks: dict[str, float]) -> None:
-        """Retain where the job last said its clocks stood."""
-        self._change("attempts", attempt.id, attempt.version, clocks=json.dumps(clocks))
+    def record_progress(
+        self, attempt: RunAttempt, clocks: dict[str, float], tally: Tally | None
+    ) -> None:
+        """Retain where the job last said its clocks and counted work stood."""
+        self._change(
+            "attempts",
+            attempt.id,
+            attempt.version,
+            clocks=json.dumps(clocks),
+            tally=None if tally is None else tally.model_dump_json(),
+        )
 
     def finish(
         self,
@@ -943,6 +963,7 @@ class Database:
         outputs: Sequence[Output] = (),
         exit_code: int | None = None,
         prepared: Prepared | None = None,
+        tally: Tally | None = None,
     ) -> None:
         self._change(
             "attempts",
@@ -955,6 +976,7 @@ class Database:
             outputs=json.dumps([o.model_dump(mode="json") for o in outputs]),
             exit_code=exit_code,
             prepared=None if prepared is None else prepared.model_dump_json(),
+            tally=None if tally is None else tally.model_dump_json(),
         )
 
     def fail_before_start(self, attempt: RunAttempt, cause: Cause, at: datetime) -> None:

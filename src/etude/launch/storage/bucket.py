@@ -345,9 +345,13 @@ class BucketJournal:
             record = self._record(session_id, run, attempt)
             if record is None:
                 continue  # not started, or its first report has not arrived
-            if record.finished is not None:
-                done = progress_from_json(record.finished, attempt, record.started_at)
-                self._finished[attempt] = done
+            log_bytes = record.log_ends[-1] if record.log_ends else 0
+            if record.exited is not None:
+                done = progress_from_json(record.exited, attempt, record.started_at)
+                if record.delivered:
+                    self._finished[attempt] = done  # complete: never read again
+                else:
+                    done = done.model_copy(update={"delivered": False, "log_bytes": log_bytes})
                 progress.append(done)
                 continue
             progress.append(
@@ -360,6 +364,8 @@ class BucketJournal:
                     clocks=record.result.clocks,
                     outputs=(),
                     exit_code=None,
+                    tally=record.result.tally,
+                    log_bytes=log_bytes,
                 )
             )
         return Observation(
@@ -429,16 +435,20 @@ class BucketJournal:
                 pieces = [self._run(run) + piece for piece in record.log_pieces(attempt)]
                 raw = self._pieces(session_id, pieces)
         return snapshot_stream(
-            session_id, attempt, producer, raw, record is not None and record.finished is not None
+            session_id,
+            attempt,
+            producer,
+            raw,
+            record is not None and record.exited is not None and record.delivered,
         )
 
     @_attribute_session
     def fetch(self, session_id: str, attempt: str, name: str, destination: Path) -> Path:
         run = self._runs(session_id).get(attempt)
         record = None if run is None else self._record(session_id, run, attempt)
-        if run is None or record is None or record.finished is None:
+        if run is None or record is None or record.exited is None or not record.delivered:
             raise LauncherError(f"attempt {attempt} recorded no output {name!r}")
-        done = progress_from_json(record.finished, attempt, None)
+        done = progress_from_json(record.exited, attempt, None)
         expected = next((o for o in done.outputs if o.name == name), None)
         if expected is None:
             raise LauncherError(f"attempt {attempt} recorded no output {name!r}")

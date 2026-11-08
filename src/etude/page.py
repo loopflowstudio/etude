@@ -407,13 +407,18 @@ def build(source: Storage | Path | str, file: Path) -> Page:
         else _Evals()
     )
     flames = [panel.prefix for panel in (*report.perf, *report.ml) if isinstance(panel, Flame)]
+    # Blocks arrive as they are sealed, so a run with no recorded end shows what it played so far.
+    unended = [run.name for run in data if run not in trained and run.state is None]
+    partial = (
+        (f"Partial results: no recorded end yet for {', '.join(unended)}.",) if unended else ()
+    )
     return Page(
         experiment=experiment,
         file=str(file),
         source=_source_name(storage),
         report=report,
         origin=origin,
-        notes=(*notes, *evals.notes),
+        notes=(*notes, *partial, *evals.notes),
         training=training(trained, prefixes=flames),
         scores=evals.scores or ((report.score,) if report.score is not None else ()),
         selections=evals.selections,
