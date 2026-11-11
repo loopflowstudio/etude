@@ -69,6 +69,7 @@ from concurrent.futures import Future
 from dataclasses import dataclass
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from importlib.util import cache_from_source
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -457,7 +458,11 @@ def _run_file(file: Path) -> dict[str, object]:
     if folder not in sys.path:
         sys.path.insert(0, folder)
     # A neighbour edited since the last build is imported afresh, as the file itself is run.
-    for name in _neighbours(file):
+    for name, source in _neighbours(file).items():
+        # Bytecode timestamps have only second precision; same-size edits within
+        # that second still need to load the source the page's inputs detected.
+        if source.suffix == ".py":
+            Path(cache_from_source(str(source))).unlink(missing_ok=True)
         sys.modules.pop(name, None)
     return runpy.run_path(str(file.resolve()))
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 import threading
@@ -278,10 +279,12 @@ def test_refresh_reads_an_edited_neighbour_the_file_imports(tmp_path: Path) -> N
         "def report() -> Report:\n    return Report(labels={'a': NAME})\n",
     )
     with Server(runs, file, ("127.0.0.1", 0)) as server:
+        os.utime(helper, ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
         assert '"First"' in (server.page() or "")
-        # Only the neighbour changes: Refresh still shows it, without a restart.
-        helper.write_text('NAME = "Second name"\n')
-        assert '"Second name"' in (server.page(refresh=True) or "")
+        # Same size and second: Python's bytecode cache must not hide this edit.
+        helper.write_text('NAME = "Other"\n')
+        os.utime(helper, ns=(1_700_000_000_000_000_001, 1_700_000_000_000_000_001))
+        assert '"Other"' in (server.page(refresh=True) or "")
         helper.write_text("NAME = (\n")
         with pytest.raises(SyntaxError):
             server.page(refresh=True)
