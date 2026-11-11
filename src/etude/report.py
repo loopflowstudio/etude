@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal, Self
 
-from pydantic import Field, FiniteFloat, model_validator
+from pydantic import Field, FiniteFloat, JsonValue, model_validator
 
 from etude.run.records import Record
 
@@ -113,7 +113,8 @@ class Curve(Record):
     section's Opponent control: a player's name, or a checkpoint of the same
     line (`Earlier`, `Fraction`, `At`). None leaves it to the control.
     A tuple of `matches` unions their matches before aggregation; `subject`
-    selects one job by its original name.
+    selects one job by its original name. `inference` selects an exact scientific
+    inference config when the matches seat several variants of one checkpoint.
     """
 
     kind: Literal["curve"] = "curve"
@@ -122,6 +123,7 @@ class Curve(Record):
     matches: Matches | tuple[Matches, ...] | None = None
     opponent: str | Earlier | Fraction | At | None = None
     subject: str | None = None
+    inference: dict[str, JsonValue] | None = None
 
     @model_validator(mode="after")
     def nonempty_matches(self) -> Self:

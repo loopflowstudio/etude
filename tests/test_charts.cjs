@@ -21,7 +21,7 @@ function page(players, cells, training = {jobs: [], runs: [], checkpoints: [], c
 }
 
 const earlier = {kind: "earlier", clock: "updates", by: 400};
-const points = (m, job, opponent = earlier) => m.jobPoints(job, "updates", m.evalValue(0, 0, {}, opponent, "{}"));
+const points = (m, job, opponent = earlier) => m.jobPoints(job, "updates", m.evalValue(0, 0, {}, opponent));
 
 test("external learners sharing positions draw separate curves against their own earlier checkpoint", () => {
   const m = context.model(page([
@@ -127,13 +127,56 @@ test("a checkpoint never resolves to itself as its own opponent", () => {
   assert.match(own.meta, /no checkpoint at updates 400/);
 });
 
-test("config defaults prefer results but preserve an explicit empty config", () => {
-  const data = page([player("empty", "a", 100), player("played", "b", 100)], [[1, null, 0.625]]);
+test("each job draws its requested results without a global config filter", () => {
+  const data = page([player("a", "a", 100), player("b", "b", 100)], [[0, null, 0.25], [1, null, 0.625]]);
   data.players[0].config = '{"search":0}';
   data.players[1].config = '{"search":9}';
   const m = context.model(data);
-  assert.equal(m.chooseConfig(null), data.players[1].config);
-  assert.equal(m.chooseConfig(data.players[0].config), data.players[0].config);
+  assert.deepEqual(Array.from(m.JOBS, j => points(m, j, "")[0].y), [0.25, 0.625]);
+});
+
+test("requested matchups select scientific variants without pooling their scores", () => {
+  const data = page([player("u100", "a", 100), player("u100", "a", 100)], [[0, null, 0.25], [1, null, 0.75]]);
+  data.players[0].config = '{"search":0}';
+  data.players[1].config = '{"search":9}';
+  data.cells[1].selection = 1;
+  const m = context.model(data), j = m.JOBS[0];
+  for (const [sel, y] of [[0, 0.25], [1, 0.75]]) {
+    assert.equal(m.jobPoints(j, "updates", m.evalValue(0, sel, {}, ""))[0].y, y);
+  }
+  data.cells[1].selection = 0;
+  const both = context.model(data), gap = points(both, both.JOBS[0], "")[0];
+  assert.equal(gap.missing, true);
+  assert.match(gap.meta, /multiple inference variants.*search.*Curve.inference/);
+  assert.equal(both.jobPoints(both.JOBS[0], "updates", both.evalValue(0, 0, {}, "", {search: 9}))[0].y, 0.75);
+});
+
+test("search against no search keeps both intentional sides selectable", () => {
+  const data = page([player("u100", "a", 100), player("u100", "a", 100)], [[0, 1, 0.25], [1, 0, 0.75]]);
+  data.players[0].config = '{"search":0}';
+  data.players[1].config = '{"search":9}';
+  const m = context.model(data);
+  for (const [search, y] of [[0, 0.25], [9, 0.75]]) {
+    const p = m.jobPoints(m.JOBS[0], "updates", m.evalValue(0, 0, {}, "", {search}))[0];
+    assert.equal(p.y, y);
+  }
+  assert.equal(points(m, m.JOBS[0], "1")[0].y, 0.25);
+  assert.equal(points(m, m.JOBS[0], "0")[0].y, 0.75);
+});
+
+test("seeds playing different scientific variants are not averaged together", () => {
+  const training = {
+    jobs: [{key: "job", name: "job", runs: ["a", "b"]}],
+    runs: [{name: "a"}, {name: "b"}], clocks: [{name: "updates"}],
+    checkpoints: ["a", "b"].map(run => ({run, ordinal: 1, align: 100, at: {updates: 100}})),
+  };
+  const data = page([player("u100", "a", 100, "a", 1), player("u100", "b", 100, "b", 1)], [[0, null, 0.25], [1, null, 0.75]], training);
+  data.players[0].config = '{"search":0}';
+  data.players[1].config = '{"search":9}';
+  const m = context.model(data), p = points(m, m.JOBS[0], "")[0];
+  assert.equal(p.missing, true);
+  assert.equal(p.y, undefined);
+  assert.match(p.meta, /seeds played different inference variants/);
 });
 
 test("tag fallback prefers results while an explicit tournament remains exact", () => {
@@ -162,7 +205,7 @@ test("union curves keep jobs separate and subject filtering omits the complement
   data.report.labels = {large: "Large model"};
   const m = context.model(data), sel = m.selectMatches(union, 0);
   assert.equal(sel, 2);
-  const ys = m.panelJobs({}).map(j => m.jobPoints(j, "updates", m.evalValue(0, sel, {}, "", "{}"))[0].y);
+  const ys = m.panelJobs({}).map(j => m.jobPoints(j, "updates", m.evalValue(0, sel, {}, ""))[0].y);
   assert.deepEqual(Array.from(ys), [0.625, 0.375]); // external learner order is lexical
   assert.equal(m.panelJobs({subject: "large"}).length, 1);
   assert.equal(m.panelJobs({subject: "large"})[0].label, "Large model");

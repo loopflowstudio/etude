@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -10,9 +11,20 @@ import pytest
 from moto import mock_aws
 
 from etude.carriage import checkpoint_file
-from etude.eval.match import environment, evaluate
+from etude.eval.match import Result, environment, evaluate
 from etude.eval.query import compare, statsdb
-from etude.eval.records import CheckpointKey, CheckpointRef, Code, Inference, Match, Model, Player
+from etude.eval.records import (
+    Benchmark,
+    CheckpointKey,
+    CheckpointRef,
+    Code,
+    Inference,
+    Match,
+    Matchup,
+    Model,
+    Player,
+)
+from etude.eval.tournament import hold
 from etude.experiment import advance, observe, read_experiment
 from etude.page import Page, build
 from etude.report import Matches
@@ -315,6 +327,105 @@ def outside(name: str, at: dict[str, float], line: str | None = None, **config: 
 
 def duel(first: Player, second: Player, deal: int = 0) -> Match:
     return Match(players=(first, second), conditions={"deal": deal}, games=2)
+
+
+def test_mixed_execution_fills_requested_games_and_replays_count_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = tmp_path / "runs"
+    file = experiment_file(tmp_path / "experiments", "lab", EVALUATION_ONLY)
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("ETUDE_SOURCE_DIR", str(file.parent))
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    checkpoint = outside("u100", {"updates": 100}, "learner").checkpoint
+
+    def recorded(match: Match) -> Result:
+        return Result(tables=play(match), execution={"device": device, "compute": compute})
+
+    for run, device, compute, commit in (
+        ("cpu", "cpu", "serial", "a" * 40),
+        ("cuda", "cuda:0", "shared-eval-v2", "b" * 40),
+    ):
+        monkeypatch.setenv("ETUDE_COMMIT", commit)
+        monkeypatch.setenv("ETUDE_RUN", run)
+        matchup = Matchup(
+            name="vs heuristic",
+            players=(Inference(source=[file], config={"search": 0}), HEURISTIC),
+            conditions=({"deal": 0}, {"deal": 1}),
+            games=2,
+        )
+        benchmark = Benchmark(name="mixed", environment=DUEL, matchups=(matchup,))
+        matches = matchup.matches(checkpoint)
+        held = hold(
+            benchmark,
+            experiment="lab",
+            checkpoints=[checkpoint],
+            matches=matches[:1] if run == "cpu" else None,
+            play=recorded,
+            directory=runs,
+        )
+        assert held.played == 1
+        # Read once between arrivals too: the kept database must retain each result's setup.
+        with statsdb("lab", runs) as db:
+            assert db.sql("select count(*) from matches where state = 'done'").fetchone() == (
+                1 if run == "cpu" else 2,
+            )
+
+    # A replay on another setup still names the same requested games and seed.
+    device, compute = "mps", "serial"
+    evaluate(
+        experiment="lab",
+        environment=DUEL,
+        matches=matches[:1],
+        play=recorded,
+        run="z-replay",
+        directory=runs,
+    )
+    monkeypatch.setenv("ETUDE_RUN", "complete")
+    assert (
+        hold(
+            benchmark,
+            experiment="lab",
+            checkpoints=[checkpoint],
+            play=recorded,
+            directory=runs,
+        ).played
+        == 0
+    )
+
+    page = build(runs, file)
+    assert len(page.players) == 2
+    selected = selection(page, "mixed")
+    subject = next(i for i, p in enumerate(page.players) if p.name == "u100.pt")
+    cell = next(
+        c
+        for c in page.cells
+        if c.selection == selected and c.subject == subject and not c.split and c.commit is None
+    )
+    assert (cell.matches, cell.rows, cell.value) == (2, 4, 0.5)
+    with statsdb("lab", runs) as db:
+        provenance = db.sql(
+            "select m.run, m.seed, m.execution, s.commit from matches m join seats s"
+            " using (run, match) where s.seat = 0 order by m.run"
+        ).fetchall()
+        # A schema-8 cache has no execution column; rebuilding must recover provenance.
+        db.execute("alter table matches drop column execution")
+        db.execute("update kept.statsdb set schema = 8")
+    with statsdb("lab", runs) as db:
+        assert (
+            db.sql(
+                "select m.run, m.seed, m.execution, s.commit from matches m join seats s"
+                " using (run, match) where s.seat = 0 order by m.run"
+            ).fetchall()
+            == provenance
+        )
+    assert [
+        (run, seed, json.loads(execution), commit) for run, seed, execution, commit in provenance
+    ] == [
+        ("cpu", matches[0].seed, {"device": "cpu", "compute": "serial"}, "a" * 40),
+        ("cuda", matches[1].seed, {"device": "cuda:0", "compute": "shared-eval-v2"}, "b" * 40),
+        ("z-replay", matches[0].seed, {"device": "mps", "compute": "serial"}, "b" * 40),
+    ]
 
 
 @pytest.fixture(scope="module")

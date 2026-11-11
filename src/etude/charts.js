@@ -229,6 +229,8 @@ function model(D) {
     const skipped = got.filter(([, v]) => v.skip);
     if (skipped.length === got.length) return {x, key, skip: true, gap: skipped[0][1].gap, meta: skipped[0][1].meta};
     if (skipped.length) return {x, key, missing: true, gap: "partial", meta: `${got.length - skipped.length} of ${got.length} seeds evaluated`};
+    if (new Set(got.map(([, v]) => v.inference).filter(v => v != null)).size > 1)
+      return {x, key, missing: true, gap: "none", meta: "seeds played different inference variants; choose a matchup or set Curve.inference"};
     const ys = got.map(([, v]) => v.y), y = mean(ys);
     return got.length > 1
       ? {x, key, y, lo: Math.min(...ys), hi: Math.max(...ys), seeds: ys}
@@ -241,16 +243,16 @@ function model(D) {
   for (const c of D.cells) if (c.opponent != null) cellIndex.set(`${c.selection}|${c.score}|${c.subject}||${+c.fixed}|${splitKey(c.split)}`, c);
   for (const c of D.cells) cellIndex.set(`${c.selection}|${c.score}|${c.subject}|${c.opponent ?? ""}|${+c.fixed}|${splitKey(c.split)}`, c);
   const cellOf = (sel, score, subject, opponent, fixed, split) => cellIndex.get(`${sel}|${score}|${subject}|${opponent ?? ""}|${+fixed}|${splitKey(split)}`);
-  const bound = new Map(); D.players.forEach((a, i) => { if (a.run != null) bound.set(`${a.run}|${a.ordinal}|${a.config}`, i); });
-  for (const i of positioned) {
-    const k = `${lineRun(lineOf(i))}|${splitKey(D.players[i].at)}|${D.players[i].config}`;
-    bound.set(k, i);
+  // A checkpoint can play several scientific variants. The requested matches choose
+  // one; execution setup lives on results and never creates another candidate.
+  const bound = new Map();
+  function bind(key, i) {
+    if (!bound.has(key)) bound.set(key, []);
+    bound.get(key).push(i);
   }
+  D.players.forEach((a, i) => { if (a.run != null) bind(`${a.run}|${a.ordinal}`, i); });
+  for (const i of positioned) bind(`${lineRun(lineOf(i))}|${splitKey(D.players[i].at)}`, i);
   const fixedPlayers = indices.filter(i => !placed(i));
-  const configs = [...new Set(indices.filter(placed).map(i => D.players[i].config))].sort();
-  const recordedConfigs = new Set(D.cells.filter(c => placed(c.subject)).map(c => D.players[c.subject].config));
-  const defaultConfig = configs.find(cfg => recordedConfigs.has(cfg)) ?? configs[0] ?? "";
-  const chooseConfig = selected => configs.includes(selected) ? selected : defaultConfig;
   const coverage = new Map(D.coverage.map(c => [`${c.run}|${c.ordinal}|${c.tournament}`, c]));
   const jobOfRun = run => JOBS.find(j => j.runs.includes(run));
   // The players a curve draws: its runs' checkpoints, or its line's.
@@ -266,7 +268,29 @@ function model(D) {
     if (!positions.has(key)) positions.set(key, []);
     positions.get(key).push(i);
   });
-  const playerName = i => { const a = D.players[i]; return a.run != null ? `${a.run} ${a.name}` : a.line != null ? `${a.line} ${a.name}` : a.name; };
+  const variants = new Map();
+  for (const a of D.players) {
+    if (!variants.has(a.name)) variants.set(a.name, new Set());
+    variants.get(a.name).add(a.config);
+  }
+  const playerName = i => {
+    const a = D.players[i], name = variants.get(a.name).size > 1 ? `${a.name} ${a.config}` : a.name;
+    return a.run != null ? `${a.run} ${name}` : a.line != null ? `${a.line} ${name}` : name;
+  };
+  const canonical = value => JSON.stringify(value, (_, v) => v && typeof v === "object" && !Array.isArray(v) ? Object.fromEntries(Object.keys(v).sort().map(k => [k, v[k]])) : v);
+  const inferenceKeys = D.players.map(a => canonical(JSON.parse(a.config)));
+  function subjectAt(run, m, played, inference = null) {
+    const candidates = (bound.get(`${run}|${m.ordinal}`) || []).filter(i => inference == null || inferenceKeys[i] === canonical(inference));
+    const recorded = candidates.filter(played);
+    const found = recorded.length ? recorded : candidates;
+    if (found.length > 1) {
+      const names = found.map(playerName).join(" and ");
+      return {gap: found.every(i => D.players[i].config === D.players[found[0]].config)
+        ? `${names} stood at ${alignClock} ${num(D.players[found[0]].at[alignClock])}`
+        : `multiple inference variants: ${names}; choose a matchup or set Curve.inference`};
+    }
+    return {index: found[0]};
+  }
   function selName(s) {
     if (Array.isArray(s)) return s.map(selName).join(" + ");
     const detail = s.matchup ?? (s.tag != null ? `tagged ${s.tag}` : null);
@@ -345,38 +369,41 @@ function model(D) {
     if (found.length > 1) return {gap: `${found.map(playerName).join(" and ")} both stood at ${spec.clock} ${num(want)}`};
     return found.length ? {index: found[0]} : {gap: `no checkpoint at ${spec.clock} ${num(want)}`};
   }
-  // The value of each checkpoint of `config` against `opponent`, split by `split`: "" for all,
-  // a player's index as a string, or a curve's own opponent ({kind: "name" | "earlier" | "fraction" | "at"}).
-  const evalValue = (score, sel, split, opponent, config) => (run, m) => {
-    const i = bound.get(`${run}|${m.ordinal}|${config}`);
+  // Each checkpoint's value in the requested matches; scientific variants are
+  // selected by their results, never averaged together behind a curve.
+  const evalValue = (score, sel, split, opponent, inference = null) => (run, m) => {
+    const own = typeof opponent === "object";
+    const opponentOf = i => own ? opponentAt(i, opponent, k => !!cellOf(sel, score, i, k, false, split)) : {index: opponent === "" ? null : +opponent};
+    const subject = subjectAt(run, m, i => {
+      const o = opponentOf(i);
+      return !o.gap && !!cellOf(sel, score, i, o.index, false, split);
+    }, inference);
+    if (subject.gap) return {missing: true, gap: "none", meta: subject.gap};
+    const i = subject.index;
     if (i == null || sel == null) return gapOf(sel, run, m, score);
-    const a = D.players[i], both = positions.get(JSON.stringify([lineOf(i), config, a.at[alignClock]]));
+    const a = D.players[i], both = positions.get(JSON.stringify([lineOf(i), a.config, a.at[alignClock]]));
     const missing = meta => ({missing: true, gap: "none", at: a.at, meta});
     if (both?.length > 1) return missing(`${both.map(playerName).join(" and ")} stood at ${alignClock} ${num(a.at[alignClock])}`);
-    const own = typeof opponent === "object";
-    let o = opponent === "" ? null : own ? null : +opponent;
-    if (own) {
-      const found = opponentAt(i, opponent, k => !!cellOf(sel, score, i, k, false, split));
-      if (found.gap) return missing(found.gap);
-      o = found.index;
-    }
+    const found = opponentOf(i);
+    if (found.gap) return missing(found.gap);
+    const o = found.index;
     const c = cellOf(sel, score, i, o, false, split);
     if (!c) return own ? missing(`not played against ${playerName(o)}`) : gapOf(sel, run, m, score);
-    return {y: c.value, lo: c.interval?.[0], hi: c.interval?.[1], at: a.at, meta: scoreCount(c, D.scores?.[score]) + (own ? " · vs " + playerName(o) : "")};
+    return {y: c.value, lo: c.interval?.[0], hi: c.interval?.[1], at: a.at, inference: a.config, meta: scoreCount(c, D.scores?.[score]) + (own ? " · vs " + playerName(o) : "")};
   };
   const evaluated = pts => pts.filter(p => !p.missing && !p.skip);
-  return {T, R, JOBS, marks, markOf, xOf, jobPoints, cellOf, bound, placed, positioned, posClocks, alignClock, fixedPlayers, configs, chooseConfig, usesSelection, selectMatches, panelJobs, scheduleSeries, coverage, jobOfRun, members, linesOf, lineMembers, playerName, selName, choices, opponents, evalValue, evaluated};
+  return {T, R, JOBS, marks, markOf, xOf, jobPoints, cellOf, subjectAt, placed, positioned, posClocks, alignClock, fixedPlayers, usesSelection, selectMatches, panelJobs, scheduleSeries, coverage, jobOfRun, members, linesOf, lineMembers, playerName, selName, choices, opponents, evalValue, evaluated};
 }
 
 // The first curve supplies the index headline, with the page's default score,
-// result-aware config and selection, on its first clock.
+// result-aware selection, on its first clock.
 function headline(D, M) {
   const panel = D.report.evals?.find(p => p.kind === "curve") || {};
   const sel = M.selectMatches(panel.matches, M.choices.length ? +M.choices[0][0] : null);
   const opp = ownOpponent(panel) ?? (sel == null ? "" : (M.opponents(0, sel)[0] || [""])[0]);
   const clock = M.alignClock || WALL;
   return M.panelJobs(panel).map(j => {
-    const pts = sel == null || !D.scores.length ? [] : M.jobPoints(j, clock, M.evalValue(0, sel, {}, opp, M.chooseConfig(null)));
+    const pts = sel == null || !D.scores.length ? [] : M.jobPoints(j, clock, M.evalValue(0, sel, {}, opp, panel.inference));
     const done = M.evaluated(pts);
     return {job: j, points: pts, latest: done.length ? done[done.length - 1] : null, against: opp === "" ? "all opponents" : typeof opp === "object" ? (opp.name || "configured opponent") : D.players[+opp].name};
   });

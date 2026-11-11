@@ -140,6 +140,16 @@ evaluate(
   (`seats.commit`, `seats.source`) but not part of the key, so changed code
   reuses what was played. Joins use the key, encoded (`players.player`,
   `seats.player`).
+- **Execution setup.** Return `Result(tables=tables, execution={"device": "cuda:0",
+  "compute": "shared-eval-v2"})` from `play` to record the setup actually used.
+  This JSON stays with each result (`MatchRecord.execution`, `matches.execution`),
+  alongside its seed (`matches.seed`) and each player's code version
+  (`seats.commit`, `seats.source`). Setup belongs here, not in `Inference.config`,
+  `Code.config`, match conditions or tournament names: it creates no new player,
+  match or selection. Requested games may finish across any setups; a replay's
+  latest delivered result counts once in reports. Missing metadata on older
+  records reads as `{}`. Existing scientific configs retain their identity;
+  Etude does not guess which historical config keys described hardware.
 - **Where a checkpoint stood.** A seated checkpoint may say where it stood on
   its clocks: `CheckpointRef(key=..., artifact=..., at={"updates": 600})`.
   A tracked checkpoint's `ref` fills `at` from its run's clocks; give it

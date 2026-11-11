@@ -281,10 +281,16 @@ replaces the displayed job name, keeping the seed count. Labels change
 presentation only: `baseline` and panel subjects still refer
 to the original job names. Unlabelled jobs keep their launch names.
 
-**Config** starts with a configuration that has recorded evaluation results
-when one is available. A valid configuration you select stays selected;
-choosing one without results shows the missing data rather than silently
-changing your choice.
+**Execution setup** is result provenance. Games played on different devices,
+compute setups or code revisions contribute to the same requested matches;
+a replay counts once, from its latest delivered result. There is no Config
+control. Record the actual setup with `Result.execution`, inspect it alongside
+`matches.seed` and `seats.commit` in `statsdb` ([evaluation](evaluation.md)).
+Scientific differences, such as search budgets in `Inference.config`, remain
+distinct players. A curve uses the variant played in its selected matches;
+when several remain, it names the ambiguity. Select the intended matchup or
+set `Curve(inference={"search": 64})` to choose that exact scientific config.
+It selects no execution setup.
 
 **Evals** are the experiment's eval runs ([evaluation](evaluation.md#experiments)).
 A checkpoint is drawn where its seat says it stood (`CheckpointRef.at`), else,
@@ -315,6 +321,7 @@ is drawn as it wants it now; one it no longer returns, as its eval runs held it.
 | Panel | Shows |
 |---|---|
 | `Curve(split=None, opponent=None)` | the score at each checkpoint, against one anchor; `split` draws one chart per value |
+| `Curve(inference={"search": 64})` | one scientific variant when several play the same checkpoint; `None` resolves from the selected matches |
 | `Curve(opponent="heuristic")` | against the player of that name, whatever the Opponent control says |
 | `Curve(opponent=Earlier(clock="updates", by=400))` | each checkpoint against the one of its line exactly 400 updates earlier; none there is a gap that says so |
 | `Curve(opponent=Fraction(clock="updates", value=0.5))` | each checkpoint against the one of its line at exactly half its updates (6,000 v 3,000); none there is a gap |
@@ -331,6 +338,22 @@ their own: `matches=Matches(tournament=..., matchup=... or tag=...)`, by the
 names `eval(state)` gives them. A matchup and a tag are alternatives; naming
 both is refused. A curve against one anchor draws the others' scores against it as
 reference lines.
+
+For a matchup seating search against no search at the same checkpoint, two
+curves can deliberately show the two scientific variants:
+
+```python
+Curve(
+    title="Search against direct",
+    matches=Matches(matchup="search vs direct"),
+    inference={"search": 64},
+)
+Curve(
+    title="Direct against search",
+    matches=Matches(matchup="search vs direct"),
+    inference={"search": 0},
+)
+```
 
 **Compare jobs across selections.**
 

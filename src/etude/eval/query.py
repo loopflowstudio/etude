@@ -8,7 +8,7 @@ beside Etude's own tables:
 |---|---|
 | `runs` | run, experiment, environment (identity), environment_name, environment_config, tournament, state (`finished` or `failed` from its `state.json`; null while it has not ended, so its results are partial) |
 | `players` | player (its key, encoded), name, kind (`model` or `code`), checkpoint (its key), artifact (digest), uri, config, at, at_conflict, line, line_conflict, and `config.KEY` per scalar config key |
-| `matches` | run, match, conditions, games, seed, state, error, wall_ms |
+| `matches` | run, match, conditions, games, seed, state, error, wall_ms, execution (result provenance) |
 | `seats` | run, match, seat, player, the version that played: commit, source (digest), at (where its checkpoint stood, or null) and line (the learner it belongs to, or null) |
 | `groups` | run, match, group, seat |
 | `tournaments` | tournament, format (`benchmark` or `round_robin`), environment, conflict |
@@ -128,7 +128,7 @@ NUMERIC = ("BOOLEAN", "BIGINT", "DOUBLE")
 # Keys and coordinates of an author table's rows: never a value.
 KEYS = ("seat", "group", "game", "run", "match")
 # A kept database of another schema is deleted and read again from its store.
-SCHEMA = 8
+SCHEMA = 9
 
 _ENVIRONMENT_FILE = "environment.json"
 _STATE_FILE = "state.json"
@@ -232,7 +232,7 @@ def _create(db: duckdb.DuckDBPyConnection, experiment: str, storage: Storage) ->
     db.execute("create table blobs (run VARCHAR, match VARCHAR, sha256 VARCHAR, size_bytes BIGINT)")
     db.execute(
         "create table matches (run VARCHAR, match VARCHAR, conditions JSON, games BIGINT,"
-        " seed BIGINT, state VARCHAR, error VARCHAR, wall_ms BIGINT)"
+        " seed BIGINT, state VARCHAR, error VARCHAR, wall_ms BIGINT, execution JSON)"
     )
     db.execute(
         "create table seats (run VARCHAR, match VARCHAR, seat BIGINT, player VARCHAR,"
@@ -485,9 +485,11 @@ def _matches(db: duckdb.DuckDBPyConnection, run: str, block: Block) -> None:
     records = block.matches
     select, values = unnest(
         {"position": "BIGINT", "match": "VARCHAR", "conditions": "VARCHAR", "games": "BIGINT",
-         "seed": "BIGINT", "state": "VARCHAR", "error": "VARCHAR", "wall_ms": "BIGINT"},
+         "seed": "BIGINT", "state": "VARCHAR", "error": "VARCHAR", "wall_ms": "BIGINT",
+         "execution": "VARCHAR"},
         [[at, record.match.key, json.dumps(record.match.conditions), record.match.games,
-          record.match.seed, record.state, record.error, record.wall_ms]
+          record.match.seed, record.state, record.error, record.wall_ms,
+          json.dumps(record.execution)]
          for at, record in enumerate(records)],
     )  # fmt: skip
     db.execute(
@@ -503,7 +505,7 @@ def _matches(db: duckdb.DuckDBPyConnection, run: str, block: Block) -> None:
             f"delete from {table} t using _taken a where t.run = ? and t.match = a.match", [run]
         )
     db.execute(
-        "insert into matches select ?, match, conditions, games, seed, state, error, wall_ms"
+        "insert into matches select ?, match, conditions, games, seed, state, error, wall_ms, execution"
         " from _taken order by position",
         [run],
     )

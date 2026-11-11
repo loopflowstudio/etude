@@ -34,14 +34,14 @@ const asked = new URLSearchParams(location.hash.slice(1)).get("commit");
 const COMMIT = PAGE.commits.some(k => k.commit === asked) ? asked : "";
 const D = {...PAGE, cells: PAGE.cells.filter(c => (c.commit ?? "") === COMMIT)};
 const M = model(D);
-const {T, R, JOBS, marks, markOf, jobPoints, cellOf, bound, placed, members, fixedPlayers, configs, jobOfRun, playerName, selName, choices, evaluated} = M;
+const {T, R, JOBS, marks, markOf, jobPoints, cellOf, subjectAt, placed, members, fixedPlayers, jobOfRun, playerName, selName, choices, evaluated} = M;
 const TRAINED = T.runs.length > 0;
 
 // The view lives in the URL, so a reload or a rewritten page shows the same thing. The x axis
 // offers the clocks training declared or positions use, and wall time where training marks exist.
 const clockNames = [...new Set([...T.clocks.map(c => c.name), ...M.posClocks]), ...(T.checkpoints.length || !M.posClocks.length ? [WALL] : [])];
 const firstClock = clockNames.includes(R.clock) ? R.clock : clockNames[0];
-const S = Object.assign({hide: "", filter: "{}", eclock: firstClock, pclock: firstClock, mlclock: firstClock, opp: "first", score: "0", sel: "", cfg: "", lines: "on", mjob: "", mkey: "", xline: "", smooth: "on", fpath: "", fscale: "share", live: "1"},
+const S = Object.assign({hide: "", filter: "{}", eclock: firstClock, pclock: firstClock, mlclock: firstClock, opp: "first", score: "0", sel: "", lines: "on", mjob: "", mkey: "", xline: "", smooth: "on", fpath: "", fscale: "share", live: "1"},
   Object.fromEntries(new URLSearchParams(location.hash.slice(1))), {commit: COMMIT});
 for (const k of ["eclock", "pclock", "mlclock"]) if (!clockNames.includes(S[k])) S[k] = firstClock;
 const writeHash = () => history.replaceState(null, "", "#" + new URLSearchParams(S));
@@ -53,7 +53,6 @@ const stepClocks = T.clocks.filter(c => c.kind === "step").map(c => c.name);
 function evalState() {
   if (!choices.some(([v]) => v === S.sel)) S.sel = choices.length ? choices[0][0] : "";
   if (+S.score >= D.scores.length) S.score = "0";
-  S.cfg = M.chooseConfig(S.cfg);
   return {sel: S.sel === "" ? null : +S.sel, score: +S.score, info: D.scores[+S.score]};
 }
 const opponents = (E, sel) => M.opponents(E.score, sel);
@@ -61,7 +60,7 @@ const oppFor = (E, sel) => { const o = opponents(E, sel); return (o.find(([v]) =
 const versusOf = opp => opp === "" ? "vs all opponents" : typeof opp === "object" ? ownVersus(opp) : `vs ${D.players[+opp].name}`;
 const ownVersus = o => o.kind === "name" ? `vs ${o.name}` : o.kind === "earlier" ? `vs the checkpoint ${num(o.by)} ${o.clock} earlier` : o.kind === "fraction" ? `vs the checkpoint at ${num(o.value)} × its ${o.clock}` : `vs the checkpoint at ${o.clock} ${num(o.value)}`;
 let F = {}; try { F = JSON.parse(S.filter) || {}; } catch { F = {}; }
-const evalValue = (E, sel, extra, opponent) => M.evalValue(E.score, sel, {...F, ...extra}, opponent, S.cfg);
+const evalValue = (E, sel, extra, opponent, inference) => M.evalValue(E.score, sel, {...F, ...extra}, opponent, inference);
 // The other anchors' scores against the curve's anchor, as reference lines.
 function anchorLines(E, sel, opp, extra = {}) {
   if (S.lines !== "on" || opp === "" || typeof opp === "object" || sel == null) return [];
@@ -159,7 +158,6 @@ function render() {
   control(ec, "Score", D.scores.map((s, i) => [String(i), `${s.table}.${s.value}`]), "score");
   S.opp = oppFor(E, E.sel);
   control(ec, "Opponent", opponents(E, E.sel), "opp");
-  control(ec, "Config", configs.map(c => [c, c === "{}" ? "no config" : c]), "cfg");
   control(ec, "Anchor lines", fixedPlayers.length > 1 ? [["on", "On"], ["off", "Off"]] : [], "lines");
   control(ec, "X axis", CLOCKS, "eclock");
   const body = document.getElementById("evals-body"); body.replaceChildren();
@@ -169,7 +167,7 @@ function render() {
   const GAPS = "○ not yet played · × failed · | not evaluated";
   // Only a job averages seeds; a line's curve is its checkpoints' own values.
   const BAND = vis.some(j => j.line == null) ? "mean over seeds · band: seed range, or one seed's 95% interval over matches" : "band: 95% interval over matches";
-  const curveOf = (j, sel, extra = {}, opp = S.opp) => jobPoints(j, S.eclock, evalValue(E, sel, extra, opp));
+  const curveOf = (j, sel, extra = {}, opp = S.opp, inference = null) => jobPoints(j, S.eclock, evalValue(E, sel, extra, opp, inference));
   const latestKey = pts => { const ok = evaluated(pts); return ok.length ? ok[ok.length - 1].key : null; };
   const keyName = k => `${M.alignClock || "checkpoint"} ${num(k)}`;
   const finalKey = j => j.runs.every(r => T.runs.find(x => x.name === r)?.state === "finished") ? (marks.get(j.runs[0]) || []).at(-1)?.align ?? null : null;
@@ -182,14 +180,14 @@ function render() {
       const c = card(body, panel.title, `${where} · ${scoreName} ${versus} · ${BAND} · ${GAPS}`, "full");
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
       const host = node("div"); c.appendChild(host);
-      later(() => line(host, series(j => curveOf(j, sel, {}, opp), M.panelJobs(panel, vis)), {...eOpts, refs: anchorLines(E, sel, opp), height: 260, empty: panel.subject ? `Nothing recorded for subject ${panel.subject}` : undefined}));
+      later(() => line(host, series(j => curveOf(j, sel, {}, opp, panel.inference), M.panelJobs(panel, vis)), {...eOpts, refs: anchorLines(E, sel, opp), height: 260, empty: panel.subject ? `Nothing recorded for subject ${panel.subject}` : undefined}));
     } else if (panel.kind === "curve") {
       const c = card(body, panel.title, `${where} · one chart per ${panel.split} · ${versus}`, "full");
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
       const vals = values(E, sel, panel.split);
       if (!vals.length) { c.appendChild(node("div", "na", absentNote(panel.split))); continue; }
       const grid = node("div", "grid multiples"); c.appendChild(grid);
-      for (const v of vals) { const m = node("div"), host = node("div"); m.append(node("div", "mini-title", `${panel.split} = ${show(v)}`), host); grid.appendChild(m); later(() => line(host, series(j => curveOf(j, sel, {[panel.split]: v}, opp), M.panelJobs(panel, vis)), {...eOpts, refs: anchorLines(E, sel, opp, {[panel.split]: v}), compact: true, height: 140})); }
+      for (const v of vals) { const m = node("div"), host = node("div"); m.append(node("div", "mini-title", `${panel.split} = ${show(v)}`), host); grid.appendChild(m); later(() => line(host, series(j => curveOf(j, sel, {[panel.split]: v}, opp, panel.inference), M.panelJobs(panel, vis)), {...eOpts, refs: anchorLines(E, sel, opp, {[panel.split]: v}), compact: true, height: 140})); }
     } else if (panel.kind === "matrix") {
       const c = card(body, panel.title || `${panel.columns} × ${panel.rows}`, `${where} · ${panel.columns} across · ${panel.rows} down · ${scoreName} ${versus}`, "full");
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
@@ -264,8 +262,9 @@ function render() {
       for (const a of vis) for (const b of JOBS) if (a !== b) {
         const theirs = members(b);
         const pts = jobPoints(a, S.eclock, (run, m) => {
-          const mine = bound.get(`${run}|${m.ordinal}|${S.cfg}`);
-          const got = mine == null ? [] : theirs.map(s => cellOf(sel, E.score, mine, s, false, F)).filter(Boolean);
+          const mine = subjectAt(run, m, i => theirs.some(s => cellOf(sel, E.score, i, s, false, F)));
+          if (mine.gap) return {missing: true, meta: mine.gap};
+          const got = mine.index == null ? [] : theirs.map(s => cellOf(sel, E.score, mine.index, s, false, F)).filter(Boolean);
           return got.length ? {y: mean(got.map(g => g.value)), meta: `against ${got.length} of ${b.label}'s checkpoints`} : null;
         }, true);
         if (pts.some(p => !p.missing)) pairs.push({label: `${a.label} vs ${b.label}`, color: color(a), dotted: a.baseline, points: pts});
@@ -285,8 +284,8 @@ function render() {
       for (const t of tabsOf) { const b = node("button", "jbtn"); b.append(swatch(t.job), t.label); b.setAttribute("aria-pressed", String(t === chosen)); b.onclick = () => { S.xline = t.key; render(); }; tabs.appendChild(b); }
       c.appendChild(tabs);
       const at = i => D.players[i].at[S.eclock] ?? D.players[i].at[M.alignClock];
-      const order = M.lineMembers(chosen.key).filter(i => D.players[i].config === S.cfg && at(i) != null).sort((a, b) => at(a) - at(b) || playerName(a).localeCompare(playerName(b)));
-      const label = i => `${S.eclock in D.players[i].at ? clockLabel(S.eclock) : M.alignClock} ${num(at(i))}`;
+      const order = M.lineMembers(chosen.key).filter(i => at(i) != null).sort((a, b) => at(a) - at(b) || playerName(a).localeCompare(playerName(b)));
+      const label = i => `${S.eclock in D.players[i].at ? clockLabel(S.eclock) : M.alignClock} ${num(at(i))}` + (order.some(k => k !== i && at(k) === at(i)) ? ` · ${playerName(i)}` : "");
       if (order.length < 2) { c.appendChild(node("div", "na", `${chosen.label} has fewer than two checkpoints with a position`)); continue; }
       const grid = node("div", "matrix"); grid.style.gridTemplateColumns = `minmax(110px, auto) repeat(${order.length}, minmax(44px, 1fr))`;
       const wrap = node("div", "mwrap"); wrap.appendChild(grid); c.appendChild(wrap);
