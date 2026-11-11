@@ -151,12 +151,12 @@ class RunData(Arrays):
                 or len(digest) != 64
                 or any(c not in "0123456789abcdef" for c in digest)
             ):
-                raise EtudeError("table_reference_invalid", 422)
+                raise EtudeError("table_reference_invalid", 422) from ValueError(digest)
             prefix = block.key.removesuffix(block.description.key)
             key = f"{prefix}artifacts/{digest}.json"
             body = block.storage.get(key)
             if sha256(body).hexdigest() != digest:
-                raise EtudeError("table_artifact_damaged", 422)
+                raise EtudeError("table_artifact_damaged", 422) from ValueError(key)
             table = RowTable.model_validate_json(body)
             points.append(TablePoint(x=float(x[index]), rows=table.rows))
         return tuple(points)

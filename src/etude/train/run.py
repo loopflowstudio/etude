@@ -289,7 +289,7 @@ class Run:
         target = self.files.root / "artifacts" / f"{digest}.json"
         if target.exists():
             if sha256(target.read_bytes()).hexdigest() != digest:
-                raise EtudeError("table_artifact_damaged", 422)
+                raise EtudeError("table_artifact_damaged", 422) from ValueError(target)
         else:
             target.parent.mkdir(parents=True, exist_ok=True)
             # Different attempts may log identical content concurrently.
