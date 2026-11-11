@@ -263,7 +263,7 @@ function render() {
         const theirs = members(b);
         const pts = jobPoints(a, S.eclock, (run, m) => {
           const mine = subjectAt(run, m, i => theirs.some(s => cellOf(sel, E.score, i, s, false, F)));
-          if (mine.gap) return {missing: true, meta: mine.gap};
+          if (mine.gap) return {missing: true, gap: "none", at: mine.at, meta: mine.gap};
           const got = mine.index == null ? [] : theirs.map(s => cellOf(sel, E.score, mine.index, s, false, F)).filter(Boolean);
           return got.length ? {y: mean(got.map(g => g.value)), meta: `against ${got.length} of ${b.label}'s checkpoints`} : null;
         }, true);

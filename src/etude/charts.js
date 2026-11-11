@@ -280,16 +280,20 @@ function model(D) {
   const canonical = value => JSON.stringify(value, (_, v) => v && typeof v === "object" && !Array.isArray(v) ? Object.fromEntries(Object.keys(v).sort().map(k => [k, v[k]])) : v);
   const inferenceKeys = D.players.map(a => canonical(JSON.parse(a.config)));
   function subjectAt(run, m, played, inference = null) {
-    const candidates = (bound.get(`${run}|${m.ordinal}`) || []).filter(i => inference == null || inferenceKeys[i] === canonical(inference));
+    const wanted = inference == null ? null : canonical(inference);
+    const candidates = (bound.get(`${run}|${m.ordinal}`) || []).filter(i => wanted == null || inferenceKeys[i] === wanted);
     const recorded = candidates.filter(played);
     const found = recorded.length ? recorded : candidates;
-    if (found.length > 1) {
-      const names = found.map(playerName).join(" and ");
-      return {gap: found.every(i => D.players[i].config === D.players[found[0]].config)
-        ? `${names} stood at ${alignClock} ${num(D.players[found[0]].at[alignClock])}`
-        : `multiple inference variants: ${names}; choose a matchup or set Curve.inference`};
-    }
-    return {index: found[0]};
+    const i = found[0];
+    if (i == null) return {};
+    const a = D.players[i];
+    if (found.some(k => D.players[k].config !== a.config))
+      return {gap: `multiple inference variants: ${found.map(playerName).join(" and ")}; choose a matchup or set Curve.inference`};
+    // Position uniqueness belongs to checkpoint resolution, for every panel.
+    const same = positions.get(JSON.stringify([lineOf(i), a.config, a.at[alignClock]])) || found;
+    if (same.length > 1)
+      return {gap: `${same.map(playerName).join(" and ")} stood at ${alignClock} ${num(a.at[alignClock])}`, at: a.at};
+    return {index: i};
   }
   function selName(s) {
     if (Array.isArray(s)) return s.map(selName).join(" + ");
@@ -378,12 +382,11 @@ function model(D) {
       const o = opponentOf(i);
       return !o.gap && !!cellOf(sel, score, i, o.index, false, split);
     }, inference);
-    if (subject.gap) return {missing: true, gap: "none", meta: subject.gap};
+    if (subject.gap) return {missing: true, gap: "none", at: subject.at, meta: subject.gap};
     const i = subject.index;
     if (i == null || sel == null) return gapOf(sel, run, m, score);
-    const a = D.players[i], both = positions.get(JSON.stringify([lineOf(i), a.config, a.at[alignClock]]));
+    const a = D.players[i];
     const missing = meta => ({missing: true, gap: "none", at: a.at, meta});
-    if (both?.length > 1) return missing(`${both.map(playerName).join(" and ")} stood at ${alignClock} ${num(a.at[alignClock])}`);
     const found = opponentOf(i);
     if (found.gap) return missing(found.gap);
     const o = found.index;

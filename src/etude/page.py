@@ -935,58 +935,61 @@ def _cells(
             continue
         named = [c for c in report.columns() if c in held]
         absent += [f"{score.table}.{c}" for c in report.columns() if c not in held]
-        present: dict[str | None, set[int]] = {}
-        views = itertools.product((None, *(each.commit for each in commits)), enumerate(selections))
         splits = [
             by for size in range(len(named) + 1) for by in itertools.combinations(named, size)
         ]
-        for commit, (chosen, selection) in views:
-            # Components precede unions; remember which produced cells in this view.
-            recorded = present.setdefault(commit, set())
-            if isinstance(selection, tuple):
-                selection = tuple(
-                    resolved
-                    for wanted in selection
-                    if (resolved := _resolve_matches(wanted, selections, recorded)) is not None
-                )
-            where = _where(selection, view=commit or "")
-            # An anchor's strength needs two anchors to have met.
-            for fixed, by in itertools.product((False, True) if anchors > 1 else (False,), splits):
-                condition = where
-                if fixed:
-                    condition += (
-                        " and match not in (select match from seats"
-                        " where player in (select player from _page_checkpoints))"
+        for commit in (None, *(each.commit for each in commits)):
+            # Components precede unions; only this view's results resolve them.
+            recorded: set[int] = set()
+            for chosen, selection in enumerate(selections):
+                if isinstance(selection, tuple):
+                    selection = tuple(
+                        resolved
+                        for wanted in selection
+                        if (resolved := _resolve_matches(wanted, selections, recorded)) is not None
                     )
-                for found in compare(
-                    db,
-                    table=score.table,
-                    value=score.value,
-                    per=score.per,
-                    where=condition,
-                    by=by,
+                where = _where(selection, view=commit or "")
+                # An anchor's strength needs two anchors to have met.
+                for fixed, by in itertools.product(
+                    (False, True) if anchors > 1 else (False,), splits
                 ):
-                    if len(found.subject) != 1 or (found.opponent and len(found.opponent) != 1):
-                        continue  # a team
-                    if fixed and found.opponent is not None:
-                        continue  # pairs of anchors are in the unrestricted cells
-                    recorded.add(chosen)
-                    cells.append(
-                        Cell(
-                            selection=chosen,
-                            commit=commit,
-                            environment=place[found.environment],
-                            score=number,
-                            subject=index[found.subject[0]],
-                            opponent=None if found.opponent is None else index[found.opponent[0]],
-                            fixed=fixed,
-                            split=found.split,
-                            value=found.value,
-                            interval=found.interval,
-                            rows=found.rows,
-                            matches=found.matches,
+                    condition = where
+                    if fixed:
+                        condition += (
+                            " and match not in (select match from seats"
+                            " where player in (select player from _page_checkpoints))"
                         )
-                    )
+                    for found in compare(
+                        db,
+                        table=score.table,
+                        value=score.value,
+                        per=score.per,
+                        where=condition,
+                        by=by,
+                    ):
+                        if len(found.subject) != 1 or (found.opponent and len(found.opponent) != 1):
+                            continue  # a team
+                        if fixed and found.opponent is not None:
+                            continue  # pairs of anchors are in the unrestricted cells
+                        recorded.add(chosen)
+                        cells.append(
+                            Cell(
+                                selection=chosen,
+                                commit=commit,
+                                environment=place[found.environment],
+                                score=number,
+                                subject=index[found.subject[0]],
+                                opponent=None
+                                if found.opponent is None
+                                else index[found.opponent[0]],
+                                fixed=fixed,
+                                split=found.split,
+                                value=found.value,
+                                interval=found.interval,
+                                rows=found.rows,
+                                matches=found.matches,
+                            )
+                        )
     cells, mixed = _newest_environment(cells, list(environments.values()))
     # "Against all" repeats the only opponent a subject met.
     met: dict[tuple[int, str | None, int, int], set[int]] = {}

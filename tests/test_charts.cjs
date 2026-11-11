@@ -77,6 +77,11 @@ test("duplicate positions are named gaps for both tracked and external checkpoin
     assert.equal(gap.missing, true);
     assert.equal(gap.y, undefined);
     assert.match(gap.meta, /first.*second.*stood at updates 400/);
+    // Head-to-head uses the same resolver, even if only one candidate has games.
+    const run = m.JOBS[0].runs[0], mark = m.marks.get(run)[0];
+    const subject = m.subjectAt(run, mark, i => i === 0);
+    assert.equal(subject.index, undefined);
+    assert.match(subject.gap, /first.*second.*stood at updates 400/);
   }
 });
 
