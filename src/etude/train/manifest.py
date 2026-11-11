@@ -1,7 +1,7 @@
 """Per-writer indexes and lazy blocks, shared by directory and bucket readers.
 
 A manifest duplicates block headers so opening a run needs no metric data.
-Each writer has two (`write_manifest`): one for permanent blocks, rewritten
+Each writer has two (`Index.write`): one for permanent blocks, rewritten
 rarely, and a small one for recent blocks, rewritten at every fold.
 StoredBlock fetches only requested arrays and verifies their CRCs. Missing
 compacted objects cause the reader to refresh its listing.
@@ -107,39 +107,34 @@ def describe(storage: Storage, prefix: str, key: str) -> BlockDescription:
     return BlockDescription(key=key, header=described, start=start)
 
 
-def _described(storage: Storage, files: Iterable[BlockFile]) -> list[BlockDescription]:
-    """Each block's header and its coarsest row groups."""
-    blocks: list[BlockDescription] = []
-    for file in files:
-        description = describe(storage, "", file.key)
-        stored = StoredBlock(storage, file.key, description)
-        level = next((level for level in stored.header.rollups if level.factor == 4096), None)
-        overview = (
-            reduce(stored.table(), 4096)
-            if level is None
-            else Reduction(
-                clocks={c.name: stored.array(c.data, "<f8", 2) for c in level.clocks},
-                series={c.name: stored.array(c.data, "<f8", 7) for c in level.series},
-            )
+def _describe_permanent(storage: Storage, file: BlockFile) -> BlockDescription:
+    """One permanent block's header and coarsest row groups."""
+    description = describe(storage, "", file.key)
+    stored = StoredBlock(storage, file.key, description)
+    level = next((level for level in stored.header.rollups if level.factor == 4096), None)
+    overview = (
+        reduce(stored.table(), 4096)
+        if level is None
+        else Reduction(
+            clocks={c.name: stored.array(c.data, "<f8", 2) for c in level.clocks},
+            series={c.name: stored.array(c.data, "<f8", 7) for c in level.series},
         )
-        inline = Overview.model_validate(
-            {
-                "clocks": {
-                    name: [[encode_number(float(value)) for value in row] for row in values]
-                    for name, values in overview.clocks.items()
-                },
-                "series": {
-                    name: [[encode_number(float(value)) for value in row] for row in values]
-                    for name, values in overview.series.items()
-                },
-            }
-        )
-        blocks.append(
-            BlockDescription(
-                key=file.key, header=description.header, start=description.start, overview=inline
-            )
-        )
-    return blocks
+    )
+    inline = Overview.model_validate(
+        {
+            "clocks": {
+                name: [[encode_number(float(value)) for value in row] for row in values]
+                for name, values in overview.clocks.items()
+            },
+            "series": {
+                name: [[encode_number(float(value)) for value in row] for row in values]
+                for name, values in overview.series.items()
+            },
+        }
+    )
+    return BlockDescription(
+        key=file.key, header=description.header, start=description.start, overview=inline
+    )
 
 
 def _latest(blocks: Iterable[BlockDescription]) -> dict[str, Number | None]:
@@ -155,31 +150,84 @@ def _latest(blocks: Iterable[BlockDescription]) -> dict[str, Number | None]:
     return latest
 
 
-def write_manifest(root: Path, writer: str, *, permanent: bool = True) -> None:
-    """Publish this writer's indexes after the blocks they describe exist.
+class Index:
+    """Writer-owned descriptions; rebuild once, then add only newly sealed blocks.
 
-    There are two files, split by how often they change, so that what is
-    rewritten and uploaded at every fold stays small however long the run is.
-    `metrics/WRITER.permanent.json` describes the permanent blocks and is
-    rewritten only when one is added (`permanent`). `metrics/WRITER.index.json`
-    carries the latest value of every metric and nothing per block: recent
-    blocks are small, so a reader fetches each whole and needs no index for it.
+    Recent refreshes use bounded recent descriptions and cached permanent latest
+    values. Publishing a permanent manifest still serializes its full history,
+    but never reads or describes those earlier blocks again.
     """
+
+    def __init__(self, root: Path, writer: str) -> None:
+        self.storage: Storage = DirectoryStorage(root)
+        self.writer = writer
+        self._permanent: dict[str, BlockDescription] = {}
+        self._recent: dict[str, BlockDescription] = {}
+        self._latest: dict[str, Number | None] = {}
+        self._dirty = False
+        files = select(
+            file
+            for path in root.glob(f"metrics/*-{writer}.blk")
+            if (file := parse(path.relative_to(root).as_posix())) is not None
+        )
+        for file in files:
+            self.add(file.key)
+
+    def add(self, key: str) -> None:
+        """Remember a sealed block, retiring recent descriptions it covers."""
+        file = parse(key)
+        if file is None or file.writer != self.writer or file.level < 1:
+            raise ValueError("index requires a sealed block from its writer")
+        if key in self._permanent or key in self._recent:
+            return
+        if file.level >= 2:
+            described = _describe_permanent(self.storage, file)
+            self._permanent[key] = described
+            self._latest.update(_latest([described]))
+            self._dirty = True
+        else:
+            described = describe(self.storage, "", key)
+        self._recent = {
+            key: block
+            for key, block in self._recent.items()
+            if not (file.first <= block.header.first and block.header.last <= file.last)
+        }
+        if file.level < 2:
+            self._recent[key] = described
+
+    def write(self) -> None:
+        """Publish indexes after their blocks exist; only permanent additions rewrite history."""
+        if self._dirty:
+            lasting = Manifest(
+                writer=self.writer, blocks=tuple(self._permanent.values()), latest=self._latest
+            )
+            self.storage.put(
+                f"metrics/{self.writer}.permanent.json", lasting.model_dump_json().encode()
+            )
+            self._dirty = False
+        recent = Manifest(
+            writer=self.writer,
+            blocks=(),
+            latest={**self._latest, **_latest(self._recent.values())},
+        )
+        self.storage.put(f"metrics/{self.writer}.index.json", recent.model_dump_json().encode())
+
+
+def metric_names(root: Path) -> set[str]:
+    """Numeric names from previous attempts, recovered once when tracking starts."""
+    names: set[str] = set()
+    indexed: set[str] = set()
+    for path in root.glob("metrics/*.index.json"):
+        manifest = Manifest.model_validate_json(path.read_bytes())
+        names.update(manifest.latest)
+        indexed.add(manifest.writer)
     storage = DirectoryStorage(root)
-    files = select(
-        file
-        for path in root.glob(f"metrics/*-{writer}.blk")
-        if (file := parse(path.relative_to(root).as_posix())) is not None
-    )
-    lasting_key = f"metrics/{writer}.permanent.json"
-    if permanent:
-        described = _described(storage, (file for file in files if file.level >= 2))
-        lasting = Manifest(writer=writer, blocks=tuple(described), latest=_latest(described))
-        storage.put(lasting_key, lasting.model_dump_json().encode())
-    elif (root / lasting_key).is_file():
-        lasting = Manifest.model_validate_json(storage.get(lasting_key))
-    else:
-        lasting = Manifest(writer=writer, blocks=(), latest={})
-    recent = [describe(storage, "", file.key) for file in files if file.level < 2]
-    manifest = Manifest(writer=writer, blocks=(), latest={**lasting.latest, **_latest(recent)})
-    storage.put(f"metrics/{writer}.index.json", manifest.model_dump_json().encode())
+    for path in (root / "metrics").glob("*"):
+        file = parse(path.relative_to(root).as_posix())
+        if file is not None and (file.level == 0 or file.writer not in indexed):
+            names.update(
+                column.name
+                for column in describe(storage, "", file.key).header.series
+                if column.kind == "metric"
+            )
+    return names

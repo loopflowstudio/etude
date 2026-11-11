@@ -194,8 +194,10 @@ its kind implies: a read must work with no provider key and no network.
 
 **Measure by counting.** Machine load makes timings unreliable, so tests count
 what matters to a user: calls to a provider, a bucket, SSH and git, database
-queries, and modules imported at start-up. Pin those numbers in tests. A change
-to a path that reaches another machine comes with a counting test.
+queries, and modules imported at start-up. Pin those numbers in tests.
+`tests.run.storage.MeasuredStorage` counts real storage reads, bytes and uploads
+in bounded directory or mocked-bucket fixtures. A change to a path that reaches
+another machine comes with a counting test.
 
 Launcher vocabulary: Machine owns acquisition and provider facts; Rental owns
 only a paid window, keyed by its machine; RunAttempt is the allocation on any

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import tracemalloc
 from pathlib import Path
 
 import boto3  # type: ignore[import-untyped]
@@ -20,7 +21,7 @@ from etude.run.listing import runs
 from etude.run.records import Attempt, RunDeclaration, RunFile, SourceKey
 from etude.run.storage import DirectoryStorage, S3Storage, Storage, run_prefix, storage_from_uri
 from etude.train.block import Builder
-from etude.train.manifest import Manifest, write_manifest
+from etude.train.manifest import Index, Manifest
 from etude.train.read import buckets, read, read_all
 from etude.train.records import Step
 from etude.train.run import log_line, seal_runs, track, write_block
@@ -276,7 +277,7 @@ def test_manifest_chart_fetches_only_reduced_columns(tmp_path: Path, backend: st
     root = tmp_path / prefix
     key = block_key(2, 0, 0, writer)
     write_block(root, key, builder.table(writer, 0))
-    write_manifest(root, writer)
+    Index(root, writer).write()
     with mock_aws():
         storage: Storage = DirectoryStorage(tmp_path)
         if backend == "s3":
@@ -315,7 +316,7 @@ def test_overview_preserves_requested_chart_resolution(tmp_path: Path, rows: int
     for row in range(rows):
         builder.add(row * 1000, {"step": float(row)}, {"value": float(row)})
     write_block(root, block_key(2, 0, 0, writer), builder.table(writer, 0))
-    write_manifest(root, writer)
+    Index(root, writer).write()
     chart = read(tmp_path, "e", "r").chart("value", "step", limit=1000)
     assert len(chart) == 1000
     assert chart.count.sum() == rows
@@ -329,13 +330,13 @@ def test_a_read_is_a_snapshot_that_survives_compaction(tmp_path: Path) -> None:
     for row in range(256):
         builder.add(row * 1000, {"step": float(row)}, {"value": row})
     write_block(root, block_key(1, 0, 0, writer), builder.table(writer, 0))
-    write_manifest(root, writer, permanent=False)
+    Index(root, writer).write()
     snapshot = read(tmp_path, "e", "r")
     for row in range(256, 512):
         builder.add(row * 1000, {"step": float(row)}, {"value": row})
     write_block(root, block_key(2, 0, 0, writer), builder.table(writer, 0))
     (root / block_key(1, 0, 0, writer)).unlink()
-    write_manifest(root, writer)
+    Index(root, writer).write()
     # The recent block was taken whole when the run was read, so the earlier
     # read still answers from it; a new read sees the permanent block.
     assert int(snapshot.chart("value", "step", 10).count.sum()) == 256
@@ -615,7 +616,7 @@ def test_manifest_latest_and_overview_retain_nonfinite_numbers(tmp_path: Path) -
     builder = Builder(["step"])
     builder.add(1000, {"step": 1}, {"value": float("inf")})
     write_block(tmp_path / prefix, block_key(2, 0, 0, writer), builder.table(writer, 0))
-    write_manifest(tmp_path / prefix, writer)
+    Index(tmp_path / prefix, writer).write()
     manifest = Manifest.model_validate_json(
         (tmp_path / prefix / f"metrics/{writer}.index.json").read_bytes()
     )
@@ -649,7 +650,7 @@ def test_chart_uses_shared_span_coordinates(tmp_path: Path, manifest: bool, rows
         builder.add(row * 1000, {"step": float(row)}, {"value": float(row)})
     write_block(root, block_key(2, 0, 0, writer), builder.table(writer, 0))
     if manifest:
-        write_manifest(root, writer)
+        Index(root, writer).write()
     data = read(tmp_path, "e", "r")
     span = (0.0, float(2 * rows - 1))
     chart = data.chart("value", "step", 16, span=span)
@@ -689,7 +690,7 @@ def test_a_resumed_run_reads_roll_ups_on_both_sides_of_the_resume_point(tmp_path
             write_block(
                 root, block_key(2, sequence, sequence, writer), builder.table(writer, sequence)
             )
-        write_manifest(root, writer)
+        Index(root, writer).write()
 
     measured = MeasuredStorage(DirectoryStorage(tmp_path))
     data = read(measured, "e", "r")
@@ -706,32 +707,69 @@ def test_a_resumed_run_reads_roll_ups_on_both_sides_of_the_resume_point(tmp_path
     assert fetched < 80000 * 16 / 2
 
 
-def test_the_manifest_rewritten_at_each_fold_does_not_grow_with_the_run(tmp_path: Path) -> None:
+@pytest.mark.parametrize("permanent_blocks", [1, 8, 32])
+def test_index_refresh_work_does_not_grow_with_permanent_history(
+    tmp_path: Path, permanent_blocks: int
+) -> None:
     writer = "abcdef123456"
     root = tmp_path / run_prefix("r")
+    index = Index(root, writer)
+    measured = MeasuredStorage(index.storage)
+    index.storage = measured
 
-    def block(level: int, sequence: int, rows: int) -> None:
+    def block(level: int, sequence: int) -> str:
         builder = Builder(["step"])
-        for row in range(rows):
-            builder.add(row, {"step": float(sequence * 10**6 + row)}, {"value": float(row)})
-        write_block(
-            root, block_key(level, sequence, sequence, writer), builder.table(writer, sequence)
-        )
+        values = {"value": float(sequence)}
+        if sequence == 0:
+            values["only_first"] = 42
+        builder.add(sequence, {"step": float(sequence)}, values)
+        key = block_key(level, sequence, sequence, writer)
+        write_block(root, key, builder.table(writer, sequence))
+        return key
 
-    sizes: list[int] = []
-    for sequence in range(4):
-        block(2, sequence * 2, 20000)
-        write_manifest(root, writer, permanent=True)
-        block(1, sequence * 2 + 1, 200)
-        write_manifest(root, writer, permanent=False)
-        sizes.append((root / f"metrics/{writer}.index.json").stat().st_size)
-        (root / block_key(1, sequence * 2 + 1, sequence * 2 + 1, writer)).unlink()
-        block(2, sequence * 2 + 1, 200)
-    # Four times the permanent blocks, the same recent one: the same small file.
-    assert max(sizes) - min(sizes) < 200
-    write_manifest(root, writer, permanent=True)
+    for sequence in range(permanent_blocks):
+        index.add(block(2, sequence))
+    # Each new permanent block: two header ranges and its tiny raw overview.
+    assert measured.requests == 3 * permanent_blocks
+    index.write()
+    permanent = root / f"metrics/{writer}.permanent.json"
+    before = permanent.stat().st_mtime_ns
+    requests = measured.requests
+    key = block(1, permanent_blocks)
+    index.add(key)
+    assert measured.requests - requests == 2  # Only the new recent header.
+    measured.requests = measured.bytes = measured.written = 0
+    tracemalloc.start()
+    try:
+        index.write()
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert measured.requests == measured.bytes == 0
+    assert measured.written < 200 and peak < 32_000
+    assert permanent.stat().st_mtime_ns == before
+    latest = Manifest.model_validate_json((root / f"metrics/{writer}.index.json").read_bytes())
+    assert latest.latest == {"value": permanent_blocks, "only_first": 42}
+
+    # Compact the recent window. The older permanent blocks are not read again.
+    index.add(block(2, permanent_blocks))
+    assert measured.requests == 3
+    index.write()
+    assert measured.requests == 3
+    lasting = Manifest.model_validate_json(permanent.read_bytes())
+    assert len(lasting.blocks) == permanent_blocks + 1
+    assert lasting.latest == latest.latest
+    before = permanent.stat().st_mtime_ns
+    written = measured.written
+    index.write()
+    assert permanent.stat().st_mtime_ns == before
+    assert measured.written - written < 200
+    # Rebuilding after restart is allowed to read the persisted evidence once.
+    Index(root, writer).write()
+    assert Manifest.model_validate_json(permanent.read_bytes()) == lasting
     data = read(tmp_path, "e", "r")
-    assert data.rows == 4 * 20200 and int(data.chart("value", "step").count.sum()) == 4 * 20200
+    assert data.points("value", "step").y.tolist() == list(range(permanent_blocks + 1))
+    assert data.points("only_first", "step").y.tolist() == [42]
 
 
 def test_a_run_split_across_machine_folders_reads_as_one(tmp_path: Path) -> None:
@@ -760,7 +798,7 @@ def test_a_run_split_across_machine_folders_reads_as_one(tmp_path: Path) -> None
                 start * 10**6 + step, {"step": float(step)}, {"value": float(step + start * 100)}
             )
         write_block(root, block_key(2, 0, 0, writer), builder.table(writer, 0))
-        write_manifest(root, writer)
+        Index(root, writer).write()
     assert runs(tmp_path) == [("e", "r")]
     (data,) = read_all(tmp_path)
     assert [attempt.host for attempt in data.attempts] == ["s1", "s2"]
@@ -848,3 +886,40 @@ def test_an_r2_uri_reaches_the_accounts_endpoint_with_r2_keys(
         assert storage.uri("r/run.json") == "r2://manabot/runs/r/run.json"
         assert storage.name == "r2-manabot-runs"
         assert read(storage_from_uri("r2://manabot/runs"), "e", "r").rows == 1
+
+
+def test_live_writer_describes_each_permanent_block_only_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    requests = 0
+
+    class CountedDirectory(DirectoryStorage):
+        def get(self, key: str) -> bytes:
+            nonlocal requests
+            requests += 1
+            return super().get(key)
+
+        def get_range(self, key: str, start: int, length: int) -> bytes:
+            nonlocal requests
+            requests += 1
+            return super().get_range(key, start, length)
+
+    monkeypatch.setattr("etude.train.manifest.DirectoryStorage", CountedDirectory)
+    # Tiny real blocks make each of these three rows a separate permanent fold.
+    monkeypatch.setattr("etude.train.run.PERMANENT_BYTES", 1)
+    with track(
+        experiment="e",
+        run="r",
+        clocks=[Step("step", "steps")],
+        directory=tmp_path,
+        segment_rows=1,
+    ) as run:
+        for step in range(3):
+            run.log({"loss": step}, step=step)
+    assert run.problems == {} and run.dropped == 0
+    # Each fold describes its new recent header (2 reads), then permanent
+    # header and overview (3). Earlier permanent blocks add no reads.
+    assert requests == 15
+    data = read(tmp_path, "e", "r")
+    assert len(data.blocks) == 3
+    assert data.points("loss", "step").y.tolist() == [0, 1, 2]
