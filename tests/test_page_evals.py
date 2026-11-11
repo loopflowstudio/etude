@@ -129,7 +129,8 @@ def selection(page: Page, tournament: str | None, *, matchup: str | None = None)
     return next(
         i
         for i, each in enumerate(page.selections)
-        if (each.tournament, each.matchup, each.tag) == (tournament, matchup, None)
+        if isinstance(each, Matches)
+        and (each.tournament, each.matchup, each.tag) == (tournament, matchup, None)
     )
 
 
@@ -174,7 +175,11 @@ def test_a_page_shows_what_was_not_evaluated_not_yet_played_and_failed(page: Pag
 
 
 def test_panels_select_matches_by_tournament_matchup_or_tag(page: Page) -> None:
-    chosen = {(each.tournament, each.matchup, each.tag) for each in page.selections}
+    chosen = {
+        (each.tournament, each.matchup, each.tag)
+        for each in page.selections
+        if isinstance(each, Matches)
+    }
     assert {("ladder", None, "anchor"), ("ladder", "vs outside", None)} <= chosen
     outside = selection(page, "ladder", matchup="vs outside")
     # The checkpoints' opponents in that matchup's matches are the outside anchor alone.
@@ -620,3 +625,60 @@ def test_a_running_eval_runs_results_show_and_are_marked_partial(
     built = build(DirectoryStorage(runs), file)
     assert any("Partial results" in note and "killed" in note for note in built.notes)
     assert built.latest_result_ms is not None
+
+
+def test_union_selections_aggregate_matches_once_before_computing_scores(
+    lab: tuple[Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runs, _ = lab
+    monkeypatch.setenv("ETUDE_HOME", str(runs.parent / "home"))
+    file = experiment_file(
+        tmp_path,
+        "lab",
+        """
+from etude.report import Curve, Matches, Report, Score
+
+def report():
+    return Report(score=Score(table="plays", value="won", unit="games"), evals=(
+        Curve(matches=(Matches(tournament="ladder"),
+                       Matches(tournament="ladder", tag="anchor"),
+                       Matches(tournament="ladder"))),
+        Curve(split="deal", matches=(Matches(tournament="ladder", matchup="vs weak"),
+                       Matches(tournament="ladder", matchup="vs outside"))),
+    ))
+""",
+    )
+    page = build(runs, file)
+    ladder = selection(page, "ladder")
+    unions = [i for i, s in enumerate(page.selections) if isinstance(s, tuple)]
+    assert len(unions) == 2
+    # An overlap, including the exact same selection twice, retains the same
+    # rows, matches, value and bootstrap interval as the single tournament.
+    original = [c.model_dump(exclude={"selection"}) for c in page.cells if c.selection == ladder]
+    overlap = [c.model_dump(exclude={"selection"}) for c in page.cells if c.selection == unions[0]]
+    assert sorted(overlap, key=str) == sorted(original, key=str)
+    components = {selection(page, "ladder", matchup=name) for name in ("vs weak", "vs outside")}
+    for subject in (player(page, "updates-200.pt", "a"), player(page, "updates-200.pt", "b")):
+        (combined,) = [
+            c
+            for c in page.cells
+            if c.selection == unions[1]
+            and c.subject == subject
+            and c.opponent is None
+            and not c.split
+            and c.commit is None
+        ]
+        parts = [
+            c
+            for c in page.cells
+            if c.selection in components
+            and c.subject == subject
+            and not c.split
+            and c.commit is None
+        ]
+        assert combined.rows == sum(c.rows for c in parts)
+        assert combined.matches == sum(c.matches for c in parts)
+        assert combined.value == pytest.approx(sum(c.value * c.rows for c in parts) / combined.rows)
+    assert page.scores[0].unit == "games"

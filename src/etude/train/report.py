@@ -57,7 +57,7 @@ class RunSummary(Record):
     incomplete: int
     dropped: int | None
     attempts: tuple[Span, ...]
-    # Where each clock last stood in the rows read, for per-step normalisation.
+    # Latest recorded position, including a continuation before its first row.
     reached: dict[str, float]
 
 
@@ -208,14 +208,21 @@ def _jobs(data: Sequence[RunData]) -> tuple[Job, ...]:
 def _summary(run: RunData) -> RunSummary:
     start = _started(run)
     last: dict[str, int] = {}
+    # A continuation may discard a previous attempt's overrun. Its recorded
+    # position, including a resume before the first row, supersedes that attempt.
+    positions = {attempt.writer: dict(attempt.resumed_at) for attempt in run.attempts}
+    starts = {attempt.writer: attempt.started_ms for attempt in run.attempts}
     for block in run.blocks:
         writer = block.header.writer
         last[writer] = max(last.get(writer, 0), block.header.wall_last)
-    reached: dict[str, float] = {}
-    for block in run.blocks:
+        starts.setdefault(writer, block.header.wall_first)
+        position = positions.setdefault(writer, {})
         for column in block.header.clocks:
             if column.last is not None:
-                reached[column.name] = max(reached.get(column.name, -math.inf), column.last)
+                position[column.name] = column.last
+    reached: dict[str, float] = {}
+    for writer in sorted(positions, key=lambda writer: starts[writer]):
+        reached.update(positions[writer])
     declaration = run.file.declaration if run.file else None
     return RunSummary(
         name=run.name,

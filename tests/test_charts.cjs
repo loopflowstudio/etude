@@ -126,3 +126,107 @@ test("a checkpoint never resolves to itself as its own opponent", () => {
   assert.equal(own.missing, true);
   assert.match(own.meta, /no checkpoint at updates 400/);
 });
+
+test("config defaults prefer results but preserve an explicit empty config", () => {
+  const data = page([player("empty", "a", 100), player("played", "b", 100)], [[1, null, 0.625]]);
+  data.players[0].config = '{"search":0}';
+  data.players[1].config = '{"search":9}';
+  const m = context.model(data);
+  assert.equal(m.chooseConfig(null), data.players[1].config);
+  assert.equal(m.chooseConfig(data.players[0].config), data.players[0].config);
+});
+
+test("tag fallback prefers results while an explicit tournament remains exact", () => {
+  const data = page([player("a", "a", 100)], [[0, null, 0.625]]);
+  data.selections = [{tournament: "empty", tag: "anchor"}, {tournament: "played", tag: "anchor"}];
+  data.cells[0].selection = 1;
+  const m = context.model(data);
+  assert.equal(m.panelSelection({matches: {tag: "anchor"}}, 0), 1);
+  assert.equal(m.panelSelection({matches: {tournament: "empty", tag: "anchor"}}, 1), 0);
+  assert.equal(m.panelSelection({matches: {tag: "missing"}}, 0), null);
+});
+
+test("union curves keep jobs separate and subject filtering omits the complementary side", () => {
+  const data = page([player("a", "small", 100), player("b", "large", 100)], [[0, 1, 0.375], [1, 0, 0.625]]);
+  const union = [{tournament: "paired", tag: "small"}, {tournament: "paired", tag: "large"}];
+  data.selections = [...union, union];
+  data.cells.forEach(c => { c.selection = 2; });
+  data.report.evals = [{kind: "curve", matches: union}];
+  data.report.labels = {large: "Large model"};
+  const m = context.model(data), sel = m.panelSelection(data.report.evals[0], 0);
+  assert.equal(sel, 2);
+  const ys = m.panelJobs({}).map(j => m.jobPoints(j, "updates", m.evalValue(0, sel, {}, "", "{}"))[0].y);
+  assert.deepEqual(Array.from(ys), [0.625, 0.375]); // external learner order is lexical
+  assert.equal(m.panelJobs({subject: "large"}).length, 1);
+  assert.equal(m.panelJobs({subject: "large"})[0].label, "Large model");
+  assert.equal(m.panelJobs({subject: "missing"}).length, 0);
+  assert.equal(m.usesSelection, false);
+  data.scores = [{unit: "games"}];
+  data.report.evals[0].subject = "large";
+  data.report.evals[0].opponent = "a";
+  const [head] = context.headline(data, m);
+  assert.equal(head.job.name, "large");
+  assert.equal(head.latest.y, 0.625);
+  assert.equal(head.against, "a");
+  data.report.evals.push({kind: "curve"});
+  assert.equal(context.model(data).usesSelection, true);
+});
+
+test("job labels retain seed counts and baseline identity", () => {
+  const data = page([], [], {jobs: [{key: "id", name: "large", label: "large · 2 seeds", runs: ["a", "b"]}], runs: [], checkpoints: [], clocks: []});
+  data.report.labels = {large: "Large model"}; data.report.baseline = "large";
+  const [job] = context.model(data).JOBS;
+  assert.equal(job.label, "Large model · 2 seeds");
+  assert.equal(job.name, "large"); assert.equal(job.key, "id"); assert.equal(job.baseline, true);
+});
+
+test("score tooltips name the interval and row unit without changing values", () => {
+  vm.runInContext("this.pointText = pointText; this.scoreFormat = scoreFormat;", context);
+  const data = page([player("a", "a", 100)], [[0, null, 0.625]]);
+  data.cells[0].interval = [0.5313, 0.7191];
+  data.cells[0].rows = 64; data.cells[0].matches = 16;
+  data.scores = [{unit: "games"}];
+  const m = context.model(data), [p] = points(m, m.JOBS[0], "");
+  assert.equal(context.pointText(p, context.scoreFormat), "0.63 · 95% interval 0.53–0.72");
+  assert.equal(p.meta, "64 games · 16 matches"); assert.equal(p.y, 0.625);
+  data.cells[0].interval = null;
+  const m2 = context.model(data), [single] = points(m2, m2.JOBS[0], "");
+  assert.equal(context.pointText(single, context.scoreFormat), "0.63");
+  assert.equal(context.pointText({y: 0.625, lo: 0.5, hi: 0.75, seeds: [0.5, 0.75]}, context.scoreFormat), "0.63 · seed range 0.50–0.75");
+});
+
+test("configured curves interpolate at recorded absolute clocks without extrapolation", () => {
+  const training = {jobs: [{key: "id", name: "large", runs: ["a", "b"]}],
+    runs: [{name: "a", reached: {updates: 1200}}, {name: "b", reached: {updates: 900}}], checkpoints: [], clocks: []};
+  const data = page([], [], training);
+  const schedule = {clock: "updates", jobs: {large: [{at: 1000, value: 1}, {at: 1400, value: 0.2}]}};
+  const [s] = context.model(data).scheduleSeries(schedule);
+  assert.deepEqual(Array.from(s.points, p => p.x), [1000, 1400]);
+  assert.equal(s.markers.length, 1); assert.equal(s.markers[0].x, 1200);
+  assert.ok(Math.abs(s.markers[0].y - 0.6) < 1e-10);
+  assert.match(s.markers[0].meta, /recorded updates/);
+  training.runs[0].reached.updates = 1400;
+  assert.equal(context.model(data).scheduleSeries(schedule)[0].markers[0].y, 0.2);
+  delete training.runs[0].reached.updates;
+  assert.equal(context.model(data).scheduleSeries(schedule)[0].markers.length, 0);
+});
+
+test("refresh failure leaves the page visible and a later success reloads once", async () => {
+  const status = {textContent: ""};
+  let reloads = 0, requests = 0, fail = true;
+  const browser = vm.createContext({
+    document: {getElementById: () => status},
+    location: {pathname: "/lab", reload: () => { reloads++; }},
+    fetch: async () => { requests++; return {ok: !fail, text: async () => "source unavailable"}; },
+  });
+  vm.runInContext(fs.readFileSync("src/etude/charts.js", "utf8") + "\nthis.refreshPage = refreshPage;", browser);
+  assert.equal(requests, 0); // loading the chart script never polls
+  await browser.refreshPage(true);
+  assert.equal(requests, 1); assert.equal(reloads, 0);
+  assert.match(status.textContent, /Refresh failed: source unavailable.*last successful generation/);
+  fail = false;
+  await browser.refreshPage(true);
+  assert.equal(requests, 2); assert.equal(reloads, 1);
+  await browser.refreshPage(false);
+  assert.equal(requests, 2); assert.equal(reloads, 2); // snapshots only reload
+});

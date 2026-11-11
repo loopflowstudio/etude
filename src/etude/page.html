@@ -53,22 +53,12 @@ const stepClocks = T.clocks.filter(c => c.kind === "step").map(c => c.name);
 function evalState() {
   if (!choices.some(([v]) => v === S.sel)) S.sel = choices.length ? choices[0][0] : "";
   if (+S.score >= D.scores.length) S.score = "0";
-  if (!configs.includes(S.cfg)) S.cfg = configs[0] ?? "";
+  S.cfg = M.chooseConfig(S.cfg);
   return {sel: S.sel === "" ? null : +S.sel, score: +S.score, info: D.scores[+S.score]};
-}
-// A panel's own matches, else the section's; a tag or matchup alone is looked for in the section's tournament first.
-function panelSel(E, panel) {
-  const m = panel.matches;
-  if (!m) return E.sel;
-  const here = E.sel == null ? null : D.selections[E.sel].tournament;
-  const fits = D.selections.map((s, i) => [s, i]).filter(([s]) => (m.tournament ?? s.tournament) === s.tournament && s.matchup === m.matchup && s.tag === m.tag);
-  return (fits.find(([s]) => s.tournament === here) || fits[0] || [null, null])[1];
 }
 const opponents = (E, sel) => M.opponents(E.score, sel);
 const oppFor = (E, sel) => { const o = opponents(E, sel); return (o.find(([v]) => v === S.opp) || o[0] || [""])[0]; };
 const versusOf = opp => opp === "" ? "vs all opponents" : typeof opp === "object" ? ownVersus(opp) : `vs ${D.players[+opp].name}`;
-// A curve's own opponent, as the evals model takes it, and as its subtitle names it.
-const ownOpponent = panel => panel.opponent == null ? null : typeof panel.opponent === "string" ? {kind: "name", name: panel.opponent} : panel.opponent;
 const ownVersus = o => o.kind === "name" ? `vs ${o.name}` : o.kind === "earlier" ? `vs the checkpoint ${num(o.by)} ${o.clock} earlier` : o.kind === "fraction" ? `vs the checkpoint at ${num(o.value)} × its ${o.clock}` : `vs the checkpoint at ${o.clock} ${num(o.value)}`;
 let F = {}; try { F = JSON.parse(S.filter) || {}; } catch { F = {}; }
 const evalValue = (E, sel, extra, opponent) => M.evalValue(E.score, sel, {...F, ...extra}, opponent, S.cfg);
@@ -94,7 +84,7 @@ function painter(found, ref) {
 function paintCell(cell, p, ref, paint) {
   // Faded where the band includes the reference: not distinguishable from even.
   const fade = ref != null && p.lo != null && p.lo <= ref && p.hi >= ref ? 0.35 : 1, c = paint(ref != null ? ref + (p.y - ref) * fade : p.y);
-  cell.style.background = c; cell.style.color = inkOn(c); cell.textContent = fmt(p.y);
+  cell.style.background = c; cell.style.color = inkOn(c); cell.textContent = scoreFormat(p.y);
 }
 function rampLegend(c, ref, found, tail) {
   const legend = node("div", "legend"), ramp = node("span", "ramp");
@@ -120,7 +110,7 @@ function render() {
   const vis = JOBS.filter(j => !hidden.has(j.key));
   const color = j => css(j.color);
   const swatch = j => { const s = node("i", "sw" + (j.baseline ? " dot" : "")); s.style.background = j.baseline ? "" : color(j); s.style.color = color(j); return s; };
-  const series = (fn, clock) => vis.map(j => ({label: j.label, color: color(j), dotted: j.baseline, points: fn(j)}));
+  const series = (fn, jobs = vis) => jobs.map(j => ({label: j.label, color: color(j), dotted: j.baseline, points: fn(j)}));
 
   // ---- header and context
   document.getElementById("title").textContent = D.experiment;
@@ -138,6 +128,7 @@ function render() {
   if (D.environments.length > 1) kv("Environments", D.environments.map(e => e.name + (Object.keys(e.config).length ? " " + JSON.stringify(e.config) : "")).join(", "));
   if (D.latest_result_ms != null) kv("Latest result", `${when(D.latest_result_ms)} (${ago(D.latest_result_ms, D.generated_ms)} this page)`);
   kv("Read", `${when(D.generated_ms)} from ${D.source}`);
+  refreshControl(ctx, D.served);
   if (D.refresh) {
     const l = node("label", "chip"), box = node("input"); box.type = "checkbox"; box.checked = S.live === "1";
     box.onchange = () => { S.live = box.checked ? "1" : "0"; writeHash(); };
@@ -162,7 +153,7 @@ function render() {
   // ---- Evals
   const E = evalState(), ref = E.info?.reference;
   const ec = document.getElementById("evals-controls"); ec.replaceChildren();
-  control(ec, "Matches", choices, "sel");
+  if (M.usesSelection) control(ec, "Matches", choices, "sel");
   const commits = D.commits.map(k => [k.commit, `${k.commit.slice(0, 10)} · ${k.matches} match${k.matches > 1 ? "es" : ""}`]);
   control(ec, "Played at", [["", "latest of each match"], ...commits], "commit", () => { writeHash(); location.reload(); });
   control(ec, "Score", D.scores.map((s, i) => [String(i), `${s.table}.${s.value}`]), "score");
@@ -173,8 +164,8 @@ function render() {
   control(ec, "X axis", CLOCKS, "eclock");
   const body = document.getElementById("evals-body"); body.replaceChildren();
   const scoreName = E.info ? `${E.info.table}.${E.info.value}${E.info.per ? " per " + E.info.per : ""}` : "";
-  document.getElementById("evals-sub").textContent = E.sel == null ? "no eval run yet" : `${selName(D.selections[E.sel])} · ${scoreName}`;
-  const eOpts = {xLabel: clockLabel(S.eclock), ref, sync: "evals"};
+  document.getElementById("evals-sub").textContent = !M.usesSelection ? "" : E.sel == null ? "no eval run yet" : `${selName(D.selections[E.sel])} · ${scoreName}`;
+  const eOpts = {xLabel: clockLabel(S.eclock), yFormat: scoreFormat, ref, sync: "evals"};
   const GAPS = "○ not yet played · × failed · | not evaluated";
   // Only a job averages seeds; a line's curve is its checkpoints' own values.
   const BAND = vis.some(j => j.line == null) ? "mean over seeds · band: seed range, or one seed's 95% interval over matches" : "band: 95% interval over matches";
@@ -186,19 +177,19 @@ function render() {
   if (!D.selections.length) card(body, "No evaluations", "", "full").appendChild(node("div", "na", `${D.file} defines no eval(state) yet. Define one and run etude eval on the file; its matches appear here.`));
   else for (const panel of R.evals) {
     const own = panel.kind === "curve" ? ownOpponent(panel) : null;
-    const sel = panelSel(E, panel), opp = own ?? oppFor(E, sel), versus = versusOf(opp), where = sel == null ? "" : selName(D.selections[sel]);
+    const sel = M.panelSelection(panel, E.sel, E.score), opp = own ?? oppFor(E, sel), versus = versusOf(opp), where = sel == null ? "" : selName(D.selections[sel]);
     if (panel.kind === "curve" && !panel.split) {
       const c = card(body, panel.title, `${where} · ${scoreName} ${versus} · ${BAND} · ${GAPS}`, "full");
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
       const host = node("div"); c.appendChild(host);
-      later(() => line(host, series(j => curveOf(j, sel, {}, opp)), {...eOpts, refs: anchorLines(E, sel, opp), height: 260}));
+      later(() => line(host, series(j => curveOf(j, sel, {}, opp), M.panelJobs(panel, vis)), {...eOpts, refs: anchorLines(E, sel, opp), height: 260, empty: panel.subject ? `Nothing recorded for subject ${panel.subject}` : undefined}));
     } else if (panel.kind === "curve") {
       const c = card(body, panel.title, `${where} · one chart per ${panel.split} · ${versus}`, "full");
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
       const vals = values(E, sel, panel.split);
       if (!vals.length) { c.appendChild(node("div", "na", absentNote(panel.split))); continue; }
       const grid = node("div", "grid multiples"); c.appendChild(grid);
-      for (const v of vals) { const m = node("div"), host = node("div"); m.append(node("div", "mini-title", `${panel.split} = ${show(v)}`), host); grid.appendChild(m); later(() => line(host, series(j => curveOf(j, sel, {[panel.split]: v}, opp)), {...eOpts, refs: anchorLines(E, sel, opp, {[panel.split]: v}), compact: true, height: 140})); }
+      for (const v of vals) { const m = node("div"), host = node("div"); m.append(node("div", "mini-title", `${panel.split} = ${show(v)}`), host); grid.appendChild(m); later(() => line(host, series(j => curveOf(j, sel, {[panel.split]: v}, opp), M.panelJobs(panel, vis)), {...eOpts, refs: anchorLines(E, sel, opp, {[panel.split]: v}), compact: true, height: 140})); }
     } else if (panel.kind === "matrix") {
       const c = card(body, panel.title || `${panel.columns} × ${panel.rows}`, `${where} · ${panel.columns} across · ${panel.rows} down · ${scoreName} ${versus}`, "full");
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
@@ -232,7 +223,7 @@ function render() {
           const p = at(r, col), ok = p && !p.missing && !p.skip, on = F[panel.rows] === r && F[panel.columns] === col;
           const cell = node("div", "cell" + (ok ? "" : " none") + (on ? " on" : ""));
           if (ok) paintCell(cell, p, ref, paint); else cell.textContent = "·";
-          cell.onpointermove = evt => showTip(evt, ok ? [{value: fmt(p.y), label: p.meta}, ...(p.lo != null ? [{value: `${fmt(p.lo)}–${fmt(p.hi)}`, label: job.runs.length > 1 ? "seed range" : "95% interval"}] : [])] : [{value: "not recorded", label: p?.meta || ""}], `${job.label} · ${panel.columns} ${show(col)} · ${panel.rows} ${show(r)} · ${versus}`);
+          cell.onpointermove = evt => showTip(evt, ok ? [{value: pointText(p, scoreFormat), label: p.meta}] : [{value: "not recorded", label: p?.meta || ""}], `${job.label} · ${panel.columns} ${show(col)} · ${panel.rows} ${show(r)} · ${versus}`);
           cell.onpointerleave = hideTip;
           cell.onclick = () => setFilter(both(r, col), true);
           grid.appendChild(cell);
@@ -258,12 +249,12 @@ function render() {
           const b = node("div", "bar"), track = node("div", "track"), fill = node("b");
           fill.style.width = p ? ((p.y - lo) / (hi - lo) * 100) + "%" : "0"; fill.style.background = color(j); if (j.baseline) { fill.className = "dot"; fill.style.color = color(j); }
           track.appendChild(fill); if (ref != null) { const e = node("em"); e.style.left = ((ref - lo) / (hi - lo) * 100) + "%"; track.appendChild(e); }
-          b.append(track, node("span", null, p ? fmt(p.y) : "n/r")); bars.appendChild(b);
+          b.append(track, node("span", null, p ? scoreFormat(p.y) : "n/r")); bars.appendChild(b);
         }
         row.appendChild(bars);
         const click = () => setFilter({[panel.by]: r.v}, true);
         row.onclick = click; row.onkeydown = evt => { if (evt.key === "Enter") click(); };
-        row.onpointermove = evt => showTip(evt, r.by.map(([j, p]) => ({color: color(j), dotted: j.baseline, value: p ? fmt(p.y) : "not recorded", label: j.label + (p ? " · " + p.meta : "")})), `${panel.by} = ${show(r.v)}`);
+        row.onpointermove = evt => showTip(evt, r.by.map(([j, p]) => ({color: color(j), dotted: j.baseline, value: p ? scoreFormat(p.y) : "not recorded", label: j.label + (p ? " · " + p.meta : "")})), `${panel.by} = ${show(r.v)}`);
         row.onpointerleave = hideTip; c.appendChild(row);
       }
     } else if (panel.kind === "head_to_head") {
@@ -309,7 +300,7 @@ function render() {
           const x = a === b ? null : cellOf(sel, E.score, a, b, false, F), cell = node("div", "cell" + (x ? "" : " none"));
           const p = x && {y: x.value, lo: x.interval?.[0], hi: x.interval?.[1]};
           if (p) paintCell(cell, p, ref, paint); else cell.textContent = a === b ? "" : "·";
-          cell.onpointermove = evt => showTip(evt, p ? [{value: fmt(p.y), label: `${x.rows} rows · ${x.matches} match${x.matches > 1 ? "es" : ""}`}, ...(p.lo != null ? [{value: `${fmt(p.lo)}–${fmt(p.hi)}`, label: "95% interval"}] : [])] : [{value: a === b ? "itself" : "not played", label: ""}], `${playerName(a)} vs ${playerName(b)}`);
+          cell.onpointermove = evt => showTip(evt, p ? [{value: pointText(p, scoreFormat), label: scoreCount(x, E.info)}] : [{value: a === b ? "itself" : "not played", label: ""}], `${playerName(a)} vs ${playerName(b)}`);
           cell.onpointerleave = hideTip; grid.appendChild(cell);
         }
       }
@@ -326,7 +317,7 @@ function render() {
       const wrap = node("div", "mwrap"); wrap.appendChild(grid); c.appendChild(wrap);
       grid.append(node("div", "rl", ""), node("div", "cl", "strength"));
       for (const b of order) grid.appendChild(node("div", "cl", D.players[b].name));
-      const pointOfCell = x => x && {y: x.value, lo: x.interval?.[0], hi: x.interval?.[1], meta: `${x.rows} rows · ${x.matches} matches`};
+      const pointOfCell = x => x && {y: x.value, lo: x.interval?.[0], hi: x.interval?.[1], meta: scoreCount(x, E.info)};
       const found = order.flatMap(a => [strength(a), ...order.map(b => a === b ? null : cellOf(sel, E.score, a, b, false, F))]).filter(Boolean).map(x => x.value);
       const paint = painter(found, ref);
       for (const a of order) {
@@ -334,7 +325,7 @@ function render() {
         for (const [b, x] of [[null, strength(a)], ...order.map(b => [b, a === b ? null : cellOf(sel, E.score, a, b, false, F)])]) {
           const p = pointOfCell(x), cell = node("div", "cell" + (p ? "" : " none"));
           if (p) paintCell(cell, p, ref, paint); else cell.textContent = a === b ? "" : "·";
-          cell.onpointermove = evt => showTip(evt, p ? [{value: fmt(p.y), label: p.meta}, ...(p.lo != null ? [{value: `${fmt(p.lo)}–${fmt(p.hi)}`, label: "95% interval"}] : [])] : [{value: "not recorded", label: ""}], `${D.players[a].name} ${b == null ? "against every anchor" : "vs " + D.players[b].name}`);
+          cell.onpointermove = evt => showTip(evt, p ? [{value: pointText(p, scoreFormat), label: p.meta}] : [{value: "not recorded", label: ""}], `${D.players[a].name} ${b == null ? "against every anchor" : "vs " + D.players[b].name}`);
           cell.onpointerleave = hideTip; grid.appendChild(cell);
         }
       }
@@ -365,7 +356,7 @@ function render() {
     const band = ((T.bands[clock] || {})[key] || []).find(l => l.owner === j.key);
     const l = band || (j.runs.length === 1 ? ((T.series[clock] || {})[key] || []).find(l => l.owner === j.runs[0]) : null);
     if (!l) return null;
-    return l.x.map((x, i) => ({x: scaleX(clock, x), y: l.mean[i], lo: band ? l.low[i] : null, hi: band ? l.high[i] : null, missing: l.mean[i] == null, meta: band ? `${l.seeds[i]} seeds` : ""}));
+    return l.x.map((x, i) => ({x: scaleX(clock, x), y: l.mean[i], lo: band ? l.low[i] : null, hi: band ? l.high[i] : null, intervalLabel: "seed range", missing: l.mean[i] == null, meta: band ? `${l.seeds[i]} seeds` : ""}));
   }
   const named = new Set([...(R.perf || []), ...(R.ml || [])].flatMap(p => p.keys || []));
   const prefixes = [...(R.perf || []), ...(R.ml || [])].filter(p => p.kind === "flame").map(p => p.prefix);
@@ -386,7 +377,17 @@ function render() {
       return lines;
     };
     for (const panel of panels) {
-      if (panel.kind === "series") {
+      if (panel.kind === "schedule") {
+        const c = card(host, panel.title, `Configured · ${panel.unit} · ${panel.clock} · markers: recorded position`, "full"), h = node("div");
+        c.appendChild(h);
+        const schedules = M.scheduleSeries(panel, vis);
+        const lines = schedules.flatMap(({job, points, markers}) => [
+          {label: job.label + " · configured", color: color(job), dotted: job.baseline, points},
+          ...markers.map(p => ({label: job.label + " · current", color: color(job), points: [p]})),
+        ]);
+        for (const {job, markers} of schedules) if (!markers.length) c.appendChild(node("div", "na", `${job.label}: no recorded ${panel.clock} within the schedule`));
+        later(() => line(h, lines, {xLabel: panel.clock, height: 220, empty: "No configured schedule for these jobs"}));
+      } else if (panel.kind === "series") {
         const present = panel.keys.filter(k => T.metrics.includes(k));
         missing.push(...panel.keys.filter(k => !present.includes(k)));
         if (!present.length) continue;
@@ -541,7 +542,7 @@ const io = new IntersectionObserver(entries => { for (const en of entries) if (e
 ["evals", "perf", "ml"].forEach(id => io.observe(document.getElementById(id)));
 render();
 let pending; addEventListener("resize", () => { clearTimeout(pending); pending = setTimeout(render, 120); });
-if (D.refresh) setInterval(() => { if (S.live === "1" && !document.hidden) location.reload(); }, D.refresh * 1000);
+if (D.refresh) setInterval(() => { if (S.live === "1" && !document.hidden) refreshPage(D.served); }, D.refresh * 1000);
 </script>
 </body>
 </html>

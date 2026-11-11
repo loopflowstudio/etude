@@ -99,11 +99,40 @@ def fetch(storage: Storage, prefix: str, key: str) -> StoredBlock:
     return StoredBlock(storage, prefix + key, description, body)
 
 
-def describe(storage: Storage, prefix: str, key: str) -> BlockDescription:
-    """Read a header in two small ranges when no manifest describes a file."""
+def describe(
+    storage: Storage,
+    prefix: str,
+    key: str,
+    *,
+    metrics: frozenset[str] | None = None,
+    prefixes: tuple[str, ...] = (),
+) -> BlockDescription:
+    """Read one header in two ranges, retaining only requested numeric columns if given.
+
+    Projection leaves every clock and original array offset/CRC intact. Peak
+    metadata is one full header plus the retained columns of previous blocks.
+    """
     front = storage.get_range(prefix + key, 0, 16)
     length = int.from_bytes(front[12:16], "little")
     described, start = header(front + storage.get_range(prefix + key, 16, length))
+    if metrics is not None:
+        series = tuple(
+            c
+            for c in described.series
+            if c.kind == "metric" and (c.name in metrics or c.name.startswith(prefixes))
+        )
+        names = {c.name for c in series}
+        described = described.model_copy(
+            update={
+                "series": series,
+                "rollups": tuple(
+                    level.model_copy(
+                        update={"series": tuple(c for c in level.series if c.name in names)}
+                    )
+                    for level in described.rollups
+                ),
+            }
+        )
     return BlockDescription(key=key, header=described, start=start)
 
 

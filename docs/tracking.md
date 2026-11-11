@@ -175,6 +175,21 @@ run.tag(model, "best")  # tags can change later
 
 ## Reports
 
+```sh
+uv run etude report ppo.py --source r2://bucket/runs --serve --open
+```
+
+This opens the experiment's Evals, Perf and ML details at
+`http://127.0.0.1:8765/`. Click **Refresh** to read newly delivered results or
+an edited `report()`. Leaving the page open does not poll storage or reload
+on a timer. The page shows its source and generation time, so you can tell
+which results you are reading.
+
+Install `etude-sdk[eval]` to report evaluations and `etude-sdk[s3]` for a
+bucket source; install `etude-sdk[eval,s3]` for both. The experiment file must
+be importable with its own dependencies. Without `--source`, the report reads
+the local tracking directory described above.
+
 ```python
 # ppo.py: experiment "ppo", beside its train() and eval(state)
 from etude.report import Anchors, Curve, HeadToHead, Matches, Matrix, Ranking, Report, Score
@@ -199,21 +214,39 @@ def report() -> Report:
 
 ```sh
 uv run etude report ppo.py --source r2://bucket/runs --open   # writes ./reports/ppo.html
-uv run etude report ppo.py --watch 5 --open   # rewrite it every 5 s; the open page reloads
-uv run etude report ppo.py --serve            # serve it live, writing nothing
+uv run etude report ppo.py --watch 5 --open   # opt in to checks and page reloads every 5 s
+uv run etude report ppo.py --serve            # refresh on demand, writing nothing
 uv run etude report experiments/ --serve      # every experiment there, with an index at /
 ```
 
-One HTML page per experiment, with its data inlined: no server and no network
-to view it. The experiment is named for the file, and the page follows the
+Without `--serve`, the result is one HTML file per experiment, with its data
+inlined: no server and no network to view it. Rerun the command to update that
+snapshot; reloading a saved HTML file cannot fetch new training results.
+The experiment is named for the file, and the page follows the
 file's `report()`; a file without one gets `Report()`, and the page says so at
-its top. `--watch` and `--serve` build a page again once its file or its runs'
-files change, so an edited `report()` shows on the next; while nothing has
-changed they list the source and build nothing. The page's top says where its runs were read from and when; it reads
-files and never launches or rents anything. From a directory the page goes to
+its top. Reports read files and never launch or rent anything.
+From a directory the page goes to
 `reports/` beside its runs, from a bucket to `./reports`; `--out DIR` chooses.
-`--serve` has no login and listens on this computer only; with `--watch` the
-served page reloads itself.
+`--serve` has no login and defaults to this computer only
+(`--host 127.0.0.1 --port 8765`). Keep the command running to use Refresh;
+Ctrl-C stops it.
+
+**Refresh** checks the experiment file and its source, then replaces the
+served page when a generation succeeds. Requests for the same report while
+that generation is running join it, so several clicks or viewers do not
+start duplicate storage reads. Ordinary views reuse the generated page.
+If refreshing fails, the last successful page and its generation time remain
+available and the failure is reported. Fix the reported source access or
+experiment-file error and click Refresh again; an old timestamp is not
+evidence of a successful update.
+
+**Automatic refresh is optional.** `--watch SECONDS` checks for changes at
+that interval and reloads the open page. Combine it with `--serve` to opt a
+served report into periodic refresh. These checks can read or list storage
+even when no new results arrive, so use on-demand refresh to avoid idle
+storage traffic. For Python callers, `etude.page.render(page)` produces a
+snapshot with no timer; `render(page, refresh=5)` opts into browser reloads.
+Rendering alone never rebuilds the page's data.
 
 **A folder** is every experiment file in it, at any depth outside hidden
 folders: a `.py` file defining `eval(state)` or `report()` at its top level,
@@ -225,8 +258,8 @@ finished, failed, restarted), its latest checkpoint, each job's latest score
 with a sparkline of its report's first curve, evaluation progress with
 failed matches, time trained and latest activity. Experiments with failures
 come first, then those with work running. A file that fails to run, or an
-experiment with no runs yet, says so on its row. A served page reloads every
-5 seconds, or every `--watch` seconds.
+experiment with no runs yet, says so on its row. The served index also
+refreshes on demand unless `--watch` is supplied.
 
 **Charts** are uPlot, inlined into the page. Drag across a chart to zoom in
 and double-click to zoom out. The cursor is shared by every chart in a
@@ -240,7 +273,15 @@ jobs and filtering are the only controls for the whole page.
 labelled by the job's launch name and seed count ("ppo · 3 seeds"), as its
 seeds' mean banded by their range. Seeds align on where each checkpoint stood
 on the run's first declared clock. The `baseline` job is dotted everywhere; a
-job's colour follows launch order.
+job's colour follows launch order. `Report(labels={"ppo": "PPO baseline"})`
+replaces the displayed job name, keeping the seed count. Labels change
+presentation only: `baseline` and panel subjects still refer
+to the original job names. Unlabelled jobs keep their launch names.
+
+**Config** starts with a configuration that has recorded evaluation results
+when one is available. A valid configuration you select stays selected;
+choosing one without results shows the missing data rather than silently
+changing your choice.
 
 **Evals** are the experiment's eval runs ([evaluation](evaluation.md#experiments)).
 A checkpoint is drawn where its seat says it stood (`CheckpointRef.at`), else,
@@ -288,6 +329,82 @@ names `eval(state)` gives them. A matchup and a tag are alternatives; naming
 both is refused. A curve against one anchor draws the others' scores against it as
 reference lines.
 
+**Compare jobs across selections.**
+
+```python
+# capacity.py: jobs "small" and "large" evaluated in benchmark "paired".
+from etude.report import Curve, Matches, Report, Score
+
+
+def report() -> Report:
+    return Report(
+        score=Score(table="plays", value="won", reference=0.5, unit="games"),
+        labels={"small": "Small model", "large": "Large model"},
+        other_metrics=False,
+        evals=(
+            Curve(
+                title="Against half-training checkpoints",
+                matches=(
+                    Matches(tournament="paired", tag="half-training-small"),
+                    Matches(tournament="paired", tag="half-training-large"),
+                ),
+            ),
+            Curve(
+                title="Against the previous checkpoint",
+                matches=(
+                    Matches(tournament="paired", tag="previous-small"),
+                    Matches(tournament="paired", tag="previous-large"),
+                ),
+            ),
+            Curve(
+                title="Large against small at equal training steps",
+                matches=Matches(tournament="paired", tag="head-to-head"),
+                subject="large",
+            ),
+            Curve(
+                title="Large against small at equal training time",
+                matches=Matches(tournament="paired", tag="equal-hours"),
+                subject="large",
+            ),
+        ),
+    )
+```
+
+The first two charts each draw a line per job from its own tagged matches.
+The last two draw only the large model's score against the small model;
+the small model's complementary score is omitted. The tags must be present
+on the benchmark's matchups, and the matching results must have been
+delivered to the report's source. This spec selects results; it schedules
+no evaluations.
+
+A tuple of `Matches` unions the selected matches for that panel. Overlapping
+selections count a match once, and jobs remain separate lines. Give an
+explicit tournament to select it exactly. With only `Matches(tag="anchor")`,
+the report prefers a matching tournament with results over an empty one;
+it does not combine every tournament carrying that tag. Use an explicit
+tuple to combine selections. Tag names are literal, not patterns.
+
+`Curve(subject="large")` selects the job whose score to show; `opponent`
+still selects whom it is scored against. Omitting `subject` keeps all
+eligible subjects. A missing subject is reported as missing rather than
+substituted with another job.
+
+The Evals section shows its Matches picker and selection subtitle only when
+at least one panel uses the section's selection. When every panel supplies
+its own matches, as above, both are hidden. Other controls still apply to
+the panels that use them.
+
+**Score labels.** For a table with one score row per game for each subject,
+`Score(..., unit="games")` labels the row count in games. For example, a
+tooltip can read `0.63 · 95% interval 0.53–0.72 · 64 games`.
+The unit names the counted rows; it does not multiply a row by the number of
+games in its match. Leave the unit unspecified for the default `rows` when
+the table has another granularity. `per` still controls the score's
+denominator, not the row count's label. Display rounding changes neither
+the stored values nor the calculation. The interval resamples whole
+matches, even when the displayed count is games; with fewer than two
+matches, no interval is shown.
+
 Gaps stay visible. A checkpoint nothing played is marked not evaluated and is
 no point of a line. One `eval(state)` wants that no eval run has delivered is
 marked not yet played, and failed matches are marked and listed; both break a
@@ -302,3 +419,50 @@ previous row). **ML details** default to reinforcement learning's `Counters`
 and `Series` over `rl/` keys; pass `perf=` or `ml=` to name an experiment's
 own. Keys a panel names that no run logged are listed, and metrics no panel
 names are drawn last.
+
+For a large metric vocabulary, use `Report(other_metrics=False)`. Only keys
+named by `Series` and `Counters`, and prefixes named by `Flame`, are read and
+drawn. This reads one immutable block header at a time instead of parsing the
+cumulative training index, retaining only the selected columns. All clocks,
+checkpoints and continuation coordinates are preserved. Memory still includes
+one full header and the selected series; this does not bound the size of an
+individual block header. The default, `other_metrics=True`, includes all logged
+metrics.
+
+```python
+from etude.report import ML, Report, Schedule, SchedulePoint
+
+
+def report() -> Report:
+    return Report(
+        ml=(
+            *ML,
+            Schedule(
+                title="Planned learning rate",
+                clock="updates",
+                unit="learning rate",
+                jobs={
+                    "large": (
+                        SchedulePoint(at=10_000, value=0.001),
+                        SchedulePoint(at=20_000, value=0.0001),
+                    ),
+                },
+            ),
+        ),
+    )
+```
+
+**Configured curves** in ML details show planned values, such as a
+learning-rate or damping schedule, separately labelled from logged
+observations. Their current-position marker comes from the run's recorded
+clock at the time the report was generated. A schedule against optimizer
+updates uses absolute update coordinates across continuation; it does not
+advance with time spent viewing the page. Refresh to move the marker when
+new clock values arrive. A configured curve is not evidence that training
+used those values; log a metric to compare the schedule with observations.
+`Schedule.jobs` uses original job names. Points must have finite values and
+strictly increasing clock coordinates. Values between samples are linearly
+interpolated; no value is extrapolated outside the supplied range. Each seed
+gets a current-position marker when its recorded clock lies inside that range;
+otherwise the chart says that no recorded position is available. The schedule
+uses its own named clock, independently of the section's X axis control.
