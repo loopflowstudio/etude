@@ -263,11 +263,15 @@ function render() {
         const theirs = members(b);
         const pts = jobPoints(a, S.eclock, (run, m) => {
           const mine = subjectAt(run, m, i => theirs.some(s => cellOf(sel, E.score, i, s, false, F)));
+          if (!mine.recorded) return null;
           if (mine.gap) return {missing: true, gap: "none", at: mine.at, meta: mine.gap};
-          const got = mine.index == null ? [] : theirs.map(s => cellOf(sel, E.score, mine.index, s, false, F)).filter(Boolean);
-          return got.length ? {y: mean(got.map(g => g.value)), meta: `against ${got.length} of ${b.label}'s checkpoints`} : null;
+          const me = D.players[mine.index], got = theirs.map(s => cellOf(sel, E.score, mine.index, s, false, F)).filter(Boolean);
+          const configs = [...new Set(got.map(g => D.players[g.opponent].config))];
+          if (configs.length > 1) return {missing: true, gap: "none", at: me.at, meta: `opponent ${b.label} played multiple inference variants: ${configs.join(" and ")}; choose a matchup`};
+          // Checkpoint positions may be averaged; both scientific sides must agree across seeds.
+          return {y: mean(got.map(g => g.value)), at: me.at, inference: JSON.stringify([me.config, configs[0]]), meta: `against ${got.length} of ${b.label}'s checkpoints`};
         }, true);
-        if (pts.some(p => !p.missing)) pairs.push({label: `${a.label} vs ${b.label}`, color: color(a), dotted: a.baseline, points: pts});
+        if (pts.length) pairs.push({label: `${a.label} vs ${b.label}`, color: color(a), dotted: a.baseline, points: pts});
       }
       if (!pairs.length) { c.appendChild(node("div", "na", "No games between checkpoints of two jobs were recorded")); continue; }
       const host = node("div"); c.appendChild(host); later(() => line(host, pairs, {...eOpts, height: 200, ref: ref}));

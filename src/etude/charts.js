@@ -68,7 +68,14 @@ function line(host, series, o = {}) {
   host.replaceChildren();
   const width = Math.max(120, host.clientWidth || 600), height = o.height || 200;
   const drawn = p => !p.missing && !p.skip && p.x != null && p.y != null && (!o.log || p.y > 0);
-  if (!series.some(s => s.points.some(drawn))) { host.appendChild(node("div", "na chart-empty", o.empty || "Nothing recorded for this selection")); return; }
+  if (!series.some(s => s.points.some(drawn))) {
+    const notes = series.flatMap(s => {
+      const reasons = new Set(s.points.filter(p => p.missing && p.meta).map(p => p.meta));
+      return [...reasons].map(reason => `${s.label}: ${reason}`);
+    });
+    for (const text of notes.length ? notes : [o.empty || "Nothing recorded for this selection"]) host.appendChild(node("div", "na chart-empty", text));
+    return;
+  }
   const xs = [...new Set(series.flatMap(s => s.points.filter(p => p.x != null).map(p => p.x)))].sort((a, b) => a - b);
   const maps = series.map(s => new Map(s.points.filter(p => p.x != null).map(p => [p.x, p])));
   const column = (m, f) => xs.map(x => { const p = m.get(x); if (!p || p.skip) return undefined; return drawn(p) ? f(p) : null; });
@@ -209,18 +216,19 @@ function model(D) {
     const per = job.runs.map(run => new Map((marks.get(run) || []).map(m => [m.align, [m, value(run, m)]]).filter(([, [, v]]) => v)));
     const keys = [...new Set(per.flatMap(p => [...p.keys()]))].sort((a, b) => a - b);
     return keys.map(key => {
-      const got = per.map(p => p.get(key));
-      const xs = got.filter(Boolean).map(([m, v]) => xAt(m, v, clock)).filter(x => x != null);
+      const got = per.map(p => p.get(key)).filter(Boolean);
+      const xs = got.map(([m, v]) => xAt(m, v, clock)).filter(x => x != null);
       const x = xs.length ? mean(xs) : null;
-      const short = `${got.filter(Boolean).length} of ${got.length} seeds evaluated`;
-      if (got.some(g => !g) && !some) {
+      const partial = got.length < job.runs.length;
+      const short = `${got.length} of ${job.runs.length} seeds evaluated`;
+      if (partial && !some) {
         // A seed without this checkpoint yet: the others' gap, if they have one, is still shown.
-        const present = got.filter(Boolean).map(([, v]) => v), why = present.find(v => v.missing && v.gap);
-        if (present.length && present.every(v => v.skip)) return {x, key, skip: true, gap: present[0].gap, meta: present[0].meta};
+        const present = got.map(([, v]) => v), why = present.find(v => v.missing && v.gap);
+        if (present.every(v => v.skip)) return {x, key, skip: true, gap: present[0].gap, meta: present[0].meta};
         return {x, key, missing: true, gap: why?.gap, meta: why ? `${why.meta} · ${short}` : short};
       }
-      if (some) { const kept = got.filter(Boolean); if (kept.length < got.length) return {...pointOf(kept, x, key), meta: short}; }
-      return pointOf(got, x, key);
+      const point = pointOf(got, x, key);
+      return partial ? {...point, meta: point.meta ? `${point.meta} · ${short}` : short} : point;
     });
   }
   function pointOf(got, x, key) {
@@ -230,7 +238,7 @@ function model(D) {
     if (skipped.length === got.length) return {x, key, skip: true, gap: skipped[0][1].gap, meta: skipped[0][1].meta};
     if (skipped.length) return {x, key, missing: true, gap: "partial", meta: `${got.length - skipped.length} of ${got.length} seeds evaluated`};
     if (new Set(got.map(([, v]) => v.inference).filter(v => v != null)).size > 1)
-      return {x, key, missing: true, gap: "none", meta: "seeds played different inference variants; choose a matchup or set Curve.inference"};
+      return {x, key, missing: true, gap: "none", meta: "seeds played different inference variants; choose a matchup (or set Curve.inference on a curve)"};
     const ys = got.map(([, v]) => v.y), y = mean(ys);
     return got.length > 1
       ? {x, key, y, lo: Math.min(...ys), hi: Math.max(...ys), seeds: ys}
@@ -287,13 +295,15 @@ function model(D) {
     const i = found[0];
     if (i == null) return {};
     const a = D.players[i];
+    // Curves explain unplayed checkpoints; HeadToHead includes only selected games.
+    const subject = {at: a.at, recorded: recorded.length > 0};
     if (found.some(k => D.players[k].config !== a.config))
-      return {gap: `multiple inference variants: ${found.map(playerName).join(" and ")}; choose a matchup or set Curve.inference`};
+      return {...subject, gap: `multiple inference variants: ${found.map(playerName).join(" and ")}; choose a matchup or set Curve.inference`};
     // Position uniqueness belongs to checkpoint resolution, for every panel.
     const same = positions.get(JSON.stringify([lineOf(i), a.config, a.at[alignClock]])) || found;
     if (same.length > 1)
-      return {gap: `${same.map(playerName).join(" and ")} stood at ${alignClock} ${num(a.at[alignClock])}`, at: a.at};
-    return {index: i};
+      return {...subject, gap: `${same.map(playerName).join(" and ")} stood at ${alignClock} ${num(a.at[alignClock])}`};
+    return {...subject, index: i};
   }
   function selName(s) {
     if (Array.isArray(s)) return s.map(selName).join(" + ");

@@ -292,6 +292,12 @@ when several remain, it names the ambiguity. Select the intended matchup or
 set `Curve(inference={"search": 64})` to choose that exact scientific config.
 It selects no execution setup.
 
+`HeadToHead(matches=Matches(matchup="search vs direct"))` uses the scientific
+variants in that matchup on both sides. It averages scores against the other
+job's checkpoint positions, then across subject seeds, only when each side's
+scientific config agrees. Mixed variants show an ambiguity even when no valid
+points remain; select a matchup to resolve it.
+
 **Evals** are the experiment's eval runs ([evaluation](evaluation.md#experiments)).
 A checkpoint is drawn where its seat says it stood (`CheckpointRef.at`), else,
 for a key a training run of the experiment saved (`RUN/checkpoints/NAME`),

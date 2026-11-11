@@ -23,6 +23,119 @@ function page(players, cells, training = {jobs: [], runs: [], checkpoints: [], c
 const earlier = {kind: "earlier", clock: "updates", by: 400};
 const points = (m, job, opponent = earlier) => m.jobPoints(job, "updates", m.evalValue(0, 0, {}, opponent));
 
+// Run the shipped page and chart renderer; only the browser DOM and plotting
+// library are replaced. Assertions see displayed text and the plotted values.
+function renderPage(data, hash = "") {
+  class Element {
+    constructor() { this.children = []; this.style = {}; this.text = ""; }
+    set textContent(text) { this.text = String(text); this.children = []; }
+    get textContent() { return this.text + this.children.map(c => typeof c === "string" ? c : c.textContent).join(" "); }
+    append(...children) { this.children.push(...children); }
+    appendChild(child) { this.append(child); return child; }
+    replaceChildren(...children) { this.text = ""; this.children = children; }
+    setAttribute() {}
+    addEventListener() {}
+  }
+  const elements = new Map(), plots = [];
+  const document = {
+    createElement: () => new Element(), querySelectorAll: () => [],
+    getElementById: id => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); },
+  };
+  const full = {
+    experiment: "test", notes: [], environments: [], commits: [], failures: [], generated_ms: 0,
+    scores: [{table: "games", value: "win", unit: "games"}], ...data,
+    report: {evals: [{kind: "head_to_head", title: "Head to head"}], perf: [], ml: [], ...data.report},
+    training: {...data.training, metrics: [], runs: data.training.runs.map(r => ({rows: 0, attempts: [], ...r}))},
+  };
+  document.getElementById("data").textContent = JSON.stringify(full);
+  const browser = vm.createContext({
+    document, URLSearchParams, location: {hash}, history: {replaceState() {}}, addEventListener() {},
+    getComputedStyle: () => ({getPropertyValue: () => "#112233"}),
+    IntersectionObserver: class { observe() {} },
+    uPlot: class {
+      constructor(options, values) { this.over = new Element(); plots.push({options, values}); }
+      destroy() {}
+    },
+  });
+  const script = fs.readFileSync("src/etude/page.html", "utf8").split("<script>\n")[1].split("</script>")[0];
+  vm.runInContext(fs.readFileSync("src/etude/charts.js", "utf8") + "\n" + script, browser);
+  return {text: document.getElementById("evals-body").textContent, plots};
+}
+
+function pairedSeeds() {
+  const training = {
+    jobs: [{key: "a", name: "a", label: "A", runs: ["a1", "a2"]}, {key: "b", name: "b", label: "B", runs: ["b1", "b2"]}],
+    runs: ["a1", "a2", "b1", "b2"].map(name => ({name})), clocks: [{name: "updates"}],
+    checkpoints: ["a1", "a2", "b1", "b2"].map(run => ({run, ordinal: 1, align: 100, at: {updates: 100}})),
+  };
+  return page(training.runs.map(r => player("u100", r.name, 100, r.name, 1)), [[0, 2, 0.25], [1, 3, 0.75]], training);
+}
+
+test("HeadToHead displays ambiguity instead of averaging scientific variants across subject seeds", () => {
+  const data = pairedSeeds();
+  data.players[0].config = '{"search":0}'; data.players[1].config = '{"search":9}';
+  const rendered = renderPage(data);
+  assert.equal(rendered.plots.length, 0);
+  assert.match(rendered.text, /A vs B.*seeds played different inference variants/);
+  assert.doesNotMatch(rendered.text, /No games|Nothing recorded/);
+});
+
+test("HeadToHead carries opposing scientific identity across subject seeds", () => {
+  const data = pairedSeeds();
+  data.players[2].config = '{"search":0}'; data.players[3].config = '{"search":9}';
+  const rendered = renderPage(data);
+  assert.equal(rendered.plots.length, 0);
+  assert.match(rendered.text, /A vs B.*different inference variants/);
+});
+
+test("HeadToHead names opposing variants instead of pooling them as checkpoints", () => {
+  for (const position of [100, 200]) {
+    const data = page([player("a", "a", 100), player("b", "b", 100), player("b", "b", position)], [[0, 1, 0.25], [0, 2, 0.75]]);
+    data.players[1].config = '{"search":0}'; data.players[2].config = '{"search":9}';
+    const rendered = renderPage(data);
+    assert.equal(rendered.plots.length, 0);
+    assert.match(rendered.text, /a vs b.*opponent.*inference variants.*search.*choose a matchup/);
+    assert.doesNotMatch(rendered.text, /No games|Nothing recorded/);
+  }
+});
+
+test("HeadToHead preserves ambiguity for partially evaluated jobs", () => {
+  const data = pairedSeeds();
+  data.players.push({...data.players[0], config: '{"search":9}'});
+  data.cells = [data.cells[0], {...data.cells[0], subject: 4, value: 0.75}];
+  const rendered = renderPage(data);
+  assert.equal(rendered.plots.length, 0);
+  assert.match(rendered.text, /A vs B.*multiple inference variants.*1 of 2 seeds evaluated/);
+});
+
+test("HeadToHead keeps legitimate means over seeds and distinct opponent positions", () => {
+  const data = pairedSeeds();
+  data.players.push(player("u200", "b1", 200, "b1", 2));
+  data.training.checkpoints.push({run: "b1", ordinal: 2, align: 200, at: {updates: 200}});
+  data.cells.push({...data.cells[0], opponent: 4, value: 0.5});
+  const {plots} = renderPage(data);
+  assert.equal(plots.length, 1);
+  assert.equal(plots[0].options.series[1].label, "A vs B");
+  assert.deepEqual(Array.from(plots[0].values[0]), [100]);
+  assert.deepEqual(Array.from(plots[0].values[1]), [(0.375 + 0.75) / 2]);
+});
+
+test("HeadToHead selection resolves variants and missing games remain an empty panel", () => {
+  const data = page([player("a", "a", 100), player("b", "b", 100), player("b", "b", 100)], [[0, 1, 0.25], [0, 2, 0.75]]);
+  data.players[1].config = '{"search":0}'; data.players[2].config = '{"search":9}';
+  data.selections.push({matchup: "search"}, {matchup: "empty"});
+  data.cells[1].selection = 1;
+  data.report.evals = [{kind: "head_to_head", matches: {matchup: "search"}}];
+  const {plots} = renderPage(data);
+  assert.equal(plots.length, 1);
+  assert.equal(plots[0].values[1][0], 0.75);
+  data.report.evals[0].matches = {matchup: "empty"};
+  const empty = renderPage(data);
+  assert.equal(empty.plots.length, 0);
+  assert.match(empty.text, /No games between checkpoints/);
+  assert.doesNotMatch(empty.text, /inference variants/);
+});
+
 test("external learners sharing positions draw separate curves against their own earlier checkpoint", () => {
   const m = context.model(page([
     player("a0", "seed-1", 0), player("a400", "seed-1", 400),
