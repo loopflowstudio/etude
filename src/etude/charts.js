@@ -298,7 +298,8 @@ function model(D) {
     // Curves explain unplayed checkpoints; HeadToHead includes only selected games.
     const subject = {at: a.at, recorded: recorded.length > 0};
     if (found.some(k => D.players[k].config !== a.config))
-      return {...subject, gap: `multiple inference variants: ${found.map(playerName).join(" and ")}; choose a matchup or set Curve.inference`};
+      // Named by config, not checkpoint: the point's position says which one, and an empty chart says it once.
+      return {...subject, gap: `multiple inference variants: ${[...new Set(found.map(k => D.players[k].config))].join(" and ")}; choose a matchup or set Curve.inference`};
     // Position uniqueness belongs to checkpoint resolution, for every panel.
     const same = positions.get(JSON.stringify([lineOf(i), a.config, a.at[alignClock]])) || found;
     if (same.length > 1)

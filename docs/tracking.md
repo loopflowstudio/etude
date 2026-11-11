@@ -231,8 +231,9 @@ From a directory the page goes to
 (`--host 127.0.0.1 --port 8765`). Keep the command running to use Refresh;
 Ctrl-C stops it.
 
-**Refresh** checks the experiment file and its source, then replaces the
-served page when a generation succeeds. Requests for the same report while
+**Refresh** checks the experiment file, the modules it imports from its
+folder, and its source, then replaces the served page when a generation
+succeeds; an edited helper module is read afresh without a restart. Requests for the same report while
 that generation is running join it, so several clicks or viewers do not
 start duplicate storage reads. Ordinary views reuse the generated page.
 If refreshing fails, the last successful page and its generation time remain

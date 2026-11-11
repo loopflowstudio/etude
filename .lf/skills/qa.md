@@ -68,6 +68,20 @@ Build a lab outside the repo (e.g. `/tmp/lab`) with its own `ETUDE_HOME`:
    Play with `uv run --project REPO etude eval NAME.py --source RUNS` from that folder.
 3. Serve with `uv run --project REPO etude report NAME.py --source RUNS --serve --port P`
    (a folder path serves an index). Drive it in Chrome; `curl -X POST /` is the Refresh.
-   Edits to `charts.js`/`page.html` take effect on the next Refresh, without restarting.
-4. Stop the servers before finishing. In zsh, `$args` does not word-split: call
+   Edits to `charts.js`/`page.html`, the experiment file and the helper modules it imports
+   from its folder take effect on the next Refresh; edits to Etude's Python need a restart.
+4. Mixed execution setups: have `play` return `Result(tables=..., execution={"device":
+   os.environ["QA_DEVICE"], ...})` and run `etude eval` once per device. To interrupt a
+   pass part way, slow `play` with a sleep and send SIGTERM (`pkill -TERM -f "etude eval
+   NAME.py"`): a backgrounded job in a non-interactive shell ignores SIGINT. Results
+   played before the signal are sealed; the next pass plays only the rest. A matchup's
+   name is its identity (`matchup_conflict` if its conditions change): add new matchups
+   under the same tag instead. Replay already-played matches on another setup with
+   `etude.eval.match.evaluate(experiment=..., matches=..., run="replay-x")`, taking the
+   benchmark from `Evaluation.model_validate_json(job.config)` for each job
+   `etude.experiment.asked(read_experiment(file).eval, observe(RUNS, NAME))` returns.
+   Inspect provenance with `etude.eval.query.statsdb(NAME, RUNS)` (`matches.execution`).
+   A page's own numbers are in `JSON.parse(document.getElementById("data").textContent)`
+   (`cells` with `selection`, `subject`, `matches`, `rows`).
+5. Stop the servers before finishing. In zsh, `$args` does not word-split: call
    commands explicitly rather than looping over argument strings.

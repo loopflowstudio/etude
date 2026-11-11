@@ -294,20 +294,18 @@ class Pages:
         return [place.versions("") for place in self._places]
 
     def _build(self, file: Path, listings: Sequence[dict[str, str]]) -> Page:
-        try:
-            stat = file.stat()
-        except FileNotFoundError:
+        if not file.is_file():
             return build(self.storage, file)  # which says why there is no page
         runs = tuple(
             self._versions(place, file.stem, listed)
             for place, listed in zip(self._places, listings, strict=True)
         )
-        inputs = _Inputs(file=(stat.st_mtime_ns, stat.st_size), runs=runs)
         kept = self._built.get(file)
-        if kept is not None and kept[0] == inputs:
+        if kept is not None and kept[0] == _Inputs(files=_sources(file), runs=runs):
             return kept[1]
         page = build(self.storage, file)
-        self._built[file] = (inputs, page)
+        # After the build, so the neighbours this run imported are among its inputs.
+        self._built[file] = (_Inputs(files=_sources(file), runs=runs), page)
         return page
 
     def _versions(
@@ -342,7 +340,8 @@ class Pages:
 class _Inputs:
     """What a page is built from, as `Pages` compares it."""
 
-    file: tuple[int, int]  # modification time in nanoseconds, and size in bytes
+    # The experiment file and its imported neighbours: (path, modification time in ns, bytes).
+    files: tuple[tuple[str, int, int], ...]
     # Per place: (key, version) of each object in the experiment's runs' folders.
     runs: tuple[tuple[tuple[str, str], ...], ...]
 
@@ -457,7 +456,51 @@ def _run_file(file: Path) -> dict[str, object]:
     folder = str(file.resolve().parent)
     if folder not in sys.path:
         sys.path.insert(0, folder)
+    # A neighbour edited since the last build is imported afresh, as the file itself is run.
+    for name in _neighbours(file):
+        sys.modules.pop(name, None)
     return runpy.run_path(str(file.resolve()))
+
+
+def _neighbours(file: Path) -> dict[str, Path]:
+    """Imported modules defined below the file's folder, outside hidden folders and Python installs.
+
+    They were imported through the resolved folder `_run_file` puts on the path,
+    so their file names start with it. Etude's own modules are never included:
+    the page's records must stay the classes it checks against, even when
+    experiments sit in an Etude checkout.
+    """
+    folder = str(file.resolve().parent) + "/"
+    installed = tuple(
+        str(Path(p).resolve()) + "/" for p in {sys.prefix, sys.base_prefix, sys.exec_prefix}
+    )
+    found: dict[str, Path] = {}
+    for name, module in list(sys.modules.items()):
+        source = getattr(module, "__file__", None)
+        if (
+            not isinstance(source, str)
+            or not source.startswith(folder)
+            or source.startswith(installed)
+        ):
+            continue
+        if name == "etude" or name.startswith("etude."):
+            continue
+        parts = Path(source[len(folder) :]).parts[:-1]
+        if not any(p.startswith(".") or p in ("site-packages", "__pycache__") for p in parts):
+            found[name] = Path(source)
+    return found
+
+
+def _sources(file: Path) -> tuple[tuple[str, int, int], ...]:
+    """What a kept page's files are compared by; a deleted neighbour reads as absent."""
+    found = []
+    for path in sorted({file.resolve(), *_neighbours(file).values()}):
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            continue
+        found.append((str(path), stat.st_mtime_ns, stat.st_size))
+    return tuple(found)
 
 
 def _report(made: object, file: Path) -> tuple[Report, str | None, tuple[str, ...]]:

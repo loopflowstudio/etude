@@ -108,6 +108,20 @@ test("HeadToHead preserves ambiguity for partially evaluated jobs", () => {
   assert.match(rendered.text, /A vs B.*multiple inference variants.*1 of 2 seeds evaluated/);
 });
 
+test("a curve whose checkpoints all play two variants says so once, naming the variants", () => {
+  const training = {
+    jobs: [{key: "a", name: "a", label: "A", runs: ["a1"]}], runs: [{name: "a1"}], clocks: [{name: "updates"}],
+    checkpoints: [100, 200, 300].map((u, k) => ({run: "a1", ordinal: k + 1, align: u, at: {updates: u}})),
+  };
+  const players = [100, 200, 300].flatMap((u, k) => ['{"search":0}', '{"search":9}'].map(config => ({...player(`u${u}`, "a1", u, "a1", k + 1), config})));
+  const data = page(players, players.map((_, i) => [i, null, 0.5]), training);
+  data.report = {clock: "updates", evals: [{kind: "curve", title: "Score"}]};
+  const rendered = renderPage(data);
+  assert.equal(rendered.plots.length, 0);
+  assert.equal(rendered.text.match(/multiple inference variants/g).length, 1);
+  assert.match(rendered.text, / A: multiple inference variants: \{"search":0\} and \{"search":9\}; choose a matchup or set Curve.inference/);
+});
+
 test("HeadToHead keeps legitimate means over seeds and distinct opponent positions", () => {
   const data = pairedSeeds();
   data.players.push(player("u200", "b1", 200, "b1", 2));

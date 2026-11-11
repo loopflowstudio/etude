@@ -266,6 +266,29 @@ def test_refresh_failure_preserves_the_last_page_and_recovers(tmp_path: Path) ->
         assert server.page() == refreshed
 
 
+def test_refresh_reads_an_edited_neighbour_the_file_imports(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    trained(runs, "lab", "a")
+    folder = tmp_path / "experiments"
+    helper = experiment_file(folder, "lab_names", 'NAME = "First"\n')
+    file = experiment_file(
+        folder,
+        "lab",
+        "from etude.report import Report\nfrom lab_names import NAME\n\n\n"
+        "def report() -> Report:\n    return Report(labels={'a': NAME})\n",
+    )
+    with Server(runs, file, ("127.0.0.1", 0)) as server:
+        assert '"First"' in (server.page() or "")
+        # Only the neighbour changes: Refresh still shows it, without a restart.
+        helper.write_text('NAME = "Second name"\n')
+        assert '"Second name"' in (server.page(refresh=True) or "")
+        helper.write_text("NAME = (\n")
+        with pytest.raises(SyntaxError):
+            server.page(refresh=True)
+        helper.write_text('NAME = "Repaired name"\n')
+        assert '"Repaired name"' in (server.page(refresh=True) or "")
+
+
 def test_concurrent_refreshes_join_one_generation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
