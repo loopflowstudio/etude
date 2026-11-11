@@ -34,7 +34,7 @@ const asked = new URLSearchParams(location.hash.slice(1)).get("commit");
 const COMMIT = PAGE.commits.some(k => k.commit === asked) ? asked : "";
 const D = {...PAGE, cells: PAGE.cells.filter(c => (c.commit ?? "") === COMMIT)};
 const M = model(D);
-const {T, R, JOBS, marks, markOf, jobPoints, cellOf, subjectAt, placed, members, fixedPlayers, jobOfRun, playerName, selName, choices, evaluated} = M;
+const {T, R, JOBS, marks, markOf, jobPoints, cellOf, placed, fixedPlayers, jobOfRun, playerName, selName, choices, evaluated} = M;
 const TRAINED = T.runs.length > 0;
 
 // The view lives in the URL, so a reload or a rewritten page shows the same thing. The x axis
@@ -260,17 +260,7 @@ function render() {
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
       const pairs = [];
       for (const a of vis) for (const b of JOBS) if (a !== b) {
-        const theirs = members(b);
-        const pts = jobPoints(a, S.eclock, (run, m) => {
-          const mine = subjectAt(run, m, i => theirs.some(s => cellOf(sel, E.score, i, s, false, F)));
-          if (!mine.recorded) return null;
-          if (mine.gap) return {missing: true, gap: "none", at: mine.at, meta: mine.gap};
-          const me = D.players[mine.index], got = theirs.map(s => cellOf(sel, E.score, mine.index, s, false, F)).filter(Boolean);
-          const configs = [...new Set(got.map(g => D.players[g.opponent].config))];
-          if (configs.length > 1) return {missing: true, gap: "none", at: me.at, meta: `opponent ${b.label} played multiple inference variants: ${configs.join(" and ")}; choose a matchup`};
-          // Checkpoint positions may be averaged; both scientific sides must agree across seeds.
-          return {y: mean(got.map(g => g.value)), at: me.at, inference: JSON.stringify([me.config, configs[0]]), meta: `against ${got.length} of ${b.label}'s checkpoints`};
-        }, true);
+        const pts = jobPoints(a, S.eclock, M.headToHeadValue(E.score, sel, F, b), true);
         if (pts.length) pairs.push({label: `${a.label} vs ${b.label}`, color: color(a), dotted: a.baseline, points: pts});
       }
       if (!pairs.length) { c.appendChild(node("div", "na", "No games between checkpoints of two jobs were recorded")); continue; }

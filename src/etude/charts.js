@@ -405,8 +405,21 @@ function model(D) {
     if (!c) return own ? missing(`not played against ${playerName(o)}`) : gapOf(sel, run, m, score);
     return {y: c.value, lo: c.interval?.[0], hi: c.interval?.[1], at: a.at, inference: a.config, meta: scoreCount(c, D.scores?.[score]) + (own ? " · vs " + playerName(o) : "")};
   };
+  function headToHeadValue(score, sel, split, opponent) {
+    const theirs = members(opponent);
+    return (run, m) => {
+      const mine = subjectAt(run, m, i => theirs.some(s => cellOf(sel, score, i, s, false, split)));
+      if (!mine.recorded) return null;
+      if (mine.gap) return {missing: true, gap: "none", at: mine.at, meta: mine.gap};
+      const me = D.players[mine.index], got = theirs.map(s => cellOf(sel, score, mine.index, s, false, split)).filter(Boolean);
+      const configs = [...new Set(got.map(g => D.players[g.opponent].config))];
+      if (configs.length > 1) return {missing: true, gap: "none", at: me.at, meta: `opponent ${opponent.label} played multiple inference variants: ${configs.join(" and ")}; choose a matchup`};
+      // Checkpoint positions may be averaged; both scientific sides must agree across seeds.
+      return {y: mean(got.map(g => g.value)), at: me.at, inference: JSON.stringify([me.config, configs[0]]), meta: `against ${got.length} of ${opponent.label}'s checkpoints`};
+    };
+  }
   const evaluated = pts => pts.filter(p => !p.missing && !p.skip);
-  return {T, R, JOBS, marks, markOf, xOf, jobPoints, cellOf, subjectAt, placed, positioned, posClocks, alignClock, fixedPlayers, usesSelection, selectMatches, panelJobs, scheduleSeries, coverage, jobOfRun, members, linesOf, lineMembers, playerName, selName, choices, opponents, evalValue, evaluated};
+  return {T, R, JOBS, marks, markOf, xOf, jobPoints, cellOf, subjectAt, placed, positioned, posClocks, alignClock, fixedPlayers, usesSelection, selectMatches, panelJobs, scheduleSeries, coverage, jobOfRun, linesOf, lineMembers, playerName, selName, choices, opponents, evalValue, headToHeadValue, evaluated};
 }
 
 // The first curve supplies the index headline, with the page's default score,
