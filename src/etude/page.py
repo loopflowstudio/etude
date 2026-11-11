@@ -1235,6 +1235,8 @@ class _Handler(BaseHTTPRequestHandler):
             served = self.server.page(self.path.split("?", 1)[0], refresh=refresh)
             found, body = served is not None, (served or "Not found.").encode()
             status = 200 if found else 404
+        except ValueError as error:  # no runs of the experiment yet
+            found, body, status = False, explain(error).encode(), 404
         except Exception as error:
             found, body, status = False, explain(error).encode(), 500
         self.send_response(status)
