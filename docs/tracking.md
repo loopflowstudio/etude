@@ -259,7 +259,10 @@ with a sparkline of its report's first curve, evaluation progress with
 failed matches, time trained and latest activity. Experiments with failures
 come first, then those with work running. A file that fails to run, or an
 experiment with no runs yet, says so on its row. The served index also
-refreshes on demand unless `--watch` is supplied.
+refreshes on demand unless `--watch` is supplied. Once discovered, an experiment
+keeps its row through syntax errors: the row shows the error and its link still
+opens the last successful page, if one was built. Repair the file and refresh
+to replace that page. Removing the file removes its row.
 
 **Charts** are uPlot, inlined into the page. Drag across a chart to zoom in
 and double-click to zoom out. The cursor is shared by every chart in a
@@ -332,8 +335,9 @@ reference lines.
 **Compare jobs across selections.**
 
 ```python
-# capacity.py: jobs "small" and "large" evaluated in benchmark "paired".
-from etude.report import Curve, Matches, Report, Score
+# capacity.py: jobs "small" and "large" evaluated in benchmark "paired",
+# checkpoints every 200 updates.
+from etude.report import Curve, Earlier, Fraction, Matches, Report, Score
 
 
 def report() -> Report:
@@ -344,6 +348,7 @@ def report() -> Report:
         evals=(
             Curve(
                 title="Against half-training checkpoints",
+                opponent=Fraction(clock="updates", value=0.5),
                 matches=(
                     Matches(tournament="paired", tag="half-training-small"),
                     Matches(tournament="paired", tag="half-training-large"),
@@ -351,6 +356,7 @@ def report() -> Report:
             ),
             Curve(
                 title="Against the previous checkpoint",
+                opponent=Earlier(clock="updates", by=200),
                 matches=(
                     Matches(tournament="paired", tag="previous-small"),
                     Matches(tournament="paired", tag="previous-large"),
@@ -371,6 +377,9 @@ def report() -> Report:
 ```
 
 The first two charts each draw a line per job from its own tagged matches.
+Both players of such a matchup are checkpoints, so `opponent` keeps each
+point the newer checkpoint's score; without it, the older checkpoint's
+complementary score is drawn at its own position on the same line.
 The last two draw only the large model's score against the small model;
 the small model's complementary score is omitted. The tags must be present
 on the benchmark's matchups, and the matching results must have been
@@ -463,6 +472,7 @@ used those values; log a metric to compare the schedule with observations.
 `Schedule.jobs` uses original job names. Points must have finite values and
 strictly increasing clock coordinates. Values between samples are linearly
 interpolated; no value is extrapolated outside the supplied range. Each seed
-gets a current-position marker when its recorded clock lies inside that range;
-otherwise the chart says that no recorded position is available. The schedule
+gets a filled current-position marker when its recorded clock lies inside that
+range; configured sample points are hollow.
+If no seed of a job has a position in range, the chart says so. The schedule
 uses its own named clock, independently of the section's X axis control.

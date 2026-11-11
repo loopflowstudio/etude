@@ -64,7 +64,7 @@ import threading
 import time
 from bisect import bisect_left
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
 from html import escape
@@ -224,18 +224,19 @@ class Index(Record):
     entries: tuple[Entry, ...]
 
 
-def experiment_files(directory: Path) -> list[Path]:
+def experiment_files(directory: Path, *, known: Collection[Path] = ()) -> list[Path]:
     """The experiment files at any depth below `directory`, outside hidden folders.
 
     A file is recognised by its text, without running it (`experiment_named`);
-    raises `EtudeError("experiment_named_twice")` for two files with one stem.
+    Previously recognised files stay experiments until removed, even while being edited.
+    Raises `EtudeError("experiment_named_twice")` for two files with one stem.
     """
     found: dict[str, Path] = {}
     for path in sorted(directory.rglob("*.py")):
         parts = path.relative_to(directory).parts
         if any(part.startswith(".") or part == "__pycache__" for part in parts):
             continue
-        if experiment_named(path) is None:
+        if path not in known and experiment_named(path) is None:
             continue
         if path.stem in found:
             raise EtudeError("experiment_named_twice", 409) from ValueError(
@@ -263,6 +264,7 @@ class Pages:
         here = DirectoryStorage(default_root())
         self._places = list({each.name: each for each in (self.storage, here)}.values())
         self._built: dict[Path, tuple[_Inputs, Page]] = {}
+        self._known: set[Path] = set()
         # Each run's experiment by place and run, with the version of the declaration read.
         self._declared: dict[tuple[str, str], tuple[str, str | None]] = {}
 
@@ -270,11 +272,17 @@ class Pages:
         """`build`'s page, kept from the last call while its inputs are the same."""
         return self._build(file, self._listings())
 
+    def find_files(self, directory: Path) -> list[Path]:
+        """Discover experiments, retaining known files through incomplete edits."""
+        found = experiment_files(directory, known=self._known)
+        self._known.update(found)
+        return found
+
     def build_each(self, directory: Path) -> dict[Path, Page | str]:
         """Each experiment file's page, or why it could not be built, so one never hides the rest."""
         listings = self._listings()
         built: dict[Path, Page | str] = {}
-        for file in experiment_files(directory):
+        for file in self.find_files(directory):
             try:
                 built[file] = self._build(file, listings)
             except Exception as error:
@@ -927,17 +935,19 @@ def _cells(
             continue
         named = [c for c in report.columns() if c in held]
         absent += [f"{score.table}.{c}" for c in report.columns() if c not in held]
+        present: dict[str | None, set[int]] = {}
         views = itertools.product((None, *(each.commit for each in commits)), enumerate(selections))
         splits = [
             by for size in range(len(named) + 1) for by in itertools.combinations(named, size)
         ]
         for commit, (chosen, selection) in views:
+            # Components precede unions; remember which produced cells in this view.
+            recorded = present.setdefault(commit, set())
             if isinstance(selection, tuple):
-                present = {c.selection for c in cells if c.score == number and c.commit == commit}
                 selection = tuple(
                     resolved
                     for wanted in selection
-                    if (resolved := _resolve_matches(wanted, selections, present)) is not None
+                    if (resolved := _resolve_matches(wanted, selections, recorded)) is not None
                 )
             where = _where(selection, view=commit or "")
             # An anchor's strength needs two anchors to have met.
@@ -960,6 +970,7 @@ def _cells(
                         continue  # a team
                     if fixed and found.opponent is not None:
                         continue  # pairs of anchors are in the unrestricted cells
+                    recorded.add(chosen)
                     cells.append(
                         Cell(
                             selection=chosen,
@@ -1204,7 +1215,7 @@ class Server(ThreadingHTTPServer):
                         )
             found = index(self.pages.storage, built, href=lambda stem: f"/{stem}")
             return render_index(found, refresh=self.refresh, served=True)
-        for file in experiment_files(self.path):
+        for file in self.pages.find_files(self.path):
             if route == f"/{file.stem}":
                 return render(self.pages.build(file), refresh=self.refresh, served=True)
         return None

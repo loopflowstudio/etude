@@ -13,6 +13,8 @@ const fmt = v => v == null ? "—" : v !== 0 && Math.abs(v) < 1e-3 ? v.toExponen
 const scoreFormat = v => v == null ? "—" : Math.abs(v) >= 0.01 && Math.abs(v) < 100 ? v.toFixed(2) : fmt(v);
 const scoreCount = (c, score) => `${c.rows} ${score?.unit || "rows"} · ${c.matches} matches`;
 const ownOpponent = panel => panel.opponent == null ? null : typeof panel.opponent === "string" ? {kind: "name", name: panel.opponent} : panel.opponent;
+// Keep partial-seed notices; format full seed means with the chart's precision.
+const pointMeta = (p, format = fmt) => p.meta ?? (p.seeds ? `mean of ${p.seeds.length} seeds: ${p.seeds.map(format).join(", ")}` : "");
 const pointText = (p, format = fmt) => format(p.y) + (p.lo != null ? ` · ${p.intervalLabel || (p.seeds ? "seed range" : "95% interval")} ${format(p.lo)}–${format(p.hi)}` : "");
 const dur = s => s >= 3600 ? (s / 3600).toFixed(2) + " h" : s >= 60 ? (s / 60).toFixed(1) + " min" : s.toFixed(s < 1 ? 2 : 1) + " s";
 const when = ms => new Date(ms).toLocaleString([], {month: "short", day: "numeric", hour: "numeric", minute: "2-digit"});
@@ -53,7 +55,7 @@ function isolated(ys) {
   return found;
 }
 
-// series: [{label, color, dotted, opacity, width, faint, points: [{x, y, lo, hi, missing, skip, gap, meta}]}]
+// series: [{label, color, dotted, opacity, width, faint, pointFill, points: [{x, y, lo, hi, missing, skip, gap, meta}]}]
 // A missing point is null to uPlot, so its line breaks: an evaluation that did not happen is
 // never bridged. A skipped point is no point of the line (undefined, which uPlot joins over).
 // A point with a `gap` is marked along the bottom: ○ not yet played, × failed or some seeds
@@ -78,7 +80,7 @@ function line(host, series, o = {}) {
     data.push(column(maps[i], p => p.y));
     spec.push({label: s.label, stroke: color, width: s.width ?? (o.spark ? 1.5 : 2), dash: s.dotted ? [1, 4] : undefined, cap: s.dotted ? "round" : "butt",
       // A dense line marks only its isolated points, which have no segment to show them.
-      points: {show: true, size: sparse ? 7 : 5, fill: color, stroke: color, filter: sparse || o.dots ? null : (u, k) => isolated(u.data[k])}});
+      points: {show: true, size: sparse ? 7 : 5, fill: s.pointFill ?? color, stroke: color, filter: sparse || o.dots ? null : (u, k) => isolated(u.data[k])}});
     const banded = o.band !== false && pts.some(p => p.lo != null);
     if (banded && !sparse) {
       data.push(column(maps[i], p => p.hi ?? p.y), column(maps[i], p => p.lo ?? p.y));
@@ -140,8 +142,12 @@ function line(host, series, o = {}) {
         const i = u.cursor.idx;
         if (i == null || u.cursor.left < 0 || !u.over.matches(":hover")) { hideTip(); return; }
         const xv = xs[i], box = u.over.getBoundingClientRect();
-        const rows = series.filter(s => !s.faint).map((s, k) => ({s, p: maps[series.indexOf(s)].get(xv)})).filter(({p}) => p)
-          .map(({s, p}) => ({color: s.color, dotted: s.dotted, label: s.label + (p.meta ? " · " + p.meta : ""), value: !drawn(p) ? "—" : pointText(p, yf), y: drawn(p) ? p.y : -Infinity}))
+        const rows = series.flatMap((s, k) => {
+          const p = maps[k].get(xv);
+          if (s.faint || !p) return [];
+          const meta = pointMeta(p, yf);
+          return [{color: s.color, dotted: s.dotted, label: s.label + (meta ? " · " + meta : ""), value: !drawn(p) ? "—" : pointText(p, yf), y: drawn(p) ? p.y : -Infinity}];
+        })
           .concat((o.refs || []).map(r => ({value: yf(r.y), label: r.label + " (anchor)", y: r.y})))
           .sort((a, b) => b.y - a.y);
         showTip({clientX: box.left + u.cursor.left, clientY: box.top + u.cursor.top}, rows.length ? rows : [{value: "no point here", label: ""}], (o.xLabel || "x") + " " + xf(xv));
@@ -225,7 +231,7 @@ function model(D) {
     if (skipped.length) return {x, key, missing: true, gap: "partial", meta: `${got.length - skipped.length} of ${got.length} seeds evaluated`};
     const ys = got.map(([, v]) => v.y), y = mean(ys);
     return got.length > 1
-      ? {x, key, y, lo: Math.min(...ys), hi: Math.max(...ys), seeds: ys, meta: `mean of ${ys.length} seeds: ${ys.map(fmt).join(", ")}`}
+      ? {x, key, y, lo: Math.min(...ys), hi: Math.max(...ys), seeds: ys}
       : {x, key, y, lo: got[0][1].lo, hi: got[0][1].hi, meta: got[0][1].meta};
   }
 
@@ -242,8 +248,9 @@ function model(D) {
   }
   const fixedPlayers = indices.filter(i => !placed(i));
   const configs = [...new Set(indices.filter(placed).map(i => D.players[i].config))].sort();
-  const chooseConfig = selected => configs.includes(selected) ? selected :
-    configs.find(cfg => D.cells.some(c => placed(c.subject) && D.players[c.subject].config === cfg)) ?? configs[0] ?? "";
+  const recordedConfigs = new Set(D.cells.filter(c => placed(c.subject)).map(c => D.players[c.subject].config));
+  const defaultConfig = configs.find(cfg => recordedConfigs.has(cfg)) ?? configs[0] ?? "";
+  const chooseConfig = selected => configs.includes(selected) ? selected : defaultConfig;
   const coverage = new Map(D.coverage.map(c => [`${c.run}|${c.ordinal}|${c.tournament}`, c]));
   const jobOfRun = run => JOBS.find(j => j.runs.includes(run));
   // The players a curve draws: its runs' checkpoints, or its line's.
@@ -260,22 +267,30 @@ function model(D) {
     positions.get(key).push(i);
   });
   const playerName = i => { const a = D.players[i]; return a.run != null ? `${a.run} ${a.name}` : a.line != null ? `${a.line} ${a.name}` : a.name; };
-  const selName = s => Array.isArray(s) ? s.map(selName).join(" + ") : s.tournament == null ? "matches outside a tournament" : s.matchup != null ? `${s.tournament} · ${s.matchup}` : s.tag != null ? `${s.tournament} · tagged ${s.tag}` : s.tournament;
+  function selName(s) {
+    if (Array.isArray(s)) return s.map(selName).join(" + ");
+    const detail = s.matchup ?? (s.tag != null ? `tagged ${s.tag}` : null);
+    return s.tournament == null ? detail ?? "matches outside a tournament" : detail == null ? s.tournament : `${s.tournament} · ${detail}`;
+  }
   // A page offers each tournament and each tag within one; a matchup only where a panel names it.
   const choices = D.selections.flatMap((s, i) => !Array.isArray(s) && s.matchup == null ? [[String(i), selName(s)]] : []);
   const usesSelection = (R.evals || []).some(p => p.matches == null);
   const sameMatches = (a, b) => (a.tournament ?? null) === (b.tournament ?? null) && (a.tag ?? null) === (b.tag ?? null) && (a.matchup ?? null) === (b.matchup ?? null);
-  function panelSelection(panel, selected, score = 0) {
-    const m = panel.matches;
-    if (m == null) return selected;
-    if (Array.isArray(m)) {
-      const i = D.selections.findIndex(s => Array.isArray(s) && s.length === m.length && s.every((v, k) => sameMatches(v, m[k])));
+  const recordedSelections = new Set(D.cells.map(c => `${c.score}|${c.selection}`));
+  function selectMatches(wanted, selected, score = 0) {
+    if (wanted == null) return selected;
+    if (Array.isArray(wanted)) {
+      const i = D.selections.findIndex(s => Array.isArray(s)
+        && s.length === wanted.length && s.every((v, k) => sameMatches(v, wanted[k])));
       return i < 0 ? null : i;
     }
-    const fits = D.selections.map((s, i) => [s, i]).filter(([s]) => !Array.isArray(s) && (m.tournament == null || m.tournament === s.tournament) && (s.tag ?? null) === (m.tag ?? null) && (s.matchup ?? null) === (m.matchup ?? null));
-    const present = fits.filter(([, i]) => D.cells.some(c => c.selection === i && c.score === score));
+    const fits = D.selections.flatMap((s, i) => !Array.isArray(s)
+      && (wanted.tournament == null || wanted.tournament === s.tournament)
+      && (s.tag ?? null) === (wanted.tag ?? null)
+      && (s.matchup ?? null) === (wanted.matchup ?? null) ? [i] : []);
+    const present = fits.filter(i => recordedSelections.has(`${score}|${i}`));
     const candidates = present.length ? present : fits;
-    return (candidates.find(([s]) => s.tournament === D.selections[selected]?.tournament) || candidates[0] || [null, null])[1];
+    return candidates.find(i => D.selections[i].tournament === D.selections[selected]?.tournament) ?? candidates[0] ?? null;
   }
   const panelJobs = (panel, jobs = JOBS) => panel.subject == null ? jobs : jobs.filter(j => j.name === panel.subject);
   function scheduleSeries(panel, jobs = JOBS) {
@@ -303,7 +318,7 @@ function model(D) {
   // nothing played, or played only outside this selection, is no point of it and is marked.
   function gapOf(sel, run, m, score) {
     const selection = D.selections[sel];
-    const tournaments = Array.isArray(selection) ? [...new Set(selection.map(s => D.selections[panelSelection({matches: s}, null, score)]?.tournament))] : [selection?.tournament];
+    const tournaments = Array.isArray(selection) ? [...new Set(selection.map(s => D.selections[selectMatches(s, null, score)]?.tournament))] : [selection?.tournament];
     const held = tournaments.map(t => coverage.get(`${run}|${m.ordinal}|${t}`)).filter(Boolean);
     const c = held.reduce((a, b) => ({played: a.played + b.played, failed: a.failed + b.failed, unplayed: a.unplayed + b.unplayed}), {played: 0, failed: 0, unplayed: 0});
     const s = n => n > 1 ? "es" : "", played = c.played ? `, ${c.played} played` : "";
@@ -350,14 +365,14 @@ function model(D) {
     return {y: c.value, lo: c.interval?.[0], hi: c.interval?.[1], at: a.at, meta: scoreCount(c, D.scores?.[score]) + (own ? " · vs " + playerName(o) : "")};
   };
   const evaluated = pts => pts.filter(p => !p.missing && !p.skip);
-  return {T, R, JOBS, marks, markOf, xOf, jobPoints, cellOf, bound, placed, positioned, posClocks, alignClock, fixedPlayers, configs, chooseConfig, usesSelection, panelSelection, panelJobs, scheduleSeries, coverage, jobOfRun, members, linesOf, lineMembers, playerName, selName, choices, opponents, evalValue, evaluated};
+  return {T, R, JOBS, marks, markOf, xOf, jobPoints, cellOf, bound, placed, positioned, posClocks, alignClock, fixedPlayers, configs, chooseConfig, usesSelection, selectMatches, panelJobs, scheduleSeries, coverage, jobOfRun, members, linesOf, lineMembers, playerName, selName, choices, opponents, evalValue, evaluated};
 }
 
 // The first curve supplies the index headline, with the page's default score,
 // result-aware config and selection, on its first clock.
 function headline(D, M) {
   const panel = D.report.evals?.find(p => p.kind === "curve") || {};
-  const sel = M.panelSelection(panel, M.choices.length ? +M.choices[0][0] : null);
+  const sel = M.selectMatches(panel.matches, M.choices.length ? +M.choices[0][0] : null);
   const opp = ownOpponent(panel) ?? (sel == null ? "" : (M.opponents(0, sel)[0] || [""])[0]);
   const clock = M.alignClock || WALL;
   return M.panelJobs(panel).map(j => {

@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from etude.cli import main
-from etude.page import Page, Pages, Server, build, experiment_files, index, render, target
+from etude.page import Index, Page, Pages, Server, build, experiment_files, index, render, target
 from etude.report import (
     Anchors,
     Curve,
@@ -340,6 +340,64 @@ def test_configured_schedule_round_trips_and_rejects_ambiguous_coordinates() -> 
             Schedule(title="Bad schedule", clock="updates", jobs={"large": points})
     with pytest.raises(ValueError):
         SchedulePoint(at=float("nan"), value=1)
+
+
+def test_http_folder_refresh_keeps_syntax_failures_and_recovers(tmp_path: Path) -> None:
+    runs, folder = tmp_path / "runs", tmp_path / "experiments"
+    trained(runs, "lab", "a")
+    file = experiment_file(folder, "lab", REPORTED)
+    # Remember recognised files even if their first build had no page to retain.
+    empty = experiment_file(folder, "empty", REPORTED)
+    experiment_file(folder, "helper", "def utility(): ...\n")
+    with Server(runs, folder, ("127.0.0.1", 0)) as server:
+        worker = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01})
+        worker.start()
+        client = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+
+        def request(method: str, route: str) -> tuple[int, str]:
+            client.request(method, route)
+            reply = client.getresponse()
+            return reply.status, reply.read().decode()
+
+        def entries(html: str) -> Index:
+            payload = html.split('<script type="application/json" id="data">', 1)[1]
+            return Index.model_validate_json(payload.split("</script>", 1)[0], extra="ignore")
+
+        try:
+            status, html = request("GET", "/")
+            assert status == 200
+            assert {e.experiment for e in entries(html).entries} == {"lab", "empty"}
+            status, original = request("GET", "/lab")
+            assert status == 200
+            file.write_text(REPORTED + "\ndef token=fixture-credential\n")
+            empty.write_text("def report(\n")
+            for _ in range(2):
+                status, html = request("POST", "/")
+                rows = {e.experiment: e for e in entries(html).entries}
+                assert status == 200 and set(rows) == {"lab", "empty"}
+                assert rows["lab"].href == "/lab"
+                assert all(e.error and "SyntaxError" in e.error for e in rows.values())
+                assert "fixture-credential" not in html
+                assert request("GET", rows["lab"].href) == (200, original)
+            status, error = request("POST", "/lab")
+            assert status == 500 and "SyntaxError" in error
+            assert "fixture-credential" not in error
+            assert request("GET", "/lab") == (200, original)
+            file.write_text(REPORTED.replace("Report()", 'Report(labels={"a": "Repaired"})'))
+            empty.unlink()
+            status, html = request("POST", "/")
+            (row,) = entries(html).entries
+            assert status == 200 and row.error is None and row.experiment == "lab"
+            status, repaired = request("GET", row.href)
+            assert status == 200 and '"Repaired"' in repaired and repaired != original
+            file.unlink()
+            status, html = request("POST", "/")
+            assert status == 200 and entries(html).entries == ()
+        finally:
+            client.close()
+            server.shutdown()
+            worker.join(timeout=5)
+            assert not worker.is_alive()
 
 
 def test_http_refresh_reports_failures_without_replacing_the_cached_page(tmp_path: Path) -> None:

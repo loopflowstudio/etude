@@ -140,10 +140,17 @@ test("tag fallback prefers results while an explicit tournament remains exact", 
   const data = page([player("a", "a", 100)], [[0, null, 0.625]]);
   data.selections = [{tournament: "empty", tag: "anchor"}, {tournament: "played", tag: "anchor"}];
   data.cells[0].selection = 1;
+  data.cells.push({...data.cells[0], selection: 0, score: 1});
   const m = context.model(data);
-  assert.equal(m.panelSelection({matches: {tag: "anchor"}}, 0), 1);
-  assert.equal(m.panelSelection({matches: {tournament: "empty", tag: "anchor"}}, 1), 0);
-  assert.equal(m.panelSelection({matches: {tag: "missing"}}, 0), null);
+  assert.equal(m.selectMatches({tag: "anchor"}, 0), 1);
+  assert.equal(m.selectMatches({tag: "anchor"}, 1, 1), 0);
+  assert.equal(m.selectMatches({tag: "anchor"}, 1, 2), 1); // no result for this score
+  assert.equal(m.selectMatches(null, 0), 0);
+  assert.equal(m.selectMatches({tournament: "empty", tag: "anchor"}, 1), 0);
+  assert.equal(m.selectMatches({tag: "missing"}, 0), null);
+  assert.equal(m.selName([{tag: "anchor"}, {matchup: "head-to-head"}]), "tagged anchor + head-to-head");
+  assert.equal(m.selName({tournament: "played", tag: "anchor"}), "played · tagged anchor");
+  assert.equal(m.selName({tournament: null}), "matches outside a tournament");
 });
 
 test("union curves keep jobs separate and subject filtering omits the complementary side", () => {
@@ -153,7 +160,7 @@ test("union curves keep jobs separate and subject filtering omits the complement
   data.cells.forEach(c => { c.selection = 2; });
   data.report.evals = [{kind: "curve", matches: union}];
   data.report.labels = {large: "Large model"};
-  const m = context.model(data), sel = m.panelSelection(data.report.evals[0], 0);
+  const m = context.model(data), sel = m.selectMatches(union, 0);
   assert.equal(sel, 2);
   const ys = m.panelJobs({}).map(j => m.jobPoints(j, "updates", m.evalValue(0, sel, {}, "", "{}"))[0].y);
   assert.deepEqual(Array.from(ys), [0.625, 0.375]); // external learner order is lexical
@@ -181,7 +188,7 @@ test("job labels retain seed counts and baseline identity", () => {
 });
 
 test("score tooltips name the interval and row unit without changing values", () => {
-  vm.runInContext("this.pointText = pointText; this.scoreFormat = scoreFormat;", context);
+  vm.runInContext("this.pointText = pointText; this.pointMeta = pointMeta; this.scoreFormat = scoreFormat;", context);
   const data = page([player("a", "a", 100)], [[0, null, 0.625]]);
   data.cells[0].interval = [0.5313, 0.7191];
   data.cells[0].rows = 64; data.cells[0].matches = 16;
@@ -193,6 +200,13 @@ test("score tooltips name the interval and row unit without changing values", ()
   const m2 = context.model(data), [single] = points(m2, m2.JOBS[0], "");
   assert.equal(context.pointText(single, context.scoreFormat), "0.63");
   assert.equal(context.pointText({y: 0.625, lo: 0.5, hi: 0.75, seeds: [0.5, 0.75]}, context.scoreFormat), "0.63 · seed range 0.50–0.75");
+  assert.equal(context.pointMeta({y: 0.5625, seeds: [0.4375, 0.6875]}, context.scoreFormat), "mean of 2 seeds: 0.44, 0.69");
+  const training = {jobs: [], clocks: [{name: "updates"}], runs: [], checkpoints:
+    ["a", "b"].map(run => ({run, ordinal: 1, align: 100, at: {updates: 100}}))};
+  const partial = context.model(page([], [], training)).jobPoints(
+    {runs: ["a", "b", "c"]}, "updates", () => ({y: 0.625}), true,
+  )[0];
+  assert.equal(context.pointMeta(partial, context.scoreFormat), "2 of 3 seeds evaluated");
 });
 
 test("configured curves interpolate at recorded absolute clocks without extrapolation", () => {
