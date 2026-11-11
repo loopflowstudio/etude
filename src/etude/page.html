@@ -386,7 +386,7 @@ function render() {
           ...markers.map(p => ({label: job.label + " · current", color: color(job), points: [p]})),
         ]);
         for (const {job, markers} of schedules) if (!markers.length) c.appendChild(node("div", "na", `${job.label}: no recorded ${panel.clock} within the schedule`));
-        later(() => line(h, lines, {xLabel: panel.clock, height: 220, empty: "No configured schedule for these jobs"}));
+        later(() => line(h, lines, {xLabel: panel.clock, height: 220, dots: true, empty: "No configured schedule for these jobs"}));
       } else if (panel.kind === "series") {
         const present = panel.keys.filter(k => T.metrics.includes(k));
         missing.push(...panel.keys.filter(k => !present.includes(k)));
