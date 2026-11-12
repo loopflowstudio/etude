@@ -88,6 +88,20 @@ test("HeadToHead carries opposing scientific identity across subject seeds", () 
   assert.match(rendered.text, /A vs B.*different inference variants/);
 });
 
+test("a curve against a named opponent preserves its scientific identity across seeds", () => {
+  const data = pairedSeeds();
+  data.report.evals = [{kind: "curve", title: "Score", subject: "a", opponent: "u100"}];
+  data.players[2].config = '{"search":0}'; data.players[3].config = '{"search":9}';
+  const ambiguous = renderPage(data);
+  assert.equal(ambiguous.plots.length, 0);
+  assert.match(ambiguous.text, /different inference variants/);
+
+  data.players[3].config = data.players[2].config;
+  const consistent = renderPage(data);
+  assert.equal(consistent.plots.length, 1);
+  assert.equal(consistent.plots[0].values[1][0], 0.5);
+});
+
 test("HeadToHead names opposing variants instead of pooling them as checkpoints", () => {
   for (const position of [100, 200]) {
     const data = page([player("a", "a", 100), player("b", "b", 100), player("b", "b", position)], [[0, 1, 0.25], [0, 2, 0.75]]);

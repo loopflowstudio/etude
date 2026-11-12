@@ -292,6 +292,8 @@ distinct players. A curve uses the variant played in its selected matches;
 when several remain, it names the ambiguity. Select the intended matchup or
 set `Curve(inference={"search": 64})` to choose that exact scientific config.
 It selects no execution setup.
+When a curve names an opponent, that opponent's scientific config must also
+agree across seeds; a shared player name alone does not make variants comparable.
 
 `HeadToHead(matches=Matches(matchup="search vs direct"))` uses the scientific
 variants in that matchup on both sides. It averages scores against the other

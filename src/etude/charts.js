@@ -403,7 +403,7 @@ function model(D) {
     const o = found.index;
     const c = cellOf(sel, score, i, o, false, split);
     if (!c) return own ? missing(`not played against ${playerName(o)}`) : gapOf(sel, run, m, score);
-    return {y: c.value, lo: c.interval?.[0], hi: c.interval?.[1], at: a.at, inference: a.config, meta: scoreCount(c, D.scores?.[score]) + (own ? " · vs " + playerName(o) : "")};
+    return {y: c.value, lo: c.interval?.[0], hi: c.interval?.[1], at: a.at, inference: JSON.stringify([a.config, o == null ? null : D.players[o].config]), meta: scoreCount(c, D.scores?.[score]) + (own ? " · vs " + playerName(o) : "")};
   };
   function headToHeadValue(score, sel, split, opponent) {
     const theirs = members(opponent);
