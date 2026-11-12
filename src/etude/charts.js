@@ -191,7 +191,7 @@ function model(D) {
   })];
   const JOBS = curves.map((j, i) => ({...j,
     label: R.labels?.[j.name] == null ? j.label : R.labels[j.name] + (j.line == null ? ` · ${j.runs.length} seed${j.runs.length === 1 ? "" : "s"}` : ""),
-    index: i, color: `--j${i % 8 + 1}`, baseline: R.baseline != null && (R.baseline === j.name || R.baseline === j.key)}));
+    index: i, color: `--j${i % 8 + 1}`, baseline: R.baseline != null && R.baseline === j.name}));
   const marks = new Map(); for (const m of T.checkpoints) { if (!marks.has(m.run)) marks.set(m.run, []); marks.get(m.run).push(m); }
   // A line curve has a mark per position, as a run has one per checkpoint.
   const lineMarks = new Map();

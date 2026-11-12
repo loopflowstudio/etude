@@ -29,7 +29,7 @@ WALL_MEANING = "wall time since the run first started"
 
 
 class Job(Record):
-    """Runs that differ only by seed. `name` is what its author called it, else its key."""
+    """Runs that differ only by provenance: seed, device and commit. Its key is its name."""
 
     key: str
     name: str
@@ -182,25 +182,22 @@ def _band(job: str, members: Sequence[RunData], metric: str, clock: str) -> Line
 
 
 def _jobs(data: Sequence[RunData]) -> tuple[Job, ...]:
-    """Each run's job: its declared one, or the run alone. Named as its author named it."""
+    """Each run's job, by the name its author launched it under, else its key, else the run.
+
+    The launcher's job key includes the commit, so grouping by name pools a
+    job's runs across commits and devices with its seeds: these are provenance,
+    and a report addresses jobs by name.
+    """
     members: dict[str, list[RunData]] = {}
     # In launch order: a job's colour follows when it started, never its rank.
     for run in sorted(data, key=_started):
-        members.setdefault(run.job or run.name, []).append(run)
-    named = {
-        key: next(
-            (r.file.declaration.job_name for r in runs if r.file and r.file.declaration.job_name),
-            key,
-        )
-        for key, runs in members.items()
-    }
-    names = list(named.values())
+        named = run.file.declaration.job_name if run.file else None
+        members.setdefault(named or run.job or run.name, []).append(run)
     jobs = []
-    for key, runs in members.items():
-        name = named[key] if names.count(named[key]) == 1 else f"{named[key]} {key[:6]}"
+    for name, runs in members.items():
         seeds = f"{len(runs)} seed{'s' if len(runs) > 1 else ''}"
         jobs.append(
-            Job(key=key, name=name, label=f"{name} · {seeds}", runs=tuple(r.name for r in runs))
+            Job(key=name, name=name, label=f"{name} · {seeds}", runs=tuple(r.name for r in runs))
         )
     return tuple(jobs)
 

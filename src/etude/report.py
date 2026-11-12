@@ -289,7 +289,7 @@ class Report(Record):
 
     `score` None offers every numeric column of every eval table. `clock`
     names the x axis each section starts on (default: the first declared
-    clock). `baseline` names the job drawn dotted, by its name or key.
+    clock). `baseline` names the job drawn dotted.
     `labels` replaces displayed job names, keeping seed counts and identity.
     A build reads and draws only the metrics its panels name.
     `other_metrics=True` also draws every other logged metric, last under ML
