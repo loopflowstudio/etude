@@ -83,13 +83,17 @@ Build a lab outside the repo (e.g. `/tmp/lab`) with its own `ETUDE_HOME`:
    Inspect provenance with `etude.eval.query.statsdb(NAME, RUNS)` (`matches.execution`).
    A page's own numbers are in `JSON.parse(document.getElementById("data").textContent)`
    (`cells` with `selection`, `subject`, `matches`, `rows`).
-5. Stop the servers before finishing. In zsh, `$args` does not word-split: call
+5. Export `ETUDE_HOME` for `python -c` statsdb reads too: otherwise `statsdb` keeps its
+   database under `~/.etude/statsdb/`. To see what `etude status` would say of a launched
+   eval pass without renting, run `etude eval` with `ETUDE_OUTPUT_DIR=DIR` and render
+   `DIR/etude-result.json`'s `tally` with `etude.launch.records.Tally`.
+6. Stop the servers before finishing. In zsh, `$args` does not word-split: call
    commands explicitly rather than looping over argument strings.
-6. `run.checkpoint` needs a value for every declared clock (otherwise
+7. `run.checkpoint` needs a value for every declared clock (otherwise
    `checkpoint_clock_mismatch`, and nothing is recorded). `play` must live in its own module beside
    the experiment file, not in the file itself. The experiment is named for its file, so
    a second report variant goes in another git-tracked folder as `NAME.py`.
-7. Bucket path: `etude sync --directory RUNS --to r2://manabot/etude-r2-test/NAME`
+8. Bucket path: `etude sync --directory RUNS --to r2://manabot/etude-r2-test/NAME`
    under `doppler run -p manabot -c prd --only-secrets R2_ACCOUNT_ID,R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY`,
    then `etude report ... --source r2://manabot/etude-r2-test/NAME` with a fresh
    `ETUDE_HOME`. `du` of that home after each build shows the bytes the build read.
@@ -97,7 +101,7 @@ Build a lab outside the repo (e.g. `/tmp/lab`) with its own `ETUDE_HOME`:
    The aws CLI also works under the same `doppler run`: `sh -c 'AWS_ACCESS_KEY_ID=$R2_ACCESS_KEY_ID
    AWS_SECRET_ACCESS_KEY=$R2_SECRET_ACCESS_KEY aws s3 rm --recursive --region auto --endpoint-url
    https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com s3://manabot/etude-r2-test/NAME/'`.
-8. To tell a regression from an old bug, run the same script on main: `git worktree add
+9. To tell a regression from an old bug, run the same script on main: `git worktree add
    --detach /tmp/NAME-main main`, `uv run` from there, then `git worktree remove`.
    Compare `etude.page.build(RUNS, FILE)` by hashing `page.training.model_dump_json()`
    and `repr(page.cells)`; rendered HTML carries timestamps.
@@ -159,3 +163,16 @@ repo, with an isolated `ETUDE_HOME`:
 - A `--keep` smoke folder's `track/` holds a tiny tournament (games=1): as an
   `etude eval --source` it gives `matchup_conflict`. Copy only the training run's
   folder out for a clean source.
+
+## Etude: tracking and reading a run against a bucket
+
+Write a real run with `track(..., directory=D, segment_rows=500)` and `run.finish()`;
+`queue_size=50_000` stops a tight logging loop dropping rows. Two `track` calls with the
+same run name, the first with `run.checkpoint(path, updates=N)`, give a resumed attempt.
+Deliver with `uv run etude sync --directory D --to r2://manabot/etude-r2-test/NAME`, with
+secrets injected by `doppler run -p manabot -c prd --only-secrets
+R2_ACCOUNT_ID,R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY -- ...`. Set `ETUDE_HOME` to an empty
+directory: `~/.etude/cache` holds ~200k files and each cached range read scans them all,
+so bucket reads take minutes there. `tests.run.storage.MeasuredStorage` counts requests
+(needs `PYTHONPATH=.`). Delete the prefix afterwards with `storage.delete` over
+`storage.keys("")`.

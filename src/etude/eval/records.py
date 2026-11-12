@@ -399,10 +399,17 @@ class Match(Record):
         return int(self.key[:15], 16)
 
 
+# The error of a match that returned no rows: refused when played (`etude.eval.match`).
+NO_ROWS = "match_has_no_rows"
+
+
 class MatchRecord(Record):
     """How one match went, kept in its block's index after its tables and blobs.
 
     A failed match's record is replaced by a later done one, wherever it is kept.
+    A match is done only with rows: Etude refuses one that returns none, and
+    reads an older run's done record without columns as failed, so its games
+    are asked for again rather than counted as played.
     """
 
     match: Match
@@ -416,6 +423,13 @@ class MatchRecord(Record):
     blobs: tuple[Digest, ...] = ()
     # Actual execution setup, supplied with the result; never part of a match's identity.
     execution: Config = {}
+
+    @model_validator(mode="before")
+    @classmethod
+    def _failed_without_rows(cls, data: Any) -> Any:  # noqa: ANN401 - pydantic's raw input
+        if isinstance(data, dict) and data.get("state") == "done" and not data.get("columns"):
+            return {**data, "state": "failed", "error": f"EtudeError: {NO_ROWS}"}
+        return data
 
 
 class Rollup(Record):

@@ -233,10 +233,13 @@ evaluate(
   store, and keeps adding new blocks' on every later open. A rollup is its
   name and its definition: another definition under a held name raises
   `rollup_conflict`, so a changed rollup takes a new name.
-- **Strict.** A row with neither or both of `seat` and `group`, a seat or
-  group the match lacks, a column named `player`, or a column whose type
-  changes during a run is refused. A refused or raising match is recorded as failed with its error,
-  nothing else of it is stored, and the run stops.
+- **Strict.** A match that returns no rows, a row with neither or both of
+  `seat` and `group`, a seat or group the match lacks, a column named
+  `player`, or a column whose type changes during a run is refused. A refused
+  or raising match is recorded as failed with its error, nothing else of it
+  is stored, and the run stops and ends failed. When a match cannot be
+  played, let `play` raise: an error caught and returned as empty tables is
+  still refused (`match_has_no_rows`), never stored as a result.
 - **Environments are never pooled.** An eval run has one environment;
   resuming with another is refused, and comparisons keep environments apart.
 - **Resume.** Calling `evaluate` again with the same `run` skips every match
@@ -466,12 +469,17 @@ before they spend ([Smoke before you spend](launcher.md#smoke-before-you-spend))
   `statsdb` read what a running pass has played and mark it partial (the
   report says so; `statsdb`'s `runs.state` is null until the run ends). A
   killed pass keeps every block it delivered and stays partial.
-- **Failures.** A match that failed is counted on every pass (`ladder: 0 new,
-  1 failed`) and not played again, so a result is never quietly replaced.
-  `--retry-failed` plays the failed matches again.
+- **Failures.** A match that raised, was refused or stored no rows is
+  failed, never played: `etude status RUN` counts it (`12/80 matches (1
+  failed)`), its run ends failed, and every later pass counts it (`ladder: 0
+  new, 1 failed`) and does not play it again, so a result is never quietly
+  replaced. `--retry-failed` plays the failed matches again. A match an
+  older run stored as done with no rows counts as failed too, so its games
+  are asked for again rather than silently missing.
 - **Without playing.** `etude.eval.tournament.played` answers what a pass
   would find: each match the definition calls for, as delivered (with the eval
-  run that delivered it last, whose rows count), failed or new. `etude report`
+  run that delivered it last, whose rows count), failed (with nothing
+  delivered since) or new. `etude report`
   reads it.
 - **Changing the design.** A new matchup or benchmark is played for every
   checkpoint chosen, including those of finished runs, and a match another of

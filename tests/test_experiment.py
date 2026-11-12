@@ -31,7 +31,7 @@ from etude.run.storage import DirectoryStorage
 from etude.train.read import read
 from etude.train.run import Run as Run_
 from etude.train.run import track
-from tests.eval.games import play, play_failing_deal_one
+from tests.eval.games import play, play_catching_errors, play_failing_deal_one
 
 WORLD = environment("duel", config={"world": "w6"})
 DEALS = tuple({"deal": deal} for deal in range(2))
@@ -208,6 +208,48 @@ def test_a_failed_match_is_counted_and_not_replayed_unless_asked(tmp_path: Path)
     assert (settled.new, settled.failed, settled.played) == (0, 1, 0)
     with pytest.raises(EtudeError, match="match_failed"):
         advance(ppo, source=bucket, directory=local, retry_failed=True)
+
+
+def test_a_pass_whose_matches_all_return_no_rows_fails_and_a_retry_replays_them(
+    tmp_path: Path,
+) -> None:
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    training = trainer(bucket, tmp_path)
+    save(training, bucket, tmp_path, range(1, 2))
+    anchor = heuristic(tmp_path)
+    games = {"play": play_catching_errors}
+
+    def eval_(state: ExperimentState) -> Job:
+        vs = Matchup(name="vs heuristic", players=(DIRECT, anchor), conditions=DEALS, games=2)
+        ladder = Benchmark(name="ladder", environment=WORLD, matchups=(vs,))
+        return evaluation(ladder, play=games["play"], checkpoints=state.run("ppo-1").checkpoints,
+                          max_hours=0.1)  # fmt: skip
+
+    ppo, local = Experiment(name="ppo", eval=eval_), tmp_path / "evaluator"
+    with pytest.raises(EtudeError, match="match_failed") as stopped:
+        advance(ppo, source=bucket, directory=local)
+    cause = stopped.value.__cause__
+    assert isinstance(cause, EtudeError) and cause.code == "match_has_no_rows"
+    with pytest.raises(EtudeError, match="match_failed"):
+        advance(ppo, source=bucket, directory=local)
+    # Every match failed: each counts as failed, none as played, and every run ended failed.
+    (settled,) = advance(ppo, source=bucket, directory=local)
+    assert (settled.new, settled.failed, settled.played) == (0, len(DEALS), 0)
+    db = statsdb("ppo", bucket)
+    assert db.sql("select distinct state from runs").fetchall() == [("failed",)]
+    assert db.sql("select count(*) from matches where state = 'done'").fetchone() == (0,)
+    db.close()
+    # Once the runtime is fixed, a retry plays the failed matches again.
+    games["play"] = play
+    (retried,) = advance(ppo, source=bucket, directory=local, retry_failed=True)
+    assert (retried.new, retried.played) == (len(DEALS), len(DEALS))
+    (done,) = advance(ppo, source=bucket, directory=local)
+    assert (done.new, done.failed, done.played) == (0, 0, 0)
+    # The kept database that read the failed end reads the retried run's new one.
+    db = statsdb("ppo", bucket)
+    assert db.sql("select distinct state from runs").fetchall() == [("finished",)]
+    assert db.sql("select distinct state from matches").fetchall() == [("done",)]
+    db.close()
 
 
 def test_an_eval_job_belongs_to_the_experiment_of_its_file(tmp_path: Path) -> None:

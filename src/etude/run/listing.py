@@ -9,12 +9,12 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from etude.run.records import RunFile
-from etude.run.storage import DirectoryStorage, Storage
+from etude.run.storage import Storage, storage_from_uri
 
 
 def as_storage(source: Storage | Path | str) -> Storage:
-    """A path is a local directory; anything else is already a storage."""
-    return DirectoryStorage(source) if isinstance(source, (Path, str)) else source
+    """A path or `s3://`/`r2://` URI is read as `storage_from_uri` reads it."""
+    return storage_from_uri(source) if isinstance(source, (Path, str)) else source
 
 
 # A folder is a run's when it holds one of these directly: its name is the run's.
