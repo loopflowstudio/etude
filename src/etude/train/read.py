@@ -11,7 +11,8 @@ Superseded rows stay on disk. Buckets keep their extremes.
 
 Rows are read by column (`etude.train.block`), so a chart costs two arrays.
 `read` holds a whole run; `read_batches` streams selected metrics a
-stretch of overlapping blocks at a time, planned from headers (`_stretches`).
+stretch of overlapping blocks at a time, planned from headers (`_stretches`),
+so it holds one stretch's arrays plus a few numbers per block.
 `RunData.points` is the same plan read all at once.
 """
 
@@ -613,11 +614,13 @@ def read_batches(
     clock: str = WALL_CLOCK,
     metrics: Sequence[str],
 ) -> Iterator[Batch]:
-    """A run's history on one clock, one stretch at a time, holding only that stretch.
+    """A run's history on one clock, one stretch at a time.
+
+    Memory is one stretch's selected arrays plus a few numbers per block.
 
     One metric's points concatenated across the batches are exactly
     `read(...).points(metric, clock)`. A first pass reads each header and keeps
-    a few numbers per block; each batch reads its blocks' headers again with
+    those numbers; each batch reads its blocks' headers again with
     their selected arrays. No metric index is loaded. A block a compaction
     replaced is found again from a fresh listing, resuming after the last batch
     yielded; a missing block, a sequence gap or a damaged array raises during

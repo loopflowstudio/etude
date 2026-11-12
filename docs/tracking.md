@@ -234,9 +234,9 @@ for batch in read_batches(
 This prints every retained `rl/loss` value, one optimizer update per line,
 from the first update to the last. The run's history arrives one batch at a
 time, so a run of any length can be read on a small machine. Memory holds
-one batch: the selected metrics' arrays for the blocks in it. That limit
-doesn't depend on how many blocks the run has, or how many other metrics it
-logged.
+one batch, the selected metrics' arrays for the blocks in it, plus a few
+numbers per block. The batch size sets the limit, not the run's length or
+how many other metrics it logged.
 
 `read_batches` follows the same rules as `read(...).points(metric, clock)`.
 Concatenate one metric's `x` and `y` across all batches and you get exactly
