@@ -274,3 +274,34 @@ def test_a_relative_seat_finds_an_exact_position_or_says_whether_one_may_still_c
             conditions=({"deal": 0},),
             games=1,
         )
+
+
+def test_an_at_or_before_seat_takes_the_latest_checkpoint_once_none_nearer_can_come() -> None:
+    direct = Inference(config={"search": 0})
+
+    def seating(seat: Fraction) -> Seating:
+        return Seating(name="s", players=(direct, seat), conditions=({"deal": 0},), games=1)
+
+    half = seating(Fraction(clock="updates", value=0.5, at_or_before=True, inference=direct))
+    exact = seating(Fraction(clock="updates", value=0.5, inference=direct))
+    line = _line("l1", "large", 100, 300, 400, 700)
+    # Half of 700 is 350: none sits there, and the latest at or before it is 300.
+    found = half.resolve(line.checkpoints[3], [line])
+    assert isinstance(found, Seated) and _found(found) == [(line.checkpoints[1], 1)]
+    assert isinstance(gap := exact.resolve(line.checkpoints[3], [line]), Gap)
+    assert gap.missing == "never"
+    # In another job's line that has not saved past 350, a save at 340 could still come.
+    other = seating(
+        Fraction(clock="updates", value=0.5, at_or_before=True, job="small", inference=direct)
+    )
+    small = _line("s1", "small", 100, 300)
+    assert isinstance(gap := other.resolve(line.checkpoints[3], [line, small]), Gap)
+    assert (gap.missing, gap.position, gap.at_or_before) == ("not_yet", 350, True)
+    # Once it saves past the target or ends, nothing nearer can come.
+    for done in (_line("s1", "small", 100, 300, 500), small.model_copy(update={"ended": True})):
+        found = other.resolve(line.checkpoints[3], [line, done])
+        assert isinstance(found, Seated) and _found(found) == [(done.checkpoints[1], 1)]
+    # Nothing at or before the target, once past it: never.
+    late = _line("s1", "small", 400)
+    assert isinstance(gap := other.resolve(line.checkpoints[3], [line, late]), Gap)
+    assert gap.missing == "never"

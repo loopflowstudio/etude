@@ -635,13 +635,17 @@ class _Standing:
 def _standing(
     want: Callable[..., object] | None, state: ExperimentState, storage: Storage, experiment: str
 ) -> tuple[list[_Standing], tuple[str, ...]]:
-    """Each tournament's standing, with a note for each one `etude eval` would refuse.
+    """Each tournament's standing, and a note for each one drawn otherwise than asked.
 
     A tournament `eval(state)` returns is what it wants now; any other the
-    experiment's eval runs hold is everything they were held for.
+    experiment's eval runs hold is everything they were held for. Where
+    `eval(state)` now defines one otherwise than its eval runs were held
+    with, such as a later revision of its file with another environment
+    digest, the page draws what they recorded: reading needs no agreement,
+    only scheduling new games (`etude eval`) does.
     """
     # The optional `eval` extra, imported where it is used (`_read_evals`).
-    from etude.eval.records import assemble  # noqa: PLC0415
+    from etude.eval.records import TournamentRun, assemble  # noqa: PLC0415
     from etude.eval.tournament import played, tournament_runs  # noqa: PLC0415
 
     wanted: dict[str, Tournament] = {}
@@ -650,14 +654,25 @@ def _standing(
             wanted.setdefault(tournament.definition.name, tournament)
     refused: list[str] = []
     for name, held in tournament_runs(experiment, storages=[storage]).items():
-        if name in wanted:
-            continue
         try:
-            wanted[name] = assemble(held)
+            recorded = assemble(held)
         except EtudeError as error:
+            wanted.pop(name, None)
             refused.append(
                 f"Tournament {name} is not shown: its eval runs disagree ({error.code})."
             )
+            continue
+        asked = wanted.get(name)
+        if asked is not None:
+            try:
+                assemble([*held, TournamentRun(tournament=asked.definition)])
+                continue
+            except EtudeError as error:
+                refused.append(
+                    f"Tournament {name} is drawn as its eval runs recorded it:"
+                    f" eval(state) now defines it otherwise ({error.code})."
+                )
+        wanted[name] = recorded
     standing = []
     for name, given in sorted(wanted.items()):
         try:
@@ -839,8 +854,15 @@ def _missing_text(gap: Gap) -> str:
         )
     if gap.position is None:
         return f"the held checkpoint has no {gap.clock} position"
+    where = f"{gap.clock} {gap.position:,.6g}"
+    if gap.at_or_before:
+        return (
+            f"{whose} has not saved past {where} yet"
+            if gap.missing == "not_yet"
+            else f"{whose} has no checkpoint at or before {where}"
+        )
     later = "yet" if gap.missing == "not_yet" else "and never will"
-    return f"{whose} has no checkpoint at {gap.clock} {gap.position:,.6g} {later}"
+    return f"{whose} has no checkpoint at {where} {later}"
 
 
 def _load(

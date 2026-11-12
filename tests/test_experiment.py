@@ -544,4 +544,18 @@ def test_relative_seats_fill_in_as_their_jobs_save_and_the_report_says_what_is_m
     with statsdb("capacity", bucket) as db:
         lines = {(s.seating, s.run): s for s in scores(db, "ladder", table="plays", value="won")}
     assert [p.ordinal for p in lines[("large vs small", "large-1")].points] == [1, 2, 3]
-    assert [p.ordinal for p in lines[("half-training", "large-1")].points] == [2, 4]
+    half_points = lines[("half-training", "large-1")].points
+    assert [p.ordinal for p in half_points] == [2, 4]
+    # 200 also sits in 400's match, as its earlier partner; its point counts only the
+    # match held for it: one condition, its seat's two games.
+    assert [(p.matches, p.rows) for p in half_points] == [(1, 2), (1, 2)]
+    page = build(bucket, file)
+    (at_200,) = [
+        h for h in page.held
+        if h.seating == "half-training" and h.run == "large-1" and h.at["updates"] == 200
+    ]  # fmt: skip
+    ((subject, opponent),) = at_200.pairs
+    assert (page.players[subject].at, page.players[opponent].at) == (
+        {"updates": 200},
+        {"updates": 100},
+    )

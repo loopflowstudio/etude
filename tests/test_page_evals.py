@@ -870,3 +870,63 @@ def _attempt(key: str) -> bool:
     """Whether a key under a run's `metrics/` is an attempt record, not a block or index."""
     name = "metrics/" + key.rsplit("/metrics/", 1)[1]
     return parse(name) is None and not name.endswith((".index.json", ".permanent.json"))
+
+
+REVISED = """
+from etude.eval.match import environment
+from etude.eval.records import Benchmark, Code, Inference, Seating
+from etude.jobs import evaluation
+from etude.report import Curve, Matches, Report, Score
+from tests.eval.games import play
+
+# A later revision of the file: its environment carries another source digest.
+DUEL = environment("duel", config={"source": SOURCE})
+DIRECT = Inference(config={"search": 0})
+WEAK = Code(name="weak", source=[__file__], config={"strength": 0})
+
+
+def eval(state):
+    held = [each for run in state.runs for each in run.checkpoints]
+    ladder = Benchmark(name="ladder", environment=DUEL, seatings=(
+        Seating(name="vs weak", players=(DIRECT, WEAK), conditions=({"deal": 0},), games=2),
+    ))
+    return evaluation(ladder, play=play, checkpoints=held, max_hours=0.1)
+
+
+def report():
+    return Report(
+        score=Score(table="plays", value="won"),
+        evals=(Curve(matches=Matches(seating="vs weak")),),
+    )
+"""
+
+
+def test_a_report_draws_what_eval_runs_recorded_after_the_file_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    runs = tmp_path / "runs"
+    file = experiment_file(tmp_path / "experiments", "lab", REVISED.replace("SOURCE", "'v1'"))
+    trained = track(experiment="lab", run="a", job="a", clocks=CLOCKS, directory=runs)
+    save(trained, tmp_path, range(100, 300, 100))
+    trained.finish(timeout=30)
+    (first,) = advance(read_experiment(file), source=DirectoryStorage(runs), directory=runs)
+    assert first.played == 2
+    drawn = build(runs, file)
+
+    file.write_text(REVISED.replace("SOURCE", "'v2'"))
+    storage = MeasuredStorage(DirectoryStorage(runs))
+    page = build(storage, file)
+    # Exactly what the held runs recorded, with a note rather than a refusal.
+    assert page.cells == drawn.cells and page.held == drawn.held
+    assert [note for note in page.notes if "ladder" in note] == [
+        "Tournament ladder is drawn as its eval runs recorded it:"
+        " eval(state) now defines it otherwise (tournament_conflict)."
+    ]
+    # What the report path lists and reads for one training run and one eval run, pinned;
+    # the eval run's tables come from the cache the first build filled.
+    assert (storage.listings, storage.requests) == (4, 12)
+    # Scheduling new games still needs the definition to agree.
+    with pytest.raises(EtudeError, match="tournament_conflict"):
+        advance(read_experiment(file), source=DirectoryStorage(runs), directory=runs)

@@ -486,7 +486,9 @@ class Earlier(Record):
     """The held checkpoint's line exactly `by` before it on `clock`, playing as `inference`.
 
     With `job`, each of that job's lines instead. Positions are exact: with
-    no checkpoint there, the seat is a gap.
+    no checkpoint there, the seat is a gap. With `at_or_before`, the latest
+    checkpoint at or before there instead, once the line has saved past it
+    or ended, so what it finds never changes after.
     """
 
     kind: Literal["earlier"] = "earlier"
@@ -494,12 +496,14 @@ class Earlier(Record):
     by: float = Field(gt=0)
     inference: Inference
     job: str | None = None
+    at_or_before: bool = False
 
 
 class Fraction(Record):
     """The held checkpoint's line at exactly `value` × its position on `clock`.
 
-    `Fraction(clock="updates", value=0.5, ...)` seats 3,000 for 6,000.
+    `Fraction(clock="updates", value=0.5, ...)` seats 3,000 for 6,000. With
+    `at_or_before`, the latest checkpoint at or before it, as for `Earlier`.
     """
 
     kind: Literal["fraction"] = "fraction"
@@ -507,6 +511,7 @@ class Fraction(Record):
     value: float = Field(gt=0, lt=1)
     inference: Inference
     job: str | None = None
+    at_or_before: bool = False
 
 
 class At(Record):
@@ -602,7 +607,8 @@ class Gap(Record):
 
     `job` is the job it looks in, None for the held checkpoint's own line;
     `clock` and `position` where it looks, None for `Final` or a held
-    checkpoint with no position on `clock`.
+    checkpoint with no position on `clock`; `at_or_before` whether any
+    checkpoint up to `position` would do.
     """
 
     seating: str
@@ -611,6 +617,7 @@ class Gap(Record):
     job: str | None = None
     clock: str | None = None
     position: float | None = None
+    at_or_before: bool = False
 
 
 class Seating(Record):
@@ -754,6 +761,7 @@ class Seating(Record):
                     job=relative.job,
                     clock=None if isinstance(relative, Final) else relative.clock,
                     position=_position(relative, checkpoint),
+                    at_or_before=isinstance(relative, Earlier | Fraction) and relative.at_or_before,
                 )
         # Pairs in seed order, (mine, theirs); this checkpoint's are contiguous from `first`.
         pairs = max(len(mine), 1) * len(found)
@@ -826,6 +834,8 @@ def _find(seat: Relative, held: CheckpointRef, line: Line) -> CheckpointRef | Mi
     """The checkpoint of `line` the seat names for `held`, or why there is none.
 
     "never" once the line has ended or has passed the position without saving there.
+    At or before, the latest checkpoint up to the position, once one is past it or
+    the line has ended: until then a later save could still be nearer.
     """
     if isinstance(seat, Final):
         if not line.ended:
@@ -834,11 +844,21 @@ def _find(seat: Relative, held: CheckpointRef, line: Line) -> CheckpointRef | Mi
     wanted = _position(seat, held)
     if wanted is None:
         return "never"
+    passed = any(each.at.get(seat.clock, float("-inf")) > wanted for each in line.checkpoints)
+    if isinstance(seat, Earlier | Fraction) and seat.at_or_before:
+        if not (passed or line.ended):
+            return "not_yet"
+        before = [
+            (stood, n)
+            for n, each in enumerate(line.checkpoints)
+            if (stood := each.at.get(seat.clock)) is not None
+            and stood <= wanted + _EXACT * max(1.0, abs(wanted))
+        ]
+        return line.checkpoints[max(before)[1]] if before else "never"
     for each in line.checkpoints:
         stood = each.at.get(seat.clock)
         if stood is not None and abs(stood - wanted) <= _EXACT * max(1.0, abs(wanted)):
             return each
-    passed = any(each.at.get(seat.clock, float("-inf")) > wanted for each in line.checkpoints)
     return "never" if line.ended or passed else "not_yet"
 
 

@@ -295,6 +295,7 @@ evaluate(
   | `Code(name="heuristic", ...)`, or `Inference(...).model(ref)` | the same fixed player for every checkpoint: code, or one chosen checkpoint such as the initialization or a frozen anchor |
   | `Earlier(clock="updates", by=400, inference=direct)` | the held checkpoint's line exactly 400 updates before it |
   | `Fraction(clock="updates", value=0.5, inference=direct)` | its line at exactly half the held checkpoint's updates (3,000 for 6,000) |
+  | `Fraction(clock="updates", value=0.5, at_or_before=True, inference=direct)` | its line's latest checkpoint at or before half the held checkpoint's updates |
   | `At(clock="updates", value=200, inference=direct)` | its line at update 200 |
   | `Final(inference=direct)` | its line's last checkpoint, once its run has ended |
   | `Aligned(clock="updates", job="small", inference=direct)` | job `small` at exactly the held checkpoint's updates |
@@ -311,7 +312,10 @@ evaluate(
   A seating against a fixed player and one against a relative seat are held,
   scored and drawn alike.
 
-  Positions are exact: a checkpoint at 2,990 is not half of 6,000. A seat
+  Positions are exact by default: a checkpoint at 2,990 is not half of
+  6,000. `Earlier` and `Fraction` take `at_or_before=True` for the latest
+  checkpoint at or before the position instead, found once the line has a
+  checkpoint past it or has ended, so a later save never moves it. A seat
   with no checkpoint there yet plays nothing, and the next hold with no
   checkpoint plays it once one is saved, so a large job's seating against
   `Aligned(job="small")` fills in as the small job catches up. A relative
@@ -369,8 +373,11 @@ evaluate(
   recorded it last.
 - **Conflicts.** Another format, environment or round-robin rules under one
   name (`tournament_conflict`), or a seating name defined two ways
-  (`seating_conflict`), is refused by a batch hold and by `scores` and
-  `standings`; `statsdb` reports it in the `tournaments` table.
+  (`seating_conflict`), is refused by a batch hold, a pass, and `scores` and
+  `standings`; `statsdb` reports it in the `tournaments` table. Reading is
+  not refused: where a later revision of an experiment file defines a
+  tournament otherwise than its eval runs were held with, `etude report`
+  draws what they recorded and says so.
 - **Run names.** Under `etude launch` the eval run is the launched run
   (`ETUDE_RUN`), so `etude logs` and `status` lead to it and a retry resumes
   it, finding the same checkpoint (by its key) wherever the retry put it. Elsewhere it is named for the tournament and what is given; the same
