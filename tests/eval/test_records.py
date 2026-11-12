@@ -72,7 +72,7 @@ OLD_ROUND_ROBIN = (
 )
 
 
-def test_renaming_changes_no_match_key_or_matchup_definition() -> None:
+def test_renaming_changes_no_match_key_or_seating_definition() -> None:
     match = Match(players=(SEARCH.model(U500), HEURISTIC), conditions={"deal": 1}, games=8)
     # Pinned at 2eb32d5: a changed key would replay every stored match.
     assert match.key == "a64354de99bed9ed3bfc72755e7af6774877e28a383306be8e512561e6c793c8"
