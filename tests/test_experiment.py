@@ -245,6 +245,11 @@ def test_a_pass_whose_matches_all_return_no_rows_fails_and_a_retry_replays_them(
     assert (retried.new, retried.played) == (len(DEALS), len(DEALS))
     (done,) = advance(ppo, source=bucket, directory=local)
     assert (done.new, done.failed, done.played) == (0, 0, 0)
+    # The kept database that read the failed end reads the retried run's new one.
+    db = statsdb("ppo", bucket)
+    assert db.sql("select distinct state from runs").fetchall() == [("finished",)]
+    assert db.sql("select distinct state from matches").fetchall() == [("done",)]
+    db.close()
 
 
 def test_an_eval_job_belongs_to_the_experiment_of_its_file(tmp_path: Path) -> None:

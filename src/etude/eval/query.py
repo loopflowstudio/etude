@@ -201,7 +201,7 @@ def _create(db: duckdb.DuckDBPyConnection, experiment: str, storage: Storage) ->
     db.execute("create table kept.statsdb (schema BIGINT, experiment VARCHAR, store VARCHAR)")
     db.execute("insert into kept.statsdb values (?, ?, ?)", [SCHEMA, experiment, storage.name])
     # Every declared run of any experiment, so each `run.json` is read once; an
-    # eval run's `state.json` state once it arrives.
+    # eval run's `state.json` state as it arrives and after each resume.
     db.execute(
         "create table kept.runs (run VARCHAR, experiment VARCHAR, kind VARCHAR, state VARCHAR)"
     )
@@ -281,7 +281,8 @@ def _catch_up(
                 if eval_run:
                     for name in new:
                         changed |= _read(db, storage, run, located[name], name, Path(copies))
-                    if _STATE_FILE in new:
+                    # A resumed run, such as a retry of failed matches, writes its end again.
+                    if new and _STATE_FILE in located:
                         _ended(db, storage, run, located[_STATE_FILE])
                         changed = True
                     _sum_missing(db, storage, run, located, Path(copies))
@@ -323,7 +324,11 @@ def _ours(
 
 
 def _ended(db: duckdb.DuckDBPyConnection, storage: Storage, run: str, place: str) -> None:
-    """Record how the eval run ended, from its `state.json`: written once, so read once."""
+    """Record how the eval run last ended, from its `state.json`.
+
+    Read when it first arrives and again whenever the run delivers new files:
+    a resumed run seals new blocks before it writes its end again.
+    """
     ended = RunState.model_validate_json(storage.get(place + _STATE_FILE))
     db.execute("update kept.runs set state = ? where run = ?", [ended.state, run])
 

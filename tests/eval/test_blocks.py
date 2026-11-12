@@ -295,8 +295,9 @@ def test_a_rollup_is_summed_once_per_block_and_a_new_block_adds_only_its_own_tot
              directory=tmp_path / "a", storages=[bucket], rollups=[WINS])  # fmt: skip
     reading = ReadStorage(DirectoryStorage(tmp_path / "bucket"))
     db = statsdb("cards", reading)
-    # Two new blocks, each read once: its index, two tables and its partial totals.
-    assert (reading.listings, reading.requests) == (1, 2 * 4)
+    # Two new blocks, each read once: its index, two tables and its partial totals;
+    # and the resumed run's end, written again.
+    assert (reading.listings, reading.requests) == (1, 2 * 4 + 1)
     assert sum(key.endswith("/wins.parquet") for key in reading.read) == 2
     assert totals(db) == from_rows(db)
     assert db.sql("select sum(rows) from wins").fetchone() == (5 * 2 * 2,)
@@ -406,8 +407,9 @@ def test_a_rollup_holds_the_card_page_and_a_catch_up_reads_only_the_new_block(
              rollups=[CARDS])  # fmt: skip
     reading = ReadStorage(DirectoryStorage(tmp_path / "bucket"))
     db = statsdb("cards", reading)
-    # The new block's index, two tables and partial totals: nothing of an earlier block.
-    assert (reading.listings, reading.requests) == (1, 4)
+    # The new block's index, two tables and partial totals, and the run's end written
+    # again: nothing of an earlier block.
+    assert (reading.listings, reading.requests) == (1, 4 + 1)
     assert card_rollup(db) == card_page(db)
     db.close()
 
