@@ -59,6 +59,15 @@ def test_a_folder_listed_without_a_declaration_is_not_asked_for_one(tmp_path: Pa
         assert client.requests == len(client.read) == 3  # declaration, attempt, state
 
 
+def test_a_run_whose_declaration_is_invalid_reads_without_one(tmp_path: Path) -> None:
+    with track(experiment="e", run="r", clocks=[], directory=tmp_path):
+        pass
+    (tmp_path / run_prefix("r") / "run.json").write_text("{}")
+    data = read(tmp_path, "e", "r")
+    assert data.file is None
+    assert len(data.attempts) == 1
+
+
 @pytest.mark.parametrize("attributed", [False, True])
 def test_resuming_does_not_inherit_a_previous_attempts_finished_state(
     tmp_path: Path, attributed: bool

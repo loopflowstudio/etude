@@ -498,7 +498,8 @@ def read(source: Storage | Path | str, experiment: str, run: str) -> RunData:
     storage = as_storage(source)
     keys = sorted(storage.keys(""))
     folders = run_folders(keys).get(run, [run_prefix(run)])
-    return _read(storage, experiment, run, folders, _named(keys, folders))
+    file = declared(storage, declaring(folders, set(keys)))
+    return _read(storage, experiment, run, folders, _named(keys, folders), run_file=file)
 
 
 def _read(
@@ -508,7 +509,7 @@ def _read(
     folders: Sequence[str],
     keys: list[tuple[str, str]],
     *,
-    run_file: RunFile | None = None,
+    run_file: RunFile | None,
     metrics: frozenset[str] | None = None,
     prefixes: tuple[str, ...] = (),
 ) -> RunData:
@@ -535,10 +536,6 @@ def _read(
         except ValidationError:
             continue
     attempts.sort(key=lambda pair: pair[0].started_ms)
-    if run_file is None:
-        declaring = next((place for place in folders if (place, "run.json") in present), None)
-        if declaring is not None:
-            run_file = RunFile.model_validate_json(storage.get(declaring + "run.json"))
     # The state the latest attempt left, where it left one.
     ended = [place for place in folders if (place, "state.json") in present]
     latest = next((place for _, place in reversed(attempts) if place in ended), None)
