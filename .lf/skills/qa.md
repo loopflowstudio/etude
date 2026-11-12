@@ -118,3 +118,16 @@ Cut storage with `docker exec box iptables -A OUTPUT -p tcp --dport 443 -j DROP`
 `/root/.etude/sessions/*/worker.log` and `usage.jsonl` in the container. Restart
 the controller after code changes. Afterwards remove the container and delete the
 `etude-qa/NAME/` prefix.
+
+## Etude: tracking and reading a run against a bucket
+
+Write a real run with `track(..., directory=D, segment_rows=500)` and `run.finish()`;
+`queue_size=50_000` stops a tight logging loop dropping rows. Two `track` calls with the
+same run name, the first with `run.checkpoint(path, updates=N)`, give a resumed attempt.
+Deliver with `uv run etude sync --directory D --to r2://manabot/etude-r2-test/NAME`, with
+secrets injected by `doppler run -p manabot -c prd --only-secrets
+R2_ACCOUNT_ID,R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY -- ...`. Set `ETUDE_HOME` to an empty
+directory: `~/.etude/cache` holds ~200k files and each cached range read scans them all,
+so bucket reads take minutes there. `tests.run.storage.MeasuredStorage` counts requests
+(needs `PYTHONPATH=.`). Delete the prefix afterwards with `storage.delete` over
+`storage.keys("")`.
