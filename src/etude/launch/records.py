@@ -543,8 +543,8 @@ class Smoke(Record):
     def outcome(self) -> Literal["passed", "no_smoke", "not_smoked"]:
         """Passed only when a step passed and none was `not_smoked`.
 
-        `not_smoked` covers a job with no tiny form and a Python client called
-        without `smoke=True`.
+        `not_smoked` covers a job with no tiny form, a smoke whose every step was
+        skipped, and a Python client called without `smoke=True`.
         """
         if self.no_smoke:
             return "no_smoke"
