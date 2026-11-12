@@ -95,7 +95,7 @@ def test_a_passing_smoke_queues_and_its_runs_record_it(
     assert main(["queue", str(file), "--seeds", "2", "--cohort", "c", "--smoke"]) == 0
     said = capsys.readouterr()
     out, err = said.out, said.err
-    # Two seeds of one job are smoked once; the matchup plays each deal once.
+    # Two seeds of one job are smoked once; the seating plays each deal once.
     assert "smoke train ppo: passed in" in err and "(1 checkpoint)" in err
     assert "smoke eval ladder: passed in" in err and "(2 matches, 1 game each)" in err
     assert "smoke report: passed in" in err

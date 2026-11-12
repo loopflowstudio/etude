@@ -230,9 +230,8 @@ function model(D) {
   }
   for (const [run, got] of lineMarks) marks.set(run, [...got.values()].sort((a, b) => a.align - b.align));
   const markOf = (run, ordinal) => (marks.get(run) || []).find(m => m.ordinal === ordinal);
-  const xOf = (m, c) => m.at[c];
   // A value's own position (`at`, from `Player.at`) wins over its mark's, so no point disagrees with the page.
-  const xAt = (m, v, c) => v.at?.[c] != null ? v.at[c] : xOf(m, c);
+  const xAt = (m, v, c) => v.at?.[c] ?? m.at[c];
   // Per checkpoint, `value(run, mark)` gives {y, lo, hi, meta}, {missing, meta}, {skip, meta}
   // for a checkpoint that is no point of this line, or nothing; `gap` says why a value is absent.
   // A job's point needs every seed: seeds align on where each checkpoint stood on the run's
@@ -320,7 +319,7 @@ function model(D) {
     const i = found[0];
     if (i == null) return {};
     const a = D.players[i];
-    const subject = {at: a.at, recorded: recorded.length > 0};
+    const subject = {at: a.at};
     if (found.some(k => D.players[k].config !== a.config))
       // Named by config, not checkpoint: the point's position says which one, and an empty chart says it once.
       return {...subject, gap: `multiple inference variants: ${[...new Set(found.map(k => D.players[k].config))].join(" and ")}; choose a seating`};
@@ -431,7 +430,7 @@ function model(D) {
     };
   };
   const evaluated = pts => pts.filter(p => !p.missing && !p.skip);
-  return {T, R, JOBS, marks, markOf, xOf, jobPoints, cellOf, subjectAt, placed, positioned, posClocks, alignClock, fixedPlayers, usesSelection, selectMatches, seated, scheduleSeries, coverage, jobOfRun, linesOf, lineMembers, playerName, selName, choices, opponents, evalValue, evaluated};
+  return {T, R, JOBS, marks, markOf, jobPoints, cellOf, subjectAt, placed, positioned, posClocks, alignClock, fixedPlayers, usesSelection, selectMatches, seated, scheduleSeries, coverage, jobOfRun, linesOf, lineMembers, playerName, selName, choices, opponents, evalValue, evaluated};
 }
 
 // The first curve supplies the index headline, with the page's default score,

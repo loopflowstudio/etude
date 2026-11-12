@@ -309,7 +309,7 @@ evaluate(
   | `Aligned(clock="updates", job="small", inference=direct)` | job `small` at exactly the held checkpoint's updates |
   | `Aligned(clock="running_hours", job="small", at_or_before=True, inference=direct)` | job `small`'s latest checkpoint at or before the held checkpoint's running hours |
 
-  The last six rows are relative seats: each names a checkpoint by where it
+  The remaining rows are relative seats: each names a checkpoint by where it
   stands relative to the one held, and plays it with its own `inference`.
   `Earlier`, `Fraction`, `At` and `Final` look in the held checkpoint's own
   line unless given a `job`: `Final(job="small", inference=direct)` seats

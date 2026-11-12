@@ -194,7 +194,7 @@ def test_an_aligned_hours_seat_takes_the_other_jobs_latest_checkpoint_once_it_ha
     assert seated() == {str(large[0].key): str(small[0].key), str(large[1].key): str(small[1].key)}
 
 
-def test_checkpoints_held_on_the_go_then_a_matchup_added_in_batch(tmp_path: Path) -> None:
+def test_checkpoints_held_on_the_go_then_a_seating_added_in_batch(tmp_path: Path) -> None:
     bucket = DirectoryStorage(tmp_path / "bucket")
     checkpoints = trained(tmp_path, bucket)
     progress = anchors(tmp_path)
@@ -230,7 +230,7 @@ def test_checkpoints_held_on_the_go_then_a_matchup_added_in_batch(tmp_path: Path
         storages=[bucket],
         directory=tmp_path / "machines" / "batch",
     )
-    # Only the new matchup's matches, for every checkpoint held so far.
+    # Only the new seating's matches, for every checkpoint held so far.
     assert (batch.played, batch.skipped) == (3 * len(DEALS), 0)
 
     lines = {line.seating: line for line in scores(statsdb(EXPERIMENT, bucket), "anchors", table="plays",
@@ -270,7 +270,7 @@ def test_a_batch_hold_skips_what_any_eval_run_of_its_environment_delivered(tmp_p
     # tournament.json and its one block's index.
     assert (measured.listings, measured.requests) == (1 + 1, 3 + 3 + 3)
 
-    # Eval runs held for no tournament already played a matchup about to be added:
+    # Eval runs held for no tournament already played a seating about to be added:
     # two checkpoints' matches in this environment, the third's in another.
     added = Seating(name="search vs greedy", players=(SEARCH, scripted(tmp_path, "greedy", 4)),
                     conditions=DEALS, games=2)  # fmt: skip
@@ -360,13 +360,13 @@ def test_a_batch_hold_over_eval_runs_stored_with_agents_replays_nothing(tmp_path
     again = hold(
         progress, experiment=EXPERIMENT, play=play, storages=[bucket], directory=tmp_path / "batch"
     )
-    # The stored keys and matchup definitions are unchanged: nothing replays, nothing conflicts.
+    # The stored keys and seating definitions are unchanged: nothing replays, nothing conflicts.
     assert again.played == 0
     db = statsdb(EXPERIMENT, bucket, rebuild=True)
     assert scores(db, "anchors", table="plays", value="won") == before
 
 
-def test_a_matchup_name_redefined_is_refused_by_a_batch_hold_and_on_read(
+def test_a_seating_name_redefined_is_refused_by_a_batch_hold_and_on_read(
     tmp_path: Path,
 ) -> None:
     bucket = DirectoryStorage(tmp_path / "bucket")
@@ -603,7 +603,7 @@ def test_a_seed_added_splits_the_point_again_and_counts_only_the_new_split(
     assert held(two) == 0
 
 
-def test_curves_of_checkpoints_no_training_run_recorded_follow_their_names(
+def test_scores_of_checkpoints_no_training_run_recorded_follow_their_names(
     tmp_path: Path,
 ) -> None:
     bucket = DirectoryStorage(tmp_path / "bucket")
@@ -640,7 +640,7 @@ def test_pairs_of_checkpoints_named_as_they_appear_are_each_played_once(tmp_path
                          games=2)  # fmt: skip
         return Benchmark(name="ladder", environment=WORLD, seatings=(anchor, *consecutive))
 
-    # On the go, a checkpoint plays only the matchups its model seats call for.
+    # On the go, a checkpoint plays only the seatings its model seats call for.
     first = hold(wanted(checkpoints[:2]), experiment=EXPERIMENT, checkpoint=checkpoints[0], play=play,
                  storages=[bucket],
                  directory=tmp_path / "go")  # fmt: skip
@@ -668,11 +668,11 @@ def test_pairs_of_checkpoints_named_as_they_appear_are_each_played_once(tmp_path
         ("updates-200.pt vs updates-100.pt", 3),
         ("updates-300.pt vs updates-200.pt", 3),
     ]
-    # Curves follow only the matchups with a model seat.
+    # Scores follow only the seatings with a model seat.
     assert [line.seating for line in scores(db, "ladder", table="plays", value="won")] == [
         "vs heuristic"
     ]
-    # The later checkpoint wins each pair; its results are found by matchup name.
+    # The later checkpoint wins each pair; its results are found by seating name.
     later = db.sql(
         "select s.seating, avg(p.won::int) from plays p"
         " join schedule s on s.match = p.match and s.tournament = 'ladder'"
@@ -716,7 +716,7 @@ def test_a_new_version_of_a_players_code_reuses_what_an_older_one_played(tmp_pat
     assert hold(first, experiment=EXPERIMENT, checkpoints=checkpoints[:1], play=play,
                 storages=[bucket], directory=tmp_path / "v1").played == len(DEALS)  # fmt: skip
     # The heuristic's file changes: its version, not its key, so nothing is played again
-    # and the matchup is not defined two ways.
+    # and the seating is not defined two ways.
     (tmp_path / "players" / "heuristic.py").write_text("STRENGTH = 0  # edited\n")
     second = ladder()
     before, after = first.seatings[0].players[1], second.seatings[0].players[1]

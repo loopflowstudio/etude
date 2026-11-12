@@ -76,10 +76,10 @@ def test_renaming_changes_no_match_key_or_matchup_definition() -> None:
     match = Match(players=(SEARCH.model(U500), HEURISTIC), conditions={"deal": 1}, games=8)
     # Pinned at 2eb32d5: a changed key would replay every stored match.
     assert match.key == "a64354de99bed9ed3bfc72755e7af6774877e28a383306be8e512561e6c793c8"
-    matchup = Seating(
+    seating = Seating(
         name="direct vs heuristic", players=(SEARCH, HEURISTIC), conditions=({"deal": 1},), games=8
     )
-    assert matchup.definition == "9185c1177e55b1aa269d7d099aaa4a02d2a013dc780343081b531dba66c1ea91"
+    assert seating.definition == "9185c1177e55b1aa269d7d099aaa4a02d2a013dc780343081b531dba66c1ea91"
 
 
 def test_a_match_stored_with_agents_loads_as_the_same_players() -> None:
@@ -92,10 +92,10 @@ def test_a_match_stored_with_agents_loads_as_the_same_players() -> None:
 
 def test_tournament_files_stored_with_agents_load_as_players() -> None:
     benchmark = TournamentRun.model_validate_json(OLD_BENCHMARK)
-    matchup = Seating(
+    seating = Seating(
         name="direct vs heuristic", players=(SEARCH, HEURISTIC), conditions=({"deal": 1},), games=8
     )
-    assert benchmark.tournament == Benchmark(name="ladder", environment=WORLD, seatings=(matchup,))
+    assert benchmark.tournament == Benchmark(name="ladder", environment=WORLD, seatings=(seating,))
     held = TournamentRun.model_validate_json(OLD_ROUND_ROBIN)
     assert isinstance(held.tournament, RoundRobin)
     assert held.entrants == (SEARCH.model(U500), HEURISTIC)

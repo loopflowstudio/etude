@@ -171,9 +171,9 @@ def test_a_pass_plays_only_what_eval_returns_now(tmp_path: Path) -> None:
         Seating(name="vs greedy", players=(DIRECT, greedy), conditions=DEALS, games=2),
     )
 
-    def design(matchups: tuple[Seating, ...]) -> Experiment:
+    def design(seatings: tuple[Seating, ...]) -> Experiment:
         def eval_(state: ExperimentState) -> Job:
-            ladder = Benchmark(name="ladder", environment=WORLD, seatings=matchups)
+            ladder = Benchmark(name="ladder", environment=WORLD, seatings=seatings)
             return evaluation(ladder, play=play, checkpoints=state.run("ppo-1").checkpoints,
                               max_hours=0.1)  # fmt: skip
 

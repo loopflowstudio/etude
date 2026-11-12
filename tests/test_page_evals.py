@@ -187,7 +187,7 @@ def test_a_page_shows_what_was_not_evaluated_not_yet_played_and_failed(page: Pag
     assert "deal 1 crashed" in (failure.error or "")
 
 
-def test_panels_select_matches_by_tournament_matchup_or_tag(page: Page) -> None:
+def test_panels_select_matches_by_tournament_seating_or_tag(page: Page) -> None:
     chosen = {
         (each.tournament, each.seating, each.tag)
         for each in page.selections
@@ -196,7 +196,7 @@ def test_panels_select_matches_by_tournament_matchup_or_tag(page: Page) -> None:
     # A panel naming a seating without a tournament has it over every tournament.
     assert {("ladder", None, "anchor"), (None, "vs outside", None)} <= chosen
     outside = selection(page, None, seating="vs outside")
-    # The checkpoints' opponents in that matchup's matches are the outside anchor alone.
+    # The checkpoints' opponents in that seating's matches are the outside anchor alone.
     opponents = {
         page.players[c.opponent].name
         for c in page.cells
@@ -345,14 +345,14 @@ def test_mixed_execution_fills_requested_games_and_replays_count_once(
     ):
         monkeypatch.setenv("ETUDE_COMMIT", commit)
         monkeypatch.setenv("ETUDE_RUN", run)
-        matchup = Seating(
+        seating = Seating(
             name="vs heuristic",
             players=(Inference(source=[file], config={"search": 0}), HEURISTIC),
             conditions=({"deal": 0}, {"deal": 1}),
             games=2,
         )
-        benchmark = Benchmark(name="mixed", environment=DUEL, seatings=(matchup,))
-        matches = matchup.matches(checkpoint)
+        benchmark = Benchmark(name="mixed", environment=DUEL, seatings=(seating,))
+        matches = seating.matches(checkpoint)
         held = hold(
             benchmark,
             experiment="lab",

@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from etude.run.records import HOURS_SINCE_START, RUNNING_HOURS
+from etude.run.records import BUILT_IN_NAMES
 
 
 def experiment_file(folder: Path, name: str, text: str = "") -> Path:
@@ -16,4 +16,4 @@ def experiment_file(folder: Path, name: str, text: str = "") -> Path:
 def authored(clocks: object) -> dict[str, object]:
     """A row's or checkpoint's clocks without Etude's, which depend on when it ran."""
     assert isinstance(clocks, dict)
-    return {k: v for k, v in clocks.items() if k not in (RUNNING_HOURS, HOURS_SINCE_START)}
+    return {k: v for k, v in clocks.items() if k not in BUILT_IN_NAMES}

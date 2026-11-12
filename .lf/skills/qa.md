@@ -126,7 +126,8 @@ Build a lab outside the repo (e.g. `/tmp/lab`) with its own `ETUDE_HOME`:
    Click `getByRole("button", {name: "Refresh"})` and read `document.body.innerText`.
    Gap reasons and point values are only in hover text: `page.mouse.move(x, y - scrollY)` on a
    point in a full-page screenshot, then read `innerText` of `.u-legend` and `[class*=tip]`.
-   A seating curve's per-checkpoint data is the page JSON's `held` (`seating`, `seeds`, `pairs`, `missing`).
+   A seating curve's per-checkpoint data is the page JSON's `points`: `selection` indexes
+   `selections`; `at` gives its position, `value` its score, and `missing` its gap reason.
 13. The stats database under `ETUDE_HOME/statsdb` rebuilds its derived tables (`players`,
    `schedule`) only when new data arrives or its `SCHEMA` changes, so after editing
    `etude/eval/query.py` delete that folder before judging the page.

@@ -159,15 +159,14 @@ def _trace(run: RunData, metric: str, clock: str) -> Trace | None:
 
 def _band(job: str, members: Sequence[RunData], metric: str, clock: str) -> Trace | None:
     """The mean of the seeds' bucket means over a shared span, banded by their range."""
-    present = [run for run in members if len(run.chart(metric, clock, BUCKETS))]
+    present = [(run, chart) for run in members if len(chart := run.chart(metric, clock, BUCKETS))]
     if len(present) < 2:
         return None
-    charts = [run.chart(metric, clock, BUCKETS) for run in present]
-    low = min(float(chart.x_first[0]) for chart in charts)
-    high = max(float(chart.x_last[-1]) for chart in charts)
+    low = min(float(chart.x_first[0]) for _, chart in present)
+    high = max(float(chart.x_last[-1]) for _, chart in present)
     width = (high - low) / BUCKETS
     means = np.full((len(present), BUCKETS), np.nan)
-    for row, run in enumerate(present):
+    for row, (run, _) in enumerate(present):
         reduced = run.chart(metric, clock, BUCKETS, span=(low, high))
         means[row, reduced.index] = reduced.mean
     count = (~np.isnan(means)).sum(axis=0)

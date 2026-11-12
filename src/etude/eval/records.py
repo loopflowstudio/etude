@@ -47,7 +47,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from hashlib import sha256
 from itertools import combinations
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, Literal, Self, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Self
 
 from pydantic import (
     BaseModel,
@@ -770,8 +770,7 @@ class Seating(Record):
             if held.job is None
             else [line for line in ordered if line.job == held.job]
         )
-        seat = next((n for n, each in enumerate(self.players) if isinstance(each, _RELATIVE)), None)
-        relative = None if seat is None else cast(Relative, self.players[seat])
+        relative = next((each for each in self.players if isinstance(each, _RELATIVE)), None)
         # The other side's seeds: the lines of the job a relative seat names; its own line,
         # or a fixed player, counts as one (None).
         theirs: list[Line | None] = [None]
@@ -810,7 +809,7 @@ class Seating(Record):
         first = (mine.index(held) if held in mine else 0) * len(found)
         pairings = [
             Pairing(
-                seats=tuple(ref if n == seat else None for n in range(len(self.players))),
+                seats=tuple(ref if isinstance(each, _RELATIVE) else None for each in self.players),
                 games=games,
             )
             for index, ref in enumerate(found, start=first)
@@ -854,12 +853,14 @@ def _chosen(
 ) -> tuple[Line, Line | None]:
     """The one seed pair a `seeds="one"` seating plays: drawn from its name and the seed sets,
     never the clock, so every point and hold draws the same until a seed is added."""
-    pairs = [(one, other) for one in mine for other in theirs]
     seeds = [
         [None if line is None else [line.seed, line.name] for line in side]
         for side in (mine, theirs)
     ]
-    return pairs[int(digest([seating, seeds])[:15], 16) % len(pairs)]
+    # The same row-major pair order as every-seed play, without materializing the product.
+    index = int(digest([seating, seeds])[:15], 16) % (len(mine) * len(theirs))
+    one, other = divmod(index, len(theirs))
+    return mine[one], theirs[other]
 
 
 def _position(seat: Relative, held: CheckpointRef) -> float | None:

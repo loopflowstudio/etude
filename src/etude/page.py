@@ -911,13 +911,11 @@ def _points(
         parts = selection if isinstance(selection, tuple) else (selection,)
         if not parts or any(part.seating is None for part in parts):
             continue
-        chosen = sorted(
-            key
-            for key in held.keys() | gaps.keys()
-            if any(p.seating == key[1] and p.tournament in (None, key[0]) for p in parts)
-        )
-        for checkpoint in dict.fromkeys(key[2] for key in chosen):
-            here = [key for key in chosen if key[2] == checkpoint]
+        chosen: dict[str, list[tuple[str, str, str]]] = {}
+        for key in sorted(held.keys() | gaps.keys()):
+            if any(p.seating == key[1] and p.tournament in (None, key[0]) for p in parts):
+                chosen.setdefault(key[2], []).append(key)
+        for checkpoint, here in chosen.items():
             ref, place = refs[checkpoint], saved.get(checkpoint)
             stood = Point(
                 selection=number,
@@ -928,13 +926,12 @@ def _points(
                 whole=any(key[:2] in one_seed for key in here),
             )
             # By view, score and split: the cells of this checkpoint's pairs.
-            met: dict[tuple[str | None, int, str], list[tuple[int, Cell]]] = {}
+            met: dict[tuple[str | None, int, str], list[Cell]] = {}
             for subject, opponent in sorted({pair for key in here for pair in held.get(key, ())}):
                 for cell in scored.get((number, subject, opponent), ()):
                     view = (cell.commit, cell.score, json.dumps(cell.split, sort_keys=True))
-                    met.setdefault(view, []).append((opponent, cell))
-            for found in met.values():
-                counted = [cell for _, cell in found]
+                    met.setdefault(view, []).append(cell)
+            for counted in met.values():
                 points.append(
                     stood.model_copy(
                         update={
@@ -945,7 +942,7 @@ def _points(
                             "interval": counted[0].interval if len(counted) == 1 else None,
                             "rows": sum(cell.rows for cell in counted),
                             "matches": sum(cell.matches for cell in counted),
-                            "opponents": tuple(opponent for opponent, _ in found),
+                            "opponents": tuple(cell.opponent for cell in counted),
                         }
                     )
                 )

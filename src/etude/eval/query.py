@@ -1008,17 +1008,14 @@ def _position(given: list[str]) -> tuple[str | None, str | None]:
     Positions that only add clocks merge, the latest winning, so a match recorded before
     Etude's built-in hour clocks agrees with one that also says where they stood.
     """
-    found: list[dict[str, float]] = [json.loads(each) for each in given]
     drawn: dict[str, float] = {}
-    for each in reversed(found):
-        drawn.update(each)
-    differ = any(
-        a[clock] != b[clock]
-        for a, b in itertools.combinations(found, 2)
-        for clock in a.keys() & b.keys()
-    )
+    differ = False
+    for encoded in reversed(given):
+        position: dict[str, float] = json.loads(encoded)
+        differ |= any(clock in drawn and drawn[clock] != value for clock, value in position.items())
+        drawn.update(position)
     return (
-        json.dumps(drawn) if found else None,
+        json.dumps(drawn) if given else None,
         f"[{','.join(sorted(given))}]" if differ else None,
     )
 
