@@ -191,11 +191,13 @@ function model(D) {
   })];
   // A report names a job by its full name, or by its launch name for every config launched under it.
   const names = (j, n) => n === j.name || n === j.launch;
-  // A full-name label wins; a launch-name label keeps the config digest ("PPO 1a2b3c").
-  const shown = j => R.labels?.[j.name] ?? (R.labels?.[j.launch] == null ? null : R.labels[j.launch] + j.name.slice(j.launch.length));
-  const JOBS = curves.map((j, i) => ({...j,
-    label: shown(j) == null ? j.label : shown(j) + (j.line == null ? ` · ${j.runs.length} seed${j.runs.length === 1 ? "" : "s"}` : ""),
-    index: i, color: `--j${i % 8 + 1}`, baseline: R.baseline != null && names(j, R.baseline)}));
+  const JOBS = curves.map((j, i) => {
+    // A full-name label wins; a launch-name label keeps the config digest ("PPO 1a2b3c").
+    const shown = R.labels?.[j.name] ?? (R.labels?.[j.launch] == null ? null : R.labels[j.launch] + j.name.slice(j.launch.length));
+    const seeds = j.line == null ? ` · ${j.runs.length} seed${j.runs.length === 1 ? "" : "s"}` : "";
+    return {...j, label: shown == null ? j.label : shown + seeds,
+      index: i, color: `--j${i % 8 + 1}`, baseline: names(j, R.baseline)};
+  });
   const marks = new Map(); for (const m of T.checkpoints) { if (!marks.has(m.run)) marks.set(m.run, []); marks.get(m.run).push(m); }
   // A line curve has a mark per position, as a run has one per checkpoint.
   const lineMarks = new Map();
