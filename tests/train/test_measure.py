@@ -21,7 +21,7 @@ from etude.run.block_file import block_key
 from etude.run.records import RunDeclaration, RunFile, SourceKey
 from etude.run.storage import DirectoryStorage, S3Storage, Storage, run_prefix
 from etude.train.block import Series, Table, encode
-from etude.train.manifest import write_manifest
+from etude.train.manifest import Index
 from etude.train.read import buckets, read
 from etude.train.records import Step, Time
 from etude.train.run import track
@@ -132,7 +132,7 @@ def test_store_measurement(tmp_path: Path, rows: int, backend: str) -> None:
             if backend == "s3":
                 DirectoryStorage(tmp_path).put(key, body)
             files += 1
-        write_manifest(tmp_path / prefix, writer)
+        Index(tmp_path / prefix, writer).write()
         if backend == "s3":
             for manifest in sorted((tmp_path / prefix / "metrics").glob("*.json")):
                 storage.put(prefix + f"metrics/{manifest.name}", manifest.read_bytes())

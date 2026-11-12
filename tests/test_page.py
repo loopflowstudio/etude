@@ -71,11 +71,18 @@ def test_the_report_is_the_files_and_the_experiment_is_named_for_it(tmp_path: Pa
 
 def test_without_a_report_the_page_is_the_default_and_says_so(tmp_path: Path) -> None:
     runs = tmp_path / "runs"
-    trained(runs, "lab", "a")
+    run = track(experiment="lab", run="a", clocks=[Step("updates", "updates")], directory=runs)
+    run.log({"custom/score": 1.0}, updates=1)
+    run.finish(timeout=30)
     page = build(runs, experiment_file(tmp_path, "lab", "def train(config: object) -> None: ...\n"))
-    assert page.report == Report() and page.origin is None
+    assert page.report == Report(other_metrics=True) and page.origin is None
     assert page.notes == ("lab.py defines no report(), so this is the default report.",)
     assert page.report.evals == (Curve(), Anchors())
+    assert "custom/score" in page.training.metrics  # nothing declared, so everything is drawn
+
+    declared = "from etude.report import Report\n\ndef report() -> Report:\n    return Report()\n"
+    page = build(runs, experiment_file(tmp_path / "declared", "lab", declared))
+    assert "custom/score" not in page.training.metrics
 
 
 def test_a_file_that_is_not_an_experiments_is_refused(tmp_path: Path) -> None:

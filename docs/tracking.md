@@ -109,7 +109,8 @@ Rules a caller can rely on:
 - **The files are the record.** Everything about a run is in one folder named
   for the run, `RUN/`, in the runs directory and in each storage it delivers
   to: `run.json` (what it is, its experiment included), `state.json`,
-  `metrics/` (row blocks and their indexes, from every attempt) and
+  `metrics/` (row blocks and their indexes, from every attempt),
+  `artifacts/` (immutable files, including logged row tables) and
   `checkpoints/` (each named for where its first clock stood, such as
   `steps-1000.pt` beside `steps-1000.json`). Under the launcher the same folder
   in the bucket also holds `attempts/ATTEMPT.json` and the pieces of the job's log
@@ -133,6 +134,79 @@ Rules a caller can rely on:
   completion inapplicable. Until the new writer finishes, the report says
   “running or unfinished.” Older completion records without a writer remain
   readable, but cannot establish completion after another attempt starts.
+
+### Row tables for training results
+
+```python
+from etude.train.records import Step
+from etude.train.run import track
+
+with track(
+    experiment="self-play",
+    run="policy-seed-0",
+    clocks=[Step("updates", "optimizer updates, absolute across continuation")],
+) as run:
+    run.log_table(
+        "matchups",
+        [
+            {"deck": "red", "opponent": "blue", "seat": 0, "wins": 12, "games": 20},
+            {"deck": "blue", "opponent": "red", "seat": 1, "wins": 8, "games": 20},
+        ],
+        updates=400,
+    )
+```
+
+This records `matchups` at optimizer update 400. Adding a matchup adds a row,
+keeping metric names bounded. Use `run.log` for scalar summaries such as loss
+and `run.log_table(name, rows, **clocks)` for JSON rows, including nested objects
+and lists. Give every declared clock, using absolute continuation coordinates.
+Keep table names separate from scalar and ordinary text names.
+
+`log_table` writes locally before returning; you can then change the input rows.
+Invalid rows or clocks and local write failures raise. Its queued reference
+follows `log`'s overflow behavior: a dropped reference increments `run.dropped`.
+
+Each table is an immutable JSON file under `artifacts/`, named by its content
+digest; the metric row holds only that digest. Identical content reuses the file.
+Writes stage as `.partial` and rename atomically before recording the reference.
+
+Tracking delivery, `etude sync` and the launcher's courier carry these files.
+When copying a run, include `artifacts/`. Readers resolve references beside the
+selected metric block, so relocated runs keep working.
+
+```python
+from etude.run.storage import default_root
+from etude.train.read import read
+
+history = read(default_root(), "self-play", "policy-seed-0")
+for table in history.read_table("matchups", "updates"):
+    print(table.x, table.rows)  # selected update coordinate and its JSON rows
+```
+
+`read_table` returns `TablePoint` records in clock order as a tuple. An empty
+table has `rows=()`; no surviving references returns `()`. `RunData.tables`
+provides raw metric-block inspection.
+
+The reader applies attempt and update supersession before fetching artifacts.
+A later table at the same update replaces the earlier one. A resumed attempt
+cuts off superseded history even before logging anything; the checkpoint
+coordinate itself survives unless replaced, as with scalar points. Unreferenced
+artifacts yield no rows. Do not reconstruct history by listing `artifacts/`.
+
+A missing or damaged selected table raises. After interrupted delivery, run
+`uv run etude sync --directory DIR --to s3://my-bucket/runs` and retry. Restore
+damaged artifacts from an intact copy, never different rows under the same digest.
+
+Etude warns once per writer when distinct numeric metric names exceed
+`track(..., metric_name_limit=1000)` (the default), pointing to `log_table`.
+Set another nonnegative limit, or `None` to disable. Earlier local attempts
+count; clocks, flags, text and table references do not. Store dimensions such
+as deck × opponent × seat × outcome in rows and keep scalar names for charts.
+
+Index refreshes reuse block descriptions and latest values, rebuilt once on
+writer start or resume. Adding a permanent block rewrites the accumulated
+manifest without rereading old blocks. Wider rows and more metric names still
+cost more. Existing blocks and manifests remain readable without migration.
 
 ### Storage outages and recovery
 
@@ -264,8 +338,9 @@ Without `--serve`, the result is one HTML file per experiment, with its data
 inlined: no server and no network to view it. Rerun the command to update that
 snapshot; reloading a saved HTML file cannot fetch new training results.
 The experiment is named for the file, and the page follows the
-file's `report()`; a file without one gets `Report()`, and the page says so at
-its top. Reports read files and never launch or rent anything.
+file's `report()`; a file without one gets `Report(other_metrics=True)`, every
+logged metric, and the page says so at its top. Reports read files and never
+launch or rent anything.
 From a directory the page goes to
 `reports/` beside its runs, from a bucket to `./reports`; `--out DIR` chooses.
 `--serve` has no login and defaults to this computer only
@@ -417,7 +492,6 @@ def report() -> Report:
     return Report(
         score=Score(table="plays", value="won", reference=0.5, unit="games"),
         labels={"small": "Small model", "large": "Large model"},
-        other_metrics=False,
         evals=(
             Curve(
                 title="Against half-training checkpoints",
@@ -499,17 +573,33 @@ checkpoint), `Attempts`, and `Flame`, an icicle of the seconds logged under
 `time/` (`time/collection`, `time/collection/inference`: seconds since the
 previous row). **ML details** default to reinforcement learning's `Counters`
 and `Series` over `rl/` keys; pass `perf=` or `ml=` to name an experiment's
-own. Keys a panel names that no run logged are listed, and metrics no panel
-names are drawn last.
+own. Keys a panel names that no run logged are listed.
 
-For a large metric vocabulary, use `Report(other_metrics=False)`. Only keys
-named by `Series` and `Counters`, and prefixes named by `Flame`, are read and
-drawn. This reads one immutable block header at a time instead of parsing the
-cumulative training index, retaining only the selected columns. All clocks,
-checkpoints and continuation coordinates are preserved. Memory still includes
-one full header and the selected series; this does not bound the size of an
-individual block header. The default, `other_metrics=True`, includes all logged
-metrics.
+A report reads and draws only the keys named by `Series` and `Counters` and
+the prefixes named by `Flame`. It reads each immutable block once, whole,
+instead of parsing the cumulative training index, retaining only the selected
+columns of its header; charts then read the block's arrays from Etude's
+storage cache. All clocks, checkpoints and continuation coordinates are
+preserved. Memory still includes one full block while it is read and the
+selected series; this does not bound the size of an individual block.
+
+`Report(other_metrics=True)` also draws every metric no panel names, last
+under ML details, by parsing each training run's cumulative index. An
+experiment without `report()` gets this, since it declares nothing; for a large
+metric vocabulary, define `report()` and name the metrics to draw.
+
+**What a build reads.** Perf and ML details read the metric blocks of training
+runs only, once per build; `eval(state)` is given the runs' checkpoints without
+reading any metric data. An eval run contributes its `run.json`, `state.json`,
+its tournament or environment record and each block's index and tables; its
+blobs, such as replay evidence, are never read to draw a page. Unless
+`other_metrics=True`, a build's memory therefore follows the metrics and tables
+the report draws, not how much data its runs hold. Bytes a build reads stay in
+Etude's storage cache, so building the same page again over unchanged runs
+downloads almost nothing: it lists the runs and reads only what was delivered
+since. A training index is rewritten as its run grows, so with
+`other_metrics=True` a build of a running experiment reads it again whenever it
+has changed.
 
 ```python
 from etude.report import ML, Report, Schedule, SchedulePoint

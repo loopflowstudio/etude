@@ -97,6 +97,30 @@ def test_opening_again_reads_only_what_arrived(tmp_path: Path) -> None:
     db.close()
 
 
+class Asked(MeasuredStorage):
+    """Storage that also counts reads asked for, a missing object's included."""
+
+    def __init__(self, storage: DirectoryStorage) -> None:
+        super().__init__(storage)
+        self.asked: list[str] = []
+
+    def get(self, key: str) -> bytes:
+        self.asked.append(key)
+        return super().get(key)
+
+
+def test_a_folder_listed_without_a_declaration_is_not_asked_for_one(tmp_path: Path) -> None:
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    evaluate(experiment="cards", environment=DUEL, play=play, matches=deals(pair(tmp_path), 0),
+             run="a", directory=tmp_path / "a", storages=[bucket])  # fmt: skip
+    # A launcher's journal beside the run can hold folders shaped like a run's.
+    bucket.put("a/attempts/a1/share/blocks/block.json", b"{}")
+    statsdb("cards", bucket).close()
+    again = Asked(bucket)
+    statsdb("cards", again).close()
+    assert (again.listings, again.asked) == (1, [])
+
+
 def test_a_run_that_has_not_ended_is_partial(tmp_path: Path) -> None:
     bucket = DirectoryStorage(tmp_path / "bucket")
     players = pair(tmp_path)

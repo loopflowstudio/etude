@@ -1018,6 +1018,28 @@ def test_changed_and_corrupt_bucket_objects_are_read_again(tmp_path: Path) -> No
     assert client.bytes == 5 + 6 + 6
 
 
+def test_ranges_of_a_held_block_are_read_locally_until_it_is_corrupted(tmp_path: Path) -> None:
+    boto3 = pytest.importorskip("boto3")
+    body = bytes(range(256)) * 64
+    with mock_aws():
+        client = CountedClient(boto3.client("s3", region_name="us-east-1"))
+        client.create_bucket(Bucket="lab")
+        storage = S3Storage("lab", client=client, cache=Cache(tmp_path / "cache"))
+        key = "run/metrics/2-00000000-00000000-abcdef123456.blk"
+        storage.put(key, body)
+        assert storage.get(key) == body
+        assert [storage.get_range(key, at, 16) for at in (0, 100, 200)] == [
+            body[at : at + 16] for at in (0, 100, 200)
+        ]
+        assert client.bytes == len(body)  # every range from the block held whole
+        held = storage.cache.root / Content.of(body).name
+        held.chmod(0o644)
+        held.write_bytes(b"\0" * len(body))
+        assert storage.get_range(key, 100, 16) == body[100:116]
+        assert client.bytes == len(body) + 16  # the corrupt copy is discarded, the range read
+        assert not held.exists()
+
+
 class _Held:
     """Content a test already has, read without a network."""
 
@@ -1132,6 +1154,36 @@ def test_held_content_is_verified_when_asked_for_and_discarded_when_corrupt(
     held.write_bytes(b"aXXdef")
     assert cache.held(content) is None
     assert not held.exists()
+
+
+def test_held_content_is_hashed_once_while_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _Held(bytes(range(256)) * 64)
+    Cache(tmp_path / "cache").read(source.artifact, source)
+    hashed: list[Path] = []
+    digest = engine._digest
+
+    def counted(path: Path) -> str:
+        hashed.append(path)
+        return digest(path)
+
+    monkeypatch.setattr(engine, "_digest", counted)
+    cache = Cache(tmp_path / "cache")
+    content = Content.of(source.body)
+    assert cache.read(source.artifact, source) == source.body
+    assert [cache.read(source.artifact, source, start=at, length=16) for at in (0, 100)] == [
+        source.body[at : at + 16] for at in (0, 100)
+    ]
+    assert cache.held(content) is not None
+    cache.place(source.artifact, tmp_path / "placed", source)
+    assert len(hashed) == 1
+    held = cache.root / content.name
+    held.chmod(0o644)
+    held.write_bytes(b"\0" * len(source.body))
+    assert cache.read(source.artifact, source, start=100, length=16) == source.body[100:116]
+    assert len(hashed) == 3  # the rewritten copy, then its replacement
+    assert source.read_bytes == len(source.body) * 2
 
 
 def test_worker_source_and_input_share_verified_transport_bytes(
