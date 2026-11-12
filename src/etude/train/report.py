@@ -1,4 +1,4 @@
-"""The training half of an experiment's report: jobs, metric lines, checkpoints and time.
+"""The training half of an experiment's report: jobs, metric traces, checkpoints and time.
 
 `training` turns an experiment's training runs (`etude.train.read.RunData`)
 into `Training`, everything the page draws from their files, already
@@ -82,10 +82,10 @@ class Mark(Record):
     pace: dict[str, float | None]
 
 
-class Line(Record):
+class Trace(Record):
     """One run's bucket means, or a job's mean over seeds, on one clock.
 
-    A job's line has `low` and `high`, the range of its seeds' bucket means,
+    A job's trace has `low` and `high`, the range of its seeds' bucket means,
     and `seeds`, how many seeds each bucket has.
     """
 
@@ -120,9 +120,9 @@ class Training(Record):
     runs: tuple[RunSummary, ...]
     checkpoints: tuple[Mark, ...]
     metrics: tuple[str, ...]  # every metric logged, in first-seen order
-    # By clock, then metric: each run's line, and each several-seed job's mean.
-    series: dict[str, dict[str, tuple[Line, ...]]]
-    bands: dict[str, dict[str, tuple[Line, ...]]]
+    # By clock, then metric: each run's trace, and each several-seed job's mean.
+    series: dict[str, dict[str, tuple[Trace, ...]]]
+    bands: dict[str, dict[str, tuple[Trace, ...]]]
     timers: tuple[Timers, ...]
 
 
@@ -148,11 +148,11 @@ def _origin(run: RunData, clock: str) -> float:
     return _started(run) if clock == WALL_CLOCK else 0.0
 
 
-def _line(run: RunData, metric: str, clock: str) -> Line | None:
+def _trace(run: RunData, metric: str, clock: str) -> Trace | None:
     reduced = run.chart(metric, clock, BUCKETS)
     if not len(reduced):
         return None
-    return Line(
+    return Trace(
         owner=run.name,
         x=_rounded((reduced.x_first + reduced.x_last) / 2 - _origin(run, clock), 7),
         mean=_rounded(reduced.mean),
@@ -160,7 +160,7 @@ def _line(run: RunData, metric: str, clock: str) -> Line | None:
     )
 
 
-def _band(job: str, members: Sequence[RunData], metric: str, clock: str) -> Line | None:
+def _band(job: str, members: Sequence[RunData], metric: str, clock: str) -> Trace | None:
     """The mean of the seeds' bucket means over a shared span, banded by their range."""
     present = [run for run in members if len(run.chart(metric, clock, BUCKETS))]
     if len(present) < 2:
@@ -176,7 +176,7 @@ def _band(job: str, members: Sequence[RunData], metric: str, clock: str) -> Line
     count = (~np.isnan(means)).sum(axis=0)
     filled = np.flatnonzero(count)
     values = [means[:, index][~np.isnan(means[:, index])].tolist() for index in filled.tolist()]
-    return Line(
+    return Trace(
         owner=job,
         x=[_round(low + (index + 0.5) * width, 7) for index in filled.tolist()],
         mean=[_round(statistics.fmean(seeds)) for seeds in values],
@@ -387,18 +387,18 @@ def training(data: Sequence[RunData], *, prefixes: Sequence[str] = ()) -> Traini
         metrics.update(dict.fromkeys(run.metrics()))
     jobs = _jobs(data)
     members = {job.name: [run for run in data if run.name in job.runs] for job in jobs}
-    series: dict[str, dict[str, tuple[Line, ...]]] = {}
-    bands: dict[str, dict[str, tuple[Line, ...]]] = {}
+    series: dict[str, dict[str, tuple[Trace, ...]]] = {}
+    bands: dict[str, dict[str, tuple[Trace, ...]]] = {}
     for clock in [*clocks, WALL_CLOCK]:
         for metric in metrics:
-            lines = [
-                line
+            traces = [
+                trace
                 for run in data
                 if clock == WALL_CLOCK or clock in {c.name for c in run.clocks}
-                if (line := _line(run, metric, clock)) is not None
+                if (trace := _trace(run, metric, clock)) is not None
             ]
-            if lines:
-                series.setdefault(clock, {})[metric] = tuple(lines)
+            if traces:
+                series.setdefault(clock, {})[metric] = tuple(traces)
             means = [
                 band
                 for job, runs in members.items()

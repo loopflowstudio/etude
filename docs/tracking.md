@@ -531,8 +531,8 @@ jobs it draws and with which inference config are the seating's
 ([evaluation](evaluation.md#tournaments)), so a chart that needs another
 comparison needs another seating.
 
-**Compare jobs over training.** With the `ladder` benchmark of
-[Experiments](evaluation.md#experiments) held for jobs `small` and `large`:
+**Compare jobs over training.** With the `ladder` and `against small`
+benchmarks of [Experiments](evaluation.md#experiments):
 
 ```python
 # capacity.py
@@ -568,8 +568,8 @@ Large against small             Large model · 2 seeds
 Each point is the seating's value, its first seat's score, at the position
 where the checkpoint it was held for stood, whether the other seat is a
 fixed player or a relative seat. The relative seat's checkpoint is not drawn
-as a point of its own. `large vs small` draws only `large`: its
-`Aligned(job="small")` seat plays nothing for small's checkpoints.
+as a point of its own. `large vs small` draws only `large`: its benchmark is
+held only for large's checkpoints.
 
 A held checkpoint whose relative seat has no checkpoint is a gap with its
 reason. While the seat's run could still save one there, the gap says "not

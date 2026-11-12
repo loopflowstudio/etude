@@ -322,9 +322,11 @@ evaluate(
   own final checkpoint gives final against final. To meet one chosen
   checkpoint of another job, seat it as a fixed player. A seating with a
   relative seat needs an inference seat to be relative to. Held for a
-  checkpoint of the job a seat's `job` names, it plays nothing, so one
-  benchmark can hold every job's checkpoints; leave `job` out to mean the
-  checkpoint's own line. A job is
+  checkpoint of the job a seat's `job` names, it plays that job, and a seat
+  that finds the held checkpoint itself seats it: self-play is a match like
+  any other, as a cooperative game or a score besides winning wants. To play
+  a seating for some jobs only, hold its benchmark for their checkpoints.
+  Leave `job` out to mean the checkpoint's own line. A job is
   named as the report names it ([tracking](tracking.md#reports)): its launch name, or the full
   name with its config digest.
 - **Pairs of checkpoints.** A seating with no inference seat is played once,
@@ -473,7 +475,13 @@ def eval(state: ExperimentState) -> list[Job]:
                 conditions=deals,
                 games=8,
             ),
-            # Played for large's checkpoints; held for small's, they play nothing.
+        ),
+    )
+    # Held only for large's checkpoints: held for small's, they would play small against itself.
+    against_small = Benchmark(
+        name="against small",
+        environment=world,
+        seatings=(
             Seating(
                 name="large vs small",
                 players=(direct, Aligned(clock="updates", job="small", inference=direct)),
@@ -488,7 +496,11 @@ def eval(state: ExperimentState) -> list[Job]:
             ),
         ),
     )
-    return [evaluation(ladder, play=play, checkpoints=rated, workers=8, max_hours=1)]
+    large = [c for run in state.runs if run.job == "large" for c in run.checkpoints.every(5)]
+    return [
+        evaluation(ladder, play=play, checkpoints=rated, workers=8, max_hours=1),
+        evaluation(against_small, play=play, checkpoints=large, workers=8, max_hours=1),
+    ]
 ```
 
 ```sh

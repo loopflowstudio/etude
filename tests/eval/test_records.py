@@ -181,8 +181,9 @@ def test_a_relative_seat_finds_an_exact_position_or_says_whether_one_may_still_c
     ended = [small.model_copy(update={"ended": True}), large]
     assert isinstance(gap := aligned.resolve(large.checkpoints[1], ended), Gap)
     assert gap.missing == "never"
-    # Held for the job it names, it plays nothing; so one benchmark holds every job.
-    assert aligned.resolve(small.checkpoints[0], lines) is None
+    # Held for the job it names, it plays that job: here the held checkpoint against itself.
+    selfplay = aligned.resolve(small.checkpoints[0], lines)
+    assert isinstance(selfplay, Seated) and selfplay.seats[1] == (small.checkpoints[0],)
     final = seating(Final(job="small", inference=direct))
     assert isinstance(final.resolve(large.checkpoints[0], lines), Gap)
     done = final.resolve(large.checkpoints[0], ended)

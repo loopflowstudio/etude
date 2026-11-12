@@ -666,40 +666,32 @@ class Seating(Record):
             for given in self.conditions
         ]
 
-    def resolve(self, checkpoint: CheckpointRef, lines: Sequence[Line]) -> Seated | Gap | None:
+    def resolve(self, checkpoint: CheckpointRef, lines: Sequence[Line]) -> Seated | Gap:
         """What the relative seats find for `checkpoint` among `lines`, or why one finds nothing.
 
-        None when the seating plays nothing for it: a seat names the held
-        checkpoint's own job, or finds only the held checkpoint itself. A seat
-        naming a job seats each of its lines that has a checkpoint there.
+        A seat naming a job seats each of its lines that has a checkpoint there,
+        the held checkpoint's own job included. A seat that finds the held
+        checkpoint itself seats it: self-play is a match like any other.
         """
         held = next((line for line in lines if line.name == checkpoint.line), None)
-        own = {held.job, held.launch} - {None} if held is not None else set()
         seats: list[tuple[CheckpointRef, ...]] = []
         gaps: list[Gap] = []
         for seat, each in enumerate(self.players):
             if not isinstance(each, _RELATIVE):
                 seats.append(())
                 continue
-            if each.job is not None and each.job in own:
-                return None
             if each.job is None:
                 candidates = [held] if held is not None else []
             else:
                 candidates = [line for line in lines if each.job in (line.job, line.launch)]
             found: list[CheckpointRef] = []
             reasons: list[Missing] = []
-            itself = False
             for line in candidates:
                 result = _find(each, checkpoint, line)
-                if isinstance(result, CheckpointRef) and result.key == checkpoint.key:
-                    itself = True
-                elif isinstance(result, CheckpointRef):
+                if isinstance(result, CheckpointRef):
                     found.append(result)
                 else:
                     reasons.append(result)
-            if not found and itself:
-                return None
             if not found:
                 # No line yet: the job has not started, or the held one's line is unknown.
                 unknown = not candidates and checkpoint.line is not None
@@ -914,9 +906,7 @@ class Tournament(Record):
                 result = seating.resolve(checkpoint, lines)
                 if isinstance(result, Seated):
                     seated.append(result)
-                elif (
-                    isinstance(result, Gap) and (seating.name, str(checkpoint.key)) not in recorded
-                ):
+                elif (seating.name, str(checkpoint.key)) not in recorded:
                     gaps.append(result)
         return self.model_copy(update={"seated": _merged(seated)}), tuple(gaps)
 

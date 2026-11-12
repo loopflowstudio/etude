@@ -128,9 +128,9 @@ def test_a_relative_seat_waits_for_its_checkpoint_and_a_batch_hold_plays_it_once
             lines=lines,
         ).played
 
-    # Small has saved only its first checkpoint: large's second waits, and small's plays nothing.
+    # Small has saved only its first checkpoint: large's second waits; small's plays itself.
     assert held(lines(1), checkpoint=large[1]) == 0
-    assert held(lines(1), checkpoint=small[0]) == 0
+    assert held(lines(1), checkpoint=small[0]) == 1
     assert held(lines(1), checkpoints=large) == 1
     # Small saves its second: a batch hold plays large's second against it, once.
     assert held(lines(2)) == 1
@@ -140,9 +140,9 @@ def test_a_relative_seat_waits_for_its_checkpoint_and_a_batch_hold_plays_it_once
     assert [each.played for each in again] == [0, 0] and again[0].name == again[1].name
     with statsdb(EXPERIMENT, bucket) as db:
         (line,) = scores(db, "paired", table="plays", value="won")
-    assert (line.seating, [p.name for p in line.points]) == (
-        "large vs small",
-        ["updates-100.pt", "updates-200.pt"],
+    # No training run recorded these checkpoints: one line of every held checkpoint played.
+    assert sorted(p.checkpoint for p in line.points) == sorted(
+        str(ref.key) for ref in (large[0], large[1], small[0])
     )
 
 

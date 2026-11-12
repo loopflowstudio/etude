@@ -506,8 +506,9 @@ def test_relative_seats_fill_in_as_their_jobs_save_and_the_report_says_what_is_m
     experiment = read_experiment(file)
     local = tmp_path / "evaluator"
     (first,) = advance(experiment, source=bucket, directory=local)
-    # Half-training for 200 of each and 400 of large; large against small at 100 and 200.
-    assert (first.new, first.played) == (5, 5)
+    # Half-training for 200 of each and 400 of large; large against small at 100 and 200,
+    # and small against itself at both.
+    assert (first.new, first.played) == (7, 7)
 
     def held(seating: str) -> dict[float, tuple[float | None, str | None]]:
         page = build(bucket, file)
@@ -531,11 +532,12 @@ def test_relative_seats_fill_in_as_their_jobs_save_and_the_report_says_what_is_m
     assert half[300] == (None, "its line has no checkpoint at updates 150 and never will")
     assert half[200][0] is not None and half[400][0] is not None
 
-    # Small catches up to 300 and ends there: 300 is played, 400 will never be.
+    # Small catches up to 300 and ends there: 300 is played, for large and against itself;
+    # 400 will never be.
     save(runs["small"], bucket, tmp_path, range(3, 4))
     runs["small"].finish(timeout=30)
     (second,) = advance(experiment, source=bucket, directory=local)
-    assert (second.new, second.played) == (1, 1)
+    assert (second.new, second.played) == (2, 2)
     against = held("large vs small")
     assert against[300][0] is not None
     assert against[400] == (None, "small has no checkpoint at updates 400 and never will")
