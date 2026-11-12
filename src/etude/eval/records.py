@@ -503,58 +503,48 @@ class Rollup(Record):
         return self
 
 
-class Earlier(Record):
-    """The held checkpoint's line exactly `by` before it on `clock`, playing as `inference`.
+class _OnClock(Record):
+    """A relative seat that looks for a position on `clock`, playing as `inference`.
 
-    With `job`, each of that job's lines instead. Positions are exact: with
-    no checkpoint there, the seat is a gap. With `at_or_before`, the latest
-    checkpoint at or before there instead, once the line has saved past it
-    or ended, so what it finds never changes after. With `trained`, only a
-    checkpoint saved after training began: the line's initial weights, where
-    every clock its run declared stands at 0, are never seated, and a held
-    checkpoint with no trained one to meet is a gap for good.
+    It looks in the held checkpoint's line, or with `job` in each of that
+    job's lines. Positions are exact: with no checkpoint there, the seat is a
+    gap. With `at_or_before`, the latest checkpoint at or before there
+    instead, once the line has saved past it or ended, so what it finds never
+    changes after. With `trained`, only a checkpoint saved after training
+    began: the line's initial weights, where every clock its run declared
+    stands at 0, are never seated, and a held checkpoint with no trained one
+    to meet is a gap for good.
     """
 
-    kind: Literal["earlier"] = "earlier"
     clock: str
-    by: float = Field(gt=0)
     inference: Inference
     job: str | None = None
     at_or_before: bool = False
     trained: bool = False
 
 
-class Fraction(Record):
+class Earlier(_OnClock):
+    """The held checkpoint's line exactly `by` before it on `clock`."""
+
+    kind: Literal["earlier"] = "earlier"
+    by: float = Field(gt=0)
+
+
+class Fraction(_OnClock):
     """The held checkpoint's line at exactly `value` × its position on `clock`.
 
-    `Fraction(clock="updates", value=0.5, ...)` seats 3,000 for 6,000. With
-    `at_or_before`, the latest checkpoint at or before it, and with `trained`,
-    never the line's initial weights, as for `Earlier`.
+    `Fraction(clock="updates", value=0.5, ...)` seats 3,000 for 6,000.
     """
 
     kind: Literal["fraction"] = "fraction"
-    clock: str
     value: float = Field(gt=0, lt=1)
-    inference: Inference
-    job: str | None = None
-    at_or_before: bool = False
-    trained: bool = False
 
 
-class At(Record):
-    """The held checkpoint's line at `value` on `clock`, such as its initial weights at 0.
-
-    With `at_or_before`, the latest checkpoint at or before it, and with
-    `trained`, never the line's initial weights, as for `Earlier`.
-    """
+class At(_OnClock):
+    """The held checkpoint's line at `value` on `clock`, such as its initial weights at 0."""
 
     kind: Literal["at"] = "at"
-    clock: str
     value: float
-    inference: Inference
-    job: str | None = None
-    at_or_before: bool = False
-    trained: bool = False
 
 
 class Final(Record):
@@ -565,19 +555,11 @@ class Final(Record):
     job: str | None = None
 
 
-class Aligned(Record):
-    """Each of job `job`'s lines at exactly the held checkpoint's position on `clock`.
-
-    With `at_or_before`, the latest checkpoint at or before it, and with
-    `trained`, never a line's initial weights, as for `Earlier`.
-    """
+class Aligned(_OnClock):
+    """Each of job `job`'s lines at exactly the held checkpoint's position on `clock`."""
 
     kind: Literal["aligned"] = "aligned"
-    clock: str
     job: str
-    inference: Inference
-    at_or_before: bool = False
-    trained: bool = False
 
 
 # A seat naming a checkpoint by where it stands relative to the one a seating is held for.
@@ -799,10 +781,12 @@ class Seating(Record):
                     checkpoint=checkpoint.key,
                     missing="not_yet" if unknown or "not_yet" in results else "never",
                     job=relative.job,
-                    clock=None if isinstance(relative, Final) else relative.clock,
                     position=_position(relative, checkpoint),
-                    at_or_before=not isinstance(relative, Final) and relative.at_or_before,
-                    trained=not isinstance(relative, Final) and relative.trained,
+                    **(
+                        {}
+                        if isinstance(relative, Final)
+                        else relative.model_dump(include={"clock", "at_or_before", "trained"})
+                    ),
                 )
         # Pairs in seed order, (mine, theirs); this checkpoint's are contiguous from `first`.
         pairs = max(len(mine), 1) * len(found)

@@ -424,10 +424,11 @@ def _place(block: StoredBlock, clock: str) -> _Placed:
     h = block.header
     given: _Given | None = None
     column = next((c for c in h.clocks if c.name == clock), None)
-    first, last = (column.first, column.last) if column is not None else (None, None)
-    if column is not None and column.increasing and first is not None and last is not None:
-        given = _Given(first, last, first)
-    if given is None and column is not None:
+    if column is None:
+        return _Placed(block.key, h.writer, h.first, h.wall_first, None)
+    if column.increasing and column.first is not None and column.last is not None:
+        given = _Given(column.first, column.last, column.first)
+    else:
         x = _clock(block, clock)
         x = x[~np.isnan(x)]
         if len(x):

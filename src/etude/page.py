@@ -630,8 +630,8 @@ def _read_evals(
     want: Callable[..., object] | None,
     data: Sequence[RunData],
 ) -> _Evals:
-    # The optional `eval` extra (DuckDB, and etude.eval over it), imported where it is
-    # used: only an experiment with evaluations reads it, so a report without loads none.
+    # The optional `eval` extra (DuckDB, and the etude.eval modules over it), imported where
+    # it is used: only an experiment with evaluations reads it, so a report without loads none.
     from etude.eval.query import statsdb  # noqa: PLC0415
     from etude.experiment import state_of  # noqa: PLC0415
 
