@@ -369,11 +369,28 @@ test("union curves keep jobs separate and subject filtering omits the complement
 });
 
 test("job labels retain seed counts and baseline identity", () => {
-  const data = page([], [], {jobs: [{key: "id", name: "large", label: "large · 2 seeds", runs: ["a", "b"]}], runs: [], checkpoints: [], clocks: []});
+  const data = page([], [], {jobs: [{key: "id", name: "large", launch: "large", label: "large · 2 seeds", runs: ["a", "b"]}], runs: [], checkpoints: [], clocks: []});
   data.report.labels = {large: "Large model"}; data.report.baseline = "large";
   const [job] = context.model(data).JOBS;
   assert.equal(job.label, "Large model · 2 seeds");
   assert.equal(job.name, "large"); assert.equal(job.key, "id"); assert.equal(job.baseline, true);
+});
+
+test("a launch name addresses every config job launched under it; a full name addresses one", () => {
+  const jobs = [
+    {key: "ppo 1a2b3c", name: "ppo 1a2b3c", launch: "ppo", label: "ppo 1a2b3c · 3 seeds", runs: ["a", "b", "c"]},
+    {key: "ppo 4d5e6f", name: "ppo 4d5e6f", launch: "ppo", label: "ppo 4d5e6f · 1 seed", runs: ["d"]},
+    {key: "dqn", name: "dqn", launch: "dqn", label: "dqn · 1 seed", runs: ["e"]},
+  ];
+  const data = page([], [], {jobs, runs: [], checkpoints: [], clocks: []});
+  data.report.labels = {ppo: "PPO", dqn: "DQN"}; data.report.baseline = "ppo";
+  const m = context.model(data);
+  assert.deepEqual(Array.from(m.panelJobs({subject: "ppo"}), j => j.label), ["PPO 1a2b3c · 3 seeds", "PPO 4d5e6f · 1 seed"]);
+  assert.deepEqual(Array.from(m.panelJobs({subject: "ppo 4d5e6f"}), j => j.name), ["ppo 4d5e6f"]);
+  assert.deepEqual(Array.from(m.JOBS, j => j.baseline), [true, true, false]);
+  assert.equal(m.JOBS[2].label, "DQN · 1 seed");
+  data.report.labels = {ppo: "PPO", "ppo 4d5e6f": "High learning rate"};
+  assert.equal(context.model(data).JOBS[1].label, "High learning rate · 1 seed");
 });
 
 test("score tooltips name the interval and row unit without changing values", () => {

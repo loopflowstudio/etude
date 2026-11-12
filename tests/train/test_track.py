@@ -529,7 +529,7 @@ def test_a_job_relaunched_with_another_config_is_its_own_job(
         run.finish()
     jobs = training([read(tmp_path, "pilot", f"seed-{seed}") for seed in range(3)]).jobs
     digests = [sha256(json.dumps(c, sort_keys=True).encode()).hexdigest()[:6] for c in configs]
-    assert [(job.name, job.runs) for job in jobs] == [
-        (f"ppo {digests[0]}", ("seed-0", "seed-1")),
-        (f"ppo {digests[2]}", ("seed-2",)),
+    assert [(job.name, job.launch, job.runs) for job in jobs] == [
+        (f"ppo {digests[0]}", "ppo", ("seed-0", "seed-1")),
+        (f"ppo {digests[2]}", "ppo", ("seed-2",)),
     ]

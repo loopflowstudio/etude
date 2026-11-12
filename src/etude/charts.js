@@ -187,11 +187,15 @@ function model(D) {
   // Only external curves carry a line; the empty string is the unnamed learner.
   const curves = [...T.jobs, ...named.map(line => {
     const name = line || "checkpoints with no line";
-    return {key: "~line:" + line, name, label: name, runs: [lineRun(line)], line};
+    return {key: "~line:" + line, name, launch: name, label: name, runs: [lineRun(line)], line};
   })];
+  // A report names a job by its full name, or by its launch name for every config launched under it.
+  const names = (j, n) => n === j.name || n === j.launch;
+  // A full-name label wins; a launch-name label keeps the config digest ("PPO 1a2b3c").
+  const shown = j => R.labels?.[j.name] ?? (R.labels?.[j.launch] == null ? null : R.labels[j.launch] + j.name.slice(j.launch.length));
   const JOBS = curves.map((j, i) => ({...j,
-    label: R.labels?.[j.name] == null ? j.label : R.labels[j.name] + (j.line == null ? ` · ${j.runs.length} seed${j.runs.length === 1 ? "" : "s"}` : ""),
-    index: i, color: `--j${i % 8 + 1}`, baseline: R.baseline != null && R.baseline === j.name}));
+    label: shown(j) == null ? j.label : shown(j) + (j.line == null ? ` · ${j.runs.length} seed${j.runs.length === 1 ? "" : "s"}` : ""),
+    index: i, color: `--j${i % 8 + 1}`, baseline: R.baseline != null && names(j, R.baseline)}));
   const marks = new Map(); for (const m of T.checkpoints) { if (!marks.has(m.run)) marks.set(m.run, []); marks.get(m.run).push(m); }
   // A line curve has a mark per position, as a run has one per checkpoint.
   const lineMarks = new Map();
@@ -331,7 +335,7 @@ function model(D) {
     const candidates = present.length ? present : fits;
     return candidates.find(i => D.selections[i].tournament === D.selections[selected]?.tournament) ?? candidates[0] ?? null;
   }
-  const panelJobs = (panel, jobs = JOBS) => panel.subject == null ? jobs : jobs.filter(j => j.name === panel.subject);
+  const panelJobs = (panel, jobs = JOBS) => panel.subject == null ? jobs : jobs.filter(j => names(j, panel.subject));
   function scheduleSeries(panel, jobs = JOBS) {
     return jobs.flatMap(job => {
       const samples = panel.jobs[job.name];

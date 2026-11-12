@@ -113,7 +113,8 @@ class Curve(Record):
     section's Opponent control: a player's name, or a checkpoint of the same
     line (`Earlier`, `Fraction`, `At`). None leaves it to the control.
     A tuple of `matches` unions their matches before aggregation; `subject`
-    selects one job by its original name. `inference` selects an exact scientific
+    selects the jobs launched under a name (one per config), or one job by
+    its full name ("ppo 1a2b3c"). `inference` selects an exact scientific
     inference config when the matches seat several variants of one checkpoint.
     """
 
@@ -289,8 +290,11 @@ class Report(Record):
 
     `score` None offers every numeric column of every eval table. `clock`
     names the x axis each section starts on (default: the first declared
-    clock). `baseline` names the job drawn dotted.
-    `labels` replaces displayed job names, keeping seed counts and identity.
+    clock). `baseline` names the job drawn dotted. `baseline`, `labels` and
+    `Curve.subject` name a job by its launch name, which covers every config
+    launched under it, or by its full name ("ppo 1a2b3c"), which covers one.
+    `labels` replaces displayed job names, keeping config digests, seed counts
+    and identity.
     A build reads and draws only the metrics its panels name.
     `other_metrics=True` also draws every other logged metric, last under ML
     details, and so reads each training run's whole metric index; an

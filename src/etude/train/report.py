@@ -30,10 +30,15 @@ WALL_MEANING = "wall time since the run first started"
 
 
 class Job(Record):
-    """Runs that differ only by provenance: seed, device and commit. Its key is its name."""
+    """Runs that differ only by provenance: seed, device and commit. Its key is its name.
+
+    `launch` is the name it was launched under; `name` adds the config digest
+    when that launch name has jobs with several configs ("ppo 1a2b3c").
+    """
 
     key: str
     name: str
+    launch: str
     label: str  # the name and its seed count, as every chart's key shows it
     runs: tuple[str, ...]
 
@@ -189,8 +194,8 @@ def _jobs(data: Sequence[RunData]) -> tuple[Job, ...]:
     The launcher's job key includes the commit, so grouping by name pools a
     job's runs across commits and devices with its seeds: these are provenance,
     and a report addresses jobs by name. A config is scientific: a name launched
-    with several configs becomes one job per config, "ppo 1a2b3c", which a bare
-    name in `subject` or `baseline` matches none of.
+    with several configs becomes one job per config, "ppo 1a2b3c"; a report
+    naming "ppo" addresses all of them.
     """
     members: dict[tuple[str, str | None], list[RunData]] = {}
     # In launch order: a job's colour follows when it started, never its rank.
@@ -205,7 +210,13 @@ def _jobs(data: Sequence[RunData]) -> tuple[Job, ...]:
         name = named if configs[named] == 1 else f"{named} {(config or 'none')[:6]}"
         seeds = f"{len(runs)} seed{'s' if len(runs) > 1 else ''}"
         jobs.append(
-            Job(key=name, name=name, label=f"{name} · {seeds}", runs=tuple(r.name for r in runs))
+            Job(
+                key=name,
+                name=name,
+                launch=named,
+                label=f"{name} · {seeds}",
+                runs=tuple(r.name for r in runs),
+            )
         )
     return tuple(jobs)
 

@@ -399,14 +399,17 @@ on the run's first declared clock. The `baseline` job is dotted everywhere; a
 job's colour follows launch order. `Report(labels={"ppo": "PPO baseline"})`
 replaces the displayed job name, keeping the seed count. Labels change
 presentation only: `baseline` and panel subjects still refer
-to the original job names. Unlabelled jobs keep their launch names.
+to the launch names. Unlabelled jobs keep their launch names.
 
 **Execution setup** is result provenance, like the seed: (device, code
 revision, seed) records how a result was produced, and the page aggregates
 over it rather than splitting by it. A job's training runs on different
 devices or commits are pooled with its seeds: runs launched under one job
 name and config are one job. A config change under the same name shows as two
-jobs, each named with its config digest ("ppo 1a2b3c"). Games played on different
+jobs, each named with its config digest ("ppo 1a2b3c"). The launch name still
+addresses both: `subject="ppo"` draws each as its own line, `baseline="ppo"`
+dots both, and `labels={"ppo": "PPO"}` shows "PPO 1a2b3c · 3 seeds". The full
+name, `subject="ppo 1a2b3c"`, selects one. Games played on different
 devices, compute setups or code revisions contribute to the same requested
 matches; a replay counts once, from its latest delivered result. There is no Config
 control. Record the actual setup with `Result.execution`, inspect it alongside
@@ -751,6 +754,9 @@ half-training self, labelled "Width 64 · 3 seeds" and "Width 160, 8 layers ·
 Fix a title or a panel in `manabot/reports.py` and click **Refresh** on any
 page that uses it: the page is rebuilt from the edited module, with no
 restart. The tags must be on the benchmark's matchups, as for any `Matches`.
+The template names jobs by launch name, so a job relaunched with a changed
+config is still drawn and labelled, once per config ("Width 64 1a2b3c · 3
+seeds").
 
 The division of work:
 
