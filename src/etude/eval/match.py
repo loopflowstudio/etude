@@ -8,8 +8,9 @@ game's replay evidence, which rows name by SHA256. A `Rollup` declared by the
 run is summed once per match as it is stored. Etude checks that every row
 names a `seat` or a `group` of its match and that a column keeps one type
 through the run, adds `run` and `match`, and stages the match
-(`etude.eval.block.Staging`). A refused or raising match is recorded as
-failed, nothing else of it is stored, and the run stops.
+(`etude.eval.block.Staging`). A refused or raising match, including one
+that returns no rows, is recorded as failed, nothing else of it is stored,
+and the run stops and ends failed.
 
 Staged matches are sealed into a block every few minutes, on a failure and on
 finish, and each block is offered to every destination once sealed: a run
@@ -58,6 +59,7 @@ from etude.eval.records import (
     ADDED,
     COLUMN_TYPES,
     IDENTIFIER,
+    NO_ROWS,
     ColumnType,
     Config,
     Environment,
@@ -163,9 +165,10 @@ def evaluate(
     totals are never taken again. Prints one line to
     stderr as each match is stored: how many of the pending are, and since
     when. Raises
-    `EtudeError("match_failed")` after recording the first match that raised
-    or returned rows Etude refuses. Delivery failures do not raise: the files
-    stay in the run's directory for `etude sync`, and stderr says so.
+    `EtudeError("match_failed")` after recording the first match that raised,
+    returned no rows or returned rows Etude refuses. Delivery failures do not
+    raise: the files stay in the run's directory for `etude sync`, and stderr
+    says so.
     """
     if workers < 1:
         raise EtudeError("workers_must_be_positive", 422)
@@ -394,6 +397,8 @@ class _Writer:
                 for table, rows in checked.items()
                 if rows
             }
+            if not types:
+                raise EtudeError(NO_ROWS, 422)
             if not all(isinstance(blob, bytes) for blob in result.blobs):
                 raise EtudeError("blob_must_be_bytes", 422)
         except EtudeError as refused:

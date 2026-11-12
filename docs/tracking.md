@@ -574,8 +574,9 @@ matches, no interval is shown.
 
 Gaps stay visible. A checkpoint nothing played is marked not evaluated and is
 no point of a line. One `eval(state)` wants that no eval run has delivered is
-marked not yet played, and failed matches are marked and listed; both break a
-line rather than bridge it. A job's point needs every seed. A column, tournament,
+marked not yet played, and failed matches, including any stored with no
+rows, are marked and listed with their errors; both break a line rather than
+bridge it. A job's point needs every seed. A column, tournament,
 matchup or tag a panel names that nothing holds is said so.
 
 **Perf** draws what Etude records for training runs: `Pace` (each step clock
