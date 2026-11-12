@@ -30,7 +30,7 @@ etude = "etude.cli:main"
 packages = ["src/etude"]
 
 [dependency-groups]
-dev = ["pytest>=8,<10", "mypy>=1.15,<2", "ruff>=0.11,<1", "moto[s3]>=5,<6", "etude-sdk[eval]"]
+dev = ["pytest>=8,<10", "mypy>=1.15,<3", "ruff>=0.11,<1", "moto[s3]>=5,<6", "etude-sdk[eval]"]
 
 [tool.mypy]
 python_version = "3.12"
