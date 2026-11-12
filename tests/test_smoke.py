@@ -10,13 +10,13 @@ import pytest
 from etude.cli import main
 from etude.launch.client import default, queue_cohort
 from etude.launch.errors import LauncherError
-from etude.launch.records import Job, Tiny
+from etude.launch.records import Job, SmokeForm
 from etude.run.records import Clock
 from etude.run.storage import default_root
 from etude.train.run import track
 
 # Saves one checkpoint at the given number of updates; refuses a real-sized run, so a
-# passing smoke shows its tiny form ran rather than the job's own command.
+# passing smoke shows its smoke form ran rather than the job's own command.
 TRAIN = """
 import sys
 from pathlib import Path
@@ -40,7 +40,7 @@ from etude.eval.match import environment
 from etude.eval.records import Benchmark, Code, Inference, Matchup
 from etude.experiment import ExperimentState
 from etude.jobs import evaluation
-from etude.launch.records import Job, Tiny
+from etude.launch.records import Job, SmokeForm
 from etude.report import Report
 from tests.eval.games import {play}
 
@@ -48,7 +48,7 @@ TRAIN = "{python} " + str(Path(__file__).parent / "train.py")
 
 
 def runs(seeds: int = 1, tiny: str = "1", bare: bool = False) -> list:
-    smoke = Tiny(command=f"{{TRAIN}} {{tiny}}") if tiny else None
+    smoke = SmokeForm(command=f"{{TRAIN}} {{tiny}}") if tiny else None
     ppo = Job(command=TRAIN + " 1000", name="ppo", max_hours=0.1, smoke=smoke).runs(*range(seeds))
     plain = Job(command=TRAIN + " 2000", name="plain", max_hours=0.1).runs(0) if bare else []
     return ppo + plain
@@ -138,24 +138,24 @@ def test_a_failing_step_submits_nothing_and_is_named(
     assert default().runs(done=True) == ()
 
 
-def test_a_job_without_a_tiny_form_is_reported_and_queues_as_before(
+def test_a_job_without_a_smoke_form_is_reported_and_queues_as_before(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     file = experiment(tmp_path / "lab")
     assert main(["queue", str(file), "--tiny", ""]) == 0
     said = capsys.readouterr()
-    assert "smoke train ppo: not smoked (no tiny form)" in said.err
+    assert "smoke train ppo: not smoked (no smoke form)" in said.err
     (id,) = _ids(said.out)
     assert default().record(id).smoke.outcome == "not_smoked"
 
 
-def test_a_job_without_a_tiny_form_beside_one_with_it_is_not_recorded_passed(
+def test_a_job_without_a_smoke_form_beside_one_with_it_is_not_recorded_passed(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     file = experiment(tmp_path / "lab")
     assert main(["queue", str(file), "--bare", "--cohort", "c"]) == 0
     said = capsys.readouterr()
-    assert "smoke train plain: not smoked (no tiny form)" in said.err
+    assert "smoke train plain: not smoked (no smoke form)" in said.err
     ppo, plain = (default().record(id) for id in _ids(said.out))
     assert (ppo.spec.name, plain.spec.name) == ("ppo", "plain")
     assert ppo.smoke.outcome == "passed"
@@ -168,7 +168,7 @@ def test_a_job_without_a_tiny_form_beside_one_with_it_is_not_recorded_passed(
     assert [(s.step, s.name) for s in plain.smoke.steps][0] == ("train", "plain")
     assert main(["status", plain.id]) == 0
     assert "passed" not in capsys.readouterr().out
-    assert str(plain.smoke) == "not smoked (train: no tiny form)"
+    assert str(plain.smoke) == "not smoked (train: no smoke form)"
 
 
 def test_a_tiny_job_that_saves_no_checkpoint_leaves_eval_not_smoked(
@@ -263,12 +263,12 @@ def test_a_launched_eval_run_records_its_smoke(
 
 
 def test_the_python_client_smokes_when_asked(tmp_path: Path) -> None:
-    broken = Job(command="true", name="broken", max_hours=0.1, smoke=Tiny(command="exit 3"))
+    broken = Job(command="true", name="broken", max_hours=0.1, smoke=SmokeForm(command="exit 3"))
     with pytest.raises(LauncherError, match="smoke train broken: .*nothing was submitted"):
         queue_cohort("refused", broken.runs(1, 2), "local", smoke=True)
     assert default().runs(done=True) == ()
     (plain,) = queue_cohort("plain", broken.runs(1), "local")
     assert default().record(plain).smoke.outcome == "not_smoked"
-    fine = broken.model_copy(update={"smoke": Tiny(command="true")})
+    fine = broken.model_copy(update={"smoke": SmokeForm(command="true")})
     (smoked,) = queue_cohort("kept", fine.runs(1), "local", smoke=True)
     assert default().record(smoked).smoke.outcome == "passed"

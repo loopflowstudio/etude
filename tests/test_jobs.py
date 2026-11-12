@@ -150,7 +150,7 @@ def test_a_config_the_function_cannot_take_is_refused_before_anything_launches(
         read_job_file(repo / "job.py", ["--python", "python3.12"])
 
 
-def test_a_training_jobs_tiny_form_is_its_smoke_config(tmp_path: Path) -> None:
+def test_a_training_jobs_smoke_form_is_its_smoke_config(tmp_path: Path) -> None:
     config = "TrainConfig(lr=0.25), smoke=TrainConfig(lr=0.5, layers=(8,))"
     repo = checkout(
         tmp_path / "lab",
@@ -160,7 +160,7 @@ def test_a_training_jobs_tiny_form_is_its_smoke_config(tmp_path: Path) -> None:
     small = tiny(run.job)
     assert small is not None and small.smoke is None
     assert (small.command, small.config) == (run.job.command, '{"lr":0.5,"layers":[8]}')
-    # The tiny form is not part of what makes the job itself.
+    # The smoke form is not part of what makes the job itself.
     assert job_identity(run.job) == job_identity(run.job.model_copy(update={"smoke": None}))
 
 
@@ -227,7 +227,7 @@ def test_an_unpackaged_uv_project_prepares_its_environment_once_per_lock(
 
 def test_typed_jobs_take_every_job_field_but_what_they_derive() -> None:
     # The experiment is the launched file's, or an evaluation's own `experiment`; a
-    # training job's tiny form is its `smoke` config, and an evaluation's is Etude's.
+    # training job's smoke form is its `smoke` config, and an evaluation's is Etude's.
     derived = {"command", "config", "experiment", "smoke"}
     assert set(JobOptions.__annotations__) == set(Job.model_fields) - derived
 

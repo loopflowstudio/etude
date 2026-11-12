@@ -191,7 +191,7 @@ def smoke_experiment(
     ] = False,
     help: FileHelp = False,
 ) -> None:
-    """Run a file's training, evaluation and report in tiny form on this computer. Spends nothing."""
+    """Run a file's training, evaluation and report in smoke form on this computer. Spends nothing."""
     if help:
         print(ctx.get_help())
     if file is None:

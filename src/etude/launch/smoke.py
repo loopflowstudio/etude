@@ -6,12 +6,12 @@ records, checkpoints or artifact cache. Prepared environments and installed
 programs are content-addressed and lock-guarded, so the real ones are shared
 and a second smoke does not build them again.
 
-`smoke_train` is the train step: each distinct job's tiny form (`Job.smoke`,
+`smoke_train` is the train step: each distinct job's smoke form (`Job.smoke`,
 applied by `tiny`) launched on that launcher's `local` pool, through the same
 path a real local run takes. `etude.smoke` adds the experiment file's
 evaluation and report; the Python client calls `smoke_train` alone. `Smoked`
 stamps each run with its own job's train step and the file's other steps, so
-a job without a tiny form is never recorded as passed beside one that has it.
+a job without a smoke form is never recorded as passed beside one that has it.
 """
 
 from __future__ import annotations
@@ -70,7 +70,7 @@ def smoke_home(*, keep: bool = False) -> Iterator[Path]:
 
 
 def tiny(job: Job) -> Job | None:
-    """The job with its tiny form's overrides, or None when it declares none."""
+    """The job with its smoke form's overrides, or None when it declares none."""
     if job.smoke is None:
         return None
     return job.model_copy(update={**job.smoke.model_dump(exclude_none=True), "smoke": None})
@@ -110,7 +110,7 @@ def job_key(job: Job) -> str:
 def smoke_train(runs: Sequence[Run], folder: Path) -> list[Trained]:
     """Each distinct job of `runs` (seeds dropped) run tiny here, one after another.
 
-    `folder` is a `smoke_home`. A job without a tiny form is `not_smoked`. The
+    `folder` is a `smoke_home`. A job without a smoke form is `not_smoked`. The
     first that does not succeed prints its job's output and raises
     `LauncherError` naming it.
     """
@@ -134,7 +134,7 @@ def _train(scheduler: Scheduler, key: str, run: Run) -> Trained:
     if job is None:
         return Trained(
             job=key,
-            step=SmokeStep(step="train", name=name, outcome="not_smoked", detail="no tiny form"),
+            step=SmokeStep(step="train", name=name, outcome="not_smoked", detail="no smoke form"),
         )
     started = time.monotonic()
     launched = scheduler.launch(Run(job=job, seed=run.seed, params=dict(run.params)), "local")

@@ -432,7 +432,7 @@ etude eval ppo.py --source s3://bucket/etude/launch --rent cpu8 --watch 600
 ```
 
 `etude smoke ppo.py` runs the file's `runs()`, `eval(state)` and `report()` in
-tiny form on this computer first, one game per match against tiny
+smoke form on this computer first, one game per match against tiny
 checkpoints, and `etude launch` and a launching `etude eval` do so before they
 spend ([Smoke before you spend](launcher.md#smoke-before-you-spend)).
 

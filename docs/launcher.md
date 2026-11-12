@@ -22,7 +22,7 @@ before renting from R. A run that cannot start yet waits.
 | `etude queue FILE.py [--pool P] [--rent R]` | Add runs. They start when a machine is free or can be rented; lack of capacity leaves them waiting. |
 | `etude launch FILE.py [--pool P] [--rent R]` | Acquire machines for the first runs (up to cohort parallelism), then record the runs. Failure records no runs. |
 | `etude launch FILE.py ... --quote` | Print the machines the first wave would take and their planned rental costs. Rents nothing. |
-| `etude smoke FILE.py` | Run the file's training, evaluation and report in tiny form on this computer. Spends nothing. `launch` and `queue` do this first ([Smoke before you spend](#smoke-before-you-spend)). |
+| `etude smoke FILE.py` | Run the file's training, evaluation and report in smoke form on this computer. Spends nothing. `launch` and `queue` do this first ([Smoke before you spend](#smoke-before-you-spend)). |
 | `etude availability R` | Ask R's provider what it would rent now, at what price. Rents nothing. |
 | `etude rent R --hours H` | Rent a machine for a window of time; it takes queued runs. |
 
@@ -314,7 +314,7 @@ A smoke runs each part of an experiment file through the same code as the real
 thing, only small, in order:
 
 1. **Train.** Each job `runs()` returns, run once on this computer with its
-   tiny form, through the `local` pool's real path: its environment is prepared,
+   smoke form, through the `local` pool's real path: its environment is prepared,
    a worker starts, and it writes a real tracked checkpoint. Seeds are dropped,
    so a cohort of three seeds is smoked once.
 2. **Evaluate.** `eval(state)` is called on the smoke's runs and checkpoints.
@@ -329,21 +329,21 @@ output, names the step, and exits 1. `launch` and `queue` then submit, queue,
 rent and publish nothing. A file with no `eval(state)` skips evaluation, and a
 file that is no experiment file skips evaluation and report; each says so.
 
-**A job's tiny form is declared on the job.** Etude does not look inside your
-training code to shrink it. `Job.smoke` is a `Tiny` of overrides used in place
+**A job's smoke form is declared on the job.** Etude does not look inside your
+training code to shrink it. `Job.smoke` is a `SmokeForm` of overrides used in place
 of the job's own for the smoke run; any it leaves unset keep the job's value:
 
 | Field | Replaces | Example |
 | --- | --- | --- |
 | `config` | the typed job's config | `training(train, config=..., smoke=TrainConfig(updates=1))` |
-| `command` | a command job's command | `Job(command="manabot train", smoke=Tiny(command="manabot train --smoke"), ...)` |
-| `until` | the target | `Tiny(until="steps=1")` |
+| `command` | a command job's command | `Job(command="manabot train", smoke=SmokeForm(command="manabot train --smoke"), ...)` |
+| `until` | the target | `SmokeForm(until="steps=1")` |
 
 `training(..., smoke=)` takes a config of the same type as `config`, and is
-checked the same way when the job is made. The tiny form is not part of the
-job's identity: changing it does not make a new job. A job with no tiny form is
+checked the same way when the job is made. The smoke form is not part of the
+job's identity: changing it does not make a new job. A job with no smoke form is
 reported `not smoked`, never passed, and a file none of whose jobs has one
-launches as before, each job's line reporting `not smoked (no tiny form)`.
+launches as before, each job's line reporting `not smoked (no smoke form)`.
 
 **Smoke is local and leaves nothing behind.** It never rents and never needs a
 provider key. Its runs, launcher records, checkpoints and report go to a
@@ -368,8 +368,8 @@ launches nothing if that fails; `--no-smoke` skips it.
 **Skipping is recorded.** Each launched run keeps what its smoke did: passed,
 skipped with `--no-smoke`, or not smoked, with each step's outcome and seconds.
 A run's steps are its own job's training and the file's evaluation and report,
-so in a cohort where only some jobs have a tiny form the others record
-`not smoked (train: no tiny form)`. A declared step the smoke could not
+so in a cohort where only some jobs have a smoke form the others record
+`not smoked (train: no smoke form)`. A declared step the smoke could not
 exercise, such as an evaluation with no checkpoints to play, is not smoked too
 (`not smoked (eval: no checkpoints)`). `etude status RUN` shows it
 (`smoke: passed in 45.1 s (train, eval, report)`, `smoke: skipped (--no-smoke)`),
@@ -377,7 +377,7 @@ and `record.smoke` holds it in Python.
 
 **From Python**, the client's `queue`, `queue_cohort`, `launch` and
 `launch_cohort` take `smoke: bool = False`. With `smoke=True` they smoke the
-train step of each job that has a tiny form before submitting, and raise
+train step of each job that has a smoke form before submitting, and raise
 `LauncherError` naming the failed job. For the whole chain, as the command runs
 it:
 

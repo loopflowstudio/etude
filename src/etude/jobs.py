@@ -63,7 +63,7 @@ from etude.launch.records import (
     Run,
     RunRecord,
     Runtime,
-    Tiny,
+    SmokeForm,
     Variable,
     number,
     parse_target,
@@ -81,7 +81,7 @@ class JobOptions(TypedDict, total=False):
 
     It derives the command and config, the experiment (an evaluation's own,
     else the one `etude launch` reads from an experiment file's name) and the
-    tiny form: a training job's `smoke` config; an evaluation's is Etude's.
+    smoke form: a training job's `smoke` config; an evaluation's is Etude's.
     """
 
     max_hours: Required[float]
@@ -114,14 +114,14 @@ def training[C: BaseModel](
 
     `train` takes one parameter annotated with `config`'s Pydantic type and is
     defined at the top of a module the job's source can import. `smoke` is the
-    config of its tiny form (`etude smoke`), checked the same way. Raises
+    config of its smoke form (`etude smoke`), checked the same way. Raises
     `LauncherError` when it is not, or when a config is not of that type or
     would not validate back into it.
     """
     job = _job(train, config, origin=train, options=options)
     if smoke is None:
         return job
-    return job.model_copy(update={"smoke": Tiny(config=_config_text(train, smoke))})
+    return job.model_copy(update={"smoke": SmokeForm(config=_config_text(train, smoke))})
 
 
 class Evaluation(Record):

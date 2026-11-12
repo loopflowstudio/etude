@@ -13,7 +13,7 @@ Each function uses the selected SSH controller, or a launcher under ETUDE_HOME
 (default ~/.etude) with an initial pool, "local", holding this computer. A
 call names a pool (`pool=`), an on-demand to rent from (`rent=`), or both.
 With `smoke=True`, `queue`, `queue_cohort`, `launch` and `launch_cohort` first
-run each job's tiny form here (`etude.launch.smoke`) and submit nothing if one
+run each job's smoke form here (`etude.launch.smoke`) and submit nothing if one
 fails; each run records what its smoke did. `etude.smoke.smoke_file` smokes a
 whole experiment file, evaluation and report too.
 """

@@ -404,7 +404,7 @@ def _distinct(value: tuple[Input, ...]) -> tuple[Input, ...]:
     return value
 
 
-class Tiny(Record):
+class SmokeForm(Record):
     """How to run a job tiny for `etude smoke`: overrides of the job's own fields.
 
     Each one given replaces the job's for the smoke run; any left unset keeps
@@ -450,7 +450,7 @@ class Job(Record):
     experiment: str | None = None
     # How to run it tiny before spending (`etude smoke`). Not part of its identity:
     # changing it does not make a new job.
-    smoke: Tiny | None = None
+    smoke: SmokeForm | None = None
 
     _check_inputs = field_validator("inputs")(_distinct)
 
@@ -520,12 +520,12 @@ class SourcePosition(Record):
 
 
 class SmokeStep(Record):
-    """One part of an experiment file run in tiny form before its runs were submitted."""
+    """One part of an experiment file run in smoke form before its runs were submitted."""
 
     step: Literal["train", "eval", "report"]
     name: str  # what ran: the job's or tournament's name, or "report"
     # skipped: the file has no such step (no eval(state), not an experiment file).
-    # not_smoked: the file has one that the smoke did not run (no tiny form, no checkpoints).
+    # not_smoked: the file has one that the smoke did not run (no smoke form, no checkpoints).
     outcome: Literal["passed", "not_smoked", "skipped"]
     seconds: float | None = None  # on the submitting machine; None when it did not run
     detail: str = ""  # what it made, such as "1 checkpoint", or why it did not run
@@ -546,7 +546,7 @@ class Smoke(Record):
         """Passed only when a step passed and none was `not_smoked`.
 
         `not_smoked` covers a declared step the smoke did not run (a job with no
-        tiny form, an eval with no checkpoints), a smoke whose every step was
+        smoke form, an eval with no checkpoints), a smoke whose every step was
         skipped, and a Python client called without `smoke=True`.
         """
         if self.no_smoke:
