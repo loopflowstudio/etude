@@ -785,7 +785,7 @@ class Seating(Record):
                     job=relative.job,
                     clock=None if isinstance(relative, Final) else relative.clock,
                     position=_position(relative, checkpoint),
-                    at_or_before=_at_or_before(relative),
+                    at_or_before=not isinstance(relative, Final) and relative.at_or_before,
                 )
         # Pairs in seed order, (mine, theirs); this checkpoint's are contiguous from `first`.
         pairs = max(len(mine), 1) * len(found)
@@ -876,7 +876,7 @@ def _find(seat: Relative, held: CheckpointRef, line: Line) -> CheckpointRef | Mi
         return "never"
     clock, tolerance = seat.clock, _EXACT * max(1.0, abs(wanted))
     passed = any(each.at.get(clock, float("-inf")) > wanted for each in line.checkpoints)
-    if _at_or_before(seat):
+    if seat.at_or_before:
         if not (passed or line.ended):
             return "not_yet"
         before = [
@@ -888,10 +888,6 @@ def _find(seat: Relative, held: CheckpointRef, line: Line) -> CheckpointRef | Mi
         if abs(each.at.get(clock, float("inf")) - wanted) <= tolerance:
             return each
     return "never" if line.ended or passed else "not_yet"
-
-
-def _at_or_before(seat: Relative) -> bool:
-    return not isinstance(seat, Final) and seat.at_or_before
 
 
 class Benchmark(Record):
