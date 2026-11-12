@@ -1349,7 +1349,7 @@ def test_courier_delivers_retained_files_after_socket_timeout(
         courier.carry_out(final=final)
     assert http.objects["/run/run.json"] == payload.read_bytes()
     assert http.posts == 5  # retained file, attempt record, usage
-    assert "pending for" in log.read_text()
+    assert "has not succeeded for" in log.read_text()
     assert ("recovered after" in log.read_text()) is (not final)
 
 

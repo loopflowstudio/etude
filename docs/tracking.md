@@ -151,7 +151,7 @@ delivery resumes when storage recovers. Reports reading the bucket show only
 what has arrived there.
 
 SDK-created boto3 clients use 60-second connection and read socket timeouts,
-so a dead connection releases the uploader.
+so a dead connection releases the uploader once boto3's own retries are spent.
 Set `ETUDE_STORAGE_TIMEOUT_SECONDS` to a positive finite number of seconds before
 creating storage to override both. Boto3 streams large uploads in chunks and
 uses multipart transfers; these are socket limits, not a total checkpoint
@@ -163,6 +163,12 @@ pass. Worker/controller uploads use the [same storage timeout policy](launcher.m
 
 `run.finish(timeout=10)` seals the run and retries final delivery within its
 allowance. Increase `timeout` in seconds to allow longer for final delivery.
+An upload already in progress keeps its socket timeout; `finish()` can return
+before that upload ends, so expiry does not confirm cancellation or delivery.
+The Python process exits only when boto3's transfer threads end. boto3 retries
+each request itself (five attempts by default; set `AWS_MAX_ATTEMPTS`), so on a
+dead connection exit can wait attempts × `ETUDE_STORAGE_TIMEOUT_SECONDS`: five
+minutes with the defaults.
 If files remain undelivered, it reports their local location for `etude sync`.
 For launched runs, the worker owns delivery and its final allowance is capped
 by the rental deadline. Inspect `etude status RUN` and `etude logs --run RUN` for

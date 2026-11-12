@@ -193,7 +193,10 @@ class Courier:
         self._inbox: Version | None = None  # the inbox as last read
         self._usage_sent = -1  # bytes of the usage journal last delivered
         self._cache = _cache()
-        self._delivery_failed_at: float | None = None
+        # Monotonic time of the last pass that left every file delivered, or the
+        # courier's start: a stall is reported from here, not from its first failure.
+        self._delivered_at = time.monotonic()
+        self._pending = False
 
     def _retain_transfer(self, raw: str) -> None:
         """Keep a transfer in the session's usage journal, not the worker log.
@@ -397,21 +400,22 @@ class Courier:
         try:
             self._carry_files(final)
         except (StorageUnavailable, OSError, ValueError) as error:
-            if self._delivery_failed_at is None:
-                self._delivery_failed_at = time.monotonic()
-            minutes = (time.monotonic() - self._delivery_failed_at) / 60
+            self._pending = True
             write_log(
                 "output delivery",
-                f"pending for {minutes:.1f} minutes ({type(error).__name__}); local files retained",
+                f"has not succeeded for {self._stalled_minutes():.1f} minutes"
+                f" ({type(error).__name__}); local files retained",
             )
             raise
-        if self._delivery_failed_at is not None:
-            minutes = (time.monotonic() - self._delivery_failed_at) / 60
-            # Final delivery belongs to a producer that has already closed its
-            # log. Its end receipt confirms recovery; append no output after EOF.
-            if not final:
-                write_log("output delivery", f"recovered after {minutes:.1f} minutes")
-            self._delivery_failed_at = None
+        # Final delivery belongs to a producer that has already closed its log.
+        # Its end receipt confirms recovery; append no output after EOF.
+        if self._pending and not final:
+            write_log("output delivery", f"recovered after {self._stalled_minutes():.1f} minutes")
+        self._pending = False
+        self._delivered_at = time.monotonic()
+
+    def _stalled_minutes(self) -> float:
+        return (time.monotonic() - self._delivered_at) / 60
 
     def _carry_files(self, final: bool) -> None:
         failure: Exception | None = None
