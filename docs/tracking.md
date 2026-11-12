@@ -338,8 +338,9 @@ Without `--serve`, the result is one HTML file per experiment, with its data
 inlined: no server and no network to view it. Rerun the command to update that
 snapshot; reloading a saved HTML file cannot fetch new training results.
 The experiment is named for the file, and the page follows the
-file's `report()`; a file without one gets `Report()`, and the page says so at
-its top. Reports read files and never launch or rent anything.
+file's `report()`; a file without one gets `Report(other_metrics=True)`, every
+logged metric, and the page says so at its top. Reports read files and never
+launch or rent anything.
 From a directory the page goes to
 `reports/` beside its runs, from a bucket to `./reports`; `--out DIR` chooses.
 `--serve` has no login and defaults to this computer only
@@ -491,7 +492,6 @@ def report() -> Report:
     return Report(
         score=Score(table="plays", value="won", reference=0.5, unit="games"),
         labels={"small": "Small model", "large": "Large model"},
-        other_metrics=False,
         evals=(
             Curve(
                 title="Against half-training checkpoints",
@@ -573,17 +573,33 @@ checkpoint), `Attempts`, and `Flame`, an icicle of the seconds logged under
 `time/` (`time/collection`, `time/collection/inference`: seconds since the
 previous row). **ML details** default to reinforcement learning's `Counters`
 and `Series` over `rl/` keys; pass `perf=` or `ml=` to name an experiment's
-own. Keys a panel names that no run logged are listed, and metrics no panel
-names are drawn last.
+own. Keys a panel names that no run logged are listed.
 
-For a large metric vocabulary, use `Report(other_metrics=False)`. Only keys
-named by `Series` and `Counters`, and prefixes named by `Flame`, are read and
-drawn. This reads one immutable block header at a time instead of parsing the
-cumulative training index, retaining only the selected columns. All clocks,
-checkpoints and continuation coordinates are preserved. Memory still includes
-one full header and the selected series; this does not bound the size of an
-individual block header. The default, `other_metrics=True`, includes all logged
-metrics.
+A report reads and draws only the keys named by `Series` and `Counters` and
+the prefixes named by `Flame`. It reads each immutable block once, whole,
+instead of parsing the cumulative training index, retaining only the selected
+columns of its header; charts then read the block's arrays from Etude's
+storage cache. All clocks, checkpoints and continuation coordinates are
+preserved. Memory still includes one full block while it is read and the
+selected series; this does not bound the size of an individual block.
+
+`Report(other_metrics=True)` also draws every metric no panel names, last
+under ML details, by parsing each training run's cumulative index. An
+experiment without `report()` gets this, since it declares nothing; for a large
+metric vocabulary, define `report()` and name the metrics to draw.
+
+**What a build reads.** Perf and ML details read the metric blocks of training
+runs only, once per build; `eval(state)` is given the runs' checkpoints without
+reading any metric data. An eval run contributes its `run.json`, `state.json`,
+its tournament or environment record and each block's index and tables; its
+blobs, such as replay evidence, are never read to draw a page. Unless
+`other_metrics=True`, a build's memory therefore follows the metrics and tables
+the report draws, not how much data its runs hold. Bytes a build reads stay in
+Etude's storage cache, so building the same page again over unchanged runs
+downloads almost nothing: it lists the runs and reads only what was delivered
+since. A training index is rewritten as its run grows, so with
+`other_metrics=True` a build of a running experiment reads it again whenever it
+has changed.
 
 ```python
 from etude.report import ML, Report, Schedule, SchedulePoint

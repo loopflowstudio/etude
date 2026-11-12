@@ -10,11 +10,14 @@ A later write at the same clock value replaces an earlier one.
 Superseded rows stay on disk. Buckets keep their extremes.
 
 Rows are read by column (`etude.train.block`), so a chart costs two arrays.
+A run's records (declaration, state, attempts, checkpoints) are read when it
+is read; its metric blocks only the first time `RunData.blocks` is used, so a
+reader of checkpoints, or of an eval run, reads no metric data.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from functools import cached_property
 from hashlib import sha256
@@ -23,11 +26,11 @@ from typing import Any
 
 import numpy as np
 import numpy.typing as npt
-from pydantic import ConfigDict, SkipValidation, ValidationError
+from pydantic import ConfigDict, PrivateAttr, SkipValidation, ValidationError
 
 from etude.run.block_file import parse, select
 from etude.run.errors import EtudeError
-from etude.run.listing import RUN_FOLDERS, as_storage, declared, places
+from etude.run.listing import as_storage, declared, run_folders, under
 from etude.run.records import WALL_CLOCK, Attempt, Clock, Record, RunFile, RunState
 from etude.run.storage import Storage, run_prefix
 from etude.train.block import DTYPES, Array, Kind, Table
@@ -79,11 +82,18 @@ class RunData(Arrays):
     name: str
     file: RunFile | None
     state: RunState | None
-    # One table per process that wrote rows, in the order the processes started.
-    blocks: SkipValidation[tuple[StoredBlock, ...]]
     checkpoints: tuple[CheckpointRecord, ...]
     # Every process that wrote to this run, in start order.
     attempts: tuple[Attempt, ...]
+    _read_blocks: Callable[[], tuple[StoredBlock, ...]] = PrivateAttr()
+
+    @cached_property
+    def blocks(self) -> tuple[StoredBlock, ...]:
+        """One table per process that wrote rows, in the order the processes started.
+
+        Read from storage the first time it is used, keeping the metrics `read_all` was given.
+        """
+        return self._read_blocks()
 
     @cached_property
     def tables(self) -> tuple[Table, ...]:
@@ -512,13 +522,15 @@ def read_all(
 ) -> list[RunData]:
     """Every run under a source, listing it once.
 
-    With `metrics`, retain only these keys and `prefixes`, reading immutable
-    headers one at a time instead of the cumulative metric indexes.
+    With `metrics`, retain only these keys and `prefixes`, reading each
+    immutable block once instead of the cumulative metric indexes.
     """
     storage = as_storage(source)
+    keys = sorted(storage.keys(""))
+    listed = set(keys)
     data = []
-    for run, folders in sorted(places(storage).items()):
-        file = declared(storage, folders)
+    for run, folders in sorted(run_folders(keys).items()):
+        file = declared(storage, folders, listed)
         if file is not None and experiment in (None, file.experiment):
             data.append(
                 _read(
@@ -526,6 +538,7 @@ def read_all(
                     file.experiment,
                     run,
                     folders,
+                    keys,
                     run_file=file,
                     metrics=metrics,
                     prefixes=prefixes,
@@ -537,7 +550,10 @@ def read_all(
 def read(source: Storage | Path | str, experiment: str, run: str) -> RunData:
     """One run's declaration, state, rows and checkpoints. Rows not yet sealed are not read."""
     storage = as_storage(source)
-    return _read(storage, experiment, run, places(storage).get(run, [run_prefix(run)]))
+    keys = sorted(storage.keys(""))
+    folders = run_folders(keys).get(run, [run_prefix(run)])
+    file = declared(storage, folders, set(keys))
+    return _read(storage, experiment, run, folders, keys, run_file=file)
 
 
 def _read(
@@ -545,25 +561,25 @@ def _read(
     experiment: str,
     run: str,
     folders: Sequence[str],
+    listing: Sequence[str],
     *,
-    run_file: RunFile | None = None,
+    run_file: RunFile | None,
     metrics: frozenset[str] | None = None,
     prefixes: tuple[str, ...] = (),
 ) -> RunData:
-    def listing() -> list[tuple[str, str]]:
-        """Every (folder, name under it), first folder first."""
-        return [(place, key[len(place) :]) for place in folders for key in storage.keys(place)]
-
-    keys = listing()
+    """The run's records from `listing`, the source's sorted keys; its blocks once used."""
+    keys = _named(listing, folders)
     present = set(keys)
     checkpoints: list[CheckpointRecord] = []
     attempts: list[tuple[Attempt, str]] = []
     for place, name in keys:
         kind, _, leaf = name.partition("/")
-        if not leaf.endswith(".json") or "/" in leaf or kind not in RUN_FOLDERS:
+        # A training run's records: `metrics/WRITER.json`, an attempt, and
+        # `checkpoints/NAME.json`. Nothing else, such as an eval run's files, is read.
+        if kind not in ("metrics", "checkpoints") or "/" in leaf or not leaf.endswith(".json"):
             continue
         if kind == "metrics" and leaf.endswith((".index.json", ".permanent.json")):
-            continue  # an index, read below
+            continue  # an index, read with the blocks
         body = storage.get(place + name)
         try:
             if kind == "checkpoints":
@@ -575,6 +591,46 @@ def _read(
         except ValidationError:
             continue
     attempts.sort(key=lambda pair: pair[0].started_ms)
+    # The state the latest attempt left, where it left one.
+    ended = [place for place in folders if (place, "state.json") in present]
+    latest = next((place for _, place in reversed(attempts) if place in ended), None)
+    state = latest or (ended[-1] if ended else None)
+    run_state = RunState.model_validate_json(storage.get(state + "state.json")) if state else None
+    if run_state is not None and attempts:
+        # A completion belongs to one writer, not every later resume. Older
+        # evidence without attribution is conclusive only for a single attempt.
+        current = run_state.writer == attempts[-1][0].writer
+        unattributed = run_state.writer is None and len(attempts) == 1
+        if not current and not unattributed:
+            run_state = None
+    data = RunData(
+        experiment=experiment,
+        name=run,
+        file=run_file,
+        state=run_state,
+        # A later attempt continues its run's ordinals; each is kept once.
+        checkpoints=tuple({r.ordinal: r for r in sorted(checkpoints, key=_order)}.values()),
+        attempts=tuple(attempt for attempt, _ in attempts),
+    )
+    started = {attempt.writer: attempt.started_ms for attempt, _ in attempts}
+    data._read_blocks = lambda: _blocks(storage, folders, keys, started, metrics, prefixes)
+    return data
+
+
+def _named(keys: Sequence[str], folders: Sequence[str]) -> list[tuple[str, str]]:
+    """Every (folder, name under it) of a sorted listing, first folder first."""
+    return [(place, key[len(place) :]) for place in folders for key in under(keys, place)]
+
+
+def _blocks(
+    storage: Storage,
+    folders: Sequence[str],
+    keys: list[tuple[str, str]],
+    started: dict[str, int],
+    metrics: frozenset[str] | None,
+    prefixes: tuple[str, ...],
+) -> tuple[StoredBlock, ...]:
+    """The run's metric blocks in write order, listing again when compaction removed one."""
     blocks: list[StoredBlock] = []
     for retry in range(3):
         try:
@@ -616,38 +672,11 @@ def _read(
         except FileNotFoundError:
             if retry == 2:
                 raise
-            keys = listing()
-    started = {attempt.writer: attempt.started_ms for attempt, _ in attempts}
+            keys = _named(sorted(k for f in folders for k in storage.keys(f)), folders)
     blocks.sort(
         key=lambda block: (
             started.get(block.header.writer, block.header.wall_first),
             block.header.first,
         )
     )
-    names = {(place, name) for place, name in keys}
-    if run_file is None:
-        declaring = next((place for place in folders if (place, "run.json") in names), None)
-        if declaring is not None:
-            run_file = RunFile.model_validate_json(storage.get(declaring + "run.json"))
-    # The state the latest attempt left, where it left one.
-    ended = [place for place in folders if (place, "state.json") in names]
-    latest = next((place for _, place in reversed(attempts) if place in ended), None)
-    state = latest or (ended[-1] if ended else None)
-    run_state = RunState.model_validate_json(storage.get(state + "state.json")) if state else None
-    if run_state is not None and attempts:
-        # A completion belongs to one writer, not every later resume. Older
-        # evidence without attribution is conclusive only for a single attempt.
-        current = run_state.writer == attempts[-1][0].writer
-        unattributed = run_state.writer is None and len(attempts) == 1
-        if not current and not unattributed:
-            run_state = None
-    return RunData(
-        experiment=experiment,
-        name=run,
-        file=run_file,
-        state=run_state,
-        blocks=tuple(blocks),
-        # A later attempt continues its run's ordinals; each is kept once.
-        checkpoints=tuple({r.ordinal: r for r in sorted(checkpoints, key=_order)}.values()),
-        attempts=tuple(attempt for attempt, _ in attempts),
-    )
+    return tuple(blocks)
