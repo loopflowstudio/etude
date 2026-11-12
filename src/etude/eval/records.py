@@ -200,7 +200,19 @@ def _config(value: object) -> object:
 type _GivenConfig = Annotated[Config, BeforeValidator(_config)]
 
 
+# The config key an author keeps execution setup under, such as `{"setup": {"device": "cuda"}}`:
+# how a player or environment was run, recorded with each match and part of no identity, so a
+# game played on one device counts as played on any.
+SETUP = "setup"
+
+
+def identifying(config: Config) -> Config:
+    """A config without its execution setup: what identity takes of it."""
+    return {key: value for key, value in config.items() if key != SETUP}
+
+
 def _encoded(player: str, config: Config) -> str:
+    config = identifying(config)
     if not config:
         return player
     return player + " " + json.dumps(config, sort_keys=True, separators=(",", ":"))
@@ -346,7 +358,11 @@ type Player = Annotated[Model | Code, Field(discriminator="kind"), BeforeValidat
 
 
 class Environment(Record):
-    """What matches are played in. Results from different identities are never pooled."""
+    """What matches are played in. Results from different identities are never pooled.
+
+    Its `config`'s `setup` is how it was run, such as the device, and no part
+    of its identity: games played under any setup pool.
+    """
 
     name: Name
     # The digest of the files that define it.
@@ -355,7 +371,7 @@ class Environment(Record):
 
     @property
     def identity(self) -> Digest:
-        return digest([self.name, self.files, self.config])
+        return digest([self.name, self.files, identifying(self.config)])
 
 
 class Match(Record):
@@ -672,9 +688,9 @@ class Seating(Record):
         # An inference seat's literal "model" predates the name `Inference`; it stays, so
         # every seating keeps the definition it was first held with.
         players = [
-            ["model", each.config]
+            ["model", identifying(each.config)]
             if isinstance(each, Inference)
-            else ["relative", each.model_dump(mode="json", exclude={"inference": {"version"}})]
+            else ["relative", _relative_definition(each)]
             if isinstance(each, _RELATIVE)
             else each.key
             for each in self.players
@@ -777,6 +793,12 @@ class Seating(Record):
         return Seated(
             seating=self.name, checkpoint=checkpoint.key, pairings=tuple(pairings), lines=counted
         )
+
+
+def _relative_definition(seat: Relative) -> dict[str, JsonValue]:
+    """A relative seat as a seating's definition takes it: its inference by config, less setup."""
+    found = seat.model_dump(mode="json", exclude={"inference"})
+    return {**found, "inference": {"config": identifying(seat.inference.config)}}
 
 
 def _seat(
@@ -1037,7 +1059,7 @@ def assemble(held: Iterable[TournamentRun]) -> Tournament:
     """The tournament its eval runs make together, from the first of them on.
 
     Raises `EtudeError("tournament_conflict")` when they disagree on its
-    format or environment, or a round robin's conditions or games, and
+    format or environment (its setup aside), or a round robin's conditions or games, and
     `EtudeError("seating_conflict")` when they define one seating name two ways.
     Versions are not definitions: a later run's seating, checkpoint or entrant
     with the same key replaces an earlier one, so what is played next records
@@ -1050,9 +1072,15 @@ def assemble(held: Iterable[TournamentRun]) -> Tournament:
     entrants: dict[str, Player] = {}
     for run in runs:
         given = run.tournament
-        if type(given) is not type(first) or given.environment != first.environment:
+        if (
+            type(given) is not type(first)
+            or given.environment.identity != first.environment.identity
+        ):
             raise EtudeError("tournament_conflict", 409) from ValueError(first.name)
-        if isinstance(given, RoundRobin) and given != first:
+        if (
+            isinstance(given, RoundRobin)
+            and given.model_copy(update={"environment": first.environment}) != first
+        ):
             raise EtudeError("tournament_conflict", 409) from ValueError(first.name)
         if isinstance(given, Benchmark):
             for each in given.seatings:

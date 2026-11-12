@@ -193,8 +193,9 @@ def test_panels_select_matches_by_tournament_matchup_or_tag(page: Page) -> None:
         for each in page.selections
         if isinstance(each, Matches)
     }
-    assert {("ladder", None, "anchor"), ("ladder", "vs outside", None)} <= chosen
-    outside = selection(page, "ladder", seating="vs outside")
+    # A panel naming a seating without a tournament has it over every tournament.
+    assert {("ladder", None, "anchor"), (None, "vs outside", None)} <= chosen
+    outside = selection(page, None, seating="vs outside")
     # The checkpoints' opponents in that matchup's matches are the outside anchor alone.
     opponents = {
         page.players[c.opponent].name
@@ -930,3 +931,65 @@ def test_a_report_draws_what_eval_runs_recorded_after_the_file_changes(
     # Scheduling new games still needs the definition to agree.
     with pytest.raises(EtudeError, match="tournament_conflict"):
         advance(read_experiment(file), source=DirectoryStorage(runs), directory=runs)
+
+
+SETUPS = """
+from etude.eval.match import environment
+from etude.eval.records import Benchmark, Code, Inference, Seating
+from etude.jobs import evaluation
+from etude.report import Curve, Matches, Report, Score
+from tests.eval.games import play
+
+
+def ladder(name, device):
+    # How it runs is setup: the CUDA ladder is the CPU one's environment and players.
+    duel = environment("duel", config={"world": "w6", "setup": {"device": device}})
+    direct = Inference(config={"search": 0, "setup": {"device": device}})
+    weak = Code(name="weak", config={"strength": 0, "setup": {"device": device}})
+    seating = Seating(name="vs weak", players=(direct, weak), conditions=({"deal": 0},), games=2)
+    return Benchmark(name=name, environment=duel, seatings=(seating,))
+
+
+def eval(state):
+    (run,) = state.runs
+    return [
+        evaluation(ladder("cpu", "cpu"), play=play, checkpoints=run.checkpoints[:1], max_hours=0.1),
+        evaluation(ladder("cuda", "cuda"), play=play, checkpoints=run.checkpoints, max_hours=0.1),
+    ]
+
+
+def report():
+    return Report(
+        score=Score(table="plays", value="won"),
+        evals=(Curve(matches=Matches(seating="vs weak")),),
+    )
+"""
+
+
+def test_a_seating_pools_every_tournament_and_setup_that_played_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    runs = tmp_path / "runs"
+    file = experiment_file(tmp_path / "experiments", "lab", SETUPS)
+    trained = track(experiment="lab", run="a", job="a", clocks=CLOCKS, directory=runs)
+    save(trained, tmp_path, range(100, 300, 100))
+    trained.finish(timeout=30)
+    passes = advance(read_experiment(file), source=DirectoryStorage(runs), directory=runs)
+    # The CUDA ladder reuses the match the CPU one played for 100: one match, one setup apart.
+    assert {each.tournament: each.played for each in passes} == {"cpu": 1, "cuda": 1}
+    page = build(runs, file)
+    assert len(page.environments) == 1
+    assert not [note for note in page.notes if "also played in" in note]
+    weak = player(page, "weak")
+    pooled = selection(page, None, seating="vs weak")
+    cells = {
+        page.players[c.subject].at["updates"]: c.matches
+        for c in page.cells
+        if c.selection == pooled and c.opponent == weak and not c.split and c.commit is None
+    }
+    # Both checkpoints, each from its one match, whichever tournament held it.
+    assert cells == {100: 1, 200: 1}
+    held = {(h.tournament, h.at["updates"]) for h in page.held if h.seating == "vs weak"}
+    assert held == {("cpu", 100), ("cuda", 100), ("cuda", 200)}

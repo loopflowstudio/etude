@@ -5,7 +5,7 @@ from __future__ import annotations
 from hashlib import sha256
 
 import pytest
-from pydantic import ValidationError
+from pydantic import JsonValue, ValidationError
 
 from etude.eval.records import (
     Aligned,
@@ -27,6 +27,7 @@ from etude.eval.records import (
     Seated,
     Seating,
     TournamentRun,
+    assemble,
 )
 from etude.run.records import ArtifactRef
 
@@ -305,3 +306,36 @@ def test_an_at_or_before_seat_takes_the_latest_checkpoint_once_none_nearer_can_c
     late = _line("s1", "small", 400)
     assert isinstance(gap := other.resolve(line.checkpoints[3], [line, late]), Gap)
     assert gap.missing == "never"
+
+
+def test_setup_is_recorded_and_part_of_no_identity() -> None:
+    def run_on(device: str) -> TournamentRun:
+        setup: dict[str, JsonValue] = {"setup": {"device": device}}
+        direct = Inference(config={"search": 0, **setup})
+        weak = Code(name="weak", config={"strength": 0, **setup})
+        seating = Seating(
+            name="vs weak",
+            players=(direct, weak),
+            conditions=({"deal": 0},),
+            games=2,
+        )
+        world = Environment(name="duel", files=DIGEST, config={"world": "w6", **setup})
+        return TournamentRun(
+            tournament=Benchmark(name="ladder", environment=world, seatings=(seating,)),
+            checkpoints=(_ref("a", 100),),
+        )
+
+    cpu, cuda = run_on("cpu"), run_on("cuda")
+    assert isinstance(cpu.tournament, Benchmark) and isinstance(cuda.tournament, Benchmark)
+    assert cpu.tournament.environment.identity == cuda.tournament.environment.identity
+    assert cpu.tournament.environment != cuda.tournament.environment
+    (one,), (other,) = cpu.tournament.seatings, cuda.tournament.seatings
+    assert one.definition == other.definition
+    # The same match, so one played on either counts for both; each records its own setup.
+    (match,), (again,) = one.matches(cpu.checkpoints[0]), other.matches(cuda.checkpoints[0])
+    assert match.key == again.key and match != again
+    # Their eval runs make one tournament.
+    assert len(assemble([cpu, cuda]).schedule()) == 1
+    # Setup aside, a config is identity: another world is another environment.
+    world = cpu.tournament.environment.model_copy(update={"config": {"world": "w7"}})
+    assert world.identity != cpu.tournament.environment.identity

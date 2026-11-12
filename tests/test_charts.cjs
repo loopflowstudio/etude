@@ -318,3 +318,20 @@ test("a seat not filled yet is a pending gap, and a seat of several lines is the
   assert.equal(rendered.plots.length, 1);
   assert.match(rendered.text, /first seat against the second, as seated/);
 });
+
+test("a seating named without a tournament draws one point per checkpoint from every tournament", () => {
+  const data = seated([
+    {at: {updates: 400}, pairs: [[2, 1]]},
+    {at: {updates: 400}, pairs: [[2, 1]], tournament: "u"},
+    {at: {updates: 200}, pairs: [[1, 0]], tournament: "u"},
+  ], [[2, 1, 0.6], [1, 0, 0.55]]);
+  data.selections = [{tournament: "t", seating: "half"}, {tournament: null, seating: "half"}];
+  data.cells.forEach(c => { c.selection = 1; });
+  const m = context.model(data);
+  assert.equal(m.selectMatches({seating: "half"}, 0), 1);
+  const at = Object.fromEntries(m.jobPoints(m.JOBS[0], "updates", m.evalValue(0, 1, {}, "")).map(p => [p.x, p]));
+  // Held by both tournaments, u400 seats the same pair: its one cell, not a mean of two.
+  assert.equal(at[400].y, 0.6);
+  assert.doesNotMatch(at[400].meta, /mean/);
+  assert.equal(at[200].y, 0.55);
+});

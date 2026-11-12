@@ -252,6 +252,13 @@ evaluate(
   still refused (`match_has_no_rows`), never stored as a result.
 - **Environments are never pooled.** An eval run has one environment;
   resuming with another is refused, and comparisons keep environments apart.
+- **Setup is provenance.** How a game was run, such as the device or dtype,
+  goes under a `setup` key of the environment's or a player's config:
+  `environment("duel", config={"world": "w6", "setup": {"device": "cuda"}})`.
+  It is recorded with each match and is part of no identity, so a CUDA
+  benchmark is the CPU one's environment, players and matches: a match
+  played under either setup counts for both, and their games pool. Etude
+  never guesses which fields are setup; anything outside `setup` is identity.
 - **Resume.** Calling `evaluate` again with the same `run` skips every match
   already delivered to any of `storages`, even on a machine with an empty disk.
 - **Progress.** Each stored match prints one line to stderr:

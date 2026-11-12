@@ -29,12 +29,14 @@ an anchor.
 
 What each tournament has played is `etude.eval.tournament.played`: for a
 tournament `eval(state)` returns, what it wants now; for any other the
-experiment's eval runs hold, everything they were held for. Each delivered
+experiment's eval runs hold, or one `eval(state)` now defines otherwise than
+they were held with, everything they were held for. Each delivered
 match counts once, from the eval run `played` says delivered it last, so at
 its latest version. Matches of eval runs held for no tournament are one more
 selection, each counting once per environment from its latest record. Values
 are computed by `compare` over those matches, once for each selection
-(`Matches`: each tournament, each of its tags, each seating a panel names,
+(`Matches`: each tournament, each of its tags, each seating or tag a panel names,
+over every tournament unless it names one,
 the matches outside a tournament, and panels' unions), each score and each combination of
 the columns panels name. So any panel, under any filter the page offers,
 shows a value `compare` computed, never one pooled in the browser. One
@@ -970,6 +972,26 @@ def _where(selection: Matches | tuple[Matches, ...], *, view: str) -> str:
             " qualify row_number() over (partition by r.environment, m.match"
             " order by m.wall_ms desc, m.run desc) = 1)"
         )
+    if selection.tournament is None and (selection.seating, selection.tag) != (None, None):
+        # A seating or tag in every tournament: each match once, from its latest delivery
+        # in each environment, whichever tournament called for it.
+        column, name = (
+            ("seating", selection.seating)
+            if selection.seating is not None
+            else ("tag", selection.tag)
+        )
+        called = (
+            "(run, match) in (select h.run, h.match from _page_held h join _page_scheduled s"
+            " on s.tournament = h.tournament and s.match = h.match"
+            f" where h.view = {_literal(view)} and h.tournament != ''"
+            f" and s.{column} = {_literal(name or '')})"
+        )
+        return (
+            "(run, match) in (select m.run, m.match from matches m"
+            f" join runs r using (run) where {called}"
+            " qualify row_number() over (partition by r.environment, m.match"
+            " order by m.wall_ms desc, m.run desc) = 1)"
+        )
     tournament = _literal(selection.tournament or "")
     held = (
         "(run, match) in (select run, match from _page_held"
@@ -1009,18 +1031,19 @@ def _selections(
     for chosen, title in requested:
         if chosen.tournament is not None and chosen.tournament not in tournaments:
             notes.append(f"A {title} names tournament {chosen.tournament!r}, which nothing holds.")
-        if chosen.tag is not None and not any(tag == chosen.tag for _, tag in tags):
+        if chosen.tag is not None and not any(
+            tag == chosen.tag and chosen.tournament in (None, t) for t, tag in tags
+        ):
             notes.append(f"A {title} names tag {chosen.tag!r}, which no seating has.")
-        if chosen.seating is None:
             continue
-        named = [
-            Matches(tournament=t, seating=m)
-            for t, m in seatings
-            if m == chosen.seating and chosen.tournament in (None, t)
-        ]
-        if not named:
+        if chosen.seating is not None and not any(
+            m == chosen.seating and chosen.tournament in (None, t) for t, m in seatings
+        ):
             notes.append(f"A {title} names seating {chosen.seating!r}, which nothing holds.")
-        selections += [each for each in named if each not in selections]
+            continue
+        # A seating or tag named without a tournament covers every tournament holding it.
+        if (chosen.seating, chosen.tag) != (None, None) and chosen not in selections:
+            selections.append(chosen)
     # Union selections follow their components so result-aware resolution can use
     # the component cells. SQL unions rows before compare computes any statistic.
     selections += list(
@@ -1034,6 +1057,8 @@ def _resolve_matches(
     selections: Sequence[Matches | tuple[Matches, ...]],
     present: set[int],
 ) -> Matches | None:
+    if wanted in selections:
+        return wanted
     candidates = [
         (i, s)
         for i, s in enumerate(selections)

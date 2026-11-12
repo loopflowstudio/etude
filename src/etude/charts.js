@@ -325,6 +325,9 @@ function model(D) {
         && s.length === wanted.length && s.every((v, k) => sameMatches(v, wanted[k])));
       return i < 0 ? null : i;
     }
+    // A seating or tag named without a tournament is its own selection, over every tournament.
+    const exact = D.selections.findIndex(s => !Array.isArray(s) && sameMatches(s, wanted));
+    if (exact >= 0 && (wanted.seating != null || wanted.tag != null)) return exact;
     const fits = D.selections.flatMap((s, i) => !Array.isArray(s)
       && (wanted.tournament == null || wanted.tournament === s.tournament)
       && (s.tag ?? null) === (wanted.tag ?? null)
@@ -387,7 +390,9 @@ function model(D) {
     return (run, m) => {
       const here = held.get(`${run}|${m.ordinal}`);
       if (!here) return gapOf(sel, run, m, score);
-      const at = here[0].at, got = here.flatMap(h => h.pairs).map(([a, b]) => cellOf(sel, score, a, b, false, split)).filter(Boolean);
+      // Two tournaments holding one seating for a checkpoint seat the same pairs: count each once.
+      const pairs = [...new Map(here.flatMap(h => h.pairs).map(p => [p.join(), p])).values()];
+      const at = here[0].at, got = pairs.map(([a, b]) => cellOf(sel, score, a, b, false, split)).filter(Boolean);
       const missing = here.find(h => h.missing != null);
       if (!got.length && missing) return {missing: true, gap: missing.missing === "not_yet" ? "pending" : "none", at, meta: missing.meta};
       if (!got.length) return gapOf(sel, run, m, score);

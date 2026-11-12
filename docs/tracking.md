@@ -501,14 +501,17 @@ anchor, and the page names the unplaced checkpoints.
 too: the page says "Evaluation only", Perf and ML details say there are no
 training runs, and the x axis offers the clocks the seats' positions use.
 Matches of eval runs held for no tournament are offered as "matches outside a
-tournament", each counting once per environment from its latest record. One
-comparison played in several environments shows the environment whose latest
+tournament", each counting once per environment from its latest record.
+Setup is not an environment: games played on CPU and on CUDA, under configs
+that differ only in their `setup` key ([evaluation](evaluation.md#eval-runs)),
+pool. One comparison played in two environments shows the one whose latest
 match is newest, and the page notes the rest. `score` names an eval table's value, computed as
 `etude.eval.query.compare` computes it, with its 95% interval over whole
 matches; without one, every numeric column is offered. Each match counts once,
 from the eval run that delivered it last (`etude.eval.tournament.played`), so at
 the version of the code that played it last. A tournament `eval(state)` returns
-is drawn as it wants it now; one it no longer returns, as its eval runs held it.
+is drawn as it wants it now; one it no longer returns, or now defines otherwise
+than its eval runs were held with, as they held it.
 
 | Panel | Shows |
 |---|---|
@@ -528,7 +531,7 @@ it as reference lines.
 
 Panels draw; seatings say who plays whom. Whom a curve scores against, which
 jobs it draws and with which inference config are the seating's
-([evaluation](evaluation.md#tournaments)), so a chart that needs another
+([evaluation](evaluation.md#eval-runs)), so a chart that needs another
 comparison needs another seating.
 
 **Compare jobs over training.** With the `ladder` and `against small`
@@ -579,12 +582,11 @@ ended or has passed that position without saving there, the gap says
 `Aligned` or `Final` seats several of a job's lines, a point is the mean over
 them, as a point of a job is the mean over its seeds.
 
-A tuple of `Matches` unions the selected matches for that panel. Overlapping
-selections count a match once, and jobs remain separate lines. Give an
-explicit tournament to select it exactly. With only `Matches(tag="anchor")`,
-the report prefers a matching tournament with results over an empty one;
-it does not combine every tournament carrying that tag. Use an explicit
-tuple to combine selections. Tag names are literal, not patterns.
+`Matches(seating="vs weak")` or `Matches(tag="anchor")` without a tournament
+covers every tournament holding that seating or tag, each match counted once.
+Give a tournament to select only its matches. A tuple of `Matches` unions the
+selected matches for that panel. Overlapping selections count a match once,
+and jobs remain separate lines. Tag names are literal, not patterns.
 
 The Evals section shows its Matches picker and selection subtitle only when
 at least one panel uses the section's selection. When every panel supplies
