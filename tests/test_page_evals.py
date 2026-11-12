@@ -447,10 +447,18 @@ def evaluation_only(tmp_path_factory: pytest.TempPathFactory) -> Iterator[tuple[
             drift = drift.model_copy(
                 update={"checkpoint": drift.checkpoint.model_copy(update={"line": run})}
             )
+            # Seated before Etude's hour clocks, then with them: the same position.
+            hours = outside(
+                "hours100", {"updates": 100} | ({"running_hours": 0.25} if run == "plain-b" else {})
+            )
             evaluate(
                 experiment="lab",
                 environment=DUEL,
-                matches=[*matches, duel(drift, HEURISTIC, deal=int(run == "plain-b"))],
+                matches=[
+                    *matches,
+                    duel(drift, HEURISTIC, deal=int(run == "plain-b")),
+                    duel(hours, HEURISTIC, deal=int(run == "plain-b")),
+                ],
                 play=play,
                 run=run,
                 directory=runs,
@@ -486,6 +494,9 @@ def test_an_evaluation_only_experiment_draws_checkpoints_where_their_seats_say(
         "drift is drawn at updates 350, as its latest seat says; earlier seats said updates 300."
         in page.notes
     )
+    # Seats that only add clocks agree: merged, with no note.
+    assert at["hours100"] == {"updates": 100, "running_hours": 0.25}
+    assert not any(note.startswith("hours100 ") for note in page.notes)
     pair = {
         (page.players[c.subject].name, page.players[c.opponent].name): c
         for c in page.cells

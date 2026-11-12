@@ -25,9 +25,9 @@ When its eval runs disagree, `conflict` names how (`tournament_conflict`,
 recorded, read from their stored JSON, so a model joins to where its
 run's clocks stood by key (`players.checkpoint = training_checkpoints.checkpoint`),
 never by its bytes. A seat may say where its checkpoint stood itself
-(`etude.eval.records.CheckpointRef.at`): `players.at` is the position from the
-latest match record giving one, and `players.at_conflict` lists every position
-given when they differ, else null; `players.line` and `players.line_conflict`
+(`etude.eval.records.CheckpointRef.at`): `players.at` merges the positions match
+records give, the latest winning, and `players.at_conflict` lists every position
+given when two disagree on a clock both name, else null; `players.line` and `players.line_conflict`
 are the same for the learner it belongs to (`CheckpointRef.line`). A match
 counts once whichever version played it: the latest record holding it
 (`seats.commit` tells which).
@@ -971,10 +971,7 @@ def _players_table(db: duckdb.DuckDBPyConnection, players: dict[str, list[Player
                 given[0].kind,
                 *_checkpoint(given[0]),
                 json.dumps(given[0].config),
-                positions[identity][0] if positions[identity] else None,
-                f"[{','.join(sorted(positions[identity]))}]"
-                if len(positions[identity]) > 1
-                else None,
+                *_position(positions[identity]),
                 lines[identity][0] if lines[identity] else None,
                 json.dumps(sorted(lines[identity])) if len(lines[identity]) > 1 else None,
                 *(flat[identity].get(key) for key in columns),
@@ -1002,6 +999,28 @@ def _seated(db: duckdb.DuckDBPyConnection, column: str) -> defaultdict[str, list
         if value not in found[identity]:
             found[identity].append(value)
     return found
+
+
+def _position(given: list[str]) -> tuple[str | None, str | None]:
+    """Where seats put a player, latest first: the position drawn, and every position given
+    if two disagree on a clock both name.
+
+    Positions that only add clocks merge, the latest winning, so a match recorded before
+    Etude's built-in hour clocks agrees with one that also says where they stood.
+    """
+    found: list[dict[str, float]] = [json.loads(each) for each in given]
+    drawn: dict[str, float] = {}
+    for each in reversed(found):
+        drawn.update(each)
+    differ = any(
+        a[clock] != b[clock]
+        for a, b in itertools.combinations(found, 2)
+        for clock in a.keys() & b.keys()
+    )
+    return (
+        json.dumps(drawn) if found else None,
+        f"[{','.join(sorted(given))}]" if differ else None,
+    )
 
 
 def _flattened(config: dict[str, JsonValue], prefix: str = "") -> dict[str, JsonValue]:
