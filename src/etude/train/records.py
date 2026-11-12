@@ -1,4 +1,4 @@
-"""File contracts for training: clock declarations and checkpoints.
+"""File contracts for training: clocks, checkpoints and immutable JSON row tables.
 
 Every logged row gives a value for every declared clock. There is no run-wide
 counter and no ordering rule: a repeated coordinate is kept, and readers take
@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, JsonValue
 
 from etude.run.records import ArtifactRef, Clock, Name, Record, SourceKey
 
@@ -70,3 +70,15 @@ def checkpoint_name(at: dict[str, float]) -> str:
     clock, value = next(iter(at.items()))
     number = str(int(value)) if float(value).is_integer() else repr(float(value))
     return re.sub(r"[^A-Za-z0-9._-]", "_", clock) + "-" + number
+
+
+class RowTable(Record):
+    """Immutable JSON rows stored together as one content-addressed artifact."""
+
+    rows: tuple[dict[str, JsonValue], ...]
+
+
+class TablePoint(RowTable):
+    """A selected row table at coordinate `x` on the reader's requested clock."""
+
+    x: float

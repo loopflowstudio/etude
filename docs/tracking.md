@@ -109,7 +109,8 @@ Rules a caller can rely on:
 - **The files are the record.** Everything about a run is in one folder named
   for the run, `RUN/`, in the runs directory and in each storage it delivers
   to: `run.json` (what it is, its experiment included), `state.json`,
-  `metrics/` (row blocks and their indexes, from every attempt) and
+  `metrics/` (row blocks and their indexes, from every attempt),
+  `artifacts/` (immutable files, including logged row tables) and
   `checkpoints/` (each named for where its first clock stood, such as
   `steps-1000.pt` beside `steps-1000.json`). Under the launcher the same folder
   in the bucket also holds `attempts/ATTEMPT.json` and the pieces of the job's log
@@ -133,6 +134,79 @@ Rules a caller can rely on:
   completion inapplicable. Until the new writer finishes, the report says
   “running or unfinished.” Older completion records without a writer remain
   readable, but cannot establish completion after another attempt starts.
+
+### Row tables for training results
+
+```python
+from etude.train.records import Step
+from etude.train.run import track
+
+with track(
+    experiment="self-play",
+    run="policy-seed-0",
+    clocks=[Step("updates", "optimizer updates, absolute across continuation")],
+) as run:
+    run.log_table(
+        "matchups",
+        [
+            {"deck": "red", "opponent": "blue", "seat": 0, "wins": 12, "games": 20},
+            {"deck": "blue", "opponent": "red", "seat": 1, "wins": 8, "games": 20},
+        ],
+        updates=400,
+    )
+```
+
+This records `matchups` at optimizer update 400. Adding a matchup adds a row,
+keeping metric names bounded. Use `run.log` for scalar summaries such as loss
+and `run.log_table(name, rows, **clocks)` for JSON rows, including nested objects
+and lists. Give every declared clock, using absolute continuation coordinates.
+Keep table names separate from scalar and ordinary text names.
+
+`log_table` writes locally before returning; you can then change the input rows.
+Invalid rows or clocks and local write failures raise. Its queued reference
+follows `log`'s overflow behavior: a dropped reference increments `run.dropped`.
+
+Each table is an immutable JSON file under `artifacts/`, named by its content
+digest; the metric row holds only that digest. Identical content reuses the file.
+Writes stage as `.partial` and rename atomically before recording the reference.
+
+Tracking delivery, `etude sync` and the launcher's courier carry these files.
+When copying a run, include `artifacts/`. Readers resolve references beside the
+selected metric block, so relocated runs keep working.
+
+```python
+from etude.run.storage import default_root
+from etude.train.read import read
+
+history = read(default_root(), "self-play", "policy-seed-0")
+for table in history.read_table("matchups", "updates"):
+    print(table.x, table.rows)  # selected update coordinate and its JSON rows
+```
+
+`read_table` returns `TablePoint` records in clock order as a tuple. An empty
+table has `rows=()`; no surviving references returns `()`. `RunData.tables`
+provides raw metric-block inspection.
+
+The reader applies attempt and update supersession before fetching artifacts.
+A later table at the same update replaces the earlier one. A resumed attempt
+cuts off superseded history even before logging anything; the checkpoint
+coordinate itself survives unless replaced, as with scalar points. Unreferenced
+artifacts yield no rows. Do not reconstruct history by listing `artifacts/`.
+
+A missing or damaged selected table raises. After interrupted delivery, run
+`uv run etude sync --directory DIR --to s3://my-bucket/runs` and retry. Restore
+damaged artifacts from an intact copy, never different rows under the same digest.
+
+Etude warns once per writer when distinct numeric metric names exceed
+`track(..., metric_name_limit=1000)` (the default), pointing to `log_table`.
+Set another nonnegative limit, or `None` to disable. Earlier local attempts
+count; clocks, flags, text and table references do not. Store dimensions such
+as deck × opponent × seat × outcome in rows and keep scalar names for charts.
+
+Index refreshes reuse block descriptions and latest values, rebuilt once on
+writer start or resume. Adding a permanent block rewrites the accumulated
+manifest without rereading old blocks. Wider rows and more metric names still
+cost more. Existing blocks and manifests remain readable without migration.
 
 ### Storage outages and recovery
 

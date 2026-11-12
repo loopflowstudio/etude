@@ -15,7 +15,9 @@ Rows are read by column (`etude.train.block`), so a chart costs two arrays.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from functools import cached_property
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -24,12 +26,13 @@ import numpy.typing as npt
 from pydantic import ConfigDict, SkipValidation, ValidationError
 
 from etude.run.block_file import parse, select
+from etude.run.errors import EtudeError
 from etude.run.listing import RUN_FOLDERS, as_storage, declared, places
 from etude.run.records import WALL_CLOCK, Attempt, Clock, Record, RunFile, RunState
 from etude.run.storage import Storage, run_prefix
-from etude.train.block import Table
+from etude.train.block import DTYPES, Array, Kind, Table
 from etude.train.manifest import BlockDescription, Manifest, StoredBlock, describe, fetch
-from etude.train.records import CheckpointRecord
+from etude.train.records import CheckpointRecord, RowTable, TablePoint
 
 type Floats = npt.NDArray[np.float64]
 
@@ -48,6 +51,25 @@ class Points(Arrays):
 
     def __len__(self) -> int:
         return len(self.x)
+
+
+@dataclass(frozen=True)
+class _Column:
+    """Values surviving attempt cutoffs, still attached to their storage block."""
+
+    block: StoredBlock
+    x: Floats
+    values: Array
+    labels: tuple[str | None, ...]
+
+
+def _last_indices(x: Floats) -> npt.NDArray[np.int64]:
+    """Sorted coordinates, with the latest write at each repeated value."""
+    if len(x) < 2 or np.all(x[1:] > x[:-1]):
+        return np.arange(len(x), dtype=np.int64)
+    order = np.argsort(x, kind="stable")
+    ordered = x[order]
+    return order[np.r_[ordered[1:] != ordered[:-1], True]]
 
 
 class RunData(Arrays):
@@ -98,7 +120,50 @@ class RunData(Arrays):
 
     def points(self, metric: str, clock: str = WALL_CLOCK) -> Points:
         """The metric's values on the clock, by the reading rules in this module's note."""
-        parts: list[tuple[Floats, Floats]] = []
+        columns = self._history(metric, "metric", clock)
+        if not columns:
+            return Points(x=np.empty(0), y=np.empty(0))
+        x = np.concatenate([column.x for column in columns])
+        y = np.concatenate([column.values for column in columns])
+        selected = _last_indices(x)
+        return Points(x=x[selected], y=y[selected])
+
+    def read_table(self, name: str, clock: str) -> tuple[TablePoint, ...]:
+        """Read selected JSON tables, in clock order; missing or damaged artifacts raise.
+
+        Resolve only after supersession, using the selected block's own storage
+        and run prefix. Unreferenced artifacts never participate in history.
+        """
+        columns = self._history(name, "text", clock)
+        if not columns:
+            return ()
+        x = np.concatenate([column.x for column in columns])
+        ends = np.cumsum([len(column.x) for column in columns])
+        points: list[TablePoint] = []
+        for index in _last_indices(x):
+            owner = int(np.searchsorted(ends, index, side="right"))
+            column = columns[owner]
+            offset = int(index - (ends[owner - 1] if owner else 0))
+            block = column.block
+            digest = column.labels[int(column.values[offset])]
+            if (
+                digest is None
+                or len(digest) != 64
+                or any(c not in "0123456789abcdef" for c in digest)
+            ):
+                raise EtudeError("table_reference_invalid", 422) from ValueError(digest)
+            prefix = block.key.removesuffix(block.description.key)
+            key = f"{prefix}artifacts/{digest}.json"
+            body = block.storage.get(key)
+            if sha256(body).hexdigest() != digest:
+                raise EtudeError("table_artifact_damaged", 422) from ValueError(key)
+            table = RowTable.model_validate_json(body)
+            points.append(TablePoint(x=float(x[index]), rows=table.rows))
+        return tuple(points)
+
+    def _history(self, name: str, kind: Kind, clock: str) -> list[_Column]:
+        """Apply attempt cutoffs before choosing the last write at each coordinate."""
+        parts: list[list[_Column]] = []
         writers: dict[str, list[StoredBlock]] = {}
         for block in self.blocks:
             writers.setdefault(block.header.writer, []).append(block)
@@ -118,8 +183,7 @@ class RunData(Arrays):
         cutoff: float | None = None
         for writer in reversed(ordered):
             group = writers[writer]
-            xs: list[Floats] = []
-            ys: list[Floats] = []
+            columns: list[_Column] = []
             recorded = attempts.get(writer)
             resumed = recorded.resumed_at.get(clock) if recorded is not None else None
             for block in group:
@@ -134,9 +198,7 @@ class RunData(Arrays):
                 given = ~np.isnan(x)
                 if resumed is None and given.any():
                     resumed = float(x[given][0])
-                column = next(
-                    (c for c in h.series if c.name == metric and c.kind == "metric"), None
-                )
+                column = next((c for c in h.series if c.name == name and c.kind == kind), None)
                 if column is None:
                     continue
                 if column.rows is not None:
@@ -144,26 +206,18 @@ class RunData(Arrays):
                 given = ~np.isnan(x)
                 if cutoff is not None:
                     given &= x <= cutoff
-                xs.append(x[given])
-                ys.append(block.array(column.data, "<f8")[given])
-            parts.append(
-                (
-                    np.concatenate(xs) if xs else np.empty(0),
-                    np.concatenate(ys) if ys else np.empty(0),
+                columns.append(
+                    _Column(
+                        block=block,
+                        x=x[given],
+                        values=block.array(column.data, DTYPES[kind])[given],
+                        labels=column.labels,
+                    )
                 )
-            )
+            parts.append(columns)
             if resumed is not None:
                 cutoff = resumed if cutoff is None else min(cutoff, resumed)
-        if not parts:
-            return Points(x=np.empty(0), y=np.empty(0))
-        parts.reverse()  # Equal coordinates must still stay in write order.
-        x, y = np.concatenate([p[0] for p in parts]), np.concatenate([p[1] for p in parts])
-        if len(x) > 1 and not np.all(x[1:] > x[:-1]):
-            order = np.argsort(x, kind="stable")  # equal values stay in write order
-            x, y = x[order], y[order]
-            last = np.r_[x[1:] != x[:-1], True]  # the latest write of each value
-            x, y = x[last], y[last]
-        return Points(x=x, y=y)
+        return [column for part in reversed(parts) for column in part]
 
     def chart(
         self,
