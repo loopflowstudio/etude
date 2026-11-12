@@ -623,8 +623,9 @@ def read_batches(
     those numbers; each batch reads its blocks' headers again with
     their selected arrays. No metric index is loaded. A block a compaction
     replaced is found again from a fresh listing, resuming after the last batch
-    yielded; a missing block, a sequence gap or a damaged array raises during
-    iteration.
+    yielded; a block still missing after fresh listings, a sequence gap or a
+    damaged array raises during iteration. A writer's newest blocks missing
+    from storage cannot be told from a run still being delivered.
     """
     storage = as_storage(source)
     folders = places(storage).get(run, [run_prefix(run)])
@@ -633,8 +634,9 @@ def read_batches(
     def block(key: str) -> StoredBlock:
         return StoredBlock(storage, key, describe(storage, "", key, metrics=selected))
 
-    done: float | None = None  # the highest clock value already yielded for
-    for retry in range(3):
+    done: float | None = None  # the highest clock value already yielded
+    failures = 0  # fresh listings in a row that yielded nothing new
+    while True:
         try:
             keys = _listing(storage, folders)
             _, attempts = _records(storage, keys)
@@ -652,9 +654,14 @@ def read_batches(
                     continue
                 yield _batch(stretch, block, metrics, clock, after=done)
                 done = high
+                failures = 0
             return
         except FileNotFoundError:
-            if retry == 2:
+            # A live writer replaces blocks every few seconds, so a slow
+            # consumer may meet several; only a listing that cannot make
+            # progress three times is a missing block.
+            failures += 1
+            if failures == 3:
                 raise
 
 

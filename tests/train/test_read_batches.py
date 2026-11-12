@@ -187,3 +187,16 @@ def test_a_compaction_while_reading_resumes_after_the_last_batch(tmp_path: Path)
         path.unlink()
     parts += [batch.points["rl/metric_0"] for batch in batches]
     assert _joined(parts).x.tolist() == list(range(3 * 16))
+
+
+def test_a_slow_reader_outlasts_every_compaction_of_a_live_run(tmp_path: Path) -> None:
+    root = tmp_path / run_prefix("r")
+    _long_run(root, 6, rows=16)
+    batches = read_batches(tmp_path, "e", "r", clock="updates", metrics=["rl/metric_0"])
+    parts = [next(batches).points["rl/metric_0"]]
+    for sequence in range(1, 6):
+        # Before each batch the writer has replaced the next block once more.
+        path = root / block_key(2, sequence, sequence, FIRST)
+        path.rename(root / block_key(3, sequence, sequence, FIRST))
+        parts.append(next(batches).points["rl/metric_0"])
+    assert _joined(parts).x.tolist() == list(range(6 * 16))

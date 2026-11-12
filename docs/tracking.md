@@ -260,11 +260,14 @@ is too large to load. It reads only the clock and the selected arrays and
 checks each one's CRC before yielding it. Rows not yet sealed are not read, as
 with `read`.
 
-A missing block, a gap in a writer's block sequence, or a damaged array raises
-during iteration. When that happens the batches already yielded are correct,
-but the history is incomplete; don't treat it as finished. A block a
-compaction replaced while you were reading is found again from a fresh
-listing. If delivery was interrupted, run `uv run etude sync --directory DIR
+A gap in a writer's block sequence, a block that stays missing after fresh
+listings, or a damaged array raises during iteration. When that happens the
+batches already yielded are correct, but the history is incomplete; don't
+treat it as finished. A block a compaction replaced while you were reading is
+found again from a fresh listing, however slowly you read. Without the index
+`read_batches` can't tell that a writer's newest blocks are missing: if they
+never reached the bucket, the history ends early, as it does for a run still
+being delivered. If delivery was interrupted, run `uv run etude sync --directory DIR
 --to s3://my-bucket/runs` and read again.
 
 `read(source, experiment, run)` returns the whole run at once, every metric
