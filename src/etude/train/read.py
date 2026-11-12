@@ -21,7 +21,7 @@ from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 import numpy.typing as npt
@@ -114,10 +114,7 @@ class RunData(Arrays):
             _batch(stretch, located.__getitem__, (metric,), clock).points[metric]
             for stretch in _stretches(placed, self.attempts, clock)
         ]
-        return Points(
-            x=np.concatenate([p.x for p in parts]) if parts else np.empty(0),
-            y=np.concatenate([p.y for p in parts]) if parts else np.empty(0),
-        )
+        return _latest([p.x for p in parts], [p.y for p in parts])
 
     def chart(
         self,
@@ -384,6 +381,14 @@ def _clock_range(block: StoredBlock, clock: str) -> tuple[float, float] | None:
     return column.first, column.last
 
 
+class _Given(NamedTuple):
+    """The lowest, highest and first clock value a block's rows give."""
+
+    low: float
+    high: float
+    first: float
+
+
 @dataclass(frozen=True, slots=True)
 class _Placed:
     """What planning needs of one block on one clock, small so a long run's plan stays small."""
@@ -392,8 +397,7 @@ class _Placed:
     writer: str
     sequence: int
     wall_first: int
-    # The lowest, highest and first value its rows give; None when no row gives the clock.
-    given: tuple[float, float, float] | None
+    given: _Given | None  # None when no row gives the clock
 
 
 @dataclass(frozen=True, slots=True)
@@ -419,22 +423,22 @@ def _clock(block: StoredBlock, clock: str) -> Floats:
 def _place(block: StoredBlock, clock: str) -> _Placed:
     """An increasing column's header gives its range; any other column is read once."""
     h = block.header
-    given: tuple[float, float, float] | None = None
+    given: _Given | None = None
     if clock == WALL_CLOCK:
         if h.rows and h.wall_increasing:
-            given = h.wall_first / 1000, h.wall_last / 1000, h.wall_first / 1000
+            given = _Given(h.wall_first / 1000, h.wall_last / 1000, h.wall_first / 1000)
         readable = h.rows > 0
     else:
         column = next((c for c in h.clocks if c.name == clock), None)
         first, last = (column.first, column.last) if column is not None else (None, None)
         if column is not None and column.increasing and first is not None and last is not None:
-            given = first, last, first
+            given = _Given(first, last, first)
         readable = column is not None
     if given is None and readable:
         x = _clock(block, clock)
         x = x[~np.isnan(x)]
         if len(x):
-            given = float(x.min()), float(x.max()), float(x[0])
+            given = _Given(float(x.min()), float(x.max()), float(x[0]))
     return _Placed(block.key, h.writer, h.first, h.wall_first, given)
 
 
@@ -474,7 +478,7 @@ def _stretches(
         record = recorded.get(writer)
         resumed = record.resumed_at.get(clock) if record is not None else None
         if resumed is None:
-            resumed = next((b.given[2] for b in writers[writer] if b.given is not None), None)
+            resumed = next((b.given.first for b in writers[writer] if b.given is not None), None)
         if resumed is not None:
             cutoff = resumed if cutoff is None else min(cutoff, resumed)
     rank = {writer: place for place, writer in enumerate(ordered)}
@@ -482,7 +486,7 @@ def _stretches(
     for index, block in enumerate(placed):
         if block.given is None:
             continue
-        low, high, _ = block.given
+        low, high = block.given.low, block.given.high
         cut = cutoffs[block.writer]
         if cut is not None:
             if low > cut:

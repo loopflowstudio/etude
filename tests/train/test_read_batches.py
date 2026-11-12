@@ -121,10 +121,9 @@ def _peak(blocks: int, root: Path, streaming: bool) -> int:
 
 def test_peak_memory_stays_flat_as_the_run_grows(tmp_path: Path) -> None:
     small, large = (
-        {streaming: _peak(blocks, tmp_path / f"{blocks}-{streaming}", streaming)
-         for streaming in (True, False)}
+        {s: _peak(blocks, tmp_path / f"{blocks}-{s}", s) for s in (True, False)}
         for blocks in (4, 32)
-    )  # fmt: skip
+    )
     # Eight times the blocks: the whole-run reader grows with them, batches do not.
     assert large[False] > 4 * small[False]
     assert large[True] < 1.5 * small[True]
