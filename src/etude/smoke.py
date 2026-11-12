@@ -1,0 +1,185 @@
+"""`etude smoke`: an experiment file's training, evaluation and report, tiny, in order, here.
+
+`smoke_file` is the whole chain, as `etude smoke`, `etude launch` and
+`etude queue` run it before submitting:
+
+1. Train: each distinct job `runs()` returns, run once with its declared tiny
+   form on a throwaway local launcher (`etude.launch.smoke.smoke_train`).
+2. Eval: the file's `eval(state)` on what training stored, each tournament it
+   returns cut to one game per match, every condition kept, and held here, through
+   `etude.eval.tournament.hold` as `etude eval` holds it.
+3. Report: `report()`, or the default, drawn from those results by `etude.page`.
+
+Everything goes to a temporary ETUDE_HOME (`smoke_home`). Without the train
+step, eval and report read checkpoints from a named source and still deliver
+only to the temporary store. The first failure prints what it can, raises
+`LauncherError` naming the step, and stops the chain.
+
+This module joins the launcher with evaluation, tracking and the report, as
+`etude.cli` does, so the launcher itself never imports it.
+"""
+
+from __future__ import annotations
+
+import time
+import traceback
+from collections.abc import Callable, Collection, Sequence
+from pathlib import Path
+from typing import Literal, cast
+
+from etude.eval.match import Result, Tables
+from etude.eval.records import Benchmark, Match, RoundRobin
+from etude.eval.tournament import hold
+from etude.experiment import asked, observe, read_experiment
+from etude.experiment_file import defined_functions, experiment_named
+from etude.jobs import evaluation_spec
+from etude.launch.errors import LauncherError
+from etude.launch.job_file import read_job_file
+from etude.launch.records import Job, Run, Smoke, SmokeStep
+from etude.launch.smoke import show, smoke_home, smoke_train, smoked
+from etude.page import build, render, write
+from etude.run.storage import DirectoryStorage, Storage
+
+type Step = Literal["train", "eval", "report"]
+STEPS: tuple[Step, ...] = ("train", "eval", "report")
+
+
+def smoke_file(
+    path: Path,
+    runs: Sequence[Run] | None = None,
+    *,
+    steps: Collection[Step] = STEPS,
+    source: Storage | None = None,
+    keep: bool = False,
+) -> Smoke:
+    """Smoke the experiment file's `steps`, in order, and return what each did.
+
+    `runs` are what its `runs()` returned, as `read_job_file` read them; read
+    with its defaults when not given. Without the train step, `source` holds
+    the checkpoints to evaluate and the runs to report on; resolve it before
+    calling, since the temporary home moves the default store. Raises
+    `LauncherError` at the first failure, after printing its output.
+    """
+    if "train" in steps and source is not None:
+        raise LauncherError("--source is for smoking eval and report without the train step")
+    if "train" not in steps and source is None and set(steps) & {"eval", "report"}:
+        raise LauncherError("smoking eval or report without train needs --source")
+    if "train" in steps and runs is None:
+        runs = read_job_file(path)
+    experiment = experiment_named(path)
+    done: list[SmokeStep] = []
+    with smoke_home(keep=keep) as folder:
+        store = DirectoryStorage(folder / "track")
+        if "train" in steps:
+            for step in smoke_train(runs or (), folder):
+                if step.run is not None and experiment is not None:
+                    step = step.model_copy(update={"detail": _saved(store, experiment, step.run)})
+                show(step)
+                done.append(step)
+        # What the temporary store holds a run of, so eval and report have something to read.
+        stored = any(each.outcome == "passed" for each in done)
+        if "eval" in steps:
+            for step in _evaluate(path, experiment, source or store, store):
+                show(step)
+                done.append(step)
+                stored = stored or step.outcome == "passed"
+        if "report" in steps:
+            step = _report(path, experiment, store if stored else source, store)
+            show(step)
+            done.append(step)
+    return smoked(done)
+
+
+def _saved(store: Storage, experiment: str, run: str) -> str:
+    found = [each for each in observe(store, experiment).runs if each.name == run]
+    count = len(found[0].checkpoints) if found else 0
+    return f"{count} checkpoint{'' if count == 1 else 's'}"
+
+
+def _evaluate(
+    path: Path, experiment: str | None, source: Storage, store: DirectoryStorage
+) -> list[SmokeStep]:
+    """Each evaluation `eval(state)` asks for on `source`, held tiny into `store`."""
+    if experiment is None or "eval" not in defined_functions(path):
+        return [SmokeStep(step="eval", name="eval", outcome="skipped", detail="no eval(state)")]
+    state = observe(source, experiment)
+    if not any(run.checkpoints for run in state.runs):
+        return [SmokeStep(step="eval", name="eval", outcome="skipped", detail="no checkpoints")]
+    jobs = _failing("eval", "eval", lambda: asked(read_experiment(path).eval, state))
+    if not jobs:
+        return [SmokeStep(step="eval", name="eval", outcome="skipped", detail="eval returned none")]
+    return [_hold(job, experiment, store) for job in jobs]
+
+
+def _hold(job: Job, experiment: str, store: DirectoryStorage) -> SmokeStep:
+    spec = evaluation_spec(job)
+    name = spec.tournament.name
+    if spec.experiment not in (None, experiment):
+        raise LauncherError(f"smoke eval {name}: a job of experiment {spec.experiment!r}")
+    tournament = tiny_tournament(spec.tournament)
+    # Loaded by import path, typed where `evaluation` was given it.
+    play = cast(Callable[[Match], Tables | Result], spec.play.load(job.repo))
+    started = time.monotonic()
+    held = _failing(
+        "eval",
+        name,
+        lambda: hold(
+            tournament,
+            experiment=experiment,
+            play=play,
+            checkpoints=tuple(each.ref for each in spec.checkpoints),
+            enter=spec.entrants,
+            storages=[store],
+        ),
+    )
+    plural = "" if held.played == 1 else "es"
+    return SmokeStep(
+        step="eval",
+        name=name,
+        outcome="passed",
+        seconds=time.monotonic() - started,
+        detail=f"{held.played} match{plural}, 1 game each",
+    )
+
+
+def tiny_tournament(tournament: Benchmark | RoundRobin) -> Benchmark | RoundRobin:
+    """The tournament with each of its matchups, or itself, at one game per match.
+
+    Every condition is kept: a game that breaks under one deal or seating is
+    the failure a rented evaluation would otherwise find after training paid.
+    """
+    if isinstance(tournament, RoundRobin):
+        return tournament.model_copy(update={"games": 1})
+    matchups = tuple(each.model_copy(update={"games": 1}) for each in tournament.matchups)
+    return tournament.model_copy(update={"matchups": matchups})
+
+
+def _report(
+    path: Path, experiment: str | None, source: Storage | None, store: DirectoryStorage
+) -> SmokeStep:
+    """`report()` drawn from `source`, written beside the temporary store."""
+    if experiment is None:
+        return SmokeStep(
+            step="report", name="report", outcome="skipped", detail="not an experiment file"
+        )
+    if source is None:
+        return SmokeStep(step="report", name="report", outcome="skipped", detail="no runs")
+    started = time.monotonic()
+    page = _failing("report", "report", lambda: build(source, path))
+    write(render(page), store.root.parent / "reports" / f"{experiment}.html")
+    return SmokeStep(
+        step="report", name="report", outcome="passed", seconds=time.monotonic() - started
+    )
+
+
+def _failing[T](step: Step, name: str, work: Callable[[], T]) -> T:
+    """`work()`, or its traceback printed and a `LauncherError` naming the step."""
+    started = time.monotonic()
+    try:
+        return work()
+    except Exception as error:
+        traceback.print_exc()
+        raise LauncherError(
+            f"smoke {step}{'' if name == step else ' ' + name}: failed after"
+            f" {time.monotonic() - started:.1f} s ({type(error).__name__}: {error}); nothing was submitted"
+        ) from error

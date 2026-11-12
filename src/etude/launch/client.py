@@ -12,12 +12,17 @@
 Each function uses the selected SSH controller, or a launcher under ETUDE_HOME
 (default ~/.etude) with an initial pool, "local", holding this computer. A
 call names a pool (`pool=`), an on-demand to rent from (`rent=`), or both.
+With `smoke=True`, `queue`, `queue_cohort`, `launch` and `launch_cohort` first
+run each job's tiny form here (`etude.launch.smoke`) and submit nothing if one
+fails; each run records what its smoke did. `etude.smoke.smoke_file` smokes a
+whole experiment file, evaluation and report too.
 """
 
 from __future__ import annotations
 
 import os
 import threading
+from collections.abc import Sequence
 from decimal import Decimal
 from functools import cache
 from pathlib import Path
@@ -46,6 +51,7 @@ from etude.launch.records import (
     Status,
 )
 from etude.launch.scheduler import Scheduler
+from etude.launch.smoke import show, smoke_home, smoke_train, smoked
 from etude.launch.source import home
 from etude.launch.ssh import SSH, SSHJournal, SSHStart
 from etude.launch.storage.bucket import BucketJournal
@@ -147,8 +153,23 @@ def _client() -> Scheduler | PythonClient:
     return PythonClient(address) if address else default()
 
 
-def queue(run: Run | Job, pool: str | None = None, *, rent: str | None = None) -> str:
-    return _client().queue(run, pool, rent=rent)
+def _smoked(runs: Sequence[Run | Job], smoke: bool) -> list[Run]:
+    each = [run if isinstance(run, Run) else Run(job=run) for run in runs]
+    if not smoke:
+        return each
+    with smoke_home() as folder:
+        steps = smoke_train(each, folder)
+    for step in steps:
+        show(step)
+    done = smoked(steps)
+    return [run.model_copy(update={"smoke": done}) for run in each]
+
+
+def queue(
+    run: Run | Job, pool: str | None = None, *, rent: str | None = None, smoke: bool = False
+) -> str:
+    (smoked_run,) = _smoked([run], smoke)
+    return _client().queue(smoked_run, pool, rent=rent)
 
 
 def queue_cohort(
@@ -159,12 +180,18 @@ def queue_cohort(
     rent: str | None = None,
     parallel: int = 1,
     max_usd: Decimal | None = None,
+    smoke: bool = False,
 ) -> tuple[str, ...]:
-    return _client().queue_cohort(name, runs, pool, rent=rent, parallel=parallel, max_usd=max_usd)
+    return _client().queue_cohort(
+        name, _smoked(runs, smoke), pool, rent=rent, parallel=parallel, max_usd=max_usd
+    )
 
 
-def launch(run: Run | Job, pool: str | None = None, *, rent: str | None = None) -> str:
-    return _client().launch(run, pool, rent=rent)
+def launch(
+    run: Run | Job, pool: str | None = None, *, rent: str | None = None, smoke: bool = False
+) -> str:
+    (smoked_run,) = _smoked([run], smoke)
+    return _client().launch(smoked_run, pool, rent=rent)
 
 
 def launch_cohort(
@@ -175,8 +202,11 @@ def launch_cohort(
     rent: str | None = None,
     parallel: int = 1,
     max_usd: Decimal | None = None,
+    smoke: bool = False,
 ) -> tuple[str, ...]:
-    return _client().launch_cohort(name, runs, pool, rent=rent, parallel=parallel, max_usd=max_usd)
+    return _client().launch_cohort(
+        name, _smoked(runs, smoke), pool, rent=rent, parallel=parallel, max_usd=max_usd
+    )
 
 
 def quote(

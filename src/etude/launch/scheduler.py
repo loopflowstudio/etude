@@ -2399,6 +2399,7 @@ class Scheduler:
             version=1,
             autorun=True,
             params=dict(run.params),
+            smoke=run.smoke,
         )
 
     def _latest(self, run: str) -> tuple[RunAttempt, Session]:

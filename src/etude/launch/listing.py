@@ -18,6 +18,8 @@ def show_runs(scheduler: Scheduler, ids: Sequence[str]) -> None:
         print(run, record.name, str(status) + where, sep="  ")
         if record.spec.repo is not None:
             print("  source: " + line(record.source, record.spec.revision or "HEAD"))
+        if record.smoke.outcome != "none":
+            print(f"  smoke: {record.smoke}")
 
 
 def resolve_runs(scheduler: Scheduler, names: Sequence[str]) -> list[str]:

@@ -117,7 +117,7 @@ def test_added_session_reuses_capacity_without_a_paid_window(tmp_path: Path) -> 
     assert b.service.creates == 0
 
 
-@pytest.mark.parametrize("version", [10, 11, 12, 13])
+@pytest.mark.parametrize("version", [10, 11, 12, 13, 14])
 def test_old_database_evidence_is_refused_without_migration(tmp_path: Path, version: int) -> None:
     path = tmp_path / "launcher.db"
     Database(path).close()

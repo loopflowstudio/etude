@@ -24,6 +24,196 @@ from etude.train.cli import checkpoints, sync
 app = launch_cli.app
 
 
+def _submit(
+    ctx: typer.Context,
+    file: Path | None,
+    pool: str | None,
+    rent: str | None,
+    cohort: str | None,
+    parallel: int,
+    max_usd: str | None,
+    help: bool,
+    queued: bool,
+    smoke: bool,
+    quote: bool = False,
+) -> None:
+    if help:
+        print(ctx.get_help())
+    if file is None:
+        if help:
+            return
+        raise typer.BadParameter("a Python FILE defining runs() is required")
+    from decimal import Decimal
+
+    from etude.launch import controller
+    from etude.launch.job_file import read_job_file
+    from etude.launch.listing import show_runs
+    from etude.launch.records import CohortSpec, Smoke
+
+    runs = read_job_file(file, ctx.args, help=help)
+    if help:
+        return
+    if cohort is None and (len(runs) > 1 or parallel != 1 or max_usd is not None):
+        raise LauncherError("several runs or cohort limits need --cohort NAME")
+    spec = (
+        CohortSpec(name=cohort, parallel=parallel, max_usd=Decimal(max_usd) if max_usd else None)
+        if cohort
+        else None
+    )
+    if not quote:
+        # Before anything is queued, rented or published: a failure raises and submits nothing.
+        if smoke:
+            from etude.smoke import smoke_file
+
+            result = smoke_file(file, runs)
+            if result.outcome == "none":
+                print(
+                    "smoke: nothing smoked; no job declares a tiny form (Job.smoke)",
+                    file=sys.stderr,
+                    flush=True,
+                )
+        else:
+            result = Smoke(outcome="skipped")
+        runs = [run.model_copy(update={"smoke": result}) for run in runs]
+    submission = controller.LaunchInput(
+        runs=tuple(runs), cohort=spec, pool=pool, rent=rent, queued=queued
+    )
+    address = controller.selected()
+    if quote:
+        from etude.launch.listing import show_quote
+
+        show_quote(
+            controller.quote(
+                controller.PythonClient(address) if address else launch_cli.default(), submission
+            )
+        )
+        return
+    if address:
+        raise typer.Exit(controller.forward(address, [], submission))
+    scheduler = launch_cli.default()
+    show_runs(scheduler, controller.submit(scheduler, submission))
+
+
+FileArgument = Annotated[Path | None, typer.Argument(help="a Python file defining runs()")]
+PoolOption = Annotated[
+    str | None,
+    typer.Option(help="the pool of machines you own to use; the default when neither is named"),
+]
+RentOption = Annotated[
+    str | None,
+    typer.Option(help="the on-demand to rent from, after the pool's free machines"),
+]
+CohortOption = Annotated[
+    str | None, typer.Option(help="a name for these runs together; required for several runs")
+]
+ParallelOption = Annotated[int, typer.Option(help="machines at once for this cohort")]
+CohortUsd = Annotated[str | None, typer.Option(help="dollar ceiling for the whole cohort")]
+SmokeOption = Annotated[
+    bool,
+    typer.Option(help="smoke the file here first (etude smoke); --no-smoke skips it, on record"),
+]
+FileHelp = Annotated[
+    bool, typer.Option("--help", "-h", help="show these options, then the file's own parameters")
+]
+
+
+@app.command(
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+    add_help_option=False,
+)
+@kind(Kind.wait)
+def launch(
+    ctx: typer.Context,
+    file: FileArgument = None,
+    pool: PoolOption = None,
+    rent: RentOption = None,
+    cohort: CohortOption = None,
+    parallel: ParallelOption = 1,
+    max_usd: CohortUsd = None,
+    quote: Annotated[
+        bool, typer.Option(help="print the machines and planned rental costs; rent nothing")
+    ] = False,
+    smoke: SmokeOption = True,
+    help: FileHelp = False,
+) -> None:
+    """Queue a file's runs and get the machines to start them now, or fail and queue nothing."""
+    _submit(ctx, file, pool, rent, cohort, parallel, max_usd, help, False, smoke, quote)
+
+
+@app.command(
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+    add_help_option=False,
+)
+@kind(Kind.ask)
+def queue(
+    ctx: typer.Context,
+    file: FileArgument = None,
+    pool: PoolOption = None,
+    rent: RentOption = None,
+    cohort: CohortOption = None,
+    parallel: ParallelOption = 1,
+    max_usd: CohortUsd = None,
+    smoke: SmokeOption = True,
+    help: FileHelp = False,
+) -> None:
+    """Add a file's runs to the queue. They start when a machine has room or can be rented."""
+    _submit(ctx, file, pool, rent, cohort, parallel, max_usd, help, True, smoke)
+
+
+@app.command(
+    "smoke",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+    add_help_option=False,
+)
+@kind(Kind.wait)
+def smoke_experiment(
+    ctx: typer.Context,
+    file: FileArgument = None,
+    step: Annotated[
+        list[str] | None,
+        typer.Option(help="smoke only this step: train, eval or report; repeat for several"),
+    ] = None,
+    source: Annotated[
+        str | None,
+        typer.Option(
+            help="without --step train: the s3://bucket/prefix or runs directory whose "
+            "checkpoints eval and report read; nothing is delivered there"
+        ),
+    ] = None,
+    keep: Annotated[
+        bool, typer.Option(help="keep the temporary folder and print where it is")
+    ] = False,
+    help: FileHelp = False,
+) -> None:
+    """Run a file's training, evaluation and report in tiny form on this computer. Spends nothing."""
+    if help:
+        print(ctx.get_help())
+    if file is None:
+        if help:
+            return
+        raise typer.BadParameter("a Python FILE defining runs() is required")
+    from typing import cast
+
+    from etude.launch.job_file import read_job_file
+    from etude.run.storage import storage_from_uri
+    from etude.smoke import STEPS, Step, smoke_file
+
+    steps = step or list(STEPS)
+    unknown = sorted(set(steps) - set(STEPS))
+    if unknown:
+        raise typer.BadParameter(f"--step is train, eval or report, not {', '.join(unknown)}")
+    runs = read_job_file(file, ctx.args, help=help) if "train" in steps else None
+    if help:
+        return
+    smoke_file(
+        file,
+        runs,
+        steps=[cast(Step, each) for each in steps],
+        source=storage_from_uri(source) if source else None,
+        keep=keep,
+    )
+
+
 @app.command()
 @kind(Kind.wait)
 def report(
@@ -159,6 +349,13 @@ def eval_experiment(
             "what a failed launched pass left unplayed"
         ),
     ] = False,
+    smoke: Annotated[
+        bool,
+        typer.Option(
+            help="with --pool or --rent, smoke eval and report here first against SOURCE; "
+            "--no-smoke skips it"
+        ),
+    ] = True,
 ) -> None:
     """Play, or with --pool or --rent launch, the matches eval(state) wants that no run delivered."""
     # Experiments join tracking, evaluation and the launcher.
@@ -166,9 +363,13 @@ def eval_experiment(
 
     from etude.experiment import advance, read_experiment
     from etude.run.storage import default_root, storage_from_uri
+    from etude.smoke import smoke_file
 
     experiment = read_experiment(file)
     storage = storage_from_uri(source or default_root())
+    if (pool or rent) and smoke:
+        # Before a launch spends anything: a failure raises and launches nothing.
+        smoke_file(file, steps=("eval", "report"), source=storage)
     try:
         while True:
             for done in advance(
@@ -299,7 +500,7 @@ app.command()(kind(Kind.wait)(sync))
 
 # Commands that run on this computer even when a controller is chosen: they read
 # local files, or they choose the controller.
-_LOCAL = ("launch", "queue", "source", "fetch", "worker", "logs")
+_LOCAL = ("launch", "queue", "smoke", "source", "fetch", "worker", "logs")
 
 
 def _main(argv: list[str]) -> int:

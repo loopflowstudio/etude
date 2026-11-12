@@ -18,7 +18,8 @@ from etude.eval.records import Benchmark, Code, Inference, Matchup, RoundRobin
 from etude.jobs import JobOptions, evaluation
 from etude.launch.errors import LauncherError
 from etude.launch.job_file import read_job_file
-from etude.launch.records import Input, Job, Runtime
+from etude.launch.records import Input, Job, Runtime, job_identity
+from etude.launch.smoke import tiny
 from tests.launch.counting import job_text
 from tests.launch.test_runpod_machines import cloud
 from tests.launch.test_worker_attempts import local
@@ -134,6 +135,7 @@ def test_a_training_job_calls_its_function_with_its_typed_config(
     [
         ("OtherConfig()", "train takes a TrainConfig config, not OtherConfig"),
         ('TrainConfig.model_construct(lr="fast")', "would not validate on the machine"),
+        ("TrainConfig(lr=1), smoke=OtherConfig()", "train takes a TrainConfig config, not Other"),
     ],
 )
 def test_a_config_the_function_cannot_take_is_refused_before_anything_launches(
@@ -146,6 +148,20 @@ def test_a_config_the_function_cannot_take_is_refused_before_anything_launches(
     )
     with pytest.raises(LauncherError, match=refusal):
         read_job_file(repo / "job.py", ["--python", "python3.12"])
+
+
+def test_a_training_jobs_tiny_form_is_its_smoke_config(tmp_path: Path) -> None:
+    config = "TrainConfig(lr=0.25), smoke=TrainConfig(lr=0.5, layers=(8,))"
+    repo = checkout(
+        tmp_path / "lab",
+        {"tiny_train.py": TRAIN, "job.py": JOB.format(module="tiny_train", config=config)},
+    )
+    (run,) = read_job_file(repo / "job.py", ["--python", "python3.12"])
+    small = tiny(run.job)
+    assert small is not None and small.smoke is None
+    assert (small.command, small.config) == (run.job.command, '{"lr":0.5,"layers":[8]}')
+    # The tiny form is not part of what makes the job itself.
+    assert job_identity(run.job) == job_identity(run.job.model_copy(update={"smoke": None}))
 
 
 def test_a_function_the_job_cannot_import_by_name_is_refused(tmp_path: Path) -> None:
@@ -210,8 +226,9 @@ def test_an_unpackaged_uv_project_prepares_its_environment_once_per_lock(
 
 
 def test_typed_jobs_take_every_job_field_but_what_they_derive() -> None:
-    # The experiment is the launched file's, or an evaluation's own `experiment`.
-    derived = {"command", "config", "experiment"}
+    # The experiment is the launched file's, or an evaluation's own `experiment`; a
+    # training job's tiny form is its `smoke` config, and an evaluation's is Etude's.
+    derived = {"command", "config", "experiment", "smoke"}
     assert set(JobOptions.__annotations__) == set(Job.model_fields) - derived
 
 

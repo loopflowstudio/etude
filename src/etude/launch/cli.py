@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, Annotated, Literal
 import typer
 
 from etude.launch.commands import Kind, kind
-from etude.launch.errors import LauncherError
 
 if TYPE_CHECKING:
     from etude.launch.scheduler import Scheduler
@@ -57,116 +56,6 @@ for name, sub in (
     ("image", image_app),
 ):
     app.add_typer(sub, name=name)
-
-
-def _submit(
-    ctx: typer.Context,
-    file: Path | None,
-    pool: str | None,
-    rent: str | None,
-    cohort: str | None,
-    parallel: int,
-    max_usd: str | None,
-    help: bool,
-    queued: bool,
-    quote: bool = False,
-) -> None:
-    if help:
-        print(ctx.get_help())
-    if file is None:
-        if help:
-            return
-        raise typer.BadParameter("a Python FILE defining runs() is required")
-    from etude.launch import controller
-    from etude.launch.job_file import read_job_file
-    from etude.launch.listing import show_runs
-    from etude.launch.records import CohortSpec
-
-    runs = read_job_file(file, ctx.args, help=help)
-    if help:
-        return
-    if cohort is None and (len(runs) > 1 or parallel != 1 or max_usd is not None):
-        raise LauncherError("several runs or cohort limits need --cohort NAME")
-    spec = (
-        CohortSpec(name=cohort, parallel=parallel, max_usd=Decimal(max_usd) if max_usd else None)
-        if cohort
-        else None
-    )
-    submission = controller.LaunchInput(
-        runs=tuple(runs), cohort=spec, pool=pool, rent=rent, queued=queued
-    )
-    address = controller.selected()
-    if quote:
-        from etude.launch.listing import show_quote
-
-        show_quote(
-            controller.quote(controller.PythonClient(address) if address else default(), submission)
-        )
-        return
-    if address:
-        raise typer.Exit(controller.forward(address, [], submission))
-    scheduler = default()
-    show_runs(scheduler, controller.submit(scheduler, submission))
-
-
-FileArgument = Annotated[Path | None, typer.Argument(help="a Python file defining runs()")]
-PoolOption = Annotated[
-    str | None,
-    typer.Option(help="the pool of machines you own to use; the default when neither is named"),
-]
-RentOption = Annotated[
-    str | None,
-    typer.Option(help="the on-demand to rent from, after the pool's free machines"),
-]
-CohortOption = Annotated[
-    str | None, typer.Option(help="a name for these runs together; required for several runs")
-]
-ParallelOption = Annotated[int, typer.Option(help="machines at once for this cohort")]
-CohortUsd = Annotated[str | None, typer.Option(help="dollar ceiling for the whole cohort")]
-FileHelp = Annotated[
-    bool, typer.Option("--help", "-h", help="show these options, then the file's own parameters")
-]
-
-
-@app.command(
-    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
-    add_help_option=False,
-)
-@kind(Kind.wait)
-def launch(
-    ctx: typer.Context,
-    file: FileArgument = None,
-    pool: PoolOption = None,
-    rent: RentOption = None,
-    cohort: CohortOption = None,
-    parallel: ParallelOption = 1,
-    max_usd: CohortUsd = None,
-    quote: Annotated[
-        bool, typer.Option(help="print the machines and planned rental costs; rent nothing")
-    ] = False,
-    help: FileHelp = False,
-) -> None:
-    """Queue a file's runs and get the machines to start them now, or fail and queue nothing."""
-    _submit(ctx, file, pool, rent, cohort, parallel, max_usd, help, False, quote)
-
-
-@app.command(
-    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
-    add_help_option=False,
-)
-@kind(Kind.ask)
-def queue(
-    ctx: typer.Context,
-    file: FileArgument = None,
-    pool: PoolOption = None,
-    rent: RentOption = None,
-    cohort: CohortOption = None,
-    parallel: ParallelOption = 1,
-    max_usd: CohortUsd = None,
-    help: FileHelp = False,
-) -> None:
-    """Add a file's runs to the queue. They start when a machine has room or can be rented."""
-    _submit(ctx, file, pool, rent, cohort, parallel, max_usd, help, True)
 
 
 @app.command()

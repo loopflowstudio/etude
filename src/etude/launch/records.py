@@ -404,6 +404,18 @@ def _distinct(value: tuple[Input, ...]) -> tuple[Input, ...]:
     return value
 
 
+class Tiny(Record):
+    """How to run a job tiny for `etude smoke`: overrides of the job's own fields.
+
+    Each one given replaces the job's for the smoke run; any left unset keeps
+    the job's. Etude never looks inside the work to shrink it.
+    """
+
+    command: str | None = None  # a command job's tiny command, such as "manabot train --smoke"
+    config: str | None = None  # a typed job's tiny config text (`training(..., smoke=...)`)
+    until: str | None = None  # a tiny target, as "clock=value"
+
+
 class Job(Record):
     """What to run, without a seed. Launching freezes it: `revision` becomes a commit.
 
@@ -436,6 +448,9 @@ class Job(Record):
     # The experiment its runs record under, handed to them as ETUDE_EXPERIMENT:
     # the experiment file `etude launch` read it from names it for its stem.
     experiment: str | None = None
+    # How to run it tiny before spending (`etude smoke`). Not part of its identity:
+    # changing it does not make a new job.
+    smoke: Tiny | None = None
 
     _check_inputs = field_validator("inputs")(_distinct)
 
@@ -504,6 +519,38 @@ class SourcePosition(Record):
     snapshot: bool = False
 
 
+class SmokeStep(Record):
+    """One part of an experiment file run in tiny form before its runs were submitted."""
+
+    step: Literal["train", "eval", "report"]
+    name: str  # what ran: the job's or tournament's name, or "report"
+    outcome: Literal["passed", "not_smoked", "skipped"]
+    seconds: float | None = None  # on the submitting machine; None when it did not run
+    detail: str = ""  # what it made, such as "1 checkpoint", or why it did not run
+    run: str | None = None  # a train step's tiny run, in the smoke's own launcher
+
+
+class Smoke(Record):
+    """What the smoke before a run's submission did. A failing smoke submits nothing.
+
+    "none" when nothing was smoked: no job declared a tiny form, or a Python
+    client launched without `smoke=True`.
+    """
+
+    outcome: Literal["passed", "skipped", "none"] = "none"
+    steps: tuple[SmokeStep, ...] = ()
+
+    def __str__(self) -> str:
+        if self.outcome == "skipped":
+            return "skipped (--no-smoke)"
+        if self.outcome == "none":
+            return "nothing smoked"
+        ran = [each for each in self.steps if each.outcome == "passed"]
+        seconds = sum(each.seconds or 0 for each in ran)
+        steps = ", ".join(dict.fromkeys(each.step for each in ran))
+        return f"passed in {seconds:.1f} s ({steps})"
+
+
 class Run(Record):
     """A job and a seed: the thing that is launched."""
 
@@ -514,6 +561,7 @@ class Run(Record):
     params: dict[str, Param] = Field(default_factory=dict)
     source: SourcePosition | None = None
     id: str | None = None  # allocated by the submitting client before git publication
+    smoke: Smoke = Smoke()
 
 
 class RunRecord(Record):
@@ -531,6 +579,7 @@ class RunRecord(Record):
     queued: bool = False  # historical submission metadata; never affects scheduling
     params: dict[str, Param] = Field(default_factory=dict)  # as on the Run that was sent
     source: SourcePosition | None = None
+    smoke: Smoke = Smoke()  # as on the Run that was sent
 
     @property
     def name(self) -> str:
