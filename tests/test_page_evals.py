@@ -34,7 +34,7 @@ from etude.run.records import ArtifactRef, Clock, Continuation, SourceKey
 from etude.run.storage import DirectoryStorage, S3Storage, Storage
 from etude.train.run import Run, track
 from tests.eval.games import play, play_failing_deal_one, play_with_evidence
-from tests.experiments import experiment_file
+from tests.experiments import authored, experiment_file
 from tests.run.storage import CountedClient, MeasuredStorage
 
 LAB = """
@@ -152,7 +152,7 @@ def test_checkpoints_are_bound_by_key_and_fixed_players_are_anchors(page: Page) 
     bound = {(each.run, each.ordinal) for each in page.players if each.run is not None}
     assert bound == {("a", 2), ("a", 4), ("b", 2), ("b", 4)}
     marks = {(m.run, m.ordinal): m.at for m in page.training.checkpoints}
-    assert marks[("a", 2)] == marks[("b", 2)] == {"updates": 200}
+    assert authored(marks[("a", 2)]) == authored(marks[("b", 2)]) == {"updates": 200}
     # Code and an outside checkpoint are fixed: no run, no ordinal.
     assert {each.name for each in page.players if each.run is None} == {"weak", "strong", "outside"}
     ladder = selection(page, "ladder")
@@ -636,7 +636,9 @@ def test_a_tracked_checkpoint_is_placed_by_its_seat_first_and_its_training_recor
         directory=runs,
     )
     page = build(runs, file)
-    placed = {each.name: (each.run, each.at) for each in page.players if each.run is not None}
+    placed = {
+        each.name: (each.run, authored(each.at)) for each in page.players if each.run is not None
+    }
     assert placed == {
         "updates-100.pt": ("a", {"updates": 100}),
         "updates-200.pt": ("a", {"updates": 250}),

@@ -32,6 +32,7 @@ from etude.train.read import read
 from etude.train.run import Run as Run_
 from etude.train.run import track
 from tests.eval.games import play, play_catching_errors, play_failing_deal_one
+from tests.experiments import authored
 
 WORLD = environment("duel", config={"world": "w6"})
 DEALS = tuple({"deal": deal} for deal in range(2))
@@ -402,8 +403,8 @@ def test_a_tracked_checkpoints_seat_says_where_its_run_stood_and_its_line(tmp_pa
     save(run, bucket, tmp_path, range(1, 2))
     run.finish(timeout=30)
     (saved,) = observe(bucket, "ppo").run("ppo-1").checkpoints
-    assert saved.ref.at == saved.clocks == {"updates": 100}
-    assert saved.model(DIRECT).checkpoint.at == {"updates": 100}
+    assert saved.ref.at == saved.clocks
+    assert authored(saved.clocks) == authored(saved.model(DIRECT).checkpoint.at) == {"updates": 100}
     assert saved.ref.line == saved.model(DIRECT).checkpoint.line == "ppo-1"
 
 
@@ -555,7 +556,7 @@ def test_relative_seats_fill_in_as_their_jobs_save_and_the_report_says_what_is_m
         if h.seating == "half-training" and h.run == "large-1" and h.at["updates"] == 200
     ]  # fmt: skip
     ((subject, opponent),) = at_200.pairs
-    assert (page.players[subject].at, page.players[opponent].at) == (
+    assert (authored(page.players[subject].at), authored(page.players[opponent].at)) == (
         {"updates": 200},
         {"updates": 100},
     )

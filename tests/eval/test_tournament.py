@@ -34,6 +34,7 @@ from etude.run.records import ArtifactRef, Clock
 from etude.run.storage import DirectoryStorage
 from etude.train.run import track
 from tests.eval.games import play, play_failing_deal_one
+from tests.experiments import authored
 from tests.run.storage import MeasuredStorage
 
 WORLD = environment("duel", config={"world": "w6"})
@@ -190,7 +191,7 @@ def test_checkpoints_held_on_the_go_then_a_matchup_added_in_batch(tmp_path: Path
     assert sorted(lines) == sorted(each.name for each in grown.seatings)
     for line in lines.values():
         assert (line.run, line.experiment) == ("ppo-1", "ppo")
-        assert [(p.ordinal, p.clocks) for p in line.points] == [
+        assert [(p.ordinal, authored(p.clocks)) for p in line.points] == [
             (1, {"updates": 100.0}),
             (2, {"updates": 200.0}),
             (3, {"updates": 300.0}),

@@ -22,7 +22,11 @@ Ownership and invariants:
   destination configured the files are already the record.
 
 Units: wall time is integer milliseconds since the Unix epoch. Clock values
-are whatever the author's clocks count; times are seconds.
+are whatever the author's clocks count; times are seconds. Etude adds its two
+clocks in hours (`etude.run.records.BUILT_IN_CLOCKS`) to every row and
+checkpoint: `running_hours` continues from the resumed checkpoint's value by
+this process's monotonic time, `hours_since_start` is wall time since the
+line's first attempt began.
 """
 
 from __future__ import annotations
@@ -32,6 +36,7 @@ import json
 import math
 import os
 import queue
+import re
 import secrets
 import socket
 import sys
@@ -56,6 +61,8 @@ from etude.run.declaration import declare
 from etude.run.delivery import RunFiles, StorageDestination, destinations, ship
 from etude.run.errors import EtudeError
 from etude.run.records import (
+    HOURS_SINCE_START,
+    RUNNING_HOURS,
     ArtifactRef,
     Attempt,
     Clock,
@@ -181,6 +188,8 @@ class Run:
         # The highest value this process has logged for each clock.
         self._high: dict[str, float] = {}
         self._clock_names = tuple(clock.name for clock in clocks)
+        # The clock columns every row and checkpoint carries: the author's, then Etude's.
+        self._columns = (*self._clock_names, RUNNING_HOURS, HOURS_SINCE_START)
         # Every checkpoint recorded in this folder, by any attempt on any machine,
         # and the name its record and file are kept under.
         self._recorded: dict[int, CheckpointRecord] = {}
@@ -198,22 +207,29 @@ class Run:
         self._writer_id = secrets.token_hex(6)
         # A later attempt or a continuation resumes from here, and its rows
         # supersede earlier attempts' from these coordinates on.
+        latest = self._latest()
         if resumed_at is None:
-            latest = self.latest_checkpoint()
             resumed_at = {} if latest is None else latest.at
+        started_ms = time.time_ns() // 1_000_000
+        # Etude's clocks continue from the checkpoint resumed, as a step clock does.
+        self._ran = resumed_at.get(
+            RUNNING_HOURS, 0.0 if latest is None else latest.at.get(RUNNING_HOURS, 0.0)
+        )
+        self._began = time.monotonic()
+        self._origin_ms = _origin(latest, root, started_ms)
         self._save(
             "metrics",
             self._writer_id,
             Attempt(
                 writer=self._writer_id,
-                started_ms=time.time_ns() // 1_000_000,
+                started_ms=started_ms,
                 host=socket.gethostname(),
                 attempt=os.environ.get("ETUDE_ATTEMPT"),
                 pod=os.environ.get("RUNPOD_POD_ID"),
                 resumed_at=dict(resumed_at),
             ),
         )
-        seal_logs(self.files.root, self._clock_names)  # what an earlier process left unsealed
+        seal_logs(self.files.root, self._columns)  # what an earlier process left unsealed
         self._index = Index(root, self._writer_id)
         self._metric_name_limit = metric_name_limit
         self._metric_names = metric_names(root) if metric_name_limit is not None else set()
@@ -263,7 +279,9 @@ class Run:
                         )
                     else:
                         self._high[name] = value
-            self._queue.put_nowait((time.time_ns() // 1_000_000, row))
+            wall_ms, hours = self._now()
+            self._queue.put_nowait((wall_ms, {**row, **hours}))
+            self._high.update(hours)
         except queue.Full:
             self._lost()
         except Exception:
@@ -355,14 +373,17 @@ class Run:
             coordinate = {**(at or {}), **clocks}
             if set(coordinate) != set(self._clock_names):
                 raise ValueError("checkpoint_clock_mismatch")
-            at = {name: float(coordinate[name]) for name in self._clock_names}
+            declared = {name: float(coordinate[name]) for name in self._clock_names}
+            wall_ms, hours = self._now()
+            at = {**declared, **hours}
             name = checkpoint_name(at)
             reference, staged = self._stage(artifact, name)
             for known in self._recorded.values():
                 same = (known.artifact.sha256 or known.artifact.uri) == (
                     reference.sha256 or reference.uri
                 )
-                if known.at == at and same:
+                # Etude's clocks always move on, so the same coordinate is the author's.
+                if all(known.at.get(n) == v for n, v in declared.items()) and same:
                     if staged is not None:
                         staged.unlink()
                     return known.artifact
@@ -378,7 +399,7 @@ class Run:
                 ordinal=ordinal,
                 artifact=reference,
                 at=at,
-                wall_ms=time.time_ns() // 1_000_000,
+                wall_ms=wall_ms,
                 tags=tuple(dict.fromkeys(tags)),
             )
         except (ValidationError, ValueError, TypeError, OSError) as error:
@@ -395,6 +416,39 @@ class Run:
         self._offer(_Kept(name, record))
         return record.artifact
 
+    def position(self, clock: str) -> float | None:
+        """Where the run stands on `clock`: Etude's clocks now, an author's the highest
+        value this process logged. None for an author's clock before its first row."""
+        if clock in (RUNNING_HOURS, HOURS_SINCE_START):
+            return self._now()[1][clock]
+        if clock not in self._clock_names:
+            raise ValueError(f"the run declares no clock {clock!r}")
+        return self._high.get(clock)
+
+    def checkpoint_due(self, every: float, clock: str = RUNNING_HOURS) -> bool:
+        """Whether `clock` has crossed a multiple of `every` since the latest checkpoint.
+
+        `if run.checkpoint_due(1): run.checkpoint(...)` saves every running hour,
+        counted from zero and continuing across resumes and continuations.
+        """
+        if every <= 0:
+            raise ValueError("every must be positive")
+        here, latest = self.position(clock), self._latest()
+        there = 0.0 if latest is None else latest.at.get(clock, 0.0)
+        return here is not None and here // every > there // every
+
+    def _now(self) -> tuple[int, dict[str, float]]:
+        """The wall time in milliseconds, and where Etude's clocks stand."""
+        wall_ms = time.time_ns() // 1_000_000
+        return wall_ms, {
+            RUNNING_HOURS: self._ran + (time.monotonic() - self._began) / 3600,
+            HOURS_SINCE_START: (wall_ms - self._origin_ms) / 3_600_000,
+        }
+
+    def _latest(self) -> CheckpointRecord | None:
+        """The latest record this run kept, else the parent's it continues from."""
+        return self._recorded[max(self._recorded)] if self._recorded else self._inherited
+
     def latest_checkpoint(self) -> CheckpointRecord | None:
         """The checkpoint to resume from: the latest this run recorded, on any attempt.
 
@@ -403,9 +457,9 @@ class Run:
         `artifact.uri`, which is on this machine. A continuation gets its
         parent's checkpoint until it records its own. None when there is none.
         """
-        if not self._recorded:
-            return self._inherited
-        record = self._recorded[max(self._recorded)]
+        record = self._latest()
+        if record is None or not self._recorded:
+            return record
         # The file keeps its name wherever the record was written.
         local = self.files.root / "checkpoints" / record.artifact.uri.rpartition("/")[2]
         if record.artifact.sha256 is None or not local.is_file():
@@ -513,7 +567,7 @@ class Run:
     def _write(self) -> None:
         stream: IO[str] | None = None
         opened_at = 0.0
-        builder = Builder(self._clock_names)
+        builder = Builder(self._columns)
 
         def seal(final: bool = False) -> None:
             nonlocal stream, builder
@@ -525,7 +579,7 @@ class Run:
                 stream.close()
                 Path(stream.name).unlink()  # The block now holds these rows.
                 self._tails.append(table)
-                stream, builder = None, Builder(self._clock_names)
+                stream, builder = None, Builder(self._columns)
                 self._sequence += 1
             self._fold(final)
             self._report_progress()
@@ -652,7 +706,7 @@ class Run:
                 except (TypeError, ValueError):
                     values[name] = type(value).__name__
         coordinate: dict[str, float] = {}
-        for name in self._clock_names:
+        for name in self._columns:
             value = values.get(name)
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 if math.isfinite(value):
@@ -662,7 +716,7 @@ class Run:
                     self._warn(
                         "incomplete", f"a logged row's clock {name!r} is not a finite number"
                     )
-        if len(coordinate) != len(self._clock_names):
+        if len(coordinate) != len(self._columns):
             # Charted against the clocks it does give, and wall time; counted.
             self.incomplete += 1
         if self._metric_name_limit is not None and "metric_names" not in self._warned:
@@ -812,7 +866,7 @@ def track(
     A resumed run's rows replace earlier attempts' from its latest checkpoint
     on. A process that restored its state from somewhere else, such as a
     snapshot of its own taken after that checkpoint, passes where it stands
-    as `resumed_at`, keyed by declared clocks.
+    as `resumed_at`, keyed by declared clocks or Etude's (`running_hours`).
     """
     if metric_name_limit is not None and metric_name_limit < 0:
         raise ValueError("metric_name_limit must be nonnegative or None")
@@ -825,7 +879,8 @@ def track(
     if experiment is None:
         raise EtudeError("experiment_not_named", 422)
     if resumed_at is not None and any(
-        clock not in {c.name for c in clocks} or not math.isfinite(value)
+        clock not in {c.name for c in clocks} | {RUNNING_HOURS, HOURS_SINCE_START}
+        or not math.isfinite(value)
         for clock, value in resumed_at.items()
     ):
         raise EtudeError("resumed_at_unknown_clock", 422)
@@ -865,6 +920,24 @@ def track(
     )
 
 
+def _origin(latest: CheckpointRecord | None, root: Path, started_ms: int) -> int:
+    """When the line's first attempt began, in milliseconds since the epoch.
+
+    The checkpoint resumed says how long after that it was saved, also across a
+    continuation; without one, the earliest attempt recorded in this folder.
+    """
+    if latest is not None and HOURS_SINCE_START in latest.at:
+        return latest.wall_ms - round(latest.at[HOURS_SINCE_START] * 3_600_000)
+    starts = [started_ms]
+    for path in (root / "metrics").glob("*.json"):
+        if re.fullmatch(r"[0-9a-f]{12}", path.stem):
+            try:
+                starts.append(Attempt.model_validate_json(path.read_bytes()).started_ms)
+            except ValidationError:
+                continue
+    return min(starts)
+
+
 def _inherited() -> tuple[SourceKey, CheckpointRecord] | None:
     """The parent's checkpoint a continuation was handed, with its file on this machine."""
     given = os.environ.get("ETUDE_CONTINUES")
@@ -888,7 +961,8 @@ def seal_runs(directory: Path | str) -> None:
     for root in sorted(path.parent for path in Path(directory).glob("*/run.json")):
         declared = RunFiles(root).run_file()
         if declared is not None:
-            seal_logs(root, [clock.name for clock in declared.declaration.clocks])
+            names = [clock.name for clock in declared.declaration.clocks]
+            seal_logs(root, [*names, RUNNING_HOURS, HOURS_SINCE_START])
 
 
 __all__ = [

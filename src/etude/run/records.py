@@ -1,8 +1,10 @@
 """File contracts every run shares: its declaration, attempts and final state.
 
 A run declares its clocks once. A clock is a coordinate the run advances: a
-step counts something, a time is in seconds. A run that logs no rows, such as
-an evaluation, declares none. Wall time is always recorded and never declared.
+step counts something, a time is a duration (seconds on an author's clocks).
+A run that logs no rows, such as an evaluation, declares none. Wall time is
+always recorded and never declared, and so are Etude's two clocks in hours
+(`BUILT_IN_CLOCKS`), which a training run gives on every row and checkpoint.
 
 These models know nothing about research, launching or providers.
 """
@@ -12,9 +14,6 @@ from __future__ import annotations
 from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
-
-# Reserved read-side axis: seconds since the Unix epoch, recorded on every row.
-WALL_CLOCK = "wall_seconds"
 
 Name = Annotated[str, StringConstraints(min_length=1, max_length=200, pattern=r"^\S+$")]
 Writer = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{12}$")]
@@ -55,11 +54,20 @@ class Clock(Record):
     kind: Literal["step", "time"]
     meaning: str = Field(min_length=1, max_length=200)
 
-    @model_validator(mode="after")
-    def not_reserved(self) -> Self:
-        if self.name == WALL_CLOCK:
-            raise ValueError("clock_name_reserved")
-        return self
+
+# Etude's clocks, which no author declares. `running_hours` is the learner line's
+# running time: absolute across resume and continuation like a step clock, it
+# counts from `track(...)` and drops what a crashed attempt ran past its last
+# checkpoint. `hours_since_start` is wall time since the line's first attempt
+# began, gaps included.
+RUNNING_HOURS = "running_hours"
+HOURS_SINCE_START = "hours_since_start"
+BUILT_IN_CLOCKS = (
+    Clock(name=RUNNING_HOURS, kind="time", meaning="hours the learner line has run"),
+    Clock(
+        name=HOURS_SINCE_START, kind="time", meaning="hours since the line's first attempt started"
+    ),
+)
 
 
 class Continuation(Record):
@@ -99,7 +107,13 @@ class RunDeclaration(Record):
         names = [clock.name for clock in self.clocks]
         if len(set(names)) != len(names):
             raise ValueError("duplicate_clock")
-        if self.continues is not None and self.continues.clock not in names:
+        if {RUNNING_HOURS, HOURS_SINCE_START} & set(names):
+            raise ValueError("clock_name_reserved")
+        if self.continues is not None and self.continues.clock not in (
+            *names,
+            RUNNING_HOURS,
+            HOURS_SINCE_START,
+        ):
             raise ValueError("continuation_clock_undeclared")
         if (self.config_json is None) != (self.config_sha256 is None):
             raise ValueError("config_requires_digest")

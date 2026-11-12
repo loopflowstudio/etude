@@ -2,7 +2,8 @@
 // the model of an experiment's page data (`etude.page.Page`): its jobs over seeds and the
 // value of each checkpoint, so the index's headline is the report's own curve.
 "use strict";
-const WALL = "wall_seconds";
+// Etude's clocks, in hours, on every training row and checkpoint (`BUILT_IN_CLOCKS`).
+const BUILT_IN = ["running_hours", "hours_since_start"];
 
 // ---------------------------------------------------------------- helpers
 const node = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
@@ -180,7 +181,7 @@ function model(D) {
   const positioned = indices.filter(i => D.players[i].run == null && placed(i));
   const posClocks = [...new Set(positioned.flatMap(i => Object.keys(D.players[i].at)))];
   // The clock a line's checkpoints are keyed by: a job's first, else the one the report names.
-  const alignClock = T.clocks[0]?.name ?? (posClocks.includes(R.clock) ? R.clock : posClocks[0]);
+  const alignClock = T.clocks.find(c => !BUILT_IN.includes(c.name))?.name ?? (posClocks.includes(R.clock) ? R.clock : posClocks[0]);
   // Named lines in order, then the checkpoints of no line. A colour follows the curve's position, never its rank.
   const named = [...new Set(positioned.map(lineOf))].sort((a, b) => (a === "") - (b === "") || a.localeCompare(b));
   // A curve's key identifies it on the page: a job's name, or its line. Only external
@@ -210,9 +211,9 @@ function model(D) {
   }
   for (const [run, got] of lineMarks) marks.set(run, [...got.values()].sort((a, b) => a.align - b.align));
   const markOf = (run, ordinal) => (marks.get(run) || []).find(m => m.ordinal === ordinal);
-  const xOf = (m, c) => c === WALL ? (m.elapsed == null ? null : m.elapsed / 3600) : m.at[c];
+  const xOf = (m, c) => m.at[c];
   // A value's own position (`at`, from `Player.at`) wins over its mark's, so no point disagrees with the page.
-  const xAt = (m, v, c) => c !== WALL && v.at?.[c] != null ? v.at[c] : xOf(m, c);
+  const xAt = (m, v, c) => v.at?.[c] != null ? v.at[c] : xOf(m, c);
   // Per checkpoint, `value(run, mark)` gives {y, lo, hi, meta}, {missing, meta}, {skip, meta}
   // for a checkpoint that is no point of this line, or nothing; `gap` says why a value is absent.
   // A job's point needs every seed: seeds align on where each checkpoint stood on the run's
@@ -429,7 +430,7 @@ function headline(D, M) {
   const sel = M.selectMatches(panel.matches, M.choices.length ? +M.choices[0][0] : null);
   const seated = M.seatingsOf(sel) != null;
   const opp = seated || sel == null ? "" : (M.opponents(0, sel)[0] || [""])[0];
-  const clock = M.alignClock || WALL;
+  const clock = M.alignClock || "hours_since_start";
   return M.JOBS.map(j => {
     const pts = sel == null || !D.scores.length ? [] : M.jobPoints(j, clock, M.evalValue(0, sel, {}, opp));
     const done = M.evaluated(pts);

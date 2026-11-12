@@ -10,7 +10,6 @@ import pytest
 
 from etude.run.block_file import block_key
 from etude.run.errors import EtudeError
-from etude.run.records import WALL_CLOCK
 from etude.run.storage import DirectoryStorage, run_prefix
 from etude.train.block import Builder, Series, Table, concat, decode
 from etude.train.manifest import Index, describe
@@ -50,8 +49,8 @@ def _joined(parts: list[Points]) -> Points:
     return Points(x=np.concatenate([p.x for p in parts]), y=np.concatenate([p.y for p in parts]))
 
 
-@pytest.mark.parametrize("clock", ["step", WALL_CLOCK])
-def test_batches_join_into_exactly_what_points_returns(tmp_path: Path, clock: str) -> None:
+def test_batches_join_into_exactly_what_points_returns(tmp_path: Path) -> None:
+    clock = "step"
     _messy_run(tmp_path / run_prefix("r"))
     metrics = ["value", "rare"]
     batches = list(read_batches(tmp_path, "e", "r", clock=clock, metrics=metrics))

@@ -92,7 +92,7 @@ from etude.run.listing import as_storage, declared, run_folders, runs, under
 from etude.run.records import Record
 from etude.run.storage import DirectoryStorage, S3Storage, Storage, default_root
 from etude.train.read import RunData, read_all
-from etude.train.report import WALL_MEANING, Training, training
+from etude.train.report import Training, training
 
 if TYPE_CHECKING:
     import duckdb
@@ -225,7 +225,6 @@ class Page(Record):
     origin: str | None
     # What the reader must know first, such as why the report is the default.
     notes: tuple[str, ...]
-    wall_meaning: str = WALL_MEANING
     training: Training
     scores: tuple[Score, ...]
     # Here Matches(tournament=None) means the matches played outside any tournament,

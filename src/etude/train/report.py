@@ -8,8 +8,10 @@ their range. Checkpoints are kept at their exact coordinates, with the wall
 time to each and the pace of every step clock since the previous one.
 Timers are summed from the metrics logged under a prefix (`etude.report.Flame`).
 
-Wall time on the page is seconds since the run first started: its first
-attempt, or its first row when no attempt was recorded.
+Every run is drawn on its declared clocks and Etude's two in hours
+(`etude.run.records.BUILT_IN_CLOCKS`). Attempt spans and checkpoint `elapsed`
+are seconds since the run first started: its first attempt, or its first row
+when no attempt was recorded.
 """
 
 from __future__ import annotations
@@ -22,11 +24,10 @@ from typing import Literal
 
 import numpy as np
 
-from etude.run.records import WALL_CLOCK, Clock, Record
+from etude.run.records import BUILT_IN_CLOCKS, HOURS_SINCE_START, Clock, Record
 from etude.train.read import Floats, RunData, lines
 
 BUCKETS = 120
-WALL_MEANING = "wall time since the run first started"
 
 
 class Job(Record):
@@ -144,17 +145,13 @@ def _started(run: RunData) -> float:
     return min(starts) / 1000 if starts else 0.0
 
 
-def _origin(run: RunData, clock: str) -> float:
-    return _started(run) if clock == WALL_CLOCK else 0.0
-
-
 def _trace(run: RunData, metric: str, clock: str) -> Trace | None:
     reduced = run.chart(metric, clock, BUCKETS)
     if not len(reduced):
         return None
     return Trace(
         owner=run.name,
-        x=_rounded((reduced.x_first + reduced.x_last) / 2 - _origin(run, clock), 7),
+        x=_rounded((reduced.x_first + reduced.x_last) / 2, 7),
         mean=_rounded(reduced.mean),
         nonfinite=int(reduced.nonfinite.sum()),
     )
@@ -165,13 +162,13 @@ def _band(job: str, members: Sequence[RunData], metric: str, clock: str) -> Trac
     present = [run for run in members if len(run.chart(metric, clock, BUCKETS))]
     if len(present) < 2:
         return None
-    charts = [(run, run.chart(metric, clock, BUCKETS), _origin(run, clock)) for run in present]
-    low = min(float(chart.x_first[0]) - origin for _, chart, origin in charts)
-    high = max(float(chart.x_last[-1]) - origin for _, chart, origin in charts)
+    charts = [run.chart(metric, clock, BUCKETS) for run in present]
+    low = min(float(chart.x_first[0]) for chart in charts)
+    high = max(float(chart.x_last[-1]) for chart in charts)
     width = (high - low) / BUCKETS
     means = np.full((len(present), BUCKETS), np.nan)
-    for row, (run, _, origin) in enumerate(charts):
-        reduced = run.chart(metric, clock, BUCKETS, span=(low + origin, high + origin))
+    for row, run in enumerate(present):
+        reduced = run.chart(metric, clock, BUCKETS, span=(low, high))
         means[row, reduced.index] = reduced.mean
     count = (~np.isnan(means)).sum(axis=0)
     filled = np.flatnonzero(count)
@@ -333,9 +330,11 @@ def _marks(run: RunData) -> list[Mark]:
 def _timers(run: RunData, prefix: str) -> Timers | None:
     """The run's icicle under `prefix`, or None when it logged no timer there."""
     totals: dict[tuple[str, ...], float] = {}
+    # Any clock every row gives; a declared one also covers rows logged before Etude's.
+    clock = run.clocks[0].name if run.clocks else HOURS_SINCE_START
     for metric in run.metrics():
         if metric.startswith(prefix) and len(metric) > len(prefix):
-            reduced = run.chart(metric, WALL_CLOCK, 1)
+            reduced = run.chart(metric, clock, 1)
             finite = reduced.count - reduced.nonfinite
             totals[tuple(metric[len(prefix) :].split("/"))] = float(
                 np.nansum(reduced.mean * finite)
@@ -382,6 +381,8 @@ def training(data: Sequence[RunData], *, prefixes: Sequence[str] = ()) -> Traini
     for run in data:
         for declared in run.clocks:
             clocks.setdefault(declared.name, declared)
+    clocks.update({clock.name: clock for clock in BUILT_IN_CLOCKS})
+    built_in = {clock.name for clock in BUILT_IN_CLOCKS}
     metrics: dict[str, None] = {}
     for run in data:
         metrics.update(dict.fromkeys(run.metrics()))
@@ -389,12 +390,12 @@ def training(data: Sequence[RunData], *, prefixes: Sequence[str] = ()) -> Traini
     members = {job.name: [run for run in data if run.name in job.runs] for job in jobs}
     series: dict[str, dict[str, tuple[Trace, ...]]] = {}
     bands: dict[str, dict[str, tuple[Trace, ...]]] = {}
-    for clock in [*clocks, WALL_CLOCK]:
+    for clock in clocks:
         for metric in metrics:
             traces = [
                 trace
                 for run in data
-                if clock == WALL_CLOCK or clock in {c.name for c in run.clocks}
+                if clock in built_in or clock in {c.name for c in run.clocks}
                 if (trace := _trace(run, metric, clock)) is not None
             ]
             if traces:

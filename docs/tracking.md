@@ -79,10 +79,10 @@ Rules a caller can rely on:
 
 - **Clocks are declared.** A run states its clocks once, each a step (a count)
   or a time (seconds) with one line of meaning. They are its only x-axis
-  options besides wall time, which every row carries. Re-declaring a run with
-  different clocks is refused.
+  options besides Etude's two clocks in hours ([below](#etudes-clocks)),
+  which every row carries. Re-declaring a run with different clocks is refused.
 - **Every row should give every clock.** A row missing one is charted against
-  the clocks it did give, and wall time. The first such row in a run raises an
+  the clocks it did give, and Etude's. The first such row in a run raises an
   `EtudeWarning` at the caller's line; `strict=True` makes it an error.
 - **No ordering rule in storage.** A repeated or lower clock value is accepted
   and kept. A read returns the latest write per clock value. A clock that goes
@@ -288,6 +288,42 @@ run.tag(model, "best")  # tags can change later
   where the machine that wrote it kept it; a record whose file has not arrived
   is listed as recorded.
 
+### Etude's clocks
+
+```python
+import os
+
+run = track(experiment="capacity-pilot", clocks=[Step("updates", "optimizer updates, absolute")])
+hours = float(os.environ["ETUDE_UNTIL_VALUE"])  # the job's until="running_hours=10"
+while run.position("running_hours") < hours:
+    update, loss = train_one_update()
+    run.log({"rl/loss": loss}, updates=update)
+    if run.checkpoint_due(1):  # every running hour
+        run.checkpoint("out/latest.pt", updates=update)
+run.finish()
+```
+
+Every row and checkpoint of a training run carries two clocks Etude keeps,
+in hours, which no run declares or logs:
+
+- **`running_hours`** is how long the learner line has run. It starts at
+  `track(...)`, so installing, booting and queueing never count, and goes on
+  from the resumed checkpoint's value, across attempts and continuations, as
+  `updates` does. What a crashed attempt ran past its last checkpoint is
+  dropped on resume, with its rows.
+- **`hours_since_start`** is wall time since the line's first attempt began,
+  gaps between attempts included.
+
+`run.position(clock)` says where the run stands on any clock;
+`run.checkpoint_due(every, clock="running_hours")` whether the clock has
+passed a multiple of `every` since the latest checkpoint. Either clock can be
+a job's `until`, the page's x axis, or a seat's clock
+(`Earlier(clock="running_hours", by=2, at_or_before=True, ...)`,
+[evaluation](evaluation.md)). Metric timers such as `time/collection` stay
+in seconds. A checkpoint saved before these clocks existed derives them from
+its wall time where its run's attempts say how; rows logged before have
+neither.
+
 ### Reading a long run's metrics
 
 ```python
@@ -322,7 +358,7 @@ log the metric. A batch can therefore hold a different number of points for
 each metric, or none. A name no block logged as a metric raises
 `EtudeError("metric_not_logged")` before the first batch, so a typo is not
 read as an empty history; `points` gives empty points for it instead.
-`metrics` is a list, even for one name. `clock` defaults to wall time.
+`metrics` is a list, even for one name. `clock` defaults to `hours_since_start`.
 
 A batch is normally one block. Blocks whose clock ranges overlap are read
 together, because the latest write must win. This happens when a process
@@ -450,7 +486,7 @@ and double-click to zoom out. The cursor is shared by every chart in a
 section.
 
 **Two parts.** Evals, then Perf and ML details, each with its own x axis (any
-declared clock, or wall hours); Perf and ML details can be smoothed. Choosing
+declared clock, `running_hours` or `hours_since_start`); Perf and ML details can be smoothed. Choosing
 jobs and filtering are the only controls for the whole page.
 
 **Training jobs.** Training curves group a job's runs across seeds,

@@ -38,15 +38,14 @@ const {T, R, JOBS, marks, markOf, jobPoints, cellOf, placed, fixedPlayers, jobOf
 const TRAINED = T.runs.length > 0;
 
 // The view lives in the URL, so a reload or a rewritten page shows the same thing. The x axis
-// offers the clocks training declared or positions use, and wall time where training marks exist.
-const clockNames = [...new Set([...T.clocks.map(c => c.name), ...M.posClocks]), ...(T.checkpoints.length || !M.posClocks.length ? [WALL] : [])];
+// offers the clocks training declared or positions use, then Etude's hours where training ran.
+const clockNames = [...new Set([...T.clocks.map(c => c.name).filter(c => !BUILT_IN.includes(c)), ...M.posClocks]), ...(TRAINED || !M.posClocks.length ? BUILT_IN : [])];
 const firstClock = clockNames.includes(R.clock) ? R.clock : clockNames[0];
 const S = Object.assign({hide: "", filter: "{}", eclock: firstClock, pclock: firstClock, mlclock: firstClock, opp: "first", score: "0", sel: "", lines: "on", mjob: "", mkey: "", xline: "", smooth: "on", fpath: "", fscale: "share", live: "1"},
   Object.fromEntries(new URLSearchParams(location.hash.slice(1))), {commit: COMMIT});
 for (const k of ["eclock", "pclock", "mlclock"]) if (!clockNames.includes(S[k])) S[k] = firstClock;
 const writeHash = () => history.replaceState(null, "", "#" + new URLSearchParams(S));
-const clockLabel = c => c === WALL ? "wall hours" : c;
-const clockMeaning = c => c === WALL ? D.wall_meaning : (T.clocks.find(k => k.name === c) || {}).meaning || c;
+const clockMeaning = c => (T.clocks.find(k => k.name === c) || {}).meaning || c;
 const stepClocks = T.clocks.filter(c => c.kind === "step").map(c => c.name);
 
 // ---------------------------------------------------------------- evals: what compare computed
@@ -100,7 +99,7 @@ function control(host, label, options, key, apply = render) {
   for (const [value, text] of options) { const b = node("button", null, text); b.setAttribute("aria-pressed", String(S[key] === value)); b.onclick = () => { S[key] = value; apply(); }; group.appendChild(b); }
   host.append(node("span", "lbl", label), group);
 }
-const CLOCKS = clockNames.map(c => [c, clockLabel(c)]);
+const CLOCKS = clockNames.map(c => [c, c]);
 const draws = []; const later = f => draws.push(f);
 
 function render() {
@@ -163,7 +162,7 @@ function render() {
   const body = document.getElementById("evals-body"); body.replaceChildren();
   const scoreName = E.info ? `${E.info.table}.${E.info.value}${E.info.per ? " per " + E.info.per : ""}` : "";
   document.getElementById("evals-sub").textContent = !M.usesSelection ? "" : E.sel == null ? "no eval run yet" : `${selName(D.selections[E.sel])} · ${scoreName}`;
-  const eOpts = {xLabel: clockLabel(S.eclock), yFormat: scoreFormat, ref, sync: "evals"};
+  const eOpts = {xLabel: S.eclock, yFormat: scoreFormat, ref, sync: "evals"};
   const GAPS = "○ not yet played · × failed · | not evaluated";
   // Only a job averages seeds; a line's curve is its checkpoints' own values.
   const BAND = vis.some(j => j.line == null) ? "mean over seeds · band: seed range, or one seed's 95% interval over matches" : "band: 95% interval over matches";
@@ -257,7 +256,7 @@ function render() {
     } else if (panel.kind === "crosstable") {
       // One line's checkpoints against each other, both axes ordered by the clock: a tab per
       // line of the curves shown, so a job's seeds are each their own.
-      const c = card(body, panel.title, `${where} · ${scoreName} · row against column · ordered by ${clockLabel(S.eclock)}`, "full");
+      const c = card(body, panel.title, `${where} · ${scoreName} · row against column · ordered by ${S.eclock}`, "full");
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
       const tabsOf = [...new Map(vis.flatMap(j => M.linesOf(j).map(key => [key, {job: j, key, label: key || "checkpoints with no line"}]))).values()];
       if (!tabsOf.length) { c.appendChild(node("div", "na", "No checkpoint has a position")); continue; }
@@ -268,7 +267,7 @@ function render() {
       c.appendChild(tabs);
       const at = i => D.players[i].at[S.eclock] ?? D.players[i].at[M.alignClock];
       const order = M.lineMembers(chosen.key).filter(i => at(i) != null).sort((a, b) => at(a) - at(b) || playerName(a).localeCompare(playerName(b)));
-      const label = i => `${S.eclock in D.players[i].at ? clockLabel(S.eclock) : M.alignClock} ${num(at(i))}` + (order.some(k => k !== i && at(k) === at(i)) ? ` · ${playerName(i)}` : "");
+      const label = i => `${S.eclock in D.players[i].at ? S.eclock : M.alignClock} ${num(at(i))}` + (order.some(k => k !== i && at(k) === at(i)) ? ` · ${playerName(i)}` : "");
       if (order.length < 2) { c.appendChild(node("div", "na", `${chosen.label} has fewer than two checkpoints with a position`)); continue; }
       const grid = node("div", "matrix"); grid.style.gridTemplateColumns = `minmax(110px, auto) repeat(${order.length}, minmax(44px, 1fr))`;
       const wrap = node("div", "mwrap"); wrap.appendChild(grid); c.appendChild(wrap);
@@ -332,13 +331,12 @@ function render() {
     const near = pts.slice(Math.max(0, i - 3), i + 4).filter(q => !q.missing && q.y != null);
     return {...p, y: mean(near.map(q => q.y)), lo: null, hi: null};
   });
-  const scaleX = (clock, x) => x == null ? null : clock === WALL ? x / 3600 : x;
   // A several-seed job is its band (mean, seed range); a one-seed job is its run's means.
   function metricPoints(j, key, clock) {
     const band = ((T.bands[clock] || {})[key] || []).find(l => l.owner === j.key);
     const l = band || (j.runs.length === 1 ? ((T.series[clock] || {})[key] || []).find(l => l.owner === j.runs[0]) : null);
     if (!l) return null;
-    return l.x.map((x, i) => ({x: scaleX(clock, x), y: l.mean[i], lo: band ? l.low[i] : null, hi: band ? l.high[i] : null, intervalLabel: "seed range", missing: l.mean[i] == null, meta: band ? `${l.seeds[i]} seeds` : ""}));
+    return l.x.map((x, i) => ({x, y: l.mean[i], lo: band ? l.low[i] : null, hi: band ? l.high[i] : null, intervalLabel: "seed range", missing: l.mean[i] == null, meta: band ? `${l.seeds[i]} seeds` : ""}));
   }
   const named = new Set([...(R.perf || []), ...(R.ml || [])].flatMap(p => p.keys || []));
   const prefixes = [...(R.perf || []), ...(R.ml || [])].filter(p => p.kind === "flame").map(p => p.prefix);
@@ -347,7 +345,7 @@ function render() {
     const ctl = document.getElementById(section + "-controls"); ctl.replaceChildren();
     if (!TRAINED) { host.appendChild(node("div", "na", "No training runs")); document.getElementById(section + "-sub").textContent = ""; return; }
     control(ctl, "X axis", CLOCKS, clockKey); control(ctl, "Lines", [["on", "Smoothed"], ["off", "Raw"]], "smooth");
-    const clock = S[clockKey], opts = {xLabel: clockLabel(clock), band: true, sync: section};
+    const clock = S[clockKey], opts = {xLabel: clock, band: true, sync: section};
     const missing = [];
     const prep = (pts, j) => S.smooth === "on"
       ? [{label: j.label, color: color(j), opacity: 0.25, width: 1, faint: true, points: pts.map(p => ({...p, lo: null, hi: null}))}, {label: j.label, color: color(j), dotted: j.baseline, points: smoothed(pts)}]
@@ -389,7 +387,7 @@ function render() {
         for (const k of present) {
           c.appendChild(node("div", "mini-title mono", k));
           for (const j of vis) {
-            const lines = j.runs.map(run => ((T.series[WALL] || {})[k] || []).find(l => l.owner === run)).filter(Boolean);
+            const lines = j.runs.map(run => ((T.series[T.clocks[0]?.name] || {})[k] || []).find(l => l.owner === run)).filter(Boolean);
             const row = node("div", "counter"), label = node("span", null, j.label); label.style.color = "var(--ink-2)";
             if (!lines.length) { row.append(node("span", "icon na", "–"), label, node("span", "count", "not logged")); c.appendChild(row); continue; }
             // Buckets keep each stretch's mean; a counter's mean is nonzero exactly where it was.

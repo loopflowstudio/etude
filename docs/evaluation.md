@@ -302,7 +302,8 @@ evaluate(
   | `Code(name="heuristic", ...)`, or `Inference(...).model(ref)` | the same fixed player for every checkpoint: code, or one chosen checkpoint such as the initialization or a frozen anchor |
   | `Earlier(clock="updates", by=400, inference=direct)` | the held checkpoint's line exactly 400 updates before it |
   | `Fraction(clock="updates", value=0.5, inference=direct)` | its line at exactly half the held checkpoint's updates (3,000 for 6,000) |
-  | `Fraction(clock="updates", value=0.5, at_or_before=True, inference=direct)` | its line's latest checkpoint at or before half the held checkpoint's updates |
+  | `Fraction(clock="running_hours", value=0.5, at_or_before=True, inference=direct)` | its line's latest checkpoint at or before half the held checkpoint's running hours |
+  | `Earlier(clock="running_hours", by=2, at_or_before=True, inference=direct)` | its line's latest checkpoint at or before two running hours before it |
   | `At(clock="updates", value=200, inference=direct)` | its line at update 200 |
   | `Final(inference=direct)` | its line's last checkpoint, once its run has ended |
   | `Aligned(clock="updates", job="small", inference=direct)` | job `small` at exactly the held checkpoint's updates |
@@ -322,7 +323,10 @@ evaluate(
   Positions are exact by default: a checkpoint at 2,990 is not half of
   6,000. `Earlier` and `Fraction` take `at_or_before=True` for the latest
   checkpoint at or before the position instead, found once the line has a
-  checkpoint past it or has ended, so a later save never moves it. A seat
+  checkpoint past it or has ended, so a later save never moves it. Etude's
+  clocks, `running_hours` and `hours_since_start`, are on every checkpoint
+  ([tracking](tracking.md#etudes-clocks)); no checkpoint is saved at an exact
+  hour, so a seat on them takes `at_or_before=True`. A seat
   with no checkpoint there yet plays nothing, and the next hold with no
   checkpoint plays it once one is saved, so a large job's seating against
   `Aligned(job="small")` fills in as the small job catches up. A relative
@@ -496,7 +500,10 @@ def eval(state: ExperimentState) -> list[Job]:
             ),
             Seating(
                 name="half-training",
-                players=(direct, Fraction(clock="updates", value=0.5, inference=direct)),
+                players=(
+                    direct,
+                    Fraction(clock="running_hours", value=0.5, at_or_before=True, inference=direct),
+                ),
                 conditions=deals,
                 games=8,
             ),
