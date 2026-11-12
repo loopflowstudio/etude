@@ -147,7 +147,7 @@ with track(
     clocks=[Step("updates", "optimizer updates, absolute across continuation")],
 ) as run:
     run.log_table(
-        "matchups",
+        "decks",
         [
             {"deck": "red", "opponent": "blue", "seat": 0, "wins": 12, "games": 20},
             {"deck": "blue", "opponent": "red", "seat": 1, "wins": 8, "games": 20},
@@ -156,7 +156,7 @@ with track(
     )
 ```
 
-This records `matchups` at optimizer update 400. Adding a matchup adds a row,
+This records `decks` at optimizer update 400. Adding a deck pair adds a row,
 keeping metric names bounded. Use `run.log` for scalar summaries such as loss
 and `run.log_table(name, rows, **clocks)` for JSON rows, including nested objects
 and lists. Give every declared clock, using absolute continuation coordinates.
@@ -179,7 +179,7 @@ from etude.run.storage import default_root
 from etude.train.read import read
 
 history = read(default_root(), "self-play", "policy-seed-0")
-for table in history.read_table("matchups", "updates"):
+for table in history.read_table("decks", "updates"):
     print(table.x, table.rows)  # selected update coordinate and its JSON rows
 ```
 
