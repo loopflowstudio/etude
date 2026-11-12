@@ -146,8 +146,10 @@ def _train(scheduler: Scheduler, key: str, run: Run) -> Trained:
     seconds = time.monotonic() - started
     if status.outcome != "succeeded":
         sys.stderr.write(render(scheduler.logs(run=launched)))
+        cause = f" ({status.cause})" if status.cause else ""
         raise LauncherError(
-            f"smoke train {name}: {status} after {seconds:.1f} s; nothing was submitted"
+            f"smoke train {name}: {status.outcome}{cause} after {seconds:.1f} s;"
+            " nothing was submitted"
         )
     step = SmokeStep(step="train", name=name, outcome="passed", seconds=seconds)
     return Trained(job=key, step=step, run=launched)

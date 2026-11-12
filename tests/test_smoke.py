@@ -113,10 +113,14 @@ def test_a_passing_smoke_queues_and_its_runs_record_it(
 @pytest.mark.parametrize(
     ("step", "change", "said"),
     [
-        ("train", {}, "smoke train ppo: "),
-        # A game that breaks under its second deal only is still caught.
-        ("eval", {"play": "play_failing_deal_one"}, "smoke eval ladder: failed"),
-        ("report", {"report": "raise RuntimeError('report broke')"}, "smoke report: failed"),
+        ("train", {}, "smoke train ppo: failed after"),
+        # A game that breaks under its second deal only is still caught, and named.
+        ("eval", {"play": "play_failing_deal_one"}, "(RuntimeError: deal 1 crashed)"),
+        (
+            "report",
+            {"report": "raise RuntimeError('report broke')"},
+            "(RuntimeError: report broke)",
+        ),
     ],
 )
 def test_a_failing_step_submits_nothing_and_is_named(

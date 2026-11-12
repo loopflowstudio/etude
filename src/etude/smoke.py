@@ -185,7 +185,12 @@ def _try_step[T](step: Step, name: str, work: Callable[[], T]) -> T:
         return work()
     except Exception as error:
         traceback.print_exc()
+        # Name the first error, not a wrapper such as eval's `match_failed`.
+        first: BaseException = error
+        while first.__cause__ is not None:
+            first = first.__cause__
         raise LauncherError(
             f"smoke {step}{'' if name == step else ' ' + name}: failed after"
-            f" {time.monotonic() - started:.1f} s ({type(error).__name__}: {error}); nothing was submitted"
+            f" {time.monotonic() - started:.1f} s ({type(first).__name__}: {first});"
+            " nothing was submitted"
         ) from error
