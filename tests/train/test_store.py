@@ -923,3 +923,52 @@ def test_live_writer_describes_each_permanent_block_only_once(
     data = read(tmp_path, "e", "r")
     assert len(data.blocks) == 3
     assert data.points("loss", "step").y.tolist() == [0, 1, 2]
+
+
+def test_selective_report_reads_bound_metadata_and_preserve_absolute_coordinates(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "r"
+    with track(experiment="e", run="r", clocks=[Step("step", "steps")], directory=tmp_path):
+        pass
+    writer = "abcdef123456"
+    for block in range(3):
+        builder = Builder(["step"])
+        builder.add(
+            1000 + block,
+            {"step": 1000.0 + block},
+            {
+                "wanted": float(block),
+                "time/train": 0.5,
+                **{f"unused/{i}": float(i) for i in range(16)},
+            },
+        )
+        write_block(root, block_key(2, block, block, writer), builder.table(writer, block))
+    # This index must never be parsed on the selective read path. A tiny poison
+    # fixture verifies the path without manufacturing memory pressure.
+    (root / f"metrics/{writer}.permanent.json").write_text("not an index")
+    measured = MeasuredStorage(DirectoryStorage(tmp_path))
+    (data,) = read_all(measured, "e", metrics=frozenset({"wanted"}), prefixes=("time/",))
+    assert data.metrics() == ["wanted", "time/train"]
+    assert len(data.blocks) == 3
+    assert all(len(b.header.series) == 2 for b in data.blocks)
+    assert all(len(level.series) == 2 for b in data.blocks for level in b.header.rollups)
+    assert measured.ranges == 6  # two ranges per header, no cumulative index
+    assert measured.requests == 9  # plus declaration, attempt and state
+    assert data.points("wanted", "step").x.tolist() == [1000, 1001, 1002]
+    assert data.points("wanted", "step").y.tolist() == [0, 1, 2]
+    assert data.points("time/train", "step").y.tolist() == [0.5, 0.5, 0.5]
+    file = experiment_file(
+        tmp_path / "experiments",
+        "e",
+        """
+from etude.report import Flame, Report, Series
+
+def report():
+    return Report(other_metrics=False, perf=(Flame(),),
+                  ml=(Series(title="Wanted", keys=("wanted",)),))
+""",
+    )
+    page = build(measured, file)
+    assert page.training.metrics == ("wanted", "time/train")
+    assert page.training.runs[0].reached["step"] == 1002

@@ -208,6 +208,47 @@ writer start or resume. Adding a permanent block rewrites the accumulated
 manifest without rereading old blocks. Wider rows and more metric names still
 cost more. Existing blocks and manifests remain readable without migration.
 
+### Storage outages and recovery
+
+```sh
+# On a computer holding the retained runs directory, after storage recovers:
+uv run etude sync --directory /data/retained-runs --to s3://my-bucket/runs
+```
+
+This delivers retained files and is safe to repeat. Use the runs directory
+containing the `RUN/` folders. It needs the same bucket credentials and
+`etude-sdk[s3]` installation as other bucket operations; it cannot recover files
+from a machine whose disk is gone.
+
+Failed delivery leaves local files available for a later pass; background
+delivery resumes when storage recovers. Reports reading the bucket show only
+what has arrived there.
+
+SDK-created boto3 clients use 60-second connection and read socket timeouts,
+so a dead connection releases the uploader once boto3's own retries are spent.
+Set `ETUDE_STORAGE_TIMEOUT_SECONDS` to a positive finite number of seconds before
+creating storage to override both. Boto3 streams large uploads in chunks and
+uses multipart transfers; these are socket limits, not a total checkpoint
+transfer deadline. A supplied `S3Storage(client=...)` keeps that client's
+`botocore.config.Config` connection/read timeouts and retry settings. Transport
+failures raise `etude.storage_timeout.StorageUnavailable`; streamed reads retry
+up to three times, and background delivery retries retained files on a later
+pass. Worker/controller uploads use the [same storage timeout policy](launcher.md#timeout-ownership).
+
+`run.finish(timeout=10)` seals the run and retries final delivery within its
+allowance. Increase `timeout` in seconds to allow longer for final delivery.
+An upload already in progress keeps its socket timeout; `finish()` can return
+before that upload ends, so expiry does not confirm cancellation or delivery.
+The Python process exits only when boto3's transfer threads end. boto3 retries
+each request itself (five attempts by default; set `AWS_MAX_ATTEMPTS`), so on a
+dead connection exit can wait attempts × `ETUDE_STORAGE_TIMEOUT_SECONDS`: five
+minutes with the defaults.
+If files remain undelivered, it reports their local location for `etude sync`.
+For launched runs, the worker owns delivery and its final allowance is capped
+by the rental deadline. Inspect `etude status RUN` and `etude logs --run RUN` for
+delivery failures and the age of the retained evidence; preserve the local files
+before the machine is deleted if storage is still unavailable.
+
 ### Checkpoints
 
 ```python
@@ -249,6 +290,21 @@ run.tag(model, "best")  # tags can change later
 
 ## Reports
 
+```sh
+uv run etude report ppo.py --source r2://bucket/runs --serve --open
+```
+
+This opens the experiment's Evals, Perf and ML details at
+`http://127.0.0.1:8765/`. Click **Refresh** to read newly delivered results or
+an edited `report()`. Leaving the page open does not poll storage or reload
+on a timer. The page shows its source and generation time, so you can tell
+which results you are reading.
+
+Install `etude-sdk[eval]` to report evaluations and `etude-sdk[s3]` for a
+bucket source; install `etude-sdk[eval,s3]` for both. The experiment file must
+be importable with its own dependencies. Without `--source`, the report reads
+the local tracking directory described above.
+
 ```python
 # ppo.py: experiment "ppo", beside its train() and eval(state)
 from etude.report import Anchors, Curve, HeadToHead, Matches, Matrix, Ranking, Report, Score
@@ -273,21 +329,40 @@ def report() -> Report:
 
 ```sh
 uv run etude report ppo.py --source r2://bucket/runs --open   # writes ./reports/ppo.html
-uv run etude report ppo.py --watch 5 --open   # rewrite it every 5 s; the open page reloads
-uv run etude report ppo.py --serve            # serve it live, writing nothing
+uv run etude report ppo.py --watch 5 --open   # opt in to checks and page reloads every 5 s
+uv run etude report ppo.py --serve            # refresh on demand, writing nothing
 uv run etude report experiments/ --serve      # every experiment there, with an index at /
 ```
 
-One HTML page per experiment, with its data inlined: no server and no network
-to view it. The experiment is named for the file, and the page follows the
+Without `--serve`, the result is one HTML file per experiment, with its data
+inlined: no server and no network to view it. Rerun the command to update that
+snapshot; reloading a saved HTML file cannot fetch new training results.
+The experiment is named for the file, and the page follows the
 file's `report()`; a file without one gets `Report()`, and the page says so at
-its top. `--watch` and `--serve` build a page again once its file or its runs'
-files change, so an edited `report()` shows on the next; while nothing has
-changed they list the source and build nothing. The page's top says where its runs were read from and when; it reads
-files and never launches or rents anything. From a directory the page goes to
+its top. Reports read files and never launch or rent anything.
+From a directory the page goes to
 `reports/` beside its runs, from a bucket to `./reports`; `--out DIR` chooses.
-`--serve` has no login and listens on this computer only; with `--watch` the
-served page reloads itself.
+`--serve` has no login and defaults to this computer only
+(`--host 127.0.0.1 --port 8765`). Keep the command running to use Refresh;
+Ctrl-C stops it.
+
+**Refresh** checks the experiment file, the modules it imports from its
+folder, and its source, then replaces the served page when a generation
+succeeds; an edited helper module is read afresh without a restart. Requests for the same report while
+that generation is running join it, so several clicks or viewers do not
+start duplicate storage reads. Ordinary views reuse the generated page.
+If refreshing fails, the last successful page and its generation time remain
+available and the failure is reported. Fix the reported source access or
+experiment-file error and click Refresh again; an old timestamp is not
+evidence of a successful update.
+
+**Automatic refresh is optional.** `--watch SECONDS` checks for changes at
+that interval and reloads the open page. Combine it with `--serve` to opt a
+served report into periodic refresh. These checks can read or list storage
+even when no new results arrive, so use on-demand refresh to avoid idle
+storage traffic. For Python callers, `etude.page.render(page)` produces a
+snapshot with no timer; `render(page, refresh=5)` opts into browser reloads.
+Rendering alone never rebuilds the page's data.
 
 **A folder** is every experiment file in it, at any depth outside hidden
 folders: a `.py` file defining `eval(state)` or `report()` at its top level,
@@ -299,8 +374,11 @@ finished, failed, restarted), its latest checkpoint, each job's latest score
 with a sparkline of its report's first curve, evaluation progress with
 failed matches, time trained and latest activity. Experiments with failures
 come first, then those with work running. A file that fails to run, or an
-experiment with no runs yet, says so on its row. A served page reloads every
-5 seconds, or every `--watch` seconds.
+experiment with no runs yet, says so on its row. The served index also
+refreshes on demand unless `--watch` is supplied. Once discovered, an experiment
+keeps its row through syntax errors: the row shows the error and its link still
+opens the last successful page, if one was built. Repair the file and refresh
+to replace that page. Removing the file removes its row.
 
 **Charts** are uPlot, inlined into the page. Drag across a chart to zoom in
 and double-click to zoom out. The cursor is shared by every chart in a
@@ -314,7 +392,29 @@ jobs and filtering are the only controls for the whole page.
 labelled by the job's launch name and seed count ("ppo · 3 seeds"), as its
 seeds' mean banded by their range. Seeds align on where each checkpoint stood
 on the run's first declared clock. The `baseline` job is dotted everywhere; a
-job's colour follows launch order.
+job's colour follows launch order. `Report(labels={"ppo": "PPO baseline"})`
+replaces the displayed job name, keeping the seed count. Labels change
+presentation only: `baseline` and panel subjects still refer
+to the original job names. Unlabelled jobs keep their launch names.
+
+**Execution setup** is result provenance. Games played on different devices,
+compute setups or code revisions contribute to the same requested matches;
+a replay counts once, from its latest delivered result. There is no Config
+control. Record the actual setup with `Result.execution`, inspect it alongside
+`matches.seed` and `seats.commit` in `statsdb` ([evaluation](evaluation.md)).
+Scientific differences, such as search budgets in `Inference.config`, remain
+distinct players. A curve uses the variant played in its selected matches;
+when several remain, it names the ambiguity. Select the intended matchup or
+set `Curve(inference={"search": 64})` to choose that exact scientific config.
+It selects no execution setup.
+When a curve names an opponent, that opponent's scientific config must also
+agree across seeds; a shared player name alone does not make variants comparable.
+
+`HeadToHead(matches=Matches(matchup="search vs direct"))` uses the scientific
+variants in that matchup on both sides. It averages scores against the other
+job's checkpoint positions, then across subject seeds, only when each side's
+scientific config agrees. Mixed variants show an ambiguity even when no valid
+points remain; select a matchup to resolve it.
 
 **Evals** are the experiment's eval runs ([evaluation](evaluation.md#experiments)).
 A checkpoint is drawn where its seat says it stood (`CheckpointRef.at`), else,
@@ -345,6 +445,7 @@ is drawn as it wants it now; one it no longer returns, as its eval runs held it.
 | Panel | Shows |
 |---|---|
 | `Curve(split=None, opponent=None)` | the score at each checkpoint, against one anchor; `split` draws one chart per value |
+| `Curve(inference={"search": 64})` | one scientific variant when several play the same checkpoint; `None` resolves from the selected matches |
 | `Curve(opponent="heuristic")` | against the player of that name, whatever the Opponent control says |
 | `Curve(opponent=Earlier(clock="updates", by=400))` | each checkpoint against the one of its line exactly 400 updates earlier; none there is a gap that says so |
 | `Curve(opponent=Fraction(clock="updates", value=0.5))` | each checkpoint against the one of its line at exactly half its updates (6,000 v 3,000); none there is a gap |
@@ -362,6 +463,104 @@ names `eval(state)` gives them. A matchup and a tag are alternatives; naming
 both is refused. A curve against one anchor draws the others' scores against it as
 reference lines.
 
+For a matchup seating search against no search at the same checkpoint, two
+curves can deliberately show the two scientific variants:
+
+```python
+Curve(
+    title="Search against direct",
+    matches=Matches(matchup="search vs direct"),
+    inference={"search": 64},
+)
+Curve(
+    title="Direct against search",
+    matches=Matches(matchup="search vs direct"),
+    inference={"search": 0},
+)
+```
+
+**Compare jobs across selections.**
+
+```python
+# capacity.py: jobs "small" and "large" evaluated in benchmark "paired",
+# checkpoints every 200 updates.
+from etude.report import Curve, Earlier, Fraction, Matches, Report, Score
+
+
+def report() -> Report:
+    return Report(
+        score=Score(table="plays", value="won", reference=0.5, unit="games"),
+        labels={"small": "Small model", "large": "Large model"},
+        other_metrics=False,
+        evals=(
+            Curve(
+                title="Against half-training checkpoints",
+                opponent=Fraction(clock="updates", value=0.5),
+                matches=(
+                    Matches(tournament="paired", tag="half-training-small"),
+                    Matches(tournament="paired", tag="half-training-large"),
+                ),
+            ),
+            Curve(
+                title="Against the previous checkpoint",
+                opponent=Earlier(clock="updates", by=200),
+                matches=(
+                    Matches(tournament="paired", tag="previous-small"),
+                    Matches(tournament="paired", tag="previous-large"),
+                ),
+            ),
+            Curve(
+                title="Large against small at equal training steps",
+                matches=Matches(tournament="paired", tag="head-to-head"),
+                subject="large",
+            ),
+            Curve(
+                title="Large against small at equal training time",
+                matches=Matches(tournament="paired", tag="equal-hours"),
+                subject="large",
+            ),
+        ),
+    )
+```
+
+The first two charts each draw a line per job from its own tagged matches.
+Both players of such a matchup are checkpoints, so `opponent` keeps each
+point the newer checkpoint's score; without it, the older checkpoint's
+complementary score is drawn at its own position on the same line.
+The last two draw only the large model's score against the small model;
+the small model's complementary score is omitted. The tags must be present
+on the benchmark's matchups, and the matching results must have been
+delivered to the report's source. This spec selects results; it schedules
+no evaluations.
+
+A tuple of `Matches` unions the selected matches for that panel. Overlapping
+selections count a match once, and jobs remain separate lines. Give an
+explicit tournament to select it exactly. With only `Matches(tag="anchor")`,
+the report prefers a matching tournament with results over an empty one;
+it does not combine every tournament carrying that tag. Use an explicit
+tuple to combine selections. Tag names are literal, not patterns.
+
+`Curve(subject="large")` selects the job whose score to show; `opponent`
+still selects whom it is scored against. Omitting `subject` keeps all
+eligible subjects. A missing subject is reported as missing rather than
+substituted with another job.
+
+The Evals section shows its Matches picker and selection subtitle only when
+at least one panel uses the section's selection. When every panel supplies
+its own matches, as above, both are hidden. Other controls still apply to
+the panels that use them.
+
+**Score labels.** For a table with one score row per game for each subject,
+`Score(..., unit="games")` labels the row count in games. For example, a
+tooltip can read `0.63 · 95% interval 0.53–0.72 · 64 games`.
+The unit names the counted rows; it does not multiply a row by the number of
+games in its match. Leave the unit unspecified for the default `rows` when
+the table has another granularity. `per` still controls the score's
+denominator, not the row count's label. Display rounding changes neither
+the stored values nor the calculation. The interval resamples whole
+matches, even when the displayed count is games; with fewer than two
+matches, no interval is shown.
+
 Gaps stay visible. A checkpoint nothing played is marked not evaluated and is
 no point of a line. One `eval(state)` wants that no eval run has delivered is
 marked not yet played, and failed matches are marked and listed; both break a
@@ -376,3 +575,51 @@ previous row). **ML details** default to reinforcement learning's `Counters`
 and `Series` over `rl/` keys; pass `perf=` or `ml=` to name an experiment's
 own. Keys a panel names that no run logged are listed, and metrics no panel
 names are drawn last.
+
+For a large metric vocabulary, use `Report(other_metrics=False)`. Only keys
+named by `Series` and `Counters`, and prefixes named by `Flame`, are read and
+drawn. This reads one immutable block header at a time instead of parsing the
+cumulative training index, retaining only the selected columns. All clocks,
+checkpoints and continuation coordinates are preserved. Memory still includes
+one full header and the selected series; this does not bound the size of an
+individual block header. The default, `other_metrics=True`, includes all logged
+metrics.
+
+```python
+from etude.report import ML, Report, Schedule, SchedulePoint
+
+
+def report() -> Report:
+    return Report(
+        ml=(
+            *ML,
+            Schedule(
+                title="Planned learning rate",
+                clock="updates",
+                unit="learning rate",
+                jobs={
+                    "large": (
+                        SchedulePoint(at=10_000, value=0.001),
+                        SchedulePoint(at=20_000, value=0.0001),
+                    ),
+                },
+            ),
+        ),
+    )
+```
+
+**Configured curves** in ML details show planned values, such as a
+learning-rate or damping schedule, separately labelled from logged
+observations. Their current-position marker comes from the run's recorded
+clock at the time the report was generated. A schedule against optimizer
+updates uses absolute update coordinates across continuation; it does not
+advance with time spent viewing the page. Refresh to move the marker when
+new clock values arrive. A configured curve is not evidence that training
+used those values; log a metric to compare the schedule with observations.
+`Schedule.jobs` uses original job names. Points must have finite values and
+strictly increasing clock coordinates. Values between samples are linearly
+interpolated; no value is extrapolated outside the supplied range. Each seed
+gets a filled current-position marker when its recorded clock lies inside that
+range; configured sample points are hollow.
+If no seed of a job has a position in range, the chart says so. The schedule
+uses its own named clock, independently of the section's X axis control.

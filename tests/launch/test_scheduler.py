@@ -30,7 +30,7 @@ from etude.launch.scheduler import Scheduler
 from etude.launch.schemas import Observation
 from etude.launch.ssh import Unreachable
 from etude.launch.storage.disk import DirectoryJournal
-from etude.launch.storage.s3 import StorageUnavailable
+from etude.storage_timeout import StorageUnavailable
 from etude.train.records import Step
 from etude.train.run import Run as TrackedRun
 from etude.train.run import track

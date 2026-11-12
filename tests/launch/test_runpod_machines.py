@@ -60,12 +60,13 @@ from etude.launch.schemas import (
     log_piece,
 )
 from etude.launch.storage.bucket import BucketJournal
-from etude.launch.storage.s3 import Bucket, Grant, Keys, Reply, StorageUnavailable
+from etude.launch.storage.s3 import Bucket, Grant, Keys, Reply
 from etude.launch.storage.transport import emit
 from etude.launch.worker import courier as courier_module
 from etude.launch.worker.courier import Courier
 from etude.launch.worker.courier import run as run_in_pod
 from etude.run.records import ArtifactRef
+from etude.storage_timeout import StorageUnavailable
 from etude.train.records import Step
 from etude.train.run import Run as TrackedRun
 from etude.train.run import track
@@ -1029,7 +1030,10 @@ def test_a_growing_worker_log_is_sent_once_in_appended_pieces(
 
 def test_a_finished_rental_delivers_its_end_and_log_tail_before_it_is_deleted(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("ETUDE_STORAGE_TIMEOUT_SECONDS", "120")
+    monkeypatch.setenv("ETUDE_STORAGE_BYTES_PER_SECOND", "524288")
     c = cloud(tmp_path)
     run = c.scheduler.launch(
         Job(command="echo done", max_hours=0.05, max_usd=Decimal(1)), rent="l4"
@@ -1051,6 +1055,8 @@ def test_a_finished_rental_delivers_its_end_and_log_tail_before_it_is_deleted(
         s for s in c.scheduler.logs(refresh=True, run=run).streams if s.producer == "worker"
     )
     assert worker.complete and worker.text.rstrip().endswith(CLOSED)
+    assert c.provider.envs[-1]["ETUDE_STORAGE_TIMEOUT_SECONDS"] == "120"
+    assert c.provider.envs[-1]["ETUDE_STORAGE_BYTES_PER_SECOND"] == "524288"
 
 
 def test_output_printed_during_an_upload_waits_for_the_next_piece(tmp_path: Path) -> None:

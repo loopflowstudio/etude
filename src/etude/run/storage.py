@@ -14,9 +14,12 @@ folder is named for the run (`run_directory`).
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
+import time
+from collections.abc import Callable
 from pathlib import Path
 from stat import S_ISREG
 from typing import Any, Literal, Protocol
@@ -24,7 +27,9 @@ from urllib.parse import quote, urlsplit
 
 from etude.cache import Artifact, Cache, Fetched
 from etude.carriage import immutable
+from etude.deadline import call, remaining
 from etude.run.errors import EtudeError
+from etude.storage_timeout import StorageUnavailable, socket_timeout
 
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._=-]{0,199}$")
 
@@ -124,6 +129,22 @@ class DirectoryStorage:
         return found
 
 
+def _storage_request[T](operation: Callable[[], T]) -> T:
+    # Optional cloud dependency: local storage never loads botocore.
+    from botocore.exceptions import (  # type: ignore[import-untyped,import-not-found,unused-ignore]  # noqa: PLC0415
+        ConnectionError,
+        HTTPClientError,
+    )
+
+    try:
+        return call(operation)
+    except FileNotFoundError:
+        raise
+    except (ConnectionError, HTTPClientError, OSError) as error:
+        logging.getLogger(__name__).warning("storage request failed (%s)", type(error).__name__)
+        raise StorageUnavailable(f"storage request failed ({type(error).__name__})") from None
+
+
 class S3Storage:
     """An S3 or R2 bucket reached with the author's own credentials.
 
@@ -165,14 +186,18 @@ class S3Storage:
         self._where = f"{endpoint.scheme}://{bucket}.{host}/"
 
     def put(self, key: str, data: bytes) -> None:
-        self.client.put_object(
-            Bucket=self.bucket, Key=self.prefix + key, Body=data, ChecksumAlgorithm="SHA256"
+        _storage_request(
+            lambda: self.client.put_object(
+                Bucket=self.bucket, Key=self.prefix + key, Body=data, ChecksumAlgorithm="SHA256"
+            )
         )
 
     def put_file(self, key: str, path: Path) -> None:
         # boto3 splits a large file into parts, checksums and retries each itself.
-        self.client.upload_file(
-            str(path), self.bucket, self.prefix + key, ExtraArgs={"ChecksumAlgorithm": "SHA256"}
+        _storage_request(
+            lambda: self.client.upload_file(
+                str(path), self.bucket, self.prefix + key, ExtraArgs={"ChecksumAlgorithm": "SHA256"}
+            )
         )
 
     def uri(self, key: str) -> str:
@@ -190,7 +215,9 @@ class S3Storage:
 
     def delete(self, key: str) -> bool:
         try:
-            self.client.delete_object(Bucket=self.bucket, Key=self.prefix + key)
+            _storage_request(
+                lambda: self.client.delete_object(Bucket=self.bucket, Key=self.prefix + key)
+            )
         except Exception as error:
             response = getattr(error, "response", {})
             if response.get("Error", {}).get("Code") in ("AccessDenied", "403"):
@@ -203,15 +230,19 @@ class S3Storage:
 
     def versions(self, prefix: str) -> dict[str, str]:
         """Each object's ETag, size and time, from the listing alone."""
-        found: dict[str, str] = {}
-        pages = self.client.get_paginator("list_objects_v2").paginate(
-            Bucket=self.bucket, Prefix=self.prefix + prefix
-        )
-        for page in pages:
-            for item in page.get("Contents", []):
-                tag = f"{item.get('ETag')}:{item.get('Size')}:{item.get('LastModified')}"
-                found[item["Key"][len(self.prefix) :]] = tag
-        return found
+
+        def collect() -> dict[str, str]:
+            found: dict[str, str] = {}
+            pages = self.client.get_paginator("list_objects_v2").paginate(
+                Bucket=self.bucket, Prefix=self.prefix + prefix
+            )
+            for page in pages:
+                for item in page.get("Contents", []):
+                    tag = f"{item.get('ETag')}:{item.get('Size')}:{item.get('LastModified')}"
+                    found[item["Key"][len(self.prefix) :]] = tag
+            return found
+
+        return _storage_request(collect)
 
 
 class _Object:
@@ -238,12 +269,37 @@ class _Object:
 
     def _get(self, options: dict[str, str]) -> Fetched | None:
         """The body and its ETag; None when `IfNoneMatch` names the current version."""
+        # Optional cloud dependency: only bucket reads need streaming exceptions.
+        from botocore.exceptions import HTTPClientError  # type: ignore[import-untyped,import-not-found,unused-ignore]  # noqa: PLC0415
+
         storage = self.storage
-        # Cloud exceptions are untyped; normalize only expected missing objects.
+
+        def fetch() -> Fetched:
+            for attempt in range(3):
+                remaining()
+                # botocore owns request retries. Only failures consuming the
+                # returned body need another read of the original range.
+                reply = storage.client.get_object(
+                    Bucket=storage.bucket, Key=storage.prefix + self.key, **options
+                )
+                body = reply["Body"]
+                try:
+                    remaining()
+                    return Fetched(body=body.read(), etag=reply.get("ETag"))
+                except (HTTPClientError, OSError):
+                    if attempt == 2:
+                        raise
+                finally:
+                    # One reader owns the response, even if it arrives after
+                    # caller expiry. Closing on the caller could block on read.
+                    body.close()
+                pause = remaining(0.1 * 2**attempt)
+                assert pause is not None
+                time.sleep(pause)
+            raise AssertionError("read retry loop exhausted without a result")
+
         try:
-            reply = storage.client.get_object(
-                Bucket=storage.bucket, Key=storage.prefix + self.key, **options
-            )
+            return _storage_request(fetch)
         except Exception as error:
             response = getattr(error, "response", {})
             code = response.get("Error", {}).get("Code")
@@ -252,7 +308,6 @@ class _Object:
             if "IfNoneMatch" in options and code in ("304", "NotModified"):
                 return None
             raise
-        return Fetched(body=reply["Body"].read(), etag=reply.get("ETag"))
 
 
 def _client(provider: Literal["s3", "r2"]) -> Any:
@@ -262,8 +317,10 @@ def _client(provider: Literal["s3", "r2"]) -> Any:
         from botocore.config import Config  # type: ignore[import-untyped,import-not-found,unused-ignore]  # noqa: PLC0415
     except ImportError:
         raise EtudeError(f"{provider}_requires_boto3", 422) from None
+    timeout = socket_timeout()
+    config = Config(connect_timeout=timeout, read_timeout=timeout)
     if provider == "s3":
-        return boto3.client("s3")
+        return boto3.client("s3", config=config)
     try:
         account, access, secret = (
             os.environ[name]
@@ -274,8 +331,11 @@ def _client(provider: Literal["s3", "r2"]) -> Any:
     # Uploads still name SHA256 themselves; this stops boto3 adding CRC checksums
     # of its own, which R2 is not relied on to accept. R2 has no object versions,
     # so nothing here asks for one.
-    config = Config(
-        request_checksum_calculation="when_required", response_checksum_validation="when_required"
+    config = config.merge(
+        Config(
+            request_checksum_calculation="when_required",
+            response_checksum_validation="when_required",
+        )
     )
     return boto3.client(
         "s3",

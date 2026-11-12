@@ -54,13 +54,15 @@ from etude.launch.storage.s3 import (
     Keys,
     PostForm,
     Reply,
-    StorageUnavailable,
     _send,
+    read,
 )
 from etude.launch.storage.transport import attribute, observe
 from etude.launch.usage import R2, S3_US_WEST_2, Access, Transfer, Usage, reconcile
 from etude.launch.worker.courier import Courier
+from etude.run.delivery import RunFiles, StorageDestination, ship
 from etude.run.storage import S3Storage
+from etude.storage_timeout import StorageUnavailable, socket_timeout
 from tests.launch.counting import Counting, Counts
 from tests.launch.fake import bench
 from tests.run.storage import CountedClient
@@ -75,6 +77,7 @@ class HTTP:
         self.posts = 0
         self.ranges: list[str] = []
         self.fault = ""
+        self.release = threading.Event()
         self.etag = '"version-one"'
         owner = self
 
@@ -84,6 +87,9 @@ class HTTP:
 
             def do_GET(self) -> None:
                 owner.requests += 1
+                if owner.fault == "silent-headers":
+                    owner.release.wait()
+                    return
                 path = urlsplit(self.path).path
                 body = owner.objects.get(path)
                 status = 200 if body is not None else 404
@@ -120,7 +126,14 @@ class HTTP:
                 if content_range:
                     self.send_header("Content-Range", content_range)
                 self.end_headers()
-                if owner.fault == "interrupted" and requested == "bytes=4-7":
+                if owner.fault == "silent-body":
+                    self.wfile.write(body[:1])
+                    self.wfile.flush()
+                    owner.release.wait()
+                    return
+                if owner.fault == "interrupted-body" or (
+                    owner.fault == "interrupted" and requested == "bytes=4-7"
+                ):
                     body = body[:2]
                     self.close_connection = True
                 try:
@@ -132,6 +145,9 @@ class HTTP:
             def do_POST(self) -> None:
                 owner.posts += 1
                 body = self.rfile.read(int(self.headers["Content-Length"]))
+                if owner.fault == "silent-upload":
+                    owner.release.wait()
+                    return
                 owner.uploads[self.path] = body
                 message = BytesParser(policy=policy.default).parsebytes(
                     f"Content-Type: {self.headers['Content-Type']}\r\n\r\n".encode() + body
@@ -149,7 +165,19 @@ class HTTP:
                 self.send_header("Content-Length", "0")
                 self.end_headers()
 
+            def do_PUT(self) -> None:
+                owner.posts += 1
+                body = self.rfile.read(int(self.headers["Content-Length"]))
+                if owner.fault == "silent-upload":
+                    owner.release.wait()
+                    return
+                owner.objects[self.path] = body
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = False  # teardown joins every controlled stalled request
         self.url = f"http://127.0.0.1:{self.server.server_port}"
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -173,6 +201,7 @@ def http(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[HTTP]:
     try:
         yield fixture
     finally:
+        fixture.release.set()
         fixture.server.shutdown()
         fixture.server.server_close()
         fixture.thread.join()
@@ -964,7 +993,7 @@ def test_a_failed_refresh_keeps_the_verified_copy_and_recovers(
         storage.put("run/manifest.json", b"second")
         client.failures = 1
         with limit_time(30):
-            with pytest.raises(ConnectionError):
+            with pytest.raises(StorageUnavailable):
                 storage.get("run/manifest.json")
             assert (storage.cache.root / Content.of(b"first").name).read_bytes() == b"first"
             assert storage.get("run/manifest.json") == b"second"
@@ -1271,3 +1300,193 @@ def test_a_failed_delivery_leaves_how_the_job_ended_and_says_why(
     sent = http.requests
     courier.carry_out()
     assert http.requests == sent
+
+
+@pytest.mark.parametrize("fault", ["silent-headers", "silent-body"])
+def test_storage_socket_timeout_retries_and_recovers(
+    http: HTTP, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    monkeypatch.setenv("ETUDE_STORAGE_TIMEOUT_SECONDS", "0.1")
+    http.fault = fault
+    events: list[str] = []
+    log = tmp_path / "retry.log"
+    with log_to(log), observe(events.append), pytest.raises(StorageUnavailable):
+        read(http.url + "/payload?X-Amz-Signature=private")
+    assert http.requests == 3
+    failed = [Transfer.model_validate_json(event) for event in events]
+    assert len(failed) == 3 and all(not event.completed for event in failed)
+    assert log.read_text().count("retrying") == 2
+    assert "private" not in log.read_text()
+    http.fault = ""
+    assert read(http.url + "/payload") == b"abcdefghijkl"
+    assert http.requests == 4
+
+
+@pytest.mark.parametrize("final", [False, True])
+def test_courier_delivers_retained_files_after_socket_timeout(
+    http: HTTP, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, final: bool
+) -> None:
+    monkeypatch.setenv("ETUDE_STORAGE_TIMEOUT_SECONDS", "0.1")
+    home = tmp_path / "worker/sessions/session"
+    attempt = home / "attempts/attempt"
+    attempt.mkdir(parents=True)
+    (attempt / "run").write_text("run")
+    track = home.parent.parent / "track/run"
+    track.mkdir(parents=True)
+    payload = track / "run.json"
+    payload.write_bytes(b'{"retained":true}')
+    grant = Grant(prefix="run/", form=PostForm(url=http.url + "/upload", fields={}))
+    courier = Courier(home, grant, "unused", runs={"run": grant})
+    http.fault = "silent-upload"
+    log = tmp_path / "delivery.log"
+    with log_to(log):
+        with pytest.raises(StorageUnavailable):
+            courier.carry_out()
+        assert payload.read_bytes() == b'{"retained":true}'
+        assert "/run/run.json" not in http.objects
+        assert http.posts == 2  # one run upload, then the retained usage journal
+        http.fault = ""
+        courier.carry_out(final=final)
+    assert http.objects["/run/run.json"] == payload.read_bytes()
+    assert http.posts == 5  # retained file, attempt record, usage
+    assert "has not succeeded for" in log.read_text()
+    assert ("recovered after" in log.read_text()) is (not final)
+
+
+@pytest.mark.parametrize("fault", ["silent-body", "interrupted-body"])
+def test_sdk_storage_failure_retains_files_and_recovers(
+    http: HTTP, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    monkeypatch.setenv("ETUDE_STORAGE_TIMEOUT_SECONDS", "0.1")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "fixture")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "fixture")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_ENDPOINT_URL_S3", http.url)
+    monkeypatch.setenv("AWS_MAX_ATTEMPTS", "1")
+    storage = S3Storage("bucket", cache=Cache(tmp_path / "cache"))
+    assert storage.client.meta.config.connect_timeout == 0.1
+    assert storage.client.meta.config.read_timeout == 0.1
+    root = tmp_path / "runs/run"
+    root.mkdir(parents=True)
+    (root / "run.json").write_bytes(b'{"retained":true}')
+    files = RunFiles(root)
+    destination = StorageDestination(storage)
+    http.fault = "silent-upload"
+    assert ship(files, "run", destination) == "unavailable: StorageUnavailable"
+    assert files.pending(storage.name) == [("run.json", files.fingerprint("run.json"))]
+    assert http.posts == 1
+    http.fault = ""
+    assert ship(files, "run", destination) is None
+    assert http.objects["/bucket/run/run.json"] == (root / "run.json").read_bytes()
+    assert not files.pending(storage.name)
+    assert http.posts == 2
+    http.fault = fault
+    with pytest.raises(StorageUnavailable):
+        storage.get("run/run.json")
+    assert http.requests == 3
+    http.fault = ""
+    assert storage.get("run/run.json") == (root / "run.json").read_bytes()
+    assert http.requests == 4
+    with pytest.raises(FileNotFoundError):
+        storage.get("absent")
+    assert http.requests == 5  # a missing object is never retried or treated as an outage
+    http.objects["/bucket/another"] = b"uncached body"
+    http.fault = "silent-body"
+    with limit_time(0.03), pytest.raises(StorageUnavailable):
+        storage.get("another")
+    assert http.requests == 6  # no fresh retry allowance after caller expiry
+
+
+def test_sdk_closes_a_response_that_arrives_after_caller_expiry(tmp_path: Path) -> None:
+    boto3 = pytest.importorskip("boto3")
+    release, closed = threading.Event(), threading.Event()
+
+    class Body(io.BytesIO):
+        def close(self) -> None:
+            super().close()
+            closed.set()
+
+    body = Body(b"late response")
+
+    class Late(CountedClient):
+        def get_object(self, **fields: Any) -> Any:
+            self.requests += 1
+            release.wait()
+            return {"Body": body}
+
+    with mock_aws():
+        client = Late(boto3.client("s3", region_name="us-east-1"))
+        storage = S3Storage("lab", client=client, cache=Cache(tmp_path / "cache"))
+        try:
+            with limit_time(0.1), pytest.raises(StorageUnavailable):
+                storage.get("late")
+        finally:
+            release.set()
+            assert closed.wait(timeout=5)
+        assert client.requests == 1
+        assert body.closed
+        assert not (storage.cache.root / Content.of(b"late response").name).exists()
+
+
+def test_storage_socket_allowance_scales_whole_body_uploads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ETUDE_STORAGE_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("ETUDE_STORAGE_BYTES_PER_SECOND", raising=False)
+    assert socket_timeout() == 60
+    assert socket_timeout(64 * 1024**2) == 124
+    monkeypatch.setenv("ETUDE_STORAGE_TIMEOUT_SECONDS", "120")
+    monkeypatch.setenv("ETUDE_STORAGE_BYTES_PER_SECOND", "524288")
+    assert socket_timeout(64 * 1024**2) == 248
+    for name in ("ETUDE_STORAGE_TIMEOUT_SECONDS", "ETUDE_STORAGE_BYTES_PER_SECOND"):
+        with monkeypatch.context() as invalid:
+            invalid.setenv(name, "nan")
+            with pytest.raises(ValueError, match="positive and finite"):
+                socket_timeout()
+
+
+def test_status_delivery_age_uses_only_retained_successful_writes(tmp_path: Path) -> None:
+    b = bench(tmp_path)
+    run = b.scheduler.queue(Job(command="train", max_hours=1, max_usd=Decimal(1)), rent="l4")
+    b.scheduler.tick()
+    attempt = b.scheduler.attempts(run)[0]
+    good = Transfer(
+        id="success",
+        observed_at=b.clock(),
+        backend="fixture",
+        key="run/metrics",
+        operation="PUT",
+        purpose="report",
+        attempt=attempt.id,
+        completed=True,
+        status=200,
+    )
+    b.store.retain_transfer(good)
+    b.clock.advance(120)
+    for identity, fields in (
+        ("failed", {"completed": False}),
+        ("denied", {"status": 403}),
+        ("read", {"operation": "GET"}),
+        ("different-attempt", {"attempt": "another"}),
+    ):
+        b.store.retain_transfer(
+            good.model_copy(update={"id": identity, "observed_at": b.clock(), **fields})
+        )
+    counting = Counting(b.store, b.service)
+    with counting.record():
+        status = b.scheduler.read(run)
+    counts = counting.snapshot()
+    assert (counts.provider, counts.bucket, counts.ssh, counts.git) == (0, 0, 0, 0)
+    assert status.delivery_age_seconds == 120
+    assert "no delivery confirmed for 2.0 minutes" in str(status)
+    assert "collection may be stale" in str(status)
+    b.store.retain_transfer(good.model_copy(update={"id": "recovered", "observed_at": b.clock()}))
+    assert b.scheduler.read(run).delivery_age_seconds == 0
+    statements: list[str] = []
+    b.store._db.set_trace_callback(statements.append)
+    assert b.store.last_delivery(attempt.id) == b.clock()
+    b.store._db.set_trace_callback(None)
+    assert len(statements) == 1
+    plan = [row[3] for row in b.store._db.execute("EXPLAIN QUERY PLAN " + statements[0])]
+    assert any("USING INDEX transfers_delivery" in step for step in plan)
+    b.store.close()

@@ -59,6 +59,7 @@ from etude.eval.records import (
     COLUMN_TYPES,
     IDENTIFIER,
     ColumnType,
+    Config,
     Environment,
     Match,
     MatchRecord,
@@ -105,14 +106,17 @@ type Tables = Mapping[str, Sequence[Row]]
 
 @dataclass(frozen=True)
 class Result:
-    """What `play` returns when a match keeps blobs beside its tables.
+    """What `play` returns with tables, optional blobs and execution provenance.
 
     Rows name a blob by its SHA256 (`hashlib.sha256(blob).hexdigest()`);
     `etude.eval.query.read_blobs` gives its bytes back.
+    `execution` records the actual device and runtime settings. It changes
+    neither the requested match nor whether its games have already been played.
     """
 
     tables: Tables = field(default_factory=dict)
     blobs: Sequence[bytes] = ()
+    execution: Config = field(default_factory=dict)
 
 
 class EvalRun(Record):
@@ -380,6 +384,7 @@ class _Writer:
         """Check every table, then stage them, the blobs and the match's record; nothing on refusal."""
         result = outcome if isinstance(outcome, Result) else Result(tables=outcome)
         try:
+            execution = as_config(result.execution)
             checked = {
                 table: _checked(scheduled, table, rows, self.rollups)
                 for table, rows in result.tables.items()
@@ -407,7 +412,12 @@ class _Writer:
             self.columns.setdefault(table, {}).update(columns)
         digests = tuple(dict.fromkeys(sha256(blob).hexdigest() for blob in result.blobs))
         record = MatchRecord(
-            match=scheduled, state="done", columns=types, wall_ms=_now_ms(), blobs=digests
+            match=scheduled,
+            state="done",
+            columns=types,
+            wall_ms=_now_ms(),
+            blobs=digests,
+            execution=execution,
         )
         self.staging.stage(record, result.blobs)
         if self.staging.due():

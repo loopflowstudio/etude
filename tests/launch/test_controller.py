@@ -77,7 +77,9 @@ def controller(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, P
     # Nothing is installed on the stand-in controller: the client sends its own code.
     monkeypatch.setenv("ETUDE_REMOTE_PYTHON", sys.executable)
     monkeypatch.setenv("PATH", str(scripts) + os.pathsep + os.environ["PATH"])
-    assert command("controller", "set", "controller-alias").returncode == 0
+    # The installer owns its deadline and child cleanup; an outer CLI timeout
+    # can expire during cold imports and leave the remote installation running.
+    assert main(["controller", "set", "controller-alias", "--startup-seconds", "15"]) == 0
     assert not (client / "launcher.db").exists()
     return client, remote
 

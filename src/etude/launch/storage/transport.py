@@ -21,6 +21,7 @@ from uuid import uuid4
 
 from etude.deadline import call, remaining
 from etude.launch.logging import sanitize, write_log
+from etude.storage_timeout import socket_timeout
 
 _sink: ContextVar[Callable[[str], None] | None] = ContextVar("transfer_sink", default=None)
 _context: ContextVar[dict[str, str | None]] = ContextVar("transfer_context", default={})
@@ -141,18 +142,25 @@ def request(
             url, data=body, headers={"User-Agent": "etude-sdk", **headers}, method=method
         )
         try:
-            reply = urllib.request.urlopen(outgoing, timeout=remaining())  # noqa: S310
+            reply = urllib.request.urlopen(
+                outgoing, timeout=remaining(socket_timeout(len(body or b"")))
+            )  # noqa: S310
         except urllib.error.HTTPError as error:
             reply = error
+        except urllib.error.URLError as error:
+            if isinstance(error.reason, TimeoutError):
+                raise TimeoutError("storage socket timed out") from None
+            raise
         with reply:
             status = reply.status
             request_id = reply.headers.get("x-amz-request-id")
             if accept is not None:
                 accept(status, {k.lower(): v for k, v in reply.headers.items()})
+            timeout = socket_timeout()
             while True:
-                left = remaining()
-                # urllib exposes its HTTPResponse socket through the buffered reader.
-                # Non-socket file responses have no socket to adjust.
+                left = remaining(timeout)
+                # HTTPResponse clears fp when the final bytes close its socket;
+                # look it up on each read rather than retain a closed socket.
                 raw = getattr(getattr(reply, "fp", None), "raw", None)
                 connection = getattr(raw, "_sock", None)
                 if connection is not None:

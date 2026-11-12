@@ -15,7 +15,7 @@ from etude.cache import Cache
 from etude.eval import block
 from etude.eval.block import Block, Staging, quote
 from etude.eval.convert import convert, delete_files
-from etude.eval.match import environment, evaluate
+from etude.eval.match import Result, environment, evaluate
 from etude.eval.query import read_blobs, statsdb
 from etude.eval.records import Code, Match, MatchRecord, Rollup
 from etude.run.errors import EtudeError
@@ -52,8 +52,12 @@ def rows(db: duckdb.DuckDBPyConnection) -> dict[str, list[tuple[object, ...]]]:
 def test_an_eval_run_delivers_a_few_objects_per_block_not_one_per_match_or_blob(
     tmp_path: Path,
 ) -> None:
+    def recorded(match: Match) -> Result:
+        result = play_with_evidence(match)
+        return Result(tables=result.tables, blobs=result.blobs, execution={"device": "cpu"})
+
     bucket = MeasuredStorage(DirectoryStorage(tmp_path / "bucket"))
-    evaluate(experiment="cards", environment=DUEL, play=play_with_evidence,
+    evaluate(experiment="cards", environment=DUEL, play=recorded,
              matches=deals(pair(tmp_path), 40), run="a", directory=tmp_path / "a",
              storages=[bucket])  # fmt: skip
     # run.json, environment.json and state.json; one block of its pack, two tables and index.
@@ -61,6 +65,7 @@ def test_an_eval_run_delivers_a_few_objects_per_block_not_one_per_match_or_blob(
     (index,) = (key for key in bucket.keys("a/blocks/") if key.endswith("/block.json"))
     kept = Block.model_validate_json(bucket.get(index))
     assert len(kept.matches) == 40 and len(kept.blobs) == 80
+    assert all(record.execution == {"device": "cpu"} for record in kept.matches)
     # Plain DuckDB reads the delivered tables without Etude.
     games = tmp_path / "bucket" / "a" / "blocks" / "*" / "games.parquet"
     assert duckdb.sql(f"select count(*) from read_parquet({quote(games)})").fetchone() == (80,)
@@ -73,6 +78,7 @@ def test_an_eval_run_delivers_a_few_objects_per_block_not_one_per_match_or_blob(
     # run.json, environment.json, state.json (read once, so the run is marked ended),
     # the index and two tables; not one byte of the pack.
     assert (reading.listings, reading.requests, reading.ranges) == (1, 6, 0)
+    assert db.sql("select distinct execution from matches").fetchall() == [('{"device": "cpu"}',)]
     assert kept.pack is not None and reading.bytes < kept.pack.size_bytes
     assert db.sql("select count(*), count(distinct match) from blobs").fetchone() == (80, 40)
     # Rows name their blobs, and each blob's bytes come back verified.

@@ -53,12 +53,12 @@ def report(
         typer.Option(
             min=0.1,
             help="rewrite it every SECONDS, and the open page reloads; with --serve, how often "
-            "the page reloads (default 5)",
+            "the page refreshes (no timer by default)",
         ),
     ] = None,
     serve: Annotated[
         bool,
-        typer.Option(help="serve it from the files as they are at each request, and write nothing"),
+        typer.Option(help="serve it with refresh on demand, and write nothing"),
     ] = False,
     host: Annotated[str, typer.Option(help="with --serve; it has no login")] = "127.0.0.1",
     port: Annotated[int, typer.Option(help="with --serve")] = 8765,
@@ -78,7 +78,7 @@ def report(
 
     storage = storage_from_uri(source or default_root())
     if serve:
-        server = Server(storage, path, (host, port), refresh=5.0 if watch is None else watch)
+        server = Server(storage, path, (host, port), refresh=watch)
         address = f"http://{host}:{server.server_port}/"
         print(address, flush=True)
         if open_:

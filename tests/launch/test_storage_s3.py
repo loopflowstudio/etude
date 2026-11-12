@@ -17,10 +17,10 @@ from etude.launch.storage.s3 import (
     Denied,
     Keys,
     Reply,
-    StorageUnavailable,
     open_bucket,
     post,
 )
+from etude.storage_timeout import StorageUnavailable
 
 # From "Signature Calculations for the Authorization Header" in the S3 API reference.
 KEYS = Keys(

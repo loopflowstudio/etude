@@ -608,6 +608,18 @@ new work or a delivery that failed, not every poll: an inbox read that finds
 nothing new leaves no line and no usage record, and every other transfer goes
 to the session's usage journal (`etude usage`), not the log.
 
+If storage stops responding, requests time out and the worker logs the failure.
+Status reports delivery age from retained evidence. Training can keep writing
+locally while bucket-backed reports and remote logs fall behind; an unchanged
+metric is not proof that training stopped.
+
+Delivery retries files retained on the machine when storage recovers, including
+during final delivery within its remaining allowance. Keep that local copy until
+delivery succeeds: a rental's deletion deadline is not extended by a storage
+outage, and files that never left a deleted machine cannot be recovered from the
+bucket. See [tracking recovery](tracking.md#storage-outages-and-recovery) to
+deliver a retained copy later.
+
 `Run(id="baseline-seed-7", job=job)` chooses a scientific identity. Failed admission
 leaves independent launch evidence, without creating a Run or RunAttempt or
 consuming that identity. A corrected launch can reuse it. An already-admitted
@@ -1199,28 +1211,28 @@ Scale cases are excluded by default. Run them explicitly:
 uv run pytest tests/launch/test_measurement.py -m scale -s
 ```
 
-Records-pass baseline on 2026-10-13 (status re-measured 2026-10-27 as a database-only
-read), same active workers and runs; no paid machines or network. Counts at 1 and
+Records-pass baseline re-measured on 2026-11-11, with delivery-age lookups and
+the same number of active workers and runs; no paid machines or network. Counts at 1 and
 10 are measured; 100 and 1000 use the pinned coefficients and await the opt-in
 scale check at gate:
 
 | Workers | Operation | Provider calls | Journal calls | SSH | Git | SQL statements |
 | ---: | --- | ---: | ---: | ---: | ---: | ---: |
-| 10 | status | 0 | 0 | 0 | 0 | 381 |
-| 10 | runs | 0 | 0 | 0 | 0 | 131 |
-| 10 | controller pass | 20 | 10 | 0 | 0 | 272 |
-| 100 | status | 0 | 0 | 0 | 0 | 3801 |
-| 100 | runs | 0 | 0 | 0 | 0 | 1301 |
-| 100 | controller pass | 200 | 100 | 0 | 0 | 2612 |
-| 1000 | status | 0 | 0 | 0 | 0 | 38001 |
-| 1000 | runs | 0 | 0 | 0 | 0 | 13001 |
-| 1000 | controller pass | 2000 | 1000 | 0 | 0 | 26012 |
+| 10 | status | 0 | 0 | 0 | 0 | 501 |
+| 10 | runs | 0 | 0 | 0 | 0 | 171 |
+| 10 | controller pass | 20 | 10 | 0 | 0 | 263 |
+| 100 | status | 0 | 0 | 0 | 0 | 5001 |
+| 100 | runs | 0 | 0 | 0 | 0 | 1701 |
+| 100 | controller pass | 200 | 100 | 0 | 0 | 2513 |
+| 1000 | status | 0 | 0 | 0 | 0 | 50001 |
+| 1000 | runs | 0 | 0 | 0 | 0 | 17001 |
+| 1000 | controller pass | 2000 | 1000 | 0 | 0 | 25013 |
 
-Queueing one source-free run costs 5 SQL statements and no external calls.
+Queueing one source-free run costs 23 SQL statements and no external calls.
 A wait with a zero timeout still advances one pass: 4 provider calls, 1 journal
-call and 70 SQL statements: packet construction reads its rental once for the
+call and 78 SQL statements: packet construction reads its rental once for the
 deadline, cap and reuse policy. Queueing three git-backed runs costs 57 git commands
-and 12 SQL statements. These are fixed fixture baselines, not physical HTTP request
+and 38 SQL statements. These are fixed fixture baselines, not physical HTTP request
 estimates or desired performance budgets.
 
 Stock-image creation adds the following physical HTTP baseline: each create
@@ -1387,8 +1399,6 @@ timeout; a configured allowance governs both the local wait and remote install.
 A timed-out wait is not proof the remote installation stopped. A log read retains
 its own explicitly chosen deadline. Downloads, SSH key generation, sshd startup
 and guardian readiness inherit this budget without separate 30/60-second caps.
-
-The prototype database schema is version 8; older database files are refused.
 
 
 ### Prepare a framework image before renting
@@ -1589,8 +1599,10 @@ a setup/training failure, cancellation or time-limit outcome. Cleanup is best-ef
 and must not be the only owner of an essential external action.
 
 Storage GETs retry transport failures and HTTP 429/500/502/503/504 at most three
-times, with 0.1/0.2-second backoff. All attempts share the caller's optional deadline, including backoff; none adds
-a separate 60-second ceiling. Retry diagnostics include attempt and failure category,
+times, with 0.1/0.2-second backoff. Connection and read timeouts follow this same
+retry policy; an exhausted storage request raises `StorageUnavailable`, not an
+absent-object result. All attempts share the caller's optional deadline,
+including backoff. Retry diagnostics include attempt and failure category,
 never signed URLs. Without a retained log destination, diagnostics go to stderr
 so command results stay readable on stdout. Missing objects and permanent/authentication errors are not
 retried. Bootstrap waits for a not-yet-published object, but an exhausted or
@@ -1610,13 +1622,42 @@ with limit_time(900):
     snapshot = scheduler.logs(run="baseline", refresh=True, timeout=None)
 ```
 
-Startup and log retrieval default to no timeout. `None` adds no deadline; nested
+Startup and log retrieval default to no total timeout. `None` adds no operation deadline; nested
 operations still obey an existing caller deadline and rental limits. Positive
 values are seconds; CLI `--timeout 0` and `--startup-seconds 0` select no timeout.
 A finite allowance is shared across requests and is never reset by a retry.
 SSH connection options can be set explicitly in the customer's SSH configuration;
-Etude supplies no hidden connection timeout. Provider HTTP and storage transports
-use the enclosing operation allowance without a separate fixed socket limit.
+Etude supplies no hidden SSH connection timeout. Provider HTTP uses the enclosing
+operation allowance. Storage HTTP also has finite socket limits so a dead
+connection cannot hold delivery indefinitely, even without an operation deadline.
+
+Set storage socket limits in the environment of the process doing delivery:
+
+```sh
+export ETUDE_STORAGE_TIMEOUT_SECONDS=120
+export ETUDE_STORAGE_BYTES_PER_SECOND=524288
+```
+
+Both values must be positive and finite. The defaults are 60 seconds and
+1,048,576 bytes/second (1 MiB/s). The socket timeout covers connection setup,
+waiting for response headers and each response read. For urllib's whole-body
+uploads it adds body bytes divided by the configured rate: a 64 MiB part gets
+124 seconds with the defaults. Response reads reset the base socket allowance
+as bytes arrive, so a progressing large download has no short total limit.
+Every socket allowance is capped by an enclosing operation deadline. Set these
+variables in the controller environment before launching; rentals and SSH
+workers receive its explicit settings in their bootstrap environment. Job
+variables alone do not configure the parent uploader. Bootstrap log publication
+uses the same policy. For SDK clients, see [tracking](tracking.md#storage-outages-and-recovery).
+
+Status's delivery age comes from the latest retained successful write for the
+current attempt, or its allocation time before any write is observed. Failed
+requests and successful reads do not reset it. The controller may simply have
+stopped collecting evidence; use the worker log to distinguish that from a
+storage outage. Completed and local-only attempts have no delivery-age warning.
+The launcher database schema is version 14; files from other versions are refused rather
+than modified. Preserve an old database with its matching Etude version when
+reading historical evidence.
 
 Finite HTTP operations also bound waiting for the complete response, even when
 a connection keeps streaming bytes. Expiry leaves the in-flight outcome unknown:
@@ -1731,9 +1772,10 @@ connections and reads the next range ahead: one connection from a RunPod L4 to R
 measured 4–12 MB/s, and this reads 19.3 GB at 48–81 MB/s. Invalid ranges, authentication failures, changed identity or digest
 mismatch fail explicitly. Files larger than the allowance, or acquired while
 other digests occupy it, stream through destination-side staging. Oversized and destination-staged downloads do not retain a reusable cache copy.
-Only verified bytes replace the destination. Downloads add no timeout by default;
+Only verified bytes replace the destination. Downloads add no total timeout by default;
 they share an existing caller deadline, and worker inputs remain bounded by the
-rental deadline. Local digest verification and copying check that allowance
+rental deadline. Each storage request still has connection and read timeouts.
+Local digest verification and copying check the total allowance
 between chunks and before atomic publication; expiry preserves an existing
 destination. Two transport retries, including HTTP 429/500/502/503/504, share
 one budget across all ranges and the caller's deadline. Python callers can

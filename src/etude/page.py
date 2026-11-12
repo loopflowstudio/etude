@@ -34,7 +34,7 @@ its latest version. Matches of eval runs held for no tournament are one more
 selection, each counting once per environment from its latest record. Values
 are computed by `compare` over those matches, once for each selection
 (`Matches`: each tournament, each of its tags, each matchup a panel names,
-and the matches outside a tournament), each score and each combination of
+the matches outside a tournament, and panels' unions), each score and each combination of
 the columns panels name. So any panel, under any filter the page offers,
 shows a value `compare` computed, never one pooled in the browser. One
 comparison played in several environments shows the environment whose latest
@@ -64,16 +64,19 @@ import threading
 import time
 from bisect import bisect_left
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
+from concurrent.futures import Future
 from dataclasses import dataclass
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from importlib.util import cache_from_source
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from pydantic import JsonValue
 
 from etude.experiment_file import experiment_named
+from etude.launch.logging import explain
 from etude.report import Curve, Flame, Matches, Report, Score
 from etude.run.errors import EtudeError
 from etude.run.listing import as_storage, declared, run_folders, runs
@@ -196,7 +199,7 @@ class Page(Record):
     scores: tuple[Score, ...]
     # Here Matches(tournament=None) means the matches played outside any tournament,
     # not a report panel's "the section's control".
-    selections: tuple[Matches, ...]
+    selections: tuple[Matches | tuple[Matches, ...], ...]
     players: tuple[Player, ...]
     environments: tuple[Environment, ...]
     commits: tuple[Commit, ...]
@@ -222,18 +225,19 @@ class Index(Record):
     entries: tuple[Entry, ...]
 
 
-def experiment_files(directory: Path) -> list[Path]:
+def experiment_files(directory: Path, *, known: Collection[Path] = ()) -> list[Path]:
     """The experiment files at any depth below `directory`, outside hidden folders.
 
     A file is recognised by its text, without running it (`experiment_named`);
-    raises `EtudeError("experiment_named_twice")` for two files with one stem.
+    Previously recognised files stay experiments until removed, even while being edited.
+    Raises `EtudeError("experiment_named_twice")` for two files with one stem.
     """
     found: dict[str, Path] = {}
     for path in sorted(directory.rglob("*.py")):
         parts = path.relative_to(directory).parts
         if any(part.startswith(".") or part == "__pycache__" for part in parts):
             continue
-        if experiment_named(path) is None:
+        if path not in known and experiment_named(path) is None:
             continue
         if path.stem in found:
             raise EtudeError("experiment_named_twice", 409) from ValueError(
@@ -261,6 +265,7 @@ class Pages:
         here = DirectoryStorage(default_root())
         self._places = list({each.name: each for each in (self.storage, here)}.values())
         self._built: dict[Path, tuple[_Inputs, Page]] = {}
+        self._known: set[Path] = set()
         # Each run's experiment by place and run, with the version of the declaration read.
         self._declared: dict[tuple[str, str], tuple[str, str | None]] = {}
 
@@ -268,36 +273,40 @@ class Pages:
         """`build`'s page, kept from the last call while its inputs are the same."""
         return self._build(file, self._listings())
 
+    def find_files(self, directory: Path) -> list[Path]:
+        """Discover experiments, retaining known files through incomplete edits."""
+        found = experiment_files(directory, known=self._known)
+        self._known.update(found)
+        return found
+
     def build_each(self, directory: Path) -> dict[Path, Page | str]:
         """Each experiment file's page, or why it could not be built, so one never hides the rest."""
         listings = self._listings()
         built: dict[Path, Page | str] = {}
-        for file in experiment_files(directory):
+        for file in self.find_files(directory):
             try:
                 built[file] = self._build(file, listings)
             except Exception as error:
                 # An author's file may fail in any way; its row says how and the others go on.
-                built[file] = f"{type(error).__name__}: {error}"
+                built[file] = explain(error)
         return built
 
     def _listings(self) -> list[dict[str, str]]:
         return [place.versions("") for place in self._places]
 
     def _build(self, file: Path, listings: Sequence[dict[str, str]]) -> Page:
-        try:
-            stat = file.stat()
-        except FileNotFoundError:
+        if not file.is_file():
             return build(self.storage, file)  # which says why there is no page
         runs = tuple(
             self._versions(place, file.stem, listed)
             for place, listed in zip(self._places, listings, strict=True)
         )
-        inputs = _Inputs(file=(stat.st_mtime_ns, stat.st_size), runs=runs)
         kept = self._built.get(file)
-        if kept is not None and kept[0] == inputs:
+        if kept is not None and kept[0] == _Inputs(files=_sources(file), runs=runs):
             return kept[1]
         page = build(self.storage, file)
-        self._built[file] = (inputs, page)
+        # After the build, so the neighbours this run imported are among its inputs.
+        self._built[file] = (_Inputs(files=_sources(file), runs=runs), page)
         return page
 
     def _versions(
@@ -332,7 +341,8 @@ class Pages:
 class _Inputs:
     """What a page is built from, as `Pages` compares it."""
 
-    file: tuple[int, int]  # modification time in nanoseconds, and size in bytes
+    # The experiment file and its imported neighbours: (path, modification time in ns, bytes).
+    files: tuple[tuple[str, int, int], ...]
     # Per place: (key, version) of each object in the experiment's runs' folders.
     runs: tuple[tuple[tuple[str, str], ...], ...]
 
@@ -387,7 +397,13 @@ def build(source: Storage | Path | str, file: Path) -> Page:
     experiment = file.stem
     names = _run_file(file)
     report, origin, notes = _report(names.get("report"), file)
-    data = read_all(storage, experiment)
+    flames = tuple(panel.prefix for panel in (*report.perf, *report.ml) if isinstance(panel, Flame))
+    data = read_all(
+        storage,
+        experiment,
+        metrics=None if report.other_metrics else frozenset(report.keys()),
+        prefixes=flames,
+    )
     if not data:
         held = sorted({name for name, _ in runs(storage)})
         raise ValueError(
@@ -406,7 +422,6 @@ def build(source: Storage | Path | str, file: Path) -> Page:
         if want is not None or len(trained) < len(data)
         else _Evals()
     )
-    flames = [panel.prefix for panel in (*report.perf, *report.ml) if isinstance(panel, Flame)]
     # Blocks arrive as they are sealed, so a run with no recorded end shows what it played so far.
     unended = [run.name for run in data if run not in trained and run.state is None]
     partial = (
@@ -442,7 +457,55 @@ def _run_file(file: Path) -> dict[str, object]:
     folder = str(file.resolve().parent)
     if folder not in sys.path:
         sys.path.insert(0, folder)
+    # A neighbour edited since the last build is imported afresh, as the file itself is run.
+    for name, source in _neighbours(file).items():
+        # Bytecode timestamps have only second precision; same-size edits within
+        # that second still need to load the source the page's inputs detected.
+        if source.suffix == ".py":
+            Path(cache_from_source(str(source))).unlink(missing_ok=True)
+        sys.modules.pop(name, None)
     return runpy.run_path(str(file.resolve()))
+
+
+def _neighbours(file: Path) -> dict[str, Path]:
+    """Imported modules defined below the file's folder, outside hidden folders and Python installs.
+
+    They were imported through the resolved folder `_run_file` puts on the path,
+    so their file names start with it. Etude's own modules are never included:
+    the page's records must stay the classes it checks against, even when
+    experiments sit in an Etude checkout.
+    """
+    folder = str(file.resolve().parent) + "/"
+    installed = tuple(
+        str(Path(p).resolve()) + "/" for p in {sys.prefix, sys.base_prefix, sys.exec_prefix}
+    )
+    found: dict[str, Path] = {}
+    for name, module in list(sys.modules.items()):
+        source = getattr(module, "__file__", None)
+        if (
+            not isinstance(source, str)
+            or not source.startswith(folder)
+            or source.startswith(installed)
+        ):
+            continue
+        if name == "etude" or name.startswith("etude."):
+            continue
+        parts = Path(source[len(folder) :]).parts[:-1]
+        if not any(p.startswith(".") or p in ("site-packages", "__pycache__") for p in parts):
+            found[name] = Path(source)
+    return found
+
+
+def _sources(file: Path) -> tuple[tuple[str, int, int], ...]:
+    """What a kept page's files are compared by; a deleted neighbour reads as absent."""
+    found = []
+    for path in sorted({file.resolve(), *_neighbours(file).values()}):
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            continue
+        found.append((str(path), stat.st_mtime_ns, stat.st_size))
+    return tuple(found)
 
 
 def _report(made: object, file: Path) -> tuple[Report, str | None, tuple[str, ...]]:
@@ -463,7 +526,7 @@ class _Evals:
     """The evals half of a page, empty for an experiment with no eval run and no eval()."""
 
     scores: tuple[Score, ...] = ()
-    selections: tuple[Matches, ...] = ()
+    selections: tuple[Matches | tuple[Matches, ...], ...] = ()
     players: tuple[Player, ...] = ()
     environments: tuple[Environment, ...] = ()
     commits: tuple[Commit, ...] = ()
@@ -772,9 +835,19 @@ def _literal(text: str) -> str:
     return "'" + text.replace("'", "''") + "'"
 
 
-def _where(selection: Matches, *, fixed: bool, view: str = "") -> str:
+def _where(selection: Matches | tuple[Matches, ...], *, view: str) -> str:
     """The rows of a selection's matches in a view of `_page_held`, as a condition
     `compare` applies to an author table."""
+    if isinstance(selection, tuple):
+        where = " or ".join(f"({_where(s, view=view)})" for s in selection) or "false"
+        # Two tournaments may hold different deliveries of the same match.
+        # Keep its latest delivery per environment, as a single selection does.
+        return (
+            "(run, match) in (select m.run, m.match from matches m"
+            f" join runs r using (run) where ({where})"
+            " qualify row_number() over (partition by r.environment, m.match"
+            " order by m.wall_ms desc, m.run desc) = 1)"
+        )
     tournament = _literal(selection.tournament or "")
     held = (
         "(run, match) in (select run, match from _page_held"
@@ -785,17 +858,12 @@ def _where(selection: Matches, *, fixed: bool, view: str = "") -> str:
         held += f" and match in ({scheduled} and matchup = {_literal(selection.matchup)})"
     if selection.tag is not None:
         held += f" and match in ({scheduled} and tag = {_literal(selection.tag)})"
-    if fixed:
-        held += (
-            " and match not in (select match from seats"
-            " where player in (select player from _page_checkpoints))"
-        )
     return held
 
 
 def _selections(
     standing: Sequence[_Standing], report: Report, *, outside: bool
-) -> tuple[list[Matches], tuple[str, ...]]:
+) -> tuple[list[Matches | tuple[Matches, ...]], tuple[str, ...]]:
     """Each tournament, the matches outside one, each tag and each matchup a panel names;
     and what is amiss."""
     tournaments = [each.name for each in standing]
@@ -803,14 +871,19 @@ def _selections(
     matchups = sorted(
         {(each.name, c.matchup) for each in standing for c in each.schedule if c.matchup}
     )
-    selections = [Matches(tournament=name) for name in tournaments]
+    selections: list[Matches | tuple[Matches, ...]] = [
+        Matches(tournament=name) for name in tournaments
+    ]
     selections += [Matches()] if outside else []
     selections += [Matches(tournament=t, tag=tag) for t, tag in tags]
     notes: list[str] = []
-    for panel in report.evals:
-        chosen, title = panel.matches, f"{type(panel).__name__} panel"
-        if chosen is None:
-            continue
+    requested = [
+        (chosen, f"{type(panel).__name__} panel")
+        for panel in report.evals
+        if panel.matches is not None
+        for chosen in (panel.matches if isinstance(panel.matches, tuple) else (panel.matches,))
+    ]
+    for chosen, title in requested:
         if chosen.tournament is not None and chosen.tournament not in tournaments:
             notes.append(f"A {title} names tournament {chosen.tournament!r}, which nothing holds.")
         if chosen.tag is not None and not any(tag == chosen.tag for _, tag in tags):
@@ -825,7 +898,30 @@ def _selections(
         if not named:
             notes.append(f"A {title} names matchup {chosen.matchup!r}, which nothing holds.")
         selections += [each for each in named if each not in selections]
+    # Union selections follow their components so result-aware resolution can use
+    # the component cells. SQL unions rows before compare computes any statistic.
+    selections += list(
+        dict.fromkeys(panel.matches for panel in report.evals if isinstance(panel.matches, tuple))
+    )
     return selections, tuple(notes)
+
+
+def _resolve_matches(
+    wanted: Matches,
+    selections: Sequence[Matches | tuple[Matches, ...]],
+    present: set[int],
+) -> Matches | None:
+    candidates = [
+        (i, s)
+        for i, s in enumerate(selections)
+        if isinstance(s, Matches)
+        and (wanted.tournament is None or s.tournament == wanted.tournament)
+        and s.tag == wanted.tag
+        and s.matchup == wanted.matchup
+    ]
+    return next(
+        (s for i, s in candidates if i in present), candidates[0][1] if candidates else None
+    )
 
 
 def _environments(db: duckdb.DuckDBPyConnection) -> dict[str, Environment]:
@@ -843,7 +939,7 @@ def _environments(db: duckdb.DuckDBPyConnection) -> dict[str, Environment]:
 
 def _cells(
     db: duckdb.DuckDBPyConnection,
-    selections: Sequence[Matches],
+    selections: Sequence[Matches | tuple[Matches, ...]],
     players: Sequence[Player],
     environments: dict[str, Environment],
     commits: Sequence[Commit],
@@ -887,42 +983,61 @@ def _cells(
             continue
         named = [c for c in report.columns() if c in held]
         absent += [f"{score.table}.{c}" for c in report.columns() if c not in held]
-        # An anchor's strength needs two anchors to have met.
-        views = itertools.product(
-            (None, *(each.commit for each in commits)),
-            enumerate(selections),
-            (False, True) if anchors > 1 else (False,),
-            (by for size in range(len(named) + 1) for by in itertools.combinations(named, size)),
-        )
-        for commit, (chosen, selection), fixed, by in views:
-            for found in compare(
-                db,
-                table=score.table,
-                value=score.value,
-                per=score.per,
-                where=_where(selection, fixed=fixed, view=commit or ""),
-                by=by,
-            ):
-                if len(found.subject) != 1 or (found.opponent and len(found.opponent) != 1):
-                    continue  # a team
-                if fixed and found.opponent is not None:
-                    continue  # pairs of anchors are in the unrestricted cells
-                cells.append(
-                    Cell(
-                        selection=chosen,
-                        commit=commit,
-                        environment=place[found.environment],
-                        score=number,
-                        subject=index[found.subject[0]],
-                        opponent=None if found.opponent is None else index[found.opponent[0]],
-                        fixed=fixed,
-                        split=found.split,
-                        value=found.value,
-                        interval=found.interval,
-                        rows=found.rows,
-                        matches=found.matches,
+        splits = [
+            by for size in range(len(named) + 1) for by in itertools.combinations(named, size)
+        ]
+        for commit in (None, *(each.commit for each in commits)):
+            # Components precede unions; only this view's results resolve them.
+            recorded: set[int] = set()
+            for chosen, selection in enumerate(selections):
+                if isinstance(selection, tuple):
+                    selection = tuple(
+                        resolved
+                        for wanted in selection
+                        if (resolved := _resolve_matches(wanted, selections, recorded)) is not None
                     )
-                )
+                where = _where(selection, view=commit or "")
+                # An anchor's strength needs two anchors to have met.
+                for fixed, by in itertools.product(
+                    (False, True) if anchors > 1 else (False,), splits
+                ):
+                    condition = where
+                    if fixed:
+                        condition += (
+                            " and match not in (select match from seats"
+                            " where player in (select player from _page_checkpoints))"
+                        )
+                    for found in compare(
+                        db,
+                        table=score.table,
+                        value=score.value,
+                        per=score.per,
+                        where=condition,
+                        by=by,
+                    ):
+                        if len(found.subject) != 1 or (found.opponent and len(found.opponent) != 1):
+                            continue  # a team
+                        if fixed and found.opponent is not None:
+                            continue  # pairs of anchors are in the unrestricted cells
+                        recorded.add(chosen)
+                        cells.append(
+                            Cell(
+                                selection=chosen,
+                                commit=commit,
+                                environment=place[found.environment],
+                                score=number,
+                                subject=index[found.subject[0]],
+                                opponent=None
+                                if found.opponent is None
+                                else index[found.opponent[0]],
+                                fixed=fixed,
+                                split=found.split,
+                                value=found.value,
+                                interval=found.interval,
+                                rows=found.rows,
+                                matches=found.matches,
+                            )
+                        )
     cells, mixed = _newest_environment(cells, list(environments.values()))
     # "Against all" repeats the only opponent a subject met.
     met: dict[tuple[int, str | None, int, int], set[int]] = {}
@@ -1035,19 +1150,21 @@ def _failures(
     )
 
 
-def render(page: Page, *, refresh: float | None = None) -> str:
+def render(page: Page, *, refresh: float | None = None, served: bool = False) -> str:
     """The page as one HTML file; `refresh` is the seconds between the open page reloading."""
-    return _inline("page.html", page.experiment, page.model_dump(mode="json"), refresh)
+    return _inline("page.html", page.experiment, page.model_dump(mode="json"), refresh, served)
 
 
-def render_index(found: Index, *, refresh: float | None = None) -> str:
+def render_index(found: Index, *, refresh: float | None = None, served: bool = False) -> str:
     """The index as one HTML file, like a page."""
-    return _inline("index.html", "Experiments", found.model_dump(mode="json"), refresh)
+    return _inline("index.html", "Experiments", found.model_dump(mode="json"), refresh, served)
 
 
-def _inline(template: str, title: str, data: dict[str, object], refresh: float | None) -> str:
+def _inline(
+    template: str, title: str, data: dict[str, object], refresh: float | None, served: bool
+) -> str:
     here = Path(__file__).parent
-    stamp = {"generated_ms": time.time_ns() // 1_000_000, "refresh": refresh}
+    stamp = {"generated_ms": time.time_ns() // 1_000_000, "refresh": refresh, "served": served}
     payload = json.dumps(data | stamp, allow_nan=False)
     # Each placeholder is replaced once, the data last, so its text is never taken for one.
     html = (here / template).read_text()
@@ -1085,7 +1202,7 @@ def write(html: str, path: Path) -> Path:
 
 class Server(ThreadingHTTPServer):
     """Serves an experiment file's page at `/`, or a folder's index at `/` and each of its
-    experiments at `/STEM`, from the files as they are at each request (`Pages`).
+    experiments at `/STEM`. Views reuse HTML; explicit refreshes join one generation.
 
     It has no login: keep it on this computer unless told otherwise.
     """
@@ -1102,35 +1219,80 @@ class Server(ThreadingHTTPServer):
         self.pages, self.path, self.refresh = Pages(source), path, refresh
         # Requests are handled on threads; a page is built by one at a time.
         self._building = threading.Lock()
+        self._lock = threading.Lock()
+        self._html: dict[str, str] = {}
+        self._pending: dict[str, Future[str | None]] = {}
 
-    def page(self, route: str = "/") -> str | None:
-        """The HTML served at `route`, or None where nothing is."""
-        with self._building:
-            if not self.path.is_dir():
-                if route != "/":
-                    return None
-                return render(self.pages.build(self.path), refresh=self.refresh)
-            if route == "/":
-                built = self.pages.build_each(self.path)
-                found = index(self.pages.storage, built, href=lambda stem: f"/{stem}")
-                return render_index(found, refresh=self.refresh)
-            for file in experiment_files(self.path):
-                if route == f"/{file.stem}":
-                    return render(self.pages.build(file), refresh=self.refresh)
-            return None
+    def page(self, route: str = "/", *, refresh: bool = False) -> str | None:
+        """Reuse a generated page, or join its refresh. A failure preserves the last HTML."""
+        with self._lock:
+            if not refresh and route in self._html:
+                return self._html[route]
+            pending = self._pending.get(route)
+            owner = pending is None
+            if pending is None:
+                pending = Future()
+                self._pending[route] = pending
+        if owner:
+            try:
+                # Pages shares imported experiment files and input state across routes.
+                with self._building:
+                    html = self._render(route)
+                with self._lock:
+                    if html is not None:
+                        self._html[route] = html
+                    pending.set_result(html)
+                    del self._pending[route]
+            except BaseException as error:
+                with self._lock:
+                    pending.set_exception(error)
+                    del self._pending[route]
+        return pending.result()
+
+    def _render(self, route: str) -> str | None:
+        if not self.path.is_dir():
+            if route != "/":
+                return None
+            return render(self.pages.build(self.path), refresh=self.refresh, served=True)
+        if route == "/":
+            built = self.pages.build_each(self.path)
+            # Index facts and links must describe the same generation. Keep a
+            # failed detail's last successful page, while its index row says why.
+            with self._lock:
+                for file, page in built.items():
+                    if isinstance(page, Page):
+                        self._html[f"/{file.stem}"] = render(
+                            page, refresh=self.refresh, served=True
+                        )
+            found = index(self.pages.storage, built, href=lambda stem: f"/{stem}")
+            return render_index(found, refresh=self.refresh, served=True)
+        for file in self.pages.find_files(self.path):
+            if route == f"/{file.stem}":
+                return render(self.pages.build(file), refresh=self.refresh, served=True)
+        return None
 
 
 class _Handler(BaseHTTPRequestHandler):
     server: Server
 
     def do_GET(self) -> None:  # noqa: N802 - the name http.server calls
+        self._respond(refresh=False)
+
+    def do_POST(self) -> None:  # noqa: N802 - the name http.server calls
+        self._respond(refresh=True)
+
+    def _respond(self, *, refresh: bool) -> None:
         try:
-            served = self.server.page(self.path.split("?", 1)[0])
+            served = self.server.page(self.path.split("?", 1)[0], refresh=refresh)
             found, body = served is not None, (served or "Not found.").encode()
+            status = 200 if found else 404
         except ValueError as error:  # no runs of the experiment yet
-            found, body = False, str(error).encode()
-        self.send_response(200 if found else 404)
+            found, body, status = False, explain(error).encode(), 404
+        except Exception as error:
+            found, body, status = False, explain(error).encode(), 500
+        self.send_response(status)
         self.send_header("Content-Type", f"text/{'html' if found else 'plain'}; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)

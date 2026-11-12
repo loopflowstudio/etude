@@ -93,6 +93,9 @@ fixture inputs below its private root home, then copy journals out after executi
 Worker deadline tests resolve runner dependencies from the fixture image's local
 wheelhouse with networking disabled; downloading packages must not consume the
 short execution window used to test partial-output retention.
+Controller fixtures call the CLI entry point in process and pass its explicit
+startup allowance: the installer must own its deadline and child cleanup, rather
+than an outer test timeout killing the client while installation continues.
 
 Commit messages say what changed and why in a sentence to a paragraph, not a
 list of edits. Never add Co-Authored-By or other AI attribution footers.
@@ -109,7 +112,9 @@ model-owned JSON serialization. Keep `providers/runpod/http.py`,
 `providers/bootstrap.py`, `providers/package.py` and `environment.py`
 standard-library-only: each rental guardian must start before
 client dependency installation. The client and each job use separate environments.
-`logging.py` is also in the standard-library bootstrap subset. Operational errors
+`logging.py` and top-level `storage_timeout.py` are also in the standard-library
+bootstrap subset. New bootstrap imports must be present in both the guardian
+archive (`providers/package.py`) and SSH's pre-install loader (`ssh.py`). Operational errors
 use its sanitizer before retention; subprocess diagnostics omit argv and traceback
 locals. Journal log reads return `LogStream`, preserving missing versus silent
 output, and share the caller's monotonic deadline through `deadline.py`.

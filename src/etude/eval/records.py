@@ -414,6 +414,8 @@ class MatchRecord(Record):
     wall_ms: int = Field(ge=0)
     # The SHA256 of each blob the match kept, which its rows may name.
     blobs: tuple[Digest, ...] = ()
+    # Actual execution setup, supplied with the result; never part of a match's identity.
+    execution: Config = {}
 
 
 class Rollup(Record):

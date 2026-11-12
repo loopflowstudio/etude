@@ -465,3 +465,30 @@ def test_tracking_commands_use_local_files_with_a_selected_controller(
     assert main(served) == 0
     assert "http://127.0.0.1:" in capsys.readouterr().out
     assert not (home / "launcher.db").exists()
+
+
+def test_finish_retries_retained_files_when_storage_recovers(tmp_path: Path) -> None:
+    class Recovering(DirectoryStorage):
+        requests = 0
+
+        def put(self, key: str, data: bytes) -> None:
+            self.requests += 1
+            if self.requests == 1:
+                raise TimeoutError("controlled storage outage")
+            super().put(key, data)
+
+    destination = Recovering(tmp_path / "bucket")
+    run = track(
+        experiment="pilot",
+        run="final",
+        clocks=CLOCKS,
+        directory=tmp_path / "local",
+        storages=[destination],
+        segment_seconds=0.05,
+    )
+    run.finish(timeout=2)
+    assert not run.problems
+    assert not run._shipper.is_alive()
+    assert destination.get("final/state.json") == (run.files.root / "state.json").read_bytes()
+    assert destination.requests == len(destination.keys("final")) + 1
+    assert not run.files.pending(destination.name)

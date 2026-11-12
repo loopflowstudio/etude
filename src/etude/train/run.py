@@ -50,6 +50,7 @@ from typing import IO, Literal, Self
 from pydantic import ValidationError
 
 from etude.carriage import taken
+from etude.deadline import limit_time
 from etude.run.block_file import block_key, tail_key
 from etude.run.declaration import declare
 from etude.run.delivery import RunFiles, StorageDestination, destinations, ship
@@ -192,6 +193,7 @@ class Run:
         self._inherited = inherited
         self._destinations = list(destinations)
         self._segment_seconds = segment_seconds
+        self._finish_deadline: float | None = None
         self._segment_rows = segment_rows
         self._writer_id = secrets.token_hex(6)
         # A later attempt or a continuation resumes from here, and its rows
@@ -693,9 +695,21 @@ class Run:
         while not self._stopping.is_set():
             self._wake.wait(timeout=delay)
             self._wake.clear()
+            if self._stopping.is_set():
+                break
             # Back off while a destination is down; sealed files keep accumulating.
             delay = self._segment_seconds if self.ship() else min(delay * 2, 60.0)
-        self.ship()
+        assert self._finish_deadline is not None
+        while (left := self._finish_deadline - time.monotonic()) > 0:
+            with limit_time(left):
+                if self.ship():
+                    return
+            self._wake.wait(
+                timeout=min(
+                    self._segment_seconds, max(0.0, self._finish_deadline - time.monotonic())
+                )
+            )
+            self._wake.clear()
 
     def ship(self) -> bool:
         """One delivery pass over every destination. True when all are current."""
@@ -716,7 +730,7 @@ class Run:
         if self._finished:
             return
         self._finished = True
-        deadline = time.monotonic() + timeout
+        deadline = self._finish_deadline = time.monotonic() + timeout
         try:
             try:
                 self._queue.put(_STOP, timeout=timeout)

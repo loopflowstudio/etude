@@ -8,8 +8,9 @@ import pytest
 
 from etude.deadline import limit_time, remaining
 from etude.launch.logging import log_to
-from etude.launch.storage.s3 import Bucket, Reply, StorageUnavailable, read
+from etude.launch.storage.s3 import Bucket, Reply, read
 from etude.launch.worker.courier import _run
+from etude.storage_timeout import StorageUnavailable
 from tests.launch.test_storage_s3 import KEYS
 
 
@@ -80,7 +81,7 @@ def test_retry_backoff_and_nested_reads_share_callers_deadline(
     with limit_time(0.15):
         with limit_time(100):
             assert remaining() == 0.15
-            with pytest.raises(StorageUnavailable, match="deadline"):
+            with pytest.raises(StorageUnavailable, match="timed out"):
                 read("https://storage.invalid", transport)
     assert transport.requests == 2 and now[0] == 0.15
 
@@ -113,7 +114,7 @@ def test_bootstrap_retries_cannot_renew_startup_allowance(
     monkeypatch.setattr("etude.launch.storage.s3.time.sleep", sleep)
     monkeypatch.setenv("ETUDE_STARTUP_DEADLINE", (start + timedelta(seconds=0.2)).isoformat())
     monkeypatch.delenv("ETUDE_DEADLINE", raising=False)
-    with log_to(tmp_path / "log"), pytest.raises(StorageUnavailable, match="deadline"):
+    with log_to(tmp_path / "log"), pytest.raises(StorageUnavailable, match="timed out"):
         _run("https://storage.invalid/bootstrap", tmp_path, send, sleep, 0.1, tmp_path / "log", "")
     assert len(requests) == 2 and max(requests) <= 0.2
     assert not list(tmp_path.glob("*/receipt"))
