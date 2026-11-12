@@ -508,8 +508,8 @@ def _sources(file: Path) -> tuple[tuple[str, int, int], ...]:
 def _report(made: object, file: Path) -> tuple[Report, str | None, tuple[str, ...]]:
     if made is None:
         # Nothing is declared, so the page draws everything logged rather than nothing.
-        default = Report(other_metrics=True)
-        return default, None, (f"{file.name} defines no report(), so this is the default report.",)
+        note = f"{file.name} defines no report(), so this is the default report."
+        return Report(other_metrics=True), None, (note,)
     if not callable(made):
         raise EtudeError("experiment_report_is_not_a_function", 422) from ValueError(file)
     report = made()

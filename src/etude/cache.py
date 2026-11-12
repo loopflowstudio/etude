@@ -330,15 +330,8 @@ class Cache:
 
     def held(self, content: Content) -> Path | None:
         """Where held content is, verified now; None when absent, and discarded when corrupt."""
-        path = self.root / content.name
-        if not path.exists():
-            return None
-        with _lock(self._made() / f"{content.name}.lock"):
-            if self._verified(path, content):
-                return path
-            with _lock(self.root / "capacity.lock"):
-                path.unlink(missing_ok=True)
-        return None
+        with self._checked(content) as path:
+            return path
 
     def release(self, holder: str) -> None:
         """Let eviction remove what `holder` kept; its bytes stay until it does."""
@@ -457,13 +450,8 @@ class Cache:
         """A range of held content, verified and locked against eviction while read."""
         if start + length > content.size_bytes:
             return None
-        path = self.root / content.name
-        with _lock(self._made() / f"{content.name}.lock"):
-            if not path.exists():
-                return None
-            if not self._verified(path, content):
-                with _lock(self.root / "capacity.lock"):
-                    path.unlink(missing_ok=True)
+        with self._checked(content) as path:
+            if path is None:
                 return None
             with path.open("rb") as stream:
                 stream.seek(start)
@@ -499,17 +487,26 @@ class Cache:
 
     def _load(self, content: Content) -> bytes | None:
         """Held content, verified; None when absent, and discarded when corrupt."""
+        with self._checked(content) as path:
+            return None if path is None else path.read_bytes()
+
+    @contextmanager
+    def _checked(self, content: Content) -> Iterator[Path | None]:
+        """Held content's path, verified and locked against eviction while in use.
+
+        None when absent; corrupt content is discarded and also gives None.
+        """
         path = self.root / content.name
         if not path.exists():
-            return None
+            yield None
+            return
         with _lock(self.root / f"{content.name}.lock"):
-            if not path.exists():
-                return None
             if self._verified(path, content):
-                return path.read_bytes()
+                yield path
+                return
             with _lock(self.root / "capacity.lock"):
                 path.unlink(missing_ok=True)
-        return None
+        yield None
 
     def _verified(self, path: Path, content: Content) -> bool:
         """Whether `path` holds `content`, marking it recently used when it does.
