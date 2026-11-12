@@ -527,14 +527,14 @@ class SmokeStep(Record):
     outcome: Literal["passed", "not_smoked", "skipped"]
     seconds: float | None = None  # on the submitting machine; None when it did not run
     detail: str = ""  # what it made, such as "1 checkpoint", or why it did not run
-    run: str | None = None  # a train step's tiny run, in the smoke's own launcher
 
 
 class Smoke(Record):
     """What the smoke before a run's submission did. A failing smoke submits nothing.
 
-    "none" when nothing was smoked: no job declared a tiny form, or a Python
-    client launched without `smoke=True`.
+    "none" when the run's job was not smoked: it declares no tiny form, or a
+    Python client launched without `smoke=True`. Its steps are its own job's
+    train step and its file's eval and report, never another job's.
     """
 
     outcome: Literal["passed", "skipped", "none"] = "none"
@@ -544,7 +544,8 @@ class Smoke(Record):
         if self.outcome == "skipped":
             return "skipped (--no-smoke)"
         if self.outcome == "none":
-            return "nothing smoked"
+            missed = any(each.outcome == "not_smoked" for each in self.steps)
+            return "not smoked (no tiny form)" if missed else "nothing smoked"
         ran = [each for each in self.steps if each.outcome == "passed"]
         seconds = sum(each.seconds or 0 for each in ran)
         steps = ", ".join(dict.fromkeys(each.step for each in ran))

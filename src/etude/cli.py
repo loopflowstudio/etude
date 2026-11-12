@@ -66,16 +66,15 @@ def _submit(
         if smoke:
             from etude.smoke import smoke_file
 
-            result = smoke_file(file, runs)
-            if result.outcome == "none":
+            runs = smoke_file(file, runs).stamp(runs)
+            if all(run.smoke.outcome == "none" for run in runs):
                 print(
                     "smoke: nothing smoked; no job declares a tiny form (Job.smoke)",
                     file=sys.stderr,
                     flush=True,
                 )
         else:
-            result = Smoke(outcome="skipped")
-        runs = [run.model_copy(update={"smoke": result}) for run in runs]
+            runs = [run.model_copy(update={"smoke": Smoke(outcome="skipped")}) for run in runs]
     submission = controller.LaunchInput(
         runs=tuple(runs), cohort=spec, pool=pool, rent=rent, queued=queued
     )
@@ -376,16 +375,17 @@ def eval_experiment(
 
     from etude.experiment import advance, read_experiment
     from etude.launch.records import Smoke
+    from etude.launch.smoke import smoked
     from etude.run.storage import default_root, storage_from_uri
     from etude.smoke import smoke_file
 
     experiment = read_experiment(file)
     storage = storage_from_uri(source or default_root())
-    smoked = Smoke()
+    before = Smoke()
     if pool or rent:
         # Before a launch spends anything: a failure raises and launches nothing.
-        smoked = (
-            smoke_file(file, steps=("eval", "report"), source=storage)
+        before = (
+            smoked(smoke_file(file, steps=("eval", "report"), source=storage).rest)
             if smoke
             else Smoke(outcome="skipped")
         )
@@ -397,7 +397,7 @@ def eval_experiment(
                 pool=pool,
                 rent=rent,
                 retry_failed=retry_failed,
-                smoke=smoked,
+                smoke=before,
             ):
                 line = f"{done.tournament}: {done.new} new"
                 if done.failed:

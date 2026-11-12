@@ -51,7 +51,7 @@ from etude.launch.records import (
     Status,
 )
 from etude.launch.scheduler import Scheduler
-from etude.launch.smoke import show, smoke_home, smoke_train, smoked
+from etude.launch.smoke import Smoked, show, smoke_home, smoke_train
 from etude.launch.source import home
 from etude.launch.ssh import SSH, SSHJournal, SSHStart
 from etude.launch.storage.bucket import BucketJournal
@@ -158,11 +158,10 @@ def _smoked(runs: Sequence[Run | Job], smoke: bool) -> list[Run]:
     if not smoke:
         return each
     with smoke_home() as folder:
-        steps = smoke_train(each, folder)
-    for step in steps:
-        show(step)
-    done = smoked(steps)
-    return [run.model_copy(update={"smoke": done}) for run in each]
+        trained = smoke_train(each, folder)
+    for one in trained:
+        show(one.step)
+    return Smoked(train={one.job: one.step for one in trained}).stamp(each)
 
 
 def queue(

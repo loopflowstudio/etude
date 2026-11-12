@@ -46,9 +46,11 @@ from tests.eval.games import {play}
 TRAIN = "{python} " + str(Path(__file__).parent / "train.py")
 
 
-def runs(seeds: int = 1, tiny: str = "1") -> list:
+def runs(seeds: int = 1, tiny: str = "1", bare: bool = False) -> list:
     smoke = Tiny(command=f"{{TRAIN}} {{tiny}}") if tiny else None
-    return Job(command=TRAIN + " 1000", name="ppo", max_hours=0.1, smoke=smoke).runs(*range(seeds))
+    ppo = Job(command=TRAIN + " 1000", name="ppo", max_hours=0.1, smoke=smoke).runs(*range(seeds))
+    plain = Job(command=TRAIN + " 2000", name="plain", max_hours=0.1).runs(0) if bare else []
+    return ppo + plain
 
 
 def eval(state: ExperimentState) -> Job:
@@ -141,6 +143,28 @@ def test_a_job_without_a_tiny_form_is_reported_and_queues_as_before(
     assert "smoke: nothing smoked; no job declares a tiny form" in said.err
     (id,) = _ids(said.out)
     assert default().record(id).smoke.outcome == "none"
+
+
+def test_a_job_without_a_tiny_form_beside_one_with_it_is_not_recorded_passed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    file = experiment(tmp_path / "lab")
+    assert main(["queue", str(file), "--bare", "--cohort", "c"]) == 0
+    said = capsys.readouterr()
+    assert "smoke train plain: not smoked (no tiny form)" in said.err
+    ppo, plain = (default().record(id) for id in _ids(said.out))
+    assert (ppo.spec.name, plain.spec.name) == ("ppo", "plain")
+    assert ppo.smoke.outcome == "passed"
+    assert [(s.step, s.name) for s in ppo.smoke.steps] == [
+        ("train", "ppo"),
+        ("eval", "ladder"),
+        ("report", "report"),
+    ]
+    assert plain.smoke.outcome == "none"
+    assert [(s.step, s.name) for s in plain.smoke.steps][0] == ("train", "plain")
+    assert main(["status", plain.id]) == 0
+    assert "passed" not in capsys.readouterr().out
+    assert str(plain.smoke) == "not smoked (no tiny form)"
 
 
 def test_no_smoke_is_recorded(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

@@ -367,8 +367,11 @@ launches nothing if that fails; `--no-smoke` skips it.
 
 **Skipping is recorded.** Each launched run keeps what its smoke did: passed,
 skipped with `--no-smoke`, or not smoked, with each step's outcome and seconds.
-`etude status RUN` shows it (`smoke: passed in 45.1 s (train, eval, report)`,
-`smoke: skipped (--no-smoke)`), and `record.smoke` holds it in Python.
+A run's steps are its own job's training and the file's evaluation and report,
+so in a cohort where only some jobs have a tiny form the others record
+`not smoked (no tiny form)`. `etude status RUN` shows it
+(`smoke: passed in 45.1 s (train, eval, report)`, `smoke: skipped (--no-smoke)`),
+and `record.smoke` holds it in Python.
 
 **From Python**, the client's `queue`, `queue_cohort`, `launch` and
 `launch_cohort` take `smoke: bool = False`. With `smoke=True` they smoke the
@@ -385,7 +388,8 @@ from etude.smoke import smoke_file
 path = Path("ppo.py")
 runs = read_job_file(path, ["--seeds", "2"])  # runs() with these flags; omitted, its defaults
 result = smoke_file(path, runs)  # raises LauncherError on the first failure
-print(result.outcome, [(step.name, step.outcome, step.seconds) for step in result.steps])
+for run in result.stamp(runs):  # each run with its own job's smoke, as submitted
+    print(run.job.name, run.seed, run.smoke)
 ```
 
 `smoke_file` also takes `steps=("eval", "report")`, `source=` (a `Storage`, such as

@@ -9,7 +9,9 @@ and a second smoke does not build them again.
 `smoke_train` is the train step: each distinct job's tiny form (`Job.smoke`,
 applied by `tiny`) launched on that launcher's `local` pool, through the same
 path a real local run takes. `etude.smoke` adds the experiment file's
-evaluation and report; the Python client calls `smoke_train` alone.
+evaluation and report; the Python client calls `smoke_train` alone. `Smoked`
+stamps each run with its own job's train step and the file's other steps, so
+a job without a tiny form is never recorded as passed beside one that has it.
 """
 
 from __future__ import annotations
@@ -20,8 +22,9 @@ import shutil
 import sys
 import tempfile
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from etude.launch.database import Database
@@ -73,7 +76,40 @@ def tiny(job: Job) -> Job | None:
     return job.model_copy(update={**job.smoke.model_dump(exclude_none=True), "smoke": None})
 
 
-def smoke_train(runs: Sequence[Run], folder: Path) -> list[SmokeStep]:
+@dataclass(frozen=True)
+class Trained:
+    """A job's train step, with its tiny run while the smoke's home still exists."""
+
+    job: str  # the job's identity, as `job_key` gives it
+    step: SmokeStep
+    run: str | None = None  # in the smoke's own launcher, which is deleted with it
+
+
+@dataclass(frozen=True)
+class Smoked:
+    """What a smoke did: each job's train step, by `job_key`, and the file's other steps."""
+
+    train: Mapping[str, SmokeStep] = field(default_factory=dict)
+    rest: tuple[SmokeStep, ...] = ()
+
+    def stamp(self, runs: Sequence[Run]) -> list[Run]:
+        """`runs`, each with its own job's train step and the rest as its smoke."""
+        return [
+            run.model_copy(update={"smoke": smoked([*self._own(run.job), *self.rest])})
+            for run in runs
+        ]
+
+    def _own(self, job: Job) -> list[SmokeStep]:
+        step = self.train.get(job_key(job))
+        return [] if step is None else [step]
+
+
+def job_key(job: Job) -> str:
+    """The job's identity as one string; seeds of one job share it."""
+    return json.dumps(job_identity(job), sort_keys=True)
+
+
+def smoke_train(runs: Sequence[Run], folder: Path) -> list[Trained]:
     """Each distinct job of `runs` (seeds dropped) run tiny here, one after another.
 
     `folder` is a `smoke_home`. A job without a tiny form is `not_smoked`. The
@@ -82,23 +118,26 @@ def smoke_train(runs: Sequence[Run], folder: Path) -> list[SmokeStep]:
     """
     distinct: dict[str, Run] = {}
     for run in runs:
-        distinct.setdefault(json.dumps(job_identity(run.job), sort_keys=True), run)
+        distinct.setdefault(job_key(run.job), run)
     store = Database(folder / "launcher.db")
     try:
         service = local(folder / "sessions")
         scheduler = Scheduler(store, {"local": lambda machine: service})
         scheduler.add_pool(Pool(name="local"))
         store.add_machine(Machine(name="local", pool="local", kind="local"))
-        return [_train(scheduler, run) for run in distinct.values()]
+        return [_train(scheduler, key, run) for key, run in distinct.items()]
     finally:
         store.close()
 
 
-def _train(scheduler: Scheduler, run: Run) -> SmokeStep:
+def _train(scheduler: Scheduler, key: str, run: Run) -> Trained:
     name = run.job.name or "job"
     job = tiny(run.job)
     if job is None:
-        return SmokeStep(step="train", name=name, outcome="not_smoked", detail="no tiny form")
+        return Trained(
+            job=key,
+            step=SmokeStep(step="train", name=name, outcome="not_smoked", detail="no tiny form"),
+        )
     started = time.monotonic()
     launched = scheduler.launch(Run(job=job, seed=run.seed, params=dict(run.params)), "local")
     (status,) = scheduler.wait(launched, every=0.1)
@@ -112,7 +151,8 @@ def _train(scheduler: Scheduler, run: Run) -> SmokeStep:
         raise LauncherError(
             f"smoke train {name}: {status} after {seconds:.1f} s; nothing was submitted"
         )
-    return SmokeStep(step="train", name=name, outcome="passed", seconds=seconds, run=launched)
+    step = SmokeStep(step="train", name=name, outcome="passed", seconds=seconds)
+    return Trained(job=key, step=step, run=launched)
 
 
 def show(step: SmokeStep) -> None:
@@ -129,6 +169,7 @@ def show(step: SmokeStep) -> None:
 
 
 def smoked(steps: Sequence[SmokeStep]) -> Smoke:
-    """The smoke `steps` make: passed when any step ran and passed, else none."""
-    passed = any(each.outcome == "passed" for each in steps)
-    return Smoke(outcome="passed" if passed else "none", steps=tuple(steps))
+    """The smoke `steps` make: passed when one passed and none was `not_smoked`, else none."""
+    ran = any(each.outcome == "passed" for each in steps)
+    missed = any(each.outcome == "not_smoked" for each in steps)
+    return Smoke(outcome="passed" if ran and not missed else "none", steps=tuple(steps))

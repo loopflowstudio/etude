@@ -35,8 +35,8 @@ from etude.experiment_file import defined_functions, experiment_named
 from etude.jobs import evaluation_spec
 from etude.launch.errors import LauncherError
 from etude.launch.job_file import read_job_file
-from etude.launch.records import Job, Run, Smoke, SmokeStep
-from etude.launch.smoke import show, smoke_home, smoke_train, smoked
+from etude.launch.records import Job, Run, SmokeStep
+from etude.launch.smoke import Smoked, show, smoke_home, smoke_train
 from etude.page import build, render, write
 from etude.run.storage import DirectoryStorage, Storage
 
@@ -51,7 +51,7 @@ def smoke_file(
     steps: Collection[Step] = STEPS,
     source: Storage | None = None,
     keep: bool = False,
-) -> Smoke:
+) -> Smoked:
     """Smoke the experiment file's `steps`, in order, and return what each did.
 
     `runs` are what its `runs()` returned, as `read_job_file` read them; read
@@ -67,17 +67,21 @@ def smoke_file(
     if "train" in steps and runs is None:
         runs = read_job_file(path)
     experiment = experiment_named(path)
+    train: dict[str, SmokeStep] = {}
     done: list[SmokeStep] = []
     with smoke_home(keep=keep) as folder:
         store = DirectoryStorage(folder / "track")
         if "train" in steps:
-            for step in smoke_train(runs or (), folder):
-                if step.run is not None and experiment is not None:
-                    step = step.model_copy(update={"detail": _saved(store, experiment, step.run)})
+            for trained in smoke_train(runs or (), folder):
+                step = trained.step
+                if trained.run is not None and experiment is not None:
+                    step = step.model_copy(
+                        update={"detail": _saved(store, experiment, trained.run)}
+                    )
                 show(step)
-                done.append(step)
+                train[trained.job] = step
         # What the temporary store holds a run of, so eval and report have something to read.
-        stored = any(each.outcome == "passed" for each in done)
+        stored = any(each.outcome == "passed" for each in train.values())
         if "eval" in steps:
             for step in _evaluate(path, experiment, source or store, store):
                 show(step)
@@ -87,7 +91,7 @@ def smoke_file(
             step = _report(path, experiment, store if stored else source, store)
             show(step)
             done.append(step)
-    return smoked(done)
+    return Smoked(train=train, rest=tuple(done))
 
 
 def _saved(store: Storage, experiment: str, run: str) -> str:
