@@ -85,3 +85,36 @@ Build a lab outside the repo (e.g. `/tmp/lab`) with its own `ETUDE_HOME`:
    (`cells` with `selection`, `subject`, `matches`, `rows`).
 5. Stop the servers before finishing. In zsh, `$args` does not word-split: call
    commands explicitly rather than looping over argument strings.
+
+## Etude: storage outages on the SDK and a launched worker
+
+SDK against fake S3: `uvx --from 'moto[server]' moto_server -p 5047`, then put a
+small TCP proxy in front of it that, when a mode file says `dead`, accepts new
+connections and stops forwarding on existing ones without closing them. boto3 reuses
+keep-alive sockets, so a proxy that only refuses new connections never causes an
+outage. Run the script with `AWS_ENDPOINT_URL=http://127.0.0.1:PROXY`, dummy AWS keys,
+`storages=[storage_from_uri("s3://BUCKET/runs")]` and a short
+`ETUDE_STORAGE_TIMEOUT_SECONDS`. Time how long the process takes to exit as well as
+`finish()`: s3transfer threads hold interpreter exit. Add
+`faulthandler.register(signal.SIGUSR1, all_threads=True)` to see where it waits;
+py-spy needs root on macOS. Recover with `etude sync --directory RUNS --to s3://…`.
+It prints nothing on success, so list the bucket afterwards.
+
+Launched worker without renting: the built-in `local` machine has no storage, so use
+an SSH host. Build a `python:3.12-slim` image with openssh-server, iptables and
+`/uv` copied from `ghcr.io/astral-sh/uv`, plus your public key in
+`/root/.ssh/authorized_keys`. Run it with `--cap-add NET_ADMIN -p 127.0.0.1:2247:22`.
+Leave `~/.ssh` alone: put `ssh`/`scp` wrappers first on `PATH` that exec
+`/usr/bin/ssh -F /tmp/…/ssh_config` (a Host alias with Port, `StrictHostKeyChecking
+accept-new` and its own `UserKnownHostsFile`). With an isolated `ETUDE_HOME`:
+`etude storage add qa --bucket manabot --prefix etude-qa/NAME --provider r2`,
+`etude machine add box ALIAS --storage qa`, then from a committed job repo (a uv
+project depending on `etude-sdk`, with `package = false`) run `etude launch job.py
+--pool box` followed by `etude controller run` in the background. Both need
+`R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` **and `R2_API_TOKEN`**
+from Doppler `manabot/prd`. Without the token, launch is refused (`capacity_refused`).
+Cut storage with `docker exec box iptables -A OUTPUT -p tcp --dport 443 -j DROP`;
+`-D` restores it. Read the worker's own log with `etude logs --machine box` or
+`/root/.etude/sessions/*/worker.log` and `usage.jsonl` in the container. Restart
+the controller after code changes. Afterwards remove the container and delete the
+`etude-qa/NAME/` prefix.

@@ -89,9 +89,10 @@ from etude.launch.schemas import (
     Work,
 )
 from etude.launch.storage.download import Mismatch as StoredMismatch
-from etude.launch.storage.s3 import StorageUnavailable, longest_grant
+from etude.launch.storage.s3 import longest_grant
 from etude.launch.storage.transport import attribute, observe
 from etude.launch.usage import Usage
+from etude.storage_timeout import StorageUnavailable
 
 Clock = Callable[[], datetime]
 # How the scheduler reaches a machine you own, or the provider behind an on-demand.
@@ -1325,8 +1326,15 @@ class Scheduler:
         last = attempts[-1] if attempts else None
         session = None if last is None else self._store.session(last.session)
         rental = None if session is None else self._store.rental_for(session)
+        delivery_age: float | None = None
+        if last is not None and last.outcome is None and session is not None:
+            if self._storage(session) is not None:
+                delivered = self._store.last_delivery(last.id)
+                since = delivered or last.planned_at or session.planned_at
+                delivery_age = max(0.0, (now - since).total_seconds())
         seen = Status(
             run=run,
+            delivery_age_seconds=delivery_age,
             phase="queued",
             reason=None,
             outcome=None,

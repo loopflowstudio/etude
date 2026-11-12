@@ -26,10 +26,12 @@ from etude.launch.providers.package import program_archive
 from etude.launch.records import BootstrapLinks, LauncherError, LogStream, Record
 from etude.launch.schemas import Observation, Packet, Work
 from etude.launch.source import source_archive
+from etude.storage_timeout import storage_environment
 
 
 class RemoteRequest(Record):
     startup_deadline: datetime | None = None
+    storage_environment: dict[str, str] = Field(default_factory=dict)
     action: str
     root: str
     session: str
@@ -72,12 +74,11 @@ with zipfile.ZipFile(io.BytesIO(code)) as archive:
     import types
     for name in ("etude", "etude.launch"):
         sys.modules.setdefault(name, types.ModuleType(name))
-    deadline=types.ModuleType("etude.deadline")
-    exec(compile(archive.read("etude/deadline.py"),"deadline.py","exec"),deadline.__dict__)
-    sys.modules[deadline.__name__]=deadline
-    logging=types.ModuleType("etude.launch.logging")
-    exec(compile(archive.read("etude/launch/logging.py"),"logging.py","exec"),logging.__dict__)
-    sys.modules[logging.__name__]=logging
+    for name in ("etude.deadline", "etude.storage_timeout", "etude.launch.logging"):
+        module=types.ModuleType(name)
+        exec(compile(archive.read(name.replace('.', '/')+'.py'),name,'exec'),module.__dict__)
+        sys.modules[name]=module
+    logging=sys.modules["etude.launch.logging"]
     source=archive.read("etude/launch/environment.py")
 namespace={"__name__":"etude_install"}
 exec(compile(source,"environment.py","exec"),namespace)
@@ -105,6 +106,7 @@ with contextlib.redirect_stdout(sys.stderr):
 _BOOT = (
     """import base64,json,os,sys
 request=json.load(sys.stdin)
+os.environ.update(request.get('storage_environment', {}))
 code=base64.b64decode(request.pop("program"))
 import pathlib
 home=pathlib.Path(request['root']).expanduser()/request['session']
@@ -226,6 +228,7 @@ class SSH:
     ) -> RemoteReply:
         request = {
             **RemoteRequest(
+                storage_environment=storage_environment(),
                 startup_deadline=(
                     startup_deadline
                     if action == "start"

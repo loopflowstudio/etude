@@ -134,6 +134,47 @@ Rules a caller can rely on:
   “running or unfinished.” Older completion records without a writer remain
   readable, but cannot establish completion after another attempt starts.
 
+### Storage outages and recovery
+
+```sh
+# On a computer holding the retained runs directory, after storage recovers:
+uv run etude sync --directory /data/retained-runs --to s3://my-bucket/runs
+```
+
+This delivers retained files and is safe to repeat. Use the runs directory
+containing the `RUN/` folders. It needs the same bucket credentials and
+`etude-sdk[s3]` installation as other bucket operations; it cannot recover files
+from a machine whose disk is gone.
+
+Failed delivery leaves local files available for a later pass; background
+delivery resumes when storage recovers. Reports reading the bucket show only
+what has arrived there.
+
+SDK-created boto3 clients use 60-second connection and read socket timeouts,
+so a dead connection releases the uploader once boto3's own retries are spent.
+Set `ETUDE_STORAGE_TIMEOUT_SECONDS` to a positive finite number of seconds before
+creating storage to override both. Boto3 streams large uploads in chunks and
+uses multipart transfers; these are socket limits, not a total checkpoint
+transfer deadline. A supplied `S3Storage(client=...)` keeps that client's
+`botocore.config.Config` connection/read timeouts and retry settings. Transport
+failures raise `etude.storage_timeout.StorageUnavailable`; streamed reads retry
+up to three times, and background delivery retries retained files on a later
+pass. Worker/controller uploads use the [same storage timeout policy](launcher.md#timeout-ownership).
+
+`run.finish(timeout=10)` seals the run and retries final delivery within its
+allowance. Increase `timeout` in seconds to allow longer for final delivery.
+An upload already in progress keeps its socket timeout; `finish()` can return
+before that upload ends, so expiry does not confirm cancellation or delivery.
+The Python process exits only when boto3's transfer threads end. boto3 retries
+each request itself (five attempts by default; set `AWS_MAX_ATTEMPTS`), so on a
+dead connection exit can wait attempts × `ETUDE_STORAGE_TIMEOUT_SECONDS`: five
+minutes with the defaults.
+If files remain undelivered, it reports their local location for `etude sync`.
+For launched runs, the worker owns delivery and its final allowance is capped
+by the rental deadline. Inspect `etude status RUN` and `etude logs --run RUN` for
+delivery failures and the age of the retained evidence; preserve the local files
+before the machine is deleted if storage is still unavailable.
+
 ### Checkpoints
 
 ```python

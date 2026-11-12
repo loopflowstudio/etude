@@ -24,6 +24,7 @@ FILES = {
     "launch/environment.py",
     "launch/logging.py",
     "deadline.py",
+    "storage_timeout.py",
     "launch/storage/__init__.py",
     "launch/storage/transport.py",
 }

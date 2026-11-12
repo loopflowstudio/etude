@@ -18,7 +18,7 @@ from etude.launch.records import BootstrapLinks, LogStream, Offer
 from etude.launch.schemas import Observation, Packet, Work
 from etude.launch.startup import ProcessStart
 from etude.launch.storage.disk import DirectoryJournal
-from etude.launch.storage.s3 import StorageUnavailable
+from etude.storage_timeout import StorageUnavailable
 
 _creation_check: ContextVar[Callable[[], None] | None] = ContextVar("creation_check", default=None)
 

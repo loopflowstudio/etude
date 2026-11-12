@@ -36,10 +36,10 @@ from etude.launch.storage.s3 import (
     Denied,
     Reply,
     Send,
-    StorageUnavailable,
     _send,
 )
 from etude.launch.storage.transport import attribute, deliver, emit, observe
+from etude.storage_timeout import StorageUnavailable
 
 PART_BYTES = 16 * 1024**2
 CONNECTIONS = 32

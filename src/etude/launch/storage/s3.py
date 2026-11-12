@@ -36,6 +36,7 @@ from etude.launch.logging import write_log
 from etude.launch.measurement import timed
 from etude.launch.records import Record, Storage
 from etude.launch.storage.transport import attribute, request
+from etude.storage_timeout import StorageUnavailable
 
 
 class Reply(Record):
@@ -86,10 +87,6 @@ def longest_grant(storage: Storage) -> int:
 
 
 TRANSIENT_STATUSES = frozenset({429, 500, 502, 503, 504})
-
-
-class StorageUnavailable(Exception):
-    """No usable answer from storage. This never means an object is absent."""
 
 
 class Denied(StorageUnavailable):
@@ -315,7 +312,7 @@ class Bucket:
             return self.send(method, url, body if method in ("PUT", "POST") else None, headers)
         except TimeoutError:
             raise StorageUnavailable(
-                f"{method} {key or '(list)'}: operation deadline reached"
+                f"{method} {key or '(list)'}: storage request timed out"
             ) from None
         except OSError:
             raise StorageUnavailable(f"{method} {key or '(list)'}: no reply") from None
@@ -429,7 +426,7 @@ class Bucket:
             with attribute(purpose="control", key="/r2/temp-access-credentials"):
                 reply = self.send("POST", url, json.dumps(body).encode(), headers)
         except TimeoutError:
-            raise StorageUnavailable("R2 grant: operation deadline reached") from None
+            raise StorageUnavailable("R2 grant: storage request timed out") from None
         except OSError:
             raise StorageUnavailable("R2 grant: no reply") from None
         if reply.status != 200:
@@ -631,7 +628,7 @@ def post(form: PostForm, key: str, body: bytes, send: Send = _send) -> None:
             status = send("POST", form.url, payload, headers).status
     except TimeoutError:
         raise StorageUnavailable(
-            f"POST {key}: operation deadline reached; reply unconfirmed"
+            f"POST {key}: storage request timed out; reply unconfirmed"
         ) from None
     except OSError:
         raise StorageUnavailable(f"POST {key}: no reply") from None
@@ -651,7 +648,7 @@ def read_version(url: str, kept: Version | None, send: Send = _send) -> Version 
     try:
         reply = _get(url, _unless(kept), send)
     except TimeoutError:
-        raise StorageUnavailable("GET by link: operation deadline reached") from None
+        raise StorageUnavailable("GET by link: storage request timed out") from None
     except OSError:
         raise StorageUnavailable("GET by link: no reply") from None
     return _version(reply, kept, "GET by link")

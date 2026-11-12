@@ -49,7 +49,6 @@ from etude.launch.storage.s3 import (
     Denied,
     Grant,
     Send,
-    StorageUnavailable,
     Version,
     _send,
     post,
@@ -57,6 +56,7 @@ from etude.launch.storage.s3 import (
     read_version,
 )
 from etude.launch.storage.transport import attribute, observe
+from etude.storage_timeout import StorageUnavailable
 
 ROOT = Path("/run/etude/sessions")
 # A log piece waits about a twentieth of its log's age, between 15 seconds and
@@ -193,6 +193,10 @@ class Courier:
         self._inbox: Version | None = None  # the inbox as last read
         self._usage_sent = -1  # bytes of the usage journal last delivered
         self._cache = _cache()
+        # Monotonic time of the last pass that left every file delivered, or the
+        # courier's start: a stall is reported from here, not from its first failure.
+        self._delivered_at = time.monotonic()
+        self._pending = False
 
     def _retain_transfer(self, raw: str) -> None:
         """Keep a transfer in the session's usage journal, not the worker log.
@@ -207,7 +211,7 @@ class Courier:
             body = path.read_bytes()
             # Delivering the journal is not itself journaled: each delivery would
             # change it and need another. A failed delivery raises to the caller.
-            with observe(lambda raw: None):
+            with limit_time(_until_deadline()), observe(lambda raw: None):
                 self._out.write_bytes("usage.jsonl", body)
             self._usage_sent = len(body)
 
@@ -393,6 +397,27 @@ class Courier:
         An attempt that cannot be carried raises after the others, the worker's
         log and usage are: that log is where its failure is told.
         """
+        try:
+            self._carry_files(final)
+        except (StorageUnavailable, OSError, ValueError) as error:
+            self._pending = True
+            write_log(
+                "output delivery",
+                f"has not succeeded for {self._stalled_minutes():.1f} minutes"
+                f" ({type(error).__name__}); local files retained",
+            )
+            raise
+        # Final delivery belongs to a producer that has already closed its log.
+        # Its end receipt confirms recovery; append no output after EOF.
+        if self._pending and not final:
+            write_log("output delivery", f"recovered after {self._stalled_minutes():.1f} minutes")
+        self._pending = False
+        self._delivered_at = time.monotonic()
+
+    def _stalled_minutes(self) -> float:
+        return (time.monotonic() - self._delivered_at) / 60
+
+    def _carry_files(self, final: bool) -> None:
         failure: Exception | None = None
         with observe(self._retain_transfer), attribute(session=self._home.name):
             self.carry_console()
@@ -590,7 +615,8 @@ def _run(
         while process.poll() is None:
             for step in (courier.bring_in, courier.carry_out):
                 try:
-                    step()
+                    with limit_time(_until_deadline()):
+                        step()
                 except (StorageUnavailable, OSError, ValueError) as error:
                     write_log(
                         "work delivery",

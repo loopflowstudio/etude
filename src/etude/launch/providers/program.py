@@ -13,6 +13,7 @@ from etude.launch.machines import MachineRequest
 from etude.launch.providers.package import program_archive
 from etude.launch.records import Image
 from etude.launch.storage.s3 import Bucket
+from etude.storage_timeout import storage_environment
 
 
 class Program:
@@ -23,6 +24,7 @@ class Program:
     def prepare(self, request: MachineRequest, image: Image) -> dict[str, str]:
         """Publish once per composition; issue fresh links for each rental."""
         assert request.deadline is not None and request.bootstrap is not None
+        timeouts = storage_environment()
         if self._digest is None:
             code = program_archive()
             digest = hashlib.sha256(code).hexdigest()
@@ -31,6 +33,7 @@ class Program:
                 self._bucket.put(key, code, once=True)
             self._digest = digest
         return {
+            **timeouts,
             "ETUDE_LOG_SECONDS": "" if request.log_seconds is None else str(request.log_seconds),
             "ETUDE_IMAGE": image.model_dump_json(),
             "ETUDE_SESSION": request.session,
