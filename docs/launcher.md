@@ -1400,8 +1400,6 @@ A timed-out wait is not proof the remote installation stopped. A log read retain
 its own explicitly chosen deadline. Downloads, SSH key generation, sshd startup
 and guardian readiness inherit this budget without separate 30/60-second caps.
 
-The prototype database schema is version 8; older database files are refused.
-
 
 ### Prepare a framework image before renting
 
@@ -1657,7 +1655,7 @@ current attempt, or its allocation time before any write is observed. Failed
 requests and successful reads do not reset it. The controller may simply have
 stopped collecting evidence; use the worker log to distinguish that from a
 storage outage. Completed and local-only attempts have no delivery-age warning.
-The launcher database schema is now version 14; older files are refused rather
+The launcher database schema is version 14; files from other versions are refused rather
 than modified. Preserve an old database with its matching Etude version when
 reading historical evidence.
 
