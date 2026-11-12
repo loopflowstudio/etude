@@ -1156,6 +1156,36 @@ def test_held_content_is_verified_when_asked_for_and_discarded_when_corrupt(
     assert not held.exists()
 
 
+def test_held_content_is_hashed_once_while_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _Held(bytes(range(256)) * 64)
+    Cache(tmp_path / "cache").read(source.artifact, source)
+    hashed: list[Path] = []
+    digest = engine._digest
+
+    def counted(path: Path) -> str:
+        hashed.append(path)
+        return digest(path)
+
+    monkeypatch.setattr(engine, "_digest", counted)
+    cache = Cache(tmp_path / "cache")
+    content = Content.of(source.body)
+    assert cache.read(source.artifact, source) == source.body
+    assert [cache.read(source.artifact, source, start=at, length=16) for at in (0, 100)] == [
+        source.body[at : at + 16] for at in (0, 100)
+    ]
+    assert cache.held(content) is not None
+    cache.place(source.artifact, tmp_path / "placed", source)
+    assert len(hashed) == 1
+    held = cache.root / content.name
+    held.chmod(0o644)
+    held.write_bytes(b"\0" * len(source.body))
+    assert cache.read(source.artifact, source, start=100, length=16) == source.body[100:116]
+    assert len(hashed) == 3  # the rewritten copy, then its replacement
+    assert source.read_bytes == len(source.body) * 2
+
+
 def test_worker_source_and_input_share_verified_transport_bytes(
     http: HTTP,
     tmp_path: Path,

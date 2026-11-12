@@ -7,11 +7,11 @@ keeps them in place for a holder until it releases them; these are views
 of one acquisition, so a checkpoint a job fetched and the same object a report
 reads are read from storage once, in either order, by any process. Content is
 kept once by SHA256 and length (`Content`), verified before it is published and
-again before it, or a range of it, is reused. A `Cache` that verified a file
-serves further ranges of it unhashed while its inode, size and modification
-time are unchanged. A whole-file digest cannot authenticate a range, so a
-range of a recorded digest is read from verified whole content, acquired first
-when not held.
+again before it, or a range of it, is reused: a `Cache` hashes a file once and
+trusts it while its inode, size and modification time stay as it left them
+(`_Stamp`), and any change hashes it again. A whole-file digest cannot
+authenticate a range, so a range of a recorded digest is read from verified
+whole content, acquired first when not held.
 
 Each location notes the content it holds and the ETag that came with it. A
 recorded digest names bytes outright; without one, a location's held bytes are
@@ -46,6 +46,7 @@ import fcntl
 import hashlib
 import os
 import re
+import stat
 import tempfile
 import time
 from collections.abc import Iterator
@@ -183,20 +184,24 @@ def _digest(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _verify(path: Path, content: Content) -> bool:
-    valid = (
-        path.is_file()
-        and path.stat().st_size == content.size_bytes
-        and _digest(path) == content.sha256
-    )
-    remaining()
-    return valid
+@dataclass(frozen=True)
+class _Stamp:
+    """What changes when a file is replaced or rewritten."""
 
+    inode: int
+    size_bytes: int
+    modified_ns: int
 
-def _identity(path: Path) -> tuple[int, int, int]:
-    """What changes when a file is replaced or rewritten: its inode, size and modification time."""
-    stat = path.stat()
-    return stat.st_ino, stat.st_size, stat.st_mtime_ns
+    @staticmethod
+    def of(path: Path) -> _Stamp | None:
+        """The stamp of the regular file at `path`; None when there is no such file."""
+        try:
+            found = path.stat()
+        except FileNotFoundError:
+            return None
+        if not stat.S_ISREG(found.st_mode):
+            return None
+        return _Stamp(found.st_ino, found.st_size, found.st_mtime_ns)
 
 
 def _discard(path: Path) -> None:
@@ -266,10 +271,7 @@ class Cache:
             raise ValueError("cache allowance must be nonnegative and range size positive")
         self.root = root or Path(os.environ.get("ETUDE_HOME", "~/.etude")).expanduser() / "cache"
         self.max_bytes, self.range_bytes = max_bytes, range_bytes
-        # Held content `_slice` verified, by name: the file's inode, size and
-        # modification time as it left it. A range of an unchanged file is
-        # served without hashing the whole file again.
-        self._sliced: dict[str, tuple[int, int, int]] = {}
+        self._stamps: dict[tuple[Path, Content], _Stamp] = {}
 
     def read(
         self, artifact: Artifact, source: Source, *, start: int = 0, length: int | None = None
@@ -332,7 +334,7 @@ class Cache:
         if not path.exists():
             return None
         with _lock(self._made() / f"{content.name}.lock"):
-            if _verify(path, content):
+            if self._verified(path, content):
                 return path
             with _lock(self.root / "capacity.lock"):
                 path.unlink(missing_ok=True)
@@ -361,11 +363,10 @@ class Cache:
         with _lock(self._made() / f"{key}.lock"):
             target = self.root / key
             if target.exists():
-                if not _verify(target, content):
+                if not self._verified(target, content):
                     with _lock(self.root / "capacity.lock"):
                         target.unlink()
                     raise Corrupt("cached download digest mismatch")
-                target.touch()
                 source.reused(content.size_bytes, None)
                 self._pin(content, holder)
                 self._locate(artifact.location, content, None)
@@ -375,7 +376,7 @@ class Cache:
             cacheable = content.size_bytes <= self.max_bytes and self._make_room(
                 key, content.size_bytes
             )
-            if not cacheable and _verify(destination, content):
+            if not cacheable and self._verified(destination, content):
                 # Too large to cache, but a retried attempt or another job on
                 # this machine already holds it where it goes.
                 source.reused(content.size_bytes, None)
@@ -387,7 +388,7 @@ class Cache:
                 else destination.parent / f".{key}.partial"
             )
             etag = self._acquire(content, partial, source)
-            if not _verify(partial, content):
+            if not self._verified(partial, content):
                 with _lock(self.root / "capacity.lock"):
                     _discard(partial)
                 raise Mismatch("download length or SHA256 mismatch")
@@ -460,13 +461,10 @@ class Cache:
         with _lock(self._made() / f"{content.name}.lock"):
             if not path.exists():
                 return None
-            if self._sliced.get(content.name) != _identity(path) and not _verify(path, content):
-                self._sliced.pop(content.name, None)
+            if not self._verified(path, content):
                 with _lock(self.root / "capacity.lock"):
                     path.unlink(missing_ok=True)
                 return None
-            path.touch()
-            self._sliced[content.name] = _identity(path)
             with path.open("rb") as stream:
                 stream.seek(start)
                 body = stream.read(length)
@@ -502,16 +500,36 @@ class Cache:
     def _load(self, content: Content) -> bytes | None:
         """Held content, verified; None when absent, and discarded when corrupt."""
         path = self.root / content.name
-        try:
-            body = path.read_bytes()
-            os.utime(path)  # recently used
-        except FileNotFoundError:
+        if not path.exists():
             return None
-        if Content.of(body) == content:
-            return body
-        with _lock(self.root / f"{content.name}.lock"), _lock(self.root / "capacity.lock"):
-            path.unlink(missing_ok=True)
+        with _lock(self.root / f"{content.name}.lock"):
+            if not path.exists():
+                return None
+            if self._verified(path, content):
+                return path.read_bytes()
+            with _lock(self.root / "capacity.lock"):
+                path.unlink(missing_ok=True)
         return None
+
+    def _verified(self, path: Path, content: Content) -> bool:
+        """Whether `path` holds `content`, marking it recently used when it does.
+
+        The file is hashed once, then trusted while its stamp is unchanged.
+        Marking it changes its modification time, so the stamp is taken after.
+        """
+        stamp = _Stamp.of(path)
+        trusted = self._stamps.pop((path, content), None)
+        if stamp is None or stamp.size_bytes != content.size_bytes:
+            return False
+        if trusted != stamp:
+            valid = _digest(path) == content.sha256
+            remaining()
+            if not valid:
+                return False
+        path.touch()
+        if (marked := _Stamp.of(path)) is not None:
+            self._stamps[(path, content)] = marked
+        return True
 
     def _keep(self, content: Content, body: bytes) -> bool:
         """Hold bytes already read in full; False when they do not fit."""
