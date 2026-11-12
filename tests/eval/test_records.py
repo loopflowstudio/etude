@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from etude.eval.records import (
     Aligned,
+    At,
     Benchmark,
     CheckpointKey,
     CheckpointRef,
@@ -147,14 +148,90 @@ def _ref(run: str, updates: float) -> CheckpointRef:
     )
 
 
-def _line(run: str, job: str, *positions: float, ended: bool = False) -> Line:
+def _line(
+    run: str, job: str, *positions: float, ended: bool = False, seed: int | None = None
+) -> Line:
     return Line(
         name=run,
+        seed=seed,
         job=job,
         launch=job,
         ended=ended,
         checkpoints=tuple(_ref(run, at) for at in positions),
     )
+
+
+def _found(seated: Seated) -> list[tuple[CheckpointRef | None, int]]:
+    """Each pairing's second seat and games."""
+    return [(each.seats[1], each.games) for each in seated.pairings]
+
+
+def test_a_point_splits_its_games_over_every_pair_of_seeds() -> None:
+    direct = Inference(config={"search": 0})
+    large = [_line(f"l{seed}", "large", 100, seed=seed) for seed in (1, 2)]
+    small = [_line(f"s{seed}", "small", 100, seed=seed) for seed in (3, 1, 2)]
+    lines = [*large, *small]
+    aligned = Seating(
+        name="s",
+        players=(direct, Aligned(clock="updates", job="small", inference=direct)),
+        conditions=({"deal": 0},),
+        games=10,
+    )
+    # 2 × 3 pairs share 10 games: the four lowest by seed get two, the rest one.
+    by_seed = [s.checkpoints[0] for s in sorted(small, key=lambda line: line.order)]
+    first, second = (aligned.resolve(each.checkpoints[0], lines) for each in large)
+    assert isinstance(first, Seated) and isinstance(second, Seated)
+    assert _found(first) == [(by_seed[0], 2), (by_seed[1], 2), (by_seed[2], 2)]
+    assert _found(second) == [(by_seed[0], 2), (by_seed[1], 1), (by_seed[2], 1)]
+    # The point holds every game; its own line and a fixed player count as one seed.
+    own = Seating(
+        name="o",
+        players=(direct, At(clock="updates", value=100, inference=direct)),
+        conditions=({"deal": 0},),
+        games=3,
+    )
+    fixed = Seating(name="f", players=(direct, HEURISTIC), conditions=({"deal": 0},), games=3)
+    for seating in (own, fixed):
+        held = [seating.resolve(each.checkpoints[0], lines) for each in large]
+        assert [
+            [games for _, games in _found(each)] for each in held if isinstance(each, Seated)
+        ] == [
+            [2],
+            [1],
+        ]
+    # A seed of the other job that may still save there holds the point back.
+    waiting = [*large, *small, _line("s4", "small", seed=4)]
+    assert isinstance(aligned.resolve(large[0].checkpoints[0], waiting), Gap)
+
+
+def test_one_seed_plays_the_same_pair_at_every_point_and_hold() -> None:
+    direct = Inference(config={"search": 0})
+    large = [_line(f"l{seed}", "large", 100, 200, seed=seed) for seed in (1, 2, 3)]
+    small = [_line(f"s{seed}", "small", 100, 200, seed=seed) for seed in (1, 2, 3)]
+    lines = [*large, *small]
+    one = Seating(
+        name="s",
+        players=(direct, Aligned(clock="updates", job="small", inference=direct)),
+        conditions=({"deal": 0},),
+        games=10,
+        seeds="one",
+    )
+
+    def played(given: list[Line]) -> list[tuple[CheckpointRef, CheckpointRef | None, int]]:
+        found = [(held, one.resolve(held, given)) for line in large for held in line.checkpoints]
+        return [
+            (held, other, games)
+            for held, seated in found
+            if isinstance(seated, Seated)
+            for other, games in _found(seated)
+        ]
+
+    chosen = played(lines)
+    # One seed per side at each point, all its games, and the same pair at both points.
+    assert [games for *_, games in chosen] == [10, 10]
+    assert len({(held.line, other.line if other else None) for held, other, _ in chosen}) == 1
+    assert played(list(reversed(lines))) == chosen
+    assert one.definition != one.model_copy(update={"seeds": "every"}).definition
 
 
 def test_a_relative_seat_finds_an_exact_position_or_says_whether_one_may_still_come() -> None:
@@ -170,7 +247,7 @@ def test_a_relative_seat_finds_an_exact_position_or_says_whether_one_may_still_c
     found = seating(Fraction(clock="updates", value=0.7, inference=direct)).resolve(
         small.checkpoints[1], lines
     )
-    assert isinstance(found, Seated) and found.seats[1] == (small.checkpoints[0],)
+    assert isinstance(found, Seated) and _found(found) == [(small.checkpoints[0], 1)]
     # Passed without saving there: never. Ahead of the line: not yet, until it ends.
     earlier = seating(Earlier(clock="updates", by=10, inference=direct))
     assert isinstance(gap := earlier.resolve(small.checkpoints[1], lines), Gap)
@@ -183,11 +260,11 @@ def test_a_relative_seat_finds_an_exact_position_or_says_whether_one_may_still_c
     assert gap.missing == "never"
     # Held for the job it names, it plays that job: here the held checkpoint against itself.
     selfplay = aligned.resolve(small.checkpoints[0], lines)
-    assert isinstance(selfplay, Seated) and selfplay.seats[1] == (small.checkpoints[0],)
+    assert isinstance(selfplay, Seated) and _found(selfplay) == [(small.checkpoints[0], 1)]
     final = seating(Final(job="small", inference=direct))
     assert isinstance(final.resolve(large.checkpoints[0], lines), Gap)
     done = final.resolve(large.checkpoints[0], ended)
-    assert isinstance(done, Seated) and done.seats[1] == (small.checkpoints[1],)
+    assert isinstance(done, Seated) and _found(done) == [(small.checkpoints[1], 1)]
     (match,) = final.matches(large.checkpoints[0], done)
     assert match.players[1] == direct.model(small.checkpoints[1])
     with pytest.raises(ValidationError, match="relative_seat_needs_an_inference_seat"):

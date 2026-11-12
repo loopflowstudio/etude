@@ -305,7 +305,7 @@ evaluate(
   line unless given a `job`: `Final(job="small", inference=direct)` seats
   job `small`'s final checkpoint, `At(clock="updates", value=0, job="small",
   ...)` its initial one. `Aligned` always names a job. A job seat fills from
-  each of that job's lines. A hold finds relative seats' checkpoints among
+  each of that job's lines (see Seeds). A hold finds relative seats' checkpoints among
   its `lines`, the experiment's training lines (`observe(source,
   experiment).lines`), held or not; `etude eval` passes them itself.
   A seating against a fixed player and one against a relative seat are held,
@@ -316,7 +316,18 @@ evaluate(
   checkpoint plays it once one is saved, so a large job's seating against
   `Aligned(job="small")` fills in as the small job catches up. A relative
   seat resolves to the same checkpoint whenever it is held, so a played
-  match never moves as runs save more. `Final` is `At` the position where
+  match never moves as runs save more.
+- **Seeds.** A seating never names a seed. `games` is per condition and
+  point, a position of the held checkpoint's job: by default the point
+  plays every pair of a seed of that job and a seed of the other seat's
+  (its own line, or a fixed player, counting as one), the games split
+  evenly over the pairs, the remainder to the lowest by seed, and pooled.
+  A job seat waits while any of its seeds may still save there. A seed is a
+  line, with the seed its first run declared. `seeds="one"` plays all of a
+  point's games between one seed per side, drawn from the seating's name
+  and the seed sets, the same pair at every point: faster, but the curve
+  shows one pair of seeds, not the jobs. A seed added later changes the
+  split, so that job's points are played again and count only the new one. `Final` is `At` the position where
   the run ended: a gap until it ends, finished or failed, then its last
   stored checkpoint. Holding a seating against `Final(job=...)` for a job's
   own final checkpoint gives final against final. To meet one chosen

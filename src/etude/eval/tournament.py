@@ -327,10 +327,13 @@ def _scheduled(
     return scheduled, added.model_copy(update={"seated": (*added.seated, *found)})
 
 
-def _found(seated: Seated) -> tuple[str, str, tuple[tuple[str, ...], ...]]:
-    """What a `Seated` found, by key: equal for one found again at another file."""
-    keys = tuple(tuple(sorted(str(ref.key) for ref in seat)) for seat in seated.seats)
-    return seated.seating, str(seated.checkpoint), keys
+def _found(seated: Seated) -> tuple[str, str, tuple[tuple[tuple[str | None, ...], int], ...]]:
+    """What a `Seated` plays, by key: equal for one found again at another file."""
+    pairings = tuple(
+        (tuple(None if ref is None else str(ref.key) for ref in each.seats), each.games)
+        for each in seated.pairings
+    )
+    return seated.seating, str(seated.checkpoint), pairings
 
 
 def _record(added: TournamentRun, experiment: str, run: str, directory: Path | str | None) -> None:

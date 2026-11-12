@@ -512,6 +512,49 @@ def test_each_share_of_a_checkpoint_benchmark_seats_fewer_checkpoints_than_a_rou
     assert [seated(share) for share in shares] == [2, 2] and round_deal == [3, 3]
 
 
+def test_a_seed_added_splits_the_point_again_and_counts_only_the_new_split(
+    tmp_path: Path,
+) -> None:
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    saved = trained(tmp_path, bucket)[:1]
+    small, small_2, large = (
+        ref.model_copy(update={"key": CheckpointKey(run=line, name=ref.key.name),
+                               "at": {"updates": 100}, "line": line})
+        for ref in saved
+        for line in ("small-1", "small-2", "large-1")
+    )  # fmt: skip
+    seating = Seating(
+        name="large vs small",
+        players=(DIRECT, Aligned(clock="updates", job="small", inference=DIRECT)),
+        conditions=DEALS[:1],
+        games=4,
+    )
+    benchmark = Benchmark(name="paired", environment=WORLD, seatings=(seating,))
+    one = [
+        Line(name="small-1", seed=1, job="small", checkpoints=(small,)),
+        Line(name="large-1", seed=1, job="large", checkpoints=(large,)),
+    ]
+    two = [*one, Line(name="small-2", seed=2, job="small", checkpoints=(small_2,))]
+
+    def held(lines: list[Line]) -> int:
+        return hold(benchmark, experiment=EXPERIMENT, play=play, storages=[bucket],
+                    checkpoints=[large], lines=lines).played  # fmt: skip
+
+    def point() -> tuple[int, int]:
+        with statsdb(EXPERIMENT, bucket) as db:
+            (line,) = scores(db, "paired", table="plays", value="won")
+        (only,) = line.points
+        return only.matches, only.rows
+
+    # One seed each: one match of every game.
+    assert held(one) == 1
+    assert point() == (1, 4)
+    # A second seed of small: two matches of two games each, and the first no longer counts.
+    assert held(two) == 2
+    assert point() == (2, 4)
+    assert held(two) == 0
+
+
 def test_curves_of_checkpoints_no_training_run_recorded_follow_their_names(
     tmp_path: Path,
 ) -> None:

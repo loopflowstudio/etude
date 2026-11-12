@@ -123,6 +123,8 @@ class TrainingRun:
     line: str
     state: Literal["running", "finished", "failed"]
     checkpoints: Checkpoints
+    # The seed it declared, if any.
+    seed: int | None = None
 
     @property
     def ended(self) -> bool:
@@ -150,21 +152,23 @@ class ExperimentState:
 
     @property
     def lines(self) -> tuple[Line, ...]:
-        """Each learner line, as relative seats find checkpoints in it: ended once every
-        run of it has."""
+        """Each learner line, as relative seats find checkpoints in it: seeded as its first
+        run declared, and ended once every run of it has."""
         found: dict[str, list[TrainingRun]] = {}
         for run in self.runs:
             found.setdefault(run.line, []).append(run)
-        return tuple(
+        made = (
             Line(
                 name=name,
+                seed=next((run.seed for run in runs if run.name == name), runs[0].seed),
                 job=runs[0].job,
                 launch=runs[0].launch,
                 ended=all(run.ended for run in runs),
                 checkpoints=tuple(c.ref for run in runs for c in run.checkpoints),
             )
-            for name, runs in sorted(found.items())
+            for name, runs in found.items()
         )
+        return tuple(sorted(made, key=lambda line: line.order))
 
     def checkpoint(self, key: CheckpointKey) -> Checkpoint | None:
         for each in self.runs:
@@ -221,6 +225,7 @@ def state_of(every: Sequence[RunData], experiment: str) -> ExperimentState:
                 line=line[data.name],
                 state=state,
                 checkpoints=saved,
+                seed=data.file.declaration.seed if data.file else None,
             )
         )
     return ExperimentState(experiment=experiment, runs=tuple(runs))
