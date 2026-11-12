@@ -472,8 +472,7 @@ def _neighbours(file: Path) -> dict[str, Path]:
     included: the page's records must stay the classes it checks against, even
     when experiments sit in an Etude checkout.
     """
-    root = _repository(file)
-    folder = str(root) + "/"
+    folder = str(_repository(file)) + "/"
     installed = tuple(
         str(Path(p).resolve()) + "/" for p in {sys.prefix, sys.base_prefix, sys.exec_prefix}
     )
