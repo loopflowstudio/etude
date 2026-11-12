@@ -47,7 +47,7 @@ def train(config: TrainConfig) -> None:
 
 ```sh
 etude smoke job.py           # one tiny update here, spending nothing
-etude launch job.py          # smokes first, then runs on this computer; --pool P for
+etude launch job.py          # runs on this computer; --smoke smokes first, --pool P for
                              # machines you own, --rent R to rent CPU or GPU machines, or both
 etude status                 # where runs stand
 etude logs --run RUN         # preparation, every attempt, cleanup

@@ -532,36 +532,32 @@ class SmokeStep(Record):
 
 
 class Smoke(Record):
-    """What the smoke before a run's submission did. A failing smoke submits nothing.
+    """What the smoke before a run's submission did; empty when none was asked for.
 
-    Its steps are its own job's train step and its file's eval and report, never
-    another job's. `no_smoke` records that the person passed `--no-smoke`.
+    Smoking at submission is opt-in (`--smoke`, `smoke=True`). Its steps are its
+    own job's train step and its file's eval and report, never another job's. A
+    failing smoke submits nothing.
     """
 
     steps: tuple[SmokeStep, ...] = ()
-    no_smoke: bool = False
 
     @property
-    def outcome(self) -> Literal["passed", "no_smoke", "not_smoked"]:
+    def outcome(self) -> Literal["passed", "not_smoked"]:
         """Passed only when a step passed and none was `not_smoked`.
 
-        `not_smoked` covers a declared step the smoke did not run (a job with no
-        smoke form, an eval with no checkpoints), a smoke whose every step was
-        skipped, and a Python client called without `smoke=True`.
+        `not_smoked` covers a submission without `--smoke`, a declared step the
+        smoke did not run (a job with no smoke form, an eval with no
+        checkpoints) and a smoke whose every step was skipped.
         """
-        if self.no_smoke:
-            return "no_smoke"
         ran = any(each.outcome == "passed" for each in self.steps)
         missed = any(each.outcome == "not_smoked" for each in self.steps)
         return "passed" if ran and not missed else "not_smoked"
 
     def __str__(self) -> str:
-        if self.outcome == "no_smoke":
-            return "skipped (--no-smoke)"
         if self.outcome == "not_smoked":
             missed = [each for each in self.steps if each.outcome == "not_smoked"]
             if not missed:
-                return "nothing smoked"
+                return "not smoked"
             return f"not smoked ({missed[0].step}: {missed[0].detail})"
         ran = [each for each in self.steps if each.outcome == "passed"]
         seconds = sum(each.seconds or 0 for each in ran)

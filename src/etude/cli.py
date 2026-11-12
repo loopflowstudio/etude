@@ -49,7 +49,7 @@ def _submit(
     from etude.launch import controller
     from etude.launch.job_file import read_job_file
     from etude.launch.listing import show_runs
-    from etude.launch.records import CohortSpec, Smoke
+    from etude.launch.records import CohortSpec
 
     runs = read_job_file(file, ctx.args, help=help)
     if help:
@@ -67,8 +67,6 @@ def _submit(
             from etude.smoke import smoke_file
 
             runs = smoke_file(file, runs).stamp(runs)
-        else:
-            runs = [run.model_copy(update={"smoke": Smoke(no_smoke=True)}) for run in runs]
     submission = controller.LaunchInput(
         runs=tuple(runs), cohort=spec, pool=pool, rent=rent, queued=queued
     )
@@ -104,7 +102,9 @@ ParallelOption = Annotated[int, typer.Option(help="machines at once for this coh
 CohortUsd = Annotated[str | None, typer.Option(help="dollar ceiling for the whole cohort")]
 SmokeOption = Annotated[
     bool,
-    typer.Option(help="smoke the file here first (etude smoke); --no-smoke skips it, on record"),
+    typer.Option(
+        help="smoke the file here first, as etude smoke does, and submit nothing if it fails"
+    ),
 ]
 FileHelp = Annotated[
     bool, typer.Option("--help", "-h", help="show these options, then the file's own parameters")
@@ -127,7 +127,7 @@ def launch(
     quote: Annotated[
         bool, typer.Option(help="print the machines and planned rental costs; rent nothing")
     ] = False,
-    smoke: SmokeOption = True,
+    smoke: SmokeOption = False,
     help: FileHelp = False,
 ) -> None:
     """Queue a file's runs and get the machines to start them now, or fail and queue nothing."""
@@ -159,7 +159,7 @@ def queue(
     cohort: CohortOption = None,
     parallel: ParallelOption = 1,
     max_usd: CohortUsd = None,
-    smoke: SmokeOption = True,
+    smoke: SmokeOption = False,
     help: FileHelp = False,
 ) -> None:
     """Add a file's runs to the queue. They start when a machine has room or can be rented."""
@@ -358,10 +358,10 @@ def eval_experiment(
     smoke: Annotated[
         bool,
         typer.Option(
-            help="with --pool or --rent, smoke eval and report here first against SOURCE; "
-            "--no-smoke skips it"
+            help="with --pool or --rent, smoke eval and report here first against SOURCE "
+            "and launch nothing if it fails"
         ),
-    ] = True,
+    ] = False,
 ) -> None:
     """Play, or with --pool or --rent launch, the matches eval(state) wants that no run delivered."""
     # Experiments join tracking, evaluation and the launcher.
@@ -375,13 +375,9 @@ def eval_experiment(
     experiment = read_experiment(file)
     storage = storage_from_uri(source or default_root())
     before = Smoke()
-    if pool or rent:
+    if smoke and (pool or rent):
         # Before a launch spends anything: a failure raises and launches nothing.
-        before = (
-            Smoke(steps=smoke_file(file, steps=("eval", "report"), source=storage).rest)
-            if smoke
-            else Smoke(no_smoke=True)
-        )
+        before = Smoke(steps=smoke_file(file, steps=("eval", "report"), source=storage).rest)
     try:
         while True:
             for done in advance(

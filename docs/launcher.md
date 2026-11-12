@@ -22,7 +22,7 @@ before renting from R. A run that cannot start yet waits.
 | `etude queue FILE.py [--pool P] [--rent R]` | Add runs. They start when a machine is free or can be rented; lack of capacity leaves them waiting. |
 | `etude launch FILE.py [--pool P] [--rent R]` | Acquire machines for the first runs (up to cohort parallelism), then record the runs. Failure records no runs. |
 | `etude launch FILE.py ... --quote` | Print the machines the first wave would take and their planned rental costs. Rents nothing. |
-| `etude smoke FILE.py` | Run the file's training, evaluation and report in smoke form on this computer. Spends nothing. `launch` and `queue` do this first ([Smoke before you spend](#smoke-before-you-spend)). |
+| `etude smoke FILE.py` | Run the file's training, evaluation and report in smoke form on this computer. Spends nothing. `launch --smoke` and `queue --smoke` do this first ([Smoke before you spend](#smoke-before-you-spend)). |
 | `etude availability R` | Ask R's provider what it would rent now, at what price. Rents nothing. |
 | `etude rent R --hours H` | Rent a machine for a window of time; it takes queued runs. |
 
@@ -306,9 +306,11 @@ $ etude smoke ppo.py
 smoke train ppo: passed in 41.2 s (1 checkpoint)
 smoke eval ladder: passed in 3.1 s (6 matches, 1 game each)
 smoke report: passed in 0.8 s
-$ etude launch ppo.py --rent l4             # smokes first; rents only if it passes
-$ etude launch ppo.py --rent l4 --no-smoke  # recorded on each run as skipped
+$ etude launch ppo.py --rent l4 --smoke  # smokes first; rents only if it passes
 ```
+
+Smoke is manual: run `etude smoke`, or pass `--smoke` to `launch`, `queue` or a
+launching `etude eval`. Nothing smokes on its own.
 
 A smoke runs each part of an experiment file through the same code as the real
 thing, only small, in order:
@@ -325,8 +327,8 @@ thing, only small, in order:
 
 Each step's line goes to standard error, so standard output stays the list of
 submitted runs. The first failure stops the smoke: it prints that step's
-output, names the step, and exits 1. `launch` and `queue` then submit, queue,
-rent and publish nothing. A file with no `eval(state)` skips evaluation, and a
+output, names the step, and exits 1. `launch --smoke` and `queue --smoke` then
+submit, queue, rent and publish nothing. A file with no `eval(state)` skips evaluation, and a
 file that is no experiment file skips evaluation and report; each says so.
 
 **A job's smoke form is declared on the job.** Etude does not look inside your
@@ -362,18 +364,35 @@ etude smoke ppo.py --step eval --step report --source s3://bucket/etude/launch
 
 They are played against that source's checkpoints and delivered to the
 temporary store, never to the source. `etude eval FILE --pool P` or `--rent R`
-smokes its evaluation and report this way first, against its `--source`, and
-launches nothing if that fails; `--no-smoke` skips it.
+`--smoke` smokes its evaluation and report this way first, against its
+`--source`, and launches nothing if that fails.
 
-**Skipping is recorded.** Each launched run keeps what its smoke did: passed,
-skipped with `--no-smoke`, or not smoked, with each step's outcome and seconds.
+**In CI.** `etude smoke` needs no provider key, no launcher database and no
+network beyond what preparing the job's environment fetches, and it exits 1 on
+the first failure, so a CI job can run it on each push:
+
+```yaml
+# .github/workflows/smoke.yml
+on: [push]
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv run etude smoke ppo.py
+```
+
+**What a run records.** Each launched run keeps what its smoke did: passed, or
+not smoked (no `--smoke`, or a step it could not run), with each step's outcome
+and seconds.
 A run's steps are its own job's training and the file's evaluation and report,
 so in a cohort where only some jobs have a smoke form the others record
 `not smoked (train: no smoke form)`. A declared step the smoke could not
 exercise, such as an evaluation with no checkpoints to play, is not smoked too
 (`not smoked (eval: no checkpoints)`). `etude status RUN` shows it
-(`smoke: passed in 45.1 s (train, eval, report)`, `smoke: skipped (--no-smoke)`),
-and `record.smoke` holds it in Python.
+(`smoke: passed in 45.1 s (train, eval, report)`); a run launched without
+`--smoke` shows no smoke line. `record.smoke` holds it in Python.
 
 **From Python**, the client's `queue`, `queue_cohort`, `launch` and
 `launch_cohort` take `smoke: bool = False`. With `smoke=True` they smoke the
@@ -1307,8 +1326,8 @@ Controller selection mutations are asks. `worker` and `controller run` are waits
 because they deliberately execute long-lived loops; they retain their existing
 lifetime rules. Job-file `runs()` is an input function, not a launcher command.
 `smoke` is a wait on this computer alone: it runs the file tiny in a temporary
-home and touches neither the database nor another machine. `queue` and `launch`
-run it first, on this computer, unless given `--no-smoke`.
+home and touches neither the database nor another machine. `queue --smoke` and
+`launch --smoke` run it first, on this computer.
 
 The full expectation also gives external work to the controller loop, makes asks
 safe to repeat with caller-chosen identities, restricts waits to watching, bounds

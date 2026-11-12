@@ -92,7 +92,7 @@ def test_a_passing_smoke_queues_and_its_runs_record_it(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     file = experiment(tmp_path / "lab")
-    assert main(["queue", str(file), "--seeds", "2", "--cohort", "c"]) == 0
+    assert main(["queue", str(file), "--seeds", "2", "--cohort", "c", "--smoke"]) == 0
     said = capsys.readouterr()
     out, err = said.out, said.err
     # Two seeds of one job are smoked once; the matchup plays each deal once.
@@ -132,7 +132,7 @@ def test_a_failing_step_submits_nothing_and_is_named(
 ) -> None:
     file = experiment(tmp_path / "lab", **change)
     flags = ["--tiny", "1 diverge"] if step == "train" else []
-    assert main(["launch", str(file), *flags]) == 1
+    assert main(["launch", str(file), *flags, "--smoke"]) == 1
     err = capsys.readouterr().err
     assert said in err and "nothing was submitted" in err
     assert default().runs(done=True) == ()
@@ -142,7 +142,7 @@ def test_a_job_without_a_smoke_form_is_reported_and_queues_as_before(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     file = experiment(tmp_path / "lab")
-    assert main(["queue", str(file), "--tiny", ""]) == 0
+    assert main(["queue", str(file), "--tiny", "", "--smoke"]) == 0
     said = capsys.readouterr()
     assert "smoke train ppo: not smoked (no smoke form)" in said.err
     (id,) = _ids(said.out)
@@ -153,7 +153,7 @@ def test_a_job_without_a_smoke_form_beside_one_with_it_is_not_recorded_passed(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     file = experiment(tmp_path / "lab")
-    assert main(["queue", str(file), "--bare", "--cohort", "c"]) == 0
+    assert main(["queue", str(file), "--bare", "--cohort", "c", "--smoke"]) == 0
     said = capsys.readouterr()
     assert "smoke train plain: not smoked (no smoke form)" in said.err
     ppo, plain = (default().record(id) for id in _ids(said.out))
@@ -175,7 +175,7 @@ def test_a_tiny_job_that_saves_no_checkpoint_leaves_eval_not_smoked(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     file = experiment(tmp_path / "lab")
-    assert main(["queue", str(file), "--tiny", "1 unsaved"]) == 0
+    assert main(["queue", str(file), "--tiny", "1 unsaved", "--smoke"]) == 0
     said = capsys.readouterr()
     assert "smoke train ppo: passed in" in said.err and "(0 checkpoints)" in said.err
     assert "smoke eval: not smoked (no checkpoints)" in said.err
@@ -185,13 +185,17 @@ def test_a_tiny_job_that_saves_no_checkpoint_leaves_eval_not_smoked(
     assert str(smoke) == "not smoked (eval: no checkpoints)"
 
 
-def test_no_smoke_is_recorded(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_without_smoke_a_broken_tiny_job_queues_unsmoked(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     file = experiment(tmp_path / "lab")
-    assert main(["queue", str(file), "--tiny", "1 diverge", "--no-smoke"]) == 0
-    (id,) = _ids(capsys.readouterr().out)
-    assert str(default().record(id).smoke) == "skipped (--no-smoke)"
+    assert main(["queue", str(file), "--tiny", "1 diverge"]) == 0
+    said = capsys.readouterr()
+    assert "smoke" not in said.err
+    (id,) = _ids(said.out)
+    assert default().record(id).smoke.outcome == "not_smoked"
     assert main(["status", id]) == 0
-    assert "  smoke: skipped (--no-smoke)" in capsys.readouterr().out
+    assert "smoke:" not in capsys.readouterr().out
 
 
 def _trained(source: Path, tmp_path: Path) -> None:
@@ -232,7 +236,7 @@ def test_a_launching_eval_that_fails_its_smoke_launches_nothing(
     source = tmp_path / "bucket"
     _trained(source, tmp_path)
     file = experiment(tmp_path / "lab", **change)
-    assert main(["eval", str(file), "--source", str(source), "--pool", "local"]) == 1
+    assert main(["eval", str(file), "--source", str(source), "--pool", "local", "--smoke"]) == 1
     assert said in capsys.readouterr().err
     assert default().runs(done=True) == ()
 
@@ -240,8 +244,8 @@ def test_a_launching_eval_that_fails_its_smoke_launches_nothing(
 @pytest.mark.parametrize(
     ("flags", "change", "outcome"),
     [
-        ([], {}, "passed"),
-        (["--no-smoke"], {"report": "raise RuntimeError('report broke')"}, "no_smoke"),
+        (["--smoke"], {}, "passed"),
+        ([], {"report": "raise RuntimeError('report broke')"}, "not_smoked"),
     ],
 )
 def test_a_launched_eval_run_records_its_smoke(
@@ -259,7 +263,7 @@ def test_a_launched_eval_run_records_its_smoke(
     (launched,) = default().runs(done=True)
     smoke = default().record(launched.id).smoke
     assert smoke.outcome == outcome
-    assert [step.step for step in smoke.steps] == (["eval", "report"] if not flags else [])
+    assert [step.step for step in smoke.steps] == (["eval", "report"] if flags else [])
 
 
 def test_the_python_client_smokes_when_asked(tmp_path: Path) -> None:
