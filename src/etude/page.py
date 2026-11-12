@@ -465,32 +465,41 @@ def _run_file(file: Path) -> dict[str, object]:
 
 
 def _neighbours(file: Path) -> dict[str, Path]:
-    """Imported modules defined below the file's folder, outside hidden folders and Python installs.
+    """Imported modules defined in the file's repository, outside hidden folders and Python installs.
 
-    They were imported through the resolved folder `_run_file` puts on the path,
-    so their file names start with it. Etude's own modules are never included:
-    the page's records must stay the classes it checks against, even when
-    experiments sit in an Etude checkout.
+    A repository's shared report modules sit beside its experiments' folder, not
+    below it, so an edited one is reread too. Etude's own modules are never
+    included: the page's records must stay the classes it checks against, even
+    when experiments sit in an Etude checkout.
     """
-    folder = str(file.resolve().parent) + "/"
+    folder = str(_repository(file)) + "/"
     installed = tuple(
         str(Path(p).resolve()) + "/" for p in {sys.prefix, sys.base_prefix, sys.exec_prefix}
     )
     found: dict[str, Path] = {}
     for name, module in list(sys.modules.items()):
         source = getattr(module, "__file__", None)
-        if (
-            not isinstance(source, str)
-            or not source.startswith(folder)
-            or source.startswith(installed)
-        ):
+        if not isinstance(source, str) or source.startswith(installed):
+            continue
+        # An editable install's modules may be imported through a symlinked path.
+        resolved = str(Path(source).resolve())
+        if not resolved.startswith(folder) or resolved.startswith(installed):
             continue
         if name == "etude" or name.startswith("etude."):
             continue
-        parts = Path(source[len(folder) :]).parts[:-1]
+        parts = Path(resolved[len(folder) :]).parts[:-1]
         if not any(p.startswith(".") or p in ("site-packages", "__pycache__") for p in parts):
-            found[name] = Path(source)
+            found[name] = Path(resolved)
     return found
+
+
+def _repository(file: Path) -> Path:
+    """The nearest folder above the file holding `pyproject.toml` or `.git`, else its own folder."""
+    folder = file.resolve().parent
+    for candidate in (folder, *folder.parents):
+        if (candidate / "pyproject.toml").exists() or (candidate / ".git").exists():
+            return candidate
+    return folder
 
 
 def _sources(file: Path) -> tuple[tuple[str, int, int], ...]:

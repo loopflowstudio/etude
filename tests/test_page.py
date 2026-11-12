@@ -26,7 +26,7 @@ from etude.report import (
     SchedulePoint,
 )
 from etude.run.errors import EtudeError
-from etude.run.storage import DirectoryStorage, storage_from_uri
+from etude.run.storage import DirectoryStorage, Storage, storage_from_uri
 from etude.train.records import Step
 from etude.train.run import track
 from tests.experiments import experiment_file
@@ -494,3 +494,45 @@ def test_schedule_position_uses_the_current_continuation_not_an_older_overrun(
     ):
         pass
     assert build(runs, file).training.runs[0].reached["updates"] == 1100
+
+
+def test_a_shared_report_module_of_the_repository_is_reread_on_refresh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    generations: list[Path] = []
+
+    def counted(storage: Storage | Path | str, file: Path) -> Page:
+        generations.append(file)
+        return build(storage, file)
+
+    monkeypatch.setattr("etude.page.build", counted)
+    runs = tmp_path / "runs"
+    trained(runs, "frontier", "a")
+    repository = tmp_path / "lab"
+    repository.mkdir()
+    (repository / "pyproject.toml").write_text("[project]\nname = 'lab'\n")
+    experiment_file(repository / "lab_reports", "__init__")
+    shared = experiment_file(
+        repository / "lab_reports",
+        "reports",
+        "from etude.report import EvalPanel, Matrix, Report\n\n\n"
+        "def standard_report(evals: tuple[EvalPanel, ...] = ()) -> Report:\n"
+        "    return Report(labels={'a': 'Width 64'}, evals=(Matrix(title='Standard', rows='deck', columns='opponent'), *evals))\n",
+    )
+    # As an editable install of the repository puts it on the path.
+    sys.path.insert(0, str(repository))
+    file = experiment_file(
+        repository / "experiments",
+        "frontier",
+        "from etude.report import Matrix, Report\nfrom lab_reports.reports import standard_report\n"
+        "\n\ndef report() -> Report:\n"
+        "    return standard_report(evals=(Matrix(title='Frontier only', rows='deck', columns='seat'),))\n",
+    )
+    with Server(runs, file, ("127.0.0.1", 0)) as server:
+        first = server.page() or ""
+        assert all(text in first for text in ('"Width 64"', '"Standard"', '"Frontier only"'))
+        server.page(refresh=True)
+        assert len(generations) == 1  # nothing changed, so nothing is rebuilt
+        shared.write_text(shared.read_text().replace("Standard", "Edited standard"))
+        assert '"Edited standard"' in (server.page(refresh=True) or "")
+        assert len(generations) == 2

@@ -410,8 +410,11 @@ From a directory the page goes to
 Ctrl-C stops it.
 
 **Refresh** checks the experiment file, the modules it imports from its
-folder, and its source, then replaces the served page when a generation
-succeeds; an edited helper module is read afresh without a restart. Requests for the same report while
+repository, and its source, then replaces the served page when a generation
+succeeds; an edited helper or [report helper](#report-helpers) module is
+read afresh without a restart. The repository is the nearest folder above the
+experiment file holding `pyproject.toml` or `.git`, outside hidden folders and
+installed packages. Requests for the same report while
 that generation is running join it, so several clicks or viewers do not
 start duplicate storage reads. Ordinary views reuse the generated page.
 If refreshing fails, the last successful page and its generation time remain
@@ -458,11 +461,21 @@ on the run's first declared clock. The `baseline` job is dotted everywhere; a
 job's colour follows launch order. `Report(labels={"ppo": "PPO baseline"})`
 replaces the displayed job name, keeping the seed count. Labels change
 presentation only: `baseline` and panel subjects still refer
-to the original job names. Unlabelled jobs keep their launch names.
+to the launch names. Unlabelled jobs keep their launch names.
 
-**Execution setup** is result provenance. Games played on different devices,
-compute setups or code revisions contribute to the same requested matches;
-a replay counts once, from its latest delivered result. There is no Config
+**Execution setup** is result provenance, like the seed: (device, code
+revision, seed) records how a result was produced, and the page aggregates
+over it rather than splitting by it. A job's training runs on different
+devices or commits are pooled with its seeds: runs launched under one job
+name and config are one job. A config change under the same name shows as two
+jobs, each named with its config digest ("ppo 1a2b3c"). The launch name still
+addresses both: `subject="ppo"` draws each as its own line, `baseline="ppo"`
+dots both, `labels={"ppo": "PPO"}` shows "PPO 1a2b3c · 3 seeds" and
+`Schedule(jobs={"ppo": ...})` draws the schedule for each. The full name,
+`subject="ppo 1a2b3c"`, selects one, and a full-name label or schedule wins
+over the launch name's. Games played on different
+devices, compute setups or code revisions contribute to the same requested
+matches; a replay counts once, from its latest delivered result. There is no Config
 control. Record the actual setup with `Result.execution`, inspect it alongside
 `matches.seed` and `seats.commit` in `statsdb` ([evaluation](evaluation.md)).
 Scientific differences, such as search budgets in `Inference.config`, remain
@@ -695,10 +708,66 @@ updates uses absolute update coordinates across continuation; it does not
 advance with time spent viewing the page. Refresh to move the marker when
 new clock values arrive. A configured curve is not evidence that training
 used those values; log a metric to compare the schedule with observations.
-`Schedule.jobs` uses original job names. Points must have finite values and
+`Schedule.jobs` uses original job names, full or launch. Points must have finite values and
 strictly increasing clock coordinates. Values between samples are linearly
 interpolated; no value is extrapolated outside the supplied range. Each seed
 gets a filled current-position marker when its recorded clock lies inside that
 range; configured sample points are hollow.
 If no seed of a job has a position in range, the chart says so. The schedule
 uses its own named clock, independently of the section's X axis control.
+
+### Report helpers
+
+Parts several experiments share are ordinary Python: keep them in a module of
+the repository and call them from each experiment's `report()`.
+
+```python
+# manabot/reports.py
+from etude.report import Curve, Fraction, Matches, Score
+
+GAMES = Score(table="games", value="score", reference=0.5, unit="games")
+
+
+def label(job: str) -> str:
+    """'w160l8' reads 'Width 160, 8 layers'; other names are kept."""
+    width, _, layers = job.removeprefix("w").partition("l")
+    if not width.isdigit():
+        return job
+    return f"Width {width}" + (f", {layers} layers" if layers else "")
+
+
+def against_half_training(job: str) -> Curve:
+    return Curve(
+        title=f"{label(job)} against itself at half its updates",
+        opponent=Fraction(clock="updates", value=0.5),
+        matches=Matches(tag=f"half-training-{job}"),
+        subject=job,
+    )
+```
+
+```python
+# experiments/frontier.py
+from etude.report import Report
+
+from manabot.reports import GAMES, against_half_training, label
+from manabot.training.panels import ML, PERF
+
+JOBS = ("w64", "w160l8")
+
+
+def report() -> Report:
+    return Report(
+        score=GAMES,
+        clock="updates",
+        labels={job: label(job) for job in JOBS},
+        evals=tuple(against_half_training(job) for job in JOBS),
+        perf=PERF,
+        ml=ML,
+    )
+```
+
+Helpers name jobs by launch name, so a job relaunched with a changed config is
+still drawn and labelled, once per config ("Width 64 1a2b3c · 3 seeds"). Edit
+`manabot/reports.py` and click **Refresh**: the page is rebuilt from the edited
+module, with no restart. Don't define `report()` or `eval(state)` at the top
+level of a helper module, or `etude report DIR` takes it for an experiment.

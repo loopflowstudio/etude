@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import math
 import statistics
+from collections import Counter
 from collections.abc import Sequence
 from typing import Literal
 
@@ -29,10 +30,14 @@ WALL_MEANING = "wall time since the run first started"
 
 
 class Job(Record):
-    """Runs that differ only by seed. `name` is what its author called it, else its key."""
+    """Runs that differ only by provenance: seed, device and commit.
 
-    key: str
+    `launch` is the name it was launched under; `name` adds the config digest
+    when that launch name has jobs with several configs ("ppo 1a2b3c").
+    """
+
     name: str
+    launch: str
     label: str  # the name and its seed count, as every chart's key shows it
     runs: tuple[str, ...]
 
@@ -84,7 +89,7 @@ class Line(Record):
     and `seeds`, how many seeds each bucket has.
     """
 
-    owner: str  # a run's name, or a job's key
+    owner: str  # a run's or a job's name
     x: list[float | None]
     mean: list[float | None]
     low: list[float | None] | None = None
@@ -182,25 +187,34 @@ def _band(job: str, members: Sequence[RunData], metric: str, clock: str) -> Line
 
 
 def _jobs(data: Sequence[RunData]) -> tuple[Job, ...]:
-    """Each run's job: its declared one, or the run alone. Named as its author named it."""
-    members: dict[str, list[RunData]] = {}
+    """Each run's job: the name its author launched it under (else its key, else
+    the run) and its config.
+
+    The launcher's job key includes the commit, so grouping by name pools a
+    job's runs across commits and devices with its seeds: these are provenance,
+    and a report addresses jobs by name. A config is scientific: a name launched
+    with several configs becomes one job per config, "ppo 1a2b3c"; a report
+    naming "ppo" addresses all of them.
+    """
+    members: dict[tuple[str, str | None], list[RunData]] = {}
     # In launch order: a job's colour follows when it started, never its rank.
     for run in sorted(data, key=_started):
-        members.setdefault(run.job or run.name, []).append(run)
-    named = {
-        key: next(
-            (r.file.declaration.job_name for r in runs if r.file and r.file.declaration.job_name),
-            key,
-        )
-        for key, runs in members.items()
-    }
-    names = list(named.values())
+        declaration = run.file.declaration if run.file else None
+        named = declaration.job_name if declaration else None
+        config = declaration.config_sha256 if declaration else None
+        members.setdefault((named or run.job or run.name, config), []).append(run)
+    configs = Counter(name for name, _ in members)
     jobs = []
-    for key, runs in members.items():
-        name = named[key] if names.count(named[key]) == 1 else f"{named[key]} {key[:6]}"
+    for (named, config), runs in members.items():
+        name = named if configs[named] == 1 else f"{named} {(config or 'none')[:6]}"
         seeds = f"{len(runs)} seed{'s' if len(runs) > 1 else ''}"
         jobs.append(
-            Job(key=key, name=name, label=f"{name} · {seeds}", runs=tuple(r.name for r in runs))
+            Job(
+                name=name,
+                launch=named,
+                label=f"{name} · {seeds}",
+                runs=tuple(r.name for r in runs),
+            )
         )
     return tuple(jobs)
 
@@ -348,7 +362,7 @@ def training(data: Sequence[RunData], *, prefixes: Sequence[str] = ()) -> Traini
     for run in data:
         metrics.update(dict.fromkeys(run.metrics()))
     jobs = _jobs(data)
-    members = {job.key: [run for run in data if run.name in job.runs] for job in jobs}
+    members = {job.name: [run for run in data if run.name in job.runs] for job in jobs}
     series: dict[str, dict[str, tuple[Line, ...]]] = {}
     bands: dict[str, dict[str, tuple[Line, ...]]] = {}
     for clock in [*clocks, WALL_CLOCK]:

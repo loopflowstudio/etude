@@ -492,3 +492,44 @@ def test_finish_retries_retained_files_when_storage_recovers(tmp_path: Path) -> 
     assert destination.get("final/state.json") == (run.files.root / "state.json").read_bytes()
     assert destination.requests == len(destination.keys("final")) + 1
     assert not run.files.pending(destination.name)
+
+
+def test_a_job_relaunched_at_another_commit_pools_with_its_seeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The launcher's job key includes the commit; the job's name does not.
+    for seed, key in enumerate(("a1b2c3d4e5f6", "f6e5d4c3b2a1")):
+        monkeypatch.setenv("ETUDE_JOB", key)
+        monkeypatch.setenv("ETUDE_JOB_NAME", "ppo")
+        run = track(
+            experiment="pilot", run=f"seed-{seed}", clocks=CLOCKS, seed=seed, directory=tmp_path
+        )
+        run.log(manabot_row(1))
+        run.finish()
+    (job,) = training([read(tmp_path, "pilot", f"seed-{seed}") for seed in range(2)]).jobs
+    assert (job.name, job.label, job.runs) == ("ppo", "ppo · 2 seeds", ("seed-0", "seed-1"))
+
+
+def test_a_job_relaunched_with_another_config_is_its_own_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ETUDE_JOB_NAME", "ppo")
+    configs = ({"lr": 0.001}, {"lr": 0.001}, {"lr": 0.01})
+    for seed, (key, config) in enumerate(zip(("a1b2c3", "f6e5d4", "f6e5d4"), configs)):
+        monkeypatch.setenv("ETUDE_JOB", key)
+        run = track(
+            experiment="pilot",
+            run=f"seed-{seed}",
+            clocks=CLOCKS,
+            seed=seed,
+            config=config,
+            directory=tmp_path,
+        )
+        run.log(manabot_row(1))
+        run.finish()
+    jobs = training([read(tmp_path, "pilot", f"seed-{seed}") for seed in range(3)]).jobs
+    digests = [sha256(json.dumps(c, sort_keys=True).encode()).hexdigest()[:6] for c in configs]
+    assert [(job.name, job.launch, job.runs) for job in jobs] == [
+        (f"ppo {digests[0]}", "ppo", ("seed-0", "seed-1")),
+        (f"ppo {digests[2]}", "ppo", ("seed-2",)),
+    ]

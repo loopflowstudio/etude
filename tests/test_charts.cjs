@@ -64,7 +64,7 @@ function renderPage(data, hash = "") {
 
 function pairedSeeds() {
   const training = {
-    jobs: [{key: "a", name: "a", label: "A", runs: ["a1", "a2"]}, {key: "b", name: "b", label: "B", runs: ["b1", "b2"]}],
+    jobs: [{name: "a", launch: "a", label: "A", runs: ["a1", "a2"]}, {name: "b", launch: "b", label: "B", runs: ["b1", "b2"]}],
     runs: ["a1", "a2", "b1", "b2"].map(name => ({name})), clocks: [{name: "updates"}],
     checkpoints: ["a1", "a2", "b1", "b2"].map(run => ({run, ordinal: 1, align: 100, at: {updates: 100}})),
   };
@@ -124,7 +124,7 @@ test("HeadToHead preserves ambiguity for partially evaluated jobs", () => {
 
 test("a curve whose checkpoints all play two variants says so once, naming the variants", () => {
   const training = {
-    jobs: [{key: "a", name: "a", label: "A", runs: ["a1"]}], runs: [{name: "a1"}], clocks: [{name: "updates"}],
+    jobs: [{name: "a", launch: "a", label: "A", runs: ["a1"]}], runs: [{name: "a1"}], clocks: [{name: "updates"}],
     checkpoints: [100, 200, 300].map((u, k) => ({run: "a1", ordinal: k + 1, align: u, at: {updates: u}})),
   };
   const players = [100, 200, 300].flatMap((u, k) => ['{"search":0}', '{"search":9}'].map(config => ({...player(`u${u}`, "a1", u, "a1", k + 1), config})));
@@ -181,7 +181,7 @@ test("external learners sharing positions draw separate curves against their own
 
 test("a continuation compares and tabulates checkpoints across job boundaries", () => {
   const training = {
-    jobs: [{key: "a", name: "a", runs: ["a"]}, {key: "b", name: "b", runs: ["b"]}],
+    jobs: [{name: "a", launch: "a", runs: ["a"]}, {name: "b", launch: "b", runs: ["b"]}],
     runs: [{name: "a"}, {name: "b"}], clocks: [{name: "updates"}],
     checkpoints: [
       {run: "a", ordinal: 1, align: 0, at: {updates: 0}},
@@ -209,7 +209,7 @@ test("duplicate positions are named gaps for both tracked and external checkpoin
     if (tracked) {
       players.forEach((p, i) => { p.run = "a"; p.ordinal = i + 1; });
       training = {
-        jobs: [{key: "a", name: "a", runs: ["a"]}], runs: [{name: "a"}], clocks: [{name: "updates"}],
+        jobs: [{name: "a", launch: "a", runs: ["a"]}], runs: [{name: "a"}], clocks: [{name: "updates"}],
         checkpoints: players.map(p => ({run: p.run, ordinal: p.ordinal, at: p.at, align: 400})),
       };
     }
@@ -312,7 +312,7 @@ test("search against no search keeps both intentional sides selectable", () => {
 
 test("seeds playing different scientific variants are not averaged together", () => {
   const training = {
-    jobs: [{key: "job", name: "job", runs: ["a", "b"]}],
+    jobs: [{name: "job", launch: "job", runs: ["a", "b"]}],
     runs: [{name: "a"}, {name: "b"}], clocks: [{name: "updates"}],
     checkpoints: ["a", "b"].map(run => ({run, ordinal: 1, align: 100, at: {updates: 100}})),
   };
@@ -369,11 +369,32 @@ test("union curves keep jobs separate and subject filtering omits the complement
 });
 
 test("job labels retain seed counts and baseline identity", () => {
-  const data = page([], [], {jobs: [{key: "id", name: "large", label: "large · 2 seeds", runs: ["a", "b"]}], runs: [], checkpoints: [], clocks: []});
+  const data = page([], [], {jobs: [{name: "large", launch: "large", label: "large · 2 seeds", runs: ["a", "b"]}], runs: [], checkpoints: [], clocks: []});
   data.report.labels = {large: "Large model"}; data.report.baseline = "large";
   const [job] = context.model(data).JOBS;
   assert.equal(job.label, "Large model · 2 seeds");
-  assert.equal(job.name, "large"); assert.equal(job.key, "id"); assert.equal(job.baseline, true);
+  assert.equal(job.name, "large"); assert.equal(job.key, "large"); assert.equal(job.baseline, true);
+});
+
+test("a launch name addresses every config job launched under it; a full name addresses one", () => {
+  const jobs = [
+    {name: "ppo 1a2b3c", launch: "ppo", label: "ppo 1a2b3c · 3 seeds", runs: ["a", "b", "c"]},
+    {name: "ppo 4d5e6f", launch: "ppo", label: "ppo 4d5e6f · 1 seed", runs: ["d"]},
+    {name: "dqn", launch: "dqn", label: "dqn · 1 seed", runs: ["e"]},
+  ];
+  const data = page([], [], {jobs, runs: [], checkpoints: [], clocks: []});
+  data.report.labels = {ppo: "PPO", dqn: "DQN"}; data.report.baseline = "ppo";
+  const m = context.model(data);
+  assert.deepEqual(Array.from(m.panelJobs({subject: "ppo"}), j => j.label), ["PPO 1a2b3c · 3 seeds", "PPO 4d5e6f · 1 seed"]);
+  assert.deepEqual(Array.from(m.panelJobs({subject: "ppo 4d5e6f"}), j => j.name), ["ppo 4d5e6f"]);
+  assert.deepEqual(Array.from(m.JOBS, j => j.baseline), [true, true, false]);
+  assert.equal(m.JOBS[2].label, "DQN · 1 seed");
+  data.report.labels = {ppo: "PPO", "ppo 4d5e6f": "High learning rate"};
+  assert.equal(context.model(data).JOBS[1].label, "High learning rate · 1 seed");
+  const plan = value => [{at: 0, value}];
+  const schedule = {clock: "updates", jobs: {ppo: plan(1), "ppo 4d5e6f": plan(2)}};
+  assert.deepEqual(Array.from(m.scheduleSeries(schedule), s => [s.job.name, s.points[0].y]),
+    [["ppo 1a2b3c", 1], ["ppo 4d5e6f", 2]]);
 });
 
 test("score tooltips name the interval and row unit without changing values", () => {
@@ -399,7 +420,7 @@ test("score tooltips name the interval and row unit without changing values", ()
 });
 
 test("configured curves interpolate at recorded absolute clocks without extrapolation", () => {
-  const training = {jobs: [{key: "id", name: "large", runs: ["a", "b"]}],
+  const training = {jobs: [{name: "large", launch: "large", runs: ["a", "b"]}],
     runs: [{name: "a", reached: {updates: 1200}}, {name: "b", reached: {updates: 900}}], checkpoints: [], clocks: []};
   const data = page([], [], training);
   const schedule = {clock: "updates", jobs: {large: [{at: 1000, value: 1}, {at: 1400, value: 0.2}]}};
