@@ -55,14 +55,14 @@ def under(keys: Sequence[str], prefix: str) -> Iterator[str]:
         yield key
 
 
-def declaring(folders: Sequence[str], listed: Container[str]) -> list[str]:
-    """The run's folders a listing shows a declaration, `run.json`, in: the only ones worth asking."""
-    return [folder for folder in folders if folder + "run.json" in listed]
+def declared(storage: Storage, folders: Sequence[str], listed: Container[str]) -> RunFile | None:
+    """The run's declaration from the first of its folders that holds a valid one.
 
-
-def declared(storage: Storage, folders: Sequence[str]) -> RunFile | None:
-    """The run's declaration from the first of its folders that holds a valid one."""
+    Only folders whose `run.json` is in `listed`, the source's listing, are asked.
+    """
     for place in folders:
+        if place + "run.json" not in listed:
+            continue
         try:
             return RunFile.model_validate_json(storage.get(place + "run.json"))
         except (FileNotFoundError, ValidationError):
@@ -80,7 +80,7 @@ def runs(source: Storage | Path | str) -> list[tuple[str, str]]:
     listed = set(keys)
     found = []
     for run, folders in run_folders(keys).items():
-        file = declared(storage, declaring(folders, listed))
+        file = declared(storage, folders, listed)
         if file is not None:
             found.append((file.experiment, run))
     return sorted(found)

@@ -31,11 +31,13 @@ from etude.launch.records import (
 )
 from etude.launch.scheduler import Scheduler
 from etude.run.listing import runs
+from etude.run.storage import DirectoryStorage
 from etude.train.read import read
 from etude.train.records import Step
 from etude.train.report import training
 from etude.train.run import track
 from tests.launch.counting import job_text
+from tests.run.storage import MeasuredStorage
 
 TRAIN = """
 test -f "$ETUDE_SOURCE_DIR/train.sh" || exit 3
@@ -150,8 +152,14 @@ def test_a_continuation_starts_from_its_parents_recorded_checkpoint(tmp_path: Pa
     parent.tag(1, "best")
     parent.finish()
     assert read(tracked, "capacity", first).checkpoints[0].tags == ("best",)
-    continued = continue_from(scheduler.record(first), "steps=5", source=tracked)
+    # A folder shaped like the run's, without a declaration, is not asked for one;
+    # "-" lists it before the declared folder.
+    (tracked / "-aside" / first).mkdir(parents=True)
+    (tracked / "-aside" / first / "environment.json").write_text("{}")
+    measured = MeasuredStorage(DirectoryStorage(tracked))
+    continued = continue_from(scheduler.record(first), "steps=5", source=measured)
     assert job_identity(continued.job) == identity
+    assert {key for key in measured.got if key.endswith("run.json")} == {f"{first}/run.json"}
 
     second = scheduler.launch(continued)
     (status,) = scheduler.wait(second, every=0.05, timeout=30)

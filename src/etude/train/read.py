@@ -27,7 +27,7 @@ import numpy.typing as npt
 from pydantic import ConfigDict, PrivateAttr, SkipValidation, ValidationError
 
 from etude.run.block_file import parse, select
-from etude.run.listing import as_storage, declared, declaring, run_folders, under
+from etude.run.listing import as_storage, declared, run_folders, under
 from etude.run.records import WALL_CLOCK, Attempt, Clock, Record, RunFile, RunState
 from etude.run.storage import Storage, run_prefix
 from etude.train.block import Table
@@ -476,7 +476,7 @@ def read_all(
     listed = set(keys)
     data = []
     for run, folders in sorted(run_folders(keys).items()):
-        file = declared(storage, declaring(folders, listed))
+        file = declared(storage, folders, listed)
         if file is not None and experiment in (None, file.experiment):
             data.append(
                 _read(
@@ -498,7 +498,7 @@ def read(source: Storage | Path | str, experiment: str, run: str) -> RunData:
     storage = as_storage(source)
     keys = sorted(storage.keys(""))
     folders = run_folders(keys).get(run, [run_prefix(run)])
-    file = declared(storage, declaring(folders, set(keys)))
+    file = declared(storage, folders, set(keys))
     return _read(storage, experiment, run, folders, _named(keys, folders), run_file=file)
 
 

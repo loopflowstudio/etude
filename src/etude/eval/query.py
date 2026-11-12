@@ -69,7 +69,7 @@ import tempfile
 import threading
 import warnings
 from collections import defaultdict
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Container, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, cast
@@ -108,7 +108,7 @@ from etude.eval.records import (
     assemble,
 )
 from etude.run.errors import EtudeError
-from etude.run.listing import as_storage, declared, declaring, run_folders, under
+from etude.run.listing import as_storage, declared, run_folders, under
 from etude.run.records import Digest, Record, RunState
 from etude.run.storage import SAFE_NAME, DirectoryStorage, Storage, default_root
 
@@ -265,7 +265,7 @@ def _catch_up(
         changed = created
         with tempfile.TemporaryDirectory(prefix="etude-statsdb-") as copies:
             for run, folders in sorted(run_folders(keys).items()):
-                if not _ours(db, storage, run, declaring(folders, listed), experiment):
+                if not _ours(db, storage, run, folders, listed, experiment):
                     continue
                 eval_run = _kind(db, run) == KIND
                 if eval_run and not _environment(db, storage, run, folders):
@@ -305,12 +305,13 @@ def _ours(
     storage: Storage,
     run: str,
     folders: Sequence[str],
+    listed: Container[str],
     experiment: str,
 ) -> bool:
     """Whether the run is the experiment's, reading its declaration the first time only."""
     found = db.execute("select experiment from kept.runs where run = ?", [run]).fetchone()
     if found is None:
-        declaration = declared(storage, folders)
+        declaration = declared(storage, folders, listed)
         if declaration is None:
             return False  # its `run.json` has not arrived yet
         db.execute(

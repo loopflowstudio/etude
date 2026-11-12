@@ -78,7 +78,7 @@ from etude.experiment_file import experiment_named
 from etude.launch.logging import explain
 from etude.report import Curve, Flame, Matches, Report, Score
 from etude.run.errors import EtudeError
-from etude.run.listing import as_storage, declared, declaring, run_folders, runs, under
+from etude.run.listing import as_storage, declared, run_folders, runs, under
 from etude.run.records import Record
 from etude.run.storage import DirectoryStorage, S3Storage, Storage, default_root
 from etude.train.read import read_all
@@ -324,11 +324,10 @@ class Pages:
         self, place: Storage, run: str, folders: Sequence[str], listed: dict[str, str]
     ) -> str | None:
         """The run's experiment, from its declaration, read again only once it has changed."""
-        declarations = declaring(folders, listed)
-        version = listed[declarations[0] + "run.json"] if declarations else ""
+        version = next((listed[f + "run.json"] for f in folders if f + "run.json" in listed), "")
         kept = self._declared.get((place.name, run))
         if kept is None or kept[0] != version:
-            file = declared(place, declarations)
+            file = declared(place, folders, listed)
             kept = (version, None if file is None else file.experiment)
             self._declared[place.name, run] = kept
         return kept[1]

@@ -68,7 +68,7 @@ from etude.launch.records import (
     parse_target,
 )
 from etude.run.errors import EtudeError
-from etude.run.listing import as_storage, declared, places
+from etude.run.listing import as_storage, declared, run_folders
 from etude.run.records import ArtifactRef, Record, SourceKey
 from etude.run.storage import Storage
 from etude.train.read import read
@@ -242,8 +242,9 @@ def continue_from(
     is not beyond it.
     """
     storage = as_storage(source)
-    folders = places(storage).get(parent.id)
-    declaration = None if folders is None else declared(storage, folders)
+    keys = storage.keys("")
+    folders = run_folders(keys).get(parent.id)
+    declaration = None if folders is None else declared(storage, folders, set(keys))
     if folders is None or declaration is None:
         raise LauncherError(f"run {parent.id} has no tracked folder in {storage.name}")
     recorded = read(storage, declaration.experiment, parent.id).checkpoints
