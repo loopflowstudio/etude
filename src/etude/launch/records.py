@@ -532,18 +532,30 @@ class SmokeStep(Record):
 class Smoke(Record):
     """What the smoke before a run's submission did. A failing smoke submits nothing.
 
-    "none" when the run's job was not smoked: it declares no tiny form, or a
-    Python client launched without `smoke=True`. Its steps are its own job's
-    train step and its file's eval and report, never another job's.
+    Its steps are its own job's train step and its file's eval and report, never
+    another job's. `no_smoke` records that the person passed `--no-smoke`.
     """
 
-    outcome: Literal["passed", "skipped", "none"] = "none"
     steps: tuple[SmokeStep, ...] = ()
+    no_smoke: bool = False
+
+    @property
+    def outcome(self) -> Literal["passed", "no_smoke", "not_smoked"]:
+        """Passed only when a step passed and none was `not_smoked`.
+
+        `not_smoked` covers a job with no tiny form and a Python client called
+        without `smoke=True`.
+        """
+        if self.no_smoke:
+            return "no_smoke"
+        ran = any(each.outcome == "passed" for each in self.steps)
+        missed = any(each.outcome == "not_smoked" for each in self.steps)
+        return "passed" if ran and not missed else "not_smoked"
 
     def __str__(self) -> str:
-        if self.outcome == "skipped":
+        if self.outcome == "no_smoke":
             return "skipped (--no-smoke)"
-        if self.outcome == "none":
+        if self.outcome == "not_smoked":
             missed = any(each.outcome == "not_smoked" for each in self.steps)
             return "not smoked (no tiny form)" if missed else "nothing smoked"
         ran = [each for each in self.steps if each.outcome == "passed"]

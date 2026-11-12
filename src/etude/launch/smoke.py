@@ -98,7 +98,7 @@ class Smoked:
         for run in runs:
             own = self.train.get(job_key(run.job))
             steps = [*self.rest] if own is None else [own, *self.rest]
-            stamped.append(run.model_copy(update={"smoke": smoked(steps)}))
+            stamped.append(run.model_copy(update={"smoke": Smoke(steps=tuple(steps))}))
         return stamped
 
 
@@ -164,10 +164,3 @@ def show(step: SmokeStep) -> None:
     else:
         said += ": not smoked" if step.outcome == "not_smoked" else ": skipped"
     print(said + (f" ({step.detail})" if step.detail else ""), file=sys.stderr, flush=True)
-
-
-def smoked(steps: Sequence[SmokeStep]) -> Smoke:
-    """The smoke `steps` make: passed when one passed and none was `not_smoked`, else none."""
-    ran = any(each.outcome == "passed" for each in steps)
-    missed = any(each.outcome == "not_smoked" for each in steps)
-    return Smoke(outcome="passed" if ran and not missed else "none", steps=tuple(steps))

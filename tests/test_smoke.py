@@ -141,7 +141,7 @@ def test_a_job_without_a_tiny_form_is_reported_and_queues_as_before(
     said = capsys.readouterr()
     assert "smoke train ppo: not smoked (no tiny form)" in said.err
     (id,) = _ids(said.out)
-    assert default().record(id).smoke.outcome == "none"
+    assert default().record(id).smoke.outcome == "not_smoked"
 
 
 def test_a_job_without_a_tiny_form_beside_one_with_it_is_not_recorded_passed(
@@ -159,7 +159,7 @@ def test_a_job_without_a_tiny_form_beside_one_with_it_is_not_recorded_passed(
         ("eval", "ladder"),
         ("report", "report"),
     ]
-    assert plain.smoke.outcome == "none"
+    assert plain.smoke.outcome == "not_smoked"
     assert [(s.step, s.name) for s in plain.smoke.steps][0] == ("train", "plain")
     assert main(["status", plain.id]) == 0
     assert "passed" not in capsys.readouterr().out
@@ -222,7 +222,7 @@ def test_a_launching_eval_that_fails_its_smoke_launches_nothing(
     ("flags", "change", "outcome"),
     [
         ([], {}, "passed"),
-        (["--no-smoke"], {"report": "raise RuntimeError('report broke')"}, "skipped"),
+        (["--no-smoke"], {"report": "raise RuntimeError('report broke')"}, "no_smoke"),
     ],
 )
 def test_a_launched_eval_run_records_its_smoke(
@@ -249,7 +249,7 @@ def test_the_python_client_smokes_when_asked(tmp_path: Path) -> None:
         queue_cohort("refused", broken.runs(1, 2), "local", smoke=True)
     assert default().runs(done=True) == ()
     (plain,) = queue_cohort("plain", broken.runs(1), "local")
-    assert default().record(plain).smoke.outcome == "none"
+    assert default().record(plain).smoke.outcome == "not_smoked"
     fine = broken.model_copy(update={"smoke": Tiny(command="true")})
     (smoked,) = queue_cohort("kept", fine.runs(1), "local", smoke=True)
     assert default().record(smoked).smoke.outcome == "passed"

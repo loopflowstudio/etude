@@ -68,7 +68,7 @@ def _submit(
 
             runs = smoke_file(file, runs).stamp(runs)
         else:
-            runs = [run.model_copy(update={"smoke": Smoke(outcome="skipped")}) for run in runs]
+            runs = [run.model_copy(update={"smoke": Smoke(no_smoke=True)}) for run in runs]
     submission = controller.LaunchInput(
         runs=tuple(runs), cohort=spec, pool=pool, rent=rent, queued=queued
     )
@@ -369,7 +369,6 @@ def eval_experiment(
 
     from etude.experiment import advance, read_experiment
     from etude.launch.records import Smoke
-    from etude.launch.smoke import smoked
     from etude.run.storage import default_root, storage_from_uri
     from etude.smoke import smoke_file
 
@@ -379,9 +378,9 @@ def eval_experiment(
     if pool or rent:
         # Before a launch spends anything: a failure raises and launches nothing.
         before = (
-            smoked(smoke_file(file, steps=("eval", "report"), source=storage).rest)
+            Smoke(steps=smoke_file(file, steps=("eval", "report"), source=storage).rest)
             if smoke
-            else Smoke(outcome="skipped")
+            else Smoke(no_smoke=True)
         )
     try:
         while True:
