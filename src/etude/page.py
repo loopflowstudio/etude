@@ -62,7 +62,6 @@ import runpy
 import sys
 import threading
 import time
-from bisect import bisect_left
 from collections import Counter
 from collections.abc import Callable, Collection, Sequence
 from concurrent.futures import Future
@@ -79,7 +78,7 @@ from etude.experiment_file import experiment_named
 from etude.launch.logging import explain
 from etude.report import Curve, Flame, Matches, Report, Score
 from etude.run.errors import EtudeError
-from etude.run.listing import as_storage, declared, run_folders, runs
+from etude.run.listing import as_storage, declared, declaring, run_folders, runs, under
 from etude.run.records import Record
 from etude.run.storage import DirectoryStorage, S3Storage, Storage, default_root
 from etude.train.read import read_all
@@ -318,20 +317,18 @@ class Pages:
         for run, folders in sorted(run_folders(keys).items()):
             if self._experiment(place, run, folders, listed) != experiment:
                 continue
-            for folder in folders:
-                start = bisect_left(keys, folder)
-                for key in itertools.takewhile(lambda k: k.startswith(folder), keys[start:]):
-                    found.append((key, listed[key]))
+            found.extend((key, listed[key]) for folder in folders for key in under(keys, folder))
         return tuple(found)
 
     def _experiment(
         self, place: Storage, run: str, folders: Sequence[str], listed: dict[str, str]
     ) -> str | None:
         """The run's experiment, from its declaration, read again only once it has changed."""
-        version = next((listed[f + "run.json"] for f in folders if f + "run.json" in listed), "")
+        declarations = declaring(folders, listed)
+        version = listed[declarations[0] + "run.json"] if declarations else ""
         kept = self._declared.get((place.name, run))
         if kept is None or kept[0] != version:
-            file = declared(place, folders)
+            file = declared(place, declarations)
             kept = (version, None if file is None else file.experiment)
             self._declared[place.name, run] = kept
         return kept[1]

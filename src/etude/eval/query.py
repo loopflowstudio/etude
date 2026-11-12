@@ -68,7 +68,6 @@ import os
 import tempfile
 import threading
 import warnings
-from bisect import bisect_left
 from collections import defaultdict
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -109,8 +108,8 @@ from etude.eval.records import (
     assemble,
 )
 from etude.run.errors import EtudeError
-from etude.run.listing import as_storage, run_folders
-from etude.run.records import Digest, Record, RunFile, RunState
+from etude.run.listing import as_storage, declared, declaring, run_folders, under
+from etude.run.records import Digest, Record, RunState
 from etude.run.storage import SAFE_NAME, DirectoryStorage, Storage, default_root
 
 if TYPE_CHECKING:
@@ -266,9 +265,7 @@ def _catch_up(
         changed = created
         with tempfile.TemporaryDirectory(prefix="etude-statsdb-") as copies:
             for run, folders in sorted(run_folders(keys).items()):
-                # Only a folder the listing shows a declaration in is asked for one.
-                declaring = [f for f in folders if f + "run.json" in listed]
-                if not _ours(db, storage, run, declaring, experiment):
+                if not _ours(db, storage, run, declaring(folders, listed), experiment):
                     continue
                 eval_run = _kind(db, run) == KIND
                 if eval_run and not _environment(db, storage, run, folders):
@@ -276,7 +273,7 @@ def _catch_up(
                 # One run may be copied to several places; a file's name is the same in each.
                 located: dict[str, str] = {}
                 for place in folders:
-                    for key in _under(keys, place):
+                    for key in under(keys, place):
                         located.setdefault(key[len(place) :], place)
                 seen = {name for (name,) in db.execute(
                     "select name from kept.seen where run = ?", [run]).fetchall()}  # fmt: skip
@@ -313,7 +310,7 @@ def _ours(
     """Whether the run is the experiment's, reading its declaration the first time only."""
     found = db.execute("select experiment from kept.runs where run = ?", [run]).fetchone()
     if found is None:
-        declaration = _declared(storage, folders)
+        declaration = declared(storage, folders)
         if declaration is None:
             return False  # its `run.json` has not arrived yet
         db.execute(
@@ -339,14 +336,6 @@ def _refuse_unconverted(db: duckdb.DuckDBPyConnection, run: str, names: Sequence
     refuse_unconverted(run, old, (name for (name,) in replaced))
 
 
-def _under(keys: Sequence[str], prefix: str) -> Iterator[str]:
-    """The keys under `prefix` of a sorted listing."""
-    for key in keys[bisect_left(keys, prefix) :]:
-        if not key.startswith(prefix):
-            return
-        yield key
-
-
 def _environment(
     db: duckdb.DuckDBPyConnection, storage: Storage, run: str, folders: Sequence[str]
 ) -> bool:
@@ -363,15 +352,6 @@ def _environment(
         )
         return True
     return False
-
-
-def _declared(storage: Storage, folders: Sequence[str]) -> RunFile | None:
-    for place in folders:
-        try:
-            return RunFile.model_validate_json(storage.get(place + "run.json"))
-        except (FileNotFoundError, ValidationError):
-            continue
-    return None
 
 
 def _kind(db: duckdb.DuckDBPyConnection, run: str) -> str:

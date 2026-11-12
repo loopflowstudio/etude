@@ -17,8 +17,6 @@ reader of checkpoints, or of an eval run, reads no metric data.
 
 from __future__ import annotations
 
-import itertools
-from bisect import bisect_left
 from collections.abc import Callable, Sequence
 from functools import cached_property
 from pathlib import Path
@@ -29,7 +27,7 @@ import numpy.typing as npt
 from pydantic import ConfigDict, PrivateAttr, SkipValidation, ValidationError
 
 from etude.run.block_file import parse, select
-from etude.run.listing import as_storage, declared, places, run_folders
+from etude.run.listing import as_storage, declared, declaring, run_folders, under
 from etude.run.records import WALL_CLOCK, Attempt, Clock, Record, RunFile, RunState
 from etude.run.storage import Storage, run_prefix
 from etude.train.block import Table
@@ -478,8 +476,7 @@ def read_all(
     listed = set(keys)
     data = []
     for run, folders in sorted(run_folders(keys).items()):
-        # Only a folder the listing shows a declaration in is asked for one.
-        file = declared(storage, [f for f in folders if f + "run.json" in listed])
+        file = declared(storage, declaring(folders, listed))
         if file is not None and experiment in (None, file.experiment):
             data.append(
                 _read(
@@ -487,10 +484,10 @@ def read_all(
                     file.experiment,
                     run,
                     folders,
+                    _named(keys, folders),
                     run_file=file,
                     metrics=metrics,
                     prefixes=prefixes,
-                    keys=[(f, key[len(f) :]) for f in folders for key in _under(keys, f)],
                 )
             )
     return sorted(data, key=lambda one: (one.experiment, one.name))
@@ -499,7 +496,9 @@ def read_all(
 def read(source: Storage | Path | str, experiment: str, run: str) -> RunData:
     """One run's declaration, state, rows and checkpoints. Rows not yet sealed are not read."""
     storage = as_storage(source)
-    return _read(storage, experiment, run, places(storage).get(run, [run_prefix(run)]))
+    keys = sorted(storage.keys(""))
+    folders = run_folders(keys).get(run, [run_prefix(run)])
+    return _read(storage, experiment, run, folders, _named(keys, folders))
 
 
 def _read(
@@ -507,14 +506,13 @@ def _read(
     experiment: str,
     run: str,
     folders: Sequence[str],
+    keys: list[tuple[str, str]],
     *,
     run_file: RunFile | None = None,
     metrics: frozenset[str] | None = None,
     prefixes: tuple[str, ...] = (),
-    keys: list[tuple[str, str]] | None = None,
 ) -> RunData:
-    """`keys`, (folder, name under it) first folder first, is the run's listing when already made."""
-    keys = _listing(storage, folders) if keys is None else keys
+    """`keys` is the run's listing as `_named` gives it."""
     present = set(keys)
     checkpoints: list[CheckpointRecord] = []
     attempts: list[tuple[Attempt, str]] = []
@@ -567,15 +565,9 @@ def _read(
     return data
 
 
-def _under(keys: Sequence[str], prefix: str) -> list[str]:
-    """The keys under `prefix` of a sorted listing."""
-    start = bisect_left(keys, prefix)
-    return list(itertools.takewhile(lambda key: key.startswith(prefix), keys[start:]))
-
-
-def _listing(storage: Storage, folders: Sequence[str]) -> list[tuple[str, str]]:
-    """Every (folder, name under it), first folder first."""
-    return [(place, key[len(place) :]) for place in folders for key in storage.keys(place)]
+def _named(keys: Sequence[str], folders: Sequence[str]) -> list[tuple[str, str]]:
+    """Every (folder, name under it) of a sorted listing, first folder first."""
+    return [(place, key[len(place) :]) for place in folders for key in under(keys, place)]
 
 
 def _blocks(
@@ -628,7 +620,7 @@ def _blocks(
         except FileNotFoundError:
             if retry == 2:
                 raise
-            keys = _listing(storage, folders)
+            keys = _named(sorted(k for f in folders for k in storage.keys(f)), folders)
     blocks.sort(
         key=lambda block: (
             started.get(block.header.writer, block.header.wall_first),

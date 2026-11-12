@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from bisect import bisect_left
+from collections.abc import Container, Iterator, Sequence
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -44,6 +45,19 @@ def run_folders(keys: Sequence[str]) -> dict[str, list[str]]:
                 found.setdefault(parts[index - 1], {})["/".join(parts[:index]) + "/"] = None
                 break
     return {run: list(folders) for run, folders in found.items()}
+
+
+def under(keys: Sequence[str], prefix: str) -> Iterator[str]:
+    """The keys under `prefix` of a sorted listing."""
+    for key in keys[bisect_left(keys, prefix) :]:
+        if not key.startswith(prefix):
+            return
+        yield key
+
+
+def declaring(folders: Sequence[str], listed: Container[str]) -> list[str]:
+    """The run's folders a listing shows a declaration, `run.json`, in: the only ones worth asking."""
+    return [folder for folder in folders if folder + "run.json" in listed]
 
 
 def declared(storage: Storage, folders: Sequence[str]) -> RunFile | None:
