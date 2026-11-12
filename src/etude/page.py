@@ -963,34 +963,17 @@ def _where(selection: Matches | tuple[Matches, ...], *, view: str) -> str:
     """The rows of a selection's matches in a view of `_page_held`, as a condition
     `compare` applies to an author table."""
     if isinstance(selection, tuple):
-        where = " or ".join(f"({_where(s, view=view)})" for s in selection) or "false"
         # Two tournaments may hold different deliveries of the same match.
-        # Keep its latest delivery per environment, as a single selection does.
-        return (
-            "(run, match) in (select m.run, m.match from matches m"
-            f" join runs r using (run) where ({where})"
-            " qualify row_number() over (partition by r.environment, m.match"
-            " order by m.wall_ms desc, m.run desc) = 1)"
-        )
-    if selection.tournament is None and (selection.seating, selection.tag) != (None, None):
-        # A seating or tag in every tournament: each match once, from its latest delivery
-        # in each environment, whichever tournament called for it.
-        column, name = (
-            ("seating", selection.seating)
-            if selection.seating is not None
-            else ("tag", selection.tag)
-        )
-        called = (
+        return _latest(" or ".join(f"({_where(s, view=view)})" for s in selection) or "false")
+    name = selection.seating if selection.seating is not None else selection.tag
+    if selection.tournament is None and name is not None:
+        # A seating or tag in every tournament, whichever tournament called for each match.
+        column = "seating" if selection.seating is not None else "tag"
+        return _latest(
             "(run, match) in (select h.run, h.match from _page_held h join _page_scheduled s"
             " on s.tournament = h.tournament and s.match = h.match"
             f" where h.view = {_literal(view)} and h.tournament != ''"
-            f" and s.{column} = {_literal(name or '')})"
-        )
-        return (
-            "(run, match) in (select m.run, m.match from matches m"
-            f" join runs r using (run) where {called}"
-            " qualify row_number() over (partition by r.environment, m.match"
-            " order by m.wall_ms desc, m.run desc) = 1)"
+            f" and s.{column} = {_literal(name)})"
         )
     tournament = _literal(selection.tournament or "")
     held = (
@@ -1003,6 +986,17 @@ def _where(selection: Matches | tuple[Matches, ...], *, view: str) -> str:
     if selection.tag is not None:
         held += f" and match in ({scheduled} and tag = {_literal(selection.tag)})"
     return held
+
+
+def _latest(where: str) -> str:
+    """Each match `where` selects once, from its latest delivery in each environment,
+    as a single tournament's selection counts it."""
+    return (
+        "(run, match) in (select m.run, m.match from matches m"
+        f" join runs r using (run) where ({where})"
+        " qualify row_number() over (partition by r.environment, m.match"
+        " order by m.wall_ms desc, m.run desc) = 1)"
+    )
 
 
 def _selections(

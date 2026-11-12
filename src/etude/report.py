@@ -57,9 +57,10 @@ class Score(Record):
 class Matches(Record):
     """Which matches a panel counts: a tournament's, or one seating or tag of it.
 
-    `tournament` names a benchmark or round robin, None leaving it to the
-    section's control; `seating` names one seating of a benchmark, and `tag` the
-    seatings tagged with it (`Seating.tags`). Give the names the experiment's
+    `tournament` names a benchmark or round robin; `seating` names one seating
+    of a benchmark, and `tag` the seatings tagged with it (`Seating.tags`). With
+    no `tournament`, a seating or tag covers every tournament holding it, each
+    match counted once, and otherwise the section's control picks one. Give the names the experiment's
     `eval(state)` gives, such as `LADDER.name`.
     """
 

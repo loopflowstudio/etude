@@ -777,7 +777,7 @@ class Seating(Record):
                     job=relative.job,
                     clock=None if isinstance(relative, Final) else relative.clock,
                     position=_position(relative, checkpoint),
-                    at_or_before=isinstance(relative, Earlier | Fraction) and relative.at_or_before,
+                    at_or_before=_at_or_before(relative),
                 )
         # Pairs in seed order, (mine, theirs); this checkpoint's are contiguous from `first`.
         pairs = max(len(mine), 1) * len(found)
@@ -866,22 +866,24 @@ def _find(seat: Relative, held: CheckpointRef, line: Line) -> CheckpointRef | Mi
     wanted = _position(seat, held)
     if wanted is None:
         return "never"
-    passed = any(each.at.get(seat.clock, float("-inf")) > wanted for each in line.checkpoints)
-    if isinstance(seat, Earlier | Fraction) and seat.at_or_before:
+    clock, tolerance = seat.clock, _EXACT * max(1.0, abs(wanted))
+    passed = any(each.at.get(clock, float("-inf")) > wanted for each in line.checkpoints)
+    if _at_or_before(seat):
         if not (passed or line.ended):
             return "not_yet"
         before = [
-            (stood, n)
-            for n, each in enumerate(line.checkpoints)
-            if (stood := each.at.get(seat.clock)) is not None
-            and stood <= wanted + _EXACT * max(1.0, abs(wanted))
+            c for c in line.checkpoints if c.at.get(clock, float("inf")) <= wanted + tolerance
         ]
-        return line.checkpoints[max(before)[1]] if before else "never"
+        latest = max(before, key=lambda c: c.at[clock], default=None)
+        return "never" if latest is None else latest
     for each in line.checkpoints:
-        stood = each.at.get(seat.clock)
-        if stood is not None and abs(stood - wanted) <= _EXACT * max(1.0, abs(wanted)):
+        if abs(each.at.get(clock, float("inf")) - wanted) <= tolerance:
             return each
     return "never" if line.ended or passed else "not_yet"
+
+
+def _at_or_before(seat: Relative) -> bool:
+    return isinstance(seat, Earlier | Fraction) and seat.at_or_before
 
 
 class Benchmark(Record):
