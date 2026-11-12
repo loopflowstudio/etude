@@ -265,7 +265,8 @@ inlined: no server and no network to view it. Rerun the command to update that
 snapshot; reloading a saved HTML file cannot fetch new training results.
 The experiment is named for the file, and the page follows the
 file's `report()`; a file without one gets `Report(other_metrics=True)`, every
-logged metric, and the page says so at its top. Reports read files and never launch or rent anything.
+logged metric, and the page says so at its top. Reports read files and never
+launch or rent anything.
 From a directory the page goes to
 `reports/` beside its runs, from a bucket to `./reports`; `--out DIR` chooses.
 `--serve` has no login and defaults to this computer only
