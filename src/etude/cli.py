@@ -33,6 +33,7 @@ def _submit(
     parallel: int,
     max_usd: str | None,
     help: bool,
+    *,
     queued: bool,
     smoke: bool,
     quote: bool = False,
@@ -137,7 +138,19 @@ def launch(
     help: FileHelp = False,
 ) -> None:
     """Queue a file's runs and get the machines to start them now, or fail and queue nothing."""
-    _submit(ctx, file, pool, rent, cohort, parallel, max_usd, help, False, smoke, quote)
+    _submit(
+        ctx,
+        file,
+        pool,
+        rent,
+        cohort,
+        parallel,
+        max_usd,
+        help,
+        queued=False,
+        smoke=smoke,
+        quote=quote,
+    )
 
 
 @app.command(
@@ -157,7 +170,7 @@ def queue(
     help: FileHelp = False,
 ) -> None:
     """Add a file's runs to the queue. They start when a machine has room or can be rented."""
-    _submit(ctx, file, pool, rent, cohort, parallel, max_usd, help, True, smoke)
+    _submit(ctx, file, pool, rent, cohort, parallel, max_usd, help, queued=True, smoke=smoke)
 
 
 @app.command(

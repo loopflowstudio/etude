@@ -105,7 +105,7 @@ def _evaluate(
     state = observe(source, experiment)
     if not any(run.checkpoints for run in state.runs):
         return [SmokeStep(step="eval", name="eval", outcome="skipped", detail="no checkpoints")]
-    jobs = _failing("eval", "eval", lambda: asked(read_experiment(path).eval, state))
+    jobs = _try_step("eval", "eval", lambda: asked(read_experiment(path).eval, state))
     if not jobs:
         return [SmokeStep(step="eval", name="eval", outcome="skipped", detail="eval returned none")]
     return [_hold(job, experiment, store) for job in jobs]
@@ -116,11 +116,11 @@ def _hold(job: Job, experiment: str, store: DirectoryStorage) -> SmokeStep:
     name = spec.tournament.name
     if spec.experiment not in (None, experiment):
         raise LauncherError(f"smoke eval {name}: a job of experiment {spec.experiment!r}")
-    tournament = tiny_tournament(spec.tournament)
+    tournament = _tiny_tournament(spec.tournament)
     # Loaded by import path, typed where `evaluation` was given it.
     play = cast(Callable[[Match], Tables | Result], spec.play.load(job.repo))
     started = time.monotonic()
-    held = _failing(
+    held = _try_step(
         "eval",
         name,
         lambda: hold(
@@ -142,7 +142,7 @@ def _hold(job: Job, experiment: str, store: DirectoryStorage) -> SmokeStep:
     )
 
 
-def tiny_tournament(tournament: Benchmark | RoundRobin) -> Benchmark | RoundRobin:
+def _tiny_tournament(tournament: Benchmark | RoundRobin) -> Benchmark | RoundRobin:
     """The tournament with each of its matchups, or itself, at one game per match.
 
     Every condition is kept: a game that breaks under one deal or seating is
@@ -165,14 +165,14 @@ def _report(
     if source is None:
         return SmokeStep(step="report", name="report", outcome="skipped", detail="no runs")
     started = time.monotonic()
-    page = _failing("report", "report", lambda: build(source, path))
+    page = _try_step("report", "report", lambda: build(source, path))
     write(render(page), store.root.parent / "reports" / f"{experiment}.html")
     return SmokeStep(
         step="report", name="report", outcome="passed", seconds=time.monotonic() - started
     )
 
 
-def _failing[T](step: Step, name: str, work: Callable[[], T]) -> T:
+def _try_step[T](step: Step, name: str, work: Callable[[], T]) -> T:
     """`work()`, or its traceback printed and a `LauncherError` naming the step."""
     started = time.monotonic()
     try:
