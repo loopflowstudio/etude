@@ -94,6 +94,9 @@ Build a lab outside the repo (e.g. `/tmp/lab`) with its own `ETUDE_HOME`:
    then `etude report ... --source r2://manabot/etude-r2-test/NAME` with a fresh
    `ETUDE_HOME`. `du` of that home after each build shows the bytes the build read.
    Afterwards delete the prefix with `S3Storage.client.delete_objects`.
+   The aws CLI also works under the same `doppler run`: `sh -c 'AWS_ACCESS_KEY_ID=$R2_ACCESS_KEY_ID
+   AWS_SECRET_ACCESS_KEY=$R2_SECRET_ACCESS_KEY aws s3 rm --recursive --region auto --endpoint-url
+   https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com s3://manabot/etude-r2-test/NAME/'`.
 8. To tell a regression from an old bug, run the same script on main: `git worktree add
    --detach /tmp/NAME-main main`, `uv run` from there, then `git worktree remove`.
    Compare `etude.page.build(RUNS, FILE)` by hashing `page.training.model_dump_json()`
