@@ -923,7 +923,7 @@ def test_selective_report_reads_bound_metadata_and_preserve_absolute_coordinates
 from etude.report import Flame, Report, Series
 
 def report():
-    return Report(other_metrics=False, perf=(Flame(),),
+    return Report(perf=(Flame(),),
                   ml=(Series(title="Wanted", keys=("wanted",)),))
 """,
     )
@@ -950,7 +950,7 @@ def test_a_selective_page_reads_each_block_once_from_a_bucket(tmp_path: Path) ->
 from etude.report import Report, Series
 
 def report():
-    return Report(other_metrics=False, perf=(), ml=(Series(title="Wanted", keys=("wanted",)),))
+    return Report(perf=(), ml=(Series(title="Wanted", keys=("wanted",)),))
 """,
     )
     with mock_aws():

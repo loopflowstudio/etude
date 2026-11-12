@@ -8,7 +8,8 @@
 
 The file names the experiment, by its stem, and may define `report()`
 (`etude.report.Report`) and `eval(state)` (`etude.experiment`). Without
-`report()` the page is `Report()` and says so at its top. The experiment's
+`report()` the page is `Report(other_metrics=True)`, drawing every metric its
+runs logged, and says so at its top. The experiment's
 training runs are drawn by `etude.train.report.training`; an experiment with
 eval runs alone is drawn as evaluation only.
 
@@ -506,7 +507,9 @@ def _sources(file: Path) -> tuple[tuple[str, int, int], ...]:
 
 def _report(made: object, file: Path) -> tuple[Report, str | None, tuple[str, ...]]:
     if made is None:
-        return Report(), None, (f"{file.name} defines no report(), so this is the default report.",)
+        # Nothing is declared, so the page draws everything logged rather than nothing.
+        default = Report(other_metrics=True)
+        return default, None, (f"{file.name} defines no report(), so this is the default report.",)
     if not callable(made):
         raise EtudeError("experiment_report_is_not_a_function", 422) from ValueError(file)
     report = made()
