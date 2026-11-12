@@ -343,7 +343,7 @@ of the job's own for the smoke run; any it leaves unset keep the job's value:
 checked the same way when the job is made. The tiny form is not part of the
 job's identity: changing it does not make a new job. A job with no tiny form is
 reported `not smoked`, never passed, and a file none of whose jobs has one
-launches as before, with a line saying nothing was smoked.
+launches as before, each job's line reporting `not smoked (no tiny form)`.
 
 **Smoke is local and leaves nothing behind.** It never rents and never needs a
 provider key. Its runs, launcher records, checkpoints and report go to a
@@ -369,7 +369,9 @@ launches nothing if that fails; `--no-smoke` skips it.
 skipped with `--no-smoke`, or not smoked, with each step's outcome and seconds.
 A run's steps are its own job's training and the file's evaluation and report,
 so in a cohort where only some jobs have a tiny form the others record
-`not smoked (no tiny form)`. `etude status RUN` shows it
+`not smoked (train: no tiny form)`. A declared step the smoke could not
+exercise, such as an evaluation with no checkpoints to play, is not smoked too
+(`not smoked (eval: no checkpoints)`). `etude status RUN` shows it
 (`smoke: passed in 45.1 s (train, eval, report)`, `smoke: skipped (--no-smoke)`),
 and `record.smoke` holds it in Python.
 

@@ -28,8 +28,9 @@ updates = int(sys.argv[1])
 if updates > 10 or "diverge" in sys.argv:
     raise SystemExit(f"{updates} updates diverged")
 with track(clocks=[Clock(name="updates", kind="step", meaning="optimizer updates")]) as run:
-    Path("model.pt").write_bytes(b"weights")
-    run.checkpoint(Path("model.pt"), updates=updates)
+    if "unsaved" not in sys.argv:
+        Path("model.pt").write_bytes(b"weights")
+        run.checkpoint(Path("model.pt"), updates=updates)
 """
 
 EXPERIMENT = """
@@ -163,7 +164,21 @@ def test_a_job_without_a_tiny_form_beside_one_with_it_is_not_recorded_passed(
     assert [(s.step, s.name) for s in plain.smoke.steps][0] == ("train", "plain")
     assert main(["status", plain.id]) == 0
     assert "passed" not in capsys.readouterr().out
-    assert str(plain.smoke) == "not smoked (no tiny form)"
+    assert str(plain.smoke) == "not smoked (train: no tiny form)"
+
+
+def test_a_tiny_job_that_saves_no_checkpoint_leaves_eval_not_smoked(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    file = experiment(tmp_path / "lab")
+    assert main(["queue", str(file), "--tiny", "1 unsaved"]) == 0
+    said = capsys.readouterr()
+    assert "smoke train ppo: passed in" in said.err and "(0 checkpoints)" in said.err
+    assert "smoke eval: not smoked (no checkpoints)" in said.err
+    (id,) = _ids(said.out)
+    smoke = default().record(id).smoke
+    assert smoke.outcome == "not_smoked"
+    assert str(smoke) == "not smoked (eval: no checkpoints)"
 
 
 def test_no_smoke_is_recorded(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

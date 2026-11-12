@@ -524,6 +524,8 @@ class SmokeStep(Record):
 
     step: Literal["train", "eval", "report"]
     name: str  # what ran: the job's or tournament's name, or "report"
+    # skipped: the file has no such step (no eval(state), not an experiment file).
+    # not_smoked: the file has one that the smoke did not run (no tiny form, no checkpoints).
     outcome: Literal["passed", "not_smoked", "skipped"]
     seconds: float | None = None  # on the submitting machine; None when it did not run
     detail: str = ""  # what it made, such as "1 checkpoint", or why it did not run
@@ -543,7 +545,8 @@ class Smoke(Record):
     def outcome(self) -> Literal["passed", "no_smoke", "not_smoked"]:
         """Passed only when a step passed and none was `not_smoked`.
 
-        `not_smoked` covers a job with no tiny form, a smoke whose every step was
+        `not_smoked` covers a declared step the smoke did not run (a job with no
+        tiny form, an eval with no checkpoints), a smoke whose every step was
         skipped, and a Python client called without `smoke=True`.
         """
         if self.no_smoke:
@@ -556,8 +559,10 @@ class Smoke(Record):
         if self.outcome == "no_smoke":
             return "skipped (--no-smoke)"
         if self.outcome == "not_smoked":
-            missed = any(each.outcome == "not_smoked" for each in self.steps)
-            return "not smoked (no tiny form)" if missed else "nothing smoked"
+            missed = [each for each in self.steps if each.outcome == "not_smoked"]
+            if not missed:
+                return "nothing smoked"
+            return f"not smoked ({missed[0].step}: {missed[0].detail})"
         ran = [each for each in self.steps if each.outcome == "passed"]
         seconds = sum(each.seconds or 0 for each in ran)
         steps = ", ".join(dict.fromkeys(each.step for each in ran))

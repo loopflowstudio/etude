@@ -108,10 +108,12 @@ def _evaluate(
         return [SmokeStep(step="eval", name="eval", outcome="skipped", detail="no eval(state)")]
     state = observe(source, experiment)
     if not any(run.checkpoints for run in state.runs):
-        return [SmokeStep(step="eval", name="eval", outcome="skipped", detail="no checkpoints")]
+        return [SmokeStep(step="eval", name="eval", outcome="not_smoked", detail="no checkpoints")]
     jobs = _try_step("eval", "eval", lambda: asked(read_experiment(path).eval, state))
     if not jobs:
-        return [SmokeStep(step="eval", name="eval", outcome="skipped", detail="eval returned none")]
+        return [
+            SmokeStep(step="eval", name="eval", outcome="not_smoked", detail="eval returned none")
+        ]
     return [_hold(job, experiment, store) for job in jobs]
 
 
@@ -167,7 +169,7 @@ def _report(
             step="report", name="report", outcome="skipped", detail="not an experiment file"
         )
     if source is None:
-        return SmokeStep(step="report", name="report", outcome="skipped", detail="no runs")
+        return SmokeStep(step="report", name="report", outcome="not_smoked", detail="no runs")
     started = time.monotonic()
     page = _try_step("report", "report", lambda: build(source, path))
     write(render(page), store.root.parent / "reports" / f"{experiment}.html")
