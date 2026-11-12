@@ -362,18 +362,29 @@ def eval_experiment(
     import time
 
     from etude.experiment import advance, read_experiment
+    from etude.launch.records import Smoke
     from etude.run.storage import default_root, storage_from_uri
     from etude.smoke import smoke_file
 
     experiment = read_experiment(file)
     storage = storage_from_uri(source or default_root())
-    if (pool or rent) and smoke:
+    smoked = Smoke()
+    if pool or rent:
         # Before a launch spends anything: a failure raises and launches nothing.
-        smoke_file(file, steps=("eval", "report"), source=storage)
+        smoked = (
+            smoke_file(file, steps=("eval", "report"), source=storage)
+            if smoke
+            else Smoke(outcome="skipped")
+        )
     try:
         while True:
             for done in advance(
-                experiment, source=storage, pool=pool, rent=rent, retry_failed=retry_failed
+                experiment,
+                source=storage,
+                pool=pool,
+                rent=rent,
+                retry_failed=retry_failed,
+                smoke=smoked,
             ):
                 line = f"{done.tournament}: {done.new} new"
                 if done.failed:

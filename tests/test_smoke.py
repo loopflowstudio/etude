@@ -152,14 +152,19 @@ def test_no_smoke_is_recorded(tmp_path: Path, capsys: pytest.CaptureFixture[str]
     assert "  smoke: skipped (--no-smoke)" in capsys.readouterr().out
 
 
-def test_eval_and_report_alone_read_a_source_and_deliver_nothing_to_it(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    source = tmp_path / "bucket"
+def _trained(source: Path, tmp_path: Path) -> None:
+    """One checkpoint of experiment ppo's run ppo-1, delivered to `source`."""
     clocks = [Clock(name="updates", kind="step", meaning="optimizer updates")]
     with track(experiment="ppo", run="ppo-1", clocks=clocks, directory=source) as run:
         (tmp_path / "model.pt").write_bytes(b"weights 1")
         run.checkpoint(tmp_path / "model.pt", updates=100)
+
+
+def test_eval_and_report_alone_read_a_source_and_deliver_nothing_to_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = tmp_path / "bucket"
+    _trained(source, tmp_path)
     before = sorted(source.rglob("*"))
     file = experiment(tmp_path / "lab")
     steps = ["--step", "eval", "--step", "report"]
@@ -170,11 +175,49 @@ def test_eval_and_report_alone_read_a_source_and_deliver_nothing_to_it(
     assert sorted(source.rglob("*")) == before
     assert main(["smoke", str(file), "--step", "eval"]) == 1
     assert "needs --source" in capsys.readouterr().err
-    # A launching `etude eval` smokes this way first, and launches nothing when it fails.
-    broken = experiment(tmp_path / "broken", play="play_failing_deal_one")
-    assert main(["eval", str(broken), "--source", str(source), "--pool", "local"]) == 1
-    assert "smoke eval ladder: failed" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("change", "said"),
+    [
+        ({"play": "play_failing_deal_one"}, "smoke eval ladder: failed"),
+        ({"report": "raise RuntimeError('report broke')"}, "smoke report: failed"),
+    ],
+)
+def test_a_launching_eval_that_fails_its_smoke_launches_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], change: dict[str, str], said: str
+) -> None:
+    source = tmp_path / "bucket"
+    _trained(source, tmp_path)
+    file = experiment(tmp_path / "lab", **change)
+    assert main(["eval", str(file), "--source", str(source), "--pool", "local"]) == 1
+    assert said in capsys.readouterr().err
     assert default().runs(done=True) == ()
+
+
+@pytest.mark.parametrize(
+    ("flags", "change", "outcome"),
+    [
+        ([], {}, "passed"),
+        (["--no-smoke"], {"report": "raise RuntimeError('report broke')"}, "skipped"),
+    ],
+)
+def test_a_launched_eval_run_records_its_smoke(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    flags: list[str],
+    change: dict[str, str],
+    outcome: str,
+) -> None:
+    source = tmp_path / "bucket"
+    _trained(source, tmp_path)
+    file = experiment(tmp_path / "lab", **change)
+    assert main(["eval", str(file), "--source", str(source), "--pool", "local", *flags]) == 0
+    assert ", launched " in capsys.readouterr().out
+    (launched,) = default().runs(done=True)
+    smoke = default().record(launched.id).smoke
+    assert smoke.outcome == outcome
+    assert [step.step for step in smoke.steps] == (["eval", "report"] if not flags else [])
 
 
 def test_the_python_client_smokes_when_asked(tmp_path: Path) -> None:

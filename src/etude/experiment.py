@@ -40,7 +40,7 @@ from etude.eval.match import Result, Tables
 from etude.eval.records import CheckpointKey, CheckpointRef, Inference, Match, Model, digest
 from etude.eval.tournament import hold, played
 from etude.launch import client
-from etude.launch.records import Job, Run
+from etude.launch.records import Job, Run, Smoke
 from etude.run.errors import EtudeError
 from etude.run.records import ArtifactRef, Digest, Record
 from etude.run.storage import Storage
@@ -267,6 +267,7 @@ def advance(
     rent: str | None = None,
     directory: Path | str | None = None,
     retry_failed: bool = False,
+    smoke: Smoke = Smoke(),
 ) -> list[Pass]:
     """One pass: observe `source`, ask the experiment's `eval`, and play or launch what is new.
 
@@ -282,7 +283,8 @@ def advance(
     to play exactly those; the machine's storage must deliver to `source`, or
     the next pass will find them still new. Raises `EtudeError("launched_pass_failed")`
     when a run an earlier pass launched failed with matches this pass wants,
-    unless `retry_failed`.
+    unless `retry_failed`. Each launched run records `smoke`, what was smoked
+    before this pass.
     """
     # Imported here: typed jobs import this module for `Checkpoint`.
     from etude.jobs import Evaluation, evaluation_spec, with_matches  # noqa: PLC0415
@@ -338,7 +340,7 @@ def advance(
             raise EtudeError("launched_pass_failed", 409) from ValueError(sorted(stopped))
         run = ledger.unused(f"{spec.tournament.name}-{digest(sorted(m.key for m in pending))[:12]}")
         launched = with_matches(job, pending, state)
-        ledger.launch(run, launched, pending, pool=pool, rent=rent)
+        ledger.launch(run, launched, pending, pool=pool, rent=rent, smoke=smoke)
         passes.append(done.model_copy(update={"launched": run}))
     return passes
 
@@ -423,8 +425,9 @@ class _Ledger:
         *,
         pool: str | None,
         rent: str | None,
+        smoke: Smoke,
     ) -> None:
-        client.launch(Run(id=run, job=job), pool, rent=rent)
+        client.launch(Run(id=run, job=job, smoke=smoke), pool, rent=rent)
         launched = [*self._read(), _Launched(run=run, matches=tuple(m.key for m in matches))]
         self.path.parent.mkdir(parents=True, exist_ok=True)
         staged = self.path.with_suffix(".tmp")
