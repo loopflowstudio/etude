@@ -130,7 +130,7 @@ def test_peak_memory_stays_flat_as_the_run_grows(tmp_path: Path) -> None:
     assert large[True] < large[False] / 4
 
 
-def test_reads_one_header_and_the_selected_arrays_of_each_block(tmp_path: Path) -> None:
+def test_reads_each_block_header_twice_and_only_its_selected_arrays(tmp_path: Path) -> None:
     _long_run(tmp_path / run_prefix("r"), 6)
     measured = MeasuredStorage(DirectoryStorage(tmp_path))
     metrics = ["rl/metric_0", "rl/metric_1"]
