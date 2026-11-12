@@ -50,6 +50,7 @@ def test_only_the_top_level_command_and_typed_jobs_import_evaluation() -> None:
         SOURCE / "etude/jobs.py",
         SOURCE / "etude/experiment.py",
         SOURCE / "etude/page.py",
+        SOURCE / "etude/smoke.py",
     }
     for path, names in _imports("etude").items():
         if not path.is_relative_to(SOURCE / "etude/eval") and path not in composers:
