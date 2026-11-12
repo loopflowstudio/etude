@@ -307,8 +307,9 @@ evaluate(
   | `At(clock="updates", value=200, inference=direct)` | its line at update 200 |
   | `Final(inference=direct)` | its line's last checkpoint, once its run has ended |
   | `Aligned(clock="updates", job="small", inference=direct)` | job `small` at exactly the held checkpoint's updates |
+  | `Aligned(clock="running_hours", job="small", at_or_before=True, inference=direct)` | job `small`'s latest checkpoint at or before the held checkpoint's running hours |
 
-  The last five are relative seats: each names a checkpoint by where it
+  The last six rows are relative seats: each names a checkpoint by where it
   stands relative to the one held, and plays it with its own `inference`.
   `Earlier`, `Fraction`, `At` and `Final` look in the held checkpoint's own
   line unless given a `job`: `Final(job="small", inference=direct)` seats
@@ -321,7 +322,7 @@ evaluate(
   scored and drawn alike.
 
   Positions are exact by default: a checkpoint at 2,990 is not half of
-  6,000. `Earlier` and `Fraction` take `at_or_before=True` for the latest
+  6,000. A seat with a position takes `at_or_before=True` for the latest
   checkpoint at or before the position instead, found once the line has a
   checkpoint past it or has ended, so a later save never moves it. Etude's
   clocks, `running_hours` and `hours_since_start`, are on every checkpoint

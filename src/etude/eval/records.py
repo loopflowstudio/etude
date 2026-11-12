@@ -531,13 +531,17 @@ class Fraction(Record):
 
 
 class At(Record):
-    """The held checkpoint's line at `value` on `clock`, such as its initial weights at 0."""
+    """The held checkpoint's line at `value` on `clock`, such as its initial weights at 0.
+
+    With `at_or_before`, the latest checkpoint at or before it, as for `Earlier`.
+    """
 
     kind: Literal["at"] = "at"
     clock: str
     value: float
     inference: Inference
     job: str | None = None
+    at_or_before: bool = False
 
 
 class Final(Record):
@@ -549,12 +553,16 @@ class Final(Record):
 
 
 class Aligned(Record):
-    """Each of job `job`'s lines at exactly the held checkpoint's position on `clock`."""
+    """Each of job `job`'s lines at exactly the held checkpoint's position on `clock`.
+
+    With `at_or_before`, the latest checkpoint at or before it, as for `Earlier`.
+    """
 
     kind: Literal["aligned"] = "aligned"
     clock: str
     job: str
     inference: Inference
+    at_or_before: bool = False
 
 
 # A seat naming a checkpoint by where it stands relative to the one a seating is held for.
@@ -883,7 +891,7 @@ def _find(seat: Relative, held: CheckpointRef, line: Line) -> CheckpointRef | Mi
 
 
 def _at_or_before(seat: Relative) -> bool:
-    return isinstance(seat, Earlier | Fraction) and seat.at_or_before
+    return not isinstance(seat, Final) and seat.at_or_before
 
 
 class Benchmark(Record):

@@ -147,6 +147,52 @@ def test_a_relative_seat_waits_for_its_checkpoint_and_a_batch_hold_plays_it_once
     )
 
 
+def test_an_aligned_hours_seat_takes_the_other_jobs_latest_checkpoint_once_it_has_passed(
+    tmp_path: Path,
+) -> None:
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    saved = trained(tmp_path, bucket)
+    # No checkpoint is saved at an exact hour: small saves a little before each, large on it.
+    small, large = (
+        [ref.model_copy(update={"key": CheckpointKey(run=line, name=ref.key.name),
+                                "at": {"running_hours": hours}, "line": line})
+         for ref, hours in zip(saved, positions, strict=True)]
+        for line, positions in (("small-1", (0.9, 1.8, 2.7)), ("large-1", (1.0, 2.0, 3.0)))
+    )  # fmt: skip
+    seat = Aligned(clock="running_hours", job="small", at_or_before=True, inference=DIRECT)
+    seating = Seating(name="large vs small", players=(DIRECT, seat), conditions=DEALS[:1], games=2)
+    benchmark = Benchmark(name="paired", environment=WORLD, seatings=(seating,))
+
+    def lines(saved: int) -> list[Line]:
+        return [
+            Line(name="small-1", job="small", checkpoints=tuple(small[:saved])),
+            Line(name="large-1", job="large", checkpoints=tuple(large[:2])),
+        ]
+
+    def seated() -> dict[str, str]:
+        """Each held large checkpoint, by name, and the small checkpoint it played."""
+        delivered = played(benchmark, experiment=EXPERIMENT, checkpoints=large[:2],
+                           storages=[bucket], lines=lines(3)).delivered  # fmt: skip
+        pairs = [each.match.players for each in delivered]
+        return {
+            str(held.checkpoint.key): str(other.checkpoint.key)
+            for held, other in pairs
+            if isinstance(held, Model)
+            and isinstance(other, Model)
+            and held.checkpoint.line == "large-1"
+        }
+
+    # Small has saved 0.9h and 1.8h: large's 1h seats 0.9h; large's 2h is not yet,
+    # since small may still save nearer before 2h.
+    assert hold(benchmark, experiment=EXPERIMENT, play=play, storages=[bucket],
+                checkpoints=large[:2], lines=lines(2)).played == 1  # fmt: skip
+    assert seated() == {str(large[0].key): str(small[0].key)}
+    # Small saves 2.7h, past 2h: large's 2h seats 1.8h, the latest at or before it.
+    assert hold(benchmark, experiment=EXPERIMENT, play=play, storages=[bucket],
+                lines=lines(3)).played == 1  # fmt: skip
+    assert seated() == {str(large[0].key): str(small[0].key), str(large[1].key): str(small[1].key)}
+
+
 def test_checkpoints_held_on_the_go_then_a_matchup_added_in_batch(tmp_path: Path) -> None:
     bucket = DirectoryStorage(tmp_path / "bucket")
     checkpoints = trained(tmp_path, bucket)
