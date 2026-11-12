@@ -39,9 +39,9 @@ are computed by `compare` over those matches, once for each selection
 over every tournament unless it names one,
 the matches outside a tournament, and panels' unions), each score and each combination of
 the columns panels name. So any panel, under any filter the page offers,
-shows a value `compare` computed, never one pooled in the browser. One
-comparison played in several environments shows the environment whose latest
-match is newest, and the page notes the rest.
+shows a value `compare` computed, never one pooled in the browser. A value
+played in several environments shows the environment whose latest match is
+newest, and the page notes the rest.
 
 A curve of seatings draws points (`Point`): each checkpoint a seating was
 held for, where it stood, with the first seat's score against the second
@@ -1260,23 +1260,25 @@ def _cells(
 def _newest_environment(
     cells: Sequence[Cell], environments: Sequence[Environment]
 ) -> tuple[list[Cell], tuple[str, ...]]:
-    """Of one comparison's cells in several environments, the newest environment's; and a
+    """Of a value's cells in several environments, the newest environment's; and a
     note per environment that loses any. Environments are never pooled."""
     # A lower index is a newer environment.
     newest: dict[tuple[object, ...], int] = {}
     for cell in cells:
-        same = _comparison(cell)
+        same = _without_environment(cell)
         newest[same] = min(cell.environment, newest.get(same, cell.environment))
-    hidden = Counter(c.environment for c in cells if c.environment != newest[_comparison(c)])
-    return [c for c in cells if c.environment == newest[_comparison(c)]], tuple(
+    hidden = Counter(
+        c.environment for c in cells if c.environment != newest[_without_environment(c)]
+    )
+    return [c for c in cells if c.environment == newest[_without_environment(c)]], tuple(
         f"{count} values were also played in {_environment_name(environments[number])};"
         " the page shows each from the environment whose latest match is newest."
         for number, count in sorted(hidden.items())
     )
 
 
-def _comparison(cell: Cell) -> tuple[object, ...]:
-    """What a cell compares, whatever environment it was played in."""
+def _without_environment(cell: Cell) -> tuple[object, ...]:
+    """A cell's identity, whatever environment it was played in."""
     return (
         cell.selection, cell.commit, cell.score, cell.subject, cell.opponent, cell.fixed,
         json.dumps(cell.split, sort_keys=True),

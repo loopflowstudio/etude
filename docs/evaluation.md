@@ -256,7 +256,7 @@ evaluate(
   played, let `play` raise: an error caught and returned as empty tables is
   still refused (`match_has_no_rows`), never stored as a result.
 - **Environments are never pooled.** An eval run has one environment;
-  resuming with another is refused, and comparisons keep environments apart.
+  resuming with another is refused, and a report shows each value from one environment.
 - **Resume.** Calling `evaluate` again with the same `run` skips every match
   already delivered to any of `storages`, even on a machine with an empty disk.
 - **Progress.** Each stored match prints one line to stderr:

@@ -547,7 +547,7 @@ Matches of eval runs held for no tournament are offered as "matches outside a
 tournament", each counting once per environment from its latest record.
 Setup is not an environment: games played on CPU and on CUDA, under configs
 that differ only in their `setup` key ([evaluation](evaluation.md#eval-runs)),
-pool. One comparison played in two environments shows the one whose latest
+pool. A value played in two environments shows the one whose latest
 match is newest, and the page notes the rest. `score` names an eval table's value, computed as
 `etude.eval.query.compare` computes it, with its 95% interval over whole
 matches; without one, every numeric column is offered. Each match counts once,
@@ -575,7 +575,7 @@ it as reference lines.
 Panels draw; seatings say who plays whom. Whom a curve scores against, which
 jobs it draws and with which inference config are the seating's
 ([evaluation](evaluation.md#tournaments)), so a chart that needs another
-comparison needs another seating.
+opponent, job or inference needs another seating.
 
 **Compare jobs over training.** With the `ladder` and `against small`
 benchmarks of [Experiments](evaluation.md#experiments):
