@@ -243,9 +243,8 @@ def continue_from(
     """
     storage = as_storage(source)
     keys = storage.keys("")
-    folders = run_folders(keys).get(parent.id)
-    declaration = None if folders is None else declared(storage, folders, set(keys))
-    if folders is None or declaration is None:
+    declaration = declared(storage, run_folders(keys).get(parent.id, []), set(keys))
+    if declaration is None:
         raise LauncherError(f"run {parent.id} has no tracked folder in {storage.name}")
     recorded = read(storage, declaration.experiment, parent.id).checkpoints
     record = next((r for r in reversed(recorded) if ordinal in (None, r.ordinal)), None)

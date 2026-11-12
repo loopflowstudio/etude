@@ -484,7 +484,7 @@ def read_all(
                     file.experiment,
                     run,
                     folders,
-                    _named(keys, folders),
+                    keys,
                     run_file=file,
                     metrics=metrics,
                     prefixes=prefixes,
@@ -499,7 +499,7 @@ def read(source: Storage | Path | str, experiment: str, run: str) -> RunData:
     keys = sorted(storage.keys(""))
     folders = run_folders(keys).get(run, [run_prefix(run)])
     file = declared(storage, folders, set(keys))
-    return _read(storage, experiment, run, folders, _named(keys, folders), run_file=file)
+    return _read(storage, experiment, run, folders, keys, run_file=file)
 
 
 def _read(
@@ -507,13 +507,14 @@ def _read(
     experiment: str,
     run: str,
     folders: Sequence[str],
-    keys: list[tuple[str, str]],
+    listing: Sequence[str],
     *,
     run_file: RunFile | None,
     metrics: frozenset[str] | None = None,
     prefixes: tuple[str, ...] = (),
 ) -> RunData:
-    """`keys` is the run's listing as `_named` gives it."""
+    """The run's records from `listing`, the source's sorted keys; its blocks once used."""
+    keys = _named(listing, folders)
     present = set(keys)
     checkpoints: list[CheckpointRecord] = []
     attempts: list[tuple[Attempt, str]] = []
