@@ -184,8 +184,9 @@ function model(D) {
   const alignClock = T.clocks[0]?.name ?? (posClocks.includes(R.clock) ? R.clock : posClocks[0]);
   // Named lines in order, then the checkpoints of no line. A colour follows the curve's position, never its rank.
   const named = [...new Set(positioned.map(lineOf))].sort((a, b) => (a === "") - (b === "") || a.localeCompare(b));
-  // Only external curves carry a line; the empty string is the unnamed learner.
-  const curves = [...T.jobs, ...named.map(line => {
+  // A curve's key identifies it on the page: a job's name, or its line. Only external
+  // curves carry a line; the empty string is the unnamed learner.
+  const curves = [...T.jobs.map(j => ({...j, key: j.name})), ...named.map(line => {
     const name = line || "checkpoints with no line";
     return {key: "~line:" + line, name, launch: name, label: name, runs: [lineRun(line)], line};
   })];

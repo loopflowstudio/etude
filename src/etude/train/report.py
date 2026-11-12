@@ -30,13 +30,12 @@ WALL_MEANING = "wall time since the run first started"
 
 
 class Job(Record):
-    """Runs that differ only by provenance: seed, device and commit. Its key is its name.
+    """Runs that differ only by provenance: seed, device and commit.
 
     `launch` is the name it was launched under; `name` adds the config digest
     when that launch name has jobs with several configs ("ppo 1a2b3c").
     """
 
-    key: str
     name: str
     launch: str
     label: str  # the name and its seed count, as every chart's key shows it
@@ -90,7 +89,7 @@ class Line(Record):
     and `seeds`, how many seeds each bucket has.
     """
 
-    owner: str  # a run's name, or a job's key
+    owner: str  # a run's or a job's name
     x: list[float | None]
     mean: list[float | None]
     low: list[float | None] | None = None
@@ -211,7 +210,6 @@ def _jobs(data: Sequence[RunData]) -> tuple[Job, ...]:
         seeds = f"{len(runs)} seed{'s' if len(runs) > 1 else ''}"
         jobs.append(
             Job(
-                key=name,
                 name=name,
                 launch=named,
                 label=f"{name} · {seeds}",
@@ -364,7 +362,7 @@ def training(data: Sequence[RunData], *, prefixes: Sequence[str] = ()) -> Traini
     for run in data:
         metrics.update(dict.fromkeys(run.metrics()))
     jobs = _jobs(data)
-    members = {job.key: [run for run in data if run.name in job.runs] for job in jobs}
+    members = {job.name: [run for run in data if run.name in job.runs] for job in jobs}
     series: dict[str, dict[str, tuple[Line, ...]]] = {}
     bands: dict[str, dict[str, tuple[Line, ...]]] = {}
     for clock in [*clocks, WALL_CLOCK]:
