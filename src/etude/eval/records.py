@@ -713,59 +713,51 @@ class Seating(Record):
         a match like any other.
         """
         held = next((line for line in lines if line.name == checkpoint.line), None)
-        subject = sorted(
+        ordered = sorted(lines, key=lambda line: line.order)
+        # The held checkpoint's side: its job's seeds, or its own line with no job.
+        mine = (
             []
             if held is None
             else [held]
             if held.job is None
-            else [line for line in lines if line.job == held.job],
-            key=lambda line: line.order,
+            else [line for line in ordered if line.job == held.job]
         )
         seat = next((n for n, each in enumerate(self.players) if isinstance(each, _RELATIVE)), None)
         relative = None if seat is None else cast(Relative, self.players[seat])
-        # The other side's seeds: a job's lines, else one (the held line's own, or a player).
-        others: list[Line | None] = [None]
+        # The other side's seeds: the lines of the job a relative seat names; its own line,
+        # or a fixed player, counts as one (None).
+        theirs: list[Line | None] = [None]
         if relative is not None and relative.job is not None:
             job = relative.job
-            others = [
-                line
-                for line in sorted(lines, key=lambda line: line.order)
-                if job in (line.job, line.launch)
-            ]
-        counted = tuple(sorted({line.name for line in (*subject, *others) if line is not None}))
-        if self.seeds == "one":
-            if subject and others:
-                mine, theirs = _chosen(self.name, subject, others)
-                if held != mine:
-                    return Seated(
-                        seating=self.name, checkpoint=checkpoint.key, pairings=(), lines=counted
-                    )
-                others = [theirs]
-            subject = [] if held is None else [held]
-        if relative is not None and relative.job is None:
-            others = [] if held is None else [held]
-        found: list[CheckpointRef | None] = []
-        reasons: list[Missing] = []
-        for line in others:
-            result = None if relative is None or line is None else _find(relative, checkpoint, line)
-            if result is None or isinstance(result, CheckpointRef):
-                found.append(result)
-            else:
-                reasons.append(result)
-        if relative is not None and (not found or "not_yet" in reasons):
-            # No line yet: the job has not started, or the held one's line is unknown.
-            unknown = not others and checkpoint.line is not None
-            return Gap(
-                seating=self.name,
-                checkpoint=checkpoint.key,
-                missing="not_yet" if unknown or "not_yet" in reasons else "never",
-                job=relative.job,
-                clock=None if isinstance(relative, Final) else relative.clock,
-                position=_position(relative, checkpoint),
-            )
+            theirs = [line for line in ordered if job in (line.job, line.launch)]
+        counted = tuple(sorted({line.name for line in (*mine, *theirs) if line is not None}))
+        if self.seeds == "one" and mine and theirs:
+            chosen, pick = _chosen(self.name, mine, theirs)
+            if held != chosen:
+                return Seated(
+                    seating=self.name, checkpoint=checkpoint.key, pairings=(), lines=counted
+                )
+            mine, theirs = [chosen], [pick]
+        found: list[CheckpointRef | None] = [None]
+        if relative is not None:
+            # A seat with no job looks in the held checkpoint's own line.
+            looked = [held] if relative.job is None else theirs
+            results = [_find(relative, checkpoint, line) for line in looked if line is not None]
+            found = [each for each in results if isinstance(each, CheckpointRef)]
+            if not found or "not_yet" in results:
+                # No line yet: the job has not started, or the held one's line is unknown.
+                unknown = not results and checkpoint.line is not None
+                return Gap(
+                    seating=self.name,
+                    checkpoint=checkpoint.key,
+                    missing="not_yet" if unknown or "not_yet" in results else "never",
+                    job=relative.job,
+                    clock=None if isinstance(relative, Final) else relative.clock,
+                    position=_position(relative, checkpoint),
+                )
         # Pairs in seed order, (mine, theirs); this checkpoint's are contiguous from `first`.
-        pairs = max(len(subject), 1) * len(found)
-        first = (subject.index(held) if held in subject else 0) * len(found)
+        pairs = max(len(mine), 1) * len(found)
+        first = (mine.index(held) if held in mine else 0) * len(found)
         pairings = [
             Pairing(
                 seats=tuple(ref if n == seat else None for n in range(len(self.players))),
@@ -802,14 +794,14 @@ def _share(games: int, pairs: int, index: int) -> int:
 
 
 def _chosen(
-    seating: str, subject: Sequence[Line], others: Sequence[Line | None]
+    seating: str, mine: Sequence[Line], theirs: Sequence[Line | None]
 ) -> tuple[Line, Line | None]:
     """The one seed pair a `seeds="one"` seating plays: drawn from its name and the seed sets,
     never the clock, so every point and hold draws the same until a seed is added."""
-    pairs = [(mine, theirs) for mine in subject for theirs in others]
+    pairs = [(one, other) for one in mine for other in theirs]
     seeds = [
         [None if line is None else [line.seed, line.name] for line in side]
-        for side in (subject, others)
+        for side in (mine, theirs)
     ]
     return pairs[int(digest([seating, seeds])[:15], 16) % len(pairs)]
 
