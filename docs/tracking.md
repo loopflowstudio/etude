@@ -408,8 +408,10 @@ devices or commits are pooled with its seeds: runs launched under one job
 name and config are one job. A config change under the same name shows as two
 jobs, each named with its config digest ("ppo 1a2b3c"). The launch name still
 addresses both: `subject="ppo"` draws each as its own line, `baseline="ppo"`
-dots both, and `labels={"ppo": "PPO"}` shows "PPO 1a2b3c · 3 seeds". The full
-name, `subject="ppo 1a2b3c"`, selects one. Games played on different
+dots both, `labels={"ppo": "PPO"}` shows "PPO 1a2b3c · 3 seeds" and
+`Schedule(jobs={"ppo": ...})` draws the schedule for each. The full name,
+`subject="ppo 1a2b3c"`, selects one, and a full-name label or schedule wins
+over the launch name's. Games played on different
 devices, compute setups or code revisions contribute to the same requested
 matches; a replay counts once, from its latest delivered result. There is no Config
 control. Record the actual setup with `Result.execution`, inspect it alongside
@@ -644,7 +646,7 @@ updates uses absolute update coordinates across continuation; it does not
 advance with time spent viewing the page. Refresh to move the marker when
 new clock values arrive. A configured curve is not evidence that training
 used those values; log a metric to compare the schedule with observations.
-`Schedule.jobs` uses original job names. Points must have finite values and
+`Schedule.jobs` uses original job names, full or launch. Points must have finite values and
 strictly increasing clock coordinates. Values between samples are linearly
 interpolated; no value is extrapolated outside the supplied range. Each seed
 gets a filled current-position marker when its recorded clock lies inside that

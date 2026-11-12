@@ -340,7 +340,7 @@ function model(D) {
   const panelJobs = (panel, jobs = JOBS) => panel.subject == null ? jobs : jobs.filter(j => names(j, panel.subject));
   function scheduleSeries(panel, jobs = JOBS) {
     return jobs.flatMap(job => {
-      const samples = panel.jobs[job.name];
+      const samples = panel.jobs[job.name] ?? panel.jobs[job.launch];
       if (!samples) return [];
       const points = samples.map(p => ({x: p.at, y: p.value}));
       const markers = job.runs.flatMap(run => {

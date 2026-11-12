@@ -215,7 +215,9 @@ class Schedule(Record):
     """Configured values per job, linearly interpolated between sampled points.
 
     These are plans, not observations. Markers use each run's recorded clock;
-    no value is extrapolated beyond the supplied points.
+    no value is extrapolated beyond the supplied points. `jobs` is keyed by a
+    job's full name or by its launch name, which covers every config launched
+    under it; the full name wins.
     """
 
     kind: Literal["schedule"] = "schedule"

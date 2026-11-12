@@ -391,6 +391,10 @@ test("a launch name addresses every config job launched under it; a full name ad
   assert.equal(m.JOBS[2].label, "DQN · 1 seed");
   data.report.labels = {ppo: "PPO", "ppo 4d5e6f": "High learning rate"};
   assert.equal(context.model(data).JOBS[1].label, "High learning rate · 1 seed");
+  const plan = value => [{at: 0, value}];
+  const schedule = {clock: "updates", jobs: {ppo: plan(1), "ppo 4d5e6f": plan(2)}};
+  assert.deepEqual(Array.from(m.scheduleSeries(schedule), s => [s.job.name, s.points[0].y]),
+    [["ppo 1a2b3c", 1], ["ppo 4d5e6f", 2]]);
 });
 
 test("score tooltips name the interval and row unit without changing values", () => {
