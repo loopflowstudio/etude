@@ -508,3 +508,28 @@ def test_a_job_relaunched_at_another_commit_pools_with_its_seeds(
         run.finish()
     (job,) = training([read(tmp_path, "pilot", f"seed-{seed}") for seed in range(2)]).jobs
     assert (job.name, job.label, job.runs) == ("ppo", "ppo · 2 seeds", ("seed-0", "seed-1"))
+
+
+def test_a_job_relaunched_with_another_config_is_its_own_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ETUDE_JOB_NAME", "ppo")
+    configs = ({"lr": 0.001}, {"lr": 0.001}, {"lr": 0.01})
+    for seed, (key, config) in enumerate(zip(("a1b2c3", "f6e5d4", "f6e5d4"), configs)):
+        monkeypatch.setenv("ETUDE_JOB", key)
+        run = track(
+            experiment="pilot",
+            run=f"seed-{seed}",
+            clocks=CLOCKS,
+            seed=seed,
+            config=config,
+            directory=tmp_path,
+        )
+        run.log(manabot_row(1))
+        run.finish()
+    jobs = training([read(tmp_path, "pilot", f"seed-{seed}") for seed in range(3)]).jobs
+    digests = [sha256(json.dumps(c, sort_keys=True).encode()).hexdigest()[:6] for c in configs]
+    assert [(job.name, job.runs) for job in jobs] == [
+        (f"ppo {digests[0]}", ("seed-0", "seed-1")),
+        (f"ppo {digests[2]}", ("seed-2",)),
+    ]

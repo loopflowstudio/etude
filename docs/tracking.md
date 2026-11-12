@@ -405,7 +405,8 @@ to the original job names. Unlabelled jobs keep their launch names.
 revision, seed) records how a result was produced, and the page aggregates
 over it rather than splitting by it. A job's training runs on different
 devices or commits are pooled with its seeds: runs launched under one job
-name are one job. Games played on different
+name and config are one job. A config change under the same name shows as two
+jobs, each named with its config digest ("ppo 1a2b3c"). Games played on different
 devices, compute setups or code revisions contribute to the same requested
 matches; a replay counts once, from its latest delivered result. There is no Config
 control. Record the actual setup with `Result.execution`, inspect it alongside
