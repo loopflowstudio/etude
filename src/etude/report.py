@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal, Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, FiniteFloat, JsonValue, model_validator
 
 from etude.run.records import Record
 
@@ -44,12 +44,14 @@ class Score(Record):
     `reference` is the value that means even, such as 0.5 for a score: drawn as
     a line, and the matrix's neutral colour. It is computed as
     `etude.eval.query.compare` computes it, with its interval over whole matches.
+    `unit` labels the counted table rows; it does not change their granularity.
     """
 
     table: str
     value: str
     per: str | None = None
     reference: float | None = None
+    unit: str = "rows"
 
 
 class Matches(Record):
@@ -110,13 +112,24 @@ class Curve(Record):
     `opponent` fixes whom each point is scored against, overriding the
     section's Opponent control: a player's name, or a checkpoint of the same
     line (`Earlier`, `Fraction`, `At`). None leaves it to the control.
+    A tuple of `matches` unions their matches before aggregation; `subject`
+    selects one job by its original name. `inference` selects an exact scientific
+    inference config when the matches seat several variants of one checkpoint.
     """
 
     kind: Literal["curve"] = "curve"
     title: str = "Score"
     split: str | None = None
-    matches: Matches | None = None
+    matches: Matches | tuple[Matches, ...] | None = None
     opponent: str | Earlier | Fraction | At | None = None
+    subject: str | None = None
+    inference: dict[str, JsonValue] | None = None
+
+    @model_validator(mode="after")
+    def nonempty_matches(self) -> Self:
+        if self.matches == ():
+            raise ValueError("curve_matches_must_not_be_empty")
+        return self
 
 
 class Matrix(Record):
@@ -190,6 +203,34 @@ class Counters(Record):
     keys: tuple[str, ...]
 
 
+class SchedulePoint(Record):
+    """One configured value at an absolute coordinate on the schedule's clock."""
+
+    at: FiniteFloat
+    value: FiniteFloat
+
+
+class Schedule(Record):
+    """Configured values per job, linearly interpolated between sampled points.
+
+    These are plans, not observations. Markers use each run's recorded clock;
+    no value is extrapolated beyond the supplied points.
+    """
+
+    kind: Literal["schedule"] = "schedule"
+    title: str
+    clock: str
+    jobs: dict[str, tuple[SchedulePoint, ...]]
+    unit: str = ""
+
+    @model_validator(mode="after")
+    def ordered_points(self) -> Self:
+        for job, points in self.jobs.items():
+            if not points or any(a.at >= b.at for a, b in zip(points, points[1:])):
+                raise ValueError(f"schedule_points_must_increase: {job}")
+        return self
+
+
 class Flame(Record):
     """Where the time went: an icicle of the seconds logged under `prefix`, per job.
 
@@ -229,7 +270,7 @@ type EvalPanel = Annotated[
     Curve | Matrix | Ranking | HeadToHead | Crosstable | Anchors, Field(discriminator="kind")
 ]
 type MetricPanel = Annotated[
-    Series | Counters | Flame | Pace | Elapsed | Attempts, Field(discriminator="kind")
+    Series | Counters | Schedule | Flame | Pace | Elapsed | Attempts, Field(discriminator="kind")
 ]
 
 PERF: tuple[MetricPanel, ...] = (Pace(), Elapsed(), Attempts(), Flame())
@@ -249,13 +290,17 @@ class Report(Record):
     `score` None offers every numeric column of every eval table. `clock`
     names the x axis each section starts on (default: the first declared
     clock). `baseline` names the job drawn dotted, by its name or key.
-    Metrics logged but named by no panel are drawn last, under ML details.
+    `labels` replaces displayed job names, keeping seed counts and identity.
+    Metrics logged but named by no panel are drawn last, under ML details;
+    `other_metrics=False` omits them and bounds retained metadata to panel keys.
     """
 
     evals: tuple[EvalPanel, ...] = (Curve(), Anchors())
     score: Score | None = None
     clock: str | None = None
     baseline: str | None = None
+    labels: dict[str, str] = {}
+    other_metrics: bool = True
     perf: tuple[MetricPanel, ...] = PERF
     ml: tuple[MetricPanel, ...] = ML
 

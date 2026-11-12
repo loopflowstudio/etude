@@ -57,7 +57,8 @@ function render() {
   const kv = (k, v) => { const s = node("span", null, k + " "); s.appendChild(node("b", null, v)); ctx.appendChild(s); };
   kv("Experiments", String(D.entries.length));
   kv("Read", `${when(D.generated_ms)} from ${D.source}`);
-  document.getElementById("pill").textContent = D.refresh ? "live" : "read once";
+  refreshControl(ctx, D.served);
+  document.getElementById("pill").textContent = D.refresh ? "live" : D.served ? "on demand" : "read once";
   if (D.refresh) {
     const l = node("label", "chip"), box = node("input"); box.type = "checkbox"; box.checked = S.live === "1";
     box.onchange = () => { S.live = box.checked ? "1" : "0"; writeHash(); };
@@ -107,7 +108,7 @@ function render() {
         const color = css(x.job.color), label = node("span"), sw = node("i", "sw" + (x.job.baseline ? " dot" : ""));
         sw.style.background = x.job.baseline ? "" : color; sw.style.color = color; label.append(sw, " ", x.job.label);
         const spark = node("div", "spark"), v = node("span");
-        v.append(node("span", "v", x.latest ? fmt(x.latest.y) : "—"), " ", node("span", "at", x.latest && clock ? `at ${clock} ${num(x.latest.key)}` : ""));
+        v.append(node("span", "v", x.latest ? scoreFormat(x.latest.y) : "—"), " ", node("span", "at", x.latest && clock ? `at ${clock} ${num(x.latest.key)}` : ""));
         score.append(label, spark, v);
         draws.push(() => line(spark, [{label: x.job.label, color, dotted: x.job.baseline, points: x.points}], {spark: true, height: 30, ref: info.reference, band: false, empty: "—"}));
       }
@@ -121,7 +122,7 @@ const filter = document.getElementById("filter");
 filter.value = S.q; filter.oninput = () => { S.q = filter.value; render(); };
 render();
 let pending; addEventListener("resize", () => { clearTimeout(pending); pending = setTimeout(render, 120); });
-if (D.refresh) setInterval(() => { if (S.live === "1" && !document.hidden) location.reload(); }, D.refresh * 1000);
+if (D.refresh) setInterval(() => { if (S.live === "1" && !document.hidden) refreshPage(D.served); }, D.refresh * 1000);
 </script>
 </body>
 </html>

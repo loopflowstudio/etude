@@ -93,6 +93,9 @@ fixture inputs below its private root home, then copy journals out after executi
 Worker deadline tests resolve runner dependencies from the fixture image's local
 wheelhouse with networking disabled; downloading packages must not consume the
 short execution window used to test partial-output retention.
+Controller fixtures call the CLI entry point in process and pass its explicit
+startup allowance: the installer must own its deadline and child cleanup, rather
+than an outer test timeout killing the client while installation continues.
 
 Commit messages say what changed and why in a sentence to a paragraph, not a
 list of edits. Never add Co-Authored-By or other AI attribution footers.

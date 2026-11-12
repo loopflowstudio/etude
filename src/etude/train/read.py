@@ -449,14 +449,34 @@ def _here(
     return record.model_copy(update={"artifact": artifact})
 
 
-def read_all(source: Storage | Path | str, experiment: str | None = None) -> list[RunData]:
-    """Every run under a source, or every run of one experiment, listing the source once."""
+def read_all(
+    source: Storage | Path | str,
+    experiment: str | None = None,
+    *,
+    metrics: frozenset[str] | None = None,
+    prefixes: tuple[str, ...] = (),
+) -> list[RunData]:
+    """Every run under a source, listing it once.
+
+    With `metrics`, retain only these keys and `prefixes`, reading immutable
+    headers one at a time instead of the cumulative metric indexes.
+    """
     storage = as_storage(source)
     data = []
     for run, folders in sorted(places(storage).items()):
         file = declared(storage, folders)
         if file is not None and experiment in (None, file.experiment):
-            data.append(_read(storage, file.experiment, run, folders, run_file=file))
+            data.append(
+                _read(
+                    storage,
+                    file.experiment,
+                    run,
+                    folders,
+                    run_file=file,
+                    metrics=metrics,
+                    prefixes=prefixes,
+                )
+            )
     return sorted(data, key=lambda one: (one.experiment, one.name))
 
 
@@ -473,6 +493,8 @@ def _read(
     folders: Sequence[str],
     *,
     run_file: RunFile | None = None,
+    metrics: frozenset[str] | None = None,
+    prefixes: tuple[str, ...] = (),
 ) -> RunData:
     def listing() -> list[tuple[str, str]]:
         """Every (folder, name under it), first folder first."""
@@ -509,6 +531,8 @@ def _read(
                 if name.startswith("metrics/") and name.endswith(
                     (".index.json", ".permanent.json")
                 ):
+                    if metrics is not None:
+                        continue
                     manifest = Manifest.model_validate_json(storage.get(place + name))
                     for block in manifest.blocks:
                         descriptions[block.key] = block
@@ -525,12 +549,14 @@ def _read(
                 expected[file.writer] = file.last + 1
                 place = folder[file.key]
                 description = descriptions.get(file.key)
-                if description is None and file.level < 2:
+                if description is None and file.level < 2 and metrics is None:
                     # A recent block: small, and in no manifest, so take it whole.
                     blocks.append(fetch(storage, place, file.key))
                     continue
                 if description is None:
-                    description = describe(storage, place, file.key)
+                    description = describe(
+                        storage, place, file.key, metrics=metrics, prefixes=prefixes
+                    )
                 blocks.append(StoredBlock(storage, place + file.key, description))
             break
         except FileNotFoundError:
