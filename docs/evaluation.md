@@ -149,16 +149,21 @@ evaluate(
   (`seats.commit`, `seats.source`) but not part of the key, so changed code
   reuses what was played. Joins use the key, encoded (`players.player`,
   `seats.player`).
-- **Execution setup.** Return `Result(tables=tables, execution={"device": "cuda:0",
-  "compute": "shared-eval-v2"})` from `play` to record the setup actually used.
-  This JSON stays with each result (`MatchRecord.execution`, `matches.execution`),
-  alongside its seed (`matches.seed`) and each player's code version
-  (`seats.commit`, `seats.source`). Setup belongs here, not in `Inference.config`,
-  `Code.config`, match conditions or tournament names: it creates no new player,
-  match or selection. Requested games may finish across any setups; a replay's
-  latest delivered result counts once in reports. Missing metadata on older
-  records reads as `{}`. Existing scientific configs retain their identity;
-  Etude does not guess which historical config keys described hardware.
+- **Setup.** How a game is run, such as the device or dtype, is provenance,
+  like the seed, and is said in two places. What `play` is asked to run with
+  goes under a `setup` key of the environment's or a player's config:
+  `environment("duel", config={"world": "w6", "setup": {"device": "cuda"}})`.
+  What `play` actually used it returns: `Result(tables=tables,
+  execution={"device": "cuda:0", "compute": "shared-eval-v2"})`, kept with
+  each result (`MatchRecord.execution`, `matches.execution`) alongside its
+  seed (`matches.seed`) and each player's code version (`seats.commit`,
+  `seats.source`). Neither is part of any identity: a CUDA benchmark is the
+  CPU one's environment, players and matches, a match played under either
+  counts for both, and their games pool. Requested games may finish across
+  any setups; a replay's latest delivered result counts once in reports.
+  Etude never guesses which fields are setup: anything outside `setup`,
+  in `Inference.config`, `Code.config` or match conditions, is identity, and
+  older configs keep theirs. `execution` on older records reads as `{}`.
 - **Where a checkpoint stood.** A seated checkpoint may say where it stood on
   its clocks: `CheckpointRef(key=..., artifact=..., at={"updates": 600})`.
   A tracked checkpoint's `ref` fills `at` from its run's clocks; give it
@@ -252,13 +257,6 @@ evaluate(
   still refused (`match_has_no_rows`), never stored as a result.
 - **Environments are never pooled.** An eval run has one environment;
   resuming with another is refused, and comparisons keep environments apart.
-- **Setup is provenance.** How a game was run, such as the device or dtype,
-  goes under a `setup` key of the environment's or a player's config:
-  `environment("duel", config={"world": "w6", "setup": {"device": "cuda"}})`.
-  It is recorded with each match and is part of no identity, so a CUDA
-  benchmark is the CPU one's environment, players and matches: a match
-  played under either setup counts for both, and their games pool. Etude
-  never guesses which fields are setup; anything outside `setup` is identity.
 - **Resume.** Calling `evaluate` again with the same `run` skips every match
   already delivered to any of `storages`, even on a machine with an empty disk.
 - **Progress.** Each stored match prints one line to stderr:
@@ -314,12 +312,30 @@ evaluate(
   `Earlier`, `Fraction`, `At` and `Final` look in the held checkpoint's own
   line unless given a `job`: `Final(job="small", inference=direct)` seats
   job `small`'s final checkpoint, `At(clock="updates", value=0, job="small",
-  ...)` its initial one. `Aligned` always names a job. A job seat fills from
-  each of that job's lines (see Seeds). A hold finds relative seats' checkpoints among
+  ...)` its initial one. `Aligned` always names a job, as the report names it
+  ([tracking](tracking.md#reports)): its launch name, or the full name with
+  its config digest. Leave `job` out to mean the held checkpoint's own line.
+  A job seat fills from each of that job's lines (see Seeds). A hold finds relative seats' checkpoints among
   its `lines`, the experiment's training lines (`observe(source,
   experiment).lines`), held or not; `etude eval` passes them itself.
   A seating against a fixed player and one against a relative seat are held,
-  scored and drawn alike.
+  scored and drawn alike. A seating with a relative seat needs an inference
+  seat to be relative to.
+
+  `Final` is `At` the position where the run ended: a gap until it ends,
+  finished or failed, then its last stored checkpoint. A run whose machine
+  was lost never writes its end; it has failed once the launcher on the
+  computer reading it has closed it without success (`etude status RUN`),
+  so its `Final` is its last stored checkpoint too. Holding a seating
+  against `Final(job=...)` for a job's own final checkpoint gives final
+  against final. To meet one chosen checkpoint of another job, seat it as a
+  fixed player.
+
+  Held for a checkpoint of the job a seat's `job` names, a seating plays
+  that job, and a seat that finds the held checkpoint itself seats it:
+  self-play is a match like any other, as a cooperative game or a score
+  besides winning wants. To play a seating for some jobs only, hold its
+  benchmark for their checkpoints.
 
   Positions are exact by default: a checkpoint at 2,990 is not half of
   6,000. A seat with a position takes `at_or_before=True` for the latest
@@ -349,22 +365,7 @@ evaluate(
   point's games between one seed per side, drawn from the seating's name
   and the seed sets, the same pair at every point: faster, but the curve
   shows one pair of seeds, not the jobs. A seed added later changes the
-  split, so that job's points are played again and count only the new one. `Final` is `At` the position where
-  the run ended: a gap until it ends, finished or failed, then its last
-  stored checkpoint. A run whose machine was lost never writes its end; it
-  has failed once the launcher on the computer reading it has closed it
-  without success (`etude status RUN`), so its `Final` is its last stored
-  checkpoint too. Holding a seating against `Final(job=...)` for a job's
-  own final checkpoint gives final against final. To meet one chosen
-  checkpoint of another job, seat it as a fixed player. A seating with a
-  relative seat needs an inference seat to be relative to. Held for a
-  checkpoint of the job a seat's `job` names, it plays that job, and a seat
-  that finds the held checkpoint itself seats it: self-play is a match like
-  any other, as a cooperative game or a score besides winning wants. To play
-  a seating for some jobs only, hold its benchmark for their checkpoints.
-  Leave `job` out to mean the checkpoint's own line. A job is
-  named as the report names it ([tracking](tracking.md#reports)): its launch name, or the full
-  name with its config digest.
+  split, so that job's points are played again and count only the new one.
 - **Pairs of checkpoints.** A seating with no inference seat is played once,
   not per checkpoint, so chosen checkpoints can meet: seat each as
   `Inference(...).model(ref)`, the model an inference seat would make of it.

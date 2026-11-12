@@ -33,15 +33,15 @@ function tickLabels(values, format, increment) {
   const decimals = Math.min(12, Math.max(0, Math.ceil(-Math.log10(increment) - 1e-9)));
   return values.map(v => v.toFixed(decimals));
 }
-// Why a seating's point has no score (`Page.points[].missing`): what its relative seat
-// looked for, in words: "small has no checkpoint at updates 8,000 yet".
+// Why a seating's point has no score (`Page.points[].gap`, an eval `Gap`): what its relative
+// seat looked for, in words: "small has no checkpoint at updates 8,000 yet".
 function missingText(g) {
-  const whose = g.job || "its line", kind = g.trained ? "trained checkpoint" : "checkpoint";
-  if (g.clock == null) return g.when === "not_yet" ? `${whose} has not ended yet` : `${whose} ended with no checkpoint`;
+  const whose = g.job || "its line", kind = g.trained ? "trained checkpoint" : "checkpoint", yet = g.missing === "not_yet";
+  if (g.clock == null) return yet ? `${whose} has not ended yet` : `${whose} ended with no checkpoint`;
   if (g.position == null) return `the held checkpoint has no ${g.clock} position`;
   const where = `${g.clock} ${(+g.position.toPrecision(6)).toLocaleString("en-US")}`;
-  if (g.at_or_before) return g.when === "not_yet" ? `${whose} has not saved past ${where} yet` : `${whose} has no ${kind} at or before ${where}`;
-  return `${whose} has no ${kind} at ${where} ${g.when === "not_yet" ? "yet" : "and never will"}`;
+  if (g.at_or_before) return yet ? `${whose} has not saved past ${where} yet` : `${whose} has no ${kind} at or before ${where}`;
+  return `${whose} has no ${kind} at ${where} ${yet ? "yet" : "and never will"}`;
 }
 
 // ---------------------------------------------------------------- tooltips
@@ -408,8 +408,8 @@ function model(D) {
         const several = p.opponents.length > 1 ? `mean of ${p.opponents.length} · ` : "";
         return {y: p.value, lo: p.interval?.[0], hi: p.interval?.[1], at: p.at, whole: p.whole, meta: `${scoreCount(p, D.scores?.[score])} · ${several}vs ${p.opponents.map(playerName).join(", ")}`};
       }
-      const gap = unseated.get(`${sel}|${here}`);
-      if (gap) return {missing: true, gap: gap.missing.when === "not_yet" ? "pending" : "none", at: gap.at, meta: missingText(gap.missing)};
+      const u = unseated.get(`${sel}|${here}`);
+      if (u) return {missing: true, gap: u.gap.missing === "not_yet" ? "pending" : "none", at: u.at, meta: missingText(u.gap)};
       return gapOf(sel, run, m, score);
     };
   }

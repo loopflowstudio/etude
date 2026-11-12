@@ -7,7 +7,6 @@ import shutil
 import time
 from decimal import Decimal
 from pathlib import Path
-from typing import Literal
 from urllib.parse import urlparse
 
 import pytest
@@ -505,7 +504,7 @@ def test_relative_seats_fill_in_as_their_jobs_save_and_the_report_says_what_is_m
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Imported here: the page is the report's, and only this test draws one.
-    from etude.page import Missing, build  # noqa: PLC0415
+    from etude.page import build  # noqa: PLC0415
     from etude.report import Matches  # noqa: PLC0415
 
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
@@ -533,28 +532,28 @@ def test_relative_seats_fill_in_as_their_jobs_save_and_the_report_says_what_is_m
     # and small against itself at both.
     assert (first.new, first.played) == (7, 7)
 
-    def drawn(seating: str) -> dict[float, float | Missing | None]:
-        """Large's points on the seating's curve: each one's score, or why it has none."""
+    type Why = tuple[str, str | None, float | None]
+
+    def drawn(seating: str) -> dict[float, float | Why | None]:
+        """Large's points on the seating's curve: each one's score, or why it has none:
+        whether a checkpoint may still appear, the job looked in and the updates looked at."""
         page = build(bucket, file)
         chosen = page.selections.index(Matches(seating=seating))
         return {
-            p.at["updates"]: p.missing or p.value
+            p.at["updates"]: p.value
+            if p.gap is None
+            else (p.gap.missing, p.gap.job, p.gap.position)
             for p in page.points
             if p.selection == chosen and p.run == "large-1"
         }
 
-    def missing(when: Literal["not_yet", "never"], job: str | None, position: float) -> Missing:
-        return Missing(
-            when=when, job=job, clock="updates", position=position, at_or_before=False, trained=False
-        )  # fmt: skip
-
     against = drawn("large vs small")
     assert sorted(against) == [100, 200, 300, 400]
     assert isinstance(against[100], float) and isinstance(against[200], float)
-    assert against[300] == missing("not_yet", "small", 300)
+    assert against[300] == ("not_yet", "small", 300)
     half = drawn("half-training")
-    assert half[100] == missing("never", None, 50)
-    assert half[300] == missing("never", None, 150)
+    assert half[100] == ("never", None, 50)
+    assert half[300] == ("never", None, 150)
     assert isinstance(half[200], float) and isinstance(half[400], float)
 
     # Small catches up to 300 and ends there: 300 is played, for large and against itself;
@@ -565,7 +564,7 @@ def test_relative_seats_fill_in_as_their_jobs_save_and_the_report_says_what_is_m
     assert (second.new, second.played) == (2, 2)
     against = drawn("large vs small")
     assert isinstance(against[300], float)
-    assert against[400] == missing("never", "small", 400)
+    assert against[400] == ("never", "small", 400)
     with statsdb("capacity", bucket) as db:
         lines = {(s.seating, s.run): s for s in scores(db, "ladder", table="plays", value="won")}
     assert [p.ordinal for p in lines[("large vs small", "large-1")].points] == [1, 2, 3]

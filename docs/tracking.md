@@ -314,8 +314,9 @@ in hours, which no run declares or logs:
 - **`hours_since_start`** is wall time since the line's first attempt began,
   gaps between attempts included.
 
-A checkpoint saved before Etude recorded them gets both from its run's
-attempt records (`metrics/WRITER.json`). Where it has neither, such as a
+A checkpoint saved before Etude recorded them gets both from its wall time
+and its run's attempt records (`metrics/WRITER.json`); rows logged before
+have neither. Where a checkpoint has neither, such as a
 run copied without those records, the report says so at its top, naming the
 runs: charts and seats on these clocks leave such a checkpoint out.
 
@@ -325,9 +326,7 @@ passed a multiple of `every` since the latest checkpoint. Either clock can be
 a job's `until`, the page's x axis, or a seat's clock
 (`Earlier(clock="running_hours", by=2, at_or_before=True, ...)`,
 [evaluation](evaluation.md)). Metric timers such as `time/collection` stay
-in seconds. A checkpoint saved before these clocks existed derives them from
-its wall time where its run's attempts say how; rows logged before have
-neither.
+in seconds.
 
 ### Reading a long run's metrics
 
@@ -518,8 +517,10 @@ names one, and a full-name label or schedule wins over the launch name's.
 `TrainingRun.job` in `eval(state)` is this same name. Games played on different
 devices, compute setups or code revisions contribute to the same requested
 matches; a replay counts once, from its latest delivered result. There is no Config
-control. Record the actual setup with `Result.execution`, inspect it alongside
-`matches.seed` and `seats.commit` in `statsdb` ([evaluation](evaluation.md)).
+control. Ask for a setup under a config's `setup` key, which is part of no
+identity; `play` returns the one it actually used as `Result.execution`, read
+alongside `matches.seed` and `seats.commit` in `statsdb`
+([evaluation](evaluation.md#eval-runs)).
 Scientific differences, such as search budgets in `Inference.config`, remain
 distinct players. A seating fixes the variant each seat plays, so a curve
 draws the variants its selected seatings name; where one point would pool two
@@ -535,7 +536,7 @@ bytes are two points. A checkpoint's line, the learner it belongs to, is
 its seat's `line`, else its training run. A checkpoint a training run saved
 is drawn in that run's job; every other placed checkpoint is drawn in its
 line's curve, labelled by the line's name, or in one curve of "checkpoints
-with no line". `Earlier`, `Fraction`, `At` and `Crosstable` look only within a line.
+with no line". `Crosstable` looks only within a line.
 Every unplaced player, code or a checkpoint seated without a position, is an
 anchor, and the page names the unplaced checkpoints.
 
@@ -573,7 +574,7 @@ it as reference lines.
 
 Panels draw; seatings say who plays whom. Whom a curve scores against, which
 jobs it draws and with which inference config are the seating's
-([evaluation](evaluation.md#eval-runs)), so a chart that needs another
+([evaluation](evaluation.md#tournaments)), so a chart that needs another
 comparison needs another seating.
 
 **Compare jobs over training.** With the `ladder` and `against small`

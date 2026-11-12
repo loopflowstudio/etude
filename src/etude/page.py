@@ -80,10 +80,11 @@ from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.util import cache_from_source
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from pydantic import JsonValue
 
+from etude.eval.records import Gap, Match, Scheduled, Tournament
 from etude.experiment_file import experiment_named
 from etude.launch.logging import explain
 from etude.report import Flame, Matches, Report, Score
@@ -97,7 +98,6 @@ from etude.train.report import Training, training
 if TYPE_CHECKING:
     import duckdb
 
-    from etude.eval.records import Gap, Match, Scheduled, Tournament
     from etude.eval.tournament import Played
     from etude.experiment import ExperimentState
 
@@ -159,24 +159,6 @@ class Cell(Record):
     matches: int
 
 
-class Missing(Record):
-    """Why a point has no score: what its seating's relative seat looked for.
-
-    `when` says whether a checkpoint may still appear there. `job` is the
-    job it looks in, None for the point's own line; `clock` and `position`
-    where, None for a line's final checkpoint or a point with no position on
-    `clock`; `at_or_before` whether any checkpoint up to `position` would do,
-    `trained` whether only one saved after training began would.
-    """
-
-    when: Literal["not_yet", "never"]
-    job: str | None
-    clock: str | None
-    position: float | None
-    at_or_before: bool
-    trained: bool
-
-
 class Point(Record):
     """A point of a curve of seatings: a checkpoint a seating was held for, where it
     stood, and its score or why it has none.
@@ -187,7 +169,7 @@ class Point(Record):
     second, in one view (`commit`), `score` and `split` as a `Cell` is: the
     mean over `opponents`, the players it met in the second seat, indexing
     `Page.players`, with `interval` where it met one. A point with no
-    `value` has `missing`, in every view. `whole` marks a `seeds="one"`
+    `value` has `gap`, what its relative seat looked for, in every view. `whole` marks a `seeds="one"`
     seating's point, which stands for its job though one seed's checkpoint
     was held for it.
     """
@@ -206,7 +188,7 @@ class Point(Record):
     rows: int = 0
     matches: int = 0
     opponents: tuple[int, ...] = ()
-    missing: Missing | None = None
+    gap: Gap | None = None
 
 
 class Commit(Record):
@@ -948,15 +930,7 @@ def _points(
                 )
             gap = next((gaps[key] for key in here if key in gaps), None)
             if gap is not None:
-                missing = Missing(
-                    when=gap.missing,
-                    job=gap.job,
-                    clock=gap.clock,
-                    position=gap.position,
-                    at_or_before=gap.at_or_before,
-                    trained=gap.trained,
-                )
-                points.append(stood.model_copy(update={"missing": missing}))
+                points.append(stood.model_copy(update={"gap": gap}))
     return tuple(points)
 
 

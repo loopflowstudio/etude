@@ -289,7 +289,7 @@ test("refresh failure leaves the page visible and a later success reloads once",
 
 // A seating held for checkpoints of line "learner": each one's point (`Page.points`), scored
 // by the page or missing because its relative seat found no checkpoint.
-const NEVER = {when: "never", job: null, clock: "updates", position: 50, at_or_before: false, trained: false};
+const NEVER = {seating: "half", checkpoint: {run: "learner", name: "u100", address: null}, missing: "never", job: null, clock: "updates", position: 50, at_or_before: false, trained: false};
 function seated(points, cells = []) {
   const data = page([player("u100", "learner", 100), player("u200", "learner", 200), player("u400", "learner", 400)], cells);
   data.selections = [{tournament: "t", seating: "half"}];
@@ -302,7 +302,7 @@ test("a seating draws each point's score where its checkpoint stood, and says wh
   const data = seated([
     {at: {updates: 400}, value: 0.6, interval: [0.5, 0.7], opponents: [1]},
     {at: {updates: 200}, value: 0.55, opponents: [0]},
-    {at: {updates: 100}, missing: NEVER},
+    {at: {updates: 100}, gap: NEVER},
   ]);
   const m = context.model(data), at = Object.fromEntries(points(m, m.JOBS[0]).map(p => [p.x, p]));
   assert.equal(at[400].y, 0.6); assert.equal(at[400].lo, 0.5);
@@ -316,8 +316,8 @@ test("a seating draws each point's score where its checkpoint stood, and says wh
 test("a seat not filled yet is a pending gap, and a point over several lines says so", () => {
   const data = seated([
     {at: {updates: 400}, value: 0.6, opponents: [0, 1]},
-    {at: {updates: 200}, missing: {...NEVER, when: "not_yet", job: "small", position: 8000}},
-    {at: {updates: 100}, missing: {...NEVER, at_or_before: true, trained: true}},
+    {at: {updates: 200}, gap: {...NEVER, missing: "not_yet", job: "small", position: 8000}},
+    {at: {updates: 100}, gap: {...NEVER, at_or_before: true, trained: true}},
   ]);
   const m = context.model(data), at = Object.fromEntries(points(m, m.JOBS[0]).map(p => [p.x, p]));
   assert.equal(at[400].y, 0.6);
