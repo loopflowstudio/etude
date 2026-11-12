@@ -335,3 +335,23 @@ test("a seating named without a tournament draws one point per checkpoint from e
   assert.doesNotMatch(at[400].meta, /mean/);
   assert.equal(at[200].y, 0.55);
 });
+
+test("a one-seed seating draws a job's point from the seed that played it, and waits for every seed otherwise", () => {
+  const training = {
+    jobs: [{name: "job", launch: "job", runs: ["a", "b"]}],
+    runs: [{name: "a"}, {name: "b"}], clocks: [{name: "updates"}],
+    checkpoints: ["a", "b"].map(run => ({run, ordinal: 1, align: 100, at: {updates: 100}})),
+  };
+  const data = page([player("a100", "a", 100, "a", 1), player("b100", "b", 100, "b", 1), player("rival", null, 0)], [[1, 2, 0.75]], training);
+  data.players[2].at = {};
+  data.selections = [{tournament: "t", seating: "rival"}];
+  // Held only for seed b's checkpoint: with seeds="one" that point is the job's.
+  data.held = [{tournament: "t", seating: "rival", seeds: "one", run: "b", ordinal: 1, line: "b", at: {updates: 100}, pairs: [[1, 2]], missing: null, meta: null}];
+  const one = points(context.model(data), context.model(data).JOBS[0])[0];
+  assert.equal(one.y, 0.75);
+  assert.doesNotMatch(one.meta, /seeds evaluated/);
+  data.held[0].seeds = "every";
+  const every = points(context.model(data), context.model(data).JOBS[0])[0];
+  assert.equal(every.missing, true);
+  assert.match(every.meta, /1 of 2 seeds evaluated/);
+});

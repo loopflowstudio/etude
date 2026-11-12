@@ -223,10 +223,12 @@ function model(D) {
     const per = job.runs.map(run => new Map((marks.get(run) || []).map(m => [m.align, [m, value(run, m)]]).filter(([, [, v]]) => v)));
     const keys = [...new Set(per.flatMap(p => [...p.keys()]))].sort((a, b) => a - b);
     return keys.map(key => {
-      const got = per.map(p => p.get(key)).filter(Boolean);
+      // A point one seed played for its whole job (`seeds="one"`) needs no other seed.
+      const all = per.map(p => p.get(key)).filter(Boolean), whole = all.some(([, v]) => v.whole);
+      const got = whole ? all.filter(([, v]) => v.whole) : all;
       const xs = got.map(([m, v]) => xAt(m, v, clock)).filter(x => x != null);
       const x = xs.length ? mean(xs) : null;
-      const partial = got.length < job.runs.length;
+      const partial = got.length < job.runs.length && !whole;
       const short = `${got.length} of ${job.runs.length} seeds evaluated`;
       if (partial && !some) {
         // A seed without this checkpoint yet: the others' gap, if they have one, is still shown.
@@ -397,9 +399,9 @@ function model(D) {
       const missing = here.find(h => h.missing != null);
       if (!got.length && missing) return {missing: true, gap: missing.missing === "not_yet" ? "pending" : "none", at, meta: missing.meta};
       if (!got.length) return gapOf(sel, run, m, score);
-      const y = mean(got.map(c => c.value));
-      if (got.length === 1) return {y, lo: got[0].interval?.[0], hi: got[0].interval?.[1], at, meta: `${scoreCount(got[0], D.scores?.[score])} · vs ${playerName(got[0].opponent)}`};
-      return {y, at, meta: `mean of ${got.length}: ${got.map(c => `${scoreFormat(c.value)} vs ${playerName(c.opponent)}`).join(", ")}`};
+      const y = mean(got.map(c => c.value)), whole = here.some(h => h.seeds === "one");
+      if (got.length === 1) return {y, lo: got[0].interval?.[0], hi: got[0].interval?.[1], at, whole, meta: `${scoreCount(got[0], D.scores?.[score])} · vs ${playerName(got[0].opponent)}`};
+      return {y, at, whole, meta: `mean of ${got.length}: ${got.map(c => `${scoreFormat(c.value)} vs ${playerName(c.opponent)}`).join(", ")}`};
     };
   }
   // Each checkpoint's value in the requested matches: as seated, for a selection of seatings;

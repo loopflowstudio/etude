@@ -166,11 +166,13 @@ class Held(Record):
     training run saved, at `at` in `line`. `pairs` are the players of its
     matches in their first two seats, indexing `Page.players`; with none,
     `missing` says why a relative seat found no checkpoint, and `meta` says
-    it in words.
+    it in words. `seeds` is the seating's: with "one", the point stands for
+    its job, though only one seed's checkpoint was held for it.
     """
 
     tournament: str
     seating: str
+    seeds: Literal["every", "one"] = "every"
     run: str | None
     ordinal: int | None
     line: str | None
@@ -804,6 +806,9 @@ def _held(
 ) -> tuple[Held, ...]:
     """Each checkpoint each seating with an inference seat was held for: its matches by their
     first two seats, or why a relative seat found no checkpoint."""
+    # The optional `eval` extra, as in `_evals`.
+    from etude.eval.records import Benchmark  # noqa: PLC0415
+
     index = {each.key: i for i, each in enumerate(players)}
     found: dict[tuple[str, str, str], set[tuple[int, int]]] = {}
     for each in standing:
@@ -822,6 +827,12 @@ def _held(
     refs = {
         (each.name, str(ref.key)): ref for each in standing for ref in each.tournament.checkpoints
     }
+    seeds = {
+        (each.name, seating.name): seating.seeds
+        for each in standing
+        if isinstance(each.tournament.definition, Benchmark)
+        for seating in each.tournament.definition.seatings
+    }
     held = []
     for key in sorted(found.keys() | missing.keys()):
         tournament, seating, checkpoint = key
@@ -831,6 +842,7 @@ def _held(
             Held(
                 tournament=tournament,
                 seating=seating,
+                seeds=seeds.get((tournament, seating), "every"),
                 run=None if place is None else place.run,
                 ordinal=None if place is None else place.ordinal,
                 line=ref.line,
