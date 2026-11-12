@@ -176,17 +176,17 @@ class RunData(Arrays):
         """
         if limit < 1:
             raise ValueError("chart limit must be positive")
-        chunks: list[tuple[Floats, Floats, np.ndarray[Any, Any]]] = []
-        ranges = [_clock_range(block, clock) for block in self.blocks]
-        # Where each writer's rows stop counting because a later attempt resumed.
-        cutoffs = self._cutoffs(clock, ranges)
-        if cutoffs is None:
+        located = {block.key: block for block in self.blocks}
+        stretches = _stretches([_place(b, clock) for b in self.blocks], self.attempts, clock)
+        # Blocks whose counted rows overlap repeat clock values, and only the
+        # exact path picks the latest write among them.
+        if any(len(stretch) > 1 for stretch in stretches):
             return buckets(self.points(metric, clock), limit, span=span)
+        extents = [stretch[0] for stretch in stretches]
         # For zooms use the window's fraction of the run to select a finer level.
-        present = [bounds for bounds in ranges if bounds is not None]
         fraction = 1.0
-        if span is not None and present:
-            width = max(b[1] for b in present) - min(b[0] for b in present)
+        if span is not None and extents:
+            width = extents[-1].high - extents[0].low
             fraction = min(1.0, max(0.0, span[1] - span[0]) / width) if width else 1.0
         target = max(1, int(self.rows * fraction) // (limit * 4))
         # An inline overview must have enough groups to fill the requested chart.
@@ -195,33 +195,25 @@ class RunData(Arrays):
             for block in self.blocks
             if block.description.overview is not None
         )
-        previous: float | None = None
-        for block, bounds in zip(self.blocks, ranges):
+        chunks: list[tuple[Floats, Floats, np.ndarray[Any, Any]]] = []
+        for extent in extents:
+            block = located[extent.key]
             h = block.header
             column = next((c for c in h.series if c.name == metric and c.kind == "metric"), None)
             if column is None:
                 continue
-            if bounds is None:
-                return buckets(self.points(metric, clock), limit, span=span)
+            bounds = _clock_range(block, clock)
             increasing = (
                 h.wall_increasing
                 if clock == WALL_CLOCK
                 else next(c.increasing for c in h.clocks if c.name == clock)
             )
-            cutoff = cutoffs[h.writer]
-            if cutoff is not None and bounds[0] > cutoff:
-                continue  # Every row here was superseded by a later attempt.
+            if not increasing or bounds is None or column.rows is not None:
+                return buckets(self.points(metric, clock), limit, span=span)
             # A block the cutoff falls inside is read raw, so its roll-up groups
             # are never split; blocks wholly before it keep their roll-ups.
-            cut = cutoff if cutoff is not None and bounds[1] > cutoff else None
-            if (
-                not increasing
-                or column.rows is not None
-                or (previous is not None and bounds[0] <= previous)
-            ):
-                return buckets(self.points(metric, clock), limit, span=span)
-            previous = bounds[1] if cut is None else cut
-            if span is not None and (bounds[1] < span[0] or bounds[0] > span[1]):
+            cut = extent.cutoff if extent.cutoff is not None and bounds[1] > extent.cutoff else None
+            if span is not None and (extent.high < span[0] or extent.low > span[1]):
                 continue
             inline = block.description.overview
             if (
@@ -253,11 +245,7 @@ class RunData(Arrays):
                 chunks.append((endpoints[:, 0], endpoints[:, 1], block.array(m.data, "<f8", 7)))
             else:
                 # Raw is still column-selective: never fetch other metrics.
-                x = (
-                    block.array(h.wall_ms, "<i8") / 1000
-                    if clock == WALL_CLOCK
-                    else block.array(next(c.data for c in h.clocks if c.name == clock), "<f8")
-                )
+                x = _clock(block, clock)
                 y = block.array(column.data, "<f8")
                 if cut is not None:
                     x, y = x[x <= cut], y[x <= cut]
@@ -273,38 +261,6 @@ class RunData(Arrays):
                 stats[~finite, :2] = np.nan
                 chunks.append((x, x, stats))
         return _chart(chunks, limit, span)
-
-    def _cutoffs(
-        self, clock: str, ranges: Sequence[tuple[float, float] | None]
-    ) -> dict[str, float | None] | None:
-        """For each writer, the clock value from which a later attempt's rows replace its own.
-
-        The rule is `points`'s, decided from block headers and attempt records
-        alone: a later attempt takes over from where it resumed, or from its
-        first row when it recorded no resume point. None when a header cannot
-        say where a writer began, which sends the caller to the exact path.
-        """
-        began: dict[str, float] = {}
-        started: dict[str, int] = {}
-        for block, bounds in zip(self.blocks, ranges):
-            writer = block.header.writer
-            if writer not in started:
-                started[writer] = block.header.wall_first
-                if bounds is None:
-                    return None
-                began[writer] = bounds[0]
-        for attempt in self.attempts:
-            started[attempt.writer] = attempt.started_ms
-            resumed = attempt.resumed_at.get(clock)
-            if resumed is not None:
-                began[attempt.writer] = resumed
-        cutoffs: dict[str, float | None] = {}
-        cutoff: float | None = None
-        for writer in sorted(started, key=lambda writer: started[writer], reverse=True):
-            cutoffs[writer] = cutoff
-            if writer in began:
-                cutoff = began[writer] if cutoff is None else min(cutoff, began[writer])
-        return cutoffs
 
 
 class Buckets(Arrays):
