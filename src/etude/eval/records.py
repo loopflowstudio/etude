@@ -538,6 +538,8 @@ class Aligned(Record):
 
 # A seat naming a checkpoint by where it stands relative to the one a seating is held for.
 type Relative = Annotated[Earlier | Fraction | At | Final | Aligned, Field(discriminator="kind")]
+# The same seats, for isinstance.
+_RELATIVE = (Earlier, Fraction, At, Final, Aligned)
 
 # Why a relative seat has no checkpoint: none there yet, or there never will be.
 type Missing = Literal["not_yet", "never"]
@@ -712,10 +714,7 @@ class Seating(Record):
         return Seated(seating=self.name, checkpoint=checkpoint.key, seats=tuple(seats))
 
 
-_RELATIVE = (Earlier, Fraction, At, Final, Aligned)
-
-
-def _position(seat: Earlier | Fraction | At | Final | Aligned, held: CheckpointRef) -> float | None:
+def _position(seat: Relative, held: CheckpointRef) -> float | None:
     """Where on its clock the seat looks for `held`; None for `Final`, or with no position."""
     if isinstance(seat, Final):
         return None
@@ -731,9 +730,7 @@ def _position(seat: Earlier | Fraction | At | Final | Aligned, held: CheckpointR
     return here
 
 
-def _find(
-    seat: Earlier | Fraction | At | Final | Aligned, held: CheckpointRef, line: Line
-) -> CheckpointRef | Missing:
+def _find(seat: Relative, held: CheckpointRef, line: Line) -> CheckpointRef | Missing:
     """The checkpoint of `line` the seat names for `held`, or why there is none.
 
     "never" once the line has ended or has passed the position without saving there.
