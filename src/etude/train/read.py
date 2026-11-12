@@ -703,7 +703,13 @@ def read_batches(
     yielded; a block still missing after fresh listings, a sequence gap or a
     damaged array raises during iteration. A writer's newest blocks missing
     from storage cannot be told from a run still being delivered.
+
+    `metrics` is a list of names: a name no block logged as a metric raises
+    `EtudeError("metric_not_logged")` before the first batch, so a misspelt
+    name is not mistaken for an empty history.
     """
+    if isinstance(metrics, str):
+        raise TypeError(f"metrics is a list of names; pass [{metrics!r}]")
     storage = as_storage(source)
     folders = run_folders(sorted(storage.keys(""))).get(run, [run_prefix(run)])
     selected = frozenset(metrics)
@@ -718,13 +724,16 @@ def read_batches(
             keys = _listing(storage, folders)
             _, attempts = _records(storage, keys)
             started = {attempt.writer: attempt.started_ms for attempt, _ in attempts}
-            placed = sorted(
-                (
-                    _place(block(place + file.key), clock)
-                    for place, file, _ in _selected(storage, keys, indexes=False)
-                ),
-                key=lambda p: _position(p.writer, p.sequence, p.wall_first, started),
-            )
+            logged: set[str] = set()
+            placed: list[_Placed] = []
+            for place, file, _ in _selected(storage, keys, indexes=False):
+                # The whole header plans the block and says which metrics it logged.
+                whole = StoredBlock(storage, place + file.key, describe(storage, place, file.key))
+                logged.update(c.name for c in whole.header.series if c.kind == "metric")
+                placed.append(_place(whole, clock))
+            if missing := sorted(selected - logged):
+                raise EtudeError("metric_not_logged", 404) from KeyError(", ".join(missing))
+            placed.sort(key=lambda p: _position(p.writer, p.sequence, p.wall_first, started))
             for stretch in _stretches(placed, [attempt for attempt, _ in attempts], clock):
                 high = max(extent.high for extent in stretch)
                 if done is not None and high <= done:

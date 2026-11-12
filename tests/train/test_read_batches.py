@@ -53,7 +53,7 @@ def _joined(parts: list[Points]) -> Points:
 @pytest.mark.parametrize("clock", ["step", WALL_CLOCK])
 def test_batches_join_into_exactly_what_points_returns(tmp_path: Path, clock: str) -> None:
     _messy_run(tmp_path / run_prefix("r"))
-    metrics = ["value", "rare", "never"]
+    metrics = ["value", "rare"]
     batches = list(read_batches(tmp_path, "e", "r", clock=clock, metrics=metrics))
     data = read(tmp_path, "e", "r")
     for metric in metrics:
@@ -200,3 +200,16 @@ def test_a_slow_reader_outlasts_every_compaction_of_a_live_run(tmp_path: Path) -
         path.rename(root / block_key(3, sequence, sequence, FIRST))
         parts.append(next(batches).points["rl/metric_0"])
     assert _joined(parts).x.tolist() == list(range(6 * 16))
+
+
+def test_a_metric_no_block_logged_raises_before_any_batch(tmp_path: Path) -> None:
+    _long_run(tmp_path / run_prefix("r"), 2, rows=16)
+    batches = read_batches(tmp_path, "e", "r", clock="updates", metrics=["rl/metric_0", "rl/lsos"])
+    with pytest.raises(EtudeError, match="metric_not_logged"):
+        next(batches)
+
+
+def test_one_name_given_as_a_string_is_refused(tmp_path: Path) -> None:
+    _long_run(tmp_path / run_prefix("r"), 1, rows=16)
+    with pytest.raises(TypeError, match=r"\['rl/metric_0'\]"):
+        next(read_batches(tmp_path, "e", "r", clock="updates", metrics="rl/metric_0"))

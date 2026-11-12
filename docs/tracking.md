@@ -319,8 +319,10 @@ never overlap. A later write at the same clock value replaces an earlier one,
 and a resumed attempt's rows replace earlier attempts' from where it resumed.
 Rows that did not give the clock are left out, and so are rows that did not
 log the metric. A batch can therefore hold a different number of points for
-each metric, or none. A metric no row logged gives empty points in every
-batch, as `points` does. `clock` defaults to wall time.
+each metric, or none. A name no block logged as a metric raises
+`EtudeError("metric_not_logged")` before the first batch, so a typo is not
+read as an empty history; `points` gives empty points for it instead.
+`metrics` is a list, even for one name. `clock` defaults to wall time.
 
 A batch is normally one block. Blocks whose clock ranges overlap are read
 together, because the latest write must win. This happens when a process
