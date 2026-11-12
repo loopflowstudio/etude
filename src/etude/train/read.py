@@ -21,6 +21,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from functools import cached_property
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -29,12 +30,13 @@ import numpy.typing as npt
 from pydantic import ConfigDict, SkipValidation, ValidationError
 
 from etude.run.block_file import BlockFile, parse, select
+from etude.run.errors import EtudeError
 from etude.run.listing import RUN_FOLDERS, as_storage, declared, places
 from etude.run.records import WALL_CLOCK, Attempt, Clock, Record, RunFile, RunState
 from etude.run.storage import Storage, run_prefix
-from etude.train.block import Table
+from etude.train.block import DTYPES, SeriesColumn, Table
 from etude.train.manifest import BlockDescription, Manifest, StoredBlock, describe, fetch
-from etude.train.records import CheckpointRecord
+from etude.train.records import CheckpointRecord, RowTable, TablePoint
 
 type Floats = npt.NDArray[np.float64]
 
@@ -116,6 +118,37 @@ class RunData(Arrays):
             for stretch in _stretches(placed, self.attempts, clock)
         ]
         return _latest([p.x for p in parts], [p.y for p in parts])
+
+    def read_table(self, name: str, clock: str) -> tuple[TablePoint, ...]:
+        """Read selected JSON tables, in clock order; missing or damaged artifacts raise.
+
+        Resolve only after supersession, using the selected block's own storage
+        and run prefix. Unreferenced artifacts never participate in history.
+        """
+        located = {block.key: block for block in self.blocks}
+        placed = [_place(block, clock) for block in self.blocks]
+        points: list[TablePoint] = []
+        for stretch in _stretches(placed, self.attempts, clock):
+            # Counted rows in write order: their clock values, and each one's block and digest.
+            xs: list[Floats] = []
+            tables: list[tuple[StoredBlock, str | None]] = []
+            for extent in stretch:
+                block = located[extent.key]
+                column = next(
+                    (c for c in block.header.series if c.kind == "text" and c.name == name), None
+                )
+                if column is None:
+                    continue
+                x, keep = _counted(block, column, _clock(block, clock), extent)
+                codes = block.array(column.data, DTYPES["text"])[keep]
+                xs.append(x[keep])
+                tables.extend((block, column.labels[int(code)]) for code in codes)
+            if not xs:
+                continue
+            x = np.concatenate(xs)
+            for index in _last_indices(x):
+                points.append(TablePoint(x=float(x[index]), rows=_table(*tables[index]).rows))
+        return tuple(points)
 
     def chart(
         self,
@@ -527,12 +560,7 @@ def _batch(
             continue
         logged = _clock(block, clock)
         for column in columns:
-            x = logged if column.rows is None else logged[block.array(column.rows, "<u4")]
-            keep = ~np.isnan(x)
-            if extent.cutoff is not None:
-                keep &= x <= extent.cutoff
-            if after is not None:
-                keep &= x > after
+            x, keep = _counted(block, column, logged, extent, after)
             xs[column.name].append(x[keep])
             ys[column.name].append(block.array(column.data, "<f8")[keep])
     return Batch(points={metric: _latest(xs[metric], ys[metric]) for metric in xs})
@@ -542,12 +570,46 @@ def _latest(xs: Sequence[Floats], ys: Sequence[Floats]) -> Points:
     """Points from parts in write order, keeping the latest write of each clock value."""
     x = np.concatenate(xs) if xs else np.empty(0)
     y = np.concatenate(ys) if ys else np.empty(0)
-    if len(x) > 1 and not np.all(x[1:] > x[:-1]):
-        order = np.argsort(x, kind="stable")  # equal values stay in write order
-        x, y = x[order], y[order]
-        last = np.r_[x[1:] != x[:-1], True]
-        x, y = x[last], y[last]
-    return Points(x=x, y=y)
+    selected = _last_indices(x)
+    return Points(x=x[selected], y=y[selected])
+
+
+def _last_indices(x: Floats) -> npt.NDArray[np.int64]:
+    """Indices of `x` in ascending order, keeping the last of each repeated value."""
+    if len(x) < 2 or np.all(x[1:] > x[:-1]):
+        return np.arange(len(x), dtype=np.int64)
+    order = np.argsort(x, kind="stable")  # equal values stay in write order
+    ordered = x[order]
+    return order[np.r_[ordered[1:] != ordered[:-1], True]]
+
+
+def _counted(
+    block: StoredBlock,
+    column: SeriesColumn,
+    logged: Floats,
+    extent: _Extent,
+    after: float | None = None,
+) -> tuple[Floats, npt.NDArray[np.bool_]]:
+    """A column's clock values, and which of its rows count in the extent (above `after`)."""
+    x = logged if column.rows is None else logged[block.array(column.rows, "<u4")]
+    keep = ~np.isnan(x)
+    if extent.cutoff is not None:
+        keep &= x <= extent.cutoff
+    if after is not None:
+        keep &= x > after
+    return x, keep
+
+
+def _table(block: StoredBlock, digest: str | None) -> RowTable:
+    """The JSON table a text row names by digest, stored beside the block's run."""
+    if digest is None or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+        raise EtudeError("table_reference_invalid", 422) from ValueError(digest)
+    prefix = block.key.removesuffix(block.description.key)
+    key = f"{prefix}artifacts/{digest}.json"
+    body = block.storage.get(key)
+    if sha256(body).hexdigest() != digest:
+        raise EtudeError("table_artifact_damaged", 422) from ValueError(key)
+    return RowTable.model_validate_json(body)
 
 
 def _order(record: CheckpointRecord) -> tuple[int, int]:

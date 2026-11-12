@@ -1,4 +1,4 @@
-"""The training client: `track`, `Run.log`, checkpoints, and shipping.
+"""The training client: `track`, scalar and table logging, checkpoints, and shipping.
 
 Ownership and invariants:
 
@@ -7,6 +7,8 @@ Ownership and invariants:
 - `log` is a put on a bounded in-memory queue. It never blocks, never does
   I/O and never raises into training code. A full queue drops the row and
   counts it; rows still in the queue when the process dies are not durable.
+- `log_table` serializes JSON rows to a local immutable artifact, then queues
+  its digest through `log`. Its local I/O and validation errors are visible.
 - The writer thread appends each row to a local log at once and keeps it by
   column in memory. Every few seconds it seals those rows as one small
   columnar block (`etude.train.block`) and removes the log. Small blocks are
@@ -66,8 +68,8 @@ from etude.run.records import (
 from etude.run.storage import DirectoryStorage, Storage, run_prefix
 from etude.train.block import Builder, Table, concat
 from etude.train.block import encode as encode_block
-from etude.train.manifest import write_manifest
-from etude.train.records import CheckpointRecord, ParentCheckpoint, checkpoint_name
+from etude.train.manifest import Index, metric_names
+from etude.train.records import CheckpointRecord, ParentCheckpoint, RowTable, checkpoint_name
 
 # Compaction is bounded by bytes or elapsed cadence, independent of training steps.
 PERMANENT_BYTES, RECENT_BLOCKS = 8_000_000, 64
@@ -130,7 +132,7 @@ def _suffix(source: Path) -> str:
 
 
 class EtudeWarning(UserWarning):
-    """A row was set aside or lost. Turn it into an error with `strict=True`."""
+    """Logging needs attention: lost rows, invalid clocks or excessive metric names."""
 
 
 _STOP = object()
@@ -160,6 +162,7 @@ class Run:
         segment_seconds: float,
         segment_rows: int,
         strict: bool,
+        metric_name_limit: int | None = 1000,
         inherited: CheckpointRecord | None = None,
         resumed_at: Mapping[str, float] | None = None,
     ) -> None:
@@ -211,6 +214,9 @@ class Run:
             ),
         )
         seal_logs(self.files.root, self._clock_names)  # what an earlier process left unsealed
+        self._index = Index(root, self._writer_id)
+        self._metric_name_limit = metric_name_limit
+        self._metric_names = metric_names(root) if metric_name_limit is not None else set()
         self._sequence = 0
         # Only the current compaction window stays in memory.
         self._tails: list[Table] = []
@@ -232,7 +238,7 @@ class Run:
         self._shipper.start()
         atexit.register(self.finish)
 
-    # --- the training-side calls: no I/O, no blocking, no exceptions ---------
+    # --- the training-side calls -------------------------------------------
 
     def log(self, values: Logged | None = None, /, **clocks: float) -> None:
         """Record one row. Every declared clock must be present, as a key or keyword."""
@@ -265,8 +271,43 @@ class Run:
                 raise
             self._lost()
 
+    def log_table(self, name: str, rows: Sequence[Mapping[str, object]], **clocks: float) -> None:
+        """Store JSON rows locally, then queue their digest at the given clocks.
+
+        Local serialization and I/O finish before return; invalid rows, names,
+        coordinates or damaged existing artifacts raise. Queue overflow follows
+        `log`: the reference is dropped and counted, leaving a harmless orphan.
+        Do not reuse the table's name for scalar or ordinary text values.
+        """
+        if not name or name in self._clock_names:
+            raise ValueError("table name must be nonempty and distinct from clocks")
+        if set(clocks) != set(self._clock_names) or any(
+            isinstance(value, bool) or not math.isfinite(value) for value in clocks.values()
+        ):
+            raise ValueError("table requires every declared clock with a finite value")
+        table = RowTable.model_validate({"rows": rows})
+        body = table.model_dump_json().encode()
+        digest = sha256(body).hexdigest()
+        target = self.files.root / "artifacts" / f"{digest}.json"
+        if target.exists():
+            if sha256(target.read_bytes()).hexdigest() != digest:
+                raise EtudeError("table_artifact_damaged", 422) from ValueError(target)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            # Different attempts may log identical content concurrently.
+            partial = target.with_name(f"{digest}.{secrets.token_hex(6)}.partial")
+            try:
+                with partial.open("xb") as stream:
+                    stream.write(body)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                partial.replace(target)
+            finally:
+                partial.unlink(missing_ok=True)
+        self.log({name: digest}, **clocks)
+
     def _warn(self, kind: str, message: str, stacklevel: int = 3) -> None:
-        """Say once per run, at the caller's line, that rows are being set aside."""
+        """Warn once per writer; warning filters must not interrupt training."""
         if kind in self._warned:
             return
         self._warned.add(kind)
@@ -545,13 +586,14 @@ class Run:
                 if not final:
                     key = block_key(1, table.first, table.last, table.writer)
                     size += write_block(self.files.root, key, table)
+                    self._index.add(key)
             compact = final or size >= PERMANENT_BYTES or len(recent) >= RECENT_BLOCKS
             if compact:
                 table = concat(recent)
-                write_block(
-                    self.files.root, block_key(2, table.first, table.last, table.writer), table
-                )
-            write_manifest(self.files.root, self._writer_id, permanent=compact)
+                key = block_key(2, table.first, table.last, table.writer)
+                write_block(self.files.root, key, table)
+                self._index.add(key)
+            self._index.write()
             retired = [tail_key(tail.first, tail.writer) for tail in self._tails]
             if compact:
                 retired.extend(
@@ -623,6 +665,21 @@ class Run:
         if len(coordinate) != len(self._clock_names):
             # Charted against the clocks it does give, and wall time; counted.
             self.incomplete += 1
+        if self._metric_name_limit is not None and "metric_names" not in self._warned:
+            self._metric_names.update(
+                name
+                for name, value in values.items()
+                if isinstance(value, (int, float)) and not isinstance(value, bool)
+            )
+            if len(self._metric_names) > self._metric_name_limit:
+                self._warn(
+                    "metric_names",
+                    f"{len(self._metric_names)} distinct metric names exceed "
+                    f"metric_name_limit={self._metric_name_limit}; use log_table for "
+                    "per-update collections instead of encoding dimensions in metric names",
+                )
+                # The one-time warning needs no growing name registry afterward.
+                self._metric_names.clear()
         return coordinate, values
 
     def _save(self, folder: str, name: str, record: Record) -> None:
@@ -735,6 +792,7 @@ def track(
     segment_seconds: float = 2.0,
     segment_rows: int = 5_000,
     strict: bool = False,
+    metric_name_limit: int | None = 1000,
     resumed_at: Mapping[str, float] | None = None,
 ) -> Run:
     """Declare or resume a run. Strict: a bad declaration raises here, not later.
@@ -756,6 +814,8 @@ def track(
     snapshot of its own taken after that checkpoint, passes where it stands
     as `resumed_at`, keyed by declared clocks.
     """
+    if metric_name_limit is not None and metric_name_limit < 0:
+        raise ValueError("metric_name_limit must be nonnegative or None")
     launched = os.environ.get("ETUDE_EXPERIMENT") or None
     if experiment is not None and launched not in (None, experiment):
         raise EtudeError("experiment_differs_from_launch", 409) from ValueError(
@@ -799,6 +859,7 @@ def track(
         segment_seconds=segment_seconds,
         segment_rows=segment_rows,
         strict=strict,
+        metric_name_limit=metric_name_limit,
         inherited=None if inherited is None else inherited[1],
         resumed_at=resumed_at,
     )
