@@ -20,6 +20,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 
 from etude.deadline import call, limit_time, remaining
+from etude.storage_timeout import socket_timeout
 
 LIMIT = 1024 * 1024
 OPENING = 4096
@@ -179,7 +180,9 @@ def publish(path: Path, url: str, timeout: float | None = None) -> None:
             return
         try:
             body = bounded(path.read_text()).encode()
-            with urlopen(Request(url, data=body, method="PUT"), timeout=remaining()):
+            with urlopen(
+                Request(url, data=body, method="PUT"), timeout=remaining(socket_timeout(len(body)))
+            ):
                 pass
         finally:
             _publication_lock.release()

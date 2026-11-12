@@ -49,7 +49,6 @@ from etude.launch.storage.s3 import (
     Denied,
     Grant,
     Send,
-    StorageUnavailable,
     Version,
     _send,
     post,
@@ -57,6 +56,7 @@ from etude.launch.storage.s3 import (
     read_version,
 )
 from etude.launch.storage.transport import attribute, observe
+from etude.storage_timeout import StorageUnavailable
 
 ROOT = Path("/run/etude/sessions")
 # A log piece waits about a twentieth of its log's age, between 15 seconds and
@@ -193,6 +193,7 @@ class Courier:
         self._inbox: Version | None = None  # the inbox as last read
         self._usage_sent = -1  # bytes of the usage journal last delivered
         self._cache = _cache()
+        self._delivery_failed_at: float | None = None
 
     def _retain_transfer(self, raw: str) -> None:
         """Keep a transfer in the session's usage journal, not the worker log.
@@ -207,7 +208,7 @@ class Courier:
             body = path.read_bytes()
             # Delivering the journal is not itself journaled: each delivery would
             # change it and need another. A failed delivery raises to the caller.
-            with observe(lambda raw: None):
+            with limit_time(_until_deadline()), observe(lambda raw: None):
                 self._out.write_bytes("usage.jsonl", body)
             self._usage_sent = len(body)
 
@@ -393,6 +394,26 @@ class Courier:
         An attempt that cannot be carried raises after the others, the worker's
         log and usage are: that log is where its failure is told.
         """
+        try:
+            self._carry_files(final)
+        except (StorageUnavailable, OSError, ValueError) as error:
+            if self._delivery_failed_at is None:
+                self._delivery_failed_at = time.monotonic()
+            minutes = (time.monotonic() - self._delivery_failed_at) / 60
+            write_log(
+                "output delivery",
+                f"pending for {minutes:.1f} minutes ({type(error).__name__}); local files retained",
+            )
+            raise
+        if self._delivery_failed_at is not None:
+            minutes = (time.monotonic() - self._delivery_failed_at) / 60
+            # Final delivery belongs to a producer that has already closed its
+            # log. Its end receipt confirms recovery; append no output after EOF.
+            if not final:
+                write_log("output delivery", f"recovered after {minutes:.1f} minutes")
+            self._delivery_failed_at = None
+
+    def _carry_files(self, final: bool) -> None:
         failure: Exception | None = None
         with observe(self._retain_transfer), attribute(session=self._home.name):
             self.carry_console()
@@ -590,7 +611,8 @@ def _run(
         while process.poll() is None:
             for step in (courier.bring_in, courier.carry_out):
                 try:
-                    step()
+                    with limit_time(_until_deadline()):
+                        step()
                 except (StorageUnavailable, OSError, ValueError) as error:
                     write_log(
                         "work delivery",

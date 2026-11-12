@@ -23,7 +23,11 @@ from etude.train.run import track
 from tests.launch.counting import job_text
 
 
-def test_remote_host_runs_kept_work_logs_outputs_and_stops(tmp_path: Path) -> None:
+def test_remote_host_runs_kept_work_logs_outputs_and_stops(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ETUDE_STORAGE_TIMEOUT_SECONDS", "120")
     executable = tmp_path / "ssh"
     executable.write_text('#!/bin/sh\nshift 2\nshift\nexec sh -c "$1"\n')
     executable.chmod(0o755)

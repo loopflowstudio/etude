@@ -685,6 +685,10 @@ class Status(Record):
     shared: int = 1  # most runs on the latest attempt's machine at once during it
     tally: Tally | None = None
 
+    # Age at this status read, from the latest retained successful write, or
+    # allocation if no delivery has arrived. None for completed/local work.
+    delivery_age_seconds: float | None = None
+
     @property
     def done(self) -> bool:
         return self.phase == "done"
@@ -703,7 +707,13 @@ class Status(Record):
             shown = self.tally.model_copy(update={"per_hour": None}) if self.done else self.tally
             at += f", {shown}"
         shared = f", shared by {self.shared} runs" if self.shared > 1 else ""
-        return f"{head}{at}{shared}, {'~' if self.estimated else ''}${self.usd:.2f}"
+        delivery = ""
+        if self.delivery_age_seconds is not None:
+            delivery = (
+                f", no delivery confirmed for {self.delivery_age_seconds / 60:.1f} minutes"
+                " (retained evidence; collection may be stale)"
+            )
+        return f"{head}{at}{shared}, {'~' if self.estimated else ''}${self.usd:.2f}{delivery}"
 
 
 class CohortSpec(Record):

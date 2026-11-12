@@ -51,6 +51,11 @@ from etude.launch.usage import Transfer
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS transfers(id TEXT PRIMARY KEY, body TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS transfers_delivery ON transfers(
+  json_extract(body, '$.attempt'), julianday(json_extract(body, '$.observed_at')) DESC)
+  WHERE json_extract(body, '$.completed') = 1
+    AND json_extract(body, '$.status') BETWEEN 200 AND 299
+    AND json_extract(body, '$.operation') IN ('PUT', 'POST');
 CREATE TABLE IF NOT EXISTS launches(id TEXT PRIMARY KEY, body TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS launch_runs(launch TEXT NOT NULL, run TEXT NOT NULL,
   PRIMARY KEY(launch, run));
@@ -118,22 +123,8 @@ CREATE INDEX IF NOT EXISTS attempts_session ON attempts(session);
 """
 
 Fact = str | int | None
-# Changes with the schema. A file from another version is refused, except those
-# `_UPGRADES` brings up to this one in place.
-_VERSION = 13
-# Statements that bring a file at a version key to the next version.
-_UPGRADES = {
-    # Attempts record the environment their machine prepared (#54).
-    10: ("ALTER TABLE attempts ADD COLUMN prepared TEXT",),
-    # A pool's machines each take this many runs at once (#84).
-    11: ("ALTER TABLE pools ADD COLUMN slots INTEGER NOT NULL DEFAULT 1",),
-    # Attempts keep how far a job got through the work it counted; a session
-    # told to finish is given no more work.
-    12: (
-        "ALTER TABLE attempts ADD COLUMN tally TEXT",
-        "ALTER TABLE sessions ADD COLUMN finish_requested_at TEXT",
-    ),
-}
+# Prototype databases from another schema version are refused, never migrated.
+_VERSION = 14
 
 
 def _text(at: datetime | None) -> str | None:
@@ -212,10 +203,6 @@ class Database:
         with self._together():
             made = self._db.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone() is not None
             version = int(self._db.execute("PRAGMA user_version").fetchone()[0])
-            while made and version in _UPGRADES:
-                for statement in _UPGRADES[version]:
-                    self._db.execute(statement)
-                version += 1
             if made and version != _VERSION:
                 raise LauncherError(
                     f"{path} was written by another version of etude; move or delete it to start again"
@@ -238,6 +225,19 @@ class Database:
             Transfer.model_validate_json(row[0])
             for row in self._db.execute("SELECT body FROM transfers ORDER BY rowid")
         )
+
+    def last_delivery(self, attempt: str) -> datetime | None:
+        """Most recent successful write retained for one allocation, without network I/O."""
+        row = self._db.execute(
+            """SELECT json_extract(body, '$.observed_at') FROM transfers
+               WHERE json_extract(body, '$.attempt') = ?
+                 AND json_extract(body, '$.completed') = 1
+                 AND json_extract(body, '$.status') BETWEEN 200 AND 299
+                 AND json_extract(body, '$.operation') IN ('PUT', 'POST')
+               ORDER BY julianday(json_extract(body, '$.observed_at')) DESC LIMIT 1""",
+            (attempt,),
+        ).fetchone()
+        return None if row is None else datetime.fromisoformat(row[0])
 
     def begin_launch(self, launch: Launch) -> None:
         with self._together():
