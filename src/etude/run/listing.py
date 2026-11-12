@@ -76,9 +76,11 @@ def runs(source: Storage | Path | str) -> list[tuple[str, str]]:
     A run is listed once its declaration, `run.json`, has arrived.
     """
     storage = as_storage(source)
+    keys = storage.keys("")
+    listed = set(keys)
     found = []
-    for run, folders in places(storage).items():
-        file = declared(storage, folders)
+    for run, folders in run_folders(keys).items():
+        file = declared(storage, declaring(folders, listed))
         if file is not None:
             found.append((file.experiment, run))
     return sorted(found)

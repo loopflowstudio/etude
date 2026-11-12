@@ -57,6 +57,9 @@ def test_a_folder_listed_without_a_declaration_is_not_asked_for_one(tmp_path: Pa
                 bucket.put(key, local.get(key))
         assert [run.name for run in read_all(bucket)] == ["r"]
         assert client.requests == len(client.read) == 3  # declaration, attempt, state
+        client.requests = 0
+        assert runs(bucket) == [("e", "r")]
+        assert client.requests == 1
 
 
 def test_a_run_whose_declaration_is_invalid_reads_without_one(tmp_path: Path) -> None:
