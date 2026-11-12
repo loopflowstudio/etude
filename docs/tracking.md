@@ -288,6 +288,68 @@ run.tag(model, "best")  # tags can change later
   where the machine that wrote it kept it; a record whose file has not arrived
   is listed as recorded.
 
+### Reading a long run's metrics
+
+```python
+from etude.train.read import read_batches
+
+for batch in read_batches(
+    "r2://my-bucket/runs",
+    "capacity-pilot",
+    "capacity-64-seed-0",
+    clock="updates",
+    metrics=["rl/loss", "collection/size"],
+):
+    loss = batch.points["rl/loss"]  # Points: x (updates, ascending) and y
+    for update, value in zip(loss.x, loss.y):
+        print(int(update), value)
+```
+
+This prints every retained `rl/loss` value, one optimizer update per line,
+from the first update to the last. The run's history arrives one batch at a
+time, so a run of any length can be read on a small machine. Memory holds
+one batch, the selected metrics' arrays for the blocks in it, plus a few
+numbers per block. The batch size sets the limit, not the run's length or
+how many other metrics it logged.
+
+`read_batches` follows the same rules as `read(...).points(metric, clock)`.
+Concatenate one metric's `x` and `y` across all batches and you get exactly
+what `points` returns. Batches come in ascending clock order and their ranges
+never overlap. A later write at the same clock value replaces an earlier one,
+and a resumed attempt's rows replace earlier attempts' from where it resumed.
+Rows that did not give the clock are left out, and so are rows that did not
+log the metric. A batch can therefore hold a different number of points for
+each metric, or none. A name no block logged as a metric raises
+`EtudeError("metric_not_logged")` before the first batch, so a typo is not
+read as an empty history; `points` gives empty points for it instead.
+`metrics` is a list, even for one name. `clock` defaults to wall time.
+
+A batch is normally one block. Blocks whose clock ranges overlap are read
+together, because the latest write must win. This happens when a process
+logged the same clock value again or its clock went backwards. Each such
+overlap makes that one batch larger.
+
+`read_batches` reads each block twice: once to plan the batches, keeping a few
+numbers per block, and again for its clock and selected arrays. From a bucket
+the block arrives once and the second read comes from Etude's storage cache.
+It never loads a writer's metric index, so it also works on runs whose index
+is too large to load. It checks each array's CRC before yielding it. Rows not yet sealed are not read, as
+with `read`.
+
+A gap in a writer's block sequence, a block that stays missing after fresh
+listings, or a damaged array raises during iteration. When that happens the
+batches already yielded are correct, but the history is incomplete; don't
+treat it as finished. A block a compaction replaced while you were reading is
+found again from a fresh listing, however slowly you read. Without the index
+`read_batches` can't tell that a writer's newest blocks are missing: if they
+never reached the bucket, the history ends early, as it does for a run still
+being delivered. If delivery was interrupted, run `uv run etude sync --directory DIR
+--to s3://my-bucket/runs` and read again.
+
+`read(source, experiment, run)` returns the whole run at once, every metric
+included, for inspection and short runs. For a long run with many metrics,
+use `read_batches`.
+
 ## Reports
 
 ```sh

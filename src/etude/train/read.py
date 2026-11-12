@@ -10,6 +10,10 @@ A later write at the same clock value replaces an earlier one.
 Superseded rows stay on disk. Buckets keep their extremes.
 
 Rows are read by column (`etude.train.block`), so a chart costs two arrays.
+`read` holds a whole run; `read_batches` streams selected metrics a
+stretch of overlapping blocks at a time, planned from headers (`_stretches`),
+so it holds one stretch's arrays plus a few numbers per block.
+`RunData.points` is the same plan read all at once.
 A run's records (declaration, state, attempts, checkpoints) are read when it
 is read; its metric blocks only the first time `RunData.blocks` is used, so a
 reader of checkpoints, or of an eval run, reads no metric data.
@@ -17,23 +21,23 @@ reader of checkpoints, or of an eval run, reads no metric data.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from functools import cached_property
 from hashlib import sha256
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 import numpy.typing as npt
 from pydantic import ConfigDict, PrivateAttr, SkipValidation, ValidationError
 
-from etude.run.block_file import parse, select
+from etude.run.block_file import BlockFile, parse, select
 from etude.run.errors import EtudeError
 from etude.run.listing import as_storage, declared, run_folders, under
 from etude.run.records import WALL_CLOCK, Attempt, Clock, Record, RunFile, RunState
 from etude.run.storage import Storage, run_prefix
-from etude.train.block import DTYPES, Array, Kind, Table
+from etude.train.block import DTYPES, SeriesColumn, Table
 from etude.train.manifest import BlockDescription, Manifest, StoredBlock, describe, fetch
 from etude.train.records import CheckpointRecord, RowTable, TablePoint
 
@@ -56,23 +60,10 @@ class Points(Arrays):
         return len(self.x)
 
 
-@dataclass(frozen=True)
-class _Column:
-    """Values surviving attempt cutoffs, still attached to their storage block."""
+class Batch(Arrays):
+    """One stretch of a run's history on one clock: each selected metric's points in it."""
 
-    block: StoredBlock
-    x: Floats
-    values: Array
-    labels: tuple[str | None, ...]
-
-
-def _last_indices(x: Floats) -> npt.NDArray[np.int64]:
-    """Sorted coordinates, with the latest write at each repeated value."""
-    if len(x) < 2 or np.all(x[1:] > x[:-1]):
-        return np.arange(len(x), dtype=np.int64)
-    order = np.argsort(x, kind="stable")
-    ordered = x[order]
-    return order[np.r_[ordered[1:] != ordered[:-1], True]]
+    points: dict[str, Points]
 
 
 class RunData(Arrays):
@@ -130,13 +121,13 @@ class RunData(Arrays):
 
     def points(self, metric: str, clock: str = WALL_CLOCK) -> Points:
         """The metric's values on the clock, by the reading rules in this module's note."""
-        columns = self._history(metric, "metric", clock)
-        if not columns:
-            return Points(x=np.empty(0), y=np.empty(0))
-        x = np.concatenate([column.x for column in columns])
-        y = np.concatenate([column.values for column in columns])
-        selected = _last_indices(x)
-        return Points(x=x[selected], y=y[selected])
+        located = {block.key: block for block in self.blocks}
+        placed = [_place(block, clock) for block in self.blocks]
+        parts = [
+            _batch(stretch, located.__getitem__, (metric,), clock).points[metric]
+            for stretch in _stretches(placed, self.attempts, clock)
+        ]
+        return _latest([p.x for p in parts], [p.y for p in parts])
 
     def read_table(self, name: str, clock: str) -> tuple[TablePoint, ...]:
         """Read selected JSON tables, in clock order; missing or damaged artifacts raise.
@@ -144,90 +135,30 @@ class RunData(Arrays):
         Resolve only after supersession, using the selected block's own storage
         and run prefix. Unreferenced artifacts never participate in history.
         """
-        columns = self._history(name, "text", clock)
-        if not columns:
-            return ()
-        x = np.concatenate([column.x for column in columns])
-        ends = np.cumsum([len(column.x) for column in columns])
+        located = {block.key: block for block in self.blocks}
+        placed = [_place(block, clock) for block in self.blocks]
         points: list[TablePoint] = []
-        for index in _last_indices(x):
-            owner = int(np.searchsorted(ends, index, side="right"))
-            column = columns[owner]
-            offset = int(index - (ends[owner - 1] if owner else 0))
-            block = column.block
-            digest = column.labels[int(column.values[offset])]
-            if (
-                digest is None
-                or len(digest) != 64
-                or any(c not in "0123456789abcdef" for c in digest)
-            ):
-                raise EtudeError("table_reference_invalid", 422) from ValueError(digest)
-            prefix = block.key.removesuffix(block.description.key)
-            key = f"{prefix}artifacts/{digest}.json"
-            body = block.storage.get(key)
-            if sha256(body).hexdigest() != digest:
-                raise EtudeError("table_artifact_damaged", 422) from ValueError(key)
-            table = RowTable.model_validate_json(body)
-            points.append(TablePoint(x=float(x[index]), rows=table.rows))
-        return tuple(points)
-
-    def _history(self, name: str, kind: Kind, clock: str) -> list[_Column]:
-        """Apply attempt cutoffs before choosing the last write at each coordinate."""
-        parts: list[list[_Column]] = []
-        writers: dict[str, list[StoredBlock]] = {}
-        for block in self.blocks:
-            writers.setdefault(block.header.writer, []).append(block)
-        attempts = {attempt.writer: attempt for attempt in self.attempts}
-        for attempt in self.attempts:
-            writers.setdefault(attempt.writer, [])
-        # A resumed attempt cuts history even before it has logged any rows.
-        ordered = sorted(
-            writers,
-            key=lambda writer: (
-                attempts[writer].started_ms
-                if writer in attempts
-                else writers[writer][0].header.wall_first
-            ),
-        )
-        # Work backwards so each writer sees the earliest cutoff of all later attempts.
-        cutoff: float | None = None
-        for writer in reversed(ordered):
-            group = writers[writer]
-            columns: list[_Column] = []
-            recorded = attempts.get(writer)
-            resumed = recorded.resumed_at.get(clock) if recorded is not None else None
-            for block in group:
-                h = block.header
-                if clock == WALL_CLOCK:
-                    x = block.array(h.wall_ms, "<i8") / 1000
-                else:
-                    c = next((c for c in h.clocks if c.name == clock), None)
-                    if c is None:
-                        continue
-                    x = block.array(c.data, "<f8")
-                given = ~np.isnan(x)
-                if resumed is None and given.any():
-                    resumed = float(x[given][0])
-                column = next((c for c in h.series if c.name == name and c.kind == kind), None)
+        for stretch in _stretches(placed, self.attempts, clock):
+            # Counted rows in write order: their clock values, and each one's block and digest.
+            xs: list[Floats] = []
+            tables: list[tuple[StoredBlock, str | None]] = []
+            for extent in stretch:
+                block = located[extent.key]
+                column = next(
+                    (c for c in block.header.series if c.kind == "text" and c.name == name), None
+                )
                 if column is None:
                     continue
-                if column.rows is not None:
-                    x = x[block.array(column.rows, "<u4")]
-                given = ~np.isnan(x)
-                if cutoff is not None:
-                    given &= x <= cutoff
-                columns.append(
-                    _Column(
-                        block=block,
-                        x=x[given],
-                        values=block.array(column.data, DTYPES[kind])[given],
-                        labels=column.labels,
-                    )
-                )
-            parts.append(columns)
-            if resumed is not None:
-                cutoff = resumed if cutoff is None else min(cutoff, resumed)
-        return [column for part in reversed(parts) for column in part]
+                x, keep = _counted(block, column, _clock(block, clock), extent)
+                codes = block.array(column.data, DTYPES["text"])[keep]
+                xs.append(x[keep])
+                tables.extend((block, column.labels[int(code)]) for code in codes)
+            if not xs:
+                continue
+            x = np.concatenate(xs)
+            for index in _last_indices(x):
+                points.append(TablePoint(x=float(x[index]), rows=_table(*tables[index]).rows))
+        return tuple(points)
 
     def chart(
         self,
@@ -245,17 +176,17 @@ class RunData(Arrays):
         """
         if limit < 1:
             raise ValueError("chart limit must be positive")
-        chunks: list[tuple[Floats, Floats, np.ndarray[Any, Any]]] = []
-        ranges = [_clock_range(block, clock) for block in self.blocks]
-        # Where each writer's rows stop counting because a later attempt resumed.
-        cutoffs = self._cutoffs(clock, ranges)
-        if cutoffs is None:
+        located = {block.key: block for block in self.blocks}
+        stretches = _stretches([_place(b, clock) for b in self.blocks], self.attempts, clock)
+        # Blocks whose counted rows overlap repeat clock values, and only the
+        # exact path picks the latest write among them.
+        if any(len(stretch) > 1 for stretch in stretches):
             return buckets(self.points(metric, clock), limit, span=span)
+        extents = [stretch[0] for stretch in stretches]
         # For zooms use the window's fraction of the run to select a finer level.
-        present = [bounds for bounds in ranges if bounds is not None]
         fraction = 1.0
-        if span is not None and present:
-            width = max(b[1] for b in present) - min(b[0] for b in present)
+        if span is not None and extents:
+            width = extents[-1].high - extents[0].low
             fraction = min(1.0, max(0.0, span[1] - span[0]) / width) if width else 1.0
         target = max(1, int(self.rows * fraction) // (limit * 4))
         # An inline overview must have enough groups to fill the requested chart.
@@ -264,33 +195,25 @@ class RunData(Arrays):
             for block in self.blocks
             if block.description.overview is not None
         )
-        previous: float | None = None
-        for block, bounds in zip(self.blocks, ranges):
+        chunks: list[tuple[Floats, Floats, np.ndarray[Any, Any]]] = []
+        for extent in extents:
+            block = located[extent.key]
             h = block.header
             column = next((c for c in h.series if c.name == metric and c.kind == "metric"), None)
             if column is None:
                 continue
-            if bounds is None:
-                return buckets(self.points(metric, clock), limit, span=span)
+            bounds = _clock_range(block, clock)
             increasing = (
                 h.wall_increasing
                 if clock == WALL_CLOCK
                 else next(c.increasing for c in h.clocks if c.name == clock)
             )
-            cutoff = cutoffs[h.writer]
-            if cutoff is not None and bounds[0] > cutoff:
-                continue  # Every row here was superseded by a later attempt.
+            if not increasing or bounds is None or column.rows is not None:
+                return buckets(self.points(metric, clock), limit, span=span)
             # A block the cutoff falls inside is read raw, so its roll-up groups
             # are never split; blocks wholly before it keep their roll-ups.
-            cut = cutoff if cutoff is not None and bounds[1] > cutoff else None
-            if (
-                not increasing
-                or column.rows is not None
-                or (previous is not None and bounds[0] <= previous)
-            ):
-                return buckets(self.points(metric, clock), limit, span=span)
-            previous = bounds[1] if cut is None else cut
-            if span is not None and (bounds[1] < span[0] or bounds[0] > span[1]):
+            cut = extent.cutoff if extent.cutoff is not None and bounds[1] > extent.cutoff else None
+            if span is not None and (extent.high < span[0] or extent.low > span[1]):
                 continue
             inline = block.description.overview
             if (
@@ -322,11 +245,7 @@ class RunData(Arrays):
                 chunks.append((endpoints[:, 0], endpoints[:, 1], block.array(m.data, "<f8", 7)))
             else:
                 # Raw is still column-selective: never fetch other metrics.
-                x = (
-                    block.array(h.wall_ms, "<i8") / 1000
-                    if clock == WALL_CLOCK
-                    else block.array(next(c.data for c in h.clocks if c.name == clock), "<f8")
-                )
+                x = _clock(block, clock)
                 y = block.array(column.data, "<f8")
                 if cut is not None:
                     x, y = x[x <= cut], y[x <= cut]
@@ -342,38 +261,6 @@ class RunData(Arrays):
                 stats[~finite, :2] = np.nan
                 chunks.append((x, x, stats))
         return _chart(chunks, limit, span)
-
-    def _cutoffs(
-        self, clock: str, ranges: Sequence[tuple[float, float] | None]
-    ) -> dict[str, float | None] | None:
-        """For each writer, the clock value from which a later attempt's rows replace its own.
-
-        The rule is `points`'s, decided from block headers and attempt records
-        alone: a later attempt takes over from where it resumed, or from its
-        first row when it recorded no resume point. None when a header cannot
-        say where a writer began, which sends the caller to the exact path.
-        """
-        began: dict[str, float] = {}
-        started: dict[str, int] = {}
-        for block, bounds in zip(self.blocks, ranges):
-            writer = block.header.writer
-            if writer not in started:
-                started[writer] = block.header.wall_first
-                if bounds is None:
-                    return None
-                began[writer] = bounds[0]
-        for attempt in self.attempts:
-            started[attempt.writer] = attempt.started_ms
-            resumed = attempt.resumed_at.get(clock)
-            if resumed is not None:
-                began[attempt.writer] = resumed
-        cutoffs: dict[str, float | None] = {}
-        cutoff: float | None = None
-        for writer in sorted(started, key=lambda writer: started[writer], reverse=True):
-            cutoffs[writer] = cutoff
-            if writer in began:
-                cutoff = began[writer] if cutoff is None else min(cutoff, began[writer])
-        return cutoffs
 
 
 class Buckets(Arrays):
@@ -494,6 +381,203 @@ def _clock_range(block: StoredBlock, clock: str) -> tuple[float, float] | None:
     return column.first, column.last
 
 
+class _Given(NamedTuple):
+    """The lowest, highest and first clock value a block's rows give."""
+
+    low: float
+    high: float
+    first: float
+
+
+@dataclass(frozen=True, slots=True)
+class _Placed:
+    """What planning needs of one block on one clock, small so a long run's plan stays small."""
+
+    key: str  # the block's location in its storage
+    writer: str
+    sequence: int
+    wall_first: int
+    given: _Given | None  # None when no row gives the clock
+
+
+@dataclass(frozen=True, slots=True)
+class _Extent:
+    """The rows of one block that count on one clock, whose values lie from `low` to `high`."""
+
+    key: str
+    # Write order across the run: the writer's place, then the block's.
+    order: tuple[int, int]
+    low: float
+    high: float
+    # Rows above this value belong to a later attempt.
+    cutoff: float | None
+
+
+def _clock(block: StoredBlock, clock: str) -> Floats:
+    h = block.header
+    if clock == WALL_CLOCK:
+        return block.array(h.wall_ms, "<i8") / 1000
+    return block.array(next(c.data for c in h.clocks if c.name == clock), "<f8")
+
+
+def _place(block: StoredBlock, clock: str) -> _Placed:
+    """An increasing column's header gives its range; any other column is read once."""
+    h = block.header
+    given: _Given | None = None
+    if clock == WALL_CLOCK:
+        if h.rows and h.wall_increasing:
+            given = _Given(h.wall_first / 1000, h.wall_last / 1000, h.wall_first / 1000)
+        readable = h.rows > 0
+    else:
+        column = next((c for c in h.clocks if c.name == clock), None)
+        first, last = (column.first, column.last) if column is not None else (None, None)
+        if column is not None and column.increasing and first is not None and last is not None:
+            given = _Given(first, last, first)
+        readable = column is not None
+    if given is None and readable:
+        x = _clock(block, clock)
+        x = x[~np.isnan(x)]
+        if len(x):
+            given = _Given(float(x.min()), float(x.max()), float(x[0]))
+    return _Placed(block.key, h.writer, h.first, h.wall_first, given)
+
+
+def _position(
+    writer: str, sequence: int, wall_first: int, started: dict[str, int]
+) -> tuple[int, int]:
+    """A block's place in write order: its process's start, then its sequence."""
+    return started.get(writer, wall_first), sequence
+
+
+def _stretches(
+    placed: Sequence[_Placed], attempts: Sequence[Attempt], clock: str
+) -> list[list[_Extent]]:
+    """The blocks whose rows count on the clock, ascending, grouped where their ranges overlap.
+
+    `placed` is in write order. Each group keeps it, so the latest write of a
+    clock value wins within the group, and no value appears in two groups.
+    """
+    writers: dict[str, list[_Placed]] = {}
+    for block in placed:
+        writers.setdefault(block.writer, []).append(block)
+    recorded = {attempt.writer: attempt for attempt in attempts}
+    for attempt in attempts:
+        writers.setdefault(attempt.writer, [])
+    # A resumed attempt cuts history even before it has logged any rows.
+    ordered = sorted(
+        writers,
+        key=lambda writer: (
+            recorded[writer].started_ms if writer in recorded else writers[writer][0].wall_first
+        ),
+    )
+    # Work backwards so each writer sees the earliest cutoff of all later attempts.
+    cutoffs: dict[str, float | None] = {}
+    cutoff: float | None = None
+    for writer in reversed(ordered):
+        cutoffs[writer] = cutoff
+        record = recorded.get(writer)
+        resumed = record.resumed_at.get(clock) if record is not None else None
+        if resumed is None:
+            resumed = next((b.given.first for b in writers[writer] if b.given is not None), None)
+        if resumed is not None:
+            cutoff = resumed if cutoff is None else min(cutoff, resumed)
+    rank = {writer: place for place, writer in enumerate(ordered)}
+    extents: list[_Extent] = []
+    for index, block in enumerate(placed):
+        if block.given is None:
+            continue
+        low, high = block.given.low, block.given.high
+        cut = cutoffs[block.writer]
+        if cut is not None:
+            if low > cut:
+                continue  # Every row here was superseded by a later attempt.
+            high = min(high, cut)
+        extents.append(_Extent(block.key, (rank[block.writer], index), low, high, cut))
+    stretches: list[list[_Extent]] = []
+    reach = -np.inf
+    for extent in sorted(extents, key=lambda extent: extent.low):
+        if stretches and extent.low <= reach:
+            stretches[-1].append(extent)
+            reach = max(reach, extent.high)
+        else:
+            stretches.append([extent])
+            reach = extent.high
+    return [sorted(stretch, key=lambda extent: extent.order) for stretch in stretches]
+
+
+def _batch(
+    stretch: Sequence[_Extent],
+    blocks: Callable[[str], StoredBlock],
+    metrics: Sequence[str],
+    clock: str,
+    after: float | None = None,
+) -> Batch:
+    """The metrics' points within one stretch, above `after` when given."""
+    xs: dict[str, list[Floats]] = {metric: [] for metric in metrics}
+    ys: dict[str, list[Floats]] = {metric: [] for metric in metrics}
+    for extent in stretch:
+        block = blocks(extent.key)
+        columns = [
+            column
+            for column in block.header.series
+            if column.kind == "metric" and column.name in xs
+        ]
+        if not columns:
+            continue
+        logged = _clock(block, clock)
+        for column in columns:
+            x, keep = _counted(block, column, logged, extent, after)
+            xs[column.name].append(x[keep])
+            ys[column.name].append(block.array(column.data, "<f8")[keep])
+    return Batch(points={metric: _latest(xs[metric], ys[metric]) for metric in xs})
+
+
+def _latest(xs: Sequence[Floats], ys: Sequence[Floats]) -> Points:
+    """Points from parts in write order, keeping the latest write of each clock value."""
+    x = np.concatenate(xs) if xs else np.empty(0)
+    y = np.concatenate(ys) if ys else np.empty(0)
+    selected = _last_indices(x)
+    return Points(x=x[selected], y=y[selected])
+
+
+def _last_indices(x: Floats) -> npt.NDArray[np.int64]:
+    """Indices of `x` in ascending order, keeping the last of each repeated value."""
+    if len(x) < 2 or np.all(x[1:] > x[:-1]):
+        return np.arange(len(x), dtype=np.int64)
+    order = np.argsort(x, kind="stable")  # equal values stay in write order
+    ordered = x[order]
+    return order[np.r_[ordered[1:] != ordered[:-1], True]]
+
+
+def _counted(
+    block: StoredBlock,
+    column: SeriesColumn,
+    logged: Floats,
+    extent: _Extent,
+    after: float | None = None,
+) -> tuple[Floats, npt.NDArray[np.bool_]]:
+    """A column's clock values, and which of its rows count in the extent (above `after`)."""
+    x = logged if column.rows is None else logged[block.array(column.rows, "<u4")]
+    keep = ~np.isnan(x)
+    if extent.cutoff is not None:
+        keep &= x <= extent.cutoff
+    if after is not None:
+        keep &= x > after
+    return x, keep
+
+
+def _table(block: StoredBlock, digest: str | None) -> RowTable:
+    """The JSON table a text row names by digest, stored beside the block's run."""
+    if digest is None or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+        raise EtudeError("table_reference_invalid", 422) from ValueError(digest)
+    prefix = block.key.removesuffix(block.description.key)
+    key = f"{prefix}artifacts/{digest}.json"
+    body = block.storage.get(key)
+    if sha256(body).hexdigest() != digest:
+        raise EtudeError("table_artifact_damaged", 422) from ValueError(key)
+    return RowTable.model_validate_json(body)
+
+
 def _order(record: CheckpointRecord) -> tuple[int, int]:
     return record.ordinal, record.wall_ms
 
@@ -556,19 +640,87 @@ def read(source: Storage | Path | str, experiment: str, run: str) -> RunData:
     return _read(storage, experiment, run, folders, keys, run_file=file)
 
 
-def _read(
-    storage: Storage,
+def read_batches(
+    source: Storage | Path | str,
     experiment: str,
     run: str,
-    folders: Sequence[str],
-    listing: Sequence[str],
     *,
-    run_file: RunFile | None,
-    metrics: frozenset[str] | None = None,
-    prefixes: tuple[str, ...] = (),
-) -> RunData:
-    """The run's records from `listing`, the source's sorted keys; its blocks once used."""
-    keys = _named(listing, folders)
+    clock: str = WALL_CLOCK,
+    metrics: Sequence[str],
+) -> Iterator[Batch]:
+    """A run's history on one clock, one stretch at a time.
+
+    Memory is one stretch's selected arrays plus a few numbers per block.
+
+    One metric's points concatenated across the batches are exactly
+    `read(...).points(metric, clock)`. A first pass reads each block and keeps
+    those numbers; each batch reads its blocks again for their selected arrays. No metric index is loaded. A block a compaction
+    replaced is found again from a fresh listing, resuming after the last batch
+    yielded; a block still missing after fresh listings, a sequence gap or a
+    damaged array raises during iteration. A writer's newest blocks missing
+    from storage cannot be told from a run still being delivered.
+
+    `metrics` is a list of names: a name no block logged as a metric raises
+    `EtudeError("metric_not_logged")` before the first batch, so a misspelt
+    name is not mistaken for an empty history.
+    """
+    if isinstance(metrics, str):
+        raise TypeError(f"metrics is a list of names; pass [{metrics!r}]")
+    storage = as_storage(source)
+    folders = run_folders(sorted(storage.keys(""))).get(run, [run_prefix(run)])
+    selected = frozenset(metrics)
+
+    def block(key: str) -> StoredBlock:
+        return StoredBlock(storage, key, describe(storage, "", key, metrics=selected))
+
+    done: float | None = None  # the highest clock value already yielded
+    failures = 0  # fresh listings in a row that yielded nothing new
+    while True:
+        try:
+            keys = _listing(storage, folders)
+            _, attempts = _records(storage, keys)
+            started = {attempt.writer: attempt.started_ms for attempt, _ in attempts}
+            logged: set[str] = set()
+            placed: list[_Placed] = []
+            for place, file, _ in _selected(storage, keys, indexes=False):
+                # The whole header plans the block and says which metrics it logged.
+                whole = StoredBlock(storage, place + file.key, describe(storage, place, file.key))
+                logged.update(c.name for c in whole.header.series if c.kind == "metric")
+                placed.append(_place(whole, clock))
+            if missing := sorted(selected - logged):
+                raise EtudeError("metric_not_logged", 404) from KeyError(", ".join(missing))
+            placed.sort(key=lambda p: _position(p.writer, p.sequence, p.wall_first, started))
+            for stretch in _stretches(placed, [attempt for attempt, _ in attempts], clock):
+                high = max(extent.high for extent in stretch)
+                if done is not None and high <= done:
+                    continue
+                yield _batch(stretch, block, metrics, clock, after=done)
+                done = high
+                failures = 0
+            return
+        except FileNotFoundError:
+            # A live writer replaces blocks every few seconds, so a slow
+            # consumer may meet several; only a listing that cannot make
+            # progress three times is a missing block.
+            failures += 1
+            if failures == 3:
+                raise
+
+
+def _named(keys: Sequence[str], folders: Sequence[str]) -> list[tuple[str, str]]:
+    """Every (folder, name under it) of a sorted listing, first folder first."""
+    return [(place, key[len(place) :]) for place in folders for key in under(keys, place)]
+
+
+def _listing(storage: Storage, folders: Sequence[str]) -> list[tuple[str, str]]:
+    """Every (folder, name under it), listed afresh, first folder first."""
+    return _named(sorted(k for f in folders for k in storage.keys(f)), folders)
+
+
+def _records(
+    storage: Storage, keys: Sequence[tuple[str, str]]
+) -> tuple[list[CheckpointRecord], list[tuple[Attempt, str]]]:
+    """The run's checkpoint records, and its attempts in start order with their folders."""
     present = set(keys)
     checkpoints: list[CheckpointRecord] = []
     attempts: list[tuple[Attempt, str]] = []
@@ -591,6 +743,56 @@ def _read(
         except ValidationError:
             continue
     attempts.sort(key=lambda pair: pair[0].started_ms)
+    return checkpoints, attempts
+
+
+def _selected(
+    storage: Storage, keys: Sequence[tuple[str, str]], *, indexes: bool
+) -> list[tuple[str, BlockFile, BlockDescription | None]]:
+    """The blocks that hold the run's rows, each with its folder and any index description.
+
+    Raises FileNotFoundError for a gap in a writer's sequence, which a fresh
+    listing may close.
+    """
+    descriptions: dict[str, BlockDescription] = {}
+    # A writer is one process on one machine, so a block's name is in one folder.
+    folder: dict[str, str] = {}
+    for place, name in keys:
+        if name.startswith("metrics/") and name.endswith((".index.json", ".permanent.json")):
+            if not indexes:
+                continue
+            manifest = Manifest.model_validate_json(storage.get(place + name))
+            for described in manifest.blocks:
+                descriptions[described.key] = described
+                folder.setdefault(described.key, place)
+        elif parse(name) is not None:
+            folder.setdefault(name, place)
+    candidates = [file for name in folder if (file := parse(name)) is not None]
+    expected: dict[str, int] = {}
+    selected = []
+    for file in select([*candidates, *(d.file() for d in descriptions.values())]):
+        if file.first != expected.get(file.writer, 0):
+            raise FileNotFoundError("block sequence gap")
+        expected[file.writer] = file.last + 1
+        selected.append((folder[file.key], file, descriptions.get(file.key)))
+    return selected
+
+
+def _read(
+    storage: Storage,
+    experiment: str,
+    run: str,
+    folders: Sequence[str],
+    listing: Sequence[str],
+    *,
+    run_file: RunFile | None,
+    metrics: frozenset[str] | None = None,
+    prefixes: tuple[str, ...] = (),
+) -> RunData:
+    """The run's records from `listing`, the source's sorted keys; its blocks once used."""
+    keys = _named(listing, folders)
+    present = set(keys)
+    checkpoints, attempts = _records(storage, keys)
     # The state the latest attempt left, where it left one.
     ended = [place for place in folders if (place, "state.json") in present]
     latest = next((place for _, place in reversed(attempts) if place in ended), None)
@@ -617,11 +819,6 @@ def _read(
     return data
 
 
-def _named(keys: Sequence[str], folders: Sequence[str]) -> list[tuple[str, str]]:
-    """Every (folder, name under it) of a sorted listing, first folder first."""
-    return [(place, key[len(place) :]) for place in folders for key in under(keys, place)]
-
-
 def _blocks(
     storage: Storage,
     folders: Sequence[str],
@@ -634,31 +831,8 @@ def _blocks(
     blocks: list[StoredBlock] = []
     for retry in range(3):
         try:
-            descriptions: dict[str, BlockDescription] = {}
-            # A writer is one process on one machine, so a block's name is in one folder.
-            folder: dict[str, str] = {}
-            for place, name in keys:
-                if name.startswith("metrics/") and name.endswith(
-                    (".index.json", ".permanent.json")
-                ):
-                    if metrics is not None:
-                        continue
-                    manifest = Manifest.model_validate_json(storage.get(place + name))
-                    for block in manifest.blocks:
-                        descriptions[block.key] = block
-                        folder.setdefault(block.key, place)
-                elif parse(name) is not None:
-                    folder.setdefault(name, place)
-            candidates = [file for name in folder if (file := parse(name)) is not None]
-            selected = select([*candidates, *(d.file() for d in descriptions.values())])
-            expected: dict[str, int] = {}
             blocks = []
-            for file in selected:
-                if file.first != expected.get(file.writer, 0):
-                    raise FileNotFoundError("block sequence gap")
-                expected[file.writer] = file.last + 1
-                place = folder[file.key]
-                description = descriptions.get(file.key)
+            for place, file, description in _selected(storage, keys, indexes=metrics is None):
                 if description is None and file.level < 2 and metrics is None:
                     # A recent block: small, and in no manifest, so take it whole.
                     blocks.append(fetch(storage, place, file.key))
@@ -672,11 +846,10 @@ def _blocks(
         except FileNotFoundError:
             if retry == 2:
                 raise
-            keys = _named(sorted(k for f in folders for k in storage.keys(f)), folders)
+            keys = _listing(storage, folders)
     blocks.sort(
-        key=lambda block: (
-            started.get(block.header.writer, block.header.wall_first),
-            block.header.first,
+        key=lambda block: _position(
+            block.header.writer, block.header.first, block.header.wall_first, started
         )
     )
     return tuple(blocks)

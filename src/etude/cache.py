@@ -34,10 +34,19 @@ Under `root` (default `ETUDE_HOME/cache`):
 
     SHA256-SIZE             verified content, read-only
     SHA256-SIZE.partial     an acquisition in progress; .json notes its ranges
-    SHA256-SIZE.lock        held by whoever reads, writes or evicts it
     SHA256-SIZE.HOLDER.pin  kept through eviction until HOLDER releases it
+    locks/SHA.lock          held by whoever reads, writes or evicts content whose
+                            SHA256 starts SHA: a fixed set of files, never one per entry
     capacity.lock           held while room is made
+    usage                   bytes of content and reservations, an upper bound
     locators/HASH.json      which content a location holds, and its ETag
+
+Making room reads `usage` rather than the directory. Only a reservation adds to
+it, so anything that removes bytes leaves it too high, never too low; when it
+says there is no room, the directory is measured, the least recently used
+content evicted until a tenth of the allowance is free, and `usage` rewritten.
+A cache of many small entries therefore lists itself once per tenth of its
+allowance admitted, not once per entry.
 """
 
 from __future__ import annotations
@@ -353,7 +362,7 @@ class Cache:
         larger than the whole allowance, `destination` itself.
         """
         key = content.name
-        with _lock(self._made() / f"{key}.lock"):
+        with _lock(self._locked(key)):
             target = self.root / key
             if target.exists():
                 if not self._verified(target, content):
@@ -466,6 +475,12 @@ class Cache:
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         return self.root
 
+    def _locked(self, key: str) -> Path:
+        """The lock file of content named `key`, shared with others of its SHA256 prefix."""
+        locks = self._made() / "locks"
+        locks.mkdir(exist_ok=True)
+        return locks / f"{key[:3]}.lock"
+
     def _locator(self, location: str) -> Path:
         return self.root / "locators" / f"{hashlib.sha256(location.encode()).hexdigest()}.json"
 
@@ -500,7 +515,7 @@ class Cache:
         if not path.exists():
             yield None
             return
-        with _lock(self.root / f"{content.name}.lock"):
+        with _lock(self._locked(content.name)):
             if self._verified(path, content):
                 yield path
                 return
@@ -536,7 +551,7 @@ class Cache:
         if content.size_bytes > self.max_bytes:
             return False
         key = content.name
-        with _lock(self._made() / f"{key}.lock"):
+        with _lock(self._locked(key)):
             target = self.root / key
             if target.exists():
                 target.touch()
@@ -552,6 +567,9 @@ class Cache:
         # Reserve capacity under the cache-wide lock. Other acquisitions hold
         # their content lock, so eviction never removes an active reader/writer.
         with _lock(self.root / "capacity.lock"):
+            used = self._usage()
+            if used is not None and used + size <= self.max_bytes:
+                return self._reserve(key, size, used)
             pinned = {p.name.partition(".")[0] for p in self.root.glob("*.pin")}
             candidates = sorted(
                 (
@@ -564,12 +582,12 @@ class Cache:
             used = sum(p.stat().st_size for p in candidates)
             evicted = False
             for path in candidates:
-                if used + size <= self.max_bytes:
+                if used + size <= self.max_bytes - self.max_bytes // 10:
                     break
                 identity = path.name.removesuffix(".partial")
                 if identity in pinned:
                     continue
-                with (self.root / f"{identity}.lock").open("a") as lock:
+                with self._locked(identity).open("a") as lock:
                     try:
                         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     except BlockingIOError:
@@ -580,10 +598,23 @@ class Cache:
             if evicted:
                 self._forget_evicted()
             if used + size > self.max_bytes:
+                _replace(self.root / "usage", str(used).encode())
                 return False
-            with (self.root / f"{key}.partial").open("a+b") as reservation:
-                reservation.truncate(size)
-            return True
+            return self._reserve(key, size, used)
+
+    def _usage(self) -> int | None:
+        """Bytes held and reserved, at most; None when not yet measured."""
+        try:
+            return int((self.root / "usage").read_text())
+        except (FileNotFoundError, ValueError):
+            return None
+
+    def _reserve(self, key: str, size: int, used: int) -> bool:
+        """Claim `size` bytes for `key` while the caller holds the capacity lock."""
+        with (self.root / f"{key}.partial").open("a+b") as reservation:
+            reservation.truncate(size)
+        _replace(self.root / "usage", str(used + size).encode())
+        return True
 
     def _forget_evicted(self) -> None:
         """Drop locators whose content is gone, so they stay as few as what is held."""

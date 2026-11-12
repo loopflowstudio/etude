@@ -325,7 +325,7 @@ def test_bounded_cache_and_oversized_download(http: HTTP, tmp_path: Path) -> Non
     http.objects["/other"] = b"mnopqrstuvwx"
     download(http.source("/other"), tmp_path / "b", cache=cache)
     payloads = [
-        p for p in cache.root.iterdir() if p.is_file() and p.suffix not in {".lock", ".json"}
+        p for p in cache.root.iterdir() if p.is_file() and "-" in p.name and p.suffix != ".json"
     ]
     assert sum(p.stat().st_size for p in payloads) <= 12
     http.objects["/large"] = b"z" * 25
@@ -888,7 +888,8 @@ def test_active_cache_capacity_streams_another_digest_without_overfilling(
     cache.root.mkdir()
     active = cache.root / ("f" * 64 + "-12.partial")
     active.write_bytes(b"reservedsize")
-    with active.with_suffix(".lock").open("a") as lock:
+    (cache.root / "locks").mkdir()
+    with (cache.root / "locks" / "fff.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         result = download(http.source(), tmp_path / "result", cache=cache)
         assert result.read_bytes() == b"abcdefghijkl"
@@ -1062,6 +1063,30 @@ class _Held:
 
     def reused(self, size_bytes: int, byte_range: str | None) -> None:
         pass
+
+
+def test_many_small_entries_leave_one_file_each(tmp_path: Path) -> None:
+    cache = Cache(tmp_path / "cache")
+    bodies = [f"block {n}".encode() for n in range(300)]
+    for body in bodies:
+        assert cache.read(_Held(body).artifact, _Held(body)) == body
+    assert cache.read(_Held(bodies[0]).artifact, _Held(bodies[0])) == bodies[0]
+    # Content, then the capacity lock and the usage note; locks come from a fixed set.
+    files = [p for p in cache.root.iterdir() if p.is_file()]
+    assert len(files) == len(bodies) + 2
+    assert len(list((cache.root / "locks").iterdir())) <= 16**3
+
+
+def test_bytes_removed_behind_the_cache_are_measured_before_it_refuses(tmp_path: Path) -> None:
+    cache = Cache(tmp_path / "cache", max_bytes=24)
+    first, second, third = b"abcdefghijkl", b"mnopqrstuvwx", b"yz0123456789"
+    for body in (first, second):
+        cache.place(_Held(body).artifact, tmp_path / "out", _Held(body))
+    (cache.root / Content.of(first).name).unlink()
+    cache.place(_Held(third).artifact, tmp_path / "out", _Held(third))
+    assert (cache.root / Content.of(third).name).read_bytes() == third
+    held = [p for p in cache.root.iterdir() if p.is_file() and "-" in p.name]
+    assert sum(p.stat().st_size for p in held) <= 24
 
 
 @pytest.mark.parametrize("reverse", [False, True])
