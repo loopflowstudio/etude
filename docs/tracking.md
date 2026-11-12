@@ -411,7 +411,7 @@ Ctrl-C stops it.
 
 **Refresh** checks the experiment file, the modules it imports from its
 repository, and its source, then replaces the served page when a generation
-succeeds; an edited helper or [shared report](#shared-report-parts) module is
+succeeds; an edited helper or [report helper](#report-helpers) module is
 read afresh without a restart. The repository is the nearest folder above the
 experiment file holding `pyproject.toml` or `.git`, outside hidden folders and
 installed packages. Requests for the same report while
@@ -716,28 +716,15 @@ range; configured sample points are hollow.
 If no seed of a job has a position in range, the chart says so. The schedule
 uses its own named clock, independently of the section's X axis control.
 
-### Shared report parts
+### Report helpers
 
-A repository's experiments usually share most of their report: the eval table
-and clock their environment logs, Perf and ML panels over the repository's own
-metric keys, how job names display, and the comparisons every experiment
-draws. Write those once, as ordinary Python in a module of the repository,
-and let each experiment's `report()` pass only what is its own.
+Parts several experiments share are ordinary Python: keep them in a module of
+the repository and call them from each experiment's `report()`.
 
 ```python
-# manabot/reports.py: imported by every experiment, and no experiment itself.
-from etude.report import (
-    Curve,
-    EvalPanel,
-    Fraction,
-    Matches,
-    Report,
-    Score,
-)
+# manabot/reports.py
+from etude.report import Curve, Fraction, Matches, Score
 
-from manabot.training.panels import ML, PERF
-
-# Every manabot eval table holds a row per game and player.
 GAMES = Score(table="games", value="score", reference=0.5, unit="games")
 
 
@@ -749,14 +736,6 @@ def label(job: str) -> str:
     return f"Width {width}" + (f", {layers} layers" if layers else "")
 
 
-def against_heuristic(job: str) -> Curve:
-    return Curve(
-        title=f"{label(job)} against the fixed heuristic",
-        matches=Matches(tag=f"heuristic-{job}"),
-        subject=job,
-    )
-
-
 def against_half_training(job: str) -> Curve:
     return Curve(
         title=f"{label(job)} against itself at half its updates",
@@ -764,91 +743,31 @@ def against_half_training(job: str) -> Curve:
         matches=Matches(tag=f"half-training-{job}"),
         subject=job,
     )
+```
+
+```python
+# experiments/frontier.py
+from etude.report import Report
+
+from manabot.reports import GAMES, against_half_training, label
+from manabot.training.panels import ML, PERF
+
+JOBS = ("w64", "w160l8")
 
 
-def head_to_head(subject: str, other: str) -> Curve:
-    return Curve(
-        title=f"{label(subject)} against {label(other)} at equal updates",
-        matches=Matches(tag="head-to-head"),
-        subject=subject,
-    )
-
-
-def standard_report(
-    jobs: tuple[str, ...],
-    evals: tuple[EvalPanel, ...] = (),
-    baseline: str | None = None,
-) -> Report:
-    """Each job against the heuristic and its earlier self, then `evals`."""
+def report() -> Report:
     return Report(
         score=GAMES,
         clock="updates",
-        baseline=baseline,
-        labels={job: label(job) for job in jobs},
-        evals=(
-            *(against_heuristic(job) for job in jobs),
-            *(against_half_training(job) for job in jobs),
-            *evals,
-        ),
+        labels={job: label(job) for job in JOBS},
+        evals=tuple(against_half_training(job) for job in JOBS),
         perf=PERF,
         ml=ML,
     )
 ```
 
-```python
-# experiments/frontier.py: jobs "w64" and "w160l8"
-from etude.report import Report
-
-from manabot.reports import head_to_head, standard_report
-
-
-def report() -> Report:
-    return standard_report(
-        jobs=("w64", "w160l8"),
-        evals=(head_to_head("w160l8", "w64"),),
-    )
-```
-
-```sh
-uv run etude report experiments/ --source r2://bucket/runs --serve
-```
-
-Every experiment's page now draws each job against the heuristic and its
-half-training self, labelled "Width 64 · 3 seeds" and "Width 160, 8 layers ·
-3 seeds", with manabot's Perf and ML panels; `frontier` adds its head-to-head.
-Fix a title or a panel in `manabot/reports.py` and click **Refresh** on any
-page that uses it: the page is rebuilt from the edited module, with no
-restart. The tags must be on the benchmark's matchups, as for any `Matches`.
-The template names jobs by launch name, so a job relaunched with a changed
-config is still drawn and labelled, once per config ("Width 64 1a2b3c · 3
-seeds").
-
-The division of work:
-
-| | Owned by |
-|---|---|
-| Chart kinds: `Curve` with `Earlier`, `Fraction`, `At` or a named opponent; `HeadToHead`, `Matrix`, `Ranking`, `Crosstable`, `Anchors`; `Series`, `Counters`, `Schedule`, Perf panels | Etude |
-| Defaults for a repository that declares nothing: `etude.report.PERF` and `ML` over `rl/` keys | Etude |
-| Metric keys, eval tables and columns, tag conventions, clocks, display names | the repository |
-| What one experiment adds or replaces | its `report()` |
-
-An experiment overrides by passing different arguments or by building its
-`Report` from the module's parts directly: `Report(score=GAMES, ml=ML,
-evals=(...))` keeps the metric panels and replaces every eval. Etude's panel
-tuples compose the same way: `perf=(*PERF, Series(title="Host load",
-keys=("host/load",)))` keeps Etude's Perf panels and adds one. A report is
-validated when `report()` returns it, so a template's mistake is reported on
-every page that uses it.
-
-Name rules are functions of job names, applied where the experiment knows
-its jobs. `labels` holds the result, so `baseline`, `subject` and `Schedule.jobs`
-still name the original jobs. A job not passed keeps its launch name. Never key
-a label or panel on a device, commit or seed: they are provenance, pooled
-within a job (see execution setup above).
-
-**The shared module is not an experiment.** `etude report DIR` takes any file
-defining `report()` or `eval(state)` at its top level as an experiment, so
-give the template function another name (`standard_report`, as above). Keep the
-module importable without the experiment's training dependencies: a report
-imports every experiment file it draws. `etude.report` itself imports only
-Pydantic and Etude's run records.
+Helpers name jobs by launch name, so a job relaunched with a changed config is
+still drawn and labelled, once per config ("Width 64 1a2b3c · 3 seeds"). Edit
+`manabot/reports.py` and click **Refresh**: the page is rebuilt from the edited
+module, with no restart. Don't define `report()` or `eval(state)` at the top
+level of a helper module, or `etude report DIR` takes it for an experiment.
