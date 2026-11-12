@@ -106,6 +106,25 @@ Build a lab outside the repo (e.g. `/tmp/lab`) with its own `ETUDE_HOME`:
    Compare `etude.page.build(RUNS, FILE)` by hashing `page.training.model_dump_json()`
    and `repr(page.cells)`; rendered HTML carries timestamps.
 
+10. Repository-level report modules (a package beside `experiments/`): make the lab a
+   uv project, `dependencies = ["etude-sdk[eval]"]` with `[tool.uv.sources] etude-sdk =
+   { path = REPO, editable = true }` and a hatchling build of its package, `uv sync`, then
+   run `uv run etude ...` from the lab, not `--project REPO`. `/tmp` is a symlink to
+   `/private/tmp`, which exercises resolved-path module matching.
+11. Launcher-style jobs without launching: set `ETUDE_JOB` (the launcher's key, which
+   hashes the commit) and `ETUDE_JOB_NAME` (the launch name) before `track()`; a new key
+   under one name is a relaunch at another commit, a different `config=` a config change.
+   Run names are global across experiments (`run_name_belongs_to_another_experiment`):
+   prefix a second experiment's runs. Use one `Benchmark` across all runs: a benchmark
+   per run makes each panel show one seed's tournament. Make `play` depend on the run
+   (`player.model_dump_json()` holds the run name), or every job's curve overlaps.
+   Changed `play` code reuses delivered matches: delete `RUNS/ladder.*` and `ETUDE_HOME`
+   to replay.
+12. When Chrome extensions are not connected: `npm i playwright-core` in a scratch folder
+   and launch with `executablePath` set to the cached
+   `~/Library/Caches/ms-playwright/chromium_headless_shell-*/…/chrome-headless-shell`.
+   Click `getByRole("button", {name: "Refresh"})` and read `document.body.innerText`.
+
 ## Etude: storage outages on the SDK and a launched worker
 
 SDK against fake S3: `uvx --from 'moto[server]' moto_server -p 5047`, then put a
