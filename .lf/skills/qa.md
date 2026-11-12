@@ -83,7 +83,10 @@ Build a lab outside the repo (e.g. `/tmp/lab`) with its own `ETUDE_HOME`:
    Inspect provenance with `etude.eval.query.statsdb(NAME, RUNS)` (`matches.execution`).
    A page's own numbers are in `JSON.parse(document.getElementById("data").textContent)`
    (`cells` with `selection`, `subject`, `matches`, `rows`).
-5. Stop the servers before finishing. In zsh, `$args` does not word-split: call
+5. Export `ETUDE_HOME` for `python -c` statsdb reads too: otherwise `statsdb` keeps its
+   database under `~/.etude/statsdb/`. To see what `etude status` would say of a launched
+   eval pass without renting, run `etude eval` with `ETUDE_OUTPUT_DIR=DIR` and render
+   `DIR/etude-result.json`'s `tally` with `etude.launch.records.Tally`. Stop the servers before finishing. In zsh, `$args` does not word-split: call
    commands explicitly rather than looping over argument strings.
 6. `run.checkpoint` needs a value for every declared clock (otherwise
    `checkpoint_clock_mismatch`, and nothing is recorded). `play` must live in its own module beside
