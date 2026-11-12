@@ -354,8 +354,9 @@ def advance(
     directory: Path | str | None = None,
     retry_failed: bool = False,
     smoke: Smoke = Smoke(),
+    queue: bool = False,
 ) -> list[Pass]:
-    """One pass: observe `source`, ask the experiment's `eval`, and play or launch what is new.
+    """One pass: observe `source`, ask `eval`, and play, launch or queue what is new.
 
     What is wanted is what `eval` returns now (`etude.eval.tournament.played`):
     a seating it no longer returns is no longer played. Each job's eval run is
@@ -371,7 +372,13 @@ def advance(
     when a run an earlier pass launched failed with matches this pass wants,
     unless `retry_failed`. Each launched run records `smoke`, what was smoked
     before this pass.
+
+    With `queue=True`, record jobs even when the chosen pool or on-demand is
+    busy. Queued matches stay in flight and are not submitted again. A launcher
+    controller or `etude wait` moves them when capacity becomes available.
     """
+    if queue and pool is None and rent is None:
+        raise EtudeError("queued_evals_need_a_pool_or_rent", 422)
     # Imported here: typed jobs import this module for `Checkpoint`.
     from etude.jobs import Evaluation, evaluation_spec, with_matches  # noqa: PLC0415
 
@@ -429,7 +436,7 @@ def advance(
         matches = digest(sorted(m.key for m in pending))[:12]
         run = ledger.unused(f"{folder_name(spec.tournament.name)}-{matches}")
         launched = with_matches(job, pending, state)
-        ledger.launch(run, launched, pending, pool=pool, rent=rent, smoke=smoke)
+        ledger.launch(run, launched, pending, pool=pool, rent=rent, smoke=smoke, queue=queue)
         passes.append(done.model_copy(update={"launched": run}))
     return passes
 
@@ -515,8 +522,10 @@ class _Ledger:
         pool: str | None,
         rent: str | None,
         smoke: Smoke,
+        queue: bool,
     ) -> None:
-        client.launch(Run(id=run, job=job, smoke=smoke), pool, rent=rent)
+        submit = client.queue if queue else client.launch
+        submit(Run(id=run, job=job, smoke=smoke), pool, rent=rent)
         launched = [*self._read(), _Launched(run=run, matches=tuple(m.key for m in matches))]
         self.path.parent.mkdir(parents=True, exist_ok=True)
         staged = self.path.with_suffix(".tmp")

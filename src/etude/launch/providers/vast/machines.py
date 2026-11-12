@@ -2,12 +2,17 @@
 
 A durable offer intent precedes the single create request. Lost replies reconcile
 by label; a retained intent never authorizes a second paid create.
+
+A rental's disk holds every undelivered output, and declaring it lost destroys
+that disk. Hosts drop offline and return, so one unhealthy read only opens a
+durable `Outage`; the rental is lost once the outage outlasts `OUTAGE_SECONDS`.
 """
 
 from __future__ import annotations
 
 import shlex
-from datetime import UTC, datetime
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from etude.deadline import limit_time
@@ -16,8 +21,19 @@ from etude.launch.executor import Refused, check_creation
 from etude.launch.machines import Allocation, Bill, MachineRequest, Safeguards
 from etude.launch.providers.program import Program, boot_source
 from etude.launch.providers.vast.api import Create, Instance, VastAPI, VastOffer
-from etude.launch.records import STOCK_IMAGE, MachineTemplate, Offer
+from etude.launch.records import STOCK_IMAGE, MachineTemplate, Offer, Record
 from etude.launch.storage.s3 import Bucket
+
+# Fifteen minutes of a single-GPU rental costs cents; its disk can hold days of work.
+OUTAGE_SECONDS = 900
+_DOWN = {"exited", "offline", "error", "stopped"}
+
+
+class Outage(Record):
+    """Why and since when a rental has looked unhealthy; retained after it ends."""
+
+    status: str | None  # None: the provider reported no such instance
+    first_seen: datetime
 
 
 class VastMachines:
@@ -25,9 +41,15 @@ class VastMachines:
     owned = False
 
     def __init__(
-        self, template: MachineTemplate, api: VastAPI, bucket: Bucket, prefix: str
+        self,
+        template: MachineTemplate,
+        api: VastAPI,
+        bucket: Bucket,
+        prefix: str,
+        now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._template, self._api, self._bucket, self._prefix = template, api, bucket, prefix
+        self._now = now
         self._offers: tuple[VastOffer, ...] | None = None
         self._program = Program(bucket, prefix)
 
@@ -153,13 +175,22 @@ class VastMachines:
             current = self._api.instance(instance.id)
         except ProviderUnavailable:
             return True
-        return current is not None and current.actual_status not in {
-            "exited",
-            "offline",
-            "destroyed",
-            "error",
-            "stopped",
-        }
+        key = self._key(session_id, "outage")
+        raw = self._bucket.get(key)
+        if current is not None and current.actual_status == "destroyed":
+            return False
+        if current is not None and current.actual_status not in _DOWN:
+            if raw is not None:
+                self._bucket.delete(key)
+            return True
+        now = self._now()
+        if raw is None:
+            status = None if current is None else current.actual_status
+            outage = Outage(status=status, first_seen=now)
+            self._bucket.put(key, outage.model_dump_json().encode())
+            return True
+        first_seen = Outage.model_validate_json(raw).first_seen
+        return now - first_seen < timedelta(seconds=OUTAGE_SECONDS)
 
     def end(self, session_id: str) -> datetime | None:
         receipt = self._receipt(session_id)

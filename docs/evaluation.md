@@ -550,12 +550,19 @@ def eval(state: ExperimentState) -> list[Job]:
 etude eval capacity.py --source s3://bucket/etude/launch               # play here
 etude eval capacity.py --source s3://bucket/etude/launch --rent cpu8   # launch
 etude eval capacity.py --source s3://bucket/etude/launch --rent cpu8 --watch 600
+etude eval capacity.py --source s3://bucket/etude/launch --pool lab --queue --watch 60
 ```
 
 `etude smoke capacity.py` runs the file's `runs()`, `eval(state)` and `report()` in
 smoke form on this computer first, one game per match against tiny
 checkpoints. `etude launch --smoke` and a launching `etude eval --smoke` do so
 before they spend ([Smoke before you spend](launcher.md#smoke-before-you-spend)).
+
+`--queue` records evaluation jobs even when the selected pool or on-demand is
+busy. Queued matches stay in flight, so later passes do not submit them again.
+Keep a launcher controller or `etude wait` running to move them when capacity
+is available. A queued run that fails stops a later pass that wants its matches,
+as a launched one does, unless `--retry-failed`.
 
 - **State.** `state.runs` is the experiment's training runs under the
   source: each one's name, its `job` (the name the report gives it: the
