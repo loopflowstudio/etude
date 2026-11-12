@@ -626,21 +626,15 @@ class Seated(Record):
 class Gap(Record):
     """A held checkpoint whose relative seat has no checkpoint, and why.
 
-    `job` is the job it looks in, None for the held checkpoint's own line;
-    `clock` and `position` where it looks, None for `Final` or a held
-    checkpoint with no position on `clock`; `at_or_before` whether any
-    checkpoint up to `position` would do, and `trained` whether only one
-    saved after training began would.
+    `position` is where on its clock the seat looks for the held checkpoint;
+    None for `Final`, or a held checkpoint with no position on that clock.
     """
 
     seating: str
     checkpoint: CheckpointKey
     missing: Missing
-    job: str | None = None
-    clock: str | None = None
+    seat: Relative
     position: float | None = None
-    at_or_before: bool = False
-    trained: bool = False
 
 
 class Seating(Record):
@@ -780,13 +774,8 @@ class Seating(Record):
                     seating=self.name,
                     checkpoint=checkpoint.key,
                     missing="not_yet" if unknown or "not_yet" in results else "never",
-                    job=relative.job,
+                    seat=relative,
                     position=_position(relative, checkpoint),
-                    **(
-                        {}
-                        if isinstance(relative, Final)
-                        else relative.model_dump(include={"clock", "at_or_before", "trained"})
-                    ),
                 )
         # Pairs in seed order, (mine, theirs); this checkpoint's are contiguous from `first`.
         pairs = max(len(mine), 1) * len(found)

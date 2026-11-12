@@ -36,11 +36,11 @@ function tickLabels(values, format, increment) {
 // Why a seating's point has no score (`Page.points[].gap`, an eval `Gap`): what its relative
 // seat looked for, in words: "small has no checkpoint at updates 8,000 yet".
 function missingText(g) {
-  const whose = g.job || "its line", kind = g.trained ? "trained checkpoint" : "checkpoint", yet = g.missing === "not_yet";
-  if (g.clock == null) return yet ? `${whose} has not ended yet` : `${whose} ended with no checkpoint`;
-  if (g.position == null) return `the held checkpoint has no ${g.clock} position`;
-  const where = `${g.clock} ${(+g.position.toPrecision(6)).toLocaleString("en-US")}`;
-  if (g.at_or_before) return yet ? `${whose} has not saved past ${where} yet` : `${whose} has no ${kind} at or before ${where}`;
+  const seat = g.seat, whose = seat.job || "its line", kind = seat.trained ? "trained checkpoint" : "checkpoint", yet = g.missing === "not_yet";
+  if (seat.clock == null) return yet ? `${whose} has not ended yet` : `${whose} ended with no checkpoint`;
+  if (g.position == null) return `the held checkpoint has no ${seat.clock} position`;
+  const where = `${seat.clock} ${(+g.position.toPrecision(6)).toLocaleString("en-US")}`;
+  if (seat.at_or_before) return yet ? `${whose} has not saved past ${where} yet` : `${whose} has no ${kind} at or before ${where}`;
   return `${whose} has no ${kind} at ${where} ${yet ? "yet" : "and never will"}`;
 }
 

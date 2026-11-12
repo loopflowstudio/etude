@@ -542,7 +542,7 @@ def test_relative_seats_fill_in_as_their_jobs_save_and_the_report_says_what_is_m
         return {
             p.at["updates"]: p.value
             if p.gap is None
-            else (p.gap.missing, p.gap.job, p.gap.position)
+            else (p.gap.missing, p.gap.seat.job, p.gap.position)
             for p in page.points
             if p.selection == chosen and p.run == "large-1"
         }
