@@ -58,9 +58,6 @@ from etude.run.records import ArtifactRef, Digest, Name, Record
 from etude.run.storage import SAFE_NAME
 
 type Config = dict[str, JsonValue]
-# How a match that returned no rows is recorded, refused when played (`etude.eval.match`).
-NO_ROWS = "match_has_no_rows"
-NO_ROWS_ERROR = f"EtudeError: {NO_ROWS}"
 type ColumnType = Literal["BOOLEAN", "BIGINT", "DOUBLE", "VARCHAR"]
 
 # The column type of each Python value a table or config may hold.
@@ -402,6 +399,10 @@ class Match(Record):
         return int(self.key[:15], 16)
 
 
+# The error of a match that returned no rows: refused when played (`etude.eval.match`).
+NO_ROWS = "match_has_no_rows"
+
+
 class MatchRecord(Record):
     """How one match went, kept in its block's index after its tables and blobs.
 
@@ -427,7 +428,7 @@ class MatchRecord(Record):
     @classmethod
     def _failed_without_rows(cls, data: Any) -> Any:  # noqa: ANN401 - pydantic's raw input
         if isinstance(data, dict) and data.get("state") == "done" and not data.get("columns"):
-            return {**data, "state": "failed", "error": data.get("error") or NO_ROWS_ERROR}
+            return {**data, "state": "failed", "error": f"EtudeError: {NO_ROWS}"}
         return data
 
 

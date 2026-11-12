@@ -166,8 +166,9 @@ def evaluate(
     stderr as each match is stored: how many of the pending are, and since
     when. Raises
     `EtudeError("match_failed")` after recording the first match that raised,
-    returned no rows or returned rows Etude refuses. Delivery failures do not raise: the files
-    stay in the run's directory for `etude sync`, and stderr says so.
+    returned no rows or returned rows Etude refuses. Delivery failures do not
+    raise: the files stay in the run's directory for `etude sync`, and stderr
+    says so.
     """
     if workers < 1:
         raise EtudeError("workers_must_be_positive", 422)
