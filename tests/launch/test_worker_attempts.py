@@ -36,6 +36,7 @@ from etude.train.read import read
 from etude.train.records import Step
 from etude.train.report import training
 from etude.train.run import track
+from tests.experiments import authored
 from tests.launch.counting import job_text
 from tests.run.storage import MeasuredStorage
 
@@ -138,7 +139,10 @@ def test_a_continuation_starts_from_its_parents_recorded_checkpoint(tmp_path: Pa
     tracked = tmp_path / "track"
     with pytest.raises(LauncherError, match="not beyond the checkpoint's steps=2"):
         continue_from(scheduler.record(first), "steps=2", source=tracked)
-    with pytest.raises(LauncherError, match="a clock its checkpoint recorded: steps"):
+    with pytest.raises(
+        LauncherError,
+        match="a clock its checkpoint recorded: hours_since_start, running_hours, steps",
+    ):
         continue_from(scheduler.record(first), "updates=9", source=tracked)
 
     # Tagging the parent's checkpoint later does not make the continuation another job.
@@ -163,7 +167,7 @@ def test_a_continuation_starts_from_its_parents_recorded_checkpoint(tmp_path: Pa
 
     second = scheduler.launch(continued)
     (status,) = scheduler.wait(second, every=0.05, timeout=30)
-    assert (status.outcome, status.clocks) == ("succeeded", {"steps": 5})
+    assert (status.outcome, authored(status.clocks)) == ("succeeded", {"steps": 5})
     data = read(tracked, "capacity", second)
     (checkpoint,) = data.checkpoints
     assert Path(urlparse(checkpoint.artifact.uri).path).read_text() == (
@@ -275,7 +279,8 @@ def test_a_launched_job_tracks_as_its_run_without_naming_itself(tmp_path: Path) 
         (attempt,) = data.attempts
         assert attempt.attempt == launched.id
         # The script never wrote etude-result.json; tracking reported its progress.
-        assert launched.clocks == {"steps": 2}
+        # With Etude's hours, which a job's `until` may name as it may name its own clocks.
+        assert authored(launched.clocks) == {"steps": 2}
         (checkpoint,) = data.checkpoints
         # Named for where its first clock stood; the launcher holds no copy of it.
         stored = tracked / record.id / "checkpoints" / "steps-2.pt"

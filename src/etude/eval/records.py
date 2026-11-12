@@ -61,8 +61,7 @@ from pydantic import (
 
 from etude.eval.source import digest_files, source_commit
 from etude.run.errors import EtudeError
-from etude.run.records import ArtifactRef, Digest, Name, Record
-from etude.run.storage import SAFE_NAME
+from etude.run.records import BUILT_IN_NAMES, ArtifactRef, Digest, Name, Record
 
 type Config = dict[str, JsonValue]
 type ColumnType = Literal["BOOLEAN", "BIGINT", "DOUBLE", "VARCHAR"]
@@ -114,6 +113,12 @@ def digest(value: object) -> Digest:
     """The digest of a value's canonical JSON, so equal values agree on every machine."""
     text = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return sha256(text.encode()).hexdigest()
+
+
+def folder_name(name: str) -> str:
+    """`name` as the start of an eval run's name, which is a folder: a tournament's name
+    may hold spaces, as a seating's may; a name already safe is itself."""
+    return re.sub(r"[^A-Za-z0-9._=-]+", "-", name).strip("-._=")[:150] or "tournament"
 
 
 def version_of(code: Sequence[Path | str]) -> Version:
@@ -504,7 +509,10 @@ class Earlier(Record):
     With `job`, each of that job's lines instead. Positions are exact: with
     no checkpoint there, the seat is a gap. With `at_or_before`, the latest
     checkpoint at or before there instead, once the line has saved past it
-    or ended, so what it finds never changes after.
+    or ended, so what it finds never changes after. With `trained`, only a
+    checkpoint saved after training began: the line's initial weights, where
+    every clock its run declared stands at 0, are never seated, and a held
+    checkpoint with no trained one to meet is a gap for good.
     """
 
     kind: Literal["earlier"] = "earlier"
@@ -513,13 +521,15 @@ class Earlier(Record):
     inference: Inference
     job: str | None = None
     at_or_before: bool = False
+    trained: bool = False
 
 
 class Fraction(Record):
     """The held checkpoint's line at exactly `value` × its position on `clock`.
 
     `Fraction(clock="updates", value=0.5, ...)` seats 3,000 for 6,000. With
-    `at_or_before`, the latest checkpoint at or before it, as for `Earlier`.
+    `at_or_before`, the latest checkpoint at or before it, and with `trained`,
+    never the line's initial weights, as for `Earlier`.
     """
 
     kind: Literal["fraction"] = "fraction"
@@ -528,12 +538,14 @@ class Fraction(Record):
     inference: Inference
     job: str | None = None
     at_or_before: bool = False
+    trained: bool = False
 
 
 class At(Record):
     """The held checkpoint's line at `value` on `clock`, such as its initial weights at 0.
 
-    With `at_or_before`, the latest checkpoint at or before it, as for `Earlier`.
+    With `at_or_before`, the latest checkpoint at or before it, and with
+    `trained`, never the line's initial weights, as for `Earlier`.
     """
 
     kind: Literal["at"] = "at"
@@ -542,6 +554,7 @@ class At(Record):
     inference: Inference
     job: str | None = None
     at_or_before: bool = False
+    trained: bool = False
 
 
 class Final(Record):
@@ -555,7 +568,8 @@ class Final(Record):
 class Aligned(Record):
     """Each of job `job`'s lines at exactly the held checkpoint's position on `clock`.
 
-    With `at_or_before`, the latest checkpoint at or before it, as for `Earlier`.
+    With `at_or_before`, the latest checkpoint at or before it, and with
+    `trained`, never a line's initial weights, as for `Earlier`.
     """
 
     kind: Literal["aligned"] = "aligned"
@@ -563,6 +577,7 @@ class Aligned(Record):
     job: str
     inference: Inference
     at_or_before: bool = False
+    trained: bool = False
 
 
 # A seat naming a checkpoint by where it stands relative to the one a seating is held for.
@@ -632,7 +647,8 @@ class Gap(Record):
     `job` is the job it looks in, None for the held checkpoint's own line;
     `clock` and `position` where it looks, None for `Final` or a held
     checkpoint with no position on `clock`; `at_or_before` whether any
-    checkpoint up to `position` would do.
+    checkpoint up to `position` would do, and `trained` whether only one
+    saved after training began would.
     """
 
     seating: str
@@ -642,6 +658,7 @@ class Gap(Record):
     clock: str | None = None
     position: float | None = None
     at_or_before: bool = False
+    trained: bool = False
 
 
 class Seating(Record):
@@ -786,6 +803,7 @@ class Seating(Record):
                     clock=None if isinstance(relative, Final) else relative.clock,
                     position=_position(relative, checkpoint),
                     at_or_before=not isinstance(relative, Final) and relative.at_or_before,
+                    trained=not isinstance(relative, Final) and relative.trained,
                 )
         # Pairs in seed order, (mine, theirs); this checkpoint's are contiguous from `first`.
         pairs = max(len(mine), 1) * len(found)
@@ -876,18 +894,27 @@ def _find(seat: Relative, held: CheckpointRef, line: Line) -> CheckpointRef | Mi
         return "never"
     clock, tolerance = seat.clock, _EXACT * max(1.0, abs(wanted))
     passed = any(each.at.get(clock, float("-inf")) > wanted for each in line.checkpoints)
+    seatable = [c for c in line.checkpoints if not seat.trained or _trained(c)]
     if seat.at_or_before:
         if not (passed or line.ended):
             return "not_yet"
-        before = [
-            c for c in line.checkpoints if c.at.get(clock, float("inf")) <= wanted + tolerance
-        ]
+        before = [c for c in seatable if c.at.get(clock, float("inf")) <= wanted + tolerance]
         latest = max(before, key=lambda c: c.at[clock], default=None)
         return "never" if latest is None else latest
-    for each in line.checkpoints:
+    for each in seatable:
         if abs(each.at.get(clock, float("inf")) - wanted) <= tolerance:
             return each
     return "never" if line.ended or passed else "not_yet"
+
+
+def _trained(checkpoint: CheckpointRef) -> bool:
+    """Whether it was saved after training began: a clock its run declared stands above 0.
+
+    Etude's hours run from `track(...)`, so they are above 0 even for initial
+    weights; they decide only for a run that declared no clock.
+    """
+    declared = [value for clock, value in checkpoint.at.items() if clock not in BUILT_IN_NAMES]
+    return any(value > 0 for value in declared or checkpoint.at.values())
 
 
 class Benchmark(Record):
@@ -899,7 +926,7 @@ class Benchmark(Record):
     appear and a batch hold plays those not yet played.
     """
 
-    name: Name
+    name: str = Field(min_length=1, max_length=200)
     environment: Environment
     seatings: tuple[Seating, ...] = ()
 
@@ -913,8 +940,6 @@ class Benchmark(Record):
 
     @model_validator(mode="after")
     def named(self) -> Self:
-        if not SAFE_NAME.match(self.name):
-            raise ValueError("unsafe_tournament_name")
         if len({each.name for each in self.seatings}) != len(self.seatings):
             raise ValueError("duplicate_seating_name")
         return self
@@ -927,17 +952,11 @@ class RoundRobin(Record):
     belong inside the author's match.
     """
 
-    name: Name
+    name: str = Field(min_length=1, max_length=200)
     environment: Environment
     # Mapping, so a literal like `{"deal": 1}` type-checks as a condition.
     conditions: tuple[Mapping[str, JsonValue], ...] = Field(min_length=1)
     games: int = Field(ge=1)
-
-    @model_validator(mode="after")
-    def named(self) -> Self:
-        if not SAFE_NAME.match(self.name):
-            raise ValueError("unsafe_tournament_name")
-        return self
 
     def matches(self, entrants: Iterable[Player]) -> list[Match]:
         """Each pair once per condition, in key order; of two entrants with one key, the later."""

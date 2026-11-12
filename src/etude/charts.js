@@ -25,6 +25,25 @@ const mixHex = (a, b, t) => { const h = x => x.replace("#", "").match(/../g).map
 const inkOn = c => { const [r, g, b] = c.match(/\d+/g).map(Number); return 0.299 * r + 0.587 * g + 0.114 * b > 150 ? "#0b0b0b" : "#ffffff"; };
 const alpha = (hex, a) => { const [r, g, b] = hex.replace("#", "").match(/../g).map(v => parseInt(v, 16)); return `rgba(${r},${g},${b},${a})`; };
 
+// Tick labels as `format` writes them, unless two ticks would read the same ("0.51" twice
+// on a narrow range): then each with the decimals its increment needs.
+function tickLabels(values, format, increment) {
+  const labels = values.map(format);
+  if (new Set(labels).size === labels.length || !(increment > 0)) return labels;
+  const decimals = Math.min(12, Math.max(0, Math.ceil(-Math.log10(increment) - 1e-9)));
+  return values.map(v => v.toFixed(decimals));
+}
+// Why a seating's point has no score (`Page.points[].missing`): what its relative seat
+// looked for, in words: "small has no checkpoint at updates 8,000 yet".
+function missingText(g) {
+  const whose = g.job || "its line", kind = g.trained ? "trained checkpoint" : "checkpoint";
+  if (g.clock == null) return g.when === "not_yet" ? `${whose} has not ended yet` : `${whose} ended with no checkpoint`;
+  if (g.position == null) return `the held checkpoint has no ${g.clock} position`;
+  const where = `${g.clock} ${(+g.position.toPrecision(6)).toLocaleString("en-US")}`;
+  if (g.at_or_before) return g.when === "not_yet" ? `${whose} has not saved past ${where} yet` : `${whose} has no ${kind} at or before ${where}`;
+  return `${whose} has no ${kind} at ${where} ${g.when === "not_yet" ? "yet" : "and never will"}`;
+}
+
 // ---------------------------------------------------------------- tooltips
 let tipNode;
 function showTip(evt, rows, title) {
@@ -105,9 +124,9 @@ function line(host, series, o = {}) {
     width, height, legend: {show: false}, bands, series: spec,
     scales: {x: {time: false}, y: o.log ? {distr: 3, log: 10} : {}},
     axes: o.spark ? [{show: false}, {show: false}] : [
-      {...axis, label: o.compact ? null : o.xLabel, labelSize: o.compact ? 0 : 18, values: (u, vs) => vs.map(xf), space: o.compact ? 50 : 70},
+      {...axis, label: o.compact ? null : o.xLabel, labelSize: o.compact ? 0 : 18, values: (u, vs, a, space, incr) => tickLabels(vs, xf, incr), space: o.compact ? 50 : 70},
       // A log axis labels its powers of ten; the ticks between stay unlabelled.
-      {...axis, values: (u, vs) => vs.map(v => !o.log || Math.abs(Math.log10(v) % 1) < 1e-9 ? yf(v) : ""), size: o.compact ? 40 : 52, space: o.compact ? 24 : 32},
+      {...axis, values: (u, vs, a, space, incr) => o.log ? vs.map(v => Math.abs(Math.log10(v) % 1) < 1e-9 ? yf(v) : "") : tickLabels(vs, yf, incr), size: o.compact ? 40 : 52, space: o.compact ? 24 : 32},
     ],
     cursor: o.spark ? {show: false} : {sync: o.sync ? {key: o.sync} : undefined, drag: {x: true, y: false}, points: {size: 6}},
     hooks: {
@@ -373,43 +392,33 @@ function model(D) {
     if (c.played) return {skip: true, meta: "not in these matches"};
     return {skip: true, gap: "none", meta: "not evaluated"};
   }
-  // A selection of seatings draws each checkpoint they were held for (`Page.held`): its first
-  // seat's score against the player in its second, where the held checkpoint stood. A held
-  // checkpoint seated against several, such as each line of a job, is the mean over them.
-  const heldKey = h => h.run != null ? `${h.run}|${h.ordinal}` : `${lineRun(h.line ?? "")}|${splitKey(h.at)}`;
-  function seatingsOf(sel) {
-    const s = sel == null ? null : D.selections[sel];
-    if (s == null) return null;
-    const parts = Array.isArray(s) ? s : [s];
-    return parts.every(p => p.seating != null) ? parts : null;
+  // A selection of seatings draws its points (`Page.points`): each checkpoint a seating was
+  // held for, where it stood, with its first seat's score against its second, which the page
+  // computed, or why its relative seat found no checkpoint.
+  const where = p => p.run != null ? `${p.run}|${p.ordinal}` : `${lineRun(p.line ?? "")}|${splitKey(p.at)}`;
+  const scored = new Map(), unseated = new Map();
+  for (const p of D.points || []) {
+    if (p.value == null) unseated.set(`${p.selection}|${where(p)}`, p);
+    else scored.set(`${p.selection}|${p.score}|${splitKey(p.split)}|${where(p)}`, p);
   }
-  function seatedValue(score, sel, split, parts) {
-    const held = new Map();
-    for (const h of D.held || []) {
-      if (!parts.some(p => p.seating === h.seating && (p.tournament == null || p.tournament === h.tournament))) continue;
-      if (!held.has(heldKey(h))) held.set(heldKey(h), []);
-      held.get(heldKey(h)).push(h);
-    }
+  const seated = sel => { const s = sel == null ? null : D.selections[sel]; return s != null && (Array.isArray(s) ? s : [s]).every(p => p.seating != null); };
+  function seatedValue(score, sel, split) {
     return (run, m) => {
-      const here = held.get(`${run}|${m.ordinal}`);
-      if (!here) return gapOf(sel, run, m, score);
-      // Two tournaments holding one seating for a checkpoint seat the same pairs: count each once.
-      const pairs = [...new Map(here.flatMap(h => h.pairs).map(p => [p.join(), p])).values()];
-      const at = here[0].at, got = pairs.map(([a, b]) => cellOf(sel, score, a, b, false, split)).filter(Boolean);
-      const missing = here.find(h => h.missing != null);
-      if (!got.length && missing) return {missing: true, gap: missing.missing === "not_yet" ? "pending" : "none", at, meta: missing.meta};
-      if (!got.length) return gapOf(sel, run, m, score);
-      const y = mean(got.map(c => c.value)), whole = here.some(h => h.seeds === "one");
-      if (got.length === 1) return {y, lo: got[0].interval?.[0], hi: got[0].interval?.[1], at, whole, meta: `${scoreCount(got[0], D.scores?.[score])} · vs ${playerName(got[0].opponent)}`};
-      return {y, at, whole, meta: `mean of ${got.length}: ${got.map(c => `${scoreFormat(c.value)} vs ${playerName(c.opponent)}`).join(", ")}`};
+      const here = `${run}|${m.ordinal}`, p = scored.get(`${sel}|${score}|${splitKey(split)}|${here}`);
+      if (p) {
+        const several = p.opponents.length > 1 ? `mean of ${p.opponents.length} · ` : "";
+        return {y: p.value, lo: p.interval?.[0], hi: p.interval?.[1], at: p.at, whole: p.whole, meta: `${scoreCount(p, D.scores?.[score])} · ${several}vs ${p.opponents.map(playerName).join(", ")}`};
+      }
+      const gap = unseated.get(`${sel}|${here}`);
+      if (gap) return {missing: true, gap: gap.missing.when === "not_yet" ? "pending" : "none", at: gap.at, meta: missingText(gap.missing)};
+      return gapOf(sel, run, m, score);
     };
   }
   // Each checkpoint's value in the requested matches: as seated, for a selection of seatings;
   // else against the opponent given, an anchor's index or "" for all. Scientific variants are
   // selected by their results, never averaged together behind a curve.
   const evalValue = (score, sel, split, opponent) => {
-    const parts = seatingsOf(sel);
-    if (parts) return seatedValue(score, sel, split, parts);
+    if (seated(sel)) return seatedValue(score, sel, split);
     return (run, m) => {
       const o = opponent === "" ? null : +opponent;
       const subject = subjectAt(run, m, i => !!cellOf(sel, score, i, o, false, split));
@@ -422,7 +431,7 @@ function model(D) {
     };
   };
   const evaluated = pts => pts.filter(p => !p.missing && !p.skip);
-  return {T, R, JOBS, marks, markOf, xOf, jobPoints, cellOf, subjectAt, placed, positioned, posClocks, alignClock, fixedPlayers, usesSelection, selectMatches, seatingsOf, scheduleSeries, coverage, jobOfRun, linesOf, lineMembers, playerName, selName, choices, opponents, evalValue, evaluated};
+  return {T, R, JOBS, marks, markOf, xOf, jobPoints, cellOf, subjectAt, placed, positioned, posClocks, alignClock, fixedPlayers, usesSelection, selectMatches, seated, scheduleSeries, coverage, jobOfRun, linesOf, lineMembers, playerName, selName, choices, opponents, evalValue, evaluated};
 }
 
 // The first curve supplies the index headline, with the page's default score,
@@ -430,7 +439,7 @@ function model(D) {
 function headline(D, M) {
   const panel = D.report.evals?.find(p => p.kind === "curve") || {};
   const sel = M.selectMatches(panel.matches, M.choices.length ? +M.choices[0][0] : null);
-  const seated = M.seatingsOf(sel) != null;
+  const seated = M.seated(sel);
   const opp = seated || sel == null ? "" : (M.opponents(0, sel)[0] || [""])[0];
   const clock = M.alignClock || "hours_since_start";
   return M.JOBS.map(j => {

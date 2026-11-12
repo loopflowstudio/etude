@@ -25,7 +25,6 @@ business.
 from __future__ import annotations
 
 import json
-import os
 import runpy
 import sys
 from collections.abc import Callable, Iterable, Sequence
@@ -38,10 +37,23 @@ from pydantic import Field
 
 from etude.carriage import CHECKPOINTS
 from etude.eval.match import Result, Tables
-from etude.eval.records import CheckpointKey, CheckpointRef, Inference, Line, Match, Model, digest
+from etude.eval.records import (
+    CheckpointKey,
+    CheckpointRef,
+    Inference,
+    Line,
+    Match,
+    Model,
+    digest,
+    folder_name,
+)
 from etude.eval.tournament import hold, played
 from etude.launch import client
+from etude.launch.database import Database
+from etude.launch.errors import LauncherError
 from etude.launch.records import Job, Run, Smoke
+from etude.launch.scheduler import Scheduler
+from etude.launch.source import home
 from etude.run.errors import EtudeError
 from etude.run.records import ArtifactRef, Digest, Record
 from etude.run.storage import Storage
@@ -189,7 +201,11 @@ def observe(source: Storage | Path | str, experiment: str) -> ExperimentState:
 
 
 def state_of(every: Sequence[RunData], experiment: str) -> ExperimentState:
-    """The experiment's training runs among runs already read, as `observe` finds them."""
+    """The experiment's training runs among runs already read, as `observe` finds them.
+
+    A run that recorded no end has failed once this computer's launcher says
+    so (`_lost`), and so ends at its last stored checkpoint.
+    """
     line = lines(every)
     ours = [
         data
@@ -199,6 +215,7 @@ def state_of(every: Sequence[RunData], experiment: str) -> ExperimentState:
         and data.file.declaration.kind != "evaluation"
     ]
     job = job_names(ours)
+    lost = _lost([data.name for data in ours if data.state is None])
     runs = []
     for data in ours:
         saved = Checkpoints(
@@ -215,7 +232,13 @@ def state_of(every: Sequence[RunData], experiment: str) -> ExperimentState:
             for record in sorted(data.checkpoints, key=lambda one: one.ordinal)
             if record.artifact.sha256 is not None and record.artifact.size_bytes is not None
         )
-        state = "running" if data.state is None else data.state.state
+        state: Literal["running", "finished", "failed"] = (
+            data.state.state
+            if data.state is not None
+            else "failed"
+            if data.name in lost
+            else "running"
+        )
         runs.append(
             TrainingRun(
                 name=data.name,
@@ -229,6 +252,37 @@ def state_of(every: Sequence[RunData], experiment: str) -> ExperimentState:
             )
         )
     return ExperimentState(experiment=experiment, runs=tuple(runs))
+
+
+def _lost(runs: Sequence[str]) -> set[str]:
+    """Of runs that recorded no end, those this computer's launcher closed without success.
+
+    Only a run's own process writes its end (`state.json`), so one whose
+    machine was lost or deleted reads as running in storage for good. The
+    launcher knows its last attempt is over. A run it calls succeeded is
+    still delivering its end, and one it never launched stays running. The
+    launcher's database is read as it stands: no provider or controller is
+    asked, so a loss this computer's launcher has not seen yet is not known.
+    """
+    database = home() / "launcher.db"
+    if not runs or not database.exists():
+        return set()
+    # Its own connection, for this thread: a served page is built on whichever thread asks,
+    # and with no services, since a read reaches no machine.
+    store = Database(database)
+    try:
+        launcher = Scheduler(store, {})
+        lost = set()
+        for run in runs:
+            try:
+                found = launcher.read(run)
+            except LauncherError:
+                continue  # a run this launcher never launched
+            if found.done and found.outcome != "succeeded":
+                lost.add(run)
+        return lost
+    finally:
+        store.close()
 
 
 # ---------------------------------------------------------------------------
@@ -372,7 +426,8 @@ def advance(
         stopped = {standing.failed[m.key] for m in pending if m.key in standing.failed}
         if stopped and not retry_failed:
             raise EtudeError("launched_pass_failed", 409) from ValueError(sorted(stopped))
-        run = ledger.unused(f"{spec.tournament.name}-{digest(sorted(m.key for m in pending))[:12]}")
+        matches = digest(sorted(m.key for m in pending))[:12]
+        run = ledger.unused(f"{folder_name(spec.tournament.name)}-{matches}")
         launched = with_matches(job, pending, state)
         ledger.launch(run, launched, pending, pool=pool, rent=rent, smoke=smoke)
         passes.append(done.model_copy(update={"launched": run}))
@@ -470,6 +525,4 @@ class _Ledger:
 
 
 def _ledger_root(directory: Path | str | None) -> Path:
-    if directory is not None:
-        return Path(directory) / "experiments"
-    return Path(os.environ.get("ETUDE_HOME", "~/.etude")).expanduser() / "experiments"
+    return (home() if directory is None else Path(directory)) / "experiments"

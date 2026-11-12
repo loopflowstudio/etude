@@ -29,10 +29,11 @@ __PAGE_CSS__
 "use strict";
 const PAGE = JSON.parse(document.getElementById("data").textContent);
 // Each match's latest result, or a commit's view of the matches as played at it. Choosing a
-// commit reloads the page, so every panel is drawn from that view's cells alone.
+// commit reloads the page, so every panel is drawn from that view's cells and points alone.
 const asked = new URLSearchParams(location.hash.slice(1)).get("commit");
 const COMMIT = PAGE.commits.some(k => k.commit === asked) ? asked : "";
-const D = {...PAGE, cells: PAGE.cells.filter(c => (c.commit ?? "") === COMMIT)};
+const inView = c => (c.commit ?? "") === COMMIT;
+const D = {...PAGE, cells: PAGE.cells.filter(inView), points: PAGE.points.filter(p => p.value == null || inView(p))};
 const M = model(D);
 const {T, R, JOBS, marks, markOf, jobPoints, cellOf, placed, fixedPlayers, jobOfRun, playerName, selName, choices, evaluated} = M;
 const TRAINED = T.runs.length > 0;
@@ -57,12 +58,12 @@ function evalState() {
 const opponents = (E, sel) => M.opponents(E.score, sel);
 const oppFor = (E, sel) => { const o = opponents(E, sel); return (o.find(([v]) => v === S.opp) || o[0] || [""])[0]; };
 // A selection of seatings is drawn as seated: each held checkpoint against its seating's second seat.
-const versusOf = (sel, opp) => M.seatingsOf(sel) ? "first seat against the second, as seated" : opp === "" ? "vs all opponents" : `vs ${D.players[+opp].name}`;
+const versusOf = (sel, opp) => M.seated(sel) ? "first seat against the second, as seated" : opp === "" ? "vs all opponents" : `vs ${D.players[+opp].name}`;
 let F = {}; try { F = JSON.parse(S.filter) || {}; } catch { F = {}; }
 const evalValue = (E, sel, extra, opponent) => M.evalValue(E.score, sel, {...F, ...extra}, opponent);
 // The other anchors' scores against the curve's anchor, as reference lines.
 function anchorLines(E, sel, opp, extra = {}) {
-  if (S.lines !== "on" || opp === "" || sel == null || M.seatingsOf(sel)) return [];
+  if (S.lines !== "on" || opp === "" || sel == null || M.seated(sel)) return [];
   return fixedPlayers.filter(b => b !== +opp).map(b => cellOf(sel, E.score, b, +opp, false, {...F, ...extra})).filter(Boolean).map(c => ({y: c.value, label: D.players[c.subject].name}));
 }
 function values(E, sel, column, extra = {}) {
@@ -343,6 +344,12 @@ function render() {
   function metricSection(section, panels, clockKey) {
     const host = document.getElementById(section + "-body"); host.replaceChildren();
     const ctl = document.getElementById(section + "-controls"); ctl.replaceChildren();
+    // A section the report gives no panel is not drawn: no header, controls or tab.
+    const others = section === "ml" ? T.metrics.filter(k => !named.has(k) && !prefixes.some(p => k.startsWith(p))) : [];
+    const shown = panels.length || others.length ? "" : "none";
+    document.getElementById(section).style.display = shown;
+    for (const tab of document.querySelectorAll(`#tabs a[data-s="${section}"]`)) tab.style.display = shown;
+    if (shown) return;
     if (!TRAINED) { host.appendChild(node("div", "na", "No training runs")); document.getElementById(section + "-sub").textContent = ""; return; }
     control(ctl, "X axis", CLOCKS, clockKey); control(ctl, "Lines", [["on", "Smoothed"], ["off", "Raw"]], "smooth");
     const clock = S[clockKey], opts = {xLabel: clock, band: true, sync: section};
@@ -429,12 +436,9 @@ function render() {
         flame(card(host, panel.title, `seconds logged under ${panel.prefix}`, "full"), panel, vis, color, swatch);
       } else card(host, `Unknown panel kind ${JSON.stringify(panel.kind)}`, "not drawn");
     }
-    if (section === "ml") {
-      const others = T.metrics.filter(k => !named.has(k) && !prefixes.some(p => k.startsWith(p)));
-      if (others.length) {
-        const c = card(host, "Other logged metrics", "named by no panel", "full"), grid = node("div", "grid multiples"); c.appendChild(grid);
-        for (const k of others) { const m = node("div"), h = node("div"); m.append(node("div", "mini-title mono", k), h); grid.appendChild(m); chartKey(h, k, "linear", 130, true); }
-      }
+    if (others.length) {
+      const c = card(host, "Other logged metrics", "named by no panel", "full"), grid = node("div", "grid multiples"); c.appendChild(grid);
+      for (const k of others) { const m = node("div"), h = node("div"); m.append(node("div", "mini-title mono", k), h); grid.appendChild(m); chartKey(h, k, "linear", 130, true); }
     }
     if (missing.length) { const m = node("div", "missing card full", "Named by a panel but not logged by these runs: "); m.style.border = "0"; m.style.padding = "0"; missing.forEach(k => m.appendChild(node("code", null, k))); host.appendChild(m); }
     document.getElementById(section + "-sub").textContent = clockMeaning(clock);

@@ -933,7 +933,7 @@ def test_a_report_draws_what_eval_runs_recorded_after_the_file_changes(
     storage = MeasuredStorage(DirectoryStorage(runs))
     page = build(storage, file)
     # Exactly what the held runs recorded, with a note rather than a refusal.
-    assert page.cells == drawn.cells and page.held == drawn.held
+    assert page.cells == drawn.cells and page.points == drawn.points
     assert [note for note in page.notes if "ladder" in note] == [
         "Tournament ladder is drawn as its eval runs recorded it:"
         " eval(state) now defines it otherwise (tournament_conflict)."
@@ -1004,5 +1004,6 @@ def test_a_seating_pools_every_tournament_and_setup_that_played_it(
     }
     # Both checkpoints, each from its one match, whichever tournament held it.
     assert cells == {100: 1, 200: 1}
-    held = {(h.tournament, h.at["updates"]) for h in page.held if h.seating == "vs weak"}
-    assert held == {("cpu", 100), ("cuda", 100), ("cuda", 200)}
+    # One point per checkpoint: 100, held by both tournaments, is not drawn twice.
+    points = sorted((p.at["updates"], p.matches) for p in page.points if p.selection == pooled)
+    assert points == [(100, 1), (200, 1)]

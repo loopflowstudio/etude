@@ -119,6 +119,7 @@ def training[C: BaseModel](
     `LauncherError` when it is not, or when a config is not of that type or
     would not validate back into it.
     """
+    _require_hours(options)
     job = _job(train, config, origin=train, options=options)
     if smoke is None:
         return job
@@ -174,6 +175,7 @@ def evaluation(
     a job is refused: a machine reads no other eval run, so cannot tell what
     is new. Any other job names its `experiment`.
     """
+    _require_hours(options)
     if isinstance(tournament, Benchmark) and enter:
         raise LauncherError(f"{tournament.name} is a benchmark: give it checkpoints, no entrants")
     if checkpoint is not None and checkpoints:
@@ -368,6 +370,12 @@ def _located(match: Match, here: Mapping[str, str]) -> Match:
             )
         )
     return match.model_copy(update={"players": tuple(players)})
+
+
+def _require_hours(options: JobOptions) -> None:
+    """Refuse a job with no `max_hours` in words, before `Job` refuses it as a missing field."""
+    if "max_hours" not in options:
+        raise LauncherError("a job needs max_hours: the most hours it may hold a machine")
 
 
 def _job(

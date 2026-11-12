@@ -277,6 +277,46 @@ def test_a_relative_seat_finds_an_exact_position_or_says_whether_one_may_still_c
         )
 
 
+def test_a_trained_seat_never_seats_the_lines_initial_weights() -> None:
+    direct = Inference(config={"search": 0})
+
+    def seating(seat: Fraction | At) -> Seating:
+        return Seating(name="s", players=(direct, seat), conditions=({"deal": 0},), games=1)
+
+    line = _line("l1", "large", 0, 100, 300, 700)
+    half = Fraction(clock="updates", value=0.5, at_or_before=True, inference=direct)
+    trained = seating(half.model_copy(update={"trained": True}))
+    # At or before half of 100, only the initial weights: seated unless trained is asked.
+    found = seating(half).resolve(line.checkpoints[1], [line])
+    assert isinstance(found, Seated) and _found(found) == [(line.checkpoints[0], 1)]
+    assert isinstance(gap := trained.resolve(line.checkpoints[1], [line]), Gap)
+    assert (gap.missing, gap.position, gap.trained) == ("never", 50, True)
+    # A trained checkpoint at or before the target is seated as ever.
+    found = trained.resolve(line.checkpoints[3], [line])
+    assert isinstance(found, Seated) and _found(found) == [(line.checkpoints[2], 1)]
+    # Exactly at the initial weights: never, though a checkpoint stands there.
+    initial = seating(At(clock="updates", value=0, trained=True, inference=direct))
+    assert isinstance(gap := initial.resolve(line.checkpoints[1], [line]), Gap)
+    assert gap.missing == "never"
+    # Etude's hours are above 0 from the start; the run's own clock says it is untrained.
+    hours = Line(
+        name="h1",
+        checkpoints=tuple(
+            _ref("h1", updates).model_copy(
+                update={"at": {"updates": updates, "running_hours": 0.001 + updates / 100}}
+            )
+            for updates in (0, 100)
+        ),
+    )
+    by_hours = seating(
+        Fraction(
+            clock="running_hours", value=0.5, at_or_before=True, trained=True, inference=direct
+        )
+    )
+    assert isinstance(gap := by_hours.resolve(hours.checkpoints[1], [hours]), Gap)
+    assert gap.missing == "never"
+
+
 def test_an_at_or_before_seat_takes_the_latest_checkpoint_once_none_nearer_can_come() -> None:
     direct = Inference(config={"search": 0})
 

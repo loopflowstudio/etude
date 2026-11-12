@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 const {test} = require("node:test");
 const context = vm.createContext({});
-vm.runInContext(fs.readFileSync("src/etude/charts.js", "utf8") + "\nthis.model = model; this.isolated = isolated;", context);
+vm.runInContext(fs.readFileSync("src/etude/charts.js", "utf8") + "\nthis.model = model; this.isolated = isolated; this.tickLabels = tickLabels;", context);
 
 function player(name, line, updates, run = null, ordinal = null) {
   return {name, line, at: {updates}, config: "{}", run, ordinal};
@@ -16,7 +16,7 @@ function page(players, cells, training = {jobs: [], runs: [], checkpoints: [], c
       subject, opponent, value, selection: 0, score: 0, split: {}, fixed: false,
       interval: [value - 0.1, value + 0.1], rows: 4, matches: 4,
     })),
-    training, report: {clock: "updates"}, coverage: [], selections: [{tournament: null}],
+    training, report: {clock: "updates"}, coverage: [], selections: [{tournament: null}], points: [],
   };
 }
 
@@ -58,8 +58,16 @@ function renderPage(data, hash = "") {
   });
   const script = fs.readFileSync("src/etude/page.html", "utf8").split("<script>\n")[1].split("</script>")[0];
   vm.runInContext(fs.readFileSync("src/etude/charts.js", "utf8") + "\n" + script, browser);
-  return {text: document.getElementById("evals-body").textContent, plots};
+  return {text: document.getElementById("evals-body").textContent, plots, display: id => document.getElementById(id).style.display};
 }
+
+test("a section the report gives no panel is hidden, header and controls with it", () => {
+  const data = page([player("u100", "learner", 100)], [[0, null, 0.5]]);
+  const none = renderPage(data);
+  assert.deepEqual([none.display("evals"), none.display("perf"), none.display("ml")], [undefined, "none", "none"]);
+  const perf = renderPage({...data, report: {clock: "updates", perf: [{kind: "lines", title: "Speed", keys: ["sps"]}]}});
+  assert.deepEqual([perf.display("perf"), perf.display("ml")], ["", "none"]);
+});
 
 test("a curve whose checkpoints all play two variants says so once, naming the variants", () => {
   const training = {
@@ -279,61 +287,64 @@ test("refresh failure leaves the page visible and a later success reloads once",
   assert.equal(requests, 2); assert.equal(reloads, 2); // snapshots only reload
 });
 
-// A seating held for checkpoints of line "learner": each held one's matches by their first
-// two seats (`Page.held`), and a held checkpoint whose relative seat found none.
-function seated(held, cells) {
+// A seating held for checkpoints of line "learner": each one's point (`Page.points`), scored
+// by the page or missing because its relative seat found no checkpoint.
+const NEVER = {when: "never", job: null, clock: "updates", position: 50, at_or_before: false, trained: false};
+function seated(points, cells = []) {
   const data = page([player("u100", "learner", 100), player("u200", "learner", 200), player("u400", "learner", 400)], cells);
   data.selections = [{tournament: "t", seating: "half"}];
-  data.held = held.map(h => ({tournament: "t", seating: "half", run: null, ordinal: null, line: "learner", pairs: [], missing: null, meta: null, ...h}));
+  data.points = points.map(p => ({selection: 0, run: null, ordinal: null, line: "learner", whole: false, commit: null,
+    ...(p.value == null ? {} : {score: 0, split: {}, interval: null, rows: 4, matches: 2}), ...p}));
   return data;
 }
 
-test("a seating draws each held checkpoint's first seat against its second, where it stood", () => {
+test("a seating draws each point's score where its checkpoint stood, and says why one is missing", () => {
   const data = seated([
-    {at: {updates: 400}, pairs: [[2, 1]]},
-    {at: {updates: 200}, pairs: [[1, 0]]},
-    {at: {updates: 100}, missing: "never", meta: "its line has no checkpoint at updates 50 and never will"},
-  ], [[2, 1, 0.6], [1, 0, 0.55], [1, 2, 0.4]]);
+    {at: {updates: 400}, value: 0.6, interval: [0.5, 0.7], opponents: [1]},
+    {at: {updates: 200}, value: 0.55, opponents: [0]},
+    {at: {updates: 100}, missing: NEVER},
+  ]);
   const m = context.model(data), at = Object.fromEntries(points(m, m.JOBS[0]).map(p => [p.x, p]));
-  assert.equal(at[400].y, 0.6);
-  // u200's own seat: its score as held, not its complementary score as the seat held for u400.
+  assert.equal(at[400].y, 0.6); assert.equal(at[400].lo, 0.5);
   assert.equal(at[200].y, 0.55);
-  assert.match(at[200].meta, /vs .*u100/);
+  assert.match(at[200].meta, /2 matches · vs .*u100/);
   assert.equal(at[100].missing, true);
   assert.equal(at[100].gap, "none");
-  assert.match(at[100].meta, /never/);
+  assert.equal(at[100].meta, "its line has no checkpoint at updates 50 and never will");
 });
 
-test("a seat not filled yet is a pending gap, and a seat of several lines is their mean", () => {
+test("a seat not filled yet is a pending gap, and a point over several lines says so", () => {
   const data = seated([
-    {at: {updates: 400}, pairs: [[2, 0], [2, 1]]},
-    {at: {updates: 200}, missing: "not_yet", meta: "small has no checkpoint at updates 200 yet"},
-  ], [[2, 0, 0.5], [2, 1, 0.7]]);
+    {at: {updates: 400}, value: 0.6, opponents: [0, 1]},
+    {at: {updates: 200}, missing: {...NEVER, when: "not_yet", job: "small", position: 8000}},
+    {at: {updates: 100}, missing: {...NEVER, at_or_before: true, trained: true}},
+  ]);
   const m = context.model(data), at = Object.fromEntries(points(m, m.JOBS[0]).map(p => [p.x, p]));
-  assert.ok(Math.abs(at[400].y - 0.6) < 1e-12);
-  assert.match(at[400].meta, /mean of 2/);
+  assert.equal(at[400].y, 0.6);
+  assert.match(at[400].meta, /mean of 2 · vs .*u100, .*u200/);
   assert.equal(at[200].gap, "pending");
-  assert.match(at[200].meta, /small has no checkpoint at updates 200 yet/);
+  assert.equal(at[200].meta, "small has no checkpoint at updates 8,000 yet");
+  assert.equal(at[100].meta, "its line has no trained checkpoint at or before updates 50");
   const rendered = renderPage({...data, report: {clock: "updates", evals: [{kind: "curve", title: "Half", matches: {seating: "half"}}]}});
   assert.equal(rendered.plots.length, 1);
   assert.match(rendered.text, /first seat against the second, as seated/);
 });
 
-test("a seating named without a tournament draws one point per checkpoint from every tournament", () => {
+test("a point is its own view's: another score or split of the same checkpoint is not drawn for it", () => {
   const data = seated([
-    {at: {updates: 400}, pairs: [[2, 1]]},
-    {at: {updates: 400}, pairs: [[2, 1]], tournament: "u"},
-    {at: {updates: 200}, pairs: [[1, 0]], tournament: "u"},
-  ], [[2, 1, 0.6], [1, 0, 0.55]]);
-  data.selections = [{tournament: "t", seating: "half"}, {tournament: null, seating: "half"}];
-  data.cells.forEach(c => { c.selection = 1; });
+    {at: {updates: 400}, value: 0.6, opponents: [1]},
+    {at: {updates: 400}, value: 0.9, opponents: [1], split: {on_play: true}},
+  ]);
   const m = context.model(data);
-  assert.equal(m.selectMatches({seating: "half"}, 0), 1);
-  const at = Object.fromEntries(m.jobPoints(m.JOBS[0], "updates", m.evalValue(0, 1, {}, "")).map(p => [p.x, p]));
-  // Held by both tournaments, u400 seats the same pair: its one cell, not a mean of two.
-  assert.equal(at[400].y, 0.6);
-  assert.doesNotMatch(at[400].meta, /mean/);
-  assert.equal(at[200].y, 0.55);
+  const whole = m.jobPoints(m.JOBS[0], "updates", m.evalValue(0, 0, {}, "")).find(p => p.x === 400);
+  const split = m.jobPoints(m.JOBS[0], "updates", m.evalValue(0, 0, {on_play: true}, "")).find(p => p.x === 400);
+  assert.deepEqual([whole.y, split.y], [0.6, 0.9]);
+});
+
+test("ticks a narrow range would label alike are written with the decimals their step needs", () => {
+  const two = v => v.toFixed(2);
+  assert.deepEqual([...context.tickLabels([0.5, 0.55, 0.6], two, 0.05)], ["0.50", "0.55", "0.60"]);
+  assert.deepEqual([...context.tickLabels([0.505, 0.51, 0.515], two, 0.005)], ["0.505", "0.510", "0.515"]);
 });
 
 test("a one-seed seating draws a job's point from the seed that played it, and waits for every seed otherwise", () => {
@@ -346,11 +357,11 @@ test("a one-seed seating draws a job's point from the seed that played it, and w
   data.players[2].at = {};
   data.selections = [{tournament: "t", seating: "rival"}];
   // Held only for seed b's checkpoint: with seeds="one" that point is the job's.
-  data.held = [{tournament: "t", seating: "rival", seeds: "one", run: "b", ordinal: 1, line: "b", at: {updates: 100}, pairs: [[1, 2]], missing: null, meta: null}];
+  data.points = [{selection: 0, run: "b", ordinal: 1, line: "b", at: {updates: 100}, whole: true, commit: null, score: 0, split: {}, value: 0.75, interval: null, rows: 4, matches: 4, opponents: [2]}];
   const one = points(context.model(data), context.model(data).JOBS[0])[0];
   assert.equal(one.y, 0.75);
   assert.doesNotMatch(one.meta, /seeds evaluated/);
-  data.held[0].seeds = "every";
+  data.points[0].whole = false;
   const every = points(context.model(data), context.model(data).JOBS[0])[0];
   assert.equal(every.missing, true);
   assert.match(every.meta, /1 of 2 seeds evaluated/);

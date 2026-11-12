@@ -60,6 +60,7 @@ from etude.eval.records import (
     TournamentRun,
     assemble,
     digest,
+    folder_name,
 )
 from etude.eval.schedule import ordered
 from etude.run.declaration import declare
@@ -161,7 +162,7 @@ def hold(
             if match.key not in delivered
         ]
     run = os.environ.get("ETUDE_RUN") or (
-        f"{tournament.name}.{digest(added.model_dump(mode='json'))[:12]}"
+        f"{folder_name(tournament.name)}.{digest(added.model_dump(mode='json'))[:12]}"
     )
     _record(added, experiment, run, directory)
     return evaluate(

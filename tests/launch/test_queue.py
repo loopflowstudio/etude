@@ -18,6 +18,7 @@ from etude.launch.scheduler import Scheduler
 from etude.launch.schemas import Packet, Work
 from etude.train.records import ParentCheckpoint, Step
 from etude.train.run import track
+from tests.experiments import authored
 from tests.launch.fake import L4, bench
 
 
@@ -214,7 +215,7 @@ def test_cli_continue_waits_without_capacity(
     record = b.scheduler.record(child)
     (given,) = record.spec.environment
     handed = ParentCheckpoint.model_validate_json(given.value)
-    assert (handed.parent.source_id, handed.checkpoint.at) == (parent, {"steps": 3})
+    assert (handed.parent.source_id, authored(handed.checkpoint.at)) == (parent, {"steps": 3})
     assert record.spec.until == "steps=7" and record.autorun
     assert b.scheduler.read(child).phase == "queued"
 

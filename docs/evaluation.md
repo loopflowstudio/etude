@@ -327,7 +327,13 @@ evaluate(
   checkpoint past it or has ended, so a later save never moves it. Etude's
   clocks, `running_hours` and `hours_since_start`, are on every checkpoint
   ([tracking](tracking.md#etudes-clocks)); no checkpoint is saved at an exact
-  hour, so a seat on them takes `at_or_before=True`. A seat
+  hour, so a seat on them takes `at_or_before=True`. A seat with a position
+  takes `trained=True` to seat only checkpoints saved after training began:
+  a line's initial weights, where every clock its run declared stands at 0,
+  are then never seated, so `Fraction(clock="running_hours", value=0.5,
+  at_or_before=True, trained=True, ...)` plays no early checkpoint against
+  its own initialization. A held checkpoint with no trained one to meet is a
+  gap that never fills. A seat
   with no checkpoint there yet plays nothing, and the next hold with no
   checkpoint plays it once one is saved, so a large job's seating against
   `Aligned(job="small")` fills in as the small job catches up. A relative
@@ -345,7 +351,10 @@ evaluate(
   shows one pair of seeds, not the jobs. A seed added later changes the
   split, so that job's points are played again and count only the new one. `Final` is `At` the position where
   the run ended: a gap until it ends, finished or failed, then its last
-  stored checkpoint. Holding a seating against `Final(job=...)` for a job's
+  stored checkpoint. A run whose machine was lost never writes its end; it
+  has failed once the launcher on the computer reading it has closed it
+  without success (`etude status RUN`), so its `Final` is its last stored
+  checkpoint too. Holding a seating against `Final(job=...)` for a job's
   own final checkpoint gives final against final. To meet one chosen
   checkpoint of another job, seat it as a fixed player. A seating with a
   relative seat needs an inference seat to be relative to. Held for a

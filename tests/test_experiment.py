@@ -7,6 +7,7 @@ import shutil
 import time
 from decimal import Decimal
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlparse
 
 import pytest
@@ -420,6 +421,26 @@ def test_a_checkpoint_carries_the_wall_time_its_record_stored(tmp_path: Path) ->
     run.finish(timeout=30)
 
 
+def test_a_run_the_launcher_lost_has_ended_at_its_last_stored_checkpoint(tmp_path: Path) -> None:
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    run = trainer(bucket, tmp_path)
+    save(run, bucket, tmp_path, range(1, 3))
+    # Its process never wrote an end, as when its machine is lost: storage says running.
+    assert observe(bucket, "ppo").run("ppo-1").state == "running"
+    # The launcher's own record of the run, closed without success.
+    import etude.launch.client as client  # noqa: PLC0415 - as the passes above import it
+
+    client.launch(Run(id="ppo-1", job=Job(command="exit 3", max_hours=0.1)), "local")
+    (closed,) = client.wait("ppo-1", timeout=60)
+    assert closed.outcome == "failed"
+    state = observe(bucket, "ppo")
+    assert state.run("ppo-1").state == "failed"
+    (line,) = state.lines
+    # So `Final` seats its last stored checkpoint instead of waiting for good.
+    assert line.ended and authored(line.checkpoints[-1].at) == {"updates": 200}
+    run.finish(timeout=30)
+
+
 def test_a_checkpoint_serialized_before_wall_time_still_loads(tmp_path: Path) -> None:
     bucket = DirectoryStorage(tmp_path / "bucket")
     run = trainer(bucket, tmp_path)
@@ -484,7 +505,8 @@ def test_relative_seats_fill_in_as_their_jobs_save_and_the_report_says_what_is_m
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Imported here: the page is the report's, and only this test draws one.
-    from etude.page import build  # noqa: PLC0415
+    from etude.page import Missing, build  # noqa: PLC0415
+    from etude.report import Matches  # noqa: PLC0415
 
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
     bucket = DirectoryStorage(tmp_path / "bucket")
@@ -511,27 +533,29 @@ def test_relative_seats_fill_in_as_their_jobs_save_and_the_report_says_what_is_m
     # and small against itself at both.
     assert (first.new, first.played) == (7, 7)
 
-    def held(seating: str) -> dict[float, tuple[float | None, str | None]]:
+    def drawn(seating: str) -> dict[float, float | Missing | None]:
+        """Large's points on the seating's curve: each one's score, or why it has none."""
         page = build(bucket, file)
+        chosen = page.selections.index(Matches(seating=seating))
         return {
-            h.at["updates"]: (
-                next((c.value for c in page.cells if (c.subject, c.opponent) == h.pairs[0]), None)
-                if h.pairs
-                else None,
-                h.meta,
-            )
-            for h in page.held
-            if h.seating == seating and h.run == "large-1"
+            p.at["updates"]: p.missing or p.value
+            for p in page.points
+            if p.selection == chosen and p.run == "large-1"
         }
 
-    against = held("large vs small")
+    def missing(when: Literal["not_yet", "never"], job: str | None, position: float) -> Missing:
+        return Missing(
+            when=when, job=job, clock="updates", position=position, at_or_before=False, trained=False
+        )  # fmt: skip
+
+    against = drawn("large vs small")
     assert sorted(against) == [100, 200, 300, 400]
-    assert all(value is not None for value, _ in (against[100], against[200]))
-    assert against[300] == (None, "small has no checkpoint at updates 300 yet")
-    half = held("half-training")
-    assert half[100] == (None, "its line has no checkpoint at updates 50 and never will")
-    assert half[300] == (None, "its line has no checkpoint at updates 150 and never will")
-    assert half[200][0] is not None and half[400][0] is not None
+    assert isinstance(against[100], float) and isinstance(against[200], float)
+    assert against[300] == missing("not_yet", "small", 300)
+    half = drawn("half-training")
+    assert half[100] == missing("never", None, 50)
+    assert half[300] == missing("never", None, 150)
+    assert isinstance(half[200], float) and isinstance(half[400], float)
 
     # Small catches up to 300 and ends there: 300 is played, for large and against itself;
     # 400 will never be.
@@ -539,9 +563,9 @@ def test_relative_seats_fill_in_as_their_jobs_save_and_the_report_says_what_is_m
     runs["small"].finish(timeout=30)
     (second,) = advance(experiment, source=bucket, directory=local)
     assert (second.new, second.played) == (2, 2)
-    against = held("large vs small")
-    assert against[300][0] is not None
-    assert against[400] == (None, "small has no checkpoint at updates 400 and never will")
+    against = drawn("large vs small")
+    assert isinstance(against[300], float)
+    assert against[400] == missing("never", "small", 400)
     with statsdb("capacity", bucket) as db:
         lines = {(s.seating, s.run): s for s in scores(db, "ladder", table="plays", value="won")}
     assert [p.ordinal for p in lines[("large vs small", "large-1")].points] == [1, 2, 3]
@@ -552,11 +576,10 @@ def test_relative_seats_fill_in_as_their_jobs_save_and_the_report_says_what_is_m
     assert [(p.matches, p.rows) for p in half_points] == [(1, 2), (1, 2)]
     page = build(bucket, file)
     (at_200,) = [
-        h for h in page.held
-        if h.seating == "half-training" and h.run == "large-1" and h.at["updates"] == 200
+        p for p in page.points
+        if p.selection == page.selections.index(Matches(seating="half-training"))
+        and p.run == "large-1" and p.at["updates"] == 200
     ]  # fmt: skip
-    ((subject, opponent),) = at_200.pairs
-    assert (authored(page.players[subject].at), authored(page.players[opponent].at)) == (
-        {"updates": 200},
-        {"updates": 100},
-    )
+    (opponent,) = at_200.opponents
+    assert authored(page.players[opponent].at) == {"updates": 100}
+    assert (at_200.matches, at_200.rows) == (1, 2)

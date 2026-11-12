@@ -43,11 +43,11 @@ shows a value `compare` computed, never one pooled in the browser. One
 comparison played in several environments shows the environment whose latest
 match is newest, and the page notes the rest.
 
-A seating's checkpoints are drawn as it was held for them (`Held`): each
-held checkpoint's matches by their first two seats, so a curve of seatings
-draws the first seat's score against the second where the held checkpoint
-stood. Relative seats find their checkpoints among the experiment's training
-lines (`etude.experiment.ExperimentState.lines`), read once with its runs.
+A curve of seatings draws points (`Point`): each checkpoint a seating was
+held for, where it stood, with the first seat's score against the second
+over that checkpoint's matches, or why it has none. Relative seats find
+their checkpoints among the experiment's training lines
+(`etude.experiment.ExperimentState.lines`), read once with its runs.
 
 Gaps stay visible. A checkpoint nothing played is not evaluated; one with a
 match no eval run delivered is not yet played; one whose relative seat has
@@ -89,7 +89,7 @@ from etude.launch.logging import explain
 from etude.report import Flame, Matches, Report, Score
 from etude.run.errors import EtudeError
 from etude.run.listing import as_storage, declared, run_folders, runs, under
-from etude.run.records import Record
+from etude.run.records import BUILT_IN_NAMES, Record
 from etude.run.storage import DirectoryStorage, S3Storage, Storage, default_root
 from etude.train.read import RunData, read_all
 from etude.train.report import Training, training
@@ -159,27 +159,54 @@ class Cell(Record):
     matches: int
 
 
-class Held(Record):
-    """A checkpoint a seating was held for, as a curve of that seating draws it.
+class Missing(Record):
+    """Why a point has no score: what its seating's relative seat looked for.
 
-    It is drawn where `run`'s checkpoint `ordinal` stood, or, for one no
-    training run saved, at `at` in `line`. `pairs` are the players of its
-    matches in their first two seats, indexing `Page.players`; with none,
-    `missing` says why a relative seat found no checkpoint, and `meta` says
-    it in words. `seeds` is the seating's: with "one", the point stands for
-    its job, though only one seed's checkpoint was held for it.
+    `when` says whether a checkpoint may still appear there. `job` is the
+    job it looks in, None for the point's own line; `clock` and `position`
+    where, None for a line's final checkpoint or a point with no position on
+    `clock`; `at_or_before` whether any checkpoint up to `position` would do,
+    `trained` whether only one saved after training began would.
     """
 
-    tournament: str
-    seating: str
-    seeds: Literal["every", "one"] = "every"
+    when: Literal["not_yet", "never"]
+    job: str | None
+    clock: str | None
+    position: float | None
+    at_or_before: bool
+    trained: bool
+
+
+class Point(Record):
+    """A point of a curve of seatings: a checkpoint a seating was held for, where it
+    stood, and its score or why it has none.
+
+    `selection` indexes `Page.selections`: one of seatings. It is drawn where
+    `run`'s checkpoint `ordinal` stood, or, for one no training run saved, at
+    `at` in `line`. A scored point is the first seat's score against the
+    second, in one view (`commit`), `score` and `split` as a `Cell` is: the
+    mean over `opponents`, the players it met in the second seat, indexing
+    `Page.players`, with `interval` where it met one. A point with no
+    `value` has `missing`, in every view. `whole` marks a `seeds="one"`
+    seating's point, which stands for its job though one seed's checkpoint
+    was held for it.
+    """
+
+    selection: int
     run: str | None
     ordinal: int | None
     line: str | None
     at: dict[str, float]
-    pairs: tuple[tuple[int, int], ...] = ()
-    missing: Literal["not_yet", "never"] | None = None
-    meta: str | None = None
+    whole: bool = False
+    commit: str | None = None
+    score: int | None = None
+    split: dict[str, JsonValue] = {}
+    value: float | None = None
+    interval: tuple[float, float] | None = None
+    rows: int = 0
+    matches: int = 0
+    opponents: tuple[int, ...] = ()
+    missing: Missing | None = None
 
 
 class Commit(Record):
@@ -236,7 +263,7 @@ class Page(Record):
     environments: tuple[Environment, ...]
     commits: tuple[Commit, ...]
     cells: tuple[Cell, ...]
-    held: tuple[Held, ...] = ()
+    points: tuple[Point, ...] = ()
     coverage: tuple[Coverage, ...]
     failures: tuple[Failure, ...]
     latest_result_ms: int | None
@@ -392,8 +419,13 @@ def index(
                 for c in built.cells
                 if c.score == 0 and not c.split and not c.fixed and c.commit is None
             )
+            points = tuple(
+                p
+                for p in built.points
+                if p.value is None or (p.score == 0 and not p.split and p.commit is None)
+            )
             lean = built.training.model_copy(update={"series": {}, "bands": {}, "timers": ()})
-            page = built.model_copy(update={"cells": kept, "training": lean})
+            page = built.model_copy(update={"cells": kept, "points": points, "training": lean})
         entries.append(
             Entry(
                 file=str(file),
@@ -463,7 +495,7 @@ def build(source: Storage | Path | str, file: Path) -> Page:
         source=_source_name(storage),
         report=report,
         origin=origin,
-        notes=(*notes, *partial, *evals.notes),
+        notes=(*notes, *partial, *_without_hours(trained), *evals.notes),
         training=training(trained, prefixes=flames),
         scores=evals.scores or ((report.score,) if report.score is not None else ()),
         selections=evals.selections,
@@ -471,11 +503,39 @@ def build(source: Storage | Path | str, file: Path) -> Page:
         environments=evals.environments,
         commits=evals.commits,
         cells=evals.cells,
-        held=evals.held,
+        points=evals.points,
         coverage=evals.coverage,
         failures=evals.failures,
         latest_result_ms=evals.latest_result_ms,
         absent=evals.absent,
+    )
+
+
+def _without_hours(trained: Sequence[RunData]) -> tuple[str, ...]:
+    """A note naming the runs whose checkpoints lack Etude's clocks, and why.
+
+    A checkpoint saved before Etude recorded them gets them from its run's
+    attempt records (`etude.train.read`); without those it stands nowhere on
+    them, so an axis or a seat on one leaves it out.
+    """
+    lacking = [
+        run
+        for run in trained
+        if any(clock not in saved.at for saved in run.checkpoints for clock in BUILT_IN_NAMES)
+    ]
+    if not lacking:
+        return ()
+    unread = [run.name for run in lacking if not run.attempts]
+    why = (
+        f" The attempt records (metrics/WRITER.json) of {', '.join(unread)} are not in this"
+        " source to derive them from."
+        if unread
+        else ""
+    )
+    return (
+        f"No {' or '.join(BUILT_IN_NAMES)} for some checkpoints of"
+        f" {', '.join(run.name for run in lacking)}, saved before Etude recorded these clocks:"
+        f" charts and seats on them leave those checkpoints out.{why}",
     )
 
 
@@ -573,7 +633,7 @@ class _Evals:
     environments: tuple[Environment, ...] = ()
     commits: tuple[Commit, ...] = ()
     cells: tuple[Cell, ...] = ()
-    held: tuple[Held, ...] = ()
+    points: tuple[Point, ...] = ()
     coverage: tuple[Coverage, ...] = ()
     failures: tuple[Failure, ...] = ()
     latest_result_ms: int | None = None
@@ -612,7 +672,7 @@ def _read_evals(
             environments=tuple(environments.values()),
             commits=commits,
             cells=tuple(cells),
-            held=_held(standing, players, _checkpoints(db)),
+            points=_points(standing, selections, players, _checkpoints(db), cells),
             coverage=_coverage(db, standing),
             failures=_failures(db, standing, players),
             latest_result_ms=None if latest is None else latest[0],
@@ -801,81 +861,106 @@ def _checkpoints(db: duckdb.DuckDBPyConnection) -> dict[str, _Saved]:
     return {key: _Saved(run, ordinal, json.loads(clocks)) for key, run, ordinal, clocks in found}
 
 
-def _held(
-    standing: Sequence[_Standing], players: Sequence[Player], saved: dict[str, _Saved]
-) -> tuple[Held, ...]:
-    """Each checkpoint each seating with an inference seat was held for: its matches by their
-    first two seats, or why a relative seat found no checkpoint."""
-    # The optional `eval` extra, as in `_evals`.
+def _points(
+    standing: Sequence[_Standing],
+    selections: Sequence[Matches | tuple[Matches, ...]],
+    players: Sequence[Player],
+    saved: dict[str, _Saved],
+    cells: Sequence[Cell],
+) -> tuple[Point, ...]:
+    """Each selection of seatings' points: per checkpoint a seating was held for, its first
+    seat's score over the matches held for it, or why its relative seat found no checkpoint.
+
+    A checkpoint's matches are those the selection's seatings call for it,
+    by their first two seats, each pair once whichever tournaments hold it;
+    their cells are the selection's own, so each view, score and split has
+    its point. Several pairs, such as each line of a job, are their mean.
+    """
+    # The optional `eval` extra, as in `_read_evals`.
     from etude.eval.records import Benchmark  # noqa: PLC0415
 
     index = {each.key: i for i, each in enumerate(players)}
-    found: dict[tuple[str, str, str], set[tuple[int, int]]] = {}
+    # (tournament, seating, checkpoint) to the pairs seated for it.
+    held: dict[tuple[str, str, str], set[tuple[int, int]]] = {}
     for each in standing:
         for called in each.schedule:
             if called.seating is None or called.checkpoint is None:
                 continue
-            key = (each.name, called.seating, str(called.checkpoint))
-            seated = found.setdefault(key, set())
+            pairs = held.setdefault((each.name, called.seating, str(called.checkpoint)), set())
             # A player no eval run seated yet has played nothing to draw.
             first, second = (index.get(p.key) for p in called.match.players[:2])
             if first is not None and second is not None:
-                seated.add((first, second))
-    missing = {
+                pairs.add((first, second))
+    gaps = {
         (each.name, gap.seating, str(gap.checkpoint)): gap for each in standing for gap in each.gaps
     }
-    refs = {
-        (each.name, str(ref.key)): ref for each in standing for ref in each.tournament.checkpoints
-    }
-    seeds = {
-        (each.name, seating.name): seating.seeds
+    refs = {str(ref.key): ref for each in standing for ref in each.tournament.checkpoints}
+    one_seed = {
+        (each.name, seating.name)
         for each in standing
         if isinstance(each.tournament.definition, Benchmark)
         for seating in each.tournament.definition.seatings
+        if seating.seeds == "one"
     }
-    held = []
-    for key in sorted(found.keys() | missing.keys()):
-        tournament, seating, checkpoint = key
-        ref, place = refs[(tournament, checkpoint)], saved.get(checkpoint)
-        reason = missing.get(key)
-        held.append(
-            Held(
-                tournament=tournament,
-                seating=seating,
-                seeds=seeds.get((tournament, seating), "every"),
+    scored: dict[tuple[int, int, int], list[Cell]] = {}
+    for cell in cells:
+        if cell.opponent is not None and not cell.fixed:
+            scored.setdefault((cell.selection, cell.subject, cell.opponent), []).append(cell)
+    points: list[Point] = []
+    for number, selection in enumerate(selections):
+        parts = selection if isinstance(selection, tuple) else (selection,)
+        if not parts or any(part.seating is None for part in parts):
+            continue
+        chosen = sorted(
+            key
+            for key in held.keys() | gaps.keys()
+            if any(p.seating == key[1] and p.tournament in (None, key[0]) for p in parts)
+        )
+        for checkpoint in dict.fromkeys(key[2] for key in chosen):
+            here = [key for key in chosen if key[2] == checkpoint]
+            ref, place = refs[checkpoint], saved.get(checkpoint)
+            stood = Point(
+                selection=number,
                 run=None if place is None else place.run,
                 ordinal=None if place is None else place.ordinal,
                 line=ref.line,
                 at=ref.at or ({} if place is None else place.clocks),
-                pairs=tuple(sorted(found.get(key, ()))),
-                missing=None if reason is None else reason.missing,
-                meta=None if reason is None else _missing_text(reason),
+                whole=any(key[:2] in one_seed for key in here),
             )
-        )
-    return tuple(held)
-
-
-def _missing_text(gap: Gap) -> str:
-    """What a gap's relative seat looked for, in words: "small has no checkpoint at updates
-    8,000 yet"."""
-    whose = gap.job or "its line"
-    if gap.clock is None:
-        return (
-            f"{whose} has not ended yet"
-            if gap.missing == "not_yet"
-            else f"{whose} ended with no checkpoint"
-        )
-    if gap.position is None:
-        return f"the held checkpoint has no {gap.clock} position"
-    where = f"{gap.clock} {gap.position:,.6g}"
-    if gap.at_or_before:
-        return (
-            f"{whose} has not saved past {where} yet"
-            if gap.missing == "not_yet"
-            else f"{whose} has no checkpoint at or before {where}"
-        )
-    later = "yet" if gap.missing == "not_yet" else "and never will"
-    return f"{whose} has no checkpoint at {where} {later}"
+            # By view, score and split: the cells of this checkpoint's pairs.
+            met: dict[tuple[str | None, int, str], list[tuple[int, Cell]]] = {}
+            for subject, opponent in sorted({pair for key in here for pair in held.get(key, ())}):
+                for cell in scored.get((number, subject, opponent), ()):
+                    view = (cell.commit, cell.score, json.dumps(cell.split, sort_keys=True))
+                    met.setdefault(view, []).append((opponent, cell))
+            for found in met.values():
+                counted = [cell for _, cell in found]
+                points.append(
+                    stood.model_copy(
+                        update={
+                            "commit": counted[0].commit,
+                            "score": counted[0].score,
+                            "split": counted[0].split,
+                            "value": sum(cell.value for cell in counted) / len(counted),
+                            "interval": counted[0].interval if len(counted) == 1 else None,
+                            "rows": sum(cell.rows for cell in counted),
+                            "matches": sum(cell.matches for cell in counted),
+                            "opponents": tuple(opponent for opponent, _ in found),
+                        }
+                    )
+                )
+            gap = next((gaps[key] for key in here if key in gaps), None)
+            if gap is not None:
+                missing = Missing(
+                    when=gap.missing,
+                    job=gap.job,
+                    clock=gap.clock,
+                    position=gap.position,
+                    at_or_before=gap.at_or_before,
+                    trained=gap.trained,
+                )
+                points.append(stood.model_copy(update={"missing": missing}))
+    return tuple(points)
 
 
 def _load(

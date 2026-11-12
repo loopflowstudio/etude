@@ -70,6 +70,7 @@ from etude.storage_timeout import StorageUnavailable
 from etude.train.records import Step
 from etude.train.run import Run as TrackedRun
 from etude.train.run import track
+from tests.experiments import authored
 from tests.launch.counting import Counting, Counts, job_text
 
 TRAIN = """
@@ -516,7 +517,7 @@ def test_a_run_from_a_commit_runs_in_a_pod_and_continues_in_another(
     first = c.scheduler.launch(Run(job=job, seed=7), rent="l4")
     c.scheduler.wait(first, every=0.05, timeout=30)
     status = released(c.scheduler, first)
-    assert (status.outcome, status.clocks) == ("succeeded", {"steps": 3})
+    assert (status.outcome, authored(status.clocks)) == ("succeeded", {"steps": 3})
     assert job_text(c.scheduler.logs(refresh=True, run=first)) == "seed 7 from 0 to 3\n"
     assert c.provider.pods == {}  # the pod deleted itself once its work was delivered
 
@@ -527,7 +528,7 @@ def test_a_run_from_a_commit_runs_in_a_pod_and_continues_in_another(
     )
     c.scheduler.wait(second, every=0.05, timeout=30)
     status = released(c.scheduler, second)
-    assert (status.outcome, status.clocks) == ("succeeded", {"steps": 7})
+    assert (status.outcome, authored(status.clocks)) == ("succeeded", {"steps": 7})
     verified, said = job_text(c.scheduler.logs(refresh=True, run=second)).split("\n", 1)
     assert verified.startswith("inputs: verified parent-checkpoint.pt (13 bytes, ")
     assert said == "seed 7 from 3 to 7\n"
@@ -600,7 +601,7 @@ def test_a_pods_checkpoint_reaches_an_owned_host_without_its_storage_from_the_bu
     for until in ("steps=7", "steps=5"):
         run = c.scheduler.launch(continue_from(parent, until, source=source), "mini")
         (status,) = c.scheduler.wait(run, every=0.05, timeout=30)
-        assert (status.outcome, status.clocks) == ("succeeded", {"steps": int(until[6:])})
+        assert (status.outcome, authored(status.clocks)) == ("succeeded", {"steps": int(until[6:])})
         verified, said = job_text(c.scheduler.logs(refresh=True, run=run)).split("\n", 1)
         assert verified.startswith("inputs: verified parent-checkpoint.pt (13 bytes, ")
         assert said == f"seed 7 from 3 to {until[6:]}\n"

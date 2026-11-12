@@ -314,6 +314,11 @@ in hours, which no run declares or logs:
 - **`hours_since_start`** is wall time since the line's first attempt began,
   gaps between attempts included.
 
+A checkpoint saved before Etude recorded them gets both from its run's
+attempt records (`metrics/WRITER.json`). Where it has neither, such as a
+run copied without those records, the report says so at its top, naming the
+runs: charts and seats on these clocks leave such a checkpoint out.
+
 `run.position(clock)` says where the run stands on any clock;
 `run.checkpoint_due(every, clock="running_hours")` whether the clock has
 passed a multiple of `every` since the latest checkpoint. Either clock can be
@@ -487,7 +492,8 @@ section.
 
 **Two parts.** Evals, then Perf and ML details, each with its own x axis (any
 declared clock, `running_hours` or `hours_since_start`); Perf and ML details can be smoothed. Choosing
-jobs and filtering are the only controls for the whole page.
+jobs and filtering are the only controls for the whole page. A section the
+report gives no panel (`perf=()`, `ml=()`) is not drawn.
 
 **Training jobs.** Training curves group a job's runs across seeds,
 labelled by the job's launch name and seed count ("ppo · 3 seeds"), as its
@@ -614,7 +620,8 @@ A held checkpoint whose relative seat has no checkpoint is a gap with its
 reason. While the seat's run could still save one there, the gap says "not
 yet" and fills in once a later pass plays it. Once it can't, because the run
 ended or has passed that position without saving there, the gap says
-"never". A `Final` seat is "not yet" until its run ends. Where
+"never", as it does for a `trained=True` seat with only initial weights to
+meet. A `Final` seat is "not yet" until its run ends. Where
 `Aligned` or `Final` seats several of a job's lines, a point is the mean over
 them, as a point of a job is the mean over its seeds.
 

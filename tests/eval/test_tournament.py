@@ -106,7 +106,8 @@ def test_a_relative_seat_waits_for_its_checkpoint_and_a_batch_hold_plays_it_once
         conditions=DEALS[:1],
         games=2,
     )
-    benchmark = Benchmark(name="paired", environment=WORLD, seatings=(seating,))
+    # A tournament's name may hold spaces, as a seating's may.
+    benchmark = Benchmark(name="paired sizes", environment=WORLD, seatings=(seating,))
 
     def lines(saved: int) -> list[Line]:
         return [
@@ -140,7 +141,7 @@ def test_a_relative_seat_waits_for_its_checkpoint_and_a_batch_hold_plays_it_once
     # Nothing new is found again: one eval run, resumed, and nothing played.
     assert [each.played for each in again] == [0, 0] and again[0].name == again[1].name
     with statsdb(EXPERIMENT, bucket) as db:
-        (line,) = scores(db, "paired", table="plays", value="won")
+        (line,) = scores(db, "paired sizes", table="plays", value="won")
     # No training run recorded these checkpoints: one line of every held checkpoint played.
     assert sorted(p.checkpoint for p in line.points) == sorted(
         str(ref.key) for ref in (large[0], large[1], small[0])
