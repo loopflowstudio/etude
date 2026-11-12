@@ -107,8 +107,9 @@ def test_row_tables_resolve_only_surviving_updates_across_machine_folders(
         TablePoint(x=1, rows=({"result": "keep"},)),
         TablePoint(x=2, rows=({"result": "checkpoint" if empty_resume else "latest"},)),
     )
-    # Two arrays per contributing block plus exactly two selected artifacts.
-    assert storage.requests - before == (4 if empty_resume else 7)
+    # Two arrays per contributing block plus exactly two selected artifacts; planning reads
+    # the resumed block's clock once more, since its repeated values give no range in the header.
+    assert storage.requests - before == (4 if empty_resume else 8)
     assert data.read_table("orphan", "updates") == ()
 
 

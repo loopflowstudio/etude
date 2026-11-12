@@ -13,7 +13,7 @@ from etude.run.errors import EtudeError
 from etude.run.records import WALL_CLOCK
 from etude.run.storage import DirectoryStorage, run_prefix
 from etude.train.block import Builder, Series, Table, concat, decode
-from etude.train.manifest import describe, write_manifest
+from etude.train.manifest import Index, describe
 from etude.train.read import Points, read, read_batches
 from etude.train.run import write_block
 from tests.run.storage import MeasuredStorage
@@ -99,7 +99,7 @@ def _long_run(root: Path, blocks: int, rows: int = 8192) -> None:
             },
         )
         write_block(root, block_key(2, sequence, sequence, FIRST), table)
-    write_manifest(root, FIRST)
+    Index(root, FIRST).write()
 
 
 def _peak(blocks: int, root: Path, streaming: bool) -> int:
