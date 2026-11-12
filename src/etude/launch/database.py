@@ -39,6 +39,7 @@ from etude.launch.records import (
     RunAttempt,
     RunRecord,
     Session,
+    Smoke,
     SourcePosition,
     Stale,
     Storage,
@@ -97,7 +98,7 @@ CREATE TABLE IF NOT EXISTS runs(
   created_at TEXT NOT NULL,
   cancel_requested_at TEXT, version INTEGER NOT NULL DEFAULT 1,
   autorun INTEGER NOT NULL DEFAULT 0, queued INTEGER NOT NULL DEFAULT 0,
-  params TEXT NOT NULL DEFAULT '{}', source TEXT,
+  params TEXT NOT NULL DEFAULT '{}', source TEXT, smoke TEXT NOT NULL DEFAULT '{}',
   CHECK (pool IS NOT NULL OR rent IS NOT NULL));
 CREATE TABLE IF NOT EXISTS sessions(
   seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
@@ -124,7 +125,7 @@ CREATE INDEX IF NOT EXISTS attempts_session ON attempts(session);
 
 Fact = str | int | None
 # Prototype databases from another schema version are refused, never migrated.
-_VERSION = 14
+_VERSION = 15
 
 
 def _text(at: datetime | None) -> str | None:
@@ -143,6 +144,7 @@ def _run(row: sqlite3.Row) -> RunRecord:
             "spec": Job.model_validate_json(row["spec"]),
             "params": json.loads(row["params"]),
             "source": SourcePosition.model_validate_json(row["source"]) if row["source"] else None,
+            "smoke": Smoke.model_validate_json(row["smoke"]),
         }
     )
 
@@ -626,8 +628,8 @@ class Database:
                 )
                 self._db.execute(
                     """INSERT INTO runs(id, job, spec, seed, pool, rent, cohort,
-                       created_at, autorun, queued, params, source)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       created_at, autorun, queued, params, source, smoke)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         run.id,
                         run.job,
@@ -641,6 +643,7 @@ class Database:
                         int(run.queued),
                         json.dumps(run.params),
                         run.source.model_dump_json() if run.source else None,
+                        run.smoke.model_dump_json(),
                     ),
                 )
 

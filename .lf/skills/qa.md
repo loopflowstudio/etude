@@ -139,6 +139,31 @@ Cut storage with `docker exec box iptables -A OUTPUT -p tcp --dport 443 -j DROP`
 the controller after code changes. Afterwards remove the container and delete the
 `etude-qa/NAME/` prefix.
 
+## Etude: launching an experiment file on this computer
+
+A lab that runs typed jobs (`training(train, config=...)`) is a git repo, outside the
+repo, with an isolated `ETUDE_HOME`:
+
+- `pyproject.toml`: `dependencies = ["etude-sdk[eval]"]` (the `eval` extra brings
+  duckdb; without it every tournament fails), `[tool.uv] package = false`, and
+  `[tool.uv.sources] etude-sdk = { path = "<this checkout>", editable = true }`.
+  `uv lock`, add `.gitignore` with `.venv/` and `__pycache__/`, and commit, or every
+  run says "plus uncommitted changes".
+- `train.py` with a Pydantic config whose real size raises, so a passing smoke shows
+  its smoke form ran; `games.py` with `play(match)`; `ppo.py` with `runs()`, `eval(state)`
+  and `report()`. A job's `max_usd` must be more than zero or omitted.
+- `uv run etude smoke ppo.py`, `uv run etude launch ppo.py --cohort NAME`, then
+  `etude status`. Nothing runs a controller here: cancel what you queued
+  (`etude cancel COHORT`) and `etude wait RUN` until each says `done: cancelled`,
+  so no worker is left behind. macOS has no `timeout`; use
+  `perl -e 'alarm 60; exec @ARGV' uv run etude wait RUN`.
+- Client jobs built in Python need `experiment=` (`job.model_copy(update=...)`); an
+  experiment file names it from its stem, and `track()` otherwise raises
+  `experiment_not_named`.
+- A `--keep` smoke folder's `track/` holds a tiny tournament (games=1): as an
+  `etude eval --source` it gives `matchup_conflict`. Copy only the training run's
+  folder out for a clean source.
+
 ## Etude: tracking and reading a run against a bucket
 
 Write a real run with `track(..., directory=D, segment_rows=500)` and `run.finish()`;

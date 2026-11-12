@@ -20,11 +20,15 @@ def experiment_named(path: Path) -> str | None:
 
     Recognised by its text, without running it; a file that does not parse is no experiment.
     """
+    return path.stem if defined_functions(path) & set(EXPERIMENT_FUNCTIONS) else None
+
+
+def defined_functions(path: Path) -> frozenset[str]:
+    """The functions a file defines at its top level, by its text; none if it does not parse."""
     try:
         tree = ast.parse(path.read_bytes(), filename=str(path))
     except SyntaxError:
-        return None
-    defined = {
+        return frozenset()
+    return frozenset(
         each.name for each in tree.body if isinstance(each, ast.FunctionDef | ast.AsyncFunctionDef)
-    }
-    return path.stem if defined & set(EXPERIMENT_FUNCTIONS) else None
+    )

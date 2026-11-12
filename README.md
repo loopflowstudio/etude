@@ -13,7 +13,13 @@ from train import TrainConfig, train
 
 
 def runs() -> Job:
-    return training(train, config=TrainConfig(lr=1e-3), max_hours=2, max_usd=Decimal(4))
+    return training(
+        train,
+        config=TrainConfig(lr=1e-3),
+        smoke=TrainConfig(updates=1),  # how to run it tiny, for `etude smoke`
+        max_hours=2,
+        max_usd=Decimal(4),
+    )
 ```
 
 ```python
@@ -40,8 +46,9 @@ def train(config: TrainConfig) -> None:
 ```
 
 ```sh
-etude launch job.py          # on this computer; --pool P for machines you own,
-                             # --rent R to rent CPU or GPU machines, or both
+etude smoke job.py           # one tiny update here, spending nothing
+etude launch job.py          # runs on this computer; --smoke smokes first, --pool P for
+                             # machines you own, --rent R to rent CPU or GPU machines, or both
 etude status                 # where runs stand
 etude logs --run RUN         # preparation, every attempt, cleanup
 etude report ppo.py --open   # experiment ppo's evals, perf and ML details, as one page

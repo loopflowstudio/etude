@@ -22,6 +22,7 @@ before renting from R. A run that cannot start yet waits.
 | `etude queue FILE.py [--pool P] [--rent R]` | Add runs. They start when a machine is free or can be rented; lack of capacity leaves them waiting. |
 | `etude launch FILE.py [--pool P] [--rent R]` | Acquire machines for the first runs (up to cohort parallelism), then record the runs. Failure records no runs. |
 | `etude launch FILE.py ... --quote` | Print the machines the first wave would take and their planned rental costs. Rents nothing. |
+| `etude smoke FILE.py` | Run the file's training, evaluation and report in smoke form on this computer. Spends nothing. `launch --smoke` and `queue --smoke` do this first ([Smoke before you spend](#smoke-before-you-spend)). |
 | `etude availability R` | Ask R's provider what it would rent now, at what price. Rents nothing. |
 | `etude rent R --hours H` | Rent a machine for a window of time; it takes queued runs. |
 
@@ -269,6 +270,152 @@ imports nothing else of Etude before the function's own module.
 To evaluate as training goes, an experiment file's `eval(state)` chooses the
 checkpoints and `etude eval` launches what is new
 ([Experiments](evaluation.md#experiments)).
+
+## Smoke before you spend
+
+```python
+# ppo.py
+from decimal import Decimal
+
+from etude.experiment import ExperimentState
+from etude.jobs import training
+from etude.launch.records import Job
+from etude.report import Report
+
+from train import TrainConfig, train
+
+
+def runs() -> Job:
+    return training(
+        train,
+        config=TrainConfig(lr=3e-4),
+        smoke=TrainConfig(updates=1),  # the same job, tiny
+        max_hours=6,
+        max_usd=Decimal(30),
+    )
+
+
+def eval(state: ExperimentState) -> list[Job]: ...  # as before
+
+
+def report() -> Report: ...  # as before
+```
+
+```sh
+$ etude smoke ppo.py
+smoke train ppo: passed in 41.2 s (1 checkpoint)
+smoke eval ladder: passed in 3.1 s (6 matches, 1 game each)
+smoke report: passed in 0.8 s
+$ etude launch ppo.py --rent l4 --smoke  # smokes first; rents only if it passes
+```
+
+Smoke is manual: run `etude smoke`, or pass `--smoke` to `launch`, `queue` or a
+launching `etude eval`. Nothing smokes on its own.
+
+A smoke runs each part of an experiment file through the same code as the real
+thing, only small, in order:
+
+1. **Train.** Each job `runs()` returns, run once on this computer with its
+   smoke form, through the `local` pool's real path: its environment is prepared,
+   a worker starts, and it writes a real tracked checkpoint. Seeds are dropped,
+   so a cohort of three seeds is smoked once.
+2. **Evaluate.** `eval(state)` is called on the smoke's runs and checkpoints.
+   Each match it calls for plays one game here, under every condition, so a
+   game that breaks under only one deal is still caught.
+3. **Report.** `report()` (or the default `Report()`) is drawn from those tiny
+   results.
+
+Each step's line goes to standard error, so standard output stays the list of
+submitted runs. The first failure stops the smoke: it prints that step's
+output, names the step, and exits 1. `launch --smoke` and `queue --smoke` then
+submit, queue, rent and publish nothing. A file with no `eval(state)` skips evaluation, and a
+file that is no experiment file skips evaluation and report; each says so.
+
+**A job's smoke form is declared on the job.** Etude does not look inside your
+training code to shrink it. `Job.smoke` is a `SmokeForm` of overrides used in place
+of the job's own for the smoke run; any it leaves unset keep the job's value:
+
+| Field | Replaces | Example |
+| --- | --- | --- |
+| `config` | the typed job's config | `training(train, config=..., smoke=TrainConfig(updates=1))` |
+| `command` | a command job's command | `Job(command="manabot train", smoke=SmokeForm(command="manabot train --smoke"), ...)` |
+| `until` | the target | `SmokeForm(until="steps=1")` |
+
+`training(..., smoke=)` takes a config of the same type as `config`, and is
+checked the same way when the job is made. The smoke form is not part of the
+job's identity: changing it does not make a new job. A job with no smoke form is
+reported `not smoked`, never passed, and a file none of whose jobs has one
+launches as before, each job's line reporting `not smoked (no smoke form)`.
+
+**Smoke is local and leaves nothing behind.** It never rents and never needs a
+provider key. Its runs, launcher records, checkpoints and report go to a
+temporary `ETUDE_HOME`, removed afterwards; your real runs, checkpoints and
+artifact cache are not touched, even with `ETUDE_TRACK_DIR` set. Prepared
+environments and installed programs (`~/.etude/prepared/`, `~/.etude/programs/`)
+are shared, so a second smoke does not build them again. `--keep` keeps the temporary folder and prints its path.
+
+**One step at a time.** `--step train`, `--step eval` and `--step report` smoke
+only those (repeat the flag for several). Evaluation and report without
+training need checkpoints from somewhere, so name a source:
+
+```sh
+etude smoke ppo.py --step eval --step report --source s3://bucket/etude/launch
+```
+
+They are played against that source's checkpoints and delivered to the
+temporary store, never to the source. `etude eval FILE --pool P` or `--rent R`
+`--smoke` smokes its evaluation and report this way first, against its
+`--source`, and launches nothing if that fails.
+
+**In CI.** `etude smoke` needs no provider key, no launcher database and no
+network beyond what preparing the job's environment fetches, and it exits 1 on
+the first failure, so a CI job can run it on each push:
+
+```yaml
+# .github/workflows/smoke.yml
+on: [push]
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv run etude smoke ppo.py
+```
+
+**What a run records.** Each launched run keeps what its smoke did: passed, or
+not smoked (no `--smoke`, or a step it could not run), with each step's outcome
+and seconds.
+A run's steps are its own job's training and the file's evaluation and report,
+so in a cohort where only some jobs have a smoke form the others record
+`not smoked (train: no smoke form)`. A declared step the smoke could not
+exercise, such as an evaluation with no checkpoints to play, is not smoked too
+(`not smoked (eval: no checkpoints)`). `etude status RUN` shows it
+(`smoke: passed in 45.1 s (train, eval, report)`); a run launched without
+`--smoke` shows no smoke line. `record.smoke` holds it in Python.
+
+**From Python**, the client's `queue`, `queue_cohort`, `launch` and
+`launch_cohort` take `smoke: bool = False`. With `smoke=True` they smoke the
+train step of each job that has a smoke form before submitting, and raise
+`LauncherError` naming the failed job. For the whole chain, as the command runs
+it:
+
+```python
+from pathlib import Path
+
+from etude.launch.job_file import read_job_file
+from etude.smoke import smoke_file
+
+path = Path("ppo.py")
+runs = read_job_file(path, ["--seeds", "2"])  # runs() with these flags; omitted, its defaults
+result = smoke_file(path, runs)  # raises LauncherError on the first failure
+for run in result.stamp(runs):  # each run with its own job's smoke, as submitted
+    print(run.job.name, run.seed, run.smoke)
+```
+
+`smoke_file` also takes `steps=("eval", "report")`, `source=` (a `Storage`, such as
+`storage_from_uri("s3://bucket/etude/launch")`) and `keep=True`, as the command's
+`--step`, `--source` and `--keep`.
 
 ## Rented machines
 
@@ -1178,6 +1325,9 @@ loop's last pass and prints when that was (`last loop: ...`); run `etude wait` o
 Controller selection mutations are asks. `worker` and `controller run` are waits
 because they deliberately execute long-lived loops; they retain their existing
 lifetime rules. Job-file `runs()` is an input function, not a launcher command.
+`smoke` is a wait on this computer alone: it runs the file tiny in a temporary
+home and touches neither the database nor another machine. `queue --smoke` and
+`launch --smoke` run it first, on this computer.
 
 The full expectation also gives external work to the controller loop, makes asks
 safe to repeat with caller-chosen identities, restricts waits to watching, bounds

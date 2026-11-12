@@ -63,6 +63,7 @@ from etude.launch.records import (
     Run,
     RunRecord,
     Runtime,
+    SmokeForm,
     Variable,
     number,
     parse_target,
@@ -78,8 +79,9 @@ from etude.train.records import ParentCheckpoint
 class JobOptions(TypedDict, total=False):
     """How a typed job is launched: every `Job` field except those it derives.
 
-    It derives the command and config, and the experiment: an evaluation's
-    own, else the one `etude launch` reads from an experiment file's name.
+    It derives the command and config, the experiment (an evaluation's own,
+    else the one `etude launch` reads from an experiment file's name) and the
+    smoke form: a training job's `smoke` config; an evaluation's is Etude's.
     """
 
     max_hours: Required[float]
@@ -102,16 +104,24 @@ class JobOptions(TypedDict, total=False):
 
 
 def training[C: BaseModel](
-    train: Callable[[C], None], *, config: C, **options: Unpack[JobOptions]
+    train: Callable[[C], None],
+    *,
+    config: C,
+    smoke: C | None = None,
+    **options: Unpack[JobOptions],
 ) -> Job:
     """A job that calls `train(config)` in the job's own environment.
 
     `train` takes one parameter annotated with `config`'s Pydantic type and is
-    defined at the top of a module the job's source can import. Raises
-    `LauncherError` when it is not, or when `config` is not of that type or
+    defined at the top of a module the job's source can import. `smoke` is the
+    config of its smoke form (`etude smoke`), checked the same way. Raises
+    `LauncherError` when it is not, or when a config is not of that type or
     would not validate back into it.
     """
-    return _job(train, config, origin=train, options=options)
+    job = _job(train, config, origin=train, options=options)
+    if smoke is None:
+        return job
+    return job.model_copy(update={"smoke": SmokeForm(config=_config_text(train, smoke))})
 
 
 class Evaluation(Record):
@@ -365,21 +375,7 @@ def _job(
     experiment: str | None = None,
 ) -> Job:
     """The job that calls `function(config)`; `origin` is the author's function it brings."""
-    try:
-        kind = config_type(function)
-    except TypeError as error:
-        raise LauncherError(str(error)) from None
-    if not isinstance(config, kind):
-        raise LauncherError(
-            f"{function.__qualname__} takes a {kind.__name__} config, not {type(config).__name__}"
-        )
-    text = config.model_dump_json()
-    try:
-        kind.model_validate_json(text)
-    except ValidationError as error:
-        raise LauncherError(
-            f"the {kind.__name__} config would not validate on the machine: {error}"
-        ) from None
+    text = _config_text(function, config)
     repo = _repo(origin, options)
     called = _function(function, repo)
     sourced: JobOptions = {**options, "repo": None if repo is None else str(repo)}
@@ -397,6 +393,26 @@ def _job(
     if called.path:
         command += f" --path {shlex.quote(called.path)}"
     return Job(**sourced, command=command, config=text, experiment=experiment)
+
+
+def _config_text(function: Callable[..., object], config: BaseModel) -> str:
+    """`config` as the job's text, refused unless `function` takes it and it validates back."""
+    try:
+        kind = config_type(function)
+    except TypeError as error:
+        raise LauncherError(str(error)) from None
+    if not isinstance(config, kind):
+        raise LauncherError(
+            f"{function.__qualname__} takes a {kind.__name__} config, not {type(config).__name__}"
+        )
+    text = config.model_dump_json()
+    try:
+        kind.model_validate_json(text)
+    except ValidationError as error:
+        raise LauncherError(
+            f"the {kind.__name__} config would not validate on the machine: {error}"
+        ) from None
+    return text
 
 
 def _uv_preparation(repo: Path) -> Preparation | None:

@@ -149,9 +149,9 @@ def test_cohort_git_and_database_counts(
             10,
             ("numpy", "pydantic", "etude.launch.worker", "etude.launch.scheduler"),
         ),
-        # Client composition includes four modules each for Vast and Lium, and
-        # the storage socket policy it forwards to workers.
-        (["pools"], 52, ("numpy", "boto3", "etude.launch.worker")),
+        # Client composition includes four modules each for Vast and Lium, the
+        # storage socket policy it forwards to workers, and its smoke of jobs.
+        (["pools"], 53, ("numpy", "boto3", "etude.launch.worker")),
         (
             ["worker", "{directory}"],
             33,  # includes the storage socket policy every request applies
