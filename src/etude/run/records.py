@@ -68,6 +68,7 @@ BUILT_IN_CLOCKS = (
         name=HOURS_SINCE_START, kind="time", meaning="hours since the line's first attempt started"
     ),
 )
+BUILT_IN_NAMES = (RUNNING_HOURS, HOURS_SINCE_START)
 
 
 class Continuation(Record):
@@ -107,13 +108,9 @@ class RunDeclaration(Record):
         names = [clock.name for clock in self.clocks]
         if len(set(names)) != len(names):
             raise ValueError("duplicate_clock")
-        if {RUNNING_HOURS, HOURS_SINCE_START} & set(names):
+        if set(BUILT_IN_NAMES) & set(names):
             raise ValueError("clock_name_reserved")
-        if self.continues is not None and self.continues.clock not in (
-            *names,
-            RUNNING_HOURS,
-            HOURS_SINCE_START,
-        ):
+        if self.continues is not None and self.continues.clock not in (*names, *BUILT_IN_NAMES):
             raise ValueError("continuation_clock_undeclared")
         if (self.config_json is None) != (self.config_sha256 is None):
             raise ValueError("config_requires_digest")

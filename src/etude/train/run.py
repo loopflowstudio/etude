@@ -61,6 +61,7 @@ from etude.run.declaration import declare
 from etude.run.delivery import RunFiles, StorageDestination, destinations, ship
 from etude.run.errors import EtudeError
 from etude.run.records import (
+    BUILT_IN_NAMES,
     HOURS_SINCE_START,
     RUNNING_HOURS,
     ArtifactRef,
@@ -189,7 +190,7 @@ class Run:
         self._high: dict[str, float] = {}
         self._clock_names = tuple(clock.name for clock in clocks)
         # The clock columns every row and checkpoint carries: the author's, then Etude's.
-        self._columns = (*self._clock_names, RUNNING_HOURS, HOURS_SINCE_START)
+        self._columns = (*self._clock_names, *BUILT_IN_NAMES)
         # Every checkpoint recorded in this folder, by any attempt on any machine,
         # and the name its record and file are kept under.
         self._recorded: dict[int, CheckpointRecord] = {}
@@ -419,7 +420,7 @@ class Run:
     def position(self, clock: str) -> float | None:
         """Where the run stands on `clock`: Etude's clocks now, an author's the highest
         value this process logged. None for an author's clock before its first row."""
-        if clock in (RUNNING_HOURS, HOURS_SINCE_START):
+        if clock in BUILT_IN_NAMES:
             return self._now()[1][clock]
         if clock not in self._clock_names:
             raise ValueError(f"the run declares no clock {clock!r}")
@@ -879,8 +880,7 @@ def track(
     if experiment is None:
         raise EtudeError("experiment_not_named", 422)
     if resumed_at is not None and any(
-        clock not in {c.name for c in clocks} | {RUNNING_HOURS, HOURS_SINCE_START}
-        or not math.isfinite(value)
+        clock not in (*(c.name for c in clocks), *BUILT_IN_NAMES) or not math.isfinite(value)
         for clock, value in resumed_at.items()
     ):
         raise EtudeError("resumed_at_unknown_clock", 422)
@@ -962,7 +962,7 @@ def seal_runs(directory: Path | str) -> None:
         declared = RunFiles(root).run_file()
         if declared is not None:
             names = [clock.name for clock in declared.declaration.clocks]
-            seal_logs(root, [*names, RUNNING_HOURS, HOURS_SINCE_START])
+            seal_logs(root, [*names, *BUILT_IN_NAMES])
 
 
 __all__ = [

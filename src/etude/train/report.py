@@ -24,7 +24,7 @@ from typing import Literal
 
 import numpy as np
 
-from etude.run.records import BUILT_IN_CLOCKS, HOURS_SINCE_START, Clock, Record
+from etude.run.records import BUILT_IN_CLOCKS, BUILT_IN_NAMES, HOURS_SINCE_START, Clock, Record
 from etude.train.read import Floats, RunData, lines
 
 BUCKETS = 120
@@ -382,7 +382,6 @@ def training(data: Sequence[RunData], *, prefixes: Sequence[str] = ()) -> Traini
         for declared in run.clocks:
             clocks.setdefault(declared.name, declared)
     clocks.update({clock.name: clock for clock in BUILT_IN_CLOCKS})
-    built_in = {clock.name for clock in BUILT_IN_CLOCKS}
     metrics: dict[str, None] = {}
     for run in data:
         metrics.update(dict.fromkeys(run.metrics()))
@@ -395,7 +394,7 @@ def training(data: Sequence[RunData], *, prefixes: Sequence[str] = ()) -> Traini
             traces = [
                 trace
                 for run in data
-                if clock in built_in or clock in {c.name for c in run.clocks}
+                if clock in BUILT_IN_NAMES or clock in {c.name for c in run.clocks}
                 if (trace := _trace(run, metric, clock)) is not None
             ]
             if traces:
