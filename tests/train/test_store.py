@@ -762,15 +762,15 @@ def test_index_refresh_work_does_not_grow_with_permanent_history(
 
     for sequence in range(permanent_blocks):
         index.add(block(2, sequence))
-    # Each new permanent block: two header ranges and its tiny raw overview.
-    assert measured.requests == 3 * permanent_blocks
+    # Each new permanent block: the block read whole once, and its tiny raw overview.
+    assert measured.requests == 2 * permanent_blocks
     index.write()
     permanent = root / f"metrics/{writer}.permanent.json"
     before = permanent.stat().st_mtime_ns
     requests = measured.requests
     key = block(1, permanent_blocks)
     index.add(key)
-    assert measured.requests - requests == 2  # Only the new recent header.
+    assert measured.requests - requests == 1  # Only the new recent block.
     measured.requests = measured.bytes = measured.written = 0
     tracemalloc.start()
     try:
@@ -786,9 +786,9 @@ def test_index_refresh_work_does_not_grow_with_permanent_history(
 
     # Compact the recent window. The older permanent blocks are not read again.
     index.add(block(2, permanent_blocks))
-    assert measured.requests == 3
+    assert measured.requests == 2
     index.write()
-    assert measured.requests == 3
+    assert measured.requests == 2
     lasting = Manifest.model_validate_json(permanent.read_bytes())
     assert len(lasting.blocks) == permanent_blocks + 1
     assert lasting.latest == latest.latest
@@ -950,9 +950,9 @@ def test_live_writer_describes_each_permanent_block_only_once(
         for step in range(3):
             run.log({"loss": step}, step=step)
     assert run.problems == {} and run.dropped == 0
-    # Each fold describes its new recent header (2 reads), then permanent
-    # header and overview (3). Earlier permanent blocks add no reads.
-    assert requests == 15
+    # Each fold reads its new recent block whole (1 read), then its permanent
+    # block whole and its overview (2). Earlier permanent blocks add no reads.
+    assert requests == 9
     data = read(tmp_path, "e", "r")
     assert len(data.blocks) == 3
     assert data.points("loss", "step").y.tolist() == [0, 1, 2]

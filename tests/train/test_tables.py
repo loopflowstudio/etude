@@ -102,6 +102,7 @@ def test_row_tables_resolve_only_surviving_updates_across_machine_folders(
     (first / "r/artifacts/orphan.json").write_bytes(b"not JSON")
     storage = MeasuredStorage(DirectoryStorage(tmp_path))
     data = read(storage, "e", "r")
+    assert data.blocks  # blocks are read when first used
     before = storage.requests
     assert data.read_table("matchups", "updates") == (
         TablePoint(x=1, rows=({"result": "keep"},)),
