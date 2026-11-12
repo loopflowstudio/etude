@@ -1,7 +1,7 @@
 """`etude smoke`: an experiment file's training, evaluation and report, tiny, in order, here.
 
-`smoke_file` is the whole chain, as `etude smoke`, `etude launch` and
-`etude queue` run it before submitting:
+`smoke_file` is the whole chain, as `etude smoke` runs it and `etude launch
+--smoke` and `etude queue --smoke` run it before submitting:
 
 1. Train: each distinct job `runs()` returns, run once with its declared tiny
    form on a throwaway local launcher (`etude.launch.smoke.smoke_train`).
