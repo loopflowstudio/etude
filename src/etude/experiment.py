@@ -6,7 +6,8 @@ file, so `ppo.py` is experiment `ppo`. `state` (`ExperimentState`, from
 checkpoints each recorded and whether it has ended. Its evaluations are the
 experiment's too, so `etude report` finds them beside its training runs. `eval` returns the evaluation jobs it wants
 now (`etude.jobs.evaluation`): a benchmark held for the checkpoints it chose,
-and matchups of chosen checkpoints against each other. It is called again on
+whose seatings may seat checkpoints relative to each held one or chosen
+checkpoints against each other. It is called again on
 every pass, so a design that depends on what exists, such as each checkpoint
 against the one before it, grows as checkpoints arrive.
 
@@ -37,14 +38,15 @@ from pydantic import Field
 
 from etude.carriage import CHECKPOINTS
 from etude.eval.match import Result, Tables
-from etude.eval.records import CheckpointKey, CheckpointRef, Inference, Match, Model, digest
+from etude.eval.records import CheckpointKey, CheckpointRef, Inference, Line, Match, Model, digest
 from etude.eval.tournament import hold, played
 from etude.launch import client
 from etude.launch.records import Job, Run, Smoke
 from etude.run.errors import EtudeError
 from etude.run.records import ArtifactRef, Digest, Record
 from etude.run.storage import Storage
-from etude.train.read import read_all
+from etude.train.read import RunData, lines, read_all
+from etude.train.report import job_names
 
 # ---------------------------------------------------------------------------
 # What eval(state) chooses from
@@ -82,7 +84,7 @@ class Checkpoint(Record):
         return CheckpointRef(key=self.key, artifact=self.artifact, at=self.clocks, line=self.line)
 
     def model(self, inference: Inference) -> Model:
-        """This checkpoint playing as `inference`, for a matchup of chosen checkpoints."""
+        """This checkpoint playing as `inference`, for a seating of chosen checkpoints."""
         return inference.model(self.ref)
 
 
@@ -112,6 +114,13 @@ class Checkpoints(tuple[Checkpoint, ...]):
 class TrainingRun:
     name: str
     experiment: str
+    # Its job as the report names it (`etude.train.report.job_names`): the launch name, with
+    # its config digest when that name ran several configs ("ppo 1a2b3c").
+    job: str
+    # The name it was launched under, which covers every config launched under it.
+    launch: str
+    # Its learner: the first run of the chain of continuations that led to it.
+    line: str
     state: Literal["running", "finished", "failed"]
     checkpoints: Checkpoints
 
@@ -139,6 +148,24 @@ class ExperimentState:
                 return each
         raise EtudeError("run_not_found", 404) from ValueError(name)
 
+    @property
+    def lines(self) -> tuple[Line, ...]:
+        """Each learner line, as relative seats find checkpoints in it: ended once every
+        run of it has."""
+        found: dict[str, list[TrainingRun]] = {}
+        for run in self.runs:
+            found.setdefault(run.line, []).append(run)
+        return tuple(
+            Line(
+                name=name,
+                job=runs[0].job,
+                launch=runs[0].launch,
+                ended=all(run.ended for run in runs),
+                checkpoints=tuple(c.ref for run in runs for c in run.checkpoints),
+            )
+            for name, runs in sorted(found.items())
+        )
+
     def checkpoint(self, key: CheckpointKey) -> Checkpoint | None:
         for each in self.runs:
             for saved in each.checkpoints:
@@ -154,21 +181,22 @@ def observe(source: Storage | Path | str, experiment: str) -> ExperimentState:
     nothing can be evaluated without its bytes. Runs' records alone are read:
     no metric block or index.
     """
-    every = read_all(source)
-    parents = {
-        data.name: data.file.declaration.continues.parent.source_id
+    return state_of(read_all(source), experiment)
+
+
+def state_of(every: Sequence[RunData], experiment: str) -> ExperimentState:
+    """The experiment's training runs among runs already read, as `observe` finds them."""
+    line = lines(every)
+    ours = [
+        data
         for data in every
-        if data.file is not None and data.file.declaration.continues is not None
-    }
+        if data.file is not None
+        and data.experiment == experiment
+        and data.file.declaration.kind != "evaluation"
+    ]
+    job = job_names(ours)
     runs = []
-    for data in every:
-        if (
-            data.file is None
-            or data.experiment != experiment
-            or data.file.declaration.kind == "evaluation"
-        ):
-            continue
-        line = _first_run(data.name, parents)
+    for data in ours:
         saved = Checkpoints(
             Checkpoint(
                 run=data.name,
@@ -177,7 +205,7 @@ def observe(source: Storage | Path | str, experiment: str) -> ExperimentState:
                 artifact=record.artifact,
                 clocks=record.at,
                 wall_ms=record.wall_ms,
-                line=line,
+                line=line[data.name],
                 tags=record.tags,
             )
             for record in sorted(data.checkpoints, key=lambda one: one.ordinal)
@@ -185,18 +213,17 @@ def observe(source: Storage | Path | str, experiment: str) -> ExperimentState:
         )
         state = "running" if data.state is None else data.state.state
         runs.append(
-            TrainingRun(name=data.name, experiment=data.experiment, state=state, checkpoints=saved)
+            TrainingRun(
+                name=data.name,
+                experiment=data.experiment,
+                job=job[data.name].name,
+                launch=job[data.name].launch,
+                line=line[data.name],
+                state=state,
+                checkpoints=saved,
+            )
         )
     return ExperimentState(experiment=experiment, runs=tuple(runs))
-
-
-def _first_run(run: str, parents: dict[str, str]) -> str:
-    """The run a chain of continuations ending at `run` started from, as far as `parents` knows."""
-    seen = {run}
-    while run in parents and parents[run] not in seen:
-        run = parents[run]
-        seen.add(run)
-    return run
 
 
 # ---------------------------------------------------------------------------
@@ -272,7 +299,7 @@ def advance(
     """One pass: observe `source`, ask the experiment's `eval`, and play or launch what is new.
 
     What is wanted is what `eval` returns now (`etude.eval.tournament.played`):
-    a matchup it no longer returns is no longer played. Each job's eval run is
+    a seating it no longer returns is no longer played. Each job's eval run is
     the experiment's; a job naming another experiment is refused with
     `EtudeError("eval_job_of_another_experiment")`. A failed match is counted
     and left alone, so a result is never quietly replaced; `retry_failed`
@@ -309,6 +336,7 @@ def advance(
             checkpoints=checkpoints,
             directory=directory,
             storages=[source],
+            lines=state.lines,
         )
         new = [*found.new, *(found.failed if retry_failed else ())]
         pending = [match for match in new if match.key not in standing.running]
@@ -332,6 +360,7 @@ def advance(
                 workers=spec.workers,
                 directory=directory,
                 storages=[source],
+                lines=state.lines,
             )
             passes.append(done.model_copy(update={"played": held.played}))
             continue

@@ -74,8 +74,8 @@ Build a lab outside the repo (e.g. `/tmp/lab`) with its own `ETUDE_HOME`:
    os.environ["QA_DEVICE"], ...})` and run `etude eval` once per device. To interrupt a
    pass part way, slow `play` with a sleep and send SIGTERM (`pkill -TERM -f "etude eval
    NAME.py"`): a backgrounded job in a non-interactive shell ignores SIGINT. Results
-   played before the signal are sealed; the next pass plays only the rest. A matchup's
-   name is its identity (`matchup_conflict` if its conditions change): add new matchups
+   played before the signal are sealed; the next pass plays only the rest. A seating's
+   name is its identity (`seating_conflict` if its conditions change): add new seatings
    under the same tag instead. Replay already-played matches on another setup with
    `etude.eval.match.evaluate(experiment=..., matches=..., run="replay-x")`, taking the
    benchmark from `Evaluation.model_validate_json(job.config)` for each job
@@ -180,7 +180,7 @@ repo, with an isolated `ETUDE_HOME`:
   experiment file names it from its stem, and `track()` otherwise raises
   `experiment_not_named`.
 - A `--keep` smoke folder's `track/` holds a tiny tournament (games=1): as an
-  `etude eval --source` it gives `matchup_conflict`. Copy only the training run's
+  `etude eval --source` it gives `seating_conflict`. Copy only the training run's
   folder out for a clean source.
 
 ## Etude: tracking and reading a run against a bucket

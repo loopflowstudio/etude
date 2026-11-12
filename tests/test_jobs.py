@@ -14,7 +14,7 @@ import pytest
 
 from etude.eval.match import environment
 from etude.eval.query import statsdb
-from etude.eval.records import Benchmark, Code, Inference, Matchup, RoundRobin
+from etude.eval.records import Benchmark, Code, Inference, RoundRobin, Seating
 from etude.jobs import JobOptions, evaluation
 from etude.launch.errors import LauncherError
 from etude.launch.job_file import read_job_file
@@ -241,8 +241,8 @@ def test_an_evaluation_job_holds_a_benchmark_for_the_checkpoint_it_is_given(
     progress = Benchmark(
         name="anchors",
         environment=environment("duel"),
-        matchups=(
-            Matchup(
+        seatings=(
+            Seating(
                 name="model vs fixed",
                 players=(
                     Inference(config={"search": 0}),

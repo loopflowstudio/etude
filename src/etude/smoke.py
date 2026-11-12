@@ -30,7 +30,7 @@ from typing import Literal, cast
 from etude.eval.match import Result, Tables
 from etude.eval.records import Benchmark, Match, RoundRobin
 from etude.eval.tournament import hold
-from etude.experiment import asked, observe, read_experiment
+from etude.experiment import ExperimentState, asked, observe, read_experiment
 from etude.experiment_file import defined_functions, experiment_named
 from etude.jobs import evaluation_spec
 from etude.launch.errors import LauncherError
@@ -114,10 +114,10 @@ def _evaluate(
         return [
             SmokeStep(step="eval", name="eval", outcome="not_smoked", detail="eval returned none")
         ]
-    return [_hold(job, experiment, store) for job in jobs]
+    return [_hold(job, experiment, store, state) for job in jobs]
 
 
-def _hold(job: Job, experiment: str, store: DirectoryStorage) -> SmokeStep:
+def _hold(job: Job, experiment: str, store: DirectoryStorage, state: ExperimentState) -> SmokeStep:
     spec = evaluation_spec(job)
     name = spec.tournament.name
     if spec.experiment not in (None, experiment):
@@ -136,6 +136,7 @@ def _hold(job: Job, experiment: str, store: DirectoryStorage) -> SmokeStep:
             checkpoints=tuple(each.ref for each in spec.checkpoints),
             enter=spec.entrants,
             storages=[store],
+            lines=state.lines,
         ),
     )
     plural = "" if held.played == 1 else "es"
@@ -149,15 +150,15 @@ def _hold(job: Job, experiment: str, store: DirectoryStorage) -> SmokeStep:
 
 
 def _tiny_tournament(tournament: Benchmark | RoundRobin) -> Benchmark | RoundRobin:
-    """The tournament with each of its matchups, or itself, at one game per match.
+    """The tournament with each of its seatings, or itself, at one game per match.
 
     Every condition is kept: a game that breaks under one deal or seating is
     the failure a rented evaluation would otherwise find after training paid.
     """
     if isinstance(tournament, RoundRobin):
         return tournament.model_copy(update={"games": 1})
-    matchups = tuple(each.model_copy(update={"games": 1}) for each in tournament.matchups)
-    return tournament.model_copy(update={"matchups": matchups})
+    seatings = tuple(each.model_copy(update={"games": 1}) for each in tournament.seatings)
+    return tournament.model_copy(update={"seatings": seatings})
 
 
 def _report(

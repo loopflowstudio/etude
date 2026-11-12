@@ -57,13 +57,13 @@ function evalState() {
 }
 const opponents = (E, sel) => M.opponents(E.score, sel);
 const oppFor = (E, sel) => { const o = opponents(E, sel); return (o.find(([v]) => v === S.opp) || o[0] || [""])[0]; };
-const versusOf = opp => opp === "" ? "vs all opponents" : typeof opp === "object" ? ownVersus(opp) : `vs ${D.players[+opp].name}`;
-const ownVersus = o => o.kind === "name" ? `vs ${o.name}` : o.kind === "earlier" ? `vs the checkpoint ${num(o.by)} ${o.clock} earlier` : o.kind === "fraction" ? `vs the checkpoint at ${num(o.value)} × its ${o.clock}` : `vs the checkpoint at ${o.clock} ${num(o.value)}`;
+// A selection of seatings is drawn as seated: each held checkpoint against its seating's second seat.
+const versusOf = (sel, opp) => M.seatingsOf(sel) ? "first seat against the second, as seated" : opp === "" ? "vs all opponents" : `vs ${D.players[+opp].name}`;
 let F = {}; try { F = JSON.parse(S.filter) || {}; } catch { F = {}; }
-const evalValue = (E, sel, extra, opponent, inference) => M.evalValue(E.score, sel, {...F, ...extra}, opponent, inference);
+const evalValue = (E, sel, extra, opponent) => M.evalValue(E.score, sel, {...F, ...extra}, opponent);
 // The other anchors' scores against the curve's anchor, as reference lines.
 function anchorLines(E, sel, opp, extra = {}) {
-  if (S.lines !== "on" || opp === "" || typeof opp === "object" || sel == null) return [];
+  if (S.lines !== "on" || opp === "" || sel == null || M.seatingsOf(sel)) return [];
   return fixedPlayers.filter(b => b !== +opp).map(b => cellOf(sel, E.score, b, +opp, false, {...F, ...extra})).filter(Boolean).map(c => ({y: c.value, label: D.players[c.subject].name}));
 }
 function values(E, sel, column, extra = {}) {
@@ -167,27 +167,26 @@ function render() {
   const GAPS = "○ not yet played · × failed · | not evaluated";
   // Only a job averages seeds; a line's curve is its checkpoints' own values.
   const BAND = vis.some(j => j.line == null) ? "mean over seeds · band: seed range, or one seed's 95% interval over matches" : "band: 95% interval over matches";
-  const curveOf = (j, sel, extra = {}, opp = S.opp, inference = null) => jobPoints(j, S.eclock, evalValue(E, sel, extra, opp, inference));
+  const curveOf = (j, sel, extra = {}, opp = S.opp) => jobPoints(j, S.eclock, evalValue(E, sel, extra, opp));
   const latestKey = pts => { const ok = evaluated(pts); return ok.length ? ok[ok.length - 1].key : null; };
   const keyName = k => `${M.alignClock || "checkpoint"} ${num(k)}`;
   const finalKey = j => j.runs.every(r => T.runs.find(x => x.name === r)?.state === "finished") ? (marks.get(j.runs[0]) || []).at(-1)?.align ?? null : null;
-  const unselected = panel => { const m = panel.matches || {}; return node("div", "na", `No eval run holds the matches this panel names (${[m.tournament && "tournament " + m.tournament, m.matchup && "matchup " + m.matchup, m.tag && "tag " + m.tag].filter(Boolean).join(", ")}).`); };
+  const unselected = panel => { const m = panel.matches || {}; return node("div", "na", `No eval run holds the matches this panel names (${[m.tournament && "tournament " + m.tournament, m.seating && "seating " + m.seating, m.tag && "tag " + m.tag].filter(Boolean).join(", ")}).`); };
   if (!D.selections.length) card(body, "No evaluations", "", "full").appendChild(node("div", "na", `${D.file} defines no eval(state) yet. Define one and run etude eval on the file; its matches appear here.`));
   else for (const panel of R.evals) {
-    const own = panel.kind === "curve" ? ownOpponent(panel) : null;
-    const sel = M.selectMatches(panel.matches, E.sel, E.score), opp = own ?? oppFor(E, sel), versus = versusOf(opp), where = sel == null ? "" : selName(D.selections[sel]);
+    const sel = M.selectMatches(panel.matches, E.sel, E.score), opp = oppFor(E, sel), versus = versusOf(sel, opp), where = sel == null ? "" : selName(D.selections[sel]);
     if (panel.kind === "curve" && !panel.split) {
       const c = card(body, panel.title, `${where} · ${scoreName} ${versus} · ${BAND} · ${GAPS}`, "full");
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
       const host = node("div"); c.appendChild(host);
-      later(() => line(host, series(j => curveOf(j, sel, {}, opp, panel.inference), M.panelJobs(panel, vis)), {...eOpts, refs: anchorLines(E, sel, opp), height: 260, empty: panel.subject ? `Nothing recorded for subject ${panel.subject}` : undefined}));
+      later(() => line(host, series(j => curveOf(j, sel, {}, opp), vis), {...eOpts, refs: anchorLines(E, sel, opp), height: 260}));
     } else if (panel.kind === "curve") {
       const c = card(body, panel.title, `${where} · one chart per ${panel.split} · ${versus}`, "full");
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
       const vals = values(E, sel, panel.split);
       if (!vals.length) { c.appendChild(node("div", "na", absentNote(panel.split))); continue; }
       const grid = node("div", "grid multiples"); c.appendChild(grid);
-      for (const v of vals) { const m = node("div"), host = node("div"); m.append(node("div", "mini-title", `${panel.split} = ${show(v)}`), host); grid.appendChild(m); later(() => line(host, series(j => curveOf(j, sel, {[panel.split]: v}, opp, panel.inference), M.panelJobs(panel, vis)), {...eOpts, refs: anchorLines(E, sel, opp, {[panel.split]: v}), compact: true, height: 140})); }
+      for (const v of vals) { const m = node("div"), host = node("div"); m.append(node("div", "mini-title", `${panel.split} = ${show(v)}`), host); grid.appendChild(m); later(() => line(host, series(j => curveOf(j, sel, {[panel.split]: v}, opp), vis), {...eOpts, refs: anchorLines(E, sel, opp, {[panel.split]: v}), compact: true, height: 140})); }
     } else if (panel.kind === "matrix") {
       const c = card(body, panel.title || `${panel.columns} × ${panel.rows}`, `${where} · ${panel.columns} across · ${panel.rows} down · ${scoreName} ${versus}`, "full");
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
@@ -255,16 +254,6 @@ function render() {
         row.onpointermove = evt => showTip(evt, r.by.map(([j, p]) => ({color: color(j), dotted: j.baseline, value: p ? scoreFormat(p.y) : "not recorded", label: j.label + (p ? " · " + pointMeta(p, scoreFormat) : "")})), `${panel.by} = ${show(r.v)}`);
         row.onpointerleave = hideTip; c.appendChild(row);
       }
-    } else if (panel.kind === "head_to_head") {
-      const c = card(body, panel.title, `${where} · a job's score against another job's checkpoints`);
-      if (sel == null) { c.appendChild(unselected(panel)); continue; }
-      const pairs = [];
-      for (const a of vis) for (const b of JOBS) if (a !== b) {
-        const pts = jobPoints(a, S.eclock, M.headToHeadValue(E.score, sel, F, b), true);
-        if (pts.length) pairs.push({label: `${a.label} vs ${b.label}`, color: color(a), dotted: a.baseline, points: pts});
-      }
-      if (!pairs.length) { c.appendChild(node("div", "na", "No games between checkpoints of two jobs were recorded")); continue; }
-      const host = node("div"); c.appendChild(host); later(() => line(host, pairs, {...eOpts, height: 200, ref: ref}));
     } else if (panel.kind === "crosstable") {
       // One line's checkpoints against each other, both axes ordered by the clock: a tab per
       // line of the curves shown, so a job's seeds are each their own.

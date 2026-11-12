@@ -23,7 +23,7 @@ from typing import Literal
 import numpy as np
 
 from etude.run.records import WALL_CLOCK, Clock, Record
-from etude.train.read import Floats, RunData
+from etude.train.read import Floats, RunData, lines
 
 BUCKETS = 120
 WALL_MEANING = "wall time since the run first started"
@@ -186,37 +186,61 @@ def _band(job: str, members: Sequence[RunData], metric: str, clock: str) -> Line
     )
 
 
-def _jobs(data: Sequence[RunData]) -> tuple[Job, ...]:
-    """Each run's job: the name its author launched it under (else its key, else
-    the run) and its config.
+class JobName(Record):
+    """A job's names: `name`, its full name, and `launch`, the name it was launched under."""
+
+    name: str
+    launch: str
+
+
+def job_names(data: Sequence[RunData]) -> dict[str, JobName]:
+    """Each run's job, by run: the name its author launched it under (else its key, else
+    the run) and its config. Reads only the runs' declarations.
 
     The launcher's job key includes the commit, so grouping by name pools a
     job's runs across commits and devices with its seeds: these are provenance,
     and a report addresses jobs by name. A config is scientific: a name launched
     with several configs becomes one job per config, "ppo 1a2b3c"; a report
-    naming "ppo" addresses all of them.
+    naming "ppo" addresses all of them. `eval(state)` names jobs by this too.
     """
-    members: dict[tuple[str, str | None], list[RunData]] = {}
-    # In launch order: a job's colour follows when it started, never its rank.
-    for run in sorted(data, key=_started):
+    keys: dict[str, tuple[str, str | None]] = {}
+    for run in data:
         declaration = run.file.declaration if run.file else None
         named = declaration.job_name if declaration else None
         config = declaration.config_sha256 if declaration else None
-        members.setdefault((named or run.job or run.name, config), []).append(run)
-    configs = Counter(name for name, _ in members)
-    jobs = []
-    for (named, config), runs in members.items():
-        name = named if configs[named] == 1 else f"{named} {(config or 'none')[:6]}"
-        seeds = f"{len(runs)} seed{'s' if len(runs) > 1 else ''}"
-        jobs.append(
+        keys[run.name] = (named or run.job or run.name, config)
+    configs = Counter(named for named, _ in set(keys.values()))
+    return {
+        run: JobName(
+            name=named if configs[named] == 1 else f"{named} {(config or 'none')[:6]}",
+            launch=named,
+        )
+        for run, (named, config) in keys.items()
+    }
+
+
+def _jobs(data: Sequence[RunData]) -> tuple[Job, ...]:
+    """The runs' jobs (`job_names`), in launch order. A job's seeds are its learner lines
+    (`etude.train.read.lines`), so a continuation is no extra seed."""
+    names = job_names(data)
+    line = lines(data)
+    members: dict[str, list[RunData]] = {}
+    # In launch order: a job's colour follows when it started, never its rank.
+    for run in sorted(data, key=_started):
+        members.setdefault(names[run.name].name, []).append(run)
+    found = []
+    for name, runs in members.items():
+        count = len({line[r.name] for r in runs})
+        seeds = f"{count} seed{'s' if count > 1 else ''}"
+        found.append(
             Job(
                 name=name,
-                launch=named,
+                launch=names[runs[0].name].launch,
                 label=f"{name} · {seeds}",
                 runs=tuple(r.name for r in runs),
             )
         )
-    return tuple(jobs)
+    return tuple(found)
 
 
 def _summary(run: RunData) -> RunSummary:

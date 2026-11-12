@@ -8,16 +8,23 @@ import pytest
 from pydantic import ValidationError
 
 from etude.eval.records import (
+    Aligned,
     Benchmark,
     CheckpointKey,
     CheckpointRef,
     Code,
+    Earlier,
     Environment,
+    Final,
+    Fraction,
+    Gap,
     Inference,
+    Line,
     Match,
-    Matchup,
     Model,
     RoundRobin,
+    Seated,
+    Seating,
     TournamentRun,
 )
 from etude.run.records import ArtifactRef
@@ -67,7 +74,7 @@ def test_renaming_changes_no_match_key_or_matchup_definition() -> None:
     match = Match(players=(SEARCH.model(U500), HEURISTIC), conditions={"deal": 1}, games=8)
     # Pinned at 2eb32d5: a changed key would replay every stored match.
     assert match.key == "a64354de99bed9ed3bfc72755e7af6774877e28a383306be8e512561e6c793c8"
-    matchup = Matchup(
+    matchup = Seating(
         name="direct vs heuristic", players=(SEARCH, HEURISTIC), conditions=({"deal": 1},), games=8
     )
     assert matchup.definition == "9185c1177e55b1aa269d7d099aaa4a02d2a013dc780343081b531dba66c1ea91"
@@ -83,10 +90,10 @@ def test_a_match_stored_with_agents_loads_as_the_same_players() -> None:
 
 def test_tournament_files_stored_with_agents_load_as_players() -> None:
     benchmark = TournamentRun.model_validate_json(OLD_BENCHMARK)
-    matchup = Matchup(
+    matchup = Seating(
         name="direct vs heuristic", players=(SEARCH, HEURISTIC), conditions=({"deal": 1},), games=8
     )
-    assert benchmark.tournament == Benchmark(name="ladder", environment=WORLD, matchups=(matchup,))
+    assert benchmark.tournament == Benchmark(name="ladder", environment=WORLD, seatings=(matchup,))
     held = TournamentRun.model_validate_json(OLD_ROUND_ROBIN)
     assert isinstance(held.tournament, RoundRobin)
     assert held.entrants == (SEARCH.model(U500), HEURISTIC)
@@ -105,7 +112,7 @@ def test_etude_sdk_0_2_players_load_and_equal_no_player_since() -> None:
         }
     )  # fmt: skip
     model, code = old.players
-    placeholder = Matchup.model_validate(
+    placeholder = Seating.model_validate(
         {"name": "vs heuristic", "players": [{"config": {"search": 0}, "code": DIGEST},
                                              {"name": "heuristic", "kind": "code", "code": DIGEST}],
          "conditions": [{"deal": 1}], "games": 2}
@@ -129,3 +136,63 @@ def test_etude_sdk_0_2_players_load_and_equal_no_player_since() -> None:
 def test_a_model_needs_its_checkpoint_digest() -> None:
     with pytest.raises(ValidationError, match="model_checkpoint_requires_digest"):
         CheckpointRef(key=U500.key, artifact=ArtifactRef(uri="s3://b/updates-500.pt"))
+
+
+def _ref(run: str, updates: float) -> CheckpointRef:
+    return CheckpointRef(
+        key=CheckpointKey(run=run, name=f"updates-{updates:g}.pt"),
+        artifact=ArtifactRef(uri=f"file:///{run}/{updates:g}.pt", sha256=DIGEST),
+        at={"updates": updates},
+        line=run,
+    )
+
+
+def _line(run: str, job: str, *positions: float, ended: bool = False) -> Line:
+    return Line(
+        name=run,
+        job=job,
+        launch=job,
+        ended=ended,
+        checkpoints=tuple(_ref(run, at) for at in positions),
+    )
+
+
+def test_a_relative_seat_finds_an_exact_position_or_says_whether_one_may_still_come() -> None:
+    direct = Inference(config={"search": 0})
+
+    def seating(seat: Earlier | Fraction | Final | Aligned) -> Seating:
+        return Seating(name="s", players=(direct, seat), conditions=({"deal": 0},), games=1)
+
+    small = _line("s1", "small", 63, 90)
+    large = _line("l1", "large", 90, 180)
+    lines = [small, large]
+    # 90 × 0.7 is 62.99999999999999 in binary, and still the checkpoint at 63.
+    found = seating(Fraction(clock="updates", value=0.7, inference=direct)).resolve(
+        small.checkpoints[1], lines
+    )
+    assert isinstance(found, Seated) and found.seats[1] == (small.checkpoints[0],)
+    # Passed without saving there: never. Ahead of the line: not yet, until it ends.
+    earlier = seating(Earlier(clock="updates", by=10, inference=direct))
+    assert isinstance(gap := earlier.resolve(small.checkpoints[1], lines), Gap)
+    assert (gap.missing, gap.position) == ("never", 80)
+    aligned = seating(Aligned(clock="updates", job="small", inference=direct))
+    assert isinstance(gap := aligned.resolve(large.checkpoints[1], lines), Gap)
+    assert (gap.missing, gap.job) == ("not_yet", "small")
+    ended = [small.model_copy(update={"ended": True}), large]
+    assert isinstance(gap := aligned.resolve(large.checkpoints[1], ended), Gap)
+    assert gap.missing == "never"
+    # Held for the job it names, it plays nothing; so one benchmark holds every job.
+    assert aligned.resolve(small.checkpoints[0], lines) is None
+    final = seating(Final(job="small", inference=direct))
+    assert isinstance(final.resolve(large.checkpoints[0], lines), Gap)
+    done = final.resolve(large.checkpoints[0], ended)
+    assert isinstance(done, Seated) and done.seats[1] == (small.checkpoints[1],)
+    (match,) = final.matches(large.checkpoints[0], done)
+    assert match.players[1] == direct.model(small.checkpoints[1])
+    with pytest.raises(ValidationError, match="relative_seat_needs_an_inference_seat"):
+        Seating(
+            name="s",
+            players=(Earlier(clock="updates", by=1, inference=direct), HEURISTIC),
+            conditions=({"deal": 0},),
+            games=1,
+        )

@@ -20,9 +20,9 @@ from etude.eval.records import (
     Code,
     Inference,
     Match,
-    Matchup,
     Model,
     Player,
+    Seating,
 )
 from etude.eval.tournament import hold
 from etude.experiment import advance, observe, read_experiment
@@ -40,7 +40,7 @@ from tests.run.storage import CountedClient, MeasuredStorage
 LAB = """
 from etude.eval.match import environment
 from etude.eval.records import (
-    ArtifactRef, Benchmark, CheckpointKey, CheckpointRef, Code, Inference, Matchup, Model,
+    ArtifactRef, Benchmark, CheckpointKey, CheckpointRef, Code, Inference, Seating, Model,
 )
 from etude.jobs import evaluation
 from etude.report import Anchors, Curve, Matches, Report, Score
@@ -62,19 +62,19 @@ OUTSIDE = Model(
 
 
 def versus(name, first, second):
-    return Matchup(name=name, players=(first, second), conditions=DEALS, games=2, tags=("anchor",))
+    return Seating(name=name, players=(first, second), conditions=DEALS, games=2, tags=("anchor",))
 
 
 def eval(state):
     rated = [each for run in state.runs for each in run.checkpoints.every(2)]
-    ladder = Benchmark(name="ladder", environment=DUEL, matchups=(
+    ladder = Benchmark(name="ladder", environment=DUEL, seatings=(
         versus("vs weak", DIRECT, WEAK),
         versus("vs outside", DIRECT, OUTSIDE),
         versus("strong vs weak", STRONG, WEAK),
         versus("outside vs weak", OUTSIDE, WEAK),
     ))
-    corrupt = Benchmark(name="corrupt", environment=DUEL, matchups=(
-        Matchup(name="deal 1", players=(DIRECT, WEAK), conditions=({"deal": 1},), games=3),
+    corrupt = Benchmark(name="corrupt", environment=DUEL, seatings=(
+        Seating(name="deal 1", players=(DIRECT, WEAK), conditions=({"deal": 1},), games=3),
     ))
     return [
         evaluation(ladder, play=play, checkpoints=rated, max_hours=0.1),
@@ -87,8 +87,8 @@ def report():
         score=Score(table="plays", value="won", reference=0.5),
         evals=(
             Curve(),
-            Curve(matches=Matches(matchup="vs outside")),
-            Curve(matches=Matches(matchup="vs nobody")),
+            Curve(matches=Matches(seating="vs outside")),
+            Curve(matches=Matches(seating="vs nobody")),
             Anchors(),
         ),
     )
@@ -138,12 +138,12 @@ def player(page: Page, name: str, run: str | None = None) -> int:
     return found
 
 
-def selection(page: Page, tournament: str | None, *, matchup: str | None = None) -> int:
+def selection(page: Page, tournament: str | None, *, seating: str | None = None) -> int:
     return next(
         i
         for i, each in enumerate(page.selections)
         if isinstance(each, Matches)
-        and (each.tournament, each.matchup, each.tag) == (tournament, matchup, None)
+        and (each.tournament, each.seating, each.tag) == (tournament, seating, None)
     )
 
 
@@ -189,12 +189,12 @@ def test_a_page_shows_what_was_not_evaluated_not_yet_played_and_failed(page: Pag
 
 def test_panels_select_matches_by_tournament_matchup_or_tag(page: Page) -> None:
     chosen = {
-        (each.tournament, each.matchup, each.tag)
+        (each.tournament, each.seating, each.tag)
         for each in page.selections
         if isinstance(each, Matches)
     }
     assert {("ladder", None, "anchor"), ("ladder", "vs outside", None)} <= chosen
-    outside = selection(page, "ladder", matchup="vs outside")
+    outside = selection(page, "ladder", seating="vs outside")
     # The checkpoints' opponents in that matchup's matches are the outside anchor alone.
     opponents = {
         page.players[c.opponent].name
@@ -204,7 +204,7 @@ def test_panels_select_matches_by_tournament_matchup_or_tag(page: Page) -> None:
         and page.players[c.subject].run is not None
     }
     assert opponents == {"outside"}
-    assert any("matchup 'vs nobody'" in note for note in page.notes)
+    assert any("seating 'vs nobody'" in note for note in page.notes)
 
 
 def test_a_watched_page_reads_each_bucket_file_once_per_computer(
@@ -244,7 +244,7 @@ def test_a_report_reads_no_checkpoint_bytes(lab: tuple[Path, Path], page: Page) 
 
 VERSIONED = """
 from etude.eval.match import environment
-from etude.eval.records import Benchmark, Code, Inference, Matchup
+from etude.eval.records import Benchmark, Code, Inference, Seating
 from etude.jobs import evaluation
 from tests.eval.games import play
 
@@ -254,8 +254,8 @@ WEAK = Code(name="weak", source=[__file__], config={"strength": 0})
 
 def eval(state):
     rated = [each for run in state.runs for each in run.checkpoints]
-    versus = Matchup(name="vs weak", players=(DIRECT, WEAK), conditions=({"deal": 0},), games=2)
-    ladder = Benchmark(name="ladder", environment=environment("duel"), matchups=(versus,))
+    versus = Seating(name="vs weak", players=(DIRECT, WEAK), conditions=({"deal": 0},), games=2)
+    ladder = Benchmark(name="ladder", environment=environment("duel"), seatings=(versus,))
     return [evaluation(ladder, play=play, checkpoints=rated, max_hours=0.1)]
 """
 
@@ -294,19 +294,14 @@ def test_a_page_offers_each_commit_its_matches_were_played_at(
 
 
 EVALUATION_ONLY = """
-from etude.report import At, Crosstable, Curve, Earlier, Report, Score
+from etude.report import Crosstable, Curve, Report, Score
 
 
 def report():
     return Report(
         score=Score(table="plays", value="won", reference=0.5),
         clock="updates",
-        evals=(
-            Curve(title="Score against the heuristic", opponent="heuristic"),
-            Curve(title="Against 400 updates earlier", opponent=Earlier(clock="updates", by=400)),
-            Curve(title="Against update 200", opponent=At(clock="updates", value=200)),
-            Crosstable(),
-        ),
+        evals=(Curve(title="Score"), Crosstable()),
     )
 """
 
@@ -349,13 +344,13 @@ def test_mixed_execution_fills_requested_games_and_replays_count_once(
     ):
         monkeypatch.setenv("ETUDE_COMMIT", commit)
         monkeypatch.setenv("ETUDE_RUN", run)
-        matchup = Matchup(
+        matchup = Seating(
             name="vs heuristic",
             players=(Inference(source=[file], config={"search": 0}), HEURISTIC),
             conditions=({"deal": 0}, {"deal": 1}),
             games=2,
         )
-        benchmark = Benchmark(name="mixed", environment=DUEL, matchups=(matchup,))
+        benchmark = Benchmark(name="mixed", environment=DUEL, seatings=(matchup,))
         matches = matchup.matches(checkpoint)
         held = hold(
             benchmark,
@@ -694,7 +689,7 @@ def test_a_continued_run_is_one_line_with_the_run_it_continues(
     continued = track(
         experiment="seated",
         run="b",
-        job="b",
+        job="a",
         clocks=CLOCKS,
         directory=runs,
         continues=Continuation(parent=parent, clock="updates", value=200),
@@ -714,8 +709,9 @@ def test_a_continued_run_is_one_line_with_the_run_it_continues(
     )
     page = build(runs, file)
     lines = {(each.run, each.line, each.at["updates"]) for each in page.players}
-    # Drawn in their own runs' jobs; `Earlier` by 500 reaches from b's 600 back to a's 100.
     assert lines == {("a", "a", 100), ("b", "a", 600)}
+    # One job, and one seed: a continuation is the learner it continues.
+    assert [job.label for job in page.training.jobs] == ["a · 1 seed"]
 
 
 def test_a_running_eval_runs_results_show_and_are_marked_partial(
@@ -757,8 +753,8 @@ def report():
         Curve(matches=(Matches(tournament="ladder"),
                        Matches(tournament="ladder", tag="anchor"),
                        Matches(tournament="ladder"))),
-        Curve(split="deal", matches=(Matches(tournament="ladder", matchup="vs weak"),
-                       Matches(tournament="ladder", matchup="vs outside"))),
+        Curve(split="deal", matches=(Matches(tournament="ladder", seating="vs weak"),
+                       Matches(tournament="ladder", seating="vs outside"))),
     ))
 """,
     )
@@ -771,7 +767,7 @@ def report():
     original = [c.model_dump(exclude={"selection"}) for c in page.cells if c.selection == ladder]
     overlap = [c.model_dump(exclude={"selection"}) for c in page.cells if c.selection == unions[0]]
     assert sorted(overlap, key=str) == sorted(original, key=str)
-    components = {selection(page, "ladder", matchup=name) for name in ("vs weak", "vs outside")}
+    components = {selection(page, "ladder", seating=name) for name in ("vs weak", "vs outside")}
     for subject in (player(page, "updates-200.pt", "a"), player(page, "updates-200.pt", "b")):
         (combined,) = [
             c

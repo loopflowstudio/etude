@@ -47,6 +47,7 @@ from etude.eval.records import (
     Benchmark,
     CheckpointKey,
     CheckpointRef,
+    Line,
     Match,
     Model,
     Player,
@@ -142,6 +143,8 @@ class Evaluation(Record):
     # job input holding each checkpoint they seat, by its key encoded.
     matches: tuple[Match, ...] | None = None
     files: dict[str, str] = {}
+    # The experiment's training lines that pass saw, where relative seats find checkpoints.
+    lines: tuple[Line, ...] = ()
 
 
 def evaluation(
@@ -159,13 +162,13 @@ def evaluation(
 
     A benchmark is held for `checkpoint`, which reaches the machine as the
     job's input and fills every inference seat; a round robin plays every pair
-    of `enter`. Each inference seat's config is in its matchup
+    of `enter`. Each inference seat's config is in its seating
     (`etude.eval.records.Inference`), so the tournament is the whole of what is
     evaluated. The eval run is the launched run, so `etude logs` and `status`
     lead to it and a retry resumes it.
 
     An experiment's `eval(state)` returns one with `checkpoints` instead, the
-    ones it chose, or none for matchups of chosen checkpoints alone, and no
+    ones it chose, or none for seatings of chosen checkpoints alone, and no
     `experiment`: `etude eval` names it for the file, finds what is new and
     plays it here or launches a job for exactly that. Launched as given, such
     a job is refused: a machine reads no other eval run, so cannot tell what
@@ -222,7 +225,7 @@ def with_matches(job: Job, matches: Sequence[Match], state: ExperimentState) -> 
         )
         for key, each in sorted(saved.items())
     )
-    spec = spec.model_copy(update={"matches": tuple(matches), "files": files})
+    spec = spec.model_copy(update={"matches": tuple(matches), "files": files, "lines": state.lines})
     return job.model_copy(
         update={"config": spec.model_dump_json(), "inputs": (*job.inputs, *inputs)}
     )
@@ -346,6 +349,7 @@ def _hold(evaluation: Evaluation) -> None:
         enter=evaluation.entrants,
         matches=matches,
         workers=evaluation.workers,
+        lines=evaluation.lines,
     )
 
 

@@ -12,7 +12,7 @@ beside Etude's own tables:
 | `seats` | run, match, seat, player, the version that played: commit, source (digest), at (where its checkpoint stood, or null) and line (the learner it belongs to, or null) |
 | `groups` | run, match, group, seat |
 | `tournaments` | tournament, format (`benchmark` or `round_robin`), environment, conflict |
-| `schedule` | tournament, match, matchup, checkpoint (its key) and the matchup's tags of a benchmark's match; no checkpoint for a matchup of fixed players |
+| `schedule` | tournament, match, seating, checkpoint (its key, the one held) and the seating's tags of a benchmark's match; no checkpoint for a seating of fixed players |
 | `training_checkpoints` | run, experiment, ordinal, checkpoint (its key, `RUN/checkpoints/NAME`), artifact (digest), wall_ms, clocks (where each stood) |
 | `blobs` | run, match (none for a converted run's other files), sha256, size_bytes |
 | ROLLUP (one per `etude.eval.records.Rollup`) | run, the rollup's `by` columns, rows, and its `sums` |
@@ -20,7 +20,7 @@ beside Etude's own tables:
 A tournament is assembled from the experiment's eval runs naming it in their
 `tournament.json`. `schedule` holds every match it calls for, held or not.
 When its eval runs disagree, `conflict` names how (`tournament_conflict`,
-`matchup_conflict`) and it has no schedule.
+`seating_conflict`) and it has no schedule.
 `training_checkpoints` holds every checkpoint the experiment's training runs
 recorded, read from their stored JSON, so a model joins to where its
 run's clocks stood by key (`players.checkpoint = training_checkpoints.checkpoint`),
@@ -52,7 +52,7 @@ players. Opponents are the other seats' players, or the match's other groups
 except `all`.
 
 `estimate` gives many ratios of totals over the same blocks, each with an
-interval from one shared bootstrap; `compare` and the tournament's curves use it.
+interval from one shared bootstrap; `compare` and the tournament's `scores` use it.
 
 Table files published etude-sdk wrote name the seat `player`; such a file has
 no `seat` column, since every file written since has one, and its `player`
@@ -127,7 +127,7 @@ NUMERIC = ("BOOLEAN", "BIGINT", "DOUBLE")
 # Keys and coordinates of an author table's rows: never a value.
 KEYS = ("seat", "group", "game", "run", "match")
 # A kept database of another schema is deleted and read again from its store.
-SCHEMA = 10
+SCHEMA = 11
 
 _ENVIRONMENT_FILE = "environment.json"
 _STATE_FILE = "state.json"
@@ -869,7 +869,7 @@ def _summaries(db: duckdb.DuckDBPyConnection) -> None:
         " environment VARCHAR, conflict VARCHAR)"
     )
     db.execute(
-        "create or replace table schedule (tournament VARCHAR, match VARCHAR, matchup VARCHAR,"
+        "create or replace table schedule (tournament VARCHAR, match VARCHAR, seating VARCHAR,"
         " checkpoint VARCHAR, tags VARCHAR[])"
     )
     by_name: dict[str, list[TournamentRun]] = {}
@@ -895,7 +895,7 @@ def _summaries(db: duckdb.DuckDBPyConnection) -> None:
             {
                 "tournament": "VARCHAR",
                 "match": "VARCHAR",
-                "matchup": "VARCHAR",
+                "seating": "VARCHAR",
                 "checkpoint": "VARCHAR",
                 "tags": "VARCHAR[]",
             },
@@ -903,7 +903,7 @@ def _summaries(db: duckdb.DuckDBPyConnection) -> None:
                 [
                     name,
                     each.match.key,
-                    each.matchup,
+                    each.seating,
                     None if each.checkpoint is None else str(each.checkpoint),
                     list(each.tags),
                 ]  # fmt: skip

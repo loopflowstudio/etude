@@ -11,7 +11,14 @@ An eval run held for a tournament (`Benchmark` or `RoundRobin`) also stores
 `tournament.json` (`TournamentRun`): the definition it was held with and what
 it added. A tournament is nothing more than the eval runs naming it;
 `assemble` makes one from them, and its schedule follows by
-`Matchup.matches` and `RoundRobin.matches` wherever it is read.
+`Seating.matches` and `RoundRobin.matches` wherever it is read.
+
+A `Seating` is the rule for who meets whom in a benchmark. A relative seat
+(`Earlier`, `Fraction`, `At`, `Final`, `Aligned`) names a checkpoint by where
+it stands relative to the held one; it is found among the experiment's
+training `Line`s, which the caller passes, since evaluation reads no training
+run. What it finds is exact, so found for good: the hold records it
+(`Seated`), and every later read schedules from the record.
 
 A `Player` is whatever takes a seat: a `Model`, a checkpoint and how it plays
 (`Inference`), or `Code`. A player is identified by its key: the checkpoint's
@@ -38,7 +45,7 @@ import json
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from hashlib import sha256
-from itertools import combinations
+from itertools import combinations, product
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Self
 
@@ -206,7 +213,7 @@ class Inference(Record):
     on top of the network and how; it is part of each model's key. `source`
     is the inference code's files: their `Version`, recorded with each match
     but not part of the key, so changed inference code reuses what was played.
-    In a matchup it is a seat each checkpoint the benchmark is held for fills.
+    In a seating it is a seat each checkpoint the benchmark is held for fills.
     """
 
     config: _GivenConfig = {}
@@ -352,7 +359,7 @@ class Environment(Record):
 
 
 class Match(Record):
-    """A seating of players under fixed conditions, played for some games.
+    """Players in their seats under fixed conditions, played for some games.
 
     The unit Etude schedules, resumes and resamples. Group `all` holds every
     seat and is added when not given.
@@ -475,24 +482,141 @@ class Rollup(Record):
         return self
 
 
-class Matchup(Record):
-    """A named line of a benchmark: `players` in seat order, each a fixed player or an `Inference`.
+class Earlier(Record):
+    """The held checkpoint's line exactly `by` before it on `clock`, playing as `inference`.
 
-    An `Inference` seat is filled by each checkpoint the benchmark is held
-    for. Its value is the first player's against the second. Both may be
-    inference seats, such as search against no search. With no inference seat
-    it is played once, not for each checkpoint, so two chosen checkpoints can
-    meet: `Inference.model(checkpoint)` seats one as the benchmark would.
+    With `job`, each of that job's lines instead. Positions are exact: with
+    no checkpoint there, the seat is a gap.
+    """
+
+    kind: Literal["earlier"] = "earlier"
+    clock: str
+    by: float = Field(gt=0)
+    inference: Inference
+    job: str | None = None
+
+
+class Fraction(Record):
+    """The held checkpoint's line at exactly `value` × its position on `clock`.
+
+    `Fraction(clock="updates", value=0.5, ...)` seats 3,000 for 6,000.
+    """
+
+    kind: Literal["fraction"] = "fraction"
+    clock: str
+    value: float = Field(gt=0, lt=1)
+    inference: Inference
+    job: str | None = None
+
+
+class At(Record):
+    """The held checkpoint's line at `value` on `clock`, such as its initial weights at 0."""
+
+    kind: Literal["at"] = "at"
+    clock: str
+    value: float
+    inference: Inference
+    job: str | None = None
+
+
+class Final(Record):
+    """The held checkpoint's line's last checkpoint, once its run has ended, finished or failed."""
+
+    kind: Literal["final"] = "final"
+    inference: Inference
+    job: str | None = None
+
+
+class Aligned(Record):
+    """Each of job `job`'s lines at exactly the held checkpoint's position on `clock`."""
+
+    kind: Literal["aligned"] = "aligned"
+    clock: str
+    job: str
+    inference: Inference
+
+
+# A seat naming a checkpoint by where it stands relative to the one a seating is held for.
+type Relative = Annotated[Earlier | Fraction | At | Final | Aligned, Field(discriminator="kind")]
+
+# Why a relative seat has no checkpoint: none there yet, or there never will be.
+type Missing = Literal["not_yet", "never"]
+
+# Relative seat positions match exactly, up to float arithmetic (0.3 × 1,000).
+_EXACT = 1e-9
+
+
+class Line(Record):
+    """A learner line as relative seats find it: a training run and the runs continuing it.
+
+    `name` is its first run, as `CheckpointRef.line` names it; `job` the full
+    name the report gives its job, `launch` its launch name; `ended` whether
+    its latest run has ended, so it saves no more. `checkpoints` are its
+    stored checkpoints in the order they were saved.
+    """
+
+    name: str
+    job: str | None = None
+    launch: str | None = None
+    ended: bool = False
+    checkpoints: tuple[CheckpointRef, ...] = ()
+
+
+class Seated(Record):
+    """The checkpoints a seating's relative seats found for one held checkpoint.
+
+    Positions are exact, so a found checkpoint is found for good: the hold
+    records it (`TournamentRun.seated`), and the schedule reads it back.
+    """
+
+    seating: str
+    checkpoint: CheckpointKey
+    # By seat: the checkpoints a relative seat found, one per line; () for any other seat.
+    seats: tuple[tuple[CheckpointRef, ...], ...]
+
+
+class Gap(Record):
+    """A held checkpoint whose relative seat has no checkpoint, and why.
+
+    `job` is the job it looks in, None for the held checkpoint's own line;
+    `clock` and `position` where it looks, None for `Final` or a held
+    checkpoint with no position on `clock`.
+    """
+
+    seating: str
+    checkpoint: CheckpointKey
+    missing: Missing
+    job: str | None = None
+    clock: str | None = None
+    position: float | None = None
+
+
+class Seating(Record):
+    """The rule for who meets whom: `players` in seat order, played under each of `conditions`.
+
+    A seat is a fixed player, an `Inference` that each checkpoint the
+    benchmark is held for fills, or a relative seat (`Earlier`, `Fraction`,
+    `At`, `Final`, `Aligned`) naming a checkpoint by where it stands relative
+    to the held one. Its value is the first player's against the second. With
+    no inference seat it is played once, not for each checkpoint, so two
+    chosen checkpoints can meet: `Inference.model(checkpoint)` seats one as the
+    benchmark would. It makes one match per condition (`matches`).
     """
 
     name: str = Field(min_length=1, max_length=200)
-    players: tuple[Player | Inference, Player | Inference]
+    players: tuple[Player | Inference | Relative, Player | Inference | Relative]
     # Mapping, so a literal like `{"deal": 1}` type-checks as a condition.
     conditions: tuple[Mapping[str, JsonValue], ...] = Field(min_length=1)
     games: int = Field(ge=1)
-    # The author's labels, such as "consecutive" or "held-out", for choosing
-    # which matchups a reading counts; `schedule` carries them.
+    # The author's labels, such as "anchor" or "held-out", for choosing
+    # which seatings a reading counts; `schedule` carries them.
     tags: tuple[Name, ...] = ()
+
+    @model_validator(mode="after")
+    def relative_to_a_held_checkpoint(self) -> Self:
+        if self.relative and not any(isinstance(each, Inference) for each in self.players):
+            raise ValueError("relative_seat_needs_an_inference_seat")
+        return self
 
     @property
     def fixed(self) -> bool:
@@ -500,51 +624,170 @@ class Matchup(Record):
         return not any(isinstance(each, Inference) for each in self.players)
 
     @property
+    def relative(self) -> bool:
+        """Whether a seat names a checkpoint relative to the held one."""
+        return any(isinstance(each, _RELATIVE) for each in self.players)
+
+    @property
     def definition(self) -> Digest:
         """What two eval runs must agree on to share the name: keys, not versions."""
         # An inference seat's literal "model" predates the name `Inference`; it stays, so
-        # every matchup keeps the definition it was first held with.
+        # every seating keeps the definition it was first held with.
         players = [
-            ["model", each.config] if isinstance(each, Inference) else each.key
+            ["model", each.config]
+            if isinstance(each, Inference)
+            else ["relative", each.model_dump(mode="json", exclude={"inference": {"version"}})]
+            if isinstance(each, _RELATIVE)
+            else each.key
             for each in self.players
         ]
         return digest([self.name, players, self.conditions, self.games, self.tags])
 
-    def matches(self, checkpoint: CheckpointRef | None = None) -> list[Match]:
-        """One match per condition, with `checkpoint` in every inference seat."""
-        seated: list[Player] = []
-        for each in self.players:
-            if not isinstance(each, Inference):
-                seated.append(each)
+    def matches(
+        self, checkpoint: CheckpointRef | None = None, seated: Seated | None = None
+    ) -> list[Match]:
+        """One match per condition and seating of players: `checkpoint` in every inference
+        seat, and in each relative seat each checkpoint `seated` found for it."""
+        options: list[list[Player]] = []
+        for seat, each in enumerate(self.players):
+            if isinstance(each, _RELATIVE):
+                if seated is None:
+                    raise ValueError("relative_seat_needs_its_checkpoints")
+                options.append([each.inference.model(ref) for ref in seated.seats[seat]])
+            elif not isinstance(each, Inference):
+                options.append([each])
             elif checkpoint is None:
                 raise ValueError("inference_seat_needs_a_checkpoint")
             else:
-                seated.append(each.model(checkpoint))
+                options.append([each.model(checkpoint)])
         return [
-            Match(players=tuple(seated), conditions=dict(given), games=self.games)
+            Match(players=players, conditions=dict(given), games=self.games)
+            for players in product(*options)
             for given in self.conditions
         ]
 
+    def resolve(self, checkpoint: CheckpointRef, lines: Sequence[Line]) -> Seated | Gap | None:
+        """What the relative seats find for `checkpoint` among `lines`, or why one finds nothing.
+
+        None when the seating plays nothing for it: a seat names the held
+        checkpoint's own job, or finds only the held checkpoint itself. A seat
+        naming a job seats each of its lines that has a checkpoint there.
+        """
+        held = next((line for line in lines if line.name == checkpoint.line), None)
+        own = {held.job, held.launch} - {None} if held is not None else set()
+        seats: list[tuple[CheckpointRef, ...]] = []
+        gaps: list[Gap] = []
+        for seat, each in enumerate(self.players):
+            if not isinstance(each, _RELATIVE):
+                seats.append(())
+                continue
+            if each.job is not None and each.job in own:
+                return None
+            if each.job is None:
+                candidates = [held] if held is not None else []
+            else:
+                candidates = [line for line in lines if each.job in (line.job, line.launch)]
+            found: list[CheckpointRef] = []
+            reasons: list[Missing] = []
+            itself = False
+            for line in candidates:
+                result = _find(each, checkpoint, line)
+                if isinstance(result, CheckpointRef) and result.key == checkpoint.key:
+                    itself = True
+                elif isinstance(result, CheckpointRef):
+                    found.append(result)
+                else:
+                    reasons.append(result)
+            if not found and itself:
+                return None
+            if not found:
+                # No line yet: the job has not started, or the held one's line is unknown.
+                unknown = not candidates and checkpoint.line is not None
+                gaps.append(
+                    Gap(
+                        seating=self.name,
+                        checkpoint=checkpoint.key,
+                        missing="not_yet" if unknown or "not_yet" in reasons else "never",
+                        job=each.job,
+                        clock=None if isinstance(each, Final) else each.clock,
+                        position=_position(each, checkpoint),
+                    )
+                )
+            seats.append(tuple(found))
+        if gaps:
+            # A seat that may still find one says so first.
+            return min(gaps, key=lambda gap: gap.missing != "not_yet")
+        return Seated(seating=self.name, checkpoint=checkpoint.key, seats=tuple(seats))
+
+
+_RELATIVE = (Earlier, Fraction, At, Final, Aligned)
+
+
+def _position(seat: Earlier | Fraction | At | Final | Aligned, held: CheckpointRef) -> float | None:
+    """Where on its clock the seat looks for `held`; None for `Final`, or with no position."""
+    if isinstance(seat, Final):
+        return None
+    if isinstance(seat, At):
+        return seat.value
+    here = held.at.get(seat.clock)
+    if here is None:
+        return None
+    if isinstance(seat, Earlier):
+        return here - seat.by
+    if isinstance(seat, Fraction):
+        return here * seat.value
+    return here
+
+
+def _find(
+    seat: Earlier | Fraction | At | Final | Aligned, held: CheckpointRef, line: Line
+) -> CheckpointRef | Missing:
+    """The checkpoint of `line` the seat names for `held`, or why there is none.
+
+    "never" once the line has ended or has passed the position without saving there.
+    """
+    if isinstance(seat, Final):
+        if not line.ended:
+            return "not_yet"
+        return line.checkpoints[-1] if line.checkpoints else "never"
+    wanted = _position(seat, held)
+    if wanted is None:
+        return "never"
+    for each in line.checkpoints:
+        stood = each.at.get(seat.clock)
+        if stood is not None and abs(stood - wanted) <= _EXACT * max(1.0, abs(wanted)):
+            return each
+    passed = any(each.at.get(seat.clock, float("-inf")) > wanted for each in line.checkpoints)
+    return "never" if line.ended or passed else "not_yet"
+
 
 class Benchmark(Record):
-    """Matchups a model's checkpoints are each held for, to follow it through training.
+    """Seatings a model's checkpoints are each held for, to follow it through training.
 
-    Its matchups are every matchup any of its eval runs was held with. A
-    matchup of fixed players is held once, such as one checkpoint against an
+    Its seatings are every seating any of its eval runs was held with. A
+    seating of fixed players is held once, such as one checkpoint against an
     earlier one, so an experiment can name the pairs it wants as checkpoints
     appear and a batch hold plays those not yet played.
     """
 
     name: Name
     environment: Environment
-    matchups: tuple[Matchup, ...] = ()
+    seatings: tuple[Seating, ...] = ()
+
+    @model_validator(mode="before")
+    @classmethod
+    def seatings_were_matchups(cls, data: Any) -> Any:  # noqa: ANN401 - pydantic's raw input
+        # etude-sdk before 0.3 stored them as `matchups`.
+        if isinstance(data, dict) and "matchups" in data:
+            data = {("seatings" if key == "matchups" else key): v for key, v in data.items()}
+        return data
 
     @model_validator(mode="after")
     def named(self) -> Self:
         if not SAFE_NAME.match(self.name):
             raise ValueError("unsafe_tournament_name")
-        if len({each.name for each in self.matchups}) != len(self.matchups):
-            raise ValueError("duplicate_matchup_name")
+        if len({each.name for each in self.seatings}) != len(self.seatings):
+            raise ValueError("duplicate_seating_name")
         return self
 
 
@@ -583,6 +826,8 @@ class TournamentRun(Record):
     tournament: Benchmark | RoundRobin
     checkpoints: tuple[CheckpointRef, ...] = ()
     entrants: tuple[Player, ...] = ()
+    # What relative seats found for the checkpoints it scheduled (`Seating.resolve`).
+    seated: tuple[Seated, ...] = ()
     # (k, n): of the schedule's keys in sorted order, the run plays every nth from the kth.
     share: tuple[int, int] = (0, 1)
 
@@ -606,42 +851,94 @@ class TournamentRun(Record):
 
 
 class Scheduled(Record):
-    """A match a tournament calls for; a benchmark's also names its matchup and, for a
-    matchup with an inference seat, its checkpoint."""
+    """A match a tournament calls for; a benchmark's also names its seating and, for a
+    seating with an inference seat, its checkpoint."""
 
     match: Match
-    matchup: str | None = None
+    seating: str | None = None
     checkpoint: CheckpointKey | None = None
     tags: tuple[Name, ...] = ()
 
 
 class Tournament(Record):
-    """A tournament as its eval runs hold it: every matchup, checkpoint and entrant they added."""
+    """A tournament as its eval runs hold it: every seating, checkpoint and entrant they added."""
 
     definition: Benchmark | RoundRobin
     checkpoints: tuple[CheckpointRef, ...] = ()
     entrants: tuple[Player, ...] = ()
+    seated: tuple[Seated, ...] = ()
 
     def schedule(self) -> list[Scheduled]:
-        """Each matchup for each checkpoint, or once when fixed, or each pair of entrants;
-        held or not."""
+        """Each seating for each checkpoint, or once when fixed, or each pair of entrants;
+        held or not. A relative seating is scheduled for a checkpoint once `seated` says
+        what its relative seats found."""
         if isinstance(self.definition, RoundRobin):
             return [Scheduled(match=match) for match in self.definition.matches(self.entrants)]
-        fixed = [
-            Scheduled(match=match, matchup=matchup.name, tags=matchup.tags)
-            for matchup in self.definition.matchups
-            if matchup.fixed
-            for match in matchup.matches()
+        found = {(each.seating, str(each.checkpoint)): each for each in self.seated}
+        scheduled = [
+            Scheduled(match=match, seating=seating.name, tags=seating.tags)
+            for seating in self.definition.seatings
+            if seating.fixed
+            for match in seating.matches()
         ]
-        return fixed + [
-            Scheduled(
-                match=match, matchup=matchup.name, checkpoint=checkpoint.key, tags=matchup.tags
-            )
-            for matchup in self.definition.matchups
-            if not matchup.fixed
-            for checkpoint in self.checkpoints
-            for match in matchup.matches(checkpoint)
-        ]
+        for seating in self.definition.seatings:
+            if seating.fixed:
+                continue
+            for checkpoint in self.checkpoints:
+                seated = found.get((seating.name, str(checkpoint.key)))
+                if seating.relative and seated is None:
+                    continue
+                scheduled += [
+                    Scheduled(
+                        match=match,
+                        seating=seating.name,
+                        checkpoint=checkpoint.key,
+                        tags=seating.tags,
+                    )
+                    for match in seating.matches(checkpoint, seated)
+                ]
+        return scheduled
+
+    def resolve(self, lines: Sequence[Line]) -> tuple[Tournament, tuple[Gap, ...]]:
+        """The tournament with what its relative seats find among `lines` added to `seated`,
+        and each held checkpoint a relative seat still finds nothing for."""
+        if not isinstance(self.definition, Benchmark):
+            return self, ()
+        seated = list(self.seated)
+        gaps: list[Gap] = []
+        recorded = {(each.seating, str(each.checkpoint)) for each in self.seated}
+        for seating in self.definition.seatings:
+            if not seating.relative:
+                continue
+            for checkpoint in self.checkpoints:
+                result = seating.resolve(checkpoint, lines)
+                if isinstance(result, Seated):
+                    seated.append(result)
+                elif (
+                    isinstance(result, Gap) and (seating.name, str(checkpoint.key)) not in recorded
+                ):
+                    gaps.append(result)
+        return self.model_copy(update={"seated": _merged(seated)}), tuple(gaps)
+
+
+def _merged(seated: Iterable[Seated]) -> tuple[Seated, ...]:
+    """One `Seated` per seating and held checkpoint: every checkpoint each seat found, by key;
+    of two with one key, the later."""
+    merged: dict[tuple[str, str], tuple[CheckpointKey, list[dict[str, CheckpointRef]]]] = {}
+    for each in seated:
+        _, seats = merged.setdefault(
+            (each.seating, str(each.checkpoint)), (each.checkpoint, [{} for _ in each.seats])
+        )
+        for kept, found in zip(seats, each.seats, strict=True):
+            kept.update((str(ref.key), ref) for ref in found)
+    return tuple(
+        Seated(
+            seating=seating,
+            checkpoint=checkpoint,
+            seats=tuple(tuple(kept[key] for key in sorted(kept)) for kept in seats),
+        )
+        for (seating, _), (checkpoint, seats) in sorted(merged.items(), key=lambda item: item[0])
+    )
 
 
 def assemble(held: Iterable[TournamentRun]) -> Tournament:
@@ -649,14 +946,14 @@ def assemble(held: Iterable[TournamentRun]) -> Tournament:
 
     Raises `EtudeError("tournament_conflict")` when they disagree on its
     format or environment, or a round robin's conditions or games, and
-    `EtudeError("matchup_conflict")` when they define one matchup name two ways.
-    Versions are not definitions: a later run's matchup, checkpoint or entrant
+    `EtudeError("seating_conflict")` when they define one seating name two ways.
+    Versions are not definitions: a later run's seating, checkpoint or entrant
     with the same key replaces an earlier one, so what is played next records
     the version that plays it.
     """
     runs = list(held)
     first = runs[0].tournament
-    matchups: dict[str, Matchup] = {}
+    seatings: dict[str, Seating] = {}
     checkpoints: dict[str, CheckpointRef] = {}
     entrants: dict[str, Player] = {}
     for run in runs:
@@ -666,14 +963,14 @@ def assemble(held: Iterable[TournamentRun]) -> Tournament:
         if isinstance(given, RoundRobin) and given != first:
             raise EtudeError("tournament_conflict", 409) from ValueError(first.name)
         if isinstance(given, Benchmark):
-            for each in given.matchups:
-                if matchups.setdefault(each.name, each).definition != each.definition:
-                    raise EtudeError("matchup_conflict", 409) from ValueError(each.name)
-                matchups[each.name] = each
+            for each in given.seatings:
+                if seatings.setdefault(each.name, each).definition != each.definition:
+                    raise EtudeError("seating_conflict", 409) from ValueError(each.name)
+                seatings[each.name] = each
         checkpoints.update((str(each.key), each) for each in run.checkpoints)
         entrants.update((each.key, each) for each in run.entrants)
     definition = (
-        first.model_copy(update={"matchups": tuple(matchups[name] for name in sorted(matchups))})
+        first.model_copy(update={"seatings": tuple(seatings[name] for name in sorted(seatings))})
         if isinstance(first, Benchmark)
         else first
     )
@@ -681,4 +978,5 @@ def assemble(held: Iterable[TournamentRun]) -> Tournament:
         definition=definition,
         checkpoints=tuple(checkpoints[key] for key in sorted(checkpoints)),
         entrants=tuple(entrants[key] for key in sorted(entrants)),
+        seated=_merged(each for run in runs for each in run.seated),
     )

@@ -12,7 +12,6 @@ const num = v => v == null ? "—" : Math.abs(v) >= 1e9 ? (v / 1e9).toPrecision(
 const fmt = v => v == null ? "—" : v !== 0 && Math.abs(v) < 1e-3 ? v.toExponential(2) : num(v);
 const scoreFormat = v => v == null ? "—" : Math.abs(v) >= 0.01 && Math.abs(v) < 100 ? v.toFixed(2) : fmt(v);
 const scoreCount = (c, score) => `${c.rows} ${score?.unit || "rows"} · ${c.matches} matches`;
-const ownOpponent = panel => panel.opponent == null ? null : typeof panel.opponent === "string" ? {kind: "name", name: panel.opponent} : panel.opponent;
 // Keep partial-seed notices; format full seed means with the chart's precision.
 const pointMeta = (p, format = fmt) => p.meta ?? (p.seeds ? `mean of ${p.seeds.length} seeds: ${p.seeds.map(format).join(", ")}` : "");
 const pointText = (p, format = fmt) => format(p.y) + (p.lo != null ? ` · ${p.intervalLabel || (p.seeds ? "seed range" : "95% interval")} ${format(p.lo)}–${format(p.hi)}` : "");
@@ -168,8 +167,8 @@ function line(host, series, o = {}) {
 
 // ---------------------------------------------------------------- an experiment's page data
 // Curves are jobs, runs across seeds, and one per line of placed checkpoints no training run
-// saved, with one more for those of no line. A line (`Player.line`) is a learner: `Earlier`,
-// `Fraction`, `At` and the crosstable compare a checkpoint only with its own line's. A model is
+// saved, with one more for those of no line. A line (`Player.line`) is a learner: the
+// crosstable compares a checkpoint only with its own line's. A model is
 // bound to its run's checkpoint by key, and drawn where `Player.at` says, which the page
 // computed (its seat's position, else its run's).
 const lineRun = line => "\u0001" + line;  // a line curve's one member, where a job has runs; no run is so named
@@ -245,7 +244,7 @@ function model(D) {
     if (skipped.length === got.length) return {x, key, skip: true, gap: skipped[0][1].gap, meta: skipped[0][1].meta};
     if (skipped.length) return {x, key, missing: true, gap: "partial", meta: `${got.length - skipped.length} of ${got.length} seeds evaluated`};
     if (new Set(got.map(([, v]) => v.inference).filter(v => v != null)).size > 1)
-      return {x, key, missing: true, gap: "none", meta: "seeds played different inference variants; choose a matchup (or set Curve.inference on a curve)"};
+      return {x, key, missing: true, gap: "none", meta: "seeds played different inference variants; choose a seating"};
     const ys = got.map(([, v]) => v.y), y = mean(ys);
     return got.length > 1
       ? {x, key, y, lo: Math.min(...ys), hi: Math.max(...ys), seeds: ys}
@@ -292,21 +291,17 @@ function model(D) {
     const a = D.players[i], name = variants.get(a.name).size > 1 ? `${a.name} ${a.config}` : a.name;
     return a.run != null ? `${a.run} ${name}` : a.line != null ? `${a.line} ${name}` : name;
   };
-  const canonical = value => JSON.stringify(value, (_, v) => v && typeof v === "object" && !Array.isArray(v) ? Object.fromEntries(Object.keys(v).sort().map(k => [k, v[k]])) : v);
-  const inferenceKeys = D.players.map(a => canonical(JSON.parse(a.config)));
-  function subjectAt(run, m, played, inference = null) {
-    const wanted = inference == null ? null : canonical(inference);
-    const candidates = (bound.get(`${run}|${m.ordinal}`) || []).filter(i => wanted == null || inferenceKeys[i] === wanted);
+  function subjectAt(run, m, played) {
+    const candidates = bound.get(`${run}|${m.ordinal}`) || [];
     const recorded = candidates.filter(played);
     const found = recorded.length ? recorded : candidates;
     const i = found[0];
     if (i == null) return {};
     const a = D.players[i];
-    // Curves explain unplayed checkpoints; HeadToHead includes only selected games.
     const subject = {at: a.at, recorded: recorded.length > 0};
     if (found.some(k => D.players[k].config !== a.config))
       // Named by config, not checkpoint: the point's position says which one, and an empty chart says it once.
-      return {...subject, gap: `multiple inference variants: ${[...new Set(found.map(k => D.players[k].config))].join(" and ")}; choose a matchup or set Curve.inference`};
+      return {...subject, gap: `multiple inference variants: ${[...new Set(found.map(k => D.players[k].config))].join(" and ")}; choose a seating`};
     // Position uniqueness belongs to checkpoint resolution, for every panel.
     const same = positions.get(JSON.stringify([lineOf(i), a.config, a.at[alignClock]])) || found;
     if (same.length > 1)
@@ -315,13 +310,13 @@ function model(D) {
   }
   function selName(s) {
     if (Array.isArray(s)) return s.map(selName).join(" + ");
-    const detail = s.matchup ?? (s.tag != null ? `tagged ${s.tag}` : null);
+    const detail = s.seating ?? (s.tag != null ? `tagged ${s.tag}` : null);
     return s.tournament == null ? detail ?? "matches outside a tournament" : detail == null ? s.tournament : `${s.tournament} · ${detail}`;
   }
-  // A page offers each tournament and each tag within one; a matchup only where a panel names it.
-  const choices = D.selections.flatMap((s, i) => !Array.isArray(s) && s.matchup == null ? [[String(i), selName(s)]] : []);
+  // A page offers each tournament and each tag within one; a seating only where a panel names it.
+  const choices = D.selections.flatMap((s, i) => !Array.isArray(s) && s.seating == null ? [[String(i), selName(s)]] : []);
   const usesSelection = (R.evals || []).some(p => p.matches == null);
-  const sameMatches = (a, b) => (a.tournament ?? null) === (b.tournament ?? null) && (a.tag ?? null) === (b.tag ?? null) && (a.matchup ?? null) === (b.matchup ?? null);
+  const sameMatches = (a, b) => (a.tournament ?? null) === (b.tournament ?? null) && (a.tag ?? null) === (b.tag ?? null) && (a.seating ?? null) === (b.seating ?? null);
   const recordedSelections = new Set(D.cells.map(c => `${c.score}|${c.selection}`));
   function selectMatches(wanted, selected, score = 0) {
     if (wanted == null) return selected;
@@ -333,12 +328,11 @@ function model(D) {
     const fits = D.selections.flatMap((s, i) => !Array.isArray(s)
       && (wanted.tournament == null || wanted.tournament === s.tournament)
       && (s.tag ?? null) === (wanted.tag ?? null)
-      && (s.matchup ?? null) === (wanted.matchup ?? null) ? [i] : []);
+      && (s.seating ?? null) === (wanted.seating ?? null) ? [i] : []);
     const present = fits.filter(i => recordedSelections.has(`${score}|${i}`));
     const candidates = present.length ? present : fits;
     return candidates.find(i => D.selections[i].tournament === D.selections[selected]?.tournament) ?? candidates[0] ?? null;
   }
-  const panelJobs = (panel, jobs = JOBS) => panel.subject == null ? jobs : jobs.filter(j => names(j, panel.subject));
   function scheduleSeries(panel, jobs = JOBS) {
     return jobs.flatMap(job => {
       const samples = panel.jobs[job.name] ?? panel.jobs[job.launch];
@@ -373,60 +367,54 @@ function model(D) {
     if (c.played) return {skip: true, meta: "not in these matches"};
     return {skip: true, gap: "none", meta: "not evaluated"};
   }
-  // A curve's own opponent for subject `i` (`etude.report.Curve.opponent`): {index} or {gap}.
-  // By name, whoever of that name the subject met; by position, the checkpoint of the same
-  // line and config standing exactly there, other than the subject itself. Positions match by
-  // value in the clock's units, so 90 × 0.7 (62.99999999999999 in binary) finds 63.
-  const exactly = v => +v.toPrecision(12);
-  function opponentAt(i, spec, played) {
-    if (spec.kind === "name") {
-      const met = indices.filter(k => D.players[k].name === spec.name && played(k));
-      if (met.length > 1) return {gap: `met ${met.map(playerName).join(" and ")}, each called ${spec.name}`};
-      return met.length ? {index: met[0]} : {gap: `not played against ${spec.name}`};
-    }
-    const me = D.players[i], here = me.at[spec.clock];
-    if (here == null) return {gap: `no position on ${spec.clock}`};
-    const want = exactly({earlier: here - spec.by, fraction: here * spec.value, at: spec.value}[spec.kind]);
-    const found = lineMembers(lineOf(i)).filter(k => k !== i && D.players[k].config === me.config && D.players[k].at[spec.clock] != null && exactly(D.players[k].at[spec.clock]) === want);
-    if (found.length > 1) return {gap: `${found.map(playerName).join(" and ")} both stood at ${spec.clock} ${num(want)}`};
-    return found.length ? {index: found[0]} : {gap: `no checkpoint at ${spec.clock} ${num(want)}`};
+  // A selection of seatings draws each checkpoint they were held for (`Page.held`): its first
+  // seat's score against the player in its second, where the held checkpoint stood. A held
+  // checkpoint seated against several, such as each line of a job, is the mean over them.
+  const heldKey = h => h.run != null ? `${h.run}|${h.ordinal}` : `${lineRun(h.line ?? "")}|${splitKey(h.at)}`;
+  function seatingsOf(sel) {
+    const s = sel == null ? null : D.selections[sel];
+    if (s == null) return null;
+    const parts = Array.isArray(s) ? s : [s];
+    return parts.every(p => p.seating != null) ? parts : null;
   }
-  // Each checkpoint's value in the requested matches; scientific variants are
-  // selected by their results, never averaged together behind a curve.
-  const evalValue = (score, sel, split, opponent, inference = null) => (run, m) => {
-    const own = typeof opponent === "object";
-    const opponentOf = i => own ? opponentAt(i, opponent, k => !!cellOf(sel, score, i, k, false, split)) : {index: opponent === "" ? null : +opponent};
-    const subject = subjectAt(run, m, i => {
-      const o = opponentOf(i);
-      return !o.gap && !!cellOf(sel, score, i, o.index, false, split);
-    }, inference);
-    if (subject.gap) return {missing: true, gap: "none", at: subject.at, meta: subject.gap};
-    const i = subject.index;
-    if (i == null || sel == null) return gapOf(sel, run, m, score);
-    const a = D.players[i];
-    const missing = meta => ({missing: true, gap: "none", at: a.at, meta});
-    const found = opponentOf(i);
-    if (found.gap) return missing(found.gap);
-    const o = found.index;
-    const c = cellOf(sel, score, i, o, false, split);
-    if (!c) return own ? missing(`not played against ${playerName(o)}`) : gapOf(sel, run, m, score);
-    return {y: c.value, lo: c.interval?.[0], hi: c.interval?.[1], at: a.at, inference: JSON.stringify([a.config, o == null ? null : D.players[o].config]), meta: scoreCount(c, D.scores?.[score]) + (own ? " · vs " + playerName(o) : "")};
-  };
-  function headToHeadValue(score, sel, split, opponent) {
-    const theirs = members(opponent);
+  function seatedValue(score, sel, split, parts) {
+    const held = new Map();
+    for (const h of D.held || []) {
+      if (!parts.some(p => p.seating === h.seating && (p.tournament == null || p.tournament === h.tournament))) continue;
+      if (!held.has(heldKey(h))) held.set(heldKey(h), []);
+      held.get(heldKey(h)).push(h);
+    }
     return (run, m) => {
-      const mine = subjectAt(run, m, i => theirs.some(s => cellOf(sel, score, i, s, false, split)));
-      if (!mine.recorded) return null;
-      if (mine.gap) return {missing: true, gap: "none", at: mine.at, meta: mine.gap};
-      const me = D.players[mine.index], got = theirs.map(s => cellOf(sel, score, mine.index, s, false, split)).filter(Boolean);
-      const configs = [...new Set(got.map(g => D.players[g.opponent].config))];
-      if (configs.length > 1) return {missing: true, gap: "none", at: me.at, meta: `opponent ${opponent.label} played multiple inference variants: ${configs.join(" and ")}; choose a matchup`};
-      // Checkpoint positions may be averaged; both scientific sides must agree across seeds.
-      return {y: mean(got.map(g => g.value)), at: me.at, inference: JSON.stringify([me.config, configs[0]]), meta: `against ${got.length} of ${opponent.label}'s checkpoints`};
+      const here = held.get(`${run}|${m.ordinal}`);
+      if (!here) return gapOf(sel, run, m, score);
+      const at = here[0].at, got = here.flatMap(h => h.pairs).map(([a, b]) => cellOf(sel, score, a, b, false, split)).filter(Boolean);
+      const missing = here.find(h => h.missing != null);
+      if (!got.length && missing) return {missing: true, gap: missing.missing === "not_yet" ? "pending" : "none", at, meta: missing.meta};
+      if (!got.length) return gapOf(sel, run, m, score);
+      const y = mean(got.map(c => c.value));
+      if (got.length === 1) return {y, lo: got[0].interval?.[0], hi: got[0].interval?.[1], at, meta: `${scoreCount(got[0], D.scores?.[score])} · vs ${playerName(got[0].opponent)}`};
+      return {y, at, meta: `mean of ${got.length}: ${got.map(c => `${scoreFormat(c.value)} vs ${playerName(c.opponent)}`).join(", ")}`};
     };
   }
+  // Each checkpoint's value in the requested matches: as seated, for a selection of seatings;
+  // else against the opponent given, an anchor's index or "" for all. Scientific variants are
+  // selected by their results, never averaged together behind a curve.
+  const evalValue = (score, sel, split, opponent) => {
+    const parts = seatingsOf(sel);
+    if (parts) return seatedValue(score, sel, split, parts);
+    return (run, m) => {
+      const o = opponent === "" ? null : +opponent;
+      const subject = subjectAt(run, m, i => !!cellOf(sel, score, i, o, false, split));
+      if (subject.gap) return {missing: true, gap: "none", at: subject.at, meta: subject.gap};
+      const i = subject.index;
+      if (i == null || sel == null) return gapOf(sel, run, m, score);
+      const a = D.players[i], c = cellOf(sel, score, i, o, false, split);
+      if (!c) return gapOf(sel, run, m, score);
+      return {y: c.value, lo: c.interval?.[0], hi: c.interval?.[1], at: a.at, inference: JSON.stringify([a.config, o == null ? null : D.players[o].config]), meta: scoreCount(c, D.scores?.[score])};
+    };
+  };
   const evaluated = pts => pts.filter(p => !p.missing && !p.skip);
-  return {T, R, JOBS, marks, markOf, xOf, jobPoints, cellOf, subjectAt, placed, positioned, posClocks, alignClock, fixedPlayers, usesSelection, selectMatches, panelJobs, scheduleSeries, coverage, jobOfRun, linesOf, lineMembers, playerName, selName, choices, opponents, evalValue, headToHeadValue, evaluated};
+  return {T, R, JOBS, marks, markOf, xOf, jobPoints, cellOf, subjectAt, placed, positioned, posClocks, alignClock, fixedPlayers, usesSelection, selectMatches, seatingsOf, scheduleSeries, coverage, jobOfRun, linesOf, lineMembers, playerName, selName, choices, opponents, evalValue, evaluated};
 }
 
 // The first curve supplies the index headline, with the page's default score,
@@ -434,12 +422,13 @@ function model(D) {
 function headline(D, M) {
   const panel = D.report.evals?.find(p => p.kind === "curve") || {};
   const sel = M.selectMatches(panel.matches, M.choices.length ? +M.choices[0][0] : null);
-  const opp = ownOpponent(panel) ?? (sel == null ? "" : (M.opponents(0, sel)[0] || [""])[0]);
+  const seated = M.seatingsOf(sel) != null;
+  const opp = seated || sel == null ? "" : (M.opponents(0, sel)[0] || [""])[0];
   const clock = M.alignClock || WALL;
-  return M.panelJobs(panel).map(j => {
-    const pts = sel == null || !D.scores.length ? [] : M.jobPoints(j, clock, M.evalValue(0, sel, {}, opp, panel.inference));
+  return M.JOBS.map(j => {
+    const pts = sel == null || !D.scores.length ? [] : M.jobPoints(j, clock, M.evalValue(0, sel, {}, opp));
     const done = M.evaluated(pts);
-    return {job: j, points: pts, latest: done.length ? done[done.length - 1] : null, against: opp === "" ? "all opponents" : typeof opp === "object" ? (opp.name || "configured opponent") : D.players[+opp].name};
+    return {job: j, points: pts, latest: done.length ? done[done.length - 1] : null, against: seated ? "as seated" : opp === "" ? "all opponents" : D.players[+opp].name};
   });
 }
 

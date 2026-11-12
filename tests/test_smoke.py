@@ -37,7 +37,7 @@ EXPERIMENT = """
 from pathlib import Path
 
 from etude.eval.match import environment
-from etude.eval.records import Benchmark, Code, Inference, Matchup
+from etude.eval.records import Benchmark, Code, Inference, Seating
 from etude.experiment import ExperimentState
 from etude.jobs import evaluation
 from etude.launch.records import Job, SmokeForm
@@ -57,9 +57,9 @@ def runs(seeds: int = 1, tiny: str = "1", bare: bool = False) -> list:
 def eval(state: ExperimentState) -> Job:
     chosen = [saved for run in state.runs for saved in run.checkpoints]
     anchor = Code(name="heuristic", source=[__file__], config={{"strength": 0}})
-    vs = Matchup(name="vs heuristic", players=(Inference(config={{"search": 0}}), anchor),
+    vs = Seating(name="vs heuristic", players=(Inference(config={{"search": 0}}), anchor),
                  conditions=({{"deal": 0}}, {{"deal": 1}}), games=4)
-    ladder = Benchmark(name="ladder", environment=environment("duel"), matchups=(vs,))
+    ladder = Benchmark(name="ladder", environment=environment("duel"), seatings=(vs,))
     return evaluation(ladder, play={play}, checkpoints=chosen, max_hours=0.1,
                       repo=None)
 

@@ -17,13 +17,13 @@ and ML details over what the training runs logged and Etude recorded. A job
 groups its runs across seeds; evaluated checkpoints no training run saved
 draw a curve per learner line, including on pages with no training runs.
 
-Panels name data, never rendering. Eval panels name columns of the score's
-eval table (`Matrix(rows=..., columns=...)`, `Ranking(by=...)`,
-`Curve(split=...)`), whom a curve is scored against (`Curve(opponent=...)`:
-a player's name, or a checkpoint of the same line by its position, `Earlier`,
-`Fraction` or `At`), and which matches they count (`Matches`): a tournament's, or one
-matchup or tag of it, by the names `eval(state)` gives them. Matches held
-outside any tournament are offered by the Evals section's Matches control.
+Panels name data, never rendering, and draw; seatings say who plays whom
+(`etude.eval.records.Seating`). Eval panels name columns of the score's eval
+table (`Matrix(rows=..., columns=...)`, `Ranking(by=...)`, `Curve(split=...)`)
+and which matches they count (`Matches`): a tournament's, or one seating or
+tag of it, by the names `eval(state)` gives them. A curve of seatings draws
+each held checkpoint's seating value where that checkpoint stood. Matches
+held outside any tournament are offered by the Evals section's Matches control.
 Metric panels name logged metric keys. The defaults are reinforcement learning's:
 override `perf` or `ml` to name an experiment's own keys. This module imports only Pydantic and Etude's run records, so an
 experiment file can import it at no cost.
@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal, Self
 
-from pydantic import Field, FiniteFloat, JsonValue, model_validator
+from pydantic import Field, FiniteFloat, model_validator
 
 from etude.run.records import Record
 
@@ -55,76 +55,41 @@ class Score(Record):
 
 
 class Matches(Record):
-    """Which matches a panel counts: a tournament's, or one matchup or tag of it.
+    """Which matches a panel counts: a tournament's, or one seating or tag of it.
 
     `tournament` names a benchmark or round robin, None leaving it to the
-    section's control; `matchup` names one line of a benchmark, and `tag` the
-    matchups tagged with it (`Matchup.tags`). Give the names the experiment's
+    section's control; `seating` names one seating of a benchmark, and `tag` the
+    seatings tagged with it (`Seating.tags`). Give the names the experiment's
     `eval(state)` gives, such as `LADDER.name`.
     """
 
     tournament: str | None = None
-    matchup: str | None = None
+    seating: str | None = None
     tag: str | None = None
 
     @model_validator(mode="after")
     def one_part(self) -> Self:
-        if self.matchup is not None and self.tag is not None:
-            raise ValueError("matches_name_a_matchup_or_a_tag_not_both")
+        if self.seating is not None and self.tag is not None:
+            raise ValueError("matches_name_a_seating_or_a_tag_not_both")
         return self
 
 
-class Earlier(Record):
-    """Each point's opponent is the checkpoint of its line that stood `by` earlier on `clock`.
-
-    Only an exact position counts: with no checkpoint there, the point is a gap
-    that says so.
-    """
-
-    kind: Literal["earlier"] = "earlier"
-    clock: str
-    by: float
-
-
-class Fraction(Record):
-    """Each point's opponent is the checkpoint of its line that stood at `value` × its position on `clock`.
-
-    `Fraction(clock="updates", value=0.5)` plays 6,000 against 3,000 and 400
-    against 200. Only an exact position counts, as with `Earlier`.
-    """
-
-    kind: Literal["fraction"] = "fraction"
-    clock: str
-    value: float = Field(gt=0, lt=1)
-
-
-class At(Record):
-    """Each point's opponent is the checkpoint of its line that stood at `value` on `clock`."""
-
-    kind: Literal["at"] = "at"
-    clock: str
-    value: float
-
-
 class Curve(Record):
-    """Scores per job or external learner line; `split` draws one chart per column value.
+    """Scores over training, a line per job or external learner line; `split` draws one
+    chart per column value.
 
-    `opponent` fixes whom each point is scored against, overriding the
-    section's Opponent control: a player's name, or a checkpoint of the same
-    line (`Earlier`, `Fraction`, `At`). None leaves it to the control.
-    A tuple of `matches` unions their matches before aggregation; `subject`
-    selects the jobs launched under a name (one per config), or one job by
-    its full name ("ppo 1a2b3c"). `inference` selects an exact scientific
-    inference config when the matches seat several variants of one checkpoint.
+    Where its `matches` name seatings, each point is a held checkpoint's
+    seating value, its first seat's score, where that checkpoint stood; a held
+    checkpoint whose relative seat has no checkpoint is a gap that says why.
+    Otherwise each point is a checkpoint's score against the opponent the
+    section's Opponent control picks. A tuple of `matches` unions their
+    matches before aggregation.
     """
 
     kind: Literal["curve"] = "curve"
     title: str = "Score"
     split: str | None = None
     matches: Matches | tuple[Matches, ...] | None = None
-    opponent: str | Earlier | Fraction | At | None = None
-    subject: str | None = None
-    inference: dict[str, JsonValue] | None = None
 
     @model_validator(mode="after")
     def nonempty_matches(self) -> Self:
@@ -149,14 +114,6 @@ class Ranking(Record):
     kind: Literal["ranking"] = "ranking"
     by: str
     title: str | None = None
-    matches: Matches | None = None
-
-
-class HeadToHead(Record):
-    """Games between checkpoints of two jobs: each job's score against the other's."""
-
-    kind: Literal["head_to_head"] = "head_to_head"
-    title: str = "Head to head"
     matches: Matches | None = None
 
 
@@ -270,7 +227,7 @@ class Attempts(Record):
 
 
 type EvalPanel = Annotated[
-    Curve | Matrix | Ranking | HeadToHead | Crosstable | Anchors, Field(discriminator="kind")
+    Curve | Matrix | Ranking | Crosstable | Anchors, Field(discriminator="kind")
 ]
 type MetricPanel = Annotated[
     Series | Counters | Schedule | Flame | Pace | Elapsed | Attempts, Field(discriminator="kind")
@@ -292,8 +249,8 @@ class Report(Record):
 
     `score` None offers every numeric column of every eval table. `clock`
     names the x axis each section starts on (default: the first declared
-    clock). `baseline` names the job drawn dotted. `baseline`, `labels` and
-    `Curve.subject` name a job by its launch name, which covers every config
+    clock). `baseline` names the job drawn dotted. `baseline` and `labels`
+    name a job by its launch name, which covers every config
     launched under it, or by its full name ("ppo 1a2b3c"), which covers one.
     `labels` replaces displayed job names, keeping config digests, seed counts
     and identity.

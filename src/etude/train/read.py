@@ -597,6 +597,24 @@ def _here(
     return record.model_copy(update={"artifact": artifact})
 
 
+def lines(data: Sequence[RunData]) -> dict[str, str]:
+    """Each run's learner line: the first run of the chain of continuations that led to it,
+    as far as `data` knows. A run and the runs continuing it are one learner, one seed."""
+    parents = {
+        run.name: run.file.declaration.continues.parent.source_id
+        for run in data
+        if run.file is not None and run.file.declaration.continues is not None
+    }
+    found = {}
+    for run in data:
+        first, seen = run.name, {run.name}
+        while first in parents and parents[first] not in seen:
+            first = parents[first]
+            seen.add(first)
+        found[run.name] = first
+    return found
+
+
 def read_all(
     source: Storage | Path | str,
     experiment: str | None = None,
