@@ -17,7 +17,7 @@ from etude.eval.block import Block, Staging, quote
 from etude.eval.convert import convert, delete_files
 from etude.eval.match import Result, environment, evaluate
 from etude.eval.query import read_blobs, statsdb
-from etude.eval.records import Code, Match, MatchRecord, Rollup
+from etude.eval.records import Code, ColumnType, Match, MatchRecord, Rollup
 from etude.run.errors import EtudeError
 from etude.run.storage import DirectoryStorage, S3Storage
 from tests.eval.games import play, play_cards, play_with_evidence
@@ -195,7 +195,10 @@ def test_matches_a_dead_writer_staged_are_sealed_by_the_next_writer(tmp_path: Pa
         f"copy (select 0 as game, 0 as player, true as won, 'a' as run, '{matches[1].key}' as match)"
         f" to {quote(staging.table('plays', matches[1].key))} (format parquet)"
     )
-    staging.stage(MatchRecord(match=matches[1], state="done", wall_ms=1))
+    columns: dict[str, ColumnType] = {"game": "BIGINT", "player": "BIGINT", "won": "BOOLEAN"}
+    staging.stage(
+        MatchRecord(match=matches[1], state="done", columns={"plays": columns}, wall_ms=1)
+    )
     staging.close()
     resumed = evaluate(experiment="cards", environment=DUEL, play=play, matches=matches, run="a",
                        directory=tmp_path)  # fmt: skip
@@ -203,6 +206,33 @@ def test_matches_a_dead_writer_staged_are_sealed_by_the_next_writer(tmp_path: Pa
     found = statsdb("cards", tmp_path)
     assert found.sql("select count(*) from matches").fetchone() == (3,)
     assert not [path for path in (root / "blocks").iterdir() if path.name.startswith(".")]
+    found.close()
+
+
+def test_a_match_an_older_run_stored_as_done_with_no_rows_is_failed_and_played_again(
+    tmp_path: Path,
+) -> None:
+    matches = deals(pair(tmp_path), 2)
+    evaluate(experiment="cards", environment=DUEL, play=play, matches=matches[:1], run="a",
+             directory=tmp_path)  # fmt: skip
+    # An older writer recorded a match whose `play` returned nothing as done.
+    staging = Staging(tmp_path / "a", "0123456789ab")
+    staging.stage(MatchRecord(match=matches[1], state="done", wall_ms=1))
+    staging.close()
+    # The next writer seals what it left.
+    evaluate(experiment="cards", environment=DUEL, play=play, matches=matches[:1], run="a",
+             directory=tmp_path)  # fmt: skip
+    found = statsdb("cards", tmp_path)
+    assert found.sql("select match, state, error from matches order by state").fetchall() == [
+        (matches[0].key, "done", None),
+        (matches[1].key, "failed", "EtudeError: match_has_no_rows"),
+    ]
+    found.close()
+    resumed = evaluate(experiment="cards", environment=DUEL, play=play, matches=matches, run="a",
+                       directory=tmp_path)  # fmt: skip
+    assert (resumed.played, resumed.skipped) == (1, 1)
+    found = statsdb("cards", tmp_path)
+    assert found.sql("select distinct state from matches").fetchall() == [("done",)]
     found.close()
 
 
@@ -265,8 +295,9 @@ def test_a_rollup_is_summed_once_per_block_and_a_new_block_adds_only_its_own_tot
              directory=tmp_path / "a", storages=[bucket], rollups=[WINS])  # fmt: skip
     reading = ReadStorage(DirectoryStorage(tmp_path / "bucket"))
     db = statsdb("cards", reading)
-    # Two new blocks, each read once: its index, two tables and its partial totals.
-    assert (reading.listings, reading.requests) == (1, 2 * 4)
+    # Two new blocks, each read once: its index, two tables and its partial totals;
+    # and the resumed run's end, written again.
+    assert (reading.listings, reading.requests) == (1, 2 * 4 + 1)
     assert sum(key.endswith("/wins.parquet") for key in reading.read) == 2
     assert totals(db) == from_rows(db)
     assert db.sql("select sum(rows) from wins").fetchone() == (5 * 2 * 2,)
@@ -376,8 +407,9 @@ def test_a_rollup_holds_the_card_page_and_a_catch_up_reads_only_the_new_block(
              rollups=[CARDS])  # fmt: skip
     reading = ReadStorage(DirectoryStorage(tmp_path / "bucket"))
     db = statsdb("cards", reading)
-    # The new block's index, two tables and partial totals: nothing of an earlier block.
-    assert (reading.listings, reading.requests) == (1, 4)
+    # The new block's index, two tables and partial totals, and the run's end written
+    # again: nothing of an earlier block.
+    assert (reading.listings, reading.requests) == (1, 4 + 1)
     assert card_rollup(db) == card_page(db)
     db.close()
 

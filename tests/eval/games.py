@@ -85,6 +85,11 @@ def play_failing_deal_one(match: Match) -> Tables:
     return play(match)
 
 
+def play_catching_errors(match: Match) -> Tables:
+    """A runtime that catches its inference error and returns empty tables, as manabot's did."""
+    return {"plays": [], "games": []}
+
+
 def play_with_evidence(match: Match) -> Result:
     """`play`, keeping each game's evidence as a blob that its `games` row names."""
     tables = play(match)
