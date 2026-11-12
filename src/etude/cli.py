@@ -67,12 +67,6 @@ def _submit(
             from etude.smoke import smoke_file
 
             runs = smoke_file(file, runs).stamp(runs)
-            if all(run.smoke.outcome == "none" for run in runs):
-                print(
-                    "smoke: nothing smoked; no job declares a tiny form (Job.smoke)",
-                    file=sys.stderr,
-                    flush=True,
-                )
         else:
             runs = [run.model_copy(update={"smoke": Smoke(outcome="skipped")}) for run in runs]
     submission = controller.LaunchInput(

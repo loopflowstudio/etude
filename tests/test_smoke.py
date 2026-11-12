@@ -140,7 +140,6 @@ def test_a_job_without_a_tiny_form_is_reported_and_queues_as_before(
     assert main(["queue", str(file), "--tiny", ""]) == 0
     said = capsys.readouterr()
     assert "smoke train ppo: not smoked (no tiny form)" in said.err
-    assert "smoke: nothing smoked; no job declares a tiny form" in said.err
     (id,) = _ids(said.out)
     assert default().record(id).smoke.outcome == "none"
 

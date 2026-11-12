@@ -94,14 +94,12 @@ class Smoked:
 
     def stamp(self, runs: Sequence[Run]) -> list[Run]:
         """`runs`, each with its own job's train step and the rest as its smoke."""
-        return [
-            run.model_copy(update={"smoke": smoked([*self._own(run.job), *self.rest])})
-            for run in runs
-        ]
-
-    def _own(self, job: Job) -> list[SmokeStep]:
-        step = self.train.get(job_key(job))
-        return [] if step is None else [step]
+        stamped = []
+        for run in runs:
+            own = self.train.get(job_key(run.job))
+            steps = [*self.rest] if own is None else [own, *self.rest]
+            stamped.append(run.model_copy(update={"smoke": smoked(steps)}))
+        return stamped
 
 
 def job_key(job: Job) -> str:
