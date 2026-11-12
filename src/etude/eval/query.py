@@ -127,7 +127,7 @@ NUMERIC = ("BOOLEAN", "BIGINT", "DOUBLE")
 # Keys and coordinates of an author table's rows: never a value.
 KEYS = ("seat", "group", "game", "run", "match")
 # A kept database of another schema is deleted and read again from its store.
-SCHEMA = 9
+SCHEMA = 10
 
 _ENVIRONMENT_FILE = "environment.json"
 _STATE_FILE = "state.json"
