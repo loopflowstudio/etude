@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from moto import mock_aws
 
-from etude.carriage import checkpoint_file
+from etude.carriage import EVAL_BLOCK_PACK, checkpoint_file
 from etude.eval.match import Result, environment, evaluate
 from etude.eval.query import compare, statsdb
 from etude.eval.records import (
@@ -28,13 +28,14 @@ from etude.eval.tournament import hold
 from etude.experiment import advance, observe, read_experiment
 from etude.page import Page, build
 from etude.report import Matches
+from etude.run.block_file import parse
 from etude.run.errors import EtudeError
 from etude.run.records import ArtifactRef, Clock, Continuation, SourceKey
-from etude.run.storage import DirectoryStorage, S3Storage
+from etude.run.storage import DirectoryStorage, S3Storage, Storage
 from etude.train.run import Run, track
-from tests.eval.games import play, play_failing_deal_one
+from tests.eval.games import play, play_failing_deal_one, play_with_evidence
 from tests.experiments import experiment_file
-from tests.run.storage import CountedClient
+from tests.run.storage import CountedClient, MeasuredStorage
 
 LAB = """
 from etude.eval.match import environment
@@ -793,3 +794,83 @@ def report():
         assert combined.matches == sum(c.matches for c in parts)
         assert combined.value == pytest.approx(sum(c.value * c.rows for c in parts) / combined.rows)
     assert page.scores[0].unit == "games"
+
+
+class KeysRead(MeasuredStorage):
+    """Storage that keeps the key of every read, in order."""
+
+    def __init__(self, storage: Storage) -> None:
+        super().__init__(storage)
+        self.read: list[str] = []
+
+    def get(self, key: str) -> bytes:
+        self.read.append(key)
+        return super().get(key)
+
+    def get_range(self, key: str, start: int, length: int) -> bytes:
+        self.read.append(key)
+        return super().get_range(key, start, length)
+
+
+SCHEDULED = """
+def eval(state):
+    return []
+"""
+
+
+def test_a_page_reads_metrics_from_training_runs_once_and_no_eval_blob(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    runs = tmp_path / "runs"
+    file = experiment_file(tmp_path / "experiments", "lab", SCHEDULED)
+    trained = track(experiment="lab", run="t", job="t", clocks=CLOCKS, directory=runs)
+    for update in range(1, 200):
+        trained.log({"loss": 1 / update}, updates=update)
+    save(trained, tmp_path, range(100, 300, 100))
+    trained.finish(timeout=30)
+    evaluate(
+        experiment="lab",
+        environment=DUEL,
+        matches=[duel(outside("u100", {"updates": 100}), HEURISTIC)],
+        play=play_with_evidence,
+        run="e",
+        directory=runs,
+    )
+    storage = KeysRead(DirectoryStorage(runs))
+    assert [key for key in storage.keys("") if key.endswith(EVAL_BLOCK_PACK)]
+
+    # eval(state) is given the experiment's checkpoints: no metric block or index is read.
+    state = observe(storage, "lab")
+    assert [len(run.checkpoints) for run in state.runs] == [2]
+    metrics = [key for key in storage.read if "/metrics/" in key]
+    assert metrics and all(_attempt(key) for key in metrics)
+
+    storage.read.clear()
+    page = build(storage, file)
+    assert "loss" in page.training.metrics and page.cells
+    assert not [key for key in storage.read if key.endswith(EVAL_BLOCK_PACK)]
+    # The training reader takes an eval run's declaration and state, nothing more;
+    # the eval database its index and tables.
+    evals = {key.split("/e/", 1)[1] for key in storage.read if "/e/" in key}
+    assert {k for k in evals if not k.startswith("blocks/")} <= {
+        "run.json",
+        "state.json",
+        "environment.json",
+        "tournament.json",
+    }
+    assert {k.rsplit("/", 1)[1] for k in evals if k.startswith("blocks/")} <= {
+        "block.json",
+        "plays.parquet",
+        "games.parquet",
+    }
+    # A training run's cumulative indexes are read once per build, not once per reader.
+    indexes = [key for key in storage.read if key.endswith((".index.json", ".permanent.json"))]
+    assert indexes and len(indexes) == len(set(indexes))
+
+
+def _attempt(key: str) -> bool:
+    """Whether a key under a run's `metrics/` is an attempt record, not a block or index."""
+    name = "metrics/" + key.rsplit("/metrics/", 1)[1]
+    return parse(name) is None and not name.endswith((".index.json", ".permanent.json"))

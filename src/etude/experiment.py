@@ -151,7 +151,8 @@ def observe(source: Storage | Path | str, experiment: str) -> ExperimentState:
     """The experiment's training runs under a directory or bucket and their stored checkpoints.
 
     A checkpoint whose file Etude did not store, so no digest, is left out:
-    nothing can be evaluated without its bytes.
+    nothing can be evaluated without its bytes. Runs' records alone are read:
+    no metric block or index.
     """
     every = read_all(source)
     parents = {

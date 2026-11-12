@@ -255,6 +255,7 @@ def _catch_up(
     and blobs it holds: rows arrive as columns (`etude.eval.block.unnest`).
     """
     keys = sorted(storage.keys(""))
+    listed = set(keys)
     db.execute("begin")
     try:
         created = _schema(db) is None
@@ -265,7 +266,9 @@ def _catch_up(
         changed = created
         with tempfile.TemporaryDirectory(prefix="etude-statsdb-") as copies:
             for run, folders in sorted(run_folders(keys).items()):
-                if not _ours(db, storage, run, folders, experiment):
+                # Only a folder the listing shows a declaration in is asked for one.
+                declaring = [f for f in folders if f + "run.json" in listed]
+                if not _ours(db, storage, run, declaring, experiment):
                     continue
                 eval_run = _kind(db, run) == KIND
                 if eval_run and not _environment(db, storage, run, folders):

@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 from moto import mock_aws
 
+from etude.cache import Cache
 from etude.page import Pages, build
 from etude.run.block_file import block_key, tail_key
 from etude.run.delivery import RunFiles, StorageDestination, sync
@@ -34,10 +35,28 @@ def test_reports_fetch_each_runs_metadata_once(tmp_path: Path) -> None:
             pass
     measured = MeasuredStorage(DirectoryStorage(tmp_path))
     assert len(build(measured, experiment_file(tmp_path / "experiments", "e")).training.runs) == 2
-    # One declaration, one attempt and one state per run; discover once, then
-    # list each run. An empty run needs no metric reads.
+    # One declaration, one attempt and one state per run, from one listing of
+    # the source. An empty run needs no metric reads.
     assert measured.requests == 6
-    assert measured.listings == 3
+    assert measured.listings == 1
+
+
+def test_a_folder_listed_without_a_declaration_is_not_asked_for_one(tmp_path: Path) -> None:
+    with track(experiment="e", run="r", clocks=[], directory=tmp_path):
+        pass
+    # A launcher's journal beside the run can hold folders shaped like a run's.
+    (tmp_path / "r/attempts/a1/share/blocks").mkdir(parents=True)
+    (tmp_path / "r/attempts/a1/share/blocks/block.json").write_text("{}")
+    with mock_aws():
+        client = CountedClient(boto3.client("s3", region_name="us-east-1"))
+        client.create_bucket(Bucket="runs")
+        bucket = S3Storage("runs", client=client, cache=Cache(tmp_path / "cache"))
+        local = DirectoryStorage(tmp_path)
+        for key in local.keys(""):
+            if not key.startswith("cache/"):
+                bucket.put(key, local.get(key))
+        assert [run.name for run in read_all(bucket)] == ["r"]
+        assert client.requests == len(client.read) == 3  # declaration, attempt, state
 
 
 @pytest.mark.parametrize("attributed", [False, True])
@@ -288,6 +307,7 @@ def test_manifest_chart_fetches_only_reduced_columns(tmp_path: Path, backend: st
                     storage.put(prefix + path.relative_to(root).as_posix(), path.read_bytes())
         measured = MeasuredStorage(storage)
         data = read(measured, "e", "r")
+        assert data.blocks  # blocks are read on first use: here, the manifest alone
         assert measured.ranges == 0
         before = measured.bytes
         chart = data.chart("value", "step", 8)
@@ -331,13 +351,14 @@ def test_a_read_is_a_snapshot_that_survives_compaction(tmp_path: Path) -> None:
     write_block(root, block_key(1, 0, 0, writer), builder.table(writer, 0))
     write_manifest(root, writer, permanent=False)
     snapshot = read(tmp_path, "e", "r")
+    assert snapshot.blocks  # blocks are read when first used, and kept from then on
     for row in range(256, 512):
         builder.add(row * 1000, {"step": float(row)}, {"value": row})
     write_block(root, block_key(2, 0, 0, writer), builder.table(writer, 0))
     (root / block_key(1, 0, 0, writer)).unlink()
     write_manifest(root, writer)
-    # The recent block was taken whole when the run was read, so the earlier
-    # read still answers from it; a new read sees the permanent block.
+    # The recent block was taken whole when its blocks were first used, so the
+    # earlier read still answers from it; a new read sees the permanent block.
     assert int(snapshot.chart("value", "step", 10).count.sum()) == 256
     chart = read(tmp_path, "e", "r").chart("value", "step", 10, span=(0, 511))
     assert int(chart.count.sum()) == 512
@@ -878,8 +899,8 @@ def test_selective_report_reads_bound_metadata_and_preserve_absolute_coordinates
     assert len(data.blocks) == 3
     assert all(len(b.header.series) == 2 for b in data.blocks)
     assert all(len(level.series) == 2 for b in data.blocks for level in b.header.rollups)
-    assert measured.ranges == 6  # two ranges per header, no cumulative index
-    assert measured.requests == 9  # plus declaration, attempt and state
+    assert measured.ranges == 0  # each block read once, whole; no cumulative index
+    assert measured.requests == 6  # plus declaration, attempt and state
     assert data.points("wanted", "step").x.tolist() == [1000, 1001, 1002]
     assert data.points("wanted", "step").y.tolist() == [0, 1, 2]
     assert data.points("time/train", "step").y.tolist() == [0.5, 0.5, 0.5]
@@ -897,3 +918,43 @@ def report():
     page = build(measured, file)
     assert page.training.metrics == ("wanted", "time/train")
     assert page.training.runs[0].reached["step"] == 1002
+
+
+def test_a_selective_page_reads_each_block_once_from_a_bucket(tmp_path: Path) -> None:
+    writer = "abcdef123456"
+    root = tmp_path / "runs" / "r"
+    with track(experiment="e", run="r", clocks=[Step("step", "steps")], directory=root.parent):
+        pass
+    for block in range(4):
+        builder = Builder(["step"])
+        for row in range(2000):
+            step = block * 2000 + row
+            builder.add(1000 + step, {"step": float(step)}, {"wanted": float(step), "unused": 0.0})
+        write_block(root, block_key(2, block, block, writer), builder.table(writer, block))
+    file = experiment_file(
+        tmp_path / "experiments",
+        "e",
+        """
+from etude.report import Report, Series
+
+def report():
+    return Report(other_metrics=False, perf=(), ml=(Series(title="Wanted", keys=("wanted",)),))
+""",
+    )
+    with mock_aws():
+        client = CountedClient(boto3.client("s3", region_name="us-east-1"))
+        client.create_bucket(Bucket="runs")
+        cache = Cache(tmp_path / "cache")
+        bucket = S3Storage("runs", client=client, cache=cache)
+        local = DirectoryStorage(root.parent)
+        for key in local.keys(""):
+            bucket.put(key, local.get(key))
+        first = build(S3Storage("runs", client=client, cache=cache), file)
+        assert first.training.metrics == ("wanted",)
+        blocks = [key for key in client.read if key.endswith(".blk")]
+        # One read of each block, whole; every array the charts need comes from the cache.
+        assert len(blocks) == 4
+        assert all(client.read[key] == len(local.get(key)) for key in blocks)
+        read_once = client.bytes
+        assert build(S3Storage("runs", client=client, cache=cache), file) == first
+        assert client.bytes == read_once

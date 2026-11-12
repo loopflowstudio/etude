@@ -7,9 +7,11 @@ keeps them in place for a holder until it releases them; these are views
 of one acquisition, so a checkpoint a job fetched and the same object a report
 reads are read from storage once, in either order, by any process. Content is
 kept once by SHA256 and length (`Content`), verified before it is published and
-again before it, or a range of it, is reused. A whole-file digest cannot
-authenticate a range, so a range of a recorded digest is read from verified
-whole content, acquired first when not held.
+again before it, or a range of it, is reused. A `Cache` that verified a file
+serves further ranges of it unhashed while its inode, size and modification
+time are unchanged. A whole-file digest cannot authenticate a range, so a
+range of a recorded digest is read from verified whole content, acquired first
+when not held.
 
 Each location notes the content it holds and the ETag that came with it. A
 recorded digest names bytes outright; without one, a location's held bytes are
@@ -191,6 +193,12 @@ def _verify(path: Path, content: Content) -> bool:
     return valid
 
 
+def _identity(path: Path) -> tuple[int, int, int]:
+    """What changes when a file is replaced or rewritten: its inode, size and modification time."""
+    stat = path.stat()
+    return stat.st_ino, stat.st_size, stat.st_mtime_ns
+
+
 def _discard(path: Path) -> None:
     """Remove payload and range notes together while their owner holds its lock."""
     path.unlink(missing_ok=True)
@@ -258,6 +266,10 @@ class Cache:
             raise ValueError("cache allowance must be nonnegative and range size positive")
         self.root = root or Path(os.environ.get("ETUDE_HOME", "~/.etude")).expanduser() / "cache"
         self.max_bytes, self.range_bytes = max_bytes, range_bytes
+        # Held content `_slice` verified, by name: the file's inode, size and
+        # modification time as it left it. A range of an unchanged file is
+        # served without hashing the whole file again.
+        self._sliced: dict[str, tuple[int, int, int]] = {}
 
     def read(
         self, artifact: Artifact, source: Source, *, start: int = 0, length: int | None = None
@@ -448,11 +460,13 @@ class Cache:
         with _lock(self._made() / f"{content.name}.lock"):
             if not path.exists():
                 return None
-            if not _verify(path, content):
+            if self._sliced.get(content.name) != _identity(path) and not _verify(path, content):
+                self._sliced.pop(content.name, None)
                 with _lock(self.root / "capacity.lock"):
                     path.unlink(missing_ok=True)
                 return None
             path.touch()
+            self._sliced[content.name] = _identity(path)
             with path.open("rb") as stream:
                 stream.seek(start)
                 body = stream.read(length)

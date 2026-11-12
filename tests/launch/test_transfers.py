@@ -1018,6 +1018,28 @@ def test_changed_and_corrupt_bucket_objects_are_read_again(tmp_path: Path) -> No
     assert client.bytes == 5 + 6 + 6
 
 
+def test_ranges_of_a_held_block_are_read_locally_until_it_is_corrupted(tmp_path: Path) -> None:
+    boto3 = pytest.importorskip("boto3")
+    body = bytes(range(256)) * 64
+    with mock_aws():
+        client = CountedClient(boto3.client("s3", region_name="us-east-1"))
+        client.create_bucket(Bucket="lab")
+        storage = S3Storage("lab", client=client, cache=Cache(tmp_path / "cache"))
+        key = "run/metrics/2-00000000-00000000-abcdef123456.blk"
+        storage.put(key, body)
+        assert storage.get(key) == body
+        assert [storage.get_range(key, at, 16) for at in (0, 100, 200)] == [
+            body[at : at + 16] for at in (0, 100, 200)
+        ]
+        assert client.bytes == len(body)  # every range from the block held whole
+        held = storage.cache.root / Content.of(body).name
+        held.chmod(0o644)
+        held.write_bytes(b"\0" * len(body))
+        assert storage.get_range(key, 100, 16) == body[100:116]
+        assert client.bytes == len(body) + 16  # the corrupt copy is discarded, the range read
+        assert not held.exists()
+
+
 class _Held:
     """Content a test already has, read without a network."""
 

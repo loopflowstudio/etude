@@ -504,12 +504,25 @@ names are drawn last.
 
 For a large metric vocabulary, use `Report(other_metrics=False)`. Only keys
 named by `Series` and `Counters`, and prefixes named by `Flame`, are read and
-drawn. This reads one immutable block header at a time instead of parsing the
-cumulative training index, retaining only the selected columns. All clocks,
+drawn. This reads each immutable block once, whole, instead of parsing the
+cumulative training index, retaining only the selected columns of its header;
+charts then read the block's arrays from Etude's storage cache. All clocks,
 checkpoints and continuation coordinates are preserved. Memory still includes
-one full header and the selected series; this does not bound the size of an
-individual block header. The default, `other_metrics=True`, includes all logged
-metrics.
+one full block while it is read and the selected series; this does not bound
+the size of an individual block. The default, `other_metrics=True`, includes
+all logged metrics.
+
+**What a build reads.** Perf and ML details read the metric blocks of training
+runs only, once per build; `eval(state)` is given the runs' checkpoints without
+reading any metric data. An eval run contributes its `run.json`, `state.json`,
+its tournament or environment record and each block's index and tables; its
+blobs, such as replay evidence, are never read to draw a page. With
+`other_metrics=False` a build's memory therefore follows the metrics and tables
+the report draws, not how much data its runs hold. Bytes a build reads stay in
+Etude's storage cache, so building the same page again over unchanged runs
+downloads almost nothing: it lists the runs and reads only what was delivered
+since. A training index is rewritten as its run grows, so under the default a
+build of a running experiment reads it again whenever it has changed.
 
 ```python
 from etude.report import ML, Report, Schedule, SchedulePoint
