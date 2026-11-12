@@ -85,6 +85,22 @@ Build a lab outside the repo (e.g. `/tmp/lab`) with its own `ETUDE_HOME`:
    (`cells` with `selection`, `subject`, `matches`, `rows`).
 5. Stop the servers before finishing. In zsh, `$args` does not word-split: call
    commands explicitly rather than looping over argument strings.
+6. `run.checkpoint` needs a value for every declared clock (otherwise
+   `checkpoint_clock_mismatch`, and nothing is recorded). `play` must live in its own module beside
+   the experiment file, not in the file itself. The experiment is named for its file, so
+   a second report variant goes in another git-tracked folder as `NAME.py`.
+7. Bucket path: `etude sync --directory RUNS --to r2://manabot/etude-r2-test/NAME`
+   under `doppler run -p manabot -c prd --only-secrets R2_ACCOUNT_ID,R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY`,
+   then `etude report ... --source r2://manabot/etude-r2-test/NAME` with a fresh
+   `ETUDE_HOME`. `du` of that home after each build shows the bytes the build read.
+   Afterwards delete the prefix with `S3Storage.client.delete_objects`.
+   The aws CLI also works under the same `doppler run`: `sh -c 'AWS_ACCESS_KEY_ID=$R2_ACCESS_KEY_ID
+   AWS_SECRET_ACCESS_KEY=$R2_SECRET_ACCESS_KEY aws s3 rm --recursive --region auto --endpoint-url
+   https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com s3://manabot/etude-r2-test/NAME/'`.
+8. To tell a regression from an old bug, run the same script on main: `git worktree add
+   --detach /tmp/NAME-main main`, `uv run` from there, then `git worktree remove`.
+   Compare `etude.page.build(RUNS, FILE)` by hashing `page.training.model_dump_json()`
+   and `repr(page.cells)`; rendered HTML carries timestamps.
 
 ## Etude: storage outages on the SDK and a launched worker
 

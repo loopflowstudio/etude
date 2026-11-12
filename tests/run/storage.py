@@ -19,6 +19,7 @@ class MeasuredStorage:
         self.uploads = 0
         self.written = 0  # bytes uploaded, replaced objects included
         self.listings = 0
+        self.got: list[str] = []  # keys asked for, a missing one included
 
     def put(self, key: str, data: bytes) -> None:
         self.storage.put(key, data)
@@ -35,6 +36,7 @@ class MeasuredStorage:
         return self.storage.delete(key)
 
     def get(self, key: str) -> bytes:
+        self.got.append(key)
         body = self.storage.get(key)
         self.bytes += len(body)
         self.requests += 1

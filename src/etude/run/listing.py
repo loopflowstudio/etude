@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from bisect import bisect_left
+from collections.abc import Container, Iterator, Sequence
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -46,9 +47,22 @@ def run_folders(keys: Sequence[str]) -> dict[str, list[str]]:
     return {run: list(folders) for run, folders in found.items()}
 
 
-def declared(storage: Storage, folders: Sequence[str]) -> RunFile | None:
-    """The run's declaration from the first of its folders that holds a valid one."""
+def under(keys: Sequence[str], prefix: str) -> Iterator[str]:
+    """The keys under `prefix` of a sorted listing."""
+    for key in keys[bisect_left(keys, prefix) :]:
+        if not key.startswith(prefix):
+            return
+        yield key
+
+
+def declared(storage: Storage, folders: Sequence[str], listed: Container[str]) -> RunFile | None:
+    """The run's declaration from the first of its folders that holds a valid one.
+
+    Only folders whose `run.json` is in `listed`, the source's listing, are asked.
+    """
     for place in folders:
+        if place + "run.json" not in listed:
+            continue
         try:
             return RunFile.model_validate_json(storage.get(place + "run.json"))
         except (FileNotFoundError, ValidationError):
@@ -62,9 +76,11 @@ def runs(source: Storage | Path | str) -> list[tuple[str, str]]:
     A run is listed once its declaration, `run.json`, has arrived.
     """
     storage = as_storage(source)
+    keys = storage.keys("")
+    listed = set(keys)
     found = []
-    for run, folders in places(storage).items():
-        file = declared(storage, folders)
+    for run, folders in run_folders(keys).items():
+        file = declared(storage, folders, listed)
         if file is not None:
             found.append((file.experiment, run))
     return sorted(found)

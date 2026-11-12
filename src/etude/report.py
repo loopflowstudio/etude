@@ -285,14 +285,16 @@ ML: tuple[MetricPanel, ...] = (
 
 
 class Report(Record):
-    """An experiment's report. `Report()` is what an experiment without `report()` gets.
+    """An experiment's report.
 
     `score` None offers every numeric column of every eval table. `clock`
     names the x axis each section starts on (default: the first declared
     clock). `baseline` names the job drawn dotted, by its name or key.
     `labels` replaces displayed job names, keeping seed counts and identity.
-    Metrics logged but named by no panel are drawn last, under ML details;
-    `other_metrics=False` omits them and bounds retained metadata to panel keys.
+    A build reads and draws only the metrics its panels name.
+    `other_metrics=True` also draws every other logged metric, last under ML
+    details, and so reads each training run's whole metric index; an
+    experiment without `report()` gets `Report(other_metrics=True)`.
     """
 
     evals: tuple[EvalPanel, ...] = (Curve(), Anchors())
@@ -300,7 +302,7 @@ class Report(Record):
     clock: str | None = None
     baseline: str | None = None
     labels: dict[str, str] = {}
-    other_metrics: bool = True
+    other_metrics: bool = False
     perf: tuple[MetricPanel, ...] = PERF
     ml: tuple[MetricPanel, ...] = ML
 

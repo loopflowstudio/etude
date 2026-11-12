@@ -8,7 +8,8 @@
 
 The file names the experiment, by its stem, and may define `report()`
 (`etude.report.Report`) and `eval(state)` (`etude.experiment`). Without
-`report()` the page is `Report()` and says so at its top. The experiment's
+`report()` the page is `Report(other_metrics=True)`, drawing every metric its
+runs logged, and says so at its top. The experiment's
 training runs are drawn by `etude.train.report.training`; an experiment with
 eval runs alone is drawn as evaluation only.
 
@@ -62,7 +63,6 @@ import runpy
 import sys
 import threading
 import time
-from bisect import bisect_left
 from collections import Counter
 from collections.abc import Callable, Collection, Sequence
 from concurrent.futures import Future
@@ -79,7 +79,7 @@ from etude.experiment_file import experiment_named
 from etude.launch.logging import explain
 from etude.report import Curve, Flame, Matches, Report, Score
 from etude.run.errors import EtudeError
-from etude.run.listing import as_storage, declared, run_folders, runs
+from etude.run.listing import as_storage, declared, run_folders, runs, under
 from etude.run.records import Record
 from etude.run.storage import DirectoryStorage, S3Storage, Storage, default_root
 from etude.train.read import read_all
@@ -318,10 +318,7 @@ class Pages:
         for run, folders in sorted(run_folders(keys).items()):
             if self._experiment(place, run, folders, listed) != experiment:
                 continue
-            for folder in folders:
-                start = bisect_left(keys, folder)
-                for key in itertools.takewhile(lambda k: k.startswith(folder), keys[start:]):
-                    found.append((key, listed[key]))
+            found.extend((key, listed[key]) for folder in folders for key in under(keys, folder))
         return tuple(found)
 
     def _experiment(
@@ -331,7 +328,7 @@ class Pages:
         version = next((listed[f + "run.json"] for f in folders if f + "run.json" in listed), "")
         kept = self._declared.get((place.name, run))
         if kept is None or kept[0] != version:
-            file = declared(place, folders)
+            file = declared(place, folders, listed)
             kept = (version, None if file is None else file.experiment)
             self._declared[place.name, run] = kept
         return kept[1]
@@ -510,7 +507,9 @@ def _sources(file: Path) -> tuple[tuple[str, int, int], ...]:
 
 def _report(made: object, file: Path) -> tuple[Report, str | None, tuple[str, ...]]:
     if made is None:
-        return Report(), None, (f"{file.name} defines no report(), so this is the default report.",)
+        # Nothing is declared, so the page draws everything logged rather than nothing.
+        note = f"{file.name} defines no report(), so this is the default report."
+        return Report(other_metrics=True), None, (note,)
     if not callable(made):
         raise EtudeError("experiment_report_is_not_a_function", 422) from ValueError(file)
     report = made()

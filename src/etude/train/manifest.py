@@ -107,14 +107,15 @@ def describe(
     metrics: frozenset[str] | None = None,
     prefixes: tuple[str, ...] = (),
 ) -> BlockDescription:
-    """Read one header in two ranges, retaining only requested numeric columns if given.
+    """Read one block's header, retaining only requested numeric columns if given.
 
-    Projection leaves every clock and original array offset/CRC intact. Peak
-    metadata is one full header plus the retained columns of previous blocks.
+    The block is read whole, once: it never changes, so a bucket's copy is kept
+    in Etude's cache and its arrays are later read from there, not as one
+    request per array. Projection leaves every clock and original array
+    offset/CRC intact. Peak metadata is one full block plus the retained
+    columns of previous blocks.
     """
-    front = storage.get_range(prefix + key, 0, 16)
-    length = int.from_bytes(front[12:16], "little")
-    described, start = header(front + storage.get_range(prefix + key, 16, length))
+    described, start = header(storage.get(prefix + key))
     if metrics is not None:
         series = tuple(
             c

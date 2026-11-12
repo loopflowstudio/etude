@@ -130,15 +130,15 @@ def test_peak_memory_stays_flat_as_the_run_grows(tmp_path: Path) -> None:
     assert large[True] < large[False] / 4
 
 
-def test_reads_each_block_header_twice_and_only_its_selected_arrays(tmp_path: Path) -> None:
+def test_reads_each_block_twice_and_only_its_selected_arrays(tmp_path: Path) -> None:
     _long_run(tmp_path / run_prefix("r"), 6)
     measured = MeasuredStorage(DirectoryStorage(tmp_path))
     metrics = ["rl/metric_0", "rl/metric_1"]
     batches = list(read_batches(measured, "e", "r", clock="updates", metrics=metrics))
     assert len(batches) == 6
-    # Per block: its header twice, planning then reading, in two ranges each;
-    # then its clock and the two metrics.
-    assert measured.requests == 6 * (2 * 2 + 1 + len(metrics))
+    # Per block: the whole block twice, planning then reading (a bucket's copy
+    # comes from the cache the second time); then its clock and the two metrics.
+    assert measured.requests == 6 * (2 + 1 + len(metrics))
     assert measured.listings == 2
 
 
