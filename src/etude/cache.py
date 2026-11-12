@@ -509,10 +509,11 @@ class Cache:
         yield None
 
     def _verified(self, path: Path, content: Content) -> bool:
-        """Whether `path` holds `content`, marking it recently used when it does.
+        """Whether `path` holds `content`; content this cache holds is marked recently used.
 
         The file is hashed once, then trusted while its stamp is unchanged.
         Marking it changes its modification time, so the stamp is taken after.
+        A destination outside the cache is verified without being changed.
         """
         stamp = _Stamp.of(path)
         trusted = self._stamps.pop((path, content), None)
@@ -523,9 +524,11 @@ class Cache:
             remaining()
             if not valid:
                 return False
-        path.touch()
-        if (marked := _Stamp.of(path)) is not None:
-            self._stamps[(path, content)] = marked
+        if path.parent == self.root:
+            path.touch()
+            stamp = _Stamp.of(path)
+        if stamp is not None:
+            self._stamps[(path, content)] = stamp
         return True
 
     def _keep(self, content: Content, body: bytes) -> bool:
