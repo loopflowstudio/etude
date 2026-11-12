@@ -1263,14 +1263,13 @@ def _newest_environment(
     """Of a value's cells in several environments, the newest environment's; and a
     note per environment that loses any. Environments are never pooled."""
     # A lower index is a newer environment.
+    keyed = [(_without_environment(cell), cell) for cell in cells]
     newest: dict[tuple[object, ...], int] = {}
-    for cell in cells:
-        same = _without_environment(cell)
-        newest[same] = min(cell.environment, newest.get(same, cell.environment))
-    hidden = Counter(
-        c.environment for c in cells if c.environment != newest[_without_environment(c)]
-    )
-    return [c for c in cells if c.environment == newest[_without_environment(c)]], tuple(
+    for key, cell in keyed:
+        newest[key] = min(cell.environment, newest.get(key, cell.environment))
+    kept = [cell for key, cell in keyed if cell.environment == newest[key]]
+    hidden = Counter(cell.environment for key, cell in keyed if cell.environment != newest[key])
+    return kept, tuple(
         f"{count} values were also played in {_environment_name(environments[number])};"
         " the page shows each from the environment whose latest match is newest."
         for number, count in sorted(hidden.items())
