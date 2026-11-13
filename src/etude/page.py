@@ -944,6 +944,8 @@ def _points(
 ) -> tuple[Point, ...]:
     """Each selection of seatings' points: per checkpoint a seating was held for, its first
     seat's score over the matches held for it, or why its relative seat found no checkpoint.
+    A fixed seating is held for its first seat's checkpoint, so a fixed pair is drawn once,
+    where that seat stood; with code in that seat it is not drawn as seated.
 
     A checkpoint's matches are those the selection's seatings call for it,
     by their first two seats, each pair once whichever tournaments hold it;
@@ -951,17 +953,23 @@ def _points(
     its point. Several pairs, such as each line of a job, are their mean.
     """
     # The optional `eval` extra, as in `_read_evals`.
-    from etude.eval.records import Benchmark  # noqa: PLC0415
+    from etude.eval.records import Benchmark, Model  # noqa: PLC0415
 
     index = {each.key: i for i, each in enumerate(players)}
+    refs = {str(ref.key): ref for each in held for ref in each.tournament.checkpoints}
     pairs: dict[_HeldFor, set[tuple[int, int]]] = {}
     for each in held:
         for called in each.schedule:
-            if called.seating is None or called.checkpoint is None:
+            if called.seating is None:
                 continue
-            seated = pairs.setdefault(
-                _HeldFor(each.name, called.seating, str(called.checkpoint)), set()
-            )
+            held_for = called.checkpoint
+            if held_for is None:
+                seat = called.match.players[0]
+                if not isinstance(seat, Model):
+                    continue
+                held_for = seat.checkpoint.key
+                refs.setdefault(str(held_for), seat.checkpoint)
+            seated = pairs.setdefault(_HeldFor(each.name, called.seating, str(held_for)), set())
             # A player no eval run seated yet has played nothing to draw.
             first, second = (index.get(p.key) for p in called.match.players[:2])
             if first is not None and second is not None:
@@ -971,7 +979,6 @@ def _points(
         for each in held
         for gap in each.gaps
     }
-    refs = {str(ref.key): ref for each in held for ref in each.tournament.checkpoints}
     one_seed = {
         (each.name, seating.name)
         for each in held

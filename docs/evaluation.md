@@ -323,7 +323,9 @@ evaluate(
   experiment).lines`), held or not; `etude eval` passes them itself.
   A seating against a fixed player and one against a relative seat are held,
   scored and drawn alike. A seating with a relative seat needs an inference
-  seat to be relative to.
+  seat to be relative to. A seating of two fixed models, such as two jobs'
+  checkpoints chosen in `eval(state)`, is drawn at its first seat's checkpoint,
+  so `Curve(matches=...)` over such seatings draws each pair once.
 
   `Final` is `At` the position where the run ended: a gap until it ends,
   finished or failed, then its last stored checkpoint. A run whose machine
