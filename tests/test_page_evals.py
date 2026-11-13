@@ -26,7 +26,7 @@ from etude.eval.records import (
 )
 from etude.eval.tournament import hold
 from etude.experiment import advance, observe, read_experiment
-from etude.page import Page, build
+from etude.page import Drawn, OutsideTournaments, Page, PanelSelection, build
 from etude.report import Matches
 from etude.run.block_file import parse
 from etude.run.errors import EtudeError
@@ -206,6 +206,14 @@ def test_panels_select_matches_by_tournament_seating_or_tag(page: Page) -> None:
     }
     assert opponents == {"outside"}
     assert any("seating 'vs nobody'" in note for note in page.notes)
+    # Each panel draws the selection the page made for it; one naming nothing held, none.
+    assert page.panel_selections == (
+        PanelSelection(control=True),
+        PanelSelection(selection=outside),
+        PanelSelection(),
+        PanelSelection(control=True),
+    )
+    assert page.drawn[outside] == Drawn(seated=True, tournaments=("ladder",))
 
 
 def test_a_watched_page_reads_each_bucket_file_once_per_computer(
@@ -473,8 +481,8 @@ def test_an_evaluation_only_experiment_draws_checkpoints_where_their_seats_say(
     monkeypatch.setenv("ETUDE_HOME", str(runs.parent / "home"))
     page = build(runs, file)
     assert page.training.runs == ()
-    outside_tournaments = selection(page, None)
-    assert page.selections[outside_tournaments] == Matches()
+    outside_tournaments = page.selections.index(OutsideTournaments())
+    assert not page.drawn[outside_tournaments].seated
     at = {each.name: each.at for each in page.players}
     assert {name: at[name] for name in ("u0", "u200", "u400", "u600")} == {
         f"u{n}": {"updates": n} for n in (0, 200, 400, 600)
@@ -713,10 +721,13 @@ def test_a_continued_run_is_one_line_with_the_run_it_continues(
     state = observe(DirectoryStorage(runs), "seated")
     saved = [each for run in state.runs for each in run.checkpoints]
     assert {(each.run, each.ref.line) for each in saved} == {("a", "a"), ("b", "a")}
+    # Seated with no line, as matches recorded before seats carried one: each checkpoint's
+    # line is its training run's, the first run of its chain.
+    unlined = [Inference().model(each.ref.model_copy(update={"line": None})) for each in saved]
     evaluate(
         experiment="seated",
         environment=DUEL,
-        matches=[duel(saved[-1].model(Inference()), saved[0].model(Inference()))],
+        matches=[duel(unlined[-1], unlined[0])],
         play=play,
         run="plain",
         directory=runs,
