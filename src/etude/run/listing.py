@@ -60,11 +60,11 @@ def declared(storage: Storage, folders: Sequence[str], listed: Container[str]) -
 
     Only folders whose `run.json` is in `listed`, the source's listing, are asked.
     """
-    for place in folders:
-        if place + "run.json" not in listed:
+    for folder in folders:
+        if folder + "run.json" not in listed:
             continue
         try:
-            return RunFile.model_validate_json(storage.get(place + "run.json"))
+            return RunFile.model_validate_json(storage.get(folder + "run.json"))
         except (FileNotFoundError, ValidationError):
             continue
     return None

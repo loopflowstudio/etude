@@ -516,27 +516,34 @@ app.command()(kind(Kind.wait)(checkpoints))
 app.command()(kind(Kind.wait)(sync))
 
 # Commands that run on this computer even when a controller is chosen: they read
-# local files, or they choose the controller.
-_LOCAL = ("launch", "queue", "smoke", "source", "fetch", "worker", "logs")
+# local files or a bucket, run a machine's worker, or submit through the controller
+# themselves. Every other command is sent to a chosen controller.
+_HERE = (
+    "launch",
+    "queue",
+    "smoke",
+    "source",
+    "fetch",
+    "worker",
+    "logs",
+    "report",
+    "checkpoints",
+    "sync",
+    "convert-eval",
+    "delete-eval-files",
+)
 
 
 def _main(argv: list[str]) -> int:
     try:
-        if (
-            argv
-            and argv[0]
-            not in ("worker", "report", "checkpoints", "sync", "convert-eval", "delete-eval-files")
-            and not {"--help", "-h"} & set(argv)
-        ):
+        if argv and argv[0] not in _HERE and not {"--help", "-h"} & set(argv):
             # Entry points import only the command being run (AGENTS.md).
             from etude.launch import controller
 
             if argv == ["--controller-request"]:
                 return controller.receive(launch_cli.default())
-            local = argv[0] in _LOCAL or argv[:2] in (
-                ["controller", "set"],
-                ["controller", "unset"],
-            )
+            # The controller command chooses the controller, so `set` and `unset` run here.
+            local = argv[:2] in (["controller", "set"], ["controller", "unset"])
             if not local and (address := controller.selected()):
                 if argv[0] == "controller":
                     print(f"controller: {address}", flush=True)

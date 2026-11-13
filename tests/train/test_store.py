@@ -21,7 +21,7 @@ from etude.run.errors import EtudeError
 from etude.run.listing import runs
 from etude.run.records import Attempt, RunDeclaration, RunFile, SourceKey
 from etude.run.storage import DirectoryStorage, S3Storage, Storage, run_prefix, storage_from_uri
-from etude.train.block import Builder
+from etude.train.block import Builder, LoggedRow
 from etude.train.manifest import Index, Manifest
 from etude.train.read import buckets, read, read_all
 from etude.train.records import Step
@@ -190,7 +190,7 @@ def test_stale_tail_and_explicit_sealing(tmp_path: Path) -> None:
     os.utime(run.files.root / key, None)
     # A dead process's unsealed log becomes the next block; stopped writers' tails go at once.
     (run.files.root / f"metrics/00000001-{writer}.open").write_text(
-        log_line(2000, {"step": 2.0}, {"value": 8})
+        log_line(LoggedRow(wall_ms=2000, clocks={"step": 2.0}, values={"value": 8}))
     )
     seal_runs(tmp_path)
     bucket = DirectoryStorage(tmp_path / "bucket")

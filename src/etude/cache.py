@@ -165,14 +165,10 @@ class _Part:
         self.source.reused(size_bytes, f"bytes={self.start}-{self.end}")
 
 
-class _Range(_Record):
-    size_bytes: int
-    sha256: str
-
-
 class _Partial(_Record):
     etag: str | None = None
-    ranges: tuple[_Range, ...] = ()
+    # Each completed range, in order from the start, as its own content.
+    ranges: tuple[Content, ...] = ()
 
 
 class _Located(_Record):
@@ -409,7 +405,7 @@ class Cache:
 
     def _read_located(self, artifact: Artifact, source: Source) -> bytes:
         """Bytes whose digest is not recorded: the location says which bytes are held."""
-        located = self._located(artifact.location)
+        located = self._read_locator(artifact.location)
         held = None if located is None else self._load(located.content)
         if held is not None and artifact.immutable:
             source.reused(len(held), None)
@@ -422,7 +418,7 @@ class Cache:
         else:
             fetched = source.read(0, None, None)
         content = Content.of(fetched.body)
-        if self._keep(content, fetched.body):
+        if self._hold_body(content, fetched.body):
             self._locate(artifact.location, content, fetched.etag)
         return fetched.body
 
@@ -437,7 +433,7 @@ class Cache:
         if artifact.content is None and not artifact.immutable:
             # A mutable object's range cannot be checked against what is held.
             return source.read(start, end, None).body
-        located = self._located(artifact.location)
+        located = self._read_locator(artifact.location)
         content = artifact.content or (None if located is None else located.content)
         held = None if content is None else self._slice(content, start, length)
         if held is not None:
@@ -484,7 +480,7 @@ class Cache:
     def _locator(self, location: str) -> Path:
         return self.root / "locators" / f"{hashlib.sha256(location.encode()).hexdigest()}.json"
 
-    def _located(self, location: str) -> _Located | None:
+    def _read_locator(self, location: str) -> _Located | None:
         try:
             return _Located.model_validate_json(self._locator(location).read_bytes())
         except FileNotFoundError:
@@ -492,7 +488,7 @@ class Cache:
 
     def _locate(self, location: str, content: Content, etag: str | None) -> None:
         """Note which held bytes a location holds; an unknown ETag keeps a known one of the same bytes."""
-        located = self._located(location)
+        located = self._read_locator(location)
         if located is not None and located.content == content and etag is None:
             return
         self.root.joinpath("locators").mkdir(exist_ok=True)
@@ -546,7 +542,7 @@ class Cache:
             self._stamps[(path, content)] = stamp
         return True
 
-    def _keep(self, content: Content, body: bytes) -> bool:
+    def _hold_body(self, content: Content, body: bytes) -> bool:
         """Hold bytes already read in full; False when they do not fit."""
         if content.size_bytes > self.max_bytes:
             return False
@@ -663,10 +659,7 @@ class Cache:
                     etag=piece.etag,
                     ranges=(
                         *state.ranges,
-                        _Range(
-                            size_bytes=len(piece.body),
-                            sha256=hashlib.sha256(piece.body).hexdigest(),
-                        ),
+                        Content.of(piece.body),
                     ),
                 )
                 _replace(note, state.model_dump_json().encode())

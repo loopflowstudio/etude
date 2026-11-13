@@ -9,9 +9,9 @@ time to each and the pace of every step clock since the previous one.
 Timers are summed from the metrics logged under a prefix (`etude.report.Flame`).
 
 Every run is drawn on its declared clocks and Etude's two in hours
-(`etude.run.records.BUILT_IN_CLOCKS`). Attempt spans and checkpoint `elapsed`
-are seconds since the run first started: its first attempt, or its first row
-when no attempt was recorded.
+(`etude.run.records.BUILT_IN_CLOCKS`). Attempts' times and checkpoint
+`elapsed` are seconds since the run first started: its first writer's start
+(`etude.train.read.RunData.writer_starts`).
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ class Job(Record):
     runs: tuple[str, ...]
 
 
-class Span(Record):
+class AttemptSummary(Record):
     """One attempt, in seconds since its run first started."""
 
     host: str
@@ -56,13 +56,12 @@ class RunSummary(Record):
     name: str
     # Seconds since the epoch when it first started; every other time here is since then.
     started: float
-    job: str
     seed: int | None
     state: str
     rows: int
     incomplete: int
     dropped: int | None
-    attempts: tuple[Span, ...]
+    attempts: tuple[AttemptSummary, ...]
     # Latest recorded position, including a continuation before its first row.
     reached: dict[str, float]
 
@@ -140,9 +139,8 @@ def _rounded(values: Floats, figures: int = 5) -> list[float | None]:
 
 def _started(run: RunData) -> float:
     """Seconds since the epoch when the run first started."""
-    starts = [attempt.started_ms for attempt in run.attempts]
-    starts += [block.header.wall_first for block in run.blocks]
-    return min(starts) / 1000 if starts else 0.0
+    starts = run.writer_starts
+    return min(starts.values()) / 1000 if starts else 0.0
 
 
 def _trace(run: RunData, metric: str, clock: str) -> Trace | None:
@@ -245,11 +243,10 @@ def _summary(run: RunData) -> RunSummary:
     # A continuation may discard a previous attempt's overrun. Its recorded
     # position, including a resume before the first row, supersedes that attempt.
     positions = {attempt.writer: dict(attempt.resumed_at) for attempt in run.attempts}
-    starts = {attempt.writer: attempt.started_ms for attempt in run.attempts}
+    starts = run.writer_starts
     for block in run.blocks:
         writer = block.header.writer
         last[writer] = max(last.get(writer, 0), block.header.wall_last)
-        starts.setdefault(writer, block.header.wall_first)
         position = positions.setdefault(writer, {})
         for column in block.header.clocks:
             if column.last is not None:
@@ -261,14 +258,13 @@ def _summary(run: RunData) -> RunSummary:
     return RunSummary(
         name=run.name,
         started=start,
-        job=run.job or run.name,
         seed=declaration.seed if declaration else None,
         state=run.state.state if run.state else "running or unfinished",
         rows=run.rows,
         incomplete=run.incomplete,
         dropped=run.state.counters.dropped if run.state else None,
         attempts=tuple(
-            Span(
+            AttemptSummary(
                 host=attempt.host,
                 pod=attempt.pod,
                 started=attempt.started_ms / 1000 - start,
@@ -286,7 +282,7 @@ def _marks(run: RunData) -> list[Mark]:
     first = run.clocks[0].name if run.clocks else None
     marks: list[Mark] = []
     previous = None
-    for checkpoint in sorted(run.checkpoints, key=lambda c: (c.ordinal, c.wall_ms)):
+    for checkpoint in run.checkpoints:
         began = [
             a for a in run.attempts if (previous.wall_ms if previous else -1) < a.started_ms
             and a.started_ms <= checkpoint.wall_ms

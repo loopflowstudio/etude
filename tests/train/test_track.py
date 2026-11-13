@@ -101,14 +101,14 @@ def test_rows_round_trip_through_files_and_a_bucket_directory(tmp_path: Path) ->
         for row in rows(table)
     ]
     assert len(stored) == 202
-    partial, _ = [row for row in stored if authored(row["clocks"]) == {CLOCKS[0].name: 999}]
-    assert partial["values"] == {"rl/loss": 0.5}
+    partial, _ = [row for row in stored if authored(row.clocks) == {CLOCKS[0].name: 999}]
+    assert partial.values == {"rl/loss": 0.5}
     third = stored[3]
-    assert authored(third["clocks"]) == {"progress/updates": 3, "progress/training_seconds": 0.75}
-    values = third["values"]
-    assert isinstance(values, dict)
+    assert authored(third.clocks) == {"progress/updates": 3, "progress/training_seconds": 0.75}
+    values = third.values
     # The files keep everything as written, including what a chart cannot draw.
-    assert math.isnan(values["rl/entropy"]) and values["stage/id"] == "self-play"
+    logged = values["rl/entropy"]
+    assert isinstance(logged, float) and math.isnan(logged) and values["stage/id"] == "self-play"
     assert values["availability/rl/loss"] is True and values["ppo/losses/policy"] == pytest.approx(
         0.3
     )
