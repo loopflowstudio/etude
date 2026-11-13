@@ -16,7 +16,7 @@ from etude.launch.job_file import read_job_file
 from etude.launch.records import Input, Job
 from etude.out import MEMBERSHIP, OutFiles
 from etude.tracking.delivery import sync
-from etude.tracking.records import Attempt
+from etude.tracking.records import RunWriter
 from etude.tracking.storage import DirectoryStorage
 from etude.train.read import read
 from etude.train.records import ParentRun, Step
@@ -75,7 +75,7 @@ def test_continuation_and_report_use_the_same_position_after_an_empty_attempt(
         run.log({"loss": 1}, updates=6)
     data = read(source, "recipe", parent)
     # Old records can declare a resume point before logging; new empty attempts cannot.
-    attempt = Attempt(
+    attempt = RunWriter(
         writer="abcdef123456",
         host="fixture",
         started_ms=data.attempts[-1].started_ms + 1,

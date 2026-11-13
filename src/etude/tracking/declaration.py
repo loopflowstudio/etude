@@ -15,6 +15,7 @@ from hashlib import sha256
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
+from etude.identity import resume_conflicts
 from etude.tracking.delivery import RunFiles
 from etude.tracking.errors import EtudeError
 from etude.tracking.records import Clock, Continuation, RunDeclaration, RunFile, SourceKey
@@ -108,20 +109,11 @@ def declare(
 
 def validate_resume(prior: RunFile, *, config: str | None, seed: int | None) -> None:
     """Refuse changed config fields or seed before an attempt can write anything."""
-    differences: list[str] = []
-    if prior.declaration.seed != seed:
-        differences.append(f"seed was {prior.declaration.seed!r}, is {seed!r}")
-    old = prior.declaration.config_json
-    if old != config:
-        before = None if old is None else json.loads(old)
-        after = None if config is None else json.loads(config)
-        if isinstance(before, dict) and isinstance(after, dict):
-            differences.extend(
-                f"{key} was {before.get(key)!r}, is {after.get(key)!r}"
-                for key in sorted(before.keys() | after.keys())
-                if key not in before or key not in after or before[key] != after[key]
-            )
-        elif before != after:
-            differences.append("config differs")
+    differences = resume_conflicts(
+        config=config,
+        seed=seed,
+        prior_config=prior.declaration.config_json,
+        prior_seed=prior.declaration.seed,
+    )
     if differences:
         raise EtudeError("run_identity_conflict", detail="; ".join(differences))

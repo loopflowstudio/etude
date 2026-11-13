@@ -20,7 +20,7 @@ from etude.tracking.block_file import block_key, tail_key
 from etude.tracking.delivery import RunFiles, StorageDestination, sync
 from etude.tracking.errors import EtudeError
 from etude.tracking.listing import runs
-from etude.tracking.records import Attempt, RunDeclaration, RunFile, SourceKey
+from etude.tracking.records import RunDeclaration, RunFile, RunWriter, SourceKey
 from etude.tracking.storage import (
     DirectoryStorage,
     S3Storage,
@@ -545,7 +545,7 @@ def test_multiple_attempts_apply_the_earliest_later_checkpoint(tmp_path: Path, r
         ((None, range(20)), (10, range(12, 20)), (resume, range(17, 18)))
     ):
         writer = f"{index:012x}"
-        attempt = Attempt(
+        attempt = RunWriter(
             writer=writer,
             started_ms=index * 1000,
             host="fixture",
@@ -628,7 +628,7 @@ def test_a_resumed_run_reads_roll_ups_on_both_sides_of_the_resume_point(tmp_path
     # checkpoint at 30,000, so its first row is step 30,001.
     for index, (resumed, steps) in enumerate(((None, range(40000)), (30000, range(30001, 70001)))):
         writer = f"{index:012x}"
-        attempt = Attempt(
+        attempt = RunWriter(
             writer=writer,
             started_ms=index * 10**9,
             host="fixture",
@@ -737,7 +737,7 @@ def test_a_run_split_across_machine_folders_reads_as_one(tmp_path: Path) -> None
         root = tmp_path / f"pool/{machine}/out/track" / run_prefix("r")
         storage = DirectoryStorage(root)
         resumed = {} if machine == "s1" else {"step": 10.0}
-        attempt = Attempt(writer=writer, started_ms=start, host=machine, resumed_at=resumed)
+        attempt = RunWriter(writer=writer, started_ms=start, host=machine, resumed_at=resumed)
         storage.put(f"metrics/{writer}.json", attempt.model_dump_json().encode())
         declared = RunFile(
             experiment="e",

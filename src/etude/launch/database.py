@@ -96,6 +96,7 @@ CREATE TABLE IF NOT EXISTS runs(
   created_at TEXT NOT NULL,
   cancel_requested_at TEXT, version INTEGER NOT NULL DEFAULT 1,
   autorun INTEGER NOT NULL DEFAULT 0, queued INTEGER NOT NULL DEFAULT 0,
+  resume_after INTEGER NOT NULL DEFAULT 0,
   params TEXT NOT NULL DEFAULT '{}', source TEXT, smoke TEXT NOT NULL DEFAULT '{}',
   CHECK (pool IS NOT NULL OR rent IS NOT NULL));
 CREATE TABLE IF NOT EXISTS sessions(
@@ -119,13 +120,13 @@ CREATE TABLE IF NOT EXISTS attempts(
 CREATE INDEX IF NOT EXISTS runs_job ON runs(job);
 CREATE INDEX IF NOT EXISTS runs_pool ON runs(pool, seq);
 CREATE INDEX IF NOT EXISTS runs_rent ON runs(rent, seq);
-CREATE INDEX IF NOT EXISTS attempts_run ON attempts(run);
+CREATE INDEX IF NOT EXISTS attempts_run ON attempts(run, number);
 CREATE INDEX IF NOT EXISTS attempts_session ON attempts(session);
 """
 
 Fact = str | int | None
 # Prototype databases from another schema version are refused, never migrated.
-_VERSION = 18
+_VERSION = 19
 
 
 def launcher_file(home: Path) -> Path:
@@ -253,12 +254,18 @@ class Database:
     def begin_launch(self, launch: Launch) -> None:
         with self._together():
             for request in launch.requests:
-                if self._db.execute("SELECT 1 FROM runs WHERE id=?", (request.run,)).fetchone():
+                if (
+                    request.resume_version is None
+                    and self._db.execute("SELECT 1 FROM runs WHERE id=?", (request.run,)).fetchone()
+                ):
                     raise LauncherError(f"run {request.run!r} already admitted")
                 for previous in self.launches(request.run):
-                    if previous.state in {"preparing", "admitting"} or any(
-                        session.refused_at is None and session.ended_at is None
-                        for session in self.launch_sessions(previous.id, acquired_only=True)
+                    if previous.state in {"preparing", "admitting"} or (
+                        previous.state != "admitted"
+                        and any(
+                            session.refused_at is None and session.ended_at is None
+                            for session in self.launch_sessions(previous.id, acquired_only=True)
+                        )
                     ):
                         raise LauncherError(
                             f"run {request.run!r}: reconciling existing request {previous.id}"
@@ -630,7 +637,34 @@ class Database:
                     )
                 except sqlite3.IntegrityError as error:
                     raise LauncherError(f"cohort {cohort.name!r} already exists") from error
+            evidence = self.launch_evidence(launch) if launch is not None else None
+            resuming = (
+                {r.run for r in evidence.requests if r.resume_version is not None}
+                if evidence is not None
+                else set()
+            )
             for run in runs:
+                if run.id in resuming:
+                    previous = self.attempts(run=run.id)
+                    if len(previous) != run.resume_after or any(
+                        a.outcome is None for a in previous
+                    ):
+                        raise Stale(f"run {run.id!r} still has an allocated attempt")
+                    self._change(
+                        "runs",
+                        run.id,
+                        run.version,
+                        job=run.job,
+                        spec=run.spec.model_dump_json(),
+                        source=run.source.model_dump_json() if run.source else None,
+                        pool=run.pool,
+                        rent=run.rent,
+                        cancel_requested_at=None,
+                        resume_after=run.resume_after,
+                        params=json.dumps(run.params),
+                        smoke=run.smoke.model_dump_json(),
+                    )
+                    continue
                 self._db.execute(
                     """INSERT INTO runs(id, job, spec, seed, pool, rent, cohort,
                        created_at, autorun, queued, params, source, smoke)
@@ -653,8 +687,7 @@ class Database:
                 )
 
             self._place(attempts)
-            if launch is not None:
-                evidence = self.launch_evidence(launch)
+            if evidence is not None:
                 self.save_launch(evidence.model_copy(update={"state": "admitted"}))
 
     def cancel(self, run: RunRecord, at: datetime) -> None:
@@ -700,8 +733,10 @@ class Database:
         rows = self._db.execute(
             f"""SELECT r.*, (SELECT count(*) FROM attempts a WHERE a.run = r.id) AS tries
                 FROM runs r
-                WHERE (r.pool = ? OR r.rent = ?) AND r.cancel_requested_at IS NULL
-                AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.run = r.id AND (
+                WHERE r.id IN (
+                  SELECT id FROM runs WHERE pool = ? UNION SELECT id FROM runs WHERE rent = ?
+                ) AND r.cancel_requested_at IS NULL
+                AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.run = r.id AND a.number > r.resume_after AND (
                   a.outcome IS NULL OR (a.outcome != 'stopped' AND
                   (a.outcome != 'lost' OR a.cause NOT IN ({marks})))))
                 ORDER BY r.seq""",

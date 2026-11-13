@@ -649,6 +649,7 @@ class RunRequest(Record):
     source: SourcePosition | None = None
     id: str | None = None  # allocated by the submitting client before git publication
     smoke: Smoke = Smoke()
+    resume: bool = False  # explicitly take up an existing run; id is required
 
 
 class RunRecord(Record):
@@ -664,6 +665,7 @@ class RunRecord(Record):
     version: int
     autorun: bool = False
     queued: bool = False  # historical submission metadata; never affects scheduling
+    resume_after: int = 0  # allocations superseded by the last explicit resume
     params: dict[str, Param] = Field(default_factory=dict)  # as on the RunRequest that was sent
     source: SourcePosition | None = None
     smoke: Smoke = Smoke()  # as on the RunRequest that was sent
@@ -920,6 +922,7 @@ class LaunchRequest(Record):
     fingerprint: str
     requested_revision: str | None
     resolved_revision: str | None = None
+    resume_version: int | None = None  # compare-and-set the existing run at admission
 
 
 class Launch(Record):

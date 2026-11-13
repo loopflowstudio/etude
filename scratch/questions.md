@@ -19,7 +19,7 @@
   one pointer read, one state listing and one deletion per older object.
 
 Folder checkpoints, the local CLI recipe and explicit local resume are built.
-Run/attempt record unification and launched explicit resume remain unbuilt.
+Run-record unification and experiment scoping remain unbuilt.
 `CheckpointRecord.player(inference)` takes anything with `player(ref)`, so the
 shared record names no evaluation type.
 
@@ -52,22 +52,13 @@ who deletes under upload-only grants; local retention; running hours):
 - On what counts as confirmed and how long the grace is: "dunno, dunno".
 - Running hours across a resume: not answered.
 
-**As the docs now state it** (`docs/training.md` Carrying on and What is on
-disk; `docs/launcher.md` The run promise, with a retention table):
-
-- `out/state/current.json` names `out/state/save-N/`; each save holds every
-  registered file and refers to nothing outside its folder. Named state is
-  `state/NAME/`. Folders are numbered because `run.save(fn)` outside
-  `run.steps` has no stepped clock.
-- A delivery pass sends only the save the local pointer names, whole, then
-  the pointer. Saves replaced before a pass reached them are never sent.
-  This is my reading of "extra uploads are not [ok]" beside 1b: no upload
-  beyond one per delivered save; identical bytes are sent again.
-- Local: saves numbered below the one storage last acknowledged a pointer
-  for are removed (no storage: below the local pointer).
-- Remote: the courier deletes below the stored pointer after storing it;
-  under an upload-only grant the controller does, with the launcher's keys,
-  when its loop looks at the run.
+`docs/training.md` (Carrying on; What is on disk) and `docs/launcher.md`
+(The run promise) carry the built layout and retention table. Each save is
+self-contained, only the pointer-selected save is delivered, and the pointer
+is published last. Courier cleanup follows acknowledgement; the controller
+owns remote deletion under upload-only grants. Skipping saves replaced before
+a delivery pass is the implementation's reading of "extra uploads are not
+[ok]"; identical bytes within successive delivered saves upload again.
 
 **Unanswered, chosen here, reversible:**
 
@@ -85,15 +76,6 @@ run saving every five minutes leaves twelve replaced saves an hour in the
 bucket until then, against "ideally avoid remote extra storage". The docs
 say so. Question: is that acceptable for upload-only S3, or should such a
 launch warn, or deliver saves less often?
-
-**Probes, re-run 2026-11-13 after the docs change.** Both still describe the
-existing carrier, not the layout to build: `state-publication.py` reproduces
-the mixed save; `state-retention.py` (three saves, identical model bytes,
-`delete` returning false) shows 3 model uploads, 3 remote copies, membership
-holding the pointer and save 3. Under the settled layout the 3 uploads are
-intended; the 2 lingering saves are the controller's to delete. Neither
-probe exercises pointer ordering, skipping unsent saves or controller
-cleanup; step 1's tests must.
 
 ## Train API docs (2026-11-13): open choices and assumptions
 
@@ -252,15 +234,26 @@ allocations changes retry limits and costs. Command jobs may also never open
 `track`, while evaluation uses its own writers. Do not refuse these contexts
 just to make the proposed record fit.
 
-Proposed correction for review: keep `RunAttempt` for machine allocations;
-replace tracking `Attempt` with `RunWriter`, explicitly the lifetime of one
-tracking context, linked to its optional allocation id. Preserve historical
-writer files and their first-row cutoffs. This is a distinct real concept,
-not a second representation of an allocation. The single stored `RunRecord`
-still needs its ownership specified: launcher `job` is an identity digest,
-but observed `TrainingRun.job` is a report label that can change when another
-config is observed. Do not persist that derived label as the job's identity.
+Implementation review, 2026-11-13: choose the `RunWriter` distinction.
+It represents a tracking context, linked to an optional allocation id; it is
+not another representation of `RunAttempt`. The record and real consumers
+are renamed, preserving historical writer files and first-row cutoffs. The
+accepted design's naming table now reflects this correction. This is an
+implementation choice, not a decision attributed to a person.
 
-Dependent record/schema work stopped for design review, as implement requires
-when a counterexample breaks the data model. Nothing here changes the accepted
-names or the user docs. Launched resume and experiment scoping remain unbuilt.
+The shared `RunRecord` must own the persisted job digest. The observed
+`TrainingRun.job` is a derived report label that can change when another
+config is observed; keep that label separate from identity. A manual resume
+now preserves the original job digest while taking the current source,
+target and limits. The single-record cut remains open.
+
+Launched resume is implemented. A file returning several jobs selects by run
+id, or by the stored job name and seed for hand-built requests with no id.
+No new cohort is created: resume keeps its existing shared limits. A resume
+of a queued run with no allocations replaces its pending specification.
+Experiment scoping remains unbuilt.
+
+Report naming needs the same cardinality care: `JobGroup` already groups
+unseeded jobs. Evaluation's `Line` is the seeded chain of continuations
+(`ExperimentState.lines`), so renaming that record to job would merge two
+concepts. Keep its lineage semantics when finishing the visible rename.

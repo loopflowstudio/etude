@@ -28,7 +28,7 @@ from etude.launch.client import (
 )
 from etude.launch.controller import FetchRequest, PythonClient, forward, warning
 from etude.launch.database import launcher_file
-from etude.launch.records import Job, LauncherError, Pool, Until
+from etude.launch.records import Job, LauncherError, Pool, RunRequest, Until
 from tests.launch.counting import job_text
 from tests.launch.test_source import git
 from tests.launch.test_source import repository as repository
@@ -361,3 +361,29 @@ def test_controller_keeps_source_history_and_checks_out_on_client(
     assert (destination / "train").read_text() == "client snapshot\n"
     assert not launcher_file(client).exists()
     assert _open(remote).read(id).phase == "queued"
+
+
+def test_remote_resume_keeps_one_run_and_its_previous_attempt(
+    controller: tuple[Path, Path],
+    tmp_path: Path,
+) -> None:
+    client, remote = controller
+    spec = Job(
+        command='echo "$ETUDE_UNTIL_VALUE" > "$ETUDE_OUTPUT_DIR/result"; printf \'{"clocks":{"steps":%s}}\' "$ETUDE_UNTIL_VALUE" > "$ETUDE_OUTPUT_DIR/etude-result.json"',
+        max_hours=0.01,
+        until=Until(clock="steps", value=10),
+    )
+    identity = launch(RunRequest(job=spec, seed=7))
+    assert wait(identity, every=0.02, timeout=10)[0].outcome == "succeeded"
+    resumed = RunRequest(
+        job=spec.model_copy(update={"until": Until(clock="steps", value=20)}),
+        seed=7,
+        id=identity,
+        resume=True,
+    )
+    assert launch(resumed) == identity
+    seen = wait(identity, every=0.02, timeout=10)[0]
+    assert (seen.outcome, seen.attempts, seen.clocks) == ("succeeded", 2, {"steps": 20})
+    assert fetch(identity, "result", tmp_path / "resumed").read_text() == "20\n"
+    assert not launcher_file(client).exists()
+    assert len(_open(remote).runs(done=True)) == 1

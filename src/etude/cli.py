@@ -80,6 +80,8 @@ def _submit(
     smoke: bool,
     quote: bool = False,
     experiment: str | None = None,
+    resume: str | None = None,
+    until: str | None = None,
 ) -> None:
     if help:
         print(ctx.get_help())
@@ -92,11 +94,34 @@ def _submit(
     from etude.launch import controller
     from etude.launch.job_file import read_job_file
     from etude.launch.listing import show_runs
-    from etude.launch.records import CohortSpec
+    from etude.launch.records import CohortSpec, Until
 
     runs = read_job_file(file, ctx.args, help=help, experiment=experiment)
     if help:
         return
+    if until is not None and resume is None:
+        raise LauncherError("--until needs --resume")
+    if resume is not None:
+        if quote or cohort is not None:
+            raise LauncherError("--resume cannot be combined with --quote or --cohort")
+        selected = [run for run in runs if run.id == resume]
+        if not selected and len(runs) == 1:
+            selected = runs
+        elif not selected:
+            address = controller.selected()
+            reader = controller.PythonClient(address) if address else launch_cli.default()
+            prior = reader.record(resume)
+            selected = [
+                run for run in runs if run.seed == prior.seed and run.job.name == prior.spec.name
+            ]
+        if len(selected) != 1:
+            raise LauncherError("--resume must select one run from the file's jobs and seeds")
+        request = selected[0]
+        if until is not None:
+            request = request.model_copy(
+                update={"job": request.job.model_copy(update={"until": Until.parse(until)})}
+            )
+        runs = [request.model_copy(update={"id": resume, "resume": True})]
     if cohort is None and (len(runs) > 1 or parallel != 1 or max_usd is not None):
         raise LauncherError("several runs or cohort limits need --cohort NAME")
     spec = (
@@ -173,6 +198,8 @@ def launch(
     smoke: SmokeOption = False,
     help: FileHelp = False,
     experiment: ExperimentOption = None,
+    resume: Annotated[str | None, typer.Option(help="resume this run on current source")] = None,
+    until: Annotated[str | None, typer.Option(help="absolute target for the resumed run")] = None,
 ) -> None:
     """Queue a file's runs and get the machines to start them now, or fail and queue nothing."""
     _submit(
@@ -188,6 +215,8 @@ def launch(
         smoke=smoke,
         quote=quote,
         experiment=experiment,
+        resume=resume,
+        until=until,
     )
 
 

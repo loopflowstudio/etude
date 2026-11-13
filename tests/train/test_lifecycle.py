@@ -255,3 +255,31 @@ def test_recipe_retirement_notes_cannot_delete_tracking_or_retained_checkpoints(
     assert OutFiles.model_validate_json(storage.get("r/out.json")).files == (
         OutFile(key="out/recipe.removed", sha256=sha256(b"run.json\n").hexdigest(), size_bytes=9),
     )
+
+
+def test_tracking_contexts_have_distinct_writers_under_one_allocation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ETUDE_ATTEMPT", "allocation-1")
+    for value in (1, 2):
+        with track(
+            experiment="e",
+            run="allocated",
+            directory=tmp_path,
+            clocks=[Step("updates", "updates")],
+        ) as run:
+            run.log({"loss": value}, updates=value)
+    data = read(tmp_path, "e", "allocated")
+    assert len({writer.writer for writer in data.attempts}) == 2
+    assert [writer.attempt for writer in data.attempts] == ["allocation-1", "allocation-1"]
+    assert data.points("loss", "updates").y.tolist() == [1, 2]
+    with track(
+        experiment="e",
+        run="another",
+        directory=tmp_path,
+        clocks=[Step("updates", "updates")],
+    ) as run:
+        run.log({"loss": 3}, updates=1)
+    other = read(tmp_path, "e", "another")
+    assert other.attempts[0].attempt == "allocation-1"
+    assert other.points("loss", "updates").y.tolist() == [3]

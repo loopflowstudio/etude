@@ -88,7 +88,8 @@ The sentence the nouns make:
 | what a loop holds in `train` | `Run` | `etude.train.run.Run` (kept) |
 | a job and a seed to launch | `RunRequest`, never named by authors | `etude.launch.records.Run` |
 | the stored run | `RunRecord`, one class | `RunRecord`, `RunDeclaration`, `RunFile`, `TrainingRun` |
-| one execution of a run on a machine | `RunAttempt`, one class | `RunAttempt` (launcher) and `Attempt` (tracking) |
+| one machine allocation of a run | `RunAttempt` | `RunAttempt` (launcher, kept) |
+| one tracking context writing rows | `RunWriter` | `Attempt` (tracking) |
 | a published model with its clocks | `CheckpointRecord`, plus one reference type | `CheckpointRecord`, `Checkpoint`, `CheckpointKey`, `CheckpointRef` |
 | a checkpoint and the code that plays it, or code alone | player | `Model`, `Code` |
 | how a run attempt ended | `outcome.json` | `state.json` at the run's root |
@@ -103,9 +104,13 @@ The sentence the nouns make:
   the file; no limits, nothing formal. **Cohort**: a named envelope of limits
   (`parallel`, `max_usd`) that runs are admitted under. A later launch adding
   to an existing cohort is EXP-61, not this work.
-- One class for a stored run and one for a run attempt means the launcher's
-  database and the tracked folder write the same record types. EXP-56 decides
-  where each field is written; the classes are single.
+- One stored `RunRecord` describes a run. `RunAttempt` describes a machine
+  allocation; `RunWriter` describes a tracking context linked to an optional
+  allocation. This correction follows the reproduced many-writers-per-allocation
+  case in `questions.md`: merging them would lose row-replacement boundaries
+  or inflate retry counts and cost. It is an implementation design correction,
+  not a new decision attributed to a person. The job digest stays an identity;
+  the report's config-disambiguated job label is derived when reading.
 - Runs and evaluations already stored stay readable: readers accept the old
   file name (`state.json` as an outcome) and old field spellings. Nothing
   stored is rewritten. Renamed Python names keep an alias that warns and

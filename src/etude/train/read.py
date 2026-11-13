@@ -40,11 +40,11 @@ from etude.tracking.listing import as_storage, declared, run_folders, under
 from etude.tracking.records import (
     HOURS_SINCE_START,
     RUNNING_HOURS,
-    Attempt,
     Clock,
     Record,
     RunFile,
     RunState,
+    RunWriter,
 )
 from etude.tracking.storage import Storage, run_prefix
 from etude.train.block import (
@@ -98,7 +98,7 @@ class RunData(Arrays):
     # In ordinal order, one per ordinal: a later attempt continues its run's ordinals.
     checkpoints: tuple[CheckpointRecord, ...]
     # Every process that wrote to this run, in start order.
-    attempts: tuple[Attempt, ...]
+    attempts: tuple[RunWriter, ...]
     _read_blocks: Callable[[], tuple[StoredBlock, ...]] = PrivateAttr()
 
     @cached_property
@@ -491,7 +491,7 @@ def _place(block: StoredBlock, clock: str) -> _Placed:
 
 
 def _writer_starts(
-    attempts: Sequence[Attempt], blocks: Iterable[tuple[str, int]]
+    attempts: Sequence[RunWriter], blocks: Iterable[tuple[str, int]]
 ) -> dict[str, int]:
     """When each writer started: its attempt's `started_ms`, else its blocks' earliest wall time.
 
@@ -505,7 +505,7 @@ def _writer_starts(
 
 
 def _stretches(
-    placed: Sequence[_Placed], attempts: Sequence[Attempt], clock: str
+    placed: Sequence[_Placed], attempts: Sequence[RunWriter], clock: str
 ) -> list[list[_Extent]]:
     """The blocks whose rows count on the clock, ascending, grouped where their ranges overlap.
 
@@ -638,7 +638,7 @@ def _order(record: CheckpointRecord) -> tuple[int, int]:
 
 
 def _hours(
-    records: Iterable[CheckpointRecord], attempts: Sequence[Attempt], *, continued: bool
+    records: Iterable[CheckpointRecord], attempts: Sequence[RunWriter], *, continued: bool
 ) -> tuple[CheckpointRecord, ...]:
     """Records in ordinal order, where one saved before Etude's clocks gets them from `wall_ms`.
 
@@ -843,7 +843,7 @@ class _Records:
 
     checkpoints: list[CheckpointRecord]
     # Every process that wrote to the run, once each, in start order.
-    attempts: tuple[Attempt, ...]
+    attempts: tuple[RunWriter, ...]
     # By writer, the folder its attempt record was first found in.
     folder_of: dict[str, str]
 
@@ -852,7 +852,7 @@ def _records(storage: Storage, keys: Sequence[tuple[str, str]]) -> _Records:
     """The run's checkpoint records and its attempts, with their folders."""
     present = set(keys)
     checkpoints: list[CheckpointRecord] = []
-    attempts: dict[str, Attempt] = {}
+    attempts: dict[str, RunWriter] = {}
     folder_of: dict[str, str] = {}
     for folder, name in keys:
         kind, _, leaf = name.partition("/")
@@ -869,7 +869,7 @@ def _records(storage: Storage, keys: Sequence[tuple[str, str]]) -> _Records:
                     _here(CheckpointRecord.model_validate_json(body), storage, folder, present)
                 )
             else:
-                attempt = Attempt.model_validate_json(body)
+                attempt = RunWriter.model_validate_json(body)
                 attempts.setdefault(attempt.writer, attempt)
                 folder_of.setdefault(attempt.writer, folder)
         except ValidationError:
@@ -976,7 +976,7 @@ def _blocks(
     storage: Storage,
     folders: Sequence[str],
     keys: list[tuple[str, str]],
-    attempts: Sequence[Attempt],
+    attempts: Sequence[RunWriter],
     metrics: frozenset[str] | None,
     prefixes: tuple[str, ...],
 ) -> tuple[StoredBlock, ...]:

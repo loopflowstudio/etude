@@ -46,8 +46,8 @@ repeat, removal in 0.5. Three questions it raised are in `questions.md`
 (Found reading the docs as a user).
 
 The branch holds main at `286e0c5` (v0.3.2, merge `429db8d`; launcher
-database version 18, so its file is `launcher-18.db` under main's per-version
-naming); `questions.md` records how the `66ffb28` merge was reconciled.
+database version 18 on main; this Task now uses version 19 under the same
+per-version naming); `questions.md` records how the `66ffb28` merge was reconciled.
 
 ## Delete — do not maintain
 
@@ -57,7 +57,8 @@ Replace these end to end:
 - Launch `Run` -> `RunRequest`; authors return Jobs with launch seeds instead.
 - Separate tracking `RunDeclaration`/`RunFile` and observed `TrainingRun` ->
   the single stored `RunRecord`, shared with the launcher.
-- Tracking `Attempt` -> the single `RunAttempt`, shared with the launcher.
+- Tracking `Attempt` -> `RunWriter` (built); `RunAttempt` stays the machine
+  allocation. See the cardinality correction in `questions.md`.
 - Experiment `Checkpoint` and eval query's `_StoredCheckpoint`/`_StoredArtifact`
   are removed. One `CheckpointRecord` and one `CheckpointRef` live in
   `etude.tracking.checkpoints`, which training and evaluation both import
@@ -107,16 +108,12 @@ not hold this release and are a separate Task.
 
 ## Remaining implementation
 
-Built: pointer-last publication of the selected save, both carriers, recovery
-independent of stale membership, delayed local/remote cleanup and controller
-cleanup under upload-only grants. Registration, PyTorch serialization, extra
-counts, callback saves, named state, step cadence, stop propagation, seed/input
-access and stepped row clocks are wired into Run. Both hour clocks survive a
-relay without checkpoints. `etude.run` is removed in favor of `etude.tracking`.
-Folder checkpoints now publish named objects or callback exports, share records
-with evaluation/query, list through `run.checkpoints()`, and travel as verified
-member inputs through `start=`, evaluation and explicit checkpoint continuation.
-The query cache rebuilds at schema 14 so folder keys join their seated players.
+Built: pointer-last selected-save publication, both carriers, delayed cleanup,
+registration and framework serialization, named state and stop propagation,
+stepped row clocks, folder checkpoints and verified member inputs through
+`start=`, evaluation and continuation. Both hour clocks survive a relay.
+`etude.run` is removed in favor of `etude.tracking`. Earlier receipts and
+implementation detail remain at `98c8f05:scratch/exp-56.md`.
 
 Built in this continuation: local `etude run` and explicit local resume with
 saved SIGINT/SIGTERM stops, target extension/retention, config and seed checks
@@ -137,19 +134,18 @@ Remaining, before the accepted API can be treated as built:
    controller message is now `RunOperation`, freeing public `RunRequest`.
    Preserve historical file/field readers during the cut. Do not extend the
    separate records as a final API.
-   **Design review needed before this cut:** the local probe in
-   `questions.md` (Record unification counterexample) found two tracking
-   writers and multiple tracked run names sharing one launcher allocation.
-   Tracking `Attempt` is a writer lifetime, not a machine allocation.
-   Review the proposed `RunWriter` distinction and job identity versus
-   derived report label before choosing the shared schema. No production
-   record changes were made in this pass.
-2. Launched `etude launch job.py --resume RUN [--until]`, keeping cumulative
-   limits and attempts, current source and the same out. No such CLI or
-   scheduler operation exists yet. Names/storage remain globally scoped in
-   the launcher; implement experiment-scoped identity and `PREFIX/EXPERIMENT/RUN`
-   carriage/grants (local CLI already nests by experiment). Ensure refused
-   launched attempts preserve a finished run too.
+   The cardinality correction in `questions.md` is reviewed and built:
+   `RunWriter` owns each tracking context and its first-row cutoff;
+   `RunAttempt` owns a machine allocation. Historical writer files still read.
+   Preserve job identity separately from the derived report label in the
+   remaining run-record cut.
+2. Experiment-scoped identity and `PREFIX/EXPERIMENT/RUN` carriage/grants,
+   including readers. Names/storage remain globally scoped in the launcher;
+   local CLI already nests by experiment. Launched explicit resume is now
+   built, with current source, retained out, target extension, cumulative
+   hours/dollars/attempts and shared cohort limits. Refusals and failed
+   admission preserve a finished run. Launcher schema is now 19, edited in
+   place for this unreleased Task.
 3. Report line -> job. Local CLI acceptance now includes two-model save,
    stop, resume, checkpoint publication and evaluation seating in one test.
    No publication, landing or Graph changes here.
@@ -161,6 +157,17 @@ Remaining, before the accepted API can be treated as built:
    changes against a probe of its recipe, or leaves it wholly to MTG-329.
 
 ## Verification
+
+2026-11-13 resume slice: `uv run pytest` on `test_resume.py`, the remote
+resume test, command import-count tests and local resume: **25 passed**;
+writer/continuation compatibility filters: **7 passed**, plus the shared
+allocation writer test passed; unallocated/shared cohort limit filters: **2
+passed**. `uv run mypy`, `uv run ruff check .`,
+`uv run ruff format --check .`: clean. Waiting-query EXPLAIN uses supply
+indexes and `attempts_run(run, number)`; refusal counts pin external calls
+at zero. Shared identity validation adds one module to pools and sync-seal.
+Full gate and remaining acceptance checks are still pending.
+
 
 2026-11-13 implement and two compress passes: `uv run --extra train pytest
 tests/train/test_local.py tests/test_jobs.py tests/launch/test_cli.py

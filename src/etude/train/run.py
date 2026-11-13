@@ -73,12 +73,12 @@ from etude.tracking.records import (
     HOURS_SINCE_START,
     RUNNING_HOURS,
     ArtifactRef,
-    Attempt,
     Clock,
     Continuation,
     Record,
     RunCounters,
     RunState,
+    RunWriter,
     SourceKey,
 )
 from etude.tracking.storage import DirectoryStorage, Storage, run_prefix
@@ -351,7 +351,7 @@ class Run:
         self._began = time.monotonic()
         # Its first durable row says where this attempt's rows supersede
         # earlier attempts' (`first_row`); one that logs nothing replaces nothing.
-        self._attempt = Attempt(
+        self._attempt = RunWriter(
             writer=self._writer_id,
             started_ms=started_ms,
             host=socket.gethostname(),
@@ -1308,7 +1308,7 @@ def _origin(latest: CheckpointRecord | None, root: Path, started_ms: int) -> int
     for path in (root / "metrics").glob("*.json"):
         if re.fullmatch(r"[0-9a-f]{12}", path.stem):
             try:
-                starts.append(Attempt.model_validate_json(path.read_bytes()).started_ms)
+                starts.append(RunWriter.model_validate_json(path.read_bytes()).started_ms)
             except ValidationError:
                 continue
     return min(starts)

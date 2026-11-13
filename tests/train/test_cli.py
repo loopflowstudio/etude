@@ -45,8 +45,9 @@ EVAL_READERS = tuple(
         (
             ["sync", "--directory", "{directory}", "--seal"],
             # etude.out, etude.stopping for Stopped, etude.train.state for saves and
-            # etude.tracking.checkpoints for the records a run publishes.
-            27,
+            # etude.tracking.checkpoints for the records a run publishes, and
+            # etude.identity for config and seed validation shared with the launcher.
+            28,
             ("boto3", "etude.page", "etude.train.report"),
         ),
     ],

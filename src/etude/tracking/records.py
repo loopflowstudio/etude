@@ -160,13 +160,11 @@ class RunState(Record):
     writer: Writer | None = None
 
 
-class Attempt(Record):
-    """One process that wrote to a run: a launch, or a relaunch after a crash.
+class RunWriter(Record):
+    """The lifetime of one tracking context, with its own row-replacement boundary.
 
-    A run outlives the hardware it runs on. Each start gets its own identity,
-    which is also the `writer` in the names of the row files it wrote, so every
-    stretch of a curve can be traced to the machine that produced it. One pod
-    may appear under many runs, and one run under many pods.
+    Many writers may share a launcher allocation, or write without one.
+    Historical writer files retain their fields and schema version.
     """
 
     schema_version: Literal[1] = 1
