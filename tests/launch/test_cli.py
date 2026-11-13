@@ -17,6 +17,7 @@ import pytest
 from etude.cli import main
 from etude.experiment import observe
 from etude.launch.client import default
+from etude.launch.database import launcher_file
 from etude.launch.schemas import Packet
 from etude.run.storage import default_root
 from tests.launch.fake import bench
@@ -173,7 +174,7 @@ def test_invalid_python_file_is_refused_before_opening_the_database(
     path.write_text(definition)
     assert main(["launch", str(path)]) == 1
     assert "runs()" in capsys.readouterr().err
-    assert not (tmp_path / "home" / "launcher.db").exists()
+    assert not launcher_file(tmp_path / "home").exists()
 
 
 def test_machines_join_pools_and_this_computer_can_be_turned_off(
@@ -414,7 +415,7 @@ def test_bootstrap_session_carries_records_without_a_launcher(
         assert any(b"out/receipt" in upload for upload in uploads)
         assert any(b"out/ended" in upload for upload in uploads)
         # The worker keeps its cache under ETUDE_HOME, but no launcher records.
-        assert not (tmp_path / "launcher" / "launcher.db").exists()
+        assert not launcher_file(tmp_path / "launcher").exists()
     finally:
         server.shutdown()
         server.server_close()

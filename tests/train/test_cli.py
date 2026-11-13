@@ -11,6 +11,7 @@ import pytest
 
 from etude.cli import main
 from etude.eval.query import statsdb
+from etude.launch.database import launcher_file
 from etude.run.delivery import sync
 from etude.run.storage import DirectoryStorage
 from etude.train.records import Step
@@ -88,7 +89,7 @@ def test_tracking_command_import_counts(
         "etude.launch.errors",
         "etude.launch.logging",
     }
-    assert not (tmp_path / "home" / "launcher.db").exists()
+    assert not launcher_file(tmp_path / "home").exists()
 
 
 def test_checkpoints_are_listed_at_their_storage_address_while_the_run_goes_on(

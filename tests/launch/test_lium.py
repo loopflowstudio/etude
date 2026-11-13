@@ -16,7 +16,7 @@ import pytest
 
 from etude.cli import main
 from etude.launch.client import _open
-from etude.launch.database import Database
+from etude.launch.database import Database, launcher_file
 from etude.launch.errors import LauncherError, ProviderUnavailable
 from etude.launch.executor import Execution, Executor, Refused
 from etude.launch.machines import MachineRequest
@@ -398,7 +398,7 @@ def _scheduler(store: Database, market: Marketplace, storage: Storage) -> Schedu
 
 def test_public_rental_budget_covers_fallback_timer(tmp_path: Path) -> None:
     market, storage = Marketplace(), Storage()
-    store = Database(tmp_path / "launcher.db")
+    store = Database(launcher_file(tmp_path))
     try:
         scheduler = _scheduler(store, market, storage)
         with pytest.raises(LauncherError):
@@ -426,7 +426,7 @@ def test_lium_executes_and_retains_outputs_before_controller_deletion(
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "client"))
     market, storage = Marketplace(), Storage()
-    store = Database(tmp_path / "launcher.db")
+    store = Database(launcher_file(tmp_path))
     scheduler = _scheduler(store, market, storage)
     environments: list[dict[str, str]] = []
 
@@ -658,7 +658,7 @@ def test_unacknowledged_timer_still_allows_cleanup_at_startup_deadline(
             return cls.fromtimestamp(clock[0].timestamp(), UTC)
 
     monkeypatch.setattr("etude.launch.providers.lium.machines.datetime", Time)
-    store = Database(tmp_path / "launcher.db")
+    store = Database(launcher_file(tmp_path))
     scheduler = _scheduler(store, market, storage)
     monkeypatch.setattr(scheduler, "_clock", lambda: clock[0])
     scheduler.set_startup("5090", 10)

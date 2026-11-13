@@ -28,7 +28,7 @@ from functools import cache
 from pathlib import Path
 
 from etude.launch.controller import PythonClient, selected
-from etude.launch.database import Database
+from etude.launch.database import Database, launcher_file
 from etude.launch.executor import Execution, Executor, local
 from etude.launch.machines import Machines, OwnedMachine, Safeguards
 from etude.launch.providers.lium.api import LiumAPI
@@ -62,8 +62,8 @@ from etude.launch.usage import Usage
 
 @cache
 def _open(home: Path) -> Scheduler:
-    fresh = not (home / "launcher.db").exists()
-    store = Database(home / "launcher.db")
+    fresh = not launcher_file(home).exists()
+    store = Database(launcher_file(home))
     here = local(home / "sessions")
     owner = threading.get_ident()
 

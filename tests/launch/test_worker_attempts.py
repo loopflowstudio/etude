@@ -17,7 +17,7 @@ import pytest
 
 from etude.cache import Artifact, Cache, Fetched
 from etude.jobs import continue_from
-from etude.launch.database import Database
+from etude.launch.database import Database, launcher_file
 from etude.launch.executor import local as local_service
 from etude.launch.records import (
     Input,
@@ -52,7 +52,7 @@ printf '{"clocks": {"%s": %s, "wall_time_ms": 1500}}' \\
 
 def local(tmp_path: Path) -> Scheduler:
     service = local_service(tmp_path / "sessions")
-    scheduler = Scheduler(Database(tmp_path / "launcher.db"), {"local": lambda held: service})
+    scheduler = Scheduler(Database(launcher_file(tmp_path)), {"local": lambda held: service})
     scheduler.add_pool(Pool(name="local"))
     scheduler._store.add_machine(Machine(name="local", pool="local", kind="local"))
     return scheduler

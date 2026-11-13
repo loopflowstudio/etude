@@ -27,7 +27,7 @@ from pydantic import ValidationError
 
 from etude.carriage import restore_set
 from etude.jobs import continue_from
-from etude.launch.database import Database
+from etude.launch.database import Database, launcher_file
 from etude.launch.executor import Execution, Executor, local
 from etude.launch.listing import show_machines, show_runs
 from etude.launch.logging import CLOSED, log_to, write_log
@@ -340,7 +340,7 @@ def cloud(
     """
     storage = Storage()
     provider = RunPod(storage, tmp_path / "pod")
-    store = Database(tmp_path / "launcher.db")
+    store = Database(launcher_file(tmp_path))
     account = Provider(name="runpod", kind="runpod", registry="reg1", storage="west")
     place = (
         Place(name="west", bucket="journals", prefix="etude/t", provider="r2")

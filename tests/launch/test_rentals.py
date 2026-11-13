@@ -11,7 +11,7 @@ import pytest
 from etude.cli import main
 from etude.launch import cli, client
 from etude.launch.controller import PythonClient, RentRequest, Request, TerminateRequest
-from etude.launch.database import Database
+from etude.launch.database import Database, launcher_file
 from etude.launch.errors import LauncherError
 from etude.launch.records import Job, Machine
 from tests.launch.counting import Counting, Counts
@@ -75,7 +75,7 @@ def test_python_rental_calls_use_selected_controller(
         RentRequest(ondemand="gpu", hours=1, max_usd=Decimal(2)),
         TerminateRequest(machine="remote-pod"),
     ]
-    assert not (tmp_path / "launcher.db").exists()
+    assert not (launcher_file(tmp_path)).exists()
 
 
 def test_machine_allocation_outlives_its_session(tmp_path: Path) -> None:
@@ -120,7 +120,7 @@ def test_added_session_reuses_capacity_without_a_paid_window(tmp_path: Path) -> 
 
 @pytest.mark.parametrize("version", [10, 11, 12, 13, 14])
 def test_old_database_evidence_is_refused_without_migration(tmp_path: Path, version: int) -> None:
-    path = tmp_path / "launcher.db"
+    path = launcher_file(tmp_path)
     Database(path).close()
     with sqlite3.connect(path) as db:
         db.execute("DROP INDEX transfers_delivery")
@@ -140,7 +140,7 @@ def test_old_database_evidence_is_refused_without_migration(tmp_path: Path, vers
 
 
 def test_a_database_from_another_version_is_refused_and_left_alone(tmp_path: Path) -> None:
-    path = tmp_path / "launcher.db"
+    path = launcher_file(tmp_path)
     Database(path).close()
     with sqlite3.connect(path) as db:
         db.execute("PRAGMA user_version = 0")

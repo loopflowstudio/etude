@@ -21,6 +21,7 @@ import pytest
 from etude.cli import main
 from etude.launch import cli, client
 from etude.launch.commands import Kind
+from etude.launch.database import launcher_file
 from etude.launch.errors import LauncherError
 from etude.launch.executor import Execution
 from etude.launch.measurement import span
@@ -216,7 +217,7 @@ def test_command_import_counts(
         "etude.train.cli",
     }
     if command[0] == "worker":
-        assert not (tmp_path / "home" / "launcher.db").exists()
+        assert not launcher_file(tmp_path / "home").exists()
 
 
 def test_phases_reads_only_retained_records(

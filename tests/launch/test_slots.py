@@ -6,7 +6,7 @@ import time
 from decimal import Decimal
 from pathlib import Path
 
-from etude.launch.database import Database
+from etude.launch.database import Database, launcher_file
 from etude.launch.executor import local as local_service
 from etude.launch.records import Job, Machine, Pool
 from etude.launch.scheduler import Scheduler
@@ -128,7 +128,7 @@ def test_a_real_worker_runs_two_slots_at_once_with_their_own_outputs(tmp_path: P
     meet = tmp_path / "meet"
     meet.mkdir()
     service = local_service(tmp_path / "sessions")
-    scheduler = Scheduler(Database(tmp_path / "launcher.db"), {"local": lambda held: service})
+    scheduler = Scheduler(Database(launcher_file(tmp_path)), {"local": lambda held: service})
     scheduler.add_pool(Pool(name="local", slots=2))
     scheduler._store.add_machine(Machine(name="local", pool="local", kind="local"))
     job = Job(command=RENDEZVOUS.format(meet=meet), max_hours=0.1)

@@ -19,7 +19,7 @@ import pytest
 
 from etude.cli import main
 from etude.launch.client import _open
-from etude.launch.database import Database
+from etude.launch.database import Database, launcher_file
 from etude.launch.errors import LauncherError, ProviderUnavailable
 from etude.launch.executor import Executor, Refused
 from etude.launch.machines import MachineRequest
@@ -283,7 +283,7 @@ def test_scheduler_retains_uncertain_acquisition_until_owned_deletion(
     clock.now = datetime.now(UTC)
     market.lost_reply = True
     market.inventory_visible = False
-    store = Database(tmp_path / "launcher.db")
+    store = Database(launcher_file(tmp_path))
     try:
         scheduler = _scheduler(store, market, storage, clock)
         name = scheduler.rent("4090", hours=1)
@@ -296,7 +296,7 @@ def test_scheduler_retains_uncertain_acquisition_until_owned_deletion(
         # Rebuild the controller from retained evidence; process-local state cannot
         # prove ownership or preserve the reservation after a lost create reply.
         store.close()
-        store = Database(tmp_path / "launcher.db")
+        store = Database(launcher_file(tmp_path))
         scheduler = _scheduler(store, market, storage, clock)
         clock.advance(60 if action == "terminate" else 3601)
         if action == "terminate":
@@ -338,7 +338,7 @@ def test_scheduler_releases_confirmed_vast_refusal(tmp_path: Path) -> None:
     market, storage, clock = Marketplace(), Storage(), Clock()
     clock.now = datetime.now(UTC)
     market.offers = [{**OFFER, "end_date": clock.now.timestamp() + 5}]
-    store = Database(tmp_path / "launcher.db")
+    store = Database(launcher_file(tmp_path))
     try:
         scheduler = _scheduler(store, market, storage, clock)
         refused = scheduler.rent("4090", hours=1)
@@ -523,7 +523,7 @@ def test_vast_cohort_uses_the_worker_and_retains_outputs_before_deletion(
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "client"))
     market, storage = Marketplace(), Storage()
-    store = Database(tmp_path / "launcher.db")
+    store = Database(launcher_file(tmp_path))
     scheduler = _scheduler(store, market, storage, lambda: datetime.now(UTC))
     # Only the remote host boundary is replaced; the scheduler, journal, courier,
     # worker, job subprocess and output retention all use their production paths.

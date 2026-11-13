@@ -20,7 +20,7 @@ from urllib.request import Request
 import pytest
 
 from etude.launch import logging, source
-from etude.launch.database import Database
+from etude.launch.database import Database, launcher_file
 from etude.launch.environment import install
 from etude.launch.errors import LauncherError, LaunchError
 from etude.launch.logging import CLOSED, LIMIT, bound, bounded
@@ -74,7 +74,7 @@ def test_failed_preparation_survives_restart_and_does_not_consume_id(
     assert caught.value.runs == (requested.id,)
     assert b.store.runs() == () and b.service.creates == 0
     b.store.close()
-    store = Database(tmp_path / "launcher.db")
+    store = Database(launcher_file(tmp_path))
     scheduler = Scheduler(store, {"runpod": lambda held: b.service}, clock=b.clock)
     snapshot = scheduler.logs(refresh=True, run="baseline-seed-7")
     assert "source publication refused" in render(snapshot)
@@ -172,7 +172,7 @@ def test_all_attempts_retained_after_cleanup_and_storage_failure(
     assert before.complete
     assert len([s for s in before.streams if s.producer == "job"]) == 2
     b.store.close()
-    store = Database(tmp_path / "launcher.db")
+    store = Database(launcher_file(tmp_path))
     scheduler = Scheduler(store, {"runpod": lambda held: b.service}, clock=b.clock)
 
     def unavailable(*args: object, **kwargs: object) -> LogStream:
@@ -583,7 +583,7 @@ def test_diagnostics_use_positions_without_showing_another_attempts_error(
     assert all(error.id != d.id for d in snapshot.diagnostics)
     assert all(not stream.diagnostics for stream in snapshot.streams)
     b.store.close()
-    store = Database(tmp_path / "launcher.db")
+    store = Database(launcher_file(tmp_path))
     scheduler = Scheduler(store, {"runpod": lambda held: b.service}, clock=b.clock)
     after = scheduler.logs(refresh=True, run=first)
     assert "other job" in render(after)
@@ -753,7 +753,7 @@ def test_bootstrap_failure_remains_readable_after_deletion_and_restart(
     b.run(1)
     assert b.store.machine(session.machine).deleted_at is not None
     b.store.close()
-    store = Database(tmp_path / "launcher.db")
+    store = Database(launcher_file(tmp_path))
     scheduler = Scheduler(store, {"runpod": lambda held: b.service}, clock=b.clock)
 
     def unavailable(*args: object, **kwargs: object) -> LogStream:
@@ -1051,7 +1051,7 @@ signal.pause()
     assert worker_log() == log.read_bytes()
     # Restart with the earlier open snapshot still cached, then refresh final output.
     b.store.close()
-    store = Database(tmp_path / "launcher.db")
+    store = Database(launcher_file(tmp_path))
     scheduler = Scheduler(store, {"runpod": lambda held: b.service}, clock=b.clock)
     after = scheduler.logs(refresh=True, run=identity)
     worker = next(s for s in after.streams if s.producer == "worker")
@@ -1072,7 +1072,7 @@ signal.pause()
     scheduler.tick()
     assert store.machine(session.machine).deleted_at is not None
     store.close()
-    store = Database(tmp_path / "launcher.db")
+    store = Database(launcher_file(tmp_path))
     scheduler = Scheduler(store, {"runpod": lambda held: b.service}, clock=b.clock)
 
     def unavailable(*args: object, **kwargs: object) -> LogStream:

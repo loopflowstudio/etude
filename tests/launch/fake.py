@@ -16,7 +16,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
-from etude.launch.database import Database
+from etude.launch.database import Database, launcher_file
 from etude.launch.executor import Refused
 from etude.launch.logs import snapshot_stream
 from etude.launch.machines import Allocation, Bill
@@ -304,7 +304,7 @@ def bench(
 ) -> Bench:
     clock = Clock()
     service = FakeService(clock, usd_per_hour)
-    store = Database(tmp_path / "launcher.db")
+    store = Database(launcher_file(tmp_path))
     free = FakeService(clock, "0")
     scheduler = Scheduler(
         store,
