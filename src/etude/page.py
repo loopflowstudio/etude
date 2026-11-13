@@ -1099,32 +1099,32 @@ def _load(
     `_page_scheduled` (tournament, match, seating, tag): what each match was
     called for as. `_page_checkpoints` (player): the placed models.
     """
-    db.execute(
-        "create or replace temp table _page_held"
-        " (view VARCHAR, tournament VARCHAR, run VARCHAR, match VARCHAR)"
+    # The optional `eval` extra, imported where it is used (`_read_evals`).
+    from etude.eval.block import stage  # noqa: PLC0415
+
+    stage(
+        db,
+        "_page_held",
+        {"view": "VARCHAR", "tournament": "VARCHAR", "run": "VARCHAR", "match": "VARCHAR"},
+        [["", each.name, d.run, d.match.key] for each in held for d in each.played.delivered],
     )
-    db.execute(
-        "create or replace temp table _page_scheduled"
-        " (tournament VARCHAR, match VARCHAR, seating VARCHAR, tag VARCHAR)"
+    stage(
+        db,
+        "_page_scheduled",
+        {"tournament": "VARCHAR", "match": "VARCHAR", "seating": "VARCHAR", "tag": "VARCHAR"},
+        [
+            [each.name, called.match.key, called.seating, tag]
+            for each in held
+            for called in each.schedule
+            for tag in (called.tags or (None,))
+        ],
     )
-    db.execute("create or replace temp table _page_checkpoints (player VARCHAR)")
-    delivered = [
-        ["", each.name, d.run, d.match.key] for each in held for d in each.played.delivered
-    ]
-    scheduled = [
-        [each.name, called.match.key, called.seating, tag]
-        for each in held
-        for called in each.schedule
-        for tag in (called.tags or (None,))
-    ]
-    placed = [[each.key] for each in players if each.placed]
-    for table, rows in (
-        ("_page_held", delivered),
-        ("_page_scheduled", scheduled),
-        ("_page_checkpoints", placed),
-    ):
-        if rows:  # DuckDB refuses an empty batch
-            db.executemany(f"insert into {table} values ({', '.join('?' * len(rows[0]))})", rows)
+    stage(
+        db,
+        "_page_checkpoints",
+        {"player": "VARCHAR"},
+        [[each.key] for each in players if each.placed],
+    )
     # Each match an eval run delivered outside a tournament, once per environment from its
     # latest record (`matches.newest`), as a tournament counts its own.
     db.execute(
