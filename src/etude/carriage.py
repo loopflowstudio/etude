@@ -35,7 +35,7 @@ from typing import Literal
 CHECKPOINTS = "checkpoints"
 
 
-class Mismatch(ValueError):
+class RecordMismatch(ValueError):
     """Relayed checkpoint bytes that do not match the record naming them."""
 
 
@@ -282,7 +282,7 @@ def put_back(root: Path, files: Mapping[str, bytes]) -> None:
     """Write what `restore_set` or `recorded_file` gave into this host's folder, keeping what it has.
 
     Records come first, so each checkpoint file is checked against the digest
-    of the record that names it; a mismatch raises `Mismatch` and writes no file.
+    of the record that names it; a mismatch raises `RecordMismatch` and writes no file.
     """
     ordered = sorted(files, key=lambda key: (checkpoint_file(key), key))
     for key in ordered:
@@ -295,7 +295,7 @@ def put_back(root: Path, files: Mapping[str, bytes]) -> None:
         if checkpoint_file(key):
             named = named_file(root, key)
             if named is None or named.sha256 != sha256(files[key]).hexdigest():
-                raise Mismatch(f"{key} does not match the checkpoint record that names it")
+                raise RecordMismatch(f"{key} does not match the checkpoint record that names it")
         target.parent.mkdir(parents=True, exist_ok=True)
         partial = target.with_name(target.name + ".partial")
         partial.write_bytes(files[key])

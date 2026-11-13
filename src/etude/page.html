@@ -361,16 +361,16 @@ function render() {
       return lines;
     };
     for (const panel of panels) {
-      if (panel.kind === "schedule") {
-        const c = card(host, panel.title, `Configured · ${panel.unit} · ${panel.clock} · hollow points: samples · filled dots: recorded position`, "full"), h = node("div");
+      if (panel.kind === "planned") {
+        const c = card(host, panel.title, `Configured · ${panel.unit} · ${panel.clock} · hollow points: samples · filled dots: recorded value`, "full"), h = node("div");
         c.appendChild(h);
-        const schedules = M.scheduleSeries(panel, vis);
-        const lines = schedules.flatMap(({job, points, markers}) => [
+        const planned = M.plannedSeries(panel, vis);
+        const lines = planned.flatMap(({job, points, markers}) => [
           {label: job.label + " · configured sample", color: color(job), dotted: job.baseline, pointFill: css("--surface"), points},
           ...markers.map(p => ({label: job.label + " · current", color: color(job), points: [p]})),
         ]);
-        for (const {job, markers} of schedules) if (!markers.length) c.appendChild(node("div", "na", `${job.label}: no recorded ${panel.clock} within the schedule`));
-        later(() => line(h, lines, {xLabel: panel.clock, height: 220, dots: true, empty: "No configured schedule for these jobs"}));
+        for (const {job, markers} of planned) if (!markers.length) c.appendChild(node("div", "na", `${job.label}: no recorded ${panel.clock} within the planned points`));
+        later(() => line(h, lines, {xLabel: panel.clock, height: 220, dots: true, empty: "No planned values for these jobs"}));
       } else if (panel.kind === "series") {
         const present = panel.keys.filter(k => T.metrics.includes(k));
         missing.push(...panel.keys.filter(k => !present.includes(k)));

@@ -97,7 +97,7 @@ def test_rows_round_trip_through_files_and_a_bucket_directory(tmp_path: Path) ->
     assert len([key for key in keys if key.endswith(".blk")]) == 1
     stored = [
         row
-        for table in read(bucket, "capacity-pilot", "training-3f9a").tables
+        for table in read(bucket, "capacity-pilot", "training-3f9a").columns
         for row in rows(table)
     ]
     assert len(stored) == 202
@@ -376,7 +376,7 @@ def test_checkpoints_are_stored_locally_and_tagged_after_a_resume(
         assert (first.pod, first.attempt) == (None, None) and first.writer != second.writer
         assert (second.pod, second.attempt) == ("pod-b", "attempt-7")
     # Only the relaunch logged rows, and its block carries its name.
-    assert [table.writer for table in data.tables] == [second.writer]
+    assert [table.writer for table in data.columns] == [second.writer]
 
 
 def test_logging_from_training_code_imports_no_command_line_library() -> None:

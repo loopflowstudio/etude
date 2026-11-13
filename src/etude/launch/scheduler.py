@@ -33,7 +33,7 @@ from uuid import uuid4
 
 from pydantic import Field
 
-from etude.carriage import Mismatch
+from etude.carriage import RecordMismatch
 from etude.deadline import limit_time, remaining
 from etude.launch import source
 from etude.launch.database import Database
@@ -88,7 +88,7 @@ from etude.launch.schemas import (
     Progress,
     Work,
 )
-from etude.launch.storage.download import Mismatch as StoredMismatch
+from etude.launch.storage.download import StoredContentMismatch
 from etude.launch.storage.s3 import longest_grant
 from etude.launch.storage.transport import attribute, observe
 from etude.launch.usage import Usage
@@ -100,7 +100,7 @@ Reach = Callable[[Machine | OnDemand], Execution]
 # What a run folder's relay raises while its holder cannot give it; the work waits.
 # An input's file that is gone or does not match its record ends the attempt
 # instead, in `_relay`; a retry's restore set waits on either.
-_RELAY_WAITS = (OSError, Mismatch, LauncherError, StorageUnavailable)
+_RELAY_WAITS = (OSError, RecordMismatch, LauncherError, StorageUnavailable)
 # How often a pass may fetch a running job's log. Reading it over SSH sends it all.
 _JOB_LOG_SECONDS = 30.0
 # A log read without a supply's `log_seconds`: one stalled bucket must not hold
@@ -1970,7 +1970,7 @@ class Scheduler:
                 continue
             try:
                 self._carry(given.run, session, key=given.key)
-            except (FileNotFoundError, StoredMismatch, Mismatch) as error:
+            except (FileNotFoundError, StoredContentMismatch, RecordMismatch) as error:
                 # The error says whether the file is gone or differs from its record.
                 self._diagnose(
                     "run folder relay",

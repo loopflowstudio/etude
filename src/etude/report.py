@@ -163,15 +163,15 @@ class Counters(Record):
     keys: tuple[str, ...]
 
 
-class SchedulePoint(Record):
-    """One configured value at an absolute coordinate on the schedule's clock."""
+class PlannedPoint(Record):
+    """One planned value where its panel's clock stands at `at`, an absolute value."""
 
     at: FiniteFloat
     value: FiniteFloat
 
 
-class Schedule(Record):
-    """Configured values per job, linearly interpolated between sampled points.
+class Planned(Record):
+    """Planned hyperparameter values per job, linearly interpolated between sampled points.
 
     These are plans, not observations. Markers use each run's recorded clock;
     no value is extrapolated beyond the supplied points. `jobs` is keyed by a
@@ -179,17 +179,17 @@ class Schedule(Record):
     under it; the full name wins.
     """
 
-    kind: Literal["schedule"] = "schedule"
+    kind: Literal["planned"] = "planned"
     title: str
     clock: str
-    jobs: dict[str, tuple[SchedulePoint, ...]]
+    jobs: dict[str, tuple[PlannedPoint, ...]]
     unit: str = ""
 
     @model_validator(mode="after")
     def ordered_points(self) -> Self:
         for job, points in self.jobs.items():
             if not points or any(a.at >= b.at for a, b in zip(points, points[1:])):
-                raise ValueError(f"schedule_points_must_increase: {job}")
+                raise ValueError(f"planned_points_must_increase: {job}")
         return self
 
 
@@ -232,7 +232,7 @@ type EvalPanel = Annotated[
     Curve | Matrix | Ranking | Crosstable | Anchors, Field(discriminator="kind")
 ]
 type MetricPanel = Annotated[
-    Series | Counters | Schedule | Flame | Pace | Elapsed | Attempts, Field(discriminator="kind")
+    Series | Counters | Planned | Flame | Pace | Elapsed | Attempts, Field(discriminator="kind")
 ]
 
 PERF: tuple[MetricPanel, ...] = (Pace(), Elapsed(), Attempts(), Flame())

@@ -1096,7 +1096,7 @@ def test_a_range_verifies_the_requested_digest_before_exposing_bytes(tmp_path: P
     expected, wrong = _Held(b"abcdef"), _Held(b"abcdeX")
     cache = Cache(tmp_path / "cache", range_bytes=2)
     # The requested range matches; corruption elsewhere still invalidates the version.
-    with pytest.raises(engine.Mismatch):
+    with pytest.raises(engine.ContentMismatch):
         cache.read(expected.artifact, wrong, start=1, length=2)
     assert cache.read(expected.artifact, expected, start=1, length=2) == b"bc"
 

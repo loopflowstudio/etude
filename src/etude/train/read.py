@@ -56,8 +56,8 @@ from etude.train.block import (
     MIN,
     STATISTICS,
     SUM,
+    Columns,
     SeriesColumn,
-    Table,
 )
 from etude.train.manifest import BlockDescription, Manifest, StoredBlock, describe, fetch
 from etude.train.records import CheckpointRecord, RowTable, TablePoint
@@ -102,16 +102,16 @@ class RunData(Arrays):
 
     @cached_property
     def blocks(self) -> tuple[StoredBlock, ...]:
-        """One table per process that wrote rows, in the order the processes started.
+        """The stored blocks of every process that wrote rows, in the order the processes started.
 
         Read from storage the first time it is used, keeping the metrics `read_all` was given.
         """
         return self._read_blocks()
 
     @cached_property
-    def tables(self) -> tuple[Table, ...]:
-        """Raw inspection loads whole blocks; chart reads do not."""
-        return tuple(block.table() for block in self.blocks)
+    def columns(self) -> tuple[Columns, ...]:
+        """Each block's rows by column. Raw inspection loads whole blocks; chart reads do not."""
+        return tuple(block.columns() for block in self.blocks)
 
     @property
     def clocks(self) -> tuple[Clock, ...]:

@@ -24,10 +24,10 @@ from etude.train.block import (
     STATISTICS,
     Array,
     ArrayLocation,
+    Columns,
     Header,
     Number,
     Reduction,
-    Table,
     decode,
     encode_number,
     header,
@@ -89,7 +89,7 @@ class StoredBlock:
         array = np.frombuffer(data, dtype=dtype)
         return array if width == 1 else array.reshape(-1, width)
 
-    def table(self) -> Table:
+    def columns(self) -> Columns:
         return decode(self.storage.get(self.key) if self.body is None else self.body)
 
 
@@ -145,7 +145,7 @@ def _describe_permanent(storage: Storage, file: BlockFile) -> BlockDescription:
     stored = StoredBlock(storage, file.key, description)
     level = next((level for level in stored.header.rollups if level.factor == 4096), None)
     overview = (
-        reduce(stored.table(), 4096)
+        reduce(stored.columns(), 4096)
         if level is None
         else Reduction(
             clocks={c.name: stored.array(c.data, "<f8", 2) for c in level.clocks},

@@ -20,7 +20,7 @@ from etude.page import build
 from etude.run.block_file import block_key
 from etude.run.records import RunDeclaration, RunFile, SourceKey
 from etude.run.storage import DirectoryStorage, S3Storage, Storage, run_prefix
-from etude.train.block import Series, Table, encode
+from etude.train.block import Columns, Series, encode
 from etude.train.manifest import Index
 from etude.train.read import buckets, read
 from etude.train.records import Step, Time
@@ -114,7 +114,7 @@ def test_store_measurement(tmp_path: Path, rows: int, backend: str) -> None:
         files = 0
         for sequence, start in enumerate(range(0, rows, 32768)):
             x = np.arange(start, min(start + 32768, rows), dtype=np.float64)
-            table = Table(
+            table = Columns(
                 writer=writer,
                 first=sequence,
                 last=sequence,

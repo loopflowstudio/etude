@@ -30,8 +30,8 @@ from etude.train.read import Floats, RunData, lines
 BUCKETS = 120
 
 
-class Job(Record):
-    """Runs that differ only by provenance: seed, device and commit.
+class JobGroup(Record):
+    """Runs drawn together as one job: they differ only by provenance, seed, device and commit.
 
     `launch` is the name it was launched under; `name` adds the config digest
     when that launch name has jobs with several configs ("ppo 1a2b3c").
@@ -116,7 +116,7 @@ class Timers(Record):
 
 class Training(Record):
     clocks: tuple[Clock, ...]
-    jobs: tuple[Job, ...]
+    jobs: tuple[JobGroup, ...]
     runs: tuple[RunSummary, ...]
     checkpoints: tuple[Mark, ...]
     metrics: tuple[str, ...]  # every metric logged, in first-seen order
@@ -213,7 +213,7 @@ def job_names(data: Sequence[RunData]) -> dict[str, JobName]:
     }
 
 
-def _jobs(data: Sequence[RunData]) -> tuple[Job, ...]:
+def _jobs(data: Sequence[RunData]) -> tuple[JobGroup, ...]:
     """The runs' jobs (`job_names`), in launch order. A job's seeds are its learner lines
     (`etude.train.read.lines`), so a continuation is no extra seed."""
     names = job_names(data)
@@ -227,7 +227,7 @@ def _jobs(data: Sequence[RunData]) -> tuple[Job, ...]:
         count = len({line[r.name] for r in runs})
         seeds = f"{count} seed{'s' if count > 1 else ''}"
         found.append(
-            Job(
+            JobGroup(
                 name=name,
                 launch=names[runs[0].name].launch,
                 label=f"{name} · {seeds}",

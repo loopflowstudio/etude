@@ -38,7 +38,7 @@ function tickLabels(values, format, increment) {
 function missingText(g) {
   const seat = g.seat, whose = seat.job || "its line", kind = seat.trained ? "trained checkpoint" : "checkpoint", yet = g.missing === "not_yet";
   if (seat.clock == null) return yet ? `${whose} has not ended yet` : `${whose} ended with no checkpoint`;
-  if (g.value == null) return `the held checkpoint has no ${seat.clock} position`;
+  if (g.value == null) return `the held checkpoint has no ${seat.clock} value`;
   const where = `${seat.clock} ${(+g.value.toPrecision(6)).toLocaleString("en-US")}`;
   if (seat.at_or_before) return yet ? `${whose} has not saved past ${where} yet` : `${whose} has no ${kind} at or before ${where}`;
   return `${whose} has no ${kind} at ${where} ${yet ? "yet" : "and never will"}`;
@@ -353,7 +353,7 @@ function model(D) {
     return p == null || p.control ? selected : p.selection;
   };
   const usesSelection = (D.panel_selections || []).some(p => p.control);
-  function scheduleSeries(panel, jobs = JOBS) {
+  function plannedSeries(panel, jobs = JOBS) {
     return jobs.flatMap(job => {
       const samples = panel.jobs[job.name] ?? panel.jobs[job.launch];
       if (!samples) return [];
@@ -425,7 +425,7 @@ function model(D) {
     };
   };
   const evaluated = pts => pts.filter(p => !p.missing && !p.skip);
-  return {T, R, JOBS, marks, markOf, jobPoints, cellOf, subjectAt, placed, positioned, atClocks, alignClock, fixedPlayers, usesSelection, panelSelection, seated, scheduleSeries, coverage, jobOfRun, linesOf, lineMembers, playerName, selName, choices, opponents, evalValue, evaluated};
+  return {T, R, JOBS, marks, markOf, jobPoints, cellOf, subjectAt, placed, positioned, atClocks, alignClock, fixedPlayers, usesSelection, panelSelection, seated, plannedSeries, coverage, jobOfRun, linesOf, lineMembers, playerName, selName, choices, opponents, evalValue, evaluated};
 }
 
 // The first curve supplies the index headline, with the page's default score,

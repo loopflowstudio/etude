@@ -94,7 +94,7 @@ class Corrupt(Exception):
     """Bytes this computer kept no longer match their digest; they were discarded."""
 
 
-class Mismatch(Exception):
+class ContentMismatch(Exception):
     """The bytes arrived but are not the ones named; asking again cannot help."""
 
 
@@ -312,7 +312,7 @@ class Cache:
 
         Content larger than the whole allowance is staged beside the destination
         instead, and is not read again when the destination already holds it.
-        Raises `Corrupt` or `Mismatch` and leaves `destination` as it was.
+        Raises `Corrupt` or `ContentMismatch` and leaves `destination` as it was.
         """
         content = artifact.content
         if content is None:
@@ -393,7 +393,7 @@ class Cache:
             if not self._verified(partial, content):
                 with _lock(self.root / "capacity.lock"):
                     _discard(partial)
-                raise Mismatch("download length or SHA256 mismatch")
+                raise ContentMismatch("download length or SHA256 mismatch")
             if cacheable:
                 _admit(partial, target)
                 self._pin(content, holder)

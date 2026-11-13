@@ -74,7 +74,7 @@ from etude.run.records import (
     SourceKey,
 )
 from etude.run.storage import DirectoryStorage, Storage, run_prefix
-from etude.train.block import Builder, Json, LoggedRow, Table, concat
+from etude.train.block import Builder, Columns, Json, LoggedRow, concat
 from etude.train.block import encode as encode_block
 from etude.train.manifest import Index, metric_names
 from etude.train.records import CheckpointRecord, ParentCheckpoint, RowTable, checkpoint_name
@@ -99,13 +99,13 @@ def log_line(row: LoggedRow) -> str:
     return f"{zlib.crc32(body.encode()):08x} {body}\n"
 
 
-def write_block(root: Path, key: str, table: Table) -> int:
+def write_block(root: Path, key: str, columns: Columns) -> int:
     """Write one block whole and durably; a reader never sees half of it."""
     target = root / key
     target.parent.mkdir(parents=True, exist_ok=True)
     partial = target.with_suffix(".partial")
     with partial.open("wb") as stream:
-        stream.write(encode_block(table))
+        stream.write(encode_block(columns))
         stream.flush()
         os.fsync(stream.fileno())
     partial.replace(target)
@@ -132,7 +132,7 @@ def seal_logs(root: Path, clocks: Sequence[str]) -> None:
             row = LoggedRow.model_validate_json(body)
             builder.add(row.wall_ms, row.clocks, row.values)
         if len(builder):
-            write_block(root, tail.key, builder.table(tail.writer, tail.first))
+            write_block(root, tail.key, builder.columns(tail.writer, tail.first))
         log.unlink()
 
 
@@ -251,9 +251,9 @@ class Run:
         self._metric_names = metric_names(root) if metric_name_limit is not None else set()
         self._sequence = 0
         # Only the current compaction window stays in memory.
-        self._tails: list[Table] = []
+        self._tails: list[Columns] = []
         self._tail_bytes = 0
-        self._recent: list[Table] = []
+        self._recent: list[Columns] = []
         self._recent_bytes = 0
         self._folded_at = time.monotonic()
         self._queue: queue.Queue[object] = queue.Queue(maxsize=queue_size)
@@ -584,13 +584,13 @@ class Run:
         def seal(final: bool = False) -> None:
             nonlocal stream, builder
             if stream is not None:
-                table = builder.table(self._writer_id, self._sequence)
+                columns = builder.columns(self._writer_id, self._sequence)
                 self._tail_bytes += write_block(
-                    self.files.root, tail_key(self._sequence, self._writer_id), table
+                    self.files.root, tail_key(self._sequence, self._writer_id), columns
                 )
                 stream.close()
                 Path(stream.name).unlink()  # The block now holds these rows.
-                self._tails.append(table)
+                self._tails.append(columns)
                 stream, builder = None, Builder(self._columns)
                 self._sequence += 1
             self._fold(final)
@@ -646,23 +646,23 @@ class Run:
             recent = list(self._recent)
             size = self._recent_bytes
             if self._tails:
-                table = concat(self._tails)
-                recent.append(table)
+                columns = concat(self._tails)
+                recent.append(columns)
                 if not final:
-                    key = block_key(1, table.first, table.last, table.writer)
-                    size += write_block(self.files.root, key, table)
+                    key = block_key(1, columns.first, columns.last, columns.writer)
+                    size += write_block(self.files.root, key, columns)
                     self._index.add(key)
             compact = final or size >= PERMANENT_BYTES or len(recent) >= RECENT_BLOCKS
             if compact:
-                table = concat(recent)
-                key = block_key(2, table.first, table.last, table.writer)
-                write_block(self.files.root, key, table)
+                columns = concat(recent)
+                key = block_key(2, columns.first, columns.last, columns.writer)
+                write_block(self.files.root, key, columns)
                 self._index.add(key)
             self._index.write()
             retired = [tail_key(tail.first, tail.writer) for tail in self._tails]
             if compact:
                 retired.extend(
-                    block_key(1, table.first, table.last, table.writer) for table in recent
+                    block_key(1, columns.first, columns.last, columns.writer) for columns in recent
                 )
             retired = [key for key in retired if (self.files.root / key).is_file()]
             # The replacement and manifest exist before the append. Couriers need

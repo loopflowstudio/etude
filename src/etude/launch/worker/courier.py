@@ -47,7 +47,7 @@ from etude.launch.schemas import (
     attempt_log,
     log_piece,
 )
-from etude.launch.storage.download import Download, Mismatch, download
+from etude.launch.storage.download import Download, StoredContentMismatch, download
 from etude.launch.storage.files import RESULT, append_usage, read_result, write
 from etude.launch.storage.s3 import (
     PART_BYTES,
@@ -367,7 +367,7 @@ class Courier:
                     with attribute(run=entry.work.run, attempt=attempt):
                         self.fetch(entry.fetch)  # files precede executable work
                     self.restore(entry.restore)
-                except Mismatch as error:
+                except StoredContentMismatch as error:
                     # Permanent: hand the work over so its setup fails and says why,
                     # rather than asking for the same wrong bytes until the deadline.
                     _diagnose("input verification", error, attempt)

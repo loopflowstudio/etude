@@ -1,9 +1,10 @@
 """Columnar blocks: how a run's logged rows are stored and read.
 
-A `Table` is rows held by column: wall time, one array per declared clock, and
-one `Series` per logged name. A block is a table written to one immutable
-file. `Builder` turns rows into a table as they are logged; `concat` joins a
-writer's consecutive tables when small blocks are merged into large ones.
+`Columns` is rows held by column: wall time, one array per declared clock, and
+one `Series` per logged name. A block is one `Columns` written to one
+immutable file. `Builder` turns rows into columns as they are logged; `concat`
+joins a writer's consecutive columns when small blocks are merged into large
+ones. These are not the JSON row tables of `log_table` (`RowTable`).
 
 File layout, all little-endian; readers depend on it, so a change needs a new VERSION:
 
@@ -76,7 +77,7 @@ class LoggedRow(Record):
 
 @dataclass(frozen=True)
 class Series:
-    """One logged name of one kind within a table."""
+    """One logged name of one kind within a block's `Columns`."""
 
     # Row numbers where it is present, ascending; None when it is on every row.
     rows: Array | None
@@ -98,7 +99,7 @@ class Reduction:
 
 
 @dataclass(frozen=True)
-class Table:
+class Columns:
     """Rows by column, from one writer, covering sequences `first` to `last` inclusive."""
 
     writer: str
@@ -170,7 +171,7 @@ class Builder:
             self._rows.setdefault(key, []).append(row)
             self._data.setdefault(key, []).append(item)
 
-    def table(self, writer: str, sequence: int) -> Table:
+    def columns(self, writer: str, sequence: int) -> Columns:
         count = len(self._wall)
         series: dict[tuple[str, Kind], Series] = {}
         for key, data in self._data.items():
@@ -179,7 +180,7 @@ class Builder:
                 data=np.asarray(data, dtype=DTYPES[key[1]]),
                 labels=tuple(self._labels.get(key[0], {})) if key[1] == "text" else (),
             )
-        return Table(
+        return Columns(
             writer=writer,
             first=sequence,
             last=sequence,
@@ -189,20 +190,21 @@ class Builder:
         )
 
 
-def concat(tables: Sequence[Table]) -> Table:
-    """One table from a writer's tables, in the order given."""
-    starts = np.cumsum([0, *(table.rows for table in tables)])
-    names = dict.fromkeys(name for table in tables for name in table.clocks)
+def concat(pieces: Sequence[Columns]) -> Columns:
+    """One `Columns` from a writer's consecutive ones, in the order given."""
+    starts = np.cumsum([0, *(columns.rows for columns in pieces)])
+    names = dict.fromkeys(name for columns in pieces for name in columns.clocks)
     clocks = {
         name: np.concatenate(
-            [table.clocks.get(name, np.full(table.rows, np.nan)) for table in tables]
+            [columns.clocks.get(name, np.full(columns.rows, np.nan)) for columns in pieces]
         )
         for name in names
     }
     series: dict[tuple[str, Kind], Series] = {}
-    for key in dict.fromkeys(key for table in tables for key in table.series):
+    for key in dict.fromkeys(key for columns in pieces for key in columns.series):
         parts = [
-            (table.series.get(key), int(start), table.rows) for table, start in zip(tables, starts)
+            (columns.series.get(key), int(start), columns.rows)
+            for columns, start in zip(pieces, starts)
         ]
         labels: dict[str | None, int] = {}
         data: list[Array] = []
@@ -228,11 +230,11 @@ def concat(tables: Sequence[Table]) -> Table:
             data=np.concatenate(data),
             labels=tuple(labels),
         )
-    return Table(
-        writer=tables[0].writer,
-        first=min(table.first for table in tables),
-        last=max(table.last for table in tables),
-        wall_ms=np.concatenate([table.wall_ms for table in tables]),
+    return Columns(
+        writer=pieces[0].writer,
+        first=min(columns.first for columns in pieces),
+        last=max(columns.last for columns in pieces),
+        wall_ms=np.concatenate([columns.wall_ms for columns in pieces]),
         clocks=clocks,
         series=series,
     )
@@ -315,19 +317,19 @@ def encode_number(value: float) -> Number:
     return "NaN" if np.isnan(value) else "Infinity" if value > 0 else "-Infinity"
 
 
-def reduce(table: Table, factor: int) -> Reduction:
+def reduce(columns: Columns, factor: int) -> Reduction:
     """Reduce by row order, keeping finite sums and the logged first/last values."""
-    starts = np.arange(0, table.rows, factor)
-    ends = np.minimum(starts + factor, table.rows) - 1
+    starts = np.arange(0, columns.rows, factor)
+    ends = np.minimum(starts + factor, columns.rows) - 1
     clocks = {
-        name: np.column_stack((data[starts], data[ends])) for name, data in table.clocks.items()
+        name: np.column_stack((data[starts], data[ends])) for name, data in columns.clocks.items()
     }
     series: dict[str, Array] = {}
-    for (name, kind), column in table.series.items():
+    for (name, kind), column in columns.series.items():
         if kind != "metric":
             continue
         data = column.data
-        row_numbers = np.arange(table.rows) if column.rows is None else column.rows
+        row_numbers = np.arange(columns.rows) if column.rows is None else column.rows
         groups = row_numbers // factor
         metric_starts = (
             np.flatnonzero(np.r_[True, groups[1:] != groups[:-1]])
@@ -356,18 +358,18 @@ def reduce(table: Table, factor: int) -> Reduction:
     return Reduction(clocks=clocks, series=series)
 
 
-def encode(table: Table) -> bytes:
-    """The table as one block file."""
+def encode(columns: Columns) -> bytes:
+    """The columns as one block file."""
     layout = _Layout()
     rollups: list[RollupColumn] = []
     for factor in (16, 256, 4096):
-        if table.rows < factor:
+        if columns.rows < factor:
             continue
-        reduced = reduce(table, factor)
+        reduced = reduce(columns, factor)
         rollups.append(
             RollupColumn(
                 factor=factor,
-                count=(table.rows + factor - 1) // factor,
+                count=(columns.rows + factor - 1) // factor,
                 clocks=tuple(
                     ClockColumn(name=name, data=layout.place(data), increasing=False)
                     for name, data in reduced.clocks.items()
@@ -385,18 +387,18 @@ def encode(table: Table) -> bytes:
             )
         )
     header = Header(
-        writer=table.writer,
-        first=table.first,
-        last=table.last,
-        rows=table.rows,
+        writer=columns.writer,
+        first=columns.first,
+        last=columns.last,
+        rows=columns.rows,
         rollups=tuple(rollups),
-        wall_first=int(table.wall_ms[0]) if table.rows else 0,
-        wall_last=int(table.wall_ms[-1]) if table.rows else 0,
-        wall_increasing=bool(np.all(table.wall_ms[1:] > table.wall_ms[:-1])),
-        incomplete=int(np.isnan(np.stack(list(table.clocks.values()))).any(axis=0).sum())
-        if table.clocks
+        wall_first=int(columns.wall_ms[0]) if columns.rows else 0,
+        wall_last=int(columns.wall_ms[-1]) if columns.rows else 0,
+        wall_increasing=bool(np.all(columns.wall_ms[1:] > columns.wall_ms[:-1])),
+        incomplete=int(np.isnan(np.stack(list(columns.clocks.values()))).any(axis=0).sum())
+        if columns.clocks
         else 0,
-        wall_ms=layout.place(table.wall_ms),
+        wall_ms=layout.place(columns.wall_ms),
         clocks=tuple(
             ClockColumn(
                 name=name,
@@ -407,7 +409,7 @@ def encode(table: Table) -> bytes:
                 increasing=bool(len(column) < 2 or np.all(column[1:] > column[:-1]))
                 and not bool(np.isnan(column).any()),
             )
-            for name, column in table.clocks.items()
+            for name, column in columns.clocks.items()
         ),
         series=tuple(
             SeriesColumn(
@@ -421,7 +423,7 @@ def encode(table: Table) -> bytes:
                 if kind == "metric" and len(series.data)
                 else None,
             )
-            for (name, kind), series in table.series.items()
+            for (name, kind), series in columns.series.items()
         ),
     )
     described = header.model_dump_json().encode()
@@ -439,8 +441,8 @@ def header(block: bytes) -> tuple[Header, int]:
     return described, 16 + length + (-(16 + length) % ALIGN)
 
 
-def decode(block: bytes) -> Table:
-    """A whole block as a table. A truncated or altered file is refused."""
+def decode(block: bytes) -> Columns:
+    """A whole block as its `Columns`. A truncated or altered file is refused."""
     if block[-4:] != END or zlib.crc32(block[:-8]) != int.from_bytes(block[-8:-4], "little"):
         raise EtudeError("block_damaged", 422)
     described, start = header(block)
@@ -451,7 +453,7 @@ def decode(block: bytes) -> Table:
             block, dtype=dtype, count=location.length // size, offset=start + location.offset
         )
 
-    return Table(
+    return Columns(
         writer=described.writer,
         first=described.first,
         last=described.last,
@@ -475,6 +477,6 @@ def decode(block: bytes) -> Table:
     )
 
 
-def rows(table: Table) -> Iterator[LoggedRow]:
+def rows(columns: Columns) -> Iterator[LoggedRow]:
     """Every row as logged, in write order."""
-    return (table.row(index) for index in range(table.rows))
+    return (columns.row(index) for index in range(columns.rows))

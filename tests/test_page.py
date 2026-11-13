@@ -20,10 +20,10 @@ from etude.report import (
     Curve,
     Matches,
     Matrix,
+    Planned,
+    PlannedPoint,
     Ranking,
     Report,
-    Schedule,
-    SchedulePoint,
 )
 from etude.run.errors import EtudeError
 from etude.run.storage import DirectoryStorage, Storage, storage_from_uri
@@ -369,19 +369,19 @@ def test_served_folder_index_reuses_output_until_refresh(tmp_path: Path) -> None
         assert server.page("/lab") == detail
 
 
-def test_configured_schedule_round_trips_and_rejects_ambiguous_coordinates() -> None:
-    schedule = Schedule(
+def test_planned_values_round_trip_and_reject_ambiguous_points() -> None:
+    planned = Planned(
         title="Learning rate",
         clock="updates",
-        jobs={"large": (SchedulePoint(at=1000, value=0.1), SchedulePoint(at=2000, value=0.01))},
+        jobs={"large": (PlannedPoint(at=1000, value=0.1), PlannedPoint(at=2000, value=0.01))},
     )
-    report = Report(ml=(schedule,))
+    report = Report(ml=(planned,))
     assert Report.model_validate_json(report.model_dump_json()) == report
-    for points in ((), (SchedulePoint(at=1000, value=1), SchedulePoint(at=1000, value=2))):
-        with pytest.raises(ValueError, match="schedule_points_must_increase"):
-            Schedule(title="Bad schedule", clock="updates", jobs={"large": points})
+    for points in ((), (PlannedPoint(at=1000, value=1), PlannedPoint(at=1000, value=2))):
+        with pytest.raises(ValueError, match="planned_points_must_increase"):
+            Planned(title="Bad plan", clock="updates", jobs={"large": points})
     with pytest.raises(ValueError):
-        SchedulePoint(at=float("nan"), value=1)
+        PlannedPoint(at=float("nan"), value=1)
 
 
 def test_http_folder_refresh_keeps_syntax_failures_and_recovers(tmp_path: Path) -> None:
@@ -475,7 +475,7 @@ def test_http_refresh_reports_failures_without_replacing_the_cached_page(tmp_pat
             assert not worker.is_alive()
 
 
-def test_schedule_position_uses_the_current_continuation_not_an_older_overrun(
+def test_planned_marker_uses_the_current_continuation_not_an_older_overrun(
     tmp_path: Path,
 ) -> None:
     runs = tmp_path / "runs"

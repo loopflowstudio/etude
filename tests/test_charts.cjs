@@ -229,8 +229,8 @@ test("a launch name addresses every config job launched under it; a full name ad
   data.report.labels = {ppo: "PPO", "ppo 4d5e6f": "High learning rate"};
   assert.equal(context.model(data).JOBS[1].label, "High learning rate · 1 seed");
   const plan = value => [{at: 0, value}];
-  const schedule = {clock: "updates", jobs: {ppo: plan(1), "ppo 4d5e6f": plan(2)}};
-  assert.deepEqual(Array.from(m.scheduleSeries(schedule), s => [s.job.name, s.points[0].y]),
+  const planned = {clock: "updates", jobs: {ppo: plan(1), "ppo 4d5e6f": plan(2)}};
+  assert.deepEqual(Array.from(m.plannedSeries(planned), s => [s.job.name, s.points[0].y]),
     [["ppo 1a2b3c", 1], ["ppo 4d5e6f", 2]]);
 });
 
@@ -260,16 +260,16 @@ test("configured curves interpolate at recorded absolute clocks without extrapol
   const training = {jobs: [{name: "large", launch: "large", runs: ["a", "b"]}],
     runs: [{name: "a", at: {updates: 1200}}, {name: "b", at: {updates: 900}}], checkpoints: [], clocks: []};
   const data = page([], [], training);
-  const schedule = {clock: "updates", jobs: {large: [{at: 1000, value: 1}, {at: 1400, value: 0.2}]}};
-  const [s] = context.model(data).scheduleSeries(schedule);
+  const planned = {clock: "updates", jobs: {large: [{at: 1000, value: 1}, {at: 1400, value: 0.2}]}};
+  const [s] = context.model(data).plannedSeries(planned);
   assert.deepEqual(Array.from(s.points, p => p.x), [1000, 1400]);
   assert.equal(s.markers.length, 1); assert.equal(s.markers[0].x, 1200);
   assert.ok(Math.abs(s.markers[0].y - 0.6) < 1e-10);
   assert.match(s.markers[0].meta, /recorded updates/);
   training.runs[0].at.updates = 1400;
-  assert.equal(context.model(data).scheduleSeries(schedule)[0].markers[0].y, 0.2);
+  assert.equal(context.model(data).plannedSeries(planned)[0].markers[0].y, 0.2);
   delete training.runs[0].at.updates;
-  assert.equal(context.model(data).scheduleSeries(schedule)[0].markers.length, 0);
+  assert.equal(context.model(data).plannedSeries(planned)[0].markers.length, 0);
 });
 
 test("refresh failure leaves the page visible and a later success reloads once", async () => {
@@ -294,7 +294,7 @@ test("refresh failure leaves the page visible and a later success reloads once",
 
 // A seating held for checkpoints of line "learner": each one's point (`Page.points`), scored
 // by the page or missing because its relative seat found no checkpoint.
-const NEVER = {seating: "half", checkpoint: {run: "learner", name: "u100", address: null}, missing: "never", position: 50, seat: {kind: "fraction", clock: "updates", value: 0.5, job: null, at_or_before: false, trained: false}};
+const NEVER = {seating: "half", checkpoint: {run: "learner", name: "u100", address: null}, missing: "never", value: 50, seat: {kind: "fraction", clock: "updates", value: 0.5, job: null, at_or_before: false, trained: false}};
 function seated(points, cells = []) {
   const data = page([player("u100", "learner", 100), player("u200", "learner", 200), player("u400", "learner", 400)], cells);
   data.selections = [{tournament: "t", seating: "half"}];
@@ -322,7 +322,7 @@ test("a seating draws each point's score where its checkpoint stood, and says wh
 test("a seat not filled yet is a pending gap, and a point over several lines says so", () => {
   const data = seated([
     {at: {updates: 400}, value: 0.6, opponents: [0, 1]},
-    {at: {updates: 200}, gap: {...NEVER, missing: "not_yet", position: 8000, seat: {...NEVER.seat, kind: "aligned", job: "small"}}},
+    {at: {updates: 200}, gap: {...NEVER, missing: "not_yet", value: 8000, seat: {...NEVER.seat, kind: "aligned", job: "small"}}},
     {at: {updates: 100}, gap: {...NEVER, seat: {...NEVER.seat, at_or_before: true, trained: true}}},
   ]);
   const m = context.model(data), at = Object.fromEntries(points(m, m.JOBS[0]).map(p => [p.x, p]));
