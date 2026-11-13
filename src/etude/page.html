@@ -141,7 +141,7 @@ function render() {
   const jobsHost = document.getElementById("jobs"); jobsHost.replaceChildren();
   for (const j of JOBS) {
     const b = node("button", "jbtn"); b.append(swatch(j), j.label); if (j.baseline) b.appendChild(node("span", "tag", "baseline"));
-    b.setAttribute("aria-pressed", String(!hidden.has(j.key))); b.title = j.line == null ? j.runs.join(", ") : j.line ? `line ${j.line}: checkpoints no training run saved, where their seats say they stood` : "checkpoints no training run saved and seated with no line, where their seats say they stood";
+    b.setAttribute("aria-pressed", String(!hidden.has(j.key))); b.title = j.line == null ? j.runs.join(", ") : j.line ? `job ${j.label}: checkpoints no training run saved, where their seats say they stood` : "checkpoints with no job, where their seats say they stood";
     b.onclick = () => { if (!hidden.has(j.key) && vis.length === 1) return; hidden.has(j.key) ? hidden.delete(j.key) : hidden.add(j.key); S.hide = [...hidden].join("|"); render(); };
     jobsHost.appendChild(b);
   }
@@ -262,7 +262,7 @@ function render() {
       // line of the curves shown, so a job's seeds are each their own.
       const c = card(body, panel.title, `${where} · ${scoreName} · row against column · ordered by ${S.eclock}`, "full");
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
-      const tabsOf = [...new Map(vis.flatMap(j => M.linesOf(j).map(key => [key, {job: j, key, label: key || "checkpoints with no line"}]))).values()];
+      const tabsOf = [...new Map(vis.flatMap(j => M.linesOf(j).map(key => [key, {job: j, key, label: j.line == null ? `${j.label} · ${key}` : j.label}]))).values()];
       if (!tabsOf.length) { c.appendChild(node("div", "na", "No checkpoint has a position")); continue; }
       if (!tabsOf.some(t => t.key === S.xline)) S.xline = tabsOf[0].key;
       const chosen = tabsOf.find(t => t.key === S.xline);

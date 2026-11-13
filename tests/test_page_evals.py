@@ -11,18 +11,18 @@ import pytest
 from moto import mock_aws
 
 from etude.carriage import EVAL_BLOCK_PACK, checkpoint_file
+from etude.checkpoints import CheckpointRef, checkpoint_id
+from etude.errors import EtudeError
 from etude.eval.match import Result, environment, evaluate
 from etude.eval.query import compare, statsdb
 from etude.eval.records import Benchmark, CheckpointPlayer, Code, Inference, Match, Player, Seating
 from etude.eval.tournament import hold
 from etude.experiment import advance, observe, read_experiment
 from etude.page import Drawn, OutsideTournaments, Page, PanelSelection, build
+from etude.records import ArtifactRef, Clock, Continuation, SourceKey
 from etude.report import Matches
+from etude.storage import DirectoryStorage, S3Storage, Storage
 from etude.tracking.block_file import parse
-from etude.tracking.checkpoints import CheckpointRef, checkpoint_id
-from etude.tracking.errors import EtudeError
-from etude.tracking.records import ArtifactRef, Clock, Continuation, SourceKey
-from etude.tracking.storage import DirectoryStorage, S3Storage, Storage
 from etude.train.run import Run, track
 from tests.eval.games import play, play_failing_deal_one, play_with_evidence
 from tests.experiments import authored, experiment_file
@@ -31,8 +31,8 @@ from tests.run.storage import CountedClient, MeasuredStorage
 LAB = """
 from etude.eval.match import environment
 from etude.eval.records import (Benchmark, Code, Inference, Seating, CheckpointPlayer)
-from etude.tracking.checkpoints import CheckpointId, checkpoint_id, CheckpointRef
-from etude.tracking.records import ArtifactRef
+from etude.checkpoints import CheckpointId, checkpoint_id, CheckpointRef
+from etude.records import ArtifactRef
 from etude.jobs import evaluation
 from etude.report import Anchors, Curve, Matches, Report, Score
 from tests.eval.games import play, play_failing_deal_one
@@ -497,8 +497,7 @@ def test_an_evaluation_only_experiment_draws_checkpoints_where_their_seats_say(
     assert at["drift"] == {"updates": 350}
     assert next(each.line for each in page.players if each.name == "drift") == "plain-b"
     assert (
-        "drift is in line plain-b, as its latest seat says; earlier seats said plain-a."
-        in page.notes
+        "drift follows plain-b, as its latest seat says; earlier seats said plain-a." in page.notes
     )
     assert (
         "drift is drawn at updates 350, as its latest seat says; earlier seats said updates 300."

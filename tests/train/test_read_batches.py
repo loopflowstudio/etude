@@ -8,9 +8,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from etude.errors import EtudeError
+from etude.storage import DirectoryStorage, run_prefix
 from etude.tracking.block_file import block_key
-from etude.tracking.errors import EtudeError
-from etude.tracking.storage import DirectoryStorage, run_prefix
 from etude.train.block import Builder, Columns, Series, concat, decode
 from etude.train.manifest import Index, describe
 from etude.train.read import Points, read, read_batches

@@ -15,10 +15,10 @@ from typing import Annotated
 
 import typer
 
+from etude.errors import EtudeError
 from etude.launch import cli as launch_cli
 from etude.launch.commands import Kind, kind
 from etude.launch.errors import LauncherError
-from etude.tracking.errors import EtudeError
 from etude.train.cli import checkpoints, sync
 
 app = launch_cli.app
@@ -289,7 +289,7 @@ def smoke_experiment(
 
     from etude.launch.job_file import read_job_file
     from etude.smoke import STEPS, Step, smoke_file
-    from etude.tracking.storage import storage_from_uri
+    from etude.storage import storage_from_uri
 
     steps = step or list(STEPS)
     unknown = sorted(set(steps) - set(STEPS))
@@ -357,7 +357,7 @@ def report(
     import webbrowser
 
     from etude.page import Page, Pages, Server, index, render, render_index, target, write
-    from etude.tracking.storage import default_root, storage_from_uri
+    from etude.storage import default_root, storage_from_uri
 
     storage = storage_from_uri(source or default_root())
     if serve:
@@ -460,7 +460,7 @@ def eval_experiment(
     from etude.experiment import advance, read_experiment
     from etude.launch.records import Smoke
     from etude.smoke import smoke_file
-    from etude.tracking.storage import default_root, storage_from_uri
+    from etude.storage import default_root, storage_from_uri
 
     experiment = read_experiment(file)
     storage = storage_from_uri(source or default_root())
@@ -504,7 +504,7 @@ def convert_eval(
 ) -> None:
     """Write blocks holding an eval run's per-file records, beside them; nothing is deleted."""
     from etude.eval.convert import convert
-    from etude.tracking.storage import storage_from_uri
+    from etude.storage import storage_from_uri
 
     done = convert(run, storage_from_uri(source))
     print(
@@ -521,7 +521,7 @@ def delete_eval_files(
 ) -> None:
     """Delete an eval run's per-file records that its blocks in SOURCE replace; refuses before."""
     from etude.eval.convert import delete_files
-    from etude.tracking.storage import storage_from_uri
+    from etude.storage import storage_from_uri
 
     print(f"{run}: deleted {delete_files(run, storage_from_uri(source))} files")
 
@@ -563,8 +563,8 @@ def continue_run(
     from etude.carriage import put_back
     from etude.jobs import continue_from, continued_config
     from etude.launch.listing import resolve_runs, show_runs
+    from etude.storage import default_root, storage_from_uri
     from etude.tracking.listing import run_folders
-    from etude.tracking.storage import default_root, storage_from_uri
 
     scheduler = launch_cli.default()
     storage = storage_from_uri(source or default_root())

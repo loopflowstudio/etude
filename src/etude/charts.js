@@ -210,7 +210,7 @@ function model(D) {
   // A curve's key identifies it on the page: a job's name, or its line. Only external
   // curves carry a line; the empty string is the unnamed learner.
   const curves = [...T.jobs.map(j => ({...j, key: j.name, members: j.runs.map(runMember)})), ...named.map(line => {
-    const name = line || "checkpoints with no line";
+    const name = line || "checkpoints with no job";
     return {key: "~line:" + line, name, launch: name, label: name, runs: [], members: [lineMember(line)], line};
   })];
   // A report names a job by its full name, or by its launch name for every config launched under it.

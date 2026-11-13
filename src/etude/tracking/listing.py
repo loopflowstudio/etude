@@ -8,8 +8,8 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from etude.tracking.records import RunFile
-from etude.tracking.storage import Storage, storage_from_uri
+from etude.records import Record, RunFile
+from etude.storage import Storage, storage_from_uri
 
 
 def as_storage(source: Storage | Path | str) -> Storage:
@@ -73,10 +73,38 @@ def runs(source: Storage | Path | str) -> list[tuple[str, str]]:
     """
     storage = as_storage(source)
     keys = storage.keys("")
+    return [(run.file.experiment, run.name) for run in located_runs(storage, keys)]
+
+
+class LocatedRun(Record):
+    """A declared identity and all copies of its files under one source."""
+
+    name: str
+    file: RunFile
+    folders: tuple[str, ...]
+
+
+def located_runs(
+    storage: Storage, keys: Sequence[str], *, run: str | None = None
+) -> list[LocatedRun]:
+    """Group copies by declared experiment and run, never by the folder name alone.
+
+    Historical flat and machine-nested folders join the same identity, which
+    keeps the first copy's declaration. Each listed declaration is read once;
+    undeclared folders cannot claim an identity. Sorted by experiment and run;
+    `run` keeps only folders of that name.
+    """
     listed = set(keys)
-    found = []
-    for run, folders in run_folders(keys).items():
-        file = declared(storage, folders, listed)
-        if file is not None:
-            found.append((file.experiment, run))
-    return sorted(found)
+    by_name = run_folders(keys)
+    if run is not None:
+        by_name = {run: by_name.get(run, [])}
+    found: dict[tuple[str, str], tuple[RunFile, list[str]]] = {}
+    for name, folders in by_name.items():
+        for folder in folders:
+            file = declared(storage, [folder], listed)
+            if file is not None:
+                found.setdefault((file.experiment, name), (file, []))[1].append(folder)
+    return [
+        LocatedRun(name=name, file=file, folders=tuple(folders))
+        for (_, name), (file, folders) in sorted(found.items(), key=lambda item: item[0])
+    ]

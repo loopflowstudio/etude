@@ -15,11 +15,11 @@ from hashlib import sha256
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
+from etude.errors import EtudeError
 from etude.identity import resume_conflicts
+from etude.records import Clock, Continuation, RunDeclaration, RunFile, SourceKey
+from etude.storage import run_directory
 from etude.tracking.delivery import RunFiles
-from etude.tracking.errors import EtudeError
-from etude.tracking.records import Clock, Continuation, RunDeclaration, RunFile, SourceKey
-from etude.tracking.storage import run_directory
 
 
 @dataclass(frozen=True)

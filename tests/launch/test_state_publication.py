@@ -13,9 +13,9 @@ from etude.launch.schemas import Work
 from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.s3 import Bucket, Keys
 from etude.out import MEMBERSHIP
+from etude.storage import DirectoryStorage
 from etude.storage_timeout import StorageUnavailable
 from etude.tracking.delivery import RunFiles, StorageDestination, prune
-from etude.tracking.storage import DirectoryStorage
 from etude.train.records import Step
 from etude.train.run import track
 from tests.launch.test_out import Writes

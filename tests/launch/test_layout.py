@@ -32,7 +32,14 @@ def test_folder_rules() -> None:
             assert not any(
                 name == package or name.startswith(package + ".")
                 for name in imports
-                for package in ("etude.tracking", "etude.train")
+                for package in (
+                    "etude.tracking",
+                    "etude.errors",
+                    "etude.storage",
+                    "etude.records",
+                    "etude.checkpoints",
+                    "etude.train",
+                )
             ), path
         edges[module] = imports
         if path.name == "__init__.py":

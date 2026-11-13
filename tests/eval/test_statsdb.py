@@ -11,15 +11,15 @@ from pathlib import Path
 import duckdb
 import pytest
 
+from etude.checkpoints import CheckpointRef, checkpoint_id
+from etude.errors import EtudeError
 from etude.eval import query
 from etude.eval.convert import convert
 from etude.eval.match import Tables, environment, evaluate
 from etude.eval.query import compare, statsdb
 from etude.eval.records import CheckpointPlayer, Code, Inference, Match
-from etude.tracking.checkpoints import CheckpointRef, checkpoint_id
-from etude.tracking.errors import EtudeError
-from etude.tracking.records import ArtifactRef
-from etude.tracking.storage import DirectoryStorage
+from etude.records import ArtifactRef
+from etude.storage import DirectoryStorage
 from tests.eval.games import play, play_game_seats
 from tests.eval.per_file import write_per_file
 from tests.run.storage import MeasuredStorage
@@ -326,3 +326,25 @@ def test_pandas_lookups_do_not_grow_with_the_matches_played_and_held(
     few, many = counted(5), counted(50)
     assert few[0] == many[0] == 0
     assert few[1] == many[1]
+
+
+def test_same_named_eval_runs_keep_each_experiments_results(tmp_path: Path) -> None:
+    source = DirectoryStorage(tmp_path / "runs")
+    players = pair(tmp_path)
+    for experiment, numbers in (("one", (0,)), ("two", (1, 2))):
+        evaluate(
+            experiment=experiment,
+            environment=DUEL,
+            play=play,
+            matches=deals(players, *numbers),
+            run="a",
+            directory=tmp_path / "runs" / experiment,
+        )
+    assert held("one", source) == (1, 1, 4)
+    assert held("two", source) == (1, 2, 8)
+    # Each database remembers folder declarations independently. Reopening
+    # either experiment reads no source objects, even with colliding names.
+    for experiment in ("one", "two"):
+        measured = MeasuredStorage(source)
+        statsdb(experiment, measured).close()
+        assert (measured.listings, measured.requests) == (1, 0)

@@ -12,14 +12,14 @@ import pytest
 from moto import mock_aws
 
 from etude.cache import Cache
+from etude.errors import EtudeError
 from etude.eval import block
 from etude.eval.block import Block, Staging, quote
 from etude.eval.convert import convert, delete_files
 from etude.eval.match import Result, environment, evaluate
 from etude.eval.query import read_blobs, statsdb
 from etude.eval.records import Code, ColumnType, Match, MatchRecord, Rollup
-from etude.tracking.errors import EtudeError
-from etude.tracking.storage import DirectoryStorage, S3Storage
+from etude.storage import DirectoryStorage, S3Storage
 from tests.eval.games import play, play_cards, play_with_evidence
 from tests.eval.per_file import write_per_file
 from tests.run.storage import CountedClient, MeasuredStorage

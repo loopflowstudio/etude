@@ -12,8 +12,8 @@ from etude.eval.query import statsdb
 from etude.eval.records import Code, Inference, Match
 from etude.experiment import observe
 from etude.jobs import checkpoint_inputs_for, training
+from etude.storage import DirectoryStorage
 from etude.tracking.delivery import RunFiles
-from etude.tracking.storage import DirectoryStorage
 from etude.train.records import Step
 from etude.train.run import track
 from tests.eval.games import play_checkpoint_folder

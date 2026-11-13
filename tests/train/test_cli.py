@@ -12,8 +12,8 @@ import pytest
 from etude.cli import main
 from etude.eval.query import statsdb
 from etude.launch.database import launcher_file
+from etude.storage import DirectoryStorage
 from etude.tracking.delivery import sync
-from etude.tracking.storage import DirectoryStorage
 from etude.train.records import Step
 from etude.train.run import track
 from tests.experiments import experiment_file
@@ -28,13 +28,13 @@ EVAL_READERS = tuple(
 @pytest.mark.parametrize(
     ("command", "count", "forbidden"),
     [
-        (["report", "--help"], 10, ("numpy", "pydantic")),
+        (["report", "--help"], 9, ("numpy", "pydantic")),
         # No eval run and no eval(state), so nothing that reads or plays evaluations
         # loads: only `etude.eval.records`, whose `Gap` a page's points carry. The report
         # recognises experiment files as `etude launch` does (`etude.experiment_file`).
         (
             ["report", "{directory}/pilot.py", "--source", "{directory}"],
-            31,  # etude.tracking.checkpoints: the checkpoint records runs and evals share
+            31,  # etude.checkpoints: the checkpoint records runs and evals share
             ("boto3", "duckdb", *EVAL_READERS, "etude.train.run"),
         ),
         (
@@ -45,7 +45,7 @@ EVAL_READERS = tuple(
         (
             ["sync", "--directory", "{directory}", "--seal"],
             # etude.out, etude.stopping for Stopped, etude.train.state for saves and
-            # etude.tracking.checkpoints for the records a run publishes, and
+            # etude.checkpoints for the records a run publishes, and
             # etude.identity for config and seed validation shared with the launcher.
             28,
             ("boto3", "etude.page", "etude.train.report"),

@@ -8,6 +8,7 @@ from hashlib import sha256
 import pytest
 from pydantic import JsonValue, ValidationError
 
+from etude.checkpoints import CheckpointRef, checkpoint_id
 from etude.eval.records import (
     Aligned,
     At,
@@ -29,8 +30,7 @@ from etude.eval.records import (
     TournamentRun,
     assemble,
 )
-from etude.tracking.checkpoints import CheckpointRef, checkpoint_id
-from etude.tracking.records import ArtifactRef
+from etude.records import ArtifactRef
 
 DIGEST = "0" * 64
 WORLD = Environment(name="world", files="1" * 64)

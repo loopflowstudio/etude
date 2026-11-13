@@ -53,9 +53,9 @@ from etude.launch.storage.s3 import Bucket, Grant, Keys, PostForm, _send, read
 from etude.launch.storage.transport import HTTPReply, attribute, observe
 from etude.launch.usage import R2, S3_US_WEST_2, Access, Transfer, Usage, reconcile
 from etude.launch.worker.courier import Courier
+from etude.storage import S3Storage
 from etude.storage_timeout import StorageUnavailable, socket_timeout
 from etude.tracking.delivery import RunFiles, StorageDestination, ship
-from etude.tracking.storage import S3Storage
 from tests.launch.counting import Counting, Counts
 from tests.launch.fake import bench
 from tests.run.storage import CountedClient

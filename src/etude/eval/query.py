@@ -81,6 +81,8 @@ import numpy.typing as npt
 from pydantic import JsonValue, TypeAdapter, ValidationError
 
 from etude.carriage import EVAL_BLOCK_INDEX, EVAL_BLOCK_PACK
+from etude.checkpoints import CheckpointRecord, checkpoint_id
+from etude.errors import EtudeError
 from etude.eval.block import (
     BLOCK_FILE,
     Block,
@@ -109,11 +111,9 @@ from etude.eval.records import (
     assemble,
     outcomes,
 )
-from etude.tracking.checkpoints import CheckpointRecord, checkpoint_id
-from etude.tracking.errors import EtudeError
+from etude.records import Digest, Record, RunState
+from etude.storage import SAFE_NAME, DirectoryStorage, Storage, default_root
 from etude.tracking.listing import as_storage, declared, run_folders, under
-from etude.tracking.records import Digest, Record, RunState
-from etude.tracking.storage import SAFE_NAME, DirectoryStorage, Storage, default_root
 
 if TYPE_CHECKING:
     import duckdb
@@ -207,10 +207,11 @@ def _create(db: duckdb.DuckDBPyConnection, experiment: str, storage: Storage) ->
     db.execute("create schema kept")
     db.execute("create table kept.statsdb (schema BIGINT, experiment VARCHAR, store VARCHAR)")
     db.execute("insert into kept.statsdb values (?, ?, ?)", [SCHEMA, experiment, storage.name])
-    # Every declared run of any experiment, so each `run.json` is read once; an
-    # eval run's `outcome.json` state as it arrives and after each resume.
+    # Each folder's experiment is retained separately: the same run name can
+    # occur in several experiments, and copied folders may sit at any depth.
+    db.execute("create table kept.declarations (folder VARCHAR PRIMARY KEY, experiment VARCHAR)")
     db.execute(
-        "create table kept.runs (run VARCHAR, experiment VARCHAR, kind VARCHAR, state VARCHAR)"
+        "create table kept.runs (run VARCHAR PRIMARY KEY, experiment VARCHAR, kind VARCHAR, state VARCHAR)"
     )
     # Files of the experiment's runs already read, by run and name within its folder.
     db.execute("create table kept.seen (run VARCHAR, name VARCHAR)")
@@ -263,6 +264,7 @@ def _catch_up(
     """
     keys = sorted(storage.keys(""))
     listed = set(keys)
+    folders_by_run = run_folders(keys)
     db.execute("begin")
     try:
         created = _schema(db) is None
@@ -270,10 +272,22 @@ def _catch_up(
             _create(db, experiment, storage)
         for rollup in rollups:
             _hold(db, rollup)
+        declarations = dict(
+            db.execute(
+                "select folder, experiment from kept.declarations "
+                "where folder in (select unnest(?::VARCHAR[]))",
+                [[folder for folders in folders_by_run.values() for folder in folders]],
+            ).fetchall()
+        )
         changed = created
         with tempfile.TemporaryDirectory(prefix="etude-statsdb-") as copies:
-            for run, folders in sorted(run_folders(keys).items()):
-                if not _ours(db, storage, run, folders, listed, experiment):
+            for run, folders in sorted(folders_by_run.items()):
+                folders = [
+                    folder
+                    for folder in folders
+                    if _ours(db, storage, run, folder, listed, experiment, declarations)
+                ]
+                if not folders:
                     continue
                 eval_run = _kind(db, run) == KIND
                 if eval_run and not _environment(db, storage, run, folders):
@@ -314,22 +328,25 @@ def _ours(
     db: duckdb.DuckDBPyConnection,
     storage: Storage,
     run: str,
-    folders: Sequence[str],
+    folder: str,
     listed: Container[str],
     experiment: str,
+    declarations: Mapping[str, str],
 ) -> bool:
-    """Whether the run is the experiment's, reading its declaration the first time only."""
-    found = db.execute("select experiment from kept.runs where run = ?", [run]).fetchone()
-    if found is None:
-        declaration = declared(storage, folders, listed)
-        if declaration is None:
-            return False  # its `run.json` has not arrived yet
-        db.execute(
-            "insert into kept.runs values (?, ?, ?, null)",
-            [run, declaration.experiment, declaration.declaration.kind],
-        )
-        return declaration.experiment == experiment
-    return bool(found[0] == experiment)
+    """Select a folder by its own declaration; retain each declaration once."""
+    if folder in declarations:
+        return declarations[folder] == experiment
+    declaration = declared(storage, [folder], listed)
+    if declaration is None:
+        return False
+    db.execute("insert into kept.declarations values (?, ?)", [folder, declaration.experiment])
+    if declaration.experiment != experiment:
+        return False
+    db.execute(
+        "insert into kept.runs values (?, ?, ?, null) on conflict do nothing",
+        [run, experiment, declaration.declaration.kind],
+    )
+    return True
 
 
 def _ended(

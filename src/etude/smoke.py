@@ -27,6 +27,7 @@ from collections.abc import Callable, Collection, Sequence
 from pathlib import Path
 from typing import Literal
 
+from etude.errors import EtudeError
 from etude.eval.records import Benchmark, RoundRobin
 from etude.experiment import ExperimentState, asked, observe, read_experiment
 from etude.experiment_file import defined_functions, experiment_named
@@ -36,8 +37,7 @@ from etude.launch.job_file import read_job_file
 from etude.launch.records import Job, RunRequest, SmokeStep
 from etude.launch.smoke import Smoked, show, smoke_home, smoke_train
 from etude.page import build, render, write
-from etude.tracking.errors import EtudeError
-from etude.tracking.storage import DirectoryStorage, Storage
+from etude.storage import DirectoryStorage, Storage
 
 type Step = Literal["train", "eval", "report"]
 STEPS: tuple[Step, ...] = ("train", "eval", "report")

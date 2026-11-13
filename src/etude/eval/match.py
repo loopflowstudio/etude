@@ -46,6 +46,7 @@ from typing import TYPE_CHECKING, Literal, NoReturn
 
 from pydantic import BaseModel
 
+from etude.errors import EtudeError
 from etude.eval.block import (
     Block,
     Staging,
@@ -71,11 +72,10 @@ from etude.eval.records import (
 )
 from etude.eval.schedule import ordered
 from etude.eval.source import digest_files
+from etude.records import Record, RunCounters, RunState
+from etude.storage import DirectoryStorage, Storage, run_prefix
 from etude.tracking.declaration import declare
 from etude.tracking.delivery import RunFiles, StorageDestination, destinations, ship
-from etude.tracking.errors import EtudeError
-from etude.tracking.records import Record, RunCounters, RunState
-from etude.tracking.storage import DirectoryStorage, Storage, run_prefix
 
 if TYPE_CHECKING:
     import duckdb

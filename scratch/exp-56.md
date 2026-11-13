@@ -40,10 +40,8 @@ The intended experience, to build against and keep true:
 - `docs/evaluation.md`: players, folder checkpoints, on main's seatings and
   relative seats.
 
-`docs/training.md` Running it now states the built local rules: Ctrl-C and
-SIGTERM as saved stops, the `--json` object, the config a `--resume` must
-repeat, removal in 0.5. Three questions it raised are in `questions.md`
-(Found reading the docs as a user).
+`docs/training.md` Running it states the built local rules; three questions
+it raised are in `questions.md` (Found reading the docs as a user).
 
 The branch holds main at `286e0c5` (v0.3.2, merge `429db8d`; launcher
 database version 18 on main; this Task now uses version 19 under the same
@@ -53,7 +51,15 @@ per-version naming); `questions.md` records how the `66ffb28` merge was reconcil
 
 Replace these end to end:
 
-- `etude.run` internals package -> `etude.tracking`: removed; real consumers moved.
+- `etude.tracking` goes away (`questions.md`, Package layout). Done: `errors`,
+  `storage`, `records`, `checkpoints` are top-level modules. Remaining:
+  `declaration`, `delivery`, `listing` (with `LocatedRun`/`located_runs`) ->
+  `etude/run.py` under a shared `Run` base; `train/run.py` ->
+  `etude/train/tracking` with `TrainingRun(Run)`; `EvalRun(Run)` in eval.
+  `block_file` has no stated home. `etude.experiment.TrainingRun` ->
+  `TrainingRunSummary`, `eval.match.EvalRun` -> `EvalResult`, warning aliases
+  until 0.5. Then drop `tracking` from `tests/run/test_layout.py` `SHARED`,
+  `tests/launch/test_layout.py` and AGENTS.md's cache paragraph.
 - Launch `Run` -> `RunRequest`; authors return Jobs with launch seeds instead.
 - Separate tracking `RunDeclaration`/`RunFile` and observed `TrainingRun` ->
   the single stored `RunRecord`, shared with the launcher.
@@ -61,7 +67,7 @@ Replace these end to end:
   stays the machine allocation.
 - Experiment `Checkpoint` and eval query's `_StoredCheckpoint`/`_StoredArtifact`
   are removed. One `CheckpointRecord` and one `CheckpointRef` live in
-  `etude.tracking.checkpoints`, which training and evaluation both import
+  `etude.checkpoints`, which training and evaluation both import
   (`tests/run/test_layout.py` forbids either importing the other); keys are
   strings (old structured keys still load).
 - Eval `Model` -> `CheckpointPlayer`, keeping the `Player` union and stored
@@ -108,47 +114,32 @@ not hold this release and are a separate Task.
 
 ## Remaining implementation
 
-Built: pointer-last selected-save publication, both carriers, delayed cleanup,
-registration and framework serialization, named state and stop propagation,
-stepped row clocks, folder checkpoints and verified member inputs through
-`start=`, evaluation and continuation. Both hour clocks survive a relay.
-`etude.run` is removed in favor of `etude.tracking`. Earlier receipts and
-implementation detail remain at `98c8f05:scratch/exp-56.md`.
-
-Built in this continuation: local `etude run` and explicit local resume with
-saved SIGINT/SIGTERM stops, target extension/retention, config and seed checks
-before the recipe, create-only local names and per-attempt commits. Refused
-local attempts preserve a finished outcome; genuine rowless failures remain
-reportable. First-row cutoffs are now marked only after a durable row.
-`outcome.json` writers retain historical `state.json` readers. Jobs accept
-launch `seeds`, job files expand jobs to named `RunRequest`s, and launch/queue
-accept `--experiment`. `training(start=)` passes the checkpoint key into the
-tracked declaration. Published spellings warn for removal in 0.5.
-`examples/coin.py` is the tiny non-Magic recipe.
+Earlier implementation receipts and built behavior are recorded at
+`f89ae54:scratch/exp-56.md`; the code and current docs remain the reference.
 
 Remaining, before the accepted API can be treated as built:
 
+0. The package layout in the Delete list (shared `Run` base, `etude/run.py`).
 1. Unify records end to end. Launcher `RunRecord`, tracking
-   `RunDeclaration`/`RunFile` and observed `TrainingRun` remain separate;
-   launcher `RunAttempt` and tracking `Attempt` remain separate. The
-   controller message is now `RunOperation`, freeing public `RunRequest`.
-   Preserve historical file/field readers during the cut. Do not extend the
-   separate records as a final API.
-   Built: `RunWriter` (tracking context, first-row cutoff) beside
-   `RunAttempt` (allocation); historical writer files read. This departs
-   from Jack Heart's "1a" (merge under `RunAttempt`); the choice is open in
-   `questions.md` (Record unification). The `RunRecord` cut keeps the job
-   digest as identity and `TrainingRun.job` as a derived report label.
-2. Experiment-scoped identity and `PREFIX/EXPERIMENT/RUN` carriage/grants,
-   including readers. Names/storage remain globally scoped in the launcher;
-   local CLI already nests by experiment. Launched explicit resume is now
-   built, with current source, retained out, target extension, cumulative
-   hours/dollars/attempts and shared cohort limits. Refusals and failed
-   admission preserve a finished run. Launcher schema is now 19, edited in
-   place for this unreleased Task.
-3. Report line -> job. Local CLI acceptance now includes two-model save,
-   stop, resume, checkpoint publication and evaluation seating in one test.
-   No publication, landing or Graph changes here.
+   `RunDeclaration`/`RunFile` and observed `TrainingRun` remain separate.
+   Preserve historical file/field readers during the cut; do not extend the
+   separate records as a final API. Built: `RunWriter` (tracking context,
+   first-row cutoff) beside `RunAttempt` (allocation). This departs from
+   Jack Heart's "1a"; the choice is open in `questions.md` (Record
+   unification). The `RunRecord` cut keeps the job digest as identity and
+   `TrainingRun.job` as a derived report label.
+2. Experiment-scoped identity and `PREFIX/EXPERIMENT/RUN` carriage/grants in
+   the launcher: names, storage and grants are still globally scoped there,
+   and its status fallback, continuation and legacy conversion need
+   experiment selection. Built: the local CLI nests by experiment; training
+   reads, evaluation queries, listing and report refresh select by each
+   folder's declaration, joining flat and machine-nested historical copies;
+   launched explicit resume. Launcher schema is 19, edited in place for this
+   unreleased Task.
+3. Built: report labels use job; crosstables still separate each seeded learner
+   and continuation chain. Internal `Line` and its stored spellings retain
+   lineage semantics. Local CLI acceptance includes two-model save, stop,
+   resume, checkpoint publication and evaluation seating in one test.
 4. The brief's acceptance check (manabot checkout with `proposed_etude`
    imports swapped to `etude.train.run`) cannot pass as written: the design
    drops `local_launch`/`run.out`-owned `state.pt` for `etude run` and
@@ -158,31 +149,21 @@ Remaining, before the accepted API can be treated as built:
 
 ## Verification
 
-2026-11-13 resume slice: `uv run pytest` on `test_resume.py`, the remote
-resume test, command import-count tests and local resume: **25 passed**;
-writer/continuation compatibility filters: **7 passed**, plus the shared
-allocation writer test passed; unallocated/shared cohort limit filters: **2
-passed**. `uv run mypy`, `uv run ruff check .`,
-`uv run ruff format --check .`: clean. Refusal counts pin external calls at
-zero.
-Compress after `897c72b`: `uv run pytest tests/launch/test_{resume,planned_stop,
-scheduler,controller}.py -q`: **77 passed**, after updating two
-`test_scheduler.py` tests that failed at `897c72b` (file-stem job name in
-quote output; explicit `resume=True` for a second tracking context). Full
-gate and remaining acceptance checks are still pending.
+Compress, 2026-11-13, after moving the four shared modules and folding the
+reader's folder selection into `train/read.py::_located`: `uv run pytest
+tests/run tests/train tests/eval tests/launch/test_layout.py
+tests/launch/test_measurement.py` plus the page, experiment, jobs, smoke and
+continuation files: **340 passed**, 6 skipped; the 5 start-up import pins
+that failed passed on a focused rerun after dropping by one each (the
+`etude.tracking` package no longer loads for `EtudeError`). `uv run mypy`, `uv run ruff check .`, `uv run ruff format
+--check .`: clean. `node --test tests/test_charts.cjs` passed 21 before this
+step and was not rerun (no JS edit here). Full gate and remaining acceptance
+checks are pending; the accepted API is not complete.
 
+A bounded 4,096-row DuckDB fixture's `EXPLAIN ANALYZE` used index scans for
+both the batched declaration lookup (two folders; 0.0015 s) and the keyed
+run-kind lookup (one row; 0.0002 s): fixture costs, not a production latency
+estimate. Reopening either same-named experiment reads zero source objects.
 
-Earlier focused receipts: `1c76176:scratch/exp-56.md` (local run, jobs,
-lifecycle) and `dda6b17:scratch/exp-56.md` (checkpoints, carriage).
-
-Counting pins moved by the state build, each with its reason beside it:
-
-- Every run now has an `out`, so its first delivery uploads an empty
-  `out.json` (`tests/train/test_store.py` 5 -> 6, `test_tables.py` 8 -> 9).
-- `BucketJournal._clear_state` asks for a run's membership, conditionally, on
-  every observation, whether or not the grant is upload-only:
-  `tests/launch/test_transfers.py` control requests 42 -> 50. Unanswered:
-  should that read happen only where the courier cannot delete?
-- `etude sync --seal` loads `etude.train.state` and
-  `etude.tracking.checkpoints` (`tests/train/test_cli.py` 25 -> 27); a report
-  loads the latter too (30 -> 31).
+Previous checks and counting-pin changes remain at
+`f89ae54:scratch/exp-56.md`. PR #103 remains draft.

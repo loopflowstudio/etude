@@ -18,8 +18,8 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Iterator, Sequence
 
+from etude.checkpoints import CheckpointId
 from etude.eval.records import CheckpointPlayer, Match
-from etude.tracking.checkpoints import CheckpointId
 
 
 def checkpoints(match: Match) -> frozenset[CheckpointId]:

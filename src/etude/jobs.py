@@ -45,6 +45,8 @@ from pydantic import BaseModel, Field, JsonValue, TypeAdapter, ValidationError
 from etude.cache import Content
 from etude.call import Function, config_type
 from etude.carriage import CHECKPOINTS, OUT_PRESENT, checkpoint_file_name, checkpoint_key
+from etude.checkpoints import CheckpointRecord, CheckpointRef, checkpoint_id
+from etude.errors import EtudeError
 from etude.eval.match import EvalRun, Result, Tables
 from etude.eval.records import Benchmark, CheckpointPlayer, Line, Match, Player, RoundRobin, digest
 from etude.eval.tournament import hold
@@ -63,11 +65,9 @@ from etude.launch.records import (
     number,
 )
 from etude.out import MEMBERSHIP, OutFile, OutFiles
-from etude.tracking.checkpoints import CheckpointRecord, CheckpointRef, checkpoint_id
-from etude.tracking.errors import EtudeError
+from etude.records import ArtifactRef, Record, SourceKey
+from etude.storage import Storage
 from etude.tracking.listing import as_storage, declared, run_folders
-from etude.tracking.records import ArtifactRef, Record, SourceKey
-from etude.tracking.storage import Storage
 from etude.train.read import read
 from etude.train.records import ParentRun
 

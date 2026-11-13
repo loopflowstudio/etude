@@ -7,8 +7,8 @@ import pytest
 from pydantic import BaseModel
 
 from etude.carriage import put_back, restore_set
+from etude.records import HOURS_SINCE_START, RUNNING_HOURS
 from etude.stopping import Stopped
-from etude.tracking.records import HOURS_SINCE_START, RUNNING_HOURS
 from etude.train.read import read
 from etude.train.records import Step
 from etude.train.run import track

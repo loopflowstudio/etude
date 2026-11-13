@@ -11,15 +11,11 @@
 - The optional PyTorch serializer is installed as `etude-sdk[train]`.
   Callback saves need no framework. Registered dictionaries load on CPU;
   the author's objects own their device transfer and format compatibility.
-- Pointer acknowledgement is kept as its serialized body in existing sent
-  markers, so cleanup on a later pass can retain newer in-flight saves.
-  Standalone local cleanup may lag remote retirement by another pass so it
+- Standalone local cleanup may lag remote retirement by another pass, so it
   keeps the names needed to retry deletion. Controller cleanup adds one
   conditional membership read per observed run; a changed state pointer costs
   one pointer read, one state listing and one deletion per older object.
 
-Folder checkpoints, the local CLI recipe and explicit local resume are built.
-Run-record unification and experiment scoping remain unbuilt.
 `CheckpointRecord.player(inference)` takes anything with `player(ref)`, so the
 shared record names no evaluation type.
 
@@ -92,7 +88,7 @@ Open product choices the design does not spell:
    and `CheckpointRecord.player` are the taught constructors. Released
    `Model`, `Checkpoint` and `.model(...)` spellings warn, removed in 0.5.
 2. **The one checkpoint reference type.** Chosen here: `CheckpointRef` in
-   `etude.tracking.checkpoints`, with an encoded string key. `checkpoint_id` builds
+   `etude.checkpoints`, with an encoded string key. `checkpoint_id` builds
    it from run/name or an outside address. Historical structured keys still
    decode; pinned match/seating hashes are unchanged. `CheckpointKey` is a
    deprecated constructor alias, not another record.
@@ -114,14 +110,11 @@ Open product choices the design does not spell:
    `--resume` on a finished run with no later target is refused. Whether its
    record reads `finished` in between is not stated anywhere.
 
-Checkpoint implementation choices (2026-11-13): folder artifacts carry a
-`members` map of relative files to the existing `cache.Content` digest/length
-record. The folder digest hashes canonical JSON of that map; length is the
-sum of member lengths. Every member becomes an ordinary verified `Input`
-under one directory name; no folder archive or extra remote object. Callback
-exports list their paths in `checkpoint.json`; named objects reuse the state
-serializer. Exports must be self-contained and use the carrier's published
-names (no symlinks, dot paths or `.open`/`.partial` files).
+Checkpoint implementation choices (2026-11-13, `etude/checkpoints.py`):
+folder artifacts carry a `members` map of relative files to `cache.Content`;
+the folder digest hashes that map's canonical JSON. Each member is an
+ordinary verified `Input`; no folder archive or extra remote object. Exports
+must be self-contained (no symlinks, dot paths or `.open`/`.partial` files).
 
 Assumptions taken (reversible, simpler option):
 
@@ -155,28 +148,21 @@ Assumptions taken (reversible, simpler option):
   `run.latest_checkpoint()`) warn for one release. State files an older loop
   kept in `run.out` are not read by `run.resume`.
 
-Not documented: EXP-37's remaining points, which are a separate Task
-(`exp-56.md`, Folded in). The docs do state its "application
-declares its restorable state and any discontinuity" point: only registered
-objects are restored, and streams or games in flight start fresh.
+Not documented: EXP-37's remaining points, a separate Task (`exp-56.md`,
+Folded in).
 
 ## Merge of main at 66ffb28 (2026-11-13)
 
-The field-by-field merge choices and check receipts (812 tests across two
-partial runs, then 58 launcher checks; type/lint clean) are preserved at
-`9a762a1:scratch/questions.md`. Keep the current invariants: first durable
-rows set attempt cutoffs; running hours resume from saved state, falling back
-to a checkpoint; hours since start include gaps. Launcher database version 18
-includes both sides' schema changes. `RunData.reached` and `RunSummary.at`
-include Etude's clocks.
+Merge choices and check receipts are at `9a762a1:scratch/questions.md`.
+Invariants kept: first durable rows set attempt cutoffs; running hours resume
+from saved state, falling back to a checkpoint; hours since start include
+gaps; `RunData.reached` and `RunSummary.at` include Etude's clocks.
 
 ## `RunRequest` name taken on main (2026-11-13, realign)
 
-`afcda22` (#105) named the controller's record/status/cancel message
-`etude.launch.controller.RunRequest`. The design renames launch `Run` to
-`RunRequest` (Jack Heart: "ok, RunRequest works"). Assumed, reversible:
-rename the internal controller message to `RunOperation` and keep the
-design's public name (implemented).
+Main's `afcda22` (#105) used `RunRequest` for the controller's message; the
+design gives that name to launch `Run` (Jack Heart: "ok, RunRequest works").
+Assumed, reversible, implemented: the controller message is `RunOperation`.
 
 Local CLI choices (2026-11-13): an omitted `--seed` on resume uses the stored
 seed; config defaults come from the current recipe, overlaid by `--config`,
@@ -184,12 +170,10 @@ then must match the stored config. An omitted `--until` keeps the previous
 attempt's target. SIGINT/SIGTERM request a saved stop. Python callers can opt
 in with `track(resume=True)`; launcher attempts opt in via their allocation.
 
-Experiment scoping must update readers in the same cut as launcher storage:
-`run_folders` groups by run name, so two experiments with the same run id
-currently share one folder group in `read_all`/evaluation queries. Local
-`etude run` writes the designed nested layout; its direct resume reads the
-experiment's own base. Cross-experiment report/query identity remains part of
-the unfinished scoping work, not a supported final implementation.
+Experiment-scoped reads (built): each folder's own declaration selects its
+experiment. Reversible assumption: a folder with no declaration cannot claim
+a declared run's experiment; raw single-run reads still support wholly
+undeclared historical metric fixtures (`train/read.py::_located`).
 
 ## Found reading the docs as a user (2026-11-13, write-docs)
 
@@ -248,13 +232,42 @@ The shared `RunRecord` must own the persisted job digest. The observed
 keep it separate from identity. Manual resume preserves the original digest
 while taking the current source, target and limits.
 
-Launched resume is implemented. A file returning several jobs selects by run
+Launched resume choices (built): a file returning several jobs selects by run
 id, or by the stored job name and seed for hand-built requests with no id.
-No new cohort is created: resume keeps its existing shared limits. A resume
-of a queued run with no allocations replaces its pending specification.
-Experiment scoping remains unbuilt.
+Resume keeps its existing cohort's shared limits. A resume of a queued run
+with no allocations replaces its pending specification.
 
-Report naming needs the same cardinality care: `JobGroup` already groups
-unseeded jobs. Evaluation's `Line` is the seeded chain of continuations
-(`ExperimentState.lines`), so renaming that record to job would merge two
-concepts. Keep its lineage semantics when finishing the visible rename.
+Report labels use job; crosstable tabs name the job and seeded learner.
+Evaluation's `Line` remains the seeded chain of continuations
+(`ExperimentState.lines`); no stored lineage spelling or grouping changed.
+
+## Package layout: run, training run, eval run (2026-11-13)
+
+Jack Heart, in order: "ok so this is should be in run then, and run should be
+top level not in training"; "and ten we can move tracking inside training";
+"to be clear this is because we also have eval runs, right"; "These should be
+training runs, which I think should be a subclass of `run`"; "We probably
+also want to have an eval run"; then, quoting the layout below back,
+"etude/eval/... EvalRun(Run): what evaluate() runs as. Adds matches, rollups,
+skips". On folding the split into this Task: "do it in 56". On moving
+errors, storage, records and checkpoints to the top level: "agreed".
+
+    etude/run.py          Run: shared base. declare (run.json), delivery
+                          (ship, destinations, RunFiles, StorageDestination),
+                          outcome (RunState, RunCounters), listing
+                          (run_folders, under, as_storage)
+    etude/train/tracking  TrainingRun(Run): what track() returns; adds
+                          log/log_table, steps, save/resume, checkpoint,
+                          stopping(); `with ... as run` finishes it
+    etude/eval/...        EvalRun(Run): what evaluate() runs as; adds
+                          matches, rollups, skips. evaluate() keeps its
+                          one-call shape.
+    etude/errors.py, etude/storage.py, etude/records.py, etude/checkpoints.py
+
+`etude.tracking` goes away. Layout rule: `etude.run` (and the four top-level
+modules) import neither train, eval nor launch; train and eval do not import
+each other. Names freed for the subclasses (proposed, not objected to): the
+read-side `etude.experiment.TrainingRun` becomes `TrainingRunSummary` (or
+folds into `train/report.RunSummary`); `etude.eval.match.EvalRun` (result of
+`evaluate`) becomes `EvalResult`. Renamed public names keep a warning alias
+until 0.5. EXP-64 is folded into EXP-56.

@@ -145,19 +145,19 @@ def test_cohort_git_and_database_counts(
 @pytest.mark.parametrize(
     ("command", "count", "forbidden"),
     [
-        (["--help"], 10, ("numpy", "pydantic", "etude.launch.scheduler", "etude.launch.worker")),
+        (["--help"], 9, ("numpy", "pydantic", "etude.launch.scheduler", "etude.launch.worker")),
         (
             ["worker", "--help"],
-            10,
+            9,
             ("numpy", "pydantic", "etude.launch.worker", "etude.launch.scheduler"),
         ),
         # Client composition includes four modules each for Vast and Lium, the
         # request every provider shares, the storage socket policy it forwards
         # to workers, its smoke of jobs, and shared run-identity validation.
-        (["pools"], 56, ("numpy", "boto3", "etude.launch.worker")),
+        (["pools"], 55, ("numpy", "boto3", "etude.launch.worker")),
         (
             ["worker", "{directory}"],
-            34,  # includes the storage socket policy every request applies
+            33,  # includes the storage socket policy every request applies
             (
                 "numpy",
                 "boto3",
@@ -212,7 +212,6 @@ def test_command_import_counts(
     # One `etude` command: tracking contributes only its command table.
     assert {name for name in loaded if name.startswith(("etude.tracking", "etude.train"))} <= {
         "etude.tracking",
-        "etude.tracking.errors",
         "etude.train",
         "etude.train.cli",
     }

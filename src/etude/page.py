@@ -85,14 +85,14 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import JsonValue
 
+from etude.errors import EtudeError
 from etude.eval.records import Gap, Scheduled, Tournament
 from etude.experiment_file import experiment_named
 from etude.launch.logging import explain
+from etude.records import BUILT_IN_NAMES, Record
 from etude.report import Flame, Matches, Report, Score
-from etude.tracking.errors import EtudeError
+from etude.storage import DirectoryStorage, S3Storage, Storage, default_root
 from etude.tracking.listing import as_storage, declared, run_folders, runs, under
-from etude.tracking.records import BUILT_IN_NAMES, Record
-from etude.tracking.storage import DirectoryStorage, S3Storage, Storage, default_root
 from etude.train.read import RunData, read_all
 from etude.train.report import Training, training
 
@@ -351,7 +351,7 @@ class Pages:
         self._places = list({each.name: each for each in (self.storage, here)}.values())
         self._built: dict[Path, tuple[_Inputs, Page]] = {}
         self._known: set[Path] = set()
-        # Each run's experiment by place and run, with the version of the declaration read.
+        # Each folder's experiment by place and prefix, with its declaration's version.
         self._declared: dict[tuple[str, str], tuple[str, str | None]] = {}
 
     def build(self, file: Path) -> Page:
@@ -400,22 +400,20 @@ class Pages:
         """The version of every object in the folders of the experiment's runs in one place."""
         keys = sorted(listed)
         found: list[tuple[str, str]] = []
-        for run, folders in sorted(run_folders(keys).items()):
-            if self._experiment(place, run, folders, listed) != experiment:
-                continue
-            found.extend((key, listed[key]) for folder in folders for key in under(keys, folder))
+        for folders in run_folders(keys).values():
+            for folder in folders:
+                if self._experiment(place, folder, listed) == experiment:
+                    found.extend((key, listed[key]) for key in under(keys, folder))
         return tuple(found)
 
-    def _experiment(
-        self, place: Storage, run: str, folders: Sequence[str], listed: dict[str, str]
-    ) -> str | None:
+    def _experiment(self, place: Storage, folder: str, listed: dict[str, str]) -> str | None:
         """The run's experiment, from its declaration, read again only once it has changed."""
-        version = next((listed[f + "run.json"] for f in folders if f + "run.json" in listed), "")
-        kept = self._declared.get((place.name, run))
+        version = listed.get(folder + "run.json", "")
+        kept = self._declared.get((place.name, folder))
         if kept is None or kept[0] != version:
-            file = declared(place, folders, listed)
+            file = declared(place, [folder], listed)
             kept = (version, None if file is None else file.experiment)
-            self._declared[place.name, run] = kept
+            self._declared[place.name, folder] = kept
         return kept[1]
 
 
@@ -847,7 +845,7 @@ def _players(
         line = seat_lines[0] if seat_lines else None
         if len(seat_lines) > 1:
             notes.append(
-                f"{name} is in line {line}, as its latest seat says;"
+                f"{name} follows {line}, as its latest seat says;"
                 f" earlier seats said {', '.join(seat_lines[1:])}."
             )
         for clock in sorted(seated.keys() & recorded.keys()):

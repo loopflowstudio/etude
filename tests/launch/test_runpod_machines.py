@@ -67,8 +67,8 @@ from etude.launch.storage.transport import HTTPReply, emit
 from etude.launch.worker import courier as courier_module
 from etude.launch.worker.courier import Courier
 from etude.launch.worker.courier import run as run_in_pod
+from etude.records import ArtifactRef
 from etude.storage_timeout import StorageUnavailable
-from etude.tracking.records import ArtifactRef
 from etude.train.records import Step
 from etude.train.run import Run as TrackedRun
 from etude.train.run import track
@@ -284,7 +284,7 @@ class RunPod:
 
 
 class BucketObjects:
-    """The in-memory bucket as tracking's readers see a bucket (`etude.tracking.storage.Storage`)."""
+    """The in-memory bucket as tracking's readers see a bucket (`etude.storage.Storage`)."""
 
     def __init__(self, storage: Storage, bucket: str) -> None:
         self.storage, self.bucket = storage, bucket

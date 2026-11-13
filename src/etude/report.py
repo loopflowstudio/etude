@@ -35,7 +35,7 @@ from typing import Annotated, Literal, Self
 
 from pydantic import Field, FiniteFloat, model_validator
 
-from etude.tracking.records import Record
+from etude.records import Record
 
 
 class Score(Record):

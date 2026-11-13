@@ -15,7 +15,7 @@ from urllib.parse import unquote, urlparse
 from pydantic import BeforeValidator, Field, field_validator, model_validator
 
 from etude.carriage import checkpoint_file_name, within
-from etude.tracking.records import ArtifactRef, Name, Record
+from etude.records import ArtifactRef, Name, Record
 
 
 def checkpoint_id(

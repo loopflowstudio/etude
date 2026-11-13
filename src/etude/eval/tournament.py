@@ -43,6 +43,8 @@ from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 
+from etude.checkpoints import CheckpointRef
+from etude.errors import EtudeError
 from etude.eval.block import Block, run_blocks
 from etude.eval.match import ETUDE_TABLES, KIND, EvalRun, Result, Tables, evaluate
 from etude.eval.query import compare, estimate
@@ -66,12 +68,10 @@ from etude.eval.records import (
     outcomes,
 )
 from etude.eval.schedule import ordered
-from etude.tracking.checkpoints import CheckpointRef
+from etude.records import Digest, Record, RunFile
+from etude.storage import DirectoryStorage, Storage, default_root
 from etude.tracking.declaration import declare
-from etude.tracking.errors import EtudeError
 from etude.tracking.listing import run_folders, under
-from etude.tracking.records import Digest, Record, RunFile
-from etude.tracking.storage import DirectoryStorage, Storage, default_root
 
 if TYPE_CHECKING:
     import duckdb

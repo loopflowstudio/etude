@@ -15,19 +15,19 @@ from moto import mock_aws
 
 from etude.cache import Cache
 from etude.carriage import listing
+from etude.errors import EtudeError
 from etude.page import Pages, build
-from etude.tracking.block_file import block_key, tail_key
-from etude.tracking.delivery import RunFiles, StorageDestination, sync
-from etude.tracking.errors import EtudeError
-from etude.tracking.listing import runs
-from etude.tracking.records import RunDeclaration, RunFile, RunWriter, SourceKey
-from etude.tracking.storage import (
+from etude.records import RunDeclaration, RunFile, RunWriter, SourceKey
+from etude.storage import (
     DirectoryStorage,
     S3Storage,
     Storage,
     run_prefix,
     storage_from_uri,
 )
+from etude.tracking.block_file import block_key, tail_key
+from etude.tracking.delivery import RunFiles, StorageDestination, sync
+from etude.tracking.listing import runs
 from etude.train.block import Builder, LoggedRow
 from etude.train.manifest import Index, Manifest
 from etude.train.read import buckets, read, read_all

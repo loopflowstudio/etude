@@ -33,11 +33,9 @@ import numpy.typing as npt
 from pydantic import ConfigDict, PrivateAttr, SkipValidation, ValidationError
 
 from etude.carriage import checkpoint_key
-from etude.tracking.block_file import BlockFile, parse, select
-from etude.tracking.checkpoints import CheckpointRecord
-from etude.tracking.errors import EtudeError
-from etude.tracking.listing import as_storage, declared, run_folders, under
-from etude.tracking.records import (
+from etude.checkpoints import CheckpointRecord
+from etude.errors import EtudeError
+from etude.records import (
     HOURS_SINCE_START,
     RUNNING_HOURS,
     Clock,
@@ -46,7 +44,9 @@ from etude.tracking.records import (
     RunState,
     RunWriter,
 )
-from etude.tracking.storage import Storage, run_prefix
+from etude.storage import Storage, run_prefix
+from etude.tracking.block_file import BlockFile, parse, select
+from etude.tracking.listing import as_storage, located_runs, run_folders, under
 from etude.train.block import (
     COUNT,
     DTYPES,
@@ -728,17 +728,16 @@ def read_all(
     """
     storage = as_storage(source)
     keys = sorted(storage.keys(""))
-    listed = set(keys)
     data = []
-    for run, folders in sorted(run_folders(keys).items()):
-        file = declared(storage, folders, listed)
-        if file is not None and experiment in (None, file.experiment):
+    for located in located_runs(storage, keys):
+        file = located.file
+        if experiment in (None, file.experiment):
             data.append(
                 _read(
                     storage,
                     file.experiment,
-                    run,
-                    folders,
+                    located.name,
+                    located.folders,
                     keys,
                     run_file=file,
                     metrics=metrics,
@@ -752,9 +751,25 @@ def read(source: Storage | Path | str, experiment: str, run: str) -> RunData:
     """One run's declaration, state, rows and checkpoints. Rows not yet sealed are not read."""
     storage = as_storage(source)
     keys = sorted(storage.keys(""))
-    folders = run_folders(keys).get(run, [run_prefix(run)])
-    file = declared(storage, folders, set(keys))
+    file, folders = _located(storage, keys, experiment, run)
     return _read(storage, experiment, run, folders, keys, run_file=file)
+
+
+def _located(
+    storage: Storage, keys: Sequence[str], experiment: str, run: str
+) -> tuple[RunFile | None, Sequence[str]]:
+    """The run's declaration and folders within one experiment.
+
+    Folders another experiment declared are not this run's. A name nobody has
+    declared keeps its folders: historical metrics were written without one.
+    """
+    identities = located_runs(storage, keys, run=run)
+    for located in identities:
+        if located.file.experiment == experiment:
+            return located.file, located.folders
+    if identities:
+        return None, ()
+    return None, run_folders(keys).get(run, [run_prefix(run)])
 
 
 def read_batches(
@@ -784,7 +799,7 @@ def read_batches(
     if isinstance(metrics, str):
         raise TypeError(f"metrics is a list of names; pass [{metrics!r}]")
     storage = as_storage(source)
-    folders = run_folders(sorted(storage.keys(""))).get(run, [run_prefix(run)])
+    _, folders = _located(storage, sorted(storage.keys("")), experiment, run)
     selected = frozenset(metrics)
 
     def block(key: str) -> StoredBlock:

@@ -11,8 +11,8 @@ import re
 
 from pydantic import Field, JsonValue
 
-from etude.tracking.checkpoints import CheckpointRecord
-from etude.tracking.records import Clock, Name, Record, SourceKey
+from etude.checkpoints import CheckpointRecord
+from etude.records import Clock, Name, Record, SourceKey
 
 
 def Step(name: str, meaning: str) -> Clock:  # noqa: N802 - reads as a declaration

@@ -11,12 +11,15 @@ import sys
 from pathlib import Path
 
 SOURCE = Path(__file__).resolve().parents[2] / "src"
+# What every run shares: the remaining `etude.tracking` package and the modules moved out of it.
+SHARED = ("tracking", "errors", "storage", "records", "checkpoints")
 
 
 def _imports(package: str) -> dict[Path, set[str]]:
-    """Every module each file of a package names in an import, at any depth in the file."""
+    """Every module each file of a package, or one module, names in an import, at any depth."""
     found: dict[Path, set[str]] = {}
-    for path in (SOURCE / package.replace(".", "/")).rglob("*.py"):
+    folder = SOURCE / package.replace(".", "/")
+    for path in folder.rglob("*.py") if folder.is_dir() else [folder.with_suffix(".py")]:
         names: set[str] = set()
         for node in ast.walk(ast.parse(path.read_text())):
             if isinstance(node, ast.Import):
@@ -32,8 +35,9 @@ def _within(name: str, package: str) -> bool:
 
 
 def test_shared_run_code_imports_no_kind_of_run_and_training_imports_no_evaluation() -> None:
+    kinds = ("etude.train", "etude.eval", "etude.launch")
     rules = {
-        "etude.tracking": ("etude.train", "etude.eval", "etude.launch"),
+        **{"etude." + shared: kinds for shared in SHARED},
         "etude.train": ("etude.eval", "etude.launch"),
         "etude.eval": ("etude.train", "etude.launch"),
     }

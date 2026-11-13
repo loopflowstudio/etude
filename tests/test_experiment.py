@@ -13,6 +13,8 @@ from urllib.parse import urlparse
 import pytest
 
 import etude.launch.client as client
+from etude.checkpoints import CheckpointRecord
+from etude.errors import EtudeError
 from etude.eval.match import environment
 from etude.eval.query import statsdb
 from etude.eval.records import Benchmark, Code, Inference, Seating
@@ -21,10 +23,8 @@ from etude.experiment import Experiment, ExperimentState, advance, observe, read
 from etude.jobs import _hold, evaluation, evaluation_spec
 from etude.launch.records import Job, Outcome, RunRequest, Status
 from etude.launch.source import home
-from etude.tracking.checkpoints import CheckpointRecord
-from etude.tracking.errors import EtudeError
-from etude.tracking.records import Clock
-from etude.tracking.storage import DirectoryStorage
+from etude.records import Clock
+from etude.storage import DirectoryStorage
 from etude.train.read import read
 from etude.train.run import Run as Run_
 from etude.train.run import track

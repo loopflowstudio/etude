@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from etude.cli import main
+from etude.errors import EtudeError
 from etude.page import Index, Page, Pages, Server, build, experiment_files, index, render, target
 from etude.report import (
     Anchors,
@@ -25,8 +26,7 @@ from etude.report import (
     Ranking,
     Report,
 )
-from etude.tracking.errors import EtudeError
-from etude.tracking.storage import DirectoryStorage, Storage, storage_from_uri
+from etude.storage import DirectoryStorage, Storage, storage_from_uri
 from etude.train.records import Step
 from etude.train.run import track
 from tests.experiments import experiment_file

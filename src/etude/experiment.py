@@ -34,6 +34,8 @@ from itertools import count
 from pathlib import Path
 from typing import Literal, cast
 
+from etude.checkpoints import CheckpointId, CheckpointRecord
+from etude.errors import EtudeError
 from etude.eval.records import CheckpointPlayer, Line, Match, digest, folder_name
 from etude.eval.tournament import played
 from etude.launch import client
@@ -42,10 +44,8 @@ from etude.launch.errors import LauncherError
 from etude.launch.records import Job, RunRequest, Smoke
 from etude.launch.scheduler import Scheduler
 from etude.launch.source import home
-from etude.tracking.checkpoints import CheckpointId, CheckpointRecord
-from etude.tracking.errors import EtudeError
-from etude.tracking.records import Digest, Record
-from etude.tracking.storage import Storage
+from etude.records import Digest, Record
+from etude.storage import Storage
 from etude.train.read import RunData, lines, read_all
 from etude.train.report import job_names
 
@@ -159,7 +159,6 @@ def state_of(every: Sequence[RunData], experiment: str) -> ExperimentState:
     A run that recorded no end has failed once this computer's launcher says
     so (`_closed_without_success`), and so ends at its last stored checkpoint.
     """
-    line = lines(every)
     ours = [
         data
         for data in every
@@ -167,6 +166,7 @@ def state_of(every: Sequence[RunData], experiment: str) -> ExperimentState:
         and data.experiment == experiment
         and data.file.declaration.kind != "evaluation"
     ]
+    line = lines(ours)
     job = job_names(ours)
     lost = _closed_without_success([data.name for data in ours if data.state is None])
     runs = []
@@ -478,7 +478,7 @@ def _ledger_root(directory: Path | str | None) -> Path:
 def __getattr__(name: str) -> object:
     if name == "Checkpoint":
         warnings.warn(
-            "etude.experiment.Checkpoint is now etude.tracking.checkpoints.CheckpointRecord; removed in 0.5",
+            "etude.experiment.Checkpoint is now etude.checkpoints.CheckpointRecord; removed in 0.5",
             DeprecationWarning,
             stacklevel=2,
         )

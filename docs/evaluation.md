@@ -24,7 +24,7 @@ from etude.eval.records import (
 )
 from etude.eval.tournament import hold, scores, standings
 from etude.experiment import observe
-from etude.tracking.checkpoints import CheckpointRef, checkpoint_id
+from etude.checkpoints import CheckpointRef, checkpoint_id
 
 world = environment("allies-vs-lessons", files=["game/"], config={"world": "w6"})
 deals = tuple({"deal": 1_910_101_000 + d} for d in range(25))
@@ -683,7 +683,7 @@ artifacts name no match), and one table per rollup.
 
 ```python
 from etude.eval.query import read_blobs, statsdb
-from etude.tracking.storage import storage_from_uri
+from etude.storage import storage_from_uri
 
 bucket = storage_from_uri("r2://manabot/evaluations")
 db = statsdb("cards", bucket)

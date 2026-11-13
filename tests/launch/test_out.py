@@ -20,8 +20,8 @@ from etude.launch.storage.s3 import Bucket, Keys
 from etude.launch.storage.transport import HTTPReply
 from etude.launch.worker.courier import Courier
 from etude.out import MEMBERSHIP, OutFile, OutFiles
+from etude.storage import DirectoryStorage
 from etude.storage_timeout import StorageUnavailable
-from etude.tracking.storage import DirectoryStorage
 from etude.train.read import read
 from etude.train.records import Step
 from etude.train.run import track

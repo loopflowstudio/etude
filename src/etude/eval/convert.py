@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from etude.carriage import EVAL_BLOCK_INDEX
+from etude.errors import EtudeError
 from etude.eval.block import (
     SEAL_BYTES,
     Block,
@@ -36,10 +37,9 @@ from etude.eval.block import (
 )
 from etude.eval.match import OLD_SEAT
 from etude.eval.records import TABLE_FILE, MatchRecord, Rollup, outcomes
-from etude.tracking.errors import EtudeError
+from etude.records import Digest, Record
+from etude.storage import Storage
 from etude.tracking.listing import as_storage, run_folders
-from etude.tracking.records import Digest, Record
-from etude.tracking.storage import Storage
 
 if TYPE_CHECKING:
     import duckdb

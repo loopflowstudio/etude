@@ -25,12 +25,12 @@ from typing import cast
 from pydantic import BaseModel
 
 from etude.call import config_type
+from etude.errors import EtudeError
 from etude.launch.records import Until
 from etude.stopping import Stopped
+from etude.storage import DirectoryStorage, default_root, run_directory
 from etude.tracking.declaration import validate_resume
 from etude.tracking.delivery import RunFiles
-from etude.tracking.errors import EtudeError
-from etude.tracking.storage import DirectoryStorage, default_root, run_directory
 from etude.train.read import read
 from etude.train.state import saved_states
 

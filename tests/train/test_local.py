@@ -14,7 +14,7 @@ from etude.cli import main
 from etude.eval.match import environment, evaluate
 from etude.eval.records import Code, Inference, Match
 from etude.experiment import observe
-from etude.tracking.storage import DirectoryStorage
+from etude.storage import DirectoryStorage
 from etude.train.read import read
 from etude.train.state import read_state
 from tests.eval.games import play_checkpoint_folder

@@ -12,6 +12,8 @@ from pathlib import Path, PurePosixPath
 import duckdb
 import pytest
 
+from etude.checkpoints import CheckpointRef, checkpoint_id
+from etude.errors import EtudeError
 from etude.eval.match import Tables, environment, evaluate
 from etude.eval.query import statsdb
 from etude.eval.records import (
@@ -28,10 +30,8 @@ from etude.eval.records import (
     TournamentRun,
 )
 from etude.eval.tournament import hold, played, scores, standings, stored_runs
-from etude.tracking.checkpoints import CheckpointRef, checkpoint_id
-from etude.tracking.errors import EtudeError
-from etude.tracking.records import ArtifactRef, Clock
-from etude.tracking.storage import DirectoryStorage
+from etude.records import ArtifactRef, Clock
+from etude.storage import DirectoryStorage
 from etude.train.run import track
 from tests.eval.games import play, play_failing_deal_one
 from tests.experiments import authored

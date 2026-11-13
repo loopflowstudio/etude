@@ -11,7 +11,7 @@ tables, storage, reading and reports. A process Etude did not start, such as a
 notebook or another scheduler's job, names its run itself:
 
 ```python
-from etude.tracking.storage import storage_from_uri
+from etude.storage import storage_from_uri
 from etude.train.records import Step, Time
 from etude.train.run import track
 
@@ -49,8 +49,9 @@ storage's prefix reads the whole run.
 One `etude` command provides compute, reports, sync and checkpoints. The
 launcher (`etude.launch`) and tracking share one package and lock file; neither
 imports the other. Tracking is `etude.train` for training runs, built on
-`etude.tracking`: what every run shares (its declaration, files, storage and
-delivery).
+what every run shares: `etude.storage`, `etude.records`, `etude.checkpoints`
+and `etude.errors`, with its declaration, listing and delivery in
+`etude.tracking`.
 Install `etude-sdk[s3]` for tracking against a bucket; local tracking does not
 need boto3. `s3://` uses boto3's own configuration. `r2://` reaches Cloudflare
 R2 at `https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com` with `R2_ACCESS_KEY_ID`
@@ -202,7 +203,7 @@ When copying a run, include `artifacts/`. Readers resolve references beside the
 selected metric block, so relocated runs keep working.
 
 ```python
-from etude.tracking.storage import default_root
+from etude.storage import default_root
 from etude.train.read import read
 
 history = read(default_root(), "self-play", "policy-seed-0")
@@ -568,8 +569,9 @@ bytes are two points. A checkpoint's line, the learner it belongs to, is
 its seat's `line`, else its training run's line: the first run of the chain
 of continuations that led to it. A checkpoint a training run saved
 is drawn in that run's job; every other placed checkpoint is drawn in its
-line's curve, labelled by the line's name, or in one curve of "checkpoints
-with no line". `Crosstable` looks only within a line.
+learner's curve, labelled by its name, or in one curve of "checkpoints
+with no job". `Crosstable` keeps each learner's checkpoints separate and labels
+its tabs by job and learner.
 Every unplaced player, code or a checkpoint seated without an `at`, is an
 anchor, and the page names the unplaced checkpoints.
 
@@ -594,7 +596,7 @@ than its eval runs were held with, as they held it.
 |---|---|
 | `Curve(split=None)` | the score at each checkpoint, against one anchor the Opponent control picks; `split` draws one chart per value |
 | `Curve(matches=Matches(seating="half-training"))` | that seating over the checkpoints it was held for: a line per job, x where each held checkpoint stood |
-| `Crosstable()` | one line's checkpoints against each other, a tab per line, both axes ordered by the clock; an unplayed pair shows `·` |
+| `Crosstable()` | one learner's checkpoints against each other, a tab per job and learner, both axes ordered by the clock; an unplayed pair shows `·` |
 | `Matrix(rows, columns)` | one job's score per cell at one checkpoint: a finished job's final, else its latest evaluated |
 | `Ranking(by)` | a bar per job for each value of `by`; clicking a row filters the page |
 | `Anchors()` | the anchors against each other, and each one's strength over matches that seat no checkpoint |

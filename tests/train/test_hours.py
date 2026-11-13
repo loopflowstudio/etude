@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from etude.tracking.records import HOURS_SINCE_START, RUNNING_HOURS, SourceKey
+from etude.records import HOURS_SINCE_START, RUNNING_HOURS, SourceKey
 from etude.train.read import read
 from etude.train.records import ParentRun, Step
 from etude.train.report import training

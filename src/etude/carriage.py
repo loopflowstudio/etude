@@ -1,6 +1,6 @@
 """What may leave a run's folder, in what order and as what: one set of rules for both carriers.
 
-A run's folder (`etude.tracking.storage.run_directory`) reaches storage by one of
+A run's folder (`etude.storage.run_directory`) reaches storage by one of
 two carriers: the tracker's shipper (`etude.tracking.delivery`) when a script runs
 on its own, and the launcher's courier (`etude.launch.worker.courier`) when it
 was launched, so the job's environment never holds bucket credentials. Both
@@ -342,7 +342,7 @@ class RecordedFile:
 def _recorded(root: Path) -> dict[int, RecordedFile]:
     """By ordinal: the file each checkpoint record names, where Etude stored one.
 
-    Reads the records (`etude.tracking.checkpoints.CheckpointRecord`) as plain JSON.
+    Reads the records (`etude.checkpoints.CheckpointRecord`) as plain JSON.
     A record that only references a model elsewhere names no file here.
     """
     recorded: dict[int, RecordedFile] = {}

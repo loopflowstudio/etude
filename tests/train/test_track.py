@@ -21,12 +21,12 @@ from moto import mock_aws
 
 from etude.carriage import listing
 from etude.cli import main
+from etude.errors import EtudeError
 from etude.launch.database import launcher_file
 from etude.page import Server, build
+from etude.storage import DirectoryStorage, S3Storage, default_root
 from etude.tracking.delivery import sync
-from etude.tracking.errors import EtudeError
 from etude.tracking.listing import runs
-from etude.tracking.storage import DirectoryStorage, S3Storage, default_root
 from etude.train.block import rows
 from etude.train.read import buckets, read
 from etude.train.records import Step, Time

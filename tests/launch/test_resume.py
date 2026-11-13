@@ -9,7 +9,7 @@ import pytest
 from etude.cli import main
 from etude.launch.client import default
 from etude.launch.records import LauncherError, RunRequest, Until
-from etude.tracking.storage import default_root
+from etude.storage import default_root
 from etude.train.read import read
 from tests.launch.counting import Counting
 from tests.launch.fake import bench

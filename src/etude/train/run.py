@@ -23,7 +23,7 @@ Ownership and invariants:
 
 Units: wall time is integer milliseconds since the Unix epoch. Clock values
 are whatever the author's clocks count; times are seconds. Etude adds its two
-clocks in hours (`etude.tracking.records.BUILT_IN_CLOCKS`) to every row and
+clocks in hours (`etude.records.BUILT_IN_CLOCKS`) to every row and
 checkpoint: `running_hours` continues from the saved state's value (or an
 older run's checkpoint when it has no saved state) by
 this process's monotonic time, `hours_since_start` is wall time since the
@@ -61,14 +61,10 @@ from pydantic import BaseModel, ValidationError
 
 from etude.cache import Content
 from etude.carriage import OUT_PRESENT, checkpoint_key, note_retired, taken
+from etude.checkpoints import CheckpointRecord
 from etude.deadline import limit_time
-from etude.stopping import Stopped
-from etude.tracking.block_file import block_key, log_key, sealed_as, tail_key
-from etude.tracking.checkpoints import CheckpointRecord
-from etude.tracking.declaration import declare
-from etude.tracking.delivery import RunFiles, StorageDestination, destinations, prune, ship
-from etude.tracking.errors import EtudeError
-from etude.tracking.records import (
+from etude.errors import EtudeError
+from etude.records import (
     BUILT_IN_NAMES,
     HOURS_SINCE_START,
     RUNNING_HOURS,
@@ -81,7 +77,11 @@ from etude.tracking.records import (
     RunWriter,
     SourceKey,
 )
-from etude.tracking.storage import DirectoryStorage, Storage, run_prefix
+from etude.stopping import Stopped
+from etude.storage import DirectoryStorage, Storage, run_prefix
+from etude.tracking.block_file import block_key, log_key, sealed_as, tail_key
+from etude.tracking.declaration import declare
+from etude.tracking.delivery import RunFiles, StorageDestination, destinations, prune, ship
 from etude.train.block import Builder, Columns, Json, LoggedRow, concat
 from etude.train.block import encode as encode_block
 from etude.train.manifest import Index, metric_names

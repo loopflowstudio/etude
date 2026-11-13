@@ -19,8 +19,8 @@ def sync(
     seal: Annotated[bool, typer.Option(help="close segments a dead process left open")] = False,
 ) -> None:
     """Deliver sealed run files and stored checkpoints to each directory or bucket."""
+    from etude.storage import storage_from_uri
     from etude.tracking.delivery import sync as deliver
-    from etude.tracking.storage import storage_from_uri
 
     if seal:
         # Sealing turns training logs into blocks; only then does it need NumPy.
@@ -41,8 +41,8 @@ def checkpoints(
     experiment: Annotated[str | None, typer.Option(help="only this experiment")] = None,
 ) -> None:
     """List recorded checkpoints."""
+    from etude.storage import storage_from_uri
     from etude.tracking.listing import runs
-    from etude.tracking.storage import storage_from_uri
     from etude.train.read import read
 
     storage = storage_from_uri(source)

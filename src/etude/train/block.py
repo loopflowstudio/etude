@@ -35,8 +35,8 @@ import numpy as np
 import numpy.typing as npt
 from pydantic import ConfigDict
 
-from etude.tracking.errors import EtudeError
-from etude.tracking.records import Record
+from etude.errors import EtudeError
+from etude.records import Record
 
 MAGIC, END, VERSION, ALIGN = b"ETUDEBLK", b"KLB1", 1, 64
 

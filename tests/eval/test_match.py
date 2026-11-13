@@ -18,15 +18,15 @@ import pytest
 from moto import mock_aws
 from pydantic import BaseModel
 
+from etude.checkpoints import CheckpointRef, checkpoint_id
+from etude.errors import EtudeError
 from etude.eval import query
 from etude.eval.match import environment, evaluate
 from etude.eval.query import Estimate, compare, estimate, statsdb
 from etude.eval.records import CheckpointPlayer, Code, Config, Inference, Match, Player
 from etude.launch.storage.files import read_result
-from etude.tracking.checkpoints import CheckpointRef, checkpoint_id
-from etude.tracking.errors import EtudeError
-from etude.tracking.records import ArtifactRef
-from etude.tracking.storage import DirectoryStorage, S3Storage
+from etude.records import ArtifactRef
+from etude.storage import DirectoryStorage, S3Storage
 from tests.eval.games import (
     play,
     play_seat_and_player,

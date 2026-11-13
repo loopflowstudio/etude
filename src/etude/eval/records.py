@@ -61,10 +61,10 @@ from pydantic import (
     model_validator,
 )
 
+from etude.checkpoints import CheckpointId, CheckpointRef, checkpoint_id
+from etude.errors import EtudeError
 from etude.eval.source import digest_files, source_commit
-from etude.tracking.checkpoints import CheckpointId, CheckpointRef, checkpoint_id
-from etude.tracking.errors import EtudeError
-from etude.tracking.records import BUILT_IN_NAMES, Digest, Name, Record
+from etude.records import BUILT_IN_NAMES, Digest, Name, Record
 
 type Config = dict[str, JsonValue]
 type ColumnType = Literal["BOOLEAN", "BIGINT", "DOUBLE", "VARCHAR"]
@@ -1110,7 +1110,7 @@ def __getattr__(name: str) -> object:
         return CheckpointPlayer
     if name == "CheckpointKey":
         warnings.warn(
-            "CheckpointKey is now checkpoint_id from etude.tracking.checkpoints; removed in 0.5",
+            "CheckpointKey is now checkpoint_id from etude.checkpoints; removed in 0.5",
             DeprecationWarning,
             stacklevel=2,
         )

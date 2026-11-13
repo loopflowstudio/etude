@@ -12,9 +12,9 @@ import pytest
 from pydantic import ValidationError
 
 from etude.carriage import immutable, listing
+from etude.errors import EtudeError
+from etude.storage import DirectoryStorage
 from etude.tracking.delivery import sync
-from etude.tracking.errors import EtudeError
-from etude.tracking.storage import DirectoryStorage
 from etude.train.read import read
 from etude.train.records import RowTable, Step, TablePoint, Time
 from etude.train.run import EtudeWarning, track
