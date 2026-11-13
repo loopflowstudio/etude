@@ -1,16 +1,13 @@
 # The Etude train API and Manabot's loops: design for EXP-56 and MTG-329
 
-Implementation review, 2026-11-13: the multi-file state layout below cannot
-provide its whole-save recovery promise through the retained mutable out
-carrier. A controlled interrupted delivery retained new weights beside the
-previous optimizer and metadata. `scratch/state-publication.py` reproduces it;
-`scratch/questions.md` records the transport/recovery findings. Dependent
-implementation is stopped for review of a snapshot publication and retention
-protocol. The API described below remains intended, unimplemented behavior.
+Blocked, 2026-11-13: the multi-file state layout below cannot keep its
+whole-save recovery promise through the retained mutable out carrier
+(`scratch/questions.md`, reproduced by `scratch/state-publication.py`).
+Implementation waits on a state publication and retention protocol.
 
-2026-11-13. Written from the day's exploration (`scratch/positioning.md` holds
-every quoted remark in full; `scratch/explore.html` and `scratch/sketch.html`
-are the pages). Jack Heart asked for it: "Be ambitious. Help us land in the
+2026-11-13. Written from the day's exploration; every quoted remark is in full
+at `1666be1:scratch/positioning.md`, the ontology review at
+`1666be1:scratch/ontology.md`. Jack Heart asked for it: "Be ambitious. Help us land in the
 new world where we're set up for the most success in terms of adoption by Jace
 and evolution into the Etude Cloud world. Don't worry about requiring a lot of
 churn on existing code of Manabot or sticking with the design as currently
@@ -21,8 +18,9 @@ us get there."
 This document replaces the client-facing shape of EXP-56 (PR #103 at
 `105abdd`) and the loop and recipe shape of MTG-329. The launcher machinery
 PR #103 built (out carriage, planned-stop retries, attempt cutoffs,
-continuation, digest-checked inputs) is kept and built on. Nothing here has
-been implemented or run.
+continuation, digest-checked inputs) is kept and built on. The independent
+Manabot CLI retirement is implemented (plan.md); the new loop and recipe API
+has not been implemented or run.
 
 ## Where this is going
 
@@ -77,7 +75,7 @@ Each is something Jack Heart said on 2026-11-13; the design is held to them.
 
 ## Names
 
-From the ontology review (`scratch/ontology.md`). Jack Heart, 2026-11-13,
+From the ontology review. Jack Heart, 2026-11-13,
 answering its questions: "1a -- i think RunAttempt is probably better than
 Attempt though", "2a", "3a", "4a, or alternatively use cohort instead of
 experiment as a more general word", "5a", "6b". All of the renaming is in
@@ -326,6 +324,13 @@ between runs (`continue`, `start=`); checkpoints with clocks; evaluations.
 The SDK adds no experiment record: an experiment stays the label those files
 share.
 
+The experiment's name comes from outside the training code. Jack Heart,
+2026-11-13: "in the future Cloud will have names for experiments and it will
+supply the experiment name to the [Etude] SDK launcher". So the launcher is
+the authority for a run's experiment: a name given at launch wins, the file's
+stem is only the default when none is given, and training code never needs to
+name its experiment. Launch commands take the name as an argument.
+
 ## Manabot (MTG-329)
 
 Rebuilt against the API above. Frozen evidence, experiment IDs and receipts
@@ -392,7 +397,7 @@ What Jace needs is exactly rungs 2 and 4: `run.resume` over five models and
 six optimizers, one checkpoint holding all its models, `run.checkpoints()` for
 past versions at the table, and `run.input` for its human-trained drafter. Its
 `limited_iteration` is unchanged; its caller becomes a `run.steps` loop
-(`scratch/sketch.html`, Part 2); its `tracking.py` is deleted. The same
+(Several models in `docs/training.md`); its `tracking.py` is deleted. The same
 checkpoint seats as a limited player and as a constructed player. Etude's
 docs should carry a multi-model example of this shape so the path is visible
 without reading Manabot.
@@ -401,13 +406,14 @@ without reading Manabot.
 
 1. **EXP-56**: the calls, the on-disk layout, PyTorch writer, `etude run`,
    `--resume`, names, config and seed checks, folder checkpoints through
-   evaluation, `start=`; the Training page rewritten as in
-   `scratch/sketch.html` Part 1; a tiny non-Magic example. Old spellings
+   evaluation, `start=`; the Training page (`docs/training.md`, drafted); a
+   tiny non-Magic example. Old spellings
    (`track(seed=)`, `local_launch`) warn and name their removal release.
 2. **MTG-329**: rebuild on an isolated override of the unreleased SDK, then
    pin the release.
 3. **EXP-12** (launcher database migration) starts as soon as EXP-56 is done.
-4. After: README led by the league (`scratch/etude-readme-draft.md`), EXP-60.
+4. After: README led by the league (`1666be1:scratch/etude-readme-draft.md`,
+   its recipe surface superseded), EXP-60.
 
 ## Acceptance for EXP-56
 

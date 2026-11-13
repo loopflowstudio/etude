@@ -9,17 +9,20 @@ PR #103 stays draft. Jack Heart's recorded steer: "#103 was converted to
 draft; keep it draft, do not mark it ready."
 
 The complete earlier design, decisions, probes and QA history are in git:
-`1666be1:scratch/exp-56.md` and its sibling scratch files. That checkpoint also
-preserves the full positioning quotes and ontology exploration. The earlier
-793-pass gate covers `105abdd`, not the unbuilt API.
+`1666be1:scratch/exp-56.md` and its siblings `positioning.md` (every dated
+remark), `ontology.md` (the naming exploration) and `etude-readme-draft.md`
+(league-led README; its local_launch/until recipe surface is superseded). The
+earlier 793-pass gate covers `105abdd`, not the unbuilt API.
+
+Later work: EXP-57 live view; EXP-58 machines/metrics; EXP-59 broader JSON
+commands; EXP-60 evaluation expansion; EXP-61 joinable shared budgets.
 
 ## Blocked persistence decision
 
-The existing carrier updates each mutable out object separately. The new API
-promises one atomic save across several model/optimizer files. Interruption
-between uploads leaves a mixed save and destroys some of the previous save.
-Membership publication last does not preserve overwritten bytes. See
-`questions.md` for the controlled result and candidate correction.
+The new API promises one atomic save across several model/optimizer files;
+the existing carrier updates each mutable out object separately, so an
+interrupted delivery leaves a mixed save. `questions.md` has the controlled
+result and the candidate corrections.
 
 The implement instruction says: "If implementation turns up a counterexample
 that breaks the slice, the data model, the deletion path or the overall design,
@@ -60,6 +63,8 @@ surviving API. Manabot cutover is MTG-329; do not edit its checkout here.
    add start= and shared checkpoint enumeration.
 5. Add local `etude run`, explicit local/launched --resume, create-only names,
    config/seed refusals and per-attempt source recording; keep finished runs safe.
+   `etude launch` and `etude run` accept the experiment name; the file's stem
+   is only the default (design, Set up for Etude Cloud; `positioning.md`).
 6. Move job seeds and examples; focused acceptance tests, then the caller's
    gate/demo steps. No publication, landing or Graph changes in implement.
 

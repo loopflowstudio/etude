@@ -55,6 +55,12 @@ Open product choices the design does not spell:
    raising them in the file is how a run that ran out gets more. Alternative:
    limits fixed at first launch, with flags to add.
 
+5. **How a launch names its experiment.** The design now says "Launch
+   commands take the name as an argument" (the launcher is the authority; the
+   stem is the default). No spelling is given and the docs do not show one
+   yet; they still say an `eval(state)`/`report()` file requires its own stem.
+   Simplest reading: `--experiment NAME` on `etude launch` and `etude run`.
+
 Assumptions taken (reversible, simpler option):
 
 - Run id is `NAME-seed-N` (`baseline-seed-7`, as the design writes it; the

@@ -99,8 +99,10 @@ The `etude-sdk` package uses Python 3.12 and one shared dependency set for launc
 computer, SSH hosts, RunPod and Lium pods, and Vast.ai instances, without any Etude account.
 
 A **Job** specifies what runs, source commit, config, target and limits. It has
-no seed or machine settings. A **Run** pairs a job with a seed and goes to a
-pool, an on-demand or both. A **Cohort** launches runs together under shared limits. A **RunAttempt**
+no seed or machine settings. A **run** is a job with a seed, and goes to a
+pool, an on-demand or both; a job launched with `seeds=(0, 1, 2)` is three
+runs. A **Cohort** is a named envelope of limits (`parallel`, `max_usd`) that
+runs are admitted under. A **RunAttempt**
 allocates a run to a machine for a bounded execution window. `status` shows the machine.
 
 `OnDemand.template` is a **MachineTemplate** that chooses the provider, GPU,
@@ -214,8 +216,8 @@ from etude.launch.records import Input
 
 job = training(train, config=TrainConfig(lr=1e-3), max_hours=6, max_usd=Decimal(30))
 weights = Input(
-    name="updates-500",
-    key="etude/launch/RUN/checkpoints/updates-500",
+    name="updates-00000500",
+    key="etude/launch/EXPERIMENT/RUN/out/checkpoints/updates-00000500",
     sha256="…",
     size_bytes=1048576,
 )
@@ -258,7 +260,7 @@ imports nothing else of Etude before the function's own module.
 - **An evaluation** holds a [tournament](evaluation.md#tournaments) as one eval
   run, which is the launched run. A benchmark's `checkpoint` is an `Input`: it
   reaches the machine verified by digest and fills every inference seat, where
-  `play` finds the file at the model's `checkpoint.artifact.uri`. A round robin
+  `play` finds the folder or file at the player's `checkpoint.artifact.uri`. A round robin
   takes `enter=` players. Holding nothing new (batch) is refused, since a launched job reads no
   other eval run. `workers=` plays matches in parallel processes. The job's
   environment needs `etude-sdk[eval]`.
@@ -767,8 +769,9 @@ outage, and files that never left a deleted machine cannot be recovered from the
 bucket. See [tracking recovery](tracking.md#storage-outages-and-recovery) to
 deliver a retained copy later.
 
-`Run(id="baseline-seed-7", job=job)` chooses a scientific identity. Failed admission
-leaves independent launch evidence, without creating a Run or RunAttempt or
+A run's id is its scientific identity: its job's name and seed
+(`baseline-seed-7`), or the `id` of a `RunRequest` built by hand. Failed admission
+leaves independent launch evidence, without creating a run or RunAttempt or
 consuming that identity. A corrected launch can reuse it. An already-admitted
 identity is a conflict; an unresolved acquisition remains fenced until confirmed
 refused or deleted. A new launch ID cannot bypass that fence. `LaunchError.launch`
@@ -938,7 +941,7 @@ defines it, by its full path, and relative imports are a lint error:
 | `from etude.launch.scheduler import Scheduler` | the owner of one database: queueing, admission, matching runs to machines |
 
 Records are frozen Pydantic models, constructed with named fields:
-`Job(command="./simulate", max_hours=2)` and `Run(job=job, seed=1)`.
+`Job(command="./simulate", max_hours=2)` and `RunRequest(job=job, seed=1)`.
 Use `model_dump_json()` for JSON and `model_validate_json()` to load it. Imports sit at the top of each module, so every command, including `--help`,
 loads the whole launcher: 33 modules and Pydantic, about 70 ms measured on
 2026-10-13. A test pins the module count. Each remote command imports client dependencies once
@@ -960,8 +963,9 @@ job = training(
     until="steps=26000",
     max_hours=6,
     max_usd=Decimal(5),
+    seeds=(1, 2, 3),
 )
-runs = queue_cohort("capacity", job.runs(1, 2, 3), rent="l4", parallel=1, max_usd=Decimal(15))
+runs = queue_cohort("capacity", job, rent="l4", parallel=1, max_usd=Decimal(15))
 wait(*runs)
 logs(run=runs[0])
 fetch(runs[0], "weights.pt", Path("out"))  # a file the job left in its output directory
@@ -972,7 +976,8 @@ continued = queue(
 ```
 
 For the command line, a Python file defines a function `runs()` that returns a
-Job, a Run, or a nonempty list of Runs. The function describes work without
+Job or a nonempty list of Jobs. Each job is launched once per seed in its
+`seeds`, or once with seed 0. The function describes work without
 sending it. The command calls it once, on the machine the command is typed on,
 before anything goes to a controller:
 
@@ -982,20 +987,20 @@ from decimal import Decimal
 
 from etude.jobs import training
 from etude.launch.client import launch_cohort
-from etude.launch.records import Run
+from etude.launch.records import Job
 from train import TrainConfig, train
 
 
-def runs(hidden: int = 256, seeds: int = 3) -> list[Run]:
-    job = training(
+def runs(hidden: int = 256, seeds: int = 3) -> Job:
+    return training(
         train,
         config=TrainConfig(hidden=hidden),
         max_hours=2,
         max_usd=Decimal(1),
         until="steps=26000",
         name=f"hidden{hidden}",
+        seeds=tuple(range(seeds)),
     )
-    return job.runs(*range(seeds))
 
 
 if __name__ == "__main__":
@@ -1021,20 +1026,24 @@ as a single clock value. The command does not run the file's `__main__` block.
 The arguments used, defaults included, are stored on each run as `params`
 (`record.params` in Python). They are for reading. A job's identity comes from
 what it runs: its command, config, source and target. Two calls with different
-arguments that produce the same four things are the same job. A function that
-builds runs for several settings can record its own with
-`job.runs(0, 1, params={"hidden": 64})`; the command leaves those alone.
+arguments that produce the same four things are the same job. Seeds, like a
+job's name and limits, are how it is launched and no part of that identity.
+
+A job file never has to name the record underneath. Code that builds a launch
+by hand uses it: `RunRequest(job=job, seed=7, id="baseline-seed-7")`, or
+`job.runs(0, 1, params={"hidden": 64})` for several, which records its own
+`params`; the command leaves those alone.
 
 A sweep is Python that calls the function:
 
 ```python
 # sweep.py
 import capacity
-from etude.launch.records import Run
+from etude.launch.records import Job
 
 
-def runs() -> list[Run]:
-    return [run for hidden in (64, 256, 1024) for run in capacity.runs(hidden=hidden)]
+def runs() -> list[Job]:
+    return [capacity.runs(hidden=hidden) for hidden in (64, 256, 1024)]
 ```
 
 Several runs require `--cohort`. Cohort limits belong to command flags, not the
@@ -1046,8 +1055,8 @@ setting is a function or class method returning one, such as
 `TrainConfig.large()`.
 
 `etude launch job.py` supplies experiment `job` to every unnamed job, even
-when the file defines only `runs()`. Recipes call `track(clocks=...)` without
-naming an experiment. A plain job file preserves explicit `Job.experiment`
+when the file defines only `runs()`. A `train` function calls
+`track(clocks=..., config=config)` without naming an experiment. A plain job file preserves explicit `Job.experiment`
 values; a file defining `eval(state)` or `report()` requires its own stem
 and refuses jobs naming another experiment.
 
@@ -1069,20 +1078,21 @@ etude launch ppo.py --rent runpod-cpu8   # attempt 1: its machine is lost at upd
 etude status RUN                         # running, updates 1400, ~$0.61: attempt 2, from update 800
 etude status RUN                         # running, updates 2140, ~$1.02: attempt 3, after a planned stop
 etude logs --run RUN                     # every attempt, and how each ended
+etude launch ppo.py --resume RUN         # after it ended unfinished: another attempt, on current code
 ```
 
 A run ends when it reaches its target, fails, is cancelled, or uses up its hours
 or dollars, or exhausts its attempts. A lost machine or a planned stop can
 retry within those bounds. The job is called again as a new RunAttempt of the
 same run, with out (`run.out`, `ETUDE_OUT`) as earlier attempts
-left it, and goes on from the state it kept there, or from the latest
-checkpoint its [tracking](tracking.md) recorded.
+left it, and `run.resume` loads the state `run.save()` kept there
+([Training](training.md#carrying-on)).
 
 - **A lost machine** is the launcher's finding: the attempt ends `lost` with
   its cause.
-- **A planned stop** is the job's own: it saw `run.stopping()`, saved its
-  state and raised `etude.train.run.Stopped`
-  ([Tracking](tracking.md#out-a-stop-signal-and-running-again)).
+- **A planned stop** is the job's own: `run.steps` saw the stop, the pass in
+  progress saved, and the next raised `etude.train.run.Stopped`
+  ([Training](training.md#counting)).
   The attempt ends `stopped`. A command job says the same by exiting 75
   (`EX_TEMPFAIL`, "try again later"), which is what a typed job's process
   exits with when its function raises `Stopped`.
@@ -1095,7 +1105,7 @@ The default `max_attempts=3` includes planned stops: a healthy run needing a
 fourth rental window ends `stopped` after its third planned stop. Increase
 `max_attempts` on the job for a longer run.
 
-`run.stopping()` also turns true before the run's own hours limit, reserving
+`run.steps` also stops before the run's own hours limit, reserving
 time to save. A planned stop there can trigger another rental for the remaining
 allowance: stopping after 560 of 600 allowed seconds leaves a 40-second attempt
 while attempts and dollars remain. If that attempt uses up its allowance, the
@@ -1105,7 +1115,7 @@ planned stops remain bounded by `max_attempts` and the run's hours and dollars.
 At a machine's deadline, an attempt that has not saved and stopped ends
 `lost`. Exhausting the run's own hours or dollars ends it `out_of_time` or
 `over_budget`; `etude cancel` ends it `cancelled`. Exhausting attempts leaves
-the last outcome, `stopped` or `lost`. Without saved state or a checkpoint,
+the last outcome, `stopped` or `lost`. Without saved state,
 the next attempt starts from the beginning. Each attempt's code starts at
 most once; an unresolved start remains fenced and can end `lost` when its
 execution cannot safely be repeated.
@@ -1115,14 +1125,34 @@ are its tracked files. They are carried to the bucket as they are written, so
 they survive pod deletion. A later attempt on the same machine finds the
 directory where it was; if the directory is gone, as after a wiped disk, it is
 restored like a fresh machine's. On a fresh machine with a bucket it is given back,
-before the job starts, the run's records, its whole `out/` as last carried and
-its latest checkpoint if stored under `checkpoints/`. A checkpoint recorded
+before the job starts, the run's records and its whole `out/` as last
+carried: the saved state in `out/state/` and every checkpoint published under
+`out/checkpoints/`. A historical run's latest checkpoint stored under
+`checkpoints/` is restored too. A checkpoint recorded
 inside `out/` is restored only while it belongs to that directory. To an owned
 host without a bucket, the controller relays the same from the bucket or the
 host that last ran the run. A retry waits until its complete restoration is
 available. Automatic recovery retains the run ID, seed and checkpoint
 ordinals. `etude continue` instead goes further than the
 target or branches from a completed run, making a new run with a parent.
+
+A run that ended unfinished, because it failed, was cancelled, or used up its
+hours, dollars or attempts, is given another attempt by name: `etude launch
+job.py --resume RUN`. The file is given because the attempt runs its current
+commit, which is what a fixed bug needs; the attempt records that commit. The
+run keeps its id, seed, config, out and checkpoint ordinals, and the job's
+limits as the file now states them bound the whole run, earlier attempts
+included, so raise `max_hours`, `max_usd` or `max_attempts` there to give it
+more. It is refused before anything is rented when the run finished, when
+the file's config or the seed differs from the run's (the error names the
+fields), or while an attempt of the run is still allocated. A refusal changes
+nothing recorded about the run.
+
+A launch whose run id is taken in its experiment is refused the same way,
+before renting: ids are never reused and a taken id is never resumed. The
+run's folder is the authority. Its `run.json` is written create-only, so a
+second claimant fails on any computer, including one whose launcher database
+has never seen the run.
 
 Delivery publishes changed `out.json` membership after its files succeed.
 Each entry names a key, SHA256 digest and byte length.
@@ -1151,11 +1181,13 @@ Training code reads `ETUDE_OUT`, `ETUDE_OUTPUT_DIR`, `ETUDE_STOP_FILE`,
 
 | Variable | What it is | Tracked code uses |
 | --- | --- | --- |
-| `ETUDE_OUT` | Out, the same on every attempt, carried to storage as it is written and restored before each attempt. | `run.out` |
+| `ETUDE_OUT` | Out, the same on every attempt, carried to storage as it is written and restored before each attempt. | `run.resume`, `run.save`, `run.checkpoint`; `run.out` |
 | `ETUDE_OUTPUT_DIR` | This attempt's output directory: `etude-result.json` and files to keep under `attempts/ATTEMPT/`. A later attempt does not see it. | nothing; tracking reports progress |
-| `ETUDE_STOP_FILE` | Appears when the attempt should stop. | `run.stopping()` |
-| `ETUDE_DEADLINE` | When the attempt's window ends, as an ISO time. The process is killed then. | `run.stopping()` |
-| `ETUDE_UNTIL_CLOCK`, `ETUDE_UNTIL_VALUE` | The launch's absolute target on a named clock. | `run.until("updates", default=config.updates)` |
+| `ETUDE_STOP_FILE` | Appears when the attempt should stop. | `run.steps`; `run.stopping()` |
+| `ETUDE_DEADLINE` | When the attempt's window ends, as an ISO time. The process is killed then. | `run.steps`; `run.stopping()` |
+| `ETUDE_UNTIL_CLOCK`, `ETUDE_UNTIL_VALUE` | The launch's absolute target on a named clock. | `run.steps("updates", to=config.updates)`; `run.until` |
+| `ETUDE_SEED` | The run's seed. | `run.seed` |
+| `ETUDE_INPUTS_DIR` | The files and checkpoint folders the run was given. | `run.input(NAME)` |
 
 A job can be given files by name:
 
@@ -1164,10 +1196,13 @@ from etude.jobs import training
 from etude.launch.records import Input
 
 policy = Input(
-    name="policy.pt", key="etude/launch/RUN/checkpoints/policy.pt", sha256="…", size_bytes=1048576
+    name="policy.pt",
+    key="etude/launch/EXPERIMENT/RUN/checkpoints/policy.pt",
+    sha256="…",
+    size_bytes=1048576,
 )
 job = training(
-    finetune,  # opens Path(os.environ["ETUDE_INPUTS_DIR"]) / "policy.pt"
+    finetune,  # opens run.input("policy.pt")
     config=FinetuneConfig(),
     inputs=(policy,),
     max_hours=1,
@@ -1175,7 +1210,11 @@ job = training(
 )
 ```
 
-An evaluation job's `checkpoint` is an input like this one.
+An evaluation job's `checkpoint` is an input like this one. So is a training
+job's `start=`, another run's checkpoint read as `run.input("start")`: a
+checkpoint folder arrives whole, verified against the digest in its record,
+and the run records the checkpoint it started from
+([Training](training.md#starting-from-another-run)).
 
 `key` names an object in the bucket of the storage the machine keeps its
 records in (the on-demand's, or an owned host's `--storage`). The launcher gives
@@ -1207,17 +1246,20 @@ identity. [Tracking](tracking.md) reads these, so a launched recipe names
 only its clocks. A tracked script
 does not write `etude-result.json` itself: tracking reports its clocks.
 
-A storage holds one folder per run, shared by every attempt on every machine,
-and the machines' own session files apart:
+A storage holds one folder per run, below its experiment's, shared by every
+attempt on every machine, and the machines' own session files apart. Runs
+stored before experiments had folders stay at `PREFIX/RUN/` and read the same:
 
 ```text
-PREFIX/RUN/                      everything about one run
+PREFIX/EXPERIMENT/RUN/           everything about one run
   attempts/ATTEMPT.log/OFFSET    what the job printed, in pieces named by first byte
   attempts/ATTEMPT.json          when it started, its progress, how it ended, its pieces
   attempts/ATTEMPT/NAME          files the job left in its output directory
-  run.json  state.json  metrics/ the run's tracked files, as they are,
-  checkpoints/                     every checkpoint tracking recorded among them
+  run.json  outcome.json  metrics/ the run's tracked files, as they are
+  checkpoints/                   checkpoint files copied from outside out
   out/                           out (`run.out`), as the job keeps it
+    state/                       what run.save() kept, replaced at each save
+    checkpoints/CLOCK-VALUE/     each published checkpoint, never changed
   out.json                       keys, SHA256 digests and byte lengths in the last carried out
 PREFIX/sessions/SESSION/         one machine's instructions, inbox and notes
   out/worker.log/OFFSET          the worker's own log, in pieces named by first byte
@@ -1293,11 +1335,11 @@ etude cancel RUN
 
 Continuation starts a new run of the parent's job and seed from the parent's
 out: the child's `out` begins as a copy of the parent's, as last
-carried, so a job that keeps its state there (weights, optimizer, anything
-else) resumes those carried saves. The parent and its directory
+carried, so `run.resume` loads the parent's last save (weights, optimizer,
+anything else registered) and `run.checkpoints()` lists its checkpoints. The parent and its directory
 are unchanged. `--until` is the child's absolute target and must exceed its
-starting position on the named clock. The recipe reads it with
-`run.until("updates", default=config.updates)`; `--until` alone extends the
+starting position on the named clock. `run.steps("updates", to=config.updates)`
+counts to it; `--until` alone extends the
 run, and its config stays unchanged. In Python,
 `continue_from(parent, "updates=6400", source=...)`.
 
@@ -1310,7 +1352,7 @@ its clock; Etude does not infer a config field from a clock name.
 
 Alongside out, a continuation inherits the parent's latest checkpoint whenever
 its file is still available: a member of out or copied into `checkpoints/`.
-`run.latest_checkpoint()` finds it in the child's out or delivered inputs.
+`run.checkpoints()` lists it, in the child's out or delivered inputs.
 A removed out checkpoint is never restored implicitly, and no older checkpoint
 is chosen in its place. Populated out uses the parent's recorded position for
 lineage and target validation; empty out with a copied checkpoint uses that
@@ -1442,13 +1484,16 @@ loop's last pass and prints when that was (`last loop: ...`); run `etude wait` o
 | --- | --- | --- | --- |
 | Read | `status`, `runs`, `logs`, `pools`, `ondemands`, `machines`, `providers`, `storages`, `controller`, `usage` | database only | immediate answer with freshness |
 | Ask | `queue`, `cancel`, `terminate`, `rent`, `pool` and `ondemand` mutations, `default`, `machine add`, `provider set`, `storage add` | database only | recorded intent and an id where applicable |
-| Wait | `wait`, `launch` (with or without `--quote`), `availability`, `fetch`, `logs --follow`, `source`, `continue` | other machines with a time limit | completion or the limit |
+| Wait | `wait`, `launch` (with or without `--quote` or `--resume`), `availability`, `fetch`, `logs --follow`, `source`, `continue` | other machines with a time limit | completion or the limit |
 
 Controller selection mutations are asks. `worker` and `controller run` are waits
 because they deliberately execute long-lived loops; they retain their existing
 lifetime rules. Job-file `runs()` is an input function, not a launcher command.
 `smoke` is a wait on this computer alone: it runs the file tiny in a temporary
-home and touches neither the database nor another machine. `queue --smoke` and
+home and touches neither the database nor another machine. `run` is the same
+kind: it calls a file's `train` here, writes the run to this computer's runs
+directory, and needs no provider key, launcher database or network; `--seconds`
+is its optional limit. `queue --smoke` and
 `launch --smoke` run it first, on this computer.
 
 The full expectation also gives external work to the controller loop, makes asks
@@ -1865,7 +1910,7 @@ remains present. An expired paid window cannot be extended for cleanup. A killed
 machine or failed preflight cannot promise cleanup.
 
 Cancellation writes `ETUDE_STOP_FILE`, then requests TERM for the process
-group, so `run.stopping()` gives time to save only to a job that handles TERM
+group, so a stop gives time to save only to a job that handles TERM
 itself. `Job.stop_seconds` optionally
 limits the graceful stop before KILL; its default is `None`, still capped by the
 phase deadline. At an exhausted phase deadline Etude sends KILL immediately and

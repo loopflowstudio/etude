@@ -1,19 +1,24 @@
 # Tracking
 
-Declare a run, log from any process wherever it runs, read it back. It writes
+Log from any process wherever it runs, and read it back. Tracking writes
 files to your own directory or bucket and reads from them. There is no server
 in this path, and nothing here starts compute or holds a provider credential.
 
+A training loop Etude calls is written as [Training](training.md) describes:
+`etude run` or the launcher says which run it is, and `track` takes only
+clocks and a config. This page covers what every tracked process shares: rows,
+tables, storage, reading and reports. A process Etude did not start, such as a
+notebook or another scheduler's job, names its run itself:
+
 ```python
-from etude.run.storage import storage_from_uri
+from etude.tracking.storage import storage_from_uri
 from etude.train.records import Step, Time
 from etude.train.run import track
 
 run = track(
     experiment="capacity-pilot",
-    run="capacity-64-seed-0",  # reusing a name resumes it
+    run="capacity-64-seed-0",  # new within its experiment: a taken name is refused
     job="capacity-64",  # what its siblings share
-    seed=0,  # the only thing that differs
     clocks=[
         Step("updates", "optimizer updates, absolute across continuation"),
         Step("learner_transitions", "transitions the learner trained on"),
@@ -34,17 +39,17 @@ uv run etude checkpoints --source s3://my-bucket/runs
 ```
 
 Runs are written to one place per computer, `~/.etude/track` (moved by
-`ETUDE_HOME`, or named with `track(directory=...)`), and `report` reads that
-place when given no source. So writing never chooses how it will be read.
+`ETUDE_HOME`, or named with `track(directory=...)`), each in
+`EXPERIMENT/RUN/`, and `report` reads that place when given no source. So writing never chooses how it will be read.
 `report` and `checkpoints` take `--source`, a directory or
 `s3://bucket/prefix` or `r2://bucket/prefix`, and find runs in it at any depth. Attempts on rented
-machines write to the same `PREFIX/RUN/` folder; pointing `--source` at the
+machines write to the same run folder; pointing `--source` at the
 storage's prefix reads the whole run.
 
 One `etude` command provides compute, reports, sync and checkpoints. The
 launcher (`etude.launch`) and tracking share one package and lock file; neither
 imports the other. Tracking is `etude.train` for training runs, built on
-`etude.run`: what every run shares (its declaration, files, storage and
+`etude.tracking`: what every run shares (its declaration, files, storage and
 delivery).
 Install `etude-sdk[s3]` for tracking against a bucket; local tracking does not
 need boto3. `s3://` uses boto3's own configuration. `r2://` reaches Cloudflare
@@ -53,23 +58,23 @@ and `R2_SECRET_ACCESS_KEY`, as DuckDB's `r2://` does. Tracking commands read the
 when a launcher controller is selected. Each command loads its own dependencies;
 help and the worker do not load NumPy.
 
-Under `etude launch` the launcher has already said which run this is, so the
-same script needs only its clocks:
+Under `etude run` and `etude launch` the run has already been named, so the
+loop gives only its clocks and config:
 
 ```python
-run = track(clocks=[Step("updates", "optimizer updates, absolute")])
+with track(clocks=[Step("updates", "optimizer updates, absolute")], config=config) as run:
+    ...
 ```
 
-The run, job, seed and cohort come from the launcher (`ETUDE_RUN`,
-`ETUDE_JOB`, `ETUDE_SEED`, `ETUDE_COHORT`); an argument passed to `track` wins.
-`etude launch ppo.py` supplies experiment `ppo` through `ETUDE_EXPERIMENT`,
-including when the file defines only `runs()`. A plain job file preserves an
-explicit `Job.experiment`; a file defining `eval(state)` or `report()` requires
-its own stem. `track(clocks=...)` needs no `experiment`, and naming another
-is refused (`experiment_differs_from_launch`). A reusable training function
-names none; called on this computer outside a launch,
-it is told its experiment and out by `local_launch`
-([below](#out-a-stop-signal-and-running-again)).
+The run, job, seed and cohort come from the command (`ETUDE_RUN`,
+`ETUDE_JOB`, `ETUDE_SEED`, `ETUDE_COHORT`), and `run.seed` reads the seed.
+The experiment is the launched file's stem (`ETUDE_EXPERIMENT`):
+`etude launch ppo.py` supplies `ppo`, including when the file defines only
+`runs()`. A plain job file preserves an explicit `Job.experiment`; a file
+defining `eval(state)` or `report()` requires its own stem. Naming another
+experiment in `track` is refused (`experiment_differs_from_launch`), so a
+reusable training function names none. A process started by another
+scheduler sets the same variables to say which run it is.
 The files are written to `ETUDE_TRACK_DIR`, one place on the machine for every
 run and attempt, and the launcher carries them to the machine's bucket as each
 file is finished, by the same rules as `sync` (`etude.carriage`): every
@@ -99,6 +104,11 @@ Rules a caller can rely on:
   file. Attempts written before this rule keep the resume point they recorded.
   Remove `resumed_at=` from existing `track` calls; the argument is no longer
   accepted. Historical run files remain readable.
+- **A run's name is taken once.** Declaring a name its experiment already
+  holds is refused; nothing is inferred from a folder that exists. Another
+  attempt of the same run is asked for by name (`etude run FILE --resume RUN`,
+  or the launcher's own retry), and must give the config and seed the run
+  started with.
 - **Continuation is lineage.** A run may name a parent run, a clock and the
   value it continues from. The parent is unchanged. The report does not join
   the two yet. A launched continuation (`etude continue`) declares this
@@ -115,17 +125,20 @@ Rules a caller can rely on:
   A full queue drops the row and counts it in
   `run.dropped`. `track` is strict and raises on a bad declaration.
 - **The files are the record.** Everything about a run is in one folder named
-  for the run, `RUN/`, in the runs directory and in each storage it delivers
-  to: `run.json` (what it is, its experiment included), `state.json`,
-  `metrics/` (row blocks and their indexes, from every attempt),
-  `artifacts/` (immutable files, including logged row tables) and
-  `checkpoints/` (each named for where its first clock stood, such as
-  `steps-1000.pt` beside `steps-1000.json`). A launched run's own working
-  files are in `out/` beside them (`run.out`). Under the launcher the same folder
-  in the bucket also holds `attempts/ATTEMPT.json` and the pieces of the job's log
-  it names, under `attempts/ATTEMPT.log/`.
-  A run's name is unique in its runs directory whatever its experiment. Config,
-  state and checkpoint records are JSON. Rows are columnar block files (the
+  for the run, `EXPERIMENT/RUN/`, in the runs directory and in each storage it
+  delivers to: `run.json` (its job, seed, config, clocks, parent and inputs),
+  `outcome.json` (how its latest attempt ended), `metrics/` (row blocks and
+  their indexes, from every attempt), `artifacts/` (immutable files,
+  including logged row tables) and `out/` (`run.out`), which holds the saved
+  state in `out/state/` and each published checkpoint in `out/checkpoints/`,
+  named for where its first clock stood (`updates-00001000/`); a checkpoint
+  file copied from outside `out` is in `checkpoints/` with its record.
+  [Training](training.md#what-is-on-disk) shows the layout. Under the launcher
+  the same folder in the bucket also holds `attempts/ATTEMPT.json` and the
+  pieces of the job's log it names, under `attempts/ATTEMPT.log/`.
+  A run's name is unique within its experiment. Runs stored before this
+  layout, in a flat `RUN/` folder with a `state.json` outcome, read the same.
+  Config, outcome, state and checkpoint records are JSON. Rows are columnar block files (the
   layout is described at the top of `src/etude/train/block.py`),
   sealed every few seconds and merged as they accumulate, so a chart reads two
   arrays. Rows logged since the last seal are in a local log and are not yet
@@ -145,117 +158,8 @@ Rules a caller can rely on:
   readable, but cannot establish completion after another attempt starts.
   An attempt that left its block by raising `Stopped` is recorded `stopped`,
   not `failed`, and the report keeps saying “running or unfinished.”
-
-### Out, a stop signal and running again
-
-```python
-# train.py
-from pydantic import BaseModel
-
-from etude.train.records import Step
-from etude.train.run import Stopped, track
-
-
-class TrainConfig(BaseModel):
-    updates: int = 3200
-
-
-def train(config: TrainConfig) -> None:
-    with track(clocks=[Step("updates", "optimizer updates")], config=config.model_dump()) as run:
-        updates = run.until("updates", default=config.updates)
-        state = run.out / "state.pt"  # the same directory on every attempt
-        learner = load(state) if state.exists() else Learner()
-        while learner.update < updates and not run.stopping():
-            loss = learner.step()
-            run.log({"loss": loss}, updates=learner.update)
-            if learner.update % 100 == 0:
-                save(learner, state)  # write beside it, then rename over it
-            if learner.update % 400 == 0:
-                model = save_model(learner, run.out / "checkpoints")
-                run.checkpoint(model, updates=learner.update)
-        save(learner, state)
-        if learner.update < updates:
-            raise Stopped
-```
-
-```python
-# On this computer, without the launcher:
-from etude.train.run import local_launch
-
-from train import TrainConfig, train
-
-with local_launch(out="runs/first", experiment="ppo"):
-    train(TrainConfig())
-```
-
-The training function is written once, as a loop that can be called again.
-Calling it a second time with the same out finds `state.pt` and
-goes on from there; one that had already reached its target does nothing and
-ends finished. Under `etude launch` the launcher makes those calls: the first
-attempt, and another after a lost machine or a planned stop
-([The run promise](launcher.md#the-run-promise)). There is no separate resume
-path to write or test.
-
-- **`run.until("updates", default=config.updates)` gives the absolute target.**
-  The launch's `until` wins for that clock, including on retries and
-  continuations. With no launch target for that clock, it returns the recipe's
-  default. `etude continue --run RUN --until updates=6400` therefore extends
-  this loop without changing its config. The clock must be declared in
-  `track(clocks=...)`. Values are numeric, including fractional time clocks;
-  a loop that requires an integer count can use `int(run.until(...))`.
-- **`run.out` is a `Path` to out**, a directory that exists. It belongs to
-  the run, not to an attempt: retries reuse it on the same machine; on another
-  machine they restore its portable files as last carried. Keep whatever a later
-  call needs to go on there: learner and optimizer state, replay data, a
-  receipt for a check that need not run twice.
-- **Under a launch Etude carries it.** `out` is `RUN/out/` in the run's folder,
-  on the machine (`ETUDE_OUT`) and in storage (`PREFIX/RUN/out/`). The
-  courier sends its files as they are written and sends a file again after it
-  changes. Before an attempt starts on another machine the launcher restores
-  the whole directory, as last carried. Files are carried one at a time, so
-  write each atomically (a name ending `.partial`, then rename; a `.partial`
-  file is never sent) and keep what one resume needs in one file. A large
-  state file is uploaded each time it is saved, so save it as often as you
-  would pay to upload it. Anything under a folder whose name starts with `.`
-  stays on the machine. Each completed delivery records which files belong
-  in `out`: deleting a file removes it from the next recovery or continuation,
-  and recovery clears stale out files on a reused host. Storage retains
-  deleted checkpoint bytes for explicit checkpoint reads; they do not reappear
-  in `out`. An empty directory stays empty.
-- **Outside a launch the caller names it.** `local_launch(out=DIR,
-  experiment=NAME)` says where `out` is and which experiment the run belongs
-  to, for every `track` in its block, so a command line can call the training
-  function as a launch does and neither handles environment variables. The
-  directory is made if missing. The run is named for the directory, and its
-  record is kept inside it, in `DIR/etude/`: read it with
-  `etude report FILE.py --source DIR`. Nothing carries a local `out`
-  anywhere. `track` outside both a launch and `local_launch` has no out,
-  and `run.out` raises `EtudeError("out_not_named")`.
-- **`run.stopping()` says when to save and stop.** Ask once per step. It is
-  true once a stop was requested (`ETUDE_STOP_FILE` exists), or once the
-  attempt's deadline (`ETUDE_DEADLINE`) is nearer than the slowest step so
-  far, measured as the longest time between two calls. The first call knows no
-  step time and is true only when a stop was requested or the deadline has
-  passed. With neither variable set, as on this computer, it is always false;
-  set them to have another scheduler stop the loop. The reserve covers one
-  more step, not the save after it: a save that takes longer than a step
-  should also happen periodically, as above.
-- **`raise Stopped` says the loop stopped on purpose**, state saved, short of
-  its target. Raised out of the `with track(...)` block it records the attempt
-  as `stopped`. Under a launch the run is then called again while it has
-  hours, dollars and attempts left; any other exception is a failure and ends
-  the run. Outside a launch the exception reaches the caller, and calling
-  again resumes. Returning normally short of the target would read as
-  finished.
-- **A checkpoint saved inside `out` is recorded where it is.**
-  `run.checkpoint(run.out / "checkpoints" / "update-400.pt", updates=400)`
-  records the file's address and digest without a second copy on disk or in
-  storage. Write each such file once and do not change or remove it: a reader
-  verifies the digest. A file anywhere else is copied into the run's
-  `checkpoints/` as before.
-- **Recording again is harmless.** A function called again after its last step
-  records its final checkpoint a second time; the same file at the same
-  clocks returns the reference already held, on any attempt.
+  An attempt refused before it began, such as a resume with another config,
+  records nothing: a finished run stays finished.
 
 ### Row tables for training results
 
@@ -297,7 +201,7 @@ When copying a run, include `artifacts/`. Readers resolve references beside the
 selected metric block, so relocated runs keep working.
 
 ```python
-from etude.run.storage import default_root
+from etude.tracking.storage import default_root
 from etude.train.read import read
 
 history = read(default_root(), "self-play", "policy-seed-0")
@@ -373,47 +277,43 @@ before the machine is deleted if storage is still unavailable.
 
 ### Checkpoints
 
+```sh
+uv run etude checkpoints --source s3://my-bucket/runs
+```
+
+[Training](training.md#checkpoints) covers publishing: `run.checkpoint(policy=model)`
+for named objects, `run.checkpoint(path)` for a file of your own format.
+
 ```python
-# A local file is stored: copied into the run's directory, digested, and
-# delivered to your bucket with the run's other files. An address such as
-# "s3://..." records a reference only.
 model = run.checkpoint(
     "out/latest.pt", updates=63_000, learner_transitions=n, training_seconds=t, tags=["periodic"]
 )
 run.tag(model, "best")  # tags can change later
 ```
 
-- **A checkpoint is a recorded model**: the saved artifact and where every
-  declared clock stood, numbered within the run from one, across every attempt
-  on every machine. `checkpoint` returns its reference; pass that to whatever
-  evaluates the model.
-- **Etude stores the file, in your storage.** A file in `run.out` is recorded
-  in place and must stay unchanged. Other local files are copied to
-  `PREFIX/RUN/checkpoints/CLOCK-VALUE.EXT` before `checkpoint` returns, so the
-  caller can overwrite its source. Both are uploaded before their records.
-  A copied JSON model uses `.json.data` to distinguish it from its record.
-  Removing stored files by rule is not built.
+- **A checkpoint is a published model**: a folder of named files, or one
+  file, and where every declared clock stood, numbered within the run from
+  one, across every attempt on every machine. `checkpoint` returns its
+  reference; pass that to whatever evaluates it.
+- **Etude stores it, in your storage.** Named objects are written to
+  `out/checkpoints/CLOCK-VALUE/` with a `checkpoint.json`. A file already in
+  `run.out` is recorded in place and must stay unchanged. Any other local file
+  is copied to `checkpoints/CLOCK-VALUE.EXT` before `checkpoint` returns, so
+  the caller can overwrite its source. All are uploaded before their records.
+  A folder's digest is over a manifest of its files' digests. An address such
+  as `s3://...` records a reference only. Removing stored files by rule is
+  not built.
 - **Nothing recorded is replaced.** Recording the same model at the same
   coordinate again returns the existing reference and sends nothing. A
   different model at a recorded coordinate is a new checkpoint,
   `CLOCK-VALUE.ordinal-N.EXT` beside the first. A name some file already
   holds is never reused, even one an interrupted attempt kept without its
   record. Only tags change later.
-- **Resume from the latest**, when the job keeps no state of its own in
-  [`run.out`](#out-a-stop-signal-and-running-again). A later
-  attempt sees every checkpoint record, and ordinals continue. On another
-  machine the launcher restores the latest copied checkpoint and files still
-  in out; a removed out checkpoint's record can refer to an unavailable file.
-  A continuation carries out and inherits the latest checkpoint whenever its
-  file is still available: a member of out or copied into `checkpoints/`.
-  Empty out with no available latest checkpoint is refused before queueing;
-  the error distinguishes never-saved state from a removed out checkpoint.
-  Etude never implicitly restores a removed checkpoint or selects an older
-  one. Use `etude continue --ordinal N` to choose a checkpoint explicitly;
-  see [continuation](launcher.md#the-run-promise) for target and lineage rules.
-  The inherited checkpoint is available until the child records its own.
-  `run.latest_checkpoint()` relocates
-  the address when its file is present here; it returns `None` with no record.
+- **A later attempt sees every checkpoint.** `run.checkpoints()` lists them,
+  oldest first, and ordinals continue. They are part of `out`, so they are
+  restored with it on another machine and copied with it into a continuation
+  ([the launcher](launcher.md#the-run-promise)). Carrying a run on uses its
+  saved state, not a checkpoint.
 - **Readers give storage addresses.** `etude checkpoints --source` and
   `etude.train.read` report each file where it is in the source read, not
   where the machine that wrote it kept it; a record whose file has not arrived

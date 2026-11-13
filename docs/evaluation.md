@@ -2,7 +2,7 @@
 
 Play players against each other in parallel workers, hand Etude whatever tables
 your game code produces, and query each experiment's results as one DuckDB
-database. Tournaments decide which matches to play: each checkpoint of a model
+database. Tournaments decide which matches to play: each checkpoint of a run
 through a benchmark's matchups as it trains, or hand-picked players in a round
 robin. Evaluation is independent of training.
 
@@ -51,7 +51,7 @@ def play(match: Match) -> Tables:  # importable by name: workers are fresh proce
 
 
 # An Inference seat is filled by the checkpoint being held, run by your inference code
-# and playing with your config (a Pydantic model or JSON): together, a Model.
+# and playing with your config (a Pydantic model or JSON): together, a player.
 net = ["players/net.py"]
 progress = Benchmark(
     name="anchors",
@@ -125,21 +125,39 @@ evaluate(
 )
 ```
 
-- **Players.** A player is whatever takes a seat: a `Model`, a checkpoint
-  and how it plays (`Inference`), or `Code`, such as a heuristic. A model's
+- **Players.** A player is whatever takes a seat: a checkpoint and the code
+  that plays it (`Inference`), or `Code` alone, such as a heuristic. "Model"
+  is left to mean your network. A checkpoint player's
   key is the checkpoint's own key plus its inference config; code's is its
   name plus its config. A config is free JSON or a Pydantic model. One
-  checkpoint at two search budgets is two models. A checkpoint's key
-  (`CheckpointKey`) is its training run and file name
-  (`ppo-1/checkpoints/updates-500.pt`) or, for any other, its address; never
-  its bytes, so two runs warm-started from one file hold two checkpoints,
-  each evaluated. An outside model is a `Model` whose checkpoint is an
-  address. `Inference(source=["players/net.py"], config=...).model(ref)` and
+  checkpoint at two search budgets is two players. A checkpoint's key
+  (`CheckpointKey`) is its training run and name
+  (`ppo-1/checkpoints/updates-00000500`) or, for any other, its address; never
+  its bytes, so two runs started from one file hold two checkpoints,
+  each evaluated. An outside player is one whose checkpoint is an
+  address. `Inference(source=["players/net.py"], config=...).player(ref)` and
   `Code(name="heuristic", source=[...])` name the code that plays: its commit
   and source digest are its `Version`, recorded with each match
   (`seats.commit`, `seats.source`) but not part of the key, so changed code
   reuses what was played. Joins use the key, encoded (`players.player`,
-  `seats.player`).
+  `seats.player`). Eval runs stored before this wording keep `"kind":
+  "model"` and read the same.
+- **A checkpoint is a folder or a file.** `play` finds it at the player's
+  `checkpoint.artifact.uri`. A checkpoint a run published from named objects
+  (`run.checkpoint(policy=model)`, [Training](training.md#checkpoints)) is a
+  folder holding `checkpoint.json`, which names its files, and the playing
+  code loads the ones it needs:
+
+  ```python
+  folder = Path(urlparse(player.checkpoint.artifact.uri).path)
+  files = json.loads((folder / "checkpoint.json").read_text())["files"]
+  policy.load_state_dict(torch.load(folder / files["policy"]))
+  ```
+
+  One checkpoint holding several models is still one checkpoint. Two
+  `Inference` seats with different source seat it as two players: one that
+  loads every file to draft, build and play, and one that loads only
+  `player.pt`. A checkpoint recorded as a single file is that file.
 - **Execution setup.** Return `Result(tables=tables, execution={"device": "cuda:0",
   "compute": "shared-eval-v2"})` from `play` to record the setup actually used.
   This JSON stays with each result (`MatchRecord.execution`, `matches.execution`),
@@ -155,7 +173,7 @@ evaluate(
   A tracked checkpoint's `ref` fills `at` from its run's clocks; give it
   yourself for a checkpoint no Etude run recorded. It is carried to each
   match's seats (`seats.at`, `players.at`) so a report can place the point,
-  and is part of no key: correcting it never forks a model or replays a
+  and is part of no key: correcting it never forks a player or replays a
   match. Seats that disagree are listed in `players.at_conflict`; a report
   draws the latest and notes the earlier.
 - **Which learner it is.** `line` names the learner a checkpoint belongs
@@ -278,7 +296,7 @@ evaluate(
   matchup ever defined for every checkpoint held, skipping what is delivered.
 - **Pairs of checkpoints.** A matchup with no inference seat is played once,
   not per checkpoint, so chosen checkpoints can meet: seat each as
-  `Inference(...).model(ref)`, the model an inference seat would make of it. Build the
+  `Inference(...).player(ref)`, the player an inference seat would make of it. Build the
   benchmark from the checkpoints saved so far, such as each against the one
   before it, and hold it in batch whenever more appear; each pass plays only
   the pairs not yet delivered. A hold on the go leaves these matchups to batch.
@@ -346,7 +364,7 @@ from arena import play, progress  # play(match: Match) -> Tables; progress is a 
 def runs(checkpoint: str, sha256: str, size_bytes: int) -> Job:
     weights = Input(
         name=checkpoint,
-        key=f"etude/launch/ppo-1/checkpoints/{checkpoint}",  # PREFIX/RUN/checkpoints/NAME
+        key=f"etude/launch/ppo/ppo-1/out/checkpoints/{checkpoint}",  # PREFIX/EXPERIMENT/RUN/out/checkpoints/NAME
         sha256=sha256,
         size_bytes=size_bytes,
         run="ppo-1",  # the checkpoint's key: its run, and the file's name
@@ -363,14 +381,14 @@ def runs(checkpoint: str, sha256: str, size_bytes: int) -> Job:
 ```
 
 ```sh
-etude launch eval.py --rent cpu8 --checkpoint updates-500 --sha256 … --size-bytes 1048576
+etude launch eval.py --rent cpu8 --checkpoint updates-00000500 --sha256 … --size-bytes 1048576
 ```
 
 An evaluation job holds a tournament on a launched machine, and nobody writes
 its command: Etude calls `hold` there with `play`, imported by name from your
 checkout, and the checkpoint, which reaches the machine as the job's input,
 verified by digest. The input's run and file name are the checkpoint's key,
-and its file is each model's `checkpoint.artifact.uri`, which `play` opens. A
+and its folder or file is each player's `checkpoint.artifact.uri`, which `play` opens. A
 round robin takes `enter=` players instead. The eval run is the launched run, so its tables reach the
 machine's storage with the run's other files and `statsdb` finds them there.
 Holding nothing new (batch) is refused: a launched job reads no other eval
@@ -406,7 +424,7 @@ def eval(state: ExperimentState) -> list[Job]:
         Matchup(
             name=f"{new.name} vs {old.name}",
             tags=("consecutive",),
-            players=(new.model(direct), old.model(direct)),
+            players=(new.player(direct), old.player(direct)),
             conditions=deals,
             games=8,
         )
@@ -417,7 +435,7 @@ def eval(state: ExperimentState) -> list[Job]:
             Matchup(
                 name=f"final vs {old.name}",
                 tags=("endpoint",),
-                players=(run.final.model(direct), old.model(direct)),
+                players=(run.final.player(direct), old.player(direct)),
                 conditions=deals,
                 games=8,
             )
@@ -454,7 +472,7 @@ as a launched one does, unless `--retry-failed`.
   *values)` and `tagged(tag)` choose by ordinal, coordinate or tag, and
   `final` is the last checkpoint once a run has finished.
 - **What `eval` returns.** Evaluation jobs holding a benchmark for the
-  checkpoints it chose. Seat a chosen checkpoint with `checkpoint.model(inference)`
+  checkpoints it chose. Seat a chosen checkpoint with `checkpoint.player(inference)`
   to make a matchup of fixed players, played once rather than per checkpoint.
   `tags` mark matchups for readers, such as pairs a rating fit leaves out.
 - **A pass.** For each job, the matches exactly what `eval` returned calls
@@ -498,7 +516,7 @@ as a launched one does, unless `--retry-failed`.
 
 `etude report ppo.py` draws the experiment's evals beside its training
 ([tracking](tracking.md#reports)), following the file's `report()`. Each
-model is drawn where its latest seat says it stood, else, found by its
+checkpoint player is drawn where its latest seat says it stood, else, found by its
 checkpoint's key, where its training run stood when it saved it; a checkpoint
 no training run recorded is drawn in its line's curve. Code and checkpoints
 with no position are anchors, drawn once. A checkpoint `eval(state)` chose that no

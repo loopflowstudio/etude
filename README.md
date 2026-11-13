@@ -17,6 +17,7 @@ def runs() -> Job:
         train,
         config=TrainConfig(lr=1e-3),
         smoke=TrainConfig(updates=1),  # how to run it tiny, for `etude smoke`
+        seeds=(0, 1, 2),  # three runs of one job
         max_hours=2,
         max_usd=Decimal(4),
     )
@@ -24,6 +25,7 @@ def runs() -> Job:
 
 ```python
 # train.py
+import torch
 from pydantic import BaseModel
 
 from etude.train.records import Step
@@ -36,27 +38,35 @@ class TrainConfig(BaseModel):
 
 
 def train(config: TrainConfig) -> None:
-    run = track(clocks=[Step("updates", "optimizer updates")])
-    updates = int(run.until("updates", default=config.updates))
-    for update in range(1, updates + 1):
-        loss = train_one_update(config.lr)
-        run.log({"loss": loss}, updates=update)
-        if update % 500 == 0:
-            run.checkpoint(save_model(), updates=update)
-    run.finish()
+    with track(clocks=[Step("updates", "optimizer updates")], config=config) as run:
+        torch.manual_seed(run.seed)
+        model, optimizer = build(config)
+        run.resume(model=model, optimizer=optimizer)  # loads the last save, if there is one
+        for update in run.steps("updates", to=config.updates):
+            run.log(one_update(model, optimizer))
+            run.save()
+            if update % 500 == 0:
+                run.checkpoint(policy=model)
+        run.checkpoint(policy=model)
 ```
 
 ```sh
+etude run train.py           # one new run on this computer, without the launcher
 etude smoke job.py           # one tiny update here, spending nothing
-etude launch job.py          # runs on this computer; --smoke smokes first, --pool P for
-                             # machines you own, --rent R to rent CPU or GPU machines, or both
+etude launch job.py --cohort baseline   # its three runs, on this computer; --smoke smokes
+                             # first, --pool P for machines you own, --rent R to rent, or both
 etude status                 # where runs stand
 etude logs --run RUN         # preparation, every attempt, cleanup
 etude report ppo.py --open   # experiment ppo's evals, perf and ML details, as one page
 etude report . --serve       # every experiment file here, with a live index
 ```
 
-`job.py` supplies the experiment name `job`; the recipe names none.
+The loop is yours: Etude owns no part of learning. `train` is one attempt at
+the whole job, and it can be called again. A run that loses its machine, or
+stops for a deadline, is called again on another with what `run.save()` kept,
+and reads back as one run ([Training](docs/training.md)). `job.py` supplies
+the experiment name `job`; `train` names none.
+
 Etude decides the job's command: on the machine it imports `train` from your
 checkout and calls it with the config, validated back into a `TrainConfig`. A
 config `train` cannot take is refused before anything launches. An evaluation
@@ -72,9 +82,8 @@ evaluation(
 ```
 
 Everything a run records goes to your own directory or S3 bucket. There is no
-server to run and no account to make. A run that loses its machine is called
-again on another, with its [out](docs/tracking.md#out-a-stop-signal-and-running-again)
-and checkpoints restored, and reads back as one run.
+server to run and no account to make. Saved state and checkpoints are JSON
+and your framework's own files, [readable without Etude](docs/training.md#what-is-on-disk).
 
 ## Install
 
@@ -88,8 +97,10 @@ uv add 'etude-sdk[s3]'             # with S3 or R2 storage
 
 ## Read more
 
-- [Tracking](docs/tracking.md): runs, clocks, row tables, checkpoints, reports.
-- [Evaluation](docs/evaluation.md): players (models and code) playing each other in parallel, benchmarks and round robins, queried with DuckDB.
+- [Training](docs/training.md): the `train` function, seeds, carrying a run
+  on, checkpoints, `etude run`.
+- [Tracking](docs/tracking.md): rows, row tables, storage, reading runs back, reports.
+- [Evaluation](docs/evaluation.md): players (checkpoints and code) playing each other in parallel, benchmarks and round robins, queried with DuckDB.
 - [The launcher](docs/launcher.md): typed jobs, pools, SSH hosts, rented
   machines, cohorts, limits and recovery.
 
