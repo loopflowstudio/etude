@@ -151,10 +151,10 @@ def test_cohort_git_and_database_counts(
         ),
         # Client composition includes four modules each for Vast and Lium, the
         # storage socket policy it forwards to workers, and its smoke of jobs.
-        (["pools"], 53, ("numpy", "boto3", "etude.launch.worker")),
+        (["pools"], 54, ("numpy", "boto3", "etude.launch.worker")),
         (
             ["worker", "{directory}"],
-            33,  # includes the storage socket policy every request applies
+            34,  # includes the storage socket policy every request applies
             (
                 "numpy",
                 "boto3",

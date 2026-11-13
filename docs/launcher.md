@@ -1100,7 +1100,8 @@ execution cannot safely be repeated.
 The launcher has no checkpoints of its own: out and checkpoints
 are its tracked files. They are carried to the bucket as they are written, so
 they survive pod deletion. A later attempt on the same machine finds the
-directory where it was. On a fresh machine with a bucket it is given back,
+directory where it was; if the directory is gone, as after a wiped disk, it is
+restored like a fresh machine's. On a fresh machine with a bucket it is given back,
 before the job starts, the run's records, its whole `out/` as last carried and
 its latest checkpoint if stored under `checkpoints/`. A checkpoint recorded
 inside `out/` is restored only while it belongs to that directory. To an owned

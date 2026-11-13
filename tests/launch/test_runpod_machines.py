@@ -593,9 +593,12 @@ def test_a_pods_checkpoint_reaches_an_owned_host_without_its_storage_from_the_bu
     folder = f"etude/t/{first}/"
     copy = tmp_path / "copy"
     for key, body in c.storage.objects.items():
-        if key.startswith(folder + "checkpoints/") or key == folder + "run.json":
+        if key.startswith((folder + "checkpoints/", folder + "out/")) or key == folder + "run.json":
             (copy / key.removeprefix(folder)).parent.mkdir(parents=True, exist_ok=True)
             (copy / key.removeprefix(folder)).write_bytes(body)
+    # Every launched run has out, carried with its membership even when empty.
+    assert folder + "out.json" in c.storage.objects
+    (copy / "out").mkdir(exist_ok=True)
     assert c.service.held(first) == restore_set(copy)
 
     parent = c.scheduler.record(first)
@@ -1399,7 +1402,7 @@ def test_a_retry_on_a_fresh_machine_resumes_from_the_runs_latest_checkpoint(
 
     fresh, _, there = machine(tmp_path / "two", storage)
     asked = len(storage.asked)
-    fresh.restore(bootstrap.restore)
+    fresh.restore(bootstrap.restore, [retry])
     reads = [what.partition("?")[0] for method, what in storage.asked[asked:] if method == "GET"]
     # The declaration and every record, then only the file the latest record names.
     assert reads == [
@@ -1506,7 +1509,7 @@ def test_a_retry_on_a_fresh_machine_never_reuses_a_name_storage_holds(tmp_path: 
     journal.prepare(Packet(session="r2", deadline=None, work=(retry,)))
     bootstrap = Bootstrap.model_validate_json(storage.objects["etude/sessions/r2/bootstrap.json"])
     fresh, _, there = machine(tmp_path / "two", storage)
-    fresh.restore(bootstrap.restore)
+    fresh.restore(bootstrap.restore, [retry])
     assert not (there / "checkpoints/steps-3.pt").exists()  # listed, never read
     _retrained(fresh, there, tmp_path / "one" / "weights.pt")
     _intact(storage)

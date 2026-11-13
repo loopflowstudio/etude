@@ -342,8 +342,8 @@ def runs(python: str) -> Job:
         continued_config(record, '{"typo":4}')
     with pytest.raises(LauncherError, match="invalid continuation config"):
         continued_config(record, '{"updates":"no"}')
-    for changes in ("[]", '{"updates":', ""):
-        with pytest.raises(LauncherError, match="invalid continuation config"):
+    for changes in ("[]", '{"updates":', "", "rate=0.25"):
+        with pytest.raises(LauncherError, match="expected a JSON object"):
             continued_config(record, changes)
     next_run = continue_from(record, "updates=4", source=source)
     assert next_run.job.config == record.spec.config

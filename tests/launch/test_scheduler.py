@@ -694,7 +694,10 @@ def test_a_retry_resumes_its_run_without_creating_a_parent_run(tmp_path: Path) -
     b.run(1)
     second = b.scheduler.attempts(run)[1]
     works = [b.service.sessions[a.session].packet.work[0] for a in (first, second)]
-    assert [(w.run, w.resumes) for w in works] == [(run, False), (run, True)]
+    assert [(w.run, w.resumes, w.here) for w in works] == [
+        (run, False, False),
+        (run, True, False),
+    ]
     b.run(601)
     assert b.scheduler.read(run).outcome == "succeeded"
     assert len(b.scheduler.runs(done=True)) == 1

@@ -195,3 +195,42 @@ directory: `~/.etude/cache` holds ~200k files and each cached range read scans t
 so bucket reads take minutes there. `tests.run.storage.MeasuredStorage` counts requests
 (needs `PYTHONPATH=.`). Delete the prefix afterwards with `storage.delete` over
 `storage.keys("")`.
+
+## Etude: a recipe's out, planned stops and retries on a fresh host
+
+Local recipe path: a lab with `train.py` written as `docs/tracking.md` shows
+(state in `run.out`, `raise Stopped`) and a driver calling it under
+`local_launch(out=DIR, experiment=NAME)`. Stop it with `ETUDE_STOP_FILE=FILE`
+and `touch FILE` from a background `sleep`; read rows with
+`etude.train.read.read(DIR, NAME, basename(DIR)).points(metric, clock).x`
+(`metrics()` is a method) and attempt starts from `DIR/etude/RUN/metrics/*.json`
+(`resumed_at`). An experiment file needs `report()` or `eval(state)`; a plain
+job file has no experiment and `track()` raises `experiment_not_named`.
+
+Manabot acceptance without touching its checkout: `git ls-files -z | rsync -a
+--from0 --files-from=- . /tmp/X/` plus the in-tree `managym/_managym.*.so`; then
+`uv venv -p 3.13` and `uv pip install` manabot's dependency list (without
+managym, which would build Rust) with `-e <this checkout>`, and `--no-deps -e .`.
+Apply the cutover in `scratch/questions.md` and run `.venv/bin/manabot train
+--recipe belief --out DIR` (about 85 s; a rerun about 13 s).
+
+SSH boxes when `docker build` hangs on registry metadata: `docker run -d` the
+cached `ghcr.io/astral-sh/uv:python3.12-bookworm-slim` (amd64 here, so pass
+`--platform linux/amd64`), `apt-get install openssh-server git iptables procps`
+inside, copy the key, `docker commit --change 'CMD ["/usr/sbin/sshd","-D","-e"]'`.
+The job repo must install this branch on the box: build a wheel into
+`wheels/`, depend on `etude-sdk[s3]` with `[tool.uv.sources] etude-sdk = {path =
+"wheels/…whl"}`, and `uv lock --upgrade-package etude-sdk` after each rebuild
+(same version, new hash). Wrap Doppler in a script (`withr2 CMD…`): zsh does
+not word-split a command stored in a variable.
+
+To place a retry on a fresh host deterministically: launch, `etude pool off P`
+at once, `etude wait RUN` under `perl -e 'alarm 100'` until attempt 1 ends
+`stopped`, then `docker rm -f` and `docker run` the box again on the same port
+(`ssh-keygen -R '[127.0.0.1]:PORT' -f KNOWN_HOSTS`), `etude pool on P`, wait.
+Grep `etude logs --run RUN` for the job's own lines. Per-session bucket reads
+are in `sessions/S/out/usage.jsonl`. Destroying an owned host mid-attempt is
+never declared lost (no deadline): the run stays `running`, and cancelling
+leaves it `stopping`. Use a fresh `ETUDE_HOME` and prefix after installing an
+interim schema. Afterwards remove the containers and delete the prefixes
+(`aws s3 rm --recursive` under Doppler, as above).

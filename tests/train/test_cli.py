@@ -31,12 +31,12 @@ from tests.experiments import experiment_file
         ),
         (
             ["sync", "--directory", "{directory}"],
-            18,
+            19,  # etude.out: out membership
             ("boto3", "numpy", "etude.page", "etude.train.report"),
         ),
         (
             ["sync", "--directory", "{directory}", "--seal"],
-            23,
+            25,  # etude.out, and etude.stopping for Stopped
             ("boto3", "etude.page", "etude.train.report"),
         ),
     ],

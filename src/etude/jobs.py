@@ -399,12 +399,21 @@ def continued_config(parent: RunRecord, changes: str) -> BaseModel:
     values = kind.model_validate_json(parent.spec.config or "{}").model_dump(mode="json")
     try:
         fields = TypeAdapter(dict[str, JsonValue]).validate_json(changes)
-        unknown = fields.keys() - kind.model_fields.keys()
-        if unknown:
-            raise LauncherError(f"unknown continuation config fields: {', '.join(sorted(unknown))}")
+    except ValidationError:
+        raise LauncherError(
+            'invalid continuation config: expected a JSON object, such as {"rate":0.001}'
+        ) from None
+    unknown = fields.keys() - kind.model_fields.keys()
+    if unknown:
+        raise LauncherError(f"unknown continuation config fields: {', '.join(sorted(unknown))}")
+    try:
         return kind.model_validate({**values, **fields})
     except ValidationError as error:
-        raise LauncherError(f"invalid continuation config: {error}") from None
+        problems = "; ".join(
+            f"{'.'.join(str(part) for part in problem['loc'])}: {problem['msg']}"
+            for problem in error.errors()
+        )
+        raise LauncherError(f"invalid continuation config: {problems}") from None
 
 
 def _hold(evaluation: Evaluation) -> None:

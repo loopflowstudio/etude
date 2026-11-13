@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 from collections import Counter
 from hashlib import sha256
 from pathlib import Path
@@ -98,7 +99,7 @@ def test_courier_hashes_mutable_out_and_restores_every_file_once(
     assert len(storage.asked) == before + 1  # one listing; links make no requests
     fresh, _, restored = machine(tmp_path / "fresh", storage)
     before = len(storage.asked)
-    fresh.restore(links)
+    fresh.restore(links, [work])
     reads = [key.partition("?")[0] for method, key in storage.asked[before:] if method == "GET"]
     assert reads == [
         "etude/run1/out.json",
@@ -134,8 +135,50 @@ def test_courier_hashes_mutable_out_and_restores_every_file_once(
     storage.objects["etude/run1/out/state"] = b"truncated"
     broken, _, broken_root = machine(tmp_path / "broken", storage)
     with pytest.raises(StorageUnavailable, match="changed length"):
-        broken.restore(links)
+        broken.restore(links, [work])
     assert not (broken_root / "out/state").exists()
+
+
+def test_a_retry_on_the_same_machine_restores_out_only_when_its_folder_is_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reimaged host, or another behind the same address, resumes from storage, not zero."""
+    storage = Observed()
+    courier, _, root = machine(tmp_path / "box", storage)
+    monkeypatch.setenv("ETUDE_OUT", str(root / "out"))
+    with track(
+        experiment="e", run="run1", clocks=[Step("updates", "updates")], directory=root.parent
+    ) as run:
+        (run.out / "state").write_bytes(b"update 12")
+    courier.carry_out()
+    journal = BucketJournal(
+        Place(name="east", bucket="b", prefix="etude", provider="s3", region="us-east-1"),
+        Bucket("b", "us-east-1", Keys(access_key="AKIA", secret_key="secret"), storage),
+    )
+    work = Work(
+        attempt="a2",
+        command="true",
+        limit_seconds=30,
+        limit_kind="out_of_time",
+        seed=None,
+        until=None,
+        config=None,
+        repo=None,
+        commit=None,
+        run="run1",
+        resumes=True,
+        here=True,
+    )
+    links = journal._restore([work])
+    (root / "out/state").write_bytes(b"update 13, not yet carried")
+    before = len(storage.asked)
+    courier.restore(links, [work])
+    assert storage.asked[before:] == []
+    assert (root / "out/state").read_bytes() == b"update 13, not yet carried"
+    wiped, _, again = machine(tmp_path / "wiped", storage)
+    shutil.rmtree(again)  # the same machine, its disk wiped
+    wiped.restore(links, [work])
+    assert (again / "out/state").read_bytes() == b"update 12"
 
 
 @pytest.mark.parametrize("grants", [True, False])
@@ -200,7 +243,7 @@ def test_deleted_files_stay_absent_after_restart_recovery_and_continuation(
     (restored / "out").mkdir()
     (restored / "out/stale").write_bytes(b"old host state")
     before = len(storage.asked)
-    fresh.restore(links)
+    fresh.restore(links, [work])
     reads = [key.partition("?")[0] for method, key in storage.asked[before:] if method == "GET"]
     assert reads == [member, "etude/run1/checkpoints/updates-2.json", "etude/run1/run.json"]
     assert list((restored / "out").iterdir()) == []
@@ -237,7 +280,7 @@ def test_deleted_files_stay_absent_after_restart_recovery_and_continuation(
     assert OutFiles.model_validate_json(storage.objects[member]).files == (
         OutFile(key="out/state", sha256=sha256(b"saved").hexdigest(), size_bytes=5),
     )
-    fresh.restore(journal._restore([work]))
+    fresh.restore(journal._restore([work]), [work])
     assert (restored / "out/state").read_bytes() == b"saved"
     assert not (restored / "out/final.pt").exists()
     assert storage.writes["etude/run1/out/state"] == 2

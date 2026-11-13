@@ -51,9 +51,12 @@ class Work(Record):
     repo: str | None
     commit: str | None
     run: str  # names the run's folder in storage, shared by all its attempts
-    # A retry on another machine: restore its run's records and out files
-    # before starting. On the same machine the existing files are newer.
+    # A retry: restore its run's records and out files before starting. When
+    # its latest attempt ran on this machine (`here`), the folder there is
+    # newer than storage and is restored only if it is gone: a wiped disk, or
+    # another machine behind the same address.
     resumes: bool = False
+    here: bool = False
     job: str | None = None
     job_name: str | None = None
     cohort: str | None = None

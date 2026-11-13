@@ -15,7 +15,7 @@ import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextvars import copy_context
 from dataclasses import dataclass
@@ -295,18 +295,22 @@ class Courier:
             finally:
                 self._carry_usage()
 
-    def restore(self, links: dict[str, ReadLink]) -> None:
+    def restore(self, links: dict[str, ReadLink], works: Sequence[Work]) -> None:
         """Put back what storage holds of a resumed run's folder, before its job starts.
 
         `links` name objects and lengths by RUN/KEY. Keep existing immutable
         records, replace out files, and verify the latest copied checkpoint.
-        What is restored counts as sent, so it is not uploaded back. Checkpoint
-        names left in storage stay taken (`etude.carriage.taken`).
+        A run whose latest attempt ran here keeps its folder, which is newer
+        than storage, unless the folder is gone. What is restored counts as
+        sent, so it is not uploaded back. Checkpoint names left in storage stay
+        taken (`etude.carriage.taken`).
         """
+        held = {w.run for w in works if w.here and (self._track_root / w.run).is_dir()}
         by_run: dict[str, dict[str, ReadLink]] = {}
         for name, url in links.items():
             run, _, key = name.partition("/")
-            by_run.setdefault(run, {})[key] = url
+            if run not in held:
+                by_run.setdefault(run, {})[key] = url
         with observe(self._retain_transfer), attribute(session=self._home.name):
             try:
                 with limit_time(_until_deadline()):
@@ -428,7 +432,7 @@ class Courier:
                     # One work's files, so its run's usage counts them.
                     with attribute(run=entry.work.run, attempt=attempt):
                         self.fetch(entry.fetch)  # files precede executable work
-                    self.restore(entry.restore)
+                    self.restore(entry.restore, [entry.work])
                     self.initialize_out(entry.work)
                 except Mismatch as error:
                     # Permanent: hand the work over so its setup fails and says why,
@@ -775,7 +779,7 @@ def _run(
                 attempt=None if only is None else only.attempt,
             ):
                 courier.fetch(bootstrap.fetch)
-            courier.restore(bootstrap.restore)
+            courier.restore(bootstrap.restore, packet.work)
             for work in packet.work:
                 courier.initialize_out(work)
         write_log("source fetch", "completed")
