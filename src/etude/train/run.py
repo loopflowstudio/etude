@@ -209,6 +209,9 @@ def local_launch(*, out: Path | str, experiment: str) -> Iterator[None]:
     Environment settings are restored on exit, including after an exception.
     Like process environment itself, this context is not thread-local.
     """
+    warnings.warn(
+        "local_launch is replaced by etude run; removed in 0.5", DeprecationWarning, stacklevel=2
+    )
     folder = Path(out).resolve()
     folder.mkdir(parents=True, exist_ok=True)
     launch = {
@@ -216,6 +219,7 @@ def local_launch(*, out: Path | str, experiment: str) -> Iterator[None]:
         "ETUDE_EXPERIMENT": experiment,
         "ETUDE_RUN": re.sub(r"[^A-Za-z0-9_.-]", "-", folder.name),
         "ETUDE_TRACK_DIR": str(folder / "etude"),
+        "ETUDE_RESUME": "1",
     }
     previous = {key: os.environ.get(key) for key in launch}
     os.environ.update(launch)
@@ -353,7 +357,8 @@ class Run:
             host=socket.gethostname(),
             attempt=os.environ.get("ETUDE_ATTEMPT"),
             pod=os.environ.get("RUNPOD_POD_ID"),
-            first_row=True,
+            commit=os.environ.get("ETUDE_COMMIT"),
+            until=None if self._until_clock is None else f"{self._until_clock}={self._until_value}",
         )
         self._save("metrics", self._writer_id, self._attempt)
         seal_logs(self.files.root, self._columns)  # what an earlier process left unsealed
@@ -966,7 +971,7 @@ class Run:
                     stream.flush()
                     if not self._attempt.resumed_at:
                         self._attempt = self._attempt.model_copy(
-                            update={"resumed_at": dict(row.clocks)}
+                            update={"resumed_at": dict(row.clocks), "first_row": True}
                         )
                         self._save("metrics", self._writer_id, self._attempt)
                     builder.add(row.wall_ms, row.clocks, row.values)
@@ -1153,7 +1158,7 @@ class Run:
             self._writer.join(max(0.0, deadline - time.monotonic()))
             counters = RunCounters(dropped=self.dropped, incomplete=self.incomplete)
             DirectoryStorage(self.files.root).put(
-                "state.json",
+                "outcome.json",
                 RunState(state=state, counters=counters, writer=self._writer_id)
                 .model_dump_json()
                 .encode(),
@@ -1210,8 +1215,9 @@ def track(
     segment_rows: int = 5_000,
     strict: bool = False,
     metric_name_limit: int | None = 1000,
+    resume: bool = False,
 ) -> Run:
-    """Declare or resume a run. Strict: a bad declaration raises here, not later.
+    """Open a new run, or explicitly resume one. A bad declaration raises here.
 
     The experiment is the one `etude launch` started the run for
     (`ETUDE_EXPERIMENT`, by default the job file's stem) unless named here. Naming
@@ -1225,12 +1231,23 @@ def track(
     handed its parent's position and optional checkpoint in `ETUDE_CONTINUES`:
     unless `continues` is given, the run declares that lineage.
 
+    A taken name is refused unless `resume=True` or the launcher requests a retry.
     A resumed run's first logged row sets where it supersedes earlier rows.
     An attempt that logs nothing replaces nothing. `local_launch` supplies a
     persistent `out` directory and experiment when calling a recipe locally.
     """
     if metric_name_limit is not None and metric_name_limit < 0:
         raise ValueError("metric_name_limit must be nonnegative or None")
+    if seed is not None:
+        warnings.warn(
+            "track(seed=) is replaced by launch seeds or etude run --seed; removed in 0.5",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+    if (target_clock := os.environ.get("ETUDE_UNTIL_CLOCK")) is not None and target_clock not in {
+        clock.name for clock in clocks
+    } | set(BUILT_IN_NAMES):
+        raise EtudeError("target_clock_undeclared", detail=target_clock)
     launched = os.environ.get("ETUDE_EXPERIMENT") or None
     if experiment is not None and launched not in (None, experiment):
         raise EtudeError("experiment_differs_from_launch", 409) from ValueError(
@@ -1258,6 +1275,9 @@ def track(
         continues=continues,
         directory=directory,
         namespace=namespace,
+        resume=resume
+        or os.environ.get("ETUDE_RESUME") == "1"
+        or bool(os.environ.get("ETUDE_ATTEMPT")),
     )
     return Run(
         experiment=experiment,

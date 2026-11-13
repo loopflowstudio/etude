@@ -937,11 +937,15 @@ def _read(
     records = _records(storage, keys)
     attempts = records.attempts
     # The state the latest attempt left, where it left one.
-    ended = [folder for folder in folders if (folder, "state.json") in present]
+    ended = {
+        folder: next(name for name in ("outcome.json", "state.json") if (folder, name) in present)
+        for folder in folders
+        if any((folder, name) in present for name in ("outcome.json", "state.json"))
+    }
     left = (records.folder_of[attempt.writer] for attempt in reversed(attempts))
     latest = next((folder for folder in left if folder in ended), None)
-    state = latest or (ended[-1] if ended else None)
-    run_state = RunState.model_validate_json(storage.get(state + "state.json")) if state else None
+    state = latest or (next(reversed(ended)) if ended else None)
+    run_state = RunState.model_validate_json(storage.get(state + ended[state])) if state else None
     if run_state is not None and attempts:
         # A completion belongs to one writer, not every later resume. Older
         # evidence without attribution is conclusive only for a single attempt.

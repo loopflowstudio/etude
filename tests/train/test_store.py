@@ -89,7 +89,7 @@ def test_resuming_does_not_inherit_a_previous_attempts_finished_state(
         pass
     if not attributed:
         # Earlier evidence has no writer on its completion; retain those bytes.
-        path = local / "r/state.json"
+        path = local / "r/outcome.json"
         state = json.loads(path.read_text())
         state.pop("writer")
         path.write_text(json.dumps(state))
@@ -97,7 +97,7 @@ def test_resuming_does_not_inherit_a_previous_attempts_finished_state(
     finished = read(bucket, "e", "r").state
     assert finished is not None and finished.state == "finished"
 
-    resumed = track(experiment="e", run="r", clocks=[], directory=local)
+    resumed = track(resume=True, experiment="e", run="r", clocks=[], directory=local)
     try:
         assert sync(local, storages=[bucket]) == {}
         assert read(local, "e", "r").state is None
@@ -130,7 +130,11 @@ def test_a_new_model_at_a_recorded_step_is_a_new_version(
         for body, uploads, recorded in ((b"first", 6, 1), (b"other", 4, 2), (b"other", 2, 2)):
             model.write_bytes(body)
             with track(
-                experiment="e", run="r", clocks=[Step("step", "steps")], directory=local
+                resume=recorded > 1,
+                experiment="e",
+                run="r",
+                clocks=[Step("step", "steps")],
+                directory=local,
             ) as run:
                 run.checkpoint(model, step=10)
                 model.write_bytes(b"overwritten by training")

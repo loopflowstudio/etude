@@ -44,7 +44,7 @@ from etude.launch.records import (
     MachineTemplate,
     OnDemand,
     Provider,
-    Run,
+    RunRequest,
     Status,
     Until,
 )
@@ -523,7 +523,7 @@ def test_a_run_from_a_commit_runs_in_a_pod_and_continues_in_another(
         max_hours=0.05,
         max_usd=Decimal(1),
     )
-    first = c.scheduler.launch(Run(job=job, seed=7), rent="l4")
+    first = c.scheduler.launch(RunRequest(job=job, seed=7), rent="l4")
     c.scheduler.wait(first, every=0.05, timeout=30)
     status = released(c.scheduler, first)
     assert (status.outcome, authored(status.clocks)) == ("succeeded", {"steps": 3})
@@ -592,7 +592,7 @@ def test_a_pods_checkpoint_reaches_an_owned_host_without_its_storage_from_the_bu
         max_hours=0.05,
         max_usd=Decimal(1),
     )
-    first = c.scheduler.launch(Run(job=job, seed=7), rent="l4")
+    first = c.scheduler.launch(RunRequest(job=job, seed=7), rent="l4")
     assert released(c.scheduler, first).outcome == "succeeded"
     assert c.provider.pods == {}  # nothing holds the parent's folder but the bucket
 
@@ -644,7 +644,7 @@ def test_a_checkpoint_gone_or_changed_in_the_bucket_ends_the_attempt_undelivered
         max_usd=Decimal(1),
         max_attempts=3,
     )
-    first = c.scheduler.launch(Run(job=job, seed=7), rent="l4")
+    first = c.scheduler.launch(RunRequest(job=job, seed=7), rent="l4")
     assert released(c.scheduler, first).outcome == "succeeded"
     folder = f"etude/t/{first}/"
     child = continue_from(

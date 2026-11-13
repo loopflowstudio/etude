@@ -19,10 +19,12 @@ import typer
 
 from etude.experiment_file import experiment_named
 from etude.launch.errors import LauncherError
-from etude.launch.records import Job, Run
+from etude.launch.records import Job, RunRequest
 
 
-def read_job_file(path: Path, given: Sequence[str] = (), *, help: bool = False) -> list[Run]:
+def read_job_file(
+    path: Path, given: Sequence[str] = (), *, help: bool = False, experiment: str | None = None
+) -> list[RunRequest]:
     """Let Typer validate runs()'s signature, then invoke it once with typed flags.
 
     Default unnamed jobs to the file's stem. Experiment files refuse other identities.
@@ -36,10 +38,22 @@ def read_job_file(path: Path, given: Sequence[str] = (), *, help: bool = False) 
         sys.path.insert(0, folder)
     function = runpy.run_path(str(path.resolve())).get("runs")
     if not callable(function):
-        raise LauncherError(f"{path.name}: define runs() returning a Job, a Run, or a list of Runs")
+        raise LauncherError(
+            f"{path.name}: define runs() returning a Job, a RunRequest, or a list of Runs"
+        )
     signature = inspect.signature(function)
     hints = typing.get_type_hints(function)
-    reserved = {"pool", "cohort", "parallel", "max_usd", "help"}
+    reserved = {
+        "pool",
+        "rent",
+        "cohort",
+        "parallel",
+        "max_usd",
+        "help",
+        "experiment",
+        "resume",
+        "until",
+    }
     arguments: dict[str, Any] = {}
     values: list[Any] = []
 
@@ -49,7 +63,7 @@ def read_job_file(path: Path, given: Sequence[str] = (), *, help: bool = False) 
             values.append(function(**kwargs))
         except Exception as error:
             hint = (
-                ". Records take named fields, such as Run(job=..., seed=1)"
+                ". Records take named fields, such as RunRequest(job=..., seed=1)"
                 if isinstance(error, TypeError) and "positional argument" in str(error)
                 else ""
             )
@@ -93,24 +107,31 @@ def read_job_file(path: Path, given: Sequence[str] = (), *, help: bool = False) 
     if help:
         return []
     value = values[0]
-    if isinstance(value, Job):
-        runs = [Run(job=value)]
-    elif isinstance(value, Run):
-        runs = [value]
-    elif isinstance(value, list) and value and all(isinstance(run, Run) for run in value):
-        runs = value
-    else:
-        raise LauncherError(
-            f"{path.name}: runs() must return a Job, a Run, or a nonempty list of Runs"
+    values = list(value) if isinstance(value, (list, tuple)) else [value]
+    if not values or not all(isinstance(each, (Job, RunRequest)) for each in values):
+        raise LauncherError(f"{path.name}: runs() must return jobs or run requests")
+    runs = [
+        run
+        for each in values
+        for run in (
+            [
+                RunRequest(job=each, seed=seed, id=f"{each.name or path.stem}-seed-{seed}")
+                for seed in each.seeds
+            ]
+            if isinstance(each, Job)
+            else [each]
         )
+    ]
     params = {
         name: each for name, each in arguments.items() if isinstance(each, (str, int, float, bool))
     }
-    experiment = experiment_named(path)
+    required = experiment_named(path)
+    if required is not None and experiment not in (None, required):
+        raise LauncherError(f"{path.name} is experiment {required!r}")
     for run in runs:
-        if experiment is not None and run.job.experiment not in (None, experiment):
+        if required is not None and run.job.experiment not in (None, required):
             raise LauncherError(
-                f"{path.name} is experiment {experiment!r}; its runs() returned a job of"
+                f"{path.name} is experiment {required!r}; its runs() returned a job of"
                 f" experiment {run.job.experiment!r}"
             )
     return [
@@ -120,7 +141,8 @@ def read_job_file(path: Path, given: Sequence[str] = (), *, help: bool = False) 
                 "job": run.job.model_copy(
                     update={
                         "repo": str(Path(run.job.repo).resolve()) if run.job.repo else None,
-                        "experiment": run.job.experiment or path.stem,
+                        "experiment": experiment or run.job.experiment or path.stem,
+                        "name": run.job.name or path.stem,
                     }
                 ),
             }

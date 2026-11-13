@@ -14,7 +14,7 @@ from etude.jobs import continue_from
 from etude.launch.database import Database
 from etude.launch.executor import Executor, local
 from etude.launch.machines import OwnedMachine
-from etude.launch.records import Job, Machine, Pool, Run, Until
+from etude.launch.records import Job, Machine, Pool, RunRequest, Until
 from etude.launch.scheduler import Scheduler
 from etude.launch.ssh import SSH, RemoteReply, RemoteRequest, SSHJournal, SSHStart
 from etude.train.records import Step
@@ -151,7 +151,7 @@ def test_continuation_moves_between_local_and_remote_disk(
         max_hours=0.1,
         max_usd=Decimal(1),
     )
-    first = scheduler.launch(Run(job=job, seed=1))
+    first = scheduler.launch(RunRequest(job=job, seed=1))
     assert scheduler.wait(first, every=0.05, timeout=30)[0].outcome == "succeeded"
 
     # Local to bench: the parent's file is relayed to the bench, and only that file.

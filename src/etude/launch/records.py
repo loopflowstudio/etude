@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import warnings
 from datetime import datetime
 from decimal import Decimal
 from typing import Literal
@@ -505,6 +506,7 @@ class Job(Record):
     max_hours: float
     max_usd: Decimal | None = None  # required when the run may rent
     name: str = ""
+    seeds: tuple[int, ...] = (0,)  # launch repetitions; excluded from job identity
     until: Until | None = None  # how far to go; absolute, also when continuing
     config: str | None = None  # the config file's text, handed back at ETUDE_CONFIG
     repo: str | None = None  # a local git repository; None runs in an empty directory
@@ -522,6 +524,13 @@ class Job(Record):
 
     _check_inputs = field_validator("inputs")(_distinct)
 
+    @field_validator("seeds")
+    @classmethod
+    def _seeds(cls, value: tuple[int, ...]) -> tuple[int, ...]:
+        if not value or len(value) != len(set(value)):
+            raise ValueError("seeds must be nonempty and distinct")
+        return value
+
     @model_validator(mode="after")
     def _prepared_from_inputs(self) -> Job:
         if self.prepare is not None:
@@ -535,9 +544,9 @@ class Job(Record):
             )
         return self
 
-    def runs(self, *seeds: int, params: dict[str, Param] | None = None) -> list[Run]:
+    def runs(self, *seeds: int, params: dict[str, Param] | None = None) -> list[RunRequest]:
         """This job once per seed, each recording the parameters that led to it."""
-        return [Run(job=self, seed=seed, params=dict(params or {})) for seed in seeds]
+        return [RunRequest(job=self, seed=seed, params=dict(params or {})) for seed in seeds]
 
 
 def job_id(job: Job) -> str:
@@ -629,7 +638,7 @@ class Smoke(Record):
         return f"passed in {seconds:.1f} s ({steps})"
 
 
-class Run(Record):
+class RunRequest(Record):
     """A job and a seed: the thing that is launched."""
 
     job: Job
@@ -655,9 +664,9 @@ class RunRecord(Record):
     version: int
     autorun: bool = False
     queued: bool = False  # historical submission metadata; never affects scheduling
-    params: dict[str, Param] = Field(default_factory=dict)  # as on the Run that was sent
+    params: dict[str, Param] = Field(default_factory=dict)  # as on the RunRequest that was sent
     source: SourcePosition | None = None
-    smoke: Smoke = Smoke()  # as on the Run that was sent
+    smoke: Smoke = Smoke()  # as on the RunRequest that was sent
 
     @property
     def name(self) -> str:
@@ -990,3 +999,14 @@ class BootstrapLinks(Record):
     url: str
     log_url: str
     worker_log_url: str
+
+
+def __getattr__(name: str) -> object:
+    if name == "Run":
+        warnings.warn(
+            "etude.launch.records.Run is now RunRequest; removed in 0.5",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return RunRequest
+    raise AttributeError(name)

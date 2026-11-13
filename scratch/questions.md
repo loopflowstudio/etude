@@ -18,8 +18,8 @@
   conditional membership read per observed run; a changed state pointer costs
   one pointer read, one state listing and one deletion per older object.
 
-Folder checkpoints and their shared record/reference are built. Run/attempt
-record unification, the default CLI recipe and explicit resume remain unbuilt.
+Folder checkpoints, the local CLI recipe and explicit local resume are built.
+Run/attempt record unification and launched explicit resume remain unbuilt.
 `CheckpointRecord.player(inference)` takes anything with `player(ref)`, so the
 shared record names no evaluation type.
 
@@ -212,5 +212,18 @@ afterwards passed again (58).
 `afcda22` (#105) named the controller's record/status/cancel message
 `etude.launch.controller.RunRequest`. The design renames launch `Run` to
 `RunRequest` (Jack Heart: "ok, RunRequest works"). Assumed, reversible:
-rename the internal controller message (e.g. `RunOperation`) and keep the
-design's public name.
+rename the internal controller message to `RunOperation` and keep the
+design's public name (implemented).
+
+Local CLI choices (2026-11-13): an omitted `--seed` on resume uses the stored
+seed; config defaults come from the current recipe, overlaid by `--config`,
+then must match the stored config. An omitted `--until` keeps the previous
+attempt's target. SIGINT/SIGTERM request a saved stop. Python callers can opt
+in with `track(resume=True)`; launcher attempts opt in via their allocation.
+
+Experiment scoping must update readers in the same cut as launcher storage:
+`run_folders` groups by run name, so two experiments with the same run id
+currently share one folder group in `read_all`/evaluation queries. Local
+`etude run` writes the designed nested layout; its direct resume reads the
+experiment's own base. Cross-experiment report/query identity remains part of
+the unfinished scoping work, not a supported final implementation.

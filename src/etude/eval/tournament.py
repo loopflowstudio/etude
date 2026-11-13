@@ -414,7 +414,9 @@ def _found(seated: Seated) -> tuple[str, str, tuple[tuple[tuple[str | None, ...]
 
 def _record(added: TournamentRun, experiment: str, run: str, directory: Path | str | None) -> None:
     """Write `tournament.json` in the eval run's folder; a resumed run must have been held alike."""
-    declared = declare(experiment=experiment, clocks=(), run=run, kind=KIND, directory=directory)
+    declared = declare(
+        experiment=experiment, clocks=(), run=run, kind=KIND, directory=directory, resume=True
+    )
     if declared.declaration.kind != KIND:
         raise EtudeError("run_is_not_an_eval_run", 409)
     path = declared.root / TOURNAMENT_FILE

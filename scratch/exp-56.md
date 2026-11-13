@@ -113,47 +113,44 @@ with evaluation/query, list through `run.checkpoints()`, and travel as verified
 member inputs through `start=`, evaluation and explicit checkpoint continuation.
 The query cache rebuilds at schema 14 so folder keys join their seated players.
 
-Checked at `7a26dd0` (realign): none of 1-5 has started.
+Built in this continuation: local `etude run` and explicit local resume with
+saved SIGINT/SIGTERM stops, target extension/retention, config and seed checks
+before the recipe, create-only local names and per-attempt commits. Refused
+local attempts preserve a finished outcome; genuine rowless failures remain
+reportable. First-row cutoffs are now marked only after a durable row.
+`outcome.json` writers retain historical `state.json` readers. Jobs accept
+launch `seeds`, job files expand jobs to named `RunRequest`s, and launch/queue
+accept `--experiment`. `training(start=)` passes the checkpoint key into the
+tracked declaration. Published spellings warn for removal in 0.5.
+`examples/coin.py` is the tiny non-Magic recipe.
 
-1. Unify records. Launch `Run` (`etude.launch.records`) is still the launched
-   record; tracking still has `RunDeclaration`, `RunFile`, `Attempt`
-   (`etude.tracking.records`) and `TrainingRun` (`etude.experiment`). Name
-   clash: main's #105 (`afcda22`) added `RunRequest` in
-   `etude.launch.controller` as the controller's record/status/cancel message,
-   so the design's `Run` -> `RunRequest` rename needs that name freed. Assumed
-   (`questions.md`): rename the internal controller message, keep the design's
-   name. Then wire historical readers and `outcome.json` (no writer yet).
-2. Default recipe acceptance through the CLI; the registration API has only
-   focused Python tests.
-3. Record `start=` lineage in the unified run record; the launcher Job
-   already persists it.
-4. Local `etude run` and explicit local/launched `--resume RUN [--until]`
-   (neither exists; `etude.cli` has launch, continue, eval, report, ...),
-   create-only names, config/seed refusals naming fields, per-attempt commit.
-   Fix the folded bug here: `Run.__exit__` still calls `finish("failed")` for
-   any non-`Stopped` error and `Attempt(first_row=True)` is written in
-   `__init__`. `etude launch` and `etude run` take `--experiment`; the stem
-   is the default.
-5. `Job` launch `seeds` (today only `Job.runs(*seeds)`), the tiny non-Magic
-   example (none exists), one-release warnings for `local_launch` and
-   `track(seed=)` (only `latest_checkpoint()` warns now), then the
-   `design-train-api.md` Acceptance list as focused tests. No publication,
-   landing or Graph changes in implement.
+Remaining, before the accepted API can be treated as built:
+
+1. Unify records end to end. Launcher `RunRecord`, tracking
+   `RunDeclaration`/`RunFile` and observed `TrainingRun` remain separate;
+   launcher `RunAttempt` and tracking `Attempt` remain separate. The
+   controller message is now `RunOperation`, freeing public `RunRequest`.
+   Preserve historical file/field readers during the cut. Do not extend the
+   separate records as a final API.
+2. Launched `etude launch job.py --resume RUN [--until]`, keeping cumulative
+   limits and attempts, current source and the same out. No such CLI or
+   scheduler operation exists yet. Names/storage remain globally scoped in
+   the launcher; implement experiment-scoped identity and `PREFIX/EXPERIMENT/RUN`
+   carriage/grants (local CLI already nests by experiment). Ensure refused
+   launched attempts preserve a finished run too.
+3. Report line -> job. Local CLI acceptance now includes two-model save,
+   stop, resume, checkpoint publication and evaluation seating in one test.
+   No publication, landing or Graph changes here.
 
 ## Verification
 
-2026-11-13 compress pass. At `d3ef6bb` three things failed outside the 28
-focused checkpoint tests: the layout rule (train imported eval, eval imported
-train), `tests/test_page_evals.py` (fixture imported `ArtifactRef` from
-`etude.eval.records`) and so its six dependants. Fixed by the move above.
-Also cut: `carriage.named_file`, `RunFiles.deliverable`, and the out-recovery
-selection duplicated in `BucketJournal.held` and `Courier._restore`, now
-`etude.out.recovery`. `uv run --extra train pytest tests/run tests/eval
-tests/train tests/test_experiment.py tests/test_page_evals.py tests/test_jobs.py
-tests/test_continuation_out.py tests/test_page.py tests/test_smoke.py` plus the
-launch state, out, worker, transfer, layout, planned-stop, queue and
-measurement files: 451 passed, and the 10 that failed or errored (import
-pins, page evals) passed once fixed. mypy, ruff check and format clean. Not run: the rest of `tests/launch`. PR #103 stays draft.
+2026-11-13 implement continuation: `uv run --extra train pytest tests/train/test_local.py -q`:
+8 passed. Focused consumers: 121 passed; launcher/experiment files: 141 passed
+and their three failures passed after explicit-resume fixes; page/hour/lineage
+rerun: 22 passed; tables, read batches, measurement, page, continuation and
+tournament: 82 passed, 6 skipped. Mypy and Ruff passed. Full gate remains later.
+PR #103 stays draft. Earlier checkpoint/carriage checks and the import-boundary
+repair are recorded at `dda6b17:scratch/exp-56.md` (451 passed, type/lint clean).
 
 Counting pins moved by the state build, each with its reason beside it:
 

@@ -26,7 +26,7 @@ from etude.launch.records import (
     LauncherError,
     Machine,
     Pool,
-    Run,
+    RunRequest,
     Status,
     Until,
     job_id,
@@ -94,7 +94,7 @@ def test_a_run_from_a_commit_reports_progress_and_keeps_its_outputs(
         max_hours=0.1,
         max_usd=Decimal(1),
     )
-    first = scheduler.launch(Run(job=spec, seed=3))
+    first = scheduler.launch(RunRequest(job=spec, seed=3))
     (status,) = scheduler.wait(first, every=0.05, timeout=30)
     assert (status.outcome, status.rental_ended) == ("succeeded", None)
     assert status.clocks == {"agent_steps": 26_000, "wall_time_ms": 1500}
@@ -136,7 +136,7 @@ def test_a_continuation_starts_from_its_parents_recorded_checkpoint(tmp_path: Pa
         max_hours=0.1,
         max_usd=Decimal(1),
     )
-    first = scheduler.launch(Run(job=spec, seed=3))
+    first = scheduler.launch(RunRequest(job=spec, seed=3))
     assert scheduler.wait(first, every=0.05, timeout=30)[0].outcome == "succeeded"
     tracked = tmp_path / "track"
     with pytest.raises(LauncherError, match="not beyond the checkpoint's steps=2"):
@@ -150,6 +150,8 @@ def test_a_continuation_starts_from_its_parents_recorded_checkpoint(tmp_path: Pa
     # Tagging the parent's checkpoint later does not make the continuation another job.
     identity = job_id(continue_from(scheduler.record(first), "steps=5", source=tracked).job)
     parent = track(
+        resume=True,
+        seed=3,
         experiment="capacity",
         clocks=[Step("steps", "training steps")],
         run=first,

@@ -30,7 +30,7 @@ from etude.launch.database import Database, launcher_file
 from etude.launch.errors import LauncherError
 from etude.launch.executor import local
 from etude.launch.logs import render
-from etude.launch.records import Job, Machine, Pool, Run, Smoke, SmokeStep, job_id
+from etude.launch.records import Job, Machine, Pool, RunRequest, Smoke, SmokeStep, job_id
 from etude.launch.scheduler import Scheduler
 from etude.launch.source import home
 
@@ -93,7 +93,7 @@ class Smoked:
     train: Mapping[str, SmokeStep] = field(default_factory=dict)
     rest: tuple[SmokeStep, ...] = ()
 
-    def stamp(self, runs: Sequence[Run]) -> list[Run]:
+    def stamp(self, runs: Sequence[RunRequest]) -> list[RunRequest]:
         """`runs`, each with its own job's train step and the rest as its smoke."""
         stamped = []
         for run in runs:
@@ -103,14 +103,14 @@ class Smoked:
         return stamped
 
 
-def smoke_train(runs: Sequence[Run], folder: Path) -> list[Trained]:
+def smoke_train(runs: Sequence[RunRequest], folder: Path) -> list[Trained]:
     """Each distinct job of `runs` (seeds dropped) run tiny here, one after another.
 
     `folder` is a `smoke_home`. A job without a smoke form is `not_smoked`. The
     first that does not succeed prints its job's output and raises
     `LauncherError` naming it.
     """
-    distinct: dict[str, Run] = {}
+    distinct: dict[str, RunRequest] = {}
     for run in runs:
         distinct.setdefault(job_id(run.job), run)
     store = Database(launcher_file(folder))
@@ -124,7 +124,7 @@ def smoke_train(runs: Sequence[Run], folder: Path) -> list[Trained]:
         store.close()
 
 
-def _train(scheduler: Scheduler, key: str, run: Run) -> Trained:
+def _train(scheduler: Scheduler, key: str, run: RunRequest) -> Trained:
     name = run.job.name or "job"
     job = tiny(run.job)
     if job is None:
@@ -133,7 +133,9 @@ def _train(scheduler: Scheduler, key: str, run: Run) -> Trained:
             step=SmokeStep(step="train", name=name, outcome="not_smoked", detail="no smoke form"),
         )
     started = time.monotonic()
-    launched = scheduler.launch(Run(job=job, seed=run.seed, params=dict(run.params)), "local")
+    launched = scheduler.launch(
+        RunRequest(job=job, seed=run.seed, params=dict(run.params)), "local"
+    )
     (status,) = scheduler.wait(launched, every=0.1)
     # Until its sessions end, so no worker still writes into the smoke's home.
     while not scheduler.logs(run=launched).settled:

@@ -20,7 +20,7 @@ from etude.launch.records import (
     Offer,
     OnDemand,
     Pool,
-    Run,
+    RunRequest,
     Stale,
     Storage,
     Tally,
@@ -228,7 +228,7 @@ def test_a_cohort_runs_one_at_a_time_and_stops_at_its_dollar_ceiling(tmp_path: P
     assert sum(s.usd for s in statuses) <= USD_PER_RUN * 2
     assert b.service.most_live == 1 and b.service.creates == 1
     with pytest.raises(LauncherError, match="already exists"):
-        b.scheduler.queue_cohort("capacity", [Run(job=job())], rent="l4")
+        b.scheduler.queue_cohort("capacity", [RunRequest(job=job())], rent="l4")
 
 
 def test_several_runs_share_one_session_and_split_its_cost(tmp_path: Path) -> None:
@@ -292,7 +292,7 @@ def test_manabot_cohort_shape(tmp_path: Path) -> None:
     for target in (63_000, 100_000):
         assert all(s.outcome == "succeeded" for s in b.scheduler.wait(*stages[-1], every=60))
         continued = [
-            Run(
+            RunRequest(
                 job=b.store.run(p).spec.model_copy(
                     update={"until": Until.parse(f"updates={target}")}
                 ),
@@ -530,12 +530,14 @@ def test_machines_shows_an_owned_machines_cost_and_expiry(
 
 def test_a_job_is_what_decides_the_result_not_its_name_or_limits(tmp_path: Path) -> None:
     b = bench(tmp_path)
-    first = b.scheduler.queue(Run(job=job(config="hidden = 256", name="small"), seed=1), rent="l4")
+    first = b.scheduler.queue(
+        RunRequest(job=job(config="hidden = 256", name="small"), seed=1), rent="l4"
+    )
     b.scheduler.tick()
     richer = job(config="hidden = 256", name="small again", max_usd=Decimal(9), max_hours=2.0)
-    second = b.scheduler.queue(Run(job=richer, seed=2), rent="l4")
+    second = b.scheduler.queue(RunRequest(job=richer, seed=2), rent="l4")
     b.scheduler.tick()
-    other = b.scheduler.queue(Run(job=job(config="hidden = 1024"), seed=1), rent="l4")
+    other = b.scheduler.queue(RunRequest(job=job(config="hidden = 1024"), seed=1), rent="l4")
     b.scheduler.tick()
     same, also, different = (b.scheduler.record(r) for r in (first, second, other))
     assert same.job == also.job != different.job

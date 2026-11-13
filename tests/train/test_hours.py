@@ -53,8 +53,14 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> Clockwork:
     return fake
 
 
-def _start(directory: Path, name: str) -> Run:
-    return track(experiment="e", run=name, clocks=[Step("step", "updates")], directory=directory)
+def _start(directory: Path, name: str, *, resume: bool = False) -> Run:
+    return track(
+        resume=resume,
+        experiment="e",
+        run=name,
+        clocks=[Step("step", "updates")],
+        directory=directory,
+    )
 
 
 def _hours(at: dict[str, float]) -> tuple[float, float]:
@@ -76,7 +82,7 @@ def test_hours_continue_across_a_resume_and_a_continuation(
     first.finish("failed")
 
     clock.wait(2)  # the machine is lost; the next attempt starts two hours later
-    second = _start(tmp_path, "r")
+    second = _start(tmp_path, "r", resume=True)
     assert second.at(RUNNING_HOURS) == pytest.approx(1.0)
     assert second.at(HOURS_SINCE_START) == pytest.approx(3.5)
     clock.run(0.25)
@@ -126,7 +132,7 @@ def test_checkpoints_saved_before_etudes_clocks_derive_them_from_wall_time(
     first.checkpoint("s3://models/10.pt", step=10)
     first.finish("failed")
     clock.wait(2)
-    second = _start(tmp_path, "r")
+    second = _start(tmp_path, "r", resume=True)
     clock.run(0.25)
     second.checkpoint("s3://models/20.pt", step=20)
     second.finish()
@@ -139,7 +145,8 @@ def test_checkpoints_saved_before_etudes_clocks_derive_them_from_wall_time(
         for field in ("at", "resumed_at"):
             for name in (RUNNING_HOURS, HOURS_SINCE_START):
                 record.get(field, {}).pop(name, None)
-        if record.pop("first_row", False) and record["started_ms"] > START_MS:
+        record.pop("first_row", None)
+        if "started_ms" in record and record["started_ms"] > START_MS:
             record["resumed_at"] = {"step": 10}  # it named the checkpoint it resumed from
         path.write_text(json.dumps(record))
 

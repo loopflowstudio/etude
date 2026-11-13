@@ -178,7 +178,9 @@ def evaluate(
     names = [rollup.name for rollup in rollups]
     if len(set(names)) != len(names) or set(names) & set(ETUDE_TABLES):
         raise EtudeError("rollup_name_refused", 422) from ValueError(names)
-    declared = declare(experiment=experiment, clocks=(), run=run, kind=KIND, directory=directory)
+    declared = declare(
+        experiment=experiment, clocks=(), run=run, kind=KIND, directory=directory, resume=True
+    )
     if declared.declaration.kind != KIND:
         raise EtudeError("run_is_not_an_eval_run", 409)
     path = declared.root / "environment.json"
@@ -462,7 +464,7 @@ class _Writer:
             self.staging.seal(self.db)
         self.staging.close()
         DirectoryStorage(self.files.root).put(
-            "state.json",
+            "outcome.json",
             RunState(state=state, counters=RunCounters(), writer=self.id)
             .model_dump_json()
             .encode(),

@@ -69,9 +69,9 @@ from etude.launch.records import (
     Record,
     Rental,
     RentalCost,
-    Run,
     RunAttempt,
     RunRecord,
+    RunRequest,
     Session,
     Stale,
     StartPhase,
@@ -508,10 +508,12 @@ class Scheduler:
             refusal=refusal(ondemand, in_use, offer),
         )
 
-    def queue(self, run: Run | Job, pool: str | None = None, *, rent: str | None = None) -> str:
+    def queue(
+        self, run: RunRequest | Job, pool: str | None = None, *, rent: str | None = None
+    ) -> str:
         """Queue one run; it waits for a free machine, or for its on-demand to rent one."""
         return self._submit(
-            (run if isinstance(run, Run) else Run(job=run),),
+            (run if isinstance(run, RunRequest) else RunRequest(job=run),),
             self._target(pool, rent),
             None,
             queued=True,
@@ -520,7 +522,7 @@ class Scheduler:
     def queue_cohort(
         self,
         name: str,
-        runs: Sequence[Run],
+        runs: Sequence[RunRequest],
         pool: str | None = None,
         *,
         rent: str | None = None,
@@ -534,7 +536,7 @@ class Scheduler:
     def _new_cohort(
         self,
         name: str,
-        runs: Sequence[Run],
+        runs: Sequence[RunRequest],
         parallel: int,
         max_usd: Decimal | None,
     ) -> Cohort:
@@ -542,10 +544,12 @@ class Scheduler:
             raise LauncherError("a cohort needs runs and positive limits")
         return Cohort(name=name, parallel=parallel, max_usd=max_usd, created_at=self._clock())
 
-    def launch(self, run: Run | Job, pool: str | None = None, *, rent: str | None = None) -> str:
+    def launch(
+        self, run: RunRequest | Job, pool: str | None = None, *, rent: str | None = None
+    ) -> str:
         """Acquire confirmed capacity, then record and hand over one run."""
         return self._submit(
-            (run if isinstance(run, Run) else Run(job=run),),
+            (run if isinstance(run, RunRequest) else RunRequest(job=run),),
             self._target(pool, rent),
             None,
             queued=False,
@@ -554,7 +558,7 @@ class Scheduler:
     def launch_cohort(
         self,
         name: str,
-        runs: Sequence[Run],
+        runs: Sequence[RunRequest],
         pool: str | None = None,
         *,
         rent: str | None = None,
@@ -567,7 +571,7 @@ class Scheduler:
 
     def quote(
         self,
-        runs: Sequence[Run],
+        runs: Sequence[RunRequest],
         pool: str | None = None,
         *,
         rent: str | None = None,
@@ -634,7 +638,7 @@ class Scheduler:
         return Quote(machines=tuple(quoted), limit_usd=None if target.rent is None else caps)
 
     def _submit(
-        self, runs: Sequence[Run], target: Target, cohort: Cohort | None, *, queued: bool
+        self, runs: Sequence[RunRequest], target: Target, cohort: Cohort | None, *, queued: bool
     ) -> tuple[str, ...]:
         launch = self.prepare_launch(runs, target.pool, rent=target.rent)
         requested = tuple(
@@ -644,7 +648,7 @@ class Scheduler:
         return self.submit_launch(launch.id, requested, target, cohort, queued=queued)
 
     def prepare_launch(
-        self, runs: Sequence[Run], pool: str | None = None, *, rent: str | None = None
+        self, runs: Sequence[RunRequest], pool: str | None = None, *, rent: str | None = None
     ) -> Launch:
         """Retain valid intent before the submitting client publishes source."""
         target = self._target(pool, rent)
@@ -682,7 +686,7 @@ class Scheduler:
     def submit_launch(
         self,
         identity: str,
-        runs: Sequence[Run],
+        runs: Sequence[RunRequest],
         target: Target,
         cohort: Cohort | None,
         *,
@@ -2397,7 +2401,7 @@ class Scheduler:
         if job.max_attempts < 1:
             raise LauncherError("a job needs at least one attempt")
 
-    def _freeze(self, run: Run, target: Target, cohort: str | None) -> RunRecord:
+    def _freeze(self, run: RunRequest, target: Target, cohort: str | None) -> RunRecord:
         job = run.job
         self._validate_job(job, target)
         run = source.freeze(run)

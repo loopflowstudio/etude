@@ -24,6 +24,45 @@ from etude.train.cli import checkpoints, sync
 app = launch_cli.app
 
 
+@app.command("run")
+@kind(Kind.wait)
+def run_recipe(
+    file: Annotated[Path, typer.Argument(help="a Python file defining train(config)")],
+    config: Annotated[
+        str, typer.Option(help="JSON config fields; omitted fields use defaults")
+    ] = "{}",
+    seed: Annotated[int | None, typer.Option(help="the run's seed")] = None,
+    name: Annotated[str | None, typer.Option(help="job name, defaulting to the file stem")] = None,
+    experiment: Annotated[
+        str | None, typer.Option(help="experiment label, defaulting to the file stem")
+    ] = None,
+    resume: Annotated[str | None, typer.Option(help="resume this run on current source")] = None,
+    until: Annotated[str | None, typer.Option(help="absolute target, such as updates=2000")] = None,
+    seconds: Annotated[
+        float | None, typer.Option(help="execution allowance before a saved stop")
+    ] = None,
+    json_output: Annotated[bool, typer.Option("--json", help="print a JSON result")] = False,
+) -> None:
+    """Run a training recipe on this computer; 0 finished, 75 stopped, other failed."""
+    from etude.launch.records import Until
+    from etude.local import run
+
+    target = Until.model_validate(until) if until is not None else None
+    raise typer.Exit(
+        run(
+            file,
+            config=config,
+            seed=seed,
+            name=name,
+            experiment=experiment,
+            resume=resume,
+            until=target,
+            seconds=seconds,
+            json_output=json_output,
+        )
+    )
+
+
 def _submit(
     ctx: typer.Context,
     file: Path | None,
@@ -37,6 +76,7 @@ def _submit(
     queued: bool,
     smoke: bool,
     quote: bool = False,
+    experiment: str | None = None,
 ) -> None:
     if help:
         print(ctx.get_help())
@@ -51,7 +91,7 @@ def _submit(
     from etude.launch.listing import show_runs
     from etude.launch.records import CohortSpec
 
-    runs = read_job_file(file, ctx.args, help=help)
+    runs = read_job_file(file, ctx.args, help=help, experiment=experiment)
     if help:
         return
     if cohort is None and (len(runs) > 1 or parallel != 1 or max_usd is not None):
@@ -129,6 +169,9 @@ def launch(
     ] = False,
     smoke: SmokeOption = False,
     help: FileHelp = False,
+    experiment: Annotated[
+        str | None, typer.Option(help="experiment label, defaulting to the file stem")
+    ] = None,
 ) -> None:
     """Queue a file's runs and get the machines to start them now, or fail and queue nothing."""
     _submit(
@@ -143,6 +186,7 @@ def launch(
         queued=False,
         smoke=smoke,
         quote=quote,
+        experiment=experiment,
     )
 
 
@@ -161,9 +205,24 @@ def queue(
     max_usd: CohortUsd = None,
     smoke: SmokeOption = False,
     help: FileHelp = False,
+    experiment: Annotated[
+        str | None, typer.Option(help="experiment label, defaulting to the file stem")
+    ] = None,
 ) -> None:
     """Add a file's runs to the queue. They start when a machine has room or can be rented."""
-    _submit(ctx, file, pool, rent, cohort, parallel, max_usd, help, queued=True, smoke=smoke)
+    _submit(
+        ctx,
+        file,
+        pool,
+        rent,
+        cohort,
+        parallel,
+        max_usd,
+        help,
+        queued=True,
+        smoke=smoke,
+        experiment=experiment,
+    )
 
 
 @app.command(

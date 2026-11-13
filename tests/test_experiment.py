@@ -19,7 +19,7 @@ from etude.eval.records import Benchmark, Code, Inference, Seating
 from etude.eval.tournament import scores
 from etude.experiment import Experiment, ExperimentState, advance, observe, read_experiment
 from etude.jobs import _hold, evaluation, evaluation_spec
-from etude.launch.records import Job, Outcome, Run, Status
+from etude.launch.records import Job, Outcome, RunRequest, Status
 from etude.launch.source import home
 from etude.tracking.checkpoints import CheckpointRecord
 from etude.tracking.errors import EtudeError
@@ -278,15 +278,15 @@ class _Launcher:
     """The launcher's two calls a pass makes, recorded instead of renting anything."""
 
     def __init__(self) -> None:
-        self.launched: list[Run] = []
+        self.launched: list[RunRequest] = []
         self.outcome: Outcome | None = None
         self.queued = False
 
-    def launch(self, run: Run, pool: str | None = None, *, rent: str | None = None) -> str:
+    def launch(self, run: RunRequest, pool: str | None = None, *, rent: str | None = None) -> str:
         self.launched.append(run)
         return str(run.id)
 
-    def queue(self, run: Run, pool: str | None = None, *, rent: str | None = None) -> str:
+    def queue(self, run: RunRequest, pool: str | None = None, *, rent: str | None = None) -> str:
         self.queued = True
         self.launched.append(run)
         return str(run.id)
@@ -463,7 +463,7 @@ def test_a_run_the_launcher_lost_has_ended_at_its_last_stored_checkpoint(tmp_pat
     # The launcher's own record of the run, closed without success.
     import etude.launch.client as client  # noqa: PLC0415 - as the passes above import it
 
-    client.launch(Run(id="ppo-1", job=Job(command="exit 3", max_hours=0.1)), "local")
+    client.launch(RunRequest(id="ppo-1", job=Job(command="exit 3", max_hours=0.1)), "local")
     (closed,) = client.wait("ppo-1", timeout=60)
     assert closed.outcome == "failed"
     state = observe(bucket, "ppo")
@@ -630,7 +630,7 @@ def test_another_versions_launcher_database_is_left_beside_this_ones(tmp_path: P
     bucket = DirectoryStorage(tmp_path / "bucket")
     run = trainer(bucket, tmp_path)
     save(run, bucket, tmp_path, range(1, 2))
-    client.launch(Run(id="ppo-1", job=Job(command="exit 3", max_hours=0.1)), "local")
+    client.launch(RunRequest(id="ppo-1", job=Job(command="exit 3", max_hours=0.1)), "local")
     (closed,) = client.wait("ppo-1", timeout=60)
     assert closed.outcome == "failed"
     assert observe(bucket, "ppo").run("ppo-1").state == "failed"

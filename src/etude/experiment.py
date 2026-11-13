@@ -39,7 +39,7 @@ from etude.eval.tournament import played
 from etude.launch import client
 from etude.launch.database import Database, launcher_file
 from etude.launch.errors import LauncherError
-from etude.launch.records import Job, Run, Smoke
+from etude.launch.records import Job, RunRequest, Smoke
 from etude.launch.scheduler import Scheduler
 from etude.launch.source import home
 from etude.tracking.checkpoints import CheckpointId, CheckpointRecord
@@ -204,7 +204,7 @@ def state_of(every: Sequence[RunData], experiment: str) -> ExperimentState:
 def _closed_without_success(runs: Sequence[str]) -> set[str]:
     """Of runs that recorded no end, those this computer's launcher closed without success.
 
-    Only a run's own process writes its end (`state.json`), so one whose
+    Only a run's own process writes its end (`outcome.json`), so one whose
     machine was lost or deleted reads as running in storage for good. The
     launcher knows its last attempt is over. A run it calls succeeded is
     still delivering its end, and one it never launched stays running. The
@@ -463,7 +463,7 @@ class _Ledger:
         queue: bool,
     ) -> None:
         submit = client.queue if queue else client.launch
-        submit(Run(id=run, job=job, smoke=smoke), pool, rent=rent)
+        submit(RunRequest(id=run, job=job, smoke=smoke), pool, rent=rent)
         launched = [*self._read(), _Launched(run=run, matches=tuple(m.key for m in matches))]
         self.path.parent.mkdir(parents=True, exist_ok=True)
         staged = self.path.with_suffix(".tmp")

@@ -113,7 +113,7 @@ def test_remote_launch_freezes_sources_config_and_returns_outputs(
     (tmp_path / "config.txt").write_text("frozen config\n")
     job = tmp_path / "job.py"
     job.write_text(
-        'from etude.launch.records import Job, Run\nfrom pathlib import Path\nhere = Path(__file__).parent\ndef runs(): return Job(command="sh train.sh", experiment="capacity", max_hours=0.01, max_usd=1, repo=str(here / "source with spaces"), config=(here / "config.txt").read_text(), until="steps=10").runs(1, 2)\n'
+        'from etude.launch.records import Job, RunRequest\nfrom pathlib import Path\nhere = Path(__file__).parent\ndef runs(): return Job(command="sh train.sh", experiment="capacity", max_hours=0.01, max_usd=1, repo=str(here / "source with spaces"), config=(here / "config.txt").read_text(), until="steps=10").runs(1, 2)\n'
     )
     launched = command("launch", str(job), "--cohort", "pair")
     assert launched.returncode == 0, launched.stderr
@@ -162,7 +162,7 @@ def test_loop_survives_an_empty_queue_and_places_later_work(
             _until_while_alive(process, heartbeat.exists)
             job = tmp_path / "job.py"
             job.write_text(
-                'from etude.launch.records import Job, Run\ndef runs(): return Job(command="sleep 0.2", max_hours=0.01, max_usd=1).runs(1, 2)\n'
+                'from etude.launch.records import Job, RunRequest\ndef runs(): return Job(command="sleep 0.2", max_hours=0.01, max_usd=1).runs(1, 2)\n'
             )
             assert command("launch", str(job), "--cohort", "later").returncode == 0
             scheduler = _open(remote)
@@ -234,7 +234,7 @@ def test_remote_queue_preserves_choice_without_local_database(
     assert command("pool", "add", "waiting").returncode == 0
     path = tmp_path / "queued.py"
     path.write_text(
-        'from etude.launch.records import Job, Run\ndef runs(): return Job(command="true", max_hours=1, max_usd=1).runs(1, 2)\n'
+        'from etude.launch.records import Job, RunRequest\ndef runs(): return Job(command="true", max_hours=1, max_usd=1).runs(1, 2)\n'
     )
     result = command("queue", str(path), "--pool", "waiting", "--cohort", "queued")
     assert result.returncode == 0, result.stderr
@@ -341,7 +341,7 @@ def test_controller_keeps_source_history_and_checks_out_on_client(
     (repo / "train").write_text("client snapshot\n")
     job = repo.parent / "snapshot.py"
     job.write_text(
-        f'from etude.launch.records import Job, Run\ndef runs(): return Job(command="true", max_hours=1, repo={str(repo)!r})\n'
+        f'from etude.launch.records import Job, RunRequest\ndef runs(): return Job(command="true", max_hours=1, repo={str(repo)!r})\n'
     )
     assert command("pool", "add", "waiting").returncode == 0
     sent = command("queue", str(job), "--pool", "waiting")

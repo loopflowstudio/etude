@@ -54,8 +54,8 @@ from etude.launch.records import (
     Input,
     Job,
     Preparation,
-    Run,
     RunRecord,
+    RunRequest,
     Runtime,
     SmokeForm,
     Until,
@@ -83,6 +83,7 @@ class JobOptions(TypedDict, total=False):
     max_hours: Required[float]
     max_usd: Decimal | None
     name: str
+    seeds: tuple[int, ...]
     until: Until | None
     # A local git repository; None runs in an empty directory. Omitted: the
     # checkout the function's file is in.
@@ -118,6 +119,10 @@ def training[C: BaseModel](
     _require_hours(options)
     if start is not None:
         options["inputs"] = (*options.get("inputs", ()), *checkpoint_inputs_for(start, "start"))
+        options["environment"] = (
+            *options.get("environment", ()),
+            Variable(name="ETUDE_START", value=start.key),
+        )
     job = _job(train, config, origin=train, options=options)
     if smoke is None:
         return job
@@ -310,7 +315,7 @@ def continue_from(
     source: Storage | Path | str,
     ordinal: int | None = None,
     config: BaseModel | None = None,
-) -> Run:
+) -> RunRequest:
     """A new run seeded with out and the available latest checkpoint, or an ordinal.
 
     File inputs freeze the bytes chosen here by digest; a parent changing them
@@ -426,7 +431,7 @@ def continue_from(
             "config": text,
         }
     )
-    return Run(job=job, seed=parent.seed, params=dict(parent.params), source=parent.source)
+    return RunRequest(job=job, seed=parent.seed, params=dict(parent.params), source=parent.source)
 
 
 def _parent_out(storage: Storage, folders: Sequence[str], keys: Sequence[str]) -> OutFiles | None:

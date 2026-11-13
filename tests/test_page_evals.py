@@ -113,7 +113,9 @@ def lab(tmp_path_factory: pytest.TempPathFactory) -> Iterator[tuple[Path, Path]]
         # Deal 1 of the corrupt benchmark fails, and the pass stops.
         with pytest.raises(EtudeError, match="match_failed"):
             advance(read_experiment(file), source=DirectoryStorage(runs), directory=runs)
-        resumed = track(experiment="lab", run="a", job="a", clocks=CLOCKS, directory=runs)
+        resumed = track(
+            resume=True, experiment="lab", run="a", job="a", clocks=CLOCKS, directory=runs
+        )
         save(resumed, tmp_path, range(500, 700, 100))
         resumed.finish(timeout=30)
         yield runs, file
@@ -272,7 +274,14 @@ def test_a_page_offers_each_commit_its_matches_were_played_at(
     for commit, updates in (("a" * 40, range(100, 300, 100)), ("b" * 40, range(300, 400, 100))):
         # Each pass sees exactly the checkpoints delivered before it: the run
         # finishes, as a resumed job's attempt does, before the eval advances.
-        run = track(experiment="versioned", run="a", job="a", clocks=CLOCKS, directory=runs)
+        run = track(
+            resume=updates.start > 100,
+            experiment="versioned",
+            run="a",
+            job="a",
+            clocks=CLOCKS,
+            directory=runs,
+        )
         save(run, tmp_path, updates)
         run.finish(timeout=30)
         monkeypatch.setenv("ETUDE_COMMIT", commit)
@@ -747,7 +756,7 @@ def test_a_running_eval_runs_results_show_and_are_marked_partial(
         matches=[Match(players=players, conditions={"deal": 0}, games=1)],
         directory=runs,
     )  # fmt: skip
-    (runs / "killed" / "state.json").unlink()  # as a machine lost before it ended
+    (runs / "killed" / "outcome.json").unlink()  # as a machine lost before it ended
     built = build(DirectoryStorage(runs), file)
     assert any("Partial results" in note and "killed" in note for note in built.notes)
     assert built.latest_result_ms is not None

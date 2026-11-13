@@ -108,7 +108,7 @@ def test_checkpoints_are_listed_at_their_storage_address_while_the_run_goes_on(
         assert time.monotonic() < deadline
         time.sleep(0.01)
     assert sync(local, storages=[DirectoryStorage(bucket)]) == {}
-    assert not (bucket / "r/state.json").exists()  # the run has not finished
+    assert not (bucket / "r/outcome.json").exists()  # the run has not finished
 
     assert main(["checkpoints", "--source", str(bucket)]) == 0
     listed = [line.split("\t") for line in capsys.readouterr().out.splitlines()]

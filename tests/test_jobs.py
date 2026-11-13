@@ -403,3 +403,21 @@ def test_the_job_command_starts_by_importing_no_other_part_of_etude() -> None:
         text=True,
     ).stdout
     assert loaded.strip() == "['etude', 'etude.call', 'etude.stopping']"
+
+
+def test_job_seeds_expand_to_named_requests_without_changing_job_identity(tmp_path: Path) -> None:
+    file = tmp_path / "job.py"
+    file.write_text(
+        'from etude.launch.records import Job\ndef runs():\n    return Job(command="true", max_hours=1, name="baseline", seeds=(0, 7))\n'
+    )
+    requests = read_job_file(file, experiment="chosen")
+    assert [(run.id, run.seed, run.job.experiment) for run in requests] == [
+        ("baseline-seed-0", 0, "chosen"),
+        ("baseline-seed-7", 7, "chosen"),
+    ]
+    first = requests[0].job
+    assert job_id(first) == job_id(first.model_copy(update={"seeds": (42,)}))
+    file.write_text(
+        'from etude.launch.records import Job\ndef runs():\n    return [Job(command="true", max_hours=1), Job(command="true", max_hours=1, name="other")]\n'
+    )
+    assert [run.id for run in read_job_file(file)] == ["job-seed-0", "other-seed-0"]

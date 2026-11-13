@@ -122,7 +122,7 @@ def test_first_row_replaces_history_and_an_empty_attempt_changes_nothing(
         model = tmp_path / "model"
         model.write_bytes(b"model at 1")
         run.checkpoint(model, updates=1)
-    with track(experiment="e", run="r", clocks=CLOCKS, directory=tmp_path) as run:
+    with track(resume=True, experiment="e", run="r", clocks=CLOCKS, directory=tmp_path) as run:
         if logged != "none":
             run.log({logged: 100}, updates=4)
     data = read(tmp_path, "e", "r")
@@ -163,7 +163,9 @@ def test_out_checkpoint_is_carried_once_and_relocated_without_a_second_copy(
     put_back(restored, restore_set(root))
     assert (restored / "out/state").read_bytes() == b"step two"
     monkeypatch.setenv("ETUDE_OUT", str(restored / "out"))
-    with track(experiment="e", run="r", clocks=CLOCKS, directory=restored.parent) as resumed:
+    with track(
+        resume=True, experiment="e", run="r", clocks=CLOCKS, directory=restored.parent
+    ) as resumed:
         latest = resumed.latest_checkpoint()
         assert latest is not None
         assert latest.artifact.uri == (restored / "out/nested/model.pt").as_uri()

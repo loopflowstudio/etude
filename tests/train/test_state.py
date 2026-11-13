@@ -42,6 +42,7 @@ def test_two_models_and_extra_resume_from_one_save(tmp_path: Path) -> None:
     model2, rival2 = torch.nn.Linear(1, 1), torch.nn.Linear(1, 1)
     optimizer2 = torch.optim.SGD(model2.parameters(), lr=0.01)
     with track(
+        resume=True,
         experiment="e",
         run="r",
         directory=tmp_path,
@@ -119,6 +120,7 @@ def test_stop_saves_the_pass_before_raising_and_never_enters_the_next_phase(
     assert not entered_second
     stop.unlink()
     with track(
+        resume=True,
         experiment="e",
         run="r",
         directory=tmp_path,
@@ -148,6 +150,7 @@ def test_running_hours_resume_from_saved_state_instead_of_a_checkpoint(
             now += 3600
             run.save()
     with track(
+        resume=True,
         experiment="e",
         run="r",
         directory=tmp_path,
@@ -191,6 +194,7 @@ def test_both_hour_clocks_survive_a_relay_without_checkpoints(
     now += 1800
     wall_ms += 1_800_000
     with track(
+        resume=True,
         experiment="e",
         run="r",
         directory=tmp_path / "second",

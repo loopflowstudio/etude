@@ -94,7 +94,7 @@ def test_rows_round_trip_through_files_and_a_bucket_directory(tmp_path: Path) ->
 
     prefix = "training-3f9a/"
     keys = bucket.keys(prefix)
-    assert prefix + "run.json" in keys and prefix + "state.json" in keys
+    assert prefix + "run.json" in keys and prefix + "outcome.json" in keys
     # A finished run this small is one block, and its rows read back as logged.
     assert len([key for key in keys if key.endswith(".blk")]) == 1
     stored = [
@@ -144,7 +144,12 @@ def test_resume_replays_harmlessly_and_sync_delivers_what_an_outage_left(
     first.finish()
     # A second process resumes the same name behind the last row and replays ten.
     second = track(
-        experiment="pilot", run="seed-1", clocks=CLOCKS, directory=local, segment_seconds=0.05
+        resume=True,
+        experiment="pilot",
+        run="seed-1",
+        clocks=CLOCKS,
+        directory=local,
+        segment_seconds=0.05,
     )
     for update in range(40, 80):
         second.log(manabot_row(update), **{"rl/loss": 9.0})
@@ -491,7 +496,7 @@ def test_finish_retries_retained_files_when_storage_recovers(tmp_path: Path) -> 
     run.finish(timeout=2)
     assert not run.problems
     assert not run._shipper.is_alive()
-    assert destination.get("final/state.json") == (run.files.root / "state.json").read_bytes()
+    assert destination.get("final/outcome.json") == (run.files.root / "outcome.json").read_bytes()
     assert destination.requests == len(destination.keys("final")) + 1
     assert all(
         destination.get("final/" + key) == (run.files.root / key).read_bytes()

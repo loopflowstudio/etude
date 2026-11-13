@@ -6,7 +6,7 @@ beside Etude's own tables:
 
 | table | columns |
 |---|---|
-| `runs` | run, experiment, environment (identity), environment_name, environment_config, tournament, state (`finished` or `failed` from its `state.json`; null while it has not ended, so its results are partial) |
+| `runs` | run, experiment, environment (identity), environment_name, environment_config, tournament, state (`finished` or `failed` from its `outcome.json`; null while it has not ended, so its results are partial) |
 | `players` | player (its key, encoded), name (the latest its seats give), names (every one, the latest first), kind (`model` or `code`), checkpoint (its key), artifact (digest), uri, config, seated_at, lines, and `config.KEY` per scalar config key |
 | `matches` | run, match, conditions, games, seed, state, error, wall_ms, execution (result provenance), newest (of the match's done records in its environment, 1 for the latest recorded, the one that counts; null for a failure) |
 | `seats` | run, match, seat, player, name (what the record calls it), the version that played: commit, source (digest), at (where its checkpoint stood, or null) and line (the learner it belongs to, or null) |
@@ -137,7 +137,7 @@ SCHEMA = 14
 _NEWEST_FIRST = "m.wall_ms desc, m.run desc"
 
 _ENVIRONMENT_FILE = "environment.json"
-_STATE_FILE = "state.json"
+_OUTCOME_FILES = ("outcome.json", "state.json")
 # mypy reports this alias as an arg-type error or not depending on its cache; pydantic accepts it.
 _PLAYER: TypeAdapter[Player] = TypeAdapter(Player)  # type: ignore[arg-type, unused-ignore]
 
@@ -208,7 +208,7 @@ def _create(db: duckdb.DuckDBPyConnection, experiment: str, storage: Storage) ->
     db.execute("create table kept.statsdb (schema BIGINT, experiment VARCHAR, store VARCHAR)")
     db.execute("insert into kept.statsdb values (?, ?, ?)", [SCHEMA, experiment, storage.name])
     # Every declared run of any experiment, so each `run.json` is read once; an
-    # eval run's `state.json` state as it arrives and after each resume.
+    # eval run's `outcome.json` state as it arrives and after each resume.
     db.execute(
         "create table kept.runs (run VARCHAR, experiment VARCHAR, kind VARCHAR, state VARCHAR)"
     )
@@ -290,8 +290,10 @@ def _catch_up(
                     for name in new:
                         changed |= _read(db, storage, run, located[name], name, Path(copies))
                     # A resumed run, such as a retry of failed matches, writes its end again.
-                    if new and _STATE_FILE in located:
-                        _ended(db, storage, run, located[_STATE_FILE])
+                    if new and (
+                        outcome := next((name for name in _OUTCOME_FILES if name in located), None)
+                    ):
+                        _ended(db, storage, run, located[outcome], outcome)
                         changed = True
                     _sum_missing(db, storage, run, located, Path(copies))
                 else:
@@ -330,13 +332,15 @@ def _ours(
     return bool(found[0] == experiment)
 
 
-def _ended(db: duckdb.DuckDBPyConnection, storage: Storage, run: str, place: str) -> None:
-    """Record how the eval run last ended, from its `state.json`.
+def _ended(
+    db: duckdb.DuckDBPyConnection, storage: Storage, run: str, place: str, name: str
+) -> None:
+    """Record how the eval run last ended, from its `outcome.json`.
 
     Read when it first arrives and again whenever the run delivers new files:
     a resumed run seals new blocks before it writes its end again.
     """
-    ended = RunState.model_validate_json(storage.get(place + _STATE_FILE))
+    ended = RunState.model_validate_json(storage.get(place + name))
     db.execute("update kept.runs set state = ? where run = ?", [ended.state, run])
 
 

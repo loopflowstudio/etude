@@ -3,6 +3,7 @@
 You write a file with a `train` function in it. Etude calls that function on a
 machine, and calls it again on another when the first is taken away.
 Everything it records is files in a directory or bucket you own.
+For a complete small recipe, see [learning a coin’s bias](../examples/coin.py).
 
 ```python
 # train.py

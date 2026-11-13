@@ -13,6 +13,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 from etude.tracking.delivery import RunFiles
 from etude.tracking.errors import EtudeError
@@ -46,14 +47,15 @@ def declare(
     continues: Continuation | None = None,
     directory: Path | str | None = None,
     namespace: str = "local",
+    resume: bool = False,
 ) -> Declared:
-    """Write a new run's `run.json`, or check a resumed one against it.
+    """Claim a new run's `run.json`, or validate an explicitly resumed one.
 
     A resumed run's declaration is the stored one. Under `etude launch`, `run`,
     `job`, `seed` and `cohort` default to what the launcher handed the process
     (`ETUDE_RUN`, `ETUDE_JOB`, `ETUDE_SEED`, `ETUDE_COHORT`); an argument given
     here wins. Elsewhere `run` defaults to a new random name. Re-using a name
-    resumes it; its experiment and clocks must match the first declaration.
+    is refused unless `resume`; its identity must match the first declaration.
     `config` given as text is kept byte for byte; a mapping is written as JSON.
     """
     handed = os.environ
@@ -75,6 +77,7 @@ def declare(
         config_json=text,
         config_sha256=sha256(text.encode()).hexdigest() if text is not None else None,
         continues=continues,
+        start=handed.get("ETUDE_START"),
     )
     prior = RunFiles(root).run_file()
     if prior is not None:
@@ -83,11 +86,42 @@ def declare(
             raise EtudeError("run_name_belongs_to_another_experiment", 409)
         if prior.declaration.clocks != declaration.clocks:
             raise EtudeError("run_clock_conflict", 409)
+        if not resume:
+            raise EtudeError("run_name_taken", detail=f"{name}; use --resume {name}")
+        validate_resume(prior, config=text, seed=seed)
         return Declared(base, root, prior.declaration)
     root.mkdir(parents=True, exist_ok=True)
-    (root / "run.json").write_text(
-        RunFile(
-            experiment=experiment, namespace=namespace, declaration=declaration
-        ).model_dump_json()
-    )
+    with NamedTemporaryFile(mode="w", prefix=".run-", dir=root) as stream:
+        stream.write(
+            RunFile(
+                experiment=experiment, namespace=namespace, declaration=declaration
+            ).model_dump_json()
+        )
+        stream.flush()
+        os.fsync(stream.fileno())
+        try:
+            os.link(stream.name, root / "run.json")
+        except FileExistsError:
+            raise EtudeError("run_name_taken", detail=name) from None
     return Declared(base, root, declaration)
+
+
+def validate_resume(prior: RunFile, *, config: str | None, seed: int | None) -> None:
+    """Refuse changed config fields or seed before an attempt can write anything."""
+    differences: list[str] = []
+    if prior.declaration.seed != seed:
+        differences.append(f"seed was {prior.declaration.seed!r}, is {seed!r}")
+    old = prior.declaration.config_json
+    if old != config:
+        before = None if old is None else json.loads(old)
+        after = None if config is None else json.loads(config)
+        if isinstance(before, dict) and isinstance(after, dict):
+            differences.extend(
+                f"{key} was {before.get(key)!r}, is {after.get(key)!r}"
+                for key in sorted(before.keys() | after.keys())
+                if key not in before or key not in after or before[key] != after[key]
+            )
+        elif before != after:
+            differences.append("config differs")
+    if differences:
+        raise EtudeError("run_identity_conflict", detail="; ".join(differences))

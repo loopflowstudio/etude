@@ -131,7 +131,7 @@ def test_a_run_that_has_not_ended_is_partial(tmp_path: Path) -> None:
         evaluate(experiment="cards", environment=DUEL, play=play, matches=deals(players, *numbers),
                  run=run, directory=tmp_path / run, storages=[bucket])  # fmt: skip
     # Killed mid-pass, `b` delivered its blocks but never wrote how it ended.
-    (bucket.root / "b" / "state.json").unlink()
+    (bucket.root / "b" / "outcome.json").unlink()
     db = statsdb("cards", bucket)
     assert db.sql("select run, state from runs order by run").fetchall() == [
         ("a", "finished"),

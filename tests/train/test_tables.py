@@ -179,6 +179,7 @@ def test_metric_name_warning_counts_numeric_names_across_attempts(tmp_path: Path
             run.log_table("decks", [], updates=1, seconds=1)
         assert said == []  # Clocks, text, flags and table references do not add numeric names.
         with track(
+            resume=True,
             experiment="e",
             run="r",
             clocks=CLOCKS,
@@ -195,6 +196,7 @@ def test_metric_name_warning_counts_numeric_names_across_attempts(tmp_path: Path
     with warnings.catch_warnings(record=True) as disabled:
         warnings.simplefilter("always", EtudeWarning)
         with track(
+            resume=True,
             experiment="e",
             run="r",
             clocks=CLOCKS,

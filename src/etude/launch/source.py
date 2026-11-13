@@ -18,7 +18,7 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 from etude.launch.measurement import timed
-from etude.launch.records import LauncherError, Run, RunRecord, SourcePosition
+from etude.launch.records import LauncherError, RunRecord, RunRequest, SourcePosition
 
 
 def home() -> Path:
@@ -217,7 +217,7 @@ def _publish(
     return source
 
 
-def freeze(run: Run) -> Run:
+def freeze(run: RunRequest) -> RunRequest:
     """Freeze at the submitting client; a controller receives this same identity."""
     if run.id is not None and (run.job.repo is None or run.source is not None):
         if run.job.repo is not None and (

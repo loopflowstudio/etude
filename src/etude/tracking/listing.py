@@ -21,7 +21,7 @@ def as_storage(source: Storage | Path | str) -> Storage:
 # `environment.json`, `tournament.json` and `blocks` are an eval run's (`etude.eval`);
 # `tables` and `matches` an eval run's of the per-file layout, kept until converted.
 RUN_FOLDERS = ("metrics", "checkpoints", "blocks", "tables", "matches")
-RUN_FILES = ("run.json", "environment.json", "tournament.json", "state.json")
+RUN_FILES = ("run.json", "environment.json", "tournament.json", "state.json", "outcome.json")
 
 
 def run_folders(keys: Sequence[str]) -> dict[str, list[str]]:

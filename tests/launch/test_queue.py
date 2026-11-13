@@ -104,7 +104,7 @@ def test_cli_queue_records_the_choice(
     monkeypatch.setattr(import_module("etude.launch.cli"), "default", lambda: b.scheduler)
     path = tmp_path / "job.py"
     path.write_text(
-        'from etude.launch.records import Job, Run\ndef runs(): return Job(command="train", max_hours=1, max_usd=1)'
+        'from etude.launch.records import Job, RunRequest\ndef runs(): return Job(command="train", max_hours=1, max_usd=1)'
         + (".runs(1, 2)" if cohort else "")
     )
     assert (

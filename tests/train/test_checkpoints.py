@@ -12,6 +12,7 @@ from etude.eval.query import statsdb
 from etude.eval.records import Code, Inference, Match
 from etude.experiment import observe
 from etude.jobs import checkpoint_inputs_for, training
+from etude.tracking.delivery import RunFiles
 from etude.tracking.storage import DirectoryStorage
 from etude.train.records import Step
 from etude.train.run import track
@@ -27,7 +28,9 @@ def train(config: Config) -> None:
     pass
 
 
-def test_two_models_publish_one_checkpoint_and_read_the_same_record(tmp_path: Path) -> None:
+def test_two_models_publish_one_checkpoint_and_read_the_same_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     torch = pytest.importorskip("torch")  # optional training dependency
     policy, value = torch.nn.Linear(1, 1), torch.nn.Linear(1, 1)
     bucket = DirectoryStorage(tmp_path / "bucket")
@@ -84,6 +87,16 @@ def test_two_models_publish_one_checkpoint_and_read_the_same_record(tmp_path: Pa
         ).fetchall() == [(observed.key,)]
     job = training(train, config=Config(), start=observed, max_hours=1)
     assert len(job.inputs) == 3
+    for variable in job.environment:
+        monkeypatch.setenv(variable.name, variable.value)
+    with track(
+        experiment="tiny",
+        run="child",
+        directory=tmp_path / "child-runs",
+        clocks=[Step("updates", "updates")],
+    ) as child:
+        recorded = RunFiles(child.files.root).run_file()
+        assert recorded is not None and recorded.declaration.start == observed.key
     # A relay keeps all folder members and checks each against its recorded digest.
     files = restore_set(run.files.root)
     copied = tmp_path / "relay"

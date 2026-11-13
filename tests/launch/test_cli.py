@@ -192,7 +192,7 @@ def test_machines_join_pools_and_this_computer_can_be_turned_off(
 
     assert run(capsys, "pool", "off", "local")[0] == "local  this computer (default) (off)"
     (tmp_path / "job.py").write_text(
-        'from etude.launch.records import Job, Run\ndef runs(): return Job(command="true", max_hours=1, max_usd=1)\n'
+        'from etude.launch.records import Job, RunRequest\ndef runs(): return Job(command="true", max_hours=1, max_usd=1)\n'
     )
     assert main(["launch", str(tmp_path / "job.py")]) == 1
     assert "pool 'local' is turned off" in capsys.readouterr().err
@@ -215,7 +215,7 @@ def test_default_target_and_owned_status(
     assert "needs a pool, an on-demand or both" in capsys.readouterr().err
     path = tmp_path / "job.py"
     path.write_text(
-        'from etude.launch.records import Job, Run\ndef runs(): return Job(command="echo hi", max_hours=0.01, max_usd=1)\n'
+        'from etude.launch.records import Job, RunRequest\ndef runs(): return Job(command="echo hi", max_hours=0.01, max_usd=1)\n'
     )
     (line,) = run(capsys, "launch", str(path))
     assert "machine local" in line
@@ -224,7 +224,7 @@ def test_default_target_and_owned_status(
         "local  local  owned (this computer), $0.00 committed, never expires"
     ]
     path.write_text(
-        'from etude.launch.records import Job, Run\ndef runs(): return Job(command="echo free", max_hours=0.001)\n'
+        'from etude.launch.records import Job, RunRequest\ndef runs(): return Job(command="echo free", name="free", max_hours=0.001)\n'
     )
     assert "machine local" in run(capsys, "launch", str(path))[0]  # no dollars needed here
     for old in ("--on", "--reserve"):
@@ -307,7 +307,7 @@ def test_launch_makes_machines_that_start_themselves(
     monkeypatch.setattr(import_module("etude.launch.cli"), "default", lambda: b.scheduler)
     path = tmp_path / "job.py"
     path.write_text(
-        'from etude.launch.records import Job, Run\ndef runs(): return Job(command="train", max_hours=1, max_usd=1)'
+        'from etude.launch.records import Job, RunRequest\ndef runs(): return Job(command="train", max_hours=1, max_usd=1)'
         + (".runs(1, 2)" if cohort else "")
     )
     lines = run(
@@ -428,7 +428,7 @@ def test_a_job_file_takes_parameters_and_records_them_on_each_run(
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
     path = tmp_path / "job.py"
     path.write_text(
-        "from __future__ import annotations\nfrom etude.launch.records import Job, Run\ndef runs(hidden: int = 256, seeds: int = 1, lr: float = 0.1, fast: bool = False,\n         tag='x', shape: list[int] | None = None) -> list[Run]:\n    assert type(hidden) is int and type(lr) is float and type(fast) is bool\n    job = Job(command=f'echo {hidden} {lr} {fast} {tag}', max_hours=0.01, max_usd=1, name=f'h{hidden}')\n    return job.runs(*range(seeds))\n"
+        "from __future__ import annotations\nfrom etude.launch.records import Job, RunRequest\ndef runs(hidden: int = 256, seeds: int = 1, lr: float = 0.1, fast: bool = False,\n         tag='x', shape: list[int] | None = None) -> list[RunRequest]:\n    assert type(hidden) is int and type(lr) is float and type(fast) is bool\n    job = Job(command=f'echo {hidden} {lr} {fast} {tag}', max_hours=0.01, max_usd=1, name=f'h{hidden}')\n    return job.runs(*range(seeds))\n"
     )
 
     sent = run(
@@ -458,7 +458,7 @@ def test_job_help_required_flags_mixed_order_and_collision(
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
     path = tmp_path / "job.py"
     path.write_text(
-        'from etude.launch.records import Job\ndef runs(width: int, fast: bool = False):\n    """Train a chosen width."""\n    return Job(command="true", max_hours=1)\n'
+        'from etude.launch.records import Job\ndef runs(width: int, fast: bool = False):\n    """Train a chosen width."""\n    return Job(command="true", name=f"width-{width}", max_hours=1)\n'
     )
     assert main(["launch", str(path), "--help"]) == 0
     help = capsys.readouterr().out

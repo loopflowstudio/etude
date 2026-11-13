@@ -33,7 +33,7 @@ from etude.experiment_file import defined_functions, experiment_named
 from etude.jobs import evaluation_spec, hold_evaluation, with_experiment
 from etude.launch.errors import LauncherError
 from etude.launch.job_file import read_job_file
-from etude.launch.records import Job, Run, SmokeStep
+from etude.launch.records import Job, RunRequest, SmokeStep
 from etude.launch.smoke import Smoked, show, smoke_home, smoke_train
 from etude.page import build, render, write
 from etude.tracking.errors import EtudeError
@@ -45,7 +45,7 @@ STEPS: tuple[Step, ...] = ("train", "eval", "report")
 
 def smoke_file(
     path: Path,
-    runs: Sequence[Run] | None = None,
+    runs: Sequence[RunRequest] | None = None,
     *,
     steps: Collection[Step] = STEPS,
     source: Storage | None = None,

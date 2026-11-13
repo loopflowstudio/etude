@@ -485,6 +485,7 @@ def test_planned_marker_uses_the_current_continuation_not_an_older_overrun(
     ) as run:
         run.log({"rl/loss": 1.0}, updates=1500)
     with track(
+        resume=True,
         experiment="lab",
         run="a",
         clocks=[Step("updates", "updates")],
@@ -494,6 +495,7 @@ def test_planned_marker_uses_the_current_continuation_not_an_older_overrun(
     page = build(runs, file)
     assert page.training.runs[0].at["updates"] == 1200
     with track(
+        resume=True,
         experiment="lab",
         run="a",
         clocks=[Step("updates", "updates")],

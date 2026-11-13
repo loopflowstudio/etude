@@ -47,7 +47,7 @@ from etude.launch.records import (
     OnDemand,
     Pool,
     Quote,
-    Run,
+    RunRequest,
     Status,
 )
 from etude.launch.scheduler import Scheduler
@@ -153,8 +153,8 @@ def _client() -> Scheduler | PythonClient:
     return PythonClient(address) if address else default()
 
 
-def _smoked(runs: Sequence[Run | Job], smoke: bool) -> list[Run]:
-    each = [run if isinstance(run, Run) else Run(job=run) for run in runs]
+def _smoked(runs: Sequence[RunRequest | Job], smoke: bool) -> list[RunRequest]:
+    each = [run if isinstance(run, RunRequest) else RunRequest(job=run) for run in runs]
     if not smoke:
         return each
     with smoke_home() as folder:
@@ -165,7 +165,7 @@ def _smoked(runs: Sequence[Run | Job], smoke: bool) -> list[Run]:
 
 
 def queue(
-    run: Run | Job, pool: str | None = None, *, rent: str | None = None, smoke: bool = False
+    run: RunRequest | Job, pool: str | None = None, *, rent: str | None = None, smoke: bool = False
 ) -> str:
     (smoked_run,) = _smoked([run], smoke)
     return _client().queue(smoked_run, pool, rent=rent)
@@ -173,7 +173,7 @@ def queue(
 
 def queue_cohort(
     name: str,
-    runs: list[Run],
+    runs: list[RunRequest],
     pool: str | None = None,
     *,
     rent: str | None = None,
@@ -187,7 +187,7 @@ def queue_cohort(
 
 
 def launch(
-    run: Run | Job, pool: str | None = None, *, rent: str | None = None, smoke: bool = False
+    run: RunRequest | Job, pool: str | None = None, *, rent: str | None = None, smoke: bool = False
 ) -> str:
     (smoked_run,) = _smoked([run], smoke)
     return _client().launch(smoked_run, pool, rent=rent)
@@ -195,7 +195,7 @@ def launch(
 
 def launch_cohort(
     name: str,
-    runs: list[Run],
+    runs: list[RunRequest],
     pool: str | None = None,
     *,
     rent: str | None = None,
@@ -209,7 +209,7 @@ def launch_cohort(
 
 
 def quote(
-    runs: list[Run],
+    runs: list[RunRequest],
     pool: str | None = None,
     *,
     rent: str | None = None,

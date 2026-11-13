@@ -98,7 +98,7 @@ class Continuation(Record):
 
 
 class RunDeclaration(Record):
-    """A run's identity. Re-declaring the same key resumes it; clocks must match."""
+    """A run's identity, checked before an explicitly resumed attempt starts."""
 
     schema_version: Literal[1] = 1
     source_key: SourceKey
@@ -116,6 +116,7 @@ class RunDeclaration(Record):
     config_json: str | None = Field(default=None, max_length=1024 * 1024)
     config_sha256: Digest | None = None
     continues: Continuation | None = None
+    start: str | None = None  # the published checkpoint this run was initialized from
 
     @model_validator(mode="after")
     def distinct_clocks(self) -> Self:
@@ -150,7 +151,7 @@ class RunFile(Record):
 
 
 class RunState(Record):
-    """`state.json`: how a tracking attempt ended, including a planned stop."""
+    """`outcome.json`: how a tracking attempt ended, including a planned stop."""
 
     state: Literal["finished", "failed", "stopped"]
     counters: RunCounters
@@ -175,6 +176,8 @@ class Attempt(Record):
     # The launcher's RunAttempt, when it started this process.
     attempt: str | None = None
     pod: str | None = None
+    commit: str | None = None
+    until: str | None = None  # absolute launch target, retained across manual resumes
     # Historical records supplied checkpoint coordinates at start. New writers
     # fill this from their first durable row and supersede that coordinate too.
     resumed_at: dict[str, float] = Field(default_factory=dict)
