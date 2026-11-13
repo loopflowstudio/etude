@@ -109,7 +109,8 @@ The sentence the nouns make:
   allocation. This correction follows the reproduced many-writers-per-allocation
   case in `questions.md`: merging them would lose row-replacement boundaries
   or inflate retry counts and cost. It is an implementation design correction,
-  not a new decision attributed to a person. The job digest stays an identity;
+  not a new decision attributed to a person, and it departs from the "1a"
+  answer above; the choice is open in `questions.md`. The job digest stays an identity;
   the report's config-disambiguated job label is derived when reading.
 - Runs and evaluations already stored stay readable: readers accept the old
   file name (`state.json` as an outcome) and old field spellings. Nothing

@@ -228,24 +228,25 @@ run under the same allocation. No worker, network or rental was involved.
 Command/result: `uv run python` inline probe; 2 writers / 1 allocation / 2
 rows, then another run / same allocation. All temporary files were removed.
 
-This is a cardinality issue, not just missing fields: merging by allocation
-id loses writer boundaries used for row replacement; counting writers as
-allocations changes retry limits and costs. Command jobs may also never open
-`track`, while evaluation uses its own writers. Do not refuse these contexts
-just to make the proposed record fit.
+Merging by allocation loses the writer boundaries row replacement uses;
+counting writers as allocations changes retry limits and cost. Command jobs
+may never open `track`; evaluation has its own writers. Do not refuse these
+contexts to make one record fit.
 
-Implementation review, 2026-11-13: choose the `RunWriter` distinction.
-It represents a tracking context, linked to an optional allocation id; it is
-not another representation of `RunAttempt`. The record and real consumers
-are renamed, preserving historical writer files and first-row cutoffs. The
-accepted design's naming table now reflects this correction. This is an
-implementation choice, not a decision attributed to a person.
+**Open decision against Jack Heart's answer.** His "1a -- i think RunAttempt
+is probably better than Attempt though" answered "two classes for an
+attempt" by merging them under `RunAttempt`. The probe above contradicts that
+merge, so the branch keeps two records: `RunWriter` (a tracking context, with
+its first-row cutoff, linked to an optional allocation id) and `RunAttempt`
+(the allocation). Built and reversible; nobody has accepted it. Choice left
+open: (a) keep `RunWriter` beside `RunAttempt`; (b) one `RunAttempt` with
+writers as a sub-part of it; (c) another name for the writer. This does not
+touch the single stored `RunRecord`, which remains accepted and unbuilt.
 
 The shared `RunRecord` must own the persisted job digest. The observed
-`TrainingRun.job` is a derived report label that can change when another
-config is observed; keep that label separate from identity. A manual resume
-now preserves the original job digest while taking the current source,
-target and limits. The single-record cut remains open.
+`TrainingRun.job` is a report label derived from configs seen and can change;
+keep it separate from identity. Manual resume preserves the original digest
+while taking the current source, target and limits.
 
 Launched resume is implemented. A file returning several jobs selects by run
 id, or by the stored job name and seed for hand-built requests with no id.

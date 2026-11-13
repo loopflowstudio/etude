@@ -57,8 +57,8 @@ Replace these end to end:
 - Launch `Run` -> `RunRequest`; authors return Jobs with launch seeds instead.
 - Separate tracking `RunDeclaration`/`RunFile` and observed `TrainingRun` ->
   the single stored `RunRecord`, shared with the launcher.
-- Tracking `Attempt` -> `RunWriter` (built); `RunAttempt` stays the machine
-  allocation. See the cardinality correction in `questions.md`.
+- Tracking `Attempt` -> `RunWriter` (built, decision open); `RunAttempt`
+  stays the machine allocation.
 - Experiment `Checkpoint` and eval query's `_StoredCheckpoint`/`_StoredArtifact`
   are removed. One `CheckpointRecord` and one `CheckpointRef` live in
   `etude.tracking.checkpoints`, which training and evaluation both import
@@ -134,11 +134,11 @@ Remaining, before the accepted API can be treated as built:
    controller message is now `RunOperation`, freeing public `RunRequest`.
    Preserve historical file/field readers during the cut. Do not extend the
    separate records as a final API.
-   The cardinality correction in `questions.md` is reviewed and built:
-   `RunWriter` owns each tracking context and its first-row cutoff;
-   `RunAttempt` owns a machine allocation. Historical writer files still read.
-   Preserve job identity separately from the derived report label in the
-   remaining run-record cut.
+   Built: `RunWriter` (tracking context, first-row cutoff) beside
+   `RunAttempt` (allocation); historical writer files read. This departs
+   from Jack Heart's "1a" (merge under `RunAttempt`); the choice is open in
+   `questions.md` (Record unification). The `RunRecord` cut keeps the job
+   digest as identity and `TrainingRun.job` as a derived report label.
 2. Experiment-scoped identity and `PREFIX/EXPERIMENT/RUN` carriage/grants,
    including readers. Names/storage remain globally scoped in the launcher;
    local CLI already nests by experiment. Launched explicit resume is now
@@ -163,9 +163,8 @@ resume test, command import-count tests and local resume: **25 passed**;
 writer/continuation compatibility filters: **7 passed**, plus the shared
 allocation writer test passed; unallocated/shared cohort limit filters: **2
 passed**. `uv run mypy`, `uv run ruff check .`,
-`uv run ruff format --check .`: clean. Waiting-query EXPLAIN uses supply
-indexes and `attempts_run(run, number)`; refusal counts pin external calls
-at zero. Shared identity validation adds one module to pools and sync-seal.
+`uv run ruff format --check .`: clean. Refusal counts pin external calls at
+zero.
 Compress after `897c72b`: `uv run pytest tests/launch/test_{resume,planned_stop,
 scheduler,controller}.py -q`: **77 passed**, after updating two
 `test_scheduler.py` tests that failed at `897c72b` (file-stem job name in
