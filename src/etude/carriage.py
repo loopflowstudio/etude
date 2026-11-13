@@ -8,12 +8,11 @@ decide here which files are ready (`listing`), their order, the transfer's
 purpose, what a writer retired (`retired`), and which objects are never sent
 twice (`immutable`): Etude's own blocks, tables and checkpoints, and any
 file an author writes under a run's `artifacts/` folder. An eval run's
-block (`etude.eval.block`) is sent data first and index last. Each carrier keeps its own change detection and storage
-I/O. A later attempt on a fresh machine restores the records and the one
-checkpoint file `resume_file` names, from storage or, on a host without one,
-as the `restore_set` another host's folder, or the launcher's copy of a
-storage, gives (`put_back`); a continuation's machine is given its parent's
-one file (`recorded_file`).
+block (`etude.eval.block`) is sent data first and index last. Each carrier
+keeps its own change detection and storage I/O. A fresh machine restores
+records, the checkpoint `resume_file` names and every working file in `out/`.
+Without shared storage, `restore_set` and `put_back` relay that state between
+hosts; `recorded_file` selects a single checkpoint or working file for an input.
 A checkpoint file's name is never used twice (`taken`), so no key under
 `checkpoints/` ever holds two different files.
 
@@ -24,7 +23,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Container, Iterable, Mapping
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
@@ -47,7 +46,8 @@ def checkpoint_file(key: str) -> bool:
     """A recorded model's bytes: a file under `checkpoints/` that is not its JSON record or a note."""
     folder, _, name = key.rpartition("/")
     return (
-        folder.rpartition("/")[2] == CHECKPOINTS
+        "out" not in PurePosixPath(folder).parts
+        and folder.rpartition("/")[2] == CHECKPOINTS
         and not name.endswith(".json")
         and not name.startswith(".")
     )
@@ -66,7 +66,7 @@ def _eval_block(folder: str) -> bool:
     return parent.rpartition("/")[2] == EVAL_BLOCKS and not name.startswith(".")
 
 
-def immutable(key: str) -> bool:
+def immutable(key: str, recorded: Container[str] = ()) -> bool:
     """Whether an object never changes once written: a metric block or tail, a
     table, a checkpoint, an eval run's block, or an author's file under `artifacts/`.
 
@@ -75,6 +75,10 @@ def immutable(key: str) -> bool:
     `artifacts/`, at any depth, once; naming it by its content keeps that
     true. The key may sit under any folders.
     """
+    if key in recorded:
+        return True
+    if "out" in PurePosixPath(key).parts:
+        return False
     folder, _, name = key.rpartition("/")
     kind = folder.rpartition("/")[2]
     return (
@@ -86,15 +90,15 @@ def immutable(key: str) -> bool:
     )
 
 
-def purpose(key: str) -> Literal["checkpoint", "report"]:
+def purpose(key: str, recorded: Container[str] = ()) -> Literal["checkpoint", "report"]:
     """What a transfer of this key is for, in usage."""
-    return "checkpoint" if checkpoint_file(key) else "report"
+    return "checkpoint" if key in recorded or checkpoint_file(key) else "report"
 
 
-def _rank(key: str) -> int:
+def _rank(key: str, recorded: Container[str]) -> int:
     # Checkpoint files precede their records, and data the indexes and
     # records that describe it, so a reader never finds a record first.
-    if checkpoint_file(key):
+    if key in recorded or checkpoint_file(key):
         return 0
     if key.endswith("/" + EVAL_BLOCK_INDEX) and _eval_block(key.rpartition("/")[0]):
         return 2
@@ -128,7 +132,8 @@ def listing(root: Path, *, tail_seconds: float) -> list[str]:
         if path.suffix == ".tail" and tail_seconds > 0 and now - stat.st_mtime < tail_seconds:
             continue
         keys.append(name.as_posix())
-    return sorted(keys, key=lambda key: (_rank(key), key))
+    recorded = recorded_files(root)
+    return sorted(keys, key=lambda key: (_rank(key, recorded), key))
 
 
 def retired(root: Path) -> list[str]:
@@ -166,11 +171,30 @@ def _recorded(root: Path) -> dict[int, tuple[str, RecordedFile]]:
             ordinal, artifact = int(record["ordinal"]), dict(record["artifact"])
         except (OSError, ValueError, KeyError, TypeError):
             continue
-        key = f"{CHECKPOINTS}/{PurePosixPath(str(artifact.get('uri', ''))).name}"
+        key = (
+            record.get("file")
+            or f"{CHECKPOINTS}/{PurePosixPath(str(artifact.get('uri', ''))).name}"
+        )
+        if not isinstance(key, str) or not within(key):
+            continue
         sha256, size = artifact.get("sha256"), artifact.get("size_bytes")
-        if isinstance(sha256, str) and isinstance(size, int) and checkpoint_file(key):
+        if (
+            isinstance(sha256, str)
+            and isinstance(size, int)
+            and (checkpoint_file(key) or key.startswith("out/"))
+        ):
             recorded[ordinal] = (f"{CHECKPOINTS}/{path.name}", RecordedFile(key, sha256, size))
     return recorded
+
+
+def within(key: str) -> bool:
+    """A plain relative file path, safe to put under a run's folder."""
+    return not key.startswith("/") and not ({"", ".", ".."} & set(key.split("/")))
+
+
+def recorded_files(root: Path) -> dict[str, RecordedFile]:
+    """Checkpoint bytes by their portable key, including references inside out."""
+    return {file.key: file for _, file in _recorded(root).values()}
 
 
 def resume_file(root: Path) -> RecordedFile | None:
@@ -222,8 +246,8 @@ def restore_set(root: Path) -> dict[str, bytes]:
     """What a later attempt on another host needs of this folder, by key.
 
     The declaration, every checkpoint record, the file `resume_file` names,
-    and the note of every checkpoint name `taken`. Nothing else: no metrics
-    and no other milestone.
+    the whole working directory, and the note of every checkpoint name
+    `taken`. Metric blocks and other copied milestones remain in storage.
     """
     keys = [f"{CHECKPOINTS}/{path.name}" for path in sorted((root / CHECKPOINTS).glob("*.json"))]
     if (root / "run.json").is_file():
@@ -231,41 +255,53 @@ def restore_set(root: Path) -> dict[str, bytes]:
     wanted = resume_file(root)
     if wanted is not None and (root / wanted.key).is_file():
         keys.append(wanted.key)
-    files = {key: (root / key).read_bytes() for key in keys}
+    keys.extend("out/" + key for key in listing(root / "out", tail_seconds=0))
+    files = {key: (root / key).read_bytes() for key in dict.fromkeys(keys)}
     files[STORED] = "".join(name + "\n" for name in sorted(taken(root))).encode()
     return files
 
 
 def recorded_file(root: Path, key: str) -> dict[str, bytes]:
-    """One recorded checkpoint file of this folder with the record that names it, by key.
+    """One checkpoint with its record, or a working file, by key.
 
     What another host needs to be given that one file (`put_back` checks it
-    against the record). Raises `FileNotFoundError` when no record here names
-    `key` or its file is gone.
+    against the record). Raises `FileNotFoundError` when the file is gone or
+    a key outside `out/` has no checkpoint record.
     """
     for record, named in _recorded(root).values():
         if named.key == key:
             return {record: (root / record).read_bytes(), key: (root / key).read_bytes()}
+    if within(key) and key.startswith("out/"):
+        return {key: (root / key).read_bytes()}
     raise FileNotFoundError(f"no checkpoint record in {root} names {key}")
 
 
 def put_back(root: Path, files: Mapping[str, bytes]) -> None:
-    """Write what `restore_set` or `recorded_file` gave into this host's folder, keeping what it has.
+    """Restore relayed files, retaining existing records and replacing working files.
 
     Records come first, so each checkpoint file is checked against the digest
     of the record that names it; a mismatch raises `Mismatch` and writes no file.
     """
-    ordered = sorted(files, key=lambda key: (checkpoint_file(key), key))
+    if any(not within(key) for key in files):
+        raise Mismatch("a restored file must be within the run folder")
+    ordered = sorted(files, key=lambda key: (checkpoint_file(key) or key.startswith("out/"), key))
+    recorded: dict[str, RecordedFile] | None = None
     for key in ordered:
         target = root / key
         if key == STORED:
             note_stored(root, files[key].decode().split("\n")[:-1])
             continue
-        if target.exists():
+        if target.exists() and not key.startswith("out/"):
             continue
-        if checkpoint_file(key):
-            named = named_file(root, key)
-            if named is None or named.sha256 != sha256(files[key]).hexdigest():
+        if recorded is None and (checkpoint_file(key) or key.startswith("out/")):
+            recorded = recorded_files(root)
+        named = None if recorded is None else recorded.get(key)
+        if named is not None or checkpoint_file(key):
+            if (
+                named is None
+                or named.size_bytes != len(files[key])
+                or named.sha256 != sha256(files[key]).hexdigest()
+            ):
                 raise Mismatch(f"{key} does not match the checkpoint record that names it")
         target.parent.mkdir(parents=True, exist_ok=True)
         partial = target.with_name(target.name + ".partial")

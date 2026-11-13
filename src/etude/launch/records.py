@@ -25,6 +25,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from etude.carriage import within
 from etude.launch.errors import LauncherError as LauncherError
 
 
@@ -34,7 +35,9 @@ class Record(BaseModel):
     model_config = ConfigDict(defer_build=True, frozen=True)
 
 
-Outcome = Literal["succeeded", "failed", "cancelled", "over_budget", "out_of_time", "lost"]
+Outcome = Literal[
+    "succeeded", "failed", "cancelled", "over_budget", "out_of_time", "lost", "stopped"
+]
 # Why infrastructure lost an attempt. Only "lost" attempts carry a cause.
 Cause = Literal[
     "capacity_refused",
@@ -332,6 +335,7 @@ class Input(Record):
     """
 
     name: str  # where the job finds it: ETUDE_INPUTS_DIR/NAME
+    out: str | None = None  # seed this path within the run directory on its first attempt
     key: str = Field(min_length=1)
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     size_bytes: int = Field(ge=0)
@@ -346,8 +350,9 @@ class Input(Record):
 
     @model_validator(mode="after")
     def _within(self) -> Input:
-        parts = self.key.split("/")
-        if self.run is not None and (self.key.startswith("/") or {"", ".", ".."} & set(parts)):
+        if self.out is not None and not within(self.out):
+            raise ValueError("an input destination must be within the run directory")
+        if self.run is not None and not within(self.key):
             raise ValueError(
                 f"input key {self.key!r} must be a path within run {self.run}'s folder"
             )

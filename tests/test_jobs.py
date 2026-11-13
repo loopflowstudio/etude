@@ -327,4 +327,4 @@ def test_the_job_command_starts_by_importing_no_other_part_of_etude() -> None:
         capture_output=True,
         text=True,
     ).stdout
-    assert loaded.strip() == "['etude', 'etude.call']"
+    assert loaded.strip() == "['etude', 'etude.call', 'etude.stopping']"

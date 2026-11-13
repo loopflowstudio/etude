@@ -10,8 +10,9 @@ from __future__ import annotations
 import re
 from typing import Literal
 
-from pydantic import Field, JsonValue
+from pydantic import Field, JsonValue, field_validator
 
+from etude.carriage import within
 from etude.run.records import ArtifactRef, Clock, Name, Record, SourceKey
 
 
@@ -38,23 +39,32 @@ class CheckpointRecord(Record):
     schema_version: Literal[1] = 1
     ordinal: int = Field(ge=1)
     artifact: ArtifactRef
+    # A stored file's key relative to the run folder. None for older records
+    # (beside this record) and references to files outside the tracked folder.
+    file: str | None = None
     at: dict[Name, float]
     wall_ms: int
     # The author's labels, such as "best". They may be added and removed later.
     tags: tuple[Name, ...] = Field(default=(), max_length=32)
 
+    @field_validator("file")
+    @classmethod
+    def _relative(cls, value: str | None) -> str | None:
+        if value is not None and not within(value):
+            raise ValueError("checkpoint file must be relative to its run")
+        return value
 
-class ParentCheckpoint(Record):
-    """`ETUDE_CONTINUES`: the parent run and the checkpoint of it a continuation starts from.
 
-    The checkpoint is the parent's record, without tags. A file stored in the
-    parent's folder reaches the machine as the job's input named `input`,
-    and the record addresses it within that folder (`checkpoints/NAME`). With
-    no input, the record references a model elsewhere by its own address.
+class ParentRun(Record):
+    """`ETUDE_CONTINUES`: lineage from a directory or a selected checkpoint.
+
+    A directory continuation names `at`. A checkpoint continuation carries
+    the parent's record without tags, and the input that delivers its file.
     """
 
     parent: SourceKey
-    checkpoint: CheckpointRecord
+    checkpoint: CheckpointRecord | None = None
+    at: dict[Name, float] = Field(default_factory=dict)
     input: str | None = None
 
 

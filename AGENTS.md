@@ -106,7 +106,9 @@ terminal, log or chat: consume it inline or redirect it. If one leaks, say so
 and flag it for rotation without quoting it again.
 
 Launcher records use frozen Pydantic models with named constructor fields and
-model-owned JSON serialization. Keep `providers/runpod/http.py`,
+model-owned JSON serialization. For `Json[Model]` fields, pass serialized text
+through `model_validate`: the typed constructor describes the decoded model,
+while runtime validation expects JSON text. Keep `providers/runpod/http.py`,
 `providers/runpod/pod.py`, `providers/vast/http.py`, `providers/vast/instance.py`,
 `providers/lium/pod.py`,
 `providers/bootstrap.py`, `providers/package.py` and `environment.py`

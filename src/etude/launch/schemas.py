@@ -51,8 +51,8 @@ class Work(Record):
     repo: str | None
     commit: str | None
     run: str  # names the run's folder in storage, shared by all its attempts
-    # A later attempt of its run: the run's folder is restored first where the
-    # machine does not hold it (`etude.carriage.resume_file`).
+    # A retry on another machine: restore its run's records and working files
+    # before starting. On the same machine the existing files are newer.
     resumes: bool = False
     job: str | None = None
     job_name: str | None = None
@@ -116,13 +116,20 @@ class Result(Record):
     tally: Tally | None = None
 
 
+class ReadLink(Record):
+    """An object to restore, checked against the length storage listed."""
+
+    url: str = Field(repr=False)
+    size_bytes: int = Field(ge=0)
+
+
 class Bootstrap(Record):
     packet: Json[Packet]
     out: Grant  # the session's own folder: its receipt, usage and end note
     runs: dict[str, Grant] = Field(default_factory=dict)  # each run's folder, for the packet's work
     inbox_url: str
     fetch: dict[str, Download] = Field(default_factory=dict)
-    restore: dict[str, str] = Field(default_factory=dict)  # see Delivery
+    restore: dict[str, ReadLink] = Field(default_factory=dict)  # see Delivery
 
 
 class Delivery(Record):
@@ -130,7 +137,7 @@ class Delivery(Record):
     access: Grant  # the run's folder
     fetch: dict[str, Download] = Field(default_factory=dict)
     # Read links to what storage holds of a resumed run's folder, by RUN/KEY.
-    restore: dict[str, str] = Field(default_factory=dict)
+    restore: dict[str, ReadLink] = Field(default_factory=dict)
 
 
 class AttemptRecord(Record):

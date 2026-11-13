@@ -16,7 +16,9 @@ from etude.carriage import (
     checkpoint_file,
     named_file,
     note_stored,
+    purpose,
     recorded_file,
+    recorded_files,
     restore_set,
     resume_file,
 )
@@ -30,6 +32,7 @@ from etude.launch.schemas import (
     Observation,
     Packet,
     Progress,
+    ReadLink,
     Work,
     WorkerLog,
     progress_from_json,
@@ -39,6 +42,7 @@ from etude.launch.storage.download import Download, download
 from etude.launch.storage.s3 import Bucket, Grant, Version
 from etude.launch.storage.transport import attribute
 from etude.launch.usage import Transfer
+from etude.storage_timeout import StorageUnavailable
 
 # How long a link lasts where no rental bounds it: a session on a machine you
 # own, and links the launcher reads itself. A rented session's grants last
@@ -208,25 +212,21 @@ class BucketJournal:
                 )
         return links
 
-    def _restore(self, works: Sequence[Work]) -> dict[str, str]:
-        """Read links to what storage holds of each resumed run's folder, by RUN/KEY.
-
-        The run's declaration and every object under `checkpoints/`; the
-        machine reads only what it lacks, and of the checkpoint files only the
-        one its latest record names (`etude.carriage.resume_file`). Linking
-        reads nothing: one listing per resumed run.
-        """
-        links: dict[str, str] = {}
+    def _restore(self, works: Sequence[Work]) -> dict[str, ReadLink]:
+        """One listing per resumed run: records, checkpoints and all working files."""
+        links: dict[str, ReadLink] = {}
         for work in works:
             if not work.resumes:
                 continue
             folder = self._run(work.run)
             with attribute(run=work.run, attempt=work.attempt, purpose="control"):
-                kept = self._bucket.list(f"{folder}{CHECKPOINTS}/")
-            for key in [folder + "run.json", *kept]:
-                links[f"{work.run}/{key[len(folder) :]}"] = self._bucket.get_url(
-                    key, _GRANT_SECONDS
-                )
+                kept = self._bucket.objects(folder)
+            for key, size in kept.items():
+                relative = key[len(folder) :]
+                if relative == "run.json" or relative.startswith(("checkpoints/", "out/")):
+                    links[f"{work.run}/{relative}"] = ReadLink(
+                        url=self._bucket.get_url(key, _GRANT_SECONDS), size_bytes=size
+                    )
         return links
 
     def held(self, run: str, key: str | None = None) -> dict[str, bytes]:
@@ -234,16 +234,18 @@ class BucketJournal:
 
         Staged in a folder on this computer, then given as a host holding it
         gives it (`etude.carriage.restore_set`, or with `key` `recorded_file`):
-        one listing, the declaration and each checkpoint record read whole, and
-        one checkpoint file through this computer's cache, verified against its
-        record, so relaying it again reads no more of it. Raises
-        `FileNotFoundError` when no record here names `key` or its file is gone.
+        one listing, the declaration, checkpoint records and working files.
+        A copied checkpoint passes through the verified cache. With `key`,
+        only that file and the checkpoint records are read. Missing or damaged
+        working files raise `StorageUnavailable`; an absent selected checkpoint
+        raises `FileNotFoundError`.
         """
         folder = self._run(run)
         with TemporaryDirectory() as staging, attribute(run=run, purpose="control"):
             root = Path(staging)
             (root / CHECKPOINTS).mkdir()
-            listed = [name[len(folder) :] for name in self._bucket.list(f"{folder}{CHECKPOINTS}/")]
+            objects = self._bucket.objects(folder)
+            listed = {name[len(folder) :]: size for name, size in objects.items()}
             note_stored(
                 root, [PurePosixPath(name).name for name in listed if checkpoint_file(name)]
             )
@@ -255,8 +257,21 @@ class BucketJournal:
             for name in records if key is not None else [*records, "run.json"]:
                 if (raw := self._bucket.get(folder + name)) is not None:
                     (root / name).write_bytes(raw)
+            recorded = recorded_files(root)
+            for name, size in listed.items():
+                if not name.startswith("out/") or key not in (None, name):
+                    continue
+                with attribute(purpose=purpose(name, recorded)):
+                    raw = self._bucket.get(folder + name)
+                if raw is None or len(raw) != size:
+                    raise StorageUnavailable(
+                        f"restored file {name} is missing or has changed length"
+                    )
+                target = root / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(raw)
             wanted = resume_file(root) if key is None else named_file(root, key)
-            if wanted is not None and wanted.key in listed:
+            if wanted is not None and wanted.key in listed and not (root / wanted.key).exists():
                 with attribute(purpose="checkpoint"):
                     download(
                         Download(

@@ -119,13 +119,15 @@ CREATE TABLE IF NOT EXISTS attempts(
   version INTEGER NOT NULL DEFAULT 1, planned_at TEXT, added INTEGER NOT NULL DEFAULT 0,
   prepared TEXT, tally TEXT);
 CREATE INDEX IF NOT EXISTS runs_job ON runs(job);
+CREATE INDEX IF NOT EXISTS runs_pool ON runs(pool, seq);
+CREATE INDEX IF NOT EXISTS runs_rent ON runs(rent, seq);
 CREATE INDEX IF NOT EXISTS attempts_run ON attempts(run);
 CREATE INDEX IF NOT EXISTS attempts_session ON attempts(session);
 """
 
 Fact = str | int | None
 # Prototype databases from another schema version are refused, never migrated.
-_VERSION = 15
+_VERSION = 16
 
 
 def _text(at: datetime | None) -> str | None:
@@ -697,7 +699,8 @@ class Database:
                 FROM runs r
                 WHERE (r.pool = ? OR r.rent = ?) AND r.cancel_requested_at IS NULL
                 AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.run = r.id AND (
-                  a.outcome IS NULL OR a.outcome != 'lost' OR a.cause NOT IN ({marks})))
+                  a.outcome IS NULL OR (a.outcome != 'stopped' AND
+                  (a.outcome != 'lost' OR a.cause NOT IN ({marks})))))
                 ORDER BY r.seq""",
             (supply, supply, *sorted(RETRYABLE)),
         ).fetchall()

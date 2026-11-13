@@ -16,7 +16,7 @@ from etude.launch.executor import Refused
 from etude.launch.records import Job, LauncherError, Offer, OnDemand, Pool, Stale
 from etude.launch.scheduler import Scheduler
 from etude.launch.schemas import Packet, Work
-from etude.train.records import ParentCheckpoint, Step
+from etude.train.records import ParentRun, Step
 from etude.train.run import track
 from tests.launch.fake import L4, bench
 
@@ -213,7 +213,8 @@ def test_cli_continue_waits_without_capacity(
     child = capsys.readouterr().out.split()[0]
     record = b.scheduler.record(child)
     (given,) = record.spec.environment
-    handed = ParentCheckpoint.model_validate_json(given.value)
+    handed = ParentRun.model_validate_json(given.value)
+    assert handed.checkpoint is not None
     assert (handed.parent.source_id, handed.checkpoint.at) == (parent, {"steps": 3})
     assert record.spec.until == "steps=7" and record.autorun
     assert b.scheduler.read(child).phase == "queued"

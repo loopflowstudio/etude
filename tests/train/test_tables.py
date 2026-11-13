@@ -79,7 +79,7 @@ def test_row_tables_resolve_only_surviving_updates_across_machine_folders(
         run.log_table("matchups", [{"result": "superseded"}], updates=3, seconds=3)
     # Damage superseded evidence: selecting history must happen before fetching artifacts.
     for path in (first / "r/artifacts").glob("*.json"):
-        if b"superseded" in path.read_bytes():
+        if not empty_resume and b"superseded" in path.read_bytes():
             path.unlink()
     second = tmp_path / "pool/second/out/track"
     with track(
@@ -87,7 +87,6 @@ def test_row_tables_resolve_only_surviving_updates_across_machine_folders(
         run="r",
         clocks=CLOCKS,
         directory=second,
-        resumed_at={"updates": 2, "seconds": 2},
     ) as resumed:
         if not empty_resume:
             resumed.log_table("matchups", [{"result": "replaced"}], updates=2, seconds=2)
@@ -107,10 +106,11 @@ def test_row_tables_resolve_only_surviving_updates_across_machine_folders(
     assert data.read_table("matchups", "updates") == (
         TablePoint(x=1, rows=({"result": "keep"},)),
         TablePoint(x=2, rows=({"result": "checkpoint" if empty_resume else "latest"},)),
+        *((TablePoint(x=3, rows=({"result": "superseded"},)),) if empty_resume else ()),
     )
-    # Two arrays per contributing block plus exactly two selected artifacts; planning reads
-    # the resumed block's clock once more, since its repeated values give no range in the header.
-    assert storage.requests - before == (4 if empty_resume else 8)
+    # Two arrays per contributing block plus the selected artifacts (three for
+    # an empty retry, two otherwise). Repeated clocks need one extra planning read.
+    assert storage.requests - before == (5 if empty_resume else 8)
     assert data.read_table("orphan", "updates") == ()
 
 

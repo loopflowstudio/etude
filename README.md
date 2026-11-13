@@ -70,8 +70,9 @@ evaluation(
 ```
 
 Everything a run records goes to your own directory or S3 bucket. There is no
-server to run and no account to make. A run that loses its machine resumes from
-its last checkpoint on another, and reads back as one run.
+server to run and no account to make. A run that loses its machine is called
+again on another, with its [run directory](docs/tracking.md#a-run-directory-a-stop-signal-and-running-again)
+and checkpoints restored, and reads back as one run.
 
 ## Install
 

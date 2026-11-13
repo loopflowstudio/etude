@@ -1365,11 +1365,10 @@ class Scheduler:
                 update={"phase": "setting_up" if last.started_at is None else "running"}
             )
         retry = last is None or (
-            last.outcome == "lost"
-            and last.cause in RETRYABLE
+            (last.outcome == "stopped" or last.outcome == "lost" and last.cause in RETRYABLE)
             and len(attempts) < record.spec.max_attempts
         )
-        if last is not None and not retry:
+        if last is not None and not retry and last.outcome != "stopped":
             return seen.model_copy(
                 update={"phase": "done", "outcome": last.outcome, "cause": last.cause}
             )
@@ -1387,8 +1386,12 @@ class Scheduler:
                     "cause": None if last is None else last.cause,
                 }
             )
+        if last is not None and not retry:
+            return seen.model_copy(update={"phase": "done", "outcome": last.outcome})
         if last is not None:
-            return seen.model_copy(update={"reason": f"retrying after {last.cause}"})
+            return seen.model_copy(
+                update={"reason": f"retrying after {last.cause or last.outcome}"}
+            )
         cohort = None if record.cohort is None else self._store.cohort(record.cohort)
         if cohort is not None and self._cohort_live(cohort.name, now) >= cohort.parallel:
             return seen.model_copy(update={"reason": f"cohort runs {cohort.parallel} at a time"})
@@ -1935,9 +1938,9 @@ class Scheduler:
     def _relay(self, attempt: RunAttempt, run: RunRecord) -> bool:
         """Hand an attempt what it needs of runs' folders from the machines that last ran them.
 
-        A later attempt gets its own run's records, declaration and latest
-        checkpoint file, so ordinals continue; an input that is a run's file
-        (`Input.run`) gets just that file. A machine that reads the holder's
+        A later attempt gets its run's records, working directory and latest
+        checkpoint. Initial directory inputs share one relay of the parent;
+        other run inputs get just their named file. A machine that reads the holder's
         storage reads them from there; any other is given them from the
         holder's storage, or else its disk (`Execution.held`). Raises while
         those cannot be reached, and the attempt waits: nothing is silently
@@ -1953,11 +1956,18 @@ class Scheduler:
         session = self._store.session(attempt.session)
         if attempt.number > 1:
             self._carry(attempt.run, session, before=attempt.number)
+        holder = self._holder(run.id, before=attempt.number) if attempt.number > 1 else None
+        copied: set[str] = set()
         for given in run.spec.inputs:
-            if given.run is None:
+            if given.run is None or (holder is not None and given.out is not None):
                 continue
             try:
-                self._carry(given.run, session, key=given.key)
+                if given.out is not None:
+                    if given.run not in copied:
+                        self._carry(given.run, session)
+                        copied.add(given.run)
+                else:
+                    self._carry(given.run, session, key=given.key)
             except (FileNotFoundError, StoredMismatch, Mismatch) as error:
                 # The error says whether the file is gone or differs from its record.
                 self._diagnose(
@@ -2018,6 +2028,7 @@ class Scheduler:
         if not self._relay(attempt, run):
             return None
         spec = run.spec
+        holder = self._holder(run.id, before=attempt.number) if attempt.number > 1 else None
         return Work(
             attempt=attempt.id,
             command=spec.command,
@@ -2035,12 +2046,12 @@ class Scheduler:
             repo=spec.repo,
             commit=None if spec.repo is None else spec.revision,
             run=run.id,
-            resumes=attempt.number > 1,
+            resumes=holder is not None and holder.machine != attempt.machine,
             job=run.job,
             job_name=spec.name or None,
             cohort=run.cohort,
             experiment=spec.experiment,
-            inputs=spec.inputs,
+            inputs=tuple(i for i in spec.inputs if holder is None or i.out is None),
             environment=spec.environment,
         )
 

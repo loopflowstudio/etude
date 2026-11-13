@@ -167,7 +167,10 @@ class Storage:
                 return Reply(status=204, body=b"")
             if "list-type" in query:
                 found = sorted(k for k in self.objects if k.startswith(query["prefix"][0]))
-                keys = "".join(f"<Contents><Key>{k}</Key></Contents>" for k in found)
+                keys = "".join(
+                    f"<Contents><Key>{k}</Key><Size>{len(self.objects[k])}</Size></Contents>"
+                    for k in found
+                )
                 page = (
                     '<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
                     f"<IsTruncated>false</IsTruncated>{keys}</ListBucketResult>"

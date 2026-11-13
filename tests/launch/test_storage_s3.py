@@ -67,7 +67,7 @@ def test_a_get_is_signed_as_amazon_documents() -> None:
 def test_a_listing_is_signed_as_amazon_documents_and_follows_pages() -> None:
     page = (
         '<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
-        "<IsTruncated>{more}</IsTruncated>{token}<Contents><Key>{key}</Key></Contents>"
+        "<IsTruncated>{more}</IsTruncated>{token}<Contents><Key>{key}</Key><Size>1</Size></Contents>"
         "</ListBucketResult>"
     )
     first = page.format(

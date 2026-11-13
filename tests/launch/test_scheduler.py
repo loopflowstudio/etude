@@ -805,6 +805,10 @@ def test_a_retry_on_another_owned_host_waits_for_and_continues_the_runs_folder(
         weights.write_bytes(f"weights at {step}".encode())
         tracked.checkpoint(weights, steps=step)
     tracked.finish()
+    for host, content in (("first", b"latest state"), ("second", b"stale state")):
+        out = hosts[host].track / run / "out"
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "state.pt").write_bytes(content)
 
     hosts["first"].reachable = False
     clock.advance(200)  # the first host's window has ended: the retry goes elsewhere
@@ -822,6 +826,7 @@ def test_a_retry_on_another_owned_host_waits_for_and_continues_the_runs_folder(
     assert hosts["second"].sessions
     # Asked on each pass until the holder answered, then never again.
     assert hosts["first"].calls["ssh"] == 3 and hosts["second"].calls["ssh"] == 1
+    assert (hosts["second"].track / run / "out/state.pt").read_bytes() == b"latest state"
     relayed = hosts["second"].track / run / "checkpoints"
     assert sorted(p.name for p in relayed.iterdir()) == [
         ".stored",

@@ -27,13 +27,16 @@ from pydantic import JsonValue
 
 from etude.cache import Cache
 from etude.carriage import (
+    RecordedFile,
     checkpoint_file,
     immutable,
     listing,
     note_stored,
     purpose,
+    recorded_files,
     resume_file,
     retired,
+    within,
 )
 from etude.deadline import limit_time
 from etude.launch.environment import startup_timeout
@@ -44,6 +47,8 @@ from etude.launch.schemas import (
     AttemptRecord,
     Bootstrap,
     Inbox,
+    ReadLink,
+    Work,
     WorkerLog,
     attempt_log,
     log_piece,
@@ -63,6 +68,7 @@ from etude.launch.storage.s3 import (
     read_version,
 )
 from etude.launch.storage.transport import attribute, deliver, observe
+from etude.launch.worker.attempts import _held, seed_out
 from etude.storage_timeout import StorageUnavailable
 
 ROOT = Path("/run/etude/sessions")
@@ -211,7 +217,8 @@ class Courier:
         self._worker_log_carried: _Log | None = None  # from its first output
         self._out = _Folder(out, send)  # the session's own folder
         self._runs = {run: _Folder(grant, send) for run, grant in (runs or {}).items()}
-        self._sent: dict[str, tuple[int, float]] = {}
+        # Working files use content digests; other files use length and mtime.
+        self._sent: dict[str, str | tuple[int, float]] = {}
         self._logs: dict[str, _Log] = {}
         self._delivered: set[str] = set()  # attempts whose completion record is stored
         self._console_position = 0
@@ -265,17 +272,35 @@ class Courier:
         """Let the cache evict this session's inputs; attempts' links keep their bytes."""
         self._cache.release(self._home.name)
 
-    def restore(self, links: dict[str, str]) -> None:
+    def initialize_out(self, work: Work) -> None:
+        """Store a continuation's initial state before allowing its first claim.
+
+        After a claim, retries depend on the child's carried state alone; its
+        parent's mutable directory may already have changed.
+        """
+        inputs = [given for given in work.inputs if given.out is not None]
+        if not inputs:
+            return
+        with (
+            observe(self._retain_transfer),
+            attribute(session=self._home.name, run=work.run, attempt=work.attempt, purpose="input"),
+        ):
+            try:
+                files = {given.name: _held(self._home, self._track_root, given) for given in inputs}
+                seed_out(self._track_root / work.run / "out", inputs, files)
+                self._track(work.run, done=False)
+            finally:
+                self._carry_usage()
+
+    def restore(self, links: dict[str, ReadLink]) -> None:
         """Put back what storage holds of a resumed run's folder, before its job starts.
 
-        `links` are read links by RUN/KEY. Only what this machine lacks is read:
-        the declaration and every checkpoint record, then the one checkpoint
-        file the latest record names (`etude.carriage.resume_file`), verified
-        by its digest. What is restored counts as sent, so it is not uploaded
-        back. The names of the checkpoint files left in storage stay taken
-        (`etude.carriage.taken`).
+        `links` name objects and lengths by RUN/KEY. Keep existing immutable
+        records, replace working files, and verify the latest copied checkpoint.
+        What is restored counts as sent, so it is not uploaded back. Checkpoint
+        names left in storage stay taken (`etude.carriage.taken`).
         """
-        by_run: dict[str, dict[str, str]] = {}
+        by_run: dict[str, dict[str, ReadLink]] = {}
         for name, url in links.items():
             run, _, key = name.partition("/")
             by_run.setdefault(run, {})[key] = url
@@ -287,18 +312,28 @@ class Courier:
             finally:
                 self._carry_usage()
 
-    def _restore(self, run: str, keys: dict[str, str]) -> None:
+    def _restore(self, run: str, keys: dict[str, ReadLink]) -> None:
         folder = self._track_root / run
         # Every checkpoint name storage holds stays taken, restored or not.
         note_stored(folder, [key.rpartition("/")[2] for key in keys if checkpoint_file(key)])
-        for key, url in sorted(keys.items()):
+        recorded: dict[str, RecordedFile] | None = None
+        for key, link in sorted(keys.items()):
+            if not within(key):
+                raise StorageUnavailable("restore path is outside the run")
             target = folder / key
-            if checkpoint_file(key) or target.exists():
+            if checkpoint_file(key) or target.exists() and not key.startswith("out/"):
                 continue
-            with attribute(run=run, purpose="report"):
-                body = read(url, self._send)
-            if body is None:
-                continue  # listed, then retired
+            if recorded is None and key.startswith("out/"):
+                recorded = recorded_files(folder)
+            named = None if recorded is None else recorded.get(key)
+            with attribute(run=run, purpose="checkpoint" if named is not None else "report"):
+                body = read(link.url, self._send)
+            if body is None or len(body) != link.size_bytes:
+                raise StorageUnavailable(f"restored file {key} is missing or has changed length")
+            if named is not None and (
+                len(body) != named.size_bytes or hashlib.sha256(body).hexdigest() != named.sha256
+            ):
+                raise StorageUnavailable(f"restored file {key} differs from its checkpoint record")
             target.parent.mkdir(parents=True, exist_ok=True)
             partial = target.with_name(target.name + ".partial")
             partial.write_bytes(body)
@@ -309,15 +344,21 @@ class Courier:
             return
         with attribute(run=run, purpose="checkpoint"):
             download(
-                Download(url=keys[wanted.key], sha256=wanted.sha256, size_bytes=wanted.size_bytes),
+                Download(
+                    url=keys[wanted.key].url, sha256=wanted.sha256, size_bytes=wanted.size_bytes
+                ),
                 folder / wanted.key,
                 send=self._send,
             )
         self._restored(run, wanted.key, folder / wanted.key)
 
     def _restored(self, run: str, key: str, path: Path) -> None:
-        stat = path.stat()
-        self._sent[f"{run}/{key}"] = (stat.st_size, stat.st_mtime)
+        if key.startswith("out/"):
+            with path.open("rb") as stream:
+                self._sent[f"{run}/{key}"] = hashlib.file_digest(stream, "sha256").hexdigest()
+        else:
+            stat = path.stat()
+            self._sent[f"{run}/{key}"] = (stat.st_size, stat.st_mtime)
 
     @property
     def _track_root(self) -> Path:
@@ -365,11 +406,13 @@ class Courier:
                     with attribute(run=entry.work.run, attempt=attempt):
                         self.fetch(entry.fetch)  # files precede executable work
                     self.restore(entry.restore)
+                    self.initialize_out(entry.work)
                 except Mismatch as error:
                     # Permanent: hand the work over so its setup fails and says why,
                     # rather than asking for the same wrong bytes until the deadline.
                     _diagnose("input verification", error, attempt)
                 except (StorageUnavailable, OSError, ValueError) as error:
+                    self._inbox = before  # the same inbox still contains un-applied work
                     _diagnose("source fetch", error, attempt)
                     raise
                 write(target, entry.work.model_dump_json())
@@ -477,12 +520,27 @@ class Courier:
         """
         folder = self._track_root / run
         removed = retired(folder) if folder.is_dir() else []
+        recorded = recorded_files(folder)
         for key in listing(folder, tail_seconds=0.0 if done else math.inf):
             # Training removes files while this runs. One gone by now is
             # skipped; what replaced it is seen on the next pass.
             try:
-                with attribute(purpose=purpose(key)):
-                    self._put(folder / key, run, key)
+                with attribute(purpose=purpose(key, recorded)):
+                    if key.startswith("out/"):
+                        sent_key = f"{run}/{key}"
+                        if key in recorded and sent_key in self._sent:
+                            continue
+                        path = folder / key
+                        # Keep one open inode through hashing and upload: atomic
+                        # replacement during the pass cannot mix two saves.
+                        with path.open("rb") as stream:
+                            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+                            if digest == self._sent.get(sent_key):
+                                continue
+                            self._runs[run].write(key, stream)
+                        self._sent[sent_key] = digest
+                    else:
+                        self._put(folder / key, run, key)
             except FileNotFoundError:
                 continue
         self._clear(run, removed)
@@ -680,6 +738,8 @@ def _run(
             ):
                 courier.fetch(bootstrap.fetch)
             courier.restore(bootstrap.restore)
+            for work in packet.work:
+                courier.initialize_out(work)
         write_log("source fetch", "completed")
         write(home / "packet.json", packet.model_dump_json())
         # Persist start intent before user code can run. A lost write reply must not

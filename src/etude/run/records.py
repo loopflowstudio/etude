@@ -125,9 +125,9 @@ class RunFile(Record):
 
 
 class RunState(Record):
-    """`state.json`: written when the run finishes or fails."""
+    """`state.json`: how a tracking attempt ended, including a planned stop."""
 
-    state: Literal["finished", "failed"]
+    state: Literal["finished", "failed", "stopped"]
     counters: RunCounters
     # Retained evidence may not identify its writer; it cannot establish that
     # a later attempt ended. New completions always name the writer.
@@ -150,5 +150,7 @@ class Attempt(Record):
     # The launcher's RunAttempt, when it started this process.
     attempt: str | None = None
     pod: str | None = None
-    # Checkpoint coordinates supplied at start, independent of the first logged row.
+    # Historical records supplied checkpoint coordinates at start. New writers
+    # fill this from their first durable row and supersede that coordinate too.
     resumed_at: dict[str, float] = Field(default_factory=dict)
+    first_row: bool = False

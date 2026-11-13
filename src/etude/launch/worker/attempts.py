@@ -43,7 +43,7 @@ import tarfile
 import tempfile
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -139,6 +139,9 @@ def _lay_out(session: Path, home: Path, work: Work) -> tuple[dict[str, str], dic
     shared = session.parent.parent / "track"
     shared.mkdir(exist_ok=True)
     environment["ETUDE_TRACK_DIR"] = str(shared)
+    out = shared / work.run / "out"
+    out.mkdir(parents=True, exist_ok=True)
+    environment["ETUDE_OUT"] = str(out)
     write(home / "run", work.run)  # the courier reads it while this runs
     environment["ETUDE_ATTEMPT"] = work.attempt
     for name, value in (
@@ -177,6 +180,7 @@ def _lay_out(session: Path, home: Path, work: Work) -> tuple[dict[str, str], dic
                 f"inputs: verified {given.name} ({given.size_bytes} bytes,"
                 f" {time.monotonic() - began:.1f} s)\n"
             )
+    seed_out(out, work.inputs, held)
     if work.seed is not None:
         environment["ETUDE_SEED"] = str(work.seed)
     if work.until is not None:
@@ -184,6 +188,18 @@ def _lay_out(session: Path, home: Path, work: Work) -> tuple[dict[str, str], dic
         environment["ETUDE_UNTIL_CLOCK"] = clock
         environment["ETUDE_UNTIL_VALUE"] = target
     return environment, held
+
+
+def seed_out(out: Path, inputs: Sequence[Input], files: Mapping[str, Path]) -> None:
+    """Copy verified initial files into out before any user code starts."""
+    for given in inputs:
+        if given.out is None:
+            continue
+        destination = out / given.out
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        partial = destination.with_name(destination.name + ".partial")
+        shutil.copyfile(files[given.name], partial)
+        partial.replace(destination)
 
 
 def _link(folder: Path, held: dict[str, Path]) -> Path:
@@ -263,7 +279,7 @@ def _end(process: subprocess.Popen[bytes], deadline: float | None, seconds: floa
 
 class Exit(Record):
     code: int | None
-    stopped: Literal["cancelled", "deadline"] | None = None
+    stopped: Literal["cancelled", "deadline", "planned"] | None = None
 
 
 def _execute(
@@ -293,7 +309,7 @@ def _execute(
         stderr=errors,
         start_new_session=True,
     )
-    stopped: Literal["cancelled", "deadline"] | None = None
+    stopped: Literal["cancelled", "deadline", "planned"] | None = None
     try:
         while process.poll() is None:
             _check_halt(stop)
@@ -525,6 +541,8 @@ def _commands(
                 labelled=labelled,
                 stop_seconds=work.stop_seconds,
             )
+            if result.code == 75 and result.stopped is None:
+                result = result.model_copy(update={"stopped": "planned"})
     finally:
         if work.cleanup is not None:
             deadline = (
@@ -546,10 +564,8 @@ def _commands(
                 stop_seconds=work.stop_seconds,
             )
             # Cleanup failure is visible but must not hide the original failure/cancellation.
-            if (
-                result.code == 0
-                and result.stopped is None
-                and (cleanup.code != 0 or cleanup.stopped)
+            if (result.code == 0 and result.stopped is None or result.stopped == "planned") and (
+                cleanup.code != 0 or cleanup.stopped
             ):
                 result = Exit(code=cleanup.code if cleanup.code else 1)
     return result
@@ -602,7 +618,7 @@ def _run(session: Path, packet: Packet, work: Work) -> None:
             log.write(("runtime failed: " + explain(error) + "\n").encode())
             result = Exit(code=1)
     outcome: Outcome
-    if result.stopped == "cancelled":
+    if result.stopped == "cancelled" or stop.exists():
         outcome = "cancelled"
     elif result.stopped == "deadline":
         outcome = (
@@ -611,6 +627,8 @@ def _run(session: Path, packet: Packet, work: Work) -> None:
             and packet.deadline < started + timedelta(seconds=work.limit_seconds)
             else work.limit_kind
         )
+    elif result.stopped == "planned":
+        outcome = "stopped"
     else:
         outcome = "succeeded" if result.code == 0 else "failed"
     _finish(home, outcome, "machine_lost" if outcome == "lost" else None, code=result.code)

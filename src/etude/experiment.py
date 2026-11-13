@@ -57,6 +57,7 @@ class Checkpoint(Record):
     experiment: str
     ordinal: int = Field(ge=1)
     artifact: ArtifactRef
+    file: str | None = None
     # Where each of the run's clocks stood when it was saved.
     clocks: dict[str, float]
     # When it was saved, in milliseconds since the epoch.
@@ -69,7 +70,11 @@ class Checkpoint(Record):
     @property
     def name(self) -> str:
         """The file's name, as a model seat names it: `updates-200.pt`."""
-        return PurePosixPath(self.artifact.uri).name
+        return (
+            self.file
+            if self.file is not None and self.file.startswith("out/")
+            else PurePosixPath(self.artifact.uri).name
+        )
 
     @property
     def key(self) -> CheckpointKey:
@@ -175,6 +180,7 @@ def observe(source: Storage | Path | str, experiment: str) -> ExperimentState:
                 experiment=data.experiment,
                 ordinal=record.ordinal,
                 artifact=record.artifact,
+                file=record.file,
                 clocks=record.at,
                 wall_ms=record.wall_ms,
                 line=line,
@@ -183,7 +189,9 @@ def observe(source: Storage | Path | str, experiment: str) -> ExperimentState:
             for record in sorted(data.checkpoints, key=lambda one: one.ordinal)
             if record.artifact.sha256 is not None and record.artifact.size_bytes is not None
         )
-        state = "running" if data.state is None else data.state.state
+        state = (
+            "running" if data.state is None or data.state.state == "stopped" else data.state.state
+        )
         runs.append(
             TrainingRun(name=data.name, experiment=data.experiment, state=state, checkpoints=saved)
         )
@@ -373,7 +381,7 @@ def checkpoint_inputs(matches: Iterable[Match], state: ExperimentState) -> dict[
 
 def checkpoint_file(saved: Checkpoint) -> str:
     """The checkpoint's key within its run's folder, where a job input finds it."""
-    return f"{CHECKPOINTS}/{saved.name}"
+    return saved.file or f"{CHECKPOINTS}/{saved.name}"
 
 
 class _Launched(Record):

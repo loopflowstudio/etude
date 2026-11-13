@@ -32,6 +32,7 @@ import json
 import math
 import os
 import queue
+import re
 import secrets
 import socket
 import sys
@@ -40,12 +41,15 @@ import time
 import warnings
 import zlib
 from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from hashlib import sha256
 from itertools import chain, count
 from pathlib import Path
 from types import TracebackType
 from typing import IO, Literal, Self
+from urllib.parse import unquote
 
 from pydantic import ValidationError
 
@@ -66,10 +70,11 @@ from etude.run.records import (
     SourceKey,
 )
 from etude.run.storage import DirectoryStorage, Storage, run_prefix
+from etude.stopping import Stopped
 from etude.train.block import Builder, Table, concat
 from etude.train.block import encode as encode_block
 from etude.train.manifest import Index, metric_names
-from etude.train.records import CheckpointRecord, ParentCheckpoint, RowTable, checkpoint_name
+from etude.train.records import CheckpointRecord, ParentRun, RowTable, checkpoint_name
 
 # Compaction is bounded by bytes or elapsed cadence, independent of training steps.
 PERMANENT_BYTES, RECENT_BLOCKS = 8_000_000, 64
@@ -135,6 +140,33 @@ class EtudeWarning(UserWarning):
     """Logging needs attention: lost rows, invalid clocks or excessive metric names."""
 
 
+@contextmanager
+def local_launch(*, out: Path | str, experiment: str) -> Iterator[None]:
+    """Call a recipe locally with one persistent directory and experiment.
+
+    Environment settings are restored on exit, including after an exception.
+    Like process environment itself, this context is not thread-local.
+    """
+    folder = Path(out).resolve()
+    folder.mkdir(parents=True, exist_ok=True)
+    launch = {
+        "ETUDE_OUT": str(folder),
+        "ETUDE_EXPERIMENT": experiment,
+        "ETUDE_RUN": re.sub(r"[^A-Za-z0-9_.-]", "-", folder.name),
+        "ETUDE_TRACK_DIR": str(folder / "etude"),
+    }
+    previous = {key: os.environ.get(key) for key in launch}
+    os.environ.update(launch)
+    try:
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 _STOP = object()
 
 
@@ -164,7 +196,6 @@ class Run:
         strict: bool,
         metric_name_limit: int | None = 1000,
         inherited: CheckpointRecord | None = None,
-        resumed_at: Mapping[str, float] | None = None,
     ) -> None:
         self.experiment = experiment
         self.name = name
@@ -172,6 +203,12 @@ class Run:
         self.files = RunFiles(root)
         self.clocks = clocks
         self.strict = strict
+        self._out = Path(given).resolve() if (given := os.environ.get("ETUDE_OUT")) else None
+        if self._out is not None:
+            self._out.mkdir(parents=True, exist_ok=True)
+        self._asked: float | None = None
+        self._slowest = 0.0
+        self._stop_requested = False
         # Rows refused by the full queue, and rows kept but not chartable.
         self.dropped = 0
         self.incomplete = 0
@@ -196,23 +233,15 @@ class Run:
         self._finish_deadline: float | None = None
         self._segment_rows = segment_rows
         self._writer_id = secrets.token_hex(6)
-        # A later attempt or a continuation resumes from here, and its rows
-        # supersede earlier attempts' from these coordinates on.
-        if resumed_at is None:
-            latest = self.latest_checkpoint()
-            resumed_at = {} if latest is None else latest.at
-        self._save(
-            "metrics",
-            self._writer_id,
-            Attempt(
-                writer=self._writer_id,
-                started_ms=time.time_ns() // 1_000_000,
-                host=socket.gethostname(),
-                attempt=os.environ.get("ETUDE_ATTEMPT"),
-                pod=os.environ.get("RUNPOD_POD_ID"),
-                resumed_at=dict(resumed_at),
-            ),
+        self._attempt = Attempt(
+            writer=self._writer_id,
+            started_ms=time.time_ns() // 1_000_000,
+            host=socket.gethostname(),
+            attempt=os.environ.get("ETUDE_ATTEMPT"),
+            pod=os.environ.get("RUNPOD_POD_ID"),
+            first_row=True,
         )
+        self._save("metrics", self._writer_id, self._attempt)
         seal_logs(self.files.root, self._clock_names)  # what an earlier process left unsealed
         self._index = Index(root, self._writer_id)
         self._metric_name_limit = metric_name_limit
@@ -239,6 +268,26 @@ class Run:
         atexit.register(self.finish)
 
     # --- the training-side calls -------------------------------------------
+
+    @property
+    def out(self) -> Path:
+        """The run's persistent working directory, named by its launch."""
+        if self._out is None:
+            raise EtudeError("run_directory_not_named", 422)
+        return self._out
+
+    def stopping(self) -> bool:
+        """Whether to save and stop: a request, or less than the slowest step left."""
+        now = time.monotonic()
+        if self._asked is not None:
+            self._slowest = max(self._slowest, now - self._asked)
+        self._asked = now
+        stop = os.environ.get("ETUDE_STOP_FILE")
+        deadline = os.environ.get("ETUDE_DEADLINE")
+        self._stop_requested |= bool(stop and Path(stop).exists()) or bool(
+            deadline and datetime.fromisoformat(deadline).timestamp() - time.time() <= self._slowest
+        )
+        return self._stop_requested
 
     def log(self, values: Logged | None = None, /, **clocks: float) -> None:
         """Record one row. Every declared clock must be present, as a key or keyword."""
@@ -335,12 +384,11 @@ class Run:
     ) -> ArtifactRef:
         """Store a saved model and record where every declared clock stood.
 
-        Given a local file, Etude copies it into the run's directory, records
-        its digest and size, and delivers it to the author's bucket in the
-        background like every other run file. The copy is made before this
-        returns, so the caller may overwrite or delete its own file at once;
-        the call takes about as long as writing the file did. Given an address
-        such as `s3://...` or an `ArtifactRef`, only the reference is recorded.
+        A file inside `out` is recorded by reference: keep it unchanged. Any
+        other local file is copied before return, so the caller may overwrite
+        its source. Recorded files are carried before their records. Given an
+        address such as `s3://...` or an `ArtifactRef`, only the reference is
+        recorded.
 
         Recording is idempotent and nothing recorded is replaced. The same
         model at the same coordinate returns the existing record's reference.
@@ -358,7 +406,12 @@ class Run:
             at = {name: float(coordinate[name]) for name in self._clock_names}
             name = checkpoint_name(at)
             reference, staged = self._stage(artifact, name)
+            file = self._file_key(reference)
             for known in self._recorded.values():
+                if (
+                    reference.uri == known.artifact.uri or file is not None and file == known.file
+                ) and reference.sha256 != known.artifact.sha256:
+                    raise ValueError("checkpoint_file_changed")
                 same = (known.artifact.sha256 or known.artifact.uri) == (
                     reference.sha256 or reference.uri
                 )
@@ -377,6 +430,7 @@ class Run:
             record = CheckpointRecord(
                 ordinal=ordinal,
                 artifact=reference,
+                file=self._file_key(reference),
                 at=at,
                 wall_ms=time.time_ns() // 1_000_000,
                 tags=tuple(dict.fromkeys(tags)),
@@ -407,7 +461,9 @@ class Run:
             return self._inherited
         record = self._recorded[max(self._recorded)]
         # The file keeps its name wherever the record was written.
-        local = self.files.root / "checkpoints" / record.artifact.uri.rpartition("/")[2]
+        local = self.files.root / (
+            record.file or "checkpoints/" + record.artifact.uri.rpartition("/")[2]
+        )
         if record.artifact.sha256 is None or not local.is_file():
             return record
         artifact = record.artifact.model_copy(update={"uri": local.resolve().as_uri()})
@@ -416,15 +472,25 @@ class Run:
     def _stage(
         self, artifact: ArtifactRef | Path | str, name: str
     ) -> tuple[ArtifactRef, Path | None]:
-        """The reference to record; a local file is first copied in and digested.
+        """Digest a file in out in place; stage any other local file as a copy.
 
-        The copy is staged under a name no carrier sends until it is kept.
+        A staged copy has a name no carrier sends until it is kept.
         """
         if isinstance(artifact, ArtifactRef):
             return artifact, None
         if isinstance(artifact, str) and "://" in artifact:
             return ArtifactRef(uri=artifact), None
-        source = Path(artifact)
+        source = Path(artifact).resolve()
+        if self._out is not None and source.is_relative_to(self._out):
+            with source.open("rb") as stream:
+                digest = sha256()
+                size = 0
+                while block := stream.read(8 * 1024 * 1024):
+                    digest.update(block)
+                    size += len(block)
+            return ArtifactRef(
+                uri=source.as_uri(), sha256=digest.hexdigest(), size_bytes=size
+            ), None
         folder = self.files.root / "checkpoints"
         folder.mkdir(parents=True, exist_ok=True)
         staged = folder / f"{name}.{secrets.token_hex(4)}.partial"
@@ -442,6 +508,13 @@ class Run:
         return (
             ArtifactRef(uri="", sha256=digest.hexdigest(), size_bytes=staged.stat().st_size),
             staged,
+        )
+
+    def _file_key(self, artifact: ArtifactRef) -> str | None:
+        """A local stored file's portable address within the tracked folder."""
+        prefix = self.files.root.resolve().as_uri() + "/"
+        return (
+            unquote(artifact.uri.removeprefix(prefix)) if artifact.uri.startswith(prefix) else None
         )
 
     def _unused(self, name: str, suffix: str, ordinal: int) -> str:
@@ -554,6 +627,9 @@ class Run:
                     coordinate, values = self._row(item[1])
                     stream.write(log_line(item[0], coordinate, values))
                     stream.flush()
+                    if not self._attempt.resumed_at:
+                        self._attempt = self._attempt.model_copy(update={"resumed_at": coordinate})
+                        self._save("metrics", self._writer_id, self._attempt)
                     builder.add(item[0], coordinate, values)
                 due = stream is not None and (
                     len(builder) >= self._segment_rows
@@ -724,7 +800,7 @@ class Run:
     # --- ending --------------------------------------------------------------
 
     def finish(
-        self, state: Literal["finished", "failed"] = "finished", *, timeout: float = 10.0
+        self, state: Literal["finished", "failed", "stopped"] = "finished", *, timeout: float = 10.0
     ) -> None:
         """Seal, record the final state and deliver, within `timeout` seconds."""
         if self._finished:
@@ -771,7 +847,13 @@ class Run:
         error: BaseException | None,
         trace: TracebackType | None,
     ) -> None:
-        self.finish("failed" if error is not None else "finished")
+        self.finish(
+            "stopped"
+            if isinstance(error, Stopped)
+            else "failed"
+            if error is not None
+            else "finished"
+        )
 
 
 def track(
@@ -793,7 +875,6 @@ def track(
     segment_rows: int = 5_000,
     strict: bool = False,
     metric_name_limit: int | None = 1000,
-    resumed_at: Mapping[str, float] | None = None,
 ) -> Run:
     """Declare or resume a run. Strict: a bad declaration raises here, not later.
 
@@ -806,13 +887,12 @@ def track(
     written to `ETUDE_TRACK_DIR`, which the launcher carries to storage as they
     are, and a later attempt finds the run's checkpoints there
     (`Run.latest_checkpoint`). A continuation (`etude.jobs.continue_from`) is
-    handed its parent's checkpoint in `ETUDE_CONTINUES`: unless `continues` is
-    given, the run declares that it continues its parent from there.
+    handed its parent's position and optional checkpoint in `ETUDE_CONTINUES`:
+    unless `continues` is given, the run declares that lineage.
 
-    A resumed run's rows replace earlier attempts' from its latest checkpoint
-    on. A process that restored its state from somewhere else, such as a
-    snapshot of its own taken after that checkpoint, passes where it stands
-    as `resumed_at`, keyed by declared clocks.
+    A resumed run's first logged row sets where it supersedes earlier rows.
+    An attempt that logs nothing replaces nothing. `local_launch` supplies a
+    persistent `out` directory and experiment when calling a recipe locally.
     """
     if metric_name_limit is not None and metric_name_limit < 0:
         raise ValueError("metric_name_limit must be nonnegative or None")
@@ -824,17 +904,14 @@ def track(
     experiment = experiment or launched
     if experiment is None:
         raise EtudeError("experiment_not_named", 422)
-    if resumed_at is not None and any(
-        clock not in {c.name for c in clocks} or not math.isfinite(value)
-        for clock, value in resumed_at.items()
-    ):
-        raise EtudeError("resumed_at_unknown_clock", 422)
-    inherited = _inherited()
-    if inherited is not None and continues is None:
-        parent, record = inherited
+    handed = _inherited()
+    if handed is not None and continues is None:
+        at = handed.at or ({} if handed.checkpoint is None else handed.checkpoint.at)
+        if not at:
+            raise EtudeError("continuation_position_missing", 422)
         until = os.environ.get("ETUDE_UNTIL_CLOCK")
-        clock = until if until in record.at else next(iter(record.at))
-        continues = Continuation(parent=parent, clock=clock, value=record.at[clock])
+        clock = until if until in at else next(iter(at))
+        continues = Continuation(parent=handed.parent, clock=clock, value=at[clock])
     declared = declare(
         experiment=experiment,
         clocks=clocks,
@@ -860,19 +937,18 @@ def track(
         segment_rows=segment_rows,
         strict=strict,
         metric_name_limit=metric_name_limit,
-        inherited=None if inherited is None else inherited[1],
-        resumed_at=resumed_at,
+        inherited=None if handed is None else handed.checkpoint,
     )
 
 
-def _inherited() -> tuple[SourceKey, CheckpointRecord] | None:
-    """The parent's checkpoint a continuation was handed, with its file on this machine."""
+def _inherited() -> ParentRun | None:
+    """The handed lineage, relocating its checkpoint input onto this machine."""
     given = os.environ.get("ETUDE_CONTINUES")
     if not given:
         return None
-    parent = ParentCheckpoint.model_validate_json(given)
+    parent = ParentRun.model_validate_json(given)
     record = parent.checkpoint
-    if parent.input is not None:
+    if parent.input is not None and record is not None:
         folder = os.environ.get("ETUDE_INPUTS_DIR")
         if not folder:
             raise EtudeError("continuation_input_missing", 422)
@@ -880,7 +956,8 @@ def _inherited() -> tuple[SourceKey, CheckpointRecord] | None:
         record = record.model_copy(
             update={"artifact": record.artifact.model_copy(update={"uri": local})}
         )
-    return parent.parent, record
+        return parent.model_copy(update={"checkpoint": record})
+    return parent
 
 
 def seal_runs(directory: Path | str) -> None:
@@ -894,6 +971,8 @@ def seal_runs(directory: Path | str) -> None:
 __all__ = [
     "EtudeWarning",
     "Run",
+    "Stopped",
+    "local_launch",
     "seal_runs",
     "track",
 ]

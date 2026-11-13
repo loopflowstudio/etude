@@ -18,9 +18,9 @@ function's parameter type on the machine; a config that would not survive that
 is refused here, before anything is launched.
 
 A continuation (`continue_from`) is a new run of a parent's job and seed with
-a further target, which starts from one of the parent's recorded checkpoints.
-The launcher has no checkpoints: this module reads the parent's tracked
-record and hands it to the job as an input and `ETUDE_CONTINUES`.
+a further target, seeded from the parent's working directory, or a selected
+checkpoint. This module reads the parent's tracking and hands over verified
+file inputs and lineage in `ETUDE_CONTINUES`.
 
 This module joins the launcher with evaluation and tracking, as `etude.cli`
 does, so the launcher itself never imports either.
@@ -29,12 +29,14 @@ does, so the launcher itself never imports either.
 from __future__ import annotations
 
 import inspect
+import json
 import os
 import shlex
 import sys
 import tomllib
 from collections.abc import Callable, Mapping, Sequence
 from decimal import Decimal
+from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from typing import Required, TypedDict, Unpack, cast
 
@@ -73,7 +75,7 @@ from etude.run.listing import as_storage, declared, run_folders
 from etude.run.records import ArtifactRef, Record, SourceKey
 from etude.run.storage import Storage
 from etude.train.read import read
-from etude.train.records import ParentCheckpoint
+from etude.train.records import ParentRun
 
 
 class JobOptions(TypedDict, total=False):
@@ -238,75 +240,141 @@ def continue_from(
     *,
     source: Storage | Path | str,
     ordinal: int | None = None,
+    config: BaseModel | None = None,
 ) -> Run:
-    """The parent's job and seed again, from one of its recorded checkpoints, to `until`.
+    """A new run seeded with the parent's out, or a selected checkpoint.
 
-    `source` holds the parent's checkpoint records: the bucket its machine
-    wrote to (`s3://bucket/prefix`), or a runs directory. The checkpoint is
-    the parent's latest, or the one numbered `ordinal`. `until` is
-    "clock=value" on a clock the checkpoint recorded, beyond where it stood;
-    it is absolute. A file stored in the parent's folder reaches the machine
-    as an input of the parent run (`Input.run`), verified by digest; a
-    reference to a model elsewhere is handed as recorded. Raises
-    `LauncherError` when the parent recorded no such checkpoint or the target
-    is not beyond it.
+    File inputs freeze the bytes chosen here by digest; a parent changing them
+    before delivery is refused. Config is validated against the typed job's
+    function before queueing. The target is absolute and must advance its clock.
     """
     storage = as_storage(source)
     keys = storage.keys("")
-    declaration = declared(storage, run_folders(keys).get(parent.id, []), set(keys))
+    folders = run_folders(keys).get(parent.id, [])
+    declaration = declared(storage, folders, set(keys))
     if declaration is None:
         raise LauncherError(f"run {parent.id} has no tracked folder in {storage.name}")
-    recorded = read(storage, declaration.experiment, parent.id).checkpoints
-    record = next((r for r in reversed(recorded) if ordinal in (None, r.ordinal)), None)
-    if record is None or record.artifact.sha256 is None or record.artifact.size_bytes is None:
-        raise LauncherError(f"run {parent.id} recorded no stored checkpoint {ordinal or ''}")
+    data = read(storage, declaration.experiment, parent.id)
     clock, position = parse_target(until)
-    if clock not in record.at:
-        raise LauncherError(
-            f"a continuation needs a target on a clock its checkpoint recorded: "
-            f"{', '.join(sorted(record.at))}"
-        )
-    if position <= record.at[clock]:
-        raise LauncherError(
-            f"the target {until} is not beyond the checkpoint's {clock}={number(record.at[clock])}"
-        )
-    inputs = tuple(i for i in parent.spec.inputs if not i.name.startswith(_PARENT_CHECKPOINT))
-    # Without tags: they label the parent's checkpoint after the fact and decide
-    # nothing about the continuation, so they stay out of its job identity.
-    checkpoint = record.model_copy(update={"tags": ()})
-    given = None
-    file = PurePosixPath(record.artifact.uri)
-    if file.parent.parts[-2:] == (parent.id, CHECKPOINTS):
-        # Stored in the parent's folder: the launcher gives the machine that file
-        # of the run, from its bucket or relayed from the parent's last machine.
-        # Addressed within that folder, so where its records were read from does
-        # not make the same continuation a different job.
-        key = f"{CHECKPOINTS}/{file.name}"
-        given = _PARENT_CHECKPOINT + file.suffix
-        inputs += (
-            Input(
+    previous = next((v.value for v in parent.spec.environment if v.name == "ETUDE_CONTINUES"), None)
+    inherited_input = None if previous is None else ParentRun.model_validate_json(previous).input
+    inputs = {i.name: i for i in parent.spec.inputs if i.name != inherited_input and i.out is None}
+    parent_key = SourceKey(namespace=declaration.namespace, kind="run", source_id=parent.id)
+    # Prefer one physical copy of the run. Hidden and unfinished files never seed a child.
+    out = next(
+        (folder + "out/" for folder in folders if any(k.startswith(folder + "out/") for k in keys)),
+        None,
+    )
+    files = (
+        []
+        if out is None
+        else [
+            key
+            for key in sorted(keys)
+            if key.startswith(out)
+            and not any(part.startswith(".") for part in key[len(out) :].split("/"))
+            and not key.endswith((".partial", ".open"))
+        ]
+    )
+    if ordinal is None and files:
+        # A recipe may save a checkpoint without logging scalar rows.
+        at = {**(data.checkpoints[-1].at if data.checkpoints else {}), **data.reached}
+        assert out is not None
+        for index, key in enumerate(files):
+            body = storage.get(key)
+            relative = key[len(out) :]
+            name = _input_name(f"parent-out-{index}", inputs)
+            inputs[name] = Input(
+                name=name,
+                out=relative,
+                key="out/" + relative,
+                sha256=sha256(body).hexdigest(),
+                size_bytes=len(body),
+                run=parent.id,
+            )
+        handed = ParentRun(parent=parent_key, at=at)
+        origin = "parent"
+    else:
+        record = next((r for r in reversed(data.checkpoints) if ordinal in (None, r.ordinal)), None)
+        if record is None or record.artifact.sha256 is None or record.artifact.size_bytes is None:
+            raise LauncherError(f"run {parent.id} recorded no stored checkpoint {ordinal or ''}")
+        at = record.at
+        checkpoint = record.model_copy(update={"tags": ()})
+        given = None
+        file = PurePosixPath(record.artifact.uri)
+        if record.file is not None or file.parent.parts[-2:] == (parent.id, CHECKPOINTS):
+            key = record.file or f"{CHECKPOINTS}/{file.name}"
+            given = _input_name(_PARENT_CHECKPOINT + file.suffix, inputs)
+            inputs[given] = Input(
                 name=given,
                 key=key,
                 sha256=record.artifact.sha256,
                 size_bytes=record.artifact.size_bytes,
                 run=parent.id,
-            ),
+            )
+            checkpoint = checkpoint.model_copy(
+                update={"artifact": record.artifact.model_copy(update={"uri": key})}
+            )
+        handed = ParentRun(parent=parent_key, checkpoint=checkpoint, input=given)
+        origin = "checkpoint"
+    if clock not in at:
+        raise LauncherError(
+            f"a continuation needs a target on a clock its {origin} recorded: {', '.join(sorted(at))}"
         )
-        artifact = record.artifact.model_copy(update={"uri": key})
-        checkpoint = checkpoint.model_copy(update={"artifact": artifact})
-    handed = ParentCheckpoint(
-        parent=SourceKey(namespace=declaration.namespace, kind="run", source_id=parent.id),
-        checkpoint=checkpoint,
-        input=given,
-    )
+    if position <= at[clock]:
+        raise LauncherError(
+            f"the target {until} is not beyond the {origin}'s {clock}={number(at[clock])}"
+        )
     environment = (
         *(v for v in parent.spec.environment if v.name != "ETUDE_CONTINUES"),
         Variable(name="ETUDE_CONTINUES", value=handed.model_dump_json()),
     )
+    text = parent.spec.config if config is None else _config_text(_called(parent.spec), config)
     job = parent.spec.model_copy(
-        update={"until": until, "inputs": inputs, "environment": environment}
+        update={
+            "until": until,
+            "inputs": tuple(inputs.values()),
+            "environment": environment,
+            "config": text,
+        }
     )
     return Run(job=job, seed=parent.seed, params=dict(parent.params), source=parent.source)
+
+
+def _input_name(name: str, inputs: Mapping[str, Input]) -> str:
+    """Choose a transport name without taking any name the job already uses."""
+    while name in inputs:
+        name += "-"
+    return name
+
+
+def _called(job: Job) -> Callable[..., object]:
+    """Load the function of a typed job; command jobs have no config model."""
+    command = shlex.split(job.command)
+    if "etude.call" not in command or "--function" not in command:
+        raise LauncherError("config changes require a typed job")
+    function = command[command.index("--function") + 1]
+    path = command[command.index("--path") + 1] if "--path" in command else ""
+    module, _, name = function.partition(":")
+    return Function(module=module, name=name, path=path).load(job.repo)
+
+
+def continued_config(parent: RunRecord, fields: Sequence[str]) -> BaseModel:
+    """Validate repeatable FIELD=VALUE changes against the parent's typed config."""
+    kind = config_type(_called(parent.spec))
+    values = kind.model_validate_json(parent.spec.config or "{}").model_dump(mode="json")
+    for field in fields:
+        name, separator, text = field.partition("=")
+        if not separator or name not in kind.model_fields:
+            raise LauncherError(f"config change {field!r} must name a field as FIELD=VALUE")
+        try:
+            values[name] = json.loads(text)
+        except json.JSONDecodeError:
+            values[name] = text
+    try:
+        return kind.model_validate(values)
+    except ValidationError as error:
+        raise LauncherError(f"invalid continuation config: {error}") from None
 
 
 def _hold(evaluation: Evaluation) -> None:
@@ -323,7 +391,10 @@ def _hold(evaluation: Evaluation) -> None:
         given = evaluation.checkpoint
         # A training run's file is keyed by its run and name; any other, by where it lies.
         key = (
-            CheckpointKey(run=given.run, name=PurePosixPath(given.key).name)
+            CheckpointKey(
+                run=given.run,
+                name=given.key if given.key.startswith("out/") else PurePosixPath(given.key).name,
+            )
             if given.run is not None
             else CheckpointKey(address=given.key)
         )

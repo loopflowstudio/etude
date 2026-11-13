@@ -453,20 +453,23 @@ def continue_run(
         ),
     ] = None,
     ordinal: Annotated[
-        int | None, typer.Option(help="the parent's checkpoint to start from; default: its latest")
+        int | None, typer.Option(help="a checkpoint instead of the parent's working directory")
     ] = None,
     cohort: Annotated[
         str | None, typer.Option(help="the new cohort's name, when continuing a cohort")
     ] = None,
+    config: Annotated[
+        list[str] | None, typer.Option(help="typed config change as FIELD=VALUE; repeatable")
+    ] = None,
     max_usd: Annotated[str | None, typer.Option(help="the new cohort's dollar ceiling")] = None,
 ) -> None:
-    """Go past a run's target from a checkpoint it recorded. This makes a new run with a parent."""
+    """Go past a run's target from its saved directory. This makes a new run with a parent."""
     # Continuation joins the launcher's runs with tracking's checkpoints.
     import tempfile
     from decimal import Decimal
 
     from etude.carriage import put_back
-    from etude.jobs import continue_from
+    from etude.jobs import continue_from, continued_config
     from etude.launch.listing import resolve_runs, show_runs
     from etude.run.listing import places
     from etude.run.storage import default_root, storage_from_uri
@@ -489,6 +492,7 @@ def continue_run(
                 until,
                 source=relayed if (Path(relayed) / parent).is_dir() else storage,
                 ordinal=ordinal,
+                config=None if not config else continued_config(scheduler.record(parent), config),
             )
             for parent in parents
         ]

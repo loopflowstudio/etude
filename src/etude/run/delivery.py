@@ -9,12 +9,19 @@ may be repeated or interrupted at any point: a replay is harmless.
 from __future__ import annotations
 
 import threading
-from collections.abc import Sequence
+from collections.abc import Container, Sequence
 from dataclasses import dataclass
-from hashlib import sha256
+from hashlib import file_digest
 from pathlib import Path
 
-from etude.carriage import EVAL_BLOCK_PACK, checkpoint_file, immutable, listing, retired
+from etude.carriage import (
+    EVAL_BLOCK_PACK,
+    checkpoint_file,
+    immutable,
+    listing,
+    recorded_files,
+    retired,
+)
 from etude.run.block_file import parse
 from etude.run.records import RunFile
 from etude.run.storage import DirectoryStorage, Storage, run_prefix
@@ -40,11 +47,12 @@ class RunFiles:
         """
         return listing(self.root, tail_seconds=self.tail_age)
 
-    def fingerprint(self, key: str) -> str:
+    def fingerprint(self, key: str, recorded: Container[str] | None = None) -> str:
         """Immutable files are sent once; others are hashed, so a change is sent again."""
-        if immutable(key):
+        if immutable(key, recorded_files(self.root) if recorded is None else recorded):
             return "immutable"
-        return sha256((self.root / key).read_bytes()).hexdigest()
+        with (self.root / key).open("rb") as stream:
+            return file_digest(stream, "sha256").hexdigest()
 
     def removed(self) -> list[str]:
         """Every path, relative to the run, that a writer has retired."""
@@ -64,8 +72,9 @@ class RunFiles:
 
     def pending(self, destination: str) -> list[tuple[str, str]]:
         pending: list[tuple[str, str]] = []
+        recorded = recorded_files(self.root)
         for key in self.deliverable():
-            mark = self.fingerprint(key)
+            mark = self.fingerprint(key, recorded)
             if self.shipped(destination, key) != mark:
                 pending.append((key, mark))
         return pending
@@ -97,6 +106,7 @@ class StorageDestination:
                 body = (
                     files.root / key
                     if checkpoint_file(key)
+                    or key.startswith("out/")
                     or key.endswith("/" + EVAL_BLOCK_PACK)
                     or block is not None
                     and block.level >= 2

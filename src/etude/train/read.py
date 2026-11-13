@@ -3,9 +3,9 @@
 The files are the record, so this reader is the reference for what they mean.
 A run's rows are one set across the processes that wrote them. For one metric
 against one clock: a row counts when it gives that clock; an earlier process's
-rows count up to and including the checkpoint coordinate a later one resumed
-from on that clock, or the later one's first logged value when no checkpoint
-coordinate is known, and not beyond it.
+rows count strictly before a later attempt's first logged value on that clock.
+Historical attempts with checkpoint-based resume coordinates keep their old
+inclusive cutoff. An attempt with no rows and no recorded cutoff hides nothing.
 A later write at the same clock value replaces an earlier one.
 Superseded rows stay on disk. Buckets keep their extremes.
 
@@ -107,6 +107,27 @@ class RunData(Arrays):
     def incomplete(self) -> int:
         """Rows that did not give every declared clock."""
         return sum(block.header.incomplete for block in self.blocks)
+
+    @property
+    def reached(self) -> dict[str, float]:
+        """Latest position per clock, with later attempts superseding earlier ones.
+
+        Historical resume coordinates count even before a row. An empty new
+        attempt leaves the previous position intact.
+        """
+        positions = {attempt.writer: dict(attempt.resumed_at) for attempt in self.attempts}
+        starts = {attempt.writer: attempt.started_ms for attempt in self.attempts}
+        for block in self.blocks:
+            writer = block.header.writer
+            starts.setdefault(writer, block.header.wall_first)
+            position = positions.setdefault(writer, {})
+            for column in block.header.clocks:
+                if column.last is not None:
+                    position[column.name] = column.last
+        reached: dict[str, float] = {}
+        for writer in sorted(positions, key=lambda writer: starts[writer]):
+            reached.update(positions[writer])
+        return reached
 
     def metrics(self) -> list[str]:
         """Names logged as numbers, in first-seen order."""
@@ -463,7 +484,7 @@ def _stretches(
     recorded = {attempt.writer: attempt for attempt in attempts}
     for attempt in attempts:
         writers.setdefault(attempt.writer, [])
-    # A resumed attempt cuts history even before it has logged any rows.
+    # Historical attempts may have a cutoff even without any logged rows.
     ordered = sorted(
         writers,
         key=lambda writer: (
@@ -480,6 +501,10 @@ def _stretches(
         if resumed is None:
             resumed = next((b.given.first for b in writers[writer] if b.given is not None), None)
         if resumed is not None:
+            # Old checkpoint cuts retained the coordinate itself. New first-row
+            # cuts replace it even when that row omits a particular metric.
+            if record is not None and record.first_row:
+                resumed = float(np.nextafter(resumed, -np.inf))
             cutoff = resumed if cutoff is None else min(cutoff, resumed)
     rank = {writer: place for place, writer in enumerate(ordered)}
     extents: list[_Extent] = []
@@ -590,7 +615,7 @@ def _here(
     The record names the file where it was written, which may be a machine
     that no longer exists. A missing file leaves the record as it is.
     """
-    name = "checkpoints/" + record.artifact.uri.rpartition("/")[2]
+    name = record.file or "checkpoints/" + record.artifact.uri.rpartition("/")[2]
     if record.artifact.sha256 is None or (place, name) not in keys:
         return record
     artifact = record.artifact.model_copy(update={"uri": storage.uri(place + name)})

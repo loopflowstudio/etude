@@ -501,20 +501,28 @@ class Bucket:
 
     def list(self, prefix: str) -> list[str]:
         """Every key under a prefix, in order."""
-        keys: list[str] = []
+        return list(self.objects(prefix))
+
+    def objects(self, prefix: str) -> dict[str, int]:
+        """Object lengths by key from one paginated listing."""
+        sizes: dict[str, int] = {}
         query = {"list-type": "2", "prefix": prefix}
         for _ in range(1000):
             reply = self._ask("GET", "", query=query)
             if reply.status != 200:
                 raise StorageUnavailable(f"list {prefix}: status {reply.status}")
             try:
-                page = ET.fromstring(reply.body)  # noqa: S314
-            except ET.ParseError:
+                page = ET.fromstring(reply.body)
+                for node in page.iter(f"{_NS}Contents"):
+                    key, size = node.findtext(f"{_NS}Key"), node.findtext(f"{_NS}Size")
+                    if key is None or size is None or int(size) < 0:
+                        raise ValueError("object without key and length")
+                    sizes[key] = int(size)
+            except (ET.ParseError, ValueError):
                 raise StorageUnavailable(f"list {prefix}: unreadable reply") from None
-            keys += [node.text or "" for node in page.iter(f"{_NS}Key")]
             more = page.findtext(f"{_NS}NextContinuationToken")
             if page.findtext(f"{_NS}IsTruncated") != "true" or not more:
-                return keys
+                return sizes
             query["continuation-token"] = more
         raise StorageUnavailable(f"list {prefix}: did not end")
 

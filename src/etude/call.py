@@ -1,6 +1,6 @@
 """Call an author's function in a job's own environment, with the job's config.
 
-    python -m etude.call --function train:train
+    uv run python -m etude.call --function train:train
 
 This is the command Etude's typed jobs (`etude.jobs.training`,
 `etude.jobs.evaluation`) run, so nobody writes one. The function takes one
@@ -24,6 +24,8 @@ from typing import Annotated
 
 import typer
 from pydantic import BaseModel, ConfigDict
+
+from etude.stopping import Stopped
 
 
 class Function(BaseModel):
@@ -89,7 +91,10 @@ def main(
     given = os.environ.get("ETUDE_CONFIG")
     if not given:
         raise SystemExit("etude.call: ETUDE_CONFIG is not set; the job has no config")
-    called(config_type(called).model_validate_json(Path(given).read_text()))
+    try:
+        called(config_type(called).model_validate_json(Path(given).read_text()))
+    except Stopped:
+        raise typer.Exit(75) from None
 
 
 if __name__ == "__main__":

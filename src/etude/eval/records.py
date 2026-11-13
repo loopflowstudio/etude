@@ -135,7 +135,14 @@ class CheckpointKey(Record):
         return self
 
     def __str__(self) -> str:
-        return self.address if self.address is not None else f"{self.run}/checkpoints/{self.name}"
+        if self.address is not None:
+            return self.address
+        key = (
+            self.name
+            if self.name is not None and self.name.startswith("out/")
+            else f"checkpoints/{self.name}"
+        )
+        return f"{self.run}/{key}"
 
     @property
     def label(self) -> str:

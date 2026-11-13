@@ -480,7 +480,6 @@ def test_schedule_position_uses_the_current_continuation_not_an_older_overrun(
         run="a",
         clocks=[Step("updates", "updates")],
         directory=runs,
-        resumed_at={"updates": 1000},
     ) as run:
         run.log({"rl/loss": 0.5}, updates=1200)
     page = build(runs, file)
@@ -490,10 +489,9 @@ def test_schedule_position_uses_the_current_continuation_not_an_older_overrun(
         run="a",
         clocks=[Step("updates", "updates")],
         directory=runs,
-        resumed_at={"updates": 1100},
     ):
         pass
-    assert build(runs, file).training.runs[0].reached["updates"] == 1100
+    assert build(runs, file).training.runs[0].reached["updates"] == 1200
 
 
 def test_a_shared_report_module_of_the_repository_is_reread_on_refresh(
