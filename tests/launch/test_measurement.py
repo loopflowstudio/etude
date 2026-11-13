@@ -28,7 +28,7 @@ from etude.launch.providers.runpod.http import PodHTTP
 from etude.launch.records import Job, Machine, OnDemand
 from etude.launch.scheduler import Scheduler
 from etude.launch.schemas import Packet
-from etude.launch.ssh import SSH
+from etude.launch.ssh import SSH, SessionRequest
 from etude.launch.storage.s3 import Bucket, Keys, Reply
 from tests.launch.counting import Counting, Counts
 from tests.launch.fake import Bench, bench
@@ -116,7 +116,7 @@ def test_ask_wait_counts(tmp_path: Path) -> None:
         with pytest.raises(TimeoutError):
             b.scheduler.wait(id, timeout=0)
         wait = counting.snapshot()
-    assert ask == Counts(database=23)  # target: ask records intent without remote effects
+    assert ask == Counts(database=22)  # target: ask records intent without remote effects
     # Creation also reads provider safeguards for affordable time and the reserved budget,
     # and the status it returns reads the machine's attempts for how many shared it.
     assert wait == Counts(provider=4, bucket=1, database=78)  # known debt: wait advances work
@@ -137,7 +137,7 @@ def test_cohort_git_and_database_counts(
             parallel=3,
         )
         result = counting.snapshot()
-    assert result == Counts(git=57, database=38)  # known debt: 19 git calls per run
+    assert result == Counts(git=57, database=35)  # known debt: 19 git calls per run
 
 
 @pytest.mark.parametrize(
@@ -338,5 +338,8 @@ def test_counting_covers_physical_transports(
         provider.delete_self("fixture")
         bucket.put("key", b"bytes")
         assert bucket.get("key") == b""
-        assert SSH("fixture").call("observe", "worker").observation is None
+        assert (
+            SSH("fixture").call(SessionRequest(action="observe", session="worker")).observation
+            is None
+        )
         assert counting.snapshot() == Counts(provider=1, bucket=2, ssh=1)

@@ -46,6 +46,7 @@ from etude.launch.records import (
     Provider,
     Run,
     Status,
+    Until,
 )
 from etude.launch.records import Storage as Place
 from etude.launch.scheduler import Scheduler
@@ -510,7 +511,7 @@ def test_a_run_from_a_commit_runs_in_a_pod_and_continues_in_another(
     job = Job(
         command=f"{sys.executable} train.py",
         repo=str(repo),
-        until="steps=3",
+        until=Until.parse("steps=3"),
         max_hours=0.05,
         max_usd=Decimal(1),
     )
@@ -579,7 +580,7 @@ def test_a_pods_checkpoint_reaches_an_owned_host_without_its_storage_from_the_bu
     job = Job(
         command=f"{sys.executable} train.py",
         repo=str(tracked_repository(tmp_path)),
-        until="steps=3",
+        until=Until.parse("steps=3"),
         max_hours=0.05,
         max_usd=Decimal(1),
     )
@@ -627,7 +628,7 @@ def test_a_checkpoint_gone_or_changed_in_the_bucket_ends_the_attempt_undelivered
     job = Job(
         command=f"{sys.executable} train.py",
         repo=str(tracked_repository(tmp_path)),
-        until="steps=3",
+        until=Until.parse("steps=3"),
         max_hours=0.05,
         max_usd=Decimal(1),
         max_attempts=3,
@@ -721,7 +722,7 @@ def test_an_r2_storage_that_cannot_grant_keys_fails_the_launch_before_renting(
     assert (c.provider.creates, c.scheduler.runs(done=True)) == (0, ())
     # Refused, not unknown: no pod was asked for, so none is looked for later.
     (session,) = c.store.sessions()
-    assert session.refused_at is not None and session.receipt is None
+    assert session.refused_at is not None and session.provider_id is None
     assert not any(key.endswith("packet.json") for key in c.storage.objects)
 
 

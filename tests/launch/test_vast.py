@@ -306,10 +306,12 @@ def test_scheduler_retains_uncertain_acquisition_until_owned_deletion(
             scheduler.tick()
         assert market.counts == {"POST": 1, "PUT": 1, "GET": 4}
         pending = store.rented_session(name)
-        assert pending.receipt is None and pending.refused_at is None and pending.ended_at is None
+        assert (
+            pending.provider_id is None and pending.refused_at is None and pending.ended_at is None
+        )
         assert [s.id for s in store.unsettled_sessions()] == [held.id]
         assert store.rental_for(pending) == rental
-        assert scheduler.rentals()[0][1] > 0
+        assert scheduler.rentals()[0].usd > 0
         assert storage.objects[f"test/sessions/{held.id}/offer.json"] == intent
         with pytest.raises(LauncherError, match="at its machine limit"):
             scheduler.rent("4090", hours=1)
@@ -322,11 +324,11 @@ def test_scheduler_retains_uncertain_acquisition_until_owned_deletion(
             scheduler.tick()  # recover the receipt
             scheduler.tick()  # enforce the elapsed deadline
         ended = store.rented_session(name)
-        assert ended.id == held.id and ended.receipt == "12"
+        assert ended.id == held.id and ended.provider_id == "12"
         assert ended.ended_at is not None and ended.refused_at is None
         assert not store.unsettled_sessions() and market.instances == {}
         assert market.counts["PUT"] == 1 and market.counts["DELETE"] == 1
-        assert scheduler.rentals()[0][1] > 0
+        assert scheduler.rentals()[0].usd > 0
     finally:
         store.close()
 
@@ -341,11 +343,11 @@ def test_scheduler_releases_confirmed_vast_refusal(tmp_path: Path) -> None:
         refused = scheduler.rent("4090", hours=1)
         assert store.machine(refused).refused_at is not None
         assert not store.unsettled_sessions()
-        assert scheduler.rentals()[0][1] == 0
+        assert scheduler.rentals()[0].usd == 0
         assert market.counts == {"POST": 1}
         market.offers = [OFFER.copy()]
         acquired = scheduler.rent("4090", hours=1)
-        assert acquired != refused and store.rented_session(acquired).receipt == "12"
+        assert acquired != refused and store.rented_session(acquired).provider_id == "12"
         scheduler.terminate(acquired)
         assert market.instances == {} and market.counts["PUT"] == market.counts["DELETE"] == 1
     finally:

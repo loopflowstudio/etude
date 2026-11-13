@@ -13,7 +13,7 @@ from etude.launch.client import queue, queue_cohort, wait
 from etude.launch.database import Database
 from etude.launch.errors import LaunchError
 from etude.launch.executor import Refused
-from etude.launch.records import Job, LauncherError, Offer, OnDemand, Pool, Stale
+from etude.launch.records import Job, LauncherError, Offer, OnDemand, Pool, Stale, Until
 from etude.launch.scheduler import Scheduler
 from etude.launch.schemas import Packet, Work
 from etude.train.records import ParentCheckpoint, Step
@@ -197,7 +197,8 @@ def test_cli_continue_waits_without_capacity(
     b = bench(tmp_path)
     monkeypatch.setattr(import_module("etude.launch.cli"), "default", lambda: b.scheduler)
     parent = b.scheduler.launch(
-        Job(command="train", max_hours=1, max_usd=Decimal(1), until="steps=3"), rent="l4"
+        Job(command="train", max_hours=1, max_usd=Decimal(1), until=Until.parse("steps=3")),
+        rent="l4",
     )
     b.run(601)
     # What the parent's job recorded, as tracking keeps it in its runs directory.
@@ -216,7 +217,7 @@ def test_cli_continue_waits_without_capacity(
     (given,) = record.spec.environment
     handed = ParentCheckpoint.model_validate_json(given.value)
     assert (handed.parent.source_id, authored(handed.checkpoint.at)) == (parent, {"steps": 3})
-    assert record.spec.until == "steps=7" and record.autorun
+    assert str(record.spec.until) == "steps=7" and record.autorun
     assert b.scheduler.read(child).phase == "queued"
 
 
@@ -358,7 +359,7 @@ def test_launch_confirms_first_wave_before_delivering_any_work(tmp_path: Path) -
     def delivered(session_id: str, work: Work) -> None:
         assert len(b.store.runs()) == 3
         assert b.service.creates == 2
-        assert all(session.receipt is not None for session in b.store.sessions())
+        assert all(session.provider_id is not None for session in b.store.sessions())
         assert all(not held.packet.work for held in b.service.sessions.values())
         add(session_id, work)
 

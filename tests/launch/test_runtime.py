@@ -1,13 +1,12 @@
 """A selected job environment is reused, checked and kept separate from the client."""
 
-import json
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-from etude.launch.records import Cause, Job, Outcome, Runtime, job_identity
+from etude.launch.records import Cause, Job, Outcome, Runtime, job_id
 from etude.launch.runtime import RuntimeInfo, select_runtime
 from etude.launch.schemas import Packet, Work
 from etude.launch.worker import attempts
@@ -67,10 +66,8 @@ def test_runtime_is_part_of_job_identity_and_package_order_is_not() -> None:
     two = original.model_copy(
         update={"runtime": Runtime(python="/job/python", packages={"b": "2", "a": "1"})}
     )
-    assert job_identity(original) != job_identity(one)
-    assert json.dumps(job_identity(one), sort_keys=True) == json.dumps(
-        job_identity(two), sort_keys=True
-    )
+    assert job_id(original) != job_id(one)
+    assert job_id(one) == job_id(two)
 
 
 def test_cuda_constraint_is_the_build_not_driver_version() -> None:

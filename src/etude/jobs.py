@@ -66,9 +66,9 @@ from etude.launch.records import (
     RunRecord,
     Runtime,
     SmokeForm,
+    Until,
     Variable,
     number,
-    parse_target,
 )
 from etude.run.errors import EtudeError
 from etude.run.listing import as_storage, declared, run_folders
@@ -89,7 +89,7 @@ class JobOptions(TypedDict, total=False):
     max_hours: Required[float]
     max_usd: Decimal | None
     name: str
-    until: str | None
+    until: Until | None
     # A local git repository; None runs in an empty directory. Omitted: the
     # checkout the function's file is in.
     repo: str | None
@@ -317,15 +317,16 @@ def continue_from(
     record = next((r for r in reversed(recorded) if ordinal in (None, r.ordinal)), None)
     if record is None or record.artifact.sha256 is None or record.artifact.size_bytes is None:
         raise LauncherError(f"run {parent.id} recorded no stored checkpoint {ordinal or ''}")
-    clock, position = parse_target(until)
-    if clock not in record.at:
+    target = Until.parse(until)
+    if target.clock not in record.at:
         raise LauncherError(
             f"a continuation needs a target on a clock its checkpoint recorded: "
             f"{', '.join(sorted(record.at))}"
         )
-    if position <= record.at[clock]:
+    if target.position <= record.at[target.clock]:
         raise LauncherError(
-            f"the target {until} is not beyond the checkpoint's {clock}={number(record.at[clock])}"
+            f"the target {target} is not beyond the checkpoint's "
+            f"{target.clock}={number(record.at[target.clock])}"
         )
     inputs = tuple(i for i in parent.spec.inputs if not i.name.startswith(_PARENT_CHECKPOINT))
     # Without tags: they label the parent's checkpoint after the fact and decide
@@ -361,7 +362,7 @@ def continue_from(
         Variable(name="ETUDE_CONTINUES", value=handed.model_dump_json()),
     )
     job = parent.spec.model_copy(
-        update={"until": until, "inputs": inputs, "environment": environment}
+        update={"until": target, "inputs": inputs, "environment": environment}
     )
     return Run(job=job, seed=parent.seed, params=dict(parent.params), source=parent.source)
 

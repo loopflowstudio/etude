@@ -10,7 +10,7 @@ import pytest
 
 from etude.cli import main
 from etude.launch import cli, client
-from etude.launch.controller import PythonClient, Request
+from etude.launch.controller import PythonClient, RentRequest, Request, TerminateRequest
 from etude.launch.database import Database
 from etude.launch.errors import LauncherError
 from etude.launch.records import Job, Machine
@@ -38,7 +38,7 @@ def test_commands_rent_and_terminate_by_machine_name(
     assert "rented until" in capsys.readouterr().out
     machine = b.scheduler.machines("l4")[0]
     assert machine.kind == "rented" and machine.provider == "fake"
-    assert machine.requested_at == b.clock.now
+    assert machine.claimed_at == b.clock.now
     assert machine.provider_id is not None and machine.address is None
     assert main(["ondemands"]) == 0
     assert "rented: " + machine.name in capsys.readouterr().out
@@ -71,9 +71,10 @@ def test_python_rental_calls_use_selected_controller(
     monkeypatch.setattr(PythonClient, "_request", request)
     assert client.rent("gpu", 1, Decimal(2)) == "remote-pod"
     assert client.terminate("remote-pod") == machine
-    assert [r.operation for r in requests] == ["rent", "terminate"]
-    assert requests[0].rent == "gpu" and requests[0].max_usd == Decimal(2)
-    assert requests[1].machine == "remote-pod"
+    assert requests == [
+        RentRequest(ondemand="gpu", hours=1, max_usd=Decimal(2)),
+        TerminateRequest(machine="remote-pod"),
+    ]
     assert not (tmp_path / "launcher.db").exists()
 
 

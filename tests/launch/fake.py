@@ -31,7 +31,7 @@ from etude.launch.records import (
     Output,
     Provider,
     Storage,
-    parse_target,
+    Until,
 )
 from etude.launch.scheduler import Scheduler
 from etude.launch.schemas import Observation, Packet, Progress, Work
@@ -271,7 +271,8 @@ class FakeService:
                 exit_code=1,
             )
         data = output_bytes(work.attempt)
-        clocks = dict([parse_target(work.until)]) if work.until else {}
+        target = None if work.until is None else Until.parse(work.until)
+        clocks = {} if target is None else {target.clock: target.position}
         output = Output(
             name="weights.pt", sha256=hashlib.sha256(data).hexdigest(), size_bytes=len(data)
         )

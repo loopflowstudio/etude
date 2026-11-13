@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import sys
 from collections import Counter
-from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -15,9 +14,9 @@ from etude.jobs import continue_from
 from etude.launch.database import Database
 from etude.launch.executor import Executor, local
 from etude.launch.machines import OwnedMachine
-from etude.launch.records import BootstrapLinks, Job, Machine, Pool, Run
+from etude.launch.records import Job, Machine, Pool, Run, Until
 from etude.launch.scheduler import Scheduler
-from etude.launch.ssh import SSH, RemoteReply, SSHJournal, SSHStart
+from etude.launch.ssh import SSH, RemoteReply, RemoteRequest, SSHJournal, SSHStart
 from etude.train.records import Step
 from etude.train.run import track
 from tests.launch.counting import job_text
@@ -84,7 +83,12 @@ def test_runs_move_between_local_and_remote_disk_including_kept_work(tmp_path: P
     )
     ids = []
     for target, pool in (("3", None), ("7", "bench"), ("9", None)):
-        job = Job(command=command, max_hours=0.005, max_usd=Decimal(1), until=f"steps={target}")
+        job = Job(
+            command=command,
+            max_hours=0.005,
+            max_usd=Decimal(1),
+            until=Until.parse(f"steps={target}"),
+        )
         ids.append(scheduler.launch(job, pool))
         (status,) = scheduler.wait(ids[-1], every=0.05, timeout=10)
         assert (status.outcome, status.clocks) == ("succeeded", {"steps": float(target)})
@@ -97,37 +101,9 @@ class CountedSSH(SSH):
 
     asks: Counter[str]
 
-    def call(
-        self,
-        action: str,
-        session_id: str,
-        *,
-        packet: str = "",
-        work: str = "",
-        attempt: str = "",
-        name: str = "",
-        key: str = "",
-        files: dict[str, str] | None = None,
-        folder: dict[str, str] | None = None,
-        bootstrap: BootstrapLinks | None = None,
-        cleanup: tuple[str, ...] = (),
-        startup_deadline: datetime | None = None,
-    ) -> RemoteReply:
-        self.asks[action] += 1
-        return super().call(
-            action,
-            session_id,
-            packet=packet,
-            work=work,
-            attempt=attempt,
-            name=name,
-            key=key,
-            files=files,
-            folder=folder,
-            bootstrap=bootstrap,
-            cleanup=cleanup,
-            startup_deadline=startup_deadline,
-        )
+    def call(self, request: RemoteRequest) -> RemoteReply:
+        self.asks[request.action] += 1
+        return super().call(request)
 
 
 # Records a checkpoint midway and at the target; each holds the lineage of the
@@ -171,7 +147,7 @@ def test_continuation_moves_between_local_and_remote_disk(
     (tmp_path / "train.py").write_text(TRAIN)
     job = Job(
         command=f"{sys.executable} {tmp_path / 'train.py'}",
-        until="steps=3",
+        until=Until.parse("steps=3"),
         max_hours=0.1,
         max_usd=Decimal(1),
     )
