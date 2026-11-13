@@ -113,20 +113,32 @@ with evaluation/query, list through `run.checkpoints()`, and travel as verified
 member inputs through `start=`, evaluation and explicit checkpoint continuation.
 The query cache rebuilds at schema 14 so folder keys join their seated players.
 
-1. Unify/rename records; wire historical readers and outcome files. The
-   tracking package move is done; RunRequest and the record unification are not.
-2. Finish default recipe acceptance on the surviving records and commands.
-   The registration API currently has focused Python tests, not CLI acceptance.
-3. Finish recording `start=` lineage in the unified run record; inputs already
-   persist it in the launcher Job. Folder carriage and enumeration are built.
-4. Add local `etude run`, explicit local/launched --resume (with `--until`
-   extending the same run, finished or not), create-only names,
-   config/seed refusals and per-attempt source recording; a refused or
-   interrupted attempt never marks a finished run failed (Folded in).
-   `etude launch` and `etude run` accept the experiment name; the file's stem
-   is only the default (design, Set up for Etude Cloud; `positioning.md`).
-5. Move job seeds and examples; focused acceptance tests, then the caller's
-   gate/demo steps. No publication, landing or Graph changes in implement.
+Checked at `7a26dd0` (realign): none of 1-5 has started.
+
+1. Unify records. Launch `Run` (`etude.launch.records`) is still the launched
+   record; tracking still has `RunDeclaration`, `RunFile`, `Attempt`
+   (`etude.tracking.records`) and `TrainingRun` (`etude.experiment`). Name
+   clash: main's #105 (`afcda22`) added `RunRequest` in
+   `etude.launch.controller` as the controller's record/status/cancel message,
+   so the design's `Run` -> `RunRequest` rename needs that name freed. Assumed
+   (`questions.md`): rename the internal controller message, keep the design's
+   name. Then wire historical readers and `outcome.json` (no writer yet).
+2. Default recipe acceptance through the CLI; the registration API has only
+   focused Python tests.
+3. Record `start=` lineage in the unified run record; the launcher Job
+   already persists it.
+4. Local `etude run` and explicit local/launched `--resume RUN [--until]`
+   (neither exists; `etude.cli` has launch, continue, eval, report, ...),
+   create-only names, config/seed refusals naming fields, per-attempt commit.
+   Fix the folded bug here: `Run.__exit__` still calls `finish("failed")` for
+   any non-`Stopped` error and `Attempt(first_row=True)` is written in
+   `__init__`. `etude launch` and `etude run` take `--experiment`; the stem
+   is the default.
+5. `Job` launch `seeds` (today only `Job.runs(*seeds)`), the tiny non-Magic
+   example (none exists), one-release warnings for `local_launch` and
+   `track(seed=)` (only `latest_checkpoint()` warns now), then the
+   `design-train-api.md` Acceptance list as focused tests. No publication,
+   landing or Graph changes in implement.
 
 ## Verification
 

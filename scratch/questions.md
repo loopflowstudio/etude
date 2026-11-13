@@ -206,3 +206,11 @@ Checks after the merge: `uv run mypy` clean, `uv run ruff check .` and
 `uv run ruff format --check .` clean; 812 tests passed across two partial
 runs (186 tracking-side, 626 other), then the four launcher files changed
 afterwards passed again (58).
+
+## `RunRequest` name taken on main (2026-11-13, realign)
+
+`afcda22` (#105) named the controller's record/status/cancel message
+`etude.launch.controller.RunRequest`. The design renames launch `Run` to
+`RunRequest` (Jack Heart: "ok, RunRequest works"). Assumed, reversible:
+rename the internal controller message (e.g. `RunOperation`) and keep the
+design's public name.
