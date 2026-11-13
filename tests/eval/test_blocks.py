@@ -399,7 +399,9 @@ def test_a_rollup_holds_the_card_page_and_a_catch_up_reads_only_the_new_block(
     assert card_rollup(db, f"player = '{strong.key}' and on_play and deck = 'red'") == card_page(
         db, f"s.player = '{strong.key}' and p.on_play and p.deck = 'red'"
     )
-    assert card_rollup(db, f"opponents = '{weak.key}'") == card_page(db, f"o.player = '{weak.key}'")
+    assert card_rollup(db, f"opponents = ['{weak.key}']") == card_page(
+        db, f"o.player = '{weak.key}'"
+    )
     db.close()
 
     evaluate(experiment="cards", environment=DUEL, play=play_cards, matches=matches,
@@ -411,6 +413,28 @@ def test_a_rollup_holds_the_card_page_and_a_catch_up_reads_only_the_new_block(
     # again: nothing of an earlier block.
     assert (reading.listings, reading.requests) == (1, 4 + 1)
     assert card_rollup(db) == card_page(db)
+    db.close()
+
+
+def test_a_rollup_sealed_with_comma_joined_opponents_still_reads(tmp_path: Path) -> None:
+    strong, weak = pair(tmp_path)
+    evaluate(experiment="cards", environment=DUEL, play=play_cards, matches=deals((strong, weak), 2),
+             run="a", directory=tmp_path / "a", storages=[DirectoryStorage(tmp_path / "bucket")],
+             rollups=[CARDS])  # fmt: skip
+    # As etude 0.3.0 sealed it: the other seats' keys joined by commas, one VARCHAR.
+    sealed_files = list((tmp_path / "bucket").rglob("card_deals.parquet"))
+    assert sealed_files
+    with duckdb.connect() as old:
+        for sealed in sealed_files:
+            old.execute(
+                f"copy (select * replace (array_to_string(opponents, ',') as opponents)"
+                f" from read_parquet({quote(sealed)})) to {quote(sealed)} (format parquet)"
+            )
+    db = statsdb("cards", tmp_path / "bucket")
+    # In a two-seat match the one opponent's key is the whole of the old text.
+    assert card_rollup(db, f"opponents = ['{weak.key}']") == card_page(
+        db, f"o.player = '{weak.key}'"
+    )
     db.close()
 
 

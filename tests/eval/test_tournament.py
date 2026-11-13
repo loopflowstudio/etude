@@ -26,6 +26,7 @@ from etude.eval.records import (
     Model,
     RoundRobin,
     Seating,
+    Share,
     TournamentRun,
 )
 from etude.eval.tournament import hold, played, scores, standings
@@ -455,7 +456,7 @@ def test_a_round_robin_held_as_two_shares_stands_as_one(tmp_path: Path) -> None:
             experiment=EXPERIMENT,
             enter=finals,
             play=play,
-            share=(k, 2),
+            share=Share(index=k, count=2),
             storages=[split],
             directory=tmp_path / f"machine-{k}",
         )  # fmt: skip
@@ -504,7 +505,7 @@ def test_round_robin_shares_differ_by_at_most_one_and_count_matches_any_run_held
     bucket = DirectoryStorage(tmp_path / "bucket")
 
     def share(k: int) -> int:
-        return hold(league, experiment=EXPERIMENT, enter=finals, play=play, share=(k, 4), storages=[bucket],
+        return hold(league, experiment=EXPERIMENT, enter=finals, play=play, share=Share(index=k, count=4), storages=[bucket],
                     directory=tmp_path / f"machine-{k}").played  # fmt: skip
 
     # 18 matches dealt four ways; the fourth share is not played yet.
@@ -541,7 +542,7 @@ def test_each_share_of_a_checkpoint_benchmark_seats_fewer_checkpoints_than_a_rou
             return play(match)
 
         hold(anchors(tmp_path), experiment=EXPERIMENT, checkpoints=checkpoints, play=seen,
-             share=(k, 2), storages=[bucket], directory=tmp_path / f"machine-{k}")  # fmt: skip
+             share=Share(index=k, count=2), storages=[bucket], directory=tmp_path / f"machine-{k}")  # fmt: skip
 
     def seated(matches: Sequence[Match]) -> int:
         return len(

@@ -424,10 +424,10 @@ def _joined(
     if set(held) & set(ROLLUP_SEATED):
         raise EtudeError("rollup_column_reserved", 422) from ValueError(rollup.name)
     seat_players, values = unnest(
-        {"match": "VARCHAR", "seat": "BIGINT", "player": "VARCHAR", "opponents": "VARCHAR"},
+        {"match": "VARCHAR", "seat": "BIGINT", "player": "VARCHAR", "opponents": "VARCHAR[]"},
         [
             [match.key, seat, player.key,
-             ",".join(other.key for at, other in enumerate(match.players) if at != seat)]
+             [other.key for at, other in enumerate(match.players) if at != seat]]
             for match in matches
             for seat, player in enumerate(match.players)
         ],

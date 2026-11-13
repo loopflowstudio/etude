@@ -234,7 +234,10 @@ evaluate(
   the rows for which `where` holds. A row is `table`'s joined to each of
   `join` on whichever of run, match, seat and game both have. `by` may name
   `player`, the key of the row's seat's player, and `opponents`, the other
-  seats' keys in seat order, comma-joined. A column a match's rows never
+  seats' keys in seat order, a list (`opponents = ['KEY']` in a two-seat
+  match). Blocks sealed by etude 0.3.0 joined them with commas, which keys
+  also hold; such a value reads as a one-element list of that text, the
+  opponent's key in a two-seat match. A column a match's rows never
   gave reads as null. A rollup that cannot sum a match (a sum of text, an
   expression DuckDB rejects) fails the match. Each block keeps its matches'
   partial totals in `card_deals.parquet`; `statsdb` adds a new block's to the
@@ -404,10 +407,13 @@ evaluate(
   (`ETUDE_RUN`), so `etude logs` and `status` lead to it and a retry resumes
   it, finding the same checkpoint (by its key) wherever the retry put it. Elsewhere it is named for the tournament and what is given; the same
   call resumes it.
-- **Splitting.** `share=(k, n)` plays one of n disjoint parts, for n
-  machines: contiguous runs of the scheduled matches in play order, so parts
-  differ by at most one match and each seats only some of the checkpoints.
-  The cut covers delivered matches too, so a retried share keeps its part.
+- **Splitting.** `share=Share(index=k, count=n)` plays part k (from 0) of
+  n disjoint parts, for n machines: contiguous runs of the scheduled matches
+  in play order, so parts differ by at most one match and each seats only
+  some of the checkpoints. The cut covers delivered matches too, so a
+  retried share keeps its part. `tournament.json` stores it as
+  `{"index": k, "count": n}`; an `[k, n]` pair written by etude 0.3.0
+  still reads.
 - **Cost.** Holding a checkpoint or entrants reads nothing of the
   tournament: it plays their matches. Holding nothing new (batch) lists each
   place once and reads each eval run's `run.json` and, for the experiment's,

@@ -59,6 +59,7 @@ from etude.eval.records import (
     Rollup,
     RoundRobin,
     Seated,
+    Share,
     TournamentRun,
     assemble,
     digest,
@@ -91,7 +92,7 @@ def hold(
     workers: int = 1,
     directory: Path | str | None = None,
     storages: Sequence[Storage] = (),
-    share: tuple[int, int] = (0, 1),
+    share: Share = Share(),
     rollups: Sequence[Rollup] = (),
     lines: Sequence[Line] = (),
 ) -> EvalRun:
@@ -117,9 +118,9 @@ def hold(
     given. Their checkpoints' files may lie elsewhere than the definition's,
     such as copied to this machine; a key never depends on where.
 
-    `share=(k, n)` cuts the scheduled matches, in the order
+    `share=Share(index=k, count=n)` cuts the scheduled matches, in the order
     `etude.eval.schedule.ordered` plays them, into n contiguous parts and plays
-    the kth, so n machines may split one hold with at most one match between
+    the kth, counting from 0, so n machines may split one hold with at most one match between
     their shares, each seating (and fetching) only some of the checkpoints.
     The cut covers delivered matches too, so a resumed share keeps its part.
     Under `etude launch` the eval run is the launched run (`ETUDE_RUN`);
@@ -131,9 +132,6 @@ def hold(
     an on-the-go hold leaves those to be found on read. Raises whatever
     `evaluate` raises.
     """
-    k, n = share
-    if not 0 <= k < n:
-        raise EtudeError("share_out_of_range", 422)
     if checkpoint is not None and checkpoints:
         raise EtudeError("hold_one_checkpoint_on_the_go_or_add_checkpoints", 422)
     given = (checkpoint,) if checkpoint is not None else tuple(checkpoints)
@@ -159,12 +157,12 @@ def hold(
         every = [*(each.match for each in so_far.delivered), *so_far.failed, *so_far.new]
         # Contiguous runs of the play order, so each share seats fewer checkpoints.
         order = list(ordered(sorted(every, key=lambda match: match.key)))
-        size, larger = divmod(len(order), n)
-        start = k * size + min(k, larger)
+        size, larger = divmod(len(order), share.count)
+        start = share.index * size + min(share.index, larger)
         delivered = {each.match.key for each in so_far.delivered}
         pending = [
             match
-            for match in order[start : start + size + (k < larger)]
+            for match in order[start : start + size + (share.index < larger)]
             if match.key not in delivered
         ]
     run = os.environ.get("ETUDE_RUN") or (
@@ -224,7 +222,7 @@ def played(
     Raises as a batch hold does, so a seating name defined two ways is refused.
     Relative seats find their checkpoints among `lines`, as in `hold`.
     """
-    added = _added(tournament, tuple(checkpoints), enter, (0, 1))
+    added = _added(tournament, tuple(checkpoints), enter, Share())
     return _called(
         added,
         experiment=experiment,
@@ -265,7 +263,7 @@ def _added(
     tournament: Benchmark | RoundRobin,
     checkpoints: tuple[CheckpointRef, ...],
     enter: Sequence[Player],
-    share: tuple[int, int],
+    share: Share,
 ) -> TournamentRun:
     if isinstance(tournament, Benchmark) and enter:
         raise EtudeError("benchmark_holds_checkpoints_not_entrants", 422)

@@ -630,6 +630,14 @@ def _rollup(db: duckdb.DuckDBPyConnection, run: str, rollup: Rollup, file: str, 
         [name, file],
     )
     arrived = {column: kind for column, kind, *_ in db.execute("describe _arrived").fetchall()}
+    if arrived.get("opponents") == "VARCHAR":
+        # Sealed comma-joined by etude 0.3.0 or earlier (`Rollup`): one element, unsplit.
+        db.execute(
+            "create or replace temp table _arrived as select * replace"
+            " (case when opponents is null then null else [opponents] end as opponents)"
+            " from _arrived"
+        )
+        arrived["opponents"] = "VARCHAR[]"
     _hold(db, rollup)
     if not _exists(db, "kept", name):
         db.execute(f'create table kept."{name}" as select * from _arrived where false')

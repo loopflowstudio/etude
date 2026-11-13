@@ -56,6 +56,7 @@ from pydantic import (
     JsonValue,
     TypeAdapter,
     ValidationError,
+    field_validator,
     model_validator,
 )
 
@@ -487,7 +488,10 @@ class Rollup(Record):
     A row is `table`'s, joined to each table in `join` on whichever of run,
     match, seat and game both have; a column of both is `table`'s. `by` may
     name `player`, the key of the player in the row's seat, and `opponents`,
-    the other seats' player keys in seat order, comma-joined. A column no
+    the other seats' player keys in seat order, a list. A block sealed by
+    etude 0.3.0 or earlier stored `opponents` comma-joined, which cannot be
+    split back because keys hold commas: it reads as a one-element list of
+    that text, which is the opponent's key in a two-seat match. A column no
     row of a match gave reads as null there.
 
     Each block keeps its matches' partial totals in `NAME.parquet`, so
@@ -957,6 +961,19 @@ class RoundRobin(Record):
         ]
 
 
+class Share(Record):
+    """Part `index` of `count` contiguous parts of a hold's scheduled matches in play order."""
+
+    index: int = Field(default=0, ge=0)
+    count: int = Field(default=1, ge=1)
+
+    @model_validator(mode="after")
+    def _within(self) -> Self:
+        if self.index >= self.count:
+            raise ValueError("share_out_of_range")
+        return self
+
+
 class TournamentRun(Record):
     """`RUN/tournament.json`: the tournament an eval run was held for, and what it added."""
 
@@ -965,8 +982,16 @@ class TournamentRun(Record):
     entrants: tuple[Player, ...] = ()
     # What relative seats found for the checkpoints it scheduled (`Seating.resolve`).
     seated: tuple[Seated, ...] = ()
-    # (k, n): of the schedule's keys in sorted order, the run plays every nth from the kth.
-    share: tuple[int, int] = (0, 1)
+    # The part of the scheduled matches the run plays (`etude.eval.tournament.hold`).
+    share: Share = Share()
+
+    @field_validator("share", mode="before")
+    @classmethod
+    def _share_pair(cls, given: object) -> object:
+        # etude 0.3.0 and earlier stored the share as an [index, count] pair.
+        if isinstance(given, (list, tuple)) and len(given) == 2:
+            return {"index": given[0], "count": given[1]}
+        return given
 
     @model_validator(mode="before")
     @classmethod

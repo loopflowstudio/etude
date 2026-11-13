@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from hashlib import sha256
 
 import pytest
@@ -26,6 +27,7 @@ from etude.eval.records import (
     RoundRobin,
     Seated,
     Seating,
+    Share,
     TournamentRun,
     assemble,
 )
@@ -99,6 +101,13 @@ def test_tournament_files_stored_with_agents_load_as_players() -> None:
     held = TournamentRun.model_validate_json(OLD_ROUND_ROBIN)
     assert isinstance(held.tournament, RoundRobin)
     assert held.entrants == (SEARCH.model(U500), HEURISTIC)
+
+
+def test_a_share_stored_as_a_pair_reads_and_is_written_by_name() -> None:
+    old = OLD_ROUND_ROBIN.replace('"share":[0,1]', '"share":[1,3]')
+    held = TournamentRun.model_validate_json(old)
+    assert held.share == Share(index=1, count=3)
+    assert json.loads(held.model_dump_json())["share"] == {"index": 1, "count": 3}
 
 
 def test_etude_sdk_0_2_players_load_and_equal_no_player_since() -> None:
