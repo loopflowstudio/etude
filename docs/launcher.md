@@ -1294,6 +1294,11 @@ A removed out checkpoint is never restored implicitly, and no older checkpoint
 is chosen in its place. Populated out uses the parent's recorded position for
 lineage and target validation; empty out with a copied checkpoint uses that
 checkpoint's position, even if the parent logged later metrics.
+Empty out with no available latest checkpoint is refused before queueing:
+there is no saved state to continue. The error distinguishes a parent that
+recorded no checkpoint from one whose latest out checkpoint was removed;
+use `--ordinal N` to select a recorded checkpoint explicitly. Populated out
+can continue without a checkpoint.
 
 `--ordinal N` starts from one recorded checkpoint instead. A historical parent
 without out also uses its latest checkpoint. In these cases the child's `out`

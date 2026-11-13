@@ -10,6 +10,7 @@ import pytest
 
 from etude.carriage import put_back, restore_set
 from etude.jobs import continue_from
+from etude.launch.errors import LauncherError
 from etude.launch.records import Input, Job
 from etude.launch.records import Storage as Place
 from etude.launch.schemas import Delivery, Inbox, Work
@@ -213,13 +214,13 @@ def test_deleted_files_stay_absent_after_restart_recovery_and_continuation(
     put_back(relayed, held)
     assert not (relayed / "out/stale").exists()
     source = MeasuredStorage(DirectoryStorage(relayed.parent))
-    child = continue_from(record, "updates=4", source=source)
-    assert not child.job.inputs  # an empty directory must not resurrect its latest checkpoint
+    with pytest.raises(LauncherError, match="latest checkpoint's out file was removed"):
+        continue_from(record, "updates=4", source=source)
     assert source.listings == 2
     assert not any("/out/" in key for key in source.got)
     source = MeasuredStorage(BucketObjects(storage, "b"))
-    child = continue_from(record, "updates=4", source=source)
-    assert not child.job.inputs
+    with pytest.raises(LauncherError, match="latest checkpoint's out file was removed"):
+        continue_from(record, "updates=4", source=source)
     assert source.got.count(member) == 1 and source.listings == 2
     assert not any("/out/" in key for key in source.got)
     source = MeasuredStorage(BucketObjects(storage, "b"))

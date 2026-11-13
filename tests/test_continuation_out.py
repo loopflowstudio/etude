@@ -210,39 +210,95 @@ def test_out_carries_copied_latest_checkpoint(
             assert list(resumed.out.iterdir()) == []
 
 
+@pytest.mark.parametrize("removed_checkpoint", [False, True])
 @pytest.mark.parametrize("populated", [False, True])
-def test_removed_out_checkpoint_does_not_choose_an_older_copied_checkpoint(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, populated: bool
+@pytest.mark.parametrize("carried", [False, True])
+def test_continuation_requires_saved_out_or_its_latest_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    removed_checkpoint: bool,
+    populated: bool,
+    carried: bool,
 ) -> None:
     scheduler = local(tmp_path)
     parent = scheduler.queue(Job(command="train", max_hours=1), "local")
     source = tmp_path / "track"
     monkeypatch.setenv("ETUDE_OUT", str(source / parent / "out"))
-    older = tmp_path / "older.pt"
-    older.write_bytes(b"old weights")
+    position = 2 if removed_checkpoint else 5
     with track(
         experiment="recipe", run=parent, clocks=[Step("updates", "updates")], directory=source
     ) as run:
-        run.checkpoint(older, updates=1)
-        latest = run.out / "final.pt"
-        latest.write_bytes(b"latest weights")
-        run.checkpoint(latest, updates=2)
+        if removed_checkpoint:
+            older = tmp_path / "older.pt"
+            older.write_bytes(b"old weights")
+            run.checkpoint(older, updates=1)
+            latest = run.out / "final.pt"
+            latest.write_bytes(b"latest weights")
+            run.checkpoint(latest, updates=position)
+        else:
+            run.log({"loss": 0}, updates=position)
         if populated:
             (run.out / "state").write_bytes(b"state")
-    destination = DirectoryStorage(tmp_path / "bucket")
-    assert sync(source, storages=[destination]) == {}
-    latest.unlink()
-    assert sync(source, storages=[destination]) == {}
+    destination = DirectoryStorage(tmp_path / "bucket" if carried else source)
+    if carried:
+        assert sync(source, storages=[destination]) == {}
+    if removed_checkpoint:
+        (run.out / "final.pt").unlink()
+        if carried:
+            assert sync(source, storages=[destination]) == {}
+    error = (
+        "latest checkpoint's out file was removed; use --ordinal N"
+        if removed_checkpoint
+        else "no saved state: out is empty and no checkpoint was recorded"
+    )
     storage = MeasuredStorage(destination)
-    child = continue_from(scheduler.record(parent), "updates=3", source=storage)
-    (lineage,) = child.job.environment
-    handed = ParentRun.model_validate_json(lineage.value)
-    assert handed.at == {"updates": 2}
-    assert handed.checkpoint is None and handed.input is None
-    assert [given.out for given in child.job.inputs] == (["state"] if populated else [])
+    if populated:
+        child = continue_from(scheduler.record(parent), "updates=9", source=storage)
+        handed = ParentRun.model_validate_json(child.job.environment[0].value)
+        assert handed.at == {"updates": position}
+        assert handed.checkpoint is None and handed.input is None
+        assert [given.out for given in child.job.inputs] == ["state"]
+    else:
+        with pytest.raises(LauncherError, match=error):
+            continue_from(scheduler.record(parent), "updates=9", source=storage)
     assert storage.listings == 2
-    assert storage.got.count(f"{parent}/{MEMBERSHIP}") == 1
-    assert not any(key.startswith(f"{parent}/out/") or key.endswith(".pt") for key in storage.got)
+    assert storage.got.count(f"{parent}/{MEMBERSHIP}") == int(carried)
+    assert [key for key in storage.got if key.startswith(f"{parent}/out/")] == (
+        [] if carried or not populated else [f"{parent}/out/state"]
+    )
+    assert not any(key.endswith(".pt") for key in storage.got)
+    if not populated:
+        monkeypatch.setattr(import_module("etude.launch.cli"), "default", lambda: scheduler)
+        capsys.readouterr()
+        assert (
+            main(
+                [
+                    "continue",
+                    "--run",
+                    parent,
+                    "--until",
+                    "updates=9",
+                    "--source",
+                    str(destination.root),
+                ]
+            )
+            == 1
+        )
+        assert error in capsys.readouterr().err
+        assert [record.id for record in scheduler.runs()] == [parent]
+
+    if removed_checkpoint:
+        # Older checkpoints remain available only by explicit selection.
+        selected = MeasuredStorage(destination)
+        explicit = continue_from(scheduler.record(parent), "updates=9", source=selected, ordinal=1)
+        assert [given.key for given in explicit.job.inputs] == ["checkpoints/updates-1.pt"]
+        assert ParentRun.model_validate_json(explicit.job.environment[0].value).at == {"updates": 1}
+        assert selected.listings == 2
+        assert f"{parent}/{MEMBERSHIP}" not in selected.got
+        assert not any(
+            key.startswith(f"{parent}/out/") or key.endswith(".pt") for key in selected.got
+        )
 
 
 def test_typed_stop_and_continuation_restore_full_state_and_only_change_target(

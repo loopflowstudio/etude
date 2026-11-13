@@ -247,6 +247,7 @@ def continue_from(
     File inputs freeze the bytes chosen here by digest; a parent changing them
     before delivery is refused. Config is validated against the typed job's
     function before queueing. The target is absolute and must advance its clock.
+    Empty out without a latest copied checkpoint is refused before queueing.
     """
     storage = as_storage(source)
     keys = storage.keys("")
@@ -270,15 +271,23 @@ def continue_from(
         if key is None and file.parent.parts[-2:] == (parent.id, CHECKPOINTS):
             key = f"{CHECKPOINTS}/{file.name}"
     copied = key is not None and key.startswith(f"{CHECKPOINTS}/")
+    members = () if out is None else out.files
     # Empty out still resumes a copied checkpoint. A removed out checkpoint
     # must never select an older record or resurrect its retained bytes.
-    if out is not None and not out.files and copied:
-        out = None
+    if out is not None and not members and not copied:
+        if checkpoint is None:
+            raise LauncherError(
+                f"run {parent.id} has no saved state: out is empty and no checkpoint was recorded"
+            )
+        raise LauncherError(
+            f"run {parent.id} has empty out and its latest checkpoint's out file was removed; "
+            "use --ordinal N to select a recorded checkpoint explicitly"
+        )
     given = None
-    if out is not None:
+    if members:
         # A recipe may save a checkpoint without logging scalar rows.
         at = {**(checkpoint.at if checkpoint is not None else {}), **data.reached}
-        for index, member in enumerate(out.files):
+        for index, member in enumerate(members):
             name = _input_name(f"parent-out-{index}", inputs)
             inputs[name] = Input(
                 name=name,
@@ -288,13 +297,13 @@ def continue_from(
                 size_bytes=member.size_bytes,
                 run=parent.id,
             )
-        if not copied and not any(member.key == key for member in out.files):
+        if not copied and not any(member.key == key for member in members):
             checkpoint = None
         origin = "parent"
     else:
         origin = "checkpoint"
         at = checkpoint.at if checkpoint is not None else {}
-    if out is None or copied:
+    if not members or copied:
         if (
             checkpoint is None
             or checkpoint.artifact.sha256 is None

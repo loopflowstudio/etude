@@ -404,12 +404,13 @@ run.tag(model, "best")  # tags can change later
   in out; a removed out checkpoint's record can refer to an unavailable file.
   A continuation carries out and inherits the latest checkpoint whenever its
   file is still available: a member of out or copied into `checkpoints/`.
-  A removed out checkpoint is never inherited, and Etude does not search older
-  checkpoints to replace it. Populated out uses the parent's recorded position
-  for lineage and target validation; empty out with a copied checkpoint uses
-  the checkpoint's position. `etude continue
-  --ordinal N` explicitly selects a checkpoint. The inherited checkpoint is
-  available until the child records its own. `run.latest_checkpoint()` relocates
+  Empty out with no available latest checkpoint is refused before queueing;
+  the error distinguishes never-saved state from a removed out checkpoint.
+  Etude never implicitly restores a removed checkpoint or selects an older
+  one. Use `etude continue --ordinal N` to choose a checkpoint explicitly;
+  see [continuation](launcher.md#the-run-promise) for target and lineage rules.
+  The inherited checkpoint is available until the child records its own.
+  `run.latest_checkpoint()` relocates
   the address when its file is present here; it returns `None` with no record.
 - **Readers give storage addresses.** `etude checkpoints --source` and
   `etude.train.read` report each file where it is in the source read, not
