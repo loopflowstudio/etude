@@ -176,9 +176,9 @@ repo, with an isolated `ETUDE_HOME`:
   (`etude cancel COHORT`) and `etude wait RUN` until each says `done: cancelled`,
   so no worker is left behind. macOS has no `timeout`; use
   `perl -e 'alarm 60; exec @ARGV' uv run etude wait RUN`.
-- Client jobs built in Python need `experiment=` (`job.model_copy(update=...)`); an
-  experiment file names it from its stem, and `track()` otherwise raises
-  `experiment_not_named`.
+- Client jobs submitted directly from Python need `experiment=`
+  (`job.model_copy(update=...)`). `etude launch FILE.py` defaults unnamed jobs
+  to the file stem; recipes call `track()` without an experiment.
 - A `--keep` smoke folder's `track/` holds a tiny tournament (games=1): as an
   `etude eval --source` it gives `matchup_conflict`. Copy only the training run's
   folder out for a clean source.
@@ -204,8 +204,10 @@ Local recipe path: a lab with `train.py` written as `docs/tracking.md` shows
 and `touch FILE` from a background `sleep`; read rows with
 `etude.train.read.read(DIR, NAME, basename(DIR)).points(metric, clock).x`
 (`metrics()` is a method) and attempt starts from `DIR/etude/RUN/metrics/*.json`
-(`resumed_at`). An experiment file needs `report()` or `eval(state)`; a plain
-job file has no experiment and `track()` raises `experiment_not_named`.
+(`resumed_at`). Launch a plain file defining only `runs()` to check that its
+stem supplies the experiment. Also check an explicit `Job.experiment`: plain
+files preserve it, while files defining `report()` or `eval(state)` require
+their own stem.
 
 Manabot acceptance without touching its checkout: `git ls-files -z | rsync -a
 --from0 --files-from=- . /tmp/X/` plus the in-tree `managym/_managym.*.so`; then

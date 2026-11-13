@@ -120,7 +120,7 @@ def read_job_file(path: Path, given: Sequence[str] = (), *, help: bool = False) 
                 "job": run.job.model_copy(
                     update={
                         "repo": str(Path(run.job.repo).resolve()) if run.job.repo else None,
-                        "experiment": experiment or run.job.experiment or path.stem,
+                        "experiment": run.job.experiment or path.stem,
                     }
                 ),
             }
