@@ -453,7 +453,11 @@ def continue_run(
         ),
     ] = None,
     ordinal: Annotated[
-        int | None, typer.Option(help="a checkpoint instead of the parent's out")
+        int | None,
+        typer.Option(
+            help="choose a checkpoint; default: the parent's out, or its latest copied "
+            "checkpoint when out is empty"
+        ),
     ] = None,
     cohort: Annotated[
         str | None, typer.Option(help="the new cohort's name, when continuing a cohort")

@@ -1076,24 +1076,19 @@ checkpoint its [tracking](tracking.md) recorded.
 - **A failure** is any other exception or nonzero exit: the attempt and the
   run end `failed`, and nothing is called again.
 
-A stopped attempt is followed by another like a lost one, within the same
-bounds: the run's hours, dollars and `max_attempts` span all attempts.
+The run's hours, dollars and `max_attempts` span all attempts. Hours count code
+execution; dollars include attributed setup and failed attempts.
 The default `max_attempts=3` includes planned stops: a healthy run needing a
 fourth rental window ends `stopped` after its third planned stop. Increase
 `max_attempts` on the job for a longer run.
 
-Hours count code execution; dollars include its attributed setup and failed
-attempts. A machine's window ending stops the job this way when it asks
-`run.stopping()`, and ends the attempt `lost` at the deadline when it does
-not; either starts another attempt if the run has limits and attempts left.
-A job stopping because the run's own hours or dollars are spent ends the run
-`out_of_time` or `over_budget`. A stop that follows
-`etude cancel` ends it `cancelled`. When no attempt is left, the run ends
-with its last attempt's outcome, `stopped` or `lost`. A run with no state in
-its directory and no checkpoint starts again from the beginning. Each
-attempt's code starts at most once; uncertain starts remain fenced. `lost`
-denotes exhausted attempts or an unresolved start whose execution cannot
-safely be repeated.
+At a machine's deadline, an attempt that has not saved and stopped ends
+`lost`. Exhausting the run's own hours or dollars ends it `out_of_time` or
+`over_budget`; `etude cancel` ends it `cancelled`. Exhausting attempts leaves
+the last outcome, `stopped` or `lost`. Without saved state or a checkpoint,
+the next attempt starts from the beginning. Each attempt's code starts at
+most once; an unresolved start remains fenced and can end `lost` when its
+execution cannot safely be repeated.
 
 The launcher has no checkpoints of its own: out and checkpoints
 are its tracked files. They are carried to the bucket as they are written, so
@@ -1101,23 +1096,25 @@ they survive pod deletion. A later attempt on the same machine finds the
 directory where it was. On a fresh machine with a bucket it is given back,
 before the job starts, the run's records, its whole `out/` as last carried and
 its latest checkpoint if stored under `checkpoints/`. A checkpoint recorded
-inside `out/` is restored only while it belongs to that directory. Each restored
-file's length is checked against the bucket's listing, and an attempt whose
-directory cannot be restored whole does not start: it waits while the bucket
-cannot be read. To an owned host without
-a bucket, the controller relays the same from the bucket or the host that
-last ran the run; while neither can be read, the retry waits. Either way its
-ordinals continue. A file the previous machine wrote after the courier's last
-pass is not there: the job resumes from what was carried. Automatic recovery
-retains the run ID and seed. `etude continue` instead goes further than the
+inside `out/` is restored only while it belongs to that directory. To an owned
+host without a bucket, the controller relays the same from the bucket or the
+host that last ran the run. A retry waits until its complete restoration is
+available. Automatic recovery retains the run ID, seed and checkpoint
+ordinals. `etude continue` instead goes further than the
 target or branches from a completed run, making a new run with a parent.
 
 Delivery publishes changed `out.json` membership after its files succeed.
 Each entry names a key, SHA256 digest and byte length.
+Recovery uses membership to select files, checking current listing lengths
+and recorded checkpoint digests. A mutable save can be newer than its
+membership if delivery stopped between the file and the index; recovery
+keeps that newer save. Continuation instead uses the published fingerprints
+and verifies them when delivering the child's inputs.
 Recovery and continuation exclude removed files, even if their bytes remain
 in storage. Recovery removes stale out files on a reused host. Deleted
-checkpoints remain available when selected explicitly;
-an empty `out` does not fall back to the latest checkpoint.
+out checkpoints remain available when selected explicitly. An empty `out`
+can resume from the latest checkpoint copied into `checkpoints/`; it never
+restores a removed out checkpoint or falls back to an older record.
 
 There is no `retry` flag; `max_attempts=1` bounds a job to one attempt.
 
@@ -1277,8 +1274,8 @@ Continuation starts a new run of the parent's job and seed from the parent's
 run directory: the child's `out` begins as a copy of the parent's, as last
 carried, so a job that keeps its state there (weights, optimizer, anything
 else) goes on exactly where the parent stopped. The parent and its directory
-are unchanged. `--until` is the child's absolute target and must exceed where
-the parent stood on the named clock. The recipe reads it with
+are unchanged. `--until` is the child's absolute target and must exceed its
+starting position on the named clock. The recipe reads it with
 `run.until("updates", default=config.updates)`; `--until` alone extends the
 run, and its config stays unchanged. In Python,
 `continue_from(parent, "updates=6400", source=...)`.
@@ -1290,11 +1287,18 @@ complete validated model with `continue_from(..., config=changed_config)`.
 The launch target stays separate from config fields and takes precedence for
 its clock; Etude does not infer a config field from a clock name.
 
+With populated out, `run.latest_checkpoint()` inherits the parent's latest
+checkpoint when its file remains a member, relocated into the child's out.
+With empty out, continuation instead uses the latest checkpoint if its file
+was copied into `checkpoints/`. Lineage and target validation then use that
+checkpoint's position, even if the parent logged later metrics. A removed
+out checkpoint is never restored implicitly, and no older checkpoint is
+chosen in its place.
+
 `--ordinal N` starts from one recorded checkpoint instead. A historical parent
-without out also uses its latest checkpoint; a recorded empty
-out stays empty. With a checkpoint input, the child's `out` starts empty
-and the checkpoint file reaches the machine as an input of the parent run
-(`Input(run=PARENT, key=RECORDED_FILE)`), verified by digest, where
+without out also uses its latest checkpoint. With a checkpoint input, the
+child's `out` starts empty and the checkpoint file reaches the machine as an
+input of the parent run (`Input(run=PARENT, key=RECORDED_FILE)`), verified by digest, where
 `run.latest_checkpoint()` finds it. That key may be under `out/` when the
 checkpoint was recorded there by reference.
 

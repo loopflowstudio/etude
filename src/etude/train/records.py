@@ -58,13 +58,13 @@ class CheckpointRecord(Record):
 class ParentRun(Record):
     """`ETUDE_CONTINUES`: lineage from a directory or a selected checkpoint.
 
-    A directory continuation names `at`. A checkpoint continuation carries
-    the parent's record without tags, and the input that delivers its file.
+    `at` owns the continuation position. An inherited checkpoint carries the
+    parent's record without tags; its file arrives in out or as a named input.
     """
 
     parent: SourceKey
+    at: dict[Name, float] = Field(min_length=1)
     checkpoint: CheckpointRecord | None = None
-    at: dict[Name, float] = Field(default_factory=dict)
     input: str | None = None
 
 

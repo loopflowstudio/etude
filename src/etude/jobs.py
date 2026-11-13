@@ -262,9 +262,21 @@ def continue_from(
     parent_key = SourceKey(namespace=declaration.namespace, kind="run", source_id=parent.id)
     # An explicit checkpoint needs no out reads, even when the parent has out.
     out = None if ordinal is not None else _parent_out(storage, folders, keys)
+    checkpoint = next((r for r in reversed(data.checkpoints) if ordinal in (None, r.ordinal)), None)
+    key = None
+    if checkpoint is not None:
+        file = PurePosixPath(checkpoint.artifact.uri)
+        key = checkpoint.file
+        if key is None and file.parent.parts[-2:] == (parent.id, CHECKPOINTS):
+            key = f"{CHECKPOINTS}/{file.name}"
+    # Empty out still resumes a copied checkpoint. A removed out checkpoint
+    # must never select an older record or resurrect its retained bytes.
+    if out is not None and not out.files and key is not None and key.startswith(f"{CHECKPOINTS}/"):
+        out = None
+    given = None
     if out is not None:
         # A recipe may save a checkpoint without logging scalar rows.
-        at = {**(data.checkpoints[-1].at if data.checkpoints else {}), **data.reached}
+        at = {**(checkpoint.at if checkpoint is not None else {}), **data.reached}
         for index, member in enumerate(out.files):
             name = _input_name(f"parent-out-{index}", inputs)
             inputs[name] = Input(
@@ -275,30 +287,26 @@ def continue_from(
                 size_bytes=member.size_bytes,
                 run=parent.id,
             )
-        handed = ParentRun(parent=parent_key, at=at)
+        if not any(member.key == key for member in out.files):
+            checkpoint = None
         origin = "parent"
     else:
-        record = next((r for r in reversed(data.checkpoints) if ordinal in (None, r.ordinal)), None)
-        if record is None or record.artifact.sha256 is None or record.artifact.size_bytes is None:
+        if (
+            checkpoint is None
+            or checkpoint.artifact.sha256 is None
+            or checkpoint.artifact.size_bytes is None
+        ):
             raise LauncherError(f"run {parent.id} recorded no stored checkpoint {ordinal or ''}")
-        at = record.at
-        checkpoint = record.model_copy(update={"tags": ()})
-        given = None
-        file = PurePosixPath(record.artifact.uri)
-        if record.file is not None or file.parent.parts[-2:] == (parent.id, CHECKPOINTS):
-            key = record.file or f"{CHECKPOINTS}/{file.name}"
-            given = _input_name(_PARENT_CHECKPOINT + file.suffix, inputs)
+        at = checkpoint.at
+        if key is not None:
+            given = _input_name(_PARENT_CHECKPOINT + PurePosixPath(key).suffix, inputs)
             inputs[given] = Input(
                 name=given,
                 key=key,
-                sha256=record.artifact.sha256,
-                size_bytes=record.artifact.size_bytes,
+                sha256=checkpoint.artifact.sha256,
+                size_bytes=checkpoint.artifact.size_bytes,
                 run=parent.id,
             )
-            checkpoint = checkpoint.model_copy(
-                update={"artifact": record.artifact.model_copy(update={"uri": key})}
-            )
-        handed = ParentRun(parent=parent_key, checkpoint=checkpoint, input=given)
         origin = "checkpoint"
     if clock not in at:
         raise LauncherError(
@@ -308,6 +316,13 @@ def continue_from(
         raise LauncherError(
             f"the target {until} is not beyond the {origin}'s {clock}={number(at[clock])}"
         )
+    if checkpoint is not None:
+        artifact = checkpoint.artifact
+        if key is not None:
+            artifact = artifact.model_copy(update={"uri": key})
+        # Mutable parent tags do not change the child's job identity.
+        checkpoint = checkpoint.model_copy(update={"artifact": artifact, "tags": ()})
+    handed = ParentRun(parent=parent_key, at=at, checkpoint=checkpoint, input=given)
     environment = (
         *(v for v in parent.spec.environment if v.name != "ETUDE_CONTINUES"),
         Variable(name="ETUDE_CONTINUES", value=handed.model_dump_json()),
@@ -327,8 +342,8 @@ def continue_from(
 def _parent_out(storage: Storage, folders: Sequence[str], keys: Sequence[str]) -> OutFiles | None:
     """Choose one physical out; absent membership requires reading and hashing its files.
 
-    None means no out exists, so continuation may use a checkpoint. Empty out
-    is a deliberate state and must not resurrect retained checkpoint bytes.
+    None means no out exists. Empty membership excludes retained out bytes;
+    copied checkpoints live separately under checkpoints/.
     """
     for folder in folders:
         if folder + MEMBERSHIP in keys:

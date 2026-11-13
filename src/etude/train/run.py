@@ -473,16 +473,15 @@ class Run:
         return record.artifact
 
     def latest_checkpoint(self) -> CheckpointRecord | None:
-        """The latest checkpoint record, or an explicitly inherited parent checkpoint.
+        """The latest checkpoint record, or an inherited parent checkpoint.
 
         Relocate its address when the file is present here. A removed out file
         is not restored just because its record survives; its recorded address
-        may be unavailable. A continuation seeded from out inherits out
-        files and lineage, not a checkpoint record. None when there is no record.
+        may be unavailable. None when there is no record.
         """
-        if not self._recorded:
-            return self._inherited
-        record = self._recorded[max(self._recorded)]
+        record = self._recorded[max(self._recorded)] if self._recorded else self._inherited
+        if record is None:
+            return None
         # The file keeps its name wherever the record was written.
         local = self.files.root / (
             record.file or "checkpoints/" + record.artifact.uri.rpartition("/")[2]
@@ -923,9 +922,7 @@ def track(
         raise EtudeError("experiment_not_named", 422)
     handed = _inherited()
     if handed is not None and continues is None:
-        at = handed.at or ({} if handed.checkpoint is None else handed.checkpoint.at)
-        if not at:
-            raise EtudeError("continuation_position_missing", 422)
+        at = handed.at
         until = os.environ.get("ETUDE_UNTIL_CLOCK")
         clock = until if until in at else next(iter(at))
         continues = Continuation(parent=handed.parent, clock=clock, value=at[clock])

@@ -5,6 +5,7 @@ import sys
 from hashlib import sha256
 from importlib import import_module
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pytest
 
@@ -13,6 +14,7 @@ from etude.jobs import continue_from, continued_config
 from etude.launch.errors import LauncherError
 from etude.launch.job_file import read_job_file
 from etude.launch.records import Input, Job
+from etude.out import MEMBERSHIP, OutFiles
 from etude.run.delivery import sync
 from etude.run.records import Attempt
 from etude.run.storage import DirectoryStorage
@@ -68,7 +70,7 @@ def test_continuation_and_report_use_the_same_position_after_an_empty_attempt(
     ) as run:
         (run.out / "state").write_bytes(b"optimizer state")
         (run.out / "model").write_bytes(b"weights")
-        run.checkpoint(run.out / "model", updates=6)
+        run.checkpoint(run.out / "model", updates=6, tags=["best"])
         run.log({"loss": 1}, updates=6)
     data = read(source, "recipe", parent)
     # Old records can declare a resume point before logging; new empty attempts cannot.
@@ -97,6 +99,89 @@ def test_continuation_and_report_use_the_same_position_after_an_empty_attempt(
         "out/state": (sha256(b"optimizer state").hexdigest(), len(b"optimizer state")),
     }
     assert training([read(source, "recipe", parent)]).runs[0].reached == {"updates": position}
+    # A checkpoint reader sees the inherited model in this child's out,
+    # without a second checkpoint input or the parent's mutable tags.
+    child_out = source / "child/out"
+    child_out.mkdir(parents=True)
+    (child_out / "model").write_bytes(b"weights")
+    monkeypatch.setenv("ETUDE_CONTINUES", lineage.value)
+    monkeypatch.setenv("ETUDE_OUT", str(child_out))
+    with track(
+        experiment="recipe", run="child", clocks=[Step("updates", "updates")], directory=source
+    ) as resumed:
+        checkpoint = resumed.latest_checkpoint()
+        assert checkpoint is not None
+        assert checkpoint.at == {"updates": 6} and checkpoint.tags == ()
+        assert Path(urlparse(checkpoint.artifact.uri).path) == child_out / "model"
+        assert Path(urlparse(checkpoint.artifact.uri).path).read_bytes() == b"weights"
+
+
+@pytest.mark.parametrize("carried", [False, True])
+def test_empty_out_continues_from_copied_checkpoint_before_later_metrics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, carried: bool
+) -> None:
+    scheduler = local(tmp_path)
+    parent = scheduler.queue(Job(command="train", max_hours=1), "local")
+    source = tmp_path / "track"
+    monkeypatch.setenv("ETUDE_OUT", str(source / parent / "out"))
+    weights = tmp_path / "weights.pt"
+    weights.write_bytes(b"saved at 2")
+    with track(
+        experiment="recipe", run=parent, clocks=[Step("updates", "updates")], directory=source
+    ) as run:
+        run.checkpoint(weights, updates=2)
+        run.log({"loss": 0}, updates=4)
+    destination = DirectoryStorage(tmp_path / "bucket" if carried else source)
+    if carried:
+        assert sync(source, storages=[destination]) == {}
+        assert OutFiles.model_validate_json(destination.get(f"{parent}/{MEMBERSHIP}")).files == ()
+    storage = MeasuredStorage(destination)
+    child = continue_from(scheduler.record(parent), "updates=3", source=storage)
+    (lineage,) = child.job.environment
+    handed = ParentRun.model_validate_json(lineage.value)
+    assert handed.at == {"updates": 2}
+    assert handed.checkpoint is not None and handed.checkpoint.at == handed.at
+    (given,) = child.job.inputs
+    assert (given.key, given.out, handed.input) == ("checkpoints/updates-2.pt", None, given.name)
+    assert (given.sha256, given.size_bytes) == (sha256(b"saved at 2").hexdigest(), 10)
+    assert storage.listings == 2
+    assert storage.got.count(f"{parent}/{MEMBERSHIP}") == int(carried)
+    assert not any(key.startswith(f"{parent}/out/") or key.endswith(".pt") for key in storage.got)
+
+
+@pytest.mark.parametrize("populated", [False, True])
+def test_removed_out_checkpoint_does_not_choose_an_older_copied_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, populated: bool
+) -> None:
+    scheduler = local(tmp_path)
+    parent = scheduler.queue(Job(command="train", max_hours=1), "local")
+    source = tmp_path / "track"
+    monkeypatch.setenv("ETUDE_OUT", str(source / parent / "out"))
+    older = tmp_path / "older.pt"
+    older.write_bytes(b"old weights")
+    with track(
+        experiment="recipe", run=parent, clocks=[Step("updates", "updates")], directory=source
+    ) as run:
+        run.checkpoint(older, updates=1)
+        latest = run.out / "final.pt"
+        latest.write_bytes(b"latest weights")
+        run.checkpoint(latest, updates=2)
+        if populated:
+            (run.out / "state").write_bytes(b"state")
+    destination = DirectoryStorage(tmp_path / "bucket")
+    assert sync(source, storages=[destination]) == {}
+    latest.unlink()
+    assert sync(source, storages=[destination]) == {}
+    storage = MeasuredStorage(destination)
+    child = continue_from(scheduler.record(parent), "updates=3", source=storage)
+    (lineage,) = child.job.environment
+    handed = ParentRun.model_validate_json(lineage.value)
+    assert handed.at == {"updates": 2}
+    assert handed.checkpoint is None and handed.input is None
+    assert [given.out for given in child.job.inputs] == (["state"] if populated else [])
+    assert storage.listings == 2
+    assert storage.got.count(f"{parent}/{MEMBERSHIP}") == 1
+    assert not any(key.startswith(f"{parent}/out/") or key.endswith(".pt") for key in storage.got)
 
 
 def test_typed_stop_and_continuation_restore_full_state_and_only_change_target(

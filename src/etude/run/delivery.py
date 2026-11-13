@@ -50,10 +50,6 @@ class RunFiles:
         """
         return [key for key in listing(self.root, tail_seconds=self.tail_age) if key != MEMBERSHIP]
 
-    def removed(self) -> list[str]:
-        """Every path, relative to the run, that a writer has retired."""
-        return retired(self.root)
-
     def _marker(self, destination: str, key: str) -> Path:
         return self.root / ".shipped" / destination / (key.replace("/", "__") + ".sent")
 
@@ -98,7 +94,7 @@ class StorageDestination:
         with TemporaryDirectory(prefix=".out-", dir=files.root) as staging:
             deliveries: list[Delivery] = []
             with files.lock:
-                retired = files.removed()
+                removed = retired(files.root)
                 keys = files.deliverable()
                 recorded = recorded_files(files.root)
                 out: list[OutFile] = []
@@ -149,7 +145,7 @@ class StorageDestination:
                 else:
                     self.storage.put(prefix + delivery.key, delivery.body)
                 files.mark(self.name, delivery.key, delivery.fingerprint)
-        for key in retired:
+        for key in removed:
             if files.shipped(self.name, key) is not None and self.storage.delete(prefix + key):
                 files._marker(self.name, key).unlink(missing_ok=True)
 

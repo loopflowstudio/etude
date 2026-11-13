@@ -402,9 +402,13 @@ run.tag(model, "best")  # tags can change later
   attempt sees every checkpoint record, and ordinals continue. On another
   machine the launcher restores the latest copied checkpoint and files still
   in out; a removed out checkpoint's record can refer to an unavailable file.
-  A continuation
-  started from a chosen checkpoint (`etude continue --ordinal`) gets that
-  checkpoint until it records its own. `run.latest_checkpoint()` relocates
+  A continuation inherits the latest checkpoint if its file remains in out.
+  When out is empty, it instead inherits the latest checkpoint if that file
+  was copied into `checkpoints/`, using the checkpoint's position for lineage
+  and target validation. A removed out checkpoint is never inherited, and
+  Etude does not search older checkpoints to replace it. `etude continue
+  --ordinal N` explicitly selects a checkpoint. The inherited checkpoint is
+  available until the child records its own. `run.latest_checkpoint()` relocates
   the address when its file is present here; it returns `None` with no record.
 - **Readers give storage addresses.** `etude checkpoints --source` and
   `etude.train.read` report each file where it is in the source read, not
