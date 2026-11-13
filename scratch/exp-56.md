@@ -153,23 +153,22 @@ Remaining, before the accepted API can be treated as built:
 3. Report line -> job. Local CLI acceptance now includes two-model save,
    stop, resume, checkpoint publication and evaluation seating in one test.
    No publication, landing or Graph changes here.
+4. The brief's acceptance check (manabot checkout with `proposed_etude`
+   imports swapped to `etude.train.run`) cannot pass as written: the design
+   drops `local_launch`/`run.out`-owned `state.pt` for `etude run` and
+   `run.resume`. Design Order of work moves that check to MTG-329 on an
+   SDK override. Undecided: whether EXP-56 reports manabot's required
+   changes against a probe of its recipe, or leaves it wholly to MTG-329.
 
 ## Verification
 
-2026-11-13 implement continuation: `uv run --extra train pytest tests/train/test_local.py -q`:
-8 passed. Focused consumers: 121 passed; launcher/experiment files: 141 passed
-and their three failures passed after explicit-resume fixes; page/hour/lineage
-rerun: 22 passed; tables, read batches, measurement, page, continuation and
-tournament: 82 passed, 6 skipped. Mypy and Ruff passed. Full gate remains later.
-Compress pass after it (resume checks in `etude.local._resumed`, one outcome-name lookup
-in `read`, plain job expansion; `ETUDE_SEED` unset for a seedless historical run):
-`uv run --extra train pytest tests/train/test_local.py tests/test_jobs.py
-tests/launch/test_cli.py tests/train/test_lifecycle.py tests/train/test_track.py -q`:
-73 passed; mypy and Ruff clean. Second compress pass (`track` docstring names
-`etude run` and `Run.checkpoints`; one `ExperimentOption` in `etude.cli`):
-`uv run --extra train pytest tests/train/test_local.py tests/launch/test_cli.py
-tests/train/test_cli.py -q`: 30 passed. Earlier checkpoint/carriage checks and the import-boundary
-repair are recorded at `dda6b17:scratch/exp-56.md` (451 passed, type/lint clean).
+2026-11-13 implement and two compress passes: `uv run --extra train pytest
+tests/train/test_local.py tests/test_jobs.py tests/launch/test_cli.py
+tests/train/test_cli.py tests/train/test_lifecycle.py tests/train/test_track.py -q`
+and the focused consumer, launcher, page, continuation and tournament files
+passed; mypy and Ruff clean. Exact counts are at `1c76176:scratch/exp-56.md`;
+earlier checkpoint/carriage receipts at `dda6b17:scratch/exp-56.md`. Full gate
+remains later.
 
 Counting pins moved by the state build, each with its reason beside it:
 
