@@ -26,7 +26,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from etude.launch.database import Database
+from etude.launch.database import Database, launcher_file
 from etude.launch.errors import LauncherError
 from etude.launch.executor import local
 from etude.launch.logs import render
@@ -113,7 +113,7 @@ def smoke_train(runs: Sequence[Run], folder: Path) -> list[Trained]:
     distinct: dict[str, Run] = {}
     for run in runs:
         distinct.setdefault(job_id(run.job), run)
-    store = Database(folder / "launcher.db")
+    store = Database(launcher_file(folder))
     try:
         service = local(folder / "sessions")
         scheduler = Scheduler(store, {"local": lambda machine: service})
