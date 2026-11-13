@@ -405,6 +405,7 @@ def _training_checkpoints(
         " training_checkpoints t on t.run = a.run and t.ordinal = a.ordinal"
         " qualify row_number() over (partition by a.ordinal) = 1"
     )
+    db.execute("drop table _arrived_checkpoints")
     return bool(rows)
 
 
@@ -463,6 +464,7 @@ def _block(
         " anti join blobs b on b.run = ? and b.match is null and b.sha256 = a.sha256",
         [run, run],
     )
+    db.execute("drop table _unnamed_blobs")
     _put(db, "kept.replaced", {"run": "VARCHAR", "name": "VARCHAR"},
          [[run, each] for each in block.replaces])  # fmt: skip
     for table in block.tables:

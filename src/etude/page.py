@@ -742,14 +742,16 @@ def _held_tournaments(
     """
     # The optional `eval` extra, imported where it is used (`_read_evals`).
     from etude.eval.records import TournamentRun, assemble  # noqa: PLC0415
-    from etude.eval.tournament import played, tournament_runs  # noqa: PLC0415
+    from etude.eval.tournament import played, stored_runs  # noqa: PLC0415
 
     wanted: dict[str, Tournament] = {}
     if want is not None:
         for tournament in _wanted(want, state):
             wanted.setdefault(tournament.definition.name, tournament)
     refused: list[str] = []
-    for name, held in tournament_runs(experiment, storages=[storage]).items():
+    # Read once for every tournament drawn: a page plays nothing, so nothing changes meanwhile.
+    runs = stored_runs(experiment, storages=[storage])
+    for name, held in runs.tournaments().items():
         try:
             recorded = assemble(held)
         except EtudeError as error:
@@ -777,8 +779,8 @@ def _held_tournaments(
                 experiment=experiment,
                 checkpoints=given.checkpoints,
                 enter=given.entrants,
-                storages=[storage],
                 lines=state.lines,
+                runs=runs,
             )
         except EtudeError as error:
             refused.append(f"Tournament {name} is not shown: it is refused ({error.code}).")
