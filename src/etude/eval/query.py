@@ -7,9 +7,9 @@ beside Etude's own tables:
 | table | columns |
 |---|---|
 | `runs` | run, experiment, environment (identity), environment_name, environment_config, tournament, state (`finished` or `failed` from its `state.json`; null while it has not ended, so its results are partial) |
-| `players` | player (its key, encoded), name, kind (`model` or `code`), checkpoint (its key), artifact (digest), uri, config, positions, lines, and `config.KEY` per scalar config key |
-| `matches` | run, match, conditions, games, seed, state, error, wall_ms, execution (result provenance) |
-| `seats` | run, match, seat, player, the version that played: commit, source (digest), at (where its checkpoint stood, or null) and line (the learner it belongs to, or null) |
+| `players` | player (its key, encoded), name (the latest its seats give), names (every one, the latest first), kind (`model` or `code`), checkpoint (its key), artifact (digest), uri, config, positions, lines, and `config.KEY` per scalar config key |
+| `matches` | run, match, conditions, games, seed, state, error, wall_ms, execution (result provenance), newest (of the match's done records in its environment, 1 for the latest recorded, the one that counts; null for a failure) |
+| `seats` | run, match, seat, player, name (what the record calls it), the version that played: commit, source (digest), at (where its checkpoint stood, or null) and line (the learner it belongs to, or null) |
 | `groups` | run, match, group, seat |
 | `tournaments` | tournament, format (`benchmark` or `round_robin`), environment, conflict |
 | `schedule` | tournament, match, seating, checkpoint (its key, the one held) and the seating's tags of a benchmark's match; no checkpoint for a seating of fixed players |
@@ -27,9 +27,10 @@ run's clocks stood by key (`players.checkpoint = training_checkpoints.checkpoint
 never by its bytes. A seat may say where its checkpoint stood itself
 (`etude.eval.records.CheckpointRef.at`): `players.positions` lists every distinct
 position match records give it, the latest record's first, and `players.lines` every
-learner they say it belongs to (`CheckpointRef.line`), the same way. A match
-counts once whichever version played it: the latest record holding it
-(`seats.commit` tells which).
+learner they say it belongs to (`CheckpointRef.line`), and `players.names` every
+name, the same way. A match counts once per environment whichever version
+played it: the latest done record holding it, `matches.newest = 1`
+(`seats.commit` tells which version that was).
 
 The database is a DuckDB file under `ETUDE_HOME/statsdb`, one per experiment
 and store, derived from the store and never the authority. Opening it lists
@@ -39,7 +40,8 @@ written once, so nothing already held is read again. A block costs one read
 of its index and one of each table and rollup; its blobs are read only by
 `read_blobs`. A rollup's totals are added to as blocks arrive (`_rollup`),
 never summed again from earlier blocks or raw rows.
-A failed match's record is replaced by the done record that follows it. An
+A failed match's record is replaced by the done record that follows it
+(`etude.eval.records.outcomes`). An
 eval run still kept a file per match raises `eval_run_not_converted`. The few tables that summarize the rest
 (`runs`, `players`, `tournaments`, `schedule`) are rebuilt from what the
 database holds whenever something arrives. Etude's bookkeeping lives in the
@@ -50,8 +52,9 @@ subject of a `seat` row is its seat's player; of a `group` row, the group's
 players. Opponents are the other seats' players, or the match's other groups
 except `all`.
 
-`estimate` gives many ratios of totals over the same blocks, each with an
-interval from one shared bootstrap; `compare` and the tournament's `scores` use it.
+`estimate` gives many ratios of totals over the same resampling units, such as
+matches, each with an interval from one shared bootstrap; `compare` and the
+tournament's `scores` use it.
 
 Table files published etude-sdk wrote name the seat `player`; such a file has
 no `seat` column, since every file written since has one, and its `player`
@@ -105,6 +108,7 @@ from etude.eval.records import (
     Scheduled,
     TournamentRun,
     assemble,
+    outcomes,
 )
 from etude.run.errors import EtudeError
 from etude.run.listing import as_storage, declared, run_folders, under
@@ -126,7 +130,11 @@ NUMERIC = ("BOOLEAN", "BIGINT", "DOUBLE")
 # Keys and coordinates of an author table's rows: never a value.
 KEYS = ("seat", "group", "game", "run", "match")
 # A kept database of another schema is deleted and read again from its store.
-SCHEMA = 11
+SCHEMA = 12
+
+# How a match's records order, newest first: by when each was recorded, then by run name.
+# `matches.newest` ranks done records so; `etude.eval.tournament.played` orders runs alike.
+_NEWEST_FIRST = "m.wall_ms desc, m.run desc"
 
 _ENVIRONMENT_FILE = "environment.json"
 _STATE_FILE = "state.json"
@@ -230,11 +238,12 @@ def _create(db: duckdb.DuckDBPyConnection, experiment: str, storage: Storage) ->
     db.execute("create table blobs (run VARCHAR, match VARCHAR, sha256 VARCHAR, size_bytes BIGINT)")
     db.execute(
         "create table matches (run VARCHAR, match VARCHAR, conditions JSON, games BIGINT,"
-        " seed BIGINT, state VARCHAR, error VARCHAR, wall_ms BIGINT, execution JSON)"
+        " seed BIGINT, state VARCHAR, error VARCHAR, wall_ms BIGINT, execution JSON,"
+        " newest BIGINT)"
     )
     db.execute(
         "create table seats (run VARCHAR, match VARCHAR, seat BIGINT, player VARCHAR,"
-        ' commit VARCHAR, source VARCHAR, "at" JSON, line VARCHAR)'
+        ' name VARCHAR, commit VARCHAR, source VARCHAR, "at" JSON, line VARCHAR)'
     )
     db.execute('create table "groups" (run VARCHAR, match VARCHAR, "group" VARCHAR, seat BIGINT)')
     db.execute(
@@ -286,7 +295,7 @@ def _catch_up(
                         changed = True
                     _sum_missing(db, storage, run, located, Path(copies))
                 else:
-                    changed |= _checkpoints(db, storage, run, experiment, located, new)
+                    changed |= _training_checkpoints(db, storage, run, experiment, located, new)
                 select, values = unnest({"run": "VARCHAR", "name": "VARCHAR"},
                                         [[run, name] for name in new])  # fmt: skip
                 db.execute(f"insert into kept.seen {select}", values)
@@ -365,7 +374,7 @@ def _kind(db: duckdb.DuckDBPyConnection, run: str) -> str:
     return str(found[0])
 
 
-def _checkpoints(
+def _training_checkpoints(
     db: duckdb.DuckDBPyConnection,
     storage: Storage,
     run: str,
@@ -465,87 +474,86 @@ def _block(
 
 
 def _matches(db: duckdb.DuckDBPyConnection, run: str, block: Block) -> None:
-    """Hold the block's match records, each unless a done one is already held.
+    """Hold the block's standing record of each match (`outcomes`), unless one held is done.
 
-    A done record replaces a failure; of one block's records of a match, the
-    first done one counts, else its first.
+    So across the run's blocks, in the order they are read, a done record
+    replaces a failure and the first done one stays, as `outcomes` keeps them.
     """
-    records = block.matches
+    records = list(outcomes(block.matches).values())
     select, values = unnest(
-        {"position": "BIGINT", "match": "VARCHAR", "conditions": "VARCHAR", "games": "BIGINT",
+        {"record": "BIGINT", "match": "VARCHAR", "conditions": "VARCHAR", "games": "BIGINT",
          "seed": "BIGINT", "state": "VARCHAR", "error": "VARCHAR", "wall_ms": "BIGINT",
          "execution": "VARCHAR"},
-        [[at, record.match.key, json.dumps(record.match.conditions), record.match.games,
+        [[index, record.match.key, json.dumps(record.match.conditions), record.match.games,
           record.match.seed, record.state, record.error, record.wall_ms,
           json.dumps(record.execution)]
-         for at, record in enumerate(records)],
+         for index, record in enumerate(records)],
     )  # fmt: skip
     db.execute(
         f"create or replace temp table _taken as select a.* from ({select}) a"
         " left join matches m on m.run = ? and m.match = a.match"
-        " where m.match is null or (m.state <> 'done' and a.state = 'done')"
-        " qualify row_number() over (partition by a.match order by a.state = 'done' desc,"
-        " a.position) = 1",
+        " where m.match is null or (m.state <> 'done' and a.state = 'done')",
         [*values, run],
     )
     for table in ("matches", "seats", '"groups"', "blobs"):
         db.execute(
             f"delete from {table} t using _taken a where t.run = ? and t.match = a.match", [run]
         )
+    # `newest` is ranked once everything has arrived (`_summaries`).
     db.execute(
-        "insert into matches select ?, match, conditions, games, seed, state, error, wall_ms, execution"
-        " from _taken order by position",
+        "insert into matches select ?, match, conditions, games, seed, state, error, wall_ms,"
+        " execution, null from _taken order by record",
         [run],
     )
     select, values = unnest(
-        {"position": "BIGINT", "seat": "BIGINT", "player": "VARCHAR", "name": "VARCHAR",
+        {"record": "BIGINT", "seat": "BIGINT", "player": "VARCHAR", "name": "VARCHAR",
          "player_json": "VARCHAR", "commit": "VARCHAR", "source": "VARCHAR", "at": "VARCHAR",
          "line": "VARCHAR"},
         [
-            [at, seat, player.key, player.name, player.model_dump_json(),
+            [index, seat, player.key, player.name, player.model_dump_json(),
              player.version.commit, player.version.source,
              _canonical(player.checkpoint.at)
              if isinstance(player, Model) and player.checkpoint.at else None,
              player.checkpoint.line if isinstance(player, Model) else None]
-            for at, record in enumerate(records)
+            for index, record in enumerate(records)
             for seat, player in enumerate(record.match.players)
         ],
     )  # fmt: skip
     db.execute(
         "create or replace temp table _arrived_seats as select s.*, a.match"
-        f" from ({select}) s join _taken a using (position)",
+        f" from ({select}) s join _taken a using (record)",
         values,
     )
     db.execute(
-        'insert into seats select ?, match, seat, player, "commit", source, "at", line'
-        " from _arrived_seats order by position, seat",
+        'insert into seats select ?, match, seat, player, name, "commit", source, "at", line'
+        " from _arrived_seats order by record, seat",
         [run],
     )
     # Every player a held match seats, as first given under each name.
     db.execute(
         "insert into kept.players select s.player, s.name, s.player_json from _arrived_seats s"
         " anti join kept.players k on k.player = s.player and k.name = s.name"
-        " qualify row_number() over (partition by s.player, s.name order by s.position, s.seat) = 1"
-        " order by s.position, s.seat"
+        " qualify row_number() over (partition by s.player, s.name order by s.record, s.seat) = 1"
+        " order by s.record, s.seat"
     )
     select, values = unnest(
-        {"position": "BIGINT", "group": "VARCHAR", "seat": "BIGINT"},
-        [[at, name, seat] for at, record in enumerate(records)
+        {"record": "BIGINT", "group": "VARCHAR", "seat": "BIGINT"},
+        [[index, name, seat] for index, record in enumerate(records)
          for name, seats in record.match.groups.items() for seat in seats],
     )  # fmt: skip
     db.execute(
         f'insert into "groups" select ?, a.match, g."group", g.seat from ({select}) g'
-        " join _taken a using (position) order by g.position",
+        " join _taken a using (record) order by g.record",
         [run, *values],
     )
     select, values = unnest(
-        {"position": "BIGINT", "sha256": "VARCHAR", "size_bytes": "BIGINT"},
-        [[at, digest, block.blobs[digest].size_bytes]
-         for at, record in enumerate(records) for digest in record.blobs],
+        {"record": "BIGINT", "sha256": "VARCHAR", "size_bytes": "BIGINT"},
+        [[index, digest, block.blobs[digest].size_bytes]
+         for index, record in enumerate(records) for digest in record.blobs],
     )  # fmt: skip
     db.execute(
         f"insert into blobs select ?, a.match, b.sha256, b.size_bytes from ({select}) b"
-        " join _taken a using (position) order by b.position",
+        " join _taken a using (record) order by b.record",
         [run, *values],
     )
     db.execute("drop table _taken")
@@ -835,7 +843,8 @@ class _StoredCheckpoint(BaseModel):
 
 
 def _summaries(db: duckdb.DuckDBPyConnection) -> None:
-    """Rebuild `runs`, `tournaments`, `schedule` and `players` from what the database holds."""
+    """Rebuild `runs`, `tournaments`, `schedule` and `players`, and rank `matches.newest`,
+    from what the database holds."""
     held = {
         run: TournamentRun.model_validate_json(text)
         for run, text in db.execute("select run, held from kept.tournament_runs").fetchall()
@@ -863,6 +872,12 @@ def _summaries(db: duckdb.DuckDBPyConnection) -> None:
          "state": "VARCHAR"},
         described,
     )  # fmt: skip
+    db.execute(
+        "update matches t set newest = n.newest from (select m.run, m.match, row_number() over"
+        f" (partition by r.environment, m.match order by {_NEWEST_FIRST}) as newest"
+        " from matches m join runs r using (run) where m.state = 'done') n"
+        " where t.run = n.run and t.match = n.match"
+    )
     db.execute(
         "create or replace table tournaments (tournament VARCHAR, format VARCHAR,"
         " environment VARCHAR, conflict VARCHAR)"
@@ -937,19 +952,38 @@ def _players_table(db: duckdb.DuckDBPyConnection, players: dict[str, list[Player
             columns[key] = seen.pop()
         else:
             warnings.warn(f"player config {key!r} has types {sorted(seen)}; only in `config`")
-    positions = _seated(db, '"at"')
-    lines = _seated(db, "line")
+    positions = _seat_values(db, '"at"')
+    lines = _seat_values(db, "line")
+    names = _seat_values(db, "name")
     db.execute(
-        "create or replace table players (player VARCHAR, name VARCHAR, kind VARCHAR,"
+        "create or replace table players (player VARCHAR, name VARCHAR, names JSON, kind VARCHAR,"
         " checkpoint VARCHAR, artifact VARCHAR, uri VARCHAR, config JSON, positions JSON,"
         " lines JSON" + "".join(f', "config.{key}" {kind}' for key, kind in columns.items()) + ")"
     )
+    rows: list[list[object]] = []
+    for identity, given in players.items():
+        # A player only scheduled has its names from the schedule.
+        named = list(dict.fromkeys([*names[identity], *(each.name for each in given)]))
+        rows.append(
+            [
+                identity,
+                named[0],
+                json.dumps(named),
+                given[0].kind,
+                *_checkpoint(given[0]),
+                json.dumps(given[0].config),
+                json.dumps([json.loads(each) for each in positions[identity]]),
+                json.dumps(lines[identity]),
+                *(flat[identity].get(key) for key in columns),
+            ]
+        )
     _put(
         db,
         "players",
         {
             "player": "VARCHAR",
             "name": "VARCHAR",
+            "names": "VARCHAR",
             "kind": "VARCHAR",
             "checkpoint": "VARCHAR",
             "artifact": "VARCHAR",
@@ -959,19 +993,7 @@ def _players_table(db: duckdb.DuckDBPyConnection, players: dict[str, list[Player
             "lines": "VARCHAR",
             **{f"config.{key}": kind for key, kind in columns.items()},
         },
-        [
-            [
-                identity,
-                "/".join(dict.fromkeys(each.name for each in given)),
-                given[0].kind,
-                *_checkpoint(given[0]),
-                json.dumps(given[0].config),
-                f"[{','.join(positions[identity])}]",
-                json.dumps(lines[identity]),
-                *(flat[identity].get(key) for key in columns),
-            ]
-            for identity, given in players.items()
-        ],
+        rows,
     )
 
 
@@ -983,12 +1005,12 @@ def _checkpoint(player: Player) -> tuple[str | None, str | None, str | None]:
     return str(checkpoint.key), checkpoint.artifact.sha256, checkpoint.artifact.uri
 
 
-def _seated(db: duckdb.DuckDBPyConnection, column: str) -> defaultdict[str, list[str]]:
-    """Each player's distinct values of a seats column, the latest match record's first."""
+def _seat_values(db: duckdb.DuckDBPyConnection, column: str) -> defaultdict[str, list[str]]:
+    """Each player's distinct values of a seats column, the newest match record's first."""
     found: defaultdict[str, list[str]] = defaultdict(list)
     for identity, value in db.execute(
         f"select s.player, s.{column} from seats s join matches m using (run, match)"
-        f" where s.{column} is not null order by m.wall_ms desc, s.run desc"
+        f" where s.{column} is not null order by {_NEWEST_FIRST}"
     ).fetchall():
         if value not in found[identity]:
             found[identity].append(value)
@@ -1084,18 +1106,19 @@ def compare(
         group by all
         """
     ).fetchall()
-    # Per comparison, per match (run, match): [numerator, denominator], and the rows counted.
-    blocks: dict[tuple[object, ...], dict[tuple[str, str], tuple[float, float]]] = {}
+    # Per comparison, per match (run, match), its resampling unit: [numerator, denominator];
+    # and the rows counted.
+    units: dict[tuple[object, ...], dict[tuple[str, str], tuple[float, float]]] = {}
     rows: dict[tuple[object, ...], int] = {}
     for environment, subject, opponent, *rest in found:
         values, (run, match, numerator, denominator, count) = rest[: len(by)], rest[len(by) :]
         held = None if opponent is None else tuple(opponent)
         key = (environment, tuple(subject), held, *values)
-        blocks.setdefault(key, {})[(run, match)] = (float(numerator), float(denominator))
+        units.setdefault(key, {})[(run, match)] = (float(numerator), float(denominator))
         rows[key] = rows.get(key, 0) + count
     comparisons: list[Comparison] = []
-    for key in sorted(blocks, key=lambda k: tuple("" if v is None else repr(v) for v in k)):
-        matches = blocks[key]
+    for key in sorted(units, key=lambda k: tuple("" if v is None else repr(v) for v in k)):
+        matches = units[key]
         [estimated] = estimate(
             list(matches),
             [[numerator] for numerator, _ in matches.values()],
@@ -1114,22 +1137,23 @@ def compare(
                 value=estimated.value,
                 interval=estimated.interval,
                 rows=rows[key],
-                matches=len(blocks[key]),
+                matches=len(units[key]),
             )
         )
     return comparisons
 
 
-# Draws by block count, least recently used first.
+# Draws by count of resampling units, least recently used first.
 _drawn: dict[int, npt.NDArray[np.float64]] = {}
 _drawn_lock = threading.Lock()
 
 
 def _weights(n: int) -> npt.NDArray[np.float64]:
-    """How often each of `n` blocks is drawn in each replicate, kept for the next call with `n`.
+    """How often each of `n` resampling units is drawn in each replicate, kept for the next
+    call with `n`.
 
-    A page of estimates over many selections asks for a few block counts again
-    and again. Each kept draw holds REPLICATES × n floats (16 kB per block);
+    A page of estimates over many selections asks for a few unit counts again
+    and again. Each kept draw holds REPLICATES × n floats (16 kB per unit);
     the least recently used go once the kept draws pass `WEIGHTS_KEPT` floats,
     though the latest is always kept.
     """
@@ -1144,9 +1168,9 @@ def _weights(n: int) -> npt.NDArray[np.float64]:
 
 
 def _draw(n: int) -> npt.NDArray[np.float64]:
-    """Draw how often each of `n` blocks is drawn in each replicate: fixed by the seed and `n` alone.
+    """Draw how often each of `n` units is drawn in each replicate: fixed by the seed and `n` alone.
 
-    Each replicate draws `n` blocks uniformly with replacement, counted with
+    Each replicate draws `n` units uniformly with replacement, counted with
     one `bincount` (a multinomial draw, linear in `n`). Counts are held as
     floats, exact at any `n`, so a matrix product needs no conversion.
     """
@@ -1189,7 +1213,7 @@ def _percentiles(
 
 @dataclass(frozen=True)
 class Estimate:
-    """A ratio of totals and its 95% interval, None with fewer than two blocks."""
+    """A ratio of totals and its 95% interval, None with fewer than two resampling units."""
 
     value: float
     interval: tuple[float, float] | None
@@ -1200,24 +1224,24 @@ def estimate(
     numerators: npt.ArrayLike,
     denominators: npt.ArrayLike,
 ) -> list[Estimate | None]:
-    """Each column's ratio of totals over blocks × columns `numerators` and `denominators`.
+    """Each column's ratio of totals over units × columns `numerators` and `denominators`.
 
-    Every column shares one bootstrap: one draw of block weights, resampling
-    whole blocks, gives each column's 95% percentile interval. Blocks are
-    ordered by their `keys` (a match, a deal) before resampling, so the
-    result does not depend on the order they were read in; keys must be
-    distinct. A column without opportunities is None: a rate without them
+    A unit is what the bootstrap resamples whole, such as a match or a deal,
+    so its correlated rows move together. Every column shares one bootstrap:
+    one draw of unit weights gives each column's 95% percentile interval.
+    Units are ordered by their `keys` before resampling, so the result does
+    not depend on the order they were read in; keys must be distinct. A column without opportunities is None: a rate without them
     has no value.
     """
     numerators = np.asarray(numerators, dtype=np.float64)
     denominators = np.asarray(denominators, dtype=np.float64)
     if numerators.ndim != 2 or numerators.shape != denominators.shape:
-        raise ValueError(f"blocks × columns {numerators.shape} and {denominators.shape}")
+        raise ValueError(f"units × columns {numerators.shape} and {denominators.shape}")
     if len(numerators) != len(keys):
-        raise ValueError(f"{len(keys)} keys for {len(numerators)} blocks")
+        raise ValueError(f"{len(keys)} keys for {len(numerators)} units")
     order = sorted(range(len(keys)), key=keys.__getitem__)
     if any(keys[a] == keys[b] for a, b in itertools.pairwise(order)):
-        raise ValueError("block keys repeat")
+        raise ValueError("unit keys repeat")
     opportunities = denominators.sum(axis=0)
     held = np.flatnonzero(opportunities)
     numerators, denominators = numerators[order][:, held], denominators[order][:, held]

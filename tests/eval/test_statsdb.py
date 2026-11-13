@@ -14,8 +14,9 @@ from etude.eval import query
 from etude.eval.convert import convert
 from etude.eval.match import Tables, environment, evaluate
 from etude.eval.query import compare, statsdb
-from etude.eval.records import Code, Match
+from etude.eval.records import CheckpointKey, CheckpointRef, Code, Inference, Match, Model
 from etude.run.errors import EtudeError
+from etude.run.records import ArtifactRef
 from etude.run.storage import DirectoryStorage
 from tests.eval.games import play, play_game_seats
 from tests.eval.per_file import write_per_file
@@ -174,6 +175,34 @@ def test_a_failed_match_retried_counts_once_as_done(tmp_path: Path) -> None:
     assert db.sql("select state from matches").fetchall() == [("done",)]
     assert db.sql("select count(*) from seats").fetchone() == (2,)
     db.close()
+
+
+def test_a_match_two_runs_played_counts_from_the_later_under_its_latest_name(
+    tmp_path: Path,
+) -> None:
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    ref = CheckpointRef(
+        key=CheckpointKey(address="hf://lab/a.pt"),
+        artifact=ArtifactRef(uri="hf://lab/a.pt", sha256="ab" * 32),
+    )
+    _, rival = pair(tmp_path)
+    # One model, renamed between runs: a name is part of no key.
+    for run, name in (("first", "early"), ("second", "late")):
+        model = Model(name=name, checkpoint=ref, inference=Inference(config={"strength": 3}))
+        evaluate(experiment="cards", environment=DUEL, play=play, run=run,
+                 matches=[Match(players=(model, rival), conditions={"deal": 0}, games=2)],
+                 directory=tmp_path / run, storages=[bucket])  # fmt: skip
+    db = statsdb("cards", bucket)
+    try:
+        assert db.sql("select run, newest from matches order by run").fetchall() == [
+            ("first", 2),
+            ("second", 1),
+        ]
+        found = db.sql("select name, names from players where kind = 'model'").fetchone()
+        assert found is not None
+        assert (found[0], json.loads(found[1])) == ("late", ["late", "early"])
+    finally:
+        db.close()
 
 
 def test_a_kept_database_is_rebuilt_on_request_or_for_another_schema(

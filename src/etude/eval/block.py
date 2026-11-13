@@ -87,6 +87,11 @@ _WHOLE = frozenset(
 _LOCAL_HEADER = 30
 
 
+def _name(written_ns: int, writer: str) -> str:
+    """A block's name: its zero-padded seal time first, so names order by when they were sealed."""
+    return f"{written_ns:020d}.{writer}"
+
+
 class Span(Record):
     """Where a blob's bytes lie in its block's pack."""
 
@@ -113,7 +118,7 @@ class Block(Record):
 
     @property
     def name(self) -> str:
-        return f"{self.written_ns:020d}.{self.writer}"
+        return _name(self.written_ns, self.writer)
 
     @property
     def summed(self) -> tuple[Rollup, ...]:
@@ -320,7 +325,7 @@ def write(
     numbers in one file and fractions in another becomes fractions.
     """
     written = time.time_ns()
-    name = f"{written:020d}.{writer}"
+    name = _name(written, writer)
     folder = root / EVAL_BLOCKS / name
     folder.mkdir(parents=True)
     pack, spans = (None, {}) if not blobs else _pack(folder / EVAL_BLOCK_PACK, blobs)
@@ -418,7 +423,7 @@ def _joined(
         raise EtudeError("rollup_needs_seat", 422) from ValueError(rollup.name)
     if set(held) & set(ROLLUP_SEATED):
         raise EtudeError("rollup_column_reserved", 422) from ValueError(rollup.name)
-    seated, values = unnest(
+    seat_players, values = unnest(
         {"match": "VARCHAR", "seat": "BIGINT", "player": "VARCHAR", "opponents": "VARCHAR"},
         [
             [match.key, seat, player.key,
@@ -427,8 +432,8 @@ def _joined(
             for seat, player in enumerate(match.players)
         ],
     )  # fmt: skip
-    db.execute(f"create or replace temp table _seated as {seated}", values)
-    return f"(select * from {source} left join _seated using (match, seat))"
+    db.execute(f"create or replace temp table _seat_players as {seat_players}", values)
+    return f"(select * from {source} left join _seat_players using (match, seat))"
 
 
 def unnest(

@@ -643,8 +643,10 @@ matches first played at it, and any held again there.
 `statsdb(experiment, store)` gives each of your tables across every eval run of
 the experiment, beside Etude's own:
 `runs` (with the tournament each was held for), `players` (`kind` `model` or
-`code`, with a `config.KEY`
-column per scalar config key, dotted when nested), `matches`, `seats`,
+`code`, `name` the latest its seats give and `names` every one, with a
+`config.KEY` column per scalar config key, dotted when nested), `matches`
+(`newest = 1` marks the record that counts: of a match's done records in its
+environment, the latest), `seats`,
 `groups`, `tournaments` (with any `conflict` among its eval runs), `schedule`
 (every match a tournament calls for, with its seating and checkpoint) and
 `training_checkpoints` (every checkpoint a training run under the source
@@ -681,20 +683,20 @@ players, or a group against the match's other groups. The value is
 percentile bootstrap over whole matches with a fixed seed, independent of
 the order rows are read in; fewer than two matches have none.
 
-`estimate` answers many ratios over the same blocks with one bootstrap, as a
-page of per-card rates over the same deals needs:
+`estimate` answers many ratios over the same resampling units, such as deals,
+with one bootstrap, as a page of per-card rates over the same deals needs:
 
 ```python
 from etude.eval.query import estimate
 
-# Blocks × columns: per deal, each card's wins and games.
+# Units × columns: per deal, each card's wins and games.
 wins = [[1, 0], [2, 1], [0, 1]]
 games = [[2, 1], [3, 1], [1, 2]]
 for card in estimate(["deal-1", "deal-2", "deal-3"], wins, games):
     print(card)  # Estimate(value=..., interval=(low, high)), or None without games
 ```
 
-Blocks are resampled in the order of their keys, never of their values or of
+Units are resampled in the order of their keys, never of their values or of
 how they were read, so each column's interval is the one it would get alone.
 Releases through v0.2.9 resampled blocks in the order of their values, so
 their intervals differ slightly from these: the same distribution, other draws.

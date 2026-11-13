@@ -37,8 +37,9 @@ import os
 import re
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from pydantic import ValidationError
 
@@ -53,6 +54,7 @@ from etude.eval.records import (
     Environment,
     Line,
     Match,
+    MatchRecord,
     Player,
     Rollup,
     RoundRobin,
@@ -61,10 +63,12 @@ from etude.eval.records import (
     assemble,
     digest,
     folder_name,
+    outcomes,
 )
 from etude.eval.schedule import ordered
 from etude.run.declaration import declare
 from etude.run.errors import EtudeError
+from etude.run.listing import run_folders, under
 from etude.run.records import Digest, Record, RunFile
 from etude.run.storage import DirectoryStorage, Storage, default_root
 
@@ -143,7 +147,7 @@ def hold(
         pending = list(matches)
     else:
         on_the_go = checkpoint is not None or bool(enter)
-        scheduled, added = _scheduled(
+        asked = _called(
             added,
             experiment=experiment,
             on_the_go=on_the_go,
@@ -151,11 +155,13 @@ def hold(
             directory=directory,
             storages=storages,
         )
+        added, so_far = asked.recorded, asked.played
+        every = [*(each.match for each in so_far.delivered), *so_far.failed, *so_far.new]
         # Contiguous runs of the play order, so each share seats fewer checkpoints.
-        order = list(ordered([match for match, _, _ in scheduled]))
+        order = list(ordered(sorted(every, key=lambda match: match.key)))
         size, larger = divmod(len(order), n)
         start = k * size + min(k, larger)
-        delivered = {match.key for match, state, _ in scheduled if state == "delivered"}
+        delivered = {each.match.key for each in so_far.delivered}
         pending = [
             match
             for match in order[start : start + size + (k < larger)]
@@ -219,7 +225,7 @@ def played(
     Relative seats find their checkpoints among `lines`, as in `hold`.
     """
     added = _added(tournament, tuple(checkpoints), enter, (0, 1))
-    scheduled, _ = _scheduled(
+    return _called(
         added,
         experiment=experiment,
         on_the_go=False,
@@ -227,16 +233,7 @@ def played(
         wanted_only=True,
         directory=directory,
         storages=storages,
-    )
-    return Played(
-        delivered=tuple(
-            Delivered(match=match, run=max(written, key=lambda run: (written[run], run)))
-            for match, state, written in scheduled
-            if state == "delivered"
-        ),
-        failed=tuple(match for match, state, _ in scheduled if state == "failed"),
-        new=tuple(match for match, state, _ in scheduled if state == "new"),
-    )
+    ).played
 
 
 def tournament_runs(
@@ -250,13 +247,17 @@ def tournament_runs(
     base = Path(directory) if directory is not None else default_root()
     found: dict[str, dict[str, TournamentRun]] = {}
     for place in {each.name: each for each in [DirectoryStorage(base), *storages]}.values():
-        keys = place.keys("")
-        for folder in sorted(_folders(keys, TOURNAMENT_FILE)):
-            if _experiment(place, folder) != experiment:
-                continue
-            added = TournamentRun.model_validate_json(place.get(folder + TOURNAMENT_FILE))
-            run = folder.rstrip("/").rsplit("/", 1)[-1]
-            found.setdefault(added.tournament.name, {}).setdefault(run, added)
+        keys = sorted(place.keys(""))
+        listed = set(keys)
+        for run, folders in sorted(run_folders(keys).items()):
+            for folder in folders:
+                if (
+                    folder + TOURNAMENT_FILE not in listed
+                    or _experiment(place, folder) != experiment
+                ):
+                    continue
+                added = TournamentRun.model_validate_json(place.get(folder + TOURNAMENT_FILE))
+                found.setdefault(added.tournament.name, {}).setdefault(run, added)
     return {name: [runs[run] for run in sorted(runs)] for name, runs in sorted(found.items())}
 
 
@@ -275,7 +276,17 @@ def _added(
     )
 
 
-def _scheduled(
+@dataclass(frozen=True)
+class _Called:
+    """What a definition calls for with what is given, and what its hold records."""
+
+    played: Played
+    # The definition held, with what its relative seats found among the lines that no
+    # stored eval run recorded.
+    recorded: TournamentRun
+
+
+def _called(
     added: TournamentRun,
     *,
     experiment: str,
@@ -284,28 +295,20 @@ def _scheduled(
     directory: Path | str | None,
     storages: Sequence[Storage],
     wanted_only: bool = False,
-) -> tuple[
-    list[tuple[Match, Literal["new", "delivered", "failed"], dict[str, int]]], TournamentRun
-]:
-    """Each match the tournament calls for with what `added` adds, in key order, whether
-    an eval run of the experiment in its environment delivered it or failed it, and when
-    each eval run delivering it recorded it; and `added` with what its relative seats
-    found among `lines` that no stored eval run recorded, for the hold to record.
+) -> _Called:
+    """Each match the tournament calls for with what `added` adds, by whether an eval run
+    of the experiment in its environment delivered it or failed it; and `added` with what
+    its relative seats found among `lines`, for the hold to record.
 
     On the go, nothing is read and a seating of fixed players is left to batch:
     it is not the checkpoint's. `wanted_only` calls for what `added` defines
     alone, still refusing a definition the stored eval runs conflict with.
     """
-    held: list[TournamentRun] = [added]
-    delivered: dict[Digest, dict[str, int]] = {}
-    failed: set[Digest] = set()
+    stored = _Stored(held=(), delivered={}, failed=set())
     if not on_the_go:
         base = Path(directory) if directory is not None else default_root()
-        stored, delivered, failed = _stored(
-            added.tournament, experiment, [DirectoryStorage(base), *storages]
-        )
-        held = [*stored, added]
-    tournament = assemble(held)
+        stored = _stored(added.tournament, experiment, [DirectoryStorage(base), *storages])
+    tournament = assemble([*stored.held, added])
     known = {_found(each) for each in tournament.seated}
     if wanted_only:
         tournament = assemble([added]).model_copy(update={"seated": tournament.seated})
@@ -317,15 +320,23 @@ def _scheduled(
         for each in tournament.schedule()
         if not on_the_go or each.checkpoint is not None or not added.checkpoints
     }
-    scheduled: list[tuple[Match, Literal["new", "delivered", "failed"], dict[str, int]]] = [
-        (
-            match,
-            "delivered" if key in delivered else "failed" if key in failed else "new",
-            delivered.get(key, {}),
-        )
-        for key, match in sorted(matches.items())
-    ]
-    return scheduled, added.model_copy(update={"seated": (*added.seated, *found)})
+    ordered_keys = sorted(matches)
+    played = Played(
+        delivered=tuple(
+            Delivered(match=matches[key], run=stored.delivered[key])
+            for key in ordered_keys
+            if key in stored.delivered
+        ),
+        failed=tuple(matches[key] for key in ordered_keys if key in stored.failed),
+        new=tuple(
+            matches[key]
+            for key in ordered_keys
+            if key not in stored.delivered and key not in stored.failed
+        ),
+    )
+    return _Called(
+        played=played, recorded=added.model_copy(update={"seated": (*added.seated, *found)})
+    )
 
 
 def _found(seated: Seated) -> tuple[str, str, tuple[tuple[tuple[str | None, ...], int], ...]]:
@@ -357,56 +368,72 @@ def _resumed(added: TournamentRun) -> dict[str, object]:
     )
 
 
+@dataclass(frozen=True)
+class _Stored:
+    """What the experiment's stored eval runs hold of a tournament and its environment."""
+
+    # The tournament's eval runs, in run order.
+    held: tuple[TournamentRun, ...]
+    # Each match an eval run in the environment holds as done, to the run that recorded it
+    # last: of runs holding it, the latest record's, then the last by name, as `statsdb`
+    # ranks `matches.newest`.
+    delivered: dict[Digest, str]
+    # Each match that failed there, with no done record anywhere.
+    failed: set[Digest]
+
+
 def _stored(
     tournament: Benchmark | RoundRobin, experiment: str, places: Sequence[Storage]
-) -> tuple[list[TournamentRun], dict[Digest, dict[str, int]], set[Digest]]:
-    """The tournament's eval runs of the experiment in every place, every match
-    that an eval run of the experiment in its environment holds as done, with when
-    each run holding it recorded it, and every one that failed there with no done
-    record anywhere.
+) -> _Stored:
+    """The tournament's eval runs of the experiment in every place, and how the experiment's
+    eval runs in its environment played each match.
 
     One listing per place, each eval run's `run.json`, and one more read of each
     of the experiment's: its `tournament.json`, or its `environment.json` when
     it has none; then of the runs in the environment, each block's index once.
     """
     held: dict[str, TournamentRun] = {}
-    delivered: dict[Digest, dict[str, int]] = {}
-    failed: set[Digest] = set()
+    records: dict[str, list[MatchRecord]] = {}
     known: dict[str, dict[str, Block]] = {}
     environment = tournament.environment.identity
     for place in {place.name: place for place in places}.values():
-        keys = place.keys("")
-        ours = {
-            folder
-            for folder in _folders(keys, TOURNAMENT_FILE) | _folders(keys, _ENVIRONMENT_FILE)
-            if _experiment(place, folder) == experiment
-        }
-        # The experiment's eval run folders: those held for a tournament, and the rest.
-        tournaments = _folders(keys, TOURNAMENT_FILE) & ours
-        alike = {
-            folder
-            for folder in (_folders(keys, _ENVIRONMENT_FILE) & ours) - tournaments
-            if Environment.model_validate_json(place.get(folder + _ENVIRONMENT_FILE)).identity
-            == environment
-        }
-        for folder in tournaments:
-            added = TournamentRun.model_validate_json(place.get(folder + TOURNAMENT_FILE))
-            # A tournament's eval run is played in the tournament's environment.
-            if added.tournament.environment.identity == environment:
-                alike.add(folder)
-            if added.tournament.name == tournament.name:
-                held.setdefault(folder.rstrip("/").rsplit("/", 1)[-1], added)
-        for folder in sorted(alike):
-            run = folder.rstrip("/").rsplit("/", 1)[-1]
-            names = (key[len(folder) :] for key in keys if key.startswith(folder))
-            for block in run_blocks(place, folder, run, names, known.setdefault(run, {})):
-                for record in block.matches:
-                    if record.state == "failed":
-                        failed.add(record.match.key)
+        keys = sorted(place.keys(""))
+        listed = set(keys)
+        for run, folders in sorted(run_folders(keys).items()):
+            for folder in folders:
+                if folder + TOURNAMENT_FILE in listed:
+                    if _experiment(place, folder) != experiment:
                         continue
-                    written = delivered.setdefault(record.match.key, {})
-                    written[run] = max(written.get(run, 0), record.wall_ms)
-    return [held[run] for run in sorted(held)], delivered, failed - delivered.keys()
+                    added = TournamentRun.model_validate_json(place.get(folder + TOURNAMENT_FILE))
+                    if added.tournament.name == tournament.name:
+                        held.setdefault(run, added)
+                    # A tournament's eval run is played in the tournament's environment.
+                    alike = added.tournament.environment.identity == environment
+                elif folder + _ENVIRONMENT_FILE in listed:
+                    if _experiment(place, folder) != experiment:
+                        continue
+                    given = Environment.model_validate_json(place.get(folder + _ENVIRONMENT_FILE))
+                    alike = given.identity == environment
+                else:
+                    continue
+                if not alike:
+                    continue
+                names = (key[len(folder) :] for key in under(keys, folder))
+                for block in run_blocks(place, folder, run, names, known.setdefault(run, {})):
+                    records.setdefault(run, []).extend(block.matches)
+    newest: dict[Digest, tuple[int, str]] = {}
+    failed: set[Digest] = set()
+    for run, held_records in records.items():
+        for key, record in outcomes(held_records).items():
+            if record.state == "failed":
+                failed.add(key)
+            elif (record.wall_ms, run) > newest.get(key, (-1, "")):
+                newest[key] = (record.wall_ms, run)
+    return _Stored(
+        held=tuple(held[run] for run in sorted(held)),
+        delivered={key: run for key, (_, run) in newest.items()},
+        failed=failed - newest.keys(),
+    )
 
 
 def _experiment(place: Storage, folder: str) -> str | None:
@@ -417,17 +444,12 @@ def _experiment(place: Storage, folder: str) -> str | None:
         return None
 
 
-def _folders(keys: Sequence[str], file: str) -> set[str]:
-    """The run folders, at any depth of a listing, that hold `file`."""
-    return {key.removesuffix(file) for key in keys if key.endswith("/" + file)}
-
-
 @contextmanager
 def _held(db: duckdb.DuckDBPyConnection, tournament: str) -> Iterator[tuple[int, int]]:
     """Temp table `_held` (run, match) of each scheduled match held; yields (scheduled, held).
 
     Each scheduled match counts once, from whichever eval run of the
-    tournament's environment recorded it last.
+    tournament's environment recorded it last (`matches.newest`).
     Raises the conflict `statsdb` found among the tournament's eval runs, if any.
     """
     found = db.execute(
@@ -439,11 +461,10 @@ def _held(db: duckdb.DuckDBPyConnection, tournament: str) -> Iterator[tuple[int,
         raise EtudeError(found[0], 409) from ValueError(tournament)
     db.execute(
         "create or replace temp table _held as"
-        " select arg_max(m.run, m.wall_ms) as run, m.match from matches m join runs r using (run)"
+        " select m.run, m.match from matches m join runs r using (run)"
         " where r.environment = (select environment from tournaments where tournament = $1)"
-        " and m.state = 'done'"
-        " and m.match in (select match from schedule where tournament = $1)"
-        " group by m.match",
+        " and m.newest = 1"
+        " and m.match in (select match from schedule where tournament = $1)",
         [tournament],
     )
     try:
@@ -463,7 +484,8 @@ class ScorePoint(Record):
 
     # Its key (`etude.eval.records.CheckpointKey`), encoded.
     checkpoint: str
-    # What the checkpoint is called: the last part of its URI, as a training run names its files.
+    # What the checkpoint's players are called: the latest name its seats give, the least of
+    # several players'. A benchmark's inference seat names it for its file (`Inference.model`).
     name: str
     # None for a checkpoint no training run under the source recorded.
     ordinal: int | None
@@ -536,18 +558,14 @@ def scores(
             """,
             [benchmark],
         ).fetchall()
-    # Per point, where its checkpoint stood: each match's totals and rows.
-    blocks: dict[
-        tuple[str, str | None, str | None, str, str, int | None, str | None],
-        dict[str, tuple[float, float, int]],
-    ] = {}
-    for *point, match, total, per_total, rows in found:
-        seating, run, experiment, checkpoint, name, ordinal, clocks = point
-        blocks.setdefault((seating, run, experiment, checkpoint, name, ordinal, clocks), {})[
-            match
-        ] = (float(total), float(per_total), int(rows))
-    lines: dict[tuple[str, str | None, str | None], list[ScorePoint]] = {}
-    for (seating, run, experiment, checkpoint, name, ordinal, clocks), totals in blocks.items():
+    # Per point, where its checkpoint stood: each match's totals and rows, its resampling unit.
+    units: dict[_Point, dict[str, tuple[float, float, int]]] = {}
+    for seating, run, experiment, checkpoint, name, ordinal, clocks, match, *sums in found:
+        point = _Point(seating, run, experiment, checkpoint, name, ordinal, clocks)
+        total, per_total, rows = sums
+        units.setdefault(point, {})[match] = (float(total), float(per_total), int(rows))
+    curves: dict[tuple[str, str | None, str | None], list[ScorePoint]] = {}
+    for point, totals in units.items():
         [estimated] = estimate(
             list(totals),
             [[total] for total, _, _ in totals.values()],
@@ -555,12 +573,12 @@ def scores(
         )
         if estimated is None:
             continue
-        lines.setdefault((seating, run, experiment), []).append(
+        curves.setdefault((point.seating, point.run, point.experiment), []).append(
             ScorePoint(
-                checkpoint=checkpoint,
-                name=name,
-                ordinal=ordinal,
-                clocks=json.loads(clocks) if clocks else {},
+                checkpoint=point.checkpoint,
+                name=point.name,
+                ordinal=point.ordinal,
+                clocks=json.loads(point.clocks) if point.clocks else {},
                 value=estimated.value,
                 interval=estimated.interval,
                 rows=sum(rows for *_, rows in totals.values()),
@@ -575,9 +593,23 @@ def scores(
             points=tuple(sorted(points, key=_training_order)),
         )
         for (seating, run, experiment), points in sorted(
-            lines.items(), key=lambda item: tuple("" if v is None else v for v in item[0])
+            curves.items(), key=lambda item: tuple("" if v is None else v for v in item[0])
         )
     ]
+
+
+@dataclass(frozen=True)
+class _Point:
+    """A score point's identity: its seating and checkpoint, and where that checkpoint stood."""
+
+    seating: str
+    run: str | None
+    experiment: str | None
+    checkpoint: str
+    name: str
+    ordinal: int | None
+    # The training checkpoint's clocks as stored JSON, decoded once per point.
+    clocks: str | None
 
 
 def _training_order(point: ScorePoint) -> tuple[bool, int, list[str | int], str]:
@@ -640,10 +672,14 @@ def standings(
             table=table,
             value=value,
             per=per,
-            where="run || '/' || match in (select run || '/' || match from _held)"
+            where="(run, match) in (select run, match from _held)"
             + (f" and ({where})" if where else ""),
         )
-    names: dict[str, str] = dict(db.sql("select player, name from players").fetchall())
+    # Every name a player was seated under, the latest first.
+    names: dict[str, str] = {
+        player: "/".join(json.loads(named))
+        for player, named in db.sql("select player, names from players").fetchall()
+    }
     # Seats only: a group's row has a team for its subject.
     entries = [
         Standing(

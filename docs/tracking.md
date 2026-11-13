@@ -533,7 +533,8 @@ for a key a training run of the experiment saved (`RUN/checkpoints/NAME`),
 where that run's clocks stood; where both give a clock and differ, the seat's
 value is drawn and the page notes it. Two runs' checkpoints holding the same
 bytes are two points. A checkpoint's line, the learner it belongs to, is
-its seat's `line`, else its training run. A checkpoint a training run saved
+its seat's `line`, else its training run's line: the first run of the chain
+of continuations that led to it. A checkpoint a training run saved
 is drawn in that run's job; every other placed checkpoint is drawn in its
 line's curve, labelled by the line's name, or in one curve of "checkpoints
 with no line". `Crosstable` looks only within a line.
@@ -544,7 +545,8 @@ anchor, and the page names the unplaced checkpoints.
 too: the page says "Evaluation only", Perf and ML details say there are no
 training runs, and the x axis offers the clocks the seats' positions use.
 Matches of eval runs held for no tournament are offered as "matches outside a
-tournament", each counting once per environment from its latest record.
+tournament", each counting once per environment from its latest record,
+whichever eval run made it.
 Setup is not an environment: games played on CPU and on CUDA, under configs
 that differ only in their `setup` key ([evaluation](evaluation.md#eval-runs)),
 pool. A value played in two environments shows the one whose latest
