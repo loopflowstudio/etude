@@ -89,7 +89,11 @@ Build a lab outside the repo (e.g. `/tmp/lab`) with its own `ETUDE_HOME`:
    `DIR/etude-result.json`'s `tally` with `etude.launch.records.Tally`.
 6. Stop the servers before finishing. In zsh, `$args` does not word-split: call
    commands explicitly rather than looping over argument strings.
-7. `run.checkpoint` needs a value for every declared clock (otherwise
+7. A "still running" lab run must not `os._exit` right after `run.ship()`: with a plain
+   `directory=` there is no destination, so `ship()` is True at once and the background
+   writer has not yet written `checkpoints/NAME.json`. The `.pt` without its manifest reads
+   as no checkpoint (the run vanishes from every curve). Wait until that `.json` exists
+   before exiting. `run.checkpoint` needs a value for every declared clock (otherwise
    `checkpoint_clock_mismatch`, and nothing is recorded). `play` must live in its own module beside
    the experiment file, not in the file itself. The experiment is named for its file, so
    a second report variant goes in another git-tracked folder as `NAME.py`.
