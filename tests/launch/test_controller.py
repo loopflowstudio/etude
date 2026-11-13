@@ -112,7 +112,7 @@ def test_remote_launch_freezes_sources_config_and_returns_outputs(
     (tmp_path / "config.txt").write_text("frozen config\n")
     job = tmp_path / "job.py"
     job.write_text(
-        'from etude.launch.records import Job, Run\nfrom pathlib import Path\nhere = Path(__file__).parent\ndef runs(): return Job(command="sh train.sh", max_hours=0.01, max_usd=1, repo=str(here / "source with spaces"), config=(here / "config.txt").read_text(), until="steps=10").runs(1, 2)\n'
+        'from etude.launch.records import Job, Run\nfrom pathlib import Path\nhere = Path(__file__).parent\ndef runs(): return Job(command="sh train.sh", experiment="capacity", max_hours=0.01, max_usd=1, repo=str(here / "source with spaces"), config=(here / "config.txt").read_text(), until="steps=10").runs(1, 2)\n'
     )
     launched = command("launch", str(job), "--cohort", "pair")
     assert launched.returncode == 0, launched.stderr
