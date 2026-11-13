@@ -22,6 +22,7 @@ from etude.launch.job_file import read_job_file
 from etude.launch.records import Input, Job, Runtime, SmokeForm, Until, job_id
 from etude.launch.smoke import tiny
 from etude.train.read import read
+from tests.experiments import authored
 from tests.launch.counting import job_text
 from tests.launch.test_runpod_machines import cloud
 from tests.launch.test_worker_attempts import local
@@ -179,7 +180,7 @@ def runs(python: str) -> Job:
     assert len(scheduler.attempts(record.id)) == 1
     tracked = tmp_path / "track"
     data = read(tracked, experiment or "plain", record.id)
-    assert data.reached == {"updates": 1}
+    assert authored(data.reached) == {"updates": 1}
     assert len(data.checkpoints) == 1
     assert (tracked / record.id / "out/final.txt").read_text() == "7"
 

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from etude.carriage import put_back, restore_set
-from etude.experiment import checkpoint_file, observe
+from etude.experiment import observe
 from etude.out import OutFile, OutFiles
 from etude.run.delivery import sync
 from etude.run.errors import EtudeError
@@ -17,6 +17,7 @@ from etude.train.read import read
 from etude.train.records import Step, Time
 from etude.train.report import training
 from etude.train.run import Stopped, local_launch, track
+from tests.experiments import authored
 from tests.run.storage import MeasuredStorage
 
 CLOCKS = [Step("updates", "optimizer updates")]
@@ -137,7 +138,7 @@ def test_first_row_replaces_history_and_an_empty_attempt_changes_nothing(
         else list(range(4))
     )
     assert data.points("loss", "updates").y.tolist() == expected
-    assert data.attempts[-1].resumed_at == ({} if logged == "none" else {"updates": 4})
+    assert authored(data.attempts[-1].resumed_at) == ({} if logged == "none" else {"updates": 4})
 
 
 def test_out_checkpoint_is_carried_once_and_relocated_without_a_second_copy(
@@ -173,7 +174,7 @@ def test_out_checkpoint_is_carried_once_and_relocated_without_a_second_copy(
         assert resumed.checkpoint(resumed.out / "nested/model.pt", updates=1).sha256 == ref.sha256
     assert len(read(restored.parent, "e", "r").checkpoints) == 1
     saved = observe(restored.parent, "e").runs[0].checkpoints[0]
-    assert checkpoint_file(saved) == "out/nested/model.pt"
+    assert saved.file == "out/nested/model.pt"
     assert str(saved.key) == "r/out/nested/model.pt"
 
 

@@ -22,6 +22,7 @@ from etude.train.read import read
 from etude.train.records import ParentRun, Step
 from etude.train.report import training
 from etude.train.run import track
+from tests.experiments import authored
 from tests.launch.counting import job_text
 from tests.launch.test_worker_attempts import local
 from tests.run.storage import MeasuredStorage
@@ -89,7 +90,7 @@ def test_continuation_and_report_use_the_same_position_after_an_empty_attempt(
     storage = MeasuredStorage(destination)
     child = continue_from(scheduler.record(parent), f"updates={position + 1}", source=storage)
     (lineage,) = child.job.environment
-    assert ParentRun.model_validate_json(lineage.value).at == {"updates": position}
+    assert authored(ParentRun.model_validate_json(lineage.value).at) == {"updates": position}
     assert storage.listings == 2
     assert storage.got.count(f"{parent}/out.json") == int(carried)
     out_reads = [key for key in storage.got if key.startswith(f"{parent}/out/")]
@@ -98,7 +99,7 @@ def test_continuation_and_report_use_the_same_position_after_an_empty_attempt(
         "out/model": (sha256(b"weights").hexdigest(), len(b"weights")),
         "out/state": (sha256(b"optimizer state").hexdigest(), len(b"optimizer state")),
     }
-    assert training([read(source, "recipe", parent)]).runs[0].reached == {"updates": position}
+    assert authored(training([read(source, "recipe", parent)]).runs[0].at) == {"updates": position}
     # A checkpoint reader sees the inherited model in this child's out,
     # without a second checkpoint input or the parent's mutable tags.
     child_out = source / "child/out"
@@ -111,7 +112,7 @@ def test_continuation_and_report_use_the_same_position_after_an_empty_attempt(
     ) as resumed:
         checkpoint = resumed.latest_checkpoint()
         assert checkpoint is not None
-        assert checkpoint.at == {"updates": 6} and checkpoint.tags == ()
+        assert authored(checkpoint.at) == {"updates": 6} and checkpoint.tags == ()
         assert Path(urlparse(checkpoint.artifact.uri).path) == child_out / "model"
         assert Path(urlparse(checkpoint.artifact.uri).path).read_bytes() == b"weights"
 
@@ -149,9 +150,9 @@ def test_out_carries_copied_latest_checkpoint(
     child = continue_from(scheduler.record(parent), f"updates={position + 1}", source=storage)
     (lineage,) = child.job.environment
     handed = ParentRun.model_validate_json(lineage.value)
-    assert handed.at == {"updates": position}
+    assert authored(handed.at) == {"updates": position}
     assert handed.checkpoint is not None
-    assert handed.checkpoint.at == {"updates": 2} and handed.checkpoint.tags == ()
+    assert authored(handed.checkpoint.at) == {"updates": 2} and handed.checkpoint.tags == ()
     assert handed.checkpoint.artifact.uri == "checkpoints/updates-2.pt"
     *out_inputs, checkpoint_input = child.job.inputs
     assert [(given.key, given.out, given.sha256, given.size_bytes) for given in out_inputs] == (
@@ -183,7 +184,9 @@ def test_out_carries_copied_latest_checkpoint(
     selected = MeasuredStorage(destination)
     explicit = continue_from(scheduler.record(parent), "updates=3", source=selected, ordinal=1)
     assert explicit.job.inputs == (checkpoint_input,)
-    assert ParentRun.model_validate_json(explicit.job.environment[0].value).at == {"updates": 2}
+    assert authored(ParentRun.model_validate_json(explicit.job.environment[0].value).at) == {
+        "updates": 2
+    }
     assert selected.listings == 2
     assert f"{parent}/{MEMBERSHIP}" not in selected.got
     assert not any(key.startswith(f"{parent}/out/") for key in selected.got)
@@ -202,7 +205,7 @@ def test_out_carries_copied_latest_checkpoint(
         experiment="recipe", run="child", clocks=[Step("updates", "updates")], directory=source
     ) as resumed:
         checkpoint = resumed.latest_checkpoint()
-        assert checkpoint is not None and checkpoint.at == {"updates": 2}
+        assert checkpoint is not None and authored(checkpoint.at) == {"updates": 2}
         assert Path(urlparse(checkpoint.artifact.uri).path).read_bytes() == b"saved at 2"
         if populated:
             assert (resumed.out / "samples.txt").read_bytes() == b"samples"
@@ -256,7 +259,7 @@ def test_continuation_requires_saved_out_or_its_latest_checkpoint(
     if populated:
         child = continue_from(scheduler.record(parent), "updates=9", source=storage)
         handed = ParentRun.model_validate_json(child.job.environment[0].value)
-        assert handed.at == {"updates": position}
+        assert authored(handed.at) == {"updates": position}
         assert handed.checkpoint is None and handed.input is None
         assert [given.out for given in child.job.inputs] == ["state"]
     else:
@@ -293,7 +296,9 @@ def test_continuation_requires_saved_out_or_its_latest_checkpoint(
         selected = MeasuredStorage(destination)
         explicit = continue_from(scheduler.record(parent), "updates=9", source=selected, ordinal=1)
         assert [given.key for given in explicit.job.inputs] == ["checkpoints/updates-1.pt"]
-        assert ParentRun.model_validate_json(explicit.job.environment[0].value).at == {"updates": 1}
+        assert authored(ParentRun.model_validate_json(explicit.job.environment[0].value).at) == {
+            "updates": 1
+        }
         assert selected.listings == 2
         assert f"{parent}/{MEMBERSHIP}" not in selected.got
         assert not any(
@@ -357,7 +362,7 @@ def runs(python: str) -> Job:
     assert (tracked / parent / "out/state.json").read_text() == "3"
     assert (tracked / child / "out/state.json").read_text() == "4"
     data = read(tracked, "recipe", child)
-    assert data.reached == {"updates": 4}
+    assert authored(data.reached) == {"updates": 4}
     assert data.file is not None and data.file.declaration.continues is not None
     assert data.file.declaration.continues.parent.source_id == parent
     assert data.file.declaration.continues.value == 3
@@ -397,6 +402,6 @@ def runs(python: str) -> Job:
     assert scheduler.read(queued).phase == "queued"
     status = scheduler.wait(queued, every=0.05, timeout=30)[0]
     assert status.outcome == "succeeded", job_text(scheduler.logs(refresh=True, run=queued))
-    assert read(tracked, "recipe", queued).reached == {"updates": 6}
+    assert authored(read(tracked, "recipe", queued).reached) == {"updates": 6}
     assert (tracked / queued / "out/state.json").read_text() == "6"
     assert (tracked / parent / "out/state.json").read_text() == "3"

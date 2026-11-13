@@ -16,7 +16,8 @@ from etude.launch.records import Input, Job
 from etude.launch.records import Storage as Place
 from etude.launch.schemas import Delivery, Inbox, Work
 from etude.launch.storage.bucket import BucketJournal
-from etude.launch.storage.s3 import Bucket, Keys, Reply
+from etude.launch.storage.s3 import Bucket, Keys
+from etude.launch.storage.transport import HTTPReply
 from etude.launch.worker.courier import Courier
 from etude.out import MEMBERSHIP, OutFile, OutFiles
 from etude.run.storage import DirectoryStorage
@@ -36,7 +37,9 @@ class Writes(Storage):
         super().__init__()
         self.writes: Counter[str] = Counter()
 
-    def __call__(self, method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Reply:
+    def __call__(
+        self, method: str, url: str, body: bytes | None, headers: dict[str, str]
+    ) -> HTTPReply:
         before = dict(self.objects)
         reply = super().__call__(method, url, body, headers)
         self.writes.update(
@@ -333,9 +336,7 @@ def test_continuation_initial_state_is_stored_before_its_first_claim(
     courier._inbox_url = bucket.get_url("inbox", 3600)
     access = bucket.grant("etude/run1/", 3600, "run1")
     storage.objects["inbox"] = (
-        Inbox(work=(Delivery.model_validate({"work": work.model_dump_json(), "access": access}),))
-        .model_dump_json(round_trip=True)
-        .encode()
+        Inbox(work=(Delivery(work=work, access=access),)).model_dump_json().encode()
     )
     (courier._home / "work").mkdir()
     initialize = courier.initialize_out
