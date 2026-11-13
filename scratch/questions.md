@@ -98,3 +98,76 @@ points (acquisition mode and loss causes in records, acknowledged checkpoint
 durability, fault-injection fixtures). The docs do state its "application
 declares its restorable state and any discontinuity" point: only registered
 objects are restored, and streams or games in flight start fresh.
+
+## State publication direction (2026-11-13)
+
+Proposed: write each save as a new immutable snapshot, upload it, publish a
+small pointer last; recovery follows the pointer. Jack Heart: "local storage
+probably fine, but ideally avoid remote extra storage". So local snapshots may
+be kept freely; remotely, extra storage should be at most transient (e.g.
+content-addressed files so unchanged files are not re-uploaded, and the
+superseded snapshot's objects deleted once the new pointer is published), not
+a growing history of saves.
+
+### What the docs now show, and what the direction leaves open
+
+`docs/training.md` (Carrying on, What is on disk), `docs/launcher.md` and
+`docs/tracking.md` describe it as: `out/state/current.json` names the save to
+load; each save is `out/state/save-N/`, written once; delivery sends the
+save's files, then the pointer, then deletes the save before.
+
+Spellings taken, reversible: the pointer is `current.json` inside `state/`
+(named state: `state/NAME/current.json`); save folders are numbered
+(`save-00000007`), not named for a clock, because `run.save(fn)` in a loop
+without `run.steps` has no stepped clock.
+
+Open, not answered by anyone:
+
+1. **Local retention.** "local storage probably fine" permits keeping older
+   saves on the machine; the docs delete the replaced save in both places,
+   one rule. Question: keep the previous save locally as a second fallback,
+   or one rule everywhere?
+2. **How an unchanged file is not uploaded again.** Either storage copies it
+   into the new save folder (needs a copy the worker's grant allows), or
+   `state.json`'s `files` may name a file in an earlier save folder, which
+   then outlives its save. The docs say only that `files` paths are relative
+   to the save's folder, which holds for both. Question: which?
+3. **Upload-only grants.** The courier cannot delete there
+   (`docs/launcher.md`: "absence does not depend on deleting bucket
+   objects"). The docs say replaced saves stay in the bucket, outside
+   membership, "until someone with delete rights removes them". Question:
+   does the launcher, which holds keys, delete them, or is this left to the
+   owner?
+4. **Running hours across a resume.** `docs/tracking.md` now says
+   `running_hours` goes on from the save an attempt resumed. The merged code
+   still continues it from the latest checkpoint (below).
+
+## Merge of main at 66ffb28 into this branch (2026-11-13)
+
+Main's #99 and #105 and this branch changed the same tracking and carriage
+code. Resolved as: main's names and types (`RecordMismatch`,
+`StoredContentMismatch`, `checkpoint_key`, `RecordedFile.record`, `Until`,
+`Fetch`, `(run, key)` sent markers, `RunSummary.at`) around this branch's
+behaviour (out carriage, `ReadLink` lengths, `CheckpointRecord.file`,
+`ParentRun`, planned stops). Launcher database version is 18: both sides
+changed the schema from 15.
+
+Behaviour choices made in the merge:
+
+- `track(resumed_at=)` stays removed, as this branch had it (gap 6: "the
+  first `run.log(..., updates=n)` of an attempt sets that point, so a recipe
+  author passes nothing"). Main still had the argument and tested it; those
+  two tests in `tests/train/test_store.py` stay deleted.
+- An attempt's first row now also sets its cut on Etude's two hour clocks.
+  `running_hours` restarts from the latest checkpoint's value, so on that
+  axis rows an earlier attempt logged after its last checkpoint are replaced
+  even when the loop resumed from later state. `hours_since_start` keeps
+  them, since wall time moved on (`tests/train/test_hours.py` asserts this).
+  Continuing `running_hours` from the save is part of the rebuild.
+- `RunData.reached` and `RunSummary.at` include Etude's clocks; tests compare
+  the declared ones through `tests.experiments.authored`.
+
+Checks after the merge: `uv run mypy` clean, `uv run ruff check .` and
+`uv run ruff format --check .` clean; 812 tests passed across two partial
+runs (186 tracking-side, 626 other), then the four launcher files changed
+afterwards passed again (58).

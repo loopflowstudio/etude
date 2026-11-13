@@ -1,9 +1,12 @@
 # The Etude train API and Manabot's loops: design for EXP-56 and MTG-329
 
-Blocked, 2026-11-13: the multi-file state layout below cannot keep its
-whole-save recovery promise through the retained mutable out carrier
+State publication, 2026-11-13: a multi-file save cannot keep its whole-save
+recovery promise through the retained mutable out carrier
 (`scratch/questions.md`, reproduced by `scratch/state-publication.py`).
-Implementation waits on a state publication and retention protocol.
+Direction given the same day: "snapshot directory + pointer published last,
+recovery follows the pointer", and on cost, Jack Heart: "local storage
+probably fine, but ideally avoid remote extra storage". The layout below and
+`docs/training.md` show it; `scratch/questions.md` lists what it leaves open.
 
 2026-11-13. Written from the day's exploration; every quoted remark is in full
 at `1666be1:scratch/positioning.md`, the ontology review at
@@ -187,7 +190,9 @@ Details that matter:
 - **`run.save()`** is called every pass. Etude writes on the last pass before
   a stop and otherwise on an interval (default by wall time, overridable with
   `every=` in steps). The write replaces the previous state whole or not at
-  all.
+  all: a new immutable save folder, then the pointer naming it, then deletion
+  of the save before. Recovery and `run.resume` follow the pointer. Unchanged
+  files are not uploaded again; a bucket holds two saves only in between.
 - **`run.checkpoint(policy=model)`** writes named objects the same way state
   is written, so "a lot of the exports... look the same". One call is one
   checkpoint and one player, however many models it holds. A single path
@@ -211,10 +216,12 @@ framework, without Etude.
   run.json                       job, seed, config, clocks, parent and inputs
   ...rows and tables              as today
   out/
-    state/                        replaced each save
-      state.json                  {"at": {"updates": 400}, "seed": 0, "commit": "...", "extra": {...}, "files": {"model": "model.pt", ...}}
-      model.pt                    the framework's own format (torch.save of a state_dict)
-      optimizer.pt
+    state/
+      current.json                {"save": "save-00000007"}; the only file rewritten, published last
+      save-00000007/              one save; immutable; the one before is deleted after the pointer moves
+        state.json                {"at": {"updates": 400}, "seed": 0, "commit": "...", "extra": {...}, "files": {"model": "model.pt", ...}}
+        model.pt                  the framework's own format (torch.save of a state_dict)
+        optimizer.pt
     checkpoints/
       updates-00000100/           never changes
         checkpoint.json           {"at": {"updates": 100}, "files": {"policy": "policy.pt"}}

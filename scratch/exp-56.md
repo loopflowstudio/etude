@@ -17,23 +17,40 @@ earlier 793-pass gate covers `105abdd`, not the unbuilt API.
 Later work: EXP-57 live view; EXP-58 machines/metrics; EXP-59 broader JSON
 commands; EXP-60 evaluation expansion; EXP-61 joinable shared budgets.
 
-## Blocked persistence decision
+## State publication
 
 The new API promises one atomic save across several model/optimizer files;
 the existing carrier updates each mutable out object separately, so an
-interrupted delivery leaves a mixed save. `questions.md` has the controlled
-result and the candidate corrections.
+interrupted delivery leaves a mixed save (`questions.md`, reproduced by
+`scratch/state-publication.py`). Direction, 2026-11-13: "snapshot directory +
+pointer published last, recovery follows the pointer"; Jack Heart on cost:
+"local storage probably fine, but ideally avoid remote extra storage".
 
-The implement instruction says: "If implementation turns up a counterexample
-that breaks the slice, the data model, the deletion path or the overall design,
-stop dependent work and revise the design or send it back to review."
-This design is sent back to review for its state publication/layout and
-retention protocol. No replacement API code has been started. The docs have
-been preserved as written; their whole-save promise has not been weakened.
+The docs show it as `out/state/current.json` naming an immutable
+`out/state/save-N/`, with the save before deleted after the pointer moves and
+unchanged files not uploaded again. `questions.md` lists four points the
+direction leaves open (local retention, how unchanged files are shared,
+upload-only grants, running hours across a resume). No replacement API code
+has been started.
+
+## Docs for the build
+
+The intended experience, to build against and keep true:
+
+- `docs/training.md`: the whole train API; Carrying on and What is on disk
+  carry the save layout.
+- `docs/launcher.md`: restoration, delivery order of a save and its pointer,
+  the storage layout, upload-only grants.
+- `docs/tracking.md`: Etude's clocks across a resume, the run folder.
+- `docs/evaluation.md`: players, folder checkpoints, on main's seatings and
+  relative seats.
+
+The branch holds main at `66ffb28` (merge `1fae5d9`); `questions.md` records
+how the two sides were reconciled.
 
 ## Delete — do not maintain
 
-When the persistence decision is resolved, replace these end to end:
+Replace these end to end:
 
 - `etude.run` internals package -> `etude.tracking`, updating all real consumers.
 - Launch `Run` -> `RunRequest`; authors return Jobs with launch seeds instead.
@@ -56,7 +73,8 @@ surviving API. Manabot cutover is MTG-329; do not edit its checkout here.
 
 ## Remaining implementation
 
-1. Resolve the state publication protocol with interruption and recovery checks.
+1. Build state publication as the docs describe it, with interruption and
+   recovery checks; settle the open points in `questions.md` first.
 2. Unify/rename records and package; wire historical readers and outcome files.
 3. Build state registration, steps, clocks, save cadence, seed and input APIs.
 4. Carry folder checkpoints through tracking, launch inputs and evaluation;
@@ -71,6 +89,6 @@ surviving API. Manabot cutover is MTG-329; do not edit its checkout here.
 ## Verification
 
 `uv run python scratch/state-publication.py` — controlled interrupted delivery:
-model=save-2, optimizer=save-1, state.json=save-1; membership unchanged.
-No build or repository tests run: production code is unchanged. This probe
-checks the retained transport, not a failing implementation of the new API.
+model=save-2, optimizer=save-1, state.json=save-1; membership unchanged. This
+probe checks the retained transport, not an implementation of the new API.
+After merging main: mypy and ruff clean, 812 tests passed (`questions.md`).
