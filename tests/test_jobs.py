@@ -18,7 +18,7 @@ from etude.eval.records import Benchmark, Code, Inference, RoundRobin, Seating
 from etude.jobs import JobOptions, evaluation
 from etude.launch.errors import LauncherError
 from etude.launch.job_file import read_job_file
-from etude.launch.records import Input, Job, Runtime, job_identity
+from etude.launch.records import Input, Job, Runtime, SmokeForm, Until, job_id
 from etude.launch.smoke import tiny
 from tests.launch.counting import job_text
 from tests.launch.test_runpod_machines import cloud
@@ -161,7 +161,21 @@ def test_a_training_jobs_smoke_form_is_its_smoke_config(tmp_path: Path) -> None:
     assert small is not None and small.smoke is None
     assert (small.command, small.config) == (run.job.command, '{"lr":0.5,"layers":[8]}')
     # The smoke form is not part of what makes the job itself.
-    assert job_identity(run.job) == job_identity(run.job.model_copy(update={"smoke": None}))
+    assert job_id(run.job) == job_id(run.job.model_copy(update={"smoke": None}))
+
+
+def test_a_target_is_read_once_and_one_job_has_one_id_however_it_is_written() -> None:
+    # Written as text, as an experiment file does.
+    written = Job.model_validate({"command": "train", "max_hours": 1, "until": "steps=26000.0"})
+    assert written.until == Until(clock="steps", value=26000)
+    assert str(written.until) == "steps=26000" and written.model_dump()["until"] == "steps=26000"
+    whole = Job(command="train", max_hours=1, until=Until.parse("steps=26000"))
+    assert job_id(written) == job_id(whole)
+    smoked = written.model_copy(update={"smoke": SmokeForm(until=Until.parse("steps=2"))})
+    small = tiny(smoked)
+    assert small is not None and small.until == Until(clock="steps", value=2)
+    with pytest.raises(LauncherError, match="not a target"):
+        Until.parse("steps")
 
 
 def test_a_function_the_job_cannot_import_by_name_is_refused(tmp_path: Path) -> None:

@@ -35,7 +35,7 @@ from etude.eval.block import (
     write,
 )
 from etude.eval.match import OLD_SEAT
-from etude.eval.records import TABLE_FILE, MatchRecord, Rollup
+from etude.eval.records import TABLE_FILE, MatchRecord, Rollup, outcomes
 from etude.run.errors import EtudeError
 from etude.run.listing import as_storage, run_folders
 from etude.run.records import Digest, Record
@@ -75,7 +75,7 @@ def convert(
     blocks: list[Block] = []
     db = duckdb.connect()
     try:
-        for folder, names in _folders(storage, run).items():
+        for folder, names in _run_files(storage, run).items():
             with tempfile.TemporaryDirectory(prefix="etude-convert-") as scratch:
                 blocks += _convert(storage, folder, names, db, Path(scratch), rollups)
     finally:
@@ -98,7 +98,7 @@ def delete_files(run: str, source: Storage | Path | str) -> int:
     """
     storage = as_storage(source)
     doomed: list[str] = []
-    for folder, names in _folders(storage, run).items():
+    for folder, names in _run_files(storage, run).items():
         replaced = _replaced(storage, folder, names)
         left = [name for name in names if _old(name) and name not in replaced]
         if left:
@@ -111,7 +111,7 @@ def delete_files(run: str, source: Storage | Path | str) -> int:
     return len(doomed)
 
 
-def _folders(storage: Storage, run: str) -> dict[str, list[str]]:
+def _run_files(storage: Storage, run: str) -> dict[str, list[str]]:
     """Each folder of the run in `storage`, with the names of its files."""
     keys = storage.keys("")
     return {
@@ -163,18 +163,17 @@ def _convert(
         for line in (copies / name).read_text().split("\n")
         if line
     }
-    records: dict[Digest, MatchRecord] = {}
-    for name in old:
-        if name.startswith("matches/") and name.endswith(".json"):
-            record = MatchRecord.model_validate_json((copies / name).read_bytes())
-            if record.match.key not in records or record.state == "done":
-                records[record.match.key] = record
+    records = outcomes(
+        MatchRecord.model_validate_json((copies / name).read_bytes())
+        for name in old
+        if name.startswith("matches/") and name.endswith(".json")
+    )
     tables: dict[str, list[Path]] = {}
     for name in old:
         if (parsed := TABLE_FILE.match(name)) and name not in retired:
             tables.setdefault(parsed[1], []).append(copies / name)
     latest: dict[str, Sequence[Path]] = {
-        table: [_latest(db, table, paths, scratch)] for table, paths in tables.items()
+        table: [_latest_rows(db, table, paths, scratch)] for table, paths in tables.items()
     }
     held = sorted(records.values(), key=lambda r: (r.wall_ms, r.match.key))
     partials: dict[str, Sequence[Path]] = {}
@@ -206,7 +205,7 @@ def _convert(
     return blocks
 
 
-def _latest(
+def _latest_rows(
     db: duckdb.DuckDBPyConnection, table: str, paths: Sequence[Path], scratch: Path
 ) -> Path:
     """One file of a table's rows, each match's from the latest file holding it, in today's columns.

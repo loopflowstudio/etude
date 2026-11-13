@@ -21,7 +21,7 @@ from etude.run.errors import EtudeError
 from etude.run.listing import runs
 from etude.run.records import Attempt, RunDeclaration, RunFile, SourceKey
 from etude.run.storage import DirectoryStorage, S3Storage, Storage, run_prefix, storage_from_uri
-from etude.train.block import Builder
+from etude.train.block import Builder, LoggedRow
 from etude.train.manifest import Index, Manifest
 from etude.train.read import buckets, read, read_all
 from etude.train.records import Step
@@ -183,14 +183,14 @@ def test_stale_tail_and_explicit_sealing(tmp_path: Path) -> None:
     builder = Builder(["step"])
     builder.add(1000, {"step": 1}, {"value": 7})
     key = tail_key(0, writer)
-    write_block(run.files.root, key, builder.table(writer, 0))
+    write_block(run.files.root, key, builder.columns(writer, 0))
     assert key not in RunFiles(run.files.root).deliverable()
     os.utime(run.files.root / key, (time.time() - 61, time.time() - 61))
     assert key in RunFiles(run.files.root).deliverable()
     os.utime(run.files.root / key, None)
     # A dead process's unsealed log becomes the next block; stopped writers' tails go at once.
     (run.files.root / f"metrics/00000001-{writer}.open").write_text(
-        log_line(2000, {"step": 2.0}, {"value": 8})
+        log_line(LoggedRow(wall_ms=2000, clocks={"step": 2.0}, values={"value": 8}))
     )
     seal_runs(tmp_path)
     bucket = DirectoryStorage(tmp_path / "bucket")
@@ -242,7 +242,7 @@ def test_permanent_and_recent_duplicate_is_read_once(tmp_path: Path) -> None:
     writer = "abcdef123456"
     builder = Builder(["step"])
     builder.add(1000, {"step": 1}, {"value": 7})
-    table = builder.table(writer, 0)
+    table = builder.columns(writer, 0)
     write_block(tmp_path / prefix, block_key(1, 0, 0, writer), table)
     write_block(tmp_path / prefix, block_key(2, 0, 0, writer), table)
     data = read(tmp_path, "e", "r")
@@ -260,9 +260,9 @@ def test_rollups_preserve_spikes_counts_and_nonfinite_values(tmp_path: Path) -> 
             value = float("nan")
         builder.add(row * 1000, {"step": float(row), "seconds": row * 0.1}, {"value": value})
     writer = "abcdef123456"
-    write_block(tmp_path / run_prefix("r"), block_key(1, 0, 0, writer), builder.table(writer, 0))
+    write_block(tmp_path / run_prefix("r"), block_key(1, 0, 0, writer), builder.columns(writer, 0))
     data = read(tmp_path, "e", "r")
-    assert set(data.tables[0].reductions) == {16, 256, 4096}
+    assert set(data.columns[0].reductions) == {16, 256, 4096}
     for clock in ("step", "seconds"):
         reduced = data.chart("value", clock, 32)
         if not len(reduced):
@@ -288,7 +288,7 @@ def test_repeated_clock_and_attempt_overlap_use_raw_rows(tmp_path: Path) -> None
     write_block(
         tmp_path / run_prefix("r"),
         block_key(1, 0, 0, "abcdef123456"),
-        builder.table("abcdef123456", 0),
+        builder.columns("abcdef123456", 0),
     )
     data = read(tmp_path, "e", "r")
     reduced = data.chart("value", "step", 10)
@@ -307,7 +307,7 @@ def test_manifest_chart_fetches_only_reduced_columns(tmp_path: Path, backend: st
         )
     root = tmp_path / prefix
     key = block_key(2, 0, 0, writer)
-    write_block(root, key, builder.table(writer, 0))
+    write_block(root, key, builder.columns(writer, 0))
     Index(root, writer).write()
     with mock_aws():
         storage: Storage = DirectoryStorage(tmp_path)
@@ -347,7 +347,7 @@ def test_overview_preserves_requested_chart_resolution(tmp_path: Path, rows: int
     builder = Builder(["step"])
     for row in range(rows):
         builder.add(row * 1000, {"step": float(row)}, {"value": float(row)})
-    write_block(root, block_key(2, 0, 0, writer), builder.table(writer, 0))
+    write_block(root, block_key(2, 0, 0, writer), builder.columns(writer, 0))
     Index(root, writer).write()
     chart = read(tmp_path, "e", "r").chart("value", "step", limit=1000)
     assert len(chart) == 1000
@@ -361,13 +361,13 @@ def test_a_read_is_a_snapshot_that_survives_compaction(tmp_path: Path) -> None:
     builder = Builder(["step"])
     for row in range(256):
         builder.add(row * 1000, {"step": float(row)}, {"value": row})
-    write_block(root, block_key(1, 0, 0, writer), builder.table(writer, 0))
+    write_block(root, block_key(1, 0, 0, writer), builder.columns(writer, 0))
     Index(root, writer).write()
     snapshot = read(tmp_path, "e", "r")
     assert snapshot.blocks  # blocks are read when first used, and kept from then on
     for row in range(256, 512):
         builder.add(row * 1000, {"step": float(row)}, {"value": row})
-    write_block(root, block_key(2, 0, 0, writer), builder.table(writer, 0))
+    write_block(root, block_key(2, 0, 0, writer), builder.columns(writer, 0))
     (root / block_key(1, 0, 0, writer)).unlink()
     Index(root, writer).write()
     # The recent block was taken whole when its blocks were first used, so the
@@ -387,15 +387,15 @@ def test_reader_refreshes_vanished_tails_and_sequence_gaps(
     root = tmp_path / prefix
     builder = Builder(["step"])
     builder.add(1000, {"step": 1}, {"value": 1})
-    write_block(root, tail_key(0, writer), builder.table(writer, 0))
+    write_block(root, tail_key(0, writer), builder.columns(writer, 0))
     snapshot = read(tmp_path, "e", "r")
-    write_block(root, block_key(1, 0, 0, writer), builder.table(writer, 0))
+    write_block(root, block_key(1, 0, 0, writer), builder.columns(writer, 0))
     (root / tail_key(0, writer)).unlink()
     assert snapshot.chart("value", "step").last.tolist() == [1]
-    write_block(root, block_key(1, 0, 0, writer), builder.table(writer, 0))
+    write_block(root, block_key(1, 0, 0, writer), builder.columns(writer, 0))
     builder = Builder(["step"])
     builder.add(2000, {"step": 2}, {"value": 2})
-    write_block(root, block_key(1, 1, 1, writer), builder.table(writer, 1))
+    write_block(root, block_key(1, 1, 1, writer), builder.columns(writer, 1))
     storage = DirectoryStorage(tmp_path)
     keys = storage.keys
     stale = True
@@ -419,7 +419,7 @@ def test_range_read_refuses_a_damaged_permanent_array(tmp_path: Path) -> None:
     for row in range(256):
         builder.add(row * 1000, {"step": float(row)}, {"value": row})
     key = block_key(2, 0, 0, writer)
-    write_block(tmp_path / prefix, key, builder.table(writer, 0))
+    write_block(tmp_path / prefix, key, builder.columns(writer, 0))
     data = read(tmp_path, "e", "r")
     block = data.blocks[0]
     span = block.header.rollups[0].series[0].data
@@ -511,13 +511,13 @@ def test_attempt_resume_cuts_metrics_even_when_the_new_attempt_omits_them(tmp_pa
     for row in range(20):
         builder.add(row * 1000, {"step": float(row)}, {"value": row})
     write_block(
-        tmp_path / prefix, block_key(2, 0, 0, "abcdef123456"), builder.table("abcdef123456", 0)
+        tmp_path / prefix, block_key(2, 0, 0, "abcdef123456"), builder.columns("abcdef123456", 0)
     )
     builder = Builder(["step"])
     builder.add(30000, {"step": 10}, {"other": 1})
     builder.add(31000, {"step": 11}, {"value": 100})
     write_block(
-        tmp_path / prefix, block_key(2, 0, 0, "abcdef123457"), builder.table("abcdef123457", 0)
+        tmp_path / prefix, block_key(2, 0, 0, "abcdef123457"), builder.columns("abcdef123457", 0)
     )
     data = read(tmp_path, "e", "r")
     # The first attempt counts up to and including where the second began.
@@ -609,7 +609,7 @@ def test_checkpoint_resume_supersedes_before_first_logged_row(
         assert chart.last.tolist() == expected_y
         zoom = data.chart("value", "step", span=(10, 19))
         assert zoom.count.sum() == (2 if logging == "metric" else 1)
-        assert sum(table.rows for table in data.tables) == 20 + (
+        assert sum(table.rows for table in data.columns) == 20 + (
             2 if logging == "metric" else 1 if logging == "other" else 0
         )
 
@@ -632,7 +632,7 @@ def test_multiple_attempts_apply_the_earliest_later_checkpoint(tmp_path: Path, r
         builder = Builder(["step"])
         for step in steps:
             builder.add(index * 100000 + step, {"step": float(step)}, {"value": index * 100 + step})
-        write_block(root, block_key(2, 0, 0, writer), builder.table(writer, 0))
+        write_block(root, block_key(2, 0, 0, writer), builder.columns(writer, 0))
 
     data = read(tmp_path, "e", "r")
     expected_x = [*range(6), 17] if resume == 5 else [*range(11), 12, 13, 14, 15, 17]
@@ -648,7 +648,7 @@ def test_manifest_latest_and_overview_retain_nonfinite_numbers(tmp_path: Path) -
     writer = "abcdef123456"
     builder = Builder(["step"])
     builder.add(1000, {"step": 1}, {"value": float("inf")})
-    write_block(tmp_path / prefix, block_key(2, 0, 0, writer), builder.table(writer, 0))
+    write_block(tmp_path / prefix, block_key(2, 0, 0, writer), builder.columns(writer, 0))
     Index(tmp_path / prefix, writer).write()
     manifest = Manifest.model_validate_json(
         (tmp_path / prefix / f"metrics/{writer}.index.json").read_bytes()
@@ -665,9 +665,9 @@ def test_sparse_metrics_have_row_order_levels_and_exact_chart_reads(tmp_path: Pa
         values = {"sparse": float(row)} if row % 7 == 0 else {"dense": float(row)}
         builder.add(row * 1000, {"step": float(row)}, values)
     writer = "abcdef123456"
-    write_block(tmp_path / run_prefix("r"), block_key(2, 0, 0, writer), builder.table(writer, 0))
+    write_block(tmp_path / run_prefix("r"), block_key(2, 0, 0, writer), builder.columns(writer, 0))
     data = read(tmp_path, "e", "r")
-    reduced = data.tables[0].reductions[16].series["sparse"]
+    reduced = data.columns[0].reductions[16].series["sparse"]
     assert reduced[:, 6].sum() == len(range(0, 512, 7))
     assert data.chart("sparse", "step").last.tolist() == list(range(0, 512, 7))
 
@@ -681,7 +681,7 @@ def test_chart_uses_shared_span_coordinates(tmp_path: Path, manifest: bool, rows
     builder = Builder(["step"])
     for row in range(rows):
         builder.add(row * 1000, {"step": float(row)}, {"value": float(row)})
-    write_block(root, block_key(2, 0, 0, writer), builder.table(writer, 0))
+    write_block(root, block_key(2, 0, 0, writer), builder.columns(writer, 0))
     if manifest:
         Index(root, writer).write()
     data = read(tmp_path, "e", "r")
@@ -721,7 +721,7 @@ def test_a_resumed_run_reads_roll_ups_on_both_sides_of_the_resume_point(tmp_path
                     {"value": float(index * 10**6 + step)},
                 )
             write_block(
-                root, block_key(2, sequence, sequence, writer), builder.table(writer, sequence)
+                root, block_key(2, sequence, sequence, writer), builder.columns(writer, sequence)
             )
         Index(root, writer).write()
 
@@ -757,7 +757,7 @@ def test_index_refresh_work_does_not_grow_with_permanent_history(
             values["only_first"] = 42
         builder.add(sequence, {"step": float(sequence)}, values)
         key = block_key(level, sequence, sequence, writer)
-        write_block(root, key, builder.table(writer, sequence))
+        write_block(root, key, builder.columns(writer, sequence))
         return key
 
     for sequence in range(permanent_blocks):
@@ -830,7 +830,7 @@ def test_a_run_split_across_machine_folders_reads_as_one(tmp_path: Path) -> None
             builder.add(
                 start * 10**6 + step, {"step": float(step)}, {"value": float(step + start * 100)}
             )
-        write_block(root, block_key(2, 0, 0, writer), builder.table(writer, 0))
+        write_block(root, block_key(2, 0, 0, writer), builder.columns(writer, 0))
         Index(root, writer).write()
     assert runs(tmp_path) == [("e", "r")]
     (data,) = read_all(tmp_path)
@@ -976,7 +976,7 @@ def test_selective_report_reads_bound_metadata_and_preserve_absolute_coordinates
                 **{f"unused/{i}": float(i) for i in range(16)},
             },
         )
-        write_block(root, block_key(2, block, block, writer), builder.table(writer, block))
+        write_block(root, block_key(2, block, block, writer), builder.columns(writer, block))
     # This index must never be parsed on the selective read path. A tiny poison
     # fixture verifies the path without manufacturing memory pressure.
     (root / f"metrics/{writer}.permanent.json").write_text("not an index")
@@ -1004,7 +1004,7 @@ def report():
     )
     page = build(measured, file)
     assert page.training.metrics == ("wanted", "time/train")
-    assert page.training.runs[0].reached["step"] == 1002
+    assert page.training.runs[0].at["step"] == 1002
 
 
 def test_a_selective_page_reads_each_block_once_from_a_bucket(tmp_path: Path) -> None:
@@ -1017,7 +1017,7 @@ def test_a_selective_page_reads_each_block_once_from_a_bucket(tmp_path: Path) ->
         for row in range(2000):
             step = block * 2000 + row
             builder.add(1000 + step, {"step": float(step)}, {"wanted": float(step), "unused": 0.0})
-        write_block(root, block_key(2, block, block, writer), builder.table(writer, block))
+        write_block(root, block_key(2, block, block, writer), builder.columns(writer, block))
     file = experiment_file(
         tmp_path / "experiments",
         "e",

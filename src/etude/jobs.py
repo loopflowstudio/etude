@@ -8,8 +8,9 @@ Each returns an `etude.launch.records.Job` whose command Etude decides: it runs
 `python -m etude.call` (`etude.call`) in the job's own environment, which
 imports the named function and calls it with the job's config. A training job
 calls the author's `train(config)`. An evaluation job calls Etude's `_hold`,
-which holds a tournament (`etude.eval.tournament.hold`) with the author's
-`play` and the checkpoint the job is given as an input.
+which holds a tournament (`hold_evaluation`, as `etude eval` and `etude smoke`
+hold one here) with the author's `play` and the checkpoint the job is given as
+an input.
 
 Functions are named by import path from the job's source checkout, which is the
 git checkout their file is in unless `repo` says otherwise. Configs are
@@ -41,8 +42,8 @@ from typing import Required, TypedDict, Unpack, cast
 from pydantic import BaseModel, Field, ValidationError
 
 from etude.call import Function, config_type
-from etude.carriage import CHECKPOINTS
-from etude.eval.match import Result, Tables
+from etude.carriage import CHECKPOINTS, checkpoint_file_name, checkpoint_key
+from etude.eval.match import EvalRun, Result, Tables
 from etude.eval.records import (
     Benchmark,
     CheckpointKey,
@@ -55,7 +56,7 @@ from etude.eval.records import (
     digest,
 )
 from etude.eval.tournament import hold
-from etude.experiment import Checkpoint, ExperimentState, checkpoint_file, checkpoint_inputs
+from etude.experiment import Checkpoint, ExperimentState, checkpoint_inputs
 from etude.launch.errors import LauncherError
 from etude.launch.records import (
     Input,
@@ -65,9 +66,9 @@ from etude.launch.records import (
     RunRecord,
     Runtime,
     SmokeForm,
+    Until,
     Variable,
     number,
-    parse_target,
 )
 from etude.run.errors import EtudeError
 from etude.run.listing import as_storage, declared, run_folders
@@ -88,7 +89,7 @@ class JobOptions(TypedDict, total=False):
     max_hours: Required[float]
     max_usd: Decimal | None
     name: str
-    until: str | None
+    until: Until | None
     # A local git repository; None runs in an empty directory. Omitted: the
     # checkout the function's file is in.
     repo: str | None
@@ -199,10 +200,61 @@ def evaluation(
 
 
 def evaluation_spec(job: Job) -> Evaluation:
-    """What an evaluation job holds; raises `EtudeError` for any other job."""
-    if job.config is None or "etude.jobs:_hold" not in job.command:
+    """What an evaluation job holds; raises `EtudeError` for any other job.
+
+    An evaluation job is one whose command calls `_hold` (`_called`).
+    """
+    if job.config is None or _called(_function(_hold, None)) not in job.command:
         raise EtudeError("not_an_evaluation_job", 422)
     return Evaluation.model_validate_json(job.config)
+
+
+def with_experiment(job: Job, experiment: str) -> Job:
+    """The evaluation job an experiment's `eval(state)` returned, as one of `experiment`.
+
+    Raises `EtudeError("eval_job_of_another_experiment")` for a job naming
+    another experiment, and `EtudeError("not_an_evaluation_job")` for one that
+    is not an evaluation.
+    """
+    spec = evaluation_spec(job)
+    if spec.experiment not in (None, experiment):
+        raise EtudeError("eval_job_of_another_experiment", 422) from ValueError(spec.experiment)
+    spec = spec.model_copy(update={"experiment": experiment})
+    return job.model_copy(update={"config": spec.model_dump_json(), "experiment": experiment})
+
+
+def hold_evaluation(
+    spec: Evaluation,
+    *,
+    checkout: str | None = None,
+    checkpoint: CheckpointRef | None = None,
+    directory: Path | str | None = None,
+    storages: Sequence[Storage] = (),
+) -> EvalRun:
+    """Hold what an evaluation job's config describes (`etude.eval.tournament.hold`).
+
+    `play` is imported from `checkout`, the job's source, or the working
+    directory as on the job's machine. `checkpoint` is a benchmark's one
+    checkpoint where it lies here. Raises `EtudeError("evaluation_names_no_experiment")`
+    for a config whose experiment is not yet named (`with_experiment`).
+    """
+    if spec.experiment is None:
+        raise EtudeError("evaluation_names_no_experiment", 422)
+    # Loaded by import path: the function `evaluation` was given, typed there.
+    play = cast(Callable[[Match], Tables | Result], spec.play.load(checkout))
+    return hold(
+        spec.tournament,
+        experiment=spec.experiment,
+        play=play,
+        checkpoint=checkpoint,
+        checkpoints=tuple(each.ref for each in spec.checkpoints),
+        enter=spec.entrants,
+        matches=spec.matches,
+        workers=spec.workers,
+        directory=directory,
+        storages=storages,
+        lines=spec.lines,
+    )
 
 
 def with_matches(job: Job, matches: Sequence[Match], state: ExperimentState) -> Job:
@@ -220,7 +272,7 @@ def with_matches(job: Job, matches: Sequence[Match], state: ExperimentState) -> 
     inputs = tuple(
         Input(
             name=files[key],
-            key=checkpoint_file(each),
+            key=checkpoint_key(each.artifact.uri),
             sha256=cast(str, each.artifact.sha256),  # observe keeps only stored files
             size_bytes=cast(int, each.artifact.size_bytes),
             run=each.run,
@@ -265,15 +317,16 @@ def continue_from(
     record = next((r for r in reversed(recorded) if ordinal in (None, r.ordinal)), None)
     if record is None or record.artifact.sha256 is None or record.artifact.size_bytes is None:
         raise LauncherError(f"run {parent.id} recorded no stored checkpoint {ordinal or ''}")
-    clock, position = parse_target(until)
-    if clock not in record.at:
+    target = Until.parse(until)
+    if target.clock not in record.at:
         raise LauncherError(
             f"a continuation needs a target on a clock its checkpoint recorded: "
             f"{', '.join(sorted(record.at))}"
         )
-    if position <= record.at[clock]:
+    if target.value <= record.at[target.clock]:
         raise LauncherError(
-            f"the target {until} is not beyond the checkpoint's {clock}={number(record.at[clock])}"
+            f"the target {target} is not beyond the checkpoint's "
+            f"{target.clock}={number(record.at[target.clock])}"
         )
     inputs = tuple(i for i in parent.spec.inputs if not i.name.startswith(_PARENT_CHECKPOINT))
     # Without tags: they label the parent's checkpoint after the fact and decide
@@ -286,7 +339,7 @@ def continue_from(
         # of the run, from its bucket or relayed from the parent's last machine.
         # Addressed within that folder, so where its records were read from does
         # not make the same continuation a different job.
-        key = f"{CHECKPOINTS}/{file.name}"
+        key = checkpoint_key(record.artifact.uri)
         given = _PARENT_CHECKPOINT + file.suffix
         inputs += (
             Input(
@@ -309,15 +362,16 @@ def continue_from(
         Variable(name="ETUDE_CONTINUES", value=handed.model_dump_json()),
     )
     job = parent.spec.model_copy(
-        update={"until": until, "inputs": inputs, "environment": environment}
+        update={"until": target, "inputs": inputs, "environment": environment}
     )
     return Run(job=job, seed=parent.seed, params=dict(parent.params), source=parent.source)
 
 
 def _hold(evaluation: Evaluation) -> None:
-    """On the machine: hold the tournament, with the checkpoint inputs in their seats."""
-    # Loaded by import path: the function `evaluation` was given, typed there.
-    play = cast(Callable[[Match], Tables | Result], evaluation.play.load())
+    """On the machine: hold the tournament, with the checkpoint inputs in their seats.
+
+    Eval job commands name it as `etude.jobs:_hold`, so its name and module stay.
+    """
     if evaluation.experiment is None or (evaluation.checkpoints and evaluation.matches is None):
         raise SystemExit("etude: an experiment's evaluation job is launched by `etude eval`")
     folder = os.environ.get("ETUDE_INPUTS_DIR")
@@ -328,7 +382,7 @@ def _hold(evaluation: Evaluation) -> None:
         given = evaluation.checkpoint
         # A training run's file is keyed by its run and name; any other, by where it lies.
         key = (
-            CheckpointKey(run=given.run, name=PurePosixPath(given.key).name)
+            CheckpointKey(run=given.run, name=checkpoint_file_name(given.key))
             if given.run is not None
             else CheckpointKey(address=given.key)
         )
@@ -338,24 +392,14 @@ def _hold(evaluation: Evaluation) -> None:
             size_bytes=given.size_bytes,
         )
         checkpoint = CheckpointRef(key=key, artifact=artifact)
-    matches = None
     if evaluation.matches is not None:
         here = {key: (Path(str(folder)) / name).as_uri() for key, name in evaluation.files.items()}
-        matches = [_located(match, here) for match in evaluation.matches]
-    hold(
-        evaluation.tournament,
-        experiment=evaluation.experiment,
-        play=play,
-        checkpoint=checkpoint,
-        checkpoints=tuple(each.ref for each in evaluation.checkpoints),
-        enter=evaluation.entrants,
-        matches=matches,
-        workers=evaluation.workers,
-        lines=evaluation.lines,
-    )
+        matches = tuple(_relocated(match, here) for match in evaluation.matches)
+        evaluation = evaluation.model_copy(update={"matches": matches})
+    hold_evaluation(evaluation, checkpoint=checkpoint)
 
 
-def _located(match: Match, here: Mapping[str, str]) -> Match:
+def _relocated(match: Match, here: Mapping[str, str]) -> Match:
     """The match with each model's checkpoint file where it lies on this machine."""
     players: list[Player] = []
     for player in match.players:
@@ -401,10 +445,15 @@ def _job(
         prepared is not None and prepared.python is not None
     )
     python = '"$ETUDE_PYTHON"' if named else "uv run python"
-    command = f"{python} -m etude.call --function {shlex.quote(str(called))}"
+    command = f"{python} -m etude.call {_called(called)}"
     if called.path:
         command += f" --path {shlex.quote(called.path)}"
     return Job(**sourced, command=command, config=text, experiment=experiment)
+
+
+def _called(function: Function) -> str:
+    """The part of a job's command that names the function it calls."""
+    return f"--function {shlex.quote(str(function))}"
 
 
 def _config_text(function: Callable[..., object], config: BaseModel) -> str:

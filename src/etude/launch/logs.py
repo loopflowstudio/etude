@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 from typing import cast
 
-from etude.launch.logging import CLOSED, TRUNCATED, bounded, portions
+from etude.launch.logging import CLOSED, TRUNCATED, bound, parse_log_line
 from etude.launch.records import Diagnostic, LogChunk, LogProducer, LogSnapshot, LogStream
 
 
@@ -12,11 +12,11 @@ def snapshot_stream(
 ) -> LogStream:
     if producer not in {"bootstrap", "worker", "job"}:
         raise ValueError("unknown log producer")
-    text = bounded(raw.decode(errors="replace")) if raw is not None else ""
+    kept = bound(raw.decode(errors="replace") if raw is not None else "")
+    opening, omitted, tail = kept.opening, kept.omitted, kept.tail
     # Captured child output may itself mention closure. Only the owning producer
     # can close this stream, using its own timestamped operational line.
-    last_message = text.removesuffix("\n").rsplit("\n", 1)[-1].partition(" ")[2]
-    opening, tail, omitted = portions(text)
+    last = parse_log_line(tail.removesuffix("\n").rsplit("\n", 1)[-1])
     diagnostics: list[Diagnostic] = []
     chunks: list[LogChunk] = []
     for offset, body in ((0, opening), (len(opening) + omitted, tail)):
@@ -28,9 +28,10 @@ def snapshot_stream(
         start = position = 0
         for line in body.splitlines(keepends=True):
             diagnostic = None
-            if " diagnostic: " in line:
+            parsed = parse_log_line(line)
+            if parsed is not None and parsed.operation == "diagnostic":
                 try:
-                    diagnostic = Diagnostic.model_validate_json(line.split(" diagnostic: ", 1)[1])
+                    diagnostic = Diagnostic.model_validate_json(parsed.message)
                 except ValueError:
                     pass  # a truncated record is explicitly incomplete evidence
             if diagnostic is not None:
@@ -52,8 +53,15 @@ def snapshot_stream(
         received=raw is not None,
         observed_at=datetime.now(UTC) if raw is not None else None,
         complete=raw is not None
-        and (closed or (producer != "job" and last_message == f"{producer}: {CLOSED}")),
-        truncated=TRUNCATED in text,
+        and (
+            closed
+            or (
+                producer != "job"
+                and last is not None
+                and (last.operation, last.message) == (producer, CLOSED)
+            )
+        ),
+        truncated=omitted > 0 or TRUNCATED in opening + tail,
     )
 
 

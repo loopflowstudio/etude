@@ -105,7 +105,7 @@ hold(league, experiment="ppo", enter=finals, play=play, workers=8, storages=[buc
 
 db = statsdb("ppo", bucket)  # or "s3://my-bucket/runs", a directory, or nothing: ~/.etude/track
 for each in scores(db, "anchors", table="plays", value="score"):
-    print(each.seating, each.run, [(p.name, p.clocks, p.value) for p in each.points])
+    print(each.seating, each.run, [(p.name, p.at, p.value) for p in each.points])
 for entry in standings(db, "finals-1", table="plays", value="score").entries:
     print(entry.name, entry.opponent_name, entry.value, entry.interval)
 ```
@@ -168,17 +168,17 @@ evaluate(
   its clocks: `CheckpointRef(key=..., artifact=..., at={"updates": 600})`.
   A tracked checkpoint's `ref` fills `at` from its run's clocks; give it
   yourself for a checkpoint no Etude run recorded. It is carried to each
-  match's seats (`seats.at`, `players.at`) so a report can place the point,
-  and is part of no key: correcting it never forks a model or replays a
-  match. Seats that disagree are listed in `players.at_conflict`; a report
-  draws the latest and notes the earlier.
+  match's seats (`seats.at`, and every distinct one in `players.seated_at`) so
+  a report can place the point, and is part of no key: correcting it never
+  forks a model or replays a match. Where seats disagree, a report draws the
+  latest and notes the earlier.
 - **Which learner it is.** `line` names the learner a checkpoint belongs
   to, such as a seed or a recipe: `CheckpointRef(..., at={"updates": 600},
   line="seed-1")`. A report compares a checkpoint with earlier ones, and
   draws its curve, only within its line. A tracked checkpoint's `ref` fills
   `line` with the first run of its run's chain of continuations, so a
   continued learner is one line. Like `at`, it is carried to the seats
-  (`seats.line`, `players.line`, `players.line_conflict`) and is part of no key.
+  (`seats.line`, `players.lines`) and is part of no key.
 - **Source files.** A directory stands for the files below it. In a git
   checkout only tracked files count, named by their path in the checkout, so
   caches and scratch files never change a version; an uncommitted edit does,
@@ -234,7 +234,10 @@ evaluate(
   the rows for which `where` holds. A row is `table`'s joined to each of
   `join` on whichever of run, match, seat and game both have. `by` may name
   `player`, the key of the row's seat's player, and `opponents`, the other
-  seats' keys in seat order, comma-joined. A column a match's rows never
+  seats' keys in seat order, a list (`opponents = ['KEY']` in a two-seat
+  match). Blocks sealed by etude 0.3.0 joined them with commas, which keys
+  also hold; such a value reads as a one-element list of that text, the
+  opponent's key in a two-seat match. A column a match's rows never
   gave reads as null. A rollup that cannot sum a match (a sum of text, an
   expression DuckDB rejects) fails the match. Each block keeps its matches'
   partial totals in `card_deals.parquet`; `statsdb` adds a new block's to the
@@ -404,10 +407,13 @@ evaluate(
   (`ETUDE_RUN`), so `etude logs` and `status` lead to it and a retry resumes
   it, finding the same checkpoint (by its key) wherever the retry put it. Elsewhere it is named for the tournament and what is given; the same
   call resumes it.
-- **Splitting.** `share=(k, n)` plays one of n disjoint parts, for n
-  machines: contiguous runs of the scheduled matches in play order, so parts
-  differ by at most one match and each seats only some of the checkpoints.
-  The cut covers delivered matches too, so a retried share keeps its part.
+- **Splitting.** `share=Share(index=k, count=n)` plays part k (from 0) of
+  n disjoint parts, for n machines: contiguous runs of the scheduled matches
+  in play order, so parts differ by at most one match and each seats only
+  some of the checkpoints. The cut covers delivered matches too, so a
+  retried share keeps its part. `tournament.json` stores it as
+  `{"index": k, "count": n}`; an `[k, n]` pair written by etude 0.3.0
+  still reads.
 - **Cost.** Holding a checkpoint or entrants reads nothing of the
   tournament: it plays their matches. Holding nothing new (batch) lists each
   place once and reads each eval run's `run.json` and, for the experiment's,
@@ -416,11 +422,12 @@ evaluate(
   environment, to play what the tournament calls for and none of the
   experiment's eval runs in its environment delivered.
 - **`scores`** gives one `Scores` per seating and training run: each held
-  checkpoint's name, ordinal, the clocks where its run stood when it saved
-  it, and the first player's value with a 95% interval over whole matches.
+  checkpoint's name, ordinal, `at` (where its run's clocks stood when it
+  saved it), and the first player's value with a 95% interval over whole matches.
   A held checkpoint whose relative seat found nothing has no point:
   `Tournament.resolve(lines)` gives each such `Gap` and why, `not_yet` or
-  `never`, and the report draws it. Checkpoints no training run under the
+  `never`, with the `value` of the seat's clock it looked for, and the report
+  draws it. Checkpoints no training run under the
   source recorded make one `Scores` per seating,
   ordered by name, numbers in order (`updates-900` before `updates-1000`).
 - **`standings`** gives a round robin's payoff matrix, best first, each entry
@@ -568,10 +575,11 @@ as a launched one does, unless `--retry-failed`.
   source: each one's name, its `job` (the name the report gives it: the
   launch name, with its config digest when one name ran two configs),
   whether it is `running`, `finished` or `failed`,
-  and the checkpoints it stored, each with its ordinal, clocks, tags and
-  `wall_ms`, when it was saved in milliseconds since the epoch.
+  and the checkpoints it stored, each with its ordinal, `at` (where its
+  run's clocks stood), tags and `wall_ms`, when it was saved in milliseconds
+  since the epoch.
   `Checkpoints` is a tuple, so a slice works too; `every(n)`, `at(clock,
-  *values)` and `tagged(tag)` choose by ordinal, coordinate or tag, and
+  *values)` and `tagged(tag)` choose by ordinal, clock value or tag, and
   `final` is the last checkpoint once a run has finished.
 - **What `eval` returns.** Evaluation jobs holding a benchmark for the
   checkpoints it chose. A relative seat finds its checkpoint among every
@@ -643,12 +651,14 @@ matches first played at it, and any held again there.
 `statsdb(experiment, store)` gives each of your tables across every eval run of
 the experiment, beside Etude's own:
 `runs` (with the tournament each was held for), `players` (`kind` `model` or
-`code`, with a `config.KEY`
-column per scalar config key, dotted when nested), `matches`, `seats`,
+`code`, `name` the latest its seats give and `names` every one, with a
+`config.KEY` column per scalar config key, dotted when nested), `matches`
+(`newest = 1` marks the record that counts: of a match's done records in its
+environment, the latest), `seats`,
 `groups`, `tournaments` (with any `conflict` among its eval runs), `schedule`
 (every match a tournament calls for, with its seating and checkpoint) and
 `training_checkpoints` (every checkpoint a training run under the source
-recorded, joined to players and the schedule by `checkpoint`, its key) and
+recorded, with its `at`, joined to players and the schedule by `checkpoint`, its key) and
 `blobs` (each blob's `sha256` and size, by run and match; a converted run's
 artifacts name no match), and one table per rollup.
 
@@ -681,20 +691,20 @@ players, or a group against the match's other groups. The value is
 percentile bootstrap over whole matches with a fixed seed, independent of
 the order rows are read in; fewer than two matches have none.
 
-`estimate` answers many ratios over the same blocks with one bootstrap, as a
-page of per-card rates over the same deals needs:
+`estimate` answers many ratios over the same resampling units, such as deals,
+with one bootstrap, as a page of per-card rates over the same deals needs:
 
 ```python
 from etude.eval.query import estimate
 
-# Blocks × columns: per deal, each card's wins and games.
+# Units × columns: per deal, each card's wins and games.
 wins = [[1, 0], [2, 1], [0, 1]]
 games = [[2, 1], [3, 1], [1, 2]]
 for card in estimate(["deal-1", "deal-2", "deal-3"], wins, games):
     print(card)  # Estimate(value=..., interval=(low, high)), or None without games
 ```
 
-Blocks are resampled in the order of their keys, never of their values or of
+Units are resampled in the order of their keys, never of their values or of
 how they were read, so each column's interval is the one it would get alone.
 Releases through v0.2.9 resampled blocks in the order of their values, so
 their intervals differ slightly from these: the same distribution, other draws.

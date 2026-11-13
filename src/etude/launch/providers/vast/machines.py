@@ -65,7 +65,7 @@ class VastMachines:
     def _key(self, session: str, name: str) -> str:
         return f"{self._prefix}/sessions/{session}/{name}.json"
 
-    def _receipt(self, session: str) -> Instance | None:
+    def _stored_instance(self, session: str) -> Instance | None:
         raw = self._bucket.get(self._key(session, "receipt"))
         return None if raw is None else Instance.model_validate_json(raw)
 
@@ -152,7 +152,7 @@ class VastMachines:
         )
 
     def find(self, session_id: str) -> Allocation | None:
-        instance = self._receipt(session_id)
+        instance = self._stored_instance(session_id)
         if instance is None:
             if self._bucket.get(self._key(session_id, "offer")) is None:
                 return None
@@ -168,7 +168,7 @@ class VastMachines:
         return self._allocation(instance)
 
     def alive(self, session_id: str) -> bool:
-        instance = self._receipt(session_id)
+        instance = self._stored_instance(session_id)
         if instance is None:
             return True
         try:
@@ -193,7 +193,7 @@ class VastMachines:
         return now - first_seen < timedelta(seconds=OUTAGE_SECONDS)
 
     def end(self, session_id: str) -> datetime | None:
-        receipt = self._receipt(session_id)
+        receipt = self._stored_instance(session_id)
         if receipt is None and self._bucket.get(self._key(session_id, "offer")) is None:
             return None
         current = (

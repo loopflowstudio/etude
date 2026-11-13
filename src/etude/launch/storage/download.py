@@ -27,18 +27,11 @@ from uuid import uuid4
 
 from pydantic import Field
 
-from etude.cache import Artifact, Cache, Corrupt, Fetched
-from etude.cache import Mismatch as ContentMismatch
+from etude.cache import Artifact, Cache, ContentMismatch, Corrupt, Fetched
 from etude.deadline import limit_time, remaining
 from etude.launch.records import Record
-from etude.launch.storage.s3 import (
-    TRANSIENT_STATUSES,
-    Denied,
-    Reply,
-    Send,
-    _send,
-)
-from etude.launch.storage.transport import attribute, deliver, emit, observe
+from etude.launch.storage.s3 import TRANSIENT_STATUSES, Denied, _send
+from etude.launch.storage.transport import HTTPReply, Send, attribute, deliver, emit, observe
 from etude.storage_timeout import StorageUnavailable
 
 PART_BYTES = 16 * 1024**2
@@ -89,8 +82,8 @@ class Download(Record):
     size_bytes: int = Field(ge=0)
 
 
-class Mismatch(StorageUnavailable):
-    """The bytes arrived but are not the ones named; asking again cannot help."""
+class StoredContentMismatch(StorageUnavailable):
+    """Storage holds other bytes than the ones named, by length or SHA256; asking again cannot help."""
 
 
 class _Link:
@@ -139,7 +132,7 @@ class _Link:
         found = reply.headers.get("etag")
         stored = (reply.headers.get("content-range") or "").rpartition("/")[2]
         if reply.status == 206 and stored.isdigit() and int(stored) != size:
-            raise Mismatch(f"storage holds {stored} bytes, not the {size} named")
+            raise StoredContentMismatch(f"storage holds {stored} bytes, not the {size} named")
         if (
             reply.status != 206
             or reply.headers.get("content-range") != f"bytes {start}-{end}/{size}"
@@ -160,7 +153,7 @@ class _Link:
             raise StorageUnavailable(f"download failed (status {reply.status})")
         return Fetched(body=reply.body, etag=reply.headers.get("etag"))
 
-    def _get(self, headers: dict[str, str]) -> Reply:
+    def _get(self, headers: dict[str, str]) -> HTTPReply:
         while True:
             remaining()
             failure = "transport interrupted"
@@ -183,8 +176,8 @@ class _Link:
             raise Denied("download refused (status 403)")
         return reply
 
-    def reused(self, size_bytes: int, byte_range: str | None) -> None:
-        emit("REUSE", self.source.url, reused=size_bytes, byte_range=byte_range, completed=True)
+    def reused(self, size_bytes: int, start: int | None, end: int | None) -> None:
+        emit("REUSE", self.source.url, reused=size_bytes, range_start=start, completed=True)
 
 
 def download(
@@ -202,7 +195,7 @@ def download(
     With `holder`, nothing is copied: the bytes stay in the cache, kept for
     `holder` (`Cache.hold`), and their path is returned; `destination` is used
     only for content larger than the cache's whole allowance.
-    Raises `Mismatch` when storage holds other bytes, and `StorageUnavailable`
+    Raises `StoredContentMismatch` when storage holds other bytes, and `StorageUnavailable`
     when it cannot be read; `destination` is left as it was.
     """
     if retries < 0:
@@ -212,7 +205,7 @@ def download(
     artifact = Artifact(location=location, sha256=source.sha256, size_bytes=source.size_bytes)
     with (
         limit_time(timeout),
-        attribute(transfer=uuid4().hex, sha256=source.sha256, size_bytes=str(source.size_bytes)),
+        attribute(transfer=uuid4().hex, sha256=source.sha256, size_bytes=source.size_bytes),
     ):
         cache = cache or Cache()
         link = _Link(source, retries, send)
@@ -221,7 +214,7 @@ def download(
                 return cache.hold(artifact, link, holder=holder, staging=destination)
             return cache.place(artifact, destination, link)
         except ContentMismatch as error:
-            raise Mismatch(str(error)) from None
+            raise StoredContentMismatch(str(error)) from None
         except Corrupt as error:
             raise StorageUnavailable(str(error)) from None
         finally:

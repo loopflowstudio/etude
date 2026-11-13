@@ -21,9 +21,9 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from functools import cache
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import RootModel, TypeAdapter
+from pydantic import Field, RootModel, TypeAdapter
 
 from etude.deadline import limit_time, remaining
 from etude.launch.errors import LaunchError
@@ -83,41 +83,92 @@ class FetchRequest(Record):
     destination: Path
 
 
-class Request(Record):
-    """Controller operations; no credentials or provider authority cross this wire."""
+# Controller operations, one record per shape of request. No credentials or
+# provider authority cross this wire; both ends run the same program.
 
-    operation: Literal[
-        "launch",
-        "prepare_launch",
-        "fail_launch",
-        "fetch",
-        "record",
-        "status",
-        "cancel",
-        "wait",
-        "logs",
-        "diagnostics",
-        "usage",
-        "cohort_runs",
-        "rent",
-        "terminate",
-        "quote",
-        "availability",
-    ]
-    api: bool = False
-    launch: str = ""
-    message: str = ""
-    submission: LaunchInput | None = None
-    run: str = ""
-    name: str = ""
-    runs: tuple[str, ...] = ()
+
+class SubmissionRequest(Record):
+    operation: Literal["launch", "prepare_launch", "quote"]
+    submission: LaunchInput
+    api: bool = False  # a launch replies with its run ids instead of printing the runs
+
+
+class FailLaunchRequest(Record):
+    operation: Literal["fail_launch"] = "fail_launch"
+    launch: str
+    message: str
+
+
+class OutputRequest(Record):
+    operation: Literal["fetch"] = "fetch"
+    run: str
+    output: str  # the output's name below the run's output directory
+
+
+class RunRequest(Record):
+    operation: Literal["record", "status", "cancel"]
+    run: str
+
+
+class WaitRequest(Record):
+    operation: Literal["wait"] = "wait"
+    runs: tuple[str, ...]
     every: float = 1.0
+    timeout: float | None = None
+
+
+class EvidenceRequest(Record):
+    operation: Literal["diagnostics", "usage"]
+    run: str | None = None
+    machine: str | None = None
+
+
+class LogsRequest(Record):
+    operation: Literal["logs"] = "logs"
+    run: str | None = None
+    machine: str | None = None
     refresh: bool = False
     timeout: float | None = None
-    rent: str = ""  # the on-demand to rent from or ask about
-    machine: str = ""
-    hours: float = 0
+
+
+class CohortRequest(Record):
+    operation: Literal["cohort_runs"] = "cohort_runs"
+    cohort: str
+
+
+class RentRequest(Record):
+    operation: Literal["rent"] = "rent"
+    ondemand: str
+    hours: float
     max_usd: Decimal | None = None
+
+
+class TerminateRequest(Record):
+    operation: Literal["terminate"] = "terminate"
+    machine: str
+
+
+class AvailabilityRequest(Record):
+    operation: Literal["availability"] = "availability"
+    ondemand: str
+    timeout: float | None = None
+
+
+type Request = Annotated[
+    SubmissionRequest
+    | FailLaunchRequest
+    | OutputRequest
+    | RunRequest
+    | WaitRequest
+    | EvidenceRequest
+    | LogsRequest
+    | CohortRequest
+    | RentRequest
+    | TerminateRequest
+    | AvailabilityRequest,
+    Field(discriminator="operation"),
+]
+_REQUEST: TypeAdapter[Request] = TypeAdapter(Request)
 
 
 type Response = (
@@ -139,7 +190,7 @@ type Response = (
 )
 
 
-class Reply(RootModel[Response]):
+class ControllerReply(RootModel[Response]):
     model_config = {"frozen": True}
 
 
@@ -241,7 +292,7 @@ def _ssh(address: str, argv: Sequence[str], **options: Any) -> subprocess.Comple
 def prepare(address: str, submission: LaunchInput) -> LaunchInput:
     client = PythonClient(address)
     launch = Launch.model_validate_json(
-        client._request(Request(operation="prepare_launch", submission=submission))
+        client._request(SubmissionRequest(operation="prepare_launch", submission=submission))
     )
     requested = tuple(
         run.model_copy(update={"id": request.run})
@@ -256,7 +307,7 @@ def prepare(address: str, submission: LaunchInput) -> LaunchInput:
     except Exception as error:
         message = explain(error)
         try:
-            client._request(Request(operation="fail_launch", launch=launch.id, message=message))
+            client._request(FailLaunchRequest(launch=launch.id, message=message))
         except Exception:
             message += "; controller evidence update unconfirmed"
         raise LaunchError(launch.id, tuple(r.run for r in launch.requests), message) from error
@@ -341,14 +392,14 @@ def forward(
         return _ssh(address, argv).returncode
     request: Request
     if submission is not None:
-        request = Request(operation="launch", submission=prepare(address, submission))
+        request = SubmissionRequest(operation="launch", submission=prepare(address, submission))
     else:
         assert fetch is not None
-        request = Request(operation="fetch", run=fetch.run, name=fetch.name)
+        request = OutputRequest(run=fetch.run, output=fetch.name)
     done = _ssh(
         address,
         ["--controller-request"],
-        input=request.model_dump_json().encode(),
+        input=_REQUEST.dump_json(request),
         stdout=subprocess.PIPE if fetch is not None else None,
     )
     if done.returncode:
@@ -393,11 +444,11 @@ class PythonClient:
         done = _ssh(
             self.address,
             ["--controller-request"],
-            input=request.model_copy(update={"api": True}).model_dump_json().encode(),
+            input=_REQUEST.dump_json(request),
             capture_output=True,
             **(
                 {"timeout": remaining(request.timeout)}
-                if request.operation in ("logs", "availability")
+                if isinstance(request, LogsRequest | AvailabilityRequest)
                 else {}
             ),
         )
@@ -426,7 +477,9 @@ class PythonClient:
         )
         try:
             return TypeAdapter(tuple[str, ...]).validate_json(
-                self._request(Request(operation="launch", submission=submission))
+                self._request(
+                    SubmissionRequest(operation="launch", submission=submission, api=True)
+                )
             )
         except Exception as error:
             assert submission.launch is not None
@@ -483,38 +536,38 @@ class PythonClient:
         )
         submission = LaunchInput(runs=tuple(runs), cohort=spec, pool=pool, rent=rent)
         return Quote.model_validate_json(
-            self._request(Request(operation="quote", submission=submission))
+            self._request(SubmissionRequest(operation="quote", submission=submission))
         )
 
     def availability(self, rent: str, *, timeout: float | None = None) -> Availability:
         return Availability.model_validate_json(
-            self._request(Request(operation="availability", rent=rent, timeout=timeout))
+            self._request(AvailabilityRequest(ondemand=rent, timeout=timeout))
         )
 
     def record(self, run: str) -> RunRecord:
-        return RunRecord.model_validate_json(self._request(Request(operation="record", run=run)))
+        return RunRecord.model_validate_json(self._request(RunRequest(operation="record", run=run)))
 
     def status(self, run: str) -> Status:
-        return Status.model_validate_json(self._request(Request(operation="status", run=run)))
+        return Status.model_validate_json(self._request(RunRequest(operation="status", run=run)))
 
     def wait(self, *runs: str, every: float = 1.0, timeout: float | None = None) -> list[Status]:
         return TypeAdapter(list[Status]).validate_json(
-            self._request(Request(operation="wait", runs=runs, every=every, timeout=timeout))
+            self._request(WaitRequest(runs=runs, every=every, timeout=timeout))
         )
 
     def cancel(self, run: str) -> Status:
-        return Status.model_validate_json(self._request(Request(operation="cancel", run=run)))
+        return Status.model_validate_json(self._request(RunRequest(operation="cancel", run=run)))
 
     def cohort_runs(self, name: str) -> tuple[RunRecord, ...]:
         return TypeAdapter(tuple[RunRecord, ...]).validate_json(
-            self._request(Request(operation="cohort_runs", name=name))
+            self._request(CohortRequest(cohort=name))
         )
 
     def diagnostics(
         self, *, run: str | None = None, machine: str | None = None
     ) -> tuple[Diagnostic, ...]:
         return TypeAdapter(tuple[Diagnostic, ...]).validate_json(
-            self._request(Request(operation="diagnostics", run=run or "", machine=machine or ""))
+            self._request(EvidenceRequest(operation="diagnostics", run=run, machine=machine))
         )
 
     def logs(
@@ -529,9 +582,7 @@ class PythonClient:
             raise ValueError("a log timeout bounds a refresh")
         if timeout is not None and timeout <= 0:
             raise ValueError("log timeout must be positive")
-        request = Request(
-            operation="logs", run=run or "", machine=machine or "", refresh=refresh, timeout=timeout
-        )
+        request = LogsRequest(run=run, machine=machine, refresh=refresh, timeout=timeout)
         try:
             with limit_time(timeout):
                 return LogSnapshot.model_validate_json(self._request(request))
@@ -542,101 +593,86 @@ class PythonClient:
 
     def usage(self, *, run: str | None = None, machine: str | None = None) -> Usage:
         return Usage.model_validate_json(
-            self._request(Request(operation="usage", run=run or "", machine=machine or ""))
+            self._request(EvidenceRequest(operation="usage", run=run, machine=machine))
         )
 
     def fetch(self, run: str, name: str, destination: Path) -> Path:
         return _save_output(
-            EncodedOutput.model_validate_json(
-                self._request(Request(operation="fetch", run=run, name=name))
-            ),
+            EncodedOutput.model_validate_json(self._request(OutputRequest(run=run, output=name))),
             FetchRequest(run=run, name=name, destination=destination),
         )
 
     def rent(self, ondemand: str, hours: float, max_usd: Decimal | None = None) -> str:
         return TypeAdapter(str).validate_json(
-            self._request(Request(operation="rent", rent=ondemand, hours=hours, max_usd=max_usd))
+            self._request(RentRequest(ondemand=ondemand, hours=hours, max_usd=max_usd))
         )
 
     def terminate(self, machine: str) -> Machine:
-        return Machine.model_validate_json(
-            self._request(Request(operation="terminate", machine=machine))
-        )
+        return Machine.model_validate_json(self._request(TerminateRequest(machine=machine)))
 
 
 def receive(scheduler: Scheduler) -> int:
-    raw = Request.model_validate_json(sys.stdin.buffer.read())
-    operation = raw.operation
+    request = _REQUEST.validate_json(sys.stdin.buffer.read())
     response: Response
-    if operation == "prepare_launch":
-        if raw.submission is None:
-            raise LauncherError("launch needs a submission")
-        response = scheduler.prepare_launch(
-            raw.submission.runs, raw.submission.pool, rent=raw.submission.rent
-        )
-    elif operation == "fail_launch":
-        scheduler.fail_launch(raw.launch, raw.message)
-        response = "failed; no run admitted"
-    elif operation == "launch":
-        submission = raw.submission
-        if submission is None:
-            raise LauncherError("launch needs a submission")
-        try:
-            _retain(submission.sources)
-        except Exception as error:
-            if submission.launch is not None:
-                scheduler.fail_launch(submission.launch, explain(error))
-            raise
-        ids = submit(scheduler, submission)
-        if not raw.api:
-            show_runs(scheduler, ids)
-            return 0
-        response = tuple(ids)
-    elif operation == "fetch":
-        with tempfile.TemporaryDirectory() as temporary:
-            path = scheduler.fetch(raw.run, raw.name, Path(temporary))
-            body = path.read_bytes()
-            response = EncodedOutput(
-                body=base64.b64encode(body).decode(), sha256=hashlib.sha256(body).hexdigest()
+    match request:
+        case SubmissionRequest(operation="prepare_launch", submission=submission):
+            response = scheduler.prepare_launch(
+                submission.runs, submission.pool, rent=submission.rent
             )
-    elif operation == "record":
-        response = scheduler.record(raw.run)
-    elif operation == "status":
-        response = scheduler.status(raw.run)
-    elif operation == "cancel":
-        response = scheduler.cancel(raw.run)
-    elif operation == "wait":
-        response = [
-            status for status in scheduler.wait(*raw.runs, every=raw.every, timeout=raw.timeout)
-        ]
-    elif operation == "usage":
-        response = scheduler.usage(run=raw.run or None, machine=raw.machine or None)
-    elif operation == "diagnostics":
-        response = scheduler.diagnostics(run=raw.run or None, machine=raw.machine or None)
-    elif operation == "cohort_runs":
-        response = scheduler.cohort_runs(raw.name)
-    elif operation == "logs":
-        response = scheduler.logs(
-            run=raw.run or None,
-            machine=raw.machine or None,
-            refresh=raw.refresh,
-            timeout=raw.timeout,
-        )
-    elif operation == "rent":
-        if not raw.rent:
-            raise LauncherError("rent needs an on-demand")
-        response = scheduler.rent(raw.rent, raw.hours, raw.max_usd)
-    elif operation == "quote":
-        if raw.submission is None:
-            raise LauncherError("quote needs a submission")
-        response = quote(scheduler, raw.submission)
-    elif operation == "availability":
-        response = scheduler.availability(raw.rent, timeout=raw.timeout)
-    elif operation == "terminate":
-        response = scheduler.terminate(raw.machine)
-    else:
-        raise LauncherError("unknown controller operation")
-    print(Reply(response).model_dump_json())
+        case SubmissionRequest(operation="launch", submission=submission):
+            try:
+                _retain(submission.sources)
+            except Exception as error:
+                if submission.launch is not None:
+                    scheduler.fail_launch(submission.launch, explain(error))
+                raise
+            ids = submit(scheduler, submission)
+            if not request.api:
+                show_runs(scheduler, ids)
+                return 0
+            response = tuple(ids)
+        case SubmissionRequest(operation="quote", submission=submission):
+            response = quote(scheduler, submission)
+        case FailLaunchRequest():
+            scheduler.fail_launch(request.launch, request.message)
+            response = "failed; no run admitted"
+        case OutputRequest():
+            with tempfile.TemporaryDirectory() as temporary:
+                path = scheduler.fetch(request.run, request.output, Path(temporary))
+                body = path.read_bytes()
+                response = EncodedOutput(
+                    body=base64.b64encode(body).decode(), sha256=hashlib.sha256(body).hexdigest()
+                )
+        case RunRequest(operation="record"):
+            response = scheduler.record(request.run)
+        case RunRequest(operation="status"):
+            response = scheduler.status(request.run)
+        case RunRequest(operation="cancel"):
+            response = scheduler.cancel(request.run)
+        case WaitRequest():
+            response = scheduler.wait(*request.runs, every=request.every, timeout=request.timeout)
+        case EvidenceRequest(operation="usage"):
+            response = scheduler.usage(run=request.run, machine=request.machine)
+        case EvidenceRequest(operation="diagnostics"):
+            response = scheduler.diagnostics(run=request.run, machine=request.machine)
+        case CohortRequest():
+            response = scheduler.cohort_runs(request.cohort)
+        case LogsRequest():
+            response = scheduler.logs(
+                run=request.run,
+                machine=request.machine,
+                refresh=request.refresh,
+                timeout=request.timeout,
+            )
+        case RentRequest():
+            response = scheduler.rent(request.ondemand, request.hours, request.max_usd)
+        case AvailabilityRequest():
+            response = scheduler.availability(request.ondemand, timeout=request.timeout)
+        case TerminateRequest():
+            response = scheduler.terminate(request.machine)
+        case _:
+            raise LauncherError(f"unknown controller operation {request.operation!r}")
+    print(ControllerReply(response).model_dump_json())
     return 0
 
 

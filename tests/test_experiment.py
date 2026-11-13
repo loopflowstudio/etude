@@ -441,8 +441,8 @@ def test_a_tracked_checkpoints_seat_says_where_its_run_stood_and_its_line(tmp_pa
     save(run, bucket, tmp_path, range(1, 2))
     run.finish(timeout=30)
     (saved,) = observe(bucket, "ppo").run("ppo-1").checkpoints
-    assert saved.ref.at == saved.clocks
-    assert authored(saved.clocks) == authored(saved.model(DIRECT).checkpoint.at) == {"updates": 100}
+    assert saved.ref.at == saved.at
+    assert authored(saved.at) == authored(saved.model(DIRECT).checkpoint.at) == {"updates": 100}
     assert saved.ref.line == saved.model(DIRECT).checkpoint.line == "ppo-1"
 
 
@@ -580,7 +580,7 @@ def test_relative_seats_fill_in_as_their_jobs_save_and_the_report_says_what_is_m
         return {
             p.at["updates"]: p.value
             if p.gap is None
-            else (p.gap.missing, p.gap.seat.job, p.gap.position)
+            else (p.gap.missing, p.gap.seat.job, p.gap.value)
             for p in page.points
             if p.selection == chosen and p.run == "large-1"
         }

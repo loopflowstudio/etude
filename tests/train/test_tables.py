@@ -52,7 +52,7 @@ def test_row_tables_roundtrip_ship_once_and_relocate(tmp_path: Path) -> None:
     assert data.read_table("absent", "updates") == ()
     assert data.metrics() == []
     # Only a digest is retained in the update's text column.
-    assert data.tables[0].row(0)["values"] == {"decks": artifact.stem}
+    assert data.columns[0].row(0).values == {"decks": artifact.stem}
     key = artifact.relative_to(local / "r").as_posix()
     assert immutable(key) and key in listing(local / "r", tail_seconds=0)
 

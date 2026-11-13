@@ -54,9 +54,9 @@ from typing import IO, Literal, Self
 
 from pydantic import ValidationError
 
-from etude.carriage import taken
+from etude.carriage import checkpoint_key, note_retired, taken
 from etude.deadline import limit_time
-from etude.run.block_file import block_key, tail_key
+from etude.run.block_file import block_key, log_key, sealed_as, tail_key
 from etude.run.declaration import declare
 from etude.run.delivery import RunFiles, StorageDestination, destinations, ship
 from etude.run.errors import EtudeError
@@ -74,7 +74,7 @@ from etude.run.records import (
     SourceKey,
 )
 from etude.run.storage import DirectoryStorage, Storage, run_prefix
-from etude.train.block import Builder, Table, concat
+from etude.train.block import Builder, Columns, Json, LoggedRow, concat
 from etude.train.block import encode as encode_block
 from etude.train.manifest import Index, metric_names
 from etude.train.records import CheckpointRecord, ParentCheckpoint, RowTable, checkpoint_name
@@ -93,19 +93,19 @@ def flatten(values: Logged, prefix: str = "") -> Iterator[tuple[str, object]]:
             yield prefix + str(name), value
 
 
-def log_line(wall_ms: int, clocks: Mapping[str, float], values: Mapping[str, object]) -> str:
+def log_line(row: LoggedRow) -> str:
     """One row of the local log: a checksum, then the row, so a torn line is detected."""
-    body = json.dumps({"wall_ms": wall_ms, "clocks": clocks, "values": values})
+    body = row.model_dump_json()
     return f"{zlib.crc32(body.encode()):08x} {body}\n"
 
 
-def write_block(root: Path, key: str, table: Table) -> int:
+def write_block(root: Path, key: str, columns: Columns) -> int:
     """Write one block whole and durably; a reader never sees half of it."""
     target = root / key
     target.parent.mkdir(parents=True, exist_ok=True)
     partial = target.with_suffix(".partial")
     with partial.open("wb") as stream:
-        stream.write(encode_block(table))
+        stream.write(encode_block(columns))
         stream.flush()
         os.fsync(stream.fileno())
     partial.replace(target)
@@ -121,17 +121,24 @@ def seal_logs(root: Path, clocks: Sequence[str]) -> None:
     process later writes the same sequence again, with more rows.
     """
     for log in sorted((root / "metrics").glob("*.open")):
-        sequence, _, writer = log.stem.partition("-")
+        tail = sealed_as(log.relative_to(root).as_posix())
+        if tail is None:
+            continue  # not a log a writer opened
         builder = Builder(clocks)
         for line in log.read_text().splitlines():
             checksum, _, body = line.partition(" ")
             if checksum != f"{zlib.crc32(body.encode()):08x}":
                 break
-            row = json.loads(body)
-            builder.add(row["wall_ms"], row["clocks"], row["values"])
+            row = LoggedRow.model_validate_json(body)
+            builder.add(row.wall_ms, row.clocks, row.values)
         if len(builder):
-            write_block(root, tail_key(int(sequence), writer), builder.table(writer, int(sequence)))
+            write_block(root, tail.key, builder.columns(tail.writer, tail.first))
         log.unlink()
+
+
+def _same_model(a: ArtifactRef, b: ArtifactRef) -> bool:
+    """Whether two references name the same model: by digest, else by address."""
+    return (a.sha256 or a.uri) == (b.sha256 or b.uri)
 
 
 def _suffix(source: Path) -> str:
@@ -144,6 +151,14 @@ class EtudeWarning(UserWarning):
 
 
 _STOP = object()
+
+
+@dataclass(frozen=True)
+class _Row:
+    """A logged row for the writer: when it was logged, and everything it gave."""
+
+    wall_ms: int
+    values: Logged
 
 
 @dataclass(frozen=True)
@@ -208,7 +223,7 @@ class Run:
         self._writer_id = secrets.token_hex(6)
         # A later attempt or a continuation resumes from here, and its rows
         # supersede earlier attempts' from these coordinates on.
-        latest = self._latest()
+        latest = self._latest_record()
         if resumed_at is None:
             resumed_at = {} if latest is None else latest.at
         started_ms = time.time_ns() // 1_000_000
@@ -236,9 +251,9 @@ class Run:
         self._metric_names = metric_names(root) if metric_name_limit is not None else set()
         self._sequence = 0
         # Only the current compaction window stays in memory.
-        self._tails: list[Table] = []
+        self._tails: list[Columns] = []
         self._tail_bytes = 0
-        self._recent: list[Table] = []
+        self._recent: list[Columns] = []
         self._recent_bytes = 0
         self._folded_at = time.monotonic()
         self._queue: queue.Queue[object] = queue.Queue(maxsize=queue_size)
@@ -281,14 +296,14 @@ class Run:
                     else:
                         self._high[name] = value
             wall_ms, hours = self._now()
-            self._queue.put_nowait((wall_ms, {**row, **hours}))
+            self._queue.put_nowait(_Row(wall_ms, {**row, **hours}))
             self._high.update(hours)
         except queue.Full:
-            self._lost()
+            self._count_dropped()
         except Exception:
             if self.strict:
                 raise
-            self._lost()
+            self._count_dropped()
 
     def log_table(self, name: str, rows: Sequence[Mapping[str, object]], **clocks: float) -> None:
         """Store JSON rows locally, then queue their digest at the given clocks.
@@ -339,7 +354,7 @@ class Run:
         except Exception:  # noqa: BLE001, S110 - a warnings filter must not break training
             pass
 
-    def _lost(self) -> None:
+    def _count_dropped(self) -> None:
         self.dropped += 1
         self._warn("dropped", "the log queue is full and a row was dropped", stacklevel=4)
 
@@ -362,8 +377,8 @@ class Run:
         such as `s3://...` or an `ArtifactRef`, only the reference is recorded.
 
         Recording is idempotent and nothing recorded is replaced. The same
-        model at the same coordinate returns the existing record's reference.
-        A different one at a recorded coordinate is kept as a new version,
+        model at the same `at` returns the existing record's reference.
+        A different one at a recorded `at` is kept as a new version,
         `CLOCK-VALUE.ordinal-N`, beside the first.
 
         Returns the model's reference: pass it to whatever evaluates the model.
@@ -371,20 +386,18 @@ class Run:
         """
         staged: Path | None = None
         try:
-            coordinate = {**(at or {}), **clocks}
-            if set(coordinate) != set(self._clock_names):
+            given = {**(at or {}), **clocks}
+            if set(given) != set(self._clock_names):
                 raise ValueError("checkpoint_clock_mismatch")
-            declared = {name: float(coordinate[name]) for name in self._clock_names}
+            declared = {name: float(given[name]) for name in self._clock_names}
             wall_ms, hours = self._now()
             at = {**declared, **hours}
             name = checkpoint_name(at)
             reference, staged = self._stage(artifact, name)
             for known in self._recorded.values():
-                same = (known.artifact.sha256 or known.artifact.uri) == (
-                    reference.sha256 or reference.uri
-                )
-                # Etude's clocks always move on, so the same coordinate is the author's.
-                if all(known.at.get(n) == v for n, v in declared.items()) and same:
+                # Etude's clocks always move on, so the same `at` is the author's.
+                same = all(known.at.get(n) == v for n, v in declared.items())
+                if same and _same_model(known.artifact, reference):
                     if staged is not None:
                         staged.unlink()
                     return known.artifact
@@ -395,7 +408,7 @@ class Run:
             )
             name = self._unused(name, suffix, ordinal)
             if staged is not None and stored:
-                reference = self._keep(staged, name + suffix, reference)
+                reference = self._rename_staged(staged, name + suffix, reference)
             record = CheckpointRecord(
                 ordinal=ordinal,
                 artifact=reference,
@@ -417,7 +430,7 @@ class Run:
         self._offer(_Kept(name, record))
         return record.artifact
 
-    def position(self, clock: str) -> float | None:
+    def at(self, clock: str) -> float | None:
         """Where the run stands on `clock`: Etude's clocks now, an author's the highest
         value this process logged. None for an author's clock before its first row."""
         if clock in BUILT_IN_NAMES:
@@ -434,7 +447,7 @@ class Run:
         """
         if every <= 0:
             raise ValueError("every must be positive")
-        here, latest = self.position(clock), self._latest()
+        here, latest = self.at(clock), self._latest_record()
         there = 0.0 if latest is None else latest.at.get(clock, 0.0)
         return here is not None and here // every > there // every
 
@@ -446,7 +459,7 @@ class Run:
             HOURS_SINCE_START: (wall_ms - self._origin_ms) / 3_600_000,
         }
 
-    def _latest(self) -> CheckpointRecord | None:
+    def _latest_record(self) -> CheckpointRecord | None:
         """The latest record this run kept, else the parent's it continues from."""
         return self._recorded[max(self._recorded)] if self._recorded else self._inherited
 
@@ -458,11 +471,11 @@ class Run:
         `artifact.uri`, which is on this machine. A continuation gets its
         parent's checkpoint until it records its own. None when there is none.
         """
-        record = self._latest()
+        record = self._latest_record()
         if record is None or not self._recorded:
             return record
         # The file keeps its name wherever the record was written.
-        local = self.files.root / "checkpoints" / record.artifact.uri.rpartition("/")[2]
+        local = self.files.root / checkpoint_key(record.artifact.uri)
         if record.artifact.sha256 is None or not local.is_file():
             return record
         artifact = record.artifact.model_copy(update={"uri": local.resolve().as_uri()})
@@ -510,7 +523,7 @@ class Run:
         candidates = chain((name, f"{name}.ordinal-{ordinal}"), versions)
         return next(c for c in candidates if c not in records and c + suffix not in files)
 
-    def _keep(self, staged: Path, filename: str, reference: ArtifactRef) -> ArtifactRef:
+    def _rename_staged(self, staged: Path, filename: str, reference: ArtifactRef) -> ArtifactRef:
         """Give a staged copy its recorded name, which nothing has used before."""
         kept = staged.with_name(filename)
         staged.replace(kept)
@@ -537,9 +550,7 @@ class Run:
                     (
                         known
                         for known in self._recorded.values()
-                        # The same model: the digest, else the URI.
-                        if (known.artifact.sha256 or known.artifact.uri)
-                        == (checkpoint.sha256 or checkpoint.uri)
+                        if _same_model(known.artifact, checkpoint)
                     ),
                     None,
                 )
@@ -561,7 +572,7 @@ class Run:
         try:
             self._queue.put_nowait(item)
         except queue.Full:
-            self._lost()
+            self._count_dropped()
 
     # --- the writer thread ---------------------------------------------------
 
@@ -573,13 +584,13 @@ class Run:
         def seal(final: bool = False) -> None:
             nonlocal stream, builder
             if stream is not None:
-                table = builder.table(self._writer_id, self._sequence)
+                columns = builder.columns(self._writer_id, self._sequence)
                 self._tail_bytes += write_block(
-                    self.files.root, tail_key(self._sequence, self._writer_id), table
+                    self.files.root, tail_key(self._sequence, self._writer_id), columns
                 )
                 stream.close()
                 Path(stream.name).unlink()  # The block now holds these rows.
-                self._tails.append(table)
+                self._tails.append(columns)
                 stream, builder = None, Builder(self._columns)
                 self._sequence += 1
             self._fold(final)
@@ -599,17 +610,16 @@ class Run:
                 if isinstance(item, _Kept):
                     self._save("checkpoints", item.name, item.record)
                     self._dirty = True
-                elif isinstance(item, tuple):
+                elif isinstance(item, _Row):
                     if stream is None:
-                        directory = self.files.root / "metrics"
-                        directory.mkdir(parents=True, exist_ok=True)
-                        name = f"{self._sequence:08d}-{self._writer_id}.open"
-                        stream = (directory / name).open("a")
+                        log = self.files.root / log_key(self._sequence, self._writer_id)
+                        log.parent.mkdir(parents=True, exist_ok=True)
+                        stream = log.open("a")
                         opened_at = time.monotonic()
-                    coordinate, values = self._row(item[1])
-                    stream.write(log_line(item[0], coordinate, values))
+                    row = self._stored(item)
+                    stream.write(log_line(row))
                     stream.flush()
-                    builder.add(item[0], coordinate, values)
+                    builder.add(row.wall_ms, row.clocks, row.values)
                 due = stream is not None and (
                     len(builder) >= self._segment_rows
                     or time.monotonic() - opened_at >= self._segment_seconds
@@ -636,23 +646,23 @@ class Run:
             recent = list(self._recent)
             size = self._recent_bytes
             if self._tails:
-                table = concat(self._tails)
-                recent.append(table)
+                columns = concat(self._tails)
+                recent.append(columns)
                 if not final:
-                    key = block_key(1, table.first, table.last, table.writer)
-                    size += write_block(self.files.root, key, table)
+                    key = block_key(1, columns.first, columns.last, columns.writer)
+                    size += write_block(self.files.root, key, columns)
                     self._index.add(key)
             compact = final or size >= PERMANENT_BYTES or len(recent) >= RECENT_BLOCKS
             if compact:
-                table = concat(recent)
-                key = block_key(2, table.first, table.last, table.writer)
-                write_block(self.files.root, key, table)
+                columns = concat(recent)
+                key = block_key(2, columns.first, columns.last, columns.writer)
+                write_block(self.files.root, key, columns)
                 self._index.add(key)
             self._index.write()
             retired = [tail_key(tail.first, tail.writer) for tail in self._tails]
             if compact:
                 retired.extend(
-                    block_key(1, table.first, table.last, table.writer) for table in recent
+                    block_key(1, columns.first, columns.last, columns.writer) for columns in recent
                 )
             retired = [key for key in retired if (self.files.root / key).is_file()]
             # The replacement and manifest exist before the append. Couriers need
@@ -666,11 +676,7 @@ class Run:
                 if not key.endswith(".tail")
                 or time.time() - (self.files.root / key).stat().st_mtime >= self.files.tail_age
             ]
-            if delivered:
-                note = self.files.root / "metrics" / f"{self._writer_id}.removed"
-                with note.open("a") as removed:
-                    removed.write("".join(key + "\n" for key in delivered))
-                    removed.flush()
+            note_retired(self.files.root, self._writer_id, delivered)
             for key in retired:
                 (self.files.root / key).unlink(missing_ok=True)
             self._recent = [] if compact else recent
@@ -695,10 +701,10 @@ class Run:
         )
         self._progress = high
 
-    def _row(self, row: Logged) -> tuple[dict[str, float], dict[str, object]]:
+    def _stored(self, row: _Row) -> LoggedRow:
         """A logged row as its clock values and everything else, ready to store."""
-        values: dict[str, object] = {}
-        for name, value in flatten(row):
+        values: dict[str, Json] = {}
+        for name, value in flatten(row.values):
             if value is None or isinstance(value, (bool, str, int, float)):
                 values[name] = value
             else:
@@ -706,18 +712,18 @@ class Run:
                     values[name] = float(value)  # type: ignore[arg-type]  # numpy and tensor scalars
                 except (TypeError, ValueError):
                     values[name] = type(value).__name__
-        coordinate: dict[str, float] = {}
+        at: dict[str, float] = {}
         for name in self._columns:
             value = values.get(name)
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 if math.isfinite(value):
-                    coordinate[name] = float(values.pop(name))  # type: ignore[arg-type]
+                    at[name] = float(values.pop(name))  # type: ignore[arg-type]
                 else:
                     # Not a finite number: stays among the values as written.
                     self._warn(
                         "incomplete", f"a logged row's clock {name!r} is not a finite number"
                     )
-        if len(coordinate) != len(self._columns):
+        if len(at) != len(self._columns):
             # Charted against the clocks it does give, and wall time; counted.
             self.incomplete += 1
         if self._metric_name_limit is not None and "metric_names" not in self._warned:
@@ -735,7 +741,7 @@ class Run:
                 )
                 # The one-time warning needs no growing name registry afterward.
                 self._metric_names.clear()
-        return coordinate, values
+        return LoggedRow(wall_ms=row.wall_ms, clocks=at, values=values)
 
     def _save(self, folder: str, name: str, record: Record) -> None:
         """Write one small record whole, so a reader never sees half of it."""
@@ -886,10 +892,10 @@ def track(
         raise EtudeError("resumed_at_unknown_clock", 422)
     inherited = _inherited()
     if inherited is not None and continues is None:
-        parent, record = inherited
+        record = inherited.checkpoint
         until = os.environ.get("ETUDE_UNTIL_CLOCK")
         clock = until if until in record.at else next(iter(record.at))
-        continues = Continuation(parent=parent, clock=clock, value=record.at[clock])
+        continues = Continuation(parent=inherited.parent, clock=clock, value=record.at[clock])
     declared = declare(
         experiment=experiment,
         clocks=clocks,
@@ -915,7 +921,7 @@ def track(
         segment_rows=segment_rows,
         strict=strict,
         metric_name_limit=metric_name_limit,
-        inherited=None if inherited is None else inherited[1],
+        inherited=None if inherited is None else inherited.checkpoint,
         resumed_at=resumed_at,
     )
 
@@ -938,22 +944,23 @@ def _origin(latest: CheckpointRecord | None, root: Path, started_ms: int) -> int
     return min(starts)
 
 
-def _inherited() -> tuple[SourceKey, CheckpointRecord] | None:
+def _inherited() -> ParentCheckpoint | None:
     """The parent's checkpoint a continuation was handed, with its file on this machine."""
     given = os.environ.get("ETUDE_CONTINUES")
     if not given:
         return None
     parent = ParentCheckpoint.model_validate_json(given)
+    if parent.input is None:
+        return parent
+    folder = os.environ.get("ETUDE_INPUTS_DIR")
+    if not folder:
+        raise EtudeError("continuation_input_missing", 422)
+    local = (Path(folder) / parent.input).resolve().as_uri()
     record = parent.checkpoint
-    if parent.input is not None:
-        folder = os.environ.get("ETUDE_INPUTS_DIR")
-        if not folder:
-            raise EtudeError("continuation_input_missing", 422)
-        local = (Path(folder) / parent.input).resolve().as_uri()
-        record = record.model_copy(
-            update={"artifact": record.artifact.model_copy(update={"uri": local})}
-        )
-    return parent.parent, record
+    moved = record.model_copy(
+        update={"artifact": record.artifact.model_copy(update={"uri": local})}
+    )
+    return parent.model_copy(update={"checkpoint": moved})
 
 
 def seal_runs(directory: Path | str) -> None:

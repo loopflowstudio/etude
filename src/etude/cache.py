@@ -94,7 +94,7 @@ class Corrupt(Exception):
     """Bytes this computer kept no longer match their digest; they were discarded."""
 
 
-class Mismatch(Exception):
+class ContentMismatch(Exception):
     """The bytes arrived but are not the ones named; asking again cannot help."""
 
 
@@ -143,8 +143,12 @@ class Source(Protocol):
         """The whole object unless `etag` names its current version; None is a check alone."""
         ...
 
-    def reused(self, size_bytes: int, byte_range: str | None) -> None:
-        """Note bytes answered from this computer rather than storage."""
+    def reused(self, size_bytes: int, start: int | None, end: int | None) -> None:
+        """Note bytes answered from this computer rather than storage.
+
+        `start` to `end` inclusive is the range of the object they are, or
+        both None for the whole object.
+        """
         ...
 
 
@@ -161,18 +165,14 @@ class _Part:
     def changed(self, etag: str) -> Fetched | None:
         raise AssertionError("a range is immutable and never asked whether it changed")
 
-    def reused(self, size_bytes: int, byte_range: str | None) -> None:
-        self.source.reused(size_bytes, f"bytes={self.start}-{self.end}")
-
-
-class _Range(_Record):
-    size_bytes: int
-    sha256: str
+    def reused(self, size_bytes: int, start: int | None, end: int | None) -> None:
+        self.source.reused(size_bytes, self.start, self.end)
 
 
 class _Partial(_Record):
     etag: str | None = None
-    ranges: tuple[_Range, ...] = ()
+    # Each completed range, in order from the start, as its own content.
+    ranges: tuple[Content, ...] = ()
 
 
 class _Located(_Record):
@@ -301,7 +301,7 @@ class Cache:
             return self._read_located(artifact, source)
         held = self._load(content)
         if held is not None:
-            source.reused(content.size_bytes, None)
+            source.reused(content.size_bytes, None, None)
             self._locate(artifact.location, content, None)
             return held
         with tempfile.TemporaryDirectory(dir=self._made()) as scratch:
@@ -312,7 +312,7 @@ class Cache:
 
         Content larger than the whole allowance is staged beside the destination
         instead, and is not read again when the destination already holds it.
-        Raises `Corrupt` or `Mismatch` and leaves `destination` as it was.
+        Raises `Corrupt` or `ContentMismatch` and leaves `destination` as it was.
         """
         content = artifact.content
         if content is None:
@@ -369,7 +369,7 @@ class Cache:
                     with _lock(self.root / "capacity.lock"):
                         target.unlink()
                     raise Corrupt("cached download digest mismatch")
-                source.reused(content.size_bytes, None)
+                source.reused(content.size_bytes, None, None)
                 self._pin(content, holder)
                 self._locate(artifact.location, content, None)
                 yield target
@@ -381,7 +381,7 @@ class Cache:
             if not cacheable and self._verified(destination, content):
                 # Too large to cache, but a retried attempt or another job on
                 # this machine already holds it where it goes.
-                source.reused(content.size_bytes, None)
+                source.reused(content.size_bytes, None, None)
                 yield destination
                 return
             partial = (
@@ -393,7 +393,7 @@ class Cache:
             if not self._verified(partial, content):
                 with _lock(self.root / "capacity.lock"):
                     _discard(partial)
-                raise Mismatch("download length or SHA256 mismatch")
+                raise ContentMismatch("download length or SHA256 mismatch")
             if cacheable:
                 _admit(partial, target)
                 self._pin(content, holder)
@@ -409,20 +409,20 @@ class Cache:
 
     def _read_located(self, artifact: Artifact, source: Source) -> bytes:
         """Bytes whose digest is not recorded: the location says which bytes are held."""
-        located = self._located(artifact.location)
+        located = self._read_locator(artifact.location)
         held = None if located is None else self._load(located.content)
         if held is not None and artifact.immutable:
-            source.reused(len(held), None)
+            source.reused(len(held), None, None)
             return held
         if held is not None and located is not None and located.etag is not None:
             fetched = source.changed(located.etag)
             if fetched is None:
-                source.reused(len(held), None)
+                source.reused(len(held), None, None)
                 return held
         else:
             fetched = source.read(0, None, None)
         content = Content.of(fetched.body)
-        if self._keep(content, fetched.body):
+        if self._hold_body(content, fetched.body):
             self._locate(artifact.location, content, fetched.etag)
         return fetched.body
 
@@ -437,11 +437,11 @@ class Cache:
         if artifact.content is None and not artifact.immutable:
             # A mutable object's range cannot be checked against what is held.
             return source.read(start, end, None).body
-        located = self._located(artifact.location)
+        located = self._read_locator(artifact.location)
         content = artifact.content or (None if located is None else located.content)
         held = None if content is None else self._slice(content, start, length)
         if held is not None:
-            source.reused(length, f"bytes={start}-{end}")
+            source.reused(length, start, end)
             return held
         if artifact.content is not None:
             # A whole-file digest cannot authenticate an isolated range. Use the
@@ -484,7 +484,7 @@ class Cache:
     def _locator(self, location: str) -> Path:
         return self.root / "locators" / f"{hashlib.sha256(location.encode()).hexdigest()}.json"
 
-    def _located(self, location: str) -> _Located | None:
+    def _read_locator(self, location: str) -> _Located | None:
         try:
             return _Located.model_validate_json(self._locator(location).read_bytes())
         except FileNotFoundError:
@@ -492,7 +492,7 @@ class Cache:
 
     def _locate(self, location: str, content: Content, etag: str | None) -> None:
         """Note which held bytes a location holds; an unknown ETag keeps a known one of the same bytes."""
-        located = self._located(location)
+        located = self._read_locator(location)
         if located is not None and located.content == content and etag is None:
             return
         self.root.joinpath("locators").mkdir(exist_ok=True)
@@ -546,7 +546,7 @@ class Cache:
             self._stamps[(path, content)] = stamp
         return True
 
-    def _keep(self, content: Content, body: bytes) -> bool:
+    def _hold_body(self, content: Content, body: bytes) -> bool:
         """Hold bytes already read in full; False when they do not fit."""
         if content.size_bytes > self.max_bytes:
             return False
@@ -645,7 +645,7 @@ class Cache:
                 offset += part.size_bytes
             remaining()
             if offset:
-                source.reused(offset, f"bytes=0-{offset - 1}")
+                source.reused(offset, 0, offset - 1)
             output.truncate(content.size_bytes)
             output.seek(offset)
             while offset < content.size_bytes:
@@ -663,10 +663,7 @@ class Cache:
                     etag=piece.etag,
                     ranges=(
                         *state.ranges,
-                        _Range(
-                            size_bytes=len(piece.body),
-                            sha256=hashlib.sha256(piece.body).hexdigest(),
-                        ),
+                        Content.of(piece.body),
                     ),
                 )
                 _replace(note, state.model_dump_json().encode())

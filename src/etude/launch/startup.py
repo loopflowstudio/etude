@@ -25,7 +25,7 @@ class ProcessStart:
         self.root = root
         self._children: list[subprocess.Popen[bytes]] = []
 
-    def start(self, machine: Allocation, packet: Packet, bootstrap: BootstrapLinks | None) -> str:
+    def start(self, machine: Allocation, packet: Packet, bootstrap: BootstrapLinks | None) -> None:
         home = self.root / packet.session
         home.mkdir(parents=True, mode=0o700)
         for work in packet.work:
@@ -34,9 +34,9 @@ class ProcessStart:
         with log_to(home / "bootstrap.log"):
             write_log("bootstrap", "local source preparation completed")
             write_log("bootstrap", CLOSED)
-        return self.spawn(packet)
+        self.spawn(packet)
 
-    def spawn(self, packet: Packet) -> str:
+    def spawn(self, packet: Packet) -> int:
         home = self.root / packet.session
         if (home / "cancel-start").exists():
             raise RuntimeError("startup cancelled before worker entry")
@@ -54,5 +54,5 @@ class ProcessStart:
                 start_new_session=True,
             )
         self._children.append(child)
-        write(home / "receipt", str(child.pid))
-        return str(child.pid)
+        write(home / "pid", str(child.pid))
+        return child.pid

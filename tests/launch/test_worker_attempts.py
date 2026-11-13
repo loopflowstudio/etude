@@ -27,7 +27,8 @@ from etude.launch.records import (
     Pool,
     Run,
     Status,
-    job_identity,
+    Until,
+    job_id,
 )
 from etude.launch.scheduler import Scheduler
 from etude.run.listing import runs
@@ -88,7 +89,7 @@ def test_a_run_from_a_commit_reports_progress_and_keeps_its_outputs(
         repo=str(repo),
         revision=revision,
         config="arm = large",
-        until="agent_steps=26000",
+        until=Until.parse("agent_steps=26000"),
         max_hours=0.1,
         max_usd=Decimal(1),
     )
@@ -130,7 +131,7 @@ def test_a_continuation_starts_from_its_parents_recorded_checkpoint(tmp_path: Pa
     (tmp_path / "train.py").write_text(CONTINUED)
     spec = Job(
         command=f"{sys.executable} {tmp_path / 'train.py'}",
-        until="steps=2",
+        until=Until.parse("steps=2"),
         max_hours=0.1,
         max_usd=Decimal(1),
     )
@@ -146,7 +147,7 @@ def test_a_continuation_starts_from_its_parents_recorded_checkpoint(tmp_path: Pa
         continue_from(scheduler.record(first), "updates=9", source=tracked)
 
     # Tagging the parent's checkpoint later does not make the continuation another job.
-    identity = job_identity(continue_from(scheduler.record(first), "steps=5", source=tracked).job)
+    identity = job_id(continue_from(scheduler.record(first), "steps=5", source=tracked).job)
     parent = track(
         experiment="capacity",
         clocks=[Step("steps", "training steps")],
@@ -162,7 +163,7 @@ def test_a_continuation_starts_from_its_parents_recorded_checkpoint(tmp_path: Pa
     (tracked / "-aside" / first / "environment.json").write_text("{}")
     measured = MeasuredStorage(DirectoryStorage(tracked))
     continued = continue_from(scheduler.record(first), "steps=5", source=measured)
-    assert job_identity(continued.job) == identity
+    assert job_id(continued.job) == identity
     assert {key for key in measured.got if key.endswith("run.json")} == {f"{first}/run.json"}
 
     second = scheduler.launch(continued)
@@ -207,7 +208,7 @@ def test_a_killed_session_retries_its_run(tmp_path: Path) -> None:
     status = until(scheduler, one, "running")
     session = scheduler.attempts(one)[0].session
     os.kill(
-        int((tmp_path / "sessions" / session / "receipt").read_text()),
+        int((tmp_path / "sessions" / session / "pid").read_text()),
         signal.SIGKILL,
     )
     status = until(scheduler, one, "done")
@@ -309,7 +310,7 @@ class _Weights:
     def changed(self, etag: str) -> Fetched | None:
         return None
 
-    def reused(self, size_bytes: int, byte_range: str | None) -> None:
+    def reused(self, size_bytes: int, start: int | None, end: int | None) -> None:
         pass
 
 

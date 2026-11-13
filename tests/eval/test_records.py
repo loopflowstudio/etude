@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from hashlib import sha256
 
 import pytest
@@ -26,6 +27,7 @@ from etude.eval.records import (
     RoundRobin,
     Seated,
     Seating,
+    Share,
     TournamentRun,
     assemble,
 )
@@ -99,6 +101,13 @@ def test_tournament_files_stored_with_agents_load_as_players() -> None:
     held = TournamentRun.model_validate_json(OLD_ROUND_ROBIN)
     assert isinstance(held.tournament, RoundRobin)
     assert held.entrants == (SEARCH.model(U500), HEURISTIC)
+
+
+def test_a_share_stored_as_a_pair_reads_and_is_written_by_name() -> None:
+    old = OLD_ROUND_ROBIN.replace('"share":[0,1]', '"share":[1,3]')
+    held = TournamentRun.model_validate_json(old)
+    assert held.share == Share(index=1, count=3)
+    assert json.loads(held.model_dump_json())["share"] == {"index": 1, "count": 3}
 
 
 def test_etude_sdk_0_2_players_load_and_equal_no_player_since() -> None:
@@ -252,7 +261,7 @@ def test_a_relative_seat_finds_an_exact_position_or_says_whether_one_may_still_c
     # Passed without saving there: never. Ahead of the line: not yet, until it ends.
     earlier = seating(Earlier(clock="updates", by=10, inference=direct))
     assert isinstance(gap := earlier.resolve(small.checkpoints[1], lines), Gap)
-    assert (gap.missing, gap.position) == ("never", 80)
+    assert (gap.missing, gap.value) == ("never", 80)
     aligned = seating(Aligned(clock="updates", job="small", inference=direct))
     assert isinstance(gap := aligned.resolve(large.checkpoints[1], lines), Gap)
     assert (gap.missing, gap.seat.job) == ("not_yet", "small")
@@ -290,7 +299,7 @@ def test_a_trained_seat_never_seats_the_lines_initial_weights() -> None:
     found = seating(half).resolve(line.checkpoints[1], [line])
     assert isinstance(found, Seated) and _found(found) == [(line.checkpoints[0], 1)]
     assert isinstance(gap := trained.resolve(line.checkpoints[1], [line]), Gap)
-    assert (gap.missing, gap.position, gap.seat) == ("never", 50, trained.players[1])
+    assert (gap.missing, gap.value, gap.seat) == ("never", 50, trained.players[1])
     # A trained checkpoint at or before the target is seated as ever.
     found = trained.resolve(line.checkpoints[3], [line])
     assert isinstance(found, Seated) and _found(found) == [(line.checkpoints[2], 1)]
@@ -337,7 +346,7 @@ def test_an_at_or_before_seat_takes_the_latest_checkpoint_once_none_nearer_can_c
     )
     small = _line("s1", "small", 100, 300)
     assert isinstance(gap := other.resolve(line.checkpoints[3], [line, small]), Gap)
-    assert (gap.missing, gap.position, gap.seat) == ("not_yet", 350, other.players[1])
+    assert (gap.missing, gap.value, gap.seat) == ("not_yet", 350, other.players[1])
     # Once it saves past the target or ends, nothing nearer can come.
     for done in (_line("s1", "small", 100, 300, 500), small.model_copy(update={"ended": True})):
         found = other.resolve(line.checkpoints[3], [line, done])

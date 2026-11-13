@@ -40,7 +40,7 @@ const TRAINED = T.runs.length > 0;
 
 // The view lives in the URL, so a reload or a rewritten page shows the same thing. The x axis
 // offers the clocks training declared or positions use, then Etude's hours where training ran.
-const clockNames = [...new Set([...T.clocks.map(c => c.name).filter(c => !BUILT_IN.includes(c)), ...M.posClocks]), ...(TRAINED || !M.posClocks.length ? BUILT_IN : [])];
+const clockNames = [...new Set([...T.clocks.map(c => c.name).filter(c => !BUILT_IN.includes(c)), ...M.atClocks]), ...(TRAINED || !M.atClocks.length ? BUILT_IN : [])];
 const firstClock = clockNames.includes(R.clock) ? R.clock : clockNames[0];
 const S = Object.assign({hide: "", filter: "{}", eclock: firstClock, pclock: firstClock, mlclock: firstClock, opp: "first", score: "0", sel: "", lines: "on", mjob: "", mkey: "", xline: "", smooth: "on", fpath: "", fscale: "share", live: "1"},
   Object.fromEntries(new URLSearchParams(location.hash.slice(1))), {commit: COMMIT});
@@ -66,12 +66,15 @@ function anchorLines(E, sel, opp, extra = {}) {
   if (S.lines !== "on" || opp === "" || sel == null || M.seated(sel)) return [];
   return fixedPlayers.filter(b => b !== +opp).map(b => cellOf(sel, E.score, b, +opp, false, {...F, ...extra})).filter(Boolean).map(c => ({y: c.value, label: D.players[c.subject].name}));
 }
-function values(E, sel, column, extra = {}) {
-  const want = Object.keys({...F, ...extra, [column]: null}).sort().join(",");
+// The values of `column` among the cells split by it, the filters and `other`, under the
+// filters on every other column. Split values are scalars, so a Set keeps each once.
+function values(E, sel, column, other = null) {
+  const free = [column, ...(other == null ? [] : [other])];
+  const want = [...new Set([...Object.keys(F), ...free])].sort().join(",");
   const found = new Set();
   for (const c of D.cells) if (c.selection === sel && c.score === E.score && !c.fixed && Object.keys(c.split).sort().join(",") === want
-    && Object.entries({...F, ...extra}).every(([k, v]) => k === column || c.split[k] === v)) found.add(JSON.stringify(c.split[column]));
-  return [...found].map(v => JSON.parse(v)).sort((a, b) => typeof a === "number" && typeof b === "number" ? a - b : String(a).localeCompare(String(b)));
+    && Object.entries(F).every(([k, v]) => free.includes(k) || c.split[k] === v)) found.add(c.split[column]);
+  return [...found].sort((a, b) => typeof a === "number" && typeof b === "number" ? a - b : String(a).localeCompare(String(b)));
 }
 // Diverging around the score's reference, else sequential over what is shown.
 function painter(found, ref) {
@@ -170,11 +173,11 @@ function render() {
   const curveOf = (j, sel, extra = {}, opp = S.opp) => jobPoints(j, S.eclock, evalValue(E, sel, extra, opp));
   const latestKey = pts => { const ok = evaluated(pts); return ok.length ? ok[ok.length - 1].key : null; };
   const keyName = k => `${M.alignClock || "checkpoint"} ${num(k)}`;
-  const finalKey = j => j.runs.every(r => T.runs.find(x => x.name === r)?.state === "finished") ? (marks.get(j.runs[0]) || []).at(-1)?.align ?? null : null;
+  const finalKey = j => j.line == null && j.runs.every(r => T.runs.find(x => x.name === r)?.state === "finished") ? (marks.get(j.members[0]?.key) || []).at(-1)?.align ?? null : null;
   const unselected = panel => { const m = panel.matches || {}; return node("div", "na", `No eval run holds the matches this panel names (${[m.tournament && "tournament " + m.tournament, m.seating && "seating " + m.seating, m.tag && "tag " + m.tag].filter(Boolean).join(", ")}).`); };
   if (!D.selections.length) card(body, "No evaluations", "", "full").appendChild(node("div", "na", `${D.file} defines no eval(state) yet. Define one and run etude eval on the file; its matches appear here.`));
-  else for (const panel of R.evals) {
-    const sel = M.selectMatches(panel.matches, E.sel, E.score), opp = oppFor(E, sel), versus = versusOf(sel, opp), where = sel == null ? "" : selName(D.selections[sel]);
+  else for (const [k, panel] of R.evals.entries()) {
+    const sel = M.panelSelection(k, E.sel), opp = oppFor(E, sel), versus = versusOf(sel, opp), where = sel == null ? "" : selName(D.selections[sel]);
     if (panel.kind === "curve" && !panel.split) {
       const c = card(body, panel.title, `${where} · ${scoreName} ${versus} · ${BAND} · ${GAPS}`, "full");
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
@@ -191,7 +194,7 @@ function render() {
       const c = card(body, panel.title || `${panel.columns} × ${panel.rows}`, `${where} · ${panel.columns} across · ${panel.rows} down · ${scoreName} ${versus}`, "full");
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
       const both = (r, col) => ({[panel.rows]: r, [panel.columns]: col});
-      const colsAt = values2(E, sel, panel.columns, panel.rows), rowsAt = values2(E, sel, panel.rows, panel.columns);
+      const colsAt = values(E, sel, panel.columns, panel.rows), rowsAt = values(E, sel, panel.rows, panel.columns);
       if (!colsAt.length || !rowsAt.length) { c.appendChild(node("div", "na", absentNote(panel.rows, panel.columns))); continue; }
       if (!vis.some(j => j.key === S.mjob)) S.mjob = vis[0].key;
       const job = vis.find(j => j.key === S.mjob), done = evaluated(curveOf(job, sel, {}, opp)).map(p => p.key), last = finalKey(job);
@@ -314,14 +317,8 @@ function render() {
       rampLegend(c, ref, found, `· ${met.length} fixed player${met.length > 1 ? "s" : ""}: code, or checkpoints with no position`);
     } else card(body, `Unknown panel kind ${JSON.stringify(panel.kind)}`, "not drawn");
   }
-  function values2(E, sel, column, other) {
-    const want = Object.keys({...F, [column]: 1, [other]: 1}).sort().join(","), found = new Set();
-    for (const c of D.cells) if (c.selection === sel && c.score === E.score && !c.fixed && Object.keys(c.split).sort().join(",") === want
-      && Object.entries(F).every(([k, v]) => k === column || k === other || c.split[k] === v)) found.add(JSON.stringify(c.split[column]));
-    return [...found].map(v => JSON.parse(v)).sort((a, b) => typeof a === "number" && typeof b === "number" ? a - b : String(a).localeCompare(String(b)));
-  }
   function absentNote(...cols) {
-    const gone = cols.filter(col => D.absent.includes(`${E.info?.table}.${col}`));
+    const gone = cols.filter(col => D.absent.some(a => a.table === E.info?.table && a.column === col));
     return gone.length ? `${gone.join(", ")} ${gone.length > 1 ? "are not columns" : "is not a column"} of ${E.info.table}` : "Nothing recorded for this selection";
   }
 
@@ -364,16 +361,16 @@ function render() {
       return lines;
     };
     for (const panel of panels) {
-      if (panel.kind === "schedule") {
-        const c = card(host, panel.title, `Configured · ${panel.unit} · ${panel.clock} · hollow points: samples · filled dots: recorded position`, "full"), h = node("div");
+      if (panel.kind === "planned") {
+        const c = card(host, panel.title, `Configured · ${panel.unit} · ${panel.clock} · hollow points: samples · filled dots: recorded value`, "full"), h = node("div");
         c.appendChild(h);
-        const schedules = M.scheduleSeries(panel, vis);
-        const lines = schedules.flatMap(({job, points, markers}) => [
+        const planned = M.plannedSeries(panel, vis);
+        const lines = planned.flatMap(({job, points, markers}) => [
           {label: job.label + " · configured sample", color: color(job), dotted: job.baseline, pointFill: css("--surface"), points},
           ...markers.map(p => ({label: job.label + " · current", color: color(job), points: [p]})),
         ]);
-        for (const {job, markers} of schedules) if (!markers.length) c.appendChild(node("div", "na", `${job.label}: no recorded ${panel.clock} within the schedule`));
-        later(() => line(h, lines, {xLabel: panel.clock, height: 220, dots: true, empty: "No configured schedule for these jobs"}));
+        for (const {job, markers} of planned) if (!markers.length) c.appendChild(node("div", "na", `${job.label}: no recorded ${panel.clock} within the planned points`));
+        later(() => line(h, lines, {xLabel: panel.clock, height: 220, dots: true, empty: "No planned values for these jobs"}));
       } else if (panel.kind === "series") {
         const present = panel.keys.filter(k => T.metrics.includes(k));
         missing.push(...panel.keys.filter(k => !present.includes(k)));
@@ -410,13 +407,13 @@ function render() {
         const grid = node("div", "grid multiples"); c.appendChild(grid);
         for (const k of stepClocks) {
           const m = node("div"), h = node("div"); m.append(node("div", "mini-title", `${k} per second`), h); grid.appendChild(m);
-          later(() => line(h, series(j => jobPoints(j, clock, (run, mk) => mk.pace[k] == null ? {missing: true, meta: "an attempt began since the last checkpoint"} : {y: mk.pace[k]})), {...opts, compact: true, height: 140}));
+          later(() => line(h, series(j => jobPoints(j, clock, mk => mk.pace[k] == null ? {missing: true, meta: "an attempt began since the last checkpoint"} : {y: mk.pace[k]})), {...opts, compact: true, height: 140}));
         }
       } else if (panel.kind === "elapsed") {
         const c = card(host, panel.title, "wall hours since the run first started");
         if (!T.checkpoints.length) { c.appendChild(node("div", "na", "No checkpoint recorded")); continue; }
         const h = node("div"); c.appendChild(h);
-        later(() => line(h, series(j => jobPoints(j, clock, (run, mk) => ({y: mk.elapsed / 3600}))), {...opts, height: 170, yFormat: v => v.toFixed(v < 10 ? 2 : 1) + " h"}));
+        later(() => line(h, series(j => jobPoints(j, clock, mk => ({y: mk.elapsed / 3600}))), {...opts, height: 170, yFormat: v => v.toFixed(v < 10 ? 2 : 1) + " h"}));
       } else if (panel.kind === "attempts") {
         const c = card(host, panel.title, "each attempt from its start to its last row · hours since the run first started");
         const runs = T.runs.filter(r => vis.some(j => j.runs.includes(r.name)));
@@ -465,8 +462,9 @@ function flame(c, panel, vis, color, swatch) {
     children: [...new Set(trees.flatMap(t => t.children.map(ch => ch.name)))].map(name => meanTree(trees.map(t => t.children.find(ch => ch.name === name) || {name, seconds: 0, status: "recorded", children: []})))});
   const items = vis.map(j => {
     const trees = j.runs.map(run => T.timers.find(t => t.run === run && t.prefix === panel.prefix)).filter(Boolean);
-    const steps = j.runs.map(run => T.runs.find(r => r.name === run)?.reached[per]).filter(v => v > 0);
-    return {j, tree: trees.length === j.runs.length ? meanTree(trees.map(t => t.tree)) : null, steps: steps.length === j.runs.length ? mean(steps) : null};
+    const steps = j.runs.map(run => T.runs.find(r => r.name === run)?.at[per]).filter(v => v > 0);
+    const every = n => j.runs.length > 0 && n === j.runs.length;
+    return {j, tree: every(trees.length) ? meanTree(trees.map(t => t.tree)) : null, steps: every(steps.length) ? mean(steps) : null};
   });
   if (!items.some(x => x.tree)) { c.appendChild(node("div", "na", `No timer logged under ${panel.prefix} for every seed of a job. Log seconds spent as ${panel.prefix}PART on each row to see where time went.`)); return; }
   const find = (n, names) => { let cur = n; for (const name of names) { cur = (cur.children || []).find(x => x.name === name); if (!cur) return null; } return cur; };

@@ -10,113 +10,128 @@ import sys
 import tempfile
 from pathlib import Path
 
-from etude.launch.schemas import Packet, Work
-from etude.launch.ssh import EncodedOutput, RemoteReply, RemoteRequest
+from etude.launch.ssh import (
+    AddRequest,
+    EncodedOutput,
+    HeldRequest,
+    HoldRequest,
+    LogsRequest,
+    OutputRequest,
+    RemoteCall,
+    RemoteReply,
+    SessionRequest,
+    StartRequest,
+    StopRequest,
+)
 from etude.launch.startup import ProcessStart
 from etude.launch.storage.disk import DirectoryJournal
 from etude.launch.storage.files import digest, write
 
 
-def invoke(request: RemoteRequest) -> RemoteReply:
-    root = Path(request.root).expanduser().resolve()
-    session = str(request.session)
-    home = root / session
+def invoke(call: RemoteCall) -> RemoteReply:
+    root = Path(call.root).expanduser().resolve()
     journal = DirectoryJournal(root)
-    action = request.action
-    for name, body in request.files.items():
-        target = home / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(base64.b64decode(body))
-    if action == "start":
-        packet = Packet.model_validate_json(request.packet)
-        # A directory can contain staged source files, but a start is exclusive.
-        home.mkdir(parents=True, exist_ok=True, mode=0o700)
-        if (home / "start-claim").exists():
+    request = call.request
+    match request:
+        case StartRequest() | AddRequest():
+            for name, body in request.files.items():
+                target = root / request.session / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(base64.b64decode(body))
+    match request:
+        case StartRequest():
+            return _start(root, request)
+        case AddRequest():
+            added = root / request.session / "work"
+            added.mkdir(exist_ok=True)
+            if not (added / f"{request.work.attempt}.json").exists():
+                write(added / f"{request.work.attempt}.json", request.work.model_dump_json())
+            return RemoteReply()
+        case SessionRequest(action="started"):
+            return RemoteReply(started=journal.started(request.session))
+        case SessionRequest(action="ended"):
+            return RemoteReply(ended_at=journal.ended(request.session))
+        case SessionRequest(action="end"):
+            return RemoteReply(ended_at=journal.end(request.session))
+        case SessionRequest(action="finish"):
+            return RemoteReply(ended_at=journal.finish(request.session))
+        case SessionRequest(action="observe"):
+            return RemoteReply(observation=journal.observe(request.session))
+        case HeldRequest():
+            try:
+                held = journal.held(request.run, request.key)
+            except FileNotFoundError as error:
+                return RemoteReply(missing=str(error))
             return RemoteReply(
-                text=(home / "receipt").read_text() if (home / "receipt").exists() else "pending"
+                folder={key: base64.b64encode(b).decode() for key, b in held.items()}
             )
-        with (home / "start-claim").open("x"):
-            pass
-        if request.bootstrap:
-            command = [
-                sys.executable,
-                "-m",
-                "etude",
-                "worker",
-                "--bootstrap",
-                request.bootstrap.url,
-                "--root",
-                str(root),
-                "--cleanup",
-                json.dumps(request.cleanup),
-            ]
-            with (home / "courier.log").open("wb") as log:
-                process = subprocess.Popen(
-                    command,
-                    env={
-                        **os.environ,
-                        "PYTHONPATH": str(Path(__file__).resolve().parents[3]),
-                        "ETUDE_SESSION": session,
-                        "ETUDE_WORKER_LOG_URL": request.bootstrap.worker_log_url,
-                    },
-                    stdin=subprocess.DEVNULL,
-                    stdout=log,
-                    stderr=subprocess.STDOUT,
-                    start_new_session=True,
-                )
-            return RemoteReply(text=str(process.pid))
-        # Sources were staged above; this start uses the same process implementation.
-        write(home / "packet.json", request.packet)
-        return RemoteReply(text=ProcessStart(root).spawn(packet))
-    if action == "add":
-        work = Work.model_validate_json(request.work)
-        added = home / "work"
-        added.mkdir(exist_ok=True)
-        if not (added / f"{work.attempt}.json").exists():
-            write(added / f"{work.attempt}.json", request.work)
-        return RemoteReply()
-    if action == "started":
-        return RemoteReply(started=journal.started(session))
-    if action == "ended":
-        at = journal.ended(session)
-        return RemoteReply(text=at.isoformat() if at else None)
-    if action == "held":
-        try:
-            held = journal.held(request.name, request.key or None)
-        except FileNotFoundError as error:
-            return RemoteReply(missing=str(error))
-        return RemoteReply(folder={key: base64.b64encode(b).decode() for key, b in held.items()})
-    if action == "hold":
-        journal.hold(
-            request.name, {key: base64.b64decode(body) for key, body in request.folder.items()}
-        )
-        return RemoteReply()
-    if action == "observe":
-        return RemoteReply(observation=journal.observe(session))
-    if action == "end":
-        at = journal.end(session)
-        return RemoteReply(text=at.isoformat() if at else None)
-    if action == "finish":
-        at = journal.finish(session)
-        return RemoteReply(text=at.isoformat() if at else None)
-    attempt = str(request.attempt)
-    if action == "stop":
-        journal.stop(session, attempt)
-        return RemoteReply()
-    if action == "logs":
-        return RemoteReply(
-            stream=journal.logs(session, request.attempt or None, producer=request.name)
-        )
-    if action == "fetch":
-        with tempfile.TemporaryDirectory() as directory:
-            path = journal.fetch(session, attempt, str(request.name), Path(directory))
+        case HoldRequest():
+            journal.hold(
+                request.run,
+                {key: base64.b64decode(body) for key, body in request.folder.items()},
+            )
+            return RemoteReply()
+        case StopRequest():
+            journal.stop(request.session, request.attempt)
+            return RemoteReply()
+        case LogsRequest():
             return RemoteReply(
-                output=EncodedOutput(
-                    body=base64.b64encode(path.read_bytes()).decode(), sha256=digest(path)
-                )
+                stream=journal.logs(request.session, request.attempt, producer=request.producer)
             )
-    raise ValueError("unknown remote operation")
+        case OutputRequest():
+            with tempfile.TemporaryDirectory() as directory:
+                path = journal.fetch(
+                    request.session, request.attempt, request.output, Path(directory)
+                )
+                return RemoteReply(
+                    output=EncodedOutput(
+                        body=base64.b64encode(path.read_bytes()).decode(), sha256=digest(path)
+                    )
+                )
+    raise ValueError(f"unknown remote operation {request.action!r}")
+
+
+def _start(root: Path, request: StartRequest) -> RemoteReply:
+    home = root / request.session
+    # A directory can contain staged source files, but a start is exclusive.
+    home.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if (home / "start-claim").exists():
+        pid = home / "pid"  # the worker's process id, once it is running
+        return RemoteReply(pid=int(pid.read_text()) if pid.exists() else None)
+    with (home / "start-claim").open("x"):
+        pass
+    if request.bootstrap:
+        command = [
+            sys.executable,
+            "-m",
+            "etude",
+            "worker",
+            "--bootstrap",
+            request.bootstrap.url,
+            "--root",
+            str(root),
+            "--cleanup",
+            json.dumps(request.cleanup),
+        ]
+        with (home / "courier.log").open("wb") as log:
+            process = subprocess.Popen(
+                command,
+                env={
+                    **os.environ,
+                    "PYTHONPATH": str(Path(__file__).resolve().parents[3]),
+                    "ETUDE_SESSION": request.session,
+                    "ETUDE_WORKER_LOG_URL": request.bootstrap.worker_log_url,
+                },
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        return RemoteReply(pid=process.pid)
+    # Sources were staged above; this start uses the same process implementation.
+    write(home / "packet.json", request.packet.model_dump_json())
+    return RemoteReply(pid=ProcessStart(root).spawn(request.packet))
 
 
 if __name__ == "__main__":
-    print(invoke(RemoteRequest.model_validate_json(sys.stdin.buffer.read())).model_dump_json())
+    print(invoke(RemoteCall.model_validate_json(sys.stdin.buffer.read())).model_dump_json())

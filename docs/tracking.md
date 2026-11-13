@@ -184,8 +184,9 @@ for table in history.read_table("decks", "updates"):
 ```
 
 `read_table` returns `TablePoint` records in clock order as a tuple. An empty
-table has `rows=()`; no surviving references returns `()`. `RunData.tables`
-provides raw metric-block inspection.
+table has `rows=()`; no surviving references returns `()`. `RunData.columns`
+gives each metric block's rows by column (`etude.train.block.Columns`) for raw
+inspection; these are not JSON row tables.
 
 The reader applies attempt and update supersession before fetching artifacts.
 A later table at the same update replaces the earlier one. A resumed attempt
@@ -272,8 +273,8 @@ run.tag(model, "best")  # tags can change later
   file did. A JSON model uses `.json.data` to keep it distinct from the JSON
   checkpoint record. Removing stored files by rule is not built.
 - **Nothing recorded is replaced.** Recording the same model at the same
-  coordinate again returns the existing reference and sends nothing. A
-  different model at a recorded coordinate is a new checkpoint,
+  `at` again returns the existing reference and sends nothing. A
+  different model at a recorded `at` is a new checkpoint,
   `CLOCK-VALUE.ordinal-N.EXT` beside the first. A name some file already
   holds is never reused, even one an interrupted attempt kept without its
   record. Only tags change later.
@@ -294,8 +295,10 @@ run.tag(model, "best")  # tags can change later
 import os
 
 run = track(experiment="capacity-pilot", clocks=[Step("updates", "optimizer updates, absolute")])
-hours = float(os.environ["ETUDE_UNTIL_VALUE"])  # the job's until="running_hours=10"
-while run.position("running_hours") < hours:
+hours = float(
+    os.environ["ETUDE_UNTIL_VALUE"]
+)  # the job's until=Until(clock="running_hours", value=10)
+while run.at("running_hours") < hours:
     update, loss = train_one_update()
     run.log({"rl/loss": loss}, updates=update)
     if run.checkpoint_due(1):  # every running hour
@@ -320,7 +323,7 @@ have neither. Where a checkpoint has neither, such as a
 run copied without those records, the report says so at its top, naming the
 runs: charts and seats on these clocks leave such a checkpoint out.
 
-`run.position(clock)` says where the run stands on any clock;
+`run.at(clock)` says where the run stands on any clock;
 `run.checkpoint_due(every, clock="running_hours")` whether the clock has
 passed a multiple of `every` since the latest checkpoint. Either clock can be
 a job's `until`, the page's x axis, or a seat's clock
@@ -501,7 +504,7 @@ runs continuing it count once. Seeds align on where each checkpoint stood
 on the run's first declared clock. The `baseline` job is dotted everywhere; a
 job's colour follows launch order. `Report(labels={"ppo": "PPO baseline"})`
 replaces the displayed job name, keeping the seed count. Labels change
-presentation only: `baseline`, `Schedule.jobs` and a seat's `job`, as in
+presentation only: `baseline`, `Planned.jobs` and a seat's `job`, as in
 `Aligned(job=...)`, still refer to the launch names. Unlabelled jobs keep their launch names.
 
 **Execution setup** is result provenance, like the seed: (device, code
@@ -511,9 +514,9 @@ devices or commits are pooled with its seeds: runs launched under one job
 name and config are one job. A config change under the same name shows as two
 jobs, each named with its config digest ("ppo 1a2b3c"). The launch name still
 addresses both: `baseline="ppo"` dots both, `labels={"ppo": "PPO"}` shows
-"PPO 1a2b3c · 3 seeds", `Schedule(jobs={"ppo": ...})` draws the schedule for
+"PPO 1a2b3c · 3 seeds", `Planned(jobs={"ppo": ...})` draws the planned values for
 each and `Aligned(job="ppo")` seats each. The full name, `"ppo 1a2b3c"`,
-names one, and a full-name label or schedule wins over the launch name's.
+names one, and a full-name label or plan wins over the launch name's.
 `TrainingRun.job` in `eval(state)` is this same name. Games played on different
 devices, compute setups or code revisions contribute to the same requested
 matches; a replay counts once, from its latest delivered result. There is no Config
@@ -533,18 +536,20 @@ for a key a training run of the experiment saved (`RUN/checkpoints/NAME`),
 where that run's clocks stood; where both give a clock and differ, the seat's
 value is drawn and the page notes it. Two runs' checkpoints holding the same
 bytes are two points. A checkpoint's line, the learner it belongs to, is
-its seat's `line`, else its training run. A checkpoint a training run saved
+its seat's `line`, else its training run's line: the first run of the chain
+of continuations that led to it. A checkpoint a training run saved
 is drawn in that run's job; every other placed checkpoint is drawn in its
 line's curve, labelled by the line's name, or in one curve of "checkpoints
 with no line". `Crosstable` looks only within a line.
-Every unplaced player, code or a checkpoint seated without a position, is an
+Every unplaced player, code or a checkpoint seated without an `at`, is an
 anchor, and the page names the unplaced checkpoints.
 
 **Evaluation only.** An experiment with eval runs and no training runs draws
 too: the page says "Evaluation only", Perf and ML details say there are no
-training runs, and the x axis offers the clocks the seats' positions use.
+training runs, and the x axis offers the clocks the seats' `at`s use.
 Matches of eval runs held for no tournament are offered as "matches outside a
-tournament", each counting once per environment from its latest record.
+tournament", each counting once per environment from its latest record,
+whichever eval run made it.
 Setup is not an environment: games played on CPU and on CUDA, under configs
 that differ only in their `setup` key ([evaluation](evaluation.md#eval-runs)),
 pool. A value played in two environments shows the one whose latest
@@ -690,21 +695,21 @@ since. A training index is rewritten as its run grows, so with
 has changed.
 
 ```python
-from etude.report import ML, Report, Schedule, SchedulePoint
+from etude.report import ML, Planned, PlannedPoint, Report
 
 
 def report() -> Report:
     return Report(
         ml=(
             *ML,
-            Schedule(
+            Planned(
                 title="Planned learning rate",
                 clock="updates",
                 unit="learning rate",
                 jobs={
                     "large": (
-                        SchedulePoint(at=10_000, value=0.001),
-                        SchedulePoint(at=20_000, value=0.0001),
+                        PlannedPoint(at=10_000, value=0.001),
+                        PlannedPoint(at=20_000, value=0.0001),
                     ),
                 },
             ),
@@ -720,13 +725,13 @@ updates uses absolute update coordinates across continuation; it does not
 advance with time spent viewing the page. Refresh to move the marker when
 new clock values arrive. A configured curve is not evidence that training
 used those values; log a metric to compare the schedule with observations.
-`Schedule.jobs` uses original job names, full or launch. Points must have finite values and
+`Planned.jobs` uses original job names, full or launch. Points must have finite values and
 strictly increasing clock coordinates. Values between samples are linearly
 interpolated; no value is extrapolated outside the supplied range. Each seed
 gets a filled current-position marker when its recorded clock lies inside that
 range; configured sample points are hollow.
-If no seed of a job has a position in range, the chart says so. The schedule
-uses its own named clock, independently of the section's X axis control.
+If no seed of a job has an `at` in range, the chart says so. A `Planned`
+panel uses its own named clock, independently of the section's X axis control.
 
 ### Report helpers
 

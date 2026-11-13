@@ -4,10 +4,10 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 const {test} = require("node:test");
 const context = vm.createContext({});
-vm.runInContext(fs.readFileSync("src/etude/charts.js", "utf8") + "\nthis.model = model; this.isolated = isolated; this.tickLabels = tickLabels;", context);
+vm.runInContext(fs.readFileSync("src/etude/charts.js", "utf8") + "\nthis.model = model; this.isolated = isolated; this.tickLabels = tickLabels; this.runMember = runMember;", context);
 
 function player(name, line, updates, run = null, ordinal = null) {
-  return {name, line, at: {updates}, config: "{}", run, ordinal};
+  return {name, line, at: {updates}, config: "{}", run, ordinal, placed: true};
 }
 
 function page(players, cells, training = {jobs: [], runs: [], checkpoints: [], clocks: []}) {
@@ -16,7 +16,8 @@ function page(players, cells, training = {jobs: [], runs: [], checkpoints: [], c
       subject, opponent, value, selection: 0, score: 0, split: {}, fixed: false,
       interval: [value - 0.1, value + 0.1], rows: 4, matches: 4,
     })),
-    training, report: {clock: "updates"}, coverage: [], selections: [{tournament: null}], points: [],
+    training, report: {clock: "updates"}, coverage: [], points: [],
+    selections: [{kind: "outside"}], drawn: [{seated: false, tournaments: []}], panel_selections: [],
   };
 }
 
@@ -102,8 +103,8 @@ test("duplicate positions are named gaps for both tracked and external checkpoin
     assert.equal(gap.y, undefined);
     assert.match(gap.meta, /first.*second.*stood at updates 400/);
     // Every panel uses the same resolver, even if only one candidate has games.
-    const run = m.JOBS[0].runs[0], mark = m.marks.get(run)[0];
-    const subject = m.subjectAt(run, mark, i => i === 0);
+    const mark = m.marks.get(m.JOBS[0].members[0].key)[0];
+    const subject = m.subjectAt(mark, i => i === 0);
     assert.equal(subject.index, undefined);
     assert.match(subject.gap, /first.*second.*stood at updates 400/);
   }
@@ -162,31 +163,34 @@ test("seeds playing different scientific variants are not averaged together", ()
   assert.match(p.meta, /seeds played different inference variants/);
 });
 
-test("tag fallback prefers results while an explicit tournament remains exact", () => {
-  const data = page([player("a", "a", 100)], [[0, null, 0.625]]);
-  data.selections = [{tournament: "empty", tag: "anchor"}, {tournament: "played", tag: "anchor"}];
-  data.cells[0].selection = 1;
-  data.cells.push({...data.cells[0], selection: 0, score: 1});
-  const m = context.model(data);
-  assert.equal(m.selectMatches({tag: "anchor"}, 0), 1);
-  assert.equal(m.selectMatches({tag: "anchor"}, 1, 1), 0);
-  assert.equal(m.selectMatches({tag: "anchor"}, 1, 2), 1); // no result for this score
-  assert.equal(m.selectMatches(null, 0), 0);
-  assert.equal(m.selectMatches({tournament: "empty", tag: "anchor"}, 1), 0);
-  assert.equal(m.selectMatches({tag: "missing"}, 0), null);
+test("selections are named for what they count", () => {
+  const m = context.model(page([player("a", "a", 100)], [[0, null, 0.625]]));
   assert.equal(m.selName([{tag: "anchor"}, {seating: "head-to-head"}]), "tagged anchor + head-to-head");
   assert.equal(m.selName({tournament: "played", tag: "anchor"}), "played · tagged anchor");
-  assert.equal(m.selName({tournament: null}), "matches outside a tournament");
+  assert.equal(m.selName({kind: "outside"}), "matches outside a tournament");
+  assert.equal(m.selName({tournament: null, seating: null, tag: "anchor"}), "tagged anchor");
+});
+
+test("a panel draws the selection the page resolved for it, or the control's", () => {
+  const data = page([player("a", "a", 100)], [[0, null, 0.625]]);
+  data.selections = [{tournament: "empty", tag: "anchor"}, {tournament: "played", tag: "anchor"}];
+  data.drawn = data.selections.map(s => ({seated: false, tournaments: [s.tournament]}));
+  data.panel_selections = [{selection: 1, control: false}, {selection: null, control: true}, {selection: null, control: false}];
+  const m = context.model(data);
+  assert.deepEqual([0, 1, 2, 3].map(k => m.panelSelection(k, 0)), [1, 0, null, 0]);
+  assert.equal(m.usesSelection, true);
 });
 
 test("union curves keep jobs separate", () => {
   const data = page([player("a", "small", 100), player("b", "large", 100)], [[0, 1, 0.375], [1, 0, 0.625]]);
   const union = [{tournament: "paired", tag: "small"}, {tournament: "paired", tag: "large"}];
   data.selections = [...union, union];
+  data.drawn = data.selections.map(() => ({seated: false, tournaments: ["paired"]}));
   data.cells.forEach(c => { c.selection = 2; });
   data.report.evals = [{kind: "curve", matches: union}];
+  data.panel_selections = [{selection: 2, control: false}];
   data.report.labels = {large: "Large model"};
-  const m = context.model(data), sel = m.selectMatches(union, 0);
+  const m = context.model(data), sel = m.panelSelection(0, 0);
   assert.equal(sel, 2);
   const ys = m.JOBS.map(j => m.jobPoints(j, "updates", m.evalValue(0, sel, {}, ""))[0].y);
   assert.deepEqual(Array.from(ys), [0.625, 0.375]); // external learner order is lexical
@@ -198,6 +202,7 @@ test("union curves keep jobs separate", () => {
   assert.equal(large.latest.y, 0.625);
   assert.equal(large.against, "all opponents");
   data.report.evals.push({kind: "curve"});
+  data.panel_selections.push({selection: null, control: true});
   assert.equal(context.model(data).usesSelection, true);
 });
 
@@ -224,8 +229,8 @@ test("a launch name addresses every config job launched under it; a full name ad
   data.report.labels = {ppo: "PPO", "ppo 4d5e6f": "High learning rate"};
   assert.equal(context.model(data).JOBS[1].label, "High learning rate · 1 seed");
   const plan = value => [{at: 0, value}];
-  const schedule = {clock: "updates", jobs: {ppo: plan(1), "ppo 4d5e6f": plan(2)}};
-  assert.deepEqual(Array.from(m.scheduleSeries(schedule), s => [s.job.name, s.points[0].y]),
+  const planned = {clock: "updates", jobs: {ppo: plan(1), "ppo 4d5e6f": plan(2)}};
+  assert.deepEqual(Array.from(m.plannedSeries(planned), s => [s.job.name, s.points[0].y]),
     [["ppo 1a2b3c", 1], ["ppo 4d5e6f", 2]]);
 });
 
@@ -246,25 +251,25 @@ test("score tooltips name the interval and row unit without changing values", ()
   const training = {jobs: [], clocks: [{name: "updates"}], runs: [], checkpoints:
     ["a", "b"].map(run => ({run, ordinal: 1, align: 100, at: {updates: 100}}))};
   const partial = context.model(page([], [], training)).jobPoints(
-    {runs: ["a", "b", "c"]}, "updates", () => ({y: 0.625}), true,
+    {members: ["a", "b", "c"].map(context.runMember)}, "updates", () => ({y: 0.625}), true,
   )[0];
   assert.equal(context.pointMeta(partial, context.scoreFormat), "2 of 3 seeds evaluated");
 });
 
 test("configured curves interpolate at recorded absolute clocks without extrapolation", () => {
   const training = {jobs: [{name: "large", launch: "large", runs: ["a", "b"]}],
-    runs: [{name: "a", reached: {updates: 1200}}, {name: "b", reached: {updates: 900}}], checkpoints: [], clocks: []};
+    runs: [{name: "a", at: {updates: 1200}}, {name: "b", at: {updates: 900}}], checkpoints: [], clocks: []};
   const data = page([], [], training);
-  const schedule = {clock: "updates", jobs: {large: [{at: 1000, value: 1}, {at: 1400, value: 0.2}]}};
-  const [s] = context.model(data).scheduleSeries(schedule);
+  const planned = {clock: "updates", jobs: {large: [{at: 1000, value: 1}, {at: 1400, value: 0.2}]}};
+  const [s] = context.model(data).plannedSeries(planned);
   assert.deepEqual(Array.from(s.points, p => p.x), [1000, 1400]);
   assert.equal(s.markers.length, 1); assert.equal(s.markers[0].x, 1200);
   assert.ok(Math.abs(s.markers[0].y - 0.6) < 1e-10);
   assert.match(s.markers[0].meta, /recorded updates/);
-  training.runs[0].reached.updates = 1400;
-  assert.equal(context.model(data).scheduleSeries(schedule)[0].markers[0].y, 0.2);
-  delete training.runs[0].reached.updates;
-  assert.equal(context.model(data).scheduleSeries(schedule)[0].markers.length, 0);
+  training.runs[0].at.updates = 1400;
+  assert.equal(context.model(data).plannedSeries(planned)[0].markers[0].y, 0.2);
+  delete training.runs[0].at.updates;
+  assert.equal(context.model(data).plannedSeries(planned)[0].markers.length, 0);
 });
 
 test("refresh failure leaves the page visible and a later success reloads once", async () => {
@@ -289,10 +294,11 @@ test("refresh failure leaves the page visible and a later success reloads once",
 
 // A seating held for checkpoints of line "learner": each one's point (`Page.points`), scored
 // by the page or missing because its relative seat found no checkpoint.
-const NEVER = {seating: "half", checkpoint: {run: "learner", name: "u100", address: null}, missing: "never", position: 50, seat: {kind: "fraction", clock: "updates", value: 0.5, job: null, at_or_before: false, trained: false}};
+const NEVER = {seating: "half", checkpoint: {run: "learner", name: "u100", address: null}, missing: "never", value: 50, seat: {kind: "fraction", clock: "updates", value: 0.5, job: null, at_or_before: false, trained: false}};
 function seated(points, cells = []) {
   const data = page([player("u100", "learner", 100), player("u200", "learner", 200), player("u400", "learner", 400)], cells);
   data.selections = [{tournament: "t", seating: "half"}];
+  data.drawn = [{seated: true, tournaments: ["t"]}];
   data.points = points.map(p => ({selection: 0, run: null, ordinal: null, line: "learner", whole: false, commit: null,
     ...(p.value == null ? {} : {score: 0, split: {}, interval: null, rows: 4, matches: 2}), ...p}));
   return data;
@@ -316,7 +322,7 @@ test("a seating draws each point's score where its checkpoint stood, and says wh
 test("a seat not filled yet is a pending gap, and a point over several lines says so", () => {
   const data = seated([
     {at: {updates: 400}, value: 0.6, opponents: [0, 1]},
-    {at: {updates: 200}, gap: {...NEVER, missing: "not_yet", position: 8000, seat: {...NEVER.seat, kind: "aligned", job: "small"}}},
+    {at: {updates: 200}, gap: {...NEVER, missing: "not_yet", value: 8000, seat: {...NEVER.seat, kind: "aligned", job: "small"}}},
     {at: {updates: 100}, gap: {...NEVER, seat: {...NEVER.seat, at_or_before: true, trained: true}}},
   ]);
   const m = context.model(data), at = Object.fromEntries(points(m, m.JOBS[0]).map(p => [p.x, p]));
@@ -325,7 +331,7 @@ test("a seat not filled yet is a pending gap, and a point over several lines say
   assert.equal(at[200].gap, "pending");
   assert.equal(at[200].meta, "small has no checkpoint at updates 8,000 yet");
   assert.equal(at[100].meta, "its line has no trained checkpoint at or before updates 50");
-  const rendered = renderPage({...data, report: {clock: "updates", evals: [{kind: "curve", title: "Half", matches: {seating: "half"}}]}});
+  const rendered = renderPage({...data, report: {clock: "updates", evals: [{kind: "curve", title: "Half", matches: {seating: "half"}}]}, panel_selections: [{selection: 0, control: false}]});
   assert.equal(rendered.plots.length, 1);
   assert.match(rendered.text, /first seat against the second, as seated/);
 });
@@ -354,8 +360,9 @@ test("a one-seed seating draws a job's point from the seed that played it, and w
     checkpoints: ["a", "b"].map(run => ({run, ordinal: 1, align: 100, at: {updates: 100}})),
   };
   const data = page([player("a100", "a", 100, "a", 1), player("b100", "b", 100, "b", 1), player("rival", null, 0)], [[1, 2, 0.75]], training);
-  data.players[2].at = {};
+  data.players[2].at = {}; data.players[2].placed = false;
   data.selections = [{tournament: "t", seating: "rival"}];
+  data.drawn = [{seated: true, tournaments: ["t"]}];
   // Held only for seed b's checkpoint: with seeds="one" that point is the job's.
   data.points = [{selection: 0, run: "b", ordinal: 1, line: "b", at: {updates: 100}, whole: true, commit: null, score: 0, split: {}, value: 0.75, interval: null, rows: 4, matches: 4, opponents: [2]}];
   const one = points(context.model(data), context.model(data).JOBS[0])[0];

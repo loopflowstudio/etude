@@ -20,7 +20,7 @@ from etude.launch.providers.package import program_archive
 from etude.launch.providers.runpod import machines
 from etude.launch.records import Job, Pool
 from etude.launch.schemas import Observation, Packet
-from etude.launch.ssh import SSH
+from etude.launch.ssh import SSH, LogsRequest, SessionRequest, StartRequest
 from tests.launch.fake import bench
 from tests.launch.test_runpod_machines import cloud
 
@@ -124,38 +124,24 @@ def test_detached_ssh_install_is_readable_cancellable_and_not_replayed(
         startup_deadline=datetime.now(UTC) + timedelta(seconds=60),
     )
     try:
-        assert (
-            ssh.call(
-                "start",
-                packet.session,
-                packet=packet.model_dump_json(),
-                startup_deadline=packet.startup_deadline,
-            ).text
-            == "pending"
-        )
-        assert (
-            ssh.call(
-                "start",
-                packet.session,
-                packet=packet.model_dump_json(),
-                startup_deadline=packet.startup_deadline,
-            ).text
-            == "pending"
-        )
+        # The worker is not running yet, so neither start knows its process.
+        assert ssh.call(StartRequest(session=packet.session, packet=packet)).pid is None
+        assert ssh.call(StartRequest(session=packet.session, packet=packet)).pid is None
         latest = time.monotonic() + 5
         while not calls.exists() and time.monotonic() < latest:
             time.sleep(0.01)
         assert calls.read_text().splitlines() == ["install"]
-        assert "starting uv sync" in (ssh.call("logs", packet.session, name="bootstrap").text or "")
-        assert not ssh.call("started", packet.session).started
-        assert ssh.call("end", packet.session).text is None
+        bootstrap = LogsRequest(session=packet.session, producer="bootstrap")
+        assert "starting uv sync" in (ssh.call(bootstrap).log or "")
+        assert not ssh.call(SessionRequest(action="started", session=packet.session)).started
+        assert ssh.call(SessionRequest(action="end", session=packet.session)).ended_at is None
     finally:
         gate.touch()
     latest = time.monotonic() + 5
     while not (root / packet.session / "ended").exists() and time.monotonic() < latest:
         time.sleep(0.01)
     assert (root / packet.session / "ended").exists()
-    assert not (root / packet.session / "receipt").exists()
+    assert not (root / packet.session / "pid").exists()
     assert calls.read_text().splitlines() == ["install"]
 
 

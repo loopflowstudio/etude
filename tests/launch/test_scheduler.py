@@ -25,6 +25,7 @@ from etude.launch.records import (
     Storage,
     Tally,
     Target,
+    Until,
 )
 from etude.launch.scheduler import Scheduler
 from etude.launch.schemas import Observation
@@ -112,7 +113,7 @@ def test_terminate_releases_a_rental_whose_lost_create_left_no_machine(tmp_path:
     del b.service.sessions[held]  # the provider has no such session
     ended = b.scheduler.terminate(machine)
     assert ended.refused_at is not None and ended.deleted_at is None
-    assert b.scheduler.rentals()[0][1] == 0
+    assert b.scheduler.rentals()[0].usd == 0
     b.scheduler.rent("l4", hours=1)  # the pool's one machine is free again
     assert b.service.creates == 2
 
@@ -278,7 +279,7 @@ def test_manabot_cohort_shape(tmp_path: Path) -> None:
             command="python -m manabot.train",
             name=name,
             config=config,
-            until="updates=26000",
+            until=Until.parse("updates=26000"),
             max_hours=11.9,
             max_usd=Decimal(5),
         )
@@ -292,7 +293,9 @@ def test_manabot_cohort_shape(tmp_path: Path) -> None:
         assert all(s.outcome == "succeeded" for s in b.scheduler.wait(*stages[-1], every=60))
         continued = [
             Run(
-                job=b.store.run(p).spec.model_copy(update={"until": f"updates={target}"}),
+                job=b.store.run(p).spec.model_copy(
+                    update={"until": Until.parse(f"updates={target}")}
+                ),
                 seed=b.store.run(p).seed,
             )
             for p in stages[-1]
@@ -310,7 +313,7 @@ def test_manabot_cohort_shape(tmp_path: Path) -> None:
     for root, middle, final in zip(*stages, strict=True):
         records = [b.store.run(r) for r in (root, middle, final)]
         assert len({(r.spec.name, r.seed, r.spec.config) for r in records}) == 1
-        assert [r.spec.until for r in records] == [
+        assert [str(r.spec.until) for r in records] == [
             "updates=26000",
             "updates=63000",
             "updates=100000",
@@ -320,7 +323,7 @@ def test_manabot_cohort_shape(tmp_path: Path) -> None:
         work = next(
             w for w, _ in b.service.sessions[attempt.session].work() if w.attempt == attempt.id
         )
-        assert (work.until, work.resumes) == ("updates=100000", False)
+        assert (work.until, work.resumes) == (Until.parse("updates=100000"), False)
     spent = sum(b.scheduler.read(j).usd for stage in stages for j in stage)
     assert abs(spent - USD_PER_RUN * 18) < Decimal("0.01")
     assert all(b.scheduler.read(j).rental_ended for stage in stages for j in stage)
@@ -598,8 +601,10 @@ def test_a_rental_made_by_hand_takes_several_launches_and_one_setup(tmp_path: Pa
     assert all(abs(s.usd - USD_PER_RUN) < Decimal("0.001") for s in statuses)
     assert str(b.scheduler.read(too_long)) == "queued (waiting for l4: at its machine limit), $0.00"
 
-    ((still, cost),) = b.scheduler.rentals()
-    assert still.machine == machine and cost > USD_PER_RUN * 2  # idle time is the rental's
+    (still,) = b.scheduler.rentals()
+    assert (
+        still.rental.machine == machine and still.usd > USD_PER_RUN * 2
+    )  # idle time is the rental's
     ended = b.scheduler.terminate(machine)
     assert ended.deleted_at is not None
     b.run(1)

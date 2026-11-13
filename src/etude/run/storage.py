@@ -264,7 +264,7 @@ class _Object:
     def changed(self, etag: str) -> Fetched | None:
         return self._get({"IfNoneMatch": etag})
 
-    def reused(self, size_bytes: int, byte_range: str | None) -> None:
+    def reused(self, size_bytes: int, start: int | None, end: int | None) -> None:
         pass
 
     def _get(self, options: dict[str, str]) -> Fetched | None:

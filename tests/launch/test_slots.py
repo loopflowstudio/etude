@@ -67,7 +67,7 @@ def test_runs_sharing_a_machine_split_its_cost_and_cancel_independently(tmp_path
     assert b.scheduler.read(second).usd == _hours_usd(300) / 2 + _hours_usd(300)
     # The runs share what they occupied; idle time before the machine ended is the rental's.
     occupied = b.scheduler.read(first).usd + b.scheduler.read(second).usd
-    assert round(occupied, 12) == round(_hours_usd(600), 12) < b.scheduler.rentals()[0][1]
+    assert round(occupied, 12) == round(_hours_usd(600), 12) < b.scheduler.rentals()[0].usd
 
 
 def test_each_run_on_a_shared_machine_publishes_its_own_outputs(tmp_path: Path) -> None:

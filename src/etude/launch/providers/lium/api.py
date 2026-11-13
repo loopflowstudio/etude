@@ -51,7 +51,7 @@ class Line(Record):
     amount_usd: Decimal | None = Field(ge=0, allow_inf_nan=False)
 
 
-class Quote(Record):
+class _LiumQuote(Record):
     executor_id: UUID
     gpu_count: int = Field(gt=0)
     hours: Decimal = Field(gt=0, allow_inf_nan=False)
@@ -63,7 +63,7 @@ class Quote(Record):
 
 class LiumOffer(Record):
     node: Node
-    quote: Quote
+    quote: _LiumQuote
 
     @property
     def price(self) -> Decimal:
@@ -182,7 +182,7 @@ class LiumAPI(LiumHTTP):
             ):
                 continue
             quote = _read(
-                Quote,
+                _LiumQuote,
                 self.ask(
                     "GET",
                     f"executors/{node.id}/quote",

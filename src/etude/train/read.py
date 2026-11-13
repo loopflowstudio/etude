@@ -26,12 +26,13 @@ from dataclasses import dataclass
 from functools import cached_property
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import NamedTuple
 
 import numpy as np
 import numpy.typing as npt
 from pydantic import ConfigDict, PrivateAttr, SkipValidation, ValidationError
 
+from etude.carriage import checkpoint_key
 from etude.run.block_file import BlockFile, parse, select
 from etude.run.errors import EtudeError
 from etude.run.listing import as_storage, declared, run_folders, under
@@ -45,7 +46,19 @@ from etude.run.records import (
     RunState,
 )
 from etude.run.storage import Storage, run_prefix
-from etude.train.block import DTYPES, SeriesColumn, Table
+from etude.train.block import (
+    COUNT,
+    DTYPES,
+    FINITE,
+    FIRST,
+    LAST,
+    MAX,
+    MIN,
+    STATISTICS,
+    SUM,
+    Columns,
+    SeriesColumn,
+)
 from etude.train.manifest import BlockDescription, Manifest, StoredBlock, describe, fetch
 from etude.train.records import CheckpointRecord, RowTable, TablePoint
 
@@ -81,6 +94,7 @@ class RunData(Arrays):
     name: str
     file: RunFile | None
     state: RunState | None
+    # In ordinal order, one per ordinal: a later attempt continues its run's ordinals.
     checkpoints: tuple[CheckpointRecord, ...]
     # Every process that wrote to this run, in start order.
     attempts: tuple[Attempt, ...]
@@ -88,16 +102,16 @@ class RunData(Arrays):
 
     @cached_property
     def blocks(self) -> tuple[StoredBlock, ...]:
-        """One table per process that wrote rows, in the order the processes started.
+        """The stored blocks of every process that wrote rows, in the order the processes started.
 
         Read from storage the first time it is used, keeping the metrics `read_all` was given.
         """
         return self._read_blocks()
 
     @cached_property
-    def tables(self) -> tuple[Table, ...]:
-        """Raw inspection loads whole blocks; chart reads do not."""
-        return tuple(block.table() for block in self.blocks)
+    def columns(self) -> tuple[Columns, ...]:
+        """Each block's rows by column. Raw inspection loads whole blocks; chart reads do not."""
+        return tuple(block.columns() for block in self.blocks)
 
     @property
     def clocks(self) -> tuple[Clock, ...]:
@@ -110,6 +124,17 @@ class RunData(Arrays):
     @property
     def rows(self) -> int:
         return sum(block.header.rows for block in self.blocks)
+
+    @property
+    def writer_starts(self) -> dict[str, int]:
+        """When each process that wrote to this run started, in milliseconds since the epoch.
+
+        Its attempt's `started_ms`, else, for a process that recorded no
+        attempt, the earliest wall time its blocks give.
+        """
+        return _writer_starts(
+            self.attempts, ((b.header.writer, b.header.wall_first) for b in self.blocks)
+        )
 
     @property
     def incomplete(self) -> int:
@@ -135,7 +160,7 @@ class RunData(Arrays):
             _batch(stretch, located.__getitem__, (metric,), clock).points[metric]
             for stretch in _stretches(placed, self.attempts, clock)
         ]
-        return _latest([p.x for p in parts], [p.y for p in parts])
+        return _latest_writes([p.x for p in parts], [p.y for p in parts])
 
     def read_table(self, name: str, clock: str) -> tuple[TablePoint, ...]:
         """Read selected JSON tables, in clock order; missing or damaged artifacts raise.
@@ -203,7 +228,7 @@ class RunData(Arrays):
             for block in self.blocks
             if block.description.overview is not None
         )
-        chunks: list[tuple[Floats, Floats, np.ndarray[Any, Any]]] = []
+        groups: list[_Groups] = []
         for extent in extents:
             block = located[extent.key]
             h = block.header
@@ -228,13 +253,8 @@ class RunData(Arrays):
                 and metric in inline.series
             ):
                 endpoints = np.asarray(inline.clocks[clock], dtype="<f8")
-                chunks.append(
-                    (
-                        endpoints[:, 0],
-                        endpoints[:, 1],
-                        np.asarray(inline.series[metric], dtype="<f8"),
-                    )
-                )
+                statistics = np.asarray(inline.series[metric], dtype="<f8")
+                groups.append(_Groups(endpoints[:, 0], endpoints[:, 1], statistics))
                 continue
             levels = [level for level in h.rollups if level.factor <= target]
             if (
@@ -246,7 +266,8 @@ class RunData(Arrays):
                 c = next(c for c in level.clocks if c.name == clock)
                 m = next(c for c in level.series if c.name == metric)
                 endpoints = block.array(c.data, "<f8", 2)
-                chunks.append((endpoints[:, 0], endpoints[:, 1], block.array(m.data, "<f8", 7)))
+                statistics = block.array(m.data, "<f8", STATISTICS)
+                groups.append(_Groups(endpoints[:, 0], endpoints[:, 1], statistics))
             else:
                 # Raw is still column-selective: never fetch other metrics.
                 x = _clock(block, clock)
@@ -258,13 +279,16 @@ class RunData(Arrays):
                     x, y = x[inside], y[inside]
                 if not len(x):
                     continue
+                # Each row is a group of one.
                 finite = np.isfinite(y)
-                stats = np.column_stack(
-                    (y, y, np.where(finite, y, 0), finite, y, y, np.ones(len(x)))
-                )
-                stats[~finite, :2] = np.nan
-                chunks.append((x, x, stats))
-        return _chart(chunks, limit, span)
+                statistics = np.empty((len(x), STATISTICS))
+                statistics[:, MIN] = statistics[:, MAX] = np.where(finite, y, np.nan)
+                statistics[:, SUM] = np.where(finite, y, 0)
+                statistics[:, FINITE] = finite
+                statistics[:, FIRST] = statistics[:, LAST] = y
+                statistics[:, COUNT] = 1
+                groups.append(_Groups(x, x, statistics))
+        return _chart(groups, limit, span)
 
 
 class Buckets(Arrays):
@@ -333,30 +357,40 @@ def buckets(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _Groups:
+    """Consecutive row groups of one metric: each group's clock endpoints and statistics."""
+
+    x_first: Floats
+    x_last: Floats
+    # One row per group, of `etude.train.block`'s `STATISTICS` columns.
+    statistics: Floats
+
+
 def _chart(
-    chunks: Sequence[tuple[Floats, Floats, np.ndarray[Any, Any]]],
+    groups: Sequence[_Groups],
     limit: int,
     span: tuple[float, float] | None = None,
 ) -> Buckets:
-    if not chunks:
+    if not groups:
         return buckets(Points(x=np.empty(0), y=np.empty(0)), limit)
-    first_x = np.concatenate([chunk[0] for chunk in chunks])
-    last_x = np.concatenate([chunk[1] for chunk in chunks])
-    stats = np.concatenate([chunk[2] for chunk in chunks])
+    first_x = np.concatenate([each.x_first for each in groups])
+    last_x = np.concatenate([each.x_last for each in groups])
+    stats = np.concatenate([each.statistics for each in groups])
     index = _bucket_indices(first_x, float(last_x[-1]), limit, span)
     starts = np.flatnonzero(np.r_[True, index[1:] != index[:-1]])
     ends = np.r_[starts[1:], len(first_x)] - 1
-    finite = np.add.reduceat(stats[:, 3], starts)
-    total = np.add.reduceat(stats[:, 6], starts).astype(np.int64)
+    finite = np.add.reduceat(stats[:, FINITE], starts)
+    total = np.add.reduceat(stats[:, COUNT], starts).astype(np.int64)
     with np.errstate(invalid="ignore", divide="ignore"):
-        mean = np.add.reduceat(stats[:, 2], starts) / finite
+        mean = np.add.reduceat(stats[:, SUM], starts) / finite
     return Buckets(
         x_first=first_x[starts],
         x_last=last_x[ends],
-        first=stats[starts, 4],
-        last=stats[ends, 5],
-        min=np.fmin.reduceat(stats[:, 0], starts),
-        max=np.fmax.reduceat(stats[:, 1], starts),
+        first=stats[starts, FIRST],
+        last=stats[ends, LAST],
+        min=np.fmin.reduceat(stats[:, MIN], starts),
+        max=np.fmax.reduceat(stats[:, MAX], starts),
         mean=mean,
         count=total,
         nonfinite=total - finite.astype(np.int64),
@@ -436,11 +470,18 @@ def _place(block: StoredBlock, clock: str) -> _Placed:
     return _Placed(block.key, h.writer, h.first, h.wall_first, given)
 
 
-def _write_order(
-    writer: str, sequence: int, wall_first: int, started: dict[str, int]
-) -> tuple[int, int]:
-    """A block's place in write order: its process's start, then its sequence."""
-    return started.get(writer, wall_first), sequence
+def _writer_starts(
+    attempts: Sequence[Attempt], blocks: Iterable[tuple[str, int]]
+) -> dict[str, int]:
+    """When each writer started: its attempt's `started_ms`, else its blocks' earliest wall time.
+
+    `blocks` gives each block's writer and first wall time. A block's place in
+    write order is its writer's start, then its sequence.
+    """
+    unrecorded: dict[str, int] = {}
+    for writer, wall_first in blocks:
+        unrecorded[writer] = min(unrecorded.get(writer, wall_first), wall_first)
+    return unrecorded | {attempt.writer: attempt.started_ms for attempt in attempts}
 
 
 def _stretches(
@@ -458,12 +499,8 @@ def _stretches(
     for attempt in attempts:
         writers.setdefault(attempt.writer, [])
     # A resumed attempt cuts history even before it has logged any rows.
-    ordered = sorted(
-        writers,
-        key=lambda writer: (
-            recorded[writer].started_ms if writer in recorded else writers[writer][0].wall_first
-        ),
-    )
+    starts = _writer_starts(attempts, ((block.writer, block.wall_first) for block in placed))
+    ordered = sorted(writers, key=starts.__getitem__)
     # Work backwards so each writer sees the earliest cutoff of all later attempts.
     cutoffs: dict[str, float | None] = {}
     cutoff: float | None = None
@@ -523,10 +560,10 @@ def _batch(
             x, keep = _counted(block, column, logged, extent, after)
             xs[column.name].append(x[keep])
             ys[column.name].append(block.array(column.data, "<f8")[keep])
-    return Batch(points={metric: _latest(xs[metric], ys[metric]) for metric in xs})
+    return Batch(points={metric: _latest_writes(xs[metric], ys[metric]) for metric in xs})
 
 
-def _latest(xs: Sequence[Floats], ys: Sequence[Floats]) -> Points:
+def _latest_writes(xs: Sequence[Floats], ys: Sequence[Floats]) -> Points:
     """Points from parts in write order, keeping the latest write of each clock value."""
     x = np.concatenate(xs) if xs else np.empty(0)
     y = np.concatenate(ys) if ys else np.empty(0)
@@ -613,17 +650,17 @@ def _hours(
 
 
 def _here(
-    record: CheckpointRecord, storage: Storage, place: str, keys: set[tuple[str, str]]
+    record: CheckpointRecord, storage: Storage, folder: str, keys: set[tuple[str, str]]
 ) -> CheckpointRecord:
     """The record with its file's address in this storage, where the file sits beside it.
 
     The record names the file where it was written, which may be a machine
     that no longer exists. A missing file leaves the record as it is.
     """
-    name = "checkpoints/" + record.artifact.uri.rpartition("/")[2]
-    if record.artifact.sha256 is None or (place, name) not in keys:
+    name = checkpoint_key(record.artifact.uri)
+    if record.artifact.sha256 is None or (folder, name) not in keys:
         return record
-    artifact = record.artifact.model_copy(update={"uri": storage.uri(place + name)})
+    artifact = record.artifact.model_copy(update={"uri": storage.uri(folder + name)})
     return record.model_copy(update={"artifact": artifact})
 
 
@@ -726,19 +763,22 @@ def read_batches(
     while True:
         try:
             keys = _listing(storage, folders)
-            _, attempts = _records(storage, keys)
-            started = {attempt.writer: attempt.started_ms for attempt, _ in attempts}
+            attempts = _records(storage, keys).attempts
             logged: set[str] = set()
             placed: list[_Placed] = []
-            for place, file, _ in _selected(storage, keys, indexes=False):
+            for chosen in _selected(storage, keys, indexes=False):
                 # The whole header plans the block and says which metrics it logged.
-                whole = StoredBlock(storage, place + file.key, describe(storage, place, file.key))
+                key = chosen.file.key
+                whole = StoredBlock(
+                    storage, chosen.folder + key, describe(storage, chosen.folder, key)
+                )
                 logged.update(c.name for c in whole.header.series if c.kind == "metric")
                 placed.append(_place(whole, clock))
             if missing := sorted(selected - logged):
                 raise EtudeError("metric_not_logged", 404) from KeyError(", ".join(missing))
-            placed.sort(key=lambda p: _write_order(p.writer, p.sequence, p.wall_first, started))
-            for stretch in _stretches(placed, [attempt for attempt, _ in attempts], clock):
+            starts = _writer_starts(attempts, ((p.writer, p.wall_first) for p in placed))
+            placed.sort(key=lambda p: (starts[p.writer], p.sequence))
+            for stretch in _stretches(placed, attempts, clock):
                 high = max(extent.high for extent in stretch)
                 if done is not None and high <= done:
                     continue
@@ -757,7 +797,7 @@ def read_batches(
 
 def _named(keys: Sequence[str], folders: Sequence[str]) -> list[tuple[str, str]]:
     """Every (folder, name under it) of a sorted listing, first folder first."""
-    return [(place, key[len(place) :]) for place in folders for key in under(keys, place)]
+    return [(folder, key[len(folder) :]) for folder in folders for key in under(keys, folder)]
 
 
 def _listing(storage: Storage, folders: Sequence[str]) -> list[tuple[str, str]]:
@@ -765,14 +805,24 @@ def _listing(storage: Storage, folders: Sequence[str]) -> list[tuple[str, str]]:
     return _named(sorted(k for f in folders for k in storage.keys(f)), folders)
 
 
-def _records(
-    storage: Storage, keys: Sequence[tuple[str, str]]
-) -> tuple[list[CheckpointRecord], list[tuple[Attempt, str]]]:
-    """The run's checkpoint records, and its attempts in start order with their folders."""
+@dataclass(frozen=True)
+class _Records:
+    """A training run's records, from every folder of it."""
+
+    checkpoints: list[CheckpointRecord]
+    # Every process that wrote to the run, once each, in start order.
+    attempts: tuple[Attempt, ...]
+    # By writer, the folder its attempt record was first found in.
+    folder_of: dict[str, str]
+
+
+def _records(storage: Storage, keys: Sequence[tuple[str, str]]) -> _Records:
+    """The run's checkpoint records and its attempts, with their folders."""
     present = set(keys)
     checkpoints: list[CheckpointRecord] = []
-    attempts: list[tuple[Attempt, str]] = []
-    for place, name in keys:
+    attempts: dict[str, Attempt] = {}
+    folder_of: dict[str, str] = {}
+    for folder, name in keys:
         kind, _, leaf = name.partition("/")
         # A training run's records: `metrics/WRITER.json`, an attempt, and
         # `checkpoints/NAME.json`. Nothing else, such as an eval run's files, is read.
@@ -780,23 +830,35 @@ def _records(
             continue
         if kind == "metrics" and leaf.endswith((".index.json", ".permanent.json")):
             continue  # an index, read with the blocks
-        body = storage.get(place + name)
+        body = storage.get(folder + name)
         try:
             if kind == "checkpoints":
                 checkpoints.append(
-                    _here(CheckpointRecord.model_validate_json(body), storage, place, present)
+                    _here(CheckpointRecord.model_validate_json(body), storage, folder, present)
                 )
             else:
-                attempts.append((Attempt.model_validate_json(body), place))
+                attempt = Attempt.model_validate_json(body)
+                attempts.setdefault(attempt.writer, attempt)
+                folder_of.setdefault(attempt.writer, folder)
         except ValidationError:
             continue
-    attempts.sort(key=lambda pair: pair[0].started_ms)
-    return checkpoints, attempts
+    ordered = tuple(sorted(attempts.values(), key=lambda attempt: attempt.started_ms))
+    return _Records(checkpoints=checkpoints, attempts=ordered, folder_of=folder_of)
+
+
+@dataclass(frozen=True)
+class _Selected:
+    """A block that holds some of the run's rows, in the folder it was found in."""
+
+    folder: str
+    file: BlockFile
+    # Its description from a writer's index, when one was read.
+    description: BlockDescription | None
 
 
 def _selected(
     storage: Storage, keys: Sequence[tuple[str, str]], *, indexes: bool
-) -> list[tuple[str, BlockFile, BlockDescription | None]]:
+) -> list[_Selected]:
     """The blocks that hold the run's rows, each with its folder and any index description.
 
     Raises FileNotFoundError for a gap in a writer's sequence, which a fresh
@@ -804,25 +866,25 @@ def _selected(
     """
     descriptions: dict[str, BlockDescription] = {}
     # A writer is one process on one machine, so a block's name is in one folder.
-    folder: dict[str, str] = {}
-    for place, name in keys:
+    folder_of: dict[str, str] = {}
+    for folder, name in keys:
         if name.startswith("metrics/") and name.endswith((".index.json", ".permanent.json")):
             if not indexes:
                 continue
-            manifest = Manifest.model_validate_json(storage.get(place + name))
+            manifest = Manifest.model_validate_json(storage.get(folder + name))
             for described in manifest.blocks:
                 descriptions[described.key] = described
-                folder.setdefault(described.key, place)
+                folder_of.setdefault(described.key, folder)
         elif parse(name) is not None:
-            folder.setdefault(name, place)
-    candidates = [file for name in folder if (file := parse(name)) is not None]
+            folder_of.setdefault(name, folder)
+    candidates = [file for name in folder_of if (file := parse(name)) is not None]
     expected: dict[str, int] = {}
     selected = []
     for file in select([*candidates, *(d.file() for d in descriptions.values())]):
         if file.first != expected.get(file.writer, 0):
             raise FileNotFoundError("block sequence gap")
         expected[file.writer] = file.last + 1
-        selected.append((folder[file.key], file, descriptions.get(file.key)))
+        selected.append(_Selected(folder_of[file.key], file, descriptions.get(file.key)))
     return selected
 
 
@@ -840,16 +902,18 @@ def _read(
     """The run's records from `listing`, the source's sorted keys; its blocks once used."""
     keys = _named(listing, folders)
     present = set(keys)
-    checkpoints, attempts = _records(storage, keys)
+    records = _records(storage, keys)
+    attempts = records.attempts
     # The state the latest attempt left, where it left one.
-    ended = [place for place in folders if (place, "state.json") in present]
-    latest = next((place for _, place in reversed(attempts) if place in ended), None)
+    ended = [folder for folder in folders if (folder, "state.json") in present]
+    left = (records.folder_of[attempt.writer] for attempt in reversed(attempts))
+    latest = next((folder for folder in left if folder in ended), None)
     state = latest or (ended[-1] if ended else None)
     run_state = RunState.model_validate_json(storage.get(state + "state.json")) if state else None
     if run_state is not None and attempts:
         # A completion belongs to one writer, not every later resume. Older
         # evidence without attribution is conclusive only for a single attempt.
-        current = run_state.writer == attempts[-1][0].writer
+        current = run_state.writer == attempts[-1].writer
         unattributed = run_state.writer is None and len(attempts) == 1
         if not current and not unattributed:
             run_state = None
@@ -860,14 +924,13 @@ def _read(
         state=run_state,
         # A later attempt continues its run's ordinals; each is kept once.
         checkpoints=_hours(
-            {r.ordinal: r for r in sorted(checkpoints, key=_order)}.values(),
-            [attempt for attempt, _ in attempts],
+            {r.ordinal: r for r in sorted(records.checkpoints, key=_order)}.values(),
+            attempts,
             continued=run_file is not None and run_file.declaration.continues is not None,
         ),
-        attempts=tuple(attempt for attempt, _ in attempts),
+        attempts=attempts,
     )
-    started = {attempt.writer: attempt.started_ms for attempt, _ in attempts}
-    data._read_blocks = lambda: _blocks(storage, folders, keys, started, metrics, prefixes)
+    data._read_blocks = lambda: _blocks(storage, folders, keys, attempts, metrics, prefixes)
     return data
 
 
@@ -875,7 +938,7 @@ def _blocks(
     storage: Storage,
     folders: Sequence[str],
     keys: list[tuple[str, str]],
-    started: dict[str, int],
+    attempts: Sequence[Attempt],
     metrics: frozenset[str] | None,
     prefixes: tuple[str, ...],
 ) -> tuple[StoredBlock, ...]:
@@ -884,24 +947,22 @@ def _blocks(
     for retry in range(3):
         try:
             blocks = []
-            for place, file, description in _selected(storage, keys, indexes=metrics is None):
+            for chosen in _selected(storage, keys, indexes=metrics is None):
+                folder, file, description = chosen.folder, chosen.file, chosen.description
                 if description is None and file.level < 2 and metrics is None:
                     # A recent block: small, and in no manifest, so take it whole.
-                    blocks.append(fetch(storage, place, file.key))
+                    blocks.append(fetch(storage, folder, file.key))
                     continue
                 if description is None:
                     description = describe(
-                        storage, place, file.key, metrics=metrics, prefixes=prefixes
+                        storage, folder, file.key, metrics=metrics, prefixes=prefixes
                     )
-                blocks.append(StoredBlock(storage, place + file.key, description))
+                blocks.append(StoredBlock(storage, folder + file.key, description))
             break
         except FileNotFoundError:
             if retry == 2:
                 raise
             keys = _listing(storage, folders)
-    blocks.sort(
-        key=lambda block: _write_order(
-            block.header.writer, block.header.first, block.header.wall_first, started
-        )
-    )
+    starts = _writer_starts(attempts, ((b.header.writer, b.header.wall_first) for b in blocks))
+    blocks.sort(key=lambda block: (starts[block.header.writer], block.header.first))
     return tuple(blocks)

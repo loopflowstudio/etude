@@ -41,6 +41,7 @@ from etude.launch.records import Storage as Place
 from etude.launch.scheduler import Scheduler
 from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.s3 import Bucket, Keys
+from etude.launch.storage.transport import HTTPReply
 from etude.launch.worker.courier import run as run_courier
 from tests.launch.fake import Clock
 from tests.launch.test_runpod_machines import Storage, released, repository, until
@@ -95,7 +96,7 @@ class Marketplace:
 
     def __call__(
         self, method: str, url: str, body: bytes | None, headers: dict[str, str]
-    ) -> tuple[int, bytes]:
+    ) -> HTTPReply:
         self.counts[method] += 1
         if self.offline:
             raise OSError("fixture unavailable")
@@ -142,7 +143,7 @@ class Marketplace:
             reply = {"results": rows, "next_token": None}
         else:
             raise AssertionError(f"unhandled fixture path: {method} {path}")
-        return 200, json.dumps(reply).encode()
+        return HTTPReply(200, json.dumps(reply).encode())
 
 
 def machines(
@@ -306,10 +307,12 @@ def test_scheduler_retains_uncertain_acquisition_until_owned_deletion(
             scheduler.tick()
         assert market.counts == {"POST": 1, "PUT": 1, "GET": 4}
         pending = store.rented_session(name)
-        assert pending.receipt is None and pending.refused_at is None and pending.ended_at is None
+        assert (
+            pending.provider_id is None and pending.refused_at is None and pending.ended_at is None
+        )
         assert [s.id for s in store.unsettled_sessions()] == [held.id]
         assert store.rental_for(pending) == rental
-        assert scheduler.rentals()[0][1] > 0
+        assert scheduler.rentals()[0].usd > 0
         assert storage.objects[f"test/sessions/{held.id}/offer.json"] == intent
         with pytest.raises(LauncherError, match="at its machine limit"):
             scheduler.rent("4090", hours=1)
@@ -322,11 +325,11 @@ def test_scheduler_retains_uncertain_acquisition_until_owned_deletion(
             scheduler.tick()  # recover the receipt
             scheduler.tick()  # enforce the elapsed deadline
         ended = store.rented_session(name)
-        assert ended.id == held.id and ended.receipt == "12"
+        assert ended.id == held.id and ended.provider_id == "12"
         assert ended.ended_at is not None and ended.refused_at is None
         assert not store.unsettled_sessions() and market.instances == {}
         assert market.counts["PUT"] == 1 and market.counts["DELETE"] == 1
-        assert scheduler.rentals()[0][1] > 0
+        assert scheduler.rentals()[0].usd > 0
     finally:
         store.close()
 
@@ -341,11 +344,11 @@ def test_scheduler_releases_confirmed_vast_refusal(tmp_path: Path) -> None:
         refused = scheduler.rent("4090", hours=1)
         assert store.machine(refused).refused_at is not None
         assert not store.unsettled_sessions()
-        assert scheduler.rentals()[0][1] == 0
+        assert scheduler.rentals()[0].usd == 0
         assert market.counts == {"POST": 1}
         market.offers = [OFFER.copy()]
         acquired = scheduler.rent("4090", hours=1)
-        assert acquired != refused and store.rented_session(acquired).receipt == "12"
+        assert acquired != refused and store.rented_session(acquired).provider_id == "12"
         scheduler.terminate(acquired)
         assert market.instances == {} and market.counts["PUT"] == market.counts["DELETE"] == 1
     finally:
@@ -441,14 +444,14 @@ def test_charges_exhaust_pages_and_reject_duplicate_contract_totals() -> None:
         "end": 1793750400,
     }
 
-    def send(
-        method: str, url: str, body: bytes | None, headers: dict[str, str]
-    ) -> tuple[int, bytes]:
+    def send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> HTTPReply:
         nonlocal calls
         calls += 1
         later = "after_token" in parse_qs(urlsplit(url).query)
         rows = [row] if later or duplicate else [{**row, "source": "instance-99"}]
-        return 200, json.dumps({"results": rows, "next_token": None if later else "next"}).encode()
+        return HTTPReply(
+            200, json.dumps({"results": rows, "next_token": None if later else "next"}).encode()
+        )
 
     api = VastAPI("fixture", send)
     instance = Instance.model_validate(INSTANCE)
@@ -650,10 +653,8 @@ def test_a_matching_label_without_an_etude_acquisition_is_not_owned() -> None:
 
 @pytest.mark.parametrize("reply", [b"not-json", b'{"offers":null}', b'{"error":"fixture-secret"}'])
 def test_invalid_offers_are_unknown_and_do_not_disclose_provider_bodies(reply: bytes) -> None:
-    def send(
-        method: str, url: str, body: bytes | None, headers: dict[str, str]
-    ) -> tuple[int, bytes]:
-        return 200, reply
+    def send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> HTTPReply:
+        return HTTPReply(200, reply)
 
     with pytest.raises(ProviderUnavailable) as error:
         VastAPI("fixture", send).offers(TEMPLATE)
@@ -666,13 +667,11 @@ def test_pagination_requires_a_terminal_page_and_detects_nonadvancing_cursors(
 ) -> None:
     calls = 0
 
-    def send(
-        method: str, url: str, body: bytes | None, headers: dict[str, str]
-    ) -> tuple[int, bytes]:
+    def send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> HTTPReply:
         nonlocal calls
         calls += 1
         field = "instances" if resource == "inventory" else "results"
-        return 200, json.dumps({field: [], "next_token": "repeated"}).encode()
+        return HTTPReply(200, json.dumps({field: [], "next_token": "repeated"}).encode())
 
     with pytest.raises(ProviderUnavailable, match="pagination"):
         api = VastAPI("fixture", send)
@@ -684,18 +683,23 @@ def test_pagination_requires_a_terminal_page_and_detects_nonadvancing_cursors(
 
 
 def test_quote_prices_the_requested_disk_allocation() -> None:
-    def send(
-        method: str, url: str, body: bytes | None, headers: dict[str, str]
-    ) -> tuple[int, bytes]:
+    def send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> HTTPReply:
         search = json.loads(body or b"{}")
         disk = search["allocated_storage"]
-        return 200, json.dumps(
-            {
-                "offers": [
-                    {**OFFER, "storage_total_cost": disk * 0.0025, "dph_total": 0.5 + disk * 0.0025}
-                ]
-            }
-        ).encode()
+        return HTTPReply(
+            200,
+            json.dumps(
+                {
+                    "offers": [
+                        {
+                            **OFFER,
+                            "storage_total_cost": disk * 0.0025,
+                            "dph_total": 0.5 + disk * 0.0025,
+                        }
+                    ]
+                }
+            ).encode(),
+        )
 
     api = VastAPI("fixture", send)
     assert api.offers(TEMPLATE)[0].dph_total == Decimal("0.6")
