@@ -1018,3 +1018,56 @@ def test_a_seating_pools_every_tournament_and_setup_that_played_it(
     # One point per checkpoint: 100, held by both tournaments, is not drawn twice.
     points = sorted((p.at["updates"], p.matches) for p in page.points if p.selection == pooled)
     assert points == [(100, 1), (200, 1)]
+
+
+FIXED_PAIRS = """
+from etude.report import Curve, Matches, Report, Score
+
+
+def report():
+    return Report(
+        score=Score(table="plays", value="won", reference=0.5),
+        clock="updates",
+        evals=(Curve(matches=tuple(Matches(seating=f"at-{n}") for n in (100, 200))),),
+    )
+"""
+
+
+def test_fixed_pairs_are_drawn_once_where_their_first_seat_stood(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = tmp_path / "runs"
+    file = experiment_file(tmp_path / "experiments", "lab", FIXED_PAIRS)
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("ETUDE_SOURCE_DIR", str(file.parent))
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    # Each seating pits one line's checkpoint against another line's at its own position,
+    # as a comparison of two jobs at equal training does.
+    seatings = tuple(
+        Seating(
+            name=f"at-{n}",
+            players=(
+                outside(f"large-{n}", {"updates": n}, "large", strength=9),
+                outside(f"small-{n}", {"updates": n // 2}, "small"),
+            ),
+            conditions=({"deal": 0},),
+            games=2,
+        )
+        for n in (100, 200)
+    )
+    hold(
+        Benchmark(name="pairs", environment=DUEL, seatings=seatings),
+        experiment="lab",
+        play=play,
+        directory=runs,
+    )
+    page = build(runs, file)
+    (pairs,) = [i for i, each in enumerate(page.selections) if isinstance(each, tuple)]
+    assert page.drawn[pairs].seated
+    # One point per pair, at the first seat's checkpoint and line: none for the second seat.
+    drawn = sorted(
+        (p.line, p.at["updates"], p.matches)
+        for p in page.points
+        if p.selection == pairs and not p.split and p.commit is None
+    )
+    assert drawn == [("large", 100, 1), ("large", 200, 1)]

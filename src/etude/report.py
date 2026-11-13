@@ -82,7 +82,9 @@ class Curve(Record):
     Where every one of its `matches` is a `Matches(seating=...)`, each point is
     a held checkpoint's seating value, its first seat's score, where that
     checkpoint stood; a held checkpoint whose relative seat has no checkpoint
-    is a gap that says why.
+    is a gap that says why. A seating of two fixed models is held for its
+    first seat's checkpoint, so a pair of jobs' checkpoints is drawn once,
+    on the first seat's line.
     Otherwise each point is a checkpoint's score against the opponent the
     section's Opponent control picks. A tuple of `matches` unions their
     matches before aggregation.
