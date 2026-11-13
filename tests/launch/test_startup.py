@@ -11,7 +11,7 @@ from typing import Self
 import pytest
 from pydantic import ValidationError
 
-from etude.launch.database import Database
+from etude.launch.database import Database, launcher_file
 from etude.launch.environment import install, startup_timeout
 from etude.launch.errors import LaunchError
 from etude.launch.logging import Console
@@ -40,7 +40,7 @@ def test_startup_policy_survives_restart_and_ondemand_changes(
     expected = None if seconds is None else b.clock() + timedelta(seconds=seconds)
     assert session.startup_deadline == expected
     b.scheduler.set_startup("l4", 1)
-    reopened = Database(tmp_path / "launcher.db")
+    reopened = Database(launcher_file(tmp_path))
     assert reopened.session(session.id).startup_deadline == expected
     assert reopened.ondemand("l4").startup_seconds == 1
     b.run((seconds or 600) - 1)

@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from etude.cli import main
-from etude.launch.database import Database
+from etude.launch.database import Database, launcher_file
 from etude.launch.records import (
     Job,
     LauncherError,
@@ -655,7 +655,7 @@ def test_the_default_target_is_persistent_and_off_default_pool_requires_one(
     one = b.scheduler.queue(job())
     b.scheduler.tick()
     assert (b.scheduler.record(one).pool, b.scheduler.record(one).rent) == ("shed", "l4")
-    assert Database(tmp_path / "launcher.db").default_target() == Target(pool="shed", rent="l4")
+    assert Database(launcher_file(tmp_path)).default_target() == Target(pool="shed", rent="l4")
     b.scheduler.turn_pool("shed", off=True)
     assert b.scheduler.record(b.scheduler.queue(job())).pool is None  # rents only
     b.scheduler.set_default("shed")
@@ -794,7 +794,7 @@ def test_a_retry_on_another_owned_host_waits_for_and_continues_the_runs_folder(
 ) -> None:
     clock = Clock()
     hosts = {name: Host(clock, tmp_path / name) for name in ("first", "second")}
-    store = Database(tmp_path / "launcher.db")
+    store = Database(launcher_file(tmp_path))
     scheduler = Scheduler(store, {"ssh": lambda held: hosts[held.name]}, clock=clock)
     scheduler.add_pool(Pool(name="lab"))
     scheduler.add_machine("first", "owned", pool="lab", expires_at=clock() + timedelta(seconds=150))

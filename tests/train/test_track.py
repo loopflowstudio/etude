@@ -20,6 +20,7 @@ import pytest
 from moto import mock_aws
 
 from etude.cli import main
+from etude.launch.database import launcher_file
 from etude.page import Server, build
 from etude.run.delivery import sync
 from etude.run.errors import EtudeError
@@ -464,7 +465,7 @@ def test_tracking_commands_use_local_files_with_a_selected_controller(
     served = ["report", pilot, "--serve", "--source", str(destination), "--port", "0"]
     assert main(served) == 0
     assert "http://127.0.0.1:" in capsys.readouterr().out
-    assert not (home / "launcher.db").exists()
+    assert not launcher_file(home).exists()
 
 
 def test_finish_retries_retained_files_when_storage_recovers(tmp_path: Path) -> None:
