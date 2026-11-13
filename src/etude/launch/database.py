@@ -46,7 +46,6 @@ from etude.launch.records import (
     Supply,
     Tally,
     Target,
-    job_identity,
 )
 from etude.launch.usage import Transfer
 
@@ -89,10 +88,9 @@ CREATE TABLE IF NOT EXISTS machines(
   cost_usd TEXT NOT NULL DEFAULT '0', expires_at TEXT,
   provider TEXT, address TEXT, storage TEXT, deleted_at TEXT, image TEXT,
   CHECK ((pool IS NULL) != (ondemand IS NULL)));
-CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, identity TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS runs(
   seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
-  job TEXT NOT NULL REFERENCES jobs(id), spec TEXT NOT NULL, seed INTEGER,
+  job TEXT NOT NULL, spec TEXT NOT NULL, seed INTEGER,
   pool TEXT REFERENCES pools(name), rent TEXT REFERENCES ondemands(name),
   cohort TEXT REFERENCES cohorts(name),
   created_at TEXT NOT NULL,
@@ -103,7 +101,7 @@ CREATE TABLE IF NOT EXISTS runs(
 CREATE TABLE IF NOT EXISTS sessions(
   seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
   machine TEXT NOT NULL REFERENCES machines(name), planned_at TEXT NOT NULL,
-  claimed_at TEXT, startup_deadline TEXT, receipt TEXT, started_at TEXT, refused_at TEXT, ended_at TEXT,
+  claimed_at TEXT, startup_deadline TEXT, provider_id TEXT, started_at TEXT, refused_at TEXT, ended_at TEXT,
   version INTEGER NOT NULL DEFAULT 1, autorun INTEGER NOT NULL DEFAULT 0, hardware TEXT,
   finish_requested_at TEXT);
 CREATE TABLE IF NOT EXISTS rentals(
@@ -125,10 +123,10 @@ CREATE INDEX IF NOT EXISTS attempts_session ON attempts(session);
 
 Fact = str | int | None
 # Prototype databases from another schema version are refused, never migrated.
-_VERSION = 15
+_VERSION = 16
 
 
-def _text(at: datetime | None) -> str | None:
+def _iso(at: datetime | None) -> str | None:
     return None if at is None else at.isoformat()
 
 
@@ -137,7 +135,7 @@ def _text(at: datetime | None) -> str | None:
 _RUNS = "SELECT r.* FROM runs r"
 
 
-def _run(row: sqlite3.Row) -> RunRecord:
+def _run_from_row(row: sqlite3.Row) -> RunRecord:
     return RunRecord.model_validate(
         {
             **dict(row),
@@ -153,7 +151,7 @@ def _run(row: sqlite3.Row) -> RunRecord:
 # said about making and deleting the machine is recorded on that session.
 _MACHINES = """SELECT m.name, m.pool, m.ondemand, m.kind, m.cost_usd, m.expires_at,
     m.provider, m.address, m.storage, m.image,
-    w.claimed_at AS requested_at, w.receipt AS provider_id, w.hardware, w.refused_at,
+    w.claimed_at, w.provider_id, w.hardware, w.refused_at,
     COALESCE(w.ended_at, m.deleted_at) AS deleted_at
     FROM machines m LEFT JOIN sessions w ON w.machine=m.name AND m.kind='rented'"""
 # A session's supply is its machine's: one owner for the fact.
@@ -162,7 +160,7 @@ _SESSIONS = """SELECT w.*, COALESCE(m.pool, m.ondemand) AS supply
 _RENTALS = "SELECT r.* FROM rentals r"
 
 
-def _machine(row: sqlite3.Row) -> Machine:
+def _machine_from_row(row: sqlite3.Row) -> Machine:
     return Machine.model_validate(
         {
             **dict(row),
@@ -172,7 +170,7 @@ def _machine(row: sqlite3.Row) -> Machine:
     )
 
 
-def _session(row: sqlite3.Row) -> Session:
+def _session_from_row(row: sqlite3.Row) -> Session:
     return Session.model_validate({**dict(row), "hardware": _hardware(row)})
 
 
@@ -180,7 +178,7 @@ def _hardware(row: sqlite3.Row) -> object:  # validated by the record holding it
     return json.loads(row["hardware"]) if row["hardware"] else None
 
 
-def _attempt(row: sqlite3.Row) -> RunAttempt:
+def _attempt_from_row(row: sqlite3.Row) -> RunAttempt:
     return RunAttempt.model_validate(
         {
             **dict(row),
@@ -572,7 +570,7 @@ class Database:
                 machine.pool,
                 machine.ondemand,
                 str(machine.cost_usd),
-                _text(machine.expires_at),
+                _iso(machine.expires_at),
                 machine.provider,
                 machine.address,
                 machine.storage,
@@ -586,14 +584,14 @@ class Database:
         row = self._db.execute(f"{_MACHINES} WHERE m.name = ?", (name,)).fetchone()
         if row is None:
             raise LauncherError(f"no machine named {name!r}")
-        return _machine(row)
+        return _machine_from_row(row)
 
     def machines(self, supply: str) -> tuple[Machine, ...]:
         """A pool's machines, or every machine ever rented from an on-demand."""
         rows = self._db.execute(
             f"{_MACHINES} WHERE m.pool = ? OR m.ondemand = ? ORDER BY m.rowid", (supply, supply)
         )
-        return tuple(_machine(row) for row in rows)
+        return tuple(_machine_from_row(row) for row in rows)
 
     # Jobs, runs and cohorts
 
@@ -622,10 +620,6 @@ class Database:
                 except sqlite3.IntegrityError as error:
                     raise LauncherError(f"cohort {cohort.name!r} already exists") from error
             for run in runs:
-                self._db.execute(
-                    "INSERT OR IGNORE INTO jobs VALUES (?, ?)",
-                    (run.job, json.dumps(job_identity(run.spec), sort_keys=True)),
-                )
                 self._db.execute(
                     """INSERT INTO runs(id, job, spec, seed, pool, rent, cohort,
                        created_at, autorun, queued, params, source, smoke)
@@ -659,15 +653,15 @@ class Database:
         row = self._db.execute(f"{_RUNS} WHERE r.id = ?", (id,)).fetchone()
         if row is None:
             raise LauncherError(f"no run {id!r}")
-        return _run(row)
+        return _run_from_row(row)
 
     def runs(self) -> tuple[RunRecord, ...]:
-        return tuple(_run(row) for row in self._db.execute(f"{_RUNS} ORDER BY r.seq"))
+        return tuple(_run_from_row(row) for row in self._db.execute(f"{_RUNS} ORDER BY r.seq"))
 
     def job_runs(self, job: str) -> tuple[RunRecord, ...]:
         """Every run of one job, oldest first: its seeds side by side."""
         rows = self._db.execute(f"{_RUNS} WHERE r.job = ? ORDER BY r.seq", (job,))
-        return tuple(_run(row) for row in rows)
+        return tuple(_run_from_row(row) for row in rows)
 
     def cohort_exists(self, name: str) -> bool:
         return (
@@ -701,7 +695,9 @@ class Database:
                 ORDER BY r.seq""",
             (supply, supply, *sorted(RETRYABLE)),
         ).fetchall()
-        return tuple(run for row in rows if (run := _run(row)).spec.max_attempts > row["tries"])
+        return tuple(
+            run for row in rows if (run := _run_from_row(row)).spec.max_attempts > row["tries"]
+        )
 
     # Sessions
 
@@ -751,7 +747,7 @@ class Database:
                         r.deadline.isoformat(),
                         int(r.kept),
                         str(r.billed_usd),
-                        _text(r.billed_through),
+                        _iso(r.billed_through),
                     ),
                 )
             if launch is not None:
@@ -795,7 +791,7 @@ class Database:
                     a.position,
                     a.limit_seconds,
                     a.limit_kind,
-                    _text(a.planned_at),
+                    _iso(a.planned_at),
                     int(a.added),
                 ),
             )
@@ -811,16 +807,12 @@ class Database:
                 session.id,
                 session.version,
                 claimed_at=at.isoformat(),
-                startup_deadline=_text(deadline),
+                startup_deadline=_iso(deadline),
             )
 
-    def record_receipt(self, session: Session, receipt: str) -> None:
-        self._change(
-            "sessions",
-            session.id,
-            session.version,
-            receipt=receipt,
-        )
+    def record_provider_id(self, session: Session, provider_id: str) -> None:
+        """Confirm the session's machine was created, under the provider's name for it."""
+        self._change("sessions", session.id, session.version, provider_id=provider_id)
 
     def record_hardware(self, session: Session, hardware: Hardware) -> None:
         self._change(
@@ -866,7 +858,7 @@ class Database:
         ).fetchone()
         if row is None:
             raise LauncherError(f"machine {machine!r} has no rental")
-        return _session(row)
+        return _session_from_row(row)
 
     def rentals(self) -> tuple[Rental, ...]:
         return tuple(Rental.model_validate(dict(row)) for row in self._db.execute(_RENTALS))
@@ -883,7 +875,9 @@ class Database:
         return int(count)
 
     def sessions(self) -> tuple[Session, ...]:
-        return tuple(_session(row) for row in self._db.execute(f"{_SESSIONS} ORDER BY w.seq"))
+        return tuple(
+            _session_from_row(row) for row in self._db.execute(f"{_SESSIONS} ORDER BY w.seq")
+        )
 
     def record_refusal(self, session: Session, at: datetime) -> None:
         self._change("sessions", session.id, session.version, refused_at=at.isoformat())
@@ -902,7 +896,7 @@ class Database:
         row = self._db.execute(f"{_SESSIONS} WHERE w.id = ?", (id,)).fetchone()
         if row is None:
             raise LauncherError(f"no session {id!r}")
-        return _session(row)
+        return _session_from_row(row)
 
     def unsettled_sessions(self) -> tuple[Session, ...]:
         """Sessions not refused and either still running or with attempts not yet settled.
@@ -915,7 +909,7 @@ class Database:
                (SELECT 1 FROM attempts a WHERE a.session = w.id AND a.outcome IS NULL))
                ORDER BY w.seq"""
         )
-        return tuple(_session(row) for row in rows)
+        return tuple(_session_from_row(row) for row in rows)
 
     def cohort_sessions(self, name: str) -> tuple[Session, ...]:
         rows = self._db.execute(
@@ -923,12 +917,12 @@ class Database:
                JOIN runs r ON r.id = a.run WHERE r.cohort = ?) ORDER BY w.seq""",
             (name,),
         )
-        return tuple(_session(row) for row in rows)
+        return tuple(_session_from_row(row) for row in rows)
 
     def cohort_runs(self, name: str) -> tuple[RunRecord, ...]:
         self.cohort(name)  # raises if no such cohort
         rows = self._db.execute(f"{_RUNS} WHERE r.cohort = ? ORDER BY r.seq", (name,))
-        return tuple(_run(row) for row in rows)
+        return tuple(_run_from_row(row) for row in rows)
 
     def cohort_attempts(self, name: str) -> tuple[RunAttempt, ...]:
         rows = self._db.execute(
@@ -936,7 +930,7 @@ class Database:
                WHERE r.cohort = ? ORDER BY a.seq""",
             (name,),
         )
-        return tuple(_attempt(row) for row in rows)
+        return tuple(_attempt_from_row(row) for row in rows)
 
     # Attempts
 
@@ -997,4 +991,4 @@ class Database:
         rows = self._db.execute(
             f"SELECT * FROM attempts WHERE {column} = ? ORDER BY {order}", (value,)
         )
-        return tuple(_attempt(row) for row in rows)
+        return tuple(_attempt_from_row(row) for row in rows)

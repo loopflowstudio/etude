@@ -38,7 +38,7 @@ def test_commands_rent_and_terminate_by_machine_name(
     assert "rented until" in capsys.readouterr().out
     machine = b.scheduler.machines("l4")[0]
     assert machine.kind == "rented" and machine.provider == "fake"
-    assert machine.requested_at == b.clock.now
+    assert machine.claimed_at == b.clock.now
     assert machine.provider_id is not None and machine.address is None
     assert main(["ondemands"]) == 0
     assert "rented: " + machine.name in capsys.readouterr().out

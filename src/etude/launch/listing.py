@@ -82,8 +82,8 @@ def show_ondemands(scheduler: Scheduler) -> None:
 
 def show_machines(scheduler: Scheduler, *, ended: bool, images: bool = False) -> None:
     """One line per machine: owned with its cost and expiry, or rented with its window and cost."""
-    windows = {rental.machine: (rental, usd) for rental, usd in scheduler.rentals()}
-    now = scheduler._clock()
+    windows = {cost.rental.machine: cost for cost in scheduler.rentals()}
+    now = scheduler.now()
     for each in scheduler.pools():
         for machine in scheduler.machines(each.name):
             where = f" ({_here()})" if machine.kind == "local" else ""
@@ -103,12 +103,12 @@ def show_machines(scheduler: Scheduler, *, ended: bool, images: bool = False) ->
         for machine in scheduler.machines(ondemand.name):
             if machine.name not in windows or (machine.deleted_at is not None and not ended):
                 continue
-            rental, usd = windows[machine.name]
-            estimated = scheduler._estimated(rental, now)
-            cost = f"{'~' if estimated else ''}${usd:.2f}"
+            spent = windows[machine.name]
+            rental = spent.rental
+            cost = f"{'~' if spent.estimated else ''}${spent.usd:.2f}"
             if rental.billed_through is not None:
                 cost = f"${rental.billed_usd:.4f} billed" + (
-                    f" + ~${usd - rental.billed_usd:.4f}" if estimated else ""
+                    f" + ~${spent.unbilled_usd:.4f}" if spent.estimated else ""
                 )
             if machine.deleted_at is not None:
                 window = f"rented, ended {machine.deleted_at:%Y-%m-%d %H:%M} UTC"
@@ -121,7 +121,7 @@ def show_machines(scheduler: Scheduler, *, ended: bool, images: bool = False) ->
                 print(
                     f"  image: {image.requested} -> {image.resolved} ({image.platform or 'platform unchecked'})"
                 )
-            if rental.billed_usd > rental.cap_usd:
+            if spent.over_cap:
                 print(f"warning: {machine.name} bill exceeds its ${rental.cap_usd:.4f} cap")
 
 

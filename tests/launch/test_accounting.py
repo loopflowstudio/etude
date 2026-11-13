@@ -39,7 +39,7 @@ def test_bills_cover_only_their_hours_and_do_not_change_admission(tmp_path: Path
     assert not b.scheduler.read(run).estimated
     assert abs(b.scheduler.read(run).usd - Decimal("1.6") * 5000 / 5100) < Decimal("0.00001")
     # Idle time between completion and controller cleanup belongs to the rental.
-    assert b.scheduler.rentals()[0][1] == Decimal("1.6")
+    assert b.scheduler.rentals()[0].usd == Decimal("1.6")
     assert b.store.rental(held.machine).cap_usd == Decimal(2)
 
 
