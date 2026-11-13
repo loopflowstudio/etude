@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
@@ -286,3 +287,39 @@ def test_a_published_table_with_the_games_own_seat_keeps_each_players_rows(tmp_p
         0,
         1,
     }
+
+
+class _PandasLookups:
+    """Counts every search of the import path for pandas (it is not installed here)."""
+
+    def __init__(self) -> None:
+        self.count = 0
+
+    def find_spec(self, name: str, path: object, target: object = None) -> None:
+        if name == "pandas":
+            self.count += 1
+
+
+def test_pandas_lookups_do_not_grow_with_the_matches_played_and_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # DuckDB looks for pandas for each Python value a statement takes as a parameter;
+    # without pandas installed, each look searches the import path. Rows reach DuckDB
+    # as files instead, so playing looks never and holding a fixed few times.
+    lookups = _PandasLookups()
+    monkeypatch.setattr(sys, "meta_path", [lookups, *sys.meta_path])
+
+    def counted(matches: int) -> tuple[int, int]:
+        bucket = DirectoryStorage(tmp_path / f"bucket-{matches}")
+        players = pair(tmp_path)
+        lookups.count = 0
+        evaluate(experiment="cards", environment=DUEL, play=play,
+                 matches=deals(players, *range(matches)), run="a",
+                 directory=tmp_path / f"run-{matches}", storages=[bucket])  # fmt: skip
+        played = lookups.count
+        assert held("cards", bucket) == (1, matches, matches * 2 * 2)
+        return played, lookups.count - played
+
+    few, many = counted(5), counted(50)
+    assert few[0] == many[0] == 0
+    assert few[1] == many[1]

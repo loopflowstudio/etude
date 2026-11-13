@@ -53,7 +53,7 @@ from etude.eval.block import (
     quote,
     run_blocks,
     seal_abandoned,
-    unnest,
+    stage,
 )
 from etude.eval.records import (
     ADDED,
@@ -431,12 +431,15 @@ class _Writer:
         self, target: Path, columns: dict[str, ColumnType], rows: Sequence[Row], match: str
     ) -> None:
         """Write one match's rows of a table to `target` as Parquet; readers never see half a file."""
-        select, values = unnest(
+        stage(
+            self.db,
+            "_match_rows",
             {**columns, "run": "VARCHAR", "match": "VARCHAR"},
             [[row.get(name) for name in columns] + [self.name, match] for row in rows],
         )
         partial = target.with_name(target.name + ".partial")
-        self.db.execute(f"copy ({select}) to {quote(partial)} (format parquet)", values)
+        self.db.execute(f"copy _match_rows to {quote(partial)} (format parquet)")
+        self.db.execute("drop table _match_rows")
         partial.replace(target)
 
     def _seal(self) -> None:

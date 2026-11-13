@@ -90,7 +90,7 @@ from etude.eval.block import (
     quote,
     read,
     refuse_unconverted,
-    unnest,
+    stage,
 )
 from etude.eval.match import ETUDE_TABLES, KIND
 from etude.eval.records import (
@@ -259,7 +259,7 @@ def _catch_up(
 
     An interrupted catch-up commits nothing, so the next open repeats it.
     Taking in a block is a fixed number of statements however many matches
-    and blobs it holds: rows arrive as columns (`etude.eval.block.unnest`).
+    and blobs it holds: rows arrive as one file each (`etude.eval.block.stage`).
     """
     keys = sorted(storage.keys(""))
     listed = set(keys)
@@ -296,9 +296,8 @@ def _catch_up(
                     _sum_missing(db, storage, run, located, Path(copies))
                 else:
                     changed |= _training_checkpoints(db, storage, run, experiment, located, new)
-                select, values = unnest({"run": "VARCHAR", "name": "VARCHAR"},
-                                        [[run, name] for name in new])  # fmt: skip
-                db.execute(f"insert into kept.seen {select}", values)
+                _put(db, "kept.seen", {"run": "VARCHAR", "name": "VARCHAR"},
+                     [[run, name] for name in new])  # fmt: skip
                 # A name seen before passed this check when it was first read.
                 _refuse_unconverted(db, run, new)
         if changed:
@@ -393,17 +392,18 @@ def _training_checkpoints(
              str(CheckpointKey(run=run, name=PurePosixPath(stored.artifact.uri).name)),
              stored.artifact.sha256, stored.wall_ms, json.dumps(stored.at)]
         )  # fmt: skip
-    select, values = unnest(
+    stage(
+        db,
+        "_arrived_checkpoints",
         {"run": "VARCHAR", "experiment": "VARCHAR", "ordinal": "BIGINT", "checkpoint": "VARCHAR",
          "artifact": "VARCHAR", "wall_ms": "BIGINT", "at": "VARCHAR"},
         rows,
     )  # fmt: skip
     # One run copied to several places records each checkpoint once.
     db.execute(
-        f"insert into training_checkpoints select a.* from ({select}) a anti join"
+        "insert into training_checkpoints select a.* from _arrived_checkpoints a anti join"
         " training_checkpoints t on t.run = a.run and t.ordinal = a.ordinal"
-        " qualify row_number() over (partition by a.ordinal) = 1",
-        values,
+        " qualify row_number() over (partition by a.ordinal) = 1"
     )
     return bool(rows)
 
@@ -452,14 +452,16 @@ def _block(
     _matches(db, run, block)
     # A converted run's files that no match named.
     named = {digest for record in block.matches for digest in record.blobs}
-    select, values = unnest(
+    stage(
+        db,
+        "_unnamed_blobs",
         {"sha256": "VARCHAR", "size_bytes": "BIGINT"},
         [[digest, span.size_bytes] for digest, span in block.blobs.items() if digest not in named],
     )
     db.execute(
-        f"insert into blobs select ?, null, a.sha256, a.size_bytes from ({select}) a"
+        "insert into blobs select ?, null, a.sha256, a.size_bytes from _unnamed_blobs a"
         " anti join blobs b on b.run = ? and b.match is null and b.sha256 = a.sha256",
-        [run, *values, run],
+        [run, run],
     )
     _put(db, "kept.replaced", {"run": "VARCHAR", "name": "VARCHAR"},
          [[run, each] for each in block.replaces])  # fmt: skip
@@ -480,7 +482,9 @@ def _matches(db: duckdb.DuckDBPyConnection, run: str, block: Block) -> None:
     replaces a failure and the first done one stays, as `outcomes` keeps them.
     """
     records = list(outcomes(block.matches).values())
-    select, values = unnest(
+    stage(
+        db,
+        "_arrived_matches",
         {"record": "BIGINT", "match": "VARCHAR", "conditions": "VARCHAR", "games": "BIGINT",
          "seed": "BIGINT", "state": "VARCHAR", "error": "VARCHAR", "wall_ms": "BIGINT",
          "execution": "VARCHAR"},
@@ -490,10 +494,10 @@ def _matches(db: duckdb.DuckDBPyConnection, run: str, block: Block) -> None:
          for index, record in enumerate(records)],
     )  # fmt: skip
     db.execute(
-        f"create or replace temp table _taken as select a.* from ({select}) a"
+        "create or replace temp table _taken as select a.* from _arrived_matches a"
         " left join matches m on m.run = ? and m.match = a.match"
         " where m.match is null or (m.state <> 'done' and a.state = 'done')",
-        [*values, run],
+        [run],
     )
     for table in ("matches", "seats", '"groups"', "blobs"):
         db.execute(
@@ -505,7 +509,9 @@ def _matches(db: duckdb.DuckDBPyConnection, run: str, block: Block) -> None:
         " execution, null from _taken order by record",
         [run],
     )
-    select, values = unnest(
+    stage(
+        db,
+        "_arrived_players",
         {"record": "BIGINT", "seat": "BIGINT", "player": "VARCHAR", "name": "VARCHAR",
          "player_json": "VARCHAR", "commit": "VARCHAR", "source": "VARCHAR", "at": "VARCHAR",
          "line": "VARCHAR"},
@@ -521,8 +527,7 @@ def _matches(db: duckdb.DuckDBPyConnection, run: str, block: Block) -> None:
     )  # fmt: skip
     db.execute(
         "create or replace temp table _arrived_seats as select s.*, a.match"
-        f" from ({select}) s join _taken a using (record)",
-        values,
+        " from _arrived_players s join _taken a using (record)"
     )
     db.execute(
         'insert into seats select ?, match, seat, player, name, "commit", source, "at", line'
@@ -536,28 +541,33 @@ def _matches(db: duckdb.DuckDBPyConnection, run: str, block: Block) -> None:
         " qualify row_number() over (partition by s.player, s.name order by s.record, s.seat) = 1"
         " order by s.record, s.seat"
     )
-    select, values = unnest(
+    stage(
+        db,
+        "_arrived_groups",
         {"record": "BIGINT", "group": "VARCHAR", "seat": "BIGINT"},
         [[index, name, seat] for index, record in enumerate(records)
          for name, seats in record.match.groups.items() for seat in seats],
     )  # fmt: skip
     db.execute(
-        f'insert into "groups" select ?, a.match, g."group", g.seat from ({select}) g'
+        'insert into "groups" select ?, a.match, g."group", g.seat from _arrived_groups g'
         " join _taken a using (record) order by g.record",
-        [run, *values],
+        [run],
     )
-    select, values = unnest(
+    stage(
+        db,
+        "_arrived_blobs",
         {"record": "BIGINT", "sha256": "VARCHAR", "size_bytes": "BIGINT"},
         [[index, digest, block.blobs[digest].size_bytes]
          for index, record in enumerate(records) for digest in record.blobs],
     )  # fmt: skip
     db.execute(
-        f"insert into blobs select ?, a.match, b.sha256, b.size_bytes from ({select}) b"
+        "insert into blobs select ?, a.match, b.sha256, b.size_bytes from _arrived_blobs b"
         " join _taken a using (record) order by b.record",
-        [run, *values],
+        [run],
     )
-    db.execute("drop table _taken")
-    db.execute("drop table _arrived_seats")
+    for table in ("_taken", "_arrived_seats", "_arrived_matches", "_arrived_players",
+                  "_arrived_groups", "_arrived_blobs"):  # fmt: skip
+        db.execute(f"drop table {table}")
 
 
 def _put(
@@ -566,9 +576,10 @@ def _put(
     columns: Mapping[str, str],
     rows: Sequence[Sequence[object]],
 ) -> None:
-    """Insert `rows` into `table` by column name, in one statement."""
-    select, values = unnest(columns, rows)
-    db.execute(f"insert into {table} by name {select}", values)
+    """Insert `rows` into `table` by column name."""
+    stage(db, "_put", columns, rows)
+    db.execute(f"insert into {table} by name select * from _put")
+    db.execute("drop table _put")
 
 
 def _canonical(value: object) -> str:
