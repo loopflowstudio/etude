@@ -145,14 +145,11 @@ def hold(
         pending = list(matches)
     else:
         on_the_go = checkpoint is not None or bool(enter)
-        asked = _called(
-            added,
-            experiment=experiment,
-            on_the_go=on_the_go,
-            lines=lines,
-            directory=directory,
-            storages=storages,
+        # On the go, nothing is read: a seating of fixed players is left to batch.
+        runs = (
+            None if on_the_go else stored_runs(experiment, directory=directory, storages=storages)
         )
+        asked = _called(added, experiment=experiment, on_the_go=on_the_go, lines=lines, runs=runs)
         added, so_far = asked.recorded, asked.played
         every = [*(each.match for each in so_far.delivered), *so_far.failed, *so_far.new]
         # Contiguous runs of the play order, so each share seats fewer checkpoints.
@@ -209,6 +206,7 @@ def played(
     directory: Path | str | None = None,
     storages: Sequence[Storage] = (),
     lines: Sequence[Line] = (),
+    runs: StoredRuns | None = None,
 ) -> Played:
     """How far exactly this definition has been played, without playing anything.
 
@@ -221,16 +219,17 @@ def played(
     and a reader counts each match from the run whose rows are latest.
     Raises as a batch hold does, so a seating name defined two ways is refused.
     Relative seats find their checkpoints among `lines`, as in `hold`.
+
+    Asking about several tournaments, pass `runs` (`stored_runs`), read once,
+    instead of `directory` and `storages`, which are read on every call.
     """
     added = _added(tournament, tuple(checkpoints), enter, Share())
+    if runs is None:
+        runs = stored_runs(experiment, directory=directory, storages=storages)
+    elif runs.experiment != experiment:
+        raise EtudeError("stored_runs_of_another_experiment", 422)
     return _called(
-        added,
-        experiment=experiment,
-        on_the_go=False,
-        lines=lines,
-        wanted_only=True,
-        directory=directory,
-        storages=storages,
+        added, experiment=experiment, on_the_go=False, lines=lines, wanted_only=True, runs=runs
     ).played
 
 
@@ -242,21 +241,90 @@ def tournament_runs(
 
     One listing per place, each eval run's `run.json` and `tournament.json`.
     """
+    return stored_runs(experiment, directory=directory, storages=storages).tournaments()
+
+
+@dataclass(frozen=True)
+class _Folder:
+    """One folder of one of the experiment's eval runs, with what it was held for."""
+
+    place: Storage
+    run: str
+    folder: str
+    # Its file names, relative to the folder.
+    names: tuple[str, ...]
+    # Its `tournament.json`; else None, and `environment` is its `environment.json`'s.
+    held: TournamentRun | None
+    environment: str | None
+
+
+class StoredRuns:
+    """The experiment's eval runs as stored, read once for several tournaments.
+
+    Each place is listed once and each eval run's `run.json`, and its
+    `tournament.json` or else `environment.json`, read once; a run's blocks
+    are read the first time a tournament in its environment asks for them.
+    """
+
+    def __init__(self, experiment: str, folders: Sequence[_Folder]) -> None:
+        self.experiment = experiment
+        self._folders = tuple(folders)
+        self._records: dict[tuple[str, str], list[MatchRecord]] = {}
+        self._blocks: dict[str, dict[str, Block]] = {}
+
+    def tournaments(self) -> dict[str, list[TournamentRun]]:
+        """What each eval run held for a tournament added, by tournament, in run order."""
+        found: dict[str, dict[str, TournamentRun]] = {}
+        for each in self._folders:
+            if each.held is not None:
+                found.setdefault(each.held.tournament.name, {}).setdefault(each.run, each.held)
+        return {name: [runs[run] for run in sorted(runs)] for name, runs in sorted(found.items())}
+
+    def folders(self) -> tuple[_Folder, ...]:
+        return self._folders
+
+    def records(self, each: _Folder) -> list[MatchRecord]:
+        """The match records of a folder's blocks, read the first time they are asked for."""
+        key = (each.place.name, each.folder)
+        if key not in self._records:
+            self._records[key] = [
+                record
+                for block in run_blocks(
+                    each.place,
+                    each.folder,
+                    each.run,
+                    each.names,
+                    self._blocks.setdefault(each.run, {}),
+                )
+                for record in block.matches
+            ]
+        return self._records[key]
+
+
+def stored_runs(
+    experiment: str, *, directory: Path | str | None = None, storages: Sequence[Storage] = ()
+) -> StoredRuns:
+    """The experiment's eval runs in this computer's eval folder and `storages`."""
     base = Path(directory) if directory is not None else default_root()
-    found: dict[str, dict[str, TournamentRun]] = {}
+    folders: list[_Folder] = []
     for place in {each.name: each for each in [DirectoryStorage(base), *storages]}.values():
         keys = sorted(place.keys(""))
         listed = set(keys)
-        for run, folders in sorted(run_folders(keys).items()):
-            for folder in folders:
-                if (
-                    folder + TOURNAMENT_FILE not in listed
-                    or _experiment(place, folder) != experiment
-                ):
+        for run, held_in in sorted(run_folders(keys).items()):
+            for folder in held_in:
+                held_file = folder + TOURNAMENT_FILE in listed
+                if not held_file and folder + _ENVIRONMENT_FILE not in listed:
                     continue
-                added = TournamentRun.model_validate_json(place.get(folder + TOURNAMENT_FILE))
-                found.setdefault(added.tournament.name, {}).setdefault(run, added)
-    return {name: [runs[run] for run in sorted(runs)] for name, runs in sorted(found.items())}
+                if _experiment(place, folder) != experiment:
+                    continue
+                names = tuple(key[len(folder) :] for key in under(keys, folder))
+                if held_file:
+                    held = TournamentRun.model_validate_json(place.get(folder + TOURNAMENT_FILE))
+                    folders.append(_Folder(place, run, folder, names, held, None))
+                else:
+                    given = Environment.model_validate_json(place.get(folder + _ENVIRONMENT_FILE))
+                    folders.append(_Folder(place, run, folder, names, None, given.identity))
+    return StoredRuns(experiment, folders)
 
 
 def _added(
@@ -290,8 +358,7 @@ def _called(
     experiment: str,
     on_the_go: bool,
     lines: Sequence[Line],
-    directory: Path | str | None,
-    storages: Sequence[Storage],
+    runs: StoredRuns | None,
     wanted_only: bool = False,
 ) -> _Called:
     """Each match the tournament calls for with what `added` adds, by whether an eval run
@@ -303,9 +370,8 @@ def _called(
     alone, still refusing a definition the stored eval runs conflict with.
     """
     stored = _Stored(held=(), delivered={}, failed=set())
-    if not on_the_go:
-        base = Path(directory) if directory is not None else default_root()
-        stored = _stored(added.tournament, experiment, [DirectoryStorage(base), *storages])
+    if runs is not None:
+        stored = _stored(added.tournament, runs)
     tournament = assemble([*stored.held, added])
     known = {_found(each) for each in tournament.seated}
     if wanted_only:
@@ -380,45 +446,23 @@ class _Stored:
     failed: set[Digest]
 
 
-def _stored(
-    tournament: Benchmark | RoundRobin, experiment: str, places: Sequence[Storage]
-) -> _Stored:
-    """The tournament's eval runs of the experiment in every place, and how the experiment's
-    eval runs in its environment played each match.
-
-    One listing per place, each eval run's `run.json`, and one more read of each
-    of the experiment's: its `tournament.json`, or its `environment.json` when
-    it has none; then of the runs in the environment, each block's index once.
-    """
+def _stored(tournament: Benchmark | RoundRobin, runs: StoredRuns) -> _Stored:
+    """The tournament's eval runs of the experiment, and how the experiment's eval runs in
+    its environment played each match; each run's blocks read once however many
+    tournaments ask (`StoredRuns`)."""
     held: dict[str, TournamentRun] = {}
     records: dict[str, list[MatchRecord]] = {}
-    known: dict[str, dict[str, Block]] = {}
     environment = tournament.environment.identity
-    for place in {place.name: place for place in places}.values():
-        keys = sorted(place.keys(""))
-        listed = set(keys)
-        for run, folders in sorted(run_folders(keys).items()):
-            for folder in folders:
-                if folder + TOURNAMENT_FILE in listed:
-                    if _experiment(place, folder) != experiment:
-                        continue
-                    added = TournamentRun.model_validate_json(place.get(folder + TOURNAMENT_FILE))
-                    if added.tournament.name == tournament.name:
-                        held.setdefault(run, added)
-                    # A tournament's eval run is played in the tournament's environment.
-                    alike = added.tournament.environment.identity == environment
-                elif folder + _ENVIRONMENT_FILE in listed:
-                    if _experiment(place, folder) != experiment:
-                        continue
-                    given = Environment.model_validate_json(place.get(folder + _ENVIRONMENT_FILE))
-                    alike = given.identity == environment
-                else:
-                    continue
-                if not alike:
-                    continue
-                names = (key[len(folder) :] for key in under(keys, folder))
-                for block in run_blocks(place, folder, run, names, known.setdefault(run, {})):
-                    records.setdefault(run, []).extend(block.matches)
+    for each in runs.folders():
+        if each.held is not None:
+            if each.held.tournament.name == tournament.name:
+                held.setdefault(each.run, each.held)
+            # A tournament's eval run is played in the tournament's environment.
+            alike = each.held.tournament.environment.identity == environment
+        else:
+            alike = each.environment == environment
+        if alike:
+            records.setdefault(each.run, []).extend(runs.records(each))
     newest: dict[Digest, tuple[int, str]] = {}
     failed: set[Digest] = set()
     for run, held_records in records.items():

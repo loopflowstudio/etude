@@ -29,7 +29,7 @@ from etude.eval.records import (
     Share,
     TournamentRun,
 )
-from etude.eval.tournament import hold, played, scores, standings
+from etude.eval.tournament import hold, played, scores, standings, stored_runs
 from etude.run.errors import EtudeError
 from etude.run.records import ArtifactRef, Clock
 from etude.run.storage import DirectoryStorage
@@ -781,3 +781,31 @@ def test_played_says_who_delivered_each_match_last_what_failed_and_what_is_new(
                    storages=[bucket], directory=reader)  # fmt: skip
     (failed,) = third.failed
     assert failed.conditions == {"deal": 1} and not third.delivered
+
+
+def test_stored_runs_read_once_answer_played_for_every_tournament_asked(tmp_path: Path) -> None:
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    progress = anchors(tmp_path)
+    checkpoints = trained(tmp_path, bucket)
+    hold(progress, experiment=EXPERIMENT, checkpoint=checkpoints[0], play=play,
+         storages=[bucket], directory=tmp_path / "first")  # fmt: skip
+    evaluate(experiment=EXPERIMENT, environment=WORLD, play=play, run="other",
+             matches=[Match(players=(scripted(tmp_path, "a", 1), scripted(tmp_path, "b", 2)),
+                            conditions={"deal": 9}, games=1)],
+             storages=[bucket], directory=tmp_path / "other")  # fmt: skip
+    reader = tmp_path / "reader"
+    measured = MeasuredStorage(bucket)
+    runs = stored_runs(EXPERIMENT, storages=[measured], directory=reader)
+    asked = [
+        played(progress, experiment=EXPERIMENT, checkpoints=each, runs=runs)
+        for each in (checkpoints[:1], checkpoints[1:2], checkpoints[2:])
+    ]
+    # Three tournaments' worth of asking reads what one does: one listing, each eval
+    # run's run.json, the tournament's tournament.json and the other's environment.json,
+    # and each run's block index once.
+    assert (measured.listings, measured.requests) == (1, 2 + 1 + 1 + 2)
+    assert [len(each.delivered) for each in asked] == [6, 0, 0]
+    assert asked[0] == played(progress, experiment=EXPERIMENT, checkpoints=checkpoints[:1],
+                              storages=[bucket], directory=reader)  # fmt: skip
+    with pytest.raises(EtudeError, match="stored_runs_of_another_experiment"):
+        played(progress, experiment="other", runs=runs)
