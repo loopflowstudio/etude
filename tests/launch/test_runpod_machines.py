@@ -54,6 +54,7 @@ from etude.launch.schemas import (
     WORKER_LOG,
     AttemptRecord,
     Bootstrap,
+    Finished,
     Packet,
     Work,
     WorkerLog,
@@ -61,8 +62,8 @@ from etude.launch.schemas import (
     log_piece,
 )
 from etude.launch.storage.bucket import BucketJournal
-from etude.launch.storage.s3 import Bucket, Grant, Keys, Reply
-from etude.launch.storage.transport import emit
+from etude.launch.storage.s3 import Bucket, Grant, Keys
+from etude.launch.storage.transport import HTTPReply, emit
 from etude.launch.worker import courier as courier_module
 from etude.launch.worker.courier import Courier
 from etude.launch.worker.courier import run as run_in_pod
@@ -120,7 +121,9 @@ class Storage:
         self.grants = True
         self.lock = threading.Lock()
 
-    def __call__(self, method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Reply:
+    def __call__(
+        self, method: str, url: str, body: bytes | None, headers: dict[str, str]
+    ) -> HTTPReply:
         parts = urlsplit(url)
         key = unquote(parts.path.lstrip("/"))
         query = parse_qs(parts.query, keep_blank_values=True)
@@ -128,15 +131,15 @@ class Storage:
             self.asked.append((method, key + ("?" + parts.query if parts.query else "")))
             if parts.netloc.startswith("sts."):
                 if not self.grants:
-                    return Reply(status=403, body=b"<ErrorResponse/>")
-                return Reply(
+                    return HTTPReply(status=403, body=b"<ErrorResponse/>")
+                return HTTPReply(
                     status=200,
                     body=b"<GetFederationTokenResponse><GetFederationTokenResult><Credentials><AccessKeyId>ASIATEMPORARY</AccessKeyId><SecretAccessKey>s</SecretAccessKey><SessionToken>t</SessionToken></Credentials></GetFederationTokenResult></GetFederationTokenResponse>",
                 )
             if method == "POST" and "uploads" in query:
                 upload = f"upload{len(self.uploads)}"
                 self.uploads[upload] = {}
-                return Reply(
+                return HTTPReply(
                     status=200, body=f"<Result><UploadId>{upload}</UploadId></Result>".encode()
                 )
             if "uploadId" in query:
@@ -144,12 +147,12 @@ class Storage:
                 if method == "PUT":
                     number = int(query["partNumber"][0])
                     held[number] = body or b""
-                    return Reply(status=200, body=b"", headers={"etag": f'"tag{number}"'})
+                    return HTTPReply(status=200, body=b"", headers={"etag": f'"tag{number}"'})
                 if method == "POST":
                     assert all(f'"tag{n}"' in (body or b"").decode() for n in held)
                     self.objects[key] = b"".join(held[n] for n in sorted(held))
                 del self.uploads[query["uploadId"][0]]
-                return Reply(status=200, body=b"")
+                return HTTPReply(status=200, body=b"")
             if method == "POST":
                 boundary = headers["Content-Type"].split("boundary=")[1].encode()
                 fields: dict[str, bytes] = {}
@@ -158,15 +161,15 @@ class Storage:
                     name = head.split(b'name="')[1].split(b'"')[0].decode()
                     fields[name] = value.removesuffix(b"\r\n")
                 self.objects[fields["key"].decode()] = fields["file"]
-                return Reply(status=204, body=b"")
+                return HTTPReply(status=204, body=b"")
             if method == "PUT":
                 if headers.get("if-none-match") == "*" and key in self.objects:
-                    return Reply(status=412, body=b"")
+                    return HTTPReply(status=412, body=b"")
                 self.objects[key] = body or b""
-                return Reply(status=200, body=b"")
+                return HTTPReply(status=200, body=b"")
             if method == "DELETE":
                 self.objects.pop(key, None)
-                return Reply(status=204, body=b"")
+                return HTTPReply(status=204, body=b"")
             if "list-type" in query:
                 found = sorted(k for k in self.objects if k.startswith(query["prefix"][0]))
                 keys = "".join(f"<Contents><Key>{k}</Key></Contents>" for k in found)
@@ -174,12 +177,12 @@ class Storage:
                     '<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
                     f"<IsTruncated>false</IsTruncated>{keys}</ListBucketResult>"
                 )
-                return Reply(status=200, body=page.encode())
+                return HTTPReply(status=200, body=page.encode())
             if key in self.objects:
                 value = self.objects[key]
                 if "Range" in headers:
                     start, end = map(int, headers["Range"].removeprefix("bytes=").split("-"))
-                    return Reply(
+                    return HTTPReply(
                         status=206,
                         body=value[start : end + 1],
                         headers={
@@ -188,8 +191,8 @@ class Storage:
                             "etag": hashlib.sha256(value).hexdigest(),
                         },
                     )
-                return Reply(status=200, body=value)
-            return Reply(status=404, body=b"")
+                return HTTPReply(status=200, body=value)
+            return HTTPReply(status=404, body=b"")
 
 
 @dataclass
@@ -208,7 +211,7 @@ class RunPod:
 
     def __call__(
         self, method: str, url: str, body: bytes | None, headers: dict[str, str]
-    ) -> tuple[int, bytes]:
+    ) -> HTTPReply:
         with self.lock:
             return self._answer(method, url, body)
 
@@ -221,12 +224,12 @@ class RunPod:
         with self.storage.lock:  # on the same timeline as storage requests and creates
             self.storage.asked.append(("TERMINATE", id))
 
-    def _answer(self, method: str, url: str, body: bytes | None) -> tuple[int, bytes]:
+    def _answer(self, method: str, url: str, body: bytes | None) -> HTTPReply:
         path = urlsplit(url).path.removeprefix("/v2/")
         if path == "catalog/gpus":
             here = [{"id": "EU-RO-1", "availability": self.available}]
             gpu = {"id": "NVIDIA L4", "price": {"secure": 0.59}, "dataCenters": here}
-            return 200, json.dumps({"gpus": [gpu]}).encode()
+            return HTTPReply(200, json.dumps({"gpus": [gpu]}).encode())
         if path == "catalog/cpus":
             here = [{"id": "EU-RO-1", "availability": self.available}]
             cpu = {
@@ -236,7 +239,7 @@ class RunPod:
                 "vcpu": {"min": 2, "max": 32},
                 "dataCenters": here,
             }
-            return 200, json.dumps({"cpus": [cpu]}).encode()
+            return HTTPReply(200, json.dumps({"cpus": [cpu]}).encode())
         if method == "POST":
             asked = json.loads(body or b"{}")
             assert asked["dataCenterIds"] == ["EU-RO-1"]  # the pool's place is the one asked for
@@ -261,18 +264,20 @@ class RunPod:
             if self.lose_reply:
                 self.lose_reply = False
                 raise OSError("the reply never arrived")
-            return 200, json.dumps(pod).encode()
+            return HTTPReply(200, json.dumps(pod).encode())
         if path == "pods":
             paging = {"hasNextPage": False, "nextCursor": None}
-            return 200, json.dumps(
-                {"pods": list(self.pods.values()), "pagination": paging}
-            ).encode()
+            return HTTPReply(
+                200, json.dumps({"pods": list(self.pods.values()), "pagination": paging}).encode()
+            )
         id = path.removeprefix("pods/")
         if method == "DELETE":
             self.pods.pop(id, None)
             self._deleted(id)
-            return 200, b""
-        return (200, json.dumps(self.pods[id]).encode()) if id in self.pods else (404, b"")
+            return HTTPReply(200, b"")
+        if id not in self.pods:
+            return HTTPReply(404, b"")
+        return HTTPReply(200, json.dumps(self.pods[id]).encode())
 
 
 class BucketObjects:
@@ -756,15 +761,13 @@ def test_the_guardian_deletes_the_pod_at_the_deadline_or_when_the_dollars_run_ou
         fact = {"id": "pod1", "name": "etude-r", "cost": cost, "status": "RUNNING"}
         fact["createdAt"] = start.isoformat()
 
-        def send(
-            method: str, url: str, body: bytes | None, headers: dict[str, str]
-        ) -> tuple[int, bytes]:
+        def send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> HTTPReply:
             if method == "DELETE":
                 deletes.append(elapsed[0])
                 if len(deletes) < 3:
                     raise OSError("the provider is unreachable")  # it keeps trying
-                return 200, b""
-            return reply, json.dumps(fact).encode()
+                return HTTPReply(200, b"")
+            return HTTPReply(reply, json.dumps(fact).encode())
 
         guard(
             GuardianAPI("pod-key", send),
@@ -823,8 +826,8 @@ def test_shared_inputs_are_prepared_once(tmp_path: Path) -> None:
     bootstrap = Bootstrap.model_validate_json(
         storage.objects["test/sessions/shared/bootstrap.json"]
     )
-    assert len(bootstrap.fetch) == 1
-    source = bootstrap.fetch[f"shared/sources/{commit}.tar"]
+    assert len(bootstrap.fetch.sources) == 1 and not bootstrap.fetch.inputs
+    source = bootstrap.fetch.sources[commit]
     archive = storage.objects[f"test/sources/{source.sha256}.tar"]  # shared by every session
     assert (source.sha256, source.size_bytes) == (hashlib.sha256(archive).hexdigest(), len(archive))
     with counting.record():
@@ -840,7 +843,7 @@ def test_a_rented_sessions_grants_last_until_its_deadline(tmp_path: Path) -> Non
 
         def __call__(
             self, method: str, url: str, body: bytes | None, headers: dict[str, str]
-        ) -> Reply:
+        ) -> HTTPReply:
             if urlsplit(url).netloc.startswith("sts."):
                 self.durations.append(int(parse_qs((body or b"").decode())["DurationSeconds"][0]))
             return super().__call__(method, url, body, headers)
@@ -873,10 +876,10 @@ def test_lost_start_receipt_reply_cannot_leave_unreported_running_code(tmp_path:
     class LostReceipt(Storage):
         def __call__(
             self, method: str, url: str, body: bytes | None, headers: dict[str, str]
-        ) -> Reply:
+        ) -> HTTPReply:
             response = super().__call__(method, url, body, headers)
             if method in ("POST", "PUT") and "test/sessions/r/out/receipt" in self.objects:
-                return Reply(status=503, body=b"")
+                return HTTPReply(status=503, body=b"")
             return response
 
     storage = LostReceipt()
@@ -969,7 +972,7 @@ def test_a_twelve_hour_log_is_sent_once_in_a_few_hundred_pieces(
                 job.flush()
                 now[0] = float(second)
                 courier.carry_out()
-    (attempt / "finished.json").write_text("{}")
+    (attempt / "finished.json").write_text(_finished())
     (courier._home / "session.log").touch()
     courier.carry_out(final=True)
     folder = "etude/run1/attempts/"
@@ -997,7 +1000,7 @@ def test_a_growing_worker_log_is_sent_once_in_appended_pieces(
 
         def __call__(
             self, method: str, url: str, body: bytes | None, headers: dict[str, str]
-        ) -> Reply:
+        ) -> HTTPReply:
             before = dict(self.objects)
             reply = super().__call__(method, url, body, headers)
             self.writes.update(k for k, v in self.objects.items() if before.get(k) is not v)
@@ -1067,7 +1070,7 @@ def test_output_printed_during_an_upload_waits_for_the_next_piece(tmp_path: Path
 
         def __call__(
             self, method: str, url: str, body: bytes | None, headers: dict[str, str]
-        ) -> Reply:
+        ) -> HTTPReply:
             if method == "PUT" and ".log/" in url:
                 with log.open("ab") as job:
                     job.write(b"printed meanwhile\n")
@@ -1235,7 +1238,7 @@ def test_replaced_files_are_deleted_before_the_attempt_is_reported_finished(
     (track / "metrics/2-00000000-00000007-0123456789ab.blk").write_bytes(b"joined")
     (track / recent).unlink()
     (track / "metrics/w.removed").write_text(recent + "\n")
-    (attempt / "finished.json").write_text("{}")
+    (attempt / "finished.json").write_text(_finished())
     courier.carry_out()
     assert f"etude/run1/{recent}" not in storage.objects
     # The launcher may release the machine once it reads the finished note, so
@@ -1256,7 +1259,7 @@ def test_finished_outputs_go_under_the_attempt_and_checkpoints_under_the_run(
     (track / "checkpoints").mkdir()
     (track / "checkpoints/steps-10.pt").write_bytes(b"weights")
     (outputs / "etude-result.json").write_text(json.dumps({"clocks": {"steps": 10}}))
-    (attempt / "finished.json").write_text("{}")
+    (attempt / "finished.json").write_text(_finished())
     courier.carry_out()
     stored = sorted(key.removeprefix("etude/run1/") for key in storage.objects)
     assert stored == ["attempts/a1.json", "attempts/a1/weights.pt", "checkpoints/steps-10.pt"]
@@ -1297,7 +1300,9 @@ def _sent(storage: Storage, part: str) -> list[str]:
 class Observed(Storage):
     """The bucket, reporting each request as the real transport does, so usage sees it."""
 
-    def __call__(self, method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Reply:
+    def __call__(
+        self, method: str, url: str, body: bytes | None, headers: dict[str, str]
+    ) -> HTTPReply:
         reply = super().__call__(method, url, body, headers)
         emit(method, url, supplied=len(body or b""), status=reply.status, completed=True)
         return reply
@@ -1509,3 +1514,15 @@ def test_a_retry_on_a_fresh_machine_never_reuses_a_name_storage_holds(tmp_path: 
     assert not (there / "checkpoints/steps-3.pt").exists()  # listed, never read
     _retrained(fresh, there, tmp_path / "one" / "weights.pt")
     _intact(storage)
+
+
+def _finished() -> str:
+    """`finished.json` as a worker writes it for a job that succeeded with no outputs."""
+    return Finished(
+        finished_at=datetime.now(UTC),
+        outcome="succeeded",
+        cause=None,
+        clocks={},
+        outputs=(),
+        exit_code=0,
+    ).model_dump_json()

@@ -16,6 +16,7 @@ import urllib.request
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -24,7 +25,22 @@ from etude.launch.logging import sanitize, write_log
 from etude.storage_timeout import socket_timeout
 
 _sink: ContextVar[Callable[[str], None] | None] = ContextVar("transfer_sink", default=None)
-_context: ContextVar[dict[str, str | None]] = ContextVar("transfer_context", default={})
+_context: ContextVar[dict[str, str]] = ContextVar("transfer_context", default={})
+_size_bytes: ContextVar[int | None] = ContextVar("transfer_size_bytes", default=None)
+
+
+@dataclass(frozen=True)
+class HTTPReply:
+    """One HTTP response, read whole: its status, body and lower-cased headers."""
+
+    status: int
+    body: bytes
+    headers: dict[str, str] = field(default_factory=dict)
+
+
+# Sends one request and returns its reply; raises OSError when no reply came.
+# Custom transports share the enclosing deadline, as the default ones do.
+Send = Callable[[str, str, bytes | None, dict[str, str]], HTTPReply]
 
 
 @contextmanager
@@ -47,7 +63,7 @@ def attribute(
     transfer: str | None = None,
     key: str | None = None,
     sha256: str | None = None,
-    size_bytes: str | None = None,
+    size_bytes: int | None = None,
 ) -> Iterator[None]:
     fields = {
         "session": session,
@@ -58,12 +74,13 @@ def attribute(
         "transfer": transfer,
         "key": key,
         "sha256": sha256,
-        "size_bytes": size_bytes,
     }
     token = _context.set({**_context.get(), **{k: v for k, v in fields.items() if v is not None}})
+    size = _size_bytes.set(_size_bytes.get() if size_bytes is None else size_bytes)
     try:
         yield
     finally:
+        _size_bytes.reset(size)
         _context.reset(token)
 
 
@@ -75,7 +92,7 @@ def emit(
     supplied: int = 0,
     status: int | None = None,
     request_id: str | None = None,
-    byte_range: str | None = None,
+    range_start: int | None = None,
     elapsed: float = 0,
     completed: bool = False,
     reused: int = 0,
@@ -95,10 +112,10 @@ def emit(
         "attempt": context.get("attempt"),
         "transfer": context.get("transfer"),
         "sha256": context.get("sha256"),
-        "size_bytes": context.get("size_bytes"),
+        "size_bytes": _size_bytes.get(),
         "status": status,
         "request_id": request_id,
-        "byte_range": byte_range,
+        "range_start": range_start,
         "received_bytes": received,
         "supplied_bytes": supplied,
         "elapsed_seconds": elapsed,
@@ -189,13 +206,22 @@ def request(
             supplied=len(body or b""),
             status=status,
             request_id=request_id,
-            byte_range=headers.get("Range", headers.get("range")),
+            range_start=_range_start(headers),
             elapsed=time.monotonic() - started,
             completed=complete,
         )
 
 
-def send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> tuple[int, bytes]:
+def _range_start(headers: Mapping[str, str]) -> int | None:
+    """The first byte a single `Range: bytes=START-END` request asks for."""
+    requested = headers.get("Range", headers.get("range"))
+    if requested is None:
+        return None
+    start = requested.removeprefix("bytes=").partition("-")[0]
+    return int(start) if start.isdigit() else None
+
+
+def send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> HTTPReply:
     output = io.BytesIO()
     status = request(method, url, body, headers, output.write)
-    return status, output.getvalue()
+    return HTTPReply(status=status, body=output.getvalue())

@@ -14,7 +14,7 @@ from etude.launch.errors import ProviderUnavailable
 from etude.launch.executor import Refused, check_creation
 from etude.launch.machines import Allocation, Bill, MachineRequest, Safeguards
 from etude.launch.providers.program import Program, boot_source
-from etude.launch.providers.runpod.api import PodFact, Quote, RunPodAPI
+from etude.launch.providers.runpod.api import PodFact, RunPodAPI
 from etude.launch.records import GPU, Hardware, LauncherError, MachineTemplate, Offer, Provider
 from etude.launch.records import STOCK_IMAGE as DEFAULT_IMAGE
 from etude.launch.storage.s3 import Bucket
@@ -36,7 +36,7 @@ class RunPodMachines:
         self._bucket, self._prefix = bucket, prefix
         self._program = Program(bucket, prefix)
 
-    def _quote(self) -> Quote:
+    def offer(self) -> Offer:
         template = self._template
         return self._api.quote(
             gpu=template.gpu,
@@ -46,27 +46,23 @@ class RunPodMachines:
             data_center=template.data_center,
         )
 
-    def offer(self) -> Offer:
-        quote = self._quote()
-        return Offer(
-            hardware=quote.hardware, usd_per_hour=quote.usd_per_hour, available=quote.available
-        )
-
     def _key(self, session_id: str) -> str:
         return f"{self._prefix}/sessions/{session_id}/receipt.json"
 
     def _keep(self, session_id: str, pod: PodFact) -> None:
         self._bucket.put(self._key(session_id), pod.model_dump_json().encode())
 
-    def _receipt(self, session_id: str) -> PodFact | None:
+    def _stored_pod(self, session_id: str) -> PodFact | None:
         raw = self._bucket.get(self._key(session_id))
         return None if raw is None else PodFact.model_validate_json(raw)
 
     def create(self, request: MachineRequest) -> Allocation:
         assert request.deadline is not None
         template = self._template
-        quote = self._quote()
-        if not quote.available:
+        offer = self.offer()
+        hardware = offer.hardware
+        assert hardware is not None  # RunPod prices only hardware it names
+        if not offer.available:
             raise Refused(
                 f"no {template.gpu or 'CPU pod'} available in"
                 f" {template.data_center or 'any data center'}"
@@ -85,12 +81,12 @@ class RunPodMachines:
         with limit_time(seconds):
             pod = self._api.create(
                 name=f"etude-{request.session}",
-                hardware=quote.hardware,
+                hardware=hardware,
                 image=image.resolved,
                 registry=self._provider.registry if image.resolved != STOCK_IMAGE else "",
                 env=env,
                 entrypoint=("python3.12", "-c", boot_source("etude.launch.providers.runpod.pod")),
-                disk_gb=template.disk_gb or _disk_gb(quote.hardware),
+                disk_gb=template.disk_gb or _disk_gb(hardware),
                 data_center=template.data_center,
             )
         self._keep(request.session, pod)
@@ -109,7 +105,7 @@ class RunPodMachines:
     def find(self, session_id: str) -> Allocation | None:
         # The immutable receipt already contains identity and charged price.
         # Health belongs to alive(); worker startup does not wait for SSH.
-        pod = self._receipt(session_id)
+        pod = self._stored_pod(session_id)
         if pod is not None:
             return self._allocation(pod)
         pod = self._api.named(f"etude-{session_id}")
@@ -119,7 +115,7 @@ class RunPodMachines:
         return self._allocation(pod)
 
     def alive(self, session_id: str) -> bool:
-        pod = self._receipt(session_id)
+        pod = self._stored_pod(session_id)
         if pod is None:
             return True
         try:
@@ -129,13 +125,13 @@ class RunPodMachines:
             return True
 
     def end(self, session_id: str) -> datetime | None:
-        pod = self._receipt(session_id) or self._api.named(f"etude-{session_id}")
+        pod = self._stored_pod(session_id) or self._api.named(f"etude-{session_id}")
         if pod is None:
             return None
         return datetime.now(UTC) if self._api.pod(pod.id) is None else self._api.delete(pod)
 
     def bill(self, session_id: str, now: datetime) -> Bill | None:
-        pod = self._receipt(session_id)
+        pod = self._stored_pod(session_id)
         if pod is None:
             return None
         rows = self._api.bills(pod, now)

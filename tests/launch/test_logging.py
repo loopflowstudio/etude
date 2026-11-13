@@ -23,7 +23,7 @@ from etude.launch import logging, source
 from etude.launch.database import Database
 from etude.launch.environment import install
 from etude.launch.errors import LauncherError, LaunchError
-from etude.launch.logging import CLOSED, LIMIT, bounded, portions
+from etude.launch.logging import CLOSED, LIMIT, bound, bounded
 from etude.launch.logs import LogCursor, render, snapshot_stream
 from etude.launch.providers import bootstrap
 from etude.launch.providers.package import program_archive
@@ -35,6 +35,7 @@ from etude.launch.schemas import (
     WORKER_LOG,
     AttemptRecord,
     Bootstrap,
+    Finished,
     Observation,
     Packet,
     WorkerLog,
@@ -44,7 +45,8 @@ from etude.launch.schemas import (
 from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.disk import DirectoryJournal
 from etude.launch.storage.files import write
-from etude.launch.storage.s3 import Bucket, Grant, Keys, PostForm, Reply
+from etude.launch.storage.s3 import Bucket, Grant, Keys, PostForm
+from etude.launch.storage.transport import HTTPReply
 from etude.launch.worker import courier as courier_module
 from etude.launch.worker.courier import Courier
 from etude.launch.worker.main import work
@@ -258,14 +260,23 @@ def test_bucket_completion_during_log_read_keeps_cached_output_refreshable(
     storage.objects[folder + log_piece(attempt_log(attempt.id), 0)] = first
     storage.objects[record_key] = AttemptRecord(log_ends=(len(first),)).model_dump_json().encode()
 
-    def send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Reply:
+    def send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> HTTPReply:
         reply = storage(method, url, body, headers)
         if method == "GET" and urlsplit(url).path == f"/{record_key}":
             # The attempt finishes while its earlier record is on the way.
             storage.objects[folder + log_piece(attempt_log(attempt.id), len(first))] = last
             storage.objects[record_key] = (
                 AttemptRecord(
-                    exited={}, delivered=True, log_ends=(len(first), len(first) + len(last))
+                    exited=Finished(
+                        finished_at=datetime.now(UTC),
+                        outcome="succeeded",
+                        cause=None,
+                        clocks={},
+                        outputs=(),
+                        exit_code=0,
+                    ),
+                    delivered=True,
+                    log_ends=(len(first), len(first) + len(last)),
                 )
                 .model_dump_json()
                 .encode()
@@ -417,12 +428,12 @@ def test_worker_leaves_cleanup_to_parent_only_when_explicit(
     monkeypatch.delenv("ETUDE_WORKER_LOG_URL", raising=False)
     deleted = tmp_path / "deleted"
 
-    class Reply(io.BytesIO):
+    class _Response(io.BytesIO):
         status = 200
         headers: dict[str, str] = {}
 
-    def read(request: Request, *, timeout: float) -> Reply:
-        return Reply(b"{}")  # malformed bootstrap fails before a receipt or user code
+    def read(request: Request, *, timeout: float) -> _Response:
+        return _Response(b"{}")  # malformed bootstrap fails before a receipt or user code
 
     def delete(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
         deleted.touch()
@@ -437,9 +448,9 @@ def test_worker_leaves_cleanup_to_parent_only_when_explicit(
 
 def test_follow_positions_survive_truncation_without_repeating_text() -> None:
     initial = "opening\n" + "x" * (LIMIT + 100)
-    text = bounded(initial)
-    opening, tail, omitted = portions(text)
-    assert len(text.encode()) <= LIMIT and omitted > 0
+    kept = bound(initial)
+    text = kept.text()
+    assert len(text.encode()) <= LIMIT and kept.omitted > 0
     cursor = LogCursor()
     first = snapshot_stream("s", "a", "job", text.encode(), False)
     assert first.observed_at is not None
@@ -451,7 +462,7 @@ def test_follow_positions_survive_truncation_without_repeating_text() -> None:
     output = cursor.render(snapshot.model_copy(update={"streams": (second,)}))
     assert "new output" in output and "opening" not in output
     assert "x" * 100 not in output
-    assert len(opening) + len(tail) + omitted == len(initial)
+    assert len(kept.opening) + len(kept.tail) + kept.omitted == len(initial)
 
 
 def test_log_reads_and_phases_never_drive_execution(tmp_path: Path) -> None:
@@ -731,7 +742,7 @@ def test_bootstrap_failure_remains_readable_after_deletion_and_restart(
     monkeypatch.setattr(
         bootstrap,
         "send",
-        lambda method, url, body, headers: (200, download(url, timeout=60).read()),
+        lambda method, url, body, headers: HTTPReply(200, download(url, timeout=60).read()),
     )
     monkeypatch.setattr(bootstrap, "install", install)
     monkeypatch.setattr(pod.GuardianAPI, "delete_self", delete)
@@ -890,7 +901,7 @@ def test_courier_owns_child_through_failure_cleanup_and_cached_restart(
     packet = Packet(session=session.id, deadline=None, work=(), log_seconds=2)
     bootstrap = Bootstrap.model_validate(
         {
-            "packet": packet.model_dump_json(),
+            "packet": packet,
             "out": Grant(prefix="", form=PostForm(url="unused", fields={})),
             "inbox_url": "unused",
         }
@@ -1083,7 +1094,7 @@ def test_courier_leaves_collection_incomplete_when_child_exit_is_unconfirmed(
     packet = Packet(session="unconfirmed", deadline=None, work=())
     bootstrap = Bootstrap.model_validate(
         {
-            "packet": packet.model_dump_json(),
+            "packet": packet,
             "out": Grant(prefix="", form=PostForm(url="unused", fields={})),
             "inbox_url": "unused",
         }

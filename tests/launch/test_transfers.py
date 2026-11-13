@@ -37,8 +37,9 @@ from etude.launch.schemas import (
     WORKER_LOG,
     AttemptRecord,
     Delivery,
+    Fetch,
+    Finished,
     Inbox,
-    Progress,
     Result,
     WorkerLog,
     attempt_log,
@@ -48,16 +49,8 @@ from etude.launch.storage import download as downloads
 from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.download import Download, download
 from etude.launch.storage.files import RESULT
-from etude.launch.storage.s3 import (
-    Bucket,
-    Grant,
-    Keys,
-    PostForm,
-    Reply,
-    _send,
-    read,
-)
-from etude.launch.storage.transport import attribute, observe
+from etude.launch.storage.s3 import Bucket, Grant, Keys, PostForm, _send, read
+from etude.launch.storage.transport import HTTPReply, attribute, observe
 from etude.launch.usage import R2, S3_US_WEST_2, Access, Transfer, Usage, reconcile
 from etude.launch.worker.courier import Courier
 from etude.run.delivery import RunFiles, StorageDestination, ship
@@ -190,7 +183,7 @@ class HTTP:
             size_bytes=len(body),
         )
 
-    def send(self, method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Reply:
+    def send(self, method: str, url: str, body: bytes | None, headers: dict[str, str]) -> HTTPReply:
         return _send(method, self.url + urlsplit(url).path, body, headers)
 
 
@@ -344,7 +337,7 @@ def test_bounded_cache_and_oversized_download(http: HTTP, tmp_path: Path) -> Non
 def test_download_inherits_caller_allowance(http: HTTP, tmp_path: Path) -> None:
     allowances: list[float | None] = []
 
-    def send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Reply:
+    def send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> HTTPReply:
         allowances.append(remaining())
         return http.send(method, url, body, headers)
 
@@ -362,7 +355,7 @@ def test_download_inherits_caller_allowance(http: HTTP, tmp_path: Path) -> None:
             "unused",
             send,
         )
-        courier.fetch({"session-one/sources/source.tar": http.source()})
+        courier.fetch(Fetch(sources={"source": http.source()}))
     assert allowances[0] is None
     assert all(left is not None and 300 < left <= 600 for left in allowances[1:])
 
@@ -387,8 +380,8 @@ def test_local_expiry_preserves_destination(
     )
     cache = Cache(tmp_path / "cache")
 
-    def send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Reply:
-        return Reply(
+    def send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> HTTPReply:
+        return HTTPReply(
             status=206,
             body=payload,
             headers={
@@ -453,12 +446,12 @@ def test_transient_range_retries_share_one_budget(tmp_path: Path, status: int) -
     )
     ranges: list[str] = []
 
-    def send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Reply:
+    def send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> HTTPReply:
         ranges.append(headers["Range"])
         if len(ranges) % 2:
-            return Reply(status=status, body=b"busy")
+            return HTTPReply(status=status, body=b"busy")
         start, end = map(int, headers["Range"].removeprefix("bytes=").split("-"))
-        return Reply(
+        return HTTPReply(
             status=206,
             body=payload[start : end + 1],
             headers={
@@ -608,10 +601,9 @@ def test_completed_workload_before_and_after(
             for run in runs
         },
     )
-    source_path = f"{session}/sources/shared.tar"
     http.fault = "denied"
     with pytest.raises(StorageUnavailable):
-        courier.fetch({source_path: http.source("/source")})
+        courier.fetch(Fetch(sources={"shared": http.source("/source")}))
     journal = BucketJournal(
         Storage(name="test", bucket="test", provider="s3", region="r", prefix="p"),
         Bucket("test", "r", Keys(access_key="a", secret_key="s"), http.send),
@@ -633,15 +625,12 @@ def test_completed_workload_before_and_after(
         http.objects["/" + root + "inbox.json"] = (
             Inbox(
                 work=tuple(
-                    Delivery.model_validate(
-                        {
-                            "work": work.model_dump_json(round_trip=True),
-                            "access": Grant(
-                                prefix=f"p/{work.run}/",
-                                form=PostForm(url=http.url + "/upload", fields={}),
-                            ),
-                            "fetch": {},
-                        }
+                    Delivery(
+                        work=work,
+                        access=Grant(
+                            prefix=f"p/{work.run}/",
+                            form=PostForm(url=http.url + "/upload", fields={}),
+                        ),
                     )
                     for work, _ in b.service.sessions[session].added
                 )
@@ -649,15 +638,11 @@ def test_completed_workload_before_and_after(
             .model_dump_json(round_trip=True)
             .encode()
         )
-        courier.fetch(
-            {
-                source_path: http.source("/source"),
-                f"{session}/attempts/{a.id}/inputs/checkpoint.pt": http.source("/checkpoint"),
-            }
-        )
+        checkpoint = http.source("/checkpoint")
+        courier.fetch(Fetch(sources={"shared": http.source("/source")}, inputs=(checkpoint,)))
         assert (home / "sources/shared.tar").read_bytes() == http.objects["/source"]
         # Held in the cache for the session's attempts to link, not copied beside it.
-        assert not (home / f"attempts/{a.id}/inputs/checkpoint.pt").exists()
+        assert not (home / "inputs" / checkpoint.sha256).exists()
         held = Cache().held(Content.of(http.objects["/checkpoint"]))
         assert held is not None and held.read_bytes() == http.objects["/checkpoint"]
         outputs = home / "attempts" / a.id / "outputs"
@@ -671,9 +656,7 @@ def test_completed_workload_before_and_after(
             size_bytes=len(payload),
         )
         (outputs / RESULT).write_text(Result().model_dump_json())
-        finished = Progress(
-            attempt=a.id,
-            started_at=b.clock(),
+        finished = Finished(
             finished_at=b.clock(),
             outcome="succeeded",
             cause=None,
@@ -843,9 +826,7 @@ def test_the_launcher_fetches_a_multipart_output_and_retains_each_part(
     output = Output(
         name="checkpoint.pt", sha256=hashlib.sha256(payload).hexdigest(), size_bytes=len(payload)
     )
-    finished = Progress(
-        attempt=attempt.id,
-        started_at=b.clock(),
+    finished = Finished(
         finished_at=b.clock(),
         outcome="succeeded",
         cause=None,
@@ -871,11 +852,7 @@ def test_the_launcher_fetches_a_multipart_output_and_retains_each_part(
     fetched = client._open(tmp_path).fetch(run, "checkpoint.pt", tmp_path / "fetched")
     assert fetched.read_bytes() == payload
     parts = [e for e in b.store.transfers() if e.id not in before and e.purpose == "result"]
-    assert sorted(e.byte_range or "" for e in parts) == [
-        "bytes=0-15",
-        "bytes=16-31",
-        "bytes=32-39",
-    ]
+    assert sorted(e.range_start or 0 for e in parts) == [0, 16, 32]
     assert sum(e.received_bytes for e in parts) == len(payload)
     assert {(e.run, e.attempt) for e in parts} == {(run, attempt.id)}
 
@@ -913,7 +890,7 @@ class _Bucket:
             size_bytes=len(body),
         )
 
-    def send(self, method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Reply:
+    def send(self, method: str, url: str, body: bytes | None, headers: dict[str, str]) -> HTTPReply:
         options = {}
         if "Range" in headers:
             options["Range"] = headers["Range"]
@@ -924,7 +901,7 @@ class _Bucket:
         fields = {"etag": reply["ETag"], "content-length": str(len(data))}
         if "ContentRange" in reply:
             fields["content-range"] = reply["ContentRange"]
-        return Reply(status=206 if "Range" in options else 200, body=data, headers=fields)
+        return HTTPReply(status=206 if "Range" in options else 200, body=data, headers=fields)
 
 
 @pytest.mark.parametrize("key", ["run/checkpoints/model.pt", "run/attempts/a1/model.pt"])
@@ -1061,7 +1038,7 @@ class _Held:
     def changed(self, etag: str) -> Fetched | None:
         return None
 
-    def reused(self, size_bytes: int, byte_range: str | None) -> None:
+    def reused(self, size_bytes: int, start: int | None, end: int | None) -> None:
         pass
 
 
@@ -1222,14 +1199,10 @@ def test_worker_source_and_input_share_verified_transport_bytes(
     courier = Courier(
         home, Grant(prefix="out/", form=PostForm(url=http.url + "/upload", fields={})), "unused"
     )
-    courier.fetch(
-        {
-            "worker-session/sources/source.tar": http.source(),
-            "worker-session/inputs/weights": http.source(),
-        }
-    )
+    weights = http.source()
+    courier.fetch(Fetch(sources={"source": http.source()}, inputs=(weights,)))
     assert target.read_bytes() == b"abcdefghijkl"
-    assert not (home / "inputs/weights").exists()  # held in the cache, not copied
+    assert not (home / "inputs" / weights.sha256).exists()  # held in the cache, not copied
     held = Cache().held(Content.of(b"abcdefghijkl"))
     assert held is not None and held.read_bytes() == b"abcdefghijkl"
     events = [
@@ -1336,10 +1309,10 @@ def test_a_failed_delivery_leaves_how_the_job_ended_and_says_why(
     (attempt / "run").write_text("pass")
     (attempt / "log").write_text("1800/1800 matches played\n")
     (attempt / "finished.json").write_text(
-        Progress(
-            attempt="a1", started_at=None, finished_at=datetime.now(UTC), outcome="succeeded",
+        Finished(
+            finished_at=datetime.now(UTC), outcome="succeeded",
             cause=None, clocks={}, outputs=(), exit_code=0,
-        ).model_dump_json(exclude={"attempt", "started_at"})
+        ).model_dump_json()
     )  # fmt: skip
     worker_log = tmp_path / "worker.log"
     upload = http.url + "/upload"
@@ -1359,7 +1332,7 @@ def test_a_failed_delivery_leaves_how_the_job_ended_and_says_why(
         courier.carry_out()
     record = AttemptRecord.model_validate_json(http.objects["/pass/attempts/a1.json"])
     assert not record.delivered and record.exited is not None
-    assert record.exited["exit_code"] == 0
+    assert record.exited.exit_code == 0
     # The worker's log and usage still go out, carrying the reason.
     told = b"".join(
         body

@@ -32,7 +32,7 @@ class Transfer(Record):
     size_bytes: int | None = None
     status: int | None = None
     request_id: str | None = None
-    byte_range: str | None = None
+    range_start: int | None = None  # the first byte a range read asked for
     received_bytes: int = Field(default=0, ge=0)
     supplied_bytes: int = Field(default=0, ge=0)
     reused_bytes: int = Field(default=0, ge=0)
@@ -113,14 +113,11 @@ class Usage(Record):
                 event.operation != "GET"
                 or event.status != 206
                 or not event.sha256
-                or not event.byte_range
+                or event.range_start is None
             ):
                 continue
-            start, _, end = event.byte_range.removeprefix("bytes=").partition("-")
-            if not start.isdigit() or not end.isdigit():
-                continue
-            offset = int(start)
-            spans.setdefault(event.sha256, []).append(range(offset, offset + event.received_bytes))
+            start = event.range_start
+            spans.setdefault(event.sha256, []).append(range(start, start + event.received_bytes))
         repeated = 0
         for ranges in spans.values():
             through = 0

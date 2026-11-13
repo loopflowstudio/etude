@@ -16,9 +16,9 @@ import pytest
 from etude.deadline import limit_time, remaining
 from etude.launch.database import Database
 from etude.launch.records import Output
-from etude.launch.schemas import AttemptRecord, Progress
-from etude.launch.storage.s3 import Grant, PostForm, Reply
-from etude.launch.storage.transport import attribute, emit, observe
+from etude.launch.schemas import AttemptRecord, Finished
+from etude.launch.storage.s3 import Grant, PostForm
+from etude.launch.storage.transport import HTTPReply, attribute, emit, observe
 from etude.launch.worker import courier as delivery
 from etude.launch.worker.courier import Courier
 from etude.storage_timeout import StorageUnavailable
@@ -35,7 +35,7 @@ class _Files:
         self._gate = threading.Barrier(2, timeout=5) if gated else None
         self._gated: set[str] = set()
 
-    def send(self, method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Reply:
+    def send(self, method: str, url: str, body: bytes | None, headers: dict[str, str]) -> HTTPReply:
         assert method == "POST" and body is not None
         message = BytesParser(policy=policy.default).parsebytes(
             f"Content-Type: {headers['Content-Type']}\r\n\r\n".encode() + body
@@ -77,7 +77,7 @@ class _Files:
                         )
                 self.objects[key] = payload
             emit("POST", url, supplied=len(body), status=204, completed=True)
-            return Reply(status=204, body=b"", headers={})
+            return HTTPReply(status=204, body=b"", headers={})
         finally:
             if output:
                 with self._lock:
@@ -97,9 +97,7 @@ def _courier(tmp_path: Path, files: _Files) -> tuple[Courier, Path]:
         (outputs / name).write_bytes(name.encode())
     (attempt / "run").write_text("study")
     (attempt / "claim").write_text(datetime.now(UTC).isoformat())
-    finished = Progress(
-        attempt="a1",
-        started_at=datetime.now(UTC),
+    finished = Finished(
         finished_at=datetime.now(UTC),
         outcome="succeeded",
         cause=None,
@@ -110,9 +108,7 @@ def _courier(tmp_path: Path, files: _Files) -> tuple[Courier, Path]:
             for name in "abcd"
         ),
     )
-    (attempt / "finished.json").write_text(
-        finished.model_dump_json(exclude={"attempt", "started_at"})
-    )
+    (attempt / "finished.json").write_text(finished.model_dump_json())
     form = PostForm(url="https://fixture.invalid/upload", fields={})
     return Courier(
         home,

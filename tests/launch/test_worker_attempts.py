@@ -310,7 +310,7 @@ class _Weights:
     def changed(self, etag: str) -> Fetched | None:
         return None
 
-    def reused(self, size_bytes: int, byte_range: str | None) -> None:
+    def reused(self, size_bytes: int, start: int | None, end: int | None) -> None:
         pass
 
 
