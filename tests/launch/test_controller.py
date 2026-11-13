@@ -27,6 +27,7 @@ from etude.launch.client import (
     wait,
 )
 from etude.launch.controller import FetchRequest, PythonClient, forward, warning
+from etude.launch.database import launcher_file
 from etude.launch.records import Job, LauncherError, Pool, Until
 from tests.launch.counting import job_text
 from tests.launch.test_source import git
@@ -80,7 +81,7 @@ def controller(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, P
     # The installer owns its deadline and child cleanup; an outer CLI timeout
     # can expire during cold imports and leave the remote installation running.
     assert main(["controller", "set", "controller-alias", "--startup-seconds", "15"]) == 0
-    assert not (client / "launcher.db").exists()
+    assert not launcher_file(client).exists()
     return client, remote
 
 
@@ -123,7 +124,7 @@ def test_remote_launch_freezes_sources_config_and_returns_outputs(
     assert command("wait", "pair").returncode == 0
     logs = command("logs", "--cohort", "pair", "--job-only")
     assert "frozen config\n1\n" in logs.stdout and "frozen config\n2\n" in logs.stdout, logs.stderr
-    assert not (client / "launcher.db").exists()
+    assert not launcher_file(client).exists()
     assert len(list((remote / "sources").glob("*.tar"))) == 1
     assert [pool.name for pool in _open(remote).pools()] == ["controller"]
     assert _open(remote).record(ids[0]).pool == "controller"
@@ -141,7 +142,7 @@ def test_remote_launch_freezes_sources_config_and_returns_outputs(
     assert command("controller").stdout.startswith("controller: controller-alias\nlast loop: ")
     assert command("controller", "unset").returncode == 0
     assert command("pools").stdout == "local  this computer (default)\n"
-    assert (client / "launcher.db").exists()
+    assert launcher_file(client).exists()
 
 
 def test_loop_survives_an_empty_queue_and_places_later_work(
@@ -242,7 +243,7 @@ def test_remote_queue_preserves_choice_without_local_database(
     scheduler = _open(remote)
     assert all(scheduler.record(id).autorun for id in ids)
     assert all(scheduler.read(id).phase == "queued" for id in ids)
-    assert not (client / "launcher.db").exists()
+    assert not launcher_file(client).exists()
 
 
 def test_python_api_uses_controller_and_preserves_checkpoint_ancestry(
@@ -269,7 +270,7 @@ def test_python_api_uses_controller_and_preserves_checkpoint_ancestry(
     assert command("pool", "add", "waiting").returncode == 0
     queued = queue_cohort("python-waiting", job.runs(3, 4), pool="waiting")
     assert all(cancel(run).outcome == "cancelled" for run in queued)
-    assert not (client / "launcher.db").exists()
+    assert not launcher_file(client).exists()
 
 
 def test_the_controller_is_sent_the_program_and_gets_it_again_if_it_goes_missing(
@@ -283,7 +284,7 @@ def test_the_controller_is_sent_the_program_and_gets_it_again_if_it_goes_missing
     again = command("pools")  # the command did not start, so it is sent and run again
     assert again.returncode == 0 and again.stdout == "controller  the controller (default)\n"
     assert (installed / "etude" / "launch" / "cli.py").exists()
-    assert not (client / "launcher.db").exists()
+    assert not launcher_file(client).exists()
 
 
 @pytest.mark.parametrize("install_seconds, expected_calls", [(20.0, 2), (3.0, 3)])
@@ -358,5 +359,5 @@ def test_controller_keeps_source_history_and_checks_out_on_client(
     result = command("source", id, str(destination))
     assert result.returncode == 0, result.stderr
     assert (destination / "train").read_text() == "client snapshot\n"
-    assert not (client / "launcher.db").exists()
+    assert not launcher_file(client).exists()
     assert _open(remote).read(id).phase == "queued"

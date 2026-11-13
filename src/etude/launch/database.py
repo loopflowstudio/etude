@@ -128,6 +128,15 @@ Fact = str | int | None
 _VERSION = 18
 
 
+def launcher_file(home: Path) -> Path:
+    """The launcher database under `home` for this schema version.
+
+    Each version has its own file, so a client of another version keeps its own
+    records and its live rentals beside this one; neither reads the other's.
+    """
+    return home / f"launcher-{_VERSION}.db"
+
+
 def _iso(at: datetime | None) -> str | None:
     return None if at is None else at.isoformat()
 

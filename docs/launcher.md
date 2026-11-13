@@ -935,7 +935,7 @@ defines it, by its full path, and relative imports are a lint error:
 | `from etude.jobs import training, evaluation` | typed jobs: Etude decides the command |
 | `from etude.launch.records import Job, Run` | what to run |
 | `from etude.launch.client import queue, launch, status, wait, ...` | the calls a script makes; they go to the controller when one is set |
-| `from etude.launch.database import Database` | the SQLite records in `launcher.db` |
+| `from etude.launch.database import Database` | the SQLite records in `launcher-<schema>.db` |
 | `from etude.launch.schemas import Packet, Work, Result` | frozen worker messages |
 | `from etude.launch.executor import Executor` | machine acquisition, startup and journal composition |
 | `from etude.launch.scheduler import Scheduler` | the owner of one database: queueing, admission, matching runs to machines |
@@ -1418,7 +1418,10 @@ The code has three layers:
    `scheduler.py` owns jobs, runs, cohorts, queue placement and limits in `database.py`. Lower layers are public Python types and can be used without
    the run scheduler.
 
-The SQLite file is `$ETUDE_HOME/launcher.db` (default `~/.etude`). Versioned
+The SQLite file is `$ETUDE_HOME/launcher-<schema>.db` (default `~/.etude`), one
+per schema version: the launcher never migrates, so a client of another version
+keeps its own file, rentals and records beside this one. Delete an old version's
+file once nothing of that version is running. Versioned
 writes claim each session once. A lost create reply is looked up, never
 repeated; if the provider still has no such machine at the rental's deadline,
 or when it is terminated, it is recorded as never acquired: it costs nothing and

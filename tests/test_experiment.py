@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import sqlite3
 import time
 from decimal import Decimal
 from pathlib import Path
@@ -26,6 +27,7 @@ from etude.experiment import (
 )
 from etude.jobs import _hold, evaluation, evaluation_spec
 from etude.launch.records import Job, Outcome, Run, Status
+from etude.launch.source import home
 from etude.run.errors import EtudeError
 from etude.run.records import Clock
 from etude.run.storage import DirectoryStorage
@@ -620,3 +622,24 @@ def test_relative_seats_fill_in_as_their_jobs_save_and_the_report_says_what_is_m
     (opponent,) = at_200.opponents
     assert authored(page.players[opponent].at) == {"updates": 100}
     assert (at_200.matches, at_200.rows) == (1, 2)
+
+
+def test_another_versions_launcher_database_is_left_beside_this_ones(tmp_path: Path) -> None:
+    # A client of an older schema version, still tracking its own live rentals.
+    older = home() / "launcher.db"
+    older.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(older) as db:
+        db.execute("CREATE TABLE rentals (machine TEXT)")
+        db.execute("PRAGMA user_version = 13")
+    with sqlite3.connect(older) as db:
+        before = tuple(db.iterdump())
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    run = trainer(bucket, tmp_path)
+    save(run, bucket, tmp_path, range(1, 2))
+    client.launch(Run(id="ppo-1", job=Job(command="exit 3", max_hours=0.1)), "local")
+    (closed,) = client.wait("ppo-1", timeout=60)
+    assert closed.outcome == "failed"
+    assert observe(bucket, "ppo").run("ppo-1").state == "failed"
+    with sqlite3.connect(older) as db:
+        assert tuple(db.iterdump()) == before
+    run.finish(timeout=30)
