@@ -25,6 +25,7 @@ import json
 import time
 from collections.abc import Container, Iterable, Mapping
 from dataclasses import dataclass
+from errno import EEXIST, ENOTEMPTY
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from stat import S_ISREG
@@ -40,6 +41,8 @@ class Mismatch(ValueError):
 # Names of checkpoint files held elsewhere (in storage, on another host) and
 # not here, one per line. A dot-name, so no carrier ever sends it.
 STORED = f"{CHECKPOINTS}/.stored"
+# A complete relay preserves an empty working directory as well as its files.
+OUT_PRESENT = ".out"
 
 
 def checkpoint_file(key: str) -> bool:
@@ -137,15 +140,19 @@ def listing(root: Path, *, tail_seconds: float) -> list[str]:
 
 
 def retired(root: Path) -> list[str]:
-    """Every key a writer has replaced, from its `.removed` notes.
+    """Tracking files a writer has replaced, from its `.removed` notes.
 
     Read before listing: a file retired during a pass is deleted only once a
-    later pass has sent what replaced it.
+    later pass has sent what replaced it. Working-directory absence belongs
+    to membership; recipe files are never interpreted as retirement notes.
     """
     lines: list[str] = []
     for note in sorted(root.rglob("*.removed")):
-        if not any(part.startswith(".") for part in note.relative_to(root).parts):
-            lines += note.read_text().split("\n")[:-1]
+        parts = note.relative_to(root).parts
+        if parts[0] != "out" and not any(part.startswith(".") for part in parts):
+            lines.extend(
+                key for key in note.read_text().split("\n")[:-1] if not key.startswith("out/")
+            )
     return lines
 
 
@@ -257,6 +264,8 @@ def restore_set(root: Path) -> dict[str, bytes]:
         keys.append(wanted.key)
     keys.extend("out/" + key for key in listing(root / "out", tail_seconds=0))
     files = {key: (root / key).read_bytes() for key in dict.fromkeys(keys)}
+    if (root / "out").is_dir() or (root / OUT_PRESENT).is_file():
+        files[OUT_PRESENT] = b""
     files[STORED] = "".join(name + "\n" for name in sorted(taken(root))).encode()
     return files
 
@@ -276,6 +285,29 @@ def recorded_file(root: Path, key: str) -> dict[str, bytes]:
     raise FileNotFoundError(f"no checkpoint record in {root} names {key}")
 
 
+def reconcile_out(root: Path, keys: Container[str]) -> None:
+    """Remove stale portable files before restoring a complete working directory.
+
+    Private and unfinished files belong to the local producer and stay local.
+    Empty directories are removed so a restored file can replace a directory.
+    """
+    out = root / "out"
+    for key in listing(out, tail_seconds=0):
+        if "out/" + key not in keys:
+            (out / key).unlink(missing_ok=True)
+    for path in sorted(out.rglob("*"), reverse=True):
+        if (
+            path.is_dir()
+            and not path.is_symlink()
+            and not any(part.startswith(".") for part in path.relative_to(out).parts)
+        ):
+            try:
+                path.rmdir()
+            except OSError as error:
+                if error.errno not in (EEXIST, ENOTEMPTY):
+                    raise
+
+
 def put_back(root: Path, files: Mapping[str, bytes]) -> None:
     """Restore relayed files, retaining existing records and replacing working files.
 
@@ -284,10 +316,16 @@ def put_back(root: Path, files: Mapping[str, bytes]) -> None:
     """
     if any(not within(key) for key in files):
         raise Mismatch("a restored file must be within the run folder")
+    # Only a complete relay includes the checkpoint-name ledger. A single
+    # input must never clear unrelated working files.
+    if STORED in files:
+        reconcile_out(root, files)
     ordered = sorted(files, key=lambda key: (checkpoint_file(key) or key.startswith("out/"), key))
     recorded: dict[str, RecordedFile] | None = None
     for key in ordered:
         target = root / key
+        if key == OUT_PRESENT:
+            (root / "out").mkdir(parents=True, exist_ok=True)
         if key == STORED:
             note_stored(root, files[key].decode().split("\n")[:-1])
             continue

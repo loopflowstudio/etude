@@ -116,11 +116,14 @@ def runs(python: str) -> Job:
     tracked = tmp_path / "track"
     source = MeasuredStorage(DirectoryStorage(tracked))
     record = scheduler.record(parent)
-    config = continued_config(record, ["updates=4"])
-    with pytest.raises(LauncherError, match="must name a field"):
-        continued_config(record, ["typo=4"])
+    config = continued_config(record, '{"updates":4}')
+    with pytest.raises(LauncherError, match="unknown continuation config fields"):
+        continued_config(record, '{"typo":4}')
     with pytest.raises(LauncherError, match="invalid continuation config"):
-        continued_config(record, ["updates=no"])
+        continued_config(record, '{"updates":"no"}')
+    for changes in ("[]", '{"updates":', ""):
+        with pytest.raises(LauncherError, match="invalid continuation config"):
+            continued_config(record, changes)
     next_run = continue_from(record, "updates=4", source=source, config=config)
     assert json.loads(next_run.job.config or "{}") == {"updates": 4, "rate": 0.125}
     assert source.listings == 2
@@ -160,7 +163,7 @@ def runs(python: str) -> Job:
                 "--until",
                 "updates=6",
                 "--config",
-                "updates=6",
+                '{"updates":6}',
                 "--source",
                 str(tracked),
             ]

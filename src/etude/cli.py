@@ -459,7 +459,8 @@ def continue_run(
         str | None, typer.Option(help="the new cohort's name, when continuing a cohort")
     ] = None,
     config: Annotated[
-        list[str] | None, typer.Option(help="typed config change as FIELD=VALUE; repeatable")
+        str | None,
+        typer.Option(help='typed config changes as a JSON object, e.g. {"updates":6400}'),
     ] = None,
     max_usd: Annotated[str | None, typer.Option(help="the new cohort's dollar ceiling")] = None,
 ) -> None:
@@ -492,7 +493,9 @@ def continue_run(
                 until,
                 source=relayed if (Path(relayed) / parent).is_dir() else storage,
                 ordinal=ordinal,
-                config=None if not config else continued_config(scheduler.record(parent), config),
+                config=None
+                if config is None
+                else continued_config(scheduler.record(parent), config),
             )
             for parent in parents
         ]

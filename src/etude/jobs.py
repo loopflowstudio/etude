@@ -29,7 +29,6 @@ does, so the launcher itself never imports either.
 from __future__ import annotations
 
 import inspect
-import json
 import os
 import shlex
 import sys
@@ -40,10 +39,10 @@ from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from typing import Required, TypedDict, Unpack, cast
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, JsonValue, TypeAdapter, ValidationError
 
 from etude.call import Function, config_type
-from etude.carriage import CHECKPOINTS
+from etude.carriage import CHECKPOINTS, OUT_PRESENT
 from etude.eval.match import Result, Tables
 from etude.eval.records import (
     Benchmark,
@@ -76,6 +75,7 @@ from etude.run.records import ArtifactRef, Record, SourceKey
 from etude.run.storage import Storage
 from etude.train.read import read
 from etude.train.records import ParentRun
+from etude.working import MEMBERSHIP, WorkingFiles
 
 
 class JobOptions(TypedDict, total=False):
@@ -260,34 +260,41 @@ def continue_from(
     inherited_input = None if previous is None else ParentRun.model_validate_json(previous).input
     inputs = {i.name: i for i in parent.spec.inputs if i.name != inherited_input and i.out is None}
     parent_key = SourceKey(namespace=declaration.namespace, kind="run", source_id=parent.id)
-    # Prefer one physical copy of the run. Hidden and unfinished files never seed a child.
-    out = next(
-        (folder + "out/" for folder in folders if any(k.startswith(folder + "out/") for k in keys)),
+    # An explicit checkpoint needs no working-directory reads. Otherwise prefer
+    # one physical copy of the run, using its carried membership when present.
+    folder = next(
+        (
+            folder
+            for folder in folders
+            if ordinal is None
+            and (
+                folder + MEMBERSHIP in keys
+                or folder + OUT_PRESENT in keys
+                or any(k.startswith(folder + "out/") for k in keys)
+            )
+        ),
         None,
     )
-    files = (
-        []
-        if out is None
-        else [
-            key
-            for key in sorted(keys)
-            if key.startswith(out)
-            and not any(part.startswith(".") for part in key[len(out) :].split("/"))
-            and not key.endswith((".partial", ".open"))
-        ]
-    )
-    if ordinal is None and files:
+    if folder is not None:
+        if folder + MEMBERSHIP in keys:
+            files = WorkingFiles.model_validate_json(storage.get(folder + MEMBERSHIP)).files
+        else:
+            files = tuple(
+                key[len(folder) :]
+                for key in sorted(keys)
+                if key.startswith(folder + "out/")
+                and not any(part.startswith(".") for part in key[len(folder) :].split("/"))
+                and not key.endswith((".partial", ".open"))
+            )
         # A recipe may save a checkpoint without logging scalar rows.
         at = {**(data.checkpoints[-1].at if data.checkpoints else {}), **data.reached}
-        assert out is not None
         for index, key in enumerate(files):
-            body = storage.get(key)
-            relative = key[len(out) :]
+            body = storage.get(folder + key)
             name = _input_name(f"parent-out-{index}", inputs)
             inputs[name] = Input(
                 name=name,
-                out=relative,
-                key="out/" + relative,
+                out=key.removeprefix("out/"),
+                key=key,
                 sha256=sha256(body).hexdigest(),
                 size_bytes=len(body),
                 run=parent.id,
@@ -359,20 +366,16 @@ def _called(job: Job) -> Callable[..., object]:
     return Function(module=module, name=name, path=path).load(job.repo)
 
 
-def continued_config(parent: RunRecord, fields: Sequence[str]) -> BaseModel:
-    """Validate repeatable FIELD=VALUE changes against the parent's typed config."""
+def continued_config(parent: RunRecord, changes: str) -> BaseModel:
+    """Validate a JSON object of changes against the parent's typed config."""
     kind = config_type(_called(parent.spec))
     values = kind.model_validate_json(parent.spec.config or "{}").model_dump(mode="json")
-    for field in fields:
-        name, separator, text = field.partition("=")
-        if not separator or name not in kind.model_fields:
-            raise LauncherError(f"config change {field!r} must name a field as FIELD=VALUE")
-        try:
-            values[name] = json.loads(text)
-        except json.JSONDecodeError:
-            values[name] = text
     try:
-        return kind.model_validate(values)
+        fields = TypeAdapter(dict[str, JsonValue]).validate_json(changes)
+        unknown = fields.keys() - kind.model_fields.keys()
+        if unknown:
+            raise LauncherError(f"unknown continuation config fields: {', '.join(sorted(unknown))}")
+        return kind.model_validate({**values, **fields})
     except ValidationError as error:
         raise LauncherError(f"invalid continuation config: {error}") from None
 

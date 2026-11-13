@@ -27,12 +27,14 @@ from pydantic import JsonValue
 
 from etude.cache import Cache
 from etude.carriage import (
+    OUT_PRESENT,
     RecordedFile,
     checkpoint_file,
     immutable,
     listing,
     note_stored,
     purpose,
+    reconcile_out,
     recorded_files,
     resume_file,
     retired,
@@ -70,6 +72,7 @@ from etude.launch.storage.s3 import (
 from etude.launch.storage.transport import attribute, deliver, observe
 from etude.launch.worker.attempts import _held, seed_out
 from etude.storage_timeout import StorageUnavailable
+from etude.working import MEMBERSHIP, WorkingFiles
 
 ROOT = Path("/run/etude/sessions")
 # A log piece waits about a twentieth of its log's age, between 15 seconds and
@@ -316,12 +319,28 @@ class Courier:
         folder = self._track_root / run
         # Every checkpoint name storage holds stays taken, restored or not.
         note_stored(folder, [key.rpartition("/")[2] for key in keys if checkpoint_file(key)])
+        membership = None
+        if MEMBERSHIP in keys:
+            body = read(keys[MEMBERSHIP].url, self._send)
+            if body is None:
+                raise StorageUnavailable("working directory membership is missing")
+            membership = WorkingFiles.model_validate_json(body)
+            members = set(membership.files)
+            if not members <= keys.keys():
+                raise StorageUnavailable("working directory member is missing")
+            keys = {k: v for k, v in keys.items() if not k.startswith("out/") or k in members}
+        reconcile_out(folder, keys)
         recorded: dict[str, RecordedFile] | None = None
         for key, link in sorted(keys.items()):
             if not within(key):
                 raise StorageUnavailable("restore path is outside the run")
             target = folder / key
-            if checkpoint_file(key) or target.exists() and not key.startswith("out/"):
+            if (
+                key == MEMBERSHIP
+                or checkpoint_file(key)
+                or target.exists()
+                and not key.startswith("out/")
+            ):
                 continue
             if recorded is None and key.startswith("out/"):
                 recorded = recorded_files(folder)
@@ -339,6 +358,10 @@ class Courier:
             partial.write_bytes(body)
             partial.replace(target)
             self._restored(run, key, target)
+        if membership is not None:
+            (folder / "out").mkdir(parents=True, exist_ok=True)
+            (folder / OUT_PRESENT).touch()
+            self._sent[f"{run}/{MEMBERSHIP}"] = membership.model_dump_json()
         wanted = resume_file(folder)
         if wanted is None or (folder / wanted.key).exists() or wanted.key not in keys:
             return
@@ -449,6 +472,21 @@ class Courier:
         if file := self._unsent(path, run, key):
             self._accept(self._upload(file))
 
+    def _put_working(self, run: str, key: str, recorded: RecordedFile | None) -> None:
+        """Send changed working bytes, keeping recorded checkpoints immutable."""
+        sent_key = f"{run}/{key}"
+        if recorded is not None and sent_key in self._sent:
+            return
+        # Keep one open inode through hashing and upload: atomic replacement
+        # during the pass cannot mix two saves.
+        with (self._track_root / run / key).open("rb") as stream:
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+            if recorded is not None and digest != recorded.sha256:
+                raise StorageUnavailable(f"working checkpoint {key} changed")
+            if digest != self._sent.get(sent_key):
+                self._runs[run].write(key, stream)
+        self._sent[sent_key] = digest
+
     def _put_outputs(self, outputs: Path, run: str, attempt: str) -> None:
         paths = iter(
             sorted(
@@ -521,28 +559,27 @@ class Courier:
         folder = self._track_root / run
         removed = retired(folder) if folder.is_dir() else []
         recorded = recorded_files(folder)
+        working: list[str] = []
         for key in listing(folder, tail_seconds=0.0 if done else math.inf):
+            if key == MEMBERSHIP:
+                continue  # only this pass can publish its membership
             # Training removes files while this runs. One gone by now is
             # skipped; what replaced it is seen on the next pass.
             try:
                 with attribute(purpose=purpose(key, recorded)):
                     if key.startswith("out/"):
-                        sent_key = f"{run}/{key}"
-                        if key in recorded and sent_key in self._sent:
-                            continue
-                        path = folder / key
-                        # Keep one open inode through hashing and upload: atomic
-                        # replacement during the pass cannot mix two saves.
-                        with path.open("rb") as stream:
-                            digest = hashlib.file_digest(stream, "sha256").hexdigest()
-                            if digest == self._sent.get(sent_key):
-                                continue
-                            self._runs[run].write(key, stream)
-                        self._sent[sent_key] = digest
+                        self._put_working(run, key, recorded.get(key))
+                        working.append(key)
                     else:
                         self._put(folder / key, run, key)
             except FileNotFoundError:
                 continue
+        if (folder / "out").is_dir() or (folder / OUT_PRESENT).is_file():
+            body = WorkingFiles(files=tuple(sorted(working))).model_dump_json()
+            if self._sent.get(f"{run}/{MEMBERSHIP}") != body:
+                self._runs[run].write_bytes(MEMBERSHIP, body.encode())
+                (folder / OUT_PRESENT).touch()
+                self._sent[f"{run}/{MEMBERSHIP}"] = body
         self._clear(run, removed)
 
     def carry_out(self, final: bool = False) -> None:

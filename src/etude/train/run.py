@@ -53,7 +53,7 @@ from urllib.parse import unquote
 
 from pydantic import ValidationError
 
-from etude.carriage import taken
+from etude.carriage import OUT_PRESENT, taken
 from etude.deadline import limit_time
 from etude.run.block_file import block_key, tail_key
 from etude.run.declaration import declare
@@ -206,6 +206,8 @@ class Run:
         self._out = Path(given).resolve() if (given := os.environ.get("ETUDE_OUT")) else None
         if self._out is not None:
             self._out.mkdir(parents=True, exist_ok=True)
+            if self._out == (root / "out").resolve():
+                (root / OUT_PRESENT).touch()
         self._asked: float | None = None
         self._slowest = 0.0
         self._stop_requested = False

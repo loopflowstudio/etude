@@ -25,6 +25,7 @@ from etude.carriage import (
 from etude.run.block_file import parse
 from etude.run.records import RunFile
 from etude.run.storage import DirectoryStorage, Storage, run_prefix
+from etude.working import MEMBERSHIP, WorkingFiles
 
 
 class RunFiles:
@@ -45,7 +46,7 @@ class RunFiles:
         The rules are the courier's too (`etude.carriage.listing`). A tail is
         sent only once it is old enough that its writer has died.
         """
-        return listing(self.root, tail_seconds=self.tail_age)
+        return [key for key in listing(self.root, tail_seconds=self.tail_age) if key != MEMBERSHIP]
 
     def fingerprint(self, key: str, recorded: Container[str] | None = None) -> str:
         """Immutable files are sent once; others are hashed, so a change is sent again."""
@@ -70,10 +71,10 @@ class RunFiles:
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_text(fingerprint)
 
-    def pending(self, destination: str) -> list[tuple[str, str]]:
+    def pending(self, destination: str, keys: Sequence[str] | None = None) -> list[tuple[str, str]]:
         pending: list[tuple[str, str]] = []
         recorded = recorded_files(self.root)
-        for key in self.deliverable():
+        for key in self.deliverable() if keys is None else keys:
             mark = self.fingerprint(key, recorded)
             if self.shipped(destination, key) != mark:
                 pending.append((key, mark))
@@ -101,7 +102,11 @@ class StorageDestination:
         deliveries: list[Delivery] = []
         with files.lock:
             retired = files.removed()
-            for key, fingerprint in files.pending(self.name):
+            keys = files.deliverable()
+            working = WorkingFiles(
+                files=tuple(sorted(key for key in keys if key.startswith("out/")))
+            )
+            for key, fingerprint in files.pending(self.name, keys):
                 block = parse(key)
                 body = (
                     files.root / key
@@ -121,6 +126,11 @@ class StorageDestination:
             else:
                 self.storage.put(prefix + delivery.key, delivery.body)
             files.mark(self.name, delivery.key, delivery.fingerprint)
+        if (files.root / "out").is_dir() or files.shipped(self.name, MEMBERSHIP) is not None:
+            membership = working.model_dump_json()
+            if files.shipped(self.name, MEMBERSHIP) != membership:
+                self.storage.put(prefix + MEMBERSHIP, membership.encode())
+                files.mark(self.name, MEMBERSHIP, membership)
         for key in retired:
             if files.shipped(self.name, key) is not None and self.storage.delete(prefix + key):
                 files._marker(self.name, key).unlink(missing_ok=True)

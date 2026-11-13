@@ -43,6 +43,7 @@ from etude.launch.storage.s3 import Bucket, Grant, Version
 from etude.launch.storage.transport import attribute
 from etude.launch.usage import Transfer
 from etude.storage_timeout import StorageUnavailable
+from etude.working import MEMBERSHIP, WorkingFiles
 
 # How long a link lasts where no rental bounds it: a session on a machine you
 # own, and links the launcher reads itself. A rented session's grants last
@@ -223,7 +224,9 @@ class BucketJournal:
                 kept = self._bucket.objects(folder)
             for key, size in kept.items():
                 relative = key[len(folder) :]
-                if relative == "run.json" or relative.startswith(("checkpoints/", "out/")):
+                if relative in ("run.json", MEMBERSHIP) or relative.startswith(
+                    ("checkpoints/", "out/")
+                ):
                     links[f"{work.run}/{relative}"] = ReadLink(
                         url=self._bucket.get_url(key, _GRANT_SECONDS), size_bytes=size
                     )
@@ -257,8 +260,19 @@ class BucketJournal:
             for name in records if key is not None else [*records, "run.json"]:
                 if (raw := self._bucket.get(folder + name)) is not None:
                     (root / name).write_bytes(raw)
+            members: set[str] | None = None
+            if key is None and MEMBERSHIP in listed:
+                raw = self._bucket.get(folder + MEMBERSHIP)
+                if raw is None:
+                    raise StorageUnavailable("working directory membership is missing")
+                members = set(WorkingFiles.model_validate_json(raw).files)
+                (root / "out").mkdir(exist_ok=True)
+                if not members <= listed.keys():
+                    raise StorageUnavailable("working directory member is missing")
             recorded = recorded_files(root)
             for name, size in listed.items():
+                if members is not None and name not in members:
+                    continue
                 if not name.startswith("out/") or key not in (None, name):
                     continue
                 with attribute(purpose=purpose(name, recorded)):
@@ -271,7 +285,12 @@ class BucketJournal:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(raw)
             wanted = resume_file(root) if key is None else named_file(root, key)
-            if wanted is not None and wanted.key in listed and not (root / wanted.key).exists():
+            if (
+                wanted is not None
+                and wanted.key in listed
+                and not (root / wanted.key).exists()
+                and (key is not None or not wanted.key.startswith("out/"))
+            ):
                 with attribute(purpose="checkpoint"):
                     download(
                         Download(

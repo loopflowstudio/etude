@@ -2,21 +2,45 @@
 
 import json
 import os
+from collections import Counter
 from hashlib import sha256
 from pathlib import Path
 
 import pytest
 
-from etude.launch.records import Input
+from etude.carriage import put_back, restore_set
+from etude.jobs import continue_from
+from etude.launch.records import Input, Job
 from etude.launch.records import Storage as Place
 from etude.launch.schemas import Delivery, Inbox, Work
 from etude.launch.storage.bucket import BucketJournal
-from etude.launch.storage.s3 import Bucket, Keys
+from etude.launch.storage.s3 import Bucket, Keys, Reply
+from etude.launch.worker.courier import Courier
+from etude.run.storage import DirectoryStorage
 from etude.storage_timeout import StorageUnavailable
 from etude.train.read import read
 from etude.train.records import Step
 from etude.train.run import track
-from tests.launch.test_runpod_machines import Observed, Storage, machine
+from etude.working import MEMBERSHIP, WorkingFiles
+from tests.launch.test_runpod_machines import BucketObjects, Observed, Storage, machine
+from tests.launch.test_worker_attempts import local
+from tests.run.storage import MeasuredStorage
+
+
+class Writes(Storage):
+    """Count stored objects for both signed PUTs and upload-only POSTs."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.writes: Counter[str] = Counter()
+
+    def __call__(self, method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Reply:
+        before = dict(self.objects)
+        reply = super().__call__(method, url, body, headers)
+        self.writes.update(
+            key for key, value in self.objects.items() if before.get(key) is not value
+        )
+        return reply
 
 
 def test_courier_hashes_mutable_out_and_restores_every_file_once(
@@ -76,6 +100,7 @@ def test_courier_hashes_mutable_out_and_restores_every_file_once(
     fresh.restore(links)
     reads = [key.partition("?")[0] for method, key in storage.asked[before:] if method == "GET"]
     assert reads == [
+        "etude/run1/out.json",
         "etude/run1/checkpoints/updates-2.json",
         "etude/run1/out/state",
         "etude/run1/out/weights/model.json",
@@ -108,25 +133,116 @@ def test_courier_hashes_mutable_out_and_restores_every_file_once(
     assert not (broken_root / "out/state").exists()
 
 
-def test_retiring_a_working_file_forgets_its_delivery_fingerprint(tmp_path: Path) -> None:
-    storage = Storage()
-    courier, _, root = machine(tmp_path, storage)
-    out = root / "out"
-    out.mkdir()
-    state = out / "state"
-    state.write_bytes(b"saved")
+@pytest.mark.parametrize("grants", [True, False])
+def test_deleted_files_stay_absent_after_restart_recovery_and_continuation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, grants: bool
+) -> None:
+    storage = Writes()
+    storage.grants = grants
+    courier, _, root = machine(tmp_path / "first", storage)
+    scheduler = local(tmp_path / "client")
+    parent = scheduler.queue(Job(command="train", max_hours=1), "local")
+    # The fixture's courier grant names run1; use its tracked run with this job.
+    record = scheduler.record(parent).model_copy(update={"id": "run1"})
+    monkeypatch.setenv("ETUDE_OUT", str(root / "out"))
+    with track(
+        experiment="e", run="run1", clocks=[Step("updates", "updates")], directory=root.parent
+    ) as run:
+        final = run.out / "final.pt"
+        final.write_bytes(b"immutable weights")
+        run.checkpoint(final, updates=2)
+        run.log({"loss": 0}, updates=2)
+        (run.out / "state").write_bytes(b"saved")
     courier.carry_out()
-    assert storage.objects["etude/run1/out/state"] == b"saved"
-    state.unlink()
-    note = root / "retired.removed"
-    note.write_text("out/state\n")
+    final.unlink()
+    (root / "out/state").unlink()
+    # Restart with no in-memory sent cache, after the recipe's ordinary unlink.
+    bucket = Bucket("b", "us-east-1", Keys(access_key="AKIA", secret_key="secret"), storage)
+    courier = Courier(
+        courier._home,
+        bucket.grant("etude/sessions/r/out/", 3600, "r"),
+        "unused",
+        storage,
+        {"run1": bucket.grant("etude/run1/", 3600, "run1")},
+        courier._home / "worker.log",
+    )
     courier.carry_out()
-    assert "etude/run1/out/state" not in storage.objects
-    note.unlink()
-    state.write_bytes(b"saved")
     courier.carry_out()
-    assert storage.objects["etude/run1/out/state"] == b"saved"
-    assert storage.asked.count(("PUT", "etude/run1/out/state")) == 2
+    member = "etude/run1/" + MEMBERSHIP
+    assert WorkingFiles.model_validate_json(storage.objects[member]).files == ()
+    assert storage.objects["etude/run1/out/final.pt"] == b"immutable weights"
+    assert storage.writes[member] == 2
+    journal = BucketJournal(
+        Place(name="east", bucket="b", prefix="etude", provider="s3", region="us-east-1"), bucket
+    )
+    work = Work(
+        attempt="a2",
+        command="true",
+        limit_seconds=30,
+        limit_kind="out_of_time",
+        seed=None,
+        until=None,
+        config=None,
+        repo=None,
+        commit=None,
+        run="run1",
+        resumes=True,
+    )
+    before = len(storage.asked)
+    links = journal._restore([work])
+    assert len(storage.asked) == before + 1
+    fresh, _, restored = machine(tmp_path / "fresh", storage)
+    (restored / "out").mkdir()
+    (restored / "out/stale").write_bytes(b"old host state")
+    before = len(storage.asked)
+    fresh.restore(links)
+    reads = [key.partition("?")[0] for method, key in storage.asked[before:] if method == "GET"]
+    assert reads == [member, "etude/run1/checkpoints/updates-2.json", "etude/run1/run.json"]
+    assert list((restored / "out").iterdir()) == []
+    before = len(storage.asked)
+    held = journal.held("run1")
+    reads = [key.partition("?")[0] for method, key in storage.asked[before:] if method == "GET"]
+    assert len(reads) == 4  # one listing, the checkpoint record, declaration and membership
+    relayed = tmp_path / "relay/run1"
+    (relayed / "out").mkdir(parents=True)
+    (relayed / "out/stale").write_bytes(b"old host state")
+    put_back(relayed, held)
+    assert not (relayed / "out/stale").exists()
+    source = MeasuredStorage(DirectoryStorage(relayed.parent))
+    child = continue_from(record, "updates=4", source=source)
+    assert not child.job.inputs  # an empty directory must not resurrect its latest checkpoint
+    assert source.listings == 2
+    assert not any("/out/" in key for key in source.got)
+    source = MeasuredStorage(BucketObjects(storage, "b"))
+    child = continue_from(record, "updates=4", source=source)
+    assert not child.job.inputs
+    assert source.got.count(member) == 1 and source.listings == 2
+    assert not any("/out/" in key for key in source.got)
+    source = MeasuredStorage(BucketObjects(storage, "b"))
+    child = continue_from(record, "updates=4", source=source, ordinal=1)
+    assert [given.key for given in child.job.inputs] == ["out/final.pt"]
+    assert member not in source.got and source.listings == 2
+    assert not any("/out/" in key for key in source.got)
+    # Explicit checkpoint selection still retrieves the immutable object.
+    assert journal.held("run1", "out/final.pt")["out/final.pt"] == b"immutable weights"
+    # Recreating the same mutable bytes is visible again; a fresh host does not
+    # mistake its retained storage object for membership.
+    (root / "out/state").write_bytes(b"saved")
+    courier.carry_out()
+    assert WorkingFiles.model_validate_json(storage.objects[member]).files == ("out/state",)
+    fresh.restore(journal._restore([work]))
+    assert (restored / "out/state").read_bytes() == b"saved"
+    assert not (restored / "out/final.pt").exists()
+    assert storage.writes["etude/run1/out/state"] == 2
+    source = MeasuredStorage(BucketObjects(storage, "b"))
+    child = continue_from(record, "updates=4", source=source)
+    assert [given.out for given in child.job.inputs] == ["state"]
+    assert source.got.count("etude/run1/out/state") == 1
+    assert "etude/run1/out/final.pt" not in source.got
+    # Direct host relay uses the live directory, not its earlier carried membership.
+    (root / "out/state").unlink()
+    put_back(restored, restore_set(root))
+    assert not (restored / "out/state").exists()
 
 
 def test_continuation_initial_state_is_stored_before_its_first_claim(
@@ -194,3 +310,37 @@ def test_continuation_initial_state_is_stored_before_its_first_claim(
     courier.carry_out()
     sent = [key for method, key in storage.asked if method in ("PUT", "POST")]
     assert sent.count("etude/run1/out/state") == 1
+
+
+def test_failed_membership_delivery_keeps_the_previous_directory_until_replayed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = Writes()
+    courier, _, root = machine(tmp_path, storage)
+    (root / "out").mkdir()
+    (root / "out/old").write_bytes(b"old")
+    courier._track("run1", done=False)
+    (root / "out/old").unlink()
+    (root / "out/new").write_bytes(b"new")
+    folder = courier._runs["run1"]
+    write = folder.write_bytes
+
+    def fail_membership(key: str, body: bytes) -> None:
+        if key == MEMBERSHIP:
+            raise StorageUnavailable("membership delivery interrupted")
+        write(key, body)
+
+    monkeypatch.setattr(folder, "write_bytes", fail_membership)
+    with pytest.raises(StorageUnavailable, match="interrupted"):
+        courier._track("run1", done=False)
+    assert storage.objects["etude/run1/out/new"] == b"new"
+    assert WorkingFiles.model_validate_json(storage.objects["etude/run1/out.json"]).files == (
+        "out/old",
+    )
+    monkeypatch.setattr(folder, "write_bytes", write)
+    courier._track("run1", done=False)
+    assert WorkingFiles.model_validate_json(storage.objects["etude/run1/out.json"]).files == (
+        "out/new",
+    )
+    assert storage.writes["etude/run1/out/new"] == 1
+    assert storage.writes["etude/run1/out.json"] == 2

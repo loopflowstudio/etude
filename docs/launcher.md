@@ -1083,7 +1083,7 @@ attempts. A machine's window ending stops the job this way when it asks
 `run.stopping()`, and ends the attempt `lost` at the deadline when it does
 not; either starts another attempt if the run has limits and attempts left.
 A job stopping because the run's own hours or dollars are spent ends the run
-`out_of_time` or `over_budget`, with its state saved. A stop that follows
+`out_of_time` or `over_budget`. A stop that follows
 `etude cancel` ends it `cancelled`. When no attempt is left, the run ends
 with its last attempt's outcome, `stopped` or `lost`. A run with no state in
 its directory and no checkpoint starts again from the beginning. Each
@@ -1105,6 +1105,12 @@ ordinals continue. A file the previous machine wrote after the courier's last
 pass is not there: the job resumes from what was carried. Automatic recovery
 retains the run ID and seed. `etude continue` instead goes further than the
 target or branches from a completed run, making a new run with a parent.
+
+Each successful delivery publishes `out.json`, the working directory's file
+membership, after its files. Recovery and continuation exclude removed files,
+even if their bytes remain in storage. Recovery removes stale working files on
+a reused host. Deleted checkpoints remain available when selected explicitly;
+an empty `out` does not fall back to the latest checkpoint.
 
 There is no `retry` flag; `max_attempts=1` bounds a job to one attempt.
 
@@ -1186,6 +1192,7 @@ PREFIX/RUN/                      everything about one run
   run.json  state.json  metrics/ the run's tracked files, as they are,
   checkpoints/                     every checkpoint tracking recorded among them
   out/                           the run's directory (`run.out`), as the job keeps it
+  out.json                       files belonging to the last carried working directory
 PREFIX/sessions/SESSION/         one machine's instructions, inbox and notes
   out/worker.log/OFFSET          the worker's own log, in pieces named by first byte
   out/worker-log.json            where its pieces end
@@ -1205,7 +1212,11 @@ pass sends checkpoint files before their records; checkpoint bytes count as
 `checkpoint` in usage; and an object under `checkpoints/` is sent once and
 never replaced. `ETUDE_OUT` is that folder's `out/`: a file in it is hashed on
 each pass and sent again when it has changed, except one a checkpoint record
-names, which is sent once before its record like any checkpoint file.
+names, which is sent once before its record like any checkpoint file. The
+membership is published after all files in that pass succeed, including when
+no files remain. A courier restart reconstructs membership from the local
+directory. This also works with upload-only grants; absence does not depend
+on deleting bucket objects.
 
 A job reports its progress by atomically replacing `etude-result.json` in the
 output directory; `etude status` shows it:
@@ -1248,7 +1259,7 @@ leaves old copies it did not upload. The launcher knows no block format or
 coverage rules, and neither Python package imports the other.
 
 ```sh
-etude continue --run RUN --until updates=6400 --config updates=6400 --source s3://bucket/etude/launch
+etude continue --run RUN --until updates=6400 --config '{"updates":6400}' --source s3://bucket/etude/launch
 etude continue --run RUN --until steps=63000 --ordinal 4 --source s3://bucket/etude/launch
 etude continue --run COHORT --until steps=63000 --cohort NEXT --source s3://bucket/etude/launch
 etude cancel RUN
@@ -1260,13 +1271,14 @@ carried, so a job that keeps its state there (weights, optimizer, anything
 else) goes on exactly where the parent stopped. The parent and its directory
 are unchanged. `--until` is the child's absolute target and must exceed where
 the parent stood on the named clock. A typed job whose target is a config
-field is given it with `--config FIELD=VALUE` (repeatable), validated back
+field is given it with `--config '{"updates":6400}'`, a JSON object validated back
 into the job's config type before anything is queued; the child's config is
 the parent's with those fields changed, and it is a new job. In Python,
 `continue_from(parent, until, source=..., config=TrainConfig(updates=6400))`.
 
-`--ordinal N` starts from one recorded checkpoint instead, and so does a
-parent whose `out` is empty, from its latest: the child's `out` starts empty
+`--ordinal N` starts from one recorded checkpoint instead. A historical parent
+without a working directory also uses its latest checkpoint; a recorded empty
+working directory stays empty. With a checkpoint input, the child's `out` starts empty
 and the checkpoint file reaches the machine as an input of the parent run
 (`Input(run=PARENT, key=RECORDED_FILE)`), verified by digest, where
 `run.latest_checkpoint()` finds it. That key may be under `out/` when the

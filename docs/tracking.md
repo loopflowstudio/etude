@@ -207,7 +207,11 @@ path to write or test.
   file is never sent) and keep what one resume needs in one file. A large
   state file is uploaded each time it is saved, so save it as often as you
   would pay to upload it. Anything under a folder whose name starts with `.`
-  stays on the machine.
+  stays on the machine. Each completed delivery records which files belong
+  in `out`: deleting a file removes it from the next recovery or continuation,
+  and recovery clears stale working files on a reused host. Storage retains
+  deleted checkpoint bytes for explicit checkpoint reads; they do not reappear
+  in `out`. An empty directory stays empty.
 - **Outside a launch the caller names it.** `local_launch(out=DIR,
   experiment=NAME)` says where `out` is and which experiment the run belongs
   to, for every `track` in its block, so a command line can call the training

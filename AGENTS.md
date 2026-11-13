@@ -129,6 +129,10 @@ monotonic allowance capped by the provider deadline; uncertain exit or collectio
 leaves the stream incomplete while parent cleanup still runs.
 An explicit empty worker cleanup command leaves deletion to its parent; omitted
 cleanup selects the provider's command.
+Working-directory membership (`out.json`) is published after its files; retained
+checkpoint objects are not evidence that they still belong in `out`. Complete
+host relays include `checkpoints/.stored`; single-file inputs do not. Only a
+complete restoration reconciles stale working files.
 
 Etude has one cache of storage reads, `etude/cache.py`, keyed by content
 SHA256 and length with locators for where bytes came from. Tracking, reports and

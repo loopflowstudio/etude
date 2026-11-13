@@ -15,6 +15,7 @@ from etude.train.read import read
 from etude.train.records import Step
 from etude.train.report import training
 from etude.train.run import Stopped, local_launch, track
+from etude.working import WorkingFiles
 from tests.run.storage import MeasuredStorage
 
 CLOCKS = [Step("updates", "optimizer updates")]
@@ -140,3 +141,47 @@ def test_out_checkpoint_is_carried_once_and_relocated_without_a_second_copy(
     saved = observe(restored.parent, "e").runs[0].checkpoints[0]
     assert checkpoint_file(saved) == "out/nested/model.pt"
     assert str(saved.key) == "r/out/nested/model.pt"
+
+
+def test_sync_carries_working_file_deletion_and_recreation_without_duplicate_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "track/r"
+    monkeypatch.setenv("ETUDE_OUT", str(root / "out"))
+    with track(experiment="e", run="r", clocks=CLOCKS, directory=root.parent) as run:
+        state = run.out / "state"
+        state.write_bytes(b"saved")
+    storage = MeasuredStorage(DirectoryStorage(tmp_path / "bucket"))
+    assert sync(root.parent, storages=[storage]) == {}
+    count = storage.uploads
+    state.unlink()
+    assert sync(root.parent, storages=[storage]) == {}
+    assert storage.uploads == count + 1
+    assert WorkingFiles.model_validate_json(storage.get("r/out.json")).files == ()
+    state.write_bytes(b"saved")
+    assert sync(root.parent, storages=[storage]) == {}
+    assert storage.uploads == count + 2
+    assert WorkingFiles.model_validate_json(storage.get("r/out.json")).files == ("out/state",)
+    assert storage.get("r/out/state") == b"saved"
+
+
+def test_recipe_retirement_notes_cannot_delete_tracking_or_retained_checkpoints(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "track/r"
+    monkeypatch.setenv("ETUDE_OUT", str(root / "out"))
+    with track(experiment="e", run="r", clocks=CLOCKS, directory=root.parent) as run:
+        model = run.out / "model.pt"
+        model.write_bytes(b"weights")
+        run.checkpoint(model, updates=1)
+    storage = MeasuredStorage(DirectoryStorage(tmp_path / "bucket"))
+    assert sync(root.parent, storages=[storage]) == {}
+    (root / "out/recipe.removed").write_text("run.json\n")
+    (root / "metrics/retired.removed").write_text("out/model.pt\n")
+    model.unlink()
+    assert sync(root.parent, storages=[storage]) == {}
+    assert storage.get("r/run.json") == (root / "run.json").read_bytes()
+    assert storage.get("r/out/model.pt") == b"weights"
+    assert WorkingFiles.model_validate_json(storage.get("r/out.json")).files == (
+        "out/recipe.removed",
+    )
