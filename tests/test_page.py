@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -17,7 +18,6 @@ from etude.page import Index, Page, Pages, Server, build, experiment_files, inde
 from etude.report import (
     Anchors,
     Curve,
-    Fraction,
     Matches,
     Matrix,
     Ranking,
@@ -67,6 +67,25 @@ def test_the_report_is_the_files_and_the_experiment_is_named_for_it(tmp_path: Pa
     assert (page.experiment, page.origin, page.notes) == ("lab", "lab.py:report", ())
     assert page.report.evals == (Matrix(rows="opponent_deck", columns="deck"),)
     assert [run.name for run in page.training.runs] == ["a"]
+
+
+def test_checkpoints_with_no_etude_clock_are_named_with_the_reason(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    run = track(experiment="lab", run="a", clocks=[Step("updates", "updates")], directory=runs)
+    run.checkpoint("s3://models/10.pt", updates=10)
+    run.finish(timeout=30)
+    file = experiment_file(tmp_path / "experiments", "lab", LAB)
+    assert build(runs, file).notes == ()
+    # As an older client saved it, copied without its attempt records.
+    for path in (runs / "a/checkpoints").glob("*.json"):
+        record = json.loads(path.read_text())
+        record["at"] = {"updates": record["at"]["updates"]}
+        path.write_text(json.dumps(record))
+    for path in (runs / "a/metrics").glob("*.json"):
+        path.unlink()
+    (note,) = build(runs, file).notes
+    assert "No running_hours or hours_since_start for some checkpoints of a" in note
+    assert "attempt records (metrics/WRITER.json) of a are not in this source" in note
 
 
 def test_without_a_report_the_page_is_the_default_and_says_so(tmp_path: Path) -> None:
@@ -233,20 +252,10 @@ def test_a_page_carries_its_charts_and_needs_no_network(tmp_path: Path) -> None:
     assert "uPlot" in html and "<script src" not in html and "<link" not in html
 
 
-def test_a_panels_matches_are_a_matchup_or_a_tag_of_a_tournament_never_both() -> None:
+def test_a_panels_matches_are_a_seating_or_a_tag_of_a_tournament_never_both() -> None:
     assert Curve(matches=Matches(tournament="ladder", tag="anchor")).matches is not None
-    with pytest.raises(ValueError, match="matches_name_a_matchup_or_a_tag_not_both"):
-        Matches(matchup="vs heuristic", tag="anchor")
-
-
-def test_a_curve_against_a_fraction_of_its_position_keeps_that_opponent_through_json() -> None:
-    report = Report(evals=(Curve(opponent=Fraction(clock="updates", value=0.5)),))
-    (curve,) = Report.model_validate_json(report.model_dump_json()).evals
-    assert isinstance(curve, Curve)
-    assert curve.opponent == Fraction(clock="updates", value=0.5)
-    for outside in (0.0, 1.0, 2.0):
-        with pytest.raises(ValueError):
-            Fraction(clock="updates", value=outside)
+    with pytest.raises(ValueError, match="matches_name_a_seating_or_a_tag_not_both"):
+        Matches(seating="vs heuristic", tag="anchor")
 
 
 def test_an_absent_experiments_error_names_the_source_as_it_was_given(tmp_path: Path) -> None:

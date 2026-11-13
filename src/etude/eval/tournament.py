@@ -1,10 +1,10 @@
 """Tournaments: structures that arrange eval runs to produce a set of matches.
 
-A `Benchmark` (`etude.eval.records`) is named matchups a training run's
+A `Benchmark` (`etude.eval.records`) is named seatings a training run's
 checkpoints are held for; a `RoundRobin` is hand-picked players, every two of
 them once.
 `hold` plays, as one eval run (`etude.eval.match.evaluate`), the matches a
-tournament adds. `curves` follows each matchup over training; `standings`
+tournament adds. `scores` follows each seating over training; `standings`
 ranks a round robin. Both read an experiment's database (`etude.eval.query.statsdb`).
 
 A tournament is stored nowhere but in its eval runs: each keeps, in its own
@@ -51,13 +51,16 @@ from etude.eval.records import (
     Benchmark,
     CheckpointRef,
     Environment,
+    Line,
     Match,
     Player,
     Rollup,
     RoundRobin,
+    Seated,
     TournamentRun,
     assemble,
     digest,
+    folder_name,
 )
 from etude.eval.schedule import ordered
 from etude.run.declaration import declare
@@ -86,6 +89,7 @@ def hold(
     storages: Sequence[Storage] = (),
     share: tuple[int, int] = (0, 1),
     rollups: Sequence[Rollup] = (),
+    lines: Sequence[Line] = (),
 ) -> EvalRun:
     """Play, as one eval run of `experiment`, the matches the tournament adds; the run records what was given.
 
@@ -94,11 +98,13 @@ def hold(
     database (`etude.eval.query.statsdb`) reads them.
 
     A benchmark held with `checkpoint` (on the go) plays each of the given
-    matchups with the checkpoint in their inference seats. Held without one
-    (batch), it plays every matchup any eval run defined for every checkpoint
-    any held or `checkpoints` adds, and each matchup of fixed players once,
-    skipping what any eval run of its environment delivered, so a matchup
-    added later is played for every checkpoint so far. A round robin held
+    seatings with the checkpoint in their inference seats. Held without one
+    (batch), it plays every seating any eval run defined for every checkpoint
+    any held or `checkpoints` adds, and each seating of fixed players once,
+    skipping what any eval run of its environment delivered, so a seating
+    added later is played for every checkpoint so far. A relative seat finds
+    its checkpoint among `lines`, the experiment's training lines; one that
+    finds none yet plays nothing until a later hold finds it. A round robin held
     with `enter` plays every pair of the players given; with none, every pair
     of every entrant so far not yet delivered.
 
@@ -116,8 +122,8 @@ def hold(
     elsewhere it is named for what is given, so the same call resumes it. A
     batch hold raises `EtudeError("tournament_conflict")` when the
     tournament's eval runs or this definition disagree on its format,
-    environment or rules, and `EtudeError("matchup_conflict")` when they
-    define a matchup name two ways;
+    environment or rules, and `EtudeError("seating_conflict")` when they
+    define a seating name two ways;
     an on-the-go hold leaves those to be found on read. Raises whatever
     `evaluate` raises.
     """
@@ -129,16 +135,19 @@ def hold(
     given = (checkpoint,) if checkpoint is not None else tuple(checkpoints)
     added = _added(tournament, given, enter, share)
     if matches is not None:
-        called = {each.match.key for each in assemble([added]).schedule()}
+        resolved, _ = assemble([added]).resolve(lines)
+        added = added.model_copy(update={"seated": resolved.seated})
+        called = {each.match.key for each in resolved.schedule()}
         if not all(each.key in called for each in matches):
             raise EtudeError("match_not_scheduled", 422)
         pending = list(matches)
     else:
         on_the_go = checkpoint is not None or bool(enter)
-        scheduled = _scheduled(
+        scheduled, added = _scheduled(
             added,
             experiment=experiment,
             on_the_go=on_the_go,
+            lines=lines,
             directory=directory,
             storages=storages,
         )
@@ -153,7 +162,7 @@ def hold(
             if match.key not in delivered
         ]
     run = os.environ.get("ETUDE_RUN") or (
-        f"{tournament.name}.{digest(added.model_dump(mode='json'))[:12]}"
+        f"{folder_name(tournament.name)}.{digest(added.model_dump(mode='json'))[:12]}"
     )
     _record(added, experiment, run, directory)
     return evaluate(
@@ -195,23 +204,26 @@ def played(
     enter: Sequence[Player] = (),
     directory: Path | str | None = None,
     storages: Sequence[Storage] = (),
+    lines: Sequence[Line] = (),
 ) -> Played:
     """How far exactly this definition has been played, without playing anything.
 
-    Only what is given is wanted: a matchup an earlier eval run defined and
+    Only what is given is wanted: a seating an earlier eval run defined and
     this definition leaves out is not, nor a checkpoint not given. What any
     eval run of the experiment in its environment delivered counts, whichever
     tournament it was held for; of several, the one that recorded it last.
     So one place can decide what is new and another, such as a launched
     machine that reads no other eval run, play it with `hold(matches=...)`,
     and a reader counts each match from the run whose rows are latest.
-    Raises as a batch hold does, so a matchup name defined two ways is refused.
+    Raises as a batch hold does, so a seating name defined two ways is refused.
+    Relative seats find their checkpoints among `lines`, as in `hold`.
     """
     added = _added(tournament, tuple(checkpoints), enter, (0, 1))
-    scheduled = _scheduled(
+    scheduled, _ = _scheduled(
         added,
         experiment=experiment,
         on_the_go=False,
+        lines=lines,
         wanted_only=True,
         directory=directory,
         storages=storages,
@@ -268,15 +280,19 @@ def _scheduled(
     *,
     experiment: str,
     on_the_go: bool,
+    lines: Sequence[Line],
     directory: Path | str | None,
     storages: Sequence[Storage],
     wanted_only: bool = False,
-) -> list[tuple[Match, Literal["new", "delivered", "failed"], dict[str, int]]]:
+) -> tuple[
+    list[tuple[Match, Literal["new", "delivered", "failed"], dict[str, int]]], TournamentRun
+]:
     """Each match the tournament calls for with what `added` adds, in key order, whether
     an eval run of the experiment in its environment delivered it or failed it, and when
-    each eval run delivering it recorded it.
+    each eval run delivering it recorded it; and `added` with what its relative seats
+    found among `lines` that no stored eval run recorded, for the hold to record.
 
-    On the go, nothing is read and a matchup of fixed players is left to batch:
+    On the go, nothing is read and a seating of fixed players is left to batch:
     it is not the checkpoint's. `wanted_only` calls for what `added` defines
     alone, still refusing a definition the stored eval runs conflict with.
     """
@@ -290,15 +306,18 @@ def _scheduled(
         )
         held = [*stored, added]
     tournament = assemble(held)
+    known = {_found(each) for each in tournament.seated}
     if wanted_only:
-        tournament = assemble([added])
-    # Two matchups may share a match; it is played once.
+        tournament = assemble([added]).model_copy(update={"seated": tournament.seated})
+    tournament, _ = tournament.resolve(lines)
+    found = tuple(each for each in tournament.seated if _found(each) not in known)
+    # Two seatings may share a match; it is played once.
     matches = {
         each.match.key: each.match
         for each in tournament.schedule()
         if not on_the_go or each.checkpoint is not None or not added.checkpoints
     }
-    return [
+    scheduled: list[tuple[Match, Literal["new", "delivered", "failed"], dict[str, int]]] = [
         (
             match,
             "delivered" if key in delivered else "failed" if key in failed else "new",
@@ -306,6 +325,16 @@ def _scheduled(
         )
         for key, match in sorted(matches.items())
     ]
+    return scheduled, added.model_copy(update={"seated": (*added.seated, *found)})
+
+
+def _found(seated: Seated) -> tuple[str, str, tuple[tuple[tuple[str | None, ...], int], ...]]:
+    """What a `Seated` plays, by key: equal for one found again at another file."""
+    pairings = tuple(
+        (tuple(None if ref is None else str(ref.key) for ref in each.seats), each.games)
+        for each in seated.pairings
+    )
+    return seated.seating, str(seated.checkpoint), pairings
 
 
 def _record(added: TournamentRun, experiment: str, run: str, directory: Path | str | None) -> None:
@@ -429,8 +458,8 @@ def _held(db: duckdb.DuckDBPyConnection, tournament: str) -> Iterator[tuple[int,
         db.execute("drop table _held")
 
 
-class CurvePoint(Record):
-    """A matchup's value for one checkpoint, and where its training run stood when it was saved."""
+class ScorePoint(Record):
+    """A seating's value for one held checkpoint, and where its training run stood when it was saved."""
 
     # Its key (`etude.eval.records.CheckpointKey`), encoded.
     checkpoint: str
@@ -446,20 +475,20 @@ class CurvePoint(Record):
     matches: int
 
 
-class Curve(Record):
-    """One matchup of a benchmark over one training run's checkpoints, in training order.
+class Scores(Record):
+    """One seating of a benchmark over one training run's held checkpoints, in training order.
 
     Checkpoints no training run recorded follow, by name with numbers in order.
     """
 
-    matchup: str
+    seating: str
     # The training run and its experiment; None for checkpoints no run recorded.
     run: str | None
     experiment: str | None
-    points: tuple[CurvePoint, ...]
+    points: tuple[ScorePoint, ...]
 
 
-def curves(
+def scores(
     db: duckdb.DuckDBPyConnection,
     benchmark: str,
     *,
@@ -467,18 +496,22 @@ def curves(
     value: str,
     per: str | None = None,
     where: str | None = None,
-) -> list[Curve]:
-    """Each matchup's first player on `table`'s `value`, per checkpoint, as `compare` measures it.
+) -> list[Scores]:
+    """Each seating's first player on `table`'s `value`, per held checkpoint, as `compare`
+    measures it.
 
     Only the first player's (seat 0's) rows of the benchmark's scheduled
-    matches count, so a matchup of a checkpoint against itself reads alike.
+    matches count, so a seating of a checkpoint against itself reads alike,
+    and a relative seat's checkpoint is no point of its own. A seating whose
+    seat found several checkpoints for one held, such as each line of a
+    job, counts all of their matches in that point.
     `per` and `where` are as in `etude.eval.query.compare`.
     """
     for name in (table, value, *([per] if per else [])):
         if not IDENTIFIER.match(name):
             raise EtudeError("column_name_refused", 422) from ValueError(name)
     if table in ETUDE_TABLES:
-        raise EtudeError("curves_need_an_author_table", 422)
+        raise EtudeError("scores_need_an_author_table", 422)
     with _held(db, benchmark):
         found = db.execute(
             f"""
@@ -492,13 +525,13 @@ def curves(
                 select checkpoint, min(name) as name from players where checkpoint is not null
                 group by checkpoint
             )
-            select s.matchup, t.run, t.experiment, s.checkpoint, n.name, t.ordinal, t.clocks,
+            select s.seating, t.run, t.experiment, s.checkpoint, n.name, t.ordinal, t.clocks,
                 r.match, sum(r._value), sum(r._per), count(*)
             from r join _held using (run, match)
             join schedule s on s.tournament = ? and s.match = r.match
             join named n on n.checkpoint = s.checkpoint
             left join training_checkpoints t on t.checkpoint = s.checkpoint
-            group by s.matchup, t.run, t.experiment, s.checkpoint, n.name, t.ordinal, t.clocks,
+            group by s.seating, t.run, t.experiment, s.checkpoint, n.name, t.ordinal, t.clocks,
                 r.match
             """,
             [benchmark],
@@ -509,12 +542,12 @@ def curves(
         dict[str, tuple[float, float, int]],
     ] = {}
     for *point, match, total, per_total, rows in found:
-        matchup, run, experiment, checkpoint, name, ordinal, clocks = point
-        blocks.setdefault((matchup, run, experiment, checkpoint, name, ordinal, clocks), {})[
+        seating, run, experiment, checkpoint, name, ordinal, clocks = point
+        blocks.setdefault((seating, run, experiment, checkpoint, name, ordinal, clocks), {})[
             match
         ] = (float(total), float(per_total), int(rows))
-    lines: dict[tuple[str, str | None, str | None], list[CurvePoint]] = {}
-    for (matchup, run, experiment, checkpoint, name, ordinal, clocks), totals in blocks.items():
+    lines: dict[tuple[str, str | None, str | None], list[ScorePoint]] = {}
+    for (seating, run, experiment, checkpoint, name, ordinal, clocks), totals in blocks.items():
         [estimated] = estimate(
             list(totals),
             [[total] for total, _, _ in totals.values()],
@@ -522,8 +555,8 @@ def curves(
         )
         if estimated is None:
             continue
-        lines.setdefault((matchup, run, experiment), []).append(
-            CurvePoint(
+        lines.setdefault((seating, run, experiment), []).append(
+            ScorePoint(
                 checkpoint=checkpoint,
                 name=name,
                 ordinal=ordinal,
@@ -535,19 +568,19 @@ def curves(
             )
         )
     return [
-        Curve(
-            matchup=matchup,
+        Scores(
+            seating=seating,
             run=run,
             experiment=experiment,
             points=tuple(sorted(points, key=_training_order)),
         )
-        for (matchup, run, experiment), points in sorted(
+        for (seating, run, experiment), points in sorted(
             lines.items(), key=lambda item: tuple("" if v is None else v for v in item[0])
         )
     ]
 
 
-def _training_order(point: CurvePoint) -> tuple[bool, int, list[str | int], str]:
+def _training_order(point: ScorePoint) -> tuple[bool, int, list[str | int], str]:
     # Digit runs compare as numbers, so `updates-900` comes before `updates-1000`.
     named = [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", point.name)]
     return point.ordinal is None, point.ordinal or 0, named, point.checkpoint

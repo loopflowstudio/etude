@@ -30,7 +30,7 @@ from etude.train.read import buckets, read
 from etude.train.records import Step, Time
 from etude.train.report import training
 from etude.train.run import EtudeWarning, Run, track
-from tests.experiments import experiment_file
+from tests.experiments import authored, experiment_file
 
 CLOCKS = [
     Step("progress/updates", "optimizer updates, absolute across continuation"),
@@ -101,10 +101,10 @@ def test_rows_round_trip_through_files_and_a_bucket_directory(tmp_path: Path) ->
         for row in rows(table)
     ]
     assert len(stored) == 202
-    partial, _ = [row for row in stored if row["clocks"] == {CLOCKS[0].name: 999}]
+    partial, _ = [row for row in stored if authored(row["clocks"]) == {CLOCKS[0].name: 999}]
     assert partial["values"] == {"rl/loss": 0.5}
     third = stored[3]
-    assert third["clocks"] == {"progress/updates": 3, "progress/training_seconds": 0.75}
+    assert authored(third["clocks"]) == {"progress/updates": 3, "progress/training_seconds": 0.75}
     values = third["values"]
     assert isinstance(values, dict)
     # The files keep everything as written, including what a chart cannot draw.
@@ -266,7 +266,7 @@ def test_checkpoint_references_read_back_and_an_incomplete_coordinate_is_not_rec
         (1, "s3://models/pilot/100.pt"),
         (2, "s3://models/pilot/200.pt"),
     ]
-    assert trained.checkpoints[1].at == {
+    assert authored(trained.checkpoints[1].at) == {
         "progress/updates": 200.0,
         "progress/training_seconds": 50.0,
     }
@@ -318,7 +318,7 @@ def test_metrics_and_checkpoints_reach_an_s3_bucket_and_read_back(
         data = read(bucket, "pilot", "s3")
         assert data.rows == 50 and data.state is not None
         assert [c.tags for c in data.checkpoints] == [("best",), ()]
-        assert data.checkpoints[0].artifact == first and data.checkpoints[0].at == AT
+        assert data.checkpoints[0].artifact == first and authored(data.checkpoints[0].at) == AT
         pilot = experiment_file(tmp_path / "experiments", "pilot")
         assert build(bucket, pilot).training.runs == build(tmp_path / "local", pilot).training.runs
         assert sync(tmp_path / "local", storages=[bucket]) == {}

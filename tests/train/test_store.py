@@ -263,7 +263,7 @@ def test_rollups_preserve_spikes_counts_and_nonfinite_values(tmp_path: Path) -> 
     write_block(tmp_path / run_prefix("r"), block_key(1, 0, 0, writer), builder.table(writer, 0))
     data = read(tmp_path, "e", "r")
     assert set(data.tables[0].reductions) == {16, 256, 4096}
-    for clock in ("step", "seconds", "wall_seconds"):
+    for clock in ("step", "seconds"):
         reduced = data.chart("value", clock, 32)
         if not len(reduced):
             continue
@@ -597,7 +597,7 @@ def test_checkpoint_resume_supersedes_before_first_logged_row(
             storage = S3Storage("etude-resume", client=client)
             assert sync(tmp_path, storages=[storage]) == {}
         data = read(storage, "e", "r")
-        assert data.attempts[-1].resumed_at == {"step": 10}
+        assert data.attempts[-1].resumed_at.get("step") == 10
         assert data.attempts[-1].attempt == "attempt-resumed"
         # Step 10 is the checkpoint the second attempt resumed from: still the first's.
         expected_x = [*range(11), 13] if logging == "metric" else list(range(11))

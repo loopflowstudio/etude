@@ -35,7 +35,7 @@ import numpy.typing as npt
 from pydantic import ConfigDict
 
 from etude.run.errors import EtudeError
-from etude.run.records import WALL_CLOCK, Record
+from etude.run.records import Record
 
 MAGIC, END, VERSION, ALIGN = b"ETUDEBLK", b"KLB1", 1, 64
 
@@ -294,8 +294,7 @@ def reduce(table: Table, factor: int) -> Reduction:
     starts = np.arange(0, table.rows, factor)
     ends = np.minimum(starts + factor, table.rows) - 1
     clocks = {
-        name: np.column_stack((data[starts], data[ends]))
-        for name, data in {WALL_CLOCK: table.wall_ms / 1000, **table.clocks}.items()
+        name: np.column_stack((data[starts], data[ends])) for name, data in table.clocks.items()
     }
     series: dict[str, Array] = {}
     for (name, kind), column in table.series.items():

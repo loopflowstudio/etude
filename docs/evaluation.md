@@ -3,7 +3,7 @@
 Play players against each other in parallel workers, hand Etude whatever tables
 your game code produces, and query each experiment's results as one DuckDB
 database. Tournaments decide which matches to play: each checkpoint of a model
-through a benchmark's matchups as it trains, or hand-picked players in a round
+through a benchmark's seatings as it trains, or hand-picked players in a round
 robin. Evaluation is independent of training.
 
 ```sh
@@ -18,12 +18,14 @@ from etude.eval.records import (
     CheckpointKey,
     CheckpointRef,
     Code,
+    Fraction,
     Inference,
     Match,
-    Matchup,
     RoundRobin,
+    Seating,
 )
-from etude.eval.tournament import curves, hold, standings
+from etude.eval.tournament import hold, scores, standings
+from etude.experiment import observe
 
 world = environment("allies-vs-lessons", files=["game/"], config={"world": "w6"})
 deals = tuple({"deal": 1_910_101_000 + d} for d in range(25))
@@ -53,50 +55,57 @@ def play(match: Match) -> Tables:  # importable by name: workers are fresh proce
 # An Inference seat is filled by the checkpoint being held, run by your inference code
 # and playing with your config (a Pydantic model or JSON): together, a Model.
 net = ["players/net.py"]
+direct = Inference(source=net, config=Direct())
 progress = Benchmark(
     name="anchors",
     environment=world,
-    matchups=(
-        Matchup(
+    seatings=(
+        Seating(
             name="no search vs heuristic",
-            players=(Inference(source=net, config=Direct()), heuristic),
+            players=(direct, heuristic),
             conditions=deals,
             games=8,
         ),
-        Matchup(
+        Seating(
             name="no search vs greedy",
-            players=(Inference(source=net, config=Direct()), greedy),
+            players=(direct, greedy),
             conditions=deals,
             games=8,
         ),
-        Matchup(
+        Seating(
             name="search vs no search",
-            players=(
-                Inference(source=net, config=PUCT(simulations=64)),
-                Inference(source=net, config=Direct()),
-            ),
+            players=(Inference(source=net, config=PUCT(simulations=64)), direct),
+            conditions=deals[:10],
+            games=4,
+        ),
+        # A relative seat: the held checkpoint against its own learner at half its updates.
+        Seating(
+            name="half-training",
+            players=(direct, Fraction(clock="updates", value=0.5, inference=direct)),
             conditions=deals[:10],
             games=4,
         ),
     ),
 )
 
-# On the go: as each checkpoint is saved, one small eval run plays every matchup.
+# On the go: as each checkpoint is saved, one small eval run plays every seating.
 # A checkpoint is its key, its run and file name, with the saved file to read.
+# Relative seats find theirs among the experiment's training lines.
 ref = CheckpointRef(key=CheckpointKey(run="ppo-1", name="updates-500.pt"), artifact=saved)
-hold(progress, experiment="ppo", checkpoint=ref, play=play, storages=[bucket])
+lines = observe(bucket, "ppo").lines
+hold(progress, experiment="ppo", checkpoint=ref, play=play, storages=[bucket], lines=lines)
 
-# Batch: add a matchup to the definition; holding with no checkpoint plays every
-# missing match, so the new line is played for every checkpoint held so far.
-hold(progress, experiment="ppo", play=play, workers=8, storages=[bucket])
+# Batch: add a seating to the definition; holding with no checkpoint plays every
+# missing match, so the new seating is played for every checkpoint held so far.
+hold(progress, experiment="ppo", play=play, workers=8, storages=[bucket], lines=lines)
 
 # Batch: hand-picked players, each against every other.
 league = RoundRobin(name="finals-1", environment=world, conditions=deals, games=8)
 hold(league, experiment="ppo", enter=finals, play=play, workers=8, storages=[bucket])
 
 db = statsdb("ppo", bucket)  # or "s3://my-bucket/runs", a directory, or nothing: ~/.etude/track
-for line in curves(db, "anchors", table="plays", value="score"):
-    print(line.matchup, line.run, [(p.name, p.clocks, p.value) for p in line.points])
+for each in scores(db, "anchors", table="plays", value="score"):
+    print(each.seating, each.run, [(p.name, p.clocks, p.value) for p in each.points])
 for entry in standings(db, "finals-1", table="plays", value="score").entries:
     print(entry.name, entry.opponent_name, entry.value, entry.interval)
 ```
@@ -140,16 +149,21 @@ evaluate(
   (`seats.commit`, `seats.source`) but not part of the key, so changed code
   reuses what was played. Joins use the key, encoded (`players.player`,
   `seats.player`).
-- **Execution setup.** Return `Result(tables=tables, execution={"device": "cuda:0",
-  "compute": "shared-eval-v2"})` from `play` to record the setup actually used.
-  This JSON stays with each result (`MatchRecord.execution`, `matches.execution`),
-  alongside its seed (`matches.seed`) and each player's code version
-  (`seats.commit`, `seats.source`). Setup belongs here, not in `Inference.config`,
-  `Code.config`, match conditions or tournament names: it creates no new player,
-  match or selection. Requested games may finish across any setups; a replay's
-  latest delivered result counts once in reports. Missing metadata on older
-  records reads as `{}`. Existing scientific configs retain their identity;
-  Etude does not guess which historical config keys described hardware.
+- **Setup.** How a game is run, such as the device or dtype, is provenance,
+  like the seed, and is said in two places. What `play` is asked to run with
+  goes under a `setup` key of the environment's or a player's config:
+  `environment("duel", config={"world": "w6", "setup": {"device": "cuda"}})`.
+  What `play` actually used it returns: `Result(tables=tables,
+  execution={"device": "cuda:0", "compute": "shared-eval-v2"})`, kept with
+  each result (`MatchRecord.execution`, `matches.execution`) alongside its
+  seed (`matches.seed`) and each player's code version (`seats.commit`,
+  `seats.source`). Neither is part of any identity: a CUDA benchmark is the
+  CPU one's environment, players and matches, a match played under either
+  counts for both, and their games pool. Requested games may finish across
+  any setups; a replay's latest delivered result counts once in reports.
+  Etude never guesses which fields are setup: anything outside `setup`,
+  in `Inference.config`, `Code.config` or match conditions, is identity, and
+  older configs keep theirs. `execution` on older records reads as `{}`.
 - **Where a checkpoint stood.** A seated checkpoint may say where it stood on
   its clocks: `CheckpointRef(key=..., artifact=..., at={"updates": 600})`.
   A tracked checkpoint's `ref` fills `at` from its run's clocks; give it
@@ -179,8 +193,9 @@ evaluate(
   0.2 were identified by a digest; they load as `etude-sdk-0.2:DIGEST`, which
   no key since equals, so their results stay readable and nothing new counts
   them as played.
-- **Matches.** A seating of players under fixed `conditions`, played for
-  `games`: the unit Etude schedules, resumes and resamples. Seat swaps belong
+- **Matches.** Players in their seats under fixed `conditions`, played for
+  `games`: the unit Etude schedules, resumes and resamples. A tournament's
+  `Seating` makes one match per condition. Seat swaps belong
   inside `play`. Group `all` holds every seat; a player may sit in two seats.
 - **Order.** Matches start, `workers` at a time, in the order
   `etude.eval.schedule.ordered` gives, so consecutive matches reuse the
@@ -241,7 +256,7 @@ evaluate(
   played, let `play` raise: an error caught and returned as empty tables is
   still refused (`match_has_no_rows`), never stored as a result.
 - **Environments are never pooled.** An eval run has one environment;
-  resuming with another is refused, and comparisons keep environments apart.
+  resuming with another is refused, and a report shows each value from one environment.
 - **Resume.** Calling `evaluate` again with the same `run` skips every match
   already delivered to any of `storages`, even on a machine with an empty disk.
 - **Progress.** Each stored match prints one line to stderr:
@@ -270,20 +285,95 @@ evaluate(
 
 ## Tournaments
 
-- **Benchmarks.** Named matchups, each its own line over training: `players`
-  in seat order, each a fixed player or `Inference(config=...)`, with its own
-  `conditions` and `games`. A matchup's value is its first player's.
-  `hold(benchmark, checkpoint=ref)` puts the checkpoint (by its key) in every
-  inference seat and plays each given matchup; with no checkpoint it plays every
-  matchup ever defined for every checkpoint held, skipping what is delivered.
-- **Pairs of checkpoints.** A matchup with no inference seat is played once,
+- **Benchmarks.** Named seatings, each its own line over training. A
+  seating is the rule for who meets whom: `players` in seat order, with its
+  own `conditions` and `games`, and it makes one match per condition. A
+  seating's value is its first player's. `hold(benchmark, checkpoint=ref)`
+  fills the seats for the checkpoint (by its key) and plays each given
+  seating; with no checkpoint it plays every seating ever defined for every
+  checkpoint held, skipping what is delivered.
+- **Seats.** A seat is one of three kinds:
+
+  | Seat | Seats |
+  |---|---|
+  | `Inference(source=net, config=Direct())` | the held checkpoint, playing with that config |
+  | `Code(name="heuristic", ...)`, or `Inference(...).model(ref)` | the same fixed player for every checkpoint: code, or one chosen checkpoint such as the initialization or a frozen anchor |
+  | `Earlier(clock="updates", by=400, inference=direct)` | the held checkpoint's line exactly 400 updates before it |
+  | `Fraction(clock="updates", value=0.5, inference=direct)` | its line at exactly half the held checkpoint's updates (3,000 for 6,000) |
+  | `Fraction(clock="running_hours", value=0.5, at_or_before=True, inference=direct)` | its line's latest checkpoint at or before half the held checkpoint's running hours |
+  | `Earlier(clock="running_hours", by=2, at_or_before=True, inference=direct)` | its line's latest checkpoint at or before two running hours before it |
+  | `At(clock="updates", value=200, inference=direct)` | its line at update 200 |
+  | `Final(inference=direct)` | its line's last checkpoint, once its run has ended |
+  | `Aligned(clock="updates", job="small", inference=direct)` | job `small` at exactly the held checkpoint's updates |
+  | `Aligned(clock="running_hours", job="small", at_or_before=True, inference=direct)` | job `small`'s latest checkpoint at or before the held checkpoint's running hours |
+
+  The remaining rows are relative seats: each names a checkpoint by where it
+  stands relative to the one held, and plays it with its own `inference`.
+  `Earlier`, `Fraction`, `At` and `Final` look in the held checkpoint's own
+  line unless given a `job`: `Final(job="small", inference=direct)` seats
+  job `small`'s final checkpoint, `At(clock="updates", value=0, job="small",
+  ...)` its initial one. `Aligned` always names a job, as the report names it
+  ([tracking](tracking.md#reports)): its launch name, or the full name with
+  its config digest. Leave `job` out to mean the held checkpoint's own line.
+  A job seat fills from each of that job's lines (see Seeds). A hold finds relative seats' checkpoints among
+  its `lines`, the experiment's training lines (`observe(source,
+  experiment).lines`), held or not; `etude eval` passes them itself.
+  A seating against a fixed player and one against a relative seat are held,
+  scored and drawn alike. A seating with a relative seat needs an inference
+  seat to be relative to.
+
+  `Final` is `At` the position where the run ended: a gap until it ends,
+  finished or failed, then its last stored checkpoint. A run whose machine
+  was lost never writes its end; it has failed once the launcher on the
+  computer reading it has closed it without success (`etude status RUN`),
+  so its `Final` is its last stored checkpoint too. Holding a seating
+  against `Final(job=...)` for a job's own final checkpoint gives final
+  against final. To meet one chosen checkpoint of another job, seat it as a
+  fixed player.
+
+  Held for a checkpoint of the job a seat's `job` names, a seating plays
+  that job, and a seat that finds the held checkpoint itself seats it:
+  self-play is a match like any other, as a cooperative game or a score
+  besides winning wants. To play a seating for some jobs only, hold its
+  benchmark for their checkpoints.
+
+  Positions are exact by default: a checkpoint at 2,990 is not half of
+  6,000. A seat with a position takes `at_or_before=True` for the latest
+  checkpoint at or before the position instead, found once the line has a
+  checkpoint past it or has ended, so a later save never moves it. Etude's
+  clocks, `running_hours` and `hours_since_start`, are on every checkpoint
+  ([tracking](tracking.md#etudes-clocks)); no checkpoint is saved at an exact
+  hour, so a seat on them takes `at_or_before=True`. A seat with a position
+  takes `trained=True` to seat only checkpoints saved after training began:
+  a line's initial weights, where every clock its run declared stands at 0,
+  are then never seated, so `Fraction(clock="running_hours", value=0.5,
+  at_or_before=True, trained=True, ...)` plays no early checkpoint against
+  its own initialization. A held checkpoint with no trained one to meet is a
+  gap that never fills. A seat
+  with no checkpoint there yet plays nothing, and the next hold with no
+  checkpoint plays it once one is saved, so a large job's seating against
+  `Aligned(job="small")` fills in as the small job catches up. A relative
+  seat resolves to the same checkpoint whenever it is held, so a played
+  match never moves as runs save more.
+- **Seeds.** A seating never names a seed. `games` is per condition and
+  point, a position of the held checkpoint's job: by default the point
+  plays every pair of a seed of that job and a seed of the other seat's
+  (its own line, or a fixed player, counting as one), the games split
+  evenly over the pairs, the remainder to the lowest by seed, and pooled.
+  A job seat waits while any of its seeds may still save there. A seed is a
+  line, with the seed its first run declared. `seeds="one"` plays all of a
+  point's games between one seed per side, drawn from the seating's name
+  and the seed sets, the same pair at every point: faster, but the curve
+  shows one pair of seeds, not the jobs. A seed added later changes the
+  split, so that job's points are played again and count only the new one.
+- **Pairs of checkpoints.** A seating with no inference seat is played once,
   not per checkpoint, so chosen checkpoints can meet: seat each as
-  `Inference(...).model(ref)`, the model an inference seat would make of it. Build the
-  benchmark from the checkpoints saved so far, such as each against the one
-  before it, and hold it in batch whenever more appear; each pass plays only
-  the pairs not yet delivered. A hold on the go leaves these matchups to batch.
-  Their rows are `schedule` rows with no `checkpoint`; `curves` follows only
-  matchups with an inference seat.
+  `Inference(...).model(ref)`, the model an inference seat would make of it.
+  Prefer a relative seat where one says the rule; hand-built pairs suit a
+  rule none states. Hold such a benchmark in batch whenever more checkpoints
+  appear; each pass plays only the pairs not yet delivered. A hold on the go
+  leaves these seatings to batch. Their rows are `schedule` rows with no
+  `checkpoint`; `scores` follows only seatings with an inference seat.
 - **Round robins.** `hold(round_robin, enter=players)` plays every pair of
   the players given once per condition; seat swaps belong inside `play`.
   `hold(round_robin)` then plays every pair of every entrant so far that no
@@ -298,15 +388,18 @@ evaluate(
   it, so a hold on a rented machine delivers its part like any other run, and
   many eval runs can grow one tournament at once.
 - **Reuse.** A match is the same wherever it is played, so within one
-  experiment and environment its results are reused by key: `curves`,
+  experiment and environment its results are reused by key: `scores`,
   `standings` and a batch hold count a scheduled match that any of the
   experiment's eval runs in the environment holds, whether held for this
   tournament, another, or none. Each counts once, from the eval run that
   recorded it last.
 - **Conflicts.** Another format, environment or round-robin rules under one
-  name (`tournament_conflict`), or a matchup name defined two ways
-  (`matchup_conflict`), is refused by a batch hold and by `curves` and
-  `standings`; `statsdb` reports it in the `tournaments` table.
+  name (`tournament_conflict`), or a seating name defined two ways
+  (`seating_conflict`), is refused by a batch hold, a pass, and `scores` and
+  `standings`; `statsdb` reports it in the `tournaments` table. Reading is
+  not refused: where a later revision of an experiment file defines a
+  tournament otherwise than its eval runs were held with, `etude report`
+  draws what they recorded and says so.
 - **Run names.** Under `etude launch` the eval run is the launched run
   (`ETUDE_RUN`), so `etude logs` and `status` lead to it and a retry resumes
   it, finding the same checkpoint (by its key) wherever the retry put it. Elsewhere it is named for the tournament and what is given; the same
@@ -322,10 +415,13 @@ evaluate(
   tournament), and each block index of those in the tournament's
   environment, to play what the tournament calls for and none of the
   experiment's eval runs in its environment delivered.
-- **`curves`** gives one line per matchup and training run: each checkpoint's
-  name, ordinal, the clocks where its run stood when it saved it, and the
-  first player's value with a 95% interval over whole matches. Checkpoints
-  no training run under the source recorded make one line per matchup,
+- **`scores`** gives one `Scores` per seating and training run: each held
+  checkpoint's name, ordinal, the clocks where its run stood when it saved
+  it, and the first player's value with a 95% interval over whole matches.
+  A held checkpoint whose relative seat found nothing has no point:
+  `Tournament.resolve(lines)` gives each such `Gap` and why, `not_yet` or
+  `never`, and the report draws it. Checkpoints no training run under the
+  source recorded make one `Scores` per seating,
   ordered by name, numbers in order (`updates-900` before `updates-1000`).
 - **`standings`** gives a round robin's payoff matrix, best first, each entry
   naming its player and opponent; `complete` says whether every scheduled
@@ -382,15 +478,16 @@ The job's environment needs `etude-sdk[eval]`; the rest is as for any
 
 An experiment file says what to evaluate given what exists, and `etude eval`
 plays whatever that calls for and no eval run has delivered. Run it while
-training goes, after it ends, or with a matchup added later: each pass looks
-again. The experiment is named for the file: `ppo.py` evaluates the training
-runs of experiment `ppo`, and its eval runs are that experiment's. Define
-`runs()` in it too and `etude launch ppo.py` starts training runs of `ppo`, so
-`track()` in the training code needs no `experiment`.
+training goes, after it ends, or with a seating added later: each pass looks
+again. The experiment is named for the file: `capacity.py` evaluates the
+training runs of experiment `capacity`, and its eval runs are that
+experiment's. Define `runs()` in it too and `etude launch capacity.py` starts
+training runs of `capacity`, so `track()` in the training code needs no
+`experiment`.
 
 ```python
-# ppo.py
-from etude.eval.records import Benchmark, Matchup
+# capacity.py: jobs "small" and "large", a checkpoint every 200 updates
+from etude.eval.records import Aligned, Benchmark, Earlier, Final, Fraction, Seating
 from etude.experiment import ExperimentState
 from etude.jobs import evaluation
 from etude.launch.records import Job
@@ -400,42 +497,63 @@ from arena import deals, direct, heuristic, play, world
 
 
 def eval(state: ExperimentState) -> list[Job]:
-    run = state.run("ppo-1")
-    rated = run.checkpoints.every(5)  # every fifth checkpoint by ordinal
-    pairs = [
-        Matchup(
-            name=f"{new.name} vs {old.name}",
-            tags=("consecutive",),
-            players=(new.model(direct), old.model(direct)),
-            conditions=deals,
-            games=8,
-        )
-        for old, new in zip(rated, rated[1:])
-    ]
-    if run.final is not None:  # once training has finished
-        pairs += [
-            Matchup(
-                name=f"final vs {old.name}",
-                tags=("endpoint",),
-                players=(run.final.model(direct), old.model(direct)),
+    rated = [c for run in state.runs for c in run.checkpoints.every(5)]  # every 1,000 updates
+    ladder = Benchmark(
+        name="ladder",
+        environment=world,
+        seatings=(
+            Seating(name="vs heuristic", players=(direct, heuristic), conditions=deals, games=8),
+            Seating(
+                name="vs previous",
+                players=(direct, Earlier(clock="updates", by=1_000, inference=direct)),
                 conditions=deals,
                 games=8,
-            )
-            for old in rated[:-1]
-        ]
-    anchors = Matchup(name="vs heuristic", players=(direct, heuristic), conditions=deals, games=8)
-    ladder = Benchmark(name="ladder", environment=world, matchups=(anchors, *pairs))
-    return [evaluation(ladder, play=play, checkpoints=rated, workers=8, max_hours=1)]
+            ),
+            Seating(
+                name="half-training",
+                players=(
+                    direct,
+                    Fraction(clock="running_hours", value=0.5, at_or_before=True, inference=direct),
+                ),
+                conditions=deals,
+                games=8,
+            ),
+        ),
+    )
+    # Held only for large's checkpoints: held for small's, they would play small against itself.
+    against_small = Benchmark(
+        name="against small",
+        environment=world,
+        seatings=(
+            Seating(
+                name="large vs small",
+                players=(direct, Aligned(clock="updates", job="small", inference=direct)),
+                conditions=deals,
+                games=8,
+            ),
+            Seating(
+                name="large vs final small",
+                players=(direct, Final(job="small", inference=direct)),
+                conditions=deals,
+                games=8,
+            ),
+        ),
+    )
+    large = [c for run in state.runs if run.job == "large" for c in run.checkpoints.every(5)]
+    return [
+        evaluation(ladder, play=play, checkpoints=rated, workers=8, max_hours=1),
+        evaluation(against_small, play=play, checkpoints=large, workers=8, max_hours=1),
+    ]
 ```
 
 ```sh
-etude eval ppo.py --source s3://bucket/etude/launch               # play here
-etude eval ppo.py --source s3://bucket/etude/launch --rent cpu8   # launch
-etude eval ppo.py --source s3://bucket/etude/launch --rent cpu8 --watch 600
-etude eval ppo.py --source s3://bucket/etude/launch --pool lab --queue --watch 60
+etude eval capacity.py --source s3://bucket/etude/launch               # play here
+etude eval capacity.py --source s3://bucket/etude/launch --rent cpu8   # launch
+etude eval capacity.py --source s3://bucket/etude/launch --rent cpu8 --watch 600
+etude eval capacity.py --source s3://bucket/etude/launch --pool lab --queue --watch 60
 ```
 
-`etude smoke ppo.py` runs the file's `runs()`, `eval(state)` and `report()` in
+`etude smoke capacity.py` runs the file's `runs()`, `eval(state)` and `report()` in
 smoke form on this computer first, one game per match against tiny
 checkpoints. `etude launch --smoke` and a launching `etude eval --smoke` do so
 before they spend ([Smoke before you spend](launcher.md#smoke-before-you-spend)).
@@ -447,18 +565,23 @@ is available. A queued run that fails stops a later pass that wants its matches,
 as a launched one does, unless `--retry-failed`.
 
 - **State.** `state.runs` is the experiment's training runs under the
-  source: each one's name, whether it is `running`, `finished` or `failed`,
+  source: each one's name, its `job` (the name the report gives it: the
+  launch name, with its config digest when one name ran two configs),
+  whether it is `running`, `finished` or `failed`,
   and the checkpoints it stored, each with its ordinal, clocks, tags and
   `wall_ms`, when it was saved in milliseconds since the epoch.
   `Checkpoints` is a tuple, so a slice works too; `every(n)`, `at(clock,
   *values)` and `tagged(tag)` choose by ordinal, coordinate or tag, and
   `final` is the last checkpoint once a run has finished.
 - **What `eval` returns.** Evaluation jobs holding a benchmark for the
-  checkpoints it chose. Seat a chosen checkpoint with `checkpoint.model(inference)`
-  to make a matchup of fixed players, played once rather than per checkpoint.
-  `tags` mark matchups for readers, such as pairs a rating fit leaves out.
+  checkpoints it chose. A relative seat finds its checkpoint among every
+  run under the source, held or not: `Earlier(by=1_000)` above seats the
+  checkpoint 1,000 updates back whether or not `every(5)` chose it. Seat a
+  chosen checkpoint with `checkpoint.model(inference)` to make a seating of
+  fixed players, played once rather than per checkpoint. `tags` mark
+  seatings for readers, such as pairs a rating fit leaves out.
 - **A pass.** For each job, the matches exactly what `eval` returned calls
-  for, the matchups it gave for the checkpoints it gave, that no eval run of
+  for, the seatings it gave for the checkpoints it gave, that no eval run of
   the experiment in its environment delivered. Without `--pool` or `--rent`
   they are played here and delivered to the source. With one, a job is
   launched to play exactly those, with each checkpoint they seat as an input
@@ -488,22 +611,27 @@ as a launched one does, unless `--retry-failed`.
   run that delivered it last, whose rows count), failed (with nothing
   delivered since) or new. `etude report`
   reads it.
-- **Changing the design.** A new matchup or benchmark is played for every
+- **Changing the design.** A new seating or benchmark is played for every
   checkpoint chosen, including those of finished runs, and a match another of
-  the experiment's tournaments already played is reused. A matchup `eval`
+  the experiment's tournaments already played is reused. A seating `eval`
   stops returning is no longer played; what it played stays. Redefining a
-  matchup under the same name is refused (`matchup_conflict`): give the new
+  seating under the same name is refused (`seating_conflict`): give the new
   one a new name. A match is its seats, conditions and game count, so raising
-  `games` plays every match of the matchup again.
+  `games` plays every match of the seating again.
+- **Older eval runs.** Benchmarks stored by etude-sdk 0.2, with `matchups`
+  and each match's `matchup`, read as seatings with the same definitions, so
+  nothing is played again.
 
-`etude report ppo.py` draws the experiment's evals beside its training
+`etude report capacity.py` draws the experiment's evals beside its training
 ([tracking](tracking.md#reports)), following the file's `report()`. Each
 model is drawn where its latest seat says it stood, else, found by its
 checkpoint's key, where its training run stood when it saved it; a checkpoint
 no training run recorded is drawn in its line's curve. Code and checkpoints
 with no position are anchors, drawn once. A checkpoint `eval(state)` chose that no
 eval run has delivered is marked not yet played, one nothing played is marked
-not evaluated, and failed matches are listed. Each match counts from the eval
+not evaluated, and failed matches are listed. A seating with a relative seat
+is drawn over the checkpoints it was held for; one whose seat has no
+checkpoint yet is a gap that says so. Each match counts from the eval
 run that delivered it last, whichever commit its code was at. Where the
 matches were played at several commits (`seats.commit`), "Played at" offers
 each: that commit's view counts every match as played at it. A delivered
@@ -518,7 +646,7 @@ the experiment, beside Etude's own:
 `code`, with a `config.KEY`
 column per scalar config key, dotted when nested), `matches`, `seats`,
 `groups`, `tournaments` (with any `conflict` among its eval runs), `schedule`
-(every match a tournament calls for, with its matchup and checkpoint) and
+(every match a tournament calls for, with its seating and checkpoint) and
 `training_checkpoints` (every checkpoint a training run under the source
 recorded, joined to players and the schedule by `checkpoint`, its key) and
 `blobs` (each blob's `sha256` and size, by run and match; a converted run's

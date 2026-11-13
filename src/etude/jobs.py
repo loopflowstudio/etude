@@ -47,6 +47,7 @@ from etude.eval.records import (
     Benchmark,
     CheckpointKey,
     CheckpointRef,
+    Line,
     Match,
     Model,
     Player,
@@ -118,6 +119,7 @@ def training[C: BaseModel](
     `LauncherError` when it is not, or when a config is not of that type or
     would not validate back into it.
     """
+    _require_hours(options)
     job = _job(train, config, origin=train, options=options)
     if smoke is None:
         return job
@@ -142,6 +144,8 @@ class Evaluation(Record):
     # job input holding each checkpoint they seat, by its key encoded.
     matches: tuple[Match, ...] | None = None
     files: dict[str, str] = {}
+    # The experiment's training lines that pass saw, where relative seats find checkpoints.
+    lines: tuple[Line, ...] = ()
 
 
 def evaluation(
@@ -159,18 +163,19 @@ def evaluation(
 
     A benchmark is held for `checkpoint`, which reaches the machine as the
     job's input and fills every inference seat; a round robin plays every pair
-    of `enter`. Each inference seat's config is in its matchup
+    of `enter`. Each inference seat's config is in its seating
     (`etude.eval.records.Inference`), so the tournament is the whole of what is
     evaluated. The eval run is the launched run, so `etude logs` and `status`
     lead to it and a retry resumes it.
 
     An experiment's `eval(state)` returns one with `checkpoints` instead, the
-    ones it chose, or none for matchups of chosen checkpoints alone, and no
+    ones it chose, or none for seatings of chosen checkpoints alone, and no
     `experiment`: `etude eval` names it for the file, finds what is new and
     plays it here or launches a job for exactly that. Launched as given, such
     a job is refused: a machine reads no other eval run, so cannot tell what
     is new. Any other job names its `experiment`.
     """
+    _require_hours(options)
     if isinstance(tournament, Benchmark) and enter:
         raise LauncherError(f"{tournament.name} is a benchmark: give it checkpoints, no entrants")
     if checkpoint is not None and checkpoints:
@@ -222,7 +227,7 @@ def with_matches(job: Job, matches: Sequence[Match], state: ExperimentState) -> 
         )
         for key, each in sorted(saved.items())
     )
-    spec = spec.model_copy(update={"matches": tuple(matches), "files": files})
+    spec = spec.model_copy(update={"matches": tuple(matches), "files": files, "lines": state.lines})
     return job.model_copy(
         update={"config": spec.model_dump_json(), "inputs": (*job.inputs, *inputs)}
     )
@@ -346,6 +351,7 @@ def _hold(evaluation: Evaluation) -> None:
         enter=evaluation.entrants,
         matches=matches,
         workers=evaluation.workers,
+        lines=evaluation.lines,
     )
 
 
@@ -364,6 +370,12 @@ def _located(match: Match, here: Mapping[str, str]) -> Match:
             )
         )
     return match.model_copy(update={"players": tuple(players)})
+
+
+def _require_hours(options: JobOptions) -> None:
+    """Refuse a job with no `max_hours` in words, before `Job` refuses it as a missing field."""
+    if "max_hours" not in options:
+        raise LauncherError("a job needs max_hours: the most hours it may hold a machine")
 
 
 def _job(

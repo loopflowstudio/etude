@@ -79,10 +79,10 @@ Rules a caller can rely on:
 
 - **Clocks are declared.** A run states its clocks once, each a step (a count)
   or a time (seconds) with one line of meaning. They are its only x-axis
-  options besides wall time, which every row carries. Re-declaring a run with
-  different clocks is refused.
+  options besides Etude's two clocks in hours ([below](#etudes-clocks)),
+  which every row carries. Re-declaring a run with different clocks is refused.
 - **Every row should give every clock.** A row missing one is charted against
-  the clocks it did give, and wall time. The first such row in a run raises an
+  the clocks it did give, and Etude's. The first such row in a run raises an
   `EtudeWarning` at the caller's line; `strict=True` makes it an error.
 - **No ordering rule in storage.** A repeated or lower clock value is accepted
   and kept. A read returns the latest write per clock value. A clock that goes
@@ -147,7 +147,7 @@ with track(
     clocks=[Step("updates", "optimizer updates, absolute across continuation")],
 ) as run:
     run.log_table(
-        "matchups",
+        "decks",
         [
             {"deck": "red", "opponent": "blue", "seat": 0, "wins": 12, "games": 20},
             {"deck": "blue", "opponent": "red", "seat": 1, "wins": 8, "games": 20},
@@ -156,7 +156,7 @@ with track(
     )
 ```
 
-This records `matchups` at optimizer update 400. Adding a matchup adds a row,
+This records `decks` at optimizer update 400. Adding a deck pair adds a row,
 keeping metric names bounded. Use `run.log` for scalar summaries such as loss
 and `run.log_table(name, rows, **clocks)` for JSON rows, including nested objects
 and lists. Give every declared clock, using absolute continuation coordinates.
@@ -179,7 +179,7 @@ from etude.run.storage import default_root
 from etude.train.read import read
 
 history = read(default_root(), "self-play", "policy-seed-0")
-for table in history.read_table("matchups", "updates"):
+for table in history.read_table("decks", "updates"):
     print(table.x, table.rows)  # selected update coordinate and its JSON rows
 ```
 
@@ -288,6 +288,46 @@ run.tag(model, "best")  # tags can change later
   where the machine that wrote it kept it; a record whose file has not arrived
   is listed as recorded.
 
+### Etude's clocks
+
+```python
+import os
+
+run = track(experiment="capacity-pilot", clocks=[Step("updates", "optimizer updates, absolute")])
+hours = float(os.environ["ETUDE_UNTIL_VALUE"])  # the job's until="running_hours=10"
+while run.position("running_hours") < hours:
+    update, loss = train_one_update()
+    run.log({"rl/loss": loss}, updates=update)
+    if run.checkpoint_due(1):  # every running hour
+        run.checkpoint("out/latest.pt", updates=update)
+run.finish()
+```
+
+Every row and checkpoint of a training run carries two clocks Etude keeps,
+in hours, which no run declares or logs:
+
+- **`running_hours`** is how long the learner line has run. It starts at
+  `track(...)`, so installing, booting and queueing never count, and goes on
+  from the resumed checkpoint's value, across attempts and continuations, as
+  `updates` does. What a crashed attempt ran past its last checkpoint is
+  dropped on resume, with its rows.
+- **`hours_since_start`** is wall time since the line's first attempt began,
+  gaps between attempts included.
+
+A checkpoint saved before Etude recorded them gets both from its wall time
+and its run's attempt records (`metrics/WRITER.json`); rows logged before
+have neither. Where a checkpoint has neither, such as a
+run copied without those records, the report says so at its top, naming the
+runs: charts and seats on these clocks leave such a checkpoint out.
+
+`run.position(clock)` says where the run stands on any clock;
+`run.checkpoint_due(every, clock="running_hours")` whether the clock has
+passed a multiple of `every` since the latest checkpoint. Either clock can be
+a job's `until`, the page's x axis, or a seat's clock
+(`Earlier(clock="running_hours", by=2, at_or_before=True, ...)`,
+[evaluation](evaluation.md)). Metric timers such as `time/collection` stay
+in seconds.
+
 ### Reading a long run's metrics
 
 ```python
@@ -322,7 +362,7 @@ log the metric. A batch can therefore hold a different number of points for
 each metric, or none. A name no block logged as a metric raises
 `EtudeError("metric_not_logged")` before the first batch, so a typo is not
 read as an empty history; `points` gives empty points for it instead.
-`metrics` is a list, even for one name. `clock` defaults to wall time.
+`metrics` is a list, even for one name. `clock` defaults to `hours_since_start`.
 
 A batch is normally one block. Blocks whose clock ranges overlap are read
 together, because the latest write must win. This happens when a process
@@ -369,7 +409,7 @@ the local tracking directory described above.
 
 ```python
 # ppo.py: experiment "ppo", beside its train() and eval(state)
-from etude.report import Anchors, Curve, HeadToHead, Matches, Matrix, Ranking, Report, Score
+from etude.report import Anchors, Curve, Matches, Matrix, Ranking, Report, Score
 
 from arena import LADDER  # the Benchmark eval(state) holds
 
@@ -379,10 +419,9 @@ def report() -> Report:
         score=Score(table="plays", value="won", reference=0.5),
         evals=(
             Curve(title="Win rate against the anchors", matches=Matches(tag="anchor")),
-            Curve(title="Against the checkpoint before", matches=Matches(tag="consecutive")),
+            Curve(title="Against the checkpoint before", matches=Matches(seating="vs previous")),
             Matrix(rows="deal", columns="on_play", matches=Matches(tournament=LADDER.name)),
             Ranking(by="on_play"),
-            HeadToHead(),
             Anchors(),
         ),
         baseline="ppo",
@@ -451,17 +490,19 @@ and double-click to zoom out. The cursor is shared by every chart in a
 section.
 
 **Two parts.** Evals, then Perf and ML details, each with its own x axis (any
-declared clock, or wall hours); Perf and ML details can be smoothed. Choosing
-jobs and filtering are the only controls for the whole page.
+declared clock, `running_hours` or `hours_since_start`); Perf and ML details can be smoothed. Choosing
+jobs and filtering are the only controls for the whole page. A section the
+report gives no panel (`perf=()`, `ml=()`) is not drawn.
 
 **Training jobs.** Training curves group a job's runs across seeds,
 labelled by the job's launch name and seed count ("ppo · 3 seeds"), as its
-seeds' mean banded by their range. Seeds align on where each checkpoint stood
+seeds' mean banded by their range. A seed is a learner line: a run and the
+runs continuing it count once. Seeds align on where each checkpoint stood
 on the run's first declared clock. The `baseline` job is dotted everywhere; a
 job's colour follows launch order. `Report(labels={"ppo": "PPO baseline"})`
 replaces the displayed job name, keeping the seed count. Labels change
-presentation only: `baseline` and panel subjects still refer
-to the launch names. Unlabelled jobs keep their launch names.
+presentation only: `baseline`, `Schedule.jobs` and a seat's `job`, as in
+`Aligned(job=...)`, still refer to the launch names. Unlabelled jobs keep their launch names.
 
 **Execution setup** is result provenance, like the seed: (device, code
 revision, seed) records how a result was produced, and the page aggregates
@@ -469,28 +510,22 @@ over it rather than splitting by it. A job's training runs on different
 devices or commits are pooled with its seeds: runs launched under one job
 name and config are one job. A config change under the same name shows as two
 jobs, each named with its config digest ("ppo 1a2b3c"). The launch name still
-addresses both: `subject="ppo"` draws each as its own line, `baseline="ppo"`
-dots both, `labels={"ppo": "PPO"}` shows "PPO 1a2b3c · 3 seeds" and
-`Schedule(jobs={"ppo": ...})` draws the schedule for each. The full name,
-`subject="ppo 1a2b3c"`, selects one, and a full-name label or schedule wins
-over the launch name's. Games played on different
+addresses both: `baseline="ppo"` dots both, `labels={"ppo": "PPO"}` shows
+"PPO 1a2b3c · 3 seeds", `Schedule(jobs={"ppo": ...})` draws the schedule for
+each and `Aligned(job="ppo")` seats each. The full name, `"ppo 1a2b3c"`,
+names one, and a full-name label or schedule wins over the launch name's.
+`TrainingRun.job` in `eval(state)` is this same name. Games played on different
 devices, compute setups or code revisions contribute to the same requested
 matches; a replay counts once, from its latest delivered result. There is no Config
-control. Record the actual setup with `Result.execution`, inspect it alongside
-`matches.seed` and `seats.commit` in `statsdb` ([evaluation](evaluation.md)).
+control. Ask for a setup under a config's `setup` key, which is part of no
+identity; `play` returns the one it actually used as `Result.execution`, read
+alongside `matches.seed` and `seats.commit` in `statsdb`
+([evaluation](evaluation.md#eval-runs)).
 Scientific differences, such as search budgets in `Inference.config`, remain
-distinct players. A curve uses the variant played in its selected matches;
-when several remain, it names the ambiguity. Select the intended matchup or
-set `Curve(inference={"search": 64})` to choose that exact scientific config.
-It selects no execution setup.
-When a curve names an opponent, that opponent's scientific config must also
-agree across seeds; a shared player name alone does not make variants comparable.
-
-`HeadToHead(matches=Matches(matchup="search vs direct"))` uses the scientific
-variants in that matchup on both sides. It averages scores against the other
-job's checkpoint positions, then across subject seeds, only when each side's
-scientific config agrees. Mixed variants show an ambiguity even when no valid
-points remain; select a matchup to resolve it.
+distinct players. A seating fixes the variant each seat plays, so a curve
+draws the variants its selected seatings name; where one point would pool two
+configs of one seat, it names the ambiguity instead. Select the intended
+seating to resolve it.
 
 **Evals** are the experiment's eval runs ([evaluation](evaluation.md#experiments)).
 A checkpoint is drawn where its seat says it stood (`CheckpointRef.at`), else,
@@ -501,7 +536,7 @@ bytes are two points. A checkpoint's line, the learner it belongs to, is
 its seat's `line`, else its training run. A checkpoint a training run saved
 is drawn in that run's job; every other placed checkpoint is drawn in its
 line's curve, labelled by the line's name, or in one curve of "checkpoints
-with no line". `Earlier`, `Fraction`, `At` and `Crosstable` look only within a line.
+with no line". `Crosstable` looks only within a line.
 Every unplaced player, code or a checkpoint seated without a position, is an
 anchor, and the page names the unplaced checkpoints.
 
@@ -509,58 +544,45 @@ anchor, and the page names the unplaced checkpoints.
 too: the page says "Evaluation only", Perf and ML details say there are no
 training runs, and the x axis offers the clocks the seats' positions use.
 Matches of eval runs held for no tournament are offered as "matches outside a
-tournament", each counting once per environment from its latest record. One
-comparison played in several environments shows the environment whose latest
+tournament", each counting once per environment from its latest record.
+Setup is not an environment: games played on CPU and on CUDA, under configs
+that differ only in their `setup` key ([evaluation](evaluation.md#eval-runs)),
+pool. A value played in two environments shows the one whose latest
 match is newest, and the page notes the rest. `score` names an eval table's value, computed as
 `etude.eval.query.compare` computes it, with its 95% interval over whole
 matches; without one, every numeric column is offered. Each match counts once,
 from the eval run that delivered it last (`etude.eval.tournament.played`), so at
 the version of the code that played it last. A tournament `eval(state)` returns
-is drawn as it wants it now; one it no longer returns, as its eval runs held it.
+is drawn as it wants it now; one it no longer returns, or now defines otherwise
+than its eval runs were held with, as they held it.
 
 | Panel | Shows |
 |---|---|
-| `Curve(split=None, opponent=None)` | the score at each checkpoint, against one anchor; `split` draws one chart per value |
-| `Curve(inference={"search": 64})` | one scientific variant when several play the same checkpoint; `None` resolves from the selected matches |
-| `Curve(opponent="heuristic")` | against the player of that name, whatever the Opponent control says |
-| `Curve(opponent=Earlier(clock="updates", by=400))` | each checkpoint against the one of its line exactly 400 updates earlier; none there is a gap that says so |
-| `Curve(opponent=Fraction(clock="updates", value=0.5))` | each checkpoint against the one of its line at exactly half its updates (6,000 v 3,000); none there is a gap |
-| `Curve(opponent=At(clock="updates", value=200))` | each checkpoint against the one of its line at update 200 |
+| `Curve(split=None)` | the score at each checkpoint, against one anchor the Opponent control picks; `split` draws one chart per value |
+| `Curve(matches=Matches(seating="half-training"))` | that seating over the checkpoints it was held for: a line per job, x where each held checkpoint stood |
 | `Crosstable()` | one line's checkpoints against each other, a tab per line, both axes ordered by the clock; an unplayed pair shows `·` |
 | `Matrix(rows, columns)` | one job's score per cell at one checkpoint: a finished job's final, else its latest evaluated |
 | `Ranking(by)` | a bar per job for each value of `by`; clicking a row filters the page |
-| `HeadToHead()` | a job's score in games against another job's checkpoints |
 | `Anchors()` | the anchors against each other, and each one's strength over matches that seat no checkpoint |
 
 Eval panels name columns of the score's table, and count the matches the
 section's control selects (a tournament, or a tag within it) unless they name
-their own: `matches=Matches(tournament=..., matchup=... or tag=...)`, by the
-names `eval(state)` gives them. A matchup and a tag are alternatives; naming
-both is refused. A curve against one anchor draws the others' scores against it as
-reference lines.
+their own: `matches=Matches(tournament=..., seating=... or tag=...)`, by the
+names `eval(state)` gives them. A seating and a tag are alternatives; naming
+both is refused. A curve against one anchor draws the others' scores against
+it as reference lines.
 
-For a matchup seating search against no search at the same checkpoint, two
-curves can deliberately show the two scientific variants:
+Panels draw; seatings say who plays whom. Whom a curve scores against, which
+jobs it draws and with which inference config are the seating's
+([evaluation](evaluation.md#tournaments)), so a chart that needs another
+opponent, job or inference needs another seating.
 
-```python
-Curve(
-    title="Search against direct",
-    matches=Matches(matchup="search vs direct"),
-    inference={"search": 64},
-)
-Curve(
-    title="Direct against search",
-    matches=Matches(matchup="search vs direct"),
-    inference={"search": 0},
-)
-```
-
-**Compare jobs across selections.**
+**Compare jobs over training.** With the `ladder` and `against small`
+benchmarks of [Experiments](evaluation.md#experiments):
 
 ```python
-# capacity.py: jobs "small" and "large" evaluated in benchmark "paired",
-# checkpoints every 200 updates.
-from etude.report import Curve, Earlier, Fraction, Matches, Report, Score
+# capacity.py
+from etude.report import Curve, Matches, Report, Score
 
 
 def report() -> Report:
@@ -568,57 +590,47 @@ def report() -> Report:
         score=Score(table="plays", value="won", reference=0.5, unit="games"),
         labels={"small": "Small model", "large": "Large model"},
         evals=(
-            Curve(
-                title="Against half-training checkpoints",
-                opponent=Fraction(clock="updates", value=0.5),
-                matches=(
-                    Matches(tournament="paired", tag="half-training-small"),
-                    Matches(tournament="paired", tag="half-training-large"),
-                ),
-            ),
-            Curve(
-                title="Against the previous checkpoint",
-                opponent=Earlier(clock="updates", by=200),
-                matches=(
-                    Matches(tournament="paired", tag="previous-small"),
-                    Matches(tournament="paired", tag="previous-large"),
-                ),
-            ),
-            Curve(
-                title="Large against small at equal training steps",
-                matches=Matches(tournament="paired", tag="head-to-head"),
-                subject="large",
-            ),
-            Curve(
-                title="Large against small at equal training time",
-                matches=Matches(tournament="paired", tag="equal-hours"),
-                subject="large",
-            ),
+            Curve(title="Against the heuristic", matches=Matches(seating="vs heuristic")),
+            Curve(title="Against half-training", matches=Matches(seating="half-training")),
+            Curve(title="Against the previous checkpoint", matches=Matches(seating="vs previous")),
+            Curve(title="Large against small", matches=Matches(seating="large vs small")),
+            Curve(title="Against small's final", matches=Matches(seating="large vs final small")),
         ),
     )
 ```
 
-The first two charts each draw a line per job from its own tagged matches.
-Both players of such a matchup are checkpoints, so `opponent` keeps each
-point the newer checkpoint's score; without it, the older checkpoint's
-complementary score is drawn at its own position on the same line.
-The last two draw only the large model's score against the small model;
-the small model's complementary score is omitted. The tags must be present
-on the benchmark's matchups, and the matching results must have been
-delivered to the report's source. This spec selects results; it schedules
-no evaluations.
+Two of its charts, as values:
 
-A tuple of `Matches` unions the selected matches for that panel. Overlapping
-selections count a match once, and jobs remain separate lines. Give an
-explicit tournament to select it exactly. With only `Matches(tag="anchor")`,
-the report prefers a matching tournament with results over an empty one;
-it does not combine every tournament carrying that tag. Use an explicit
-tuple to combine selections. Tag names are literal, not patterns.
+```text
+Against half-training           Small model · 2 seeds, Large model · 2 seeds
+  updates   2,000  4,000  6,000  8,000
+  small      0.58   0.61   0.57      ·   not yet played
+  large      0.62   0.66   0.64   0.63
+Large against small             Large model · 2 seeds
+  updates   2,000  4,000  6,000  8,000
+  large      0.55   0.59   0.61   ┆      small has no checkpoint at updates 8,000 yet
+```
 
-`Curve(subject="large")` selects the job whose score to show; `opponent`
-still selects whom it is scored against. Omitting `subject` keeps all
-eligible subjects. A missing subject is reported as missing rather than
-substituted with another job.
+Each point is the seating's value, its first seat's score, at the position
+where the checkpoint it was held for stood, whether the other seat is a
+fixed player or a relative seat. The relative seat's checkpoint is not drawn
+as a point of its own. `large vs small` draws only `large`: its benchmark is
+held only for large's checkpoints.
+
+A held checkpoint whose relative seat has no checkpoint is a gap with its
+reason. While the seat's run could still save one there, the gap says "not
+yet" and fills in once a later pass plays it. Once it can't, because the run
+ended or has passed that position without saving there, the gap says
+"never", as it does for a `trained=True` seat with only initial weights to
+meet. A `Final` seat is "not yet" until its run ends. Where
+`Aligned` or `Final` seats several of a job's lines, a point is the mean over
+them, as a point of a job is the mean over its seeds.
+
+`Matches(seating="vs weak")` or `Matches(tag="anchor")` without a tournament
+covers every tournament holding that seating or tag, each match counted once.
+Give a tournament to select only its matches. A tuple of `Matches` unions the
+selected matches for that panel. Overlapping selections count a match once,
+and jobs remain separate lines. Tag names are literal, not patterns.
 
 The Evals section shows its Matches picker and selection subtitle only when
 at least one panel uses the section's selection. When every panel supplies
@@ -641,7 +653,7 @@ no point of a line. One `eval(state)` wants that no eval run has delivered is
 marked not yet played, and failed matches, including any stored with no
 rows, are marked and listed with their errors; both break a line rather than
 bridge it. A job's point needs every seed. A column, tournament,
-matchup or tag a panel names that nothing holds is said so.
+seating or tag a panel names that nothing holds is said so.
 
 **Perf** draws what Etude records for training runs: `Pace` (each step clock
 per wall second between checkpoints), `Elapsed` (wall hours to each
@@ -723,7 +735,7 @@ the repository and call them from each experiment's `report()`.
 
 ```python
 # manabot/reports.py
-from etude.report import Curve, Fraction, Matches, Score
+from etude.report import Curve, Matches, Score
 
 GAMES = Score(table="games", value="score", reference=0.5, unit="games")
 
@@ -736,20 +748,22 @@ def label(job: str) -> str:
     return f"Width {width}" + (f", {layers} layers" if layers else "")
 
 
-def against_half_training(job: str) -> Curve:
-    return Curve(
-        title=f"{label(job)} against itself at half its updates",
-        opponent=Fraction(clock="updates", value=0.5),
-        matches=Matches(tag=f"half-training-{job}"),
-        subject=job,
-    )
+def against(seating: str, title: str) -> Curve:
+    return Curve(title=title, matches=Matches(tournament="frontier", seating=seating))
+
+
+PANELS = (
+    against("half-training", "Against itself at half its updates"),
+    against("vs initialization", "Against the initial weights"),
+    against("vs heuristic", "Against the heuristic"),
+)
 ```
 
 ```python
 # experiments/frontier.py
 from etude.report import Report
 
-from manabot.reports import GAMES, against_half_training, label
+from manabot.reports import GAMES, PANELS, label
 from manabot.training.panels import ML, PERF
 
 JOBS = ("w64", "w160l8")
@@ -760,7 +774,7 @@ def report() -> Report:
         score=GAMES,
         clock="updates",
         labels={job: label(job) for job in JOBS},
-        evals=tuple(against_half_training(job) for job in JOBS),
+        evals=PANELS,
         perf=PERF,
         ml=ML,
     )

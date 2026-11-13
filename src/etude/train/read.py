@@ -21,7 +21,7 @@ reader of checkpoints, or of an eval run, reads no metric data.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from functools import cached_property
 from hashlib import sha256
@@ -35,7 +35,15 @@ from pydantic import ConfigDict, PrivateAttr, SkipValidation, ValidationError
 from etude.run.block_file import BlockFile, parse, select
 from etude.run.errors import EtudeError
 from etude.run.listing import as_storage, declared, run_folders, under
-from etude.run.records import WALL_CLOCK, Attempt, Clock, Record, RunFile, RunState
+from etude.run.records import (
+    HOURS_SINCE_START,
+    RUNNING_HOURS,
+    Attempt,
+    Clock,
+    Record,
+    RunFile,
+    RunState,
+)
 from etude.run.storage import Storage, run_prefix
 from etude.train.block import DTYPES, SeriesColumn, Table
 from etude.train.manifest import BlockDescription, Manifest, StoredBlock, describe, fetch
@@ -119,7 +127,7 @@ class RunData(Arrays):
             )
         )
 
-    def points(self, metric: str, clock: str = WALL_CLOCK) -> Points:
+    def points(self, metric: str, clock: str = HOURS_SINCE_START) -> Points:
         """The metric's values on the clock, by the reading rules in this module's note."""
         located = {block.key: block for block in self.blocks}
         placed = [_place(block, clock) for block in self.blocks]
@@ -163,7 +171,7 @@ class RunData(Arrays):
     def chart(
         self,
         metric: str,
-        clock: str = WALL_CLOCK,
+        clock: str = HOURS_SINCE_START,
         limit: int = 1000,
         *,
         span: tuple[float, float] | None = None,
@@ -203,11 +211,7 @@ class RunData(Arrays):
             if column is None:
                 continue
             bounds = _clock_range(block, clock)
-            increasing = (
-                h.wall_increasing
-                if clock == WALL_CLOCK
-                else next(c.increasing for c in h.clocks if c.name == clock)
-            )
+            increasing = next(c.increasing for c in h.clocks if c.name == clock)
             if not increasing or bounds is None or column.rows is not None:
                 return buckets(self.points(metric, clock), limit, span=span)
             # A block the cutoff falls inside is read raw, so its roll-up groups
@@ -372,10 +376,7 @@ def _bucket_indices(
 
 
 def _clock_range(block: StoredBlock, clock: str) -> tuple[float, float] | None:
-    h = block.header
-    if clock == WALL_CLOCK:
-        return h.wall_first / 1000, h.wall_last / 1000
-    column = next((c for c in h.clocks if c.name == clock), None)
+    column = next((c for c in block.header.clocks if c.name == clock), None)
     if column is None or column.first is None or column.last is None:
         return None
     return column.first, column.last
@@ -415,8 +416,6 @@ class _Extent:
 
 def _clock(block: StoredBlock, clock: str) -> Floats:
     h = block.header
-    if clock == WALL_CLOCK:
-        return block.array(h.wall_ms, "<i8") / 1000
     return block.array(next(c.data for c in h.clocks if c.name == clock), "<f8")
 
 
@@ -424,17 +423,12 @@ def _place(block: StoredBlock, clock: str) -> _Placed:
     """An increasing column's header gives its range; any other column is read once."""
     h = block.header
     given: _Given | None = None
-    if clock == WALL_CLOCK:
-        if h.rows and h.wall_increasing:
-            given = _Given(h.wall_first / 1000, h.wall_last / 1000, h.wall_first / 1000)
-        readable = h.rows > 0
+    column = next((c for c in h.clocks if c.name == clock), None)
+    if column is None:
+        return _Placed(block.key, h.writer, h.first, h.wall_first, None)
+    if column.increasing and column.first is not None and column.last is not None:
+        given = _Given(column.first, column.last, column.first)
     else:
-        column = next((c for c in h.clocks if c.name == clock), None)
-        first, last = (column.first, column.last) if column is not None else (None, None)
-        if column is not None and column.increasing and first is not None and last is not None:
-            given = _Given(first, last, first)
-        readable = column is not None
-    if given is None and readable:
         x = _clock(block, clock)
         x = x[~np.isnan(x)]
         if len(x):
@@ -442,7 +436,7 @@ def _place(block: StoredBlock, clock: str) -> _Placed:
     return _Placed(block.key, h.writer, h.first, h.wall_first, given)
 
 
-def _position(
+def _write_order(
     writer: str, sequence: int, wall_first: int, started: dict[str, int]
 ) -> tuple[int, int]:
     """A block's place in write order: its process's start, then its sequence."""
@@ -582,6 +576,42 @@ def _order(record: CheckpointRecord) -> tuple[int, int]:
     return record.ordinal, record.wall_ms
 
 
+def _hours(
+    records: Iterable[CheckpointRecord], attempts: Sequence[Attempt], *, continued: bool
+) -> tuple[CheckpointRecord, ...]:
+    """Records in ordinal order, where one saved before Etude's clocks gets them from `wall_ms`.
+
+    `hours_since_start` counts from the run's first attempt; `running_hours`
+    adds the time since the attempt that saved it began to where that attempt
+    resumed. Either stays absent where the line began in a parent, or the
+    checkpoint an attempt resumed from is unknown.
+    """
+    done: list[CheckpointRecord] = []
+    for record in records:
+        at = dict(record.at)
+        began = [a for a in attempts if a.started_ms <= record.wall_ms]
+        if began and not continued:
+            at.setdefault(HOURS_SINCE_START, (record.wall_ms - attempts[0].started_ms) / 3_600_000)
+        if began and RUNNING_HOURS not in at:
+            attempt = began[-1]
+            if not attempt.resumed_at:
+                base = None if continued else 0.0
+            else:
+                resumed = next(
+                    (
+                        d
+                        for d in reversed(done)
+                        if all(d.at.get(k) == v for k, v in attempt.resumed_at.items())
+                    ),
+                    None,
+                )
+                base = None if resumed is None else resumed.at.get(RUNNING_HOURS)
+            if base is not None:
+                at[RUNNING_HOURS] = base + (record.wall_ms - attempt.started_ms) / 3_600_000
+        done.append(record if at == record.at else record.model_copy(update={"at": at}))
+    return tuple(done)
+
+
 def _here(
     record: CheckpointRecord, storage: Storage, place: str, keys: set[tuple[str, str]]
 ) -> CheckpointRecord:
@@ -595,6 +625,24 @@ def _here(
         return record
     artifact = record.artifact.model_copy(update={"uri": storage.uri(place + name)})
     return record.model_copy(update={"artifact": artifact})
+
+
+def lines(data: Sequence[RunData]) -> dict[str, str]:
+    """Each run's learner line: the first run of the chain of continuations that led to it,
+    as far as `data` knows. A run and the runs continuing it are one learner, one seed."""
+    parents = {
+        run.name: run.file.declaration.continues.parent.source_id
+        for run in data
+        if run.file is not None and run.file.declaration.continues is not None
+    }
+    found = {}
+    for run in data:
+        first, seen = run.name, {run.name}
+        while first in parents and parents[first] not in seen:
+            first = parents[first]
+            seen.add(first)
+        found[run.name] = first
+    return found
 
 
 def read_all(
@@ -645,7 +693,7 @@ def read_batches(
     experiment: str,
     run: str,
     *,
-    clock: str = WALL_CLOCK,
+    clock: str = HOURS_SINCE_START,
     metrics: Sequence[str],
 ) -> Iterator[Batch]:
     """A run's history on one clock, one stretch at a time.
@@ -689,7 +737,7 @@ def read_batches(
                 placed.append(_place(whole, clock))
             if missing := sorted(selected - logged):
                 raise EtudeError("metric_not_logged", 404) from KeyError(", ".join(missing))
-            placed.sort(key=lambda p: _position(p.writer, p.sequence, p.wall_first, started))
+            placed.sort(key=lambda p: _write_order(p.writer, p.sequence, p.wall_first, started))
             for stretch in _stretches(placed, [attempt for attempt, _ in attempts], clock):
                 high = max(extent.high for extent in stretch)
                 if done is not None and high <= done:
@@ -811,7 +859,11 @@ def _read(
         file=run_file,
         state=run_state,
         # A later attempt continues its run's ordinals; each is kept once.
-        checkpoints=tuple({r.ordinal: r for r in sorted(checkpoints, key=_order)}.values()),
+        checkpoints=_hours(
+            {r.ordinal: r for r in sorted(checkpoints, key=_order)}.values(),
+            [attempt for attempt, _ in attempts],
+            continued=run_file is not None and run_file.declaration.continues is not None,
+        ),
         attempts=tuple(attempt for attempt, _ in attempts),
     )
     started = {attempt.writer: attempt.started_ms for attempt, _ in attempts}
@@ -848,7 +900,7 @@ def _blocks(
                 raise
             keys = _listing(storage, folders)
     blocks.sort(
-        key=lambda block: _position(
+        key=lambda block: _write_order(
             block.header.writer, block.header.first, block.header.wall_first, started
         )
     )

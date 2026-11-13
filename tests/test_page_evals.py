@@ -20,9 +20,9 @@ from etude.eval.records import (
     Code,
     Inference,
     Match,
-    Matchup,
     Model,
     Player,
+    Seating,
 )
 from etude.eval.tournament import hold
 from etude.experiment import advance, observe, read_experiment
@@ -34,13 +34,13 @@ from etude.run.records import ArtifactRef, Clock, Continuation, SourceKey
 from etude.run.storage import DirectoryStorage, S3Storage, Storage
 from etude.train.run import Run, track
 from tests.eval.games import play, play_failing_deal_one, play_with_evidence
-from tests.experiments import experiment_file
+from tests.experiments import authored, experiment_file
 from tests.run.storage import CountedClient, MeasuredStorage
 
 LAB = """
 from etude.eval.match import environment
 from etude.eval.records import (
-    ArtifactRef, Benchmark, CheckpointKey, CheckpointRef, Code, Inference, Matchup, Model,
+    ArtifactRef, Benchmark, CheckpointKey, CheckpointRef, Code, Inference, Seating, Model,
 )
 from etude.jobs import evaluation
 from etude.report import Anchors, Curve, Matches, Report, Score
@@ -62,19 +62,19 @@ OUTSIDE = Model(
 
 
 def versus(name, first, second):
-    return Matchup(name=name, players=(first, second), conditions=DEALS, games=2, tags=("anchor",))
+    return Seating(name=name, players=(first, second), conditions=DEALS, games=2, tags=("anchor",))
 
 
 def eval(state):
     rated = [each for run in state.runs for each in run.checkpoints.every(2)]
-    ladder = Benchmark(name="ladder", environment=DUEL, matchups=(
+    ladder = Benchmark(name="ladder", environment=DUEL, seatings=(
         versus("vs weak", DIRECT, WEAK),
         versus("vs outside", DIRECT, OUTSIDE),
         versus("strong vs weak", STRONG, WEAK),
         versus("outside vs weak", OUTSIDE, WEAK),
     ))
-    corrupt = Benchmark(name="corrupt", environment=DUEL, matchups=(
-        Matchup(name="deal 1", players=(DIRECT, WEAK), conditions=({"deal": 1},), games=3),
+    corrupt = Benchmark(name="corrupt", environment=DUEL, seatings=(
+        Seating(name="deal 1", players=(DIRECT, WEAK), conditions=({"deal": 1},), games=3),
     ))
     return [
         evaluation(ladder, play=play, checkpoints=rated, max_hours=0.1),
@@ -87,8 +87,8 @@ def report():
         score=Score(table="plays", value="won", reference=0.5),
         evals=(
             Curve(),
-            Curve(matches=Matches(matchup="vs outside")),
-            Curve(matches=Matches(matchup="vs nobody")),
+            Curve(matches=Matches(seating="vs outside")),
+            Curve(matches=Matches(seating="vs nobody")),
             Anchors(),
         ),
     )
@@ -138,12 +138,12 @@ def player(page: Page, name: str, run: str | None = None) -> int:
     return found
 
 
-def selection(page: Page, tournament: str | None, *, matchup: str | None = None) -> int:
+def selection(page: Page, tournament: str | None, *, seating: str | None = None) -> int:
     return next(
         i
         for i, each in enumerate(page.selections)
         if isinstance(each, Matches)
-        and (each.tournament, each.matchup, each.tag) == (tournament, matchup, None)
+        and (each.tournament, each.seating, each.tag) == (tournament, seating, None)
     )
 
 
@@ -152,7 +152,7 @@ def test_checkpoints_are_bound_by_key_and_fixed_players_are_anchors(page: Page) 
     bound = {(each.run, each.ordinal) for each in page.players if each.run is not None}
     assert bound == {("a", 2), ("a", 4), ("b", 2), ("b", 4)}
     marks = {(m.run, m.ordinal): m.at for m in page.training.checkpoints}
-    assert marks[("a", 2)] == marks[("b", 2)] == {"updates": 200}
+    assert authored(marks[("a", 2)]) == authored(marks[("b", 2)]) == {"updates": 200}
     # Code and an outside checkpoint are fixed: no run, no ordinal.
     assert {each.name for each in page.players if each.run is None} == {"weak", "strong", "outside"}
     ladder = selection(page, "ladder")
@@ -187,15 +187,16 @@ def test_a_page_shows_what_was_not_evaluated_not_yet_played_and_failed(page: Pag
     assert "deal 1 crashed" in (failure.error or "")
 
 
-def test_panels_select_matches_by_tournament_matchup_or_tag(page: Page) -> None:
+def test_panels_select_matches_by_tournament_seating_or_tag(page: Page) -> None:
     chosen = {
-        (each.tournament, each.matchup, each.tag)
+        (each.tournament, each.seating, each.tag)
         for each in page.selections
         if isinstance(each, Matches)
     }
-    assert {("ladder", None, "anchor"), ("ladder", "vs outside", None)} <= chosen
-    outside = selection(page, "ladder", matchup="vs outside")
-    # The checkpoints' opponents in that matchup's matches are the outside anchor alone.
+    # A panel naming a seating without a tournament has it over every tournament.
+    assert {("ladder", None, "anchor"), (None, "vs outside", None)} <= chosen
+    outside = selection(page, None, seating="vs outside")
+    # The checkpoints' opponents in that seating's matches are the outside anchor alone.
     opponents = {
         page.players[c.opponent].name
         for c in page.cells
@@ -204,7 +205,7 @@ def test_panels_select_matches_by_tournament_matchup_or_tag(page: Page) -> None:
         and page.players[c.subject].run is not None
     }
     assert opponents == {"outside"}
-    assert any("matchup 'vs nobody'" in note for note in page.notes)
+    assert any("seating 'vs nobody'" in note for note in page.notes)
 
 
 def test_a_watched_page_reads_each_bucket_file_once_per_computer(
@@ -244,7 +245,7 @@ def test_a_report_reads_no_checkpoint_bytes(lab: tuple[Path, Path], page: Page) 
 
 VERSIONED = """
 from etude.eval.match import environment
-from etude.eval.records import Benchmark, Code, Inference, Matchup
+from etude.eval.records import Benchmark, Code, Inference, Seating
 from etude.jobs import evaluation
 from tests.eval.games import play
 
@@ -254,8 +255,8 @@ WEAK = Code(name="weak", source=[__file__], config={"strength": 0})
 
 def eval(state):
     rated = [each for run in state.runs for each in run.checkpoints]
-    versus = Matchup(name="vs weak", players=(DIRECT, WEAK), conditions=({"deal": 0},), games=2)
-    ladder = Benchmark(name="ladder", environment=environment("duel"), matchups=(versus,))
+    versus = Seating(name="vs weak", players=(DIRECT, WEAK), conditions=({"deal": 0},), games=2)
+    ladder = Benchmark(name="ladder", environment=environment("duel"), seatings=(versus,))
     return [evaluation(ladder, play=play, checkpoints=rated, max_hours=0.1)]
 """
 
@@ -294,19 +295,14 @@ def test_a_page_offers_each_commit_its_matches_were_played_at(
 
 
 EVALUATION_ONLY = """
-from etude.report import At, Crosstable, Curve, Earlier, Report, Score
+from etude.report import Crosstable, Curve, Report, Score
 
 
 def report():
     return Report(
         score=Score(table="plays", value="won", reference=0.5),
         clock="updates",
-        evals=(
-            Curve(title="Score against the heuristic", opponent="heuristic"),
-            Curve(title="Against 400 updates earlier", opponent=Earlier(clock="updates", by=400)),
-            Curve(title="Against update 200", opponent=At(clock="updates", value=200)),
-            Crosstable(),
-        ),
+        evals=(Curve(title="Score"), Crosstable()),
     )
 """
 
@@ -349,14 +345,14 @@ def test_mixed_execution_fills_requested_games_and_replays_count_once(
     ):
         monkeypatch.setenv("ETUDE_COMMIT", commit)
         monkeypatch.setenv("ETUDE_RUN", run)
-        matchup = Matchup(
+        seating = Seating(
             name="vs heuristic",
             players=(Inference(source=[file], config={"search": 0}), HEURISTIC),
             conditions=({"deal": 0}, {"deal": 1}),
             games=2,
         )
-        benchmark = Benchmark(name="mixed", environment=DUEL, matchups=(matchup,))
-        matches = matchup.matches(checkpoint)
+        benchmark = Benchmark(name="mixed", environment=DUEL, seatings=(seating,))
+        matches = seating.matches(checkpoint)
         held = hold(
             benchmark,
             experiment="lab",
@@ -451,10 +447,18 @@ def evaluation_only(tmp_path_factory: pytest.TempPathFactory) -> Iterator[tuple[
             drift = drift.model_copy(
                 update={"checkpoint": drift.checkpoint.model_copy(update={"line": run})}
             )
+            # Seated before Etude's hour clocks, then with them: the same position.
+            hours = outside(
+                "hours100", {"updates": 100} | ({"running_hours": 0.25} if run == "plain-b" else {})
+            )
             evaluate(
                 experiment="lab",
                 environment=DUEL,
-                matches=[*matches, duel(drift, HEURISTIC, deal=int(run == "plain-b"))],
+                matches=[
+                    *matches,
+                    duel(drift, HEURISTIC, deal=int(run == "plain-b")),
+                    duel(hours, HEURISTIC, deal=int(run == "plain-b")),
+                ],
                 play=play,
                 run=run,
                 directory=runs,
@@ -490,6 +494,9 @@ def test_an_evaluation_only_experiment_draws_checkpoints_where_their_seats_say(
         "drift is drawn at updates 350, as its latest seat says; earlier seats said updates 300."
         in page.notes
     )
+    # Seats that only add clocks agree: merged, with no note.
+    assert at["hours100"] == {"updates": 100, "running_hours": 0.25}
+    assert not any(note.startswith("hours100 ") for note in page.notes)
     pair = {
         (page.players[c.subject].name, page.players[c.opponent].name): c
         for c in page.cells
@@ -640,7 +647,9 @@ def test_a_tracked_checkpoint_is_placed_by_its_seat_first_and_its_training_recor
         directory=runs,
     )
     page = build(runs, file)
-    placed = {each.name: (each.run, each.at) for each in page.players if each.run is not None}
+    placed = {
+        each.name: (each.run, authored(each.at)) for each in page.players if each.run is not None
+    }
     assert placed == {
         "updates-100.pt": ("a", {"updates": 100}),
         "updates-200.pt": ("a", {"updates": 250}),
@@ -694,7 +703,7 @@ def test_a_continued_run_is_one_line_with_the_run_it_continues(
     continued = track(
         experiment="seated",
         run="b",
-        job="b",
+        job="a",
         clocks=CLOCKS,
         directory=runs,
         continues=Continuation(parent=parent, clock="updates", value=200),
@@ -714,8 +723,9 @@ def test_a_continued_run_is_one_line_with_the_run_it_continues(
     )
     page = build(runs, file)
     lines = {(each.run, each.line, each.at["updates"]) for each in page.players}
-    # Drawn in their own runs' jobs; `Earlier` by 500 reaches from b's 600 back to a's 100.
     assert lines == {("a", "a", 100), ("b", "a", 600)}
+    # One job, and one seed: a continuation is the learner it continues.
+    assert [job.label for job in page.training.jobs] == ["a · 1 seed"]
 
 
 def test_a_running_eval_runs_results_show_and_are_marked_partial(
@@ -757,8 +767,8 @@ def report():
         Curve(matches=(Matches(tournament="ladder"),
                        Matches(tournament="ladder", tag="anchor"),
                        Matches(tournament="ladder"))),
-        Curve(split="deal", matches=(Matches(tournament="ladder", matchup="vs weak"),
-                       Matches(tournament="ladder", matchup="vs outside"))),
+        Curve(split="deal", matches=(Matches(tournament="ladder", seating="vs weak"),
+                       Matches(tournament="ladder", seating="vs outside"))),
     ))
 """,
     )
@@ -771,7 +781,7 @@ def report():
     original = [c.model_dump(exclude={"selection"}) for c in page.cells if c.selection == ladder]
     overlap = [c.model_dump(exclude={"selection"}) for c in page.cells if c.selection == unions[0]]
     assert sorted(overlap, key=str) == sorted(original, key=str)
-    components = {selection(page, "ladder", matchup=name) for name in ("vs weak", "vs outside")}
+    components = {selection(page, "ladder", seating=name) for name in ("vs weak", "vs outside")}
     for subject in (player(page, "updates-200.pt", "a"), player(page, "updates-200.pt", "b")):
         (combined,) = [
             c
@@ -874,3 +884,126 @@ def _attempt(key: str) -> bool:
     """Whether a key under a run's `metrics/` is an attempt record, not a block or index."""
     name = "metrics/" + key.rsplit("/metrics/", 1)[1]
     return parse(name) is None and not name.endswith((".index.json", ".permanent.json"))
+
+
+REVISED = """
+from etude.eval.match import environment
+from etude.eval.records import Benchmark, Code, Inference, Seating
+from etude.jobs import evaluation
+from etude.report import Curve, Matches, Report, Score
+from tests.eval.games import play
+
+# A later revision of the file: its environment carries another source digest.
+DUEL = environment("duel", config={"source": SOURCE})
+DIRECT = Inference(config={"search": 0})
+WEAK = Code(name="weak", source=[__file__], config={"strength": 0})
+
+
+def eval(state):
+    held = [each for run in state.runs for each in run.checkpoints]
+    ladder = Benchmark(name="ladder", environment=DUEL, seatings=(
+        Seating(name="vs weak", players=(DIRECT, WEAK), conditions=({"deal": 0},), games=2),
+    ))
+    return evaluation(ladder, play=play, checkpoints=held, max_hours=0.1)
+
+
+def report():
+    return Report(
+        score=Score(table="plays", value="won"),
+        evals=(Curve(matches=Matches(seating="vs weak")),),
+    )
+"""
+
+
+def test_a_report_draws_what_eval_runs_recorded_after_the_file_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    runs = tmp_path / "runs"
+    file = experiment_file(tmp_path / "experiments", "lab", REVISED.replace("SOURCE", "'v1'"))
+    trained = track(experiment="lab", run="a", job="a", clocks=CLOCKS, directory=runs)
+    save(trained, tmp_path, range(100, 300, 100))
+    trained.finish(timeout=30)
+    (first,) = advance(read_experiment(file), source=DirectoryStorage(runs), directory=runs)
+    assert first.played == 2
+    drawn = build(runs, file)
+
+    file.write_text(REVISED.replace("SOURCE", "'v2'"))
+    storage = MeasuredStorage(DirectoryStorage(runs))
+    page = build(storage, file)
+    # Exactly what the held runs recorded, with a note rather than a refusal.
+    assert page.cells == drawn.cells and page.points == drawn.points
+    assert [note for note in page.notes if "ladder" in note] == [
+        "Tournament ladder is drawn as its eval runs recorded it:"
+        " eval(state) now defines it otherwise (tournament_conflict)."
+    ]
+    # What the report path lists and reads for one training run and one eval run, pinned;
+    # the eval run's tables come from the cache the first build filled.
+    assert (storage.listings, storage.requests) == (4, 12)
+    # Scheduling new games still needs the definition to agree.
+    with pytest.raises(EtudeError, match="tournament_conflict"):
+        advance(read_experiment(file), source=DirectoryStorage(runs), directory=runs)
+
+
+SETUPS = """
+from etude.eval.match import environment
+from etude.eval.records import Benchmark, Code, Inference, Seating
+from etude.jobs import evaluation
+from etude.report import Curve, Matches, Report, Score
+from tests.eval.games import play
+
+
+def ladder(name, device):
+    # How it runs is setup: the CUDA ladder is the CPU one's environment and players.
+    duel = environment("duel", config={"world": "w6", "setup": {"device": device}})
+    direct = Inference(config={"search": 0, "setup": {"device": device}})
+    weak = Code(name="weak", config={"strength": 0, "setup": {"device": device}})
+    seating = Seating(name="vs weak", players=(direct, weak), conditions=({"deal": 0},), games=2)
+    return Benchmark(name=name, environment=duel, seatings=(seating,))
+
+
+def eval(state):
+    (run,) = state.runs
+    return [
+        evaluation(ladder("cpu", "cpu"), play=play, checkpoints=run.checkpoints[:1], max_hours=0.1),
+        evaluation(ladder("cuda", "cuda"), play=play, checkpoints=run.checkpoints, max_hours=0.1),
+    ]
+
+
+def report():
+    return Report(
+        score=Score(table="plays", value="won"),
+        evals=(Curve(matches=Matches(seating="vs weak")),),
+    )
+"""
+
+
+def test_a_seating_pools_every_tournament_and_setup_that_played_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    runs = tmp_path / "runs"
+    file = experiment_file(tmp_path / "experiments", "lab", SETUPS)
+    trained = track(experiment="lab", run="a", job="a", clocks=CLOCKS, directory=runs)
+    save(trained, tmp_path, range(100, 300, 100))
+    trained.finish(timeout=30)
+    passes = advance(read_experiment(file), source=DirectoryStorage(runs), directory=runs)
+    # The CUDA ladder reuses the match the CPU one played for 100: one match, one setup apart.
+    assert {each.tournament: each.played for each in passes} == {"cpu": 1, "cuda": 1}
+    page = build(runs, file)
+    assert len(page.environments) == 1
+    assert not [note for note in page.notes if "also played in" in note]
+    weak = player(page, "weak")
+    pooled = selection(page, None, seating="vs weak")
+    cells = {
+        page.players[c.subject].at["updates"]: c.matches
+        for c in page.cells
+        if c.selection == pooled and c.opponent == weak and not c.split and c.commit is None
+    }
+    # Both checkpoints, each from its one match, whichever tournament held it.
+    assert cells == {100: 1, 200: 1}
+    # One point per checkpoint: 100, held by both tournaments, is not drawn twice.
+    points = sorted((p.at["updates"], p.matches) for p in page.points if p.selection == pooled)
+    assert points == [(100, 1), (200, 1)]

@@ -37,7 +37,7 @@ EXPERIMENT = """
 from pathlib import Path
 
 from etude.eval.match import environment
-from etude.eval.records import Benchmark, Code, Inference, Matchup
+from etude.eval.records import Benchmark, Code, Inference, Seating
 from etude.experiment import ExperimentState
 from etude.jobs import evaluation
 from etude.launch.records import Job, SmokeForm
@@ -57,9 +57,9 @@ def runs(seeds: int = 1, tiny: str = "1", bare: bool = False) -> list:
 def eval(state: ExperimentState) -> Job:
     chosen = [saved for run in state.runs for saved in run.checkpoints]
     anchor = Code(name="heuristic", source=[__file__], config={{"strength": 0}})
-    vs = Matchup(name="vs heuristic", players=(Inference(config={{"search": 0}}), anchor),
+    vs = Seating(name="vs heuristic", players=(Inference(config={{"search": 0}}), anchor),
                  conditions=({{"deal": 0}}, {{"deal": 1}}), games=4)
-    ladder = Benchmark(name="ladder", environment=environment("duel"), matchups=(vs,))
+    ladder = Benchmark(name="ladder", environment=environment("duel"), seatings=(vs,))
     return evaluation(ladder, play={play}, checkpoints=chosen, max_hours=0.1,
                       repo=None)
 
@@ -95,7 +95,7 @@ def test_a_passing_smoke_queues_and_its_runs_record_it(
     assert main(["queue", str(file), "--seeds", "2", "--cohort", "c", "--smoke"]) == 0
     said = capsys.readouterr()
     out, err = said.out, said.err
-    # Two seeds of one job are smoked once; the matchup plays each deal once.
+    # Two seeds of one job are smoked once; the seating plays each deal once.
     assert "smoke train ppo: passed in" in err and "(1 checkpoint)" in err
     assert "smoke eval ladder: passed in" in err and "(2 matches, 1 game each)" in err
     assert "smoke report: passed in" in err
