@@ -45,19 +45,9 @@ from pydantic import BaseModel, Field, JsonValue, TypeAdapter, ValidationError
 from etude.call import Function, config_type
 from etude.carriage import CHECKPOINTS, OUT_PRESENT, checkpoint_file_name, checkpoint_key
 from etude.eval.match import EvalRun, Result, Tables
-from etude.eval.records import (
-    Benchmark,
-    CheckpointKey,
-    CheckpointRef,
-    Line,
-    Match,
-    Model,
-    Player,
-    RoundRobin,
-    digest,
-)
+from etude.eval.records import Benchmark, CheckpointPlayer, Line, Match, Player, RoundRobin, digest
 from etude.eval.tournament import hold
-from etude.experiment import Checkpoint, ExperimentState, checkpoint_inputs
+from etude.experiment import ExperimentState, checkpoint_inputs
 from etude.launch.errors import LauncherError
 from etude.launch.records import (
     Input,
@@ -77,7 +67,12 @@ from etude.tracking.listing import as_storage, declared, run_folders
 from etude.tracking.records import ArtifactRef, Record, SourceKey
 from etude.tracking.storage import Storage
 from etude.train.read import read
-from etude.train.records import ParentRun
+from etude.train.records import (
+    CheckpointRecord,
+    CheckpointRef,
+    ParentRun,
+    checkpoint_id,
+)
 
 
 class JobOptions(TypedDict, total=False):
@@ -112,6 +107,7 @@ def training[C: BaseModel](
     *,
     config: C,
     smoke: C | None = None,
+    start: CheckpointRecord | None = None,
     **options: Unpack[JobOptions],
 ) -> Job:
     """A job that calls `train(config)` in the job's own environment.
@@ -123,6 +119,8 @@ def training[C: BaseModel](
     would not validate back into it.
     """
     _require_hours(options)
+    if start is not None:
+        options["inputs"] = (*options.get("inputs", ()), *checkpoint_inputs_for(start, "start"))
     job = _job(train, config, origin=train, options=options)
     if smoke is None:
         return job
@@ -139,7 +137,7 @@ class Evaluation(Record):
     # A benchmark's checkpoint, as the job's input of that name.
     checkpoint: Input | None = None
     # Checkpoints an experiment's eval chose to hold the benchmark for.
-    checkpoints: tuple[Checkpoint, ...] = ()
+    checkpoints: tuple[CheckpointRecord, ...] = ()
     # A round robin's entrants.
     entrants: tuple[Player, ...] = ()
     workers: int = Field(default=1, ge=1)
@@ -157,7 +155,7 @@ def evaluation(
     play: Callable[[Match], Tables | Result],
     experiment: str | None = None,
     checkpoint: Input | None = None,
-    checkpoints: Sequence[Checkpoint] = (),
+    checkpoints: Sequence[CheckpointRecord] = (),
     enter: Sequence[Player] = (),
     workers: int = 1,
     **options: Unpack[JobOptions],
@@ -272,18 +270,41 @@ def with_matches(job: Job, matches: Sequence[Match], state: ExperimentState) -> 
     files = {key: f"checkpoint-{digest(key)[:16]}{PurePosixPath(each.name).suffix}"
              for key, each in saved.items()}  # fmt: skip
     inputs = tuple(
-        Input(
-            name=files[key],
-            key=each.file or checkpoint_key(each.artifact.uri),
-            sha256=cast(str, each.artifact.sha256),  # observe keeps only stored files
-            size_bytes=cast(int, each.artifact.size_bytes),
-            run=each.run,
-        )
+        given
         for key, each in sorted(saved.items())
+        for given in checkpoint_inputs_for(each, files[key])
     )
     spec = spec.model_copy(update={"matches": tuple(matches), "files": files, "lines": state.lines})
     return job.model_copy(
         update={"config": spec.model_dump_json(), "inputs": (*job.inputs, *inputs)}
+    )
+
+
+def checkpoint_inputs_for(checkpoint: CheckpointRecord, name: str) -> tuple[Input, ...]:
+    """The individually verified files of one checkpoint, under one input name."""
+    artifact = checkpoint.artifact
+    key = checkpoint.file or checkpoint_key(artifact.uri)
+    if artifact.members:
+        return tuple(
+            Input(
+                name=name + "/" + member,
+                key=key + "/" + member,
+                sha256=content.sha256,
+                size_bytes=content.size_bytes,
+                run=checkpoint.run,
+            )
+            for member, content in sorted(artifact.members.items())
+        )
+    if artifact.sha256 is None or artifact.size_bytes is None:
+        raise LauncherError("a checkpoint input requires its digest and byte length")
+    return (
+        Input(
+            name=name,
+            key=key,
+            sha256=artifact.sha256,
+            size_bytes=artifact.size_bytes,
+            run=checkpoint.run,
+        ),
     )
 
 
@@ -316,7 +337,13 @@ def continue_from(
     target = Until.parse(until)
     previous = next((v.value for v in parent.spec.environment if v.name == "ETUDE_CONTINUES"), None)
     inherited_input = None if previous is None else ParentRun.model_validate_json(previous).input
-    inputs = {i.name: i for i in parent.spec.inputs if i.name != inherited_input and i.out is None}
+    inputs = {
+        i.name: i
+        for i in parent.spec.inputs
+        if i.name != inherited_input
+        and (inherited_input is None or not i.name.startswith(inherited_input + "/"))
+        and i.out is None
+    }
     parent_key = SourceKey(namespace=declaration.namespace, kind="run", source_id=parent.id)
     # An explicit checkpoint needs no out reads, even when the parent has out.
     out = None if ordinal is not None else _parent_out(storage, folders, keys)
@@ -356,7 +383,10 @@ def continue_from(
                 size_bytes=member.size_bytes,
                 run=parent.id,
             )
-        if not copied and not any(member.key == key for member in members):
+        if not copied and not any(
+            member.key == key or key is not None and member.key.startswith(key + "/")
+            for member in members
+        ):
             checkpoint = None
         origin = "parent"
     else:
@@ -371,13 +401,9 @@ def continue_from(
             raise LauncherError(f"run {parent.id} recorded no stored checkpoint {ordinal or ''}")
         if key is not None:
             given = _input_name(_PARENT_CHECKPOINT + PurePosixPath(key).suffix, inputs)
-            inputs[given] = Input(
-                name=given,
-                key=key,
-                sha256=checkpoint.artifact.sha256,
-                size_bytes=checkpoint.artifact.size_bytes,
-                run=parent.id,
-            )
+            located = checkpoint.model_copy(update={"run": parent.id, "file": key})
+            for file_input in checkpoint_inputs_for(located, given):
+                inputs[file_input.name] = file_input
     if target.clock not in at:
         raise LauncherError(
             f"a continuation needs a target on a clock its {origin} recorded: {', '.join(sorted(at))}"
@@ -493,12 +519,12 @@ def _hold(evaluation: Evaluation) -> None:
         given = evaluation.checkpoint
         # A training run's file is keyed by its run and name; any other, by where it lies.
         key = (
-            CheckpointKey(
+            checkpoint_id(
                 run=given.run,
                 name=given.key if given.key.startswith("out/") else checkpoint_file_name(given.key),
             )
             if given.run is not None
-            else CheckpointKey(address=given.key)
+            else checkpoint_id(address=given.key)
         )
         artifact = ArtifactRef(
             uri=(Path(str(folder)) / given.name).as_uri(),
@@ -517,7 +543,7 @@ def _relocated(match: Match, here: Mapping[str, str]) -> Match:
     """The match with each model's checkpoint file where it lies on this machine."""
     players: list[Player] = []
     for player in match.players:
-        if not isinstance(player, Model) or str(player.checkpoint.key) not in here:
+        if not isinstance(player, CheckpointPlayer) or str(player.checkpoint.key) not in here:
             players.append(player)
             continue
         checkpoint = player.checkpoint

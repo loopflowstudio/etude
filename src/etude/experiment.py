@@ -27,25 +27,14 @@ from __future__ import annotations
 import json
 import runpy
 import sys
+import warnings
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from itertools import count
 from pathlib import Path
 from typing import Literal, cast
 
-from pydantic import Field
-
-from etude.carriage import checkpoint_file_name
-from etude.eval.records import (
-    CheckpointKey,
-    CheckpointRef,
-    Inference,
-    Line,
-    Match,
-    Model,
-    digest,
-    folder_name,
-)
+from etude.eval.records import CheckpointPlayer, Line, Match, digest, folder_name
 from etude.eval.tournament import played
 from etude.launch import client
 from etude.launch.database import Database, launcher_file
@@ -54,57 +43,17 @@ from etude.launch.records import Job, Run, Smoke
 from etude.launch.scheduler import Scheduler
 from etude.launch.source import home
 from etude.tracking.errors import EtudeError
-from etude.tracking.records import ArtifactRef, Digest, Record
+from etude.tracking.records import Digest, Record
 from etude.tracking.storage import Storage
 from etude.train.read import RunData, lines, read_all
+from etude.train.records import CheckpointId, CheckpointRecord
 from etude.train.report import job_names
 
 # ---------------------------------------------------------------------------
 # What eval(state) chooses from
 
 
-class Checkpoint(Record):
-    """A checkpoint a training run recorded, with a stored file to evaluate."""
-
-    run: str
-    experiment: str
-    ordinal: int = Field(ge=1)
-    artifact: ArtifactRef
-    file: str | None = None
-    # Where each of the run's clocks stood when it was saved.
-    at: dict[str, float]
-    # When it was saved, in milliseconds since the epoch.
-    # None only in a checkpoint serialized before this field existed.
-    wall_ms: int | None = None
-    # The learner it belongs to: the first run of the chain of continuations that led to its run.
-    line: str
-    tags: tuple[str, ...] = ()
-
-    @property
-    def name(self) -> str:
-        """The file's name, as a model seat names it: `updates-200.pt`."""
-        return (
-            self.file
-            if self.file is not None and self.file.startswith("out/")
-            else checkpoint_file_name(self.artifact.uri)
-        )
-
-    @property
-    def key(self) -> CheckpointKey:
-        """What identifies it: its run and file, never its bytes."""
-        return CheckpointKey(run=self.run, name=self.name)
-
-    @property
-    def ref(self) -> CheckpointRef:
-        """Its key, stored file, where it stood and its line, as a benchmark is held for it."""
-        return CheckpointRef(key=self.key, artifact=self.artifact, at=self.at, line=self.line)
-
-    def model(self, inference: Inference) -> Model:
-        """This checkpoint playing as `inference`, for a seating of chosen checkpoints."""
-        return inference.model(self.ref)
-
-
-class Checkpoints(tuple[Checkpoint, ...]):
+class Checkpoints(tuple[CheckpointRecord, ...]):
     """A training run's checkpoints in the order it saved them; a tuple, so slices work."""
 
     def every(self, n: int) -> Checkpoints:
@@ -122,7 +71,7 @@ class Checkpoints(tuple[Checkpoint, ...]):
         return Checkpoints(each for each in self if tag in each.tags)
 
     @property
-    def last(self) -> Checkpoint | None:
+    def last(self) -> CheckpointRecord | None:
         return self[-1] if self else None
 
 
@@ -147,7 +96,7 @@ class TrainingRun:
         return self.state != "running"
 
     @property
-    def final(self) -> Checkpoint | None:
+    def final(self) -> CheckpointRecord | None:
         """The last checkpoint once the run finished; None while it may save more."""
         return self.checkpoints.last if self.state == "finished" else None
 
@@ -186,7 +135,7 @@ class ExperimentState:
         )
         return tuple(sorted(made, key=lambda line: line.order))
 
-    def checkpoint(self, key: CheckpointKey) -> Checkpoint | None:
+    def checkpoint(self, key: CheckpointId) -> CheckpointRecord | None:
         for each in self.runs:
             for saved in each.checkpoints:
                 if saved.key == key:
@@ -223,16 +172,8 @@ def state_of(every: Sequence[RunData], experiment: str) -> ExperimentState:
     runs = []
     for data in ours:
         saved = Checkpoints(
-            Checkpoint(
-                run=data.name,
-                experiment=data.experiment,
-                ordinal=record.ordinal,
-                artifact=record.artifact,
-                file=record.file,
-                at=record.at,
-                wall_ms=record.wall_ms,
-                line=line[data.name],
-                tags=record.tags,
+            record.model_copy(
+                update={"run": data.name, "experiment": data.experiment, "line": line[data.name]}
             )
             for record in data.checkpoints
             if record.artifact.sha256 is not None and record.artifact.size_bytes is not None
@@ -385,7 +326,7 @@ def advance(
     """
     if queue and pool is None and rent is None:
         raise EtudeError("queued_evals_need_a_pool_or_rent", 422)
-    # Imported here: typed jobs import this module for `Checkpoint`.
+    # Imported here: typed jobs import this module for `CheckpointRecord`.
     from etude.jobs import (  # noqa: PLC0415
         evaluation_spec,
         hold_evaluation,
@@ -441,16 +382,18 @@ def advance(
     return passes
 
 
-def checkpoint_inputs(matches: Iterable[Match], state: ExperimentState) -> dict[str, Checkpoint]:
+def checkpoint_inputs(
+    matches: Iterable[Match], state: ExperimentState
+) -> dict[str, CheckpointRecord]:
     """Each checkpoint the matches seat, by its key encoded, as `state` found it stored.
 
     Raises `EtudeError("checkpoint_not_stored")` for a seated checkpoint no
     training run of the experiment stored, such as one by an outside address.
     """
-    found: dict[str, Checkpoint] = {}
+    found: dict[str, CheckpointRecord] = {}
     for match in matches:
         for player in match.players:
-            if not isinstance(player, Model) or str(player.checkpoint.key) in found:
+            if not isinstance(player, CheckpointPlayer) or str(player.checkpoint.key) in found:
                 continue
             key = player.checkpoint.key
             saved = state.checkpoint(key)
@@ -530,3 +473,14 @@ class _Ledger:
 
 def _ledger_root(directory: Path | str | None) -> Path:
     return (home() if directory is None else Path(directory)) / "experiments"
+
+
+def __getattr__(name: str) -> object:
+    if name == "Checkpoint":
+        warnings.warn(
+            "etude.experiment.Checkpoint is now etude.train.records.CheckpointRecord; removed in 0.5",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return CheckpointRecord
+    raise AttributeError(name)

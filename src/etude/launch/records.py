@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from datetime import datetime
 from decimal import Decimal
 from typing import Literal
@@ -403,8 +402,8 @@ class Input(Record):
     @field_validator("name")
     @classmethod
     def _plain(cls, name: str) -> str:
-        if name in (".", "..") or not re.fullmatch(r"[A-Za-z0-9._-]+", name):
-            raise ValueError(f"input name {name!r} must be a plain file name")
+        if not within(name):
+            raise ValueError(f"input name {name!r} must be a portable relative path")
         return name
 
     @model_validator(mode="after")
@@ -465,6 +464,11 @@ class Variable(Record):
 def _distinct(value: tuple[Input, ...]) -> tuple[Input, ...]:
     if len({given.name for given in value}) != len(value):
         raise ValueError("each input needs its own name")
+    names = {given.name for given in value}
+    for name in names:
+        parts = name.split("/")
+        if any("/".join(parts[:n]) in names for n in range(1, len(parts))):
+            raise ValueError("an input cannot be both a file and a folder")
     return value
 
 

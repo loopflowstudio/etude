@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import re
 from hashlib import sha256
+from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 from etude.eval.match import Result, Tables
-from etude.eval.records import Match, Player
+from etude.eval.records import CheckpointPlayer, Match, Player
 
 type Rows = list[dict[str, bool | int | float | str | None]]
 
@@ -140,3 +143,19 @@ def play_cards(match: Match) -> Tables:
                     }
                 )
     return {"card_plays": plays, "card_counts": counts}
+
+
+def play_checkpoint_folder(match: Match) -> Tables:
+    """Read both models of a folder checkpoint as playing code would."""
+    rows: Rows = []
+    for seat, player in enumerate(match.players):
+        if not isinstance(player, CheckpointPlayer):
+            continue
+        folder = Path(unquote(urlparse(player.checkpoint.artifact.uri).path))
+        manifest = json.loads((folder / "checkpoint.json").read_text())
+        files = manifest["files"]
+        if set(files) != {"policy", "value"}:
+            raise ValueError("a player needs its policy and value model")
+        size = sum((folder / name).stat().st_size for name in files.values())
+        rows.append({"seat": seat, "files": len(files), "bytes": size})
+    return {"models": rows}

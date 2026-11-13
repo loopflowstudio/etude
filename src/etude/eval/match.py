@@ -1,6 +1,6 @@
 """The eval run: `evaluate` plays matches in worker processes and stores their tables.
 
-Players (`etude.eval.records.Model` and `Code`), `environment` and `Match`
+Players (`etude.eval.records.CheckpointPlayer` and `Code`), `environment` and `Match`
 describe what `evaluate` plays; it knows nothing of tournaments
 (`etude.eval.tournament` arranges eval runs). The author's `play(match)`
 returns tables of rows, or a `Result` that also keeps blobs: bytes such as a

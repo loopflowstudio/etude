@@ -17,14 +17,7 @@ from etude.eval.match import environment
 from etude.eval.query import statsdb
 from etude.eval.records import Benchmark, Code, Inference, Seating
 from etude.eval.tournament import scores
-from etude.experiment import (
-    Checkpoint,
-    Experiment,
-    ExperimentState,
-    advance,
-    observe,
-    read_experiment,
-)
+from etude.experiment import Experiment, ExperimentState, advance, observe, read_experiment
 from etude.jobs import _hold, evaluation, evaluation_spec
 from etude.launch.records import Job, Outcome, Run, Status
 from etude.launch.source import home
@@ -32,6 +25,7 @@ from etude.tracking.errors import EtudeError
 from etude.tracking.records import Clock
 from etude.tracking.storage import DirectoryStorage
 from etude.train.read import read
+from etude.train.records import CheckpointRecord
 from etude.train.run import Run as Run_
 from etude.train.run import track
 from tests.eval.games import play, play_catching_errors, play_failing_deal_one
@@ -73,7 +67,7 @@ def save(run: Run_, bucket: DirectoryStorage, tmp_path: Path, saves: range) -> N
         time.sleep(0.01)
 
 
-def _saved(run: Run_, bucket: DirectoryStorage) -> tuple[Checkpoint, ...]:
+def _saved(run: Run_, bucket: DirectoryStorage) -> tuple[CheckpointRecord, ...]:
     found = [each for each in observe(bucket, run.experiment).runs if each.name == run.name]
     return found[0].checkpoints if found else ()
 
@@ -88,7 +82,7 @@ def design(tmp_path: Path) -> Experiment:
         rated = run.checkpoints.every(2)
         pairs = [
             Seating(name=f"{new.name} vs {old.name}", tags=("consecutive",),
-                    players=(new.model(DIRECT), old.model(DIRECT)), conditions=DEALS, games=2)
+                    players=(new.player(DIRECT), old.player(DIRECT)), conditions=DEALS, games=2)
             for old, new in zip(rated, rated[1:])
         ]  # fmt: skip
         if run.final is not None and run.checkpoints:
@@ -96,7 +90,7 @@ def design(tmp_path: Path) -> Experiment:
             pairs.append(
                 Seating(
                     name="final vs first",
-                    players=(run.final.model(DIRECT), first.model(DIRECT)),
+                    players=(run.final.player(DIRECT), first.player(DIRECT)),
                     conditions=DEALS,
                     games=2,
                 )  # fmt: skip
@@ -444,8 +438,8 @@ def test_a_tracked_checkpoints_seat_says_where_its_run_stood_and_its_line(tmp_pa
     run.finish(timeout=30)
     (saved,) = observe(bucket, "ppo").run("ppo-1").checkpoints
     assert saved.ref.at == saved.at
-    assert authored(saved.at) == authored(saved.model(DIRECT).checkpoint.at) == {"updates": 100}
-    assert saved.ref.line == saved.model(DIRECT).checkpoint.line == "ppo-1"
+    assert authored(saved.at) == authored(saved.player(DIRECT).checkpoint.at) == {"updates": 100}
+    assert saved.ref.line == saved.player(DIRECT).checkpoint.line == "ppo-1"
 
 
 def test_a_checkpoint_carries_the_wall_time_its_record_stored(tmp_path: Path) -> None:
@@ -486,9 +480,9 @@ def test_a_checkpoint_serialized_before_wall_time_still_loads(tmp_path: Path) ->
     save(run, bucket, tmp_path, range(1, 2))
     run.finish(timeout=30)
     (saved,) = observe(bucket, "ppo").run("ppo-1").checkpoints
-    assert Checkpoint.model_validate_json(saved.model_dump_json()) == saved
+    assert CheckpointRecord.model_validate_json(saved.model_dump_json()) == saved
     older = saved.model_dump(mode="json", exclude={"wall_ms"})
-    assert Checkpoint.model_validate(older).wall_ms is None
+    assert CheckpointRecord.model_validate(older).wall_ms is None
 
 
 def test_a_finished_run_without_checkpoints_has_no_final(tmp_path: Path) -> None:

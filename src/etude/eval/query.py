@@ -73,12 +73,12 @@ import warnings
 from collections import defaultdict
 from collections.abc import Container, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import numpy as np
 import numpy.typing as npt
-from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationError
+from pydantic import JsonValue, TypeAdapter, ValidationError
 
 from etude.carriage import EVAL_BLOCK_INDEX, EVAL_BLOCK_PACK
 from etude.eval.block import (
@@ -99,10 +99,9 @@ from etude.eval.records import (
     ROLLUP_ROWS,
     TOURNAMENT_FILE,
     Benchmark,
-    CheckpointKey,
+    CheckpointPlayer,
     ColumnType,
     Environment,
-    Model,
     Player,
     Rollup,
     Scheduled,
@@ -114,6 +113,7 @@ from etude.tracking.errors import EtudeError
 from etude.tracking.listing import as_storage, declared, run_folders, under
 from etude.tracking.records import Digest, Record, RunState
 from etude.tracking.storage import SAFE_NAME, DirectoryStorage, Storage, default_root
+from etude.train.records import CheckpointRecord, checkpoint_id
 
 if TYPE_CHECKING:
     import duckdb
@@ -130,7 +130,7 @@ NUMERIC = ("BOOLEAN", "BIGINT", "DOUBLE")
 # Keys and coordinates of an author table's rows: never a value.
 KEYS = ("seat", "group", "game", "run", "match")
 # A kept database of another schema is deleted and read again from its store.
-SCHEMA = 13
+SCHEMA = 14
 
 # How a match's records order, newest first: by when each was recorded, then by run name.
 # `matches.newest` ranks done records so; `etude.eval.tournament.played` orders runs alike.
@@ -386,10 +386,10 @@ def _training_checkpoints(
     for name in names:
         if not (name.startswith("checkpoints/") and name.endswith(".json")):
             continue
-        stored = _StoredCheckpoint.model_validate_json(storage.get(located[name] + name))
+        stored = CheckpointRecord.model_validate_json(storage.get(located[name] + name))
         rows.append(
             [run, experiment, stored.ordinal,
-             str(CheckpointKey(run=run, name=PurePosixPath(stored.artifact.uri).name)),
+             checkpoint_id(run=run, name=stored.name),
              stored.artifact.sha256, stored.wall_ms, json.dumps(stored.at)]
         )  # fmt: skip
     stage(
@@ -521,8 +521,8 @@ def _matches(db: duckdb.DuckDBPyConnection, run: str, block: Block) -> None:
             [index, seat, player.key, player.name, player.model_dump_json(),
              player.version.commit, player.version.source,
              _canonical(player.checkpoint.at)
-             if isinstance(player, Model) and player.checkpoint.at else None,
-             player.checkpoint.line if isinstance(player, Model) else None]
+             if isinstance(player, CheckpointPlayer) and player.checkpoint.at else None,
+             player.checkpoint.line if isinstance(player, CheckpointPlayer) else None]
             for index, record in enumerate(records)
             for seat, player in enumerate(record.match.players)
         ],
@@ -845,24 +845,6 @@ def _adjacent(members: Sequence[tuple[str, int, int]]) -> Iterator[list[tuple[st
         yield group
 
 
-class _StoredArtifact(BaseModel):
-    model_config = ConfigDict(extra="ignore", frozen=True)
-
-    uri: str
-    sha256: str | None = None
-
-
-class _StoredCheckpoint(BaseModel):
-    """What evaluation reads of a training run's `checkpoints/NAME.json`; the rest is training's."""
-
-    model_config = ConfigDict(extra="ignore", frozen=True)
-
-    ordinal: int
-    artifact: _StoredArtifact
-    at: dict[str, float]
-    wall_ms: int
-
-
 def _summaries(db: duckdb.DuckDBPyConnection) -> None:
     """Rebuild `runs`, `tournaments`, `schedule` and `players`, and rank `matches.newest`,
     from what the database holds."""
@@ -1020,7 +1002,7 @@ def _players_table(db: duckdb.DuckDBPyConnection, players: dict[str, list[Player
 
 def _checkpoint(player: Player) -> tuple[str | None, str | None, str | None]:
     """A model's checkpoint key, digest and file; nothing for code."""
-    if not isinstance(player, Model):
+    if not isinstance(player, CheckpointPlayer):
         return None, None, None
     checkpoint = player.checkpoint
     return str(checkpoint.key), checkpoint.artifact.sha256, checkpoint.artifact.uri

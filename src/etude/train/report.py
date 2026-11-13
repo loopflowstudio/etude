@@ -274,8 +274,10 @@ def _marks(run: RunData) -> list[Mark]:
     marks: list[Mark] = []
     previous = None
     for checkpoint in run.checkpoints:
+        if checkpoint.wall_ms is None:
+            continue
         began = [
-            a for a in run.attempts if (previous.wall_ms if previous else -1) < a.started_ms
+            a for a in run.attempts if (previous.wall_ms if previous and previous.wall_ms is not None else -1) < a.started_ms
             and a.started_ms <= checkpoint.wall_ms
         ]  # fmt: skip
         # Pace is measured within one attempt: from the previous checkpoint, or
@@ -286,7 +288,7 @@ def _marks(run: RunData) -> list[Mark]:
         for clock in steps:
             here = checkpoint.at.get(clock)
             if since is not None:
-                there, then = since.at.get(clock), since.wall_ms
+                there, then = since.at.get(clock), since.wall_ms or 0
             elif resumed is not None:
                 there, then = resumed.resumed_at.get(clock), resumed.started_ms
             else:

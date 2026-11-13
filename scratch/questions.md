@@ -18,8 +18,8 @@
   conditional membership read per observed run; a changed state pointer costs
   one pointer read, one state listing and one deletion per older object.
 
-The default recipe, record unification, folder checkpoints and explicit resume
-commands are still unbuilt; the docs continue to describe the target experience.
+Folder checkpoints and their shared record/reference are built. Run/attempt
+record unification, the default CLI recipe and explicit resume remain unbuilt.
 
 The accepted rebuild is `design-train-api.md`; `docs/training.md` describes its
 intended experience. Earlier local_launch/Run.until choices and QA history are
@@ -102,17 +102,16 @@ flight, the public example, save cadence) is unchanged and not repeated.
 
 Open product choices the design does not spell:
 
-1. **Class names for players.** The design renames the noun (`Model` →
-   player; Jack Heart: "works for me") but gives no class name, and
-   `etude.eval.records.Player` is already the `Model | Code` union. Docs avoid
-   naming the class and write `Inference(...).player(ref)` and
-   `checkpoint.player(inference)`. Question: what is today's `Model` class
-   called (`CheckpointPlayer`? `Player` with the union renamed?), and is
-   `Code` kept?
-2. **The one checkpoint reference type.** Design: "`CheckpointRecord`, plus
-   one reference type" replacing `Checkpoint`, `CheckpointKey`,
-   `CheckpointRef`. No name given. Docs keep `CheckpointRef`/`CheckpointKey`
-   spellings in `docs/evaluation.md` untouched.
+1. **Class names for players.** Reversible implementation choice: the existing
+   `Player` union already covers checkpoint and code seats, so keep it and
+   `Code`; rename the checkpoint case `CheckpointPlayer`. `Inference.player`
+   and `CheckpointRecord.player` are the taught constructors. Released
+   `Model`, `Checkpoint` and `.model(...)` spellings warn, removed in 0.5.
+2. **The one checkpoint reference type.** Chosen here: `CheckpointRef` in
+   `etude.train.records`, with an encoded string key. `checkpoint_id` builds
+   it from run/name or an outside address. Historical structured keys still
+   decode; pinned match/seating hashes are unchanged. `CheckpointKey` is a
+   deprecated constructor alias, not another record.
 3. **How playing code receives a folder checkpoint.** Docs take the smallest
    extension: `player.checkpoint.artifact.uri` names the folder, which holds
    `checkpoint.json`. Alternative: a `path` accessor on the reference.
@@ -130,6 +129,15 @@ Open product choices the design does not spell:
    say a finished run becomes unfinished until the new target, and that
    `--resume` on a finished run with no later target is refused. Whether its
    record reads `finished` in between is not stated anywhere.
+
+Checkpoint implementation choices (2026-11-13): folder artifacts carry a
+`members` map of relative files to the existing `cache.Content` digest/length
+record. The folder digest hashes canonical JSON of that map; length is the
+sum of member lengths. Every member becomes an ordinary verified `Input`
+under one directory name; no folder archive or extra remote object. Callback
+exports list their paths in `checkpoint.json`; named objects reuse the state
+serializer. Exports must be self-contained and use the carrier's published
+names (no symlinks, dot paths or `.open`/`.partial` files).
 
 Assumptions taken (reversible, simpler option):
 

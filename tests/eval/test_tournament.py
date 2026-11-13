@@ -17,13 +17,11 @@ from etude.eval.query import statsdb
 from etude.eval.records import (
     Aligned,
     Benchmark,
-    CheckpointKey,
-    CheckpointRef,
+    CheckpointPlayer,
     Code,
     Inference,
     Line,
     Match,
-    Model,
     RoundRobin,
     Seating,
     Share,
@@ -33,6 +31,7 @@ from etude.eval.tournament import hold, played, scores, standings, stored_runs
 from etude.tracking.errors import EtudeError
 from etude.tracking.records import ArtifactRef, Clock
 from etude.tracking.storage import DirectoryStorage
+from etude.train.records import CheckpointRef, checkpoint_id
 from etude.train.run import track
 from tests.eval.games import play, play_failing_deal_one
 from tests.experiments import authored
@@ -67,7 +66,7 @@ def trained(tmp_path: Path, bucket: DirectoryStorage) -> list[CheckpointRef]:
         model = tmp_path / "latest.pt"
         model.write_bytes(f"weights {ordinal}".encode())
         artifact = run.checkpoint(model, updates=100 * ordinal)
-        key = CheckpointKey(run="ppo-1", name=PurePosixPath(artifact.uri).name)
+        key = checkpoint_id(run="ppo-1", name=PurePosixPath(artifact.uri).name)
         saved.append(CheckpointRef(key=key, artifact=artifact))
     run.finish(timeout=30)
     return saved
@@ -96,7 +95,7 @@ def test_a_relative_seat_waits_for_its_checkpoint_and_a_batch_hold_plays_it_once
     saved = trained(tmp_path, bucket)
     # Two learners' checkpoints at the same positions, as two training runs would key them.
     small, large = (
-        [ref.model_copy(update={"key": CheckpointKey(run=line, name=ref.key.name),
+        [ref.model_copy(update={"key": checkpoint_id(run=line, name=ref.key.rsplit("/", 1)[-1]),
                                 "at": {"updates": 100 * n}, "line": line})
          for n, ref in enumerate(saved, 1)]
         for line in ("small-1", "large-1")
@@ -156,7 +155,7 @@ def test_an_aligned_hours_seat_takes_the_other_jobs_latest_checkpoint_once_it_ha
     saved = trained(tmp_path, bucket)
     # No checkpoint is saved at an exact hour: small saves a little before each, large on it.
     small, large = (
-        [ref.model_copy(update={"key": CheckpointKey(run=line, name=ref.key.name),
+        [ref.model_copy(update={"key": checkpoint_id(run=line, name=ref.key.rsplit("/", 1)[-1]),
                                 "at": {"running_hours": hours}, "line": line})
          for ref, hours in zip(saved, positions, strict=True)]
         for line, positions in (("small-1", (0.9, 1.8, 2.7)), ("large-1", (1.0, 2.0, 3.0)))
@@ -179,8 +178,8 @@ def test_an_aligned_hours_seat_takes_the_other_jobs_latest_checkpoint_once_it_ha
         return {
             str(held.checkpoint.key): str(other.checkpoint.key)
             for held, other in pairs
-            if isinstance(held, Model)
-            and isinstance(other, Model)
+            if isinstance(held, CheckpointPlayer)
+            and isinstance(other, CheckpointPlayer)
             and held.checkpoint.line == "large-1"
         }
 
@@ -257,7 +256,7 @@ def test_a_batch_hold_skips_what_any_eval_run_of_its_environment_delivered(tmp_p
     checkpoints = trained(tmp_path, bucket)
     for each in checkpoints:
         hold(progress, experiment=EXPERIMENT, checkpoint=each, play=play, storages=[bucket],
-             directory=tmp_path / str(each.key.name))  # fmt: skip
+             directory=tmp_path / str(each.key.rsplit("/", 1)[-1]))  # fmt: skip
     measured = MeasuredStorage(bucket)
     again = hold(
         progress,
@@ -351,7 +350,7 @@ def test_a_batch_hold_over_eval_runs_stored_with_agents_replays_nothing(tmp_path
     progress = anchors(tmp_path)
     for each in trained(tmp_path, bucket):
         hold(progress, experiment=EXPERIMENT, checkpoint=each, play=play, storages=[bucket],
-             directory=tmp_path / str(each.key.name))  # fmt: skip
+             directory=tmp_path / str(each.key.rsplit("/", 1)[-1]))  # fmt: skip
     before = scores(statsdb(EXPERIMENT, bucket), "anchors", table="plays", value="won")
     _as_published(tmp_path / "bucket")
     assert all(
@@ -550,7 +549,7 @@ def test_each_share_of_a_checkpoint_benchmark_seats_fewer_checkpoints_than_a_rou
                 each.checkpoint.key
                 for match in matches
                 for each in match.players
-                if isinstance(each, Model)
+                if isinstance(each, CheckpointPlayer)
             }
         )
 
@@ -567,7 +566,7 @@ def test_a_seed_added_splits_the_point_again_and_counts_only_the_new_split(
     bucket = DirectoryStorage(tmp_path / "bucket")
     saved = trained(tmp_path, bucket)[:1]
     small, small_2, large = (
-        ref.model_copy(update={"key": CheckpointKey(run=line, name=ref.key.name),
+        ref.model_copy(update={"key": checkpoint_id(run=line, name=ref.key.rsplit("/", 1)[-1]),
                                "at": {"updates": 100}, "line": line})
         for ref in saved
         for line in ("small-1", "small-2", "large-1")
@@ -613,7 +612,7 @@ def test_scores_of_checkpoints_no_training_run_recorded_follow_their_names(
     for name in saved:
         # An outside checkpoint, keyed by its address.
         artifact = ArtifactRef(uri=f"s3://models/{name}", sha256=sha256(name.encode()).hexdigest())
-        checkpoint = CheckpointRef(key=CheckpointKey(address=artifact.uri), artifact=artifact)
+        checkpoint = CheckpointRef(key=checkpoint_id(address=artifact.uri), artifact=artifact)
         hold(progress, experiment=EXPERIMENT, checkpoint=checkpoint, play=play, storages=[bucket],
              directory=tmp_path / name)  # fmt: skip
     for line in scores(statsdb(EXPERIMENT, bucket), "anchors", table="plays", value="won"):
@@ -633,8 +632,8 @@ def test_pairs_of_checkpoints_named_as_they_appear_are_each_played_once(tmp_path
     def wanted(saved: list[CheckpointRef]) -> Benchmark:
         """Each checkpoint against the heuristic, and each against the one before it."""
         consecutive = [
-            Seating(name=f"{DIRECT.model(new).name} vs {DIRECT.model(old).name}",
-                    players=(DIRECT.model(new), DIRECT.model(old)), conditions=DEALS, games=2)
+            Seating(name=f"{DIRECT.player(new).name} vs {DIRECT.player(old).name}",
+                    players=(DIRECT.player(new), DIRECT.player(old)), conditions=DEALS, games=2)
             for old, new in zip(saved, saved[1:])
         ]  # fmt: skip
         anchor = Seating(name="vs heuristic", players=(DIRECT, heuristic), conditions=DEALS,
@@ -651,7 +650,7 @@ def test_pairs_of_checkpoints_named_as_they_appear_are_each_played_once(tmp_path
         definition = wanted(saved)
         for checkpoint in saved:  # what a training run's on-the-go holds would add
             hold(definition, experiment=EXPERIMENT, checkpoint=checkpoint, play=play, storages=[bucket],
-                 directory=tmp_path / machine / str(checkpoint.key.name))  # fmt: skip
+                 directory=tmp_path / machine / str(checkpoint.key.rsplit("/", 1)[-1]))  # fmt: skip
         return hold(definition, experiment=EXPERIMENT, play=play, storages=[bucket],
                     directory=tmp_path / machine).played  # fmt: skip
 
@@ -690,7 +689,7 @@ def test_two_keys_holding_the_same_bytes_are_two_models_each_played(tmp_path: Pa
     # Two runs warm-started from one file: the same bytes, two checkpoints.
     file = ArtifactRef(uri="s3://models/init.pt", sha256=sha256(b"init").hexdigest())
     starts = [
-        CheckpointRef(key=CheckpointKey(run=run, name="updates-100.pt"), artifact=file)
+        CheckpointRef(key=checkpoint_id(run=run, name="updates-100.pt"), artifact=file)
         for run in ("ppo-1", "ppo-2")
     ]
     played = hold(ladder, experiment=EXPERIMENT, checkpoints=starts, play=play,

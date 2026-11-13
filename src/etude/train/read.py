@@ -633,7 +633,7 @@ def _table(block: StoredBlock, digest: str | None) -> RowTable:
 
 
 def _order(record: CheckpointRecord) -> tuple[int, int]:
-    return record.ordinal, record.wall_ms
+    return record.ordinal, record.wall_ms or 0
 
 
 def _hours(
@@ -648,6 +648,9 @@ def _hours(
     """
     done: list[CheckpointRecord] = []
     for record in records:
+        if record.wall_ms is None:
+            done.append(record)
+            continue
         at = dict(record.at)
         began = [a for a in attempts if a.started_ms <= record.wall_ms]
         if began and not continued:
@@ -681,7 +684,12 @@ def _here(
     that no longer exists. A missing file leaves the record as it is.
     """
     name = record.file or checkpoint_key(record.artifact.uri)
-    if record.artifact.sha256 is None or (folder, name) not in keys:
+    present = (
+        all((folder, name + "/" + member) in keys for member in record.artifact.members)
+        if record.artifact.members
+        else (folder, name) in keys
+    )
+    if record.artifact.sha256 is None or not present:
         return record
     artifact = record.artifact.model_copy(update={"uri": storage.uri(folder + name)})
     return record.model_copy(update={"artifact": artifact})

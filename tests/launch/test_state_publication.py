@@ -16,6 +16,8 @@ from etude.out import MEMBERSHIP
 from etude.storage_timeout import StorageUnavailable
 from etude.tracking.delivery import RunFiles, StorageDestination, prune
 from etude.tracking.storage import DirectoryStorage
+from etude.train.records import Step
+from etude.train.run import track
 from tests.launch.test_out import Writes
 from tests.launch.test_runpod_machines import machine
 from tests.run.storage import MeasuredStorage
@@ -221,3 +223,37 @@ def test_controller_retires_remote_saves_under_an_upload_only_grant(tmp_path: Pa
     assert Counter(method for method, _ in storage.asked[asked:]) == {"GET": 1}
     assert sum(storage.writes.values()) == before
     assert json.loads(journal.held("run1")["out/state/current.json"])["save"] == second.name
+
+
+def test_a_folder_checkpoint_is_delivered_once_and_relayed_member_by_member(tmp_path: Path) -> None:
+    storage = Writes()
+    courier, _, root = machine(tmp_path, storage)
+    with track(
+        experiment="tiny",
+        run="run1",
+        directory=root.parent,
+        clocks=[Step("updates", "updates")],
+        strict=True,
+    ) as run:
+
+        def export(folder: Path) -> None:
+            (folder / "policy").write_bytes(b"weights")
+            (folder / "value").write_bytes(b"value weights")
+
+        run.checkpoint(export, updates=1)
+        (checkpoint,) = run.checkpoints()
+    courier._track("run1", done=False)
+    courier._track("run1", done=False)
+    record = next(root.glob("checkpoints/*.json")).relative_to(root).as_posix()
+    assert checkpoint.file is not None
+    written = list(storage.writes)
+    for member in checkpoint.artifact.members:
+        key = "etude/run1/" + checkpoint.file + "/" + member
+        assert storage.writes[key] == 1
+        assert written.index(key) < written.index("etude/run1/" + record)
+        relayed = _journal(storage).held("run1", checkpoint.file + "/" + member)
+        target = tmp_path / "relay" / member.replace("/", "_")
+        put_back(target, relayed)
+        assert (target / checkpoint.file / member).read_bytes() == (
+            checkpoint.path / member
+        ).read_bytes()

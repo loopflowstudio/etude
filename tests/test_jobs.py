@@ -60,14 +60,14 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from etude.eval.match import Tables
-from etude.eval.records import Match, Model
+from etude.eval.records import Match, CheckpointPlayer
 
 
 def play(match: Match) -> Tables:
     # A model's checkpoint file is on this machine; the row says how big it is.
     sizes = [
         len(Path(urlparse(seated.checkpoint.artifact.uri).path).read_bytes())
-        if isinstance(seated, Model)
+        if isinstance(seated, CheckpointPlayer)
         else 0
         for seated in match.players
     ]

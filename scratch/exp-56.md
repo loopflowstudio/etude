@@ -53,10 +53,11 @@ Replace these end to end:
 - Separate tracking `RunDeclaration`/`RunFile` and observed `TrainingRun` ->
   the single stored `RunRecord`, shared with the launcher.
 - Tracking `Attempt` -> the single `RunAttempt`, shared with the launcher.
-- Experiment `Checkpoint`, eval `CheckpointKey`/`CheckpointRef` and tracking
-  `CheckpointRecord` -> one record and one reference; preserve identity,
-  lineage, ordinals, tags, clocks, digests and relative-seat resolution.
-- Eval model noun -> player; report line noun -> job.
+- Experiment `Checkpoint` and eval query's `_StoredCheckpoint`/`_StoredArtifact`
+  are removed. One `CheckpointRecord` and one `CheckpointRef` live in
+  `etude.train.records`; keys are strings (old structured keys still load).
+- Eval `Model` -> `CheckpointPlayer`, keeping the `Player` union and stored
+  kind; `.player(...)` replaces `.model(...)`. Report line -> job is still open.
 - Root `state.json` writer -> `outcome.json`; retain old outcome readers.
 - Implicit resume on taken names -> create-only identity and explicit resume.
 - `local_launch`, `track(seed=)` and `latest_checkpoint()` leave the taught
@@ -105,13 +106,17 @@ cleanup under upload-only grants. Registration, PyTorch serialization, extra
 counts, callback saves, named state, step cadence, stop propagation, seed/input
 access and stepped row clocks are wired into Run. Both hour clocks survive a
 relay without checkpoints. `etude.run` is removed in favor of `etude.tracking`.
+Folder checkpoints now publish named objects or callback exports, share records
+with evaluation/query, list through `run.checkpoints()`, and travel as verified
+member inputs through `start=`, evaluation and explicit checkpoint continuation.
+The query cache rebuilds at schema 14 so folder keys join their seated players.
 
 1. Unify/rename records; wire historical readers and outcome files. The
    tracking package move is done; RunRequest and the record unification are not.
 2. Finish default recipe acceptance on the surviving records and commands.
    The registration API currently has focused Python tests, not CLI acceptance.
-3. Carry folder checkpoints through tracking, launch inputs and evaluation;
-   add start= and shared checkpoint enumeration.
+3. Finish recording `start=` lineage in the unified run record; inputs already
+   persist it in the launcher Job. Folder carriage and enumeration are built.
 4. Add local `etude run`, explicit local/launched --resume (with `--until`
    extending the same run, finished or not), create-only names,
    config/seed refusals and per-attempt source recording; a refused or
@@ -123,14 +128,14 @@ relay without checkpoints. `etude.run` is removed in favor of `etude.tracking`.
 
 ## Verification
 
-2026-11-13, after compress: `uv run --extra train pytest tests/train
-tests/launch/test_state_publication.py tests/launch/test_out.py tests/run
-tests/test_continuation_out.py tests/launch/test_worker_attempts.py
-tests/launch/test_transfers.py tests/launch/test_measurement.py -q`: 248
-passed, 6 skipped. `uv run mypy`, `uv run ruff check .`, `uv run ruff format
---check .`: clean. No full gate, publication, landing or Graph changes. The
-two historical probes still describe raw mutable out carriage, not registered
-state.
+2026-11-13 checkpoint pass: focused acceptance commands for
+`tests/train/test_checkpoints.py`, folder courier/worker inputs, folder
+continuation, historical keys, relative seats, query joins and immutable file
+versions: `uv run --extra train pytest` on focused checkpoint acceptance
+files/nodes plus `tests/eval/test_records.py -q`: 28 passed. `uv run mypy`,
+`uv run ruff check .` and `uv run ruff format --check .`: clean.
+Earlier 248-pass state check: `a8efc13:scratch/exp-56.md`. No gate, publication,
+landing or Graph changes. PR #103 stays draft.
 
 Counting pins moved by the state build, each with its reason beside it:
 

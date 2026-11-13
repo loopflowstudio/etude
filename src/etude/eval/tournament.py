@@ -50,7 +50,6 @@ from etude.eval.records import (
     IDENTIFIER,
     TOURNAMENT_FILE,
     Benchmark,
-    CheckpointRef,
     Environment,
     Line,
     Match,
@@ -72,6 +71,7 @@ from etude.tracking.errors import EtudeError
 from etude.tracking.listing import run_folders, under
 from etude.tracking.records import Digest, Record, RunFile
 from etude.tracking.storage import DirectoryStorage, Storage, default_root
+from etude.train.records import CheckpointRef
 
 if TYPE_CHECKING:
     import duckdb
@@ -524,7 +524,7 @@ def _held(db: duckdb.DuckDBPyConnection, tournament: str) -> Iterator[tuple[int,
 class ScorePoint(Record):
     """A seating's value for one held checkpoint, and where its training run stood when it was saved."""
 
-    # Its key (`etude.eval.records.CheckpointKey`), encoded.
+    # Its key (`etude.eval.records.CheckpointId`), encoded.
     checkpoint: str
     # What the checkpoint's players are called: the latest name its seats give, the least of
     # several players'. A benchmark's inference seat names it for its file (`Inference.model`).

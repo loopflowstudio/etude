@@ -20,9 +20,9 @@ training `Line`s, which the caller passes, since evaluation reads no training
 run. What it finds is exact, so found for good: the hold records it
 (`Seated`), and every later read schedules from the record.
 
-A `Player` is whatever takes a seat: a `Model`, a checkpoint and how it plays
+A `Player` is whatever takes a seat: a `CheckpointPlayer`, a checkpoint and how it plays
 (`Inference`), or `Code`. A player is identified by its key: the checkpoint's
-own key (`CheckpointKey`) or the code's name, together with its config. One
+own key (`CheckpointId`) or the code's name, together with its config. One
 checkpoint at two search budgets is two models; two checkpoint keys holding
 the same bytes are two models too, since where a checkpoint's bytes came from
 is not part of what it is. The code's commit and source digest are its
@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import json
 import re
+import warnings
 from collections.abc import Iterable, Mapping, Sequence
 from hashlib import sha256
 from itertools import combinations
@@ -62,7 +63,8 @@ from pydantic import (
 
 from etude.eval.source import digest_files, source_commit
 from etude.tracking.errors import EtudeError
-from etude.tracking.records import BUILT_IN_NAMES, ArtifactRef, Digest, Name, Record
+from etude.tracking.records import BUILT_IN_NAMES, Digest, Name, Record
+from etude.train.records import CheckpointId, CheckpointRef, checkpoint_id
 
 type Config = dict[str, JsonValue]
 type ColumnType = Literal["BOOLEAN", "BIGINT", "DOUBLE", "VARCHAR"]
@@ -125,65 +127,6 @@ def folder_name(name: str) -> str:
 def version_of(code: Sequence[Path | str]) -> Version:
     """The version of the code in these source files: its commit, and their digest."""
     return Version(commit=source_commit(code), source=digest_files(code))
-
-
-class CheckpointKey(Record):
-    """A checkpoint by where its experiment keeps it: a training run's file, or an outside address.
-
-    `run` and `name` name a training run's checkpoint (`RUN/checkpoints/NAME`);
-    `address` names any other, such as a URI. Never its bytes' digest: two keys
-    holding the same bytes are two checkpoints.
-    """
-
-    run: Name | None = None
-    name: str | None = Field(default=None, min_length=1, max_length=500)
-    address: str | None = Field(default=None, min_length=1, max_length=1000)
-
-    @model_validator(mode="after")
-    def one_place(self) -> Self:
-        if (self.run is None) != (self.name is None) or (self.run is None) == (
-            self.address is None
-        ):
-            raise ValueError("checkpoint_key_is_a_run_and_name_or_an_address")
-        return self
-
-    def __str__(self) -> str:
-        if self.address is not None:
-            return self.address
-        key = (
-            self.name
-            if self.name is not None and self.name.startswith("out/")
-            else f"checkpoints/{self.name}"
-        )
-        return f"{self.run}/{key}"
-
-    @property
-    def label(self) -> str:
-        """Its last path part, as a report names it."""
-        return str(self).rstrip("/").rsplit("/", 1)[-1] or str(self)
-
-
-class CheckpointRef(Record):
-    """A checkpoint to seat: its key, and the file holding it, which must carry its digest.
-
-    `at` is where it stood on each clock, such as `{"updates": 600}`: a
-    declared fact the seat carries to its matches so a report can place it,
-    and part of no key. `line` names the learner it belongs to, such as a
-    seed or a recipe, so a report compares it with that learner's other
-    checkpoints; also part of no key. A tracked checkpoint's ref fills both
-    from its run; give them yourself for a checkpoint no Etude run recorded.
-    """
-
-    key: CheckpointKey
-    artifact: ArtifactRef
-    at: dict[str, float] = {}
-    line: str | None = None
-
-    @model_validator(mode="after")
-    def verifiable(self) -> Self:
-        if self.artifact.sha256 is None:
-            raise ValueError("model_checkpoint_requires_digest")
-        return self
 
 
 class Version(Record):
@@ -262,15 +205,24 @@ class Inference(Record):
             data["version"] = {"source": data.pop("code")}
         return _versioned(data)
 
-    def model(self, checkpoint: CheckpointRef) -> Model:
-        """The model `checkpoint` is when it plays this way, named for its file."""
-        return Model(
-            name=re.sub(r"\s", "_", checkpoint.key.label), checkpoint=checkpoint, inference=self
+    def player(self, checkpoint: CheckpointRef) -> CheckpointPlayer:
+        """The player `checkpoint` is when it plays this way, named for its files."""
+        return CheckpointPlayer(
+            name=re.sub(r"\s", "_", checkpoint.key.rstrip("/").rsplit("/", 1)[-1]),
+            checkpoint=checkpoint,
+            inference=self,
         )
 
+    def model(self, checkpoint: CheckpointRef) -> CheckpointPlayer:
+        """Released spelling; use player()."""
+        warnings.warn(
+            "Inference.model() is now player(); removed in 0.5", DeprecationWarning, stacklevel=2
+        )
+        return self.player(checkpoint)
 
-class Model(Record):
-    """A checkpoint and how it plays (`Inference`). One checkpoint at two configs is two models."""
+
+class CheckpointPlayer(Record):
+    """A checkpoint and how it plays (`Inference`). One checkpoint at two configs is two players."""
 
     kind: Literal["model"] = "model"
     # What a report calls it.
@@ -323,7 +275,7 @@ class Code(Record):
 
 
 def _player(data: Any) -> Any:
-    """A player as published etude-sdk stored it (an `Agent`), as a `Model` or `Code`.
+    """A player as published etude-sdk stored it (an `Agent`), as a `CheckpointPlayer` or `Code`.
 
     An Agent was keyed by `key.checkpoint` or `key.code` with its config; an
     etude-sdk 0.2 agent by a digest of `kind`, `artifact`, `code` and `config`,
@@ -367,7 +319,9 @@ def _player(data: Any) -> Any:
 
 
 # What takes a seat: a checkpoint playing some way, or code.
-type Player = Annotated[Model | Code, Field(discriminator="kind"), BeforeValidator(_player)]
+type Player = Annotated[
+    CheckpointPlayer | Code, Field(discriminator="kind"), BeforeValidator(_player)
+]
 
 
 class Environment(Record):
@@ -643,7 +597,7 @@ class Seated(Record):
     """
 
     seating: str
-    checkpoint: CheckpointKey
+    checkpoint: CheckpointId
     pairings: tuple[Pairing, ...]
     # The lines of both sides it counted, by name.
     lines: tuple[str, ...] = ()
@@ -657,7 +611,7 @@ class Gap(Record):
     """
 
     seating: str
-    checkpoint: CheckpointKey
+    checkpoint: CheckpointId
     missing: Missing
     seat: Relative
     value: float | None = None
@@ -671,7 +625,7 @@ class Seating(Record):
     `At`, `Final`, `Aligned`) naming a checkpoint by where it stands relative
     to the held one. Its value is the first player's against the second. With
     no inference seat it is played once, not for each checkpoint, so two
-    chosen checkpoints can meet: `Inference.model(checkpoint)` seats one as the
+    chosen checkpoints can meet: `Inference.player(checkpoint)` seats one as the
     benchmark would. It makes one match per condition (`matches`).
 
     `games` is per condition and point: an `at` of the held checkpoint's
@@ -834,11 +788,11 @@ def _seat(
     if isinstance(each, _RELATIVE):
         if found is None:
             raise ValueError("relative_seat_needs_its_checkpoints")
-        return each.inference.model(found)
+        return each.inference.player(found)
     if isinstance(each, Inference):
         if checkpoint is None:
             raise ValueError("inference_seat_needs_a_checkpoint")
-        return each.model(checkpoint)
+        return each.player(checkpoint)
     return each
 
 
@@ -1025,7 +979,7 @@ class Scheduled(Record):
 
     match: Match
     seating: str | None = None
-    checkpoint: CheckpointKey | None = None
+    checkpoint: CheckpointId | None = None
     tags: tuple[Name, ...] = ()
 
 
@@ -1146,3 +1100,19 @@ def assemble(held: Iterable[TournamentRun]) -> Tournament:
         entrants=tuple(entrants[key] for key in sorted(entrants)),
         seated=_most_lines(each for run in runs for each in run.seated),
     )
+
+
+def __getattr__(name: str) -> object:
+    if name == "Model":
+        warnings.warn(
+            "Model is now CheckpointPlayer; removed in 0.5", DeprecationWarning, stacklevel=2
+        )
+        return CheckpointPlayer
+    if name == "CheckpointKey":
+        warnings.warn(
+            "CheckpointKey is now checkpoint_id from etude.train.records; removed in 0.5",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return checkpoint_id
+    raise AttributeError(name)

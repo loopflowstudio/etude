@@ -13,17 +13,7 @@ from moto import mock_aws
 from etude.carriage import EVAL_BLOCK_PACK, checkpoint_file
 from etude.eval.match import Result, environment, evaluate
 from etude.eval.query import compare, statsdb
-from etude.eval.records import (
-    Benchmark,
-    CheckpointKey,
-    CheckpointRef,
-    Code,
-    Inference,
-    Match,
-    Model,
-    Player,
-    Seating,
-)
+from etude.eval.records import Benchmark, CheckpointPlayer, Code, Inference, Match, Player, Seating
 from etude.eval.tournament import hold
 from etude.experiment import advance, observe, read_experiment
 from etude.page import Drawn, OutsideTournaments, Page, PanelSelection, build
@@ -32,6 +22,7 @@ from etude.tracking.block_file import parse
 from etude.tracking.errors import EtudeError
 from etude.tracking.records import ArtifactRef, Clock, Continuation, SourceKey
 from etude.tracking.storage import DirectoryStorage, S3Storage, Storage
+from etude.train.records import CheckpointRef, checkpoint_id
 from etude.train.run import Run, track
 from tests.eval.games import play, play_failing_deal_one, play_with_evidence
 from tests.experiments import authored, experiment_file
@@ -39,9 +30,8 @@ from tests.run.storage import CountedClient, MeasuredStorage
 
 LAB = """
 from etude.eval.match import environment
-from etude.eval.records import (
-    ArtifactRef, Benchmark, CheckpointKey, CheckpointRef, Code, Inference, Seating, Model,
-)
+from etude.eval.records import (ArtifactRef, Benchmark, Code, Inference, Seating, CheckpointPlayer)
+from etude.train.records import (CheckpointId, checkpoint_id, CheckpointRef)
 from etude.jobs import evaluation
 from etude.report import Anchors, Curve, Matches, Report, Score
 from tests.eval.games import play, play_failing_deal_one
@@ -51,10 +41,10 @@ DIRECT = Inference(config={"search": 0})
 DEALS = ({"deal": 0}, {"deal": 1})
 WEAK = Code(name="weak", source=[__file__], config={"strength": 0})
 STRONG = Code(name="strong", source=[__file__], config={"strength": 9})
-OUTSIDE = Model(
+OUTSIDE = CheckpointPlayer(
     name="outside",
     checkpoint=CheckpointRef(
-        key=CheckpointKey(address="hf://lab/outside.pt"),
+        key=checkpoint_id(address="hf://lab/outside.pt"),
         artifact=ArtifactRef(uri="hf://lab/outside.pt", sha256="ab" * 32),
     ),
     inference=Inference(config={"strength": 5}),
@@ -318,16 +308,18 @@ DUEL = environment("duel")
 HEURISTIC = Code(name="heuristic", source=[__file__], config={"strength": 5})
 
 
-def outside(name: str, at: dict[str, float], line: str | None = None, **config: int) -> Model:
+def outside(
+    name: str, at: dict[str, float], line: str | None = None, **config: int
+) -> CheckpointPlayer:
     """A checkpoint no Etude run recorded, keyed by its address, seated where `at` says."""
     address = f"hf://lab/{name}.pt" if line is None else f"hf://lab/{line}/{name}.pt"
     ref = CheckpointRef(
-        key=CheckpointKey(address=address),
+        key=checkpoint_id(address=address),
         artifact=ArtifactRef(uri=address, sha256="cd" * 32),
         at=at,
         line=line,
     )
-    return Model(name=name, checkpoint=ref, inference=Inference(config=config))
+    return CheckpointPlayer(name=name, checkpoint=ref, inference=Inference(config=config))
 
 
 def duel(first: Player, second: Player, deal: int = 0) -> Match:
@@ -647,8 +639,8 @@ def test_a_tracked_checkpoint_is_placed_by_its_seat_first_and_its_training_recor
         experiment="seated",
         environment=DUEL,
         matches=[
-            duel(Inference().model(bare), HEURISTIC),
-            duel(Inference().model(moved), HEURISTIC),
+            duel(Inference().player(bare), HEURISTIC),
+            duel(Inference().player(moved), HEURISTIC),
         ],
         play=play,
         run="plain",
@@ -723,7 +715,7 @@ def test_a_continued_run_is_one_line_with_the_run_it_continues(
     assert {(each.run, each.ref.line) for each in saved} == {("a", "a"), ("b", "a")}
     # Seated with no line, as matches recorded before seats carried one: each checkpoint's
     # line is its training run's, the first run of its chain.
-    unlined = [Inference().model(each.ref.model_copy(update={"line": None})) for each in saved]
+    unlined = [Inference().player(each.ref.model_copy(update={"line": None})) for each in saved]
     evaluate(
         experiment="seated",
         environment=DUEL,

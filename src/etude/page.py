@@ -116,7 +116,7 @@ class Placement(Record):
     to a run or given an `at`; else it is an anchor.
     """
 
-    key: str  # its key (`etude.eval.records.Model.key` or `Code.key`), as the database holds it
+    key: str  # its key (`etude.eval.records.CheckpointPlayer.key` or `Code.key`), as the database holds it
     # Every name its seats gave it, the latest first, joined by "/".
     name: str
     run: str | None
@@ -953,7 +953,7 @@ def _points(
     its point. Several pairs, such as each line of a job, are their mean.
     """
     # The optional `eval` extra, as in `_read_evals`.
-    from etude.eval.records import Benchmark, Model  # noqa: PLC0415
+    from etude.eval.records import Benchmark, CheckpointPlayer  # noqa: PLC0415
 
     index = {each.key: i for i, each in enumerate(players)}
     refs = {str(ref.key): ref for each in held for ref in each.tournament.checkpoints}
@@ -965,7 +965,7 @@ def _points(
             held_for = called.checkpoint
             if held_for is None:
                 seat = called.match.players[0]
-                if not isinstance(seat, Model):
+                if not isinstance(seat, CheckpointPlayer):
                     continue
                 held_for = seat.checkpoint.key
                 refs.setdefault(str(held_for), seat.checkpoint)

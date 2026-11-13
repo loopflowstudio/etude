@@ -15,6 +15,8 @@ from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
+from etude.cache import Content
+
 Name = Annotated[str, StringConstraints(min_length=1, max_length=200, pattern=r"^\S+$")]
 Writer = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{12}$")]
 Digest = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
@@ -37,7 +39,7 @@ class SourceKey(Record):
 
 
 class ArtifactRef(Record):
-    """Where a file lies and, when known, the digest and size it must have."""
+    """A file or checkpoint folder, with its digest, size and individually verified members."""
 
     uri: str
     sha256: Digest | None = None
@@ -45,6 +47,17 @@ class ArtifactRef(Record):
     version: str | None = None
     state: Literal["unverified", "unavailable", "verified"] = "unverified"
     media_type: str = "application/octet-stream"
+    # Folder checkpoints carry a manifest of individually verifiable objects.
+    members: dict[str, Content] = Field(
+        default_factory=dict, exclude_if=lambda members: not members
+    )
+
+    @model_validator(mode="after")
+    def _portable_members(self) -> Self:
+        for key in self.members:
+            if key.startswith("/") or {"", ".", ".."} & set(key.split("/")):
+                raise ValueError("artifact members must be portable relative paths")
+        return self
 
 
 class Clock(Record):

@@ -12,8 +12,7 @@ from etude.eval.records import (
     Aligned,
     At,
     Benchmark,
-    CheckpointKey,
-    CheckpointRef,
+    CheckpointPlayer,
     Code,
     Earlier,
     Environment,
@@ -23,7 +22,6 @@ from etude.eval.records import (
     Inference,
     Line,
     Match,
-    Model,
     RoundRobin,
     Seated,
     Seating,
@@ -32,11 +30,12 @@ from etude.eval.records import (
     assemble,
 )
 from etude.tracking.records import ArtifactRef
+from etude.train.records import CheckpointRef, checkpoint_id
 
 DIGEST = "0" * 64
 WORLD = Environment(name="world", files="1" * 64)
 U500 = CheckpointRef(
-    key=CheckpointKey(run="ppo-1", name="updates-500.pt"),
+    key=checkpoint_id(run="ppo-1", name="updates-500.pt"),
     artifact=ArtifactRef(uri="s3://b/updates-500.pt", sha256=DIGEST),
 )
 SEARCH = Inference(config={"sims": 64})
@@ -75,7 +74,7 @@ OLD_ROUND_ROBIN = (
 
 
 def test_renaming_changes_no_match_key_or_seating_definition() -> None:
-    match = Match(players=(SEARCH.model(U500), HEURISTIC), conditions={"deal": 1}, games=8)
+    match = Match(players=(SEARCH.player(U500), HEURISTIC), conditions={"deal": 1}, games=8)
     # Pinned at 2eb32d5: a changed key would replay every stored match.
     assert match.key == "a64354de99bed9ed3bfc72755e7af6774877e28a383306be8e512561e6c793c8"
     seating = Seating(
@@ -86,7 +85,7 @@ def test_renaming_changes_no_match_key_or_seating_definition() -> None:
 
 def test_a_match_stored_with_agents_loads_as_the_same_players() -> None:
     old = Match.model_validate_json(OLD_MATCH)
-    now = Match(players=(SEARCH.model(U500), HEURISTIC), conditions={"deal": 1}, games=8)
+    now = Match(players=(SEARCH.player(U500), HEURISTIC), conditions={"deal": 1}, games=8)
     assert old == now
     assert Match.model_validate_json(now.model_dump_json()) == now
     assert "agents" not in now.model_dump_json()
@@ -100,7 +99,7 @@ def test_tournament_files_stored_with_agents_load_as_players() -> None:
     assert benchmark.tournament == Benchmark(name="ladder", environment=WORLD, seatings=(seating,))
     held = TournamentRun.model_validate_json(OLD_ROUND_ROBIN)
     assert isinstance(held.tournament, RoundRobin)
-    assert held.entrants == (SEARCH.model(U500), HEURISTIC)
+    assert held.entrants == (SEARCH.player(U500), HEURISTIC)
 
 
 def test_a_share_stored_as_a_pair_reads_and_is_written_by_name() -> None:
@@ -132,12 +131,12 @@ def test_etude_sdk_0_2_players_load_and_equal_no_player_since() -> None:
         {"config": {"search": 0}, "version": {"source": DIGEST}}
     )
     assert isinstance(placeholder.players[1], Code)
-    assert isinstance(model, Model) and isinstance(code, Code)
+    assert isinstance(model, CheckpointPlayer) and isinstance(code, Code)
     assert model.inference.config == {"search": 0}
     assert model.checkpoint.artifact.uri == "s3://models/updates-100.pt"
-    now = Inference(config={"search": 0}).model(
+    now = Inference(config={"search": 0}).player(
         CheckpointRef(
-            key=CheckpointKey(run="ppo-1", name="updates-100.pt"),
+            key=checkpoint_id(run="ppo-1", name="updates-100.pt"),
             artifact=ArtifactRef(uri="s3://models/updates-100.pt", sha256=sha),
         )
     )
@@ -151,7 +150,7 @@ def test_a_model_needs_its_checkpoint_digest() -> None:
 
 def _ref(run: str, updates: float) -> CheckpointRef:
     return CheckpointRef(
-        key=CheckpointKey(run=run, name=f"updates-{updates:g}.pt"),
+        key=checkpoint_id(run=run, name=f"updates-{updates:g}.pt"),
         artifact=ArtifactRef(uri=f"file:///{run}/{updates:g}.pt", sha256=DIGEST),
         at={"updates": updates},
         line=run,
@@ -276,7 +275,7 @@ def test_a_relative_seat_finds_an_exact_position_or_says_whether_one_may_still_c
     done = final.resolve(large.checkpoints[0], ended)
     assert isinstance(done, Seated) and _found(done) == [(small.checkpoints[1], 1)]
     (match,) = final.matches(large.checkpoints[0], done)
-    assert match.players[1] == direct.model(small.checkpoints[1])
+    assert match.players[1] == direct.player(small.checkpoints[1])
     with pytest.raises(ValidationError, match="relative_seat_needs_an_inference_seat"):
         Seating(
             name="s",

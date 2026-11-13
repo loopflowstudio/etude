@@ -106,11 +106,8 @@ class State:
     def __init__(
         self, folder: Path, objects: Mapping[str, object], extra: BaseModel | None
     ) -> None:
-        for name in objects:
-            if re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*", name) is None:
-                raise ValueError("object name must be one portable name")
         self.folder = folder
-        self.objects = {name: _object(value) for name, value in objects.items()}
+        self.objects = _objects(objects)
         self.extra = extra
         self.export: Callable[[Path], None] | None = None
         self.saved_at = time.monotonic()
@@ -149,12 +146,9 @@ class State:
         target = self.folder / f"save-{number:08d}"
         with TemporaryDirectory(prefix=".save-", dir=self.folder) as temporary:
             staged = Path(temporary)
-            files: dict[str, str] = {}
             if self.export is not None:
                 self.export(staged)
-            for name, value in self.objects.items():
-                files[name] = name + ".pt"
-                _torch().save(value.state_dict(), staged / files[name])
+            files = write_objects(staged, self.objects)
             saved = SavedState(
                 at=at,
                 wall_ms=wall_ms,
@@ -179,3 +173,19 @@ class State:
         pointer.replace(self.folder / "current.json")
         self.saved_at = time.monotonic()
         self.last_at = at
+
+
+def _objects(objects: Mapping[str, object]) -> dict[str, StateObject]:
+    for name in objects:
+        if re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*", name) is None:
+            raise ValueError("object name must be one portable name")
+    return {name: _object(value) for name, value in objects.items()}
+
+
+def write_objects(folder: Path, objects: Mapping[str, object]) -> dict[str, str]:
+    """Serialize named state objects in the framework's own format."""
+    files: dict[str, str] = {}
+    for name, value in _objects(objects).items():
+        files[name] = name + ".pt"
+        _torch().save(value.state_dict(), folder / files[name])
+    return files

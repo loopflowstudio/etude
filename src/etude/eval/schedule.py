@@ -1,6 +1,6 @@
 """The order an eval run plays its matches in, so consecutive matches reuse checkpoints.
 
-A match seats checkpoints, by their `CheckpointKey` (`checkpoints`); code
+A match seats checkpoints, by their `CheckpointId` (`checkpoints`); code
 players need none. An author's inference runtime, such as Manabot's
 `PolicyStore`, keeps the checkpoints used most recently loaded and evicts the
 least recently used. `ordered` yields matches in the order `evaluate` plays
@@ -18,17 +18,20 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Iterator, Sequence
 
-from etude.eval.records import CheckpointKey, Match, Model
+from etude.eval.records import CheckpointPlayer, Match
+from etude.train.records import CheckpointId
 
 
-def checkpoints(match: Match) -> frozenset[CheckpointKey]:
+def checkpoints(match: Match) -> frozenset[CheckpointId]:
     """The checkpoints a match seats; one checkpoint at two configs is one checkpoint."""
-    return frozenset(_model_checkpoints(match))
+    return frozenset(_find_checkpoints(match))
 
 
-def _model_checkpoints(match: Match) -> list[CheckpointKey]:
-    """The checkpoints of a match's models, in seat order."""
-    return [player.checkpoint.key for player in match.players if isinstance(player, Model)]
+def _find_checkpoints(match: Match) -> list[CheckpointId]:
+    """The checkpoints seated by a match, in seat order."""
+    return [
+        player.checkpoint.key for player in match.players if isinstance(player, CheckpointPlayer)
+    ]
 
 
 def ordered(matches: Sequence[Match]) -> Iterator[Match]:
@@ -38,16 +41,16 @@ def ordered(matches: Sequence[Match]) -> Iterator[Match]:
     cutting its own batches should cut contiguous runs of this order.
     """
     # Matches seating the same checkpoints, each group in the caller's order.
-    groups: dict[frozenset[CheckpointKey], deque[tuple[int, Match]]] = {}
+    groups: dict[frozenset[CheckpointId], deque[tuple[int, Match]]] = {}
     for index, match in enumerate(matches):
         groups.setdefault(checkpoints(match), deque()).append((index, match))
     # Checkpoints by when they were last used, least recent first.
-    used: dict[CheckpointKey, None] = {}
+    used: dict[CheckpointId, None] = {}
     while groups:
         # How many checkpoints were used since each one: its stack distance.
         since = {key: len(used) - 1 - at for at, key in enumerate(used)}
 
-        def cost(group: frozenset[CheckpointKey]) -> tuple[int, ...]:
+        def cost(group: frozenset[CheckpointId]) -> tuple[int, ...]:
             warm = [since[key] for key in group if key in since]
             first = groups[group][0][0]
             return (len(group) - len(warm), -len(warm), max(warm, default=0), first)
@@ -59,7 +62,7 @@ def ordered(matches: Sequence[Match]) -> Iterator[Match]:
             del groups[group]
         # Seat order, not the `checkpoints` set, whose iteration follows string
         # hashing: every process, and so every share of a hold, sees one order.
-        for key in _model_checkpoints(match):
+        for key in _find_checkpoints(match):
             used.pop(key, None)
             used[key] = None
         yield match

@@ -39,6 +39,7 @@ import os
 import queue
 import re
 import secrets
+import shutil
 import socket
 import sys
 import threading
@@ -58,6 +59,7 @@ from urllib.parse import unquote
 
 from pydantic import BaseModel, ValidationError
 
+from etude.cache import Content
 from etude.carriage import OUT_PRESENT, checkpoint_key, note_retired, taken
 from etude.deadline import limit_time
 from etude.stopping import Stopped
@@ -83,7 +85,7 @@ from etude.train.block import Builder, Columns, Json, LoggedRow, concat
 from etude.train.block import encode as encode_block
 from etude.train.manifest import Index, metric_names
 from etude.train.records import CheckpointRecord, ParentRun, RowTable, checkpoint_name
-from etude.train.state import State, saved_states, state_folder
+from etude.train.state import State, saved_states, state_folder, write_objects
 
 # Compaction is bounded by bytes or elapsed cadence, independent of training steps.
 PERMANENT_BYTES, RECENT_BLOCKS = 8_000_000, 64
@@ -142,14 +144,56 @@ def seal_logs(root: Path, clocks: Sequence[str]) -> None:
         log.unlink()
 
 
-def _same_model(a: ArtifactRef, b: ArtifactRef) -> bool:
-    """Whether two references name the same model: by digest, else by address."""
+def _same_content(a: ArtifactRef, b: ArtifactRef) -> bool:
+    """Whether two artifacts hold the same content: by digest, else by address."""
     return (a.sha256 or a.uri) == (b.sha256 or b.uri)
 
 
 def _suffix(source: Path) -> str:
     """A stored checkpoint's suffix: its source's, except that JSON never takes a record's."""
     return ".json.data" if source.suffix == ".json" else source.suffix
+
+
+def _remove(path: Path) -> None:
+    if path.is_dir():
+        shutil.rmtree(path)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def _folder_artifact(folder: Path) -> ArtifactRef:
+    members: dict[str, Content] = {}
+    for path in sorted(folder.rglob("*")):
+        if path.is_symlink():
+            raise ValueError("a checkpoint must be self-contained, without symbolic links")
+        if path.is_file():
+            key = path.relative_to(folder).as_posix()
+            if any(
+                part.startswith(".") for part in path.relative_to(folder).parts
+            ) or path.suffix in (".open", ".partial"):
+                raise ValueError(
+                    "checkpoint files must use portable published names, without private or unfinished files"
+                )
+            with path.open("rb") as stream:
+                content = Content(
+                    sha256=file_digest(stream, "sha256").hexdigest(),
+                    size_bytes=os.fstat(stream.fileno()).st_size,
+                )
+                os.fsync(stream.fileno())
+            members[key] = content
+    if not members:
+        raise ValueError("a checkpoint folder must hold files")
+    manifest = json.dumps(
+        {name: content.model_dump() for name, content in members.items()},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return ArtifactRef(
+        uri=folder.as_uri(),
+        sha256=sha256(manifest.encode()).hexdigest(),
+        size_bytes=sum(c.size_bytes for c in members.values()),
+        members=members,
+    )
 
 
 class EtudeWarning(UserWarning):
@@ -269,6 +313,9 @@ class Run:
         self._names: dict[int, str] = {}
         for path in sorted((root / "checkpoints").glob("*.json")):
             known = CheckpointRecord.model_validate_json(path.read_bytes())
+            known = known.model_copy(
+                update={"run": name, "experiment": experiment, "line": known.line or name}
+            )
             self._recorded[known.ordinal] = known
             self._names[known.ordinal] = path.stem
         self._checkpoints = max(self._recorded, default=0)
@@ -555,12 +602,12 @@ class Run:
 
     def checkpoint(
         self,
-        artifact: ArtifactRef | Path | str,
+        artifact: ArtifactRef | Path | str | Callable[[Path], None] | None = None,
         at: Mapping[str, float] | None = None,
         /,
         *,
         tags: Sequence[str] = (),
-        **clocks: float,
+        **objects: object,
     ) -> ArtifactRef:
         """Store a saved model and record where every declared clock stood.
 
@@ -580,14 +627,40 @@ class Run:
         """
         staged: Path | None = None
         try:
-            given = {**(at or {}), **clocks}
+            clocks = {
+                name: objects.pop(name) for name in tuple(objects) if name in self._clock_names
+            }
+            if artifact is not None and objects:
+                raise ValueError("give a checkpoint path, an export function, or named objects")
+            given = (
+                {**(at or {}), **clocks}
+                if at is not None or clocks
+                else {name: self.at(name) for name in self._clock_names}
+            )
             if set(given) != set(self._clock_names):
                 raise ValueError("checkpoint_clock_mismatch")
-            declared = {name: float(given[name]) for name in self._clock_names}
+            declared: dict[str, float] = {}
+            for clock in self._clock_names:
+                value = given[clock]
+                if not isinstance(value, (int, float)) or isinstance(value, bool):
+                    raise ValueError("checkpoint clocks must be numbers")
+                declared[clock] = float(value)
             wall_ms, hours = self._now()
             at = {**declared, **hours}
-            name = checkpoint_name(at)
-            reference, staged = self._stage(artifact, name)
+            folder_checkpoint = (
+                artifact is None
+                or callable(artifact)
+                or isinstance(artifact, (str, Path))
+                and "://" not in str(artifact)
+                and Path(artifact).is_dir()
+            )
+            name = checkpoint_name(at, padded=folder_checkpoint)
+            if artifact is None or callable(artifact):
+                if artifact is None and not objects:
+                    raise ValueError("a checkpoint needs objects, a path, or an export function")
+                reference, staged = self._export(artifact, objects, declared)
+            else:
+                reference, staged = self._stage(artifact, name)
             file = self._file_key(reference)
             for known in self._recorded.values():
                 if (
@@ -596,30 +669,42 @@ class Run:
                     raise ValueError("checkpoint_file_changed")
                 # Etude's clocks always move on, so the same `at` is the author's.
                 same = all(known.at.get(n) == v for n, v in declared.items())
-                if same and _same_model(known.artifact, reference):
+                if same and _same_content(known.artifact, reference):
                     if staged is not None:
-                        staged.unlink()
+                        _remove(staged)
                     return known.artifact
             ordinal = self._checkpoints + 1
             suffix = (
                 _suffix(Path(artifact))
-                if staged is not None and not isinstance(artifact, ArtifactRef)
+                if staged is not None and not staged.is_dir() and isinstance(artifact, (Path, str))
                 else ""
             )
             name = self._unused(name, suffix, ordinal)
-            if staged is not None:
-                reference = self._rename_staged(staged, name + suffix, reference)
             record = CheckpointRecord(
+                run=self.name,
+                experiment=self.experiment,
+                line=self._inherited.line
+                if self._inherited is not None and self._inherited.line
+                else self.name,
                 ordinal=ordinal,
                 artifact=reference,
-                file=self._file_key(reference),
                 at=at,
                 wall_ms=wall_ms,
                 tags=tuple(dict.fromkeys(tags)),
             )
+            if staged is not None:
+                if staged.is_dir():
+                    kept = staged.parent / name
+                    staged.rename(kept)
+                    reference = reference.model_copy(update={"uri": kept.resolve().as_uri()})
+                else:
+                    reference = self._rename_staged(staged, name + suffix, reference)
+            record = record.model_copy(
+                update={"artifact": reference, "file": self._file_key(reference)}
+            )
         except (ValidationError, ValueError, TypeError, OSError) as error:
             if staged is not None:
-                staged.unlink(missing_ok=True)
+                _remove(staged)
             if self.strict:
                 raise
             self.incomplete += 1
@@ -662,15 +747,51 @@ class Run:
         is not restored just because its record survives; its recorded address
         may be unavailable. None when there is no record.
         """
+        warnings.warn(
+            "Run.latest_checkpoint() is now checkpoints(); removed in 0.5",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         record = self._latest_record()
-        if record is None:
-            return None
-        # A copied file keeps its name wherever the record was written.
+        return None if record is None else self._checkpoint_here(record)
+
+    def checkpoints(self) -> tuple[CheckpointRecord, ...]:
+        """Published checkpoints in ordinal order, relocated when their bytes are here."""
+        return tuple(self._checkpoint_here(self._recorded[n]) for n in sorted(self._recorded))
+
+    def _checkpoint_here(self, record: CheckpointRecord) -> CheckpointRecord:
         local = self.files.root / (record.file or checkpoint_key(record.artifact.uri))
-        if record.artifact.sha256 is None or not local.is_file():
+        if record.artifact.sha256 is None or not local.exists():
             return record
         artifact = record.artifact.model_copy(update={"uri": local.resolve().as_uri()})
         return record.model_copy(update={"artifact": artifact})
+
+    def _export(
+        self,
+        export: Callable[[Path], None] | None,
+        objects: Mapping[str, object],
+        at: dict[str, float],
+    ) -> tuple[ArtifactRef, Path]:
+        folder = self.out / "checkpoints"
+        folder.mkdir(parents=True, exist_ok=True)
+        staged = folder / (".checkpoint-" + secrets.token_hex(6))
+        staged.mkdir()
+        try:
+            if export is not None:
+                export(staged)
+            files = {
+                path.relative_to(staged).as_posix(): path.relative_to(staged).as_posix()
+                for path in staged.rglob("*")
+                if path.is_file() and path.name != "checkpoint.json"
+            }
+            files.update(write_objects(staged, objects))
+            (staged / "checkpoint.json").write_text(
+                json.dumps({"at": at, "files": files}, sort_keys=True)
+            )
+            return _folder_artifact(staged), staged
+        except BaseException:
+            _remove(staged)
+            raise
 
     def _stage(
         self, artifact: ArtifactRef | Path | str, name: str
@@ -684,6 +805,20 @@ class Run:
         if isinstance(artifact, str) and "://" in artifact:
             return ArtifactRef(uri=artifact), None
         source = Path(artifact).resolve()
+        if source.is_dir():
+            if source.is_relative_to(self._out):
+                return _folder_artifact(source), None
+            folder = self.out / "checkpoints"
+            folder.mkdir(parents=True, exist_ok=True)
+            staged = folder / (".checkpoint-" + secrets.token_hex(6))
+            try:
+                # Validate links before copying, so a directory cannot publish outside bytes.
+                _folder_artifact(source)
+                shutil.copytree(source, staged)
+                return _folder_artifact(staged), staged
+            except BaseException:
+                _remove(staged)
+                raise
         if source.is_relative_to(self._out):
             with source.open("rb") as stream:
                 digest = file_digest(stream, "sha256")
@@ -724,6 +859,7 @@ class Run:
         host keeps it (`etude.carriage.taken`), so nothing is ever replaced.
         """
         files, records = taken(self.files.root), set(self._names.values())
+        records.update(path.name for path in (self.out / "checkpoints").glob("*"))
         versions = (f"{name}.ordinal-{ordinal}-{n}" for n in count(2))
         candidates = chain((name, f"{name}.ordinal-{ordinal}"), versions)
         return next(c for c in candidates if c not in records and c + suffix not in files)
@@ -755,7 +891,7 @@ class Run:
                     (
                         known
                         for known in self._recorded.values()
-                        if _same_model(known.artifact, checkpoint)
+                        if _same_content(known.artifact, checkpoint)
                     ),
                     None,
                 )
@@ -1142,7 +1278,7 @@ def _origin(latest: CheckpointRecord | None, root: Path, started_ms: int) -> int
     The checkpoint resumed says how long after that it was saved, also across a
     continuation; without one, the earliest attempt recorded in this folder.
     """
-    if latest is not None and HOURS_SINCE_START in latest.at:
+    if latest is not None and latest.wall_ms is not None and HOURS_SINCE_START in latest.at:
         return latest.wall_ms - round(latest.at[HOURS_SINCE_START] * 3_600_000)
     starts = [started_ms]
     for path in (root / "metrics").glob("*.json"):

@@ -372,7 +372,21 @@ def within(key: str) -> bool:
 
 def recorded_files(root: Path) -> dict[str, RecordedFile]:
     """Checkpoint bytes by their portable key, including references inside out."""
-    return {file.key: file for file in _recorded(root).values()}
+    result: dict[str, RecordedFile] = {}
+    for file in _recorded(root).values():
+        record = json.loads((root / file.record).read_bytes())
+        members = record["artifact"].get("members", {})
+        if members:
+            for name, content in members.items():
+                if not within(name):
+                    raise RecordMismatch("checkpoint member must be a portable relative path")
+                key = file.key + "/" + name
+                result[key] = RecordedFile(
+                    key, content["sha256"], content["size_bytes"], file.record
+                )
+        else:
+            result[file.key] = file
+    return result
 
 
 def resume_file(root: Path) -> RecordedFile | None:
@@ -383,7 +397,7 @@ def resume_file(root: Path) -> RecordedFile | None:
 
 def named_file(root: Path, key: str) -> RecordedFile | None:
     """The checkpoint file `key` as the record in `root` naming it describes it, when one does."""
-    return next((file for file in _recorded(root).values() if file.key == key), None)
+    return recorded_files(root).get(key)
 
 
 def _stored(root: Path) -> set[str]:
@@ -452,7 +466,7 @@ def recorded_file(root: Path, key: str) -> dict[str, bytes]:
     against the record). Raises `FileNotFoundError` when the file is gone or
     a key outside `out/` has no checkpoint record.
     """
-    named = named_file(root, key)
+    named = recorded_files(root).get(key)
     if named is not None:
         return {named.record: (root / named.record).read_bytes(), key: (root / key).read_bytes()}
     if within(key) and key.startswith("out/"):

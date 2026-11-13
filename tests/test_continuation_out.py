@@ -405,3 +405,32 @@ def runs(python: str) -> Job:
     assert authored(read(tracked, "recipe", queued).reached) == {"updates": 6}
     assert (tracked / queued / "out/state.json").read_text() == "6"
     assert (tracked / parent / "out/state.json").read_text() == "3"
+
+
+def test_an_explicit_folder_checkpoint_continuation_names_every_member(tmp_path: Path) -> None:
+    scheduler = local(tmp_path)
+    parent = scheduler.queue(Job(command="train", max_hours=1), "local")
+    source = tmp_path / "track"
+    with track(
+        experiment="recipe",
+        run=parent,
+        clocks=[Step("updates", "updates")],
+        directory=source,
+        strict=True,
+    ) as run:
+
+        def export(folder: Path) -> None:
+            (folder / "policy").write_bytes(b"weights")
+            (folder / "value").write_bytes(b"value weights")
+
+        run.checkpoint(export, updates=2)
+    counted = MeasuredStorage(DirectoryStorage(source))
+    child = continue_from(scheduler.record(parent), "updates=3", source=counted, ordinal=1)
+    handed = ParentRun.model_validate_json(child.job.environment[-1].value)
+    assert handed.checkpoint is not None and handed.input is not None
+    assert authored(handed.at) == {"updates": 2}
+    assert {given.name for given in child.job.inputs} == {
+        handed.input + "/" + name for name in ("checkpoint.json", "policy", "value")
+    }
+    assert counted.listings == 2
+    assert not any("/out/" in key for key in counted.got)

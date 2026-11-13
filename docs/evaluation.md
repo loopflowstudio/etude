@@ -15,8 +15,6 @@ from etude.eval.match import Tables, environment
 from etude.eval.query import statsdb
 from etude.eval.records import (
     Benchmark,
-    CheckpointKey,
-    CheckpointRef,
     Code,
     Fraction,
     Inference,
@@ -26,6 +24,7 @@ from etude.eval.records import (
 )
 from etude.eval.tournament import hold, scores, standings
 from etude.experiment import observe
+from etude.train.records import CheckpointRef, checkpoint_id
 
 world = environment("allies-vs-lessons", files=["game/"], config={"world": "w6"})
 deals = tuple({"deal": 1_910_101_000 + d} for d in range(25))
@@ -91,7 +90,7 @@ progress = Benchmark(
 # On the go: as each checkpoint is saved, one small eval run plays every seating.
 # A checkpoint is its key, its run and file name, with the saved file to read.
 # Relative seats find theirs among the experiment's training lines.
-ref = CheckpointRef(key=CheckpointKey(run="ppo-1", name="updates-500.pt"), artifact=saved)
+ref = CheckpointRef(key=checkpoint_id(run="ppo-1", name="updates-500.pt"), artifact=saved)
 lines = observe(bucket, "ppo").lines
 hold(progress, experiment="ppo", checkpoint=ref, play=play, storages=[bucket], lines=lines)
 
@@ -140,7 +139,7 @@ evaluate(
   key is the checkpoint's own key plus its inference config; code's is its
   name plus its config. A config is free JSON or a Pydantic model. One
   checkpoint at two search budgets is two players. A checkpoint's key
-  (`CheckpointKey`) is its training run and name
+  (`CheckpointRef.key`) is its training run and name
   (`ppo-1/checkpoints/updates-00000500`) or, for any other, its address; never
   its bytes, so two runs started from one file hold two checkpoints,
   each evaluated. An outside player is one whose checkpoint is an

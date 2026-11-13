@@ -204,6 +204,7 @@ def _link(folder: Path, held: dict[str, Path]) -> Path:
     folder.mkdir()
     for name, path in held.items():
         linked = folder / name
+        linked.parent.mkdir(parents=True, exist_ok=True)
         try:
             os.link(path, linked)
         except OSError as error:

@@ -16,7 +16,8 @@ from urllib.parse import urlparse
 import pytest
 
 from etude.cache import Artifact, Cache, Fetched
-from etude.jobs import continue_from
+from etude.carriage import put_back, restore_set
+from etude.jobs import checkpoint_inputs_for, continue_from
 from etude.launch.database import Database, launcher_file
 from etude.launch.executor import local as local_service
 from etude.launch.records import (
@@ -354,3 +355,35 @@ def test_a_corrupted_held_input_is_refused_before_the_job_starts(tmp_path: Path)
     assert (status.outcome, status.cause) == ("lost", "input_undelivered")
     assert scheduler.attempts(one)[0].started_at is None
     assert not held.exists()  # the corrupt copy is discarded, not trusted again
+
+
+def test_a_folder_checkpoint_reaches_a_job_as_verified_nested_inputs(tmp_path: Path) -> None:
+    with track(
+        experiment="tiny",
+        run="r",
+        directory=tmp_path / "tracked",
+        clocks=[Step("updates", "updates")],
+        strict=True,
+    ) as run:
+
+        def export(folder: Path) -> None:
+            (folder / "nested").mkdir()
+            (folder / "nested/policy").write_text("policy weights")
+            (folder / "value").write_text("value weights")
+
+        run.checkpoint(export, updates=1)
+        (checkpoint,) = run.checkpoints()
+    scheduler = local(tmp_path)
+    inputs = checkpoint_inputs_for(checkpoint, "start")
+    # Put the parent where a machine holds tracked folders; no provider or bucket needed.
+    put_back(tmp_path / "track/r", restore_set(run.files.root))
+    one = scheduler.launch(
+        Job(
+            command='cat "$ETUDE_INPUTS_DIR/start/nested/policy" "$ETUDE_INPUTS_DIR/start/value"',
+            inputs=inputs,
+            max_hours=0.1,
+        )
+    )
+    (status,) = scheduler.wait(one, every=0.05, timeout=30)
+    assert status.outcome == "succeeded"
+    assert "policy weightsvalue weights" in job_text(scheduler.logs(refresh=True, run=one))

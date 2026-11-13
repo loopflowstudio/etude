@@ -15,10 +15,11 @@ from etude.eval import query
 from etude.eval.convert import convert
 from etude.eval.match import Tables, environment, evaluate
 from etude.eval.query import compare, statsdb
-from etude.eval.records import CheckpointKey, CheckpointRef, Code, Inference, Match, Model
+from etude.eval.records import CheckpointPlayer, Code, Inference, Match
 from etude.tracking.errors import EtudeError
 from etude.tracking.records import ArtifactRef
 from etude.tracking.storage import DirectoryStorage
+from etude.train.records import CheckpointRef, checkpoint_id
 from tests.eval.games import play, play_game_seats
 from tests.eval.per_file import write_per_file
 from tests.run.storage import MeasuredStorage
@@ -183,13 +184,15 @@ def test_a_match_two_runs_played_counts_from_the_later_under_its_latest_name(
 ) -> None:
     bucket = DirectoryStorage(tmp_path / "bucket")
     ref = CheckpointRef(
-        key=CheckpointKey(address="hf://lab/a.pt"),
+        key=checkpoint_id(address="hf://lab/a.pt"),
         artifact=ArtifactRef(uri="hf://lab/a.pt", sha256="ab" * 32),
     )
     _, rival = pair(tmp_path)
     # One model, renamed between runs: a name is part of no key.
     for run, name in (("first", "early"), ("second", "late")):
-        model = Model(name=name, checkpoint=ref, inference=Inference(config={"strength": 3}))
+        model = CheckpointPlayer(
+            name=name, checkpoint=ref, inference=Inference(config={"strength": 3})
+        )
         evaluate(experiment="cards", environment=DUEL, play=play, run=run,
                  matches=[Match(players=(model, rival), conditions={"deal": 0}, games=2)],
                  directory=tmp_path / run, storages=[bucket])  # fmt: skip

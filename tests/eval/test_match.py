@@ -21,20 +21,12 @@ from pydantic import BaseModel
 from etude.eval import query
 from etude.eval.match import environment, evaluate
 from etude.eval.query import Estimate, compare, estimate, statsdb
-from etude.eval.records import (
-    CheckpointKey,
-    CheckpointRef,
-    Code,
-    Config,
-    Inference,
-    Match,
-    Model,
-    Player,
-)
+from etude.eval.records import CheckpointPlayer, Code, Config, Inference, Match, Player
 from etude.launch.storage.files import read_result
 from etude.tracking.errors import EtudeError
 from etude.tracking.records import ArtifactRef
 from etude.tracking.storage import DirectoryStorage, S3Storage
+from etude.train.records import CheckpointRef, checkpoint_id
 from tests.eval.games import (
     play,
     play_seat_and_player,
@@ -49,14 +41,14 @@ def roster(tmp_path: Path) -> list[Player]:
     script = tmp_path / "scripted.py"
     script.write_text("def act(state): return 0\n")
     file = ArtifactRef(uri="s3://models/a.pt", sha256=sha256(b"a").hexdigest())
-    model = CheckpointRef(key=CheckpointKey(address=file.uri), artifact=file)
+    model = CheckpointRef(key=checkpoint_id(address=file.uri), artifact=file)
     return [
-        Model(
+        CheckpointPlayer(
             name="deep",
             checkpoint=model,
             inference=Inference(config={"strength": 3, "search": {"simulations": 64}}),
         ),
-        Model(
+        CheckpointPlayer(
             name="shallow",
             checkpoint=model,
             inference=Inference(config={"strength": 2, "search": {"simulations": 8}}),
@@ -305,26 +297,26 @@ def _git(repo: Path, *args: str) -> None:
 
 def test_a_models_inference_code_is_its_version_not_its_key(tmp_path: Path) -> None:
     file = ArtifactRef(uri="s3://models/updates-100.pt", sha256=sha256(b"a").hexdigest())
-    checkpoint = CheckpointRef(key=CheckpointKey(run="ppo-1", name="updates-100.pt"), artifact=file)
+    checkpoint = CheckpointRef(key=checkpoint_id(run="ppo-1", name="updates-100.pt"), artifact=file)
     inference = tmp_path / "inference.py"
     inference.write_text("def act(state): return 0\n")
-    before = Inference(source=[inference], config=Direct()).model(checkpoint)
+    before = Inference(source=[inference], config=Direct()).player(checkpoint)
     assert before.key == 'checkpoint:ppo-1/checkpoints/updates-100.pt {"search":0}'
     assert before.name == "updates-100.pt"
     inference.write_text("def act(state): return 1\n")
-    changed = Inference(source=[inference], config=Direct()).model(checkpoint)
+    changed = Inference(source=[inference], config=Direct()).player(checkpoint)
     assert changed.key == before.key
     assert changed.version.source != before.version.source
     # The same bytes under another key are another model.
-    copied = CheckpointRef(key=CheckpointKey(run="ppo-2", name="updates-100.pt"), artifact=file)
-    assert Inference(config=Direct()).model(copied).key != before.key
+    copied = CheckpointRef(key=checkpoint_id(run="ppo-2", name="updates-100.pt"), artifact=file)
+    assert Inference(config=Direct()).player(copied).key != before.key
 
 
 def test_where_a_checkpoint_stood_is_carried_by_its_seat_and_is_not_its_identity() -> None:
     file = ArtifactRef(uri="hf://lab/u600.pt", sha256=sha256(b"a").hexdigest())
-    key = CheckpointKey(address=file.uri)
-    seated = Inference().model(CheckpointRef(key=key, artifact=file, at={"updates": 600}))
-    corrected = Inference().model(
+    key = checkpoint_id(address=file.uri)
+    seated = Inference().player(CheckpointRef(key=key, artifact=file, at={"updates": 600}))
+    corrected = Inference().player(
         CheckpointRef(key=key, artifact=file, at={"updates": 612}, line="seed-2")
     )
     rival = Code(name="rival", source=[__file__])
