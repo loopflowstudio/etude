@@ -194,7 +194,7 @@ def test_a_kept_database_is_rebuilt_on_request_or_for_another_schema(
         db.close()
 
 
-def as_published(folder: Path) -> None:
+def _as_published(folder: Path) -> None:
     """Rewrite an eval run as published etude-sdk stored it: `agents`, and seats as `player`."""
     for file in folder.glob("matches/*.json"):
         record = json.loads(file.read_text())
@@ -216,7 +216,7 @@ def as_published(folder: Path) -> None:
         )
 
 
-def played_and_published(tmp_path: Path, play: Callable[[Match], Tables]) -> tuple[Path, Path]:
+def _published(tmp_path: Path, play: Callable[[Match], Tables]) -> tuple[Path, Path]:
     """Run `a` played as blocks (`now`), and the same run as published etude-sdk stored it, converted."""
     players = pair(tmp_path)
     now = tmp_path / "now"
@@ -224,7 +224,7 @@ def played_and_published(tmp_path: Path, play: Callable[[Match], Tables]) -> tup
              matches=deals(players, 0, 1, 2), directory=now)  # fmt: skip
     published = tmp_path / "published"
     write_per_file(now / "a", published / "a")
-    as_published(published / "a")
+    _as_published(published / "a")
     assert all(
         '"agents"' in file.read_text() for file in (published / "a" / "matches").glob("*.json")
     )
@@ -233,7 +233,7 @@ def played_and_published(tmp_path: Path, play: Callable[[Match], Tables]) -> tup
 
 
 def test_eval_runs_published_etude_sdk_stored_read_as_players_and_seats(tmp_path: Path) -> None:
-    now, published = (statsdb("cards", folder) for folder in played_and_published(tmp_path, play))
+    now, published = (statsdb("cards", folder) for folder in _published(tmp_path, play))
     assert published.sql("select count(*) from plays where seat is not null").fetchone() == (
         3 * 2 * 2,
     )
@@ -247,9 +247,7 @@ def test_eval_runs_published_etude_sdk_stored_read_as_players_and_seats(tmp_path
 
 
 def test_a_published_table_with_the_games_own_seat_keeps_each_players_rows(tmp_path: Path) -> None:
-    now, published = (
-        statsdb("cards", folder) for folder in played_and_published(tmp_path, play_game_seats)
-    )
+    now, published = (statsdb("cards", folder) for folder in _published(tmp_path, play_game_seats))
     rows = (
         "select p.name, x.game, x.game_seat, x.won from plays x join seats s"
         " using (run, match, seat) join players p using (player) order by all"

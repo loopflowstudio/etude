@@ -18,20 +18,20 @@ from etude.storage_timeout import storage_environment
 
 class Program:
     def __init__(self, bucket: Bucket, prefix: str) -> None:
-        self.bucket, self.prefix = bucket, prefix
-        self.digest: str | None = None
+        self._bucket, self._prefix = bucket, prefix
+        self._digest: str | None = None
 
     def prepare(self, request: MachineRequest, image: Image) -> dict[str, str]:
         """Publish once per composition; issue fresh links for each rental."""
         assert request.deadline is not None and request.bootstrap is not None
         timeouts = storage_environment()
-        if self.digest is None:
+        if self._digest is None:
             code = program_archive()
             digest = hashlib.sha256(code).hexdigest()
-            key = f"{self.prefix}/programs/{digest}.zip"
-            if self.bucket.get(key) is None:
-                self.bucket.put(key, code, once=True)
-            self.digest = digest
+            key = f"{self._prefix}/programs/{digest}.zip"
+            if self._bucket.get(key) is None:
+                self._bucket.put(key, code, once=True)
+            self._digest = digest
         return {
             **timeouts,
             "ETUDE_LOG_SECONDS": "" if request.log_seconds is None else str(request.log_seconds),
@@ -45,10 +45,10 @@ class Program:
             "ETUDE_BOOTSTRAP_URL": request.bootstrap.url,
             "ETUDE_BOOTSTRAP_LOG_URL": request.bootstrap.log_url,
             "ETUDE_WORKER_LOG_URL": request.bootstrap.worker_log_url,
-            "ETUDE_PACKAGE_URL": self.bucket.get_url(
-                f"{self.prefix}/programs/{self.digest}.zip", 13 * 3600
+            "ETUDE_PACKAGE_URL": self._bucket.get_url(
+                f"{self._prefix}/programs/{self._digest}.zip", 13 * 3600
             ),
-            "ETUDE_PACKAGE_SHA256": self.digest,
+            "ETUDE_PACKAGE_SHA256": self._digest,
             "ETUDE_PROGRAM": base64.b64encode(program_archive(guardian=True)).decode(),
         }
 

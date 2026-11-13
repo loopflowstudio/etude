@@ -68,7 +68,7 @@ def test_python_rental_calls_use_selected_controller(
 
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path))
     monkeypatch.setattr(client, "selected", lambda: "fixture-controller")
-    monkeypatch.setattr(PythonClient, "request", request)
+    monkeypatch.setattr(PythonClient, "_request", request)
     assert client.rent("gpu", 1, Decimal(2)) == "remote-pod"
     assert client.terminate("remote-pod") == machine
     assert [r.operation for r in requests] == ["rent", "terminate"]
@@ -85,16 +85,16 @@ def test_machine_allocation_outlives_its_session(tmp_path: Path) -> None:
     attempt = b.scheduler.attempts(run)[0]
     # Retained history can hold an unfinished allocation from an older session.
     # The current session's empty attempt list must not make that machine free.
-    b.store.db.execute(
+    b.store._db.execute(
         """INSERT INTO sessions(id,machine,planned_at,ended_at)
         SELECT 'earlier',machine,planned_at,? FROM sessions WHERE id=?""",
         (b.clock.now.isoformat(), attempt.session),
     )
-    b.store.db.execute("UPDATE attempts SET session='earlier' WHERE id=?", (attempt.id,))
+    b.store._db.execute("UPDATE attempts SET session='earlier' WHERE id=?", (attempt.id,))
     ondemand = b.store.ondemand("l4")
     counting = Counting(b.store, b.service)
     with counting.record():
-        assert b.scheduler.idle_sessions(ondemand, b.clock.now) == []
+        assert b.scheduler._idle_sessions(ondemand, b.clock.now) == []
     assert counting.snapshot() == Counts(database=3)
     assert b.store.machine_busy(machine)
 
@@ -110,7 +110,7 @@ def test_added_session_reuses_capacity_without_a_paid_window(tmp_path: Path) -> 
     second = b.scheduler.queue(Job(command="train", max_hours=1), "bench")
     with b.store.lock("bench", b.clock) as acquired:
         assert acquired
-        b.scheduler.plan(b.store.pool("bench"), b.clock.now)
+        b.scheduler._plan(b.store.pool("bench"), b.clock.now)
     placed = b.scheduler.attempts(second)[0]
     assert placed.machine == "bench" and placed.session == attempt.session
     assert b.store.rental_for(b.store.session(placed.session)) is None

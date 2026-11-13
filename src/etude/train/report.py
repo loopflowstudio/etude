@@ -127,37 +127,37 @@ class Training(Record):
     timers: tuple[Timers, ...]
 
 
-def round_value(value: float | None, figures: int = 5) -> float | None:
+def _round(value: float | None, figures: int = 5) -> float | None:
     """Significant figures for the page; NaN and infinities become gaps."""
     if value is None or not math.isfinite(value):
         return None
     return float(f"{value:.{figures}g}")
 
 
-def rounded(values: Floats, figures: int = 5) -> list[float | None]:
-    return [round_value(value, figures) for value in values.tolist()]
+def _rounded(values: Floats, figures: int = 5) -> list[float | None]:
+    return [_round(value, figures) for value in values.tolist()]
 
 
-def started(run: RunData) -> float:
+def _started(run: RunData) -> float:
     """Seconds since the epoch when the run first started."""
     starts = [attempt.started_ms for attempt in run.attempts]
     starts += [block.header.wall_first for block in run.blocks]
     return min(starts) / 1000 if starts else 0.0
 
 
-def run_trace(run: RunData, metric: str, clock: str) -> Trace | None:
+def _trace(run: RunData, metric: str, clock: str) -> Trace | None:
     reduced = run.chart(metric, clock, BUCKETS)
     if not len(reduced):
         return None
     return Trace(
         owner=run.name,
-        x=rounded((reduced.x_first + reduced.x_last) / 2, 7),
-        mean=rounded(reduced.mean),
+        x=_rounded((reduced.x_first + reduced.x_last) / 2, 7),
+        mean=_rounded(reduced.mean),
         nonfinite=int(reduced.nonfinite.sum()),
     )
 
 
-def job_band(job: str, members: Sequence[RunData], metric: str, clock: str) -> Trace | None:
+def _band(job: str, members: Sequence[RunData], metric: str, clock: str) -> Trace | None:
     """The mean of the seeds' bucket means over a shared span, banded by their range."""
     present = [(run, chart) for run in members if len(chart := run.chart(metric, clock, BUCKETS))]
     if len(present) < 2:
@@ -174,10 +174,10 @@ def job_band(job: str, members: Sequence[RunData], metric: str, clock: str) -> T
     values = [means[:, index][~np.isnan(means[:, index])].tolist() for index in filled.tolist()]
     return Trace(
         owner=job,
-        x=[round_value(low + (index + 0.5) * width, 7) for index in filled.tolist()],
-        mean=[round_value(statistics.fmean(seeds)) for seeds in values],
-        low=[round_value(min(seeds)) for seeds in values],
-        high=[round_value(max(seeds)) for seeds in values],
+        x=[_round(low + (index + 0.5) * width, 7) for index in filled.tolist()],
+        mean=[_round(statistics.fmean(seeds)) for seeds in values],
+        low=[_round(min(seeds)) for seeds in values],
+        high=[_round(max(seeds)) for seeds in values],
         seeds=count[filled].tolist(),
     )
 
@@ -215,14 +215,14 @@ def job_names(data: Sequence[RunData]) -> dict[str, JobName]:
     }
 
 
-def launched_jobs(data: Sequence[RunData]) -> tuple[Job, ...]:
+def _jobs(data: Sequence[RunData]) -> tuple[Job, ...]:
     """The runs' jobs (`job_names`), in launch order. A job's seeds are its learner lines
     (`etude.train.read.lines`), so a continuation is no extra seed."""
     names = job_names(data)
     line = lines(data)
     members: dict[str, list[RunData]] = {}
     # In launch order: a job's colour follows when it started, never its rank.
-    for run in sorted(data, key=started):
+    for run in sorted(data, key=_started):
         members.setdefault(names[run.name].name, []).append(run)
     found = []
     for name, runs in members.items():
@@ -239,8 +239,8 @@ def launched_jobs(data: Sequence[RunData]) -> tuple[Job, ...]:
     return tuple(found)
 
 
-def summary(run: RunData) -> RunSummary:
-    start = started(run)
+def _summary(run: RunData) -> RunSummary:
+    start = _started(run)
     last: dict[str, int] = {}
     # A continuation may discard a previous attempt's overrun. Its recorded
     # position, including a resume before the first row, supersedes that attempt.
@@ -280,8 +280,8 @@ def summary(run: RunData) -> RunSummary:
     )
 
 
-def run_marks(run: RunData) -> list[Mark]:
-    start = started(run)
+def _marks(run: RunData) -> list[Mark]:
+    start = _started(run)
     steps = [clock.name for clock in run.clocks if clock.kind == "step"]
     first = run.clocks[0].name if run.clocks else None
     marks: list[Mark] = []
@@ -306,7 +306,7 @@ def run_marks(run: RunData) -> list[Mark]:
                 there, then = None, 0
             seconds = (checkpoint.wall_ms - then) / 1000
             pace[clock] = (
-                round_value((here - there) / seconds)
+                _round((here - there) / seconds)
                 if here is not None and there is not None and seconds > 0
                 else None
             )
@@ -326,7 +326,7 @@ def run_marks(run: RunData) -> list[Mark]:
     return marks
 
 
-def timers(run: RunData, prefix: str) -> Timers | None:
+def _timers(run: RunData, prefix: str) -> Timers | None:
     """The run's icicle under `prefix`, or None when it logged no timer there."""
     totals: dict[tuple[str, ...], float] = {}
     # Any clock every row gives; a declared one also covers rows logged before Etude's.
@@ -384,7 +384,7 @@ def training(data: Sequence[RunData], *, prefixes: Sequence[str] = ()) -> Traini
     metrics: dict[str, None] = {}
     for run in data:
         metrics.update(dict.fromkeys(run.metrics()))
-    jobs = launched_jobs(data)
+    jobs = _jobs(data)
     members = {job.name: [run for run in data if run.name in job.runs] for job in jobs}
     series: dict[str, dict[str, tuple[Trace, ...]]] = {}
     bands: dict[str, dict[str, tuple[Trace, ...]]] = {}
@@ -394,22 +394,22 @@ def training(data: Sequence[RunData], *, prefixes: Sequence[str] = ()) -> Traini
                 trace
                 for run in data
                 if clock in BUILT_IN_NAMES or clock in {c.name for c in run.clocks}
-                if (trace := run_trace(run, metric, clock)) is not None
+                if (trace := _trace(run, metric, clock)) is not None
             ]
             if traces:
                 series.setdefault(clock, {})[metric] = tuple(traces)
             means = [
                 band
                 for job, runs in members.items()
-                if (band := job_band(job, runs, metric, clock)) is not None
+                if (band := _band(job, runs, metric, clock)) is not None
             ]
             if means:
                 bands.setdefault(clock, {})[metric] = tuple(means)
     return Training(
         clocks=tuple(clocks.values()),
         jobs=jobs,
-        runs=tuple(summary(run) for run in data),
-        checkpoints=tuple(mark for run in data for mark in run_marks(run)),
+        runs=tuple(_summary(run) for run in data),
+        checkpoints=tuple(mark for run in data for mark in _marks(run)),
         metrics=tuple(metrics),
         series=series,
         bands=bands,
@@ -417,6 +417,6 @@ def training(data: Sequence[RunData], *, prefixes: Sequence[str] = ()) -> Traini
             found
             for prefix in dict.fromkeys(prefixes)
             for run in data
-            if (found := timers(run, prefix)) is not None
+            if (found := _timers(run, prefix)) is not None
         ),
     )

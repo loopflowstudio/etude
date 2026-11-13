@@ -32,7 +32,7 @@ class Intent(Record):
 
 # A lost SSH reply can be retried, but never starts a second bootstrap. The
 # claim lives on the pod, and the child owns a process group for its watchdog.
-START = """import json,os,pathlib,sys
+_START = """import json,os,pathlib,sys
 payload=json.load(sys.stdin)
 root=pathlib.Path('/run/etude')
 root.mkdir(parents=True,exist_ok=True,mode=0o700)
@@ -51,13 +51,13 @@ exec(payload['code'])
 
 
 @timed("ssh.call")
-def start(pod: Pod, env: dict[str, str]) -> None:
+def _start(pod: Pod, env: dict[str, str]) -> None:
     address = pod.address
     if address is None:
         raise ProviderUnavailable("running Lium pod has no SSH address")
     try:
         result = subprocess.run(
-            ["ssh", "-o", "BatchMode=yes", address, "python3.12 -c " + shlex.quote(START)],
+            ["ssh", "-o", "BatchMode=yes", address, "python3.12 -c " + shlex.quote(_START)],
             input=json.dumps(
                 {"env": env, "code": boot_source("etude.launch.providers.lium.pod")}
             ).encode(),
@@ -78,11 +78,11 @@ class LiumMachines:
     def __init__(
         self, template: MachineTemplate, api: LiumAPI, bucket: Bucket, prefix: str
     ) -> None:
-        self._template, self.api, self.bucket, self.prefix = template, api, bucket, prefix
-        self.program = Program(bucket, prefix)
+        self._template, self._api, self._bucket, self._prefix = template, api, bucket, prefix
+        self._program = Program(bucket, prefix)
 
     def offer(self) -> Offer:
-        offers = self.api.offers(self._template)
+        offers = self._api.offers(self._template)
         selected = offers[0] if offers else None
         return Offer(
             hardware=None if selected is None else selected.hardware,
@@ -90,17 +90,17 @@ class LiumMachines:
             available=selected is not None,
         )
 
-    def key(self, session: str, name: str) -> str:
-        return f"{self.prefix}/sessions/{session}/{name}.json"
+    def _key(self, session: str, name: str) -> str:
+        return f"{self._prefix}/sessions/{session}/{name}.json"
 
-    def read[T: Record](self, session: str, name: str, model: type[T]) -> T | None:
-        raw = self.bucket.get(self.key(session, name))
+    def _read[T: Record](self, session: str, name: str, model: type[T]) -> T | None:
+        raw = self._bucket.get(self._key(session, name))
         return None if raw is None else model.model_validate_json(raw)
 
-    def keep(self, session: str, pod: Pod) -> None:
+    def _keep(self, session: str, pod: Pod) -> None:
         if pod.pod_name != f"etude-{session}":
             raise ProviderUnavailable("Lium pod name does not match this session")
-        self.bucket.put(self.key(session, "receipt"), pod.model_dump_json().encode())
+        self._bucket.put(self._key(session, "receipt"), pod.model_dump_json().encode())
 
     def create(self, request: MachineRequest) -> Allocation:
         if request.deadline is None or request.bootstrap is None:
@@ -114,7 +114,7 @@ class LiumMachines:
             or "\n" in public_key
         ):
             raise Refused("LIUM_SSH_PUBLIC_KEY must contain the controller's public SSH key")
-        offers = self.api.offers(self._template)  # revalidate current stock, resources and price
+        offers = self._api.offers(self._template)  # revalidate current stock, resources and price
         if not offers:
             raise Refused("no compatible secure Lium allocation")
         offer = offers[0]
@@ -136,44 +136,44 @@ class LiumMachines:
         )
         intent = Intent(request=request, offer=offer)
         check_creation()
-        self.bucket.put(
-            self.key(request.session, "intent"), intent.model_dump_json().encode(), once=True
+        self._bucket.put(
+            self._key(request.session, "intent"), intent.model_dump_json().encode(), once=True
         )
         check_creation()
         with limit_time((cutoff - datetime.now(UTC)).total_seconds()):
-            id = self.api.create(offer, creation, request.session)
-            pod = self.api.pod(id)
+            id = self._api.create(offer, creation, request.session)
+            pod = self._api.pod(id)
             if pod is None:
                 raise ProviderUnavailable("Lium accepted creation; pod not yet visible")
-            self.keep(request.session, pod)
-            return self.resume(intent, pod)
+            self._keep(request.session, pod)
+            return self._resume(intent, pod)
 
-    def resume(self, intent: Intent, pod: Pod) -> Allocation:
+    def _resume(self, intent: Intent, pod: Pod) -> Allocation:
         request = intent.request
         assert request.deadline is not None
         if pod.executor_id != intent.offer.node.id or pod.gpu_count != intent.offer.quote.gpu_count:
-            self.api.delete(pod.id)
+            self._api.delete(pod.id)
             raise ProviderUnavailable("Lium allocated a different node or GPU count")
         cutoff = min(request.deadline, request.startup_deadline or request.deadline)
         if datetime.now(UTC) < cutoff:
             if pod.removal_scheduled_at is None or pod.removal_scheduled_at > request.deadline:
-                pod = self.api.schedule(pod.id, request.deadline)
-                self.keep(request.session, pod)
+                pod = self._api.schedule(pod.id, request.deadline)
+                self._keep(request.session, pod)
             if (
                 pod.status == "RUNNING"
                 and datetime.now(UTC) < cutoff
-                and self.bucket.get(self.key(request.session, "booted")) is None
+                and self._bucket.get(self._key(request.session, "booted")) is None
             ):
                 if pod.price > intent.offer.price:
-                    self.api.delete(pod.id)
+                    self._api.delete(pod.id)
                     raise ProviderUnavailable("Lium allocated above the admitted hourly price")
                 with limit_time((cutoff - datetime.now(UTC)).total_seconds()):
-                    start(pod, self.program.prepare(request, self._template.image or STOCK_IMAGE))
-                self.bucket.put(self.key(request.session, "booted"), b"true")
-        return self.allocation(intent, pod)
+                    _start(pod, self._program.prepare(request, self._template.image or STOCK_IMAGE))
+                self._bucket.put(self._key(request.session, "booted"), b"true")
+        return self._allocation(intent, pod)
 
     @staticmethod
-    def allocation(intent: Intent, pod: Pod) -> Allocation:
+    def _allocation(intent: Intent, pod: Pod) -> Allocation:
         # Retain the admitted tolerance until billing supplies actual charges.
         # Lowering the rate here would also lower downstream budget reservations.
         return Allocation(
@@ -185,41 +185,45 @@ class LiumMachines:
         )
 
     def find(self, session_id: str) -> Allocation | None:
-        intent = self.read(session_id, "intent", Intent)
+        intent = self._read(session_id, "intent", Intent)
         if intent is None:
             return None
-        receipt = self.read(session_id, "receipt", Pod)
-        pod = self.api.named(f"etude-{session_id}") if receipt is None else self.api.pod(receipt.id)
+        receipt = self._read(session_id, "receipt", Pod)
+        pod = (
+            self._api.named(f"etude-{session_id}") if receipt is None else self._api.pod(receipt.id)
+        )
         if pod is None:
             if receipt is not None:
-                return self.allocation(intent, receipt)
+                return self._allocation(intent, receipt)
             raise ProviderUnavailable("Lium create already attempted; awaiting reconciliation")
-        self.keep(session_id, pod)
-        return self.resume(intent, pod)
+        self._keep(session_id, pod)
+        return self._resume(intent, pod)
 
     def alive(self, session_id: str) -> bool:
-        receipt = self.read(session_id, "receipt", Pod)
+        receipt = self._read(session_id, "receipt", Pod)
         if receipt is None:
             return True
-        pod = self.api.pod(receipt.id)
+        pod = self._api.pod(receipt.id)
         return pod is not None and pod.status not in {"ERROR", "FAILED", "TERMINATED"}
 
     def end(self, session_id: str) -> datetime | None:
-        receipt = self.read(session_id, "receipt", Pod)
-        if receipt is None and self.read(session_id, "intent", Intent) is None:
+        receipt = self._read(session_id, "receipt", Pod)
+        if receipt is None and self._read(session_id, "intent", Intent) is None:
             return None
-        pod = self.api.named(f"etude-{session_id}") if receipt is None else self.api.pod(receipt.id)
+        pod = (
+            self._api.named(f"etude-{session_id}") if receipt is None else self._api.pod(receipt.id)
+        )
         if pod is None:
             return datetime.now(UTC) if receipt is not None else None
-        self.keep(session_id, pod)
-        self.api.delete(pod.id)
-        return datetime.now(UTC) if self.api.pod(pod.id) is None else None
+        self._keep(session_id, pod)
+        self._api.delete(pod.id)
+        return datetime.now(UTC) if self._api.pod(pod.id) is None else None
 
     def bill(self, session_id: str, now: datetime) -> Bill | None:
-        receipt = self.read(session_id, "receipt", Pod)
+        receipt = self._read(session_id, "receipt", Pod)
         if receipt is None:
             return None
-        statement = self.api.statement(receipt.id)
+        statement = self._api.statement(receipt.id)
         if statement is None or statement.billed_until is None:
             return None
         watermarks = [row.billed_until for row in statement.days]
@@ -236,7 +240,7 @@ class LiumMachines:
             raise ProviderUnavailable("Lium statement does not establish settled coverage")
         # This endpoint promises the entire ledger, including paused/free time;
         # billed_until is its explicit contiguous settlement watermark.
-        self.bucket.put(self.key(session_id, "statement"), statement.model_dump_json().encode())
+        self._bucket.put(self._key(session_id, "statement"), statement.model_dump_json().encode())
         # A final settled removal proves zero compute charges after removal,
         # including the gap before the controller observed absence.
         through = now if statement.removed else statement.billed_until

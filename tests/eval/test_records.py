@@ -140,7 +140,7 @@ def test_a_model_needs_its_checkpoint_digest() -> None:
         CheckpointRef(key=U500.key, artifact=ArtifactRef(uri="s3://b/updates-500.pt"))
 
 
-def ref(run: str, updates: float) -> CheckpointRef:
+def _ref(run: str, updates: float) -> CheckpointRef:
     return CheckpointRef(
         key=CheckpointKey(run=run, name=f"updates-{updates:g}.pt"),
         artifact=ArtifactRef(uri=f"file:///{run}/{updates:g}.pt", sha256=DIGEST),
@@ -149,7 +149,7 @@ def ref(run: str, updates: float) -> CheckpointRef:
     )
 
 
-def make_line(
+def _line(
     run: str, job: str, *positions: float, ended: bool = False, seed: int | None = None
 ) -> Line:
     return Line(
@@ -158,19 +158,19 @@ def make_line(
         job=job,
         launch=job,
         ended=ended,
-        checkpoints=tuple(ref(run, at) for at in positions),
+        checkpoints=tuple(_ref(run, at) for at in positions),
     )
 
 
-def found_pairs(seated: Seated) -> list[tuple[CheckpointRef | None, int]]:
+def _found(seated: Seated) -> list[tuple[CheckpointRef | None, int]]:
     """Each pairing's second seat and games."""
     return [(each.seats[1], each.games) for each in seated.pairings]
 
 
 def test_a_point_splits_its_games_over_every_pair_of_seeds() -> None:
     direct = Inference(config={"search": 0})
-    large = [make_line(f"l{seed}", "large", 100, seed=seed) for seed in (1, 2)]
-    small = [make_line(f"s{seed}", "small", 100, seed=seed) for seed in (3, 1, 2)]
+    large = [_line(f"l{seed}", "large", 100, seed=seed) for seed in (1, 2)]
+    small = [_line(f"s{seed}", "small", 100, seed=seed) for seed in (3, 1, 2)]
     lines = [*large, *small]
     aligned = Seating(
         name="s",
@@ -182,8 +182,8 @@ def test_a_point_splits_its_games_over_every_pair_of_seeds() -> None:
     by_seed = [s.checkpoints[0] for s in sorted(small, key=lambda line: line.order)]
     first, second = (aligned.resolve(each.checkpoints[0], lines) for each in large)
     assert isinstance(first, Seated) and isinstance(second, Seated)
-    assert found_pairs(first) == [(by_seed[0], 2), (by_seed[1], 2), (by_seed[2], 2)]
-    assert found_pairs(second) == [(by_seed[0], 2), (by_seed[1], 1), (by_seed[2], 1)]
+    assert _found(first) == [(by_seed[0], 2), (by_seed[1], 2), (by_seed[2], 2)]
+    assert _found(second) == [(by_seed[0], 2), (by_seed[1], 1), (by_seed[2], 1)]
     # The point holds every game; its own line and a fixed player count as one seed.
     own = Seating(
         name="o",
@@ -195,20 +195,20 @@ def test_a_point_splits_its_games_over_every_pair_of_seeds() -> None:
     for seating in (own, fixed):
         held = [seating.resolve(each.checkpoints[0], lines) for each in large]
         assert [
-            [games for _, games in found_pairs(each)] for each in held if isinstance(each, Seated)
+            [games for _, games in _found(each)] for each in held if isinstance(each, Seated)
         ] == [
             [2],
             [1],
         ]
     # A seed of the other job that may still save there holds the point back.
-    waiting = [*large, *small, make_line("s4", "small", seed=4)]
+    waiting = [*large, *small, _line("s4", "small", seed=4)]
     assert isinstance(aligned.resolve(large[0].checkpoints[0], waiting), Gap)
 
 
 def test_one_seed_plays_the_same_pair_at_every_point_and_hold() -> None:
     direct = Inference(config={"search": 0})
-    large = [make_line(f"l{seed}", "large", 100, 200, seed=seed) for seed in (1, 2, 3)]
-    small = [make_line(f"s{seed}", "small", 100, 200, seed=seed) for seed in (1, 2, 3)]
+    large = [_line(f"l{seed}", "large", 100, 200, seed=seed) for seed in (1, 2, 3)]
+    small = [_line(f"s{seed}", "small", 100, 200, seed=seed) for seed in (1, 2, 3)]
     lines = [*large, *small]
     one = Seating(
         name="s",
@@ -224,7 +224,7 @@ def test_one_seed_plays_the_same_pair_at_every_point_and_hold() -> None:
             (held, other, games)
             for held, seated in found
             if isinstance(seated, Seated)
-            for other, games in found_pairs(seated)
+            for other, games in _found(seated)
         ]
 
     chosen = played(lines)
@@ -241,14 +241,14 @@ def test_a_relative_seat_finds_an_exact_position_or_says_whether_one_may_still_c
     def seating(seat: Earlier | Fraction | Final | Aligned) -> Seating:
         return Seating(name="s", players=(direct, seat), conditions=({"deal": 0},), games=1)
 
-    small = make_line("s1", "small", 63, 90)
-    large = make_line("l1", "large", 90, 180)
+    small = _line("s1", "small", 63, 90)
+    large = _line("l1", "large", 90, 180)
     lines = [small, large]
     # 90 × 0.7 is 62.99999999999999 in binary, and still the checkpoint at 63.
     found = seating(Fraction(clock="updates", value=0.7, inference=direct)).resolve(
         small.checkpoints[1], lines
     )
-    assert isinstance(found, Seated) and found_pairs(found) == [(small.checkpoints[0], 1)]
+    assert isinstance(found, Seated) and _found(found) == [(small.checkpoints[0], 1)]
     # Passed without saving there: never. Ahead of the line: not yet, until it ends.
     earlier = seating(Earlier(clock="updates", by=10, inference=direct))
     assert isinstance(gap := earlier.resolve(small.checkpoints[1], lines), Gap)
@@ -261,11 +261,11 @@ def test_a_relative_seat_finds_an_exact_position_or_says_whether_one_may_still_c
     assert gap.missing == "never"
     # Held for the job it names, it plays that job: here the held checkpoint against itself.
     selfplay = aligned.resolve(small.checkpoints[0], lines)
-    assert isinstance(selfplay, Seated) and found_pairs(selfplay) == [(small.checkpoints[0], 1)]
+    assert isinstance(selfplay, Seated) and _found(selfplay) == [(small.checkpoints[0], 1)]
     final = seating(Final(job="small", inference=direct))
     assert isinstance(final.resolve(large.checkpoints[0], lines), Gap)
     done = final.resolve(large.checkpoints[0], ended)
-    assert isinstance(done, Seated) and found_pairs(done) == [(small.checkpoints[1], 1)]
+    assert isinstance(done, Seated) and _found(done) == [(small.checkpoints[1], 1)]
     (match,) = final.matches(large.checkpoints[0], done)
     assert match.players[1] == direct.model(small.checkpoints[1])
     with pytest.raises(ValidationError, match="relative_seat_needs_an_inference_seat"):
@@ -283,17 +283,17 @@ def test_a_trained_seat_never_seats_the_lines_initial_weights() -> None:
     def seating(seat: Fraction | At) -> Seating:
         return Seating(name="s", players=(direct, seat), conditions=({"deal": 0},), games=1)
 
-    line = make_line("l1", "large", 0, 100, 300, 700)
+    line = _line("l1", "large", 0, 100, 300, 700)
     half = Fraction(clock="updates", value=0.5, at_or_before=True, inference=direct)
     trained = seating(half.model_copy(update={"trained": True}))
     # At or before half of 100, only the initial weights: seated unless trained is asked.
     found = seating(half).resolve(line.checkpoints[1], [line])
-    assert isinstance(found, Seated) and found_pairs(found) == [(line.checkpoints[0], 1)]
+    assert isinstance(found, Seated) and _found(found) == [(line.checkpoints[0], 1)]
     assert isinstance(gap := trained.resolve(line.checkpoints[1], [line]), Gap)
     assert (gap.missing, gap.position, gap.seat) == ("never", 50, trained.players[1])
     # A trained checkpoint at or before the target is seated as ever.
     found = trained.resolve(line.checkpoints[3], [line])
-    assert isinstance(found, Seated) and found_pairs(found) == [(line.checkpoints[2], 1)]
+    assert isinstance(found, Seated) and _found(found) == [(line.checkpoints[2], 1)]
     # Exactly at the initial weights: never, though a checkpoint stands there.
     initial = seating(At(clock="updates", value=0, trained=True, inference=direct))
     assert isinstance(gap := initial.resolve(line.checkpoints[1], [line]), Gap)
@@ -302,7 +302,7 @@ def test_a_trained_seat_never_seats_the_lines_initial_weights() -> None:
     hours = Line(
         name="h1",
         checkpoints=tuple(
-            ref("h1", updates).model_copy(
+            _ref("h1", updates).model_copy(
                 update={"at": {"updates": updates, "running_hours": 0.001 + updates / 100}}
             )
             for updates in (0, 100)
@@ -325,25 +325,25 @@ def test_an_at_or_before_seat_takes_the_latest_checkpoint_once_none_nearer_can_c
 
     half = seating(Fraction(clock="updates", value=0.5, at_or_before=True, inference=direct))
     exact = seating(Fraction(clock="updates", value=0.5, inference=direct))
-    line = make_line("l1", "large", 100, 300, 400, 700)
+    line = _line("l1", "large", 100, 300, 400, 700)
     # Half of 700 is 350: none sits there, and the latest at or before it is 300.
     found = half.resolve(line.checkpoints[3], [line])
-    assert isinstance(found, Seated) and found_pairs(found) == [(line.checkpoints[1], 1)]
+    assert isinstance(found, Seated) and _found(found) == [(line.checkpoints[1], 1)]
     assert isinstance(gap := exact.resolve(line.checkpoints[3], [line]), Gap)
     assert gap.missing == "never"
     # In another job's line that has not saved past 350, a save at 340 could still come.
     other = seating(
         Fraction(clock="updates", value=0.5, at_or_before=True, job="small", inference=direct)
     )
-    small = make_line("s1", "small", 100, 300)
+    small = _line("s1", "small", 100, 300)
     assert isinstance(gap := other.resolve(line.checkpoints[3], [line, small]), Gap)
     assert (gap.missing, gap.position, gap.seat) == ("not_yet", 350, other.players[1])
     # Once it saves past the target or ends, nothing nearer can come.
-    for done in (make_line("s1", "small", 100, 300, 500), small.model_copy(update={"ended": True})):
+    for done in (_line("s1", "small", 100, 300, 500), small.model_copy(update={"ended": True})):
         found = other.resolve(line.checkpoints[3], [line, done])
-        assert isinstance(found, Seated) and found_pairs(found) == [(done.checkpoints[1], 1)]
+        assert isinstance(found, Seated) and _found(found) == [(done.checkpoints[1], 1)]
     # Nothing at or before the target, once past it: never.
-    late = make_line("s1", "small", 400)
+    late = _line("s1", "small", 400)
     assert isinstance(gap := other.resolve(line.checkpoints[3], [line, late]), Gap)
     assert gap.missing == "never"
 
@@ -362,7 +362,7 @@ def test_setup_is_recorded_and_part_of_no_identity() -> None:
         world = Environment(name="duel", files=DIGEST, config={"world": "w6", **setup})
         return TournamentRun(
             tournament=Benchmark(name="ladder", environment=world, seatings=(seating,)),
-            checkpoints=(ref("a", 100),),
+            checkpoints=(_ref("a", 100),),
         )
 
     cpu, cuda = run_on("cpu"), run_on("cuda")

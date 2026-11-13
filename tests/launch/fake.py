@@ -91,49 +91,49 @@ class FakeService:
         self.most_live = 0
         self.staged: list[tuple[str, int]] = []  # each staged commit, with creates before it
 
-    def call(self, boundary: str) -> None:
+    def _call(self, boundary: str) -> None:
         self.calls[boundary] += 1
         if self.delay_seconds:
             time.sleep(self.delay_seconds)
 
     def started(self, session_id: str) -> bool:
-        self.call("bucket")
+        self._call("bucket")
         return session_id in self.sessions
 
     def allocation(self, session_id: str) -> Allocation | None:
-        self.call("provider")
+        self._call("provider")
         return Allocation(
             id=session_id, address=None, usd_per_hour=self.usd_per_hour, created_at=self.clock()
         )
 
     def bill(self, session_id: str, now: datetime) -> Bill | None:
-        self.call("provider")
+        self._call("provider")
         return None
 
     def offer(self) -> Offer:
-        self.call("provider")
+        self._call("provider")
         hardware = GPU(id="NVIDIA L4", min_vcpus=6, min_memory_gb=48)
         return Offer(hardware=hardware, usd_per_hour=self.usd_per_hour, available=True)
 
     def create(self, packet: Packet) -> str:
-        self.call("provider")
+        self._call("provider")
         self.creates += 1
         if self.refuse:
             self.refuse -= 1
             raise Refused("no capacity")
         self.sessions[packet.session] = FakeSession(packet, self.clock())
-        self.most_live = max(self.most_live, sum(self.alive(p) for p in self.sessions.values()))
+        self.most_live = max(self.most_live, sum(self._alive(p) for p in self.sessions.values()))
         if self.lose_reply:
             self.lose_reply -= 1
             raise ConnectionError("the reply never arrived")
         return f"provider-{packet.session}"
 
     def stage(self, repo: str, commit: str) -> None:
-        self.call("bucket")
+        self._call("bucket")
         self.staged.append((commit, self.creates))
 
     def add(self, session_id: str, work: Work) -> None:
-        self.call("bucket")
+        self._call("bucket")
         held = self.sessions[session_id]
         if held.told_to_finish:
             return  # its worker has stopped taking work
@@ -141,13 +141,13 @@ class FakeService:
             held.added.append((work, self.clock()))
 
     def find(self, session_id: str) -> str | None:
-        self.call("provider")
+        self._call("provider")
         return f"provider-{session_id}" if session_id in self.sessions else None
 
     def observe(self, session_id: str) -> Observation:
-        self.call("bucket")
+        self._call("bucket")
         held = self.sessions[session_id]
-        return Observation(alive=self.alive(held), progress=self.progress(held))
+        return Observation(alive=self._alive(held), progress=self._progress(held))
 
     def held(self, run: str, key: str | None = None) -> dict[str, bytes]:
         return {}  # nothing of any run's folder is kept
@@ -156,24 +156,24 @@ class FakeService:
         pass
 
     def stop(self, session_id: str, attempt: str) -> None:
-        self.call("bucket")
+        self._call("bucket")
         self.sessions[session_id].stops.setdefault(attempt, self.clock())
 
     def end(self, session_id: str) -> datetime | None:
-        self.call("provider")
+        self._call("provider")
         held = self.sessions[session_id]
-        if self.alive(held):
+        if self._alive(held):
             held.killed_at = self.clock()
-        return self.ended_at(held)
+        return self._ended_at(held)
 
     def finish(self, session_id: str) -> datetime | None:
         # Its work is done, so it ends once it has delivered everything.
-        self.call("bucket")
+        self._call("bucket")
         held = self.sessions[session_id]
-        if self.alive(held) and not held.told_to_finish:
+        if self._alive(held) and not held.told_to_finish:
             held.told_to_finish = True
             held.killed_at = self.clock() + timedelta(seconds=self.finish_seconds)
-        return self.ended_at(held) if not self.alive(held) else None
+        return self._ended_at(held) if not self._alive(held) else None
 
     def kill(self, session_id: str) -> None:
         self.sessions[session_id].killed_at = self.clock()
@@ -181,38 +181,38 @@ class FakeService:
     def logs(
         self, session_id: str, attempt: str | None = None, *, producer: str = "job"
     ) -> LogStream:
-        self.call("bucket")
+        self._call("bucket")
         held = self.sessions.get(session_id)
-        closed = held is not None and not self.alive(held)
+        closed = held is not None and not self._alive(held)
         raw = f"log of {attempt}\n".encode() if attempt else b"startup\n"
         return snapshot_stream(session_id, attempt, producer, raw, closed)
 
     def fetch(self, session_id: str, attempt: str, name: str, destination: Path) -> Path:
-        self.call("bucket")
+        self._call("bucket")
         destination.mkdir(parents=True, exist_ok=True)
         copy = destination / name
         copy.write_bytes(output_bytes(attempt))
         return copy
 
-    def ended_at(self, session: FakeSession) -> datetime:
+    def _ended_at(self, session: FakeSession) -> datetime:
         """When the session stopped: killed, out of work, or at its deadline."""
-        limit = self.limit(session)
+        limit = self._limit(session)
         if session.packet.kept:
             return limit
-        progress = self.progress(session, limit)
+        progress = self._progress(session, limit)
         done = [p.finished_at for p in progress if p.finished_at is not None]
         whole = len(done) == len(session.work())
         return min(max(done) if whole and done else limit, limit)
 
-    def limit(self, session: FakeSession) -> datetime:
+    def _limit(self, session: FakeSession) -> datetime:
         deadline = session.packet.deadline or datetime.max.replace(tzinfo=UTC)
         return min(session.killed_at or deadline, deadline)
 
-    def alive(self, session: FakeSession) -> bool:
-        return self.clock() < self.ended_at(session)
+    def _alive(self, session: FakeSession) -> bool:
+        return self.clock() < self._ended_at(session)
 
-    def progress(self, session: FakeSession, at: datetime | None = None) -> tuple[Progress, ...]:
-        now = min(at or self.clock(), self.limit(session))
+    def _progress(self, session: FakeSession, at: datetime | None = None) -> tuple[Progress, ...]:
+        now = min(at or self.clock(), self._limit(session))
         at_deadline = session.packet.deadline is not None and now >= session.packet.deadline
         # When each slot is next free; a running attempt holds its slot past now.
         free = [session.created_at] * session.packet.slots
@@ -223,7 +223,7 @@ class FakeService:
             cursor = max(free[slot], arrived)
             stop = session.stops.get(work.attempt)
             if stop is not None and stop <= cursor:
-                progress.append(self.finished(work, None, cursor, "cancelled"))
+                progress.append(self._finished(work, None, cursor, "cancelled"))
                 continue
             if cursor >= now:
                 break
@@ -253,12 +253,12 @@ class FakeService:
                 outcome = work.limit_kind
             else:
                 outcome = self.outcome(work)
-            progress.append(self.finished(work, cursor, end, outcome))
+            progress.append(self._finished(work, cursor, end, outcome))
             free[slot] = end
         return tuple(progress)
 
     @staticmethod
-    def finished(work: Work, started: datetime | None, at: datetime, outcome: Outcome) -> Progress:
+    def _finished(work: Work, started: datetime | None, at: datetime, outcome: Outcome) -> Progress:
         if outcome != "succeeded":
             return Progress(
                 attempt=work.attempt,

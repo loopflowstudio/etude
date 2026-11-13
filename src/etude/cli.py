@@ -24,7 +24,7 @@ from etude.train.cli import checkpoints, sync
 app = launch_cli.app
 
 
-def submit(
+def _submit(
     ctx: typer.Context,
     file: Path | None,
     pool: str | None,
@@ -131,7 +131,7 @@ def launch(
     help: FileHelp = False,
 ) -> None:
     """Queue a file's runs and get the machines to start them now, or fail and queue nothing."""
-    submit(
+    _submit(
         ctx,
         file,
         pool,
@@ -163,7 +163,7 @@ def queue(
     help: FileHelp = False,
 ) -> None:
     """Add a file's runs to the queue. They start when a machine has room or can be rented."""
-    submit(ctx, file, pool, rent, cohort, parallel, max_usd, help, queued=True, smoke=smoke)
+    _submit(ctx, file, pool, rent, cohort, parallel, max_usd, help, queued=True, smoke=smoke)
 
 
 @app.command(
@@ -517,10 +517,10 @@ app.command()(kind(Kind.wait)(sync))
 
 # Commands that run on this computer even when a controller is chosen: they read
 # local files, or they choose the controller.
-LOCAL = ("launch", "queue", "smoke", "source", "fetch", "worker", "logs")
+_LOCAL = ("launch", "queue", "smoke", "source", "fetch", "worker", "logs")
 
 
-def run_command(argv: list[str]) -> int:
+def _main(argv: list[str]) -> int:
     try:
         if (
             argv
@@ -533,7 +533,7 @@ def run_command(argv: list[str]) -> int:
 
             if argv == ["--controller-request"]:
                 return controller.receive(launch_cli.default())
-            local = argv[0] in LOCAL or argv[:2] in (
+            local = argv[0] in _LOCAL or argv[:2] in (
                 ["controller", "set"],
                 ["controller", "unset"],
             )
@@ -562,7 +562,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Profile a whole invocation with `etude --profile FILE COMMAND ...`."""
     args = list(sys.argv[1:] if argv is None else argv)
     if not args or args[0] != "--profile":
-        return run_command(args)
+        return _main(args)
     if len(args) < 3:
         print("etude: --profile needs a file and a command", file=sys.stderr)
         return 1
@@ -571,6 +571,6 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     profile = cProfile.Profile()
     try:
-        return int(profile.runcall(run_command, args[2:]))
+        return int(profile.runcall(_main, args[2:]))
     finally:
         profile.dump_stats(args[1])

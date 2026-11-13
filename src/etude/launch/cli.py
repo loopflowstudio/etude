@@ -25,7 +25,7 @@ def default() -> Scheduler:
     return open_scheduler()
 
 
-def make_app(*, help: str | None = None, invoke_without_command: bool = False) -> typer.Typer:
+def _app(*, help: str | None = None, invoke_without_command: bool = False) -> typer.Typer:
     return typer.Typer(
         rich_markup_mode=None,
         pretty_exceptions_enable=False,
@@ -35,17 +35,17 @@ def make_app(*, help: str | None = None, invoke_without_command: bool = False) -
     )
 
 
-app = make_app(help="Launch runs on your own or rented machines, and track what they record.")
-pool_app = make_app(help="Add a pool of machines you own, or change whether it takes runs.")
-ondemand_app = make_app(help="Add an on-demand to rent from: a machine template and a budget.")
-machine_app = make_app(help="Add a machine you own.")
-controller_app = make_app(
+app = _app(help="Launch runs on your own or rented machines, and track what they record.")
+pool_app = _app(help="Add a pool of machines you own, or change whether it takes runs.")
+ondemand_app = _app(help="Add an on-demand to rent from: a machine template and a budget.")
+machine_app = _app(help="Add a machine you own.")
+controller_app = _app(
     help="Show or choose the machine that holds the database, or run its loop.",
     invoke_without_command=True,
 )
-provider_app = make_app(help="Record an account that supplies machines.")
-storage_app = make_app(help="Add a place in a bucket for records.")
-image_app = make_app(help="Resolve container images before renting.")
+provider_app = _app(help="Record an account that supplies machines.")
+storage_app = _app(help="Add a place in a bucket for records.")
+image_app = _app(help="Resolve container images before renting.")
 for name, sub in (
     ("pool", pool_app),
     ("ondemand", ondemand_app),
@@ -204,14 +204,14 @@ def logs(
     """Read retained preparation, startup, execution and cleanup evidence."""
     import time
 
-    from etude.launch.client import client
+    from etude.launch.client import _client
     from etude.launch.logs import LogCursor, render
 
     if sum(value is not None for value in (run, machine, cohort)) != 1:
         raise typer.BadParameter("name exactly one --run, --machine or --cohort")
     if timeout and not follow:
         raise typer.BadParameter("--timeout bounds --follow")
-    scheduler = client()
+    scheduler = _client()
     runs = [r.id for r in scheduler.cohort_runs(cohort)] if cohort else [run]
     if not follow:
         snapshots = [scheduler.logs(run=identity, machine=machine) for identity in runs]

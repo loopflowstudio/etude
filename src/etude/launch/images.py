@@ -44,7 +44,7 @@ class Inspection(Record):
     image: Platform | dict[str, Platform]
 
 
-FORMAT = '{"name":{{json .Name}},"manifest":{{json .Manifest}},"image":{{json .Image}}}'
+_FORMAT = '{"name":{{json .Name}},"manifest":{{json .Manifest}},"image":{{json .Image}}}'
 
 
 def resolve_image(
@@ -57,7 +57,7 @@ def resolve_image(
         raise ValueError("image resolution timeout must be positive and finite, or None")
     try:
         result = subprocess.run(
-            ["docker", "buildx", "imagetools", "inspect", "--format", FORMAT, "--", reference],
+            ["docker", "buildx", "imagetools", "inspect", "--format", _FORMAT, "--", reference],
             capture_output=True,
             check=True,
             timeout=remaining(timeout),

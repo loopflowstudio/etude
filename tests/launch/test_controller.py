@@ -16,12 +16,12 @@ import pytest
 
 from etude.cli import main
 from etude.launch.client import (
+    _open,
     cancel,
     fetch,
     launch,
     launch_cohort,
     logs,
-    open_file,
     queue_cohort,
     status,
     wait,
@@ -125,9 +125,9 @@ def test_remote_launch_freezes_sources_config_and_returns_outputs(
     assert "frozen config\n1\n" in logs.stdout and "frozen config\n2\n" in logs.stdout, logs.stderr
     assert not (client / "launcher.db").exists()
     assert len(list((remote / "sources").glob("*.tar"))) == 1
-    assert [pool.name for pool in open_file(remote).pools()] == ["controller"]
-    assert open_file(remote).record(ids[0]).pool == "controller"
-    frozen = open_file(remote).record(ids[0]).spec
+    assert [pool.name for pool in _open(remote).pools()] == ["controller"]
+    assert _open(remote).record(ids[0]).pool == "controller"
+    frozen = _open(remote).record(ids[0]).spec
     assert frozen.repo == str(repo) and frozen.revision != "HEAD"
     # Continuation works without the client's repository: it uses the retained archive.
     continued = command("continue", "--run", ids[0], "--until", "steps=20")
@@ -158,15 +158,15 @@ def test_loop_survives_an_empty_queue_and_places_later_work(
     ) as process:
         try:
             heartbeat = remote / "controller-heartbeat"
-            until_while_alive(process, heartbeat.exists)
+            _until_while_alive(process, heartbeat.exists)
             job = tmp_path / "job.py"
             job.write_text(
                 'from etude.launch.records import Job, Run\ndef runs(): return Job(command="sleep 0.2", max_hours=0.01, max_usd=1).runs(1, 2)\n'
             )
             assert command("launch", str(job), "--cohort", "later").returncode == 0
-            scheduler = open_file(remote)
+            scheduler = _open(remote)
             # Read only: the standing loop must finish both runs.
-            until_while_alive(process, lambda: not scheduler.runs())
+            _until_while_alive(process, lambda: not scheduler.runs())
             assert len(scheduler.runs(done=True)) == 2
             assert all(
                 scheduler.read(run.id).outcome == "succeeded" for run in scheduler.runs(done=True)
@@ -176,7 +176,7 @@ def test_loop_survives_an_empty_queue_and_places_later_work(
             process.wait(timeout=5)
 
 
-def until_while_alive(process: subprocess.Popen[bytes], done: Callable[[], bool]) -> None:
+def _until_while_alive(process: subprocess.Popen[bytes], done: Callable[[], bool]) -> None:
     """Wait for the standing loop to make `done` true; fail as soon as it exits.
 
     The only time limit catches a hung loop. Progress is judged by the condition,
@@ -195,7 +195,7 @@ def test_waiting_work_warns_when_loop_is_absent_or_stale(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path))
-    scheduler = open_file(tmp_path)
+    scheduler = _open(tmp_path)
     scheduler.turn_pool("local", off=True)
     scheduler.add_pool(Pool(name="waiting"))
     scheduler.queue(Job(command="true", max_hours=1, max_usd=Decimal(1)), pool="waiting")
@@ -239,7 +239,7 @@ def test_remote_queue_preserves_choice_without_local_database(
     assert result.returncode == 0, result.stderr
     ids = [line.split()[0] for line in result.stdout.splitlines()]
     assert len(ids) == 2
-    scheduler = open_file(remote)
+    scheduler = _open(remote)
     assert all(scheduler.record(id).autorun for id in ids)
     assert all(scheduler.read(id).phase == "queued" for id in ids)
     assert not (client / "launcher.db").exists()
@@ -346,7 +346,7 @@ def test_controller_keeps_source_history_and_checks_out_on_client(
     sent = command("queue", str(job), "--pool", "waiting")
     assert sent.returncode == 0, sent.stderr
     id = sent.stdout.split()[0]
-    record = open_file(remote).record(id)
+    record = _open(remote).record(id)
     assert record.source is not None and record.source.snapshot
     assert record.source.origin == str(origin)
     assert git(origin, "rev-parse", f"refs/etude/runs/{id}") == record.spec.revision
@@ -359,4 +359,4 @@ def test_controller_keeps_source_history_and_checks_out_on_client(
     assert result.returncode == 0, result.stderr
     assert (destination / "train").read_text() == "client snapshot\n"
     assert not (client / "launcher.db").exists()
-    assert open_file(remote).read(id).phase == "queued"
+    assert _open(remote).read(id).phase == "queued"

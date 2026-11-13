@@ -26,9 +26,9 @@ LIMIT = 1024 * 1024
 OPENING = 4096
 TRUNCATED = "[retention truncated"
 CLOSED = "[producer closed]"
-lock = threading.Lock()
-publication_lock = threading.Lock()
-log_path: ContextVar[Path | None] = ContextVar("log_path", default=None)
+_lock = threading.Lock()
+_publication_lock = threading.Lock()
+_path: ContextVar[Path | None] = ContextVar("log_path", default=None)
 
 
 class Console:
@@ -39,39 +39,39 @@ class Console:
     """
 
     def __init__(self, operation: str) -> None:
-        self.operation = operation
-        self.pending = b""
-        self.omitting = False
+        self._operation = operation
+        self._pending = b""
+        self._omitting = False
 
     def write(self, body: bytes, *, final: bool = False) -> None:
         for piece in body.splitlines(keepends=True):
-            if not self.omitting:
-                self.pending += piece
-                if len(self.pending) > LIMIT:
-                    self.pending = b""
-                    self.omitting = True
+            if not self._omitting:
+                self._pending += piece
+                if len(self._pending) > LIMIT:
+                    self._pending = b""
+                    self._omitting = True
             if piece.endswith(b"\n"):
-                self.flush()
+                self._flush()
         if final:
-            self.flush()
+            self._flush()
 
-    def flush(self) -> None:
-        if self.omitting:
-            write_log(self.operation, "[retention truncated: oversized console line omitted]")
-        elif self.pending:
-            write_log(self.operation, self.pending.decode(errors="replace").rstrip("\n"))
-        self.pending = b""
-        self.omitting = False
+    def _flush(self) -> None:
+        if self._omitting:
+            write_log(self._operation, "[retention truncated: oversized console line omitted]")
+        elif self._pending:
+            write_log(self._operation, self._pending.decode(errors="replace").rstrip("\n"))
+        self._pending = b""
+        self._omitting = False
 
 
 @contextmanager
 def log_to(path: Path) -> Iterator[None]:
     """Give this producer its own file without changing another thread's environment."""
-    token = log_path.set(path)
+    token = _path.set(path)
     try:
         yield
     finally:
-        log_path.reset(token)
+        _path.reset(token)
 
 
 def sanitize(text: str) -> str:
@@ -142,10 +142,10 @@ def write_log(operation: str, message: str) -> None:
     """Append one sanitized line. A log is only appended to, so it can be carried in
     pieces each sent once; what is retained or shown of it is `bounded`."""
     line = bounded(sanitize(f"{datetime.now(UTC).isoformat()} {operation}: {message}\n"))
-    path = log_path.get() or os.environ.get("ETUDE_LOG_PATH")
+    path = _path.get() or os.environ.get("ETUDE_LOG_PATH")
     try:
         if path:
-            with lock:
+            with _lock:
                 target = Path(path)
                 target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
                 with target.open("a") as log:
@@ -174,7 +174,7 @@ def publish(path: Path, url: str, timeout: float | None = None) -> None:
     def deliver() -> None:
         left = remaining()
         acquired = (
-            publication_lock.acquire() if left is None else publication_lock.acquire(timeout=left)
+            _publication_lock.acquire() if left is None else _publication_lock.acquire(timeout=left)
         )
         if not acquired:
             return
@@ -185,7 +185,7 @@ def publish(path: Path, url: str, timeout: float | None = None) -> None:
             ):
                 pass
         finally:
-            publication_lock.release()
+            _publication_lock.release()
 
     try:
         with limit_time(seconds):

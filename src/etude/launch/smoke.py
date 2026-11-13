@@ -36,8 +36,8 @@ from etude.launch.scheduler import Scheduler
 from etude.launch.source import home
 
 # Kept under ETUDE_HOME by content key with their own locks: shared with the real home.
-SHARED = ("prepared", "programs")
-MOVED = ("ETUDE_HOME", "ETUDE_TRACK_DIR")
+_SHARED = ("prepared", "programs")
+_MOVED = ("ETUDE_HOME", "ETUDE_TRACK_DIR")
 
 
 @contextmanager
@@ -49,10 +49,10 @@ def smoke_home(*, keep: bool = False) -> Iterator[Path]:
     """
     real = home()
     folder = Path(tempfile.mkdtemp(prefix="etude-smoke-"))
-    for name in SHARED:
+    for name in _SHARED:
         (real / name).mkdir(parents=True, exist_ok=True, mode=0o700)
         (folder / name).symlink_to(real / name, target_is_directory=True)
-    saved = {name: os.environ.get(name) for name in MOVED}
+    saved = {name: os.environ.get(name) for name in _MOVED}
     os.environ["ETUDE_HOME"] = str(folder)
     os.environ["ETUDE_TRACK_DIR"] = str(folder / "track")
     try:
@@ -123,12 +123,12 @@ def smoke_train(runs: Sequence[Run], folder: Path) -> list[Trained]:
         scheduler = Scheduler(store, {"local": lambda machine: service})
         scheduler.add_pool(Pool(name="local"))
         store.add_machine(Machine(name="local", pool="local", kind="local"))
-        return [train(scheduler, key, run) for key, run in distinct.items()]
+        return [_train(scheduler, key, run) for key, run in distinct.items()]
     finally:
         store.close()
 
 
-def train(scheduler: Scheduler, key: str, run: Run) -> Trained:
+def _train(scheduler: Scheduler, key: str, run: Run) -> Trained:
     name = run.job.name or "job"
     job = tiny(run.job)
     if job is None:

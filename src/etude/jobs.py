@@ -7,7 +7,7 @@
 Each returns an `etude.launch.records.Job` whose command Etude decides: it runs
 `python -m etude.call` (`etude.call`) in the job's own environment, which
 imports the named function and calls it with the job's config. A training job
-calls the author's `train(config)`. An evaluation job calls Etude's `hold_on_machine`,
+calls the author's `train(config)`. An evaluation job calls Etude's `_hold`,
 which holds a tournament (`etude.eval.tournament.hold`) with the author's
 `play` and the checkpoint the job is given as an input.
 
@@ -119,15 +119,15 @@ def training[C: BaseModel](
     `LauncherError` when it is not, or when a config is not of that type or
     would not validate back into it.
     """
-    require_hours(options)
-    job = make_job(train, config, origin=train, options=options)
+    _require_hours(options)
+    job = _job(train, config, origin=train, options=options)
     if smoke is None:
         return job
-    return job.model_copy(update={"smoke": SmokeForm(config=config_text(train, smoke))})
+    return job.model_copy(update={"smoke": SmokeForm(config=_config_text(train, smoke))})
 
 
 class Evaluation(Record):
-    """An evaluation job's config: what `hold_on_machine` holds, with what, on the machine."""
+    """An evaluation job's config: what `_hold` holds, with what, on the machine."""
 
     tournament: Benchmark | RoundRobin
     # None in a job an experiment's eval returns: `etude eval` names it for the file.
@@ -175,7 +175,7 @@ def evaluation(
     a job is refused: a machine reads no other eval run, so cannot tell what
     is new. Any other job names its `experiment`.
     """
-    require_hours(options)
+    _require_hours(options)
     if isinstance(tournament, Benchmark) and enter:
         raise LauncherError(f"{tournament.name} is a benchmark: give it checkpoints, no entrants")
     if checkpoint is not None and checkpoints:
@@ -189,18 +189,18 @@ def evaluation(
     spec = Evaluation(
         tournament=tournament,
         experiment=experiment,
-        play=called_function(play, job_repo(play, options)),
+        play=_function(play, _repo(play, options)),
         checkpoint=checkpoint,
         checkpoints=tuple(checkpoints),
         entrants=tuple(enter),
         workers=workers,
     )
-    return make_job(hold_on_machine, spec, origin=play, options=options, experiment=experiment)
+    return _job(_hold, spec, origin=play, options=options, experiment=experiment)
 
 
 def evaluation_spec(job: Job) -> Evaluation:
     """What an evaluation job holds; raises `EtudeError` for any other job."""
-    if job.config is None or "etude.jobs:hold_on_machine" not in job.command:
+    if job.config is None or "etude.jobs:_hold" not in job.command:
         raise EtudeError("not_an_evaluation_job", 422)
     return Evaluation.model_validate_json(job.config)
 
@@ -234,7 +234,7 @@ def with_matches(job: Job, matches: Sequence[Match], state: ExperimentState) -> 
 
 
 # The job input that carries a continuation's checkpoint file, before its suffix.
-PARENT_CHECKPOINT = "parent-checkpoint"
+_PARENT_CHECKPOINT = "parent-checkpoint"
 
 
 def continue_from(
@@ -275,7 +275,7 @@ def continue_from(
         raise LauncherError(
             f"the target {until} is not beyond the checkpoint's {clock}={number(record.at[clock])}"
         )
-    inputs = tuple(i for i in parent.spec.inputs if not i.name.startswith(PARENT_CHECKPOINT))
+    inputs = tuple(i for i in parent.spec.inputs if not i.name.startswith(_PARENT_CHECKPOINT))
     # Without tags: they label the parent's checkpoint after the fact and decide
     # nothing about the continuation, so they stay out of its job identity.
     checkpoint = record.model_copy(update={"tags": ()})
@@ -287,7 +287,7 @@ def continue_from(
         # Addressed within that folder, so where its records were read from does
         # not make the same continuation a different job.
         key = f"{CHECKPOINTS}/{file.name}"
-        given = PARENT_CHECKPOINT + file.suffix
+        given = _PARENT_CHECKPOINT + file.suffix
         inputs += (
             Input(
                 name=given,
@@ -314,7 +314,7 @@ def continue_from(
     return Run(job=job, seed=parent.seed, params=dict(parent.params), source=parent.source)
 
 
-def hold_on_machine(evaluation: Evaluation) -> None:
+def _hold(evaluation: Evaluation) -> None:
     """On the machine: hold the tournament, with the checkpoint inputs in their seats."""
     # Loaded by import path: the function `evaluation` was given, typed there.
     play = cast(Callable[[Match], Tables | Result], evaluation.play.load())
@@ -341,7 +341,7 @@ def hold_on_machine(evaluation: Evaluation) -> None:
     matches = None
     if evaluation.matches is not None:
         here = {key: (Path(str(folder)) / name).as_uri() for key, name in evaluation.files.items()}
-        matches = [located(match, here) for match in evaluation.matches]
+        matches = [_located(match, here) for match in evaluation.matches]
     hold(
         evaluation.tournament,
         experiment=evaluation.experiment,
@@ -355,7 +355,7 @@ def hold_on_machine(evaluation: Evaluation) -> None:
     )
 
 
-def located(match: Match, here: Mapping[str, str]) -> Match:
+def _located(match: Match, here: Mapping[str, str]) -> Match:
     """The match with each model's checkpoint file where it lies on this machine."""
     players: list[Player] = []
     for player in match.players:
@@ -372,13 +372,13 @@ def located(match: Match, here: Mapping[str, str]) -> Match:
     return match.model_copy(update={"players": tuple(players)})
 
 
-def require_hours(options: JobOptions) -> None:
+def _require_hours(options: JobOptions) -> None:
     """Refuse a job with no `max_hours` in words, before `Job` refuses it as a missing field."""
     if "max_hours" not in options:
         raise LauncherError("a job needs max_hours: the most hours it may hold a machine")
 
 
-def make_job(
+def _job(
     function: Callable[..., object],
     config: BaseModel,
     *,
@@ -387,12 +387,12 @@ def make_job(
     experiment: str | None = None,
 ) -> Job:
     """The job that calls `function(config)`; `origin` is the author's function it brings."""
-    text = config_text(function, config)
-    repo = job_repo(origin, options)
-    called = called_function(function, repo)
+    text = _config_text(function, config)
+    repo = _repo(origin, options)
+    called = _function(function, repo)
     sourced: JobOptions = {**options, "repo": None if repo is None else str(repo)}
     if "prepare" not in options and options.get("runtime") is None and repo is not None:
-        derived = uv_preparation(repo)
+        derived = _uv_preparation(repo)
         if derived is not None:
             sourced["prepare"] = derived
     prepared = sourced.get("prepare")
@@ -407,7 +407,7 @@ def make_job(
     return Job(**sourced, command=command, config=text, experiment=experiment)
 
 
-def config_text(function: Callable[..., object], config: BaseModel) -> str:
+def _config_text(function: Callable[..., object], config: BaseModel) -> str:
     """`config` as the job's text, refused unless `function` takes it and it validates back."""
     try:
         kind = config_type(function)
@@ -427,7 +427,7 @@ def config_text(function: Callable[..., object], config: BaseModel) -> str:
     return text
 
 
-def uv_preparation(repo: Path) -> Preparation | None:
+def _uv_preparation(repo: Path) -> Preparation | None:
     """The dependency environment of an unpackaged uv project, prepared once per lock.
 
     uv installs only the dependencies of a project it does not package (no build
@@ -456,16 +456,16 @@ def uv_preparation(repo: Path) -> Preparation | None:
             " uv sync --frozen --no-install-project"
         ),
         # uv chooses the interpreter from .python-version, so it decides the result too.
-        paths=("pyproject.toml", "uv.lock", *present(repo, ".python-version")),
+        paths=("pyproject.toml", "uv.lock", *_present(repo, ".python-version")),
         python=".venv/bin/python",
     )
 
 
-def present(repo: Path, *names: str) -> tuple[str, ...]:
+def _present(repo: Path, *names: str) -> tuple[str, ...]:
     return tuple(name for name in names if (repo / name).is_file())
 
 
-def job_repo(origin: Callable[..., object], options: JobOptions) -> Path | None:
+def _repo(origin: Callable[..., object], options: JobOptions) -> Path | None:
     """The job's source: `repo` when given, else the git checkout `origin`'s file is in."""
     if "repo" in options:
         given = options["repo"]
@@ -477,7 +477,7 @@ def job_repo(origin: Callable[..., object], options: JobOptions) -> Path | None:
     raise LauncherError(f"{file} is in no git checkout; name the job's source with repo=")
 
 
-def called_function(function: Callable[..., object], repo: Path | None) -> Function:
+def _function(function: Callable[..., object], repo: Path | None) -> Function:
     """Name `function` by import path, from where its module sits in `repo`.
 
     A module installed in this environment is imported by name alone, as in

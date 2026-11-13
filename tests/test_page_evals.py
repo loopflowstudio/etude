@@ -855,7 +855,7 @@ def test_a_page_reads_metrics_from_training_runs_once_and_no_eval_blob(
     state = observe(storage, "lab")
     assert [len(run.checkpoints) for run in state.runs] == [2]
     metrics = [key for key in storage.read if "/metrics/" in key]
-    assert metrics and all(attempt(key) for key in metrics)
+    assert metrics and all(_attempt(key) for key in metrics)
 
     storage.read.clear()
     page = build(storage, file)
@@ -880,7 +880,7 @@ def test_a_page_reads_metrics_from_training_runs_once_and_no_eval_blob(
     assert indexes and len(indexes) == len(set(indexes))
 
 
-def attempt(key: str) -> bool:
+def _attempt(key: str) -> bool:
     """Whether a key under a run's `metrics/` is an attempt record, not a block or index."""
     name = "metrics/" + key.rsplit("/metrics/", 1)[1]
     return parse(name) is None and not name.endswith((".index.json", ".permanent.json"))

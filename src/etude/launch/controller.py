@@ -51,7 +51,7 @@ from etude.launch.records import (
 from etude.launch.scheduler import Scheduler
 from etude.launch.source import freeze, home, retain, source_archive
 from etude.launch.ssh import (
-    INSTALL_CODE,
+    _INSTALL_CODE,
     EncodedOutput,
     login_shell,
     remote_python,
@@ -167,26 +167,26 @@ def unset() -> None:
 # The controller runs the client's own code, sent over SSH and kept by digest
 # beside its database, installed with uv in its own environment. The two sides
 # always use the same source and dependency lock.
-MISSING = 97  # the remote exit status meaning "that program is not here yet"
-INSTALL = "import sys\ncode=sys.stdin.buffer.read()\n" + INSTALL_CODE
+_MISSING = 97  # the remote exit status meaning "that program is not here yet"
+_INSTALL = "import sys\ncode=sys.stdin.buffer.read()\n" + _INSTALL_CODE
 
 
 @cache
-def controller_program() -> tuple[str, bytes]:
+def _program() -> tuple[str, bytes]:
     code = program_archive()
     return hashlib.sha256(code).hexdigest(), code
 
 
-def command(address: str, argv: Sequence[str]) -> list[str]:
+def _command(address: str, argv: Sequence[str]) -> list[str]:
     # A remote setting cannot forward again. No local environment/keys are serialized.
-    root = '"${ETUDE_HOME:-$HOME/.etude}/programs/' + controller_program()[0] + '"'
+    root = '"${ETUDE_HOME:-$HOME/.etude}/programs/' + _program()[0] + '"'
     run = root + "/.venv/bin/python -m etude"
     return [
         "ssh",
         "--",
         address,
         login_shell(
-            f"test -f {root}/ready || exit {MISSING}; "
+            f"test -f {root}/ready || exit {_MISSING}; "
             f"ETUDE_CONTROLLER_LOCAL=1 exec {run} {shlex.join(argv)}"
         ),
     ]
@@ -203,11 +203,11 @@ def install(address: str, *, startup_seconds: float | None = None) -> None:
         if allowance is not None
         else ""
     )
-    program = "import os\nos.environ['ETUDE_STARTUP_DEADLINE']=" + repr(deadline) + "\n" + INSTALL
+    program = "import os\nos.environ['ETUDE_STARTUP_DEADLINE']=" + repr(deadline) + "\n" + _INSTALL
     try:
         done = subprocess.run(
             ["ssh", "--", address, login_shell(shlex.join([remote_python(), "-c", program]))],
-            input=controller_program()[1],
+            input=_program()[1],
             capture_output=True,
             timeout=allowance,
         )
@@ -223,32 +223,32 @@ def install(address: str, *, startup_seconds: float | None = None) -> None:
 
 
 @timed("ssh.controller.command")
-def ssh(address: str, argv: Sequence[str], **options: Any) -> subprocess.CompletedProcess[bytes]:
+def _ssh(address: str, argv: Sequence[str], **options: Any) -> subprocess.CompletedProcess[bytes]:
     """Run one command on the controller, sending the program first if it is not there.
 
     Exit status 97 means the command did not start, so running it again is safe.
     """
     options["timeout"] = remaining(options.get("timeout"))
-    done = subprocess.run(command(address, argv), **options)
-    if done.returncode == MISSING:
+    done = subprocess.run(_command(address, argv), **options)
+    if done.returncode == _MISSING:
         install(address)
         if "timeout" in options:
             options["timeout"] = remaining(options["timeout"])
-        done = subprocess.run(command(address, argv), **options)
+        done = subprocess.run(_command(address, argv), **options)
     return done
 
 
 def prepare(address: str, submission: LaunchInput) -> LaunchInput:
     client = PythonClient(address)
     launch = Launch.model_validate_json(
-        client.request(Request(operation="prepare_launch", submission=submission))
+        client._request(Request(operation="prepare_launch", submission=submission))
     )
     requested = tuple(
         run.model_copy(update={"id": request.run})
         for run, request in zip(submission.runs, launch.requests, strict=True)
     )
     try:
-        return with_sources(
+        return _with_sources(
             submission.model_copy(
                 update={"launch": launch.id, "runs": tuple(freeze(run) for run in requested)}
             )
@@ -256,13 +256,13 @@ def prepare(address: str, submission: LaunchInput) -> LaunchInput:
     except Exception as error:
         message = explain(error)
         try:
-            client.request(Request(operation="fail_launch", launch=launch.id, message=message))
+            client._request(Request(operation="fail_launch", launch=launch.id, message=message))
         except Exception:
             message += "; controller evidence update unconfirmed"
         raise LaunchError(launch.id, tuple(r.run for r in launch.requests), message) from error
 
 
-def with_sources(submission: LaunchInput) -> LaunchInput:
+def _with_sources(submission: LaunchInput) -> LaunchInput:
     """Attach transport bytes to already frozen intent, without submitting a new run."""
     sources: dict[tuple[str, str], Source] = {}
     for run in submission.runs:
@@ -338,14 +338,14 @@ def forward(
     fetch: FetchRequest | None = None,
 ) -> int:
     if submission is None and fetch is None:
-        return ssh(address, argv).returncode
+        return _ssh(address, argv).returncode
     request: Request
     if submission is not None:
         request = Request(operation="launch", submission=prepare(address, submission))
     else:
         assert fetch is not None
         request = Request(operation="fetch", run=fetch.run, name=fetch.name)
-    done = ssh(
+    done = _ssh(
         address,
         ["--controller-request"],
         input=request.model_dump_json().encode(),
@@ -354,11 +354,11 @@ def forward(
     if done.returncode:
         return done.returncode  # a lost reply never retries a launch
     if fetch is not None:
-        print(save_output(EncodedOutput.model_validate_json(done.stdout), fetch))
+        print(_save_output(EncodedOutput.model_validate_json(done.stdout), fetch))
     return 0
 
 
-def retain_sources(sources: Sequence[Source]) -> None:
+def _retain(sources: Sequence[Source]) -> None:
     for source in sources:
         body = base64.b64decode(source.body, validate=True)
         if hashlib.sha256(body).hexdigest() != source.sha256:
@@ -366,7 +366,7 @@ def retain_sources(sources: Sequence[Source]) -> None:
         retain(source.repo, source.commit, body)
 
 
-def save_output(raw: EncodedOutput, request: FetchRequest) -> Path:
+def _save_output(raw: EncodedOutput, request: FetchRequest) -> Path:
     content = base64.b64decode(raw.body, validate=True)
     if hashlib.sha256(content).hexdigest() != raw.sha256:
         raise LauncherError("fetched output digest mismatch")
@@ -389,8 +389,8 @@ class PythonClient:
     def __init__(self, address: str) -> None:
         self.address = address
 
-    def request(self, request: Request) -> bytes:
-        done = ssh(
+    def _request(self, request: Request) -> bytes:
+        done = _ssh(
             self.address,
             ["--controller-request"],
             input=request.model_copy(update={"api": True}).model_dump_json().encode(),
@@ -407,7 +407,7 @@ class PythonClient:
             )
         return done.stdout
 
-    def submit(
+    def _submit(
         self,
         runs: Sequence[Run],
         cohort: CohortSpec | None,
@@ -426,7 +426,7 @@ class PythonClient:
         )
         try:
             return TypeAdapter(tuple[str, ...]).validate_json(
-                self.request(Request(operation="launch", submission=submission))
+                self._request(Request(operation="launch", submission=submission))
             )
         except Exception as error:
             assert submission.launch is not None
@@ -436,11 +436,11 @@ class PythonClient:
 
     def queue(self, run: Run | Job, pool: str | None = None, *, rent: str | None = None) -> str:
         one = [Run(job=run) if isinstance(run, Job) else run]
-        return self.submit(one, None, Target(pool=pool, rent=rent), True)[0]
+        return self._submit(one, None, Target(pool=pool, rent=rent), True)[0]
 
     def launch(self, run: Run | Job, pool: str | None = None, *, rent: str | None = None) -> str:
         one = [Run(job=run) if isinstance(run, Job) else run]
-        return self.submit(one, None, Target(pool=pool, rent=rent), False)[0]
+        return self._submit(one, None, Target(pool=pool, rent=rent), False)[0]
 
     def queue_cohort(
         self,
@@ -453,7 +453,7 @@ class PythonClient:
         max_usd: Decimal | None = None,
     ) -> tuple[str, ...]:
         cohort = CohortSpec(name=name, parallel=parallel, max_usd=max_usd)
-        return self.submit(runs, cohort, Target(pool=pool, rent=rent), True)
+        return self._submit(runs, cohort, Target(pool=pool, rent=rent), True)
 
     def launch_cohort(
         self,
@@ -466,7 +466,7 @@ class PythonClient:
         max_usd: Decimal | None = None,
     ) -> tuple[str, ...]:
         cohort = CohortSpec(name=name, parallel=parallel, max_usd=max_usd)
-        return self.submit(runs, cohort, Target(pool=pool, rent=rent), False)
+        return self._submit(runs, cohort, Target(pool=pool, rent=rent), False)
 
     def quote(
         self,
@@ -483,38 +483,38 @@ class PythonClient:
         )
         submission = LaunchInput(runs=tuple(runs), cohort=spec, pool=pool, rent=rent)
         return Quote.model_validate_json(
-            self.request(Request(operation="quote", submission=submission))
+            self._request(Request(operation="quote", submission=submission))
         )
 
     def availability(self, rent: str, *, timeout: float | None = None) -> Availability:
         return Availability.model_validate_json(
-            self.request(Request(operation="availability", rent=rent, timeout=timeout))
+            self._request(Request(operation="availability", rent=rent, timeout=timeout))
         )
 
     def record(self, run: str) -> RunRecord:
-        return RunRecord.model_validate_json(self.request(Request(operation="record", run=run)))
+        return RunRecord.model_validate_json(self._request(Request(operation="record", run=run)))
 
     def status(self, run: str) -> Status:
-        return Status.model_validate_json(self.request(Request(operation="status", run=run)))
+        return Status.model_validate_json(self._request(Request(operation="status", run=run)))
 
     def wait(self, *runs: str, every: float = 1.0, timeout: float | None = None) -> list[Status]:
         return TypeAdapter(list[Status]).validate_json(
-            self.request(Request(operation="wait", runs=runs, every=every, timeout=timeout))
+            self._request(Request(operation="wait", runs=runs, every=every, timeout=timeout))
         )
 
     def cancel(self, run: str) -> Status:
-        return Status.model_validate_json(self.request(Request(operation="cancel", run=run)))
+        return Status.model_validate_json(self._request(Request(operation="cancel", run=run)))
 
     def cohort_runs(self, name: str) -> tuple[RunRecord, ...]:
         return TypeAdapter(tuple[RunRecord, ...]).validate_json(
-            self.request(Request(operation="cohort_runs", name=name))
+            self._request(Request(operation="cohort_runs", name=name))
         )
 
     def diagnostics(
         self, *, run: str | None = None, machine: str | None = None
     ) -> tuple[Diagnostic, ...]:
         return TypeAdapter(tuple[Diagnostic, ...]).validate_json(
-            self.request(Request(operation="diagnostics", run=run or "", machine=machine or ""))
+            self._request(Request(operation="diagnostics", run=run or "", machine=machine or ""))
         )
 
     def logs(
@@ -534,7 +534,7 @@ class PythonClient:
         )
         try:
             with limit_time(timeout):
-                return LogSnapshot.model_validate_json(self.request(request))
+                return LogSnapshot.model_validate_json(self._request(request))
         except (subprocess.TimeoutExpired, TimeoutError):
             raise LauncherError(
                 "controller log retrieval time limit reached; evidence remains on controller"
@@ -542,25 +542,25 @@ class PythonClient:
 
     def usage(self, *, run: str | None = None, machine: str | None = None) -> Usage:
         return Usage.model_validate_json(
-            self.request(Request(operation="usage", run=run or "", machine=machine or ""))
+            self._request(Request(operation="usage", run=run or "", machine=machine or ""))
         )
 
     def fetch(self, run: str, name: str, destination: Path) -> Path:
-        return save_output(
+        return _save_output(
             EncodedOutput.model_validate_json(
-                self.request(Request(operation="fetch", run=run, name=name))
+                self._request(Request(operation="fetch", run=run, name=name))
             ),
             FetchRequest(run=run, name=name, destination=destination),
         )
 
     def rent(self, ondemand: str, hours: float, max_usd: Decimal | None = None) -> str:
         return TypeAdapter(str).validate_json(
-            self.request(Request(operation="rent", rent=ondemand, hours=hours, max_usd=max_usd))
+            self._request(Request(operation="rent", rent=ondemand, hours=hours, max_usd=max_usd))
         )
 
     def terminate(self, machine: str) -> Machine:
         return Machine.model_validate_json(
-            self.request(Request(operation="terminate", machine=machine))
+            self._request(Request(operation="terminate", machine=machine))
         )
 
 
@@ -582,7 +582,7 @@ def receive(scheduler: Scheduler) -> int:
         if submission is None:
             raise LauncherError("launch needs a submission")
         try:
-            retain_sources(submission.sources)
+            _retain(submission.sources)
         except Exception as error:
             if submission.launch is not None:
                 scheduler.fail_launch(submission.launch, explain(error))

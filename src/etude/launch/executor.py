@@ -20,21 +20,21 @@ from etude.launch.startup import ProcessStart
 from etude.launch.storage.disk import DirectoryJournal
 from etude.storage_timeout import StorageUnavailable
 
-creation_check: ContextVar[Callable[[], None] | None] = ContextVar("creation_check", default=None)
+_creation_check: ContextVar[Callable[[], None] | None] = ContextVar("creation_check", default=None)
 
 
 @contextmanager
 def creation_guard(check: Callable[[], None]) -> Iterator[None]:
     """Carry the controller's placement fence through provider preparation."""
-    token = creation_check.set(check)
+    token = _creation_check.set(check)
     try:
         yield
     finally:
-        creation_check.reset(token)
+        _creation_check.reset(token)
 
 
 def check_creation() -> None:
-    check = creation_check.get()
+    check = _creation_check.get()
     if check is not None:
         check()
 

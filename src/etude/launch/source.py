@@ -72,7 +72,7 @@ def source_archive(repo: str, commit: str) -> bytes:
 
 
 @timed("git.command")
-def git(repo: str, *args: str, env: dict[str, str] | None = None) -> str:
+def _git(repo: str, *args: str, env: dict[str, str] | None = None) -> str:
     done = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, env=env)
     if done.returncode:
         # Git's stderr may contain credential-bearing URLs or helper output.
@@ -81,13 +81,13 @@ def git(repo: str, *args: str, env: dict[str, str] | None = None) -> str:
 
 
 @timed("git.optional")
-def optional(repo: str, *args: str) -> str | None:
+def _optional(repo: str, *args: str) -> str | None:
     done = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True)
     return done.stdout.strip() if done.returncode == 0 else None
 
 
-def origin_url(repo: str) -> str | None:
-    address = optional(repo, "remote", "get-url", "origin")
+def _origin(repo: str) -> str | None:
+    address = _optional(repo, "remote", "get-url", "origin")
     if not address:
         return None
     parsed = urlsplit(address)
@@ -98,16 +98,16 @@ def origin_url(repo: str) -> str | None:
     return address
 
 
-def snapshot(repo: str, parent: str) -> str:
+def _snapshot(repo: str, parent: str) -> str:
     """A private index captures final working bytes, including nonignored new files."""
     with tempfile.TemporaryDirectory() as directory:
         env = {**os.environ, "GIT_INDEX_FILE": str(Path(directory) / "index")}
-        git(repo, "read-tree", parent, env=env)
-        git(repo, "add", "-A", "--", ".", env=env)
-        tree = git(repo, "write-tree", env=env)
-    if tree == git(repo, "rev-parse", parent + "^{tree}"):
+        _git(repo, "read-tree", parent, env=env)
+        _git(repo, "add", "-A", "--", ".", env=env)
+        tree = _git(repo, "write-tree", env=env)
+    if tree == _git(repo, "rev-parse", parent + "^{tree}"):
         return parent
-    date = git(repo, "show", "-s", "--format=%cI", parent)
+    date = _git(repo, "show", "-s", "--format=%cI", parent)
     env = {
         **os.environ,
         "GIT_AUTHOR_NAME": "Etude snapshot",
@@ -117,7 +117,7 @@ def snapshot(repo: str, parent: str) -> str:
         "GIT_AUTHOR_DATE": date,
         "GIT_COMMITTER_DATE": date,
     }
-    return git(
+    return _git(
         repo,
         "-c",
         "commit.gpgsign=false",
@@ -132,11 +132,11 @@ def snapshot(repo: str, parent: str) -> str:
 
 
 @contextmanager
-def remote_history(origin: str) -> Iterator[str]:
+def _history(origin: str) -> Iterator[str]:
     """Read remote history in a disposable object database; leave local refs untouched."""
     with tempfile.TemporaryDirectory() as directory:
-        git(directory, "init", "--bare", "-q")
-        git(
+        _git(directory, "init", "--bare", "-q")
+        _git(
             directory,
             "fetch",
             "--quiet",
@@ -149,7 +149,7 @@ def remote_history(origin: str) -> Iterator[str]:
         yield directory
 
 
-def publish(
+def _publish(
     repo: str,
     commit: str,
     run: str,
@@ -164,24 +164,24 @@ def publish(
     """
     source = previous or SourcePosition(
         commit=commit,
-        origin=origin_url(repo),
-        branch=optional(repo, "symbolic-ref", "--quiet", "--short", "HEAD"),
+        origin=_origin(repo),
+        branch=_optional(repo, "symbolic-ref", "--quiet", "--short", "HEAD"),
         base_branch=None,
         base_commit=None,
         base_date=None,
         base_subject=None,
         ahead=None,
-        release=optional(repo, "describe", "--tags", commit),
+        release=_optional(repo, "describe", "--tags", commit),
         snapshot=snapshot,
     )
     ref = f"refs/etude/runs/{run}"
     if source.origin is not None:
-        with remote_history(source.origin) as history:
+        with _history(source.origin) as history:
             # FETCH_HEAD supplies the run's objects but is not an advertised ref.
-            git(history, "fetch", "--quiet", "--no-tags", "--", repo, commit)
-            reachable = bool(git(history, "for-each-ref", "--contains=" + commit))
+            _git(history, "fetch", "--quiet", "--no-tags", "--", repo, commit)
+            reachable = bool(_git(history, "for-each-ref", "--contains=" + commit))
             if previous is None:
-                advertised = git(repo, "ls-remote", "--symref", "origin", "HEAD")
+                advertised = _git(repo, "ls-remote", "--symref", "origin", "HEAD")
                 branch = next(
                     (
                         line.split()[1]
@@ -190,30 +190,30 @@ def publish(
                     ),
                     None,
                 )
-                base = optional(history, "merge-base", commit, branch) if branch else None
+                base = _optional(history, "merge-base", commit, branch) if branch else None
                 source = source.model_copy(
                     update={
                         "base_branch": branch.removeprefix("refs/heads/") if branch else None,
                         "base_commit": base,
-                        "base_date": git(history, "show", "-s", "--format=%cI", base)
+                        "base_date": _git(history, "show", "-s", "--format=%cI", base)
                         if base
                         else None,
-                        "base_subject": git(history, "show", "-s", "--format=%s", base)
+                        "base_subject": _git(history, "show", "-s", "--format=%s", base)
                         if base
                         else None,
-                        "ahead": int(git(history, "rev-list", "--count", base + ".." + commit))
+                        "ahead": int(_git(history, "rev-list", "--count", base + ".." + commit))
                         if base
                         else None,
                     }
                 )
         if not reachable:
-            git(repo, "push", "--porcelain", "origin", f"{commit}:{ref}")
-            if git(repo, "ls-remote", "origin", ref).split() != [commit, ref]:
+            _git(repo, "push", "--porcelain", "origin", f"{commit}:{ref}")
+            if _git(repo, "ls-remote", "origin", ref).split() != [commit, ref]:
                 raise LauncherError(
                     "pushed source is not readable on origin; check origin's push URL"
                 )
     # Keep queued source available for archiving even after local garbage collection.
-    git(repo, "update-ref", ref, commit)
+    _git(repo, "update-ref", ref, commit)
     return source
 
 
@@ -235,11 +235,11 @@ def freeze(run: Run) -> Run:
         if source is not None and source.commit != commit:
             raise LauncherError("run source does not match its revision")
         if Path(repo).is_dir():
-            repo = git(repo, "rev-parse", "--show-toplevel")
+            repo = _git(repo, "rev-parse", "--show-toplevel")
             parent = commit
             if source is None and job.revision is None:
-                commit = snapshot(repo, parent)
-            source = publish(repo, commit, id, previous=source, snapshot=commit != parent)
+                commit = _snapshot(repo, parent)
+            source = _publish(repo, commit, id, previous=source, snapshot=commit != parent)
         job = job.model_copy(update={"repo": repo, "revision": commit})
     else:
         job = job.model_copy(update={"revision": job.revision or "HEAD"})
@@ -281,16 +281,16 @@ def checkout(run: RunRecord, destination: Path) -> Path:
     """Fetch git objects into a new checkout, never overwrite an existing directory."""
     if run.spec.repo is None or run.spec.revision is None:
         raise LauncherError(f"run {run.id} has no source repository")
-    origin = run.source.origin if run.source else origin_url(run.spec.repo)
+    origin = run.source.origin if run.source else _origin(run.spec.repo)
     address = origin or run.spec.repo
     if destination.exists():
         raise LauncherError("source destination already exists; choose a new directory")
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=destination.parent) as temporary:
-        git(temporary, "init", "-q")
-        git(temporary, "remote", "add", "origin", address)
-        git(temporary, "fetch", "--quiet", "origin", run.spec.revision)
-        git(temporary, "checkout", "--quiet", "--detach", run.spec.revision)
+        _git(temporary, "init", "-q")
+        _git(temporary, "remote", "add", "origin", address)
+        _git(temporary, "fetch", "--quiet", "origin", run.spec.revision)
+        _git(temporary, "checkout", "--quiet", "--detach", run.spec.revision)
         # Rename only the finished checkout. Never use the tar cache as source truth.
         os.rename(temporary, destination)
     return destination
@@ -303,16 +303,16 @@ def contains(run: RunRecord, revision: str) -> bool:
     repo = run.spec.repo
     if Path(repo).is_dir():
         ancestor = resolve(repo, revision)
-        return is_ancestor(repo, ancestor, run.spec.revision)
+        return _ancestor(repo, ancestor, run.spec.revision)
     if run.source is None or run.source.origin is None:
         raise LauncherError(f"source history for local-only run {run.id} is unavailable")
-    with remote_history(run.source.origin) as history:
-        git(history, "fetch", "--quiet", "--", run.source.origin, run.spec.revision)
-        return is_ancestor(history, resolve(history, revision), run.spec.revision)
+    with _history(run.source.origin) as history:
+        _git(history, "fetch", "--quiet", "--", run.source.origin, run.spec.revision)
+        return _ancestor(history, resolve(history, revision), run.spec.revision)
 
 
 @timed("git.ancestor")
-def is_ancestor(repo: str, ancestor: str, commit: str) -> bool:
+def _ancestor(repo: str, ancestor: str, commit: str) -> bool:
     done = subprocess.run(
         ["git", "-C", repo, "merge-base", "--is-ancestor", ancestor, commit], capture_output=True
     )

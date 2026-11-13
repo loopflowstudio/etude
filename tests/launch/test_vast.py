@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from etude.cli import main
-from etude.launch.client import open_file
+from etude.launch.client import _open
 from etude.launch.database import Database
 from etude.launch.errors import LauncherError, ProviderUnavailable
 from etude.launch.executor import Executor, Refused
@@ -255,7 +255,7 @@ def test_unconfirmed_create_and_foreign_labels_never_trigger_paid_retries_or_del
     assert market.counts["DELETE"] == 0 and 12 in market.instances
 
 
-def make_scheduler(
+def _scheduler(
     store: Database, market: Marketplace, storage: Storage, clock: Callable[[], datetime]
 ) -> Scheduler:
     bucket = Bucket(
@@ -284,7 +284,7 @@ def test_scheduler_retains_uncertain_acquisition_until_owned_deletion(
     market.inventory_visible = False
     store = Database(tmp_path / "launcher.db")
     try:
-        scheduler = make_scheduler(store, market, storage, clock)
+        scheduler = _scheduler(store, market, storage, clock)
         name = scheduler.rent("4090", hours=1)
         held = store.rented_session(name)
         rental = store.rental_for(held)
@@ -296,7 +296,7 @@ def test_scheduler_retains_uncertain_acquisition_until_owned_deletion(
         # prove ownership or preserve the reservation after a lost create reply.
         store.close()
         store = Database(tmp_path / "launcher.db")
-        scheduler = make_scheduler(store, market, storage, clock)
+        scheduler = _scheduler(store, market, storage, clock)
         clock.advance(60 if action == "terminate" else 3601)
         if action == "terminate":
             with pytest.raises(ProviderUnavailable, match="awaiting reconciliation"):
@@ -337,7 +337,7 @@ def test_scheduler_releases_confirmed_vast_refusal(tmp_path: Path) -> None:
     market.offers = [{**OFFER, "end_date": clock.now.timestamp() + 5}]
     store = Database(tmp_path / "launcher.db")
     try:
-        scheduler = make_scheduler(store, market, storage, clock)
+        scheduler = _scheduler(store, market, storage, clock)
         refused = scheduler.rent("4090", hours=1)
         assert store.machine(refused).refused_at is not None
         assert not store.unsettled_sessions()
@@ -494,7 +494,7 @@ def test_configured_vast_reads_need_no_provider_credentials(
 ) -> None:
     monkeypatch.delenv("VAST_API_KEY", raising=False)
     monkeypatch.delenv("RUNPOD_API_KEY", raising=False)
-    scheduler = open_file(tmp_path)
+    scheduler = _open(tmp_path)
     scheduler.add_storage(
         Place(name="evidence", bucket="fixture", prefix="test", provider="s3", region="us-west-2")
     )
@@ -502,7 +502,7 @@ def test_configured_vast_reads_need_no_provider_credentials(
     scheduler.add_ondemand(OnDemand(name="4090", template=TEMPLATE))
     assert scheduler.providers()[0].kind == "vast"
     assert scheduler.ondemands()[0].template == TEMPLATE
-    scheduler.store.close()
+    scheduler._store.close()
 
 
 def test_default_cleanup_uses_only_the_active_instance(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -521,7 +521,7 @@ def test_vast_cohort_uses_the_worker_and_retains_outputs_before_deletion(
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "client"))
     market, storage = Marketplace(), Storage()
     store = Database(tmp_path / "launcher.db")
-    scheduler = make_scheduler(store, market, storage, lambda: datetime.now(UTC))
+    scheduler = _scheduler(store, market, storage, lambda: datetime.now(UTC))
     # Only the remote host boundary is replaced; the scheduler, journal, courier,
     # worker, job subprocess and output retention all use their production paths.
     worker: threading.Thread | None = None
@@ -579,7 +579,7 @@ def test_vast_cohort_uses_the_worker_and_retains_outputs_before_deletion(
 def rented(market: Marketplace, storage: Storage, clock: Clock) -> VastMachines:
     market.instances[12] = INSTANCE.copy()
     machine = machines(market, storage, clock)
-    machine.keep("session", Instance.model_validate(INSTANCE))
+    machine._keep("session", Instance.model_validate(INSTANCE))
     return machine
 
 

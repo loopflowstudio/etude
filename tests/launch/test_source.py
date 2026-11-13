@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from etude.cli import main
-from etude.launch.client import default, open_file
+from etude.launch.client import _open, default
 from etude.launch.records import Job, LauncherError, Pool, SourcePosition
 from etude.launch.source import checkout, contains, line, retain, source_archive, stored
 
@@ -69,7 +69,7 @@ def test_position_snapshot_publication_and_checkout(repository: tuple[Path, Path
     (repo / "new").write_text("new\n")
     (repo / "ignored").write_text("secret\n")
     index = (repo / ".git/index").read_bytes()
-    scheduler = open_file(repo.parent / "launcher")
+    scheduler = _open(repo.parent / "launcher")
     scheduler.add_pool(Pool(name="waiting"))
     first = scheduler.queue(Job(command="true", max_hours=1, repo=str(repo)), "waiting")
     second = scheduler.queue(Job(command="true", max_hours=1, repo=str(repo)), "waiting")
@@ -96,14 +96,14 @@ def test_position_snapshot_publication_and_checkout(repository: tuple[Path, Path
     with pytest.raises(LauncherError, match="already exists"):
         checkout(run, recovered)
     assert contains(run, head)
-    assert open_file(repo.parent / "launcher").record(first).source == position
+    assert _open(repo.parent / "launcher").record(first).source == position
 
 
 def test_explicit_revision_and_failed_push(repository: tuple[Path, Path]) -> None:
     repo, origin = repository
     head = git(repo, "rev-parse", "HEAD")
     (repo / "train").write_text("not part of explicit HEAD\n")
-    scheduler = open_file(repo.parent / "launcher")
+    scheduler = _open(repo.parent / "launcher")
     scheduler.add_pool(Pool(name="waiting"))
     id = scheduler.queue(
         Job(command="true", max_hours=1, repo=str(repo), revision="HEAD"), "waiting"
@@ -184,7 +184,7 @@ def test_containment_distinguishes_squashed_history(repository: tuple[Path, Path
     (repo / "train").write_text("feature\n")
     git(repo, "commit", "-am", "Feature")
     feature = git(repo, "rev-parse", "HEAD")
-    scheduler = open_file(repo.parent / "launcher")
+    scheduler = _open(repo.parent / "launcher")
     scheduler.add_pool(Pool(name="waiting"))
     id = scheduler.queue(Job(command="true", max_hours=1, repo=str(repo)), "waiting")
     run = scheduler.record(id)

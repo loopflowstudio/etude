@@ -32,13 +32,13 @@ class RunPodMachines:
         bucket: Bucket,
         prefix: str,
     ) -> None:
-        self._provider, self._template, self.api = provider, template, api
-        self.bucket, self.prefix = bucket, prefix
-        self.program = Program(bucket, prefix)
+        self._provider, self._template, self._api = provider, template, api
+        self._bucket, self._prefix = bucket, prefix
+        self._program = Program(bucket, prefix)
 
-    def quote(self) -> Quote:
+    def _quote(self) -> Quote:
         template = self._template
-        return self.api.quote(
+        return self._api.quote(
             gpu=template.gpu,
             gpu_count=template.gpu_count,
             vcpus=template.vcpus or 4,
@@ -47,25 +47,25 @@ class RunPodMachines:
         )
 
     def offer(self) -> Offer:
-        quote = self.quote()
+        quote = self._quote()
         return Offer(
             hardware=quote.hardware, usd_per_hour=quote.usd_per_hour, available=quote.available
         )
 
-    def key(self, session_id: str) -> str:
-        return f"{self.prefix}/sessions/{session_id}/receipt.json"
+    def _key(self, session_id: str) -> str:
+        return f"{self._prefix}/sessions/{session_id}/receipt.json"
 
-    def keep(self, session_id: str, pod: PodFact) -> None:
-        self.bucket.put(self.key(session_id), pod.model_dump_json().encode())
+    def _keep(self, session_id: str, pod: PodFact) -> None:
+        self._bucket.put(self._key(session_id), pod.model_dump_json().encode())
 
-    def receipt(self, session_id: str) -> PodFact | None:
-        raw = self.bucket.get(self.key(session_id))
+    def _receipt(self, session_id: str) -> PodFact | None:
+        raw = self._bucket.get(self._key(session_id))
         return None if raw is None else PodFact.model_validate_json(raw)
 
     def create(self, request: MachineRequest) -> Allocation:
         assert request.deadline is not None
         template = self._template
-        quote = self.quote()
+        quote = self._quote()
         if not quote.available:
             raise Refused(
                 f"no {template.gpu or 'CPU pod'} available in"
@@ -74,7 +74,7 @@ class RunPodMachines:
         if request.bootstrap is None:
             raise LauncherError("a rented machine needs a storage bootstrap link")
         image = template.image or DEFAULT_IMAGE
-        env = self.program.prepare(request, image)
+        env = self._program.prepare(request, image)
         creation_deadline = min(request.deadline, request.startup_deadline or request.deadline)
         if datetime.now(UTC) >= creation_deadline:
             raise Refused(
@@ -83,21 +83,21 @@ class RunPodMachines:
         check_creation()
         seconds = (creation_deadline - datetime.now(UTC)).total_seconds()
         with limit_time(seconds):
-            pod = self.api.create(
+            pod = self._api.create(
                 name=f"etude-{request.session}",
                 hardware=quote.hardware,
                 image=image.resolved,
                 registry=self._provider.registry if image.resolved != STOCK_IMAGE else "",
                 env=env,
                 entrypoint=("python3.12", "-c", boot_source("etude.launch.providers.runpod.pod")),
-                disk_gb=template.disk_gb or disk_gb(quote.hardware),
+                disk_gb=template.disk_gb or _disk_gb(quote.hardware),
                 data_center=template.data_center,
             )
-        self.keep(request.session, pod)
-        return self.allocation(pod)
+        self._keep(request.session, pod)
+        return self._allocation(pod)
 
     @staticmethod
-    def allocation(pod: PodFact) -> Allocation:
+    def _allocation(pod: PodFact) -> Allocation:
         return Allocation(
             id=pod.id,
             address=pod.address,
@@ -109,36 +109,36 @@ class RunPodMachines:
     def find(self, session_id: str) -> Allocation | None:
         # The immutable receipt already contains identity and charged price.
         # Health belongs to alive(); worker startup does not wait for SSH.
-        pod = self.receipt(session_id)
+        pod = self._receipt(session_id)
         if pod is not None:
-            return self.allocation(pod)
-        pod = self.api.named(f"etude-{session_id}")
+            return self._allocation(pod)
+        pod = self._api.named(f"etude-{session_id}")
         if pod is None:
             return None
-        self.keep(session_id, pod)
-        return self.allocation(pod)
+        self._keep(session_id, pod)
+        return self._allocation(pod)
 
     def alive(self, session_id: str) -> bool:
-        pod = self.receipt(session_id)
+        pod = self._receipt(session_id)
         if pod is None:
             return True
         try:
-            current = self.api.pod(pod.id)
+            current = self._api.pod(pod.id)
             return current is not None and current.status not in {"EXITED", "TERMINATED", "ERROR"}
         except ProviderUnavailable:
             return True
 
     def end(self, session_id: str) -> datetime | None:
-        pod = self.receipt(session_id) or self.api.named(f"etude-{session_id}")
+        pod = self._receipt(session_id) or self._api.named(f"etude-{session_id}")
         if pod is None:
             return None
-        return datetime.now(UTC) if self.api.pod(pod.id) is None else self.api.delete(pod)
+        return datetime.now(UTC) if self._api.pod(pod.id) is None else self._api.delete(pod)
 
     def bill(self, session_id: str, now: datetime) -> Bill | None:
-        pod = self.receipt(session_id)
+        pod = self._receipt(session_id)
         if pod is None:
             return None
-        rows = self.api.bills(pod, now)
+        rows = self._api.bills(pod, now)
         through = pod.created_at.replace(minute=0, second=0, microsecond=0)
         usd = Decimal(0)
         for row in rows:
@@ -149,7 +149,7 @@ class RunPodMachines:
         return Bill(usd=usd, through=through) if through > pod.created_at else None
 
 
-def disk_gb(hardware: Hardware) -> int:
+def _disk_gb(hardware: Hardware) -> int:
     # RunPod caps a CPU pod's container disk at 10 GB per vCPU on its smallest flavors.
     return 40 if isinstance(hardware, GPU) else min(40, 10 * hardware.vcpus)
 

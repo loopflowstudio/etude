@@ -9,7 +9,7 @@ import pytest
 from etude.deadline import limit_time, remaining
 from etude.launch.logging import log_to
 from etude.launch.storage.s3 import Bucket, Reply, read
-from etude.launch.worker.courier import run_courier
+from etude.launch.worker.courier import _run
 from etude.storage_timeout import StorageUnavailable
 from tests.launch.test_storage_s3 import KEYS
 
@@ -115,9 +115,7 @@ def test_bootstrap_retries_cannot_renew_startup_allowance(
     monkeypatch.setenv("ETUDE_STARTUP_DEADLINE", (start + timedelta(seconds=0.2)).isoformat())
     monkeypatch.delenv("ETUDE_DEADLINE", raising=False)
     with log_to(tmp_path / "log"), pytest.raises(StorageUnavailable, match="timed out"):
-        run_courier(
-            "https://storage.invalid/bootstrap", tmp_path, send, sleep, 0.1, tmp_path / "log", ""
-        )
+        _run("https://storage.invalid/bootstrap", tmp_path, send, sleep, 0.1, tmp_path / "log", "")
     assert len(requests) == 2 and max(requests) <= 0.2
     assert not list(tmp_path.glob("*/receipt"))
 
@@ -126,7 +124,7 @@ def test_bootstrap_retries_cannot_renew_startup_allowance(
 def test_bootstrap_does_not_add_an_outer_retry_loop(tmp_path: Path, status: int) -> None:
     transport = Transport([(status, b"")] * 3)
     with log_to(tmp_path / "log"), pytest.raises(StorageUnavailable, match=str(status)):
-        run_courier(
+        _run(
             "https://storage.invalid/bootstrap",
             tmp_path,
             transport,

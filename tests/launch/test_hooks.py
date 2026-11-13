@@ -10,7 +10,7 @@ import pytest
 
 from etude.launch.records import Job, job_identity
 from etude.launch.schemas import Packet, Progress, Work
-from etude.launch.worker.attempts import run_attempt
+from etude.launch.worker.attempts import _run
 from tests.launch.counting import job_text
 from tests.launch.test_worker_attempts import local
 
@@ -109,7 +109,7 @@ def test_cleanup_never_extends_paid_window(tmp_path: Path) -> None:
         work=(work,),
         cap_usd=Decimal(1),
     )
-    run_attempt(session, packet, work)
+    _run(session, packet, work)
     home = session / "attempts/attempt"
     assert not marker.exists()
     text = (home / "log").read_text()

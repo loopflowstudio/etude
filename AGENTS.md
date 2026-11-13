@@ -23,9 +23,7 @@ When code fails because it assumed a fixed context, prefer adapting to the
 context over adding a guard, allowlist or precondition that refuses.
 
 Name things for what they are (`Checkpoint`, not `CheckpointHelper`). Action
-functions start with a verb. Never prefix a name with an underscore: a leading
-`_` is a smell, so name a helper for what it is, even one with a single caller.
-The one exception is where a library needs it, such as a Pydantic private attribute.
+functions start with a verb. Private helpers start with an underscore.
 
 ## Python
 

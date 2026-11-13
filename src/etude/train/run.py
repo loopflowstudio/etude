@@ -134,7 +134,7 @@ def seal_logs(root: Path, clocks: Sequence[str]) -> None:
         log.unlink()
 
 
-def stored_suffix(source: Path) -> str:
+def _suffix(source: Path) -> str:
     """A stored checkpoint's suffix: its source's, except that JSON never takes a record's."""
     return ".json.data" if source.suffix == ".json" else source.suffix
 
@@ -143,11 +143,11 @@ class EtudeWarning(UserWarning):
     """Logging needs attention: lost rows, invalid clocks or excessive metric names."""
 
 
-STOP = object()
+_STOP = object()
 
 
 @dataclass(frozen=True)
-class Kept:
+class _Kept:
     """A checkpoint record for the writer, and the name it is kept under."""
 
     name: str
@@ -185,44 +185,44 @@ class Run:
         self.incomplete = 0
         # Destination name to the reason its last delivery pass did not complete.
         self.problems: dict[str, str] = {}
-        self.warned: set[str] = set()
+        self._warned: set[str] = set()
         # The highest value this process has logged for each clock.
-        self.high: dict[str, float] = {}
-        self.clock_names = tuple(clock.name for clock in clocks)
+        self._high: dict[str, float] = {}
+        self._clock_names = tuple(clock.name for clock in clocks)
         # The clock columns every row and checkpoint carries: the author's, then Etude's.
-        self.columns = (*self.clock_names, *BUILT_IN_NAMES)
+        self._columns = (*self._clock_names, *BUILT_IN_NAMES)
         # Every checkpoint recorded in this folder, by any attempt on any machine,
         # and the name its record and file are kept under.
-        self.recorded: dict[int, CheckpointRecord] = {}
-        self.names: dict[int, str] = {}
+        self._recorded: dict[int, CheckpointRecord] = {}
+        self._names: dict[int, str] = {}
         for path in sorted((root / "checkpoints").glob("*.json")):
             known = CheckpointRecord.model_validate_json(path.read_bytes())
-            self.recorded[known.ordinal] = known
-            self.names[known.ordinal] = path.stem
-        self.checkpoints = max(self.recorded, default=0)
-        self.inherited_checkpoint = inherited
-        self.destinations = list(destinations)
-        self.segment_seconds = segment_seconds
-        self.finish_deadline: float | None = None
-        self.segment_rows = segment_rows
-        self.writer_id = secrets.token_hex(6)
+            self._recorded[known.ordinal] = known
+            self._names[known.ordinal] = path.stem
+        self._checkpoints = max(self._recorded, default=0)
+        self._inherited = inherited
+        self._destinations = list(destinations)
+        self._segment_seconds = segment_seconds
+        self._finish_deadline: float | None = None
+        self._segment_rows = segment_rows
+        self._writer_id = secrets.token_hex(6)
         # A later attempt or a continuation resumes from here, and its rows
         # supersede earlier attempts' from these coordinates on.
-        latest = self.latest()
+        latest = self._latest()
         if resumed_at is None:
             resumed_at = {} if latest is None else latest.at
         started_ms = time.time_ns() // 1_000_000
         # Etude's clocks continue from the checkpoint resumed, as a step clock does.
-        self.ran = resumed_at.get(
+        self._ran = resumed_at.get(
             RUNNING_HOURS, 0.0 if latest is None else latest.at.get(RUNNING_HOURS, 0.0)
         )
-        self.began = time.monotonic()
-        self.origin_ms = line_started(latest, root, started_ms)
-        self.save(
+        self._began = time.monotonic()
+        self._origin_ms = _origin(latest, root, started_ms)
+        self._save(
             "metrics",
-            self.writer_id,
+            self._writer_id,
             Attempt(
-                writer=self.writer_id,
+                writer=self._writer_id,
                 started_ms=started_ms,
                 host=socket.gethostname(),
                 attempt=os.environ.get("ETUDE_ATTEMPT"),
@@ -230,31 +230,29 @@ class Run:
                 resumed_at=dict(resumed_at),
             ),
         )
-        seal_logs(self.files.root, self.columns)  # what an earlier process left unsealed
-        self.index = Index(root, self.writer_id)
-        self.metric_name_limit = metric_name_limit
-        self.metric_names = metric_names(root) if metric_name_limit is not None else set()
-        self.sequence = 0
+        seal_logs(self.files.root, self._columns)  # what an earlier process left unsealed
+        self._index = Index(root, self._writer_id)
+        self._metric_name_limit = metric_name_limit
+        self._metric_names = metric_names(root) if metric_name_limit is not None else set()
+        self._sequence = 0
         # Only the current compaction window stays in memory.
-        self.tails: list[Table] = []
-        self.tail_bytes = 0
-        self.recent: list[Table] = []
-        self.recent_bytes = 0
-        self.folded_at = time.monotonic()
-        self.queue: queue.Queue[object] = queue.Queue(maxsize=queue_size)
-        self.wake = threading.Event()
-        self.stopping = threading.Event()
-        self.finished = False
+        self._tails: list[Table] = []
+        self._tail_bytes = 0
+        self._recent: list[Table] = []
+        self._recent_bytes = 0
+        self._folded_at = time.monotonic()
+        self._queue: queue.Queue[object] = queue.Queue(maxsize=queue_size)
+        self._wake = threading.Event()
+        self._stopping = threading.Event()
+        self._finished = False
         # Checkpoint changes not yet sealed; only the writer thread touches it.
-        self.dirty = False
+        self._dirty = False
         # The clocks last written to the launcher's progress file.
-        self.progress: dict[str, float] = {}
-        self.writer = threading.Thread(target=self.write_rows, name="etude-writer", daemon=True)
-        self.shipper = threading.Thread(
-            target=self.deliver_segments, name="etude-shipper", daemon=True
-        )
-        self.writer.start()
-        self.shipper.start()
+        self._progress: dict[str, float] = {}
+        self._writer = threading.Thread(target=self._write, name="etude-writer", daemon=True)
+        self._shipper = threading.Thread(target=self._deliver, name="etude-shipper", daemon=True)
+        self._writer.start()
+        self._shipper.start()
         atexit.register(self.finish)
 
     # --- the training-side calls -------------------------------------------
@@ -263,34 +261,34 @@ class Run:
         """Record one row. Every declared clock must be present, as a key or keyword."""
         try:
             row = {**(values or {}), **clocks}
-            for name in self.clock_names:
+            for name in self._clock_names:
                 value = row.get(name)
                 if value is None:
                     if self.strict:
                         raise EtudeError("row_missing_clock", 422)
-                    self.warn("incomplete", f"a logged row has no value for clock {name!r}")
+                    self._warn("incomplete", f"a logged row has no value for clock {name!r}")
                 elif isinstance(value, (int, float)):
-                    high = self.high.get(name)
+                    high = self._high.get(name)
                     if high is not None and value < high:
                         # Within one process a clock only moves forward; a resume
                         # from an earlier checkpoint is a new process and is fine.
                         if self.strict:
                             raise EtudeError("clock_went_backwards", 422)
-                        self.warn(
+                        self._warn(
                             "backwards",
                             f"a logged row's clock {name!r} went backwards, from {high} to {value}",
                         )
                     else:
-                        self.high[name] = value
-            wall_ms, hours = self.now()
-            self.queue.put_nowait((wall_ms, {**row, **hours}))
-            self.high.update(hours)
+                        self._high[name] = value
+            wall_ms, hours = self._now()
+            self._queue.put_nowait((wall_ms, {**row, **hours}))
+            self._high.update(hours)
         except queue.Full:
-            self.drop_row()
+            self._lost()
         except Exception:
             if self.strict:
                 raise
-            self.drop_row()
+            self._lost()
 
     def log_table(self, name: str, rows: Sequence[Mapping[str, object]], **clocks: float) -> None:
         """Store JSON rows locally, then queue their digest at the given clocks.
@@ -300,9 +298,9 @@ class Run:
         `log`: the reference is dropped and counted, leaving a harmless orphan.
         Do not reuse the table's name for scalar or ordinary text values.
         """
-        if not name or name in self.clock_names:
+        if not name or name in self._clock_names:
             raise ValueError("table name must be nonempty and distinct from clocks")
-        if set(clocks) != set(self.clock_names) or any(
+        if set(clocks) != set(self._clock_names) or any(
             isinstance(value, bool) or not math.isfinite(value) for value in clocks.values()
         ):
             raise ValueError("table requires every declared clock with a finite value")
@@ -327,11 +325,11 @@ class Run:
                 partial.unlink(missing_ok=True)
         self.log({name: digest}, **clocks)
 
-    def warn(self, kind: str, message: str, stacklevel: int = 3) -> None:
+    def _warn(self, kind: str, message: str, stacklevel: int = 3) -> None:
         """Warn once per writer; warning filters must not interrupt training."""
-        if kind in self.warned:
+        if kind in self._warned:
             return
-        self.warned.add(kind)
+        self._warned.add(kind)
         try:
             warnings.warn(
                 f"etude run {self.name}: {message}.",
@@ -341,9 +339,9 @@ class Run:
         except Exception:  # noqa: BLE001, S110 - a warnings filter must not break training
             pass
 
-    def drop_row(self) -> None:
+    def _lost(self) -> None:
         self.dropped += 1
-        self.warn("dropped", "the log queue is full and a row was dropped", stacklevel=4)
+        self._warn("dropped", "the log queue is full and a row was dropped", stacklevel=4)
 
     def checkpoint(
         self,
@@ -374,14 +372,14 @@ class Run:
         staged: Path | None = None
         try:
             coordinate = {**(at or {}), **clocks}
-            if set(coordinate) != set(self.clock_names):
+            if set(coordinate) != set(self._clock_names):
                 raise ValueError("checkpoint_clock_mismatch")
-            declared = {name: float(coordinate[name]) for name in self.clock_names}
-            wall_ms, hours = self.now()
+            declared = {name: float(coordinate[name]) for name in self._clock_names}
+            wall_ms, hours = self._now()
             at = {**declared, **hours}
             name = checkpoint_name(at)
-            reference, staged = self.stage(artifact, name)
-            for known in self.recorded.values():
+            reference, staged = self._stage(artifact, name)
+            for known in self._recorded.values():
                 same = (known.artifact.sha256 or known.artifact.uri) == (
                     reference.sha256 or reference.uri
                 )
@@ -390,16 +388,14 @@ class Run:
                     if staged is not None:
                         staged.unlink()
                     return known.artifact
-            ordinal = self.checkpoints + 1
+            ordinal = self._checkpoints + 1
             stored = staged is not None and not isinstance(artifact, ArtifactRef)
             suffix = (
-                ""
-                if isinstance(artifact, ArtifactRef) or not stored
-                else stored_suffix(Path(artifact))
+                "" if isinstance(artifact, ArtifactRef) or not stored else _suffix(Path(artifact))
             )
-            name = self.unused(name, suffix, ordinal)
+            name = self._unused(name, suffix, ordinal)
             if staged is not None and stored:
-                reference = self.keep(staged, name + suffix, reference)
+                reference = self._keep(staged, name + suffix, reference)
             record = CheckpointRecord(
                 ordinal=ordinal,
                 artifact=reference,
@@ -413,22 +409,22 @@ class Run:
             if self.strict:
                 raise
             self.incomplete += 1
-            self.warn("checkpoint", f"a checkpoint was not recorded ({error})")
+            self._warn("checkpoint", f"a checkpoint was not recorded ({error})")
             return artifact if isinstance(artifact, ArtifactRef) else ArtifactRef(uri=str(artifact))
-        self.checkpoints = ordinal
-        self.recorded[ordinal] = record
-        self.names[ordinal] = name
-        self.offer(Kept(name, record))
+        self._checkpoints = ordinal
+        self._recorded[ordinal] = record
+        self._names[ordinal] = name
+        self._offer(_Kept(name, record))
         return record.artifact
 
     def position(self, clock: str) -> float | None:
         """Where the run stands on `clock`: Etude's clocks now, an author's the highest
         value this process logged. None for an author's clock before its first row."""
         if clock in BUILT_IN_NAMES:
-            return self.now()[1][clock]
-        if clock not in self.clock_names:
+            return self._now()[1][clock]
+        if clock not in self._clock_names:
             raise ValueError(f"the run declares no clock {clock!r}")
-        return self.high.get(clock)
+        return self._high.get(clock)
 
     def checkpoint_due(self, every: float, clock: str = RUNNING_HOURS) -> bool:
         """Whether `clock` has crossed a multiple of `every` since the latest checkpoint.
@@ -438,21 +434,21 @@ class Run:
         """
         if every <= 0:
             raise ValueError("every must be positive")
-        here, latest = self.position(clock), self.latest()
+        here, latest = self.position(clock), self._latest()
         there = 0.0 if latest is None else latest.at.get(clock, 0.0)
         return here is not None and here // every > there // every
 
-    def now(self) -> tuple[int, dict[str, float]]:
+    def _now(self) -> tuple[int, dict[str, float]]:
         """The wall time in milliseconds, and where Etude's clocks stand."""
         wall_ms = time.time_ns() // 1_000_000
         return wall_ms, {
-            RUNNING_HOURS: self.ran + (time.monotonic() - self.began) / 3600,
-            HOURS_SINCE_START: (wall_ms - self.origin_ms) / 3_600_000,
+            RUNNING_HOURS: self._ran + (time.monotonic() - self._began) / 3600,
+            HOURS_SINCE_START: (wall_ms - self._origin_ms) / 3_600_000,
         }
 
-    def latest(self) -> CheckpointRecord | None:
+    def _latest(self) -> CheckpointRecord | None:
         """The latest record this run kept, else the parent's it continues from."""
-        return self.recorded[max(self.recorded)] if self.recorded else self.inherited_checkpoint
+        return self._recorded[max(self._recorded)] if self._recorded else self._inherited
 
     def latest_checkpoint(self) -> CheckpointRecord | None:
         """The checkpoint to resume from: the latest this run recorded, on any attempt.
@@ -462,8 +458,8 @@ class Run:
         `artifact.uri`, which is on this machine. A continuation gets its
         parent's checkpoint until it records its own. None when there is none.
         """
-        record = self.latest()
-        if record is None or not self.recorded:
+        record = self._latest()
+        if record is None or not self._recorded:
             return record
         # The file keeps its name wherever the record was written.
         local = self.files.root / "checkpoints" / record.artifact.uri.rpartition("/")[2]
@@ -472,7 +468,7 @@ class Run:
         artifact = record.artifact.model_copy(update={"uri": local.resolve().as_uri()})
         return record.model_copy(update={"artifact": artifact})
 
-    def stage(
+    def _stage(
         self, artifact: ArtifactRef | Path | str, name: str
     ) -> tuple[ArtifactRef, Path | None]:
         """The reference to record; a local file is first copied in and digested.
@@ -503,44 +499,44 @@ class Run:
             staged,
         )
 
-    def unused(self, name: str, suffix: str, ordinal: int) -> str:
+    def _unused(self, name: str, suffix: str, ordinal: int) -> str:
         """The first of `name`, `name.ordinal-N`, `name.ordinal-N-2`, ... no record or file holds.
 
         A file counts even without a record, here or where storage or another
         host keeps it (`etude.carriage.taken`), so nothing is ever replaced.
         """
-        files, records = taken(self.files.root), set(self.names.values())
+        files, records = taken(self.files.root), set(self._names.values())
         versions = (f"{name}.ordinal-{ordinal}-{n}" for n in count(2))
         candidates = chain((name, f"{name}.ordinal-{ordinal}"), versions)
         return next(c for c in candidates if c not in records and c + suffix not in files)
 
-    def keep(self, staged: Path, filename: str, reference: ArtifactRef) -> ArtifactRef:
+    def _keep(self, staged: Path, filename: str, reference: ArtifactRef) -> ArtifactRef:
         """Give a staged copy its recorded name, which nothing has used before."""
         kept = staged.with_name(filename)
         staged.replace(kept)
         key = kept.relative_to(self.files.root).as_posix()
-        remote = next(iter(self.destinations), None)
+        remote = next(iter(self._destinations), None)
         uri = remote.storage.uri(run_prefix(self.name) + key) if remote else kept.resolve().as_uri()
         return reference.model_copy(update={"uri": uri})
 
     def tag(self, checkpoint: ArtifactRef | int, *tags: str) -> None:
         """Add labels to a checkpoint this run recorded, by reference or ordinal."""
-        self.retag(checkpoint, tags, ())
+        self._retag(checkpoint, tags, ())
 
     def untag(self, checkpoint: ArtifactRef | int, *tags: str) -> None:
-        self.retag(checkpoint, (), tags)
+        self._retag(checkpoint, (), tags)
 
-    def retag(
+    def _retag(
         self, checkpoint: ArtifactRef | int, add: Sequence[str], remove: Sequence[str]
     ) -> None:
         try:
             record = (
-                self.recorded.get(checkpoint)
+                self._recorded.get(checkpoint)
                 if isinstance(checkpoint, int)
                 else next(
                     (
                         known
-                        for known in self.recorded.values()
+                        for known in self._recorded.values()
                         # The same model: the digest, else the URI.
                         if (known.artifact.sha256 or known.artifact.uri)
                         == (checkpoint.sha256 or checkpoint.uri)
@@ -556,104 +552,104 @@ class Run:
             if self.strict:
                 raise
             self.incomplete += 1
-            self.warn("tag", f"a checkpoint was not tagged ({error})")
+            self._warn("tag", f"a checkpoint was not tagged ({error})")
             return
-        self.recorded[changed.ordinal] = changed
-        self.offer(Kept(self.names[changed.ordinal], changed))
+        self._recorded[changed.ordinal] = changed
+        self._offer(_Kept(self._names[changed.ordinal], changed))
 
-    def offer(self, item: object) -> None:
+    def _offer(self, item: object) -> None:
         try:
-            self.queue.put_nowait(item)
+            self._queue.put_nowait(item)
         except queue.Full:
-            self.drop_row()
+            self._lost()
 
     # --- the writer thread ---------------------------------------------------
 
-    def write_rows(self) -> None:
+    def _write(self) -> None:
         stream: IO[str] | None = None
         opened_at = 0.0
-        builder = Builder(self.columns)
+        builder = Builder(self._columns)
 
         def seal(final: bool = False) -> None:
             nonlocal stream, builder
             if stream is not None:
-                table = builder.table(self.writer_id, self.sequence)
-                self.tail_bytes += write_block(
-                    self.files.root, tail_key(self.sequence, self.writer_id), table
+                table = builder.table(self._writer_id, self._sequence)
+                self._tail_bytes += write_block(
+                    self.files.root, tail_key(self._sequence, self._writer_id), table
                 )
                 stream.close()
                 Path(stream.name).unlink()  # The block now holds these rows.
-                self.tails.append(table)
-                stream, builder = None, Builder(self.columns)
-                self.sequence += 1
-            self.fold(final)
-            self.report_progress()
-            self.dirty = False
-            self.wake.set()
+                self._tails.append(table)
+                stream, builder = None, Builder(self._columns)
+                self._sequence += 1
+            self._fold(final)
+            self._report_progress()
+            self._dirty = False
+            self._wake.set()
 
         while True:
             try:
-                item = self.queue.get(timeout=self.segment_seconds / 4)
+                item = self._queue.get(timeout=self._segment_seconds / 4)
             except queue.Empty:
                 item = None
             try:
-                if item is STOP:
+                if item is _STOP:
                     seal(final=True)
                     return
-                if isinstance(item, Kept):
-                    self.save("checkpoints", item.name, item.record)
-                    self.dirty = True
+                if isinstance(item, _Kept):
+                    self._save("checkpoints", item.name, item.record)
+                    self._dirty = True
                 elif isinstance(item, tuple):
                     if stream is None:
                         directory = self.files.root / "metrics"
                         directory.mkdir(parents=True, exist_ok=True)
-                        name = f"{self.sequence:08d}-{self.writer_id}.open"
+                        name = f"{self._sequence:08d}-{self._writer_id}.open"
                         stream = (directory / name).open("a")
                         opened_at = time.monotonic()
-                    coordinate, values = self.row(item[1])
+                    coordinate, values = self._row(item[1])
                     stream.write(log_line(item[0], coordinate, values))
                     stream.flush()
                     builder.add(item[0], coordinate, values)
                 due = stream is not None and (
-                    len(builder) >= self.segment_rows
-                    or time.monotonic() - opened_at >= self.segment_seconds
+                    len(builder) >= self._segment_rows
+                    or time.monotonic() - opened_at >= self._segment_seconds
                 )
-                if due or (item is None and self.dirty):
+                if due or (item is None and self._dirty):
                     seal()
                 elif item is None:
-                    self.fold()
+                    self._fold()
             except Exception as error:  # noqa: BLE001 - the writer must outlive bad input
                 self.problems["writer"] = type(error).__name__
                 self.incomplete += 1
 
-    def fold(self, final: bool = False) -> None:
+    def _fold(self, final: bool = False) -> None:
         """Seal recent blocks, then compact them before removing covered files."""
-        if not self.tails and not (final and self.recent):
+        if not self._tails and not (final and self._recent):
             return
         if (
             not final
-            and self.tail_bytes < PERMANENT_BYTES
-            and time.monotonic() - self.folded_at < 8 * self.segment_seconds
+            and self._tail_bytes < PERMANENT_BYTES
+            and time.monotonic() - self._folded_at < 8 * self._segment_seconds
         ):
             return
         with self.files.lock:
-            recent = list(self.recent)
-            size = self.recent_bytes
-            if self.tails:
-                table = concat(self.tails)
+            recent = list(self._recent)
+            size = self._recent_bytes
+            if self._tails:
+                table = concat(self._tails)
                 recent.append(table)
                 if not final:
                     key = block_key(1, table.first, table.last, table.writer)
                     size += write_block(self.files.root, key, table)
-                    self.index.add(key)
+                    self._index.add(key)
             compact = final or size >= PERMANENT_BYTES or len(recent) >= RECENT_BLOCKS
             if compact:
                 table = concat(recent)
                 key = block_key(2, table.first, table.last, table.writer)
                 write_block(self.files.root, key, table)
-                self.index.add(key)
-            self.index.write()
-            retired = [tail_key(tail.first, tail.writer) for tail in self.tails]
+                self._index.add(key)
+            self._index.write()
+            retired = [tail_key(tail.first, tail.writer) for tail in self._tails]
             if compact:
                 retired.extend(
                     block_key(1, table.first, table.last, table.writer) for table in recent
@@ -671,19 +667,19 @@ class Run:
                 or time.time() - (self.files.root / key).stat().st_mtime >= self.files.tail_age
             ]
             if delivered:
-                note = self.files.root / "metrics" / f"{self.writer_id}.removed"
+                note = self.files.root / "metrics" / f"{self._writer_id}.removed"
                 with note.open("a") as removed:
                     removed.write("".join(key + "\n" for key in delivered))
                     removed.flush()
             for key in retired:
                 (self.files.root / key).unlink(missing_ok=True)
-            self.recent = [] if compact else recent
-            self.recent_bytes = 0 if compact else size
-            self.tails.clear()
-            self.tail_bytes = 0
-            self.folded_at = time.monotonic()
+            self._recent = [] if compact else recent
+            self._recent_bytes = 0 if compact else size
+            self._tails.clear()
+            self._tail_bytes = 0
+            self._folded_at = time.monotonic()
 
-    def report_progress(self) -> None:
+    def _report_progress(self) -> None:
         """Under `etude launch`, say how far the run has got, for the launcher's status.
 
         `etude-result.json` in `ETUDE_OUTPUT_DIR` holds the highest value
@@ -691,15 +687,15 @@ class Run:
         run's records, never the launcher's.
         """
         outputs = os.environ.get("ETUDE_OUTPUT_DIR")
-        high = dict(self.high)
-        if outputs is None or high == self.progress:
+        high = dict(self._high)
+        if outputs is None or high == self._progress:
             return
         DirectoryStorage(Path(outputs)).put(
             "etude-result.json", json.dumps({"clocks": high}).encode()
         )
-        self.progress = high
+        self._progress = high
 
-    def row(self, row: Logged) -> tuple[dict[str, float], dict[str, object]]:
+    def _row(self, row: Logged) -> tuple[dict[str, float], dict[str, object]]:
         """A logged row as its clock values and everything else, ready to store."""
         values: dict[str, object] = {}
         for name, value in flatten(row):
@@ -711,35 +707,37 @@ class Run:
                 except (TypeError, ValueError):
                     values[name] = type(value).__name__
         coordinate: dict[str, float] = {}
-        for name in self.columns:
+        for name in self._columns:
             value = values.get(name)
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 if math.isfinite(value):
                     coordinate[name] = float(values.pop(name))  # type: ignore[arg-type]
                 else:
                     # Not a finite number: stays among the values as written.
-                    self.warn("incomplete", f"a logged row's clock {name!r} is not a finite number")
-        if len(coordinate) != len(self.columns):
+                    self._warn(
+                        "incomplete", f"a logged row's clock {name!r} is not a finite number"
+                    )
+        if len(coordinate) != len(self._columns):
             # Charted against the clocks it does give, and wall time; counted.
             self.incomplete += 1
-        if self.metric_name_limit is not None and "metric_names" not in self.warned:
-            self.metric_names.update(
+        if self._metric_name_limit is not None and "metric_names" not in self._warned:
+            self._metric_names.update(
                 name
                 for name, value in values.items()
                 if isinstance(value, (int, float)) and not isinstance(value, bool)
             )
-            if len(self.metric_names) > self.metric_name_limit:
-                self.warn(
+            if len(self._metric_names) > self._metric_name_limit:
+                self._warn(
                     "metric_names",
-                    f"{len(self.metric_names)} distinct metric names exceed "
-                    f"metric_name_limit={self.metric_name_limit}; use log_table for "
+                    f"{len(self._metric_names)} distinct metric names exceed "
+                    f"metric_name_limit={self._metric_name_limit}; use log_table for "
                     "per-update collections instead of encoding dimensions in metric names",
                 )
                 # The one-time warning needs no growing name registry afterward.
-                self.metric_names.clear()
+                self._metric_names.clear()
         return coordinate, values
 
-    def save(self, folder: str, name: str, record: Record) -> None:
+    def _save(self, folder: str, name: str, record: Record) -> None:
         """Write one small record whole, so a reader never sees half of it."""
         DirectoryStorage(self.files.root).put(
             f"{folder}/{name}.json", record.model_dump_json().encode()
@@ -747,34 +745,36 @@ class Run:
 
     # --- the shipper thread --------------------------------------------------
 
-    def deliver_segments(self) -> None:
-        delay = self.segment_seconds
-        while not self.stopping.is_set():
-            self.wake.wait(timeout=delay)
-            self.wake.clear()
-            if self.stopping.is_set():
+    def _deliver(self) -> None:
+        delay = self._segment_seconds
+        while not self._stopping.is_set():
+            self._wake.wait(timeout=delay)
+            self._wake.clear()
+            if self._stopping.is_set():
                 break
             # Back off while a destination is down; sealed files keep accumulating.
-            delay = self.segment_seconds if self.ship() else min(delay * 2, 60.0)
-        assert self.finish_deadline is not None
-        while (left := self.finish_deadline - time.monotonic()) > 0:
+            delay = self._segment_seconds if self.ship() else min(delay * 2, 60.0)
+        assert self._finish_deadline is not None
+        while (left := self._finish_deadline - time.monotonic()) > 0:
             with limit_time(left):
                 if self.ship():
                     return
-            self.wake.wait(
-                timeout=min(self.segment_seconds, max(0.0, self.finish_deadline - time.monotonic()))
+            self._wake.wait(
+                timeout=min(
+                    self._segment_seconds, max(0.0, self._finish_deadline - time.monotonic())
+                )
             )
-            self.wake.clear()
+            self._wake.clear()
 
     def ship(self) -> bool:
         """One delivery pass over every destination. True when all are current."""
-        for destination in self.destinations:
+        for destination in self._destinations:
             reason = ship(self.files, self.name, destination)
             if reason is None:
                 self.problems.pop(destination.name, None)
             else:
                 self.problems[destination.name] = reason
-        return not any(d.name in self.problems for d in self.destinations)
+        return not any(d.name in self.problems for d in self._destinations)
 
     # --- ending --------------------------------------------------------------
 
@@ -782,27 +782,27 @@ class Run:
         self, state: Literal["finished", "failed"] = "finished", *, timeout: float = 10.0
     ) -> None:
         """Seal, record the final state and deliver, within `timeout` seconds."""
-        if self.finished:
+        if self._finished:
             return
-        self.finished = True
-        deadline = self.finish_deadline = time.monotonic() + timeout
+        self._finished = True
+        deadline = self._finish_deadline = time.monotonic() + timeout
         try:
             try:
-                self.queue.put(STOP, timeout=timeout)
+                self._queue.put(_STOP, timeout=timeout)
             except queue.Full:
                 self.dropped += 1
-            self.writer.join(max(0.0, deadline - time.monotonic()))
+            self._writer.join(max(0.0, deadline - time.monotonic()))
             counters = RunCounters(dropped=self.dropped, incomplete=self.incomplete)
             DirectoryStorage(self.files.root).put(
                 "state.json",
-                RunState(state=state, counters=counters, writer=self.writer_id)
+                RunState(state=state, counters=counters, writer=self._writer_id)
                 .model_dump_json()
                 .encode(),
             )
-            self.stopping.set()
-            self.wake.set()
-            self.shipper.join(max(0.0, deadline - time.monotonic()))
-            undelivered = self.shipper.is_alive() or bool(self.problems)
+            self._stopping.set()
+            self._wake.set()
+            self._shipper.join(max(0.0, deadline - time.monotonic()))
+            undelivered = self._shipper.is_alive() or bool(self.problems)
             if undelivered or self.dropped or self.incomplete:
                 print(
                     f"etude: {self.dropped} rows dropped, {self.incomplete} incomplete."
@@ -884,7 +884,7 @@ def track(
         for clock, value in resumed_at.items()
     ):
         raise EtudeError("resumed_at_unknown_clock", 422)
-    inherited = inherited_checkpoint()
+    inherited = _inherited()
     if inherited is not None and continues is None:
         parent, record = inherited
         until = os.environ.get("ETUDE_UNTIL_CLOCK")
@@ -920,7 +920,7 @@ def track(
     )
 
 
-def line_started(latest: CheckpointRecord | None, root: Path, started_ms: int) -> int:
+def _origin(latest: CheckpointRecord | None, root: Path, started_ms: int) -> int:
     """When the line's first attempt began, in milliseconds since the epoch.
 
     The checkpoint resumed says how long after that it was saved, also across a
@@ -938,7 +938,7 @@ def line_started(latest: CheckpointRecord | None, root: Path, started_ms: int) -
     return min(starts)
 
 
-def inherited_checkpoint() -> tuple[SourceKey, CheckpointRecord] | None:
+def _inherited() -> tuple[SourceKey, CheckpointRecord] | None:
     """The parent's checkpoint a continuation was handed, with its file on this machine."""
     given = os.environ.get("ETUDE_CONTINUES")
     if not given:

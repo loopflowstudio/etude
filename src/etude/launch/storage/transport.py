@@ -23,17 +23,17 @@ from etude.deadline import call, remaining
 from etude.launch.logging import sanitize, write_log
 from etude.storage_timeout import socket_timeout
 
-transfer_sink: ContextVar[Callable[[str], None] | None] = ContextVar("transfer_sink", default=None)
-transfer_context: ContextVar[dict[str, str | None]] = ContextVar("transfer_context", default={})
+_sink: ContextVar[Callable[[str], None] | None] = ContextVar("transfer_sink", default=None)
+_context: ContextVar[dict[str, str | None]] = ContextVar("transfer_context", default={})
 
 
 @contextmanager
 def observe(sink: Callable[[str], None]) -> Iterator[None]:
-    token = transfer_sink.set(sink)
+    token = _sink.set(sink)
     try:
         yield
     finally:
-        transfer_sink.reset(token)
+        _sink.reset(token)
 
 
 @contextmanager
@@ -60,13 +60,11 @@ def attribute(
         "sha256": sha256,
         "size_bytes": size_bytes,
     }
-    token = transfer_context.set(
-        {**transfer_context.get(), **{k: v for k, v in fields.items() if v is not None}}
-    )
+    token = _context.set({**_context.get(), **{k: v for k, v in fields.items() if v is not None}})
     try:
         yield
     finally:
-        transfer_context.reset(token)
+        _context.reset(token)
 
 
 def emit(
@@ -83,7 +81,7 @@ def emit(
     reused: int = 0,
 ) -> None:
     parts = urllib.parse.urlsplit(url)
-    context = transfer_context.get()
+    context = _context.get()
     event = {
         "id": uuid4().hex,
         "observed_at": datetime.now(UTC).isoformat(),
@@ -112,7 +110,7 @@ def emit(
 
 def deliver(raw: str) -> None:
     """Hand one observation to this thread's sink, or the worker log without one."""
-    sink = transfer_sink.get()
+    sink = _sink.get()
     if sink is None:
         write_log("transfer", raw)
     else:

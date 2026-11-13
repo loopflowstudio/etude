@@ -8,11 +8,11 @@ from contextlib import contextmanager
 from contextvars import ContextVar, copy_context
 from threading import Thread
 
-current_deadline: ContextVar[float | None] = ContextVar("operation_deadline", default=None)
+_deadline: ContextVar[float | None] = ContextVar("operation_deadline", default=None)
 
 
 def remaining(default: float | None = None) -> float | None:
-    deadline = current_deadline.get()
+    deadline = _deadline.get()
     if deadline is None:
         return default
     left = deadline - time.monotonic()
@@ -26,15 +26,15 @@ def limit_time(seconds: float | None) -> Iterator[None]:
     """Share an operation budget; None adds no limit and never extends an outer one."""
     if seconds is not None and (not math.isfinite(seconds) or seconds <= 0):
         raise ValueError("timeout must be positive and finite, or None")
-    outer = current_deadline.get()
+    outer = _deadline.get()
     deadline = None if seconds is None else time.monotonic() + seconds
     if outer is not None:
         deadline = outer if deadline is None else min(outer, deadline)
-    token = current_deadline.set(deadline)
+    token = _deadline.set(deadline)
     try:
         yield
     finally:
-        current_deadline.reset(token)
+        _deadline.reset(token)
 
 
 def call[T](operation: Callable[[], T]) -> T:

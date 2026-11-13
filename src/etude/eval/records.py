@@ -35,7 +35,7 @@ and fixes the conditions it is played under. A match's key is the digest of
 its players' keys, its groups and conditions.
 
 Records published etude-sdk wrote, with `agents` and etude-sdk 0.2's digest
-identities, load as players (`player`); a 0.2 player's key equals no key
+identities, load as players (`_player`); a 0.2 player's key equals no key
 since, so its matches stay readable and are never counted as played again.
 """
 
@@ -95,7 +95,7 @@ EVERYONE = "all"
 TABLE_FILE = re.compile(r"^tables/([A-Za-z][A-Za-z0-9_]*)\.(\d{20})\.([0-9a-f]+)\.parquet$")
 
 
-CONFIG: TypeAdapter[Config] = TypeAdapter(dict[str, JsonValue])
+_CONFIG: TypeAdapter[Config] = TypeAdapter(dict[str, JsonValue])
 
 
 def as_config(config: Mapping[str, object] | BaseModel | None) -> Config:
@@ -104,7 +104,7 @@ def as_config(config: Mapping[str, object] | BaseModel | None) -> Config:
         return {}
     data = config.model_dump(mode="json") if isinstance(config, BaseModel) else dict(config)
     try:
-        return CONFIG.validate_python(data)
+        return _CONFIG.validate_python(data)
     except ValidationError as error:
         raise EtudeError("config_is_not_json", 422) from error
 
@@ -187,7 +187,7 @@ class Version(Record):
     source: Digest | None = None
 
 
-def versioned(data: Any) -> Any:
+def _versioned(data: Any) -> Any:
     """Source files given as `source` become their `Version`; a stored record holds that."""
     if isinstance(data, dict) and "source" in data:
         data = dict(data)
@@ -197,12 +197,12 @@ def versioned(data: Any) -> Any:
     return data
 
 
-def config(value: object) -> object:
+def _config(value: object) -> object:
     return as_config(value) if value is None or isinstance(value, BaseModel) else value
 
 
 # A config as an author gives it: a Pydantic model or None becomes stored JSON.
-type GivenConfig = Annotated[Config, BeforeValidator(config)]
+type _GivenConfig = Annotated[Config, BeforeValidator(_config)]
 
 
 # The config key an author keeps execution setup under, such as `{"setup": {"device": "cuda"}}`:
@@ -216,7 +216,7 @@ def identifying(config: Config) -> Config:
     return {key: value for key, value in config.items() if key != SETUP}
 
 
-def encoded(player: str, config: Config) -> str:
+def _encoded(player: str, config: Config) -> str:
     config = identifying(config)
     if not config:
         return player
@@ -233,7 +233,7 @@ class Inference(Record):
     In a seating it is a seat each checkpoint the benchmark is held for fills.
     """
 
-    config: GivenConfig = {}
+    config: _GivenConfig = {}
     version: Version = Version()
 
     if TYPE_CHECKING:
@@ -252,7 +252,7 @@ class Inference(Record):
             # etude-sdk 0.2 stored the inference files' digest as `code`.
             data = dict(data)
             data["version"] = {"source": data.pop("code")}
-        return versioned(data)
+        return _versioned(data)
 
     def model(self, checkpoint: CheckpointRef) -> Model:
         """The model `checkpoint` is when it plays this way, named for its file."""
@@ -273,7 +273,7 @@ class Model(Record):
     @property
     def key(self) -> str:
         """Its identity as one string, for files, columns and indexes."""
-        return encoded(f"checkpoint:{self.checkpoint.key}", self.config)
+        return _encoded(f"checkpoint:{self.checkpoint.key}", self.config)
 
     # A player's config and version, as `Code` has them; `inference` holds both.
     @property
@@ -290,7 +290,7 @@ class Code(Record):
 
     kind: Literal["code"] = "code"
     name: Name
-    config: GivenConfig = {}
+    config: _GivenConfig = {}
     version: Version = Version()
 
     if TYPE_CHECKING:
@@ -306,15 +306,15 @@ class Code(Record):
     @model_validator(mode="before")
     @classmethod
     def versioned(cls, data: Any) -> Any:
-        return versioned(data)
+        return _versioned(data)
 
     @property
     def key(self) -> str:
         """Its identity as one string, for files, columns and indexes."""
-        return encoded(f"code:{self.name}", self.config)
+        return _encoded(f"code:{self.name}", self.config)
 
 
-def player(data: Any) -> Any:
+def _player(data: Any) -> Any:
     """A player as published etude-sdk stored it (an `Agent`), as a `Model` or `Code`.
 
     An Agent was keyed by `key.checkpoint` or `key.code` with its config; an
@@ -359,7 +359,7 @@ def player(data: Any) -> Any:
 
 
 # What takes a seat: a checkpoint playing some way, or code.
-type Player = Annotated[Model | Code, Field(discriminator="kind"), BeforeValidator(player)]
+type Player = Annotated[Model | Code, Field(discriminator="kind"), BeforeValidator(_player)]
 
 
 class Environment(Record):
@@ -454,7 +454,7 @@ class MatchRecord(Record):
 
     @model_validator(mode="before")
     @classmethod
-    def failed_without_rows(cls, data: Any) -> Any:  # noqa: ANN401 - pydantic's raw input
+    def _failed_without_rows(cls, data: Any) -> Any:  # noqa: ANN401 - pydantic's raw input
         if isinstance(data, dict) and data.get("state") == "done" and not data.get("columns"):
             return {**data, "state": "failed", "error": f"EtudeError: {NO_ROWS}"}
         return data
@@ -503,7 +503,7 @@ class Rollup(Record):
         return self
 
 
-class OnClock(Record):
+class _OnClock(Record):
     """A relative seat that looks for a position on `clock`, playing as `inference`.
 
     It looks in the held checkpoint's line, or with `job` in each of that
@@ -523,14 +523,14 @@ class OnClock(Record):
     trained: bool = False
 
 
-class Earlier(OnClock):
+class Earlier(_OnClock):
     """The held checkpoint's line exactly `by` before it on `clock`."""
 
     kind: Literal["earlier"] = "earlier"
     by: float = Field(gt=0)
 
 
-class Fraction(OnClock):
+class Fraction(_OnClock):
     """The held checkpoint's line at exactly `value` × its position on `clock`.
 
     `Fraction(clock="updates", value=0.5, ...)` seats 3,000 for 6,000.
@@ -540,7 +540,7 @@ class Fraction(OnClock):
     value: float = Field(gt=0, lt=1)
 
 
-class At(OnClock):
+class At(_OnClock):
     """The held checkpoint's line at `value` on `clock`, such as its initial weights at 0."""
 
     kind: Literal["at"] = "at"
@@ -555,7 +555,7 @@ class Final(Record):
     job: str | None = None
 
 
-class Aligned(OnClock):
+class Aligned(_OnClock):
     """Each of job `job`'s lines at exactly the held checkpoint's position on `clock`."""
 
     kind: Literal["aligned"] = "aligned"
@@ -565,13 +565,13 @@ class Aligned(OnClock):
 # A seat naming a checkpoint by where it stands relative to the one a seating is held for.
 type Relative = Annotated[Earlier | Fraction | At | Final | Aligned, Field(discriminator="kind")]
 # The same seats, for isinstance.
-RELATIVE = (Earlier, Fraction, At, Final, Aligned)
+_RELATIVE = (Earlier, Fraction, At, Final, Aligned)
 
 # Why a relative seat has no checkpoint: none there yet, or there never will be.
 type Missing = Literal["not_yet", "never"]
 
 # Relative seat positions match exactly, up to float arithmetic (0.3 × 1,000).
-EXACT = 1e-9
+_EXACT = 1e-9
 
 
 class Line(Record):
@@ -681,7 +681,7 @@ class Seating(Record):
     @property
     def relative(self) -> bool:
         """Whether a seat names a checkpoint relative to the held one."""
-        return any(isinstance(each, RELATIVE) for each in self.players)
+        return any(isinstance(each, _RELATIVE) for each in self.players)
 
     @property
     def definition(self) -> Digest:
@@ -691,8 +691,8 @@ class Seating(Record):
         players = [
             ["model", identifying(each.config)]
             if isinstance(each, Inference)
-            else ["relative", relative_definition(each)]
-            if isinstance(each, RELATIVE)
+            else ["relative", _relative_definition(each)]
+            if isinstance(each, _RELATIVE)
             else each.key
             for each in self.players
         ]
@@ -717,7 +717,7 @@ class Seating(Record):
         return [
             Match(
                 players=tuple(
-                    seat(each, checkpoint, found)
+                    _seat(each, checkpoint, found)
                     for each, found in zip(self.players, pairing.seats, strict=True)
                 ),
                 conditions=dict(given),
@@ -746,7 +746,7 @@ class Seating(Record):
             if held.job is None
             else [line for line in ordered if line.job == held.job]
         )
-        relative = next((each for each in self.players if isinstance(each, RELATIVE)), None)
+        relative = next((each for each in self.players if isinstance(each, _RELATIVE)), None)
         # The other side's seeds: the lines of the job a relative seat names; its own line,
         # or a fixed player, counts as one (None).
         theirs: list[Line | None] = [None]
@@ -755,7 +755,7 @@ class Seating(Record):
             theirs = [line for line in ordered if job in (line.job, line.launch)]
         counted = tuple(sorted({line.name for line in (*mine, *theirs) if line is not None}))
         if self.seeds == "one" and mine and theirs:
-            chosen, pick = chosen_pair(self.name, mine, theirs)
+            chosen, pick = _chosen(self.name, mine, theirs)
             if held != chosen:
                 return Seated(
                     seating=self.name, checkpoint=checkpoint.key, pairings=(), lines=counted
@@ -765,7 +765,7 @@ class Seating(Record):
         if relative is not None:
             # A seat with no job looks in the held checkpoint's own line.
             looked = [held] if relative.job is None else theirs
-            results = [find(relative, checkpoint, line) for line in looked if line is not None]
+            results = [_find(relative, checkpoint, line) for line in looked if line is not None]
             found = [each for each in results if isinstance(each, CheckpointRef)]
             if not found or "not_yet" in results:
                 # No line yet: the job has not started, or the held one's line is unknown.
@@ -775,37 +775,37 @@ class Seating(Record):
                     checkpoint=checkpoint.key,
                     missing="not_yet" if unknown or "not_yet" in results else "never",
                     seat=relative,
-                    position=position(relative, checkpoint),
+                    position=_position(relative, checkpoint),
                 )
         # Pairs in seed order, (mine, theirs); this checkpoint's are contiguous from `first`.
         pairs = max(len(mine), 1) * len(found)
         first = (mine.index(held) if held in mine else 0) * len(found)
         pairings = [
             Pairing(
-                seats=tuple(ref if isinstance(each, RELATIVE) else None for each in self.players),
+                seats=tuple(ref if isinstance(each, _RELATIVE) else None for each in self.players),
                 games=games,
             )
             for index, ref in enumerate(found, start=first)
-            if (games := share(self.games, pairs, index))
+            if (games := _share(self.games, pairs, index))
         ]
         return Seated(
             seating=self.name, checkpoint=checkpoint.key, pairings=tuple(pairings), lines=counted
         )
 
 
-def relative_definition(seat: Relative) -> dict[str, JsonValue]:
+def _relative_definition(seat: Relative) -> dict[str, JsonValue]:
     """A relative seat as a seating's definition takes it: its inference by config, less setup."""
     found = seat.model_dump(mode="json", exclude={"inference"})
     return {**found, "inference": {"config": identifying(seat.inference.config)}}
 
 
-def seat(
+def _seat(
     each: Player | Inference | Relative,
     checkpoint: CheckpointRef | None,
     found: CheckpointRef | None,
 ) -> Player:
     """Who takes a seating's seat in one pairing."""
-    if isinstance(each, RELATIVE):
+    if isinstance(each, _RELATIVE):
         if found is None:
             raise ValueError("relative_seat_needs_its_checkpoints")
         return each.inference.model(found)
@@ -816,12 +816,12 @@ def seat(
     return each
 
 
-def share(games: int, pairs: int, index: int) -> int:
+def _share(games: int, pairs: int, index: int) -> int:
     """Pair `index`'s games of `games` split evenly over `pairs`, the remainder to the lowest."""
     return games // pairs + (1 if index < games % pairs else 0)
 
 
-def chosen_pair(
+def _chosen(
     seating: str, mine: Sequence[Line], theirs: Sequence[Line | None]
 ) -> tuple[Line, Line | None]:
     """The one seed pair a `seeds="one"` seating plays: drawn from its name and the seed sets,
@@ -836,7 +836,7 @@ def chosen_pair(
     return mine[one], theirs[other]
 
 
-def position(seat: Relative, held: CheckpointRef) -> float | None:
+def _position(seat: Relative, held: CheckpointRef) -> float | None:
     """Where on its clock the seat looks for `held`; None for `Final`, or with no position."""
     if isinstance(seat, Final):
         return None
@@ -852,7 +852,7 @@ def position(seat: Relative, held: CheckpointRef) -> float | None:
     return here
 
 
-def find(seat: Relative, held: CheckpointRef, line: Line) -> CheckpointRef | Missing:
+def _find(seat: Relative, held: CheckpointRef, line: Line) -> CheckpointRef | Missing:
     """The checkpoint of `line` the seat names for `held`, or why there is none.
 
     "never" once the line has ended or has passed the position without saving there.
@@ -863,12 +863,12 @@ def find(seat: Relative, held: CheckpointRef, line: Line) -> CheckpointRef | Mis
         if not line.ended:
             return "not_yet"
         return line.checkpoints[-1] if line.checkpoints else "never"
-    wanted = position(seat, held)
+    wanted = _position(seat, held)
     if wanted is None:
         return "never"
-    clock, tolerance = seat.clock, EXACT * max(1.0, abs(wanted))
+    clock, tolerance = seat.clock, _EXACT * max(1.0, abs(wanted))
     passed = any(each.at.get(clock, float("-inf")) > wanted for each in line.checkpoints)
-    seatable = [c for c in line.checkpoints if not seat.trained or trained(c)]
+    seatable = [c for c in line.checkpoints if not seat.trained or _trained(c)]
     if seat.at_or_before:
         if not (passed or line.ended):
             return "not_yet"
@@ -881,7 +881,7 @@ def find(seat: Relative, held: CheckpointRef, line: Line) -> CheckpointRef | Mis
     return "never" if line.ended or passed else "not_yet"
 
 
-def trained(checkpoint: CheckpointRef) -> bool:
+def _trained(checkpoint: CheckpointRef) -> bool:
     """Whether it was saved after training began: a clock its run declared stands above 0.
 
     Etude's hours run from `track(...)`, so they are above 0 even for initial
@@ -1039,10 +1039,10 @@ class Tournament(Record):
                     seated.append(result)
                 elif (seating.name, str(checkpoint.key)) not in recorded:
                     gaps.append(result)
-        return self.model_copy(update={"seated": merged(seated)}), tuple(gaps)
+        return self.model_copy(update={"seated": _merged(seated)}), tuple(gaps)
 
 
-def merged(seated: Iterable[Seated]) -> tuple[Seated, ...]:
+def _merged(seated: Iterable[Seated]) -> tuple[Seated, ...]:
     """One `Seated` per seating and held checkpoint: of two, the one that counted more lines,
     and of those resolved alike, the later."""
     merged: dict[tuple[str, str], Seated] = {}
@@ -1097,5 +1097,5 @@ def assemble(held: Iterable[TournamentRun]) -> Tournament:
         definition=definition,
         checkpoints=tuple(checkpoints[key] for key in sorted(checkpoints)),
         entrants=tuple(entrants[key] for key in sorted(entrants)),
-        seated=merged(each for run in runs for each in run.seated),
+        seated=_merged(each for run in runs for each in run.seated),
     )

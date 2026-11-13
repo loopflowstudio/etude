@@ -9,7 +9,7 @@ reads are read from storage once, in either order, by any process. Content is
 kept once by SHA256 and length (`Content`), verified before it is published and
 again before it, or a range of it, is reused: a `Cache` hashes a file once and
 trusts it while its inode, size and modification time stay as it left them
-(`Stamp`), and any change hashes it again. A whole-file digest cannot
+(`_Stamp`), and any change hashes it again. A whole-file digest cannot
 authenticate a range, so a range of a recorded digest is read from verified
 whole content, acquired first when not held.
 
@@ -68,14 +68,14 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from etude.deadline import remaining
 
-CHUNK = 65536
+_CHUNK = 65536
 
 
-class Record(BaseModel):
+class _Record(BaseModel):
     model_config = ConfigDict(frozen=True)
 
 
-class Content(Record):
+class Content(_Record):
     """Bytes named by what they are, not where they are kept."""
 
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -106,7 +106,7 @@ class Fetched:
     etag: str | None
 
 
-class Artifact(Record):
+class Artifact(_Record):
     """Bytes at a stable location, with whatever is recorded about which bytes they are.
 
     `location` is the object's unsigned URL, endpoint included
@@ -148,7 +148,7 @@ class Source(Protocol):
         ...
 
 
-class Part:
+class _Part:
     """One range of a source, read as an object of its own; a range never changes version."""
 
     def __init__(self, source: Source, start: int, end: int) -> None:
@@ -165,27 +165,27 @@ class Part:
         self.source.reused(size_bytes, f"bytes={self.start}-{self.end}")
 
 
-class Range(Record):
+class _Range(_Record):
     size_bytes: int
     sha256: str
 
 
-class Partial(Record):
+class _Partial(_Record):
     etag: str | None = None
-    ranges: tuple[Range, ...] = ()
+    ranges: tuple[_Range, ...] = ()
 
 
-class Located(Record):
+class _Located(_Record):
     content: Content
     etag: str | None
 
 
-def digest(path: Path) -> str:
+def _digest(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         while True:
             remaining()
-            chunk = stream.read(CHUNK)
+            chunk = stream.read(_CHUNK)
             if not chunk:
                 break
             digest.update(chunk)
@@ -194,7 +194,7 @@ def digest(path: Path) -> str:
 
 
 @dataclass(frozen=True)
-class Stamp:
+class _Stamp:
     """What changes when a file is replaced or rewritten."""
 
     inode: int
@@ -202,7 +202,7 @@ class Stamp:
     modified_ns: int
 
     @staticmethod
-    def of(path: Path) -> Stamp | None:
+    def of(path: Path) -> _Stamp | None:
         """The stamp of the regular file at `path`; None when there is no such file."""
         try:
             found = path.stat()
@@ -210,25 +210,25 @@ class Stamp:
             return None
         if not stat.S_ISREG(found.st_mode):
             return None
-        return Stamp(found.st_ino, found.st_size, found.st_mtime_ns)
+        return _Stamp(found.st_ino, found.st_size, found.st_mtime_ns)
 
 
-def discard(path: Path) -> None:
+def _discard(path: Path) -> None:
     """Remove payload and range notes together while their owner holds its lock."""
     path.unlink(missing_ok=True)
     path.with_suffix(".json").unlink(missing_ok=True)
 
 
-def admit(partial: Path, target: Path) -> None:
+def _admit(partial: Path, target: Path) -> None:
     """Publish a completed acquisition as held content, under the capacity lock."""
-    with file_lock(target.parent / "capacity.lock"):
+    with _lock(target.parent / "capacity.lock"):
         partial.chmod(0o444)  # verified content never changes; holders may link it
         partial.replace(target)
         partial.with_suffix(".json").unlink(missing_ok=True)
 
 
 @contextmanager
-def file_lock(path: Path) -> Iterator[None]:
+def _lock(path: Path) -> Iterator[None]:
     with path.open("a") as lock:
         while True:
             remaining()
@@ -240,13 +240,13 @@ def file_lock(path: Path) -> Iterator[None]:
         yield
 
 
-def replace_file(target: Path, body: bytes) -> None:
+def _replace(target: Path, body: bytes) -> None:
     with tempfile.NamedTemporaryFile(dir=target.parent, suffix=".tmp", delete=False) as partial:
         partial.write(body)
     Path(partial.name).replace(target)
 
 
-def publish(source: Path, destination: Path) -> Path:
+def _publish(source: Path, destination: Path) -> Path:
     """A copy, never a link: a destination is the caller's to change."""
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as temporary:
@@ -255,7 +255,7 @@ def publish(source: Path, destination: Path) -> Path:
             with source.open("rb") as stream:
                 while True:
                     remaining()
-                    chunk = stream.read(CHUNK)
+                    chunk = stream.read(_CHUNK)
                     if not chunk:
                         break
                     temporary.write(chunk)
@@ -280,7 +280,7 @@ class Cache:
             raise ValueError("cache allowance must be nonnegative and range size positive")
         self.root = root or Path(os.environ.get("ETUDE_HOME", "~/.etude")).expanduser() / "cache"
         self.max_bytes, self.range_bytes = max_bytes, range_bytes
-        self.stamps: dict[tuple[Path, Content], Stamp] = {}
+        self._stamps: dict[tuple[Path, Content], _Stamp] = {}
 
     def read(
         self, artifact: Artifact, source: Source, *, start: int = 0, length: int | None = None
@@ -293,18 +293,18 @@ class Cache:
         a range. Location-only immutable objects can fetch and keep ranges alone.
         """
         if length is not None:
-            return self.read_range(artifact, source, start, length)
+            return self._read_range(artifact, source, start, length)
         if start:
             raise ValueError("a read from an offset names its length")
         content = artifact.content
         if content is None:
-            return self.read_located(artifact, source)
-        held = self.load(content)
+            return self._read_located(artifact, source)
+        held = self._load(content)
         if held is not None:
             source.reused(content.size_bytes, None)
-            self.locate(artifact.location, content, None)
+            self._locate(artifact.location, content, None)
             return held
-        with tempfile.TemporaryDirectory(dir=self.made()) as scratch:
+        with tempfile.TemporaryDirectory(dir=self._made()) as scratch:
             return self.place(artifact, Path(scratch) / content.name, source).read_bytes()
 
     def place(self, artifact: Artifact, destination: Path, source: Source) -> Path:
@@ -318,10 +318,10 @@ class Cache:
         if content is None:
             body = self.read(artifact, source)
             destination.parent.mkdir(parents=True, exist_ok=True)
-            replace_file(destination, body)
+            _replace(destination, body)
             return destination
-        with self.holding(artifact, content, destination, source, None) as held:
-            return held if held == destination else publish(held, destination)
+        with self._holding(artifact, content, destination, source, None) as held:
+            return held if held == destination else _publish(held, destination)
 
     def hold(self, artifact: Artifact, source: Source, *, holder: str, staging: Path) -> Path:
         """The artifact's verified, read-only bytes in this cache, kept until `holder` releases them.
@@ -334,12 +334,12 @@ class Cache:
             raise ValueError("only content named by its digest can be held")
         if not re.fullmatch(r"[A-Za-z0-9_-]+", holder):
             raise ValueError(f"holder {holder!r} must be a plain name")
-        with self.holding(artifact, content, staging, source, holder) as held:
+        with self._holding(artifact, content, staging, source, holder) as held:
             return held
 
     def held(self, content: Content) -> Path | None:
         """Where held content is, verified now; None when absent, and discarded when corrupt."""
-        with self.checked(content) as path:
+        with self._checked(content) as path:
             return path
 
     def release(self, holder: str) -> None:
@@ -348,7 +348,7 @@ class Cache:
             pin.unlink(missing_ok=True)
 
     @contextmanager
-    def holding(
+    def _holding(
         self,
         artifact: Artifact,
         content: Content,
@@ -362,23 +362,23 @@ class Cache:
         larger than the whole allowance, `destination` itself.
         """
         key = content.name
-        with file_lock(self.locked(key)):
+        with _lock(self._locked(key)):
             target = self.root / key
             if target.exists():
-                if not self.verified(target, content):
-                    with file_lock(self.root / "capacity.lock"):
+                if not self._verified(target, content):
+                    with _lock(self.root / "capacity.lock"):
                         target.unlink()
                     raise Corrupt("cached download digest mismatch")
                 source.reused(content.size_bytes, None)
-                self.pin(content, holder)
-                self.locate(artifact.location, content, None)
+                self._pin(content, holder)
+                self._locate(artifact.location, content, None)
                 yield target
                 return
             destination.parent.mkdir(parents=True, exist_ok=True)
-            cacheable = content.size_bytes <= self.max_bytes and self.make_room(
+            cacheable = content.size_bytes <= self.max_bytes and self._make_room(
                 key, content.size_bytes
             )
-            if not cacheable and self.verified(destination, content):
+            if not cacheable and self._verified(destination, content):
                 # Too large to cache, but a retried attempt or another job on
                 # this machine already holds it where it goes.
                 source.reused(content.size_bytes, None)
@@ -389,28 +389,28 @@ class Cache:
                 if cacheable
                 else destination.parent / f".{key}.partial"
             )
-            etag = self.acquire(content, partial, source)
-            if not self.verified(partial, content):
-                with file_lock(self.root / "capacity.lock"):
-                    discard(partial)
+            etag = self._acquire(content, partial, source)
+            if not self._verified(partial, content):
+                with _lock(self.root / "capacity.lock"):
+                    _discard(partial)
                 raise Mismatch("download length or SHA256 mismatch")
             if cacheable:
-                admit(partial, target)
-                self.pin(content, holder)
-                self.locate(artifact.location, content, etag)
+                _admit(partial, target)
+                self._pin(content, holder)
+                self._locate(artifact.location, content, etag)
                 yield target
                 return
             # Staging is already beside the destination, on the same filesystem.
             partial.chmod(0o600)
             remaining()
             partial.replace(destination)
-            discard(partial)
+            _discard(partial)
             yield destination
 
-    def read_located(self, artifact: Artifact, source: Source) -> bytes:
+    def _read_located(self, artifact: Artifact, source: Source) -> bytes:
         """Bytes whose digest is not recorded: the location says which bytes are held."""
-        located = self.located(artifact.location)
-        held = None if located is None else self.load(located.content)
+        located = self._located(artifact.location)
+        held = None if located is None else self._load(located.content)
         if held is not None and artifact.immutable:
             source.reused(len(held), None)
             return held
@@ -422,11 +422,11 @@ class Cache:
         else:
             fetched = source.read(0, None, None)
         content = Content.of(fetched.body)
-        if self.keep(content, fetched.body):
-            self.locate(artifact.location, content, fetched.etag)
+        if self._keep(content, fetched.body):
+            self._locate(artifact.location, content, fetched.etag)
         return fetched.body
 
-    def read_range(self, artifact: Artifact, source: Source, start: int, length: int) -> bytes:
+    def _read_range(self, artifact: Artifact, source: Source, start: int, length: int) -> bytes:
         if start < 0 or length < 0:
             raise ValueError("a range starts and runs forward from a nonnegative offset")
         if length == 0:
@@ -437,9 +437,9 @@ class Cache:
         if artifact.content is None and not artifact.immutable:
             # A mutable object's range cannot be checked against what is held.
             return source.read(start, end, None).body
-        located = self.located(artifact.location)
+        located = self._located(artifact.location)
         content = artifact.content or (None if located is None else located.content)
-        held = None if content is None else self.slice_of(content, start, length)
+        held = None if content is None else self._slice(content, start, length)
         if held is not None:
             source.reused(length, f"bytes={start}-{end}")
             return held
@@ -447,19 +447,19 @@ class Cache:
             # A whole-file digest cannot authenticate an isolated range. Use the
             # same verified acquisition as a whole read, including when too large
             # to retain, and expose only the requested bytes after it succeeds.
-            with tempfile.TemporaryDirectory(dir=self.made()) as scratch:
+            with tempfile.TemporaryDirectory(dir=self._made()) as scratch:
                 path = self.place(artifact, Path(scratch) / artifact.content.name, source)
                 with path.open("rb") as stream:
                     stream.seek(start)
                     return stream.read(length)
         part = Artifact(location=f"{artifact.location}\0bytes={start}-{end}", immutable=True)
-        return self.read_located(part, Part(source, start, end))
+        return self._read_located(part, _Part(source, start, end))
 
-    def slice_of(self, content: Content, start: int, length: int) -> bytes | None:
+    def _slice(self, content: Content, start: int, length: int) -> bytes | None:
         """A range of held content, verified and locked against eviction while read."""
         if start + length > content.size_bytes:
             return None
-        with self.checked(content) as path:
+        with self._checked(content) as path:
             if path is None:
                 return None
             with path.open("rb") as stream:
@@ -467,46 +467,46 @@ class Cache:
                 body = stream.read(length)
         return body if len(body) == length else None
 
-    def pin(self, content: Content, holder: str | None) -> None:
+    def _pin(self, content: Content, holder: str | None) -> None:
         if holder is not None:
             (self.root / f"{content.name}.{holder}.pin").touch()
 
-    def made(self) -> Path:
+    def _made(self) -> Path:
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         return self.root
 
-    def locked(self, key: str) -> Path:
+    def _locked(self, key: str) -> Path:
         """The lock file of content named `key`, shared with others of its SHA256 prefix."""
-        locks = self.made() / "locks"
+        locks = self._made() / "locks"
         locks.mkdir(exist_ok=True)
         return locks / f"{key[:3]}.lock"
 
-    def locator(self, location: str) -> Path:
+    def _locator(self, location: str) -> Path:
         return self.root / "locators" / f"{hashlib.sha256(location.encode()).hexdigest()}.json"
 
-    def located(self, location: str) -> Located | None:
+    def _located(self, location: str) -> _Located | None:
         try:
-            return Located.model_validate_json(self.locator(location).read_bytes())
+            return _Located.model_validate_json(self._locator(location).read_bytes())
         except FileNotFoundError:
             return None
 
-    def locate(self, location: str, content: Content, etag: str | None) -> None:
+    def _locate(self, location: str, content: Content, etag: str | None) -> None:
         """Note which held bytes a location holds; an unknown ETag keeps a known one of the same bytes."""
-        located = self.located(location)
+        located = self._located(location)
         if located is not None and located.content == content and etag is None:
             return
         self.root.joinpath("locators").mkdir(exist_ok=True)
-        replace_file(
-            self.locator(location), Located(content=content, etag=etag).model_dump_json().encode()
+        _replace(
+            self._locator(location), _Located(content=content, etag=etag).model_dump_json().encode()
         )
 
-    def load(self, content: Content) -> bytes | None:
+    def _load(self, content: Content) -> bytes | None:
         """Held content, verified; None when absent, and discarded when corrupt."""
-        with self.checked(content) as path:
+        with self._checked(content) as path:
             return None if path is None else path.read_bytes()
 
     @contextmanager
-    def checked(self, content: Content) -> Iterator[Path | None]:
+    def _checked(self, content: Content) -> Iterator[Path | None]:
         """Held content's path, verified and locked against eviction while in use.
 
         None when absent; corrupt content is discarded and also gives None.
@@ -515,61 +515,61 @@ class Cache:
         if not path.exists():
             yield None
             return
-        with file_lock(self.locked(content.name)):
-            if self.verified(path, content):
+        with _lock(self._locked(content.name)):
+            if self._verified(path, content):
                 yield path
                 return
-            with file_lock(self.root / "capacity.lock"):
+            with _lock(self.root / "capacity.lock"):
                 path.unlink(missing_ok=True)
         yield None
 
-    def verified(self, path: Path, content: Content) -> bool:
+    def _verified(self, path: Path, content: Content) -> bool:
         """Whether `path` holds `content`; content this cache holds is marked recently used.
 
         The file is hashed once, then trusted while its stamp is unchanged.
         Marking it changes its modification time, so the stamp is taken after.
         A destination outside the cache is verified without being changed.
         """
-        stamp = Stamp.of(path)
-        trusted = self.stamps.pop((path, content), None)
+        stamp = _Stamp.of(path)
+        trusted = self._stamps.pop((path, content), None)
         if stamp is None or stamp.size_bytes != content.size_bytes:
             return False
         if trusted != stamp:
-            valid = digest(path) == content.sha256
+            valid = _digest(path) == content.sha256
             remaining()
             if not valid:
                 return False
         if path.parent == self.root:
             path.touch()
-            stamp = Stamp.of(path)
+            stamp = _Stamp.of(path)
         if stamp is not None:
-            self.stamps[(path, content)] = stamp
+            self._stamps[(path, content)] = stamp
         return True
 
-    def keep(self, content: Content, body: bytes) -> bool:
+    def _keep(self, content: Content, body: bytes) -> bool:
         """Hold bytes already read in full; False when they do not fit."""
         if content.size_bytes > self.max_bytes:
             return False
         key = content.name
-        with file_lock(self.locked(key)):
+        with _lock(self._locked(key)):
             target = self.root / key
             if target.exists():
                 target.touch()
                 return True
-            if not self.make_room(key, content.size_bytes):
+            if not self._make_room(key, content.size_bytes):
                 return False
             partial = self.root / f"{key}.partial"
             partial.write_bytes(body)
-            admit(partial, target)
+            _admit(partial, target)
             return True
 
-    def make_room(self, key: str, size: int) -> bool:
+    def _make_room(self, key: str, size: int) -> bool:
         # Reserve capacity under the cache-wide lock. Other acquisitions hold
         # their content lock, so eviction never removes an active reader/writer.
-        with file_lock(self.root / "capacity.lock"):
-            used = self.usage()
+        with _lock(self.root / "capacity.lock"):
+            used = self._usage()
             if used is not None and used + size <= self.max_bytes:
-                return self.reserve(key, size, used)
+                return self._reserve(key, size, used)
             pinned = {p.name.partition(".")[0] for p in self.root.glob("*.pin")}
             candidates = sorted(
                 (
@@ -587,60 +587,60 @@ class Cache:
                 identity = path.name.removesuffix(".partial")
                 if identity in pinned:
                     continue
-                with self.locked(identity).open("a") as lock:
+                with self._locked(identity).open("a") as lock:
                     try:
                         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     except BlockingIOError:
                         continue
                     used -= path.stat().st_size
-                    discard(path)
+                    _discard(path)
                     evicted = True
             if evicted:
-                self.forget_evicted()
+                self._forget_evicted()
             if used + size > self.max_bytes:
-                replace_file(self.root / "usage", str(used).encode())
+                _replace(self.root / "usage", str(used).encode())
                 return False
-            return self.reserve(key, size, used)
+            return self._reserve(key, size, used)
 
-    def usage(self) -> int | None:
+    def _usage(self) -> int | None:
         """Bytes held and reserved, at most; None when not yet measured."""
         try:
             return int((self.root / "usage").read_text())
         except (FileNotFoundError, ValueError):
             return None
 
-    def reserve(self, key: str, size: int, used: int) -> bool:
+    def _reserve(self, key: str, size: int, used: int) -> bool:
         """Claim `size` bytes for `key` while the caller holds the capacity lock."""
         with (self.root / f"{key}.partial").open("a+b") as reservation:
             reservation.truncate(size)
-        replace_file(self.root / "usage", str(used + size).encode())
+        _replace(self.root / "usage", str(used + size).encode())
         return True
 
-    def forget_evicted(self) -> None:
+    def _forget_evicted(self) -> None:
         """Drop locators whose content is gone, so they stay as few as what is held."""
         for path in self.root.glob("locators/*.json"):
             try:
-                located = Located.model_validate_json(path.read_bytes())
+                located = _Located.model_validate_json(path.read_bytes())
             except (FileNotFoundError, ValueError):
                 path.unlink(missing_ok=True)
                 continue
             if not (self.root / located.content.name).exists():
                 path.unlink(missing_ok=True)
 
-    def acquire(self, content: Content, path: Path, source: Source) -> str | None:
+    def _acquire(self, content: Content, path: Path, source: Source) -> str | None:
         """Read what the partial lacks, a range at a time; the version's ETag, if any.
 
         A source may read a range as concurrent parts, and read ahead.
         """
         note = path.with_suffix(".json")
-        state = Partial.model_validate_json(note.read_bytes()) if note.exists() else Partial()
+        state = _Partial.model_validate_json(note.read_bytes()) if note.exists() else _Partial()
         offset = 0
         with path.open("r+b" if path.exists() else "w+b") as output:
             for part in state.ranges:
                 remaining()
                 data = output.read(part.size_bytes)
                 if len(data) != part.size_bytes or hashlib.sha256(data).hexdigest() != part.sha256:
-                    discard(path)  # the next attempt starts over
+                    _discard(path)  # the next attempt starts over
                     raise Corrupt("retained download range is corrupt")
                 offset += part.size_bytes
             remaining()
@@ -659,16 +659,16 @@ class Cache:
                 output.write(piece.body)
                 output.flush()
                 os.fsync(output.fileno())
-                state = Partial(
+                state = _Partial(
                     etag=piece.etag,
                     ranges=(
                         *state.ranges,
-                        Range(
+                        _Range(
                             size_bytes=len(piece.body),
                             sha256=hashlib.sha256(piece.body).hexdigest(),
                         ),
                     ),
                 )
-                replace_file(note, state.model_dump_json().encode())
+                _replace(note, state.model_dump_json().encode())
                 offset = end + 1
         return state.etag

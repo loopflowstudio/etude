@@ -296,7 +296,7 @@ def test_a_batch_hold_skips_what_any_eval_run_of_its_environment_delivered(tmp_p
     assert [p.matches for p in lines["search vs greedy"].points] == [len(DEALS)] * 3
 
 
-def agent(player: object) -> object:
+def _agent(player: object) -> object:
     """A player as published etude-sdk stored it: an `Agent` keyed by checkpoint or code."""
     if not isinstance(player, dict):
         return player
@@ -321,22 +321,22 @@ def agent(player: object) -> object:
             "config": player["config"],
         }
         return {"key": key, "name": player["name"], "artifact": None, "version": player["version"]}
-    return {name: published_seats(value) for name, value in player.items()}
+    return {name: _published(value) for name, value in player.items()}
 
 
-def published_seats(value: object) -> object:
+def _published(value: object) -> object:
     if isinstance(value, list):
-        return [agent(each) for each in value]
-    return agent(value)
+        return [_agent(each) for each in value]
+    return _agent(value)
 
 
-def as_published(bucket: Path) -> None:
+def _as_published(bucket: Path) -> None:
     """Rewrite every eval run as published etude-sdk stored it: agents, and seats as `player`."""
     for file in bucket.rglob("tournament.json"):
-        file.write_text(json.dumps(published_seats(json.loads(file.read_text()))))
+        file.write_text(json.dumps(_published(json.loads(file.read_text()))))
     for file in bucket.rglob("matches/*.json"):
         record = json.loads(file.read_text())
-        record["match"]["agents"] = published_seats(record["match"].pop("players"))
+        record["match"]["agents"] = _published(record["match"].pop("players"))
         file.write_text(json.dumps(record))
     for file in bucket.rglob("tables/*.parquet"):
         duckdb.sql(
@@ -352,7 +352,7 @@ def test_a_batch_hold_over_eval_runs_stored_with_agents_replays_nothing(tmp_path
         hold(progress, experiment=EXPERIMENT, checkpoint=each, play=play, storages=[bucket],
              directory=tmp_path / str(each.key.name))  # fmt: skip
     before = scores(statsdb(EXPERIMENT, bucket), "anchors", table="plays", value="won")
-    as_published(tmp_path / "bucket")
+    _as_published(tmp_path / "bucket")
     assert all(
         '"agents"' in file.read_text() for file in (tmp_path / "bucket").rglob("matches/*.json")
     )

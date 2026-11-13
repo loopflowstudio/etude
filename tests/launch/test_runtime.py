@@ -126,7 +126,7 @@ def test_failure_diagnostic_precedes_completion_record(
     )
     packet = Packet(session="session", deadline=None, work=(work,))
     published: list[str] = []
-    finish = attempts.finish
+    finish = attempts._finish
 
     def observe_completion(
         home: Path, outcome: Outcome, cause: Cause | None = None, code: int | None = None
@@ -134,8 +134,8 @@ def test_failure_diagnostic_precedes_completion_record(
         published.append((home / "log").read_text())
         finish(home, outcome, cause, code)
 
-    monkeypatch.setattr(attempts, "finish", observe_completion)
-    attempts.run_attempt(session, packet, work)
+    monkeypatch.setattr(attempts, "_finish", observe_completion)
+    attempts._run(session, packet, work)
     assert (
         len(published) == 1 and "job interpreter" in published[0] and "unavailable" in published[0]
     )

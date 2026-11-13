@@ -41,7 +41,7 @@ class Guardian(Protocol):
     def delete_self(self, machine: str) -> None: ...
 
 
-def utc_now() -> datetime:
+def _now() -> datetime:
     return datetime.now(UTC)
 
 
@@ -51,7 +51,7 @@ def guard(
     deadline: datetime,
     max_usd: Decimal,
     sleep: Callable[[float], None] = time.sleep,
-    now: Callable[[], datetime] = utc_now,
+    now: Callable[[], datetime] = _now,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> None:
     """Wait for the deadline, then retry the provider's deletion or local stop action."""
@@ -85,7 +85,7 @@ UV_URL = (
 UV_SHA256 = "741ff1f5742c5a4a25d2f829e8395355e43f7a5ae2ebc6368e9ae2df0efb69cf"
 
 
-def download(url: str) -> bytes:
+def _download(url: str) -> bytes:
     with limit_time(startup_timeout()), attribute(purpose="runtime"):
         status, body = send("GET", url, None, {})
         if status != 200:
@@ -97,7 +97,7 @@ def ensure_uv() -> None:
     """Supply uv when a stock image has only Python; verify before extraction."""
     if shutil.which("uv") is not None:
         return
-    code = download(UV_URL)
+    code = _download(UV_URL)
     if hashlib.sha256(code).hexdigest() != UV_SHA256:
         raise ValueError("uv download checksum does not match")
     with tarfile.open(fileobj=io.BytesIO(code), mode="r:gz") as archive:
@@ -176,7 +176,7 @@ def boot(
             write_log("package download", "ensuring uv")
             ensure_uv()
             write_log("package download", "fetching client")
-            code = download(os.environ["ETUDE_PACKAGE_URL"])
+            code = _download(os.environ["ETUDE_PACKAGE_URL"])
             if hashlib.sha256(code).hexdigest() != os.environ["ETUDE_PACKAGE_SHA256"]:
                 raise ValueError("client package digest does not match")
             root = install(code)

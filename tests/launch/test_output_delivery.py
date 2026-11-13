@@ -24,16 +24,16 @@ from etude.launch.worker.courier import Courier
 from etude.storage_timeout import StorageUnavailable
 
 
-class Files:
+class _Files:
     def __init__(self, *, gated: bool = False) -> None:
         self.objects: dict[str, bytes] = {}
         self.failed = ""
         self.active = 0
         self.peak = 0
         self.allowances: list[float | None] = []
-        self.lock = threading.Lock()
-        self.gate = threading.Barrier(2, timeout=5) if gated else None
-        self.gated: set[str] = set()
+        self._lock = threading.Lock()
+        self._gate = threading.Barrier(2, timeout=5) if gated else None
+        self._gated: set[str] = set()
 
     def send(self, method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Reply:
         assert method == "POST" and body is not None
@@ -49,23 +49,23 @@ class Files:
         key, payload = fields["key"].decode(), fields["file"]
         output = key.startswith("runs/study/attempts/a1/")
         gated = False
-        with self.lock:
+        with self._lock:
             if output:
                 self.active += 1
                 self.peak = max(self.peak, self.active)
                 self.allowances.append(remaining())
-                if self.gate is not None and key.rsplit("/", 1)[-1] in {"a", "b"}:
-                    gated = key not in self.gated
-                    self.gated.add(key)
+                if self._gate is not None and key.rsplit("/", 1)[-1] in {"a", "b"}:
+                    gated = key not in self._gated
+                    self._gated.add(key)
         try:
             # Two single-byte transfers rendezvous; no throughput/load fixture.
             if gated:
-                assert self.gate is not None
-                self.gate.wait()
+                assert self._gate is not None
+                self._gate.wait()
             if output and key.endswith(self.failed) and self.failed:
                 emit("POST", url, supplied=len(body), completed=False)
                 raise TimeoutError("controlled unavailable reply")
-            with self.lock:
+            with self._lock:
                 if output:
                     assert key not in self.objects, "successful immutable output was resent"
                 if key == "runs/study/attempts/a1.json":
@@ -80,7 +80,7 @@ class Files:
             return Reply(status=204, body=b"", headers={})
         finally:
             if output:
-                with self.lock:
+                with self._lock:
                     self.active -= 1
 
     def delivered(self) -> bool:
@@ -88,7 +88,7 @@ class Files:
         return stored is not None and AttemptRecord.model_validate_json(stored).delivered
 
 
-def make_courier(tmp_path: Path, files: Files) -> tuple[Courier, Path]:
+def _courier(tmp_path: Path, files: _Files) -> tuple[Courier, Path]:
     home = tmp_path / "sessions/session"
     attempt = home / "attempts/a1"
     outputs = attempt / "outputs"
@@ -128,10 +128,10 @@ def test_failed_output_keeps_completion_absent_and_retry_keeps_delivered_bytes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "cache"))
-    monkeypatch.setattr(delivery, "OUTPUT_UPLOADS", 2)
-    files = Files(gated=True)
+    monkeypatch.setattr(delivery, "_OUTPUT_UPLOADS", 2)
+    files = _Files(gated=True)
     files.failed = "/b"
-    courier, _ = make_courier(tmp_path, files)
+    courier, _ = _courier(tmp_path, files)
     with pytest.raises(StorageUnavailable):
         courier.carry_out()
     assert files.peak == 2
@@ -152,15 +152,15 @@ def test_transfer_retention_runs_on_the_invoking_database_thread_with_its_deadli
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "cache"))
-    files = Files()
-    courier, outputs = make_courier(tmp_path, files)
+    files = _Files()
+    courier, outputs = _courier(tmp_path, files)
     with closing(Database(tmp_path / "owner.sqlite")) as database:
         with (
             limit_time(60),
             attribute(session="session", run="study", attempt="a1"),
             observe(database.retain_transfer_json),
         ):
-            courier.put_outputs(outputs, "study", "a1")
+            courier._put_outputs(outputs, "study", "a1")
         events = database.transfers()
     assert len(events) == 4 and all(event.completed for event in events)
     assert all(
@@ -177,9 +177,9 @@ def test_delivery_retains_in_flight_outputs_when_the_caller_cannot_continue(
     interrupted: bool,
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "cache"))
-    monkeypatch.setattr(delivery, "OUTPUT_UPLOADS", 2)
-    files = Files(gated=True)
-    courier, outputs = make_courier(tmp_path, files)
+    monkeypatch.setattr(delivery, "_OUTPUT_UPLOADS", 2)
+    files = _Files(gated=True)
+    courier, outputs = _courier(tmp_path, files)
     observations: list[str] = []
     with monkeypatch.context() as fault:
         if interrupted:
@@ -191,17 +191,17 @@ def test_delivery_retains_in_flight_outputs_when_the_caller_cannot_continue(
             error: type[BaseException] = KeyboardInterrupt
         else:
             # Fail at submission, after traversal has admitted all four files.
-            original_unsent = courier.unsent
+            original_unsent = courier._unsent
 
-            def unsent(path: Path, run: str, key: str) -> delivery.Upload | None:
+            def unsent(path: Path, run: str, key: str) -> delivery._Upload | None:
                 if path == outputs / "c":
                     raise FileNotFoundError(path)
                 return original_unsent(path, run, key)
 
-            fault.setattr(courier, "unsent", unsent)
+            fault.setattr(courier, "_unsent", unsent)
             error = FileNotFoundError
         with observe(observations.append), pytest.raises(error):
-            courier.put_outputs(outputs, "study", "a1")
+            courier._put_outputs(outputs, "study", "a1")
     assert len(observations) >= 2
     assert all(json.loads(row)["completed"] for row in observations)
     assert not files.delivered()

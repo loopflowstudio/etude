@@ -23,7 +23,7 @@ from etude.train.records import Step
 from etude.train.run import track
 
 
-def recorded_files(tmp_path: Path) -> Path:
+def _recorded(tmp_path: Path) -> Path:
     run = track(
         experiment="pin", clocks=[Step("steps", "training steps")], run="r", directory=tmp_path
     )
@@ -40,7 +40,7 @@ def recorded_files(tmp_path: Path) -> Path:
 
 
 def test_resume_file_names_the_file_of_the_tracker_s_latest_record(tmp_path: Path) -> None:
-    folder = recorded_files(tmp_path)
+    folder = _recorded(tmp_path)
     wanted = resume_file(folder)
     assert wanted is not None and wanted.key == "checkpoints/steps-2.pt"
     body = (folder / wanted.key).read_bytes()
@@ -50,7 +50,7 @@ def test_resume_file_names_the_file_of_the_tracker_s_latest_record(tmp_path: Pat
 def test_a_relayed_folder_keeps_only_what_resume_needs_and_every_taken_name(
     tmp_path: Path,
 ) -> None:
-    folder = recorded_files(tmp_path / "one")
+    folder = _recorded(tmp_path / "one")
     (folder / "checkpoints/steps-3.pt").write_bytes(b"kept without a record")
     there = tmp_path / "two/r"
     put_back(there, restore_set(folder))
@@ -66,7 +66,7 @@ def test_a_relayed_folder_keeps_only_what_resume_needs_and_every_taken_name(
 
 
 def test_one_recorded_file_travels_with_only_its_record(tmp_path: Path) -> None:
-    folder = recorded_files(tmp_path / "one")
+    folder = _recorded(tmp_path / "one")
     there = tmp_path / "two/r"
     put_back(there, recorded_file(folder, "checkpoints/steps-1.pt"))
     assert sorted(p.name for p in (there / "checkpoints").iterdir()) == [

@@ -209,18 +209,18 @@ class RunPod:
         self, method: str, url: str, body: bytes | None, headers: dict[str, str]
     ) -> tuple[int, bytes]:
         with self.lock:
-            return self.answer(method, url, body)
+            return self._answer(method, url, body)
 
-    def delete(self, id: str) -> None:
+    def _delete(self, id: str) -> None:
         with self.lock:
             self.pods.pop(id, None)
-            self.deleted(id)
+            self._deleted(id)
 
-    def deleted(self, id: str) -> None:
+    def _deleted(self, id: str) -> None:
         with self.storage.lock:  # on the same timeline as storage requests and creates
             self.storage.asked.append(("TERMINATE", id))
 
-    def answer(self, method: str, url: str, body: bytes | None) -> tuple[int, bytes]:
+    def _answer(self, method: str, url: str, body: bytes | None) -> tuple[int, bytes]:
         path = urlsplit(url).path.removeprefix("/v2/")
         if path == "catalog/gpus":
             here = [{"id": "EU-RO-1", "availability": self.available}]
@@ -252,7 +252,7 @@ class RunPod:
             self.envs.append(env)
             thread = threading.Thread(
                 target=run_in_pod,
-                args=(env["ETUDE_BOOTSTRAP_URL"], lambda: self.delete(id)),
+                args=(env["ETUDE_BOOTSTRAP_URL"], lambda: self._delete(id)),
                 kwargs={"root": self.root, "send": self.storage, "every": 0.05},
                 daemon=True,
             )
@@ -269,7 +269,7 @@ class RunPod:
         id = path.removeprefix("pods/")
         if method == "DELETE":
             self.pods.pop(id, None)
-            self.deleted(id)
+            self._deleted(id)
             return 200, b""
         return (200, json.dumps(self.pods[id]).encode()) if id in self.pods else (404, b"")
 
@@ -1142,7 +1142,7 @@ def test_courier_defers_removals_added_during_an_upload_pass(
     # The first pass must ignore this torn line until the writer finishes it.
     (track / "metrics/w.removed").write_text("metrics/first")
     (track / "run.json").write_bytes(b"identity")
-    put = courier.put
+    put = courier._put
 
     def compact_during_upload(path: Path, run: str, key: str) -> None:
         put(path, run, key)
@@ -1151,13 +1151,13 @@ def test_courier_defers_removals_added_during_an_upload_pass(
             (track / "metrics/w.removed").write_text("metrics/first\n")
             old.unlink()
 
-    monkeypatch.setattr(courier, "put", compact_during_upload)
+    monkeypatch.setattr(courier, "_put", compact_during_upload)
     courier.carry_out()
     out = "etude/run1/"
     assert storage.objects[out + "metrics/first"] == b"first"
     assert out + "metrics/joined" not in storage.objects
     assert sum(method == "DELETE" for method, _ in storage.asked) == 0
-    monkeypatch.setattr(courier, "put", put)
+    monkeypatch.setattr(courier, "_put", put)
     courier.carry_out()
     assert out + "metrics/first" not in storage.objects
     assert storage.objects[out + "metrics/joined"] == b"joined"
@@ -1174,20 +1174,20 @@ def test_courier_keeps_old_files_when_replacement_upload_fails(
     (track / "metrics/joined").write_bytes(b"joined")
     (track / "metrics/w.removed").write_text("metrics/first\n")
     (track / "metrics/first").unlink()
-    put = courier.put
+    put = courier._put
 
     def unavailable(path: Path, run: str, key: str) -> None:
         if path.name == "joined":
             raise StorageUnavailable("offline")
         put(path, run, key)
 
-    monkeypatch.setattr(courier, "put", unavailable)
+    monkeypatch.setattr(courier, "_put", unavailable)
     with pytest.raises(StorageUnavailable):
         courier.carry_out()
     out = "etude/run1/"
     assert storage.objects[out + "metrics/first"] == b"first"
     assert sum(method == "DELETE" for method, _ in storage.asked) == 0
-    monkeypatch.setattr(courier, "put", put)
+    monkeypatch.setattr(courier, "_put", put)
     courier.carry_out()
     assert out + "metrics/first" not in storage.objects
     assert storage.objects[out + "metrics/joined"] == b"joined"
@@ -1265,7 +1265,7 @@ def test_finished_outputs_go_under_the_attempt_and_checkpoints_under_the_run(
     assert storage.asked.count(("PUT", "etude/run1/checkpoints/steps-10.pt")) == 1
 
 
-def tracked_run(root: Path, run: str = "run1") -> TrackedRun:
+def _tracked(root: Path, run: str = "run1") -> TrackedRun:
     """A tracked run writing into a machine's track folder, as a launched job's would."""
     return track(
         experiment="capacity",
@@ -1276,7 +1276,7 @@ def tracked_run(root: Path, run: str = "run1") -> TrackedRun:
     )
 
 
-def wait_kept(folder: Path, records: int) -> None:
+def _kept(folder: Path, records: int) -> None:
     """Wait for the tracker's writer to have kept this many checkpoint records."""
     deadline = time.monotonic() + 10
     while len(list((folder / "checkpoints").glob("*.json"))) < records:
@@ -1284,7 +1284,7 @@ def wait_kept(folder: Path, records: int) -> None:
         time.sleep(0.01)
 
 
-def sent(storage: Storage, part: str) -> list[str]:
+def _sent(storage: Storage, part: str) -> list[str]:
     """Keys written under the run's checkpoints, in the order they were sent."""
     return [
         what.removeprefix("etude/run1/")
@@ -1305,17 +1305,17 @@ class Observed(Storage):
 def test_each_checkpoint_reaches_storage_while_the_attempt_runs(tmp_path: Path) -> None:
     storage = Observed()
     courier, attempt, folder = machine(tmp_path, storage)
-    run = tracked_run(folder.parent)
+    run = _tracked(folder.parent)
     weights = tmp_path / "weights.pt"
     for step in (1, 2, 3):
         weights.write_bytes(f"weights at {step}".encode())
         run.checkpoint(weights, steps=step)
-        wait_kept(folder, step)
+        _kept(folder, step)
         courier.carry_out()
         assert storage.objects[f"etude/run1/checkpoints/steps-{step}.pt"] == weights.read_bytes()
     assert not (attempt / "finished.json").exists()
     # One upload per file and per record, each file before its record.
-    assert sent(storage, "/checkpoints/") == [
+    assert _sent(storage, "/checkpoints/") == [
         name
         for step in (1, 2, 3)
         for name in (f"checkpoints/steps-{step}.pt", f"checkpoints/steps-{step}.json")
@@ -1334,14 +1334,14 @@ def test_each_checkpoint_reaches_storage_while_the_attempt_runs(tmp_path: Path) 
     first = storage.objects["etude/run1/checkpoints/steps-3.json"]
     again = run.checkpoint(weights, steps=3)
     courier.carry_out()
-    assert len(sent(storage, "/checkpoints/")) == 6
+    assert len(_sent(storage, "/checkpoints/")) == 6
     latest = run.latest_checkpoint()
     assert latest is not None and (latest.ordinal, latest.artifact.sha256) == (3, again.sha256)
     weights.write_bytes(b"retrained")
     run.checkpoint(weights, steps=3)
-    wait_kept(folder, 4)
+    _kept(folder, 4)
     courier.carry_out()
-    assert sent(storage, "/checkpoints/")[6:] == [
+    assert _sent(storage, "/checkpoints/")[6:] == [
         "checkpoints/steps-3.ordinal-4.pt",
         "checkpoints/steps-3.ordinal-4.json",
     ]
@@ -1362,12 +1362,12 @@ def test_a_retry_on_a_fresh_machine_resumes_from_the_runs_latest_checkpoint(
 ) -> None:
     storage = Storage()
     courier, _, folder = machine(tmp_path / "one", storage)
-    run = tracked_run(folder.parent)
+    run = _tracked(folder.parent)
     weights = tmp_path / "weights.pt"
     for step in (1, 2, 3):
         weights.write_bytes(f"weights at {step}".encode() * 100)
         run.checkpoint(weights, steps=step)
-    wait_kept(folder, 3)
+    _kept(folder, 3)
     run.finish()
     courier.carry_out()
     written = sum(len(body) for key, body in storage.objects.items() if "/checkpoints/" in key)
@@ -1409,13 +1409,13 @@ def test_a_retry_on_a_fresh_machine_resumes_from_the_runs_latest_checkpoint(
     ]
     assert sum(len(storage.objects[key]) for key in reads) <= 2 * written
 
-    resumed = tracked_run(there.parent)
+    resumed = _tracked(there.parent)
     latest = resumed.latest_checkpoint()
     assert latest is not None and latest.ordinal == 3
     assert Path(urlsplit(latest.artifact.uri).path).read_bytes() == b"weights at 3" * 100
     weights.write_bytes(b"weights at 4")
     resumed.checkpoint(weights, steps=4)
-    wait_kept(there, 4)
+    _kept(there, 4)
     resumed.finish()
     asked = len(storage.asked)
     fresh.carry_out()
@@ -1429,15 +1429,15 @@ def test_a_retry_on_a_fresh_machine_resumes_from_the_runs_latest_checkpoint(
     assert json.loads(storage.objects["etude/run1/checkpoints/steps-4.json"])["ordinal"] == 4
 
 
-def orphaned(tmp_path: Path, storage: Storage) -> tuple[Courier, Path, Path]:
+def _orphaned(tmp_path: Path, storage: Storage) -> tuple[Courier, Path, Path]:
     """Two checkpoints recorded, then a writer that died after keeping steps-3.pt, before its record."""
     courier, _, folder = machine(tmp_path, storage)
-    run = tracked_run(folder.parent)
+    run = _tracked(folder.parent)
     weights = tmp_path / "weights.pt"
     for step in (1, 2):
         weights.write_bytes(f"weights at {step}".encode())
         run.checkpoint(weights, steps=step)
-    wait_kept(folder, 2)
+    _kept(folder, 2)
     run.finish()
     (folder / "checkpoints/steps-3.pt").write_bytes(b"orphan")
     courier.carry_out()
@@ -1445,20 +1445,20 @@ def orphaned(tmp_path: Path, storage: Storage) -> tuple[Courier, Path, Path]:
     return courier, folder, weights
 
 
-def retrained(courier: Courier, folder: Path, weights: Path) -> ArtifactRef:
+def _retrained(courier: Courier, folder: Path, weights: Path) -> ArtifactRef:
     """The next attempt resumes from steps 2 and reaches steps 3 with different bytes."""
-    resumed = tracked_run(folder.parent)
+    resumed = _tracked(folder.parent)
     latest = resumed.latest_checkpoint()
     assert latest is not None and latest.ordinal == 2
     weights.write_bytes(b"weights at 3")
     reference = resumed.checkpoint(weights, steps=3)
-    wait_kept(folder, 3)
+    _kept(folder, 3)
     resumed.finish()
     courier.carry_out()
     return reference
 
 
-def intact(storage: Storage) -> None:
+def _intact(storage: Storage) -> None:
     """The orphan's key holds its one upload, and the new record names bytes storage holds."""
     assert storage.asked.count(("PUT", "etude/run1/checkpoints/steps-3.pt")) == 1
     assert storage.objects["etude/run1/checkpoints/steps-3.pt"] == b"orphan"
@@ -1474,16 +1474,16 @@ def test_a_retry_on_the_same_host_never_reuses_a_file_left_without_its_record(
     tmp_path: Path,
 ) -> None:
     storage = Storage()
-    courier, folder, weights = orphaned(tmp_path, storage)
-    reference = retrained(courier, folder, weights)
+    courier, folder, weights = _orphaned(tmp_path, storage)
+    reference = _retrained(courier, folder, weights)
     assert reference.uri.endswith("/steps-3.ordinal-3.pt")
     assert (folder / "checkpoints/steps-3.pt").read_bytes() == b"orphan"
-    intact(storage)
+    _intact(storage)
 
 
 def test_a_retry_on_a_fresh_machine_never_reuses_a_name_storage_holds(tmp_path: Path) -> None:
     storage = Storage()
-    orphaned(tmp_path / "one", storage)
+    _orphaned(tmp_path / "one", storage)
     journal = BucketJournal(
         Place(name="east", bucket="b", prefix="etude", provider="s3", region="us-east-1"),
         Bucket("b", "us-east-1", Keys(access_key="AKIA", secret_key="secret"), storage),
@@ -1506,5 +1506,5 @@ def test_a_retry_on_a_fresh_machine_never_reuses_a_name_storage_holds(tmp_path: 
     fresh, _, there = machine(tmp_path / "two", storage)
     fresh.restore(bootstrap.restore)
     assert not (there / "checkpoints/steps-3.pt").exists()  # listed, never read
-    retrained(fresh, there, tmp_path / "one" / "weights.pt")
-    intact(storage)
+    _retrained(fresh, there, tmp_path / "one" / "weights.pt")
+    _intact(storage)

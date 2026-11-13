@@ -90,7 +90,7 @@ class Provider(Record):
     storage: str  # the storage a new pool uses unless it names another
 
     @model_validator(mode="after")
-    def registry_supported(self) -> Provider:
+    def _registry_supported(self) -> Provider:
         if self.kind in {"vast", "lium"} and self.registry:
             raise ValueError(
                 f"{self.kind.title()} supports public images; registry credentials are not stored"
@@ -114,7 +114,7 @@ class Storage(Record):
     region: str | None = None  # an S3 bucket's region; R2 has none
 
     @model_validator(mode="after")
-    def region_where_needed(self) -> Storage:
+    def _region_where_needed(self) -> Storage:
         if (self.provider == "s3") != (self.region is not None):
             raise ValueError("an S3 storage needs its region, and an R2 storage takes none")
         return self
@@ -133,7 +133,7 @@ class Image(Record):
     platform: str | None = None  # unknown for a caller-supplied pinned reference
 
 
-def coerce_image(value: object) -> object:
+def _image(value: object) -> object:
     # Published callers pass pinned strings; normalize them into the same record.
     if isinstance(value, str):
         return Image(requested=value, resolved=value)
@@ -151,7 +151,7 @@ class MachineTemplate(Record):
     disk_gb: int | None = None
     image: Image | None = None
 
-    parse_image = field_validator("image", mode="before")(coerce_image)
+    _parse_image = field_validator("image", mode="before")(_image)
     data_center: str | None = None  # RunPod data center id; Vast/Lium country code; None: anywhere
 
 
@@ -339,13 +339,13 @@ class Input(Record):
 
     @field_validator("name")
     @classmethod
-    def plain(cls, name: str) -> str:
+    def _plain(cls, name: str) -> str:
         if name in (".", "..") or not re.fullmatch(r"[A-Za-z0-9._-]+", name):
             raise ValueError(f"input name {name!r} must be a plain file name")
         return name
 
     @model_validator(mode="after")
-    def within(self) -> Input:
+    def _within(self) -> Input:
         parts = self.key.split("/")
         if self.run is not None and (self.key.startswith("/") or {"", ".", ".."} & set(parts)):
             raise ValueError(
@@ -375,7 +375,7 @@ class Preparation(Record):
 
     @field_validator("paths")
     @classmethod
-    def within_source(cls, paths: tuple[str, ...]) -> tuple[str, ...]:
+    def _within_source(cls, paths: tuple[str, ...]) -> tuple[str, ...]:
         for path in paths:
             if path.startswith("/") or {"", ".", ".."} & set(path.rstrip("/").split("/")):
                 raise ValueError(f"prepare path {path!r} must be a path within the source")
@@ -383,7 +383,7 @@ class Preparation(Record):
 
     @field_validator("python")
     @classmethod
-    def within_prepared(cls, python: str | None) -> str | None:
+    def _within_prepared(cls, python: str | None) -> str | None:
         if python is not None and (
             python.startswith("/") or {"", ".", ".."} & set(python.split("/"))
         ):
@@ -398,7 +398,7 @@ class Variable(Record):
     value: str
 
 
-def distinct(value: tuple[Input, ...]) -> tuple[Input, ...]:
+def _distinct(value: tuple[Input, ...]) -> tuple[Input, ...]:
     if len({given.name for given in value}) != len(value):
         raise ValueError("each input needs its own name")
     return value
@@ -452,10 +452,10 @@ class Job(Record):
     # changing it does not make a new job.
     smoke: SmokeForm | None = None
 
-    check_inputs = field_validator("inputs")(distinct)
+    _check_inputs = field_validator("inputs")(_distinct)
 
     @model_validator(mode="after")
-    def prepared_from_inputs(self) -> Job:
+    def _prepared_from_inputs(self) -> Job:
         if self.prepare is not None:
             unknown = set(self.prepare.inputs) - {given.name for given in self.inputs}
             if unknown:

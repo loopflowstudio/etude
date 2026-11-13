@@ -12,31 +12,29 @@ from etude.launch.errors import ProviderUnavailable
 from etude.launch.measurement import timed
 
 BASE = "https://lium.io/api/"
-MAX_REPLY_BYTES = 8 * 1024 * 1024
+_MAX_REPLY_BYTES = 8 * 1024 * 1024
 Send = Callable[[str, str, bytes | None, dict[str, str]], tuple[int, bytes]]
 
 
-def send_request(
-    method: str, url: str, body: bytes | None, headers: dict[str, str]
-) -> tuple[int, bytes]:
+def _send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> tuple[int, bytes]:
     request = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
         with urllib.request.urlopen(request, timeout=remaining()) as reply:
-            return reply.status, reply.read(MAX_REPLY_BYTES + 1)
+            return reply.status, reply.read(_MAX_REPLY_BYTES + 1)
     except urllib.error.HTTPError as error:
         return error.code, b""
 
 
 class LiumHTTP:
-    def __init__(self, key: str, send: Send = send_request) -> None:
+    def __init__(self, key: str, send: Send = _send) -> None:
         if not key or any(character.isspace() for character in key):
             raise ValueError("a Lium API key is required")
-        self.headers = {
+        self._headers = {
             "X-API-Key": key,
             "Content-Type": "application/json",
             "User-Agent": "etude-launcher",
         }
-        self.send_request = send
+        self._send = send
 
     @timed("provider.http.ask")
     def ask(
@@ -52,12 +50,12 @@ class LiumHTTP:
         url = BASE + path + ("?" + urllib.parse.urlencode(params) if params else "")
         try:
             status, raw = call(
-                lambda: self.send_request(
+                lambda: self._send(
                     method,
                     url,
                     None if body is None else body.encode(),
                     {
-                        **self.headers,
+                        **self._headers,
                         **({"Idempotency-Key": idempotency_key} if idempotency_key else {}),
                     },
                 )
@@ -66,6 +64,6 @@ class LiumHTTP:
             raise ProviderUnavailable(f"Lium {method} {path}: reply unconfirmed") from None
         if absent_ok and status == 404:
             return None
-        if not 200 <= status < 300 or len(raw) > MAX_REPLY_BYTES:
+        if not 200 <= status < 300 or len(raw) > _MAX_REPLY_BYTES:
             raise ProviderUnavailable(f"Lium {method} {path}: status {status}")
         return raw

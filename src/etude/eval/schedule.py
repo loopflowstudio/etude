@@ -23,10 +23,10 @@ from etude.eval.records import CheckpointKey, Match, Model
 
 def checkpoints(match: Match) -> frozenset[CheckpointKey]:
     """The checkpoints a match seats; one checkpoint at two configs is one checkpoint."""
-    return frozenset(seated(match))
+    return frozenset(_seated(match))
 
 
-def seated(match: Match) -> list[CheckpointKey]:
+def _seated(match: Match) -> list[CheckpointKey]:
     """The checkpoints of a match's models, in seat order."""
     return [player.checkpoint.key for player in match.players if isinstance(player, Model)]
 
@@ -59,7 +59,7 @@ def ordered(matches: Sequence[Match]) -> Iterator[Match]:
             del groups[group]
         # Seat order, not the `checkpoints` set, whose iteration follows string
         # hashing: every process, and so every share of a hold, sees one order.
-        for key in seated(match):
+        for key in _seated(match):
             used.pop(key, None)
             used[key] = None
         yield match

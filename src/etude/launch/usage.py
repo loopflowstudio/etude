@@ -75,7 +75,7 @@ R2 = Rates(
 )
 
 
-def is_write(event: Transfer) -> bool:
+def _writes(event: Transfer) -> bool:
     """Billed at the write rate. A listing is a GET of the bucket's root (virtual-host style)."""
     return event.operation in ("PUT", "POST") or (event.operation == "GET" and event.key == "/")
 
@@ -135,8 +135,8 @@ class Usage(Record):
 
     def estimate(self, rates: Rates) -> Decimal:
         """Downloads and requests at these rates, excluding storage and unobserved traffic."""
-        writes = sum(is_write(event) for event in self.events)
-        reads = sum(e.operation in ("GET", "HEAD") and not is_write(e) for e in self.events)
+        writes = sum(_writes(event) for event in self.events)
+        reads = sum(e.operation in ("GET", "HEAD") and not _writes(e) for e in self.events)
         return (
             Decimal(self.received_bytes) / 10**9 * rates.download_usd_per_gb
             + Decimal(writes) / 10**6 * rates.write_usd_per_million

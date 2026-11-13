@@ -36,7 +36,7 @@ from etude.launch.storage.s3 import (
     Denied,
     Reply,
     Send,
-    send_request,
+    _send,
 )
 from etude.launch.storage.transport import attribute, deliver, emit, observe
 from etude.storage_timeout import StorageUnavailable
@@ -45,11 +45,11 @@ PART_BYTES = 16 * 1024**2
 CONNECTIONS = 32
 
 
-class Pending[T]:
+class _Pending[T]:
     """An operation running on a worker thread; its observations wait for its result."""
 
     def __init__(self, future: Future[T], events: list[str]) -> None:
-        self._future, self.events = future, events
+        self._future, self._events = future, events
 
     def result(self) -> T:
         """Wait for the operation, then emit what it observed on this thread.
@@ -59,7 +59,7 @@ class Pending[T]:
         try:
             return self._future.result()
         finally:
-            events, self.events = self.events, []
+            events, self._events = self._events, []
             for raw in events:
                 deliver(raw)
 
@@ -72,7 +72,7 @@ class Pending[T]:
                 pass
 
 
-def submit[T](pool: ThreadPoolExecutor, operation: Callable[[], T]) -> Pending[T]:
+def _submit[T](pool: ThreadPoolExecutor, operation: Callable[[], T]) -> _Pending[T]:
     """Run `operation` on `pool` in a copy of this context: its deadline and attribution."""
     events: list[str] = []
 
@@ -80,7 +80,7 @@ def submit[T](pool: ThreadPoolExecutor, operation: Callable[[], T]) -> Pending[T
         with observe(events.append):
             return operation()
 
-    return Pending(pool.submit(copy_context().run, run), events)
+    return _Pending(pool.submit(copy_context().run, run), events)
 
 
 class Download(Record):
@@ -93,49 +93,49 @@ class Mismatch(StorageUnavailable):
     """The bytes arrived but are not the ones named; asking again cannot help."""
 
 
-class Link:
+class _Link:
     """One presigned link; `retries` is shared by every request through it."""
 
     def __init__(self, source: Download, retries: int, send: Send) -> None:
         self.source, self.retries, self.send = source, retries, send
-        self.retrying = threading.Lock()
-        self.pool = ThreadPoolExecutor(CONNECTIONS)
-        self.parts: dict[int, Pending[Fetched]] = {}  # by first byte, running or read
+        self._retrying = threading.Lock()
+        self._pool = ThreadPoolExecutor(CONNECTIONS)
+        self._parts: dict[int, _Pending[Fetched]] = {}  # by first byte, running or read
 
     def read(self, start: int, end: int | None, etag: str | None) -> Fetched:
         size = self.source.size_bytes
         end = size - 1 if end is None else end
-        if end - start < PART_BYTES and not self.parts:
-            return self.part(start, end, etag)
-        bounds = self.bounds(start, end)
+        if end - start < PART_BYTES and not self._parts:
+            return self._part(start, end, etag)
+        bounds = self._bounds(start, end)
         # The cache asks next for the range after this one, of the same length.
-        for first, last in (*bounds, *self.bounds(end + 1, min(size - 1, 2 * end - start + 1))):
-            if first not in self.parts:
-                self.parts[first] = submit(self.pool, partial(self.part, first, last, etag))
-        pieces = [self.parts.pop(first).result() for first, _ in bounds]
+        for first, last in (*bounds, *self._bounds(end + 1, min(size - 1, 2 * end - start + 1))):
+            if first not in self._parts:
+                self._parts[first] = _submit(self._pool, partial(self._part, first, last, etag))
+        pieces = [self._parts.pop(first).result() for first, _ in bounds]
         if any(piece.etag != (etag or pieces[0].etag) for piece in pieces):
             raise StorageUnavailable("download parts came from different object versions")
         return Fetched(body=b"".join(piece.body for piece in pieces), etag=pieces[0].etag)
 
     def close(self) -> None:
         """Abandon parts read ahead that no range asked for, observing what they read."""
-        for part in self.parts.values():
+        for part in self._parts.values():
             part.abandon()
-        self.parts.clear()
-        self.pool.shutdown()
+        self._parts.clear()
+        self._pool.shutdown()
 
     @staticmethod
-    def bounds(start: int, end: int) -> list[tuple[int, int]]:
+    def _bounds(start: int, end: int) -> list[tuple[int, int]]:
         return [
             (first, min(end, first + PART_BYTES - 1)) for first in range(start, end + 1, PART_BYTES)
         ]
 
-    def part(self, start: int, end: int, etag: str | None) -> Fetched:
+    def _part(self, start: int, end: int, etag: str | None) -> Fetched:
         size = self.source.size_bytes
         headers = {"Range": f"bytes={start}-{end}"}
         if etag is not None:
             headers["If-Match"] = etag
-        reply = self.get(headers)
+        reply = self._get(headers)
         found = reply.headers.get("etag")
         stored = (reply.headers.get("content-range") or "").rpartition("/")[2]
         if reply.status == 206 and stored.isdigit() and int(stored) != size:
@@ -153,14 +153,14 @@ class Link:
         return Fetched(body=reply.body, etag=found)
 
     def changed(self, etag: str) -> Fetched | None:
-        reply = self.get({"If-None-Match": etag})
+        reply = self._get({"If-None-Match": etag})
         if reply.status == 304:
             return None
         if reply.status != 200:
             raise StorageUnavailable(f"download failed (status {reply.status})")
         return Fetched(body=reply.body, etag=reply.headers.get("etag"))
 
-    def get(self, headers: dict[str, str]) -> Reply:
+    def _get(self, headers: dict[str, str]) -> Reply:
         while True:
             remaining()
             failure = "transport interrupted"
@@ -173,7 +173,7 @@ class Link:
                 break
             except OSError:
                 remaining()
-                with self.retrying:
+                with self._retrying:
                     if self.retries == 0:
                         raise StorageUnavailable(
                             f"download failed ({failure}); completed ranges retained"
@@ -193,7 +193,7 @@ def download(
     *,
     timeout: float | None = None,
     retries: int = 2,
-    send: Send = send_request,
+    send: Send = _send,
     cache: Cache | None = None,
     holder: str | None = None,
 ) -> Path:
@@ -215,7 +215,7 @@ def download(
         attribute(transfer=uuid4().hex, sha256=source.sha256, size_bytes=str(source.size_bytes)),
     ):
         cache = cache or Cache()
-        link = Link(source, retries, send)
+        link = _Link(source, retries, send)
         try:
             if holder is not None:
                 return cache.hold(artifact, link, holder=holder, staging=destination)

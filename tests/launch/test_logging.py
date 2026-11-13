@@ -726,7 +726,7 @@ def test_bootstrap_failure_remains_readable_after_deletion_and_restart(
 
     monkeypatch.setattr(b.service, "logs", read)
     monkeypatch.setattr(subprocess, "Popen", start)
-    monkeypatch.setattr(pod, "start_ssh", lambda: None)
+    monkeypatch.setattr(pod, "_start_ssh", lambda: None)
     monkeypatch.setattr(bootstrap, "ensure_uv", lambda: None)
     monkeypatch.setattr(
         bootstrap,

@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     import duckdb
 
 # Reads of a bucket's small files run this many at once.
-READERS = 32
+_READERS = 32
 
 
 class Conversion(Record):
@@ -75,9 +75,9 @@ def convert(
     blocks: list[Block] = []
     db = duckdb.connect()
     try:
-        for folder, names in folders(storage, run).items():
+        for folder, names in _folders(storage, run).items():
             with tempfile.TemporaryDirectory(prefix="etude-convert-") as scratch:
-                blocks += convert_folder(storage, folder, names, db, Path(scratch), rollups)
+                blocks += _convert(storage, folder, names, db, Path(scratch), rollups)
     finally:
         db.close()
     return Conversion(
@@ -98,9 +98,9 @@ def delete_files(run: str, source: Storage | Path | str) -> int:
     """
     storage = as_storage(source)
     doomed: list[str] = []
-    for folder, names in folders(storage, run).items():
-        replaced = replaced_files(storage, folder, names)
-        left = [name for name in names if is_old(name) and name not in replaced]
+    for folder, names in _folders(storage, run).items():
+        replaced = _replaced(storage, folder, names)
+        left = [name for name in names if _old(name) and name not in replaced]
         if left:
             raise EtudeError("eval_files_not_converted", 409) from ValueError(
                 f"{folder}: {len(left)} files no block replaces, such as {left[0]}"
@@ -111,7 +111,7 @@ def delete_files(run: str, source: Storage | Path | str) -> int:
     return len(doomed)
 
 
-def folders(storage: Storage, run: str) -> dict[str, list[str]]:
+def _folders(storage: Storage, run: str) -> dict[str, list[str]]:
     """Each folder of the run in `storage`, with the names of its files."""
     keys = storage.keys("")
     return {
@@ -120,12 +120,12 @@ def folders(storage: Storage, run: str) -> dict[str, list[str]]:
     }
 
 
-def replaced_files(storage: Storage, folder: str, names: Sequence[str]) -> set[str]:
+def _replaced(storage: Storage, folder: str, names: Sequence[str]) -> set[str]:
     """The old files the folder's blocks replace."""
     return {name for each in sealed(names) for name in read(storage, folder, each).replaces}
 
 
-def is_old(name: str) -> bool:
+def _old(name: str) -> bool:
     """A file of the per-file layout: a record, a table file, a `.removed` note or an artifact."""
     return (
         per_file(name)
@@ -134,7 +134,7 @@ def is_old(name: str) -> bool:
     )
 
 
-def convert_folder(
+def _convert(
     storage: Storage,
     folder: str,
     names: Sequence[str],
@@ -143,8 +143,8 @@ def convert_folder(
     rollups: Sequence[Rollup],
 ) -> list[Block]:
     """Blocks for the folder's old files no block replaces yet, delivered to it."""
-    replaced = replaced_files(storage, folder, names)
-    old = sorted(name for name in names if is_old(name) and name not in replaced)
+    replaced = _replaced(storage, folder, names)
+    old = sorted(name for name in names if _old(name) and name not in replaced)
     if not old:
         return []
     copies = scratch / "old"
@@ -154,7 +154,7 @@ def convert_folder(
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(storage.get(folder + name))
 
-    with ThreadPoolExecutor(READERS) as readers:
+    with ThreadPoolExecutor(_READERS) as readers:
         list(readers.map(fetch, old))
     retired = {
         line
@@ -174,7 +174,7 @@ def convert_folder(
         if (parsed := TABLE_FILE.match(name)) and name not in retired:
             tables.setdefault(parsed[1], []).append(copies / name)
     latest: dict[str, Sequence[Path]] = {
-        table: [latest_blocks(db, table, paths, scratch)] for table, paths in tables.items()
+        table: [_latest(db, table, paths, scratch)] for table, paths in tables.items()
     }
     held = sorted(records.values(), key=lambda r: (r.wall_ms, r.match.key))
     partials: dict[str, Sequence[Path]] = {}
@@ -184,7 +184,7 @@ def convert_folder(
         if partial_totals(db, rollup, latest, [r.match for r in held], target):
             partials[rollup.name] = [target]
     artifacts = [name for name in old if name.startswith("artifacts/")]
-    packs = blob_packs(copies, artifacts)
+    packs = _packs(copies, artifacts)
     root = scratch / "run"
     blocks: list[Block] = []
     for index, (blobs, packed) in enumerate(packs or [({}, [])]):
@@ -201,12 +201,12 @@ def convert_folder(
             rollups=rollups,
             partials=partials if first else {},
         )
-        deliver_block(storage, folder, root, block)
+        _deliver(storage, folder, root, block)
         blocks.append(block)
     return blocks
 
 
-def latest_blocks(
+def _latest(
     db: duckdb.DuckDBPyConnection, table: str, paths: Sequence[Path], scratch: Path
 ) -> Path:
     """One file of a table's rows, each match's from the latest file holding it, in today's columns.
@@ -235,9 +235,7 @@ def latest_blocks(
     return target
 
 
-def blob_packs(
-    copies: Path, artifacts: Sequence[str]
-) -> list[tuple[dict[Digest, Path], list[str]]]:
+def _packs(copies: Path, artifacts: Sequence[str]) -> list[tuple[dict[Digest, Path], list[str]]]:
     """The artifacts as blobs, in packs of at most `SEAL_BYTES` each, with the names each holds."""
     packs: list[tuple[dict[Digest, Path], list[str]]] = []
     size = 0
@@ -254,7 +252,7 @@ def blob_packs(
     return packs
 
 
-def deliver_block(storage: Storage, folder: str, root: Path, block: Block) -> None:
+def _deliver(storage: Storage, folder: str, root: Path, block: Block) -> None:
     """Send a written block to the run's folder: its data, then its index."""
     for file in [*block.files, EVAL_BLOCK_INDEX]:
         storage.put_file(folder + file_key(block.name, file), root / file_key(block.name, file))

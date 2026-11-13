@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from etude.launch.client import open_file
+from etude.launch.client import _open
 from etude.launch.environment import install
 from etude.launch.providers import bootstrap, package
 from etude.launch.providers.package import program_archive
@@ -64,7 +64,7 @@ def test_job_uses_its_own_python_path(tmp_path: Path, monkeypatch: pytest.Monkey
         "PATH", os.pathsep.join([str(Path(sys.executable).parent), str(bin), os.environ["PATH"]])
     )
     monkeypatch.setenv("VIRTUAL_ENV", str(Path(sys.executable).parent.parent))
-    scheduler = open_file(tmp_path / "launcher")
+    scheduler = _open(tmp_path / "launcher")
     id = scheduler.launch(Job(command="python", max_hours=0.01))
     assert scheduler.wait(id, every=0.05, timeout=10)[0].outcome == "succeeded"
     assert job_text(scheduler.logs(refresh=True, run=id)) == "job-python\n"
@@ -198,7 +198,7 @@ def test_stock_boot_requires_guardian_before_download_and_install(
         events.append("delete")
 
     monkeypatch.setattr(subprocess, "Popen", start)
-    monkeypatch.setattr(rental, "start_ssh" if provider == "runpod" else "ssh_ready", start_ssh)
+    monkeypatch.setattr(rental, "_start_ssh" if provider == "runpod" else "_ssh_ready", start_ssh)
     monkeypatch.setattr(bootstrap, "ensure_uv", lambda: None)
     monkeypatch.setattr(
         bootstrap,
@@ -249,7 +249,7 @@ def test_ssh_keeps_authorized_keys_private_and_reports_startup(
 
     monkeypatch.setattr(Path, "mkdir", make_directory)
     monkeypatch.setattr(subprocess, "run", run)
-    pod.start_ssh()
+    pod._start_ssh()
     assert authorized.read_text().splitlines() == [
         "ssh-ed25519 existing-public-key",
         key,
@@ -267,7 +267,7 @@ def test_ssh_without_account_keys_explains_setup_without_touching_disk(
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("PUBLIC_KEY", raising=False)
-    pod.start_ssh()
+    pod._start_ssh()
     assert "add a public key to your RunPod account" in capsys.readouterr().out
     assert not (tmp_path / ".ssh").exists()
 

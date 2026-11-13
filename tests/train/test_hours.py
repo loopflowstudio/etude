@@ -53,18 +53,18 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> Clockwork:
     return fake
 
 
-def start(directory: Path, name: str) -> Run:
+def _start(directory: Path, name: str) -> Run:
     return track(experiment="e", run=name, clocks=[Step("step", "updates")], directory=directory)
 
 
-def hours(at: dict[str, float]) -> tuple[float, float]:
+def _hours(at: dict[str, float]) -> tuple[float, float]:
     return round(at[RUNNING_HOURS], 6), round(at[HOURS_SINCE_START], 6)
 
 
 def test_hours_continue_across_a_resume_and_a_continuation(
     tmp_path: Path, clock: Clockwork, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    first = start(tmp_path, "r")
+    first = _start(tmp_path, "r")
     clock.run(0.5)
     first.log({"loss": 1.0}, step=5)
     clock.run(0.5)
@@ -76,7 +76,7 @@ def test_hours_continue_across_a_resume_and_a_continuation(
     first.finish("failed")
 
     clock.wait(2)  # the machine is lost; the next attempt starts two hours later
-    second = start(tmp_path, "r")
+    second = _start(tmp_path, "r")
     assert second.position(RUNNING_HOURS) == pytest.approx(1.0)
     assert second.position(HOURS_SINCE_START) == pytest.approx(3.5)
     clock.run(0.25)
@@ -85,7 +85,7 @@ def test_hours_continue_across_a_resume_and_a_continuation(
     second.finish()
 
     data = read(tmp_path, "e", "r")
-    assert [hours(c.at) for c in data.checkpoints] == [(1.0, 1.0), (1.25, 3.75)]
+    assert [_hours(c.at) for c in data.checkpoints] == [(1.0, 1.0), (1.25, 3.75)]
     points = data.points("loss", RUNNING_HOURS)
     assert points.x.round(6).tolist() == [0.5, 1.25] and points.y.tolist() == [1.0, 0.5]
     assert data.points("loss", HOURS_SINCE_START).x.round(6).tolist() == [0.5, 3.75]
@@ -99,7 +99,7 @@ def test_hours_continue_across_a_resume_and_a_continuation(
     )
     monkeypatch.setenv("ETUDE_CONTINUES", handed.model_dump_json())
     monkeypatch.setenv("ETUDE_UNTIL_CLOCK", RUNNING_HOURS)
-    continued = start(tmp_path, "c")
+    continued = _start(tmp_path, "c")
     clock.run(0.5)
     assert not continued.checkpoint_due(1)  # 1.75 hours: the hour after 1.25 is not over
     continued.checkpoint("s3://models/30.pt", step=30)
@@ -110,18 +110,18 @@ def test_hours_continue_across_a_resume_and_a_continuation(
     child = read(tmp_path, "e", "c")
     assert child.file is not None and child.file.declaration.continues is not None
     assert child.file.declaration.continues.clock == RUNNING_HOURS
-    assert [hours(c.at) for c in child.checkpoints] == [(1.75, 5.25)]
+    assert [_hours(c.at) for c in child.checkpoints] == [(1.75, 5.25)]
 
 
 def test_checkpoints_saved_before_etudes_clocks_derive_them_from_wall_time(
     tmp_path: Path, clock: Clockwork
 ) -> None:
-    first = start(tmp_path, "r")
+    first = _start(tmp_path, "r")
     clock.run(1)
     first.checkpoint("s3://models/10.pt", step=10)
     first.finish("failed")
     clock.wait(2)
-    second = start(tmp_path, "r")
+    second = _start(tmp_path, "r")
     clock.run(0.25)
     second.checkpoint("s3://models/20.pt", step=20)
     second.finish()
@@ -137,4 +137,4 @@ def test_checkpoints_saved_before_etudes_clocks_derive_them_from_wall_time(
         path.write_text(json.dumps(record))
 
     data = read(tmp_path, "e", "r")
-    assert [hours(c.at) for c in data.checkpoints] == [(1.0, 1.0), (1.25, 3.25)]
+    assert [_hours(c.at) for c in data.checkpoints] == [(1.0, 1.0), (1.25, 3.25)]

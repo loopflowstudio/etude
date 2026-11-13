@@ -26,7 +26,7 @@ from etude.launch.storage.s3 import Bucket
 
 # Fifteen minutes of a single-GPU rental costs cents; its disk can hold days of work.
 OUTAGE_SECONDS = 900
-DOWN = {"exited", "offline", "error", "stopped"}
+_DOWN = {"exited", "offline", "error", "stopped"}
 
 
 class Outage(Record):
@@ -48,44 +48,44 @@ class VastMachines:
         prefix: str,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
-        self._template, self.api, self.bucket, self.prefix = template, api, bucket, prefix
-        self.now = now
-        self.offers: tuple[VastOffer, ...] | None = None
-        self.program = Program(bucket, prefix)
+        self._template, self._api, self._bucket, self._prefix = template, api, bucket, prefix
+        self._now = now
+        self._offers: tuple[VastOffer, ...] | None = None
+        self._program = Program(bucket, prefix)
 
     def offer(self) -> Offer:
-        self.offers = self.api.offers(self._template)
-        selected = self.offers[0] if self.offers else None
+        self._offers = self._api.offers(self._template)
+        selected = self._offers[0] if self._offers else None
         return Offer(
             hardware=None if selected is None else selected.hardware,
             usd_per_hour=Decimal(0) if selected is None else selected.dph_total,
             available=selected is not None,
         )
 
-    def key(self, session: str, name: str) -> str:
-        return f"{self.prefix}/sessions/{session}/{name}.json"
+    def _key(self, session: str, name: str) -> str:
+        return f"{self._prefix}/sessions/{session}/{name}.json"
 
-    def receipt(self, session: str) -> Instance | None:
-        raw = self.bucket.get(self.key(session, "receipt"))
+    def _receipt(self, session: str) -> Instance | None:
+        raw = self._bucket.get(self._key(session, "receipt"))
         return None if raw is None else Instance.model_validate_json(raw)
 
-    def keep(self, session: str, instance: Instance) -> None:
+    def _keep(self, session: str, instance: Instance) -> None:
         if instance.label != f"etude-{session}":
             raise ProviderUnavailable("Vast instance label does not match this session")
-        self.bucket.put(self.key(session, "receipt"), instance.model_dump_json().encode())
+        self._bucket.put(self._key(session, "receipt"), instance.model_dump_json().encode())
 
     def create(self, request: MachineRequest) -> Allocation:
         if request.deadline is None or request.bootstrap is None:
             raise Refused("Vast rentals need a deadline and a storage bootstrap link")
-        if self.bucket.get(self.key(request.session, "offer")) is not None:
+        if self._bucket.get(self._key(request.session, "offer")) is not None:
             existing = self.find(request.session)
             if existing is not None:
                 return existing
             raise ProviderUnavailable("Vast create already attempted; awaiting reconciliation")
-        offers = self.offers
-        self.offers = None  # the next acquisition needs current capacity
+        offers = self._offers
+        self._offers = None  # the next acquisition needs current capacity
         if offers is None:
-            offers = self.api.offers(self._template)
+            offers = self._api.offers(self._template)
         if not offers:
             raise Refused("no compatible Vast offer with free upload and download")
         # Equivalent offers can have different contract expiry dates. Select one
@@ -104,7 +104,7 @@ class VastMachines:
         if offer is None:
             raise Refused("no quoted Vast offer covers the requested rental deadline")
         image = self._template.image or STOCK_IMAGE
-        env = self.program.prepare(request, image)
+        env = self._program.prepare(request, image)
         creation_deadline = min(request.deadline, request.startup_deadline or request.deadline)
         now = datetime.now(UTC)
         if now >= creation_deadline:
@@ -114,12 +114,12 @@ class VastMachines:
             raise Refused("Vast offer exceeds the reserved rental budget")
         # Receipt of intent is not a receipt of creation. Never retry the PUT,
         # even if its connection or the subsequent storage write is lost.
-        self.bucket.put(
-            self.key(request.session, "offer"), offer.model_dump_json().encode(), once=True
+        self._bucket.put(
+            self._key(request.session, "offer"), offer.model_dump_json().encode(), once=True
         )
         check_creation()
         with limit_time((creation_deadline - datetime.now(UTC)).total_seconds()):
-            id = self.api.create(
+            id = self._api.create(
                 offer,
                 Create(
                     image=image.resolved,
@@ -130,14 +130,14 @@ class VastMachines:
                     + shlex.quote(boot_source("etude.launch.providers.vast.instance")),
                 ),
             )
-            instance = self.api.instance(id)
+            instance = self._api.instance(id)
         if instance is None:
             raise ProviderUnavailable("Vast accepted creation but instance is not yet visible")
-        self.keep(request.session, instance)
-        return self.allocation(instance)
+        self._keep(request.session, instance)
+        return self._allocation(instance)
 
     @staticmethod
-    def allocation(instance: Instance) -> Allocation:
+    def _allocation(instance: Instance) -> Allocation:
         address = (
             f"ssh://root@{instance.ssh_host}:{instance.ssh_port}"
             if instance.ssh_host and instance.ssh_port
@@ -152,11 +152,11 @@ class VastMachines:
         )
 
     def find(self, session_id: str) -> Allocation | None:
-        instance = self.receipt(session_id)
+        instance = self._receipt(session_id)
         if instance is None:
-            if self.bucket.get(self.key(session_id, "offer")) is None:
+            if self._bucket.get(self._key(session_id, "offer")) is None:
                 return None
-            instance = self.api.named(f"etude-{session_id}")
+            instance = self._api.named(f"etude-{session_id}")
             if instance is None:
                 # Inventory can lag creation, even beyond the local rental deadline.
                 # Retain reconciliation duty until the paid outcome is known.
@@ -164,53 +164,53 @@ class VastMachines:
                     "Vast create already attempted; instance not yet visible; "
                     "awaiting reconciliation"
                 )
-            self.keep(session_id, instance)
-        return self.allocation(instance)
+            self._keep(session_id, instance)
+        return self._allocation(instance)
 
     def alive(self, session_id: str) -> bool:
-        instance = self.receipt(session_id)
+        instance = self._receipt(session_id)
         if instance is None:
             return True
         try:
-            current = self.api.instance(instance.id)
+            current = self._api.instance(instance.id)
         except ProviderUnavailable:
             return True
-        key = self.key(session_id, "outage")
-        raw = self.bucket.get(key)
+        key = self._key(session_id, "outage")
+        raw = self._bucket.get(key)
         if current is not None and current.actual_status == "destroyed":
             return False
-        if current is not None and current.actual_status not in DOWN:
+        if current is not None and current.actual_status not in _DOWN:
             if raw is not None:
-                self.bucket.delete(key)
+                self._bucket.delete(key)
             return True
-        now = self.now()
+        now = self._now()
         if raw is None:
             status = None if current is None else current.actual_status
             outage = Outage(status=status, first_seen=now)
-            self.bucket.put(key, outage.model_dump_json().encode())
+            self._bucket.put(key, outage.model_dump_json().encode())
             return True
         first_seen = Outage.model_validate_json(raw).first_seen
         return now - first_seen < timedelta(seconds=OUTAGE_SECONDS)
 
     def end(self, session_id: str) -> datetime | None:
-        receipt = self.receipt(session_id)
-        if receipt is None and self.bucket.get(self.key(session_id, "offer")) is None:
+        receipt = self._receipt(session_id)
+        if receipt is None and self._bucket.get(self._key(session_id, "offer")) is None:
             return None
         current = (
-            self.api.instance(receipt.id)
+            self._api.instance(receipt.id)
             if receipt is not None
-            else self.api.named(f"etude-{session_id}")
+            else self._api.named(f"etude-{session_id}")
         )
         if current is None:
             return datetime.now(UTC) if receipt is not None else None
         if current.label != f"etude-{session_id}":
             raise ProviderUnavailable("refusing to destroy a Vast instance with a different label")
         if receipt is None:
-            self.keep(session_id, current)
-        self.api.delete_self(str(current.id))
+            self._keep(session_id, current)
+        self._api.delete_self(str(current.id))
         # DELETE success acknowledges the operation. Confirm absence before
         # declaring the rental ended and releasing its reservation.
-        return datetime.now(UTC) if self.api.instance(current.id) is None else None
+        return datetime.now(UTC) if self._api.instance(current.id) is None else None
 
     def bill(self, session_id: str, now: datetime) -> Bill | None:
         # Vast's daily charge totals do not establish contiguous settled

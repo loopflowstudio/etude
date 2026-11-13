@@ -360,7 +360,7 @@ def test_supplies_are_stored_and_a_run_names_where_it_may_go(tmp_path: Path) -> 
     assert b.store.machine(held.machine).deleted_at is not None  # gone with its rental
 
 
-def holds(b: Bench, run: str) -> tuple[str | None, Decimal]:
+def _holds(b: Bench, run: str) -> tuple[str | None, Decimal]:
     """The owned machine a run's first attempt is on, or None when rented, and its price."""
     held = b.store.session(b.scheduler.attempts(run)[0].session)
     machine = b.store.machine(held.machine)
@@ -383,8 +383,8 @@ def test_a_launch_with_a_pool_and_rent_uses_free_owned_machines_before_renting(
 
     assert not b.store.session(b.scheduler.attempts(first)[0].session).autorun
     assert b.store.session(b.scheduler.attempts(second)[0].session).autorun
-    assert holds(b, first) == ("bench", Decimal(0))  # owned: its cost is already paid
-    assert holds(b, second) == (None, Decimal("0.59"))  # rented
+    assert _holds(b, first) == ("bench", Decimal(0))  # owned: its cost is already paid
+    assert _holds(b, second) == (None, Decimal("0.59"))  # rented
     assert (
         str(b.scheduler.read(third))
         == "queued (waiting for lab: no free machine; l4: at its machine limit), $0.00"
@@ -396,7 +396,7 @@ def test_a_launch_with_a_pool_and_rent_uses_free_owned_machines_before_renting(
     b.run(601)
     assert [b.scheduler.read(r).outcome for r in (first, second)] == ["succeeded", "succeeded"]
     b.run(1)  # the finished rental ended; the limit allows another
-    assert holds(b, third) == (None, Decimal("0.59"))  # the off pool gave nothing; it rented
+    assert _holds(b, third) == (None, Decimal("0.59"))  # the off pool gave nothing; it rented
     assert b.store.machine("bench").deleted_at is None  # owned: it remains
     assert len(b.store.machines("l4")) == 2
 
@@ -409,12 +409,12 @@ def test_a_pool_alone_never_rents_and_rent_alone_never_takes_owned_machines(
     owned = [b.scheduler.queue(job(), "shed") for _ in range(2)]
     rented = b.scheduler.queue(job(), rent="l4")
     b.scheduler.tick()
-    assert holds(b, owned[0]) == ("shed", Decimal(0))
+    assert _holds(b, owned[0]) == ("shed", Decimal(0))
     assert str(b.scheduler.read(owned[1])) == "queued (waiting for shed: no free machine), $0.00"
-    assert holds(b, rented) == (None, Decimal("0.59"))
+    assert _holds(b, rented) == (None, Decimal("0.59"))
     assert b.service.creates == 1  # only the run that may rent was rented for
     b.run(601)
-    assert holds(b, owned[1]) == ("shed", Decimal(0))  # it waited for the owned machine
+    assert _holds(b, owned[1]) == ("shed", Decimal(0))  # it waited for the owned machine
     assert b.service.creates == 1
 
 
@@ -427,7 +427,7 @@ def test_an_owned_machine_leaves_its_pool_at_expiry_and_its_run_retries_elsewher
     b.scheduler.add_machine("window", "owned", pool="lab", cost_usd=Decimal(3), expires_at=expiry)
     run = b.scheduler.queue(job(), "lab", rent="l4")
     b.scheduler.tick()
-    assert holds(b, run) == ("window", Decimal(0))
+    assert _holds(b, run) == ("window", Decimal(0))
     b.run(1)
     b.run(1)
     assert b.scheduler.read(run).phase == "running"
@@ -768,17 +768,17 @@ class Host(FakeService):
         self.reachable = True
 
     def held(self, run: str, key: str | None = None) -> dict[str, bytes]:
-        self.call("ssh")
+        self._call("ssh")
         if not self.reachable:
             raise Unreachable("SSH transport failed; remote outcome unconfirmed")
         return self.disk.held(run, key)
 
     def hold(self, run: str, files: dict[str, bytes]) -> None:
-        self.call("ssh")
+        self._call("ssh")
         self.disk.hold(run, files)
 
 
-def tracked_run(directory: Path, run: str) -> TrackedRun:
+def _tracked(directory: Path, run: str) -> TrackedRun:
     return track(
         experiment="lab", clocks=[Step("steps", "training steps")], run=run, directory=directory
     )
@@ -799,7 +799,7 @@ def test_a_retry_on_another_owned_host_waits_for_and_continues_the_runs_folder(
     first = scheduler.attempts(run)[0]
     assert store.session(first.session).machine == "first"
 
-    tracked = tracked_run(hosts["first"].track, run)
+    tracked = _tracked(hosts["first"].track, run)
     weights = tmp_path / "weights.pt"
     for step in (1, 2):
         weights.write_bytes(f"weights at {step}".encode())
@@ -830,7 +830,7 @@ def test_a_retry_on_another_owned_host_waits_for_and_continues_the_runs_folder(
         "steps-2.pt",
     ]
 
-    resumed = tracked_run(hosts["second"].track, run)
+    resumed = _tracked(hosts["second"].track, run)
     latest = resumed.latest_checkpoint()
     assert latest is not None and latest.ordinal == 2
     weights.write_bytes(b"weights at 3")
@@ -840,7 +840,7 @@ def test_a_retry_on_another_owned_host_waits_for_and_continues_the_runs_folder(
     assert record["ordinal"] == 3
 
 
-def reporting(b: Bench, **changes: object) -> None:
+def _reporting(b: Bench, **changes: object) -> None:
     """Every running attempt's journal also says `changes`."""
     observe = b.service.observe
 
@@ -863,7 +863,7 @@ def test_status_says_how_far_a_running_job_has_got_through_its_work(tmp_path: Pa
     one = b.scheduler.queue(job(), rent="l4")
     b.scheduler.tick()
     tally = Tally(unit="matches", done=412, total=1800, failed=1, per_hour=940.0)
-    reporting(b, tally=tally)
+    _reporting(b, tally=tally)
     b.run(1)
     said = str(b.scheduler.read(one))
     assert said.startswith("running, 412/1800 matches (1 failed), 940/hour, ~1.5 hours left")
@@ -884,7 +884,7 @@ def test_a_job_that_exited_is_not_lost_when_its_files_never_arrive(tmp_path: Pat
     one = b.scheduler.queue(job(), rent="l4")
     b.scheduler.tick()
     b.run(1)
-    reporting(
+    _reporting(
         b, finished_at=b.clock(), outcome="succeeded", exit_code=0, delivered=False, outputs=()
     )
     b.run(1)
@@ -933,12 +933,12 @@ def test_a_read_shows_a_running_jobs_output_and_a_pass_fetches_it_only_as_it_gro
         return logs(session_id, attempt, producer=producer)
 
     b.service.logs = counted  # type: ignore[method-assign]
-    reporting(b, log_bytes=100)
+    _reporting(b, log_bytes=100)
     b.run(1)
     assert f"log of {attempt.id}" in job_text(b.scheduler.logs(run=one))
     assert fetched == 1
     b.run(40)  # nothing new stored
     assert fetched == 1
-    reporting(b, log_bytes=200)
+    _reporting(b, log_bytes=200)
     b.run(1)
     assert fetched == 2

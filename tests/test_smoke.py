@@ -77,13 +77,13 @@ def experiment(folder: Path, *, play: str = "play", report: str = "return Report
     return path
 
 
-def listed_ids(out: str) -> list[str]:
+def _ids(out: str) -> list[str]:
     """The run ids a submission listed: its lines that are not indented."""
     return [line.split()[0] for line in out.splitlines() if not line.startswith(" ")]
 
 
 @pytest.fixture(autouse=True)
-def restore_imports(monkeypatch: pytest.MonkeyPatch) -> None:
+def _restore_imports(monkeypatch: pytest.MonkeyPatch) -> None:
     # Experiment files put their folder on the import path; each test keeps its own.
     monkeypatch.setattr(sys, "path", list(sys.path))
 
@@ -99,7 +99,7 @@ def test_a_passing_smoke_queues_and_its_runs_record_it(
     assert "smoke train ppo: passed in" in err and "(1 checkpoint)" in err
     assert "smoke eval ladder: passed in" in err and "(2 matches, 1 game each)" in err
     assert "smoke report: passed in" in err
-    ids = listed_ids(out)
+    ids = _ids(out)
     assert len(ids) == 2
     record = default().record(ids[0])
     assert record.smoke.outcome == "passed"
@@ -145,7 +145,7 @@ def test_a_job_without_a_smoke_form_is_reported_and_queues_as_before(
     assert main(["queue", str(file), "--tiny", "", "--smoke"]) == 0
     said = capsys.readouterr()
     assert "smoke train ppo: not smoked (no smoke form)" in said.err
-    (id,) = listed_ids(said.out)
+    (id,) = _ids(said.out)
     assert default().record(id).smoke.outcome == "not_smoked"
 
 
@@ -156,7 +156,7 @@ def test_a_job_without_a_smoke_form_beside_one_with_it_is_not_recorded_passed(
     assert main(["queue", str(file), "--bare", "--cohort", "c", "--smoke"]) == 0
     said = capsys.readouterr()
     assert "smoke train plain: not smoked (no smoke form)" in said.err
-    ppo, plain = (default().record(id) for id in listed_ids(said.out))
+    ppo, plain = (default().record(id) for id in _ids(said.out))
     assert (ppo.spec.name, plain.spec.name) == ("ppo", "plain")
     assert ppo.smoke.outcome == "passed"
     assert [(s.step, s.name) for s in ppo.smoke.steps] == [
@@ -179,7 +179,7 @@ def test_a_tiny_job_that_saves_no_checkpoint_leaves_eval_not_smoked(
     said = capsys.readouterr()
     assert "smoke train ppo: passed in" in said.err and "(0 checkpoints)" in said.err
     assert "smoke eval: not smoked (no checkpoints)" in said.err
-    (id,) = listed_ids(said.out)
+    (id,) = _ids(said.out)
     smoke = default().record(id).smoke
     assert smoke.outcome == "not_smoked"
     assert str(smoke) == "not smoked (eval: no checkpoints)"
@@ -192,13 +192,13 @@ def test_without_smoke_a_broken_tiny_job_queues_unsmoked(
     assert main(["queue", str(file), "--tiny", "1 diverge"]) == 0
     said = capsys.readouterr()
     assert "smoke" not in said.err
-    (id,) = listed_ids(said.out)
+    (id,) = _ids(said.out)
     assert default().record(id).smoke.outcome == "not_smoked"
     assert main(["status", id]) == 0
     assert "smoke:" not in capsys.readouterr().out
 
 
-def trained(source: Path, tmp_path: Path) -> None:
+def _trained(source: Path, tmp_path: Path) -> None:
     """One checkpoint of experiment ppo's run ppo-1, delivered to `source`."""
     clocks = [Clock(name="updates", kind="step", meaning="optimizer updates")]
     with track(experiment="ppo", run="ppo-1", clocks=clocks, directory=source) as run:
@@ -210,7 +210,7 @@ def test_eval_and_report_alone_read_a_source_and_deliver_nothing_to_it(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     source = tmp_path / "bucket"
-    trained(source, tmp_path)
+    _trained(source, tmp_path)
     before = sorted(source.rglob("*"))
     file = experiment(tmp_path / "lab")
     steps = ["--step", "eval", "--step", "report"]
@@ -234,7 +234,7 @@ def test_a_launching_eval_that_fails_its_smoke_launches_nothing(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], change: dict[str, str], said: str
 ) -> None:
     source = tmp_path / "bucket"
-    trained(source, tmp_path)
+    _trained(source, tmp_path)
     file = experiment(tmp_path / "lab", **change)
     assert main(["eval", str(file), "--source", str(source), "--pool", "local", "--smoke"]) == 1
     assert said in capsys.readouterr().err
@@ -256,7 +256,7 @@ def test_a_launched_eval_run_records_its_smoke(
     outcome: str,
 ) -> None:
     source = tmp_path / "bucket"
-    trained(source, tmp_path)
+    _trained(source, tmp_path)
     file = experiment(tmp_path / "lab", **change)
     assert main(["eval", str(file), "--source", str(source), "--pool", "local", *flags]) == 0
     assert ", launched " in capsys.readouterr().out

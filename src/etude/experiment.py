@@ -204,7 +204,7 @@ def state_of(every: Sequence[RunData], experiment: str) -> ExperimentState:
     """The experiment's training runs among runs already read, as `observe` finds them.
 
     A run that recorded no end has failed once this computer's launcher says
-    so (`lost_runs`), and so ends at its last stored checkpoint.
+    so (`_lost`), and so ends at its last stored checkpoint.
     """
     line = lines(every)
     ours = [
@@ -215,7 +215,7 @@ def state_of(every: Sequence[RunData], experiment: str) -> ExperimentState:
         and data.file.declaration.kind != "evaluation"
     ]
     job = job_names(ours)
-    lost = lost_runs([data.name for data in ours if data.state is None])
+    lost = _lost([data.name for data in ours if data.state is None])
     runs = []
     for data in ours:
         saved = Checkpoints(
@@ -254,7 +254,7 @@ def state_of(every: Sequence[RunData], experiment: str) -> ExperimentState:
     return ExperimentState(experiment=experiment, runs=tuple(runs))
 
 
-def lost_runs(runs: Sequence[str]) -> set[str]:
+def _lost(runs: Sequence[str]) -> set[str]:
     """Of runs that recorded no end, those this computer's launcher closed without success.
 
     Only a run's own process writes its end (`state.json`), so one whose
@@ -384,8 +384,8 @@ def advance(
 
     state = observe(source, experiment.name)
     jobs = asked(experiment.eval, state)
-    ledger = Ledger(ledger_root(directory)) if pool or rent else None
-    standing = ledger.standing() if ledger is not None else Standing()
+    ledger = _Ledger(_ledger_root(directory)) if pool or rent else None
+    standing = ledger.standing() if ledger is not None else _Standing()
     passes = []
     for given_job in jobs:
         spec: Evaluation = evaluation_spec(given_job)
@@ -465,13 +465,13 @@ def checkpoint_file(saved: Checkpoint) -> str:
     return f"{CHECKPOINTS}/{saved.name}"
 
 
-class Launched(Record):
+class _Launched(Record):
     run: str
     matches: tuple[Digest, ...]
 
 
 @dataclass(frozen=True)
-class Standing:
+class _Standing:
     """What the ledger's runs mean for this pass."""
 
     # Matches of runs not yet done.
@@ -480,7 +480,7 @@ class Standing:
     failed: dict[Digest, str] = field(default_factory=dict)
 
 
-class Ledger:
+class _Ledger:
     """The runs passes launched, kept in one JSON file per computer.
 
     It only says which matches are in flight; delivered results are read from
@@ -490,15 +490,15 @@ class Ledger:
     def __init__(self, root: Path) -> None:
         self.path = root / "launched.json"
 
-    def read_ledger(self) -> list[Launched]:
+    def _read(self) -> list[_Launched]:
         if not self.path.is_file():
             return []
-        return [Launched.model_validate(each) for each in json.loads(self.path.read_text())]
+        return [_Launched.model_validate(each) for each in json.loads(self.path.read_text())]
 
-    def standing(self) -> Standing:
+    def standing(self) -> _Standing:
         """Where every launched run stands. One ledger serves all of a computer's experiments."""
-        standing = Standing()
-        for each in self.read_ledger():
+        standing = _Standing()
+        for each in self._read():
             found = client.status(each.run)
             if not found.done:
                 standing.running.update(each.matches)
@@ -508,7 +508,7 @@ class Ledger:
 
     def unused(self, run: str) -> str:
         """`run`, or the next `run-N` no pass launched: a retry may be given the same matches."""
-        taken = {each.run for each in self.read_ledger()}
+        taken = {each.run for each in self._read()}
         if run not in taken:
             return run
         return next(f"{run}-{n}" for n in count(2) if f"{run}-{n}" not in taken)
@@ -526,12 +526,12 @@ class Ledger:
     ) -> None:
         submit = client.queue if queue else client.launch
         submit(Run(id=run, job=job, smoke=smoke), pool, rent=rent)
-        launched = [*self.read_ledger(), Launched(run=run, matches=tuple(m.key for m in matches))]
+        launched = [*self._read(), _Launched(run=run, matches=tuple(m.key for m in matches))]
         self.path.parent.mkdir(parents=True, exist_ok=True)
         staged = self.path.with_suffix(".tmp")
         staged.write_text(json.dumps([each.model_dump(mode="json") for each in launched]))
         staged.replace(self.path)
 
 
-def ledger_root(directory: Path | str | None) -> Path:
+def _ledger_root(directory: Path | str | None) -> Path:
     return (home() if directory is None else Path(directory)) / "experiments"

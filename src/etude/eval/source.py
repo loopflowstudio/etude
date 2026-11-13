@@ -33,7 +33,7 @@ def source_commit(paths: Sequence[Path | str]) -> str | None:
     given_source = os.environ.get(SOURCE_DIR)
     source = Path(given_source).resolve() if given_source else None
     first = Path(paths[0]).resolve()
-    root = checkout(first, source)
+    root = _checkout(first, source)
     if root is None:
         within = source is not None and first.is_relative_to(source)
         return os.environ.get(SOURCE_COMMIT) if within else None
@@ -51,14 +51,14 @@ def digest_files(paths: Sequence[Path | str]) -> Digest:
     file at or below it, or none tracked inside a git checkout.
     """
     digest = sha256()
-    named = named_files(paths)
+    named = _named(paths)
     for name in sorted(named):
         data = named[name].read_bytes()
         digest.update(f"{name}\0{len(data)}\0".encode() + data)
     return digest.hexdigest()
 
 
-def named_files(paths: Sequence[Path | str]) -> dict[str, Path]:
+def _named(paths: Sequence[Path | str]) -> dict[str, Path]:
     """Each file by its name below its root; one `git ls-files` per checkout."""
     given_source = os.environ.get(SOURCE_DIR)
     source = Path(given_source).resolve() if given_source else None
@@ -70,7 +70,7 @@ def named_files(paths: Sequence[Path | str]) -> dict[str, Path]:
         if not given.exists():
             raise EtudeError("identity_file_missing", 422) from FileNotFoundError(given)
         resolved = given.resolve()
-        root = checkout(resolved, source)
+        root = _checkout(resolved, source)
         if root is not None:
             checkouts.setdefault(root, []).append(resolved)
             continue
@@ -99,7 +99,7 @@ def named_files(paths: Sequence[Path | str]) -> dict[str, Path]:
     return found
 
 
-def checkout(path: Path, source: Path | None) -> Path | None:
+def _checkout(path: Path, source: Path | None) -> Path | None:
     """The git checkout holding `path`, unless the source root comes first."""
     for parent in (path, *path.parents):
         if (parent / ".git").exists():
