@@ -44,7 +44,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
-from hashlib import sha256
+from hashlib import file_digest, sha256
 from itertools import chain, count
 from pathlib import Path
 from types import TracebackType
@@ -203,6 +203,14 @@ class Run:
         self.files = RunFiles(root)
         self.clocks = clocks
         self.strict = strict
+        self._until_clock = os.environ.get("ETUDE_UNTIL_CLOCK")
+        value = os.environ.get("ETUDE_UNTIL_VALUE")
+        self._until_value = None if value is None else float(value)
+        if (self._until_clock is None) != (self._until_value is None) or (
+            self._until_value is not None
+            and (not math.isfinite(self._until_value) or self._until_value < 0)
+        ):
+            raise ValueError("a launch target needs a clock and a finite nonnegative value")
         self._out = Path(given).resolve() if (given := os.environ.get("ETUDE_OUT")) else None
         if self._out is not None:
             self._out.mkdir(parents=True, exist_ok=True)
@@ -270,6 +278,18 @@ class Run:
         atexit.register(self.finish)
 
     # --- the training-side calls -------------------------------------------
+
+    def until(self, clock: str, *, default: float) -> float:
+        """The launch's absolute target for this clock, otherwise the recipe's default.
+
+        Clock values are numeric, including fractional time clocks. An undeclared
+        clock raises, so a misspelled name cannot silently ignore a launch target.
+        """
+        if clock not in self._clock_names:
+            raise ValueError(f"undeclared clock: {clock!r}")
+        if clock == self._until_clock and self._until_value is not None:
+            return self._until_value
+        return default
 
     @property
     def out(self) -> Path:
@@ -422,12 +442,13 @@ class Run:
                         staged.unlink()
                     return known.artifact
             ordinal = self._checkpoints + 1
-            stored = staged is not None and not isinstance(artifact, ArtifactRef)
             suffix = (
-                "" if isinstance(artifact, ArtifactRef) or not stored else _suffix(Path(artifact))
+                _suffix(Path(artifact))
+                if staged is not None and not isinstance(artifact, ArtifactRef)
+                else ""
             )
             name = self._unused(name, suffix, ordinal)
-            if staged is not None and stored:
+            if staged is not None:
                 reference = self._keep(staged, name + suffix, reference)
             record = CheckpointRecord(
                 ordinal=ordinal,
@@ -485,11 +506,8 @@ class Run:
         source = Path(artifact).resolve()
         if self._out is not None and source.is_relative_to(self._out):
             with source.open("rb") as stream:
-                digest = sha256()
-                size = 0
-                while block := stream.read(8 * 1024 * 1024):
-                    digest.update(block)
-                    size += len(block)
+                digest = file_digest(stream, "sha256")
+                size = os.fstat(stream.fileno()).st_size
             return ArtifactRef(
                 uri=source.as_uri(), sha256=digest.hexdigest(), size_bytes=size
             ), None
@@ -849,13 +867,10 @@ class Run:
         error: BaseException | None,
         trace: TracebackType | None,
     ) -> None:
-        self.finish(
-            "stopped"
-            if isinstance(error, Stopped)
-            else "failed"
-            if error is not None
-            else "finished"
-        )
+        if isinstance(error, Stopped):
+            self.finish("stopped")
+        else:
+            self.finish("finished" if error is None else "failed")
 
 
 def track(

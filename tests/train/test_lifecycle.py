@@ -12,13 +12,46 @@ from etude.run.delivery import sync
 from etude.run.errors import EtudeError
 from etude.run.storage import DirectoryStorage
 from etude.train.read import read
-from etude.train.records import Step
+from etude.train.records import Step, Time
 from etude.train.report import training
 from etude.train.run import Stopped, local_launch, track
 from etude.working import WorkingFiles
 from tests.run.storage import MeasuredStorage
 
 CLOCKS = [Step("updates", "optimizer updates")]
+
+
+@pytest.mark.parametrize("target", [None, "0", "6", "6.5"])
+def test_recipe_uses_launch_target_for_its_clock_or_its_local_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str | None
+) -> None:
+    monkeypatch.delenv("ETUDE_UNTIL_CLOCK", raising=False)
+    monkeypatch.delenv("ETUDE_UNTIL_VALUE", raising=False)
+    if target is not None:
+        monkeypatch.setenv("ETUDE_UNTIL_CLOCK", "seconds")
+        monkeypatch.setenv("ETUDE_UNTIL_VALUE", target)
+    with local_launch(out=tmp_path / "run", experiment="recipe"):
+        with track(clocks=[*CLOCKS, Time("seconds", "active time")]) as run:
+            assert run.until("seconds", default=2) == (2 if target is None else float(target))
+            assert run.until("updates", default=3) == 3
+            with pytest.raises(ValueError, match="undeclared clock"):
+                run.until("typo", default=2)
+
+
+@pytest.mark.parametrize(
+    ("clock", "value"),
+    [(None, "4"), ("updates", None), ("updates", "nan"), ("updates", "inf"), ("updates", "-1")],
+)
+def test_recipe_refuses_incomplete_or_invalid_launch_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clock: str | None, value: str | None
+) -> None:
+    for name, given in (("ETUDE_UNTIL_CLOCK", clock), ("ETUDE_UNTIL_VALUE", value)):
+        if given is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, given)
+    with pytest.raises(ValueError, match="launch target"):
+        track(experiment="recipe", clocks=CLOCKS, directory=tmp_path)
 
 
 def test_local_recipe_stops_resumes_and_repeats_without_another_checkpoint(tmp_path: Path) -> None:

@@ -1096,9 +1096,11 @@ are its tracked files. They are carried to the bucket as they are written, so
 they survive pod deletion. A later attempt on the same machine finds the
 directory where it was. On a fresh machine with a bucket it is given back,
 before the job starts, the run's records, its whole `out/` as last carried and
-its latest checkpoint file. Each restored file's length is checked against the
-bucket's listing, and an attempt whose directory cannot be restored whole does
-not start: it waits while the bucket cannot be read. To an owned host without
+its latest checkpoint if stored under `checkpoints/`. A checkpoint recorded
+inside `out/` is restored only while it belongs to that directory. Each restored
+file's length is checked against the bucket's listing, and an attempt whose
+directory cannot be restored whole does not start: it waits while the bucket
+cannot be read. To an owned host without
 a bucket, the controller relays the same from the bucket or the host that
 last ran the run; while neither can be read, the retry waits. Either way its
 ordinals continue. A file the previous machine wrote after the courier's last
@@ -1106,10 +1108,10 @@ pass is not there: the job resumes from what was carried. Automatic recovery
 retains the run ID and seed. `etude continue` instead goes further than the
 target or branches from a completed run, making a new run with a parent.
 
-Each successful delivery publishes `out.json`, the working directory's file
-membership, after its files. Recovery and continuation exclude removed files,
-even if their bytes remain in storage. Recovery removes stale working files on
-a reused host. Deleted checkpoints remain available when selected explicitly;
+Delivery publishes changed `out.json` membership after its files succeed.
+Recovery and continuation exclude removed files, even if their bytes remain
+in storage. Recovery removes stale working files on a reused host. Deleted
+checkpoints remain available when selected explicitly;
 an empty `out` does not fall back to the latest checkpoint.
 
 There is no `retry` flag; `max_attempts=1` bounds a job to one attempt.
@@ -1130,6 +1132,7 @@ Training code reads `ETUDE_OUT`, `ETUDE_OUTPUT_DIR`, `ETUDE_STOP_FILE`,
 | `ETUDE_OUTPUT_DIR` | This attempt's output directory: `etude-result.json` and files to keep under `attempts/ATTEMPT/`. A later attempt does not see it. | nothing; tracking reports progress |
 | `ETUDE_STOP_FILE` | Appears when the attempt should stop. | `run.stopping()` |
 | `ETUDE_DEADLINE` | When the attempt's window ends, as an ISO time. The process is killed then. | `run.stopping()` |
+| `ETUDE_UNTIL_CLOCK`, `ETUDE_UNTIL_VALUE` | The launch's absolute target on a named clock. | `run.until("updates", default=config.updates)` |
 
 A job can be given files by name:
 
@@ -1259,7 +1262,7 @@ leaves old copies it did not upload. The launcher knows no block format or
 coverage rules, and neither Python package imports the other.
 
 ```sh
-etude continue --run RUN --until updates=6400 --config '{"updates":6400}' --source s3://bucket/etude/launch
+etude continue --run RUN --until updates=6400 --source s3://bucket/etude/launch
 etude continue --run RUN --until steps=63000 --ordinal 4 --source s3://bucket/etude/launch
 etude continue --run COHORT --until steps=63000 --cohort NEXT --source s3://bucket/etude/launch
 etude cancel RUN
@@ -1270,11 +1273,17 @@ run directory: the child's `out` begins as a copy of the parent's, as last
 carried, so a job that keeps its state there (weights, optimizer, anything
 else) goes on exactly where the parent stopped. The parent and its directory
 are unchanged. `--until` is the child's absolute target and must exceed where
-the parent stood on the named clock. A typed job whose target is a config
-field is given it with `--config '{"updates":6400}'`, a JSON object validated back
-into the job's config type before anything is queued; the child's config is
-the parent's with those fields changed, and it is a new job. In Python,
-`continue_from(parent, until, source=..., config=TrainConfig(updates=6400))`.
+the parent stood on the named clock. The recipe reads it with
+`run.until("updates", default=config.updates)`; `--until` alone extends the
+run, and its config stays unchanged. In Python,
+`continue_from(parent, "updates=6400", source=...)`.
+
+To change other recipe settings too, a typed job accepts `--config
+'{"rate":0.001}'`, a JSON object validated against the job's config type before
+anything is queued. Only those config fields change. Python callers pass their
+complete validated model with `continue_from(..., config=changed_config)`.
+The launch target stays separate from config fields and takes precedence for
+its clock; Etude does not infer a config field from a clock name.
 
 `--ordinal N` starts from one recorded checkpoint instead. A historical parent
 without a working directory also uses its latest checkpoint; a recorded empty

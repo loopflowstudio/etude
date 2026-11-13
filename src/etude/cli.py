@@ -460,7 +460,7 @@ def continue_run(
     ] = None,
     config: Annotated[
         str | None,
-        typer.Option(help='typed config changes as a JSON object, e.g. {"updates":6400}'),
+        typer.Option(help='typed config changes as a JSON object, e.g. {"rate":0.001}'),
     ] = None,
     max_usd: Annotated[str | None, typer.Option(help="the new cohort's dollar ceiling")] = None,
 ) -> None:
@@ -477,25 +477,23 @@ def continue_run(
 
     scheduler = launch_cli.default()
     storage = storage_from_uri(source or default_root())
-    parents = resolve_runs(scheduler, [run])
-    first = scheduler.record(parents[0])
+    parents = [scheduler.record(parent) for parent in resolve_runs(scheduler, [run])]
+    first = parents[0]
     with tempfile.TemporaryDirectory() as relayed:
         if source is None:
             # A parent that ran on another owned host: its records, from there.
             here = places(storage)
             for parent in parents:
-                files = None if parent in here else scheduler.held(parent)
+                files = None if parent.id in here else scheduler.held(parent.id)
                 if files is not None:
-                    put_back(Path(relayed) / parent, files)
+                    put_back(Path(relayed) / parent.id, files)
         again = [
             continue_from(
-                scheduler.record(parent),
+                parent,
                 until,
-                source=relayed if (Path(relayed) / parent).is_dir() else storage,
+                source=relayed if (Path(relayed) / parent.id).is_dir() else storage,
                 ordinal=ordinal,
-                config=None
-                if config is None
-                else continued_config(scheduler.record(parent), config),
+                config=None if config is None else continued_config(parent, config),
             )
             for parent in parents
         ]

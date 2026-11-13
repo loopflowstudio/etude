@@ -37,7 +37,8 @@ class TrainConfig(BaseModel):
 
 def train(config: TrainConfig) -> None:
     run = track(experiment="capacity-pilot", clocks=[Step("updates", "optimizer updates")])
-    for update in range(1, config.updates + 1):
+    updates = int(run.until("updates", default=config.updates))
+    for update in range(1, updates + 1):
         loss = train_one_update(config.lr)
         run.log({"loss": loss}, updates=update)
         if update % 500 == 0:

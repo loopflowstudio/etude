@@ -160,9 +160,10 @@ class TrainConfig(BaseModel):
 
 def train(config: TrainConfig) -> None:
     with track(clocks=[Step("updates", "optimizer updates")], config=config.model_dump()) as run:
+        updates = run.until("updates", default=config.updates)
         state = run.out / "state.pt"  # the same directory on every attempt
         learner = load(state) if state.exists() else Learner()
-        while learner.update < config.updates and not run.stopping():
+        while learner.update < updates and not run.stopping():
             loss = learner.step()
             run.log({"loss": loss}, updates=learner.update)
             if learner.update % 100 == 0:
@@ -171,7 +172,7 @@ def train(config: TrainConfig) -> None:
                 model = save_model(learner, run.out / "checkpoints")
                 run.checkpoint(model, updates=learner.update)
         save(learner, state)
-        if learner.update < config.updates:
+        if learner.update < updates:
             raise Stopped
 ```
 
@@ -193,6 +194,13 @@ attempt, and another after a lost machine or a planned stop
 ([The run promise](launcher.md#the-run-promise)). There is no separate resume
 path to write or test.
 
+- **`run.until("updates", default=config.updates)` gives the absolute target.**
+  The launch's `until` wins for that clock, including on retries and
+  continuations. With no launch target for that clock, it returns the recipe's
+  default. `etude continue --run RUN --until updates=6400` therefore extends
+  this loop without changing its config. The clock must be declared in
+  `track(clocks=...)`. Values are numeric, including fractional time clocks;
+  a loop that requires an integer count can use `int(run.until(...))`.
 - **`run.out` is the run's directory**, a `Path` that exists. It belongs to
   the run, not to an attempt: every attempt of a run is given the same
   directory with everything earlier attempts left in it. Keep whatever a later

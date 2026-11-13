@@ -36,18 +36,19 @@ class Config(BaseModel):
 
 def train(config: Config) -> None:
     with track(clocks=[Step("updates", "updates")], config=config.model_dump()) as run:
+        updates = int(run.until("updates", default=config.updates))
         state = run.out / "state.json"
         if not state.exists():
             state.write_text('1')
             run.log({"loss": 1}, updates=1)
             raise Stopped
         previous = int(state.read_text())
-        print(f"restored {previous} to {config.updates}, rate {config.rate}")
-        state.write_text(str(config.updates))
-        model = run.out / f"model-{config.updates}.pt"
+        print(f"restored {previous} to {updates}, rate {config.rate}")
+        state.write_text(str(updates))
+        model = run.out / f"model-{updates}.pt"
         model.write_bytes(b"weights")
-        run.log({"loss": 0}, updates=config.updates)
-        run.checkpoint(model, updates=config.updates)
+        run.log({"loss": 0}, updates=updates)
+        run.checkpoint(model, updates=updates)
 """
 
 
@@ -107,7 +108,9 @@ def runs(python: str) -> Job:
     # The file reader imports the recipe; include its source in the launched job.
     monkeypatch.setattr(sys, "path", list(sys.path))
     (given,) = read_job_file(repo / "job.py", ["--python", job_python])
-    spec = given.job.model_copy(update={"repo": str(repo), "experiment": "recipe"})
+    spec = given.job.model_copy(
+        update={"repo": str(repo), "experiment": "recipe", "until": "updates=3"}
+    )
     scheduler = local(tmp_path)
     parent = scheduler.launch(spec)
     status = scheduler.wait(parent, every=0.05, timeout=30)[0]
@@ -116,7 +119,8 @@ def runs(python: str) -> Job:
     tracked = tmp_path / "track"
     source = MeasuredStorage(DirectoryStorage(tracked))
     record = scheduler.record(parent)
-    config = continued_config(record, '{"updates":4}')
+    config = continued_config(record, '{"rate":0.25}')
+    assert json.loads(config.model_dump_json()) == {"updates": 2, "rate": 0.25}
     with pytest.raises(LauncherError, match="unknown continuation config fields"):
         continued_config(record, '{"typo":4}')
     with pytest.raises(LauncherError, match="invalid continuation config"):
@@ -124,24 +128,27 @@ def runs(python: str) -> Job:
     for changes in ("[]", '{"updates":', ""):
         with pytest.raises(LauncherError, match="invalid continuation config"):
             continued_config(record, changes)
-    next_run = continue_from(record, "updates=4", source=source, config=config)
-    assert json.loads(next_run.job.config or "{}") == {"updates": 4, "rate": 0.125}
+    next_run = continue_from(record, "updates=4", source=source)
+    assert next_run.job.config == record.spec.config
     assert source.listings == 2
     assert source.got.count(f"{parent}/out/state.json") == 1
-    assert source.got.count(f"{parent}/out/model-2.pt") == 1
+    assert source.got.count(f"{parent}/out/model-3.pt") == 1
     assert len([i for i in next_run.job.inputs if i.out is not None]) == 2
     child = scheduler.launch(next_run)
     status = scheduler.wait(child, every=0.05, timeout=30)[0]
     assert status.outcome == "succeeded", job_text(scheduler.logs(refresh=True, run=child))
-    assert (tracked / parent / "out/state.json").read_text() == "2"
+    assert (tracked / parent / "out/state.json").read_text() == "3"
     assert (tracked / child / "out/state.json").read_text() == "4"
     data = read(tracked, "recipe", child)
+    assert data.reached == {"updates": 4}
     assert data.file is not None and data.file.declaration.continues is not None
     assert data.file.declaration.continues.parent.source_id == parent
-    assert data.file.declaration.continues.value == 2
+    assert data.file.declaration.continues.value == 3
+    changed = continue_from(record, "updates=5", source=tracked, config=config)
+    assert json.loads(changed.job.config or "{}") == {"updates": 2, "rate": 0.25}
     chosen = continue_from(record, "updates=5", source=tracked, ordinal=1)
     assert len(chosen.job.inputs) == 1
-    assert chosen.job.inputs[0].key == "out/model-2.pt"
+    assert chosen.job.inputs[0].key == "out/model-3.pt"
     assert chosen.job.inputs[0].out is None
     original = (
         Input(name="parent-out-0", key="data", sha256="0" * 64, size_bytes=0),
@@ -162,8 +169,6 @@ def runs(python: str) -> Job:
                 parent,
                 "--until",
                 "updates=6",
-                "--config",
-                '{"updates":6}',
                 "--source",
                 str(tracked),
             ]
@@ -171,5 +176,10 @@ def runs(python: str) -> Job:
         == 0
     )
     queued = capsys.readouterr().out.split()[0]
-    assert json.loads(scheduler.record(queued).spec.config or "{}") == {"updates": 6, "rate": 0.125}
+    assert scheduler.record(queued).spec.config == record.spec.config
     assert scheduler.read(queued).phase == "queued"
+    status = scheduler.wait(queued, every=0.05, timeout=30)[0]
+    assert status.outcome == "succeeded", job_text(scheduler.logs(refresh=True, run=queued))
+    assert read(tracked, "recipe", queued).reached == {"updates": 6}
+    assert (tracked / queued / "out/state.json").read_text() == "6"
+    assert (tracked / parent / "out/state.json").read_text() == "3"
