@@ -238,7 +238,7 @@ def test_checkpoints_held_on_the_go_then_a_seating_added_in_batch(tmp_path: Path
     assert sorted(lines) == sorted(each.name for each in grown.seatings)
     for line in lines.values():
         assert (line.run, line.experiment) == ("ppo-1", "ppo")
-        assert [(p.ordinal, authored(p.clocks)) for p in line.points] == [
+        assert [(p.ordinal, authored(p.at)) for p in line.points] == [
             (1, {"updates": 100.0}),
             (2, {"updates": 200.0}),
             (3, {"updates": 300.0}),

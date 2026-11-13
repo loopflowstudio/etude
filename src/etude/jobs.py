@@ -323,7 +323,7 @@ def continue_from(
             f"a continuation needs a target on a clock its checkpoint recorded: "
             f"{', '.join(sorted(record.at))}"
         )
-    if target.position <= record.at[target.clock]:
+    if target.value <= record.at[target.clock]:
         raise LauncherError(
             f"the target {target} is not beyond the checkpoint's "
             f"{target.clock}={number(record.at[target.clock])}"

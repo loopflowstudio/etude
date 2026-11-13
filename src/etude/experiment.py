@@ -71,7 +71,7 @@ class Checkpoint(Record):
     ordinal: int = Field(ge=1)
     artifact: ArtifactRef
     # Where each of the run's clocks stood when it was saved.
-    clocks: dict[str, float]
+    at: dict[str, float]
     # When it was saved, in milliseconds since the epoch.
     # None only in a checkpoint serialized before this field existed.
     wall_ms: int | None = None
@@ -92,7 +92,7 @@ class Checkpoint(Record):
     @property
     def ref(self) -> CheckpointRef:
         """Its key, stored file, where it stood and its line, as a benchmark is held for it."""
-        return CheckpointRef(key=self.key, artifact=self.artifact, at=self.clocks, line=self.line)
+        return CheckpointRef(key=self.key, artifact=self.artifact, at=self.at, line=self.line)
 
     def model(self, inference: Inference) -> Model:
         """This checkpoint playing as `inference`, for a seating of chosen checkpoints."""
@@ -111,7 +111,7 @@ class Checkpoints(tuple[Checkpoint, ...]):
     def at(self, clock: str, *values: float) -> Checkpoints:
         """The checkpoints saved where `clock` stood at one of `values`."""
         wanted = set(values)
-        return Checkpoints(each for each in self if each.clocks.get(clock) in wanted)
+        return Checkpoints(each for each in self if each.at.get(clock) in wanted)
 
     def tagged(self, tag: str) -> Checkpoints:
         return Checkpoints(each for each in self if tag in each.tags)
@@ -223,7 +223,7 @@ def state_of(every: Sequence[RunData], experiment: str) -> ExperimentState:
                 experiment=data.experiment,
                 ordinal=record.ordinal,
                 artifact=record.artifact,
-                clocks=record.at,
+                at=record.at,
                 wall_ms=record.wall_ms,
                 line=line[data.name],
                 tags=record.tags,

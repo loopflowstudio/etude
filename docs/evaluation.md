@@ -105,7 +105,7 @@ hold(league, experiment="ppo", enter=finals, play=play, workers=8, storages=[buc
 
 db = statsdb("ppo", bucket)  # or "s3://my-bucket/runs", a directory, or nothing: ~/.etude/track
 for each in scores(db, "anchors", table="plays", value="score"):
-    print(each.seating, each.run, [(p.name, p.clocks, p.value) for p in each.points])
+    print(each.seating, each.run, [(p.name, p.at, p.value) for p in each.points])
 for entry in standings(db, "finals-1", table="plays", value="score").entries:
     print(entry.name, entry.opponent_name, entry.value, entry.interval)
 ```
@@ -168,7 +168,7 @@ evaluate(
   its clocks: `CheckpointRef(key=..., artifact=..., at={"updates": 600})`.
   A tracked checkpoint's `ref` fills `at` from its run's clocks; give it
   yourself for a checkpoint no Etude run recorded. It is carried to each
-  match's seats (`seats.at`, and every distinct one in `players.positions`) so
+  match's seats (`seats.at`, and every distinct one in `players.seated_at`) so
   a report can place the point, and is part of no key: correcting it never
   forks a model or replays a match. Where seats disagree, a report draws the
   latest and notes the earlier.
@@ -416,11 +416,12 @@ evaluate(
   environment, to play what the tournament calls for and none of the
   experiment's eval runs in its environment delivered.
 - **`scores`** gives one `Scores` per seating and training run: each held
-  checkpoint's name, ordinal, the clocks where its run stood when it saved
-  it, and the first player's value with a 95% interval over whole matches.
+  checkpoint's name, ordinal, `at` (where its run's clocks stood when it
+  saved it), and the first player's value with a 95% interval over whole matches.
   A held checkpoint whose relative seat found nothing has no point:
   `Tournament.resolve(lines)` gives each such `Gap` and why, `not_yet` or
-  `never`, and the report draws it. Checkpoints no training run under the
+  `never`, with the `value` of the seat's clock it looked for, and the report
+  draws it. Checkpoints no training run under the
   source recorded make one `Scores` per seating,
   ordered by name, numbers in order (`updates-900` before `updates-1000`).
 - **`standings`** gives a round robin's payoff matrix, best first, each entry
@@ -568,10 +569,11 @@ as a launched one does, unless `--retry-failed`.
   source: each one's name, its `job` (the name the report gives it: the
   launch name, with its config digest when one name ran two configs),
   whether it is `running`, `finished` or `failed`,
-  and the checkpoints it stored, each with its ordinal, clocks, tags and
-  `wall_ms`, when it was saved in milliseconds since the epoch.
+  and the checkpoints it stored, each with its ordinal, `at` (where its
+  run's clocks stood), tags and `wall_ms`, when it was saved in milliseconds
+  since the epoch.
   `Checkpoints` is a tuple, so a slice works too; `every(n)`, `at(clock,
-  *values)` and `tagged(tag)` choose by ordinal, coordinate or tag, and
+  *values)` and `tagged(tag)` choose by ordinal, clock value or tag, and
   `final` is the last checkpoint once a run has finished.
 - **What `eval` returns.** Evaluation jobs holding a benchmark for the
   checkpoints it chose. A relative seat finds its checkpoint among every
@@ -650,7 +652,7 @@ environment, the latest), `seats`,
 `groups`, `tournaments` (with any `conflict` among its eval runs), `schedule`
 (every match a tournament calls for, with its seating and checkpoint) and
 `training_checkpoints` (every checkpoint a training run under the source
-recorded, joined to players and the schedule by `checkpoint`, its key) and
+recorded, with its `at`, joined to players and the schedule by `checkpoint`, its key) and
 `blobs` (each blob's `sha256` and size, by run and match; a converted run's
 artifacts name no match), and one table per rollup.
 

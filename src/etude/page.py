@@ -14,7 +14,7 @@ training runs are drawn by `etude.train.report.training`; an experiment with
 eval runs alone is drawn as evaluation only.
 
 Evals come from the experiment's eval database (`etude.eval.query.statsdb`).
-A model is placed where its seats say it stood (`players.positions`, from
+A model is placed where its seats say it stood (`players.seated_at`, from
 `etude.eval.records.CheckpointRef.at`, merged with the latest winning), else,
 for a key a training run of the experiment recorded, where that run's clocks
 stood (`players.checkpoint` joined to `training_checkpoints`). Where both
@@ -25,7 +25,7 @@ chain of continuations that led to it (`etude.experiment.Checkpoint.line`).
 A bound model is drawn in its run's job; every other placed model is drawn in
 its line's curve, or in the one curve of checkpoints with no line. Two keys
 holding the same bytes are two models. Every unplaced player (code, a
-checkpoint seated with no position from outside the experiment, an etude-sdk
+checkpoint seated with no `at` from outside the experiment, an etude-sdk
 0.2 digest) is fixed, and drawn once as an anchor.
 
 What each tournament has played is `etude.eval.tournament.played`: for a
@@ -109,11 +109,11 @@ class Placement(Record):
 
     `run` and `ordinal` name the training run's checkpoint its key binds it
     to, None for any other. `at` is where it is drawn, by clock: its seats'
-    position, else its training record's; empty for a fixed player. `line` is
+    `at`, else its training record's; empty for a fixed player. `line` is
     the learner it belongs to: its latest seat's, else its training run's
     line; None for a fixed player or a checkpoint of no line. `placed`: it is
     drawn on a curve, a job's or one of checkpoints no run saved, so bound
-    to a run or given a position; else it is an anchor.
+    to a run or given an `at`; else it is an anchor.
     """
 
     key: str  # its key (`etude.eval.records.Model.key` or `Code.key`), as the database holds it
@@ -819,11 +819,11 @@ def _players(
 
     `lines` gives each training run's line. Where seat and training record
     differ on a clock, the seat's value is drawn: it is what the evaluation
-    declared. Where seats disagree, on a position or a line, the latest is
+    declared. Where seats disagree, on an `at` or a line, the latest is
     drawn, so a later evaluation corrects a wrong one.
     """
     found = db.sql(
-        "select player, names, kind, config, checkpoint, positions, lines"
+        "select player, names, kind, config, checkpoint, seated_at, lines"
         " from players order by player"
     ).fetchall()
     players: list[Placement] = []
@@ -832,11 +832,11 @@ def _players(
     for key, names, kind, config, checkpoint, given, named in found:
         name = "/".join(json.loads(names))
         bound = saved.get(checkpoint)
-        recorded = {} if bound is None else bound.clocks
-        positions: list[dict[str, float]] = json.loads(given)
-        seated = _seat_position(positions)
-        if _disagree(positions):
-            earlier = "; ".join(_described(each) for each in positions if each != seated)
+        recorded = {} if bound is None else bound.at
+        seated_at: list[dict[str, float]] = json.loads(given)
+        seated = _merged(seated_at)
+        if _disagree(seated_at):
+            earlier = "; ".join(_described(each) for each in seated_at if each != seated)
             notes.append(
                 f"{name} is drawn at {_described(seated)}, as its latest seat says;"
                 f" earlier seats said {earlier}."
@@ -872,29 +872,29 @@ def _players(
         )
     if unplaced:
         notes.append(
-            f"Drawn as anchors, seated without a position and saved by no training run of the"
+            f"Drawn as anchors, seated without an `at` and saved by no training run of the"
             f" experiment: {', '.join(unplaced)}."
         )
     return players, tuple(notes)
 
 
-def _seat_position(positions: list[dict[str, float]]) -> dict[str, float]:
-    """Where seats put a player, latest first: their positions merged, the latest winning, so a
+def _merged(seated_at: list[dict[str, float]]) -> dict[str, float]:
+    """Where seats put a player, latest first: their `at`s merged, the latest winning, so a
     match recorded before Etude's built-in hour clocks agrees with one that also says where
     they stood."""
     merged: dict[str, float] = {}
-    for position in reversed(positions):
-        merged.update(position)
+    for at in reversed(seated_at):
+        merged.update(at)
     return merged
 
 
-def _disagree(positions: list[dict[str, float]]) -> bool:
-    """Whether two positions give a clock they both name different values."""
+def _disagree(seated_at: list[dict[str, float]]) -> bool:
+    """Whether two `at`s give a clock they both name different values."""
     seen: dict[str, float] = {}
-    for position in positions:
-        if any(seen.get(clock, value) != value for clock, value in position.items()):
+    for at in seated_at:
+        if any(seen.get(clock, value) != value for clock, value in at.items()):
             return True
-        seen.update(position)
+        seen.update(at)
     return False
 
 
@@ -908,7 +908,7 @@ class _Saved:
 
     run: str
     ordinal: int
-    clocks: dict[str, float]
+    at: dict[str, float]
 
 
 def _saved_checkpoints(db: duckdb.DuckDBPyConnection) -> dict[str, _Saved]:
@@ -918,10 +918,10 @@ def _saved_checkpoints(db: duckdb.DuckDBPyConnection) -> dict[str, _Saved]:
     bound to the later.
     """
     found = db.sql(
-        "select checkpoint, run, max(ordinal), arg_max(clocks, ordinal) from training_checkpoints"
+        'select checkpoint, run, max(ordinal), arg_max("at", ordinal) from training_checkpoints'
         " group by checkpoint, run"
     ).fetchall()
-    return {key: _Saved(run, ordinal, json.loads(clocks)) for key, run, ordinal, clocks in found}
+    return {key: _Saved(run, ordinal, json.loads(at)) for key, run, ordinal, at in found}
 
 
 @dataclass(frozen=True, order=True)
@@ -997,7 +997,7 @@ def _points(
                 run=None if place is None else place.run,
                 ordinal=None if place is None else place.ordinal,
                 line=ref.line,
-                at=ref.at or ({} if place is None else place.clocks),
+                at=ref.at or ({} if place is None else place.at),
                 whole=any((key.tournament, key.seating) in one_seed for key in here),
             )
             # By view, score and split: the cells of this checkpoint's pairs.

@@ -38,8 +38,8 @@ function tickLabels(values, format, increment) {
 function missingText(g) {
   const seat = g.seat, whose = seat.job || "its line", kind = seat.trained ? "trained checkpoint" : "checkpoint", yet = g.missing === "not_yet";
   if (seat.clock == null) return yet ? `${whose} has not ended yet` : `${whose} ended with no checkpoint`;
-  if (g.position == null) return `the held checkpoint has no ${seat.clock} position`;
-  const where = `${seat.clock} ${(+g.position.toPrecision(6)).toLocaleString("en-US")}`;
+  if (g.value == null) return `the held checkpoint has no ${seat.clock} position`;
+  const where = `${seat.clock} ${(+g.value.toPrecision(6)).toLocaleString("en-US")}`;
   if (seat.at_or_before) return yet ? `${whose} has not saved past ${where} yet` : `${whose} has no ${kind} at or before ${where}`;
   return `${whose} has no ${kind} at ${where} ${yet ? "yet" : "and never will"}`;
 }
@@ -202,9 +202,9 @@ function model(D) {
   const placed = i => D.players[i].placed;
   const lineOf = i => D.players[i].line ?? "";
   const positioned = indices.filter(i => D.players[i].run == null && placed(i));
-  const posClocks = [...new Set(positioned.flatMap(i => Object.keys(D.players[i].at)))];
+  const atClocks = [...new Set(positioned.flatMap(i => Object.keys(D.players[i].at)))];
   // The clock a line's checkpoints are keyed by: a job's first, else the one the report names.
-  const alignClock = T.clocks.find(c => !BUILT_IN.includes(c.name))?.name ?? (posClocks.includes(R.clock) ? R.clock : posClocks[0]);
+  const alignClock = T.clocks.find(c => !BUILT_IN.includes(c.name))?.name ?? (atClocks.includes(R.clock) ? R.clock : atClocks[0]);
   // Named lines in order, then the checkpoints of no line. A colour follows the curve's position, never its rank.
   const named = [...new Set(positioned.map(lineOf))].sort((a, b) => (a === "") - (b === "") || a.localeCompare(b));
   // A curve's key identifies it on the page: a job's name, or its line. Only external
@@ -359,7 +359,7 @@ function model(D) {
       if (!samples) return [];
       const points = samples.map(p => ({x: p.at, y: p.value}));
       const markers = job.runs.flatMap(run => {
-        const x = T.runs.find(r => r.name === run)?.reached?.[panel.clock];
+        const x = T.runs.find(r => r.name === run)?.at?.[panel.clock];
         if (x == null || x < points[0].x || x > points.at(-1).x) return [];
         const right = points.findIndex(p => p.x >= x), b = points[right], a = points[Math.max(0, right - 1)];
         const y = x === b.x ? b.y : a.y + (b.y - a.y) * (x - a.x) / (b.x - a.x);
@@ -425,7 +425,7 @@ function model(D) {
     };
   };
   const evaluated = pts => pts.filter(p => !p.missing && !p.skip);
-  return {T, R, JOBS, marks, markOf, jobPoints, cellOf, subjectAt, placed, positioned, posClocks, alignClock, fixedPlayers, usesSelection, panelSelection, seated, scheduleSeries, coverage, jobOfRun, linesOf, lineMembers, playerName, selName, choices, opponents, evalValue, evaluated};
+  return {T, R, JOBS, marks, markOf, jobPoints, cellOf, subjectAt, placed, positioned, atClocks, alignClock, fixedPlayers, usesSelection, panelSelection, seated, scheduleSeries, coverage, jobOfRun, linesOf, lineMembers, playerName, selName, choices, opponents, evalValue, evaluated};
 }
 
 // The first curve supplies the index headline, with the page's default score,

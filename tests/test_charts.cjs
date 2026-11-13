@@ -258,7 +258,7 @@ test("score tooltips name the interval and row unit without changing values", ()
 
 test("configured curves interpolate at recorded absolute clocks without extrapolation", () => {
   const training = {jobs: [{name: "large", launch: "large", runs: ["a", "b"]}],
-    runs: [{name: "a", reached: {updates: 1200}}, {name: "b", reached: {updates: 900}}], checkpoints: [], clocks: []};
+    runs: [{name: "a", at: {updates: 1200}}, {name: "b", at: {updates: 900}}], checkpoints: [], clocks: []};
   const data = page([], [], training);
   const schedule = {clock: "updates", jobs: {large: [{at: 1000, value: 1}, {at: 1400, value: 0.2}]}};
   const [s] = context.model(data).scheduleSeries(schedule);
@@ -266,9 +266,9 @@ test("configured curves interpolate at recorded absolute clocks without extrapol
   assert.equal(s.markers.length, 1); assert.equal(s.markers[0].x, 1200);
   assert.ok(Math.abs(s.markers[0].y - 0.6) < 1e-10);
   assert.match(s.markers[0].meta, /recorded updates/);
-  training.runs[0].reached.updates = 1400;
+  training.runs[0].at.updates = 1400;
   assert.equal(context.model(data).scheduleSeries(schedule)[0].markers[0].y, 0.2);
-  delete training.runs[0].reached.updates;
+  delete training.runs[0].at.updates;
   assert.equal(context.model(data).scheduleSeries(schedule)[0].markers.length, 0);
 });
 

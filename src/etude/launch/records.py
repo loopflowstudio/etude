@@ -65,19 +65,19 @@ Phase = Literal["queued", "renting", "setting_up", "running", "stopping", "done"
 
 
 def number(value: float) -> str:
-    """A clock position as written: whole numbers without a decimal point."""
+    """A clock's value as written: whole numbers without a decimal point."""
     return str(int(value)) if float(value).is_integer() else str(value)
 
 
 class Until(Record):
-    """How far a job goes: a position on one of its clocks, absolute also when continuing.
+    """How far a job goes: a value on one of its clocks, absolute also when continuing.
 
     Written and stored as "clock=value", like `steps=26000`; a whole number is
     kept as an int, so `steps=26000.0` is the same target.
     """
 
     clock: str = Field(pattern=r"^[A-Za-z0-9_]+$")
-    position: int | float = Field(ge=0, allow_inf_nan=False)
+    value: int | float = Field(ge=0, allow_inf_nan=False)
 
     @classmethod
     def parse(cls, text: str) -> Until:
@@ -91,26 +91,26 @@ class Until(Record):
             return value
         clock, equals, text = value.partition("=")
         try:
-            position = float(text) if "." in text or "e" in text.lower() else int(text)
+            parsed = float(text) if "." in text or "e" in text.lower() else int(text)
         except ValueError:
-            position = None
-        if not equals or not clock.replace("_", "").isalnum() or position is None or position < 0:
+            parsed = None
+        if not equals or not clock.replace("_", "").isalnum() or parsed is None or parsed < 0:
             raise LauncherError(
                 f"{value!r} is not a target; write it as clock=value, like steps=26000"
             )
-        return {"clock": clock, "position": position}
+        return {"clock": clock, "value": parsed}
 
-    @field_validator("position")
+    @field_validator("value")
     @classmethod
-    def _whole(cls, position: int | float) -> int | float:
-        return int(position) if isinstance(position, float) and position.is_integer() else position
+    def _whole(cls, value: int | float) -> int | float:
+        return int(value) if isinstance(value, float) and value.is_integer() else value
 
     @model_serializer
     def _as_text(self) -> str:
         return str(self)
 
     def __str__(self) -> str:
-        return f"{self.clock}={number(self.position)}"
+        return f"{self.clock}={number(self.value)}"
 
 
 class Stale(LauncherError):

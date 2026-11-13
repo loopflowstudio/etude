@@ -489,7 +489,8 @@ class ScorePoint(Record):
     name: str
     # None for a checkpoint no training run under the source recorded.
     ordinal: int | None
-    clocks: dict[str, float]
+    # Where each of its training run's clocks stood when it was saved; empty for no run's.
+    at: dict[str, float]
     value: float
     # A 95% interval resampling whole matches; None with fewer than two.
     interval: tuple[float, float] | None
@@ -547,21 +548,21 @@ def scores(
                 select checkpoint, min(name) as name from players where checkpoint is not null
                 group by checkpoint
             )
-            select s.seating, t.run, t.experiment, s.checkpoint, n.name, t.ordinal, t.clocks,
+            select s.seating, t.run, t.experiment, s.checkpoint, n.name, t.ordinal, t."at",
                 r.match, sum(r._value), sum(r._per), count(*)
             from r join _held using (run, match)
             join schedule s on s.tournament = ? and s.match = r.match
             join named n on n.checkpoint = s.checkpoint
             left join training_checkpoints t on t.checkpoint = s.checkpoint
-            group by s.seating, t.run, t.experiment, s.checkpoint, n.name, t.ordinal, t.clocks,
+            group by s.seating, t.run, t.experiment, s.checkpoint, n.name, t.ordinal, t."at",
                 r.match
             """,
             [benchmark],
         ).fetchall()
     # Per point, where its checkpoint stood: each match's totals and rows, its resampling unit.
     units: dict[_Point, dict[str, tuple[float, float, int]]] = {}
-    for seating, run, experiment, checkpoint, name, ordinal, clocks, match, *sums in found:
-        point = _Point(seating, run, experiment, checkpoint, name, ordinal, clocks)
+    for seating, run, experiment, checkpoint, name, ordinal, at, match, *sums in found:
+        point = _Point(seating, run, experiment, checkpoint, name, ordinal, at)
         total, per_total, rows = sums
         units.setdefault(point, {})[match] = (float(total), float(per_total), int(rows))
     curves: dict[tuple[str, str | None, str | None], list[ScorePoint]] = {}
@@ -578,7 +579,7 @@ def scores(
                 checkpoint=point.checkpoint,
                 name=point.name,
                 ordinal=point.ordinal,
-                clocks=json.loads(point.clocks) if point.clocks else {},
+                at=json.loads(point.at) if point.at else {},
                 value=estimated.value,
                 interval=estimated.interval,
                 rows=sum(rows for *_, rows in totals.values()),
@@ -608,8 +609,8 @@ class _Point:
     checkpoint: str
     name: str
     ordinal: int | None
-    # The training checkpoint's clocks as stored JSON, decoded once per point.
-    clocks: str | None
+    # The training checkpoint's `at` as stored JSON, decoded once per point.
+    at: str | None
 
 
 def _training_order(point: ScorePoint) -> tuple[bool, int, list[str | int], str]:

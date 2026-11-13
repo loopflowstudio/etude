@@ -1004,7 +1004,7 @@ def report():
     )
     page = build(measured, file)
     assert page.training.metrics == ("wanted", "time/train")
-    assert page.training.runs[0].reached["step"] == 1002
+    assert page.training.runs[0].at["step"] == 1002
 
 
 def test_a_selective_page_reads_each_block_once_from_a_bucket(tmp_path: Path) -> None:

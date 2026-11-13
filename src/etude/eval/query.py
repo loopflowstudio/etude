@@ -7,13 +7,13 @@ beside Etude's own tables:
 | table | columns |
 |---|---|
 | `runs` | run, experiment, environment (identity), environment_name, environment_config, tournament, state (`finished` or `failed` from its `state.json`; null while it has not ended, so its results are partial) |
-| `players` | player (its key, encoded), name (the latest its seats give), names (every one, the latest first), kind (`model` or `code`), checkpoint (its key), artifact (digest), uri, config, positions, lines, and `config.KEY` per scalar config key |
+| `players` | player (its key, encoded), name (the latest its seats give), names (every one, the latest first), kind (`model` or `code`), checkpoint (its key), artifact (digest), uri, config, seated_at, lines, and `config.KEY` per scalar config key |
 | `matches` | run, match, conditions, games, seed, state, error, wall_ms, execution (result provenance), newest (of the match's done records in its environment, 1 for the latest recorded, the one that counts; null for a failure) |
 | `seats` | run, match, seat, player, name (what the record calls it), the version that played: commit, source (digest), at (where its checkpoint stood, or null) and line (the learner it belongs to, or null) |
 | `groups` | run, match, group, seat |
 | `tournaments` | tournament, format (`benchmark` or `round_robin`), environment, conflict |
 | `schedule` | tournament, match, seating, checkpoint (its key, the one held) and the seating's tags of a benchmark's match; no checkpoint for a seating of fixed players |
-| `training_checkpoints` | run, experiment, ordinal, checkpoint (its key, `RUN/checkpoints/NAME`), artifact (digest), wall_ms, clocks (where each stood) |
+| `training_checkpoints` | run, experiment, ordinal, checkpoint (its key, `RUN/checkpoints/NAME`), artifact (digest), wall_ms, at (where each of its run's clocks stood) |
 | `blobs` | run, match (none for a converted run's other files), sha256, size_bytes |
 | ROLLUP (one per `etude.eval.records.Rollup`) | run, the rollup's `by` columns, rows, and its `sums` |
 
@@ -25,8 +25,8 @@ When its eval runs disagree, `conflict` names how (`tournament_conflict`,
 recorded, read from their stored JSON, so a model joins to where its
 run's clocks stood by key (`players.checkpoint = training_checkpoints.checkpoint`),
 never by its bytes. A seat may say where its checkpoint stood itself
-(`etude.eval.records.CheckpointRef.at`): `players.positions` lists every distinct
-position match records give it, the latest record's first, and `players.lines` every
+(`etude.eval.records.CheckpointRef.at`): `players.seated_at` lists every distinct
+`at` match records give it, the latest record's first, and `players.lines` every
 learner they say it belongs to (`CheckpointRef.line`), and `players.names` every
 name, the same way. A match counts once per environment whichever version
 played it: the latest done record holding it, `matches.newest = 1`
@@ -130,7 +130,7 @@ NUMERIC = ("BOOLEAN", "BIGINT", "DOUBLE")
 # Keys and coordinates of an author table's rows: never a value.
 KEYS = ("seat", "group", "game", "run", "match")
 # A kept database of another schema is deleted and read again from its store.
-SCHEMA = 12
+SCHEMA = 13
 
 # How a match's records order, newest first: by when each was recorded, then by run name.
 # `matches.newest` ranks done records so; `etude.eval.tournament.played` orders runs alike.
@@ -248,7 +248,7 @@ def _create(db: duckdb.DuckDBPyConnection, experiment: str, storage: Storage) ->
     db.execute('create table "groups" (run VARCHAR, match VARCHAR, "group" VARCHAR, seat BIGINT)')
     db.execute(
         "create table training_checkpoints (run VARCHAR, experiment VARCHAR, ordinal BIGINT,"
-        " checkpoint VARCHAR, artifact VARCHAR, wall_ms BIGINT, clocks JSON)"
+        ' checkpoint VARCHAR, artifact VARCHAR, wall_ms BIGINT, "at" JSON)'
     )
 
 
@@ -395,7 +395,7 @@ def _training_checkpoints(
         )  # fmt: skip
     select, values = unnest(
         {"run": "VARCHAR", "experiment": "VARCHAR", "ordinal": "BIGINT", "checkpoint": "VARCHAR",
-         "artifact": "VARCHAR", "wall_ms": "BIGINT", "clocks": "VARCHAR"},
+         "artifact": "VARCHAR", "wall_ms": "BIGINT", "at": "VARCHAR"},
         rows,
     )  # fmt: skip
     # One run copied to several places records each checkpoint once.
@@ -572,7 +572,7 @@ def _put(
 
 
 def _canonical(value: object) -> str:
-    """JSON with sorted keys, so equal positions compare equal as text."""
+    """JSON with sorted keys, so equal `at`s compare equal as text."""
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
@@ -952,12 +952,12 @@ def _players_table(db: duckdb.DuckDBPyConnection, players: dict[str, list[Player
             columns[key] = seen.pop()
         else:
             warnings.warn(f"player config {key!r} has types {sorted(seen)}; only in `config`")
-    positions = _seat_values(db, '"at"')
+    seated_at = _seat_values(db, '"at"')
     lines = _seat_values(db, "line")
     names = _seat_values(db, "name")
     db.execute(
         "create or replace table players (player VARCHAR, name VARCHAR, names JSON, kind VARCHAR,"
-        " checkpoint VARCHAR, artifact VARCHAR, uri VARCHAR, config JSON, positions JSON,"
+        " checkpoint VARCHAR, artifact VARCHAR, uri VARCHAR, config JSON, seated_at JSON,"
         " lines JSON" + "".join(f', "config.{key}" {kind}' for key, kind in columns.items()) + ")"
     )
     rows: list[list[object]] = []
@@ -972,7 +972,7 @@ def _players_table(db: duckdb.DuckDBPyConnection, players: dict[str, list[Player
                 given[0].kind,
                 *_checkpoint(given[0]),
                 json.dumps(given[0].config),
-                json.dumps([json.loads(each) for each in positions[identity]]),
+                json.dumps([json.loads(each) for each in seated_at[identity]]),
                 json.dumps(lines[identity]),
                 *(flat[identity].get(key) for key in columns),
             ]
@@ -989,7 +989,7 @@ def _players_table(db: duckdb.DuckDBPyConnection, players: dict[str, list[Player
             "artifact": "VARCHAR",
             "uri": "VARCHAR",
             "config": "VARCHAR",
-            "positions": "VARCHAR",
+            "seated_at": "VARCHAR",
             "lines": "VARCHAR",
             **{f"config.{key}": kind for key, kind in columns.items()},
         },

@@ -272,8 +272,8 @@ run.tag(model, "best")  # tags can change later
   file did. A JSON model uses `.json.data` to keep it distinct from the JSON
   checkpoint record. Removing stored files by rule is not built.
 - **Nothing recorded is replaced.** Recording the same model at the same
-  coordinate again returns the existing reference and sends nothing. A
-  different model at a recorded coordinate is a new checkpoint,
+  `at` again returns the existing reference and sends nothing. A
+  different model at a recorded `at` is a new checkpoint,
   `CLOCK-VALUE.ordinal-N.EXT` beside the first. A name some file already
   holds is never reused, even one an interrupted attempt kept without its
   record. Only tags change later.
@@ -295,7 +295,7 @@ import os
 
 run = track(experiment="capacity-pilot", clocks=[Step("updates", "optimizer updates, absolute")])
 hours = float(os.environ["ETUDE_UNTIL_VALUE"])  # the job's until="running_hours=10"
-while run.position("running_hours") < hours:
+while run.at("running_hours") < hours:
     update, loss = train_one_update()
     run.log({"rl/loss": loss}, updates=update)
     if run.checkpoint_due(1):  # every running hour
@@ -320,7 +320,7 @@ have neither. Where a checkpoint has neither, such as a
 run copied without those records, the report says so at its top, naming the
 runs: charts and seats on these clocks leave such a checkpoint out.
 
-`run.position(clock)` says where the run stands on any clock;
+`run.at(clock)` says where the run stands on any clock;
 `run.checkpoint_due(every, clock="running_hours")` whether the clock has
 passed a multiple of `every` since the latest checkpoint. Either clock can be
 a job's `until`, the page's x axis, or a seat's clock
@@ -538,12 +538,12 @@ of continuations that led to it. A checkpoint a training run saved
 is drawn in that run's job; every other placed checkpoint is drawn in its
 line's curve, labelled by the line's name, or in one curve of "checkpoints
 with no line". `Crosstable` looks only within a line.
-Every unplaced player, code or a checkpoint seated without a position, is an
+Every unplaced player, code or a checkpoint seated without an `at`, is an
 anchor, and the page names the unplaced checkpoints.
 
 **Evaluation only.** An experiment with eval runs and no training runs draws
 too: the page says "Evaluation only", Perf and ML details say there are no
-training runs, and the x axis offers the clocks the seats' positions use.
+training runs, and the x axis offers the clocks the seats' `at`s use.
 Matches of eval runs held for no tournament are offered as "matches outside a
 tournament", each counting once per environment from its latest record,
 whichever eval run made it.

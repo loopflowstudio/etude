@@ -272,7 +272,7 @@ class FakeService:
             )
         data = output_bytes(work.attempt)
         target = None if work.until is None else Until.parse(work.until)
-        clocks = {} if target is None else {target.clock: target.position}
+        clocks = {} if target is None else {target.clock: target.value}
         output = Output(
             name="weights.pt", sha256=hashlib.sha256(data).hexdigest(), size_bytes=len(data)
         )

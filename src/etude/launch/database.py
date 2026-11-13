@@ -123,7 +123,7 @@ CREATE INDEX IF NOT EXISTS attempts_session ON attempts(session);
 
 Fact = str | int | None
 # Prototype databases from another schema version are refused, never migrated.
-_VERSION = 16
+_VERSION = 17
 
 
 def _iso(at: datetime | None) -> str | None:

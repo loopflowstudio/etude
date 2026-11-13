@@ -40,7 +40,7 @@ const TRAINED = T.runs.length > 0;
 
 // The view lives in the URL, so a reload or a rewritten page shows the same thing. The x axis
 // offers the clocks training declared or positions use, then Etude's hours where training ran.
-const clockNames = [...new Set([...T.clocks.map(c => c.name).filter(c => !BUILT_IN.includes(c)), ...M.posClocks]), ...(TRAINED || !M.posClocks.length ? BUILT_IN : [])];
+const clockNames = [...new Set([...T.clocks.map(c => c.name).filter(c => !BUILT_IN.includes(c)), ...M.atClocks]), ...(TRAINED || !M.atClocks.length ? BUILT_IN : [])];
 const firstClock = clockNames.includes(R.clock) ? R.clock : clockNames[0];
 const S = Object.assign({hide: "", filter: "{}", eclock: firstClock, pclock: firstClock, mlclock: firstClock, opp: "first", score: "0", sel: "", lines: "on", mjob: "", mkey: "", xline: "", smooth: "on", fpath: "", fscale: "share", live: "1"},
   Object.fromEntries(new URLSearchParams(location.hash.slice(1))), {commit: COMMIT});
@@ -462,7 +462,7 @@ function flame(c, panel, vis, color, swatch) {
     children: [...new Set(trees.flatMap(t => t.children.map(ch => ch.name)))].map(name => meanTree(trees.map(t => t.children.find(ch => ch.name === name) || {name, seconds: 0, status: "recorded", children: []})))});
   const items = vis.map(j => {
     const trees = j.runs.map(run => T.timers.find(t => t.run === run && t.prefix === panel.prefix)).filter(Boolean);
-    const steps = j.runs.map(run => T.runs.find(r => r.name === run)?.reached[per]).filter(v => v > 0);
+    const steps = j.runs.map(run => T.runs.find(r => r.name === run)?.at[per]).filter(v => v > 0);
     const every = n => j.runs.length > 0 && n === j.runs.length;
     return {j, tree: every(trees.length) ? meanTree(trees.map(t => t.tree)) : null, steps: every(steps.length) ? mean(steps) : null};
   });

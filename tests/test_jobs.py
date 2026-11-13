@@ -167,13 +167,13 @@ def test_a_training_jobs_smoke_form_is_its_smoke_config(tmp_path: Path) -> None:
 def test_a_target_is_read_once_and_one_job_has_one_id_however_it_is_written() -> None:
     # Written as text, as an experiment file does.
     written = Job.model_validate({"command": "train", "max_hours": 1, "until": "steps=26000.0"})
-    assert written.until == Until(clock="steps", position=26000)
+    assert written.until == Until(clock="steps", value=26000)
     assert str(written.until) == "steps=26000" and written.model_dump()["until"] == "steps=26000"
     whole = Job(command="train", max_hours=1, until=Until.parse("steps=26000"))
     assert job_id(written) == job_id(whole)
     smoked = written.model_copy(update={"smoke": SmokeForm(until=Until.parse("steps=2"))})
     small = tiny(smoked)
-    assert small is not None and small.until == Until(clock="steps", position=2)
+    assert small is not None and small.until == Until(clock="steps", value=2)
     with pytest.raises(LauncherError, match="not a target"):
         Until.parse("steps")
 

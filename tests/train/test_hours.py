@@ -77,8 +77,8 @@ def test_hours_continue_across_a_resume_and_a_continuation(
 
     clock.wait(2)  # the machine is lost; the next attempt starts two hours later
     second = _start(tmp_path, "r")
-    assert second.position(RUNNING_HOURS) == pytest.approx(1.0)
-    assert second.position(HOURS_SINCE_START) == pytest.approx(3.5)
+    assert second.at(RUNNING_HOURS) == pytest.approx(1.0)
+    assert second.at(HOURS_SINCE_START) == pytest.approx(3.5)
     clock.run(0.25)
     second.log({"loss": 0.5}, step=12)
     parent = second.checkpoint("s3://models/20.pt", step=20)

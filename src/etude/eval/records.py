@@ -26,7 +26,7 @@ own key (`CheckpointKey`) or the code's name, together with its config. One
 checkpoint at two search budgets is two models; two checkpoint keys holding
 the same bytes are two models too, since where a checkpoint's bytes came from
 is not part of what it is. The code's commit and source digest are its
-`Version`, a checkpoint's position on its clocks is `CheckpointRef.at` and
+`Version`, where a checkpoint stood on its clocks is `CheckpointRef.at` and
 the learner it belongs to is `CheckpointRef.line`; all are recorded with each
 match but not part of the key: a match one
 version played counts as played for every version, and reads can select a
@@ -519,7 +519,7 @@ class Rollup(Record):
 
 
 class _OnClock(Record):
-    """A relative seat that looks for a position on `clock`, playing as `inference`.
+    """A relative seat that looks for a value of `clock`, playing as `inference`.
 
     It looks in the held checkpoint's line, or with `job` in each of that
     job's lines. Positions are exact: with no checkpoint there, the seat is a
@@ -546,7 +546,7 @@ class Earlier(_OnClock):
 
 
 class Fraction(_OnClock):
-    """The held checkpoint's line at exactly `value` × its position on `clock`.
+    """The held checkpoint's line at exactly `value` × where it stood on `clock`.
 
     `Fraction(clock="updates", value=0.5, ...)` seats 3,000 for 6,000.
     """
@@ -571,7 +571,7 @@ class Final(Record):
 
 
 class Aligned(_OnClock):
-    """Each of job `job`'s lines at exactly the held checkpoint's position on `clock`."""
+    """Each of job `job`'s lines at exactly where the held checkpoint stood on `clock`."""
 
     kind: Literal["aligned"] = "aligned"
     job: str
@@ -585,7 +585,7 @@ _RELATIVE = (Earlier, Fraction, At, Final, Aligned)
 # Why a relative seat has no checkpoint: none there yet, or there never will be.
 type Missing = Literal["not_yet", "never"]
 
-# Relative seat positions match exactly, up to float arithmetic (0.3 × 1,000).
+# Relative seat values match exactly, up to float arithmetic (0.3 × 1,000).
 _EXACT = 1e-9
 
 
@@ -641,15 +641,15 @@ class Seated(Record):
 class Gap(Record):
     """A held checkpoint whose relative seat has no checkpoint, and why.
 
-    `position` is where on its clock the seat looks for the held checkpoint;
-    None for `Final`, or a held checkpoint with no position on that clock.
+    `value` is where on `seat.clock` the seat looks for the held checkpoint;
+    None for `Final`, or a held checkpoint whose `at` lacks that clock.
     """
 
     seating: str
     checkpoint: CheckpointKey
     missing: Missing
     seat: Relative
-    position: float | None = None
+    value: float | None = None
 
 
 class Seating(Record):
@@ -663,7 +663,7 @@ class Seating(Record):
     chosen checkpoints can meet: `Inference.model(checkpoint)` seats one as the
     benchmark would. It makes one match per condition (`matches`).
 
-    `games` is per condition and point: a position of the held checkpoint's
+    `games` is per condition and point: an `at` of the held checkpoint's
     job, whatever its seeds. With `seeds="every"` a point plays every pair of
     a seed of that job and a seed of the other seat's (its own line, or a
     fixed player, counting as one), its games split evenly over the pairs,
@@ -790,7 +790,7 @@ class Seating(Record):
                     checkpoint=checkpoint.key,
                     missing="not_yet" if unknown or "not_yet" in results else "never",
                     seat=relative,
-                    position=_wanted(relative, checkpoint),
+                    value=_wanted(relative, checkpoint),
                 )
         # Pairs in seed order, (mine, theirs); this checkpoint's are contiguous from `first`.
         pairs = max(len(mine), 1) * len(found)
@@ -852,7 +852,7 @@ def _chosen(
 
 
 def _wanted(seat: Relative, held: CheckpointRef) -> float | None:
-    """Where on its clock the seat looks for `held`; None for `Final`, or with no position."""
+    """Where on its clock the seat looks for `held`; None for `Final`, or with no value there."""
     if isinstance(seat, Final):
         return None
     if isinstance(seat, At):
@@ -870,8 +870,8 @@ def _wanted(seat: Relative, held: CheckpointRef) -> float | None:
 def _find(seat: Relative, held: CheckpointRef, line: Line) -> CheckpointRef | Missing:
     """The checkpoint of `line` the seat names for `held`, or why there is none.
 
-    "never" once the line has ended or has passed the position without saving there.
-    At or before, the latest checkpoint up to the position, once one is past it or
+    "never" once the line has ended or has passed the value without saving there.
+    At or before, the latest checkpoint up to the value, once one is past it or
     the line has ended: until then a later save could still be nearer.
     """
     if isinstance(seat, Final):

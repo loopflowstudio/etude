@@ -132,7 +132,7 @@ class Crosstable(Record):
 
 
 class Anchors(Record):
-    """Fixed players (code, or checkpoints with no position) against each other.
+    """Fixed players (code, or checkpoints with no `at`) against each other.
 
     Drawn once, not per job: each anchor's score against the others, and its
     strength, the score over its matches that seat no placed checkpoint. A

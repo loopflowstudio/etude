@@ -377,8 +377,8 @@ class Run:
         such as `s3://...` or an `ArtifactRef`, only the reference is recorded.
 
         Recording is idempotent and nothing recorded is replaced. The same
-        model at the same coordinate returns the existing record's reference.
-        A different one at a recorded coordinate is kept as a new version,
+        model at the same `at` returns the existing record's reference.
+        A different one at a recorded `at` is kept as a new version,
         `CLOCK-VALUE.ordinal-N`, beside the first.
 
         Returns the model's reference: pass it to whatever evaluates the model.
@@ -386,16 +386,16 @@ class Run:
         """
         staged: Path | None = None
         try:
-            coordinate = {**(at or {}), **clocks}
-            if set(coordinate) != set(self._clock_names):
+            given = {**(at or {}), **clocks}
+            if set(given) != set(self._clock_names):
                 raise ValueError("checkpoint_clock_mismatch")
-            declared = {name: float(coordinate[name]) for name in self._clock_names}
+            declared = {name: float(given[name]) for name in self._clock_names}
             wall_ms, hours = self._now()
             at = {**declared, **hours}
             name = checkpoint_name(at)
             reference, staged = self._stage(artifact, name)
             for known in self._recorded.values():
-                # Etude's clocks always move on, so the same coordinate is the author's.
+                # Etude's clocks always move on, so the same `at` is the author's.
                 same = all(known.at.get(n) == v for n, v in declared.items())
                 if same and _same_model(known.artifact, reference):
                     if staged is not None:
@@ -430,7 +430,7 @@ class Run:
         self._offer(_Kept(name, record))
         return record.artifact
 
-    def position(self, clock: str) -> float | None:
+    def at(self, clock: str) -> float | None:
         """Where the run stands on `clock`: Etude's clocks now, an author's the highest
         value this process logged. None for an author's clock before its first row."""
         if clock in BUILT_IN_NAMES:
@@ -447,7 +447,7 @@ class Run:
         """
         if every <= 0:
             raise ValueError("every must be positive")
-        here, latest = self.position(clock), self._latest_record()
+        here, latest = self.at(clock), self._latest_record()
         there = 0.0 if latest is None else latest.at.get(clock, 0.0)
         return here is not None and here // every > there // every
 
@@ -712,18 +712,18 @@ class Run:
                     values[name] = float(value)  # type: ignore[arg-type]  # numpy and tensor scalars
                 except (TypeError, ValueError):
                     values[name] = type(value).__name__
-        coordinate: dict[str, float] = {}
+        at: dict[str, float] = {}
         for name in self._columns:
             value = values.get(name)
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 if math.isfinite(value):
-                    coordinate[name] = float(values.pop(name))  # type: ignore[arg-type]
+                    at[name] = float(values.pop(name))  # type: ignore[arg-type]
                 else:
                     # Not a finite number: stays among the values as written.
                     self._warn(
                         "incomplete", f"a logged row's clock {name!r} is not a finite number"
                     )
-        if len(coordinate) != len(self._columns):
+        if len(at) != len(self._columns):
             # Charted against the clocks it does give, and wall time; counted.
             self.incomplete += 1
         if self._metric_name_limit is not None and "metric_names" not in self._warned:
@@ -741,7 +741,7 @@ class Run:
                 )
                 # The one-time warning needs no growing name registry afterward.
                 self._metric_names.clear()
-        return LoggedRow(wall_ms=row.wall_ms, clocks=coordinate, values=values)
+        return LoggedRow(wall_ms=row.wall_ms, clocks=at, values=values)
 
     def _save(self, folder: str, name: str, record: Record) -> None:
         """Write one small record whole, so a reader never sees half of it."""
