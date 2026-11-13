@@ -71,42 +71,15 @@ def run(
         settings = config_type(train).model_validate_json(text)
         label = experiment or file.stem
         base = default_root() / label
-        chosen_seed = seed
         if resume is not None:
-            _, root = run_directory(base, label, resume)
-            prior = RunFiles(root).run_file()
-            if prior is None:
-                raise EtudeError("run_not_found", 404, detail=resume)
-            chosen_seed = prior.declaration.seed if seed is None else seed
-            if prior.experiment != label:
-                raise EtudeError("run_name_belongs_to_another_experiment")
-            validate_resume(prior, config=text, seed=chosen_seed)
-            data = read(DirectoryStorage(base), label, resume)
-            if until is None and data.attempts and data.attempts[-1].until is not None:
-                until = Until.model_validate(data.attempts[-1].until)
-            if data.state is not None and data.state.state == "finished":
-                reached = data.reached
-                for at in [
-                    *(item.at for item in saved_states(root / "out")),
-                    *(item.at for item in data.checkpoints),
-                ]:
-                    for clock, position in at.items():
-                        reached[clock] = max(reached.get(clock, 0), position)
-                if until is None or until.value <= reached.get(until.clock, 0):
-                    raise EtudeError(
-                        "run_already_finished", detail="give --until with a later target"
-                    )
-            if until is not None and until.clock not in {
-                clock.name for clock in prior.declaration.clocks
-            }:
-                raise ValueError(f"undeclared clock: {until.clock!r}")
             identity = resume
+            seed, until = _resumed(base, label, resume, config=text, seed=seed, until=until)
         else:
-            chosen_seed = 0 if seed is None else seed
-            identity = f"{name or file.stem}-seed-{chosen_seed}"
-            _, root = run_directory(base, label, identity)
-            if (root / "run.json").exists():
-                raise EtudeError("run_name_taken", detail=f"{identity}; use --resume {identity}")
+            seed = 0 if seed is None else seed
+            identity = f"{name or file.stem}-seed-{seed}"
+        root = run_directory(base, label, identity)[1]
+        if resume is None and (root / "run.json").exists():
+            raise EtudeError("run_name_taken", detail=f"{identity}; use --resume {identity}")
         commit = subprocess.run(
             ["git", "-C", str(file.parent), "rev-parse", "HEAD"],
             capture_output=True,
@@ -117,13 +90,14 @@ def run(
             "ETUDE_EXPERIMENT": label,
             "ETUDE_RUN": identity,
             "ETUDE_JOB_NAME": name or file.stem,
-            "ETUDE_SEED": str(chosen_seed if chosen_seed is not None else 0),
             "ETUDE_TRACK_DIR": str(base),
             "ETUDE_OUT": str(root / "out"),
             "ETUDE_RESUME": "1" if resume is not None else "0",
         }
         if "ETUDE_HOME" in os.environ:
             values["ETUDE_HOME"] = os.environ["ETUDE_HOME"]
+        if seed is not None:  # a historical run may have declared none
+            values["ETUDE_SEED"] = str(seed)
         if commit.returncode == 0:
             values["ETUDE_COMMIT"] = commit.stdout.strip()
         if until is not None:
@@ -154,6 +128,39 @@ def run(
         return result
     finally:
         sys.path.remove(str(file.parent))
+
+
+def _resumed(
+    base: Path, label: str, run: str, *, config: str, seed: int | None, until: Until | None
+) -> tuple[int | None, Until | None]:
+    """The seed and target a resumed attempt uses, or the refusal that leaves the run as it is.
+
+    An omitted seed or target is the stored one. A finished run resumes only
+    towards a target beyond everything it has logged, saved or published.
+    """
+    root = run_directory(base, label, run)[1]
+    prior = RunFiles(root).run_file()
+    if prior is None:
+        raise EtudeError("run_not_found", 404, detail=run)
+    if prior.experiment != label:
+        raise EtudeError("run_name_belongs_to_another_experiment")
+    if seed is None:
+        seed = prior.declaration.seed
+    validate_resume(prior, config=config, seed=seed)
+    data = read(DirectoryStorage(base), label, run)
+    if until is None and data.attempts and data.attempts[-1].until is not None:
+        until = Until.model_validate(data.attempts[-1].until)
+    if until is not None and until.clock not in {clock.name for clock in prior.declaration.clocks}:
+        raise ValueError(f"undeclared clock: {until.clock!r}")
+    if data.state is not None and data.state.state == "finished":
+        positions = [
+            data.reached,
+            *(item.at for item in saved_states(root / "out")),
+            *(item.at for item in data.checkpoints),
+        ]
+        if until is None or until.value <= max(at.get(until.clock, 0) for at in positions):
+            raise EtudeError("run_already_finished", detail="give --until with a later target")
+    return seed, until
 
 
 @contextmanager

@@ -38,9 +38,7 @@ def read_job_file(
         sys.path.insert(0, folder)
     function = runpy.run_path(str(path.resolve())).get("runs")
     if not callable(function):
-        raise LauncherError(
-            f"{path.name}: define runs() returning a Job, a RunRequest, or a list of Runs"
-        )
+        raise LauncherError(f"{path.name}: define runs() returning jobs or run requests")
     signature = inspect.signature(function)
     hints = typing.get_type_hints(function)
     reserved = {
@@ -106,22 +104,19 @@ def read_job_file(
     )
     if help:
         return []
-    value = values[0]
-    values = list(value) if isinstance(value, (list, tuple)) else [value]
-    if not values or not all(isinstance(each, (Job, RunRequest)) for each in values):
+    returned = values[0]
+    returned = list(returned) if isinstance(returned, (list, tuple)) else [returned]
+    if not returned or not all(isinstance(each, (Job, RunRequest)) for each in returned):
         raise LauncherError(f"{path.name}: runs() must return jobs or run requests")
-    runs = [
-        run
-        for each in values
-        for run in (
-            [
+    runs: list[RunRequest] = []
+    for each in returned:
+        if isinstance(each, RunRequest):
+            runs.append(each)
+        else:
+            runs.extend(
                 RunRequest(job=each, seed=seed, id=f"{each.name or path.stem}-seed-{seed}")
                 for seed in each.seeds
-            ]
-            if isinstance(each, Job)
-            else [each]
-        )
-    ]
+            )
     params = {
         name: each for name, each in arguments.items() if isinstance(each, (str, int, float, bool))
     }

@@ -937,10 +937,12 @@ def _read(
     records = _records(storage, keys)
     attempts = records.attempts
     # The state the latest attempt left, where it left one.
+    # `state.json` is the historical name; where both exist `outcome.json` wins.
     ended = {
-        folder: next(name for name in ("outcome.json", "state.json") if (folder, name) in present)
+        folder: name
         for folder in folders
-        if any((folder, name) in present for name in ("outcome.json", "state.json"))
+        for name in ("state.json", "outcome.json")
+        if (folder, name) in present
     }
     left = (records.folder_of[attempt.writer] for attempt in reversed(attempts))
     latest = next((folder for folder in left if folder in ended), None)

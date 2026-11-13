@@ -149,7 +149,11 @@ Remaining, before the accepted API can be treated as built:
 and their three failures passed after explicit-resume fixes; page/hour/lineage
 rerun: 22 passed; tables, read batches, measurement, page, continuation and
 tournament: 82 passed, 6 skipped. Mypy and Ruff passed. Full gate remains later.
-PR #103 stays draft. Earlier checkpoint/carriage checks and the import-boundary
+Compress pass after it (resume checks in `etude.local._resumed`, one outcome-name lookup
+in `read`, plain job expansion; `ETUDE_SEED` unset for a seedless historical run):
+`uv run --extra train pytest tests/train/test_local.py tests/test_jobs.py
+tests/launch/test_cli.py tests/train/test_lifecycle.py tests/train/test_track.py -q`:
+73 passed; mypy and Ruff clean. Earlier checkpoint/carriage checks and the import-boundary
 repair are recorded at `dda6b17:scratch/exp-56.md` (451 passed, type/lint clean).
 
 Counting pins moved by the state build, each with its reason beside it:
