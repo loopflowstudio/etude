@@ -657,7 +657,6 @@ class Scheduler:
             raise LauncherError("a launch needs at least one run")
         for run in runs:
             self._validate_job(run.job, target)
-        resumed = {str(run.id): self._resumed(run) for run in runs if run.resume}
         requested = tuple(run.model_copy(update={"id": run.id or _id()}) for run in runs)
         ids = tuple(str(run.id) for run in requested)
         if len(set(ids)) != len(ids):
@@ -670,7 +669,8 @@ class Scheduler:
                     run=str(run.id),
                     fingerprint=hashlib.sha256(run.model_dump_json().encode()).hexdigest(),
                     requested_revision=sanitize(run.job.revision) if run.job.revision else None,
-                    resume_version=resumed[str(run.id)].version if run.resume else None,
+                    # Refuses a resume before the client publishes source.
+                    resume_version=self._resumed(run).version if run.resume else None,
                 )
                 for run in requested
             ),
@@ -1474,8 +1474,6 @@ class Scheduler:
             )
         if last is not None and not retry:
             return seen.model_copy(update={"phase": "done", "outcome": last.outcome})
-        if len(attempts) >= record.spec.max_attempts:
-            return seen.model_copy(update={"phase": "done", "outcome": "stopped"})
         if last is not None:
             return seen.model_copy(
                 update={

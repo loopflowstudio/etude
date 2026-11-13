@@ -166,16 +166,15 @@ passed**. `uv run mypy`, `uv run ruff check .`,
 `uv run ruff format --check .`: clean. Waiting-query EXPLAIN uses supply
 indexes and `attempts_run(run, number)`; refusal counts pin external calls
 at zero. Shared identity validation adds one module to pools and sync-seal.
-Full gate and remaining acceptance checks are still pending.
+Compress after `897c72b`: `uv run pytest tests/launch/test_{resume,planned_stop,
+scheduler,controller}.py -q`: **77 passed**, after updating two
+`test_scheduler.py` tests that failed at `897c72b` (file-stem job name in
+quote output; explicit `resume=True` for a second tracking context). Full
+gate and remaining acceptance checks are still pending.
 
 
-2026-11-13 implement and two compress passes: `uv run --extra train pytest
-tests/train/test_local.py tests/test_jobs.py tests/launch/test_cli.py
-tests/train/test_cli.py tests/train/test_lifecycle.py tests/train/test_track.py -q`
-and the focused consumer, launcher, page, continuation and tournament files
-passed; mypy and Ruff clean. Exact counts are at `1c76176:scratch/exp-56.md`;
-earlier checkpoint/carriage receipts at `dda6b17:scratch/exp-56.md`. Full gate
-remains later.
+Earlier focused receipts: `1c76176:scratch/exp-56.md` (local run, jobs,
+lifecycle) and `dda6b17:scratch/exp-56.md` (checkpoints, carriage).
 
 Counting pins moved by the state build, each with its reason beside it:
 

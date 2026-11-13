@@ -467,8 +467,8 @@ def test_quote_prints_planned_first_wave_costs_and_rents_nothing(
     assert code == 0
     assert counting.snapshot().provider == 1  # one price; nothing created
     assert capsys.readouterr().out.splitlines() == [
-        "seed1  machine mini  planned rental cost $0.00",
-        "seed2  rent NVIDIA L4 with at least 6 vCPUs, 48 GB at $0.59/hour  planned rental cost $0.88",
+        "job-seed1  machine mini  planned rental cost $0.00",
+        "job-seed2  rent NVIDIA L4 with at least 6 vCPUs, 48 GB at $0.59/hour  planned rental cost $0.88",
         "planned first-wave rental cost: $0.88; nothing rented",
         "job/cohort rental budget: $6.00",
         "Rental costs assume deletion on time. Provider delays can exceed the budget; "
@@ -788,9 +788,13 @@ class Host(FakeService):
         self.disk.hold(run, files)
 
 
-def _tracked(directory: Path, run: str) -> TrackedRun:
+def _tracked(directory: Path, run: str, *, resume: bool = False) -> TrackedRun:
     return track(
-        experiment="lab", clocks=[Step("steps", "training steps")], run=run, directory=directory
+        experiment="lab",
+        clocks=[Step("steps", "training steps")],
+        run=run,
+        directory=directory,
+        resume=resume,
     )
 
 
@@ -845,7 +849,7 @@ def test_a_retry_on_another_owned_host_waits_for_and_continues_the_runs_folder(
         "steps-2.pt",
     ]
 
-    resumed = _tracked(hosts["second"].track, run)
+    resumed = _tracked(hosts["second"].track, run, resume=True)
     latest = resumed.latest_checkpoint()
     assert latest is not None and latest.ordinal == 2
     weights.write_bytes(b"weights at 3")
