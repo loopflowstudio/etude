@@ -116,9 +116,16 @@ def test_continuation_and_report_use_the_same_position_after_an_empty_attempt(
         assert Path(urlparse(checkpoint.artifact.uri).path).read_bytes() == b"weights"
 
 
+@pytest.mark.parametrize(
+    ("populated", "later_metrics"), [(False, True), (True, False), (True, True)]
+)
 @pytest.mark.parametrize("carried", [False, True])
-def test_empty_out_continues_from_copied_checkpoint_before_later_metrics(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, carried: bool
+def test_out_carries_copied_latest_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    populated: bool,
+    later_metrics: bool,
+    carried: bool,
 ) -> None:
     scheduler = local(tmp_path)
     parent = scheduler.queue(Job(command="train", max_hours=1), "local")
@@ -129,24 +136,78 @@ def test_empty_out_continues_from_copied_checkpoint_before_later_metrics(
     with track(
         experiment="recipe", run=parent, clocks=[Step("updates", "updates")], directory=source
     ) as run:
-        run.checkpoint(weights, updates=2)
-        run.log({"loss": 0}, updates=4)
+        if populated:
+            (run.out / "samples.txt").write_bytes(b"samples")
+        run.checkpoint(weights, updates=2, tags=["best"])
+        if later_metrics:
+            run.log({"loss": 0}, updates=4)
+    position = 4 if populated and later_metrics else 2
     destination = DirectoryStorage(tmp_path / "bucket" if carried else source)
     if carried:
         assert sync(source, storages=[destination]) == {}
-        assert OutFiles.model_validate_json(destination.get(f"{parent}/{MEMBERSHIP}")).files == ()
     storage = MeasuredStorage(destination)
-    child = continue_from(scheduler.record(parent), "updates=3", source=storage)
+    child = continue_from(scheduler.record(parent), f"updates={position + 1}", source=storage)
     (lineage,) = child.job.environment
     handed = ParentRun.model_validate_json(lineage.value)
-    assert handed.at == {"updates": 2}
-    assert handed.checkpoint is not None and handed.checkpoint.at == handed.at
-    (given,) = child.job.inputs
-    assert (given.key, given.out, handed.input) == ("checkpoints/updates-2.pt", None, given.name)
-    assert (given.sha256, given.size_bytes) == (sha256(b"saved at 2").hexdigest(), 10)
+    assert handed.at == {"updates": position}
+    assert handed.checkpoint is not None
+    assert handed.checkpoint.at == {"updates": 2} and handed.checkpoint.tags == ()
+    assert handed.checkpoint.artifact.uri == "checkpoints/updates-2.pt"
+    *out_inputs, checkpoint_input = child.job.inputs
+    assert [(given.key, given.out, given.sha256, given.size_bytes) for given in out_inputs] == (
+        [("out/samples.txt", "samples.txt", sha256(b"samples").hexdigest(), 7)] if populated else []
+    )
+    if carried and not populated:
+        assert OutFiles.model_validate_json(destination.get(f"{parent}/{MEMBERSHIP}")).files == ()
+    assert (checkpoint_input.key, checkpoint_input.out, handed.input) == (
+        "checkpoints/updates-2.pt",
+        None,
+        checkpoint_input.name,
+    )
+    assert (checkpoint_input.sha256, checkpoint_input.size_bytes) == (
+        sha256(b"saved at 2").hexdigest(),
+        10,
+    )
+    assert all(given.run == parent for given in child.job.inputs)
     assert storage.listings == 2
     assert storage.got.count(f"{parent}/{MEMBERSHIP}") == int(carried)
-    assert not any(key.startswith(f"{parent}/out/") or key.endswith(".pt") for key in storage.got)
+    assert [key for key in storage.got if key.startswith(f"{parent}/out/")] == (
+        [] if carried or not populated else [f"{parent}/out/samples.txt"]
+    )
+    assert not any(key.endswith(".pt") for key in storage.got)
+    origin = "parent" if populated else "checkpoint"
+    with pytest.raises(LauncherError, match=f"not beyond the {origin}'s"):
+        continue_from(scheduler.record(parent), f"updates={position}", source=destination)
+
+    # An ordinal selects only the checkpoint, without reading out membership or bytes.
+    selected = MeasuredStorage(destination)
+    explicit = continue_from(scheduler.record(parent), "updates=3", source=selected, ordinal=1)
+    assert explicit.job.inputs == (checkpoint_input,)
+    assert ParentRun.model_validate_json(explicit.job.environment[0].value).at == {"updates": 2}
+    assert selected.listings == 2
+    assert f"{parent}/{MEMBERSHIP}" not in selected.got
+    assert not any(key.startswith(f"{parent}/out/") for key in selected.got)
+
+    child_out = source / "child/out"
+    child_out.mkdir(parents=True)
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    for given in child.job.inputs:
+        target = child_out / given.out if given.out is not None else inputs / given.name
+        target.write_bytes(destination.get(f"{parent}/{given.key}"))
+    monkeypatch.setenv("ETUDE_CONTINUES", lineage.value)
+    monkeypatch.setenv("ETUDE_OUT", str(child_out))
+    monkeypatch.setenv("ETUDE_INPUTS_DIR", str(inputs))
+    with track(
+        experiment="recipe", run="child", clocks=[Step("updates", "updates")], directory=source
+    ) as resumed:
+        checkpoint = resumed.latest_checkpoint()
+        assert checkpoint is not None and checkpoint.at == {"updates": 2}
+        assert Path(urlparse(checkpoint.artifact.uri).path).read_bytes() == b"saved at 2"
+        if populated:
+            assert (resumed.out / "samples.txt").read_bytes() == b"samples"
+        else:
+            assert list(resumed.out.iterdir()) == []
 
 
 @pytest.mark.parametrize("populated", [False, True])

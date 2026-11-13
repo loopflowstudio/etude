@@ -1,4 +1,4 @@
-"""A stopped recipe spends attempts and budgets, retaining one run directory."""
+"""A stopped recipe spends attempts and budgets, retaining the run's out."""
 
 from hashlib import sha256
 from pathlib import Path

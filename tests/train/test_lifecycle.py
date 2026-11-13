@@ -84,7 +84,7 @@ def test_local_recipe_stops_resumes_and_repeats_without_another_checkpoint(tmp_p
         with track(clocks=CLOCKS) as other:
             assert other.latest_checkpoint() is None
     with track(experiment="recipe", clocks=CLOCKS, directory=tmp_path / "plain") as plain:
-        with pytest.raises(EtudeError, match="run_directory_not_named"):
+        with pytest.raises(EtudeError, match="out_not_named"):
             _ = plain.out
 
 

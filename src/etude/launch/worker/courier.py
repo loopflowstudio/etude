@@ -349,15 +349,19 @@ class Courier:
                 body = read(link.url, self._send)
             if body is None or len(body) != link.size_bytes:
                 raise StorageUnavailable(f"restored file {key} is missing or has changed length")
-            if named is not None and (
-                len(body) != named.size_bytes or hashlib.sha256(body).hexdigest() != named.sha256
-            ):
+            # Reuse the received bytes for verification and the sent marker;
+            # restoring a large out file needs no second read from disk.
+            digest = hashlib.sha256(body).hexdigest() if key.startswith("out/") else None
+            if named is not None and (len(body) != named.size_bytes or digest != named.sha256):
                 raise StorageUnavailable(f"restored file {key} differs from its checkpoint record")
             target.parent.mkdir(parents=True, exist_ok=True)
             partial = target.with_name(target.name + ".partial")
             partial.write_bytes(body)
             partial.replace(target)
-            self._restored(run, key, target)
+            if digest is not None:
+                self._sent[f"{run}/{key}"] = digest
+            else:
+                self._restored(run, key, target)
         if membership is not None:
             (folder / "out").mkdir(parents=True, exist_ok=True)
             (folder / OUT_PRESENT).touch()
@@ -376,12 +380,8 @@ class Courier:
         self._restored(run, wanted.key, folder / wanted.key)
 
     def _restored(self, run: str, key: str, path: Path) -> None:
-        if key.startswith("out/"):
-            with path.open("rb") as stream:
-                self._sent[f"{run}/{key}"] = hashlib.file_digest(stream, "sha256").hexdigest()
-        else:
-            stat = path.stat()
-            self._sent[f"{run}/{key}"] = (stat.st_size, stat.st_mtime)
+        stat = path.stat()
+        self._sent[f"{run}/{key}"] = (stat.st_size, stat.st_mtime)
 
     @property
     def _track_root(self) -> Path:

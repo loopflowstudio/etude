@@ -18,7 +18,7 @@ Ownership and invariants:
   author's directory or bucket (`etude.run.delivery`). A marker per
   destination records what arrived, so `sync` can finish the job later from
   the same files and replays are harmless.
-- The local run directory uses the same layout as a destination, so with no
+- The local run's folder uses the same layout as a destination, so with no
   destination configured the files are already the record.
 
 Units: wall time is integer milliseconds since the Unix epoch. Clock values
@@ -293,9 +293,9 @@ class Run:
 
     @property
     def out(self) -> Path:
-        """The run directory (out), named by its launch."""
+        """The run's out, named by its launch."""
         if self._out is None:
-            raise EtudeError("run_directory_not_named", 422)
+            raise EtudeError("out_not_named", 422)
         return self._out
 
     def stopping(self) -> bool:

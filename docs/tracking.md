@@ -68,8 +68,8 @@ so `track(clocks=...)` needs no `experiment`, and one naming another
 experiment is refused (`experiment_differs_from_launch`). Launched from a
 plain job file, the script names its experiment. A training function meant
 for any experiment file names none; called on this computer outside a launch,
-it is told its experiment and run directory by `local_launch`
-([below](#a-run-directory-a-stop-signal-and-running-again)).
+it is told its experiment and out by `local_launch`
+([below](#out-a-stop-signal-and-running-again)).
 The files are written to `ETUDE_TRACK_DIR`, one place on the machine for every
 run and attempt, and the launcher carries them to the machine's bucket as each
 file is finished, by the same rules as `sync` (`etude.carriage`): every
@@ -144,7 +144,7 @@ Rules a caller can rely on:
   An attempt that left its block by raising `Stopped` is recorded `stopped`,
   not `failed`, and the report keeps saying “running or unfinished.”
 
-### A run directory, a stop signal and running again
+### Out, a stop signal and running again
 
 ```python
 # train.py
@@ -187,7 +187,7 @@ with local_launch(out="runs/first", experiment="ppo"):
 ```
 
 The training function is written once, as a loop that can be called again.
-Calling it a second time with the same run directory finds `state.pt` and
+Calling it a second time with the same out finds `state.pt` and
 goes on from there; one that had already reached its target does nothing and
 ends finished. Under `etude launch` the launcher makes those calls: the first
 attempt, and another after a lost machine or a planned stop
@@ -201,7 +201,7 @@ path to write or test.
   this loop without changing its config. The clock must be declared in
   `track(clocks=...)`. Values are numeric, including fractional time clocks;
   a loop that requires an integer count can use `int(run.until(...))`.
-- **`run.out` is the run directory**, a `Path` that exists. It belongs to
+- **`run.out` is a `Path` to out**, a directory that exists. It belongs to
   the run, not to an attempt: retries reuse it on the same machine; on another
   machine they restore its portable files as last carried. Keep whatever a later
   call needs to go on there: learner and optimizer state, replay data, a
@@ -227,8 +227,8 @@ path to write or test.
   directory is made if missing. The run is named for the directory, and its
   record is kept inside it, in `DIR/etude/`: read it with
   `etude report FILE.py --source DIR`. Nothing carries a local `out`
-  anywhere. `track` outside both a launch and `local_launch` has no run
-  directory, and `run.out` raises `EtudeError("run_directory_not_named")`.
+  anywhere. `track` outside both a launch and `local_launch` has no out,
+  and `run.out` raises `EtudeError("out_not_named")`.
 - **`run.stopping()` says when to save and stop.** Ask once per step. It is
   true once a stop was requested (`ETUDE_STOP_FILE` exists), or once the
   attempt's deadline (`ETUDE_DEADLINE`) is nearer than the slowest step so
@@ -398,15 +398,16 @@ run.tag(model, "best")  # tags can change later
   holds is never reused, even one an interrupted attempt kept without its
   record. Only tags change later.
 - **Resume from the latest**, when the job keeps no state of its own in
-  [`run.out`](#a-run-directory-a-stop-signal-and-running-again). A later
+  [`run.out`](#out-a-stop-signal-and-running-again). A later
   attempt sees every checkpoint record, and ordinals continue. On another
   machine the launcher restores the latest copied checkpoint and files still
   in out; a removed out checkpoint's record can refer to an unavailable file.
-  A continuation inherits the latest checkpoint if its file remains in out.
-  When out is empty, it instead inherits the latest checkpoint if that file
-  was copied into `checkpoints/`, using the checkpoint's position for lineage
-  and target validation. A removed out checkpoint is never inherited, and
-  Etude does not search older checkpoints to replace it. `etude continue
+  A continuation carries out and inherits the latest checkpoint whenever its
+  file is still available: a member of out or copied into `checkpoints/`.
+  A removed out checkpoint is never inherited, and Etude does not search older
+  checkpoints to replace it. Populated out uses the parent's recorded position
+  for lineage and target validation; empty out with a copied checkpoint uses
+  the checkpoint's position. `etude continue
   --ordinal N` explicitly selects a checkpoint. The inherited checkpoint is
   available until the child records its own. `run.latest_checkpoint()` relocates
   the address when its file is present here; it returns `None` with no record.

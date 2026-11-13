@@ -49,8 +49,8 @@ Queue submission only writes intent and never waits for a provider. The standing
 matches waiting runs, visiting every pool before any on-demand, and rents
 within each on-demand's limits. Keep that loop running
 when the queue must move without further commands.
-`etude continue` queues new runs that start from a copy of a parent's run
-directory, or from one of its recorded checkpoints, with absolute targets and
+`etude continue` queues new runs that start from a copy of a parent's out,
+or from one of its recorded checkpoints, with absolute targets and
 the parent's pool and on-demand; lack of capacity does not reject continuation.
 
 | Record | The question it answers | Exists for |
@@ -1061,7 +1061,7 @@ etude logs --run RUN                     # every attempt, and how each ended
 A run ends when it reaches its target, fails, is cancelled, or uses up its hours
 or dollars, or exhausts its attempts. A lost machine or a planned stop can
 retry within those bounds. The job is called again as a new RunAttempt of the
-same run, with the run directory (`run.out`, `ETUDE_OUT`) as earlier attempts
+same run, with out (`run.out`, `ETUDE_OUT`) as earlier attempts
 left it, and goes on from the state it kept there, or from the latest
 checkpoint its [tracking](tracking.md) recorded.
 
@@ -1069,7 +1069,7 @@ checkpoint its [tracking](tracking.md) recorded.
   its cause.
 - **A planned stop** is the job's own: it saw `run.stopping()`, saved its
   state and raised `etude.train.run.Stopped`
-  ([Tracking](tracking.md#a-run-directory-a-stop-signal-and-running-again)).
+  ([Tracking](tracking.md#out-a-stop-signal-and-running-again)).
   The attempt ends `stopped`. A command job says the same by exiting 75
   (`EX_TEMPFAIL`, "try again later"), which is what a typed job's process
   exits with when its function raises `Stopped`.
@@ -1196,7 +1196,7 @@ PREFIX/RUN/                      everything about one run
   attempts/ATTEMPT/NAME          files the job left in its output directory
   run.json  state.json  metrics/ the run's tracked files, as they are,
   checkpoints/                     every checkpoint tracking recorded among them
-  out/                           run directory (`run.out`), as the job keeps it
+  out/                           out (`run.out`), as the job keeps it
   out.json                       keys, SHA256 digests and byte lengths in the last carried out
 PREFIX/sessions/SESSION/         one machine's instructions, inbox and notes
   out/worker.log/OFFSET          the worker's own log, in pieces named by first byte
@@ -1271,9 +1271,9 @@ etude cancel RUN
 ```
 
 Continuation starts a new run of the parent's job and seed from the parent's
-run directory: the child's `out` begins as a copy of the parent's, as last
+out: the child's `out` begins as a copy of the parent's, as last
 carried, so a job that keeps its state there (weights, optimizer, anything
-else) goes on exactly where the parent stopped. The parent and its directory
+else) resumes those carried saves. The parent and its directory
 are unchanged. `--until` is the child's absolute target and must exceed its
 starting position on the named clock. The recipe reads it with
 `run.until("updates", default=config.updates)`; `--until` alone extends the
@@ -1287,20 +1287,19 @@ complete validated model with `continue_from(..., config=changed_config)`.
 The launch target stays separate from config fields and takes precedence for
 its clock; Etude does not infer a config field from a clock name.
 
-With populated out, `run.latest_checkpoint()` inherits the parent's latest
-checkpoint when its file remains a member, relocated into the child's out.
-With empty out, continuation instead uses the latest checkpoint if its file
-was copied into `checkpoints/`. Lineage and target validation then use that
-checkpoint's position, even if the parent logged later metrics. A removed
-out checkpoint is never restored implicitly, and no older checkpoint is
-chosen in its place.
+Alongside out, a continuation inherits the parent's latest checkpoint whenever
+its file is still available: a member of out or copied into `checkpoints/`.
+`run.latest_checkpoint()` finds it in the child's out or delivered inputs.
+A removed out checkpoint is never restored implicitly, and no older checkpoint
+is chosen in its place. Populated out uses the parent's recorded position for
+lineage and target validation; empty out with a copied checkpoint uses that
+checkpoint's position, even if the parent logged later metrics.
 
 `--ordinal N` starts from one recorded checkpoint instead. A historical parent
-without out also uses its latest checkpoint. With a checkpoint input, the
-child's `out` starts empty and the checkpoint file reaches the machine as an
-input of the parent run (`Input(run=PARENT, key=RECORDED_FILE)`), verified by digest, where
-`run.latest_checkpoint()` finds it. That key may be under `out/` when the
-checkpoint was recorded there by reference.
+without out also uses its latest checkpoint. In these cases the child's `out`
+starts empty. A checkpoint delivered as an input names its parent run
+(`Input(run=PARENT, key=RECORDED_FILE)`); its bytes are verified by digest.
+That key may be under `out/` when the checkpoint was recorded there by reference.
 
 `etude.jobs` reads the parent's records and `out.json` from `--source`.
 Continuation uses those fingerprints without downloading out files; inputs

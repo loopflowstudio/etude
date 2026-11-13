@@ -335,7 +335,7 @@ class Input(Record):
     """
 
     name: str  # where the job finds it: ETUDE_INPUTS_DIR/NAME
-    out: str | None = None  # seed this path within the run directory on its first attempt
+    out: str | None = None  # seed this path within the run's out on its first attempt
     key: str = Field(min_length=1)
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     size_bytes: int = Field(ge=0)
@@ -351,7 +351,7 @@ class Input(Record):
     @model_validator(mode="after")
     def _within(self) -> Input:
         if self.out is not None and not within(self.out):
-            raise ValueError("an input destination must be within the run directory")
+            raise ValueError("an input destination must be within the run's out")
         if self.run is not None and not within(self.key):
             raise ValueError(
                 f"input key {self.key!r} must be a path within run {self.run}'s folder"

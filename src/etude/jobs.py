@@ -242,7 +242,7 @@ def continue_from(
     ordinal: int | None = None,
     config: BaseModel | None = None,
 ) -> Run:
-    """A new run seeded with the parent's out, or a selected checkpoint.
+    """A new run seeded with out and the available latest checkpoint, or an ordinal.
 
     File inputs freeze the bytes chosen here by digest; a parent changing them
     before delivery is refused. Config is validated against the typed job's
@@ -269,9 +269,10 @@ def continue_from(
         key = checkpoint.file
         if key is None and file.parent.parts[-2:] == (parent.id, CHECKPOINTS):
             key = f"{CHECKPOINTS}/{file.name}"
+    copied = key is not None and key.startswith(f"{CHECKPOINTS}/")
     # Empty out still resumes a copied checkpoint. A removed out checkpoint
     # must never select an older record or resurrect its retained bytes.
-    if out is not None and not out.files and key is not None and key.startswith(f"{CHECKPOINTS}/"):
+    if out is not None and not out.files and copied:
         out = None
     given = None
     if out is not None:
@@ -287,17 +288,19 @@ def continue_from(
                 size_bytes=member.size_bytes,
                 run=parent.id,
             )
-        if not any(member.key == key for member in out.files):
+        if not copied and not any(member.key == key for member in out.files):
             checkpoint = None
         origin = "parent"
     else:
+        origin = "checkpoint"
+        at = checkpoint.at if checkpoint is not None else {}
+    if out is None or copied:
         if (
             checkpoint is None
             or checkpoint.artifact.sha256 is None
             or checkpoint.artifact.size_bytes is None
         ):
             raise LauncherError(f"run {parent.id} recorded no stored checkpoint {ordinal or ''}")
-        at = checkpoint.at
         if key is not None:
             given = _input_name(_PARENT_CHECKPOINT + PurePosixPath(key).suffix, inputs)
             inputs[given] = Input(
@@ -307,7 +310,6 @@ def continue_from(
                 size_bytes=checkpoint.artifact.size_bytes,
                 run=parent.id,
             )
-        origin = "checkpoint"
     if clock not in at:
         raise LauncherError(
             f"a continuation needs a target on a clock its {origin} recorded: {', '.join(sorted(at))}"
