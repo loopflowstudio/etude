@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from etude.cli import main
 from etude.eval.match import environment
 from etude.eval.query import statsdb
 from etude.eval.records import Benchmark, Code, Inference, Matchup, RoundRobin
@@ -20,6 +21,7 @@ from etude.launch.errors import LauncherError
 from etude.launch.job_file import read_job_file
 from etude.launch.records import Input, Job, Runtime, job_identity
 from etude.launch.smoke import tiny
+from etude.train.read import read
 from tests.launch.counting import job_text
 from tests.launch.test_runpod_machines import cloud
 from tests.launch.test_worker_attempts import local
@@ -127,6 +129,59 @@ def test_a_training_job_calls_its_function_with_its_typed_config(
     assert status.outcome == "succeeded", text
     # The tuple crossed as JSON and arrived as the function's own type again.
     assert "TrainConfig lr=0.25 layers=(64, 64)" in text
+
+
+@pytest.mark.parametrize("experiment", [None, "existing-study"])
+def test_a_plain_training_file_supplies_the_recipes_experiment(
+    tmp_path: Path,
+    job_python: str,
+    monkeypatch: pytest.MonkeyPatch,
+    experiment: str | None,
+) -> None:
+    module = "plain_" + (experiment or "unnamed").replace("-", "_")
+    repo = checkout(
+        tmp_path / "lab",
+        {
+            f"{module}.py": """
+from pydantic import BaseModel
+from etude.train.records import Step
+from etude.train.run import track
+
+class Config(BaseModel):
+    value: int = 7
+
+def train(config: Config) -> None:
+    with track(clocks=[Step("updates", "optimizer updates")], strict=True) as run:
+        saved = run.out / "final.txt"
+        saved.write_text(str(config.value))
+        run.log({"value": config.value}, updates=1)
+        run.checkpoint(saved, updates=1)
+""",
+            "plain.py": f"""
+from etude.jobs import training
+from etude.launch.records import Job, Runtime
+from {module} import Config, train
+
+def runs(python: str) -> Job:
+    job = training(train, config=Config(), max_hours=0.01, max_attempts=1,
+                   runtime=Runtime(python=python))
+    return job.model_copy(update={{"experiment": {experiment!r}}})
+""",
+        },
+    )
+    scheduler = local(tmp_path)
+    monkeypatch.setattr(importlib.import_module("etude.launch.cli"), "default", lambda: scheduler)
+    assert main(["launch", str(repo / "plain.py"), "--python", job_python]) == 0
+    (record,) = scheduler.runs()
+    (status,) = scheduler.wait(record.id, every=0.05, timeout=30)
+    assert status.outcome == "succeeded", job_text(scheduler.logs(refresh=True, run=record.id))
+    assert record.spec.experiment == (experiment or "plain")
+    assert len(scheduler.attempts(record.id)) == 1
+    tracked = tmp_path / "track"
+    data = read(tracked, experiment or "plain", record.id)
+    assert data.reached == {"updates": 1}
+    assert len(data.checkpoints) == 1
+    assert (tracked / record.id / "out/final.txt").read_text() == "7"
 
 
 @pytest.mark.filterwarnings("ignore:Pydantic serializer warnings")

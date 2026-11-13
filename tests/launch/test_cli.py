@@ -33,7 +33,7 @@ here = Path(__file__).parent
 def runs(steps: int = 26000, seeds: int = 2) -> list[Run]:
     return [run for arm in ("small", "large") for run in
             Job(command=command, max_hours=0.1, max_usd=Decimal(5), until=f"steps={steps}",
-                      name=arm, config=(here / (arm + ".toml")).read_text()
+                      name=arm, experiment="capacity", config=(here / (arm + ".toml")).read_text()
                       ).runs(*range(1, seeds + 1))]
 
 

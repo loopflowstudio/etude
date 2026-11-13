@@ -82,7 +82,7 @@ class JobOptions(TypedDict, total=False):
     """How a typed job is launched: every `Job` field except those it derives.
 
     It derives the command and config, the experiment (an evaluation's own,
-    else the one `etude launch` reads from an experiment file's name) and the
+    else the one `etude launch` reads from the job file's name) and the
     smoke form: a training job's `smoke` config; an evaluation's is Etude's.
     """
 

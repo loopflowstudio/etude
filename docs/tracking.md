@@ -54,20 +54,20 @@ when a launcher controller is selected. Each command loads its own dependencies;
 help and the worker do not load NumPy.
 
 Under `etude launch` the launcher has already said which run this is, so the
-same script needs only its experiment and clocks:
+same script needs only its clocks:
 
 ```python
-run = track(experiment="capacity-pilot", clocks=[Step("updates", "optimizer updates, absolute")])
+run = track(clocks=[Step("updates", "optimizer updates, absolute")])
 ```
 
 The run, job, seed and cohort come from the launcher (`ETUDE_RUN`,
 `ETUDE_JOB`, `ETUDE_SEED`, `ETUDE_COHORT`); an argument passed to `track` wins.
-Launched from an experiment file, the run is that experiment's
-(`ETUDE_EXPERIMENT`): `etude launch ppo.py` starts runs of experiment `ppo`,
-so `track(clocks=...)` needs no `experiment`, and one naming another
-experiment is refused (`experiment_differs_from_launch`). Launched from a
-plain job file, the script names its experiment. A training function meant
-for any experiment file names none; called on this computer outside a launch,
+`etude launch ppo.py` supplies experiment `ppo` through `ETUDE_EXPERIMENT`,
+including when the file defines only `runs()`. A plain job file preserves an
+explicit `Job.experiment`; a file defining `eval(state)` or `report()` requires
+its own stem. `track(clocks=...)` needs no `experiment`, and naming another
+is refused (`experiment_differs_from_launch`). A reusable training function
+names none; called on this computer outside a launch,
 it is told its experiment and out by `local_launch`
 ([below](#out-a-stop-signal-and-running-again)).
 The files are written to `ETUDE_TRACK_DIR`, one place on the machine for every

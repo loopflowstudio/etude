@@ -1,8 +1,8 @@
 """Read a Python job file and validate its runs() flags before submission.
 
-A job file that is also an experiment file, defining `eval(state)` or
-`report()` at its top level, names the experiment its runs record under for
-its stem (`experiment_named`), so `ppo.py` launches runs of experiment `ppo`.
+Unnamed jobs record under the file's stem, so `ppo.py` launches runs of
+experiment `ppo`. Plain job files preserve explicit job experiments; files
+defining `eval(state)` or `report()` require their own experiment identity.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from etude.launch.records import Job, Run
 def read_job_file(path: Path, given: Sequence[str] = (), *, help: bool = False) -> list[Run]:
     """Let Typer validate runs()'s signature, then invoke it once with typed flags.
 
-    An experiment file's runs are given its experiment; a job naming another is refused.
+    Default unnamed jobs to the file's stem. Experiment files refuse other identities.
     """
 
     if path.suffix != ".py":
@@ -120,7 +120,7 @@ def read_job_file(path: Path, given: Sequence[str] = (), *, help: bool = False) 
                 "job": run.job.model_copy(
                     update={
                         "repo": str(Path(run.job.repo).resolve()) if run.job.repo else None,
-                        "experiment": experiment or run.job.experiment,
+                        "experiment": experiment or run.job.experiment or path.stem,
                     }
                 ),
             }

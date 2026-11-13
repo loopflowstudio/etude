@@ -895,7 +895,7 @@ def track(
     """Declare or resume a run. Strict: a bad declaration raises here, not later.
 
     The experiment is the one `etude launch` started the run for
-    (`ETUDE_EXPERIMENT`, the experiment file's stem) unless named here. Naming
+    (`ETUDE_EXPERIMENT`, by default the job file's stem) unless named here. Naming
     another raises `EtudeError("experiment_differs_from_launch")`; naming none
     outside such a launch raises `EtudeError("experiment_not_named")`. The
     run's identity, and whether it resumes, is settled by

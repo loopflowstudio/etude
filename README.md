@@ -36,7 +36,7 @@ class TrainConfig(BaseModel):
 
 
 def train(config: TrainConfig) -> None:
-    run = track(experiment="capacity-pilot", clocks=[Step("updates", "optimizer updates")])
+    run = track(clocks=[Step("updates", "optimizer updates")])
     updates = int(run.until("updates", default=config.updates))
     for update in range(1, updates + 1):
         loss = train_one_update(config.lr)
@@ -56,6 +56,7 @@ etude report ppo.py --open   # experiment ppo's evals, perf and ML details, as o
 etude report . --serve       # every experiment file here, with a live index
 ```
 
+`job.py` supplies the experiment name `job`; the recipe names none.
 Etude decides the job's command: on the machine it imports `train` from your
 checkout and calls it with the config, validated back into a `TrainConfig`. A
 config `train` cannot take is refused before anything launches. An evaluation

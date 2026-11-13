@@ -1045,6 +1045,12 @@ config is a Pydantic model in Python, not a file beside the job: a named
 setting is a function or class method returning one, such as
 `TrainConfig.large()`.
 
+`etude launch job.py` supplies experiment `job` to every unnamed job, even
+when the file defines only `runs()`. Recipes call `track(clocks=...)` without
+naming an experiment. A plain job file preserves explicit `Job.experiment`
+values; a file defining `eval(state)` or `report()` requires its own stem
+and refuses jobs naming another experiment.
+
 TOML job files are no longer accepted. A script may also call `queue` or `launch` from
 `etude.launch.client` directly. Where commands accept run IDs, a cohort name selects
 its runs.
@@ -1187,11 +1193,11 @@ The job is also told who it is: `ETUDE_RUN` (the run's id), `ETUDE_JOB` (the
 digest its job's runs share), `ETUDE_JOB_NAME` when the job has a name,
 `ETUDE_ATTEMPT`, and `ETUDE_COHORT` when the run has one. It runs in
 `ETUDE_SOURCE_DIR`, its commit's files without `.git`; [evaluation](evaluation.md)
-hashes identity files relative to it. A job launched from an experiment file
-(one defining `eval(state)` or `report()`) is that experiment's, named for the
-file's stem, and is told so in `ETUDE_EXPERIMENT`; the experiment is part of
-its identity. [Tracking](tracking.md) reads these, so a launched job names
-only its clocks, and its experiment when its file is not one. A tracked script
+hashes identity files relative to it. `ETUDE_EXPERIMENT` is the job's explicit
+experiment or the launched file's stem; files defining `eval(state)` or
+`report()` require their own stem. The experiment is part of the job's
+identity. [Tracking](tracking.md) reads these, so a launched recipe names
+only its clocks. A tracked script
 does not write `etude-result.json` itself: tracking reports its clocks.
 
 A storage holds one folder per run, shared by every attempt on every machine,
