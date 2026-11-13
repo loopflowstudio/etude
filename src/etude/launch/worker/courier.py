@@ -576,7 +576,7 @@ class Courier:
             except FileNotFoundError:
                 continue
         if (folder / "out").is_dir() or (folder / OUT_PRESENT).is_file():
-            body = OutFiles(files=tuple(sorted(out, key=lambda file: file.key))).model_dump_json()
+            body = OutFiles(files=tuple(out)).model_dump_json()
             if self._sent.get(f"{run}/{MEMBERSHIP}") != body:
                 self._runs[run].write_bytes(MEMBERSHIP, body.encode())
                 (folder / OUT_PRESENT).touch()

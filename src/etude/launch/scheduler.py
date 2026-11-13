@@ -1935,7 +1935,7 @@ class Scheduler:
             session = self._store.session(session.id)
         return session
 
-    def _relay(self, attempt: RunAttempt, run: RunRecord) -> bool:
+    def _relay(self, attempt: RunAttempt, work: Work) -> bool:
         """Hand an attempt what it needs of runs' folders from the machines that last ran them.
 
         A later attempt gets its run's records, out and latest
@@ -1950,16 +1950,15 @@ class Scheduler:
         """
         if attempt.id in self._relayed:
             return True
-        if attempt.number == 1 and all(given.run is None for given in run.spec.inputs):
+        if not work.resumes and all(given.run is None for given in work.inputs):
             self._relayed.add(attempt.id)
             return True
         session = self._store.session(attempt.session)
-        if attempt.number > 1:
+        if work.resumes:
             self._carry(attempt.run, session, before=attempt.number)
-        holder = self._holder(run.id, before=attempt.number) if attempt.number > 1 else None
         copied: set[str] = set()
-        for given in run.spec.inputs:
-            if given.run is None or (holder is not None and given.out is not None):
+        for given in work.inputs:
+            if given.run is None:
                 continue
             try:
                 if given.out is not None:
@@ -2025,11 +2024,11 @@ class Scheduler:
     def _work(self, attempt: RunAttempt) -> Work | None:
         """What the attempt's machine is sent; None when the attempt ended undelivered."""
         run = self._store.run(attempt.run)
-        if not self._relay(attempt, run):
-            return None
         spec = run.spec
         holder = self._holder(run.id, before=attempt.number) if attempt.number > 1 else None
-        return Work(
+        # Relay and delivery use the same selection: a claimed child resumes
+        # its own state; an unclaimed child still needs the parent's initial out.
+        work = Work(
             attempt=attempt.id,
             command=spec.command,
             runtime=spec.runtime,
@@ -2054,6 +2053,7 @@ class Scheduler:
             inputs=tuple(i for i in spec.inputs if holder is None or i.out is None),
             environment=spec.environment,
         )
+        return work if self._relay(attempt, work) else None
 
     def _hand(self, session: Session, attempt: RunAttempt) -> None:
         """Add placed work to a kept session; while its run's folder cannot be relayed, it waits.

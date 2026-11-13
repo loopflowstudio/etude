@@ -64,6 +64,23 @@ def test_stopped_attempts_obey_remaining_limits(tmp_path: Path, ending: str) -> 
     assert status.attempts == 1
 
 
+def test_stopped_near_hours_limit_rents_again_for_the_remaining_time(tmp_path: Path) -> None:
+    b = bench(tmp_path)
+    b.service.seconds = 560
+    b.service.outcome = lambda work: "stopped"
+    run = b.scheduler.queue(job(max_hours=600 / 3600), rent="l4")
+    b.scheduler.tick()
+    b.run(600)
+    assert [attempt.limit_seconds for attempt in b.scheduler.attempts(run)] == [600, 40]
+
+    # The retry cannot complete its 560 seconds of work in the remaining 40.
+    b.run(200)
+    status = b.scheduler.read(run)
+    assert (status.phase, status.outcome, status.attempts) == ("done", "out_of_time", 2)
+    assert [attempt.outcome for attempt in b.scheduler.attempts(run)] == ["stopped", "out_of_time"]
+    assert b.service.creates == 2
+
+
 def test_failed_input_delivery_retries_the_whole_initial_directory(tmp_path: Path) -> None:
     body = b"saved optimizer state"
     seed = Input(

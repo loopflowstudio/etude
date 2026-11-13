@@ -109,8 +109,9 @@ def _rank(key: str) -> int:
 
 
 def listing(root: Path, *, tail_seconds: float) -> list[str]:
-    """Every file under `root` ready to carry, as slash-separated keys, in sending order.
+    """Ready files as slash-separated keys, ordered by delivery rank then key.
 
+    Out files share the first rank, so their membership is already in key order.
     A file still being written (`.open`, `.partial`) waits until it is whole,
     and anything under a folder starting with `.` (a carrier's own markers)
     never leaves. A tail is ready once it is `tail_seconds` old: 0 once its

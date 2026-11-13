@@ -1082,6 +1082,13 @@ The default `max_attempts=3` includes planned stops: a healthy run needing a
 fourth rental window ends `stopped` after its third planned stop. Increase
 `max_attempts` on the job for a longer run.
 
+`run.stopping()` also turns true before the run's own hours limit, reserving
+time to save. A planned stop there can trigger another rental for the remaining
+allowance: stopping after 560 of 600 allowed seconds leaves a 40-second attempt
+while attempts and dollars remain. If that attempt uses up its allowance, the
+run ends `out_of_time`; if it stops early again, it can retry again. Repeated
+planned stops remain bounded by `max_attempts` and the run's hours and dollars.
+
 At a machine's deadline, an attempt that has not saved and stopped ends
 `lost`. Exhausting the run's own hours or dollars ends it `out_of_time` or
 `over_budget`; `etude cancel` ends it `cancelled`. Exhausting attempts leaves

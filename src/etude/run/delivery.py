@@ -131,9 +131,7 @@ class StorageDestination:
                 if (files.root / "out").is_dir() or files.shipped(
                     self.name, MEMBERSHIP
                 ) is not None:
-                    membership = OutFiles(
-                        files=tuple(sorted(out, key=lambda file: file.key))
-                    ).model_dump_json()
+                    membership = OutFiles(files=tuple(out)).model_dump_json()
                     if files.shipped(self.name, MEMBERSHIP) != membership:
                         # The same queue publishes membership only after all its files succeed.
                         deliveries.append(Delivery(MEMBERSHIP, membership, membership.encode()))
