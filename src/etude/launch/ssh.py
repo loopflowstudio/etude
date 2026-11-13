@@ -15,6 +15,7 @@ import shlex
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Annotated, Literal, cast, get_args
 
 from pydantic import Field
 
@@ -23,28 +24,90 @@ from etude.launch.logs import snapshot_stream
 from etude.launch.machines import Allocation
 from etude.launch.measurement import timed
 from etude.launch.providers.package import program_archive
-from etude.launch.records import BootstrapLinks, LauncherError, LogStream, Record
+from etude.launch.records import BootstrapLinks, LauncherError, LogProducer, LogStream, Record
 from etude.launch.schemas import Observation, Packet, Work
 from etude.launch.source import source_archive
 from etude.storage_timeout import storage_environment
 
+# What the host is asked to do, one record per shape of request. Both ends run
+# the same program version, which every invocation selects.
 
-class RemoteRequest(Record):
-    startup_deadline: datetime | None = None
-    storage_environment: dict[str, str] = Field(default_factory=dict)
-    action: str
-    root: str
+
+class StartRequest(Record):
+    action: Literal["start"] = "start"
     session: str
-    packet: str = ""
-    work: str = ""
-    attempt: str = ""
-    name: str = ""
-    key: str = ""  # one file of the run's folder `name`, for "held"
-    files: dict[str, str] = Field(default_factory=dict)
-    # A run's folder relayed from another host, base64 by key (`etude.carriage.restore_set`).
-    folder: dict[str, str] = Field(default_factory=dict)
+    packet: Packet
+    files: dict[str, str] = Field(default_factory=dict)  # base64 by path in the session's folder
     bootstrap: BootstrapLinks | None = None
     cleanup: tuple[str, ...] = ()
+
+
+class AddRequest(Record):
+    action: Literal["add"] = "add"
+    session: str
+    work: Work
+    files: dict[str, str] = Field(default_factory=dict)  # base64 by path in the session's folder
+
+
+class SessionRequest(Record):
+    action: Literal["started", "ended", "end", "finish", "observe"]
+    session: str
+
+
+class StopRequest(Record):
+    action: Literal["stop"] = "stop"
+    session: str
+    attempt: str
+
+
+class LogsRequest(Record):
+    action: Literal["logs"] = "logs"
+    session: str
+    producer: LogProducer
+    attempt: str | None = None
+
+
+class OutputRequest(Record):
+    action: Literal["fetch"] = "fetch"
+    session: str
+    attempt: str
+    output: str  # the output's name below the attempt's output directory
+
+
+class HeldRequest(Record):
+    action: Literal["held"] = "held"
+    run: str
+    key: str | None = None  # one file of the run's folder; None: what a retry needs
+
+
+class HoldRequest(Record):
+    action: Literal["hold"] = "hold"
+    run: str
+    # A run's folder relayed from another host, base64 by key (`etude.carriage.restore_set`).
+    folder: dict[str, str]
+
+
+type RemoteRequest = Annotated[
+    StartRequest
+    | AddRequest
+    | SessionRequest
+    | StopRequest
+    | LogsRequest
+    | OutputRequest
+    | HeldRequest
+    | HoldRequest,
+    Field(discriminator="action"),
+]
+
+
+class RemoteCall(Record):
+    """One SSH invocation: a request, where the host keeps sessions, and its time limit."""
+
+    root: str
+    storage_environment: dict[str, str] = Field(default_factory=dict)
+    # A start's startup deadline; otherwise when the caller's allowance runs out.
+    startup_deadline: datetime | None = None
+    request: RemoteRequest
 
 
 class EncodedOutput(Record):
@@ -53,7 +116,11 @@ class EncodedOutput(Record):
 
 
 class RemoteReply(Record):
-    text: str | None = None
+    """What the host answered; each request fills the fields it has an answer for."""
+
+    pid: int | None = None  # start: its worker process; None while another start holds it
+    ended_at: datetime | None = None  # ended, end, finish: when the session ended, if it has
+    log: str | None = None  # logs of the bootstrap producer: its text, None while it has none
     stream: LogStream | None = None
     started: bool = False
     observation: Observation | None = None
@@ -103,48 +170,49 @@ with contextlib.redirect_stdout(sys.stderr):
             publication.set()
             logging.publish(pathlib.Path(os.environ["ETUDE_LOG_PATH"]), links["log_url"])
 """
+# It reads the RemoteCall as JSON: `request` is its request, and replies are RemoteReply.
 _BOOT = (
     """import base64,json,os,sys
-request=json.load(sys.stdin)
-os.environ.update(request.get('storage_environment', {}))
-code=base64.b64decode(request.pop("program"))
+call=json.load(sys.stdin)
+os.environ.update(call.get('storage_environment', {}))
+code=base64.b64decode(call.pop("program"))
+request=call['request']
 import pathlib
-home=pathlib.Path(request['root']).expanduser()/request['session']
-if request['action']=='logs' and request['name']=='bootstrap':
+home=pathlib.Path(call['root']).expanduser()/request.get('session','')
+if request['action']=='logs' and request['producer']=='bootstrap':
     path=home/'bootstrap.log'
-    print(json.dumps({'text':path.read_text() if path.exists() else None})); sys.exit(0)
-if request['action']=='started' and not (home/'receipt').exists():
+    print(json.dumps({'log':path.read_text() if path.exists() else None})); sys.exit(0)
+if request['action']=='started' and not (home/'pid').exists():
     print(json.dumps({'started':False})); sys.exit(0)
-if request['action']=='observe' and (home/'boot-claim').exists() and not (home/'receipt').exists():
+if request['action']=='observe' and (home/'boot-claim').exists() and not (home/'pid').exists():
     print(json.dumps({'observation':{'alive':not (home/'ended').exists(),'progress':[],'start_unknown':True}})); sys.exit(0)
 if request['action']=='ended':
     path=home/'ended'
-    print(json.dumps({'text':path.read_text() if path.exists() else None})); sys.exit(0)
+    print(json.dumps({'ended_at':path.read_text() if path.exists() else None})); sys.exit(0)
 if request['action']=='end':
     home.mkdir(parents=True,exist_ok=True)
     (home/'cancel-start').touch()
-    if not (home/'receipt').exists():
+    if not (home/'pid').exists():
         path=home/'ended'
-        print(json.dumps({'text':path.read_text() if path.exists() else None})); sys.exit(0)
+        print(json.dumps({'ended_at':path.read_text() if path.exists() else None})); sys.exit(0)
 if request['action']=='start':
     home.mkdir(parents=True,exist_ok=True,mode=0o700)
     try:
         (home/'boot-claim').open('x').close()
     except FileExistsError:
-        print(json.dumps({'text':'pending'})); sys.exit(0)
+        print(json.dumps({})); sys.exit(0)
     pid=os.fork()
     if pid:
-        print(json.dumps({'text':'pending'}),flush=True); os._exit(0)
+        print(json.dumps({}),flush=True); os._exit(0)
     os.setsid()
     with open(os.devnull,'r+b') as sink:
         for fd in (0,1,2): os.dup2(sink.fileno(),fd)
-    os.environ['ETUDE_STARTUP_DEADLINE']=request.get('startup_deadline') or ''
+    os.environ['ETUDE_STARTUP_DEADLINE']=call.get('startup_deadline') or ''
     os.environ['ETUDE_STARTUP_CANCEL']=str(home/'cancel-start')
-    log=pathlib.Path(request['root']).expanduser()/request['session']/'bootstrap.log'
-    os.environ['ETUDE_LOG_PATH']=str(log)
+    os.environ['ETUDE_LOG_PATH']=str(home/'bootstrap.log')
 else:
     os.environ.pop('ETUDE_LOG_PATH',None)
-    os.environ['ETUDE_STARTUP_DEADLINE']=request.get('startup_deadline') or ''
+    os.environ['ETUDE_STARTUP_DEADLINE']=call.get('startup_deadline') or ''
 """
     + _INSTALL_CODE
     + """
@@ -157,7 +225,7 @@ if request['action']=='start':
             raise RuntimeError('startup cancelled before worker entry')
         invoked=True
         done=subprocess.run([str(root/'.venv/bin/python'),'-m','etude.launch.worker.remote'],
-            input=json.dumps(request).encode(),capture_output=True,timeout=namespace['startup_timeout']())
+            input=json.dumps(call).encode(),capture_output=True,timeout=namespace['startup_timeout']())
         console=logging.Console('worker entry')
         console.write(done.stderr,final=True)
         if done.returncode:
@@ -174,7 +242,7 @@ if request['action']=='start':
     sys.exit(0)
 import tempfile
 with tempfile.TemporaryFile() as payload:
-    payload.write(json.dumps(request).encode()); payload.seek(0)
+    payload.write(json.dumps(call).encode()); payload.seek(0)
     os.dup2(payload.fileno(),0)
     os.execv(str(root/".venv/bin/python"),[str(root/".venv/bin/python"),"-m","etude.launch.worker.remote"])
 """
@@ -210,51 +278,26 @@ class SSH:
         self._program = base64.b64encode(program_archive()).decode()
 
     @timed("ssh.call")
-    def call(
-        self,
-        action: str,
-        session_id: str,
-        *,
-        packet: str = "",
-        work: str = "",
-        attempt: str = "",
-        name: str = "",
-        key: str = "",
-        files: dict[str, str] | None = None,
-        folder: dict[str, str] | None = None,
-        bootstrap: BootstrapLinks | None = None,
-        cleanup: tuple[str, ...] = (),
-        startup_deadline: datetime | None = None,
-    ) -> RemoteReply:
-        request = {
-            **RemoteRequest(
-                storage_environment=storage_environment(),
-                startup_deadline=(
-                    startup_deadline
-                    if action == "start"
-                    else (
-                        datetime.now(UTC) + timedelta(seconds=seconds)
-                        if (seconds := remaining()) is not None
-                        else None
-                    )
-                ),
-                action=action,
-                root=self.root,
-                session=session_id,
-                packet=packet,
-                work=work,
-                attempt=attempt,
-                name=name,
-                key=key,
-                files=files or {},
-                folder=folder or {},
-                bootstrap=bootstrap,
-                cleanup=cleanup,
-            ).model_dump(mode="json"),
-            "program": self._program,
-        }
+    def call(self, request: RemoteRequest) -> RemoteReply:
+        start = isinstance(request, StartRequest)
+        startup_deadline = (
+            request.packet.startup_deadline
+            if isinstance(request, StartRequest)
+            else (
+                datetime.now(UTC) + timedelta(seconds=seconds)
+                if (seconds := remaining()) is not None
+                else None
+            )
+        )
+        call = RemoteCall(
+            root=self.root,
+            storage_environment=storage_environment(),
+            startup_deadline=startup_deadline,
+            request=request,
+        )
+        sent = {**call.model_dump(mode="json"), "program": self._program}
         allowance = remaining()
-        if action == "start" and startup_deadline is not None:
+        if start and startup_deadline is not None:
             startup_left = (startup_deadline - datetime.now(UTC)).total_seconds()
             if startup_left <= 0:
                 raise Unreachable("startup deadline reached before SSH request")
@@ -268,7 +311,7 @@ class SSH:
                     self.address,
                     login_shell(shlex.join([self.python, "-c", _BOOT])),
                 ],
-                input=json.dumps(request).encode(),
+                input=json.dumps(sent).encode(),
                 capture_output=True,
                 timeout=allowance,
             )
@@ -303,19 +346,17 @@ class SSHStart:
     def __init__(self, ssh: SSH) -> None:
         self.ssh = ssh
 
-    def start(self, machine: Allocation, packet: Packet, bootstrap: BootstrapLinks | None) -> str:
+    def start(self, machine: Allocation, packet: Packet, bootstrap: BootstrapLinks | None) -> None:
         ssh = self.ssh
         files = {path: body for work in packet.work for path, body in ssh.files(work).items()}
-        return str(
-            ssh.call(
-                "start",
-                packet.session,
-                packet=packet.model_dump_json(),
-                startup_deadline=packet.startup_deadline,
+        ssh.call(
+            StartRequest(
+                session=packet.session,
+                packet=packet,
                 files=files,
                 bootstrap=bootstrap,
                 cleanup=machine.cleanup,
-            ).text
+            )
         )
 
 
@@ -332,30 +373,22 @@ class SSHJournal:
         """Nothing to do ahead: source is copied to the host when its session starts."""
 
     def started(self, session_id: str) -> bool:
-        return self.ssh.call("started", session_id).started
+        return self.ssh.call(SessionRequest(action="started", session=session_id)).started
 
     def ended(self, session_id: str) -> datetime | None:
-        raw = self.ssh.call("ended", session_id).text
-        return datetime.fromisoformat(raw) if raw else None
+        return self.ssh.call(SessionRequest(action="ended", session=session_id)).ended_at
 
     def end(self, session_id: str) -> datetime | None:
-        raw = self.ssh.call("end", session_id).text
-        return datetime.fromisoformat(raw) if raw else None
+        return self.ssh.call(SessionRequest(action="end", session=session_id)).ended_at
 
     def finish(self, session_id: str) -> datetime | None:
-        raw = self.ssh.call("finish", session_id).text
-        return datetime.fromisoformat(raw) if raw else None
+        return self.ssh.call(SessionRequest(action="finish", session=session_id)).ended_at
 
     def add(self, session_id: str, work: Work) -> None:
-        self.ssh.call(
-            "add",
-            session_id,
-            work=work.model_dump_json(),
-            files=self.ssh.files(work),
-        )
+        self.ssh.call(AddRequest(session=session_id, work=work, files=self.ssh.files(work)))
 
     def held(self, run: str, key: str | None = None) -> dict[str, bytes]:
-        reply = self.ssh.call("held", "", name=run, key=key or "")
+        reply = self.ssh.call(HeldRequest(run=run, key=key))
         if reply.missing is not None:
             raise FileNotFoundError(reply.missing)
         folder = reply.folder
@@ -365,27 +398,30 @@ class SSHJournal:
 
     def hold(self, run: str, files: dict[str, bytes]) -> None:
         encoded = {key: base64.b64encode(body).decode() for key, body in files.items()}
-        self.ssh.call("hold", "", name=run, folder=encoded)
+        self.ssh.call(HoldRequest(run=run, folder=encoded))
 
     def observe(self, session_id: str) -> Observation:
-        observation = self.ssh.call("observe", session_id).observation
+        observation = self.ssh.call(
+            SessionRequest(action="observe", session=session_id)
+        ).observation
         if observation is None:
             raise Unreachable("SSH returned no observation")
         return observation
 
     def stop(self, session_id: str, attempt: str) -> None:
-        self.ssh.call("stop", session_id, attempt=attempt)
+        self.ssh.call(StopRequest(session=session_id, attempt=attempt))
 
     def logs(
         self, session_id: str, attempt: str | None = None, *, producer: str = "job"
     ) -> LogStream:
-        reply = self.ssh.call("logs", session_id, attempt=attempt or "", name=producer)
-        if producer == "bootstrap":
+        named = _producer(producer)
+        reply = self.ssh.call(LogsRequest(session=session_id, producer=named, attempt=attempt))
+        if named == "bootstrap":
             return snapshot_stream(
                 session_id,
                 None,
-                producer,
-                reply.text.encode() if reply.text is not None else None,
+                named,
+                reply.log.encode() if reply.log is not None else None,
                 False,
             )
         stream = reply.stream
@@ -394,7 +430,7 @@ class SSHJournal:
         return stream
 
     def fetch(self, session_id: str, attempt: str, name: str, destination: Path) -> Path:
-        raw = self.ssh.call("fetch", session_id, attempt=attempt, name=name).output
+        raw = self.ssh.call(OutputRequest(session=session_id, attempt=attempt, output=name)).output
         assert raw is not None
         body = base64.b64decode(raw.body)
         if hashlib.sha256(body).hexdigest() != raw.sha256:
@@ -403,3 +439,10 @@ class SSHJournal:
         path = destination / Path(name).name
         path.write_bytes(body)
         return path
+
+
+def _producer(name: str) -> LogProducer:
+    # The journal protocol names producers as text; the wire names one of them.
+    if name not in get_args(LogProducer):
+        raise LauncherError(f"no log producer {name!r}")
+    return cast(LogProducer, name)

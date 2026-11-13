@@ -1,4 +1,4 @@
-"""The training half of an experiment's report: jobs, metric lines, checkpoints and time.
+"""The training half of an experiment's report: jobs, metric traces, checkpoints and time.
 
 `training` turns an experiment's training runs (`etude.train.read.RunData`)
 into `Training`, everything the page draws from their files, already
@@ -8,8 +8,10 @@ their range. Checkpoints are kept at their exact coordinates, with the wall
 time to each and the pace of every step clock since the previous one.
 Timers are summed from the metrics logged under a prefix (`etude.report.Flame`).
 
-Wall time on the page is seconds since the run first started: its first
-attempt, or its first row when no attempt was recorded.
+Every run is drawn on its declared clocks and Etude's two in hours
+(`etude.run.records.BUILT_IN_CLOCKS`). Attempts' times and checkpoint
+`elapsed` are seconds since the run first started: its first writer's start
+(`etude.train.read.RunData.writer_starts`).
 """
 
 from __future__ import annotations
@@ -22,15 +24,14 @@ from typing import Literal
 
 import numpy as np
 
-from etude.run.records import WALL_CLOCK, Clock, Record
-from etude.train.read import Floats, RunData
+from etude.run.records import BUILT_IN_CLOCKS, BUILT_IN_NAMES, HOURS_SINCE_START, Clock, Record
+from etude.train.read import Floats, RunData, lines
 
 BUCKETS = 120
-WALL_MEANING = "wall time since the run first started"
 
 
-class Job(Record):
-    """Runs that differ only by provenance: seed, device and commit.
+class JobGroup(Record):
+    """Runs drawn together as one job: they differ only by provenance, seed, device and commit.
 
     `launch` is the name it was launched under; `name` adds the config digest
     when that launch name has jobs with several configs ("ppo 1a2b3c").
@@ -42,7 +43,7 @@ class Job(Record):
     runs: tuple[str, ...]
 
 
-class Span(Record):
+class AttemptSummary(Record):
     """One attempt, in seconds since its run first started."""
 
     host: str
@@ -55,15 +56,14 @@ class RunSummary(Record):
     name: str
     # Seconds since the epoch when it first started; every other time here is since then.
     started: float
-    job: str
     seed: int | None
     state: str
     rows: int
     incomplete: int
     dropped: int | None
-    attempts: tuple[Span, ...]
-    # Latest recorded position across attempts, including historical resume points.
-    reached: dict[str, float]
+    attempts: tuple[AttemptSummary, ...]
+    # Where each clock last stood across attempts (`etude.train.read.RunData.reached`).
+    at: dict[str, float]
 
 
 class Mark(Record):
@@ -82,10 +82,10 @@ class Mark(Record):
     pace: dict[str, float | None]
 
 
-class Line(Record):
+class Trace(Record):
     """One run's bucket means, or a job's mean over seeds, on one clock.
 
-    A job's line has `low` and `high`, the range of its seeds' bucket means,
+    A job's trace has `low` and `high`, the range of its seeds' bucket means,
     and `seeds`, how many seeds each bucket has.
     """
 
@@ -116,13 +116,13 @@ class Timers(Record):
 
 class Training(Record):
     clocks: tuple[Clock, ...]
-    jobs: tuple[Job, ...]
+    jobs: tuple[JobGroup, ...]
     runs: tuple[RunSummary, ...]
     checkpoints: tuple[Mark, ...]
     metrics: tuple[str, ...]  # every metric logged, in first-seen order
-    # By clock, then metric: each run's line, and each several-seed job's mean.
-    series: dict[str, dict[str, tuple[Line, ...]]]
-    bands: dict[str, dict[str, tuple[Line, ...]]]
+    # By clock, then metric: each run's trace, and each several-seed job's mean.
+    series: dict[str, dict[str, tuple[Trace, ...]]]
+    bands: dict[str, dict[str, tuple[Trace, ...]]]
     timers: tuple[Timers, ...]
 
 
@@ -139,44 +139,38 @@ def _rounded(values: Floats, figures: int = 5) -> list[float | None]:
 
 def _started(run: RunData) -> float:
     """Seconds since the epoch when the run first started."""
-    starts = [attempt.started_ms for attempt in run.attempts]
-    starts += [block.header.wall_first for block in run.blocks]
-    return min(starts) / 1000 if starts else 0.0
+    starts = run.writer_starts
+    return min(starts.values()) / 1000 if starts else 0.0
 
 
-def _origin(run: RunData, clock: str) -> float:
-    return _started(run) if clock == WALL_CLOCK else 0.0
-
-
-def _line(run: RunData, metric: str, clock: str) -> Line | None:
+def _trace(run: RunData, metric: str, clock: str) -> Trace | None:
     reduced = run.chart(metric, clock, BUCKETS)
     if not len(reduced):
         return None
-    return Line(
+    return Trace(
         owner=run.name,
-        x=_rounded((reduced.x_first + reduced.x_last) / 2 - _origin(run, clock), 7),
+        x=_rounded((reduced.x_first + reduced.x_last) / 2, 7),
         mean=_rounded(reduced.mean),
         nonfinite=int(reduced.nonfinite.sum()),
     )
 
 
-def _band(job: str, members: Sequence[RunData], metric: str, clock: str) -> Line | None:
+def _band(job: str, members: Sequence[RunData], metric: str, clock: str) -> Trace | None:
     """The mean of the seeds' bucket means over a shared span, banded by their range."""
-    present = [run for run in members if len(run.chart(metric, clock, BUCKETS))]
+    present = [(run, chart) for run in members if len(chart := run.chart(metric, clock, BUCKETS))]
     if len(present) < 2:
         return None
-    charts = [(run, run.chart(metric, clock, BUCKETS), _origin(run, clock)) for run in present]
-    low = min(float(chart.x_first[0]) - origin for _, chart, origin in charts)
-    high = max(float(chart.x_last[-1]) - origin for _, chart, origin in charts)
+    low = min(float(chart.x_first[0]) for _, chart in present)
+    high = max(float(chart.x_last[-1]) for _, chart in present)
     width = (high - low) / BUCKETS
     means = np.full((len(present), BUCKETS), np.nan)
-    for row, (run, _, origin) in enumerate(charts):
-        reduced = run.chart(metric, clock, BUCKETS, span=(low + origin, high + origin))
+    for row, (run, _) in enumerate(present):
+        reduced = run.chart(metric, clock, BUCKETS, span=(low, high))
         means[row, reduced.index] = reduced.mean
     count = (~np.isnan(means)).sum(axis=0)
     filled = np.flatnonzero(count)
     values = [means[:, index][~np.isnan(means[:, index])].tolist() for index in filled.tolist()]
-    return Line(
+    return Trace(
         owner=job,
         x=[_round(low + (index + 0.5) * width, 7) for index in filled.tolist()],
         mean=[_round(statistics.fmean(seeds)) for seeds in values],
@@ -186,37 +180,61 @@ def _band(job: str, members: Sequence[RunData], metric: str, clock: str) -> Line
     )
 
 
-def _jobs(data: Sequence[RunData]) -> tuple[Job, ...]:
-    """Each run's job: the name its author launched it under (else its key, else
-    the run) and its config.
+class JobName(Record):
+    """A job's names: `name`, its full name, and `launch`, the name it was launched under."""
+
+    name: str
+    launch: str
+
+
+def job_names(data: Sequence[RunData]) -> dict[str, JobName]:
+    """Each run's job, by run: the name its author launched it under (else its key, else
+    the run) and its config. Reads only the runs' declarations.
 
     The launcher's job key includes the commit, so grouping by name pools a
     job's runs across commits and devices with its seeds: these are provenance,
     and a report addresses jobs by name. A config is scientific: a name launched
     with several configs becomes one job per config, "ppo 1a2b3c"; a report
-    naming "ppo" addresses all of them.
+    naming "ppo" addresses all of them. `eval(state)` names jobs by this too.
     """
-    members: dict[tuple[str, str | None], list[RunData]] = {}
-    # In launch order: a job's colour follows when it started, never its rank.
-    for run in sorted(data, key=_started):
+    keys: dict[str, tuple[str, str | None]] = {}
+    for run in data:
         declaration = run.file.declaration if run.file else None
         named = declaration.job_name if declaration else None
         config = declaration.config_sha256 if declaration else None
-        members.setdefault((named or run.job or run.name, config), []).append(run)
-    configs = Counter(name for name, _ in members)
-    jobs = []
-    for (named, config), runs in members.items():
-        name = named if configs[named] == 1 else f"{named} {(config or 'none')[:6]}"
-        seeds = f"{len(runs)} seed{'s' if len(runs) > 1 else ''}"
-        jobs.append(
-            Job(
+        keys[run.name] = (named or run.job or run.name, config)
+    configs = Counter(named for named, _ in set(keys.values()))
+    return {
+        run: JobName(
+            name=named if configs[named] == 1 else f"{named} {(config or 'none')[:6]}",
+            launch=named,
+        )
+        for run, (named, config) in keys.items()
+    }
+
+
+def _jobs(data: Sequence[RunData]) -> tuple[JobGroup, ...]:
+    """The runs' jobs (`job_names`), in launch order. A job's seeds are its learner lines
+    (`etude.train.read.lines`), so a continuation is no extra seed."""
+    names = job_names(data)
+    line = lines(data)
+    members: dict[str, list[RunData]] = {}
+    # In launch order: a job's colour follows when it started, never its rank.
+    for run in sorted(data, key=_started):
+        members.setdefault(names[run.name].name, []).append(run)
+    found = []
+    for name, runs in members.items():
+        count = len({line[r.name] for r in runs})
+        seeds = f"{count} seed{'s' if count > 1 else ''}"
+        found.append(
+            JobGroup(
                 name=name,
-                launch=named,
+                launch=names[runs[0].name].launch,
                 label=f"{name} · {seeds}",
                 runs=tuple(r.name for r in runs),
             )
         )
-    return tuple(jobs)
+    return tuple(found)
 
 
 def _summary(run: RunData) -> RunSummary:
@@ -229,7 +247,6 @@ def _summary(run: RunData) -> RunSummary:
     return RunSummary(
         name=run.name,
         started=start,
-        job=run.job or run.name,
         seed=declaration.seed if declaration else None,
         state=run.state.state
         if run.state and run.state.state != "stopped"
@@ -238,7 +255,7 @@ def _summary(run: RunData) -> RunSummary:
         incomplete=run.incomplete,
         dropped=run.state.counters.dropped if run.state else None,
         attempts=tuple(
-            Span(
+            AttemptSummary(
                 host=attempt.host,
                 pod=attempt.pod,
                 started=attempt.started_ms / 1000 - start,
@@ -246,7 +263,7 @@ def _summary(run: RunData) -> RunSummary:
             )
             for attempt in run.attempts
         ),
-        reached=run.reached,
+        at=run.reached,
     )
 
 
@@ -256,7 +273,7 @@ def _marks(run: RunData) -> list[Mark]:
     first = run.clocks[0].name if run.clocks else None
     marks: list[Mark] = []
     previous = None
-    for checkpoint in sorted(run.checkpoints, key=lambda c: (c.ordinal, c.wall_ms)):
+    for checkpoint in run.checkpoints:
         began = [
             a for a in run.attempts if (previous.wall_ms if previous else -1) < a.started_ms
             and a.started_ms <= checkpoint.wall_ms
@@ -299,9 +316,11 @@ def _marks(run: RunData) -> list[Mark]:
 def _timers(run: RunData, prefix: str) -> Timers | None:
     """The run's icicle under `prefix`, or None when it logged no timer there."""
     totals: dict[tuple[str, ...], float] = {}
+    # Any clock every row gives; a declared one also covers rows logged before Etude's.
+    clock = run.clocks[0].name if run.clocks else HOURS_SINCE_START
     for metric in run.metrics():
         if metric.startswith(prefix) and len(metric) > len(prefix):
-            reduced = run.chart(metric, WALL_CLOCK, 1)
+            reduced = run.chart(metric, clock, 1)
             finite = reduced.count - reduced.nonfinite
             totals[tuple(metric[len(prefix) :].split("/"))] = float(
                 np.nansum(reduced.mean * finite)
@@ -348,23 +367,24 @@ def training(data: Sequence[RunData], *, prefixes: Sequence[str] = ()) -> Traini
     for run in data:
         for declared in run.clocks:
             clocks.setdefault(declared.name, declared)
+    clocks.update({clock.name: clock for clock in BUILT_IN_CLOCKS})
     metrics: dict[str, None] = {}
     for run in data:
         metrics.update(dict.fromkeys(run.metrics()))
     jobs = _jobs(data)
     members = {job.name: [run for run in data if run.name in job.runs] for job in jobs}
-    series: dict[str, dict[str, tuple[Line, ...]]] = {}
-    bands: dict[str, dict[str, tuple[Line, ...]]] = {}
-    for clock in [*clocks, WALL_CLOCK]:
+    series: dict[str, dict[str, tuple[Trace, ...]]] = {}
+    bands: dict[str, dict[str, tuple[Trace, ...]]] = {}
+    for clock in clocks:
         for metric in metrics:
-            lines = [
-                line
+            traces = [
+                trace
                 for run in data
-                if clock == WALL_CLOCK or clock in {c.name for c in run.clocks}
-                if (line := _line(run, metric, clock)) is not None
+                if clock in BUILT_IN_NAMES or clock in {c.name for c in run.clocks}
+                if (trace := _trace(run, metric, clock)) is not None
             ]
-            if lines:
-                series.setdefault(clock, {})[metric] = tuple(lines)
+            if traces:
+                series.setdefault(clock, {})[metric] = tuple(traces)
             means = [
                 band
                 for job, runs in members.items()

@@ -27,7 +27,7 @@ from etude.launch.client import (
     wait,
 )
 from etude.launch.controller import FetchRequest, PythonClient, forward, warning
-from etude.launch.records import Job, LauncherError, Pool
+from etude.launch.records import Job, LauncherError, Pool, Until
 from tests.launch.counting import job_text
 from tests.launch.test_source import git
 from tests.launch.test_source import repository as repository
@@ -257,7 +257,7 @@ def test_python_api_uses_controller_and_preserves_checkpoint_ancestry(
         '"$ETUDE_UNTIL_VALUE" > "$ETUDE_OUTPUT_DIR/etude-result.json"',
         max_hours=0.01,
         max_usd=Decimal(1),
-        until="steps=10",
+        until=Until.parse("steps=10"),
     )
     first = launch(job)
     assert wait(first, every=0.02, timeout=10)[0].outcome == "succeeded"

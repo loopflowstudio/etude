@@ -10,9 +10,8 @@ import pytest
 
 from etude.run.block_file import block_key
 from etude.run.errors import EtudeError
-from etude.run.records import WALL_CLOCK
 from etude.run.storage import DirectoryStorage, run_prefix
-from etude.train.block import Builder, Series, Table, concat, decode
+from etude.train.block import Builder, Columns, Series, concat, decode
 from etude.train.manifest import Index, describe
 from etude.train.read import Points, read, read_batches
 from etude.train.run import write_block
@@ -29,29 +28,29 @@ def _messy_run(root: Path) -> None:
         if step % 3 == 0:
             values["rare"] = -float(step)
         builder.add(1000 + step, {"step": float(step)}, values)
-    write_block(root, block_key(1, 0, 0, FIRST), builder.table(FIRST, 0))
+    write_block(root, block_key(1, 0, 0, FIRST), builder.columns(FIRST, 0))
     builder = Builder(["step"])
     for step in range(8, 15):  # went back to 8: these replace the earlier 8 and 9
         builder.add(2000 + step, {"step": float(step)}, {"value": 100.0 + step})
-    write_block(root, block_key(1, 1, 1, FIRST), builder.table(FIRST, 1))
+    write_block(root, block_key(1, 1, 1, FIRST), builder.columns(FIRST, 1))
     builder = Builder(["step"])
     builder.add(3000, {}, {"value": 999.0})  # gives no step
     for step in range(20, 25):
         builder.add(3001 + step, {"step": float(step)}, {"value": float(step), "rare": 1.0})
-    write_block(root, block_key(1, 2, 2, FIRST), builder.table(FIRST, 2))
+    write_block(root, block_key(1, 2, 2, FIRST), builder.columns(FIRST, 2))
     # A later process began at 22, so the first writer's rows count up to 22.
     builder = Builder(["step"])
     for step in range(22, 27):
         builder.add(5000 + step, {"step": float(step)}, {"value": 200.0 + step})
-    write_block(root, block_key(1, 0, 0, LATER), builder.table(LATER, 0))
+    write_block(root, block_key(1, 0, 0, LATER), builder.columns(LATER, 0))
 
 
 def _joined(parts: list[Points]) -> Points:
     return Points(x=np.concatenate([p.x for p in parts]), y=np.concatenate([p.y for p in parts]))
 
 
-@pytest.mark.parametrize("clock", ["step", WALL_CLOCK])
-def test_batches_join_into_exactly_what_points_returns(tmp_path: Path, clock: str) -> None:
+def test_batches_join_into_exactly_what_points_returns(tmp_path: Path) -> None:
+    clock = "step"
     _messy_run(tmp_path / run_prefix("r"))
     metrics = ["value", "rare"]
     batches = list(read_batches(tmp_path, "e", "r", clock=clock, metrics=metrics))
@@ -87,7 +86,7 @@ def _long_run(root: Path, blocks: int, rows: int = 8192) -> None:
     """Permanent blocks of five metrics, with the writer's index beside them."""
     for sequence in range(blocks):
         x = np.arange(sequence * rows, (sequence + 1) * rows, dtype=np.float64)
-        table = Table(
+        table = Columns(
             writer=FIRST,
             first=sequence,
             last=sequence,

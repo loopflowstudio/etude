@@ -1,4 +1,4 @@
-"""Metric block names and sequence coverage, for their writers, readers and delivery.
+"""Metric block and log names and their sequence coverage, for writers, readers and delivery.
 
 Names identify the writer and covered sequences without reading block bytes or
 loading NumPy. Wider blocks supersede their covered tails and recent blocks.
@@ -31,6 +31,19 @@ def tail_key(sequence: int, writer: str) -> str:
 
 def block_key(level: int, first: int, last: int, writer: str) -> str:
     return f"metrics/{level}-{first:08d}-{last:08d}-{writer}.blk"
+
+
+def log_key(sequence: int, writer: str) -> str:
+    """The local log a writer appends a sequence's rows to until it seals them as its tail."""
+    return f"metrics/{sequence:08d}-{writer}.open"
+
+
+def sealed_as(log: str) -> BlockFile | None:
+    """The tail a local log (`log_key`) is sealed as, or None when it names something else."""
+    if not log.endswith(".open"):
+        return None
+    tail = parse(log.removesuffix(".open") + ".tail")
+    return tail if tail is not None and tail.level == 0 else None
 
 
 def parse(key: str) -> BlockFile | None:

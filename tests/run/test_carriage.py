@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from etude.carriage import (
-    Mismatch,
+    RecordMismatch,
     immutable,
     put_back,
     recorded_file,
@@ -60,7 +60,7 @@ def test_a_relayed_folder_keeps_only_what_resume_needs_and_every_taken_name(
 
     files = restore_set(folder)
     files["checkpoints/steps-2.pt"] = b"something else"
-    with pytest.raises(Mismatch, match="does not match"):
+    with pytest.raises(RecordMismatch, match="does not match"):
         put_back(tmp_path / "three/r", files)
     assert not (tmp_path / "three/r/checkpoints/steps-2.pt").exists()
 
@@ -79,7 +79,7 @@ def test_one_recorded_file_travels_with_only_its_record(tmp_path: Path) -> None:
 
     files = recorded_file(folder, "checkpoints/steps-1.pt")
     files["checkpoints/steps-1.pt"] = b"something else"
-    with pytest.raises(Mismatch, match="does not match"):
+    with pytest.raises(RecordMismatch, match="does not match"):
         put_back(tmp_path / "three/r", files)
 
 

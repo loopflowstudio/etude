@@ -28,8 +28,9 @@ from etude.launch.providers.runpod.http import PodHTTP
 from etude.launch.records import Job, Machine, OnDemand
 from etude.launch.scheduler import Scheduler
 from etude.launch.schemas import Packet
-from etude.launch.ssh import SSH
-from etude.launch.storage.s3 import Bucket, Keys, Reply
+from etude.launch.ssh import SSH, SessionRequest
+from etude.launch.storage.s3 import Bucket, Keys
+from etude.launch.storage.transport import HTTPReply
 from tests.launch.counting import Counting, Counts
 from tests.launch.fake import Bench, bench
 from tests.launch.test_source import repository  # noqa: F401
@@ -116,7 +117,7 @@ def test_ask_wait_counts(tmp_path: Path) -> None:
         with pytest.raises(TimeoutError):
             b.scheduler.wait(id, timeout=0)
         wait = counting.snapshot()
-    assert ask == Counts(database=23)  # target: ask records intent without remote effects
+    assert ask == Counts(database=22)  # target: ask records intent without remote effects
     # Creation also reads provider safeguards for affordable time and the reserved budget,
     # and the status it returns reads the machine's attempts for how many shared it.
     assert wait == Counts(provider=4, bucket=1, database=78)  # known debt: wait advances work
@@ -137,7 +138,7 @@ def test_cohort_git_and_database_counts(
             parallel=3,
         )
         result = counting.snapshot()
-    assert result == Counts(git=57, database=38)  # known debt: 19 git calls per run
+    assert result == Counts(git=57, database=35)  # known debt: 19 git calls per run
 
 
 @pytest.mark.parametrize(
@@ -150,8 +151,9 @@ def test_cohort_git_and_database_counts(
             ("numpy", "pydantic", "etude.launch.worker", "etude.launch.scheduler"),
         ),
         # Client composition includes four modules each for Vast and Lium, the
-        # storage socket policy it forwards to workers, and its smoke of jobs.
-        (["pools"], 54, ("numpy", "boto3", "etude.launch.worker")),
+        # request every provider shares, the storage socket policy it forwards
+        # to workers, and its smoke of jobs.
+        (["pools"], 55, ("numpy", "boto3", "etude.launch.worker")),
         (
             ["worker", "{directory}"],
             34,  # includes the storage socket policy every request applies
@@ -318,10 +320,8 @@ def test_counting_covers_physical_transports(
     b = bench(tmp_path)
     counting = Counting(b.store, b.service)
 
-    def send(
-        method: str, url: str, body: bytes | None, headers: dict[str, str]
-    ) -> tuple[int, bytes]:
-        return 200, b""
+    def send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> HTTPReply:
+        return HTTPReply(200, b"")
 
     def process(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
         return subprocess.CompletedProcess(args=args[0], returncode=0, stdout=b"{}", stderr=b"")
@@ -331,12 +331,15 @@ def test_counting_covers_physical_transports(
         "fixture",
         "us-west-2",
         Keys(access_key="fixture", secret_key="fixture"),
-        counting.transport("bucket", lambda m, u, b, h: Reply(status=200, body=b"")),
+        counting.transport("bucket", lambda m, u, b, h: HTTPReply(status=200, body=b"")),
     )
     provider = PodHTTP("fixture", counting.transport("provider", send))
     with counting.record():
         provider.delete_self("fixture")
         bucket.put("key", b"bytes")
         assert bucket.get("key") == b""
-        assert SSH("fixture").call("observe", "worker").observation is None
+        assert (
+            SSH("fixture").call(SessionRequest(action="observe", session="worker")).observation
+            is None
+        )
         assert counting.snapshot() == Counts(provider=1, bucket=2, ssh=1)

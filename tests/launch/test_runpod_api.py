@@ -20,6 +20,7 @@ from etude.launch.providers.runpod.machines import STOCK_IMAGE, RunPodMachines
 from etude.launch.records import CPU, GPU, BootstrapLinks, LauncherError, MachineTemplate
 from etude.launch.records import Provider as Account
 from etude.launch.storage.s3 import Bucket, Keys
+from etude.launch.storage.transport import HTTPReply
 from tests.launch.counting import Counting, Counts
 from tests.launch.test_runpod_machines import Storage
 
@@ -43,7 +44,7 @@ class Provider:
 
     def __call__(
         self, method: str, url: str, body: bytes | None, headers: dict[str, str]
-    ) -> tuple[int, bytes]:
+    ) -> HTTPReply:
         assert headers["Authorization"] == "Bearer key"
         path = url.removeprefix("https://api.runpod.io/v2/")
         self.asked.append((method, path, None if body is None else json.loads(body)))
@@ -51,7 +52,7 @@ class Provider:
         if reply is None:
             raise OSError("no route to host")
         status, value = reply
-        return status, b"" if value is None else json.dumps(value).encode()
+        return HTTPReply(status, b"" if value is None else json.dumps(value).encode())
 
 
 @pytest.mark.parametrize("count", [1, 2])

@@ -87,10 +87,10 @@ UV_SHA256 = "741ff1f5742c5a4a25d2f829e8395355e43f7a5ae2ebc6368e9ae2df0efb69cf"
 
 def _download(url: str) -> bytes:
     with limit_time(startup_timeout()), attribute(purpose="runtime"):
-        status, body = send("GET", url, None, {})
-        if status != 200:
-            raise OSError(f"runtime download status {status}")
-        return body
+        reply = send("GET", url, None, {})
+        if reply.status != 200:
+            raise OSError(f"runtime download status {reply.status}")
+        return reply.body
 
 
 def ensure_uv() -> None:

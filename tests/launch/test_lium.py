@@ -39,6 +39,7 @@ from etude.launch.records import Storage as Place
 from etude.launch.scheduler import Scheduler
 from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.s3 import Bucket, Keys
+from etude.launch.storage.transport import HTTPReply
 from etude.launch.worker.courier import run as run_courier
 from tests.launch.test_runpod_machines import Storage, released, repository, until
 
@@ -94,7 +95,7 @@ class Marketplace:
 
     def __call__(
         self, method: str, url: str, body: bytes | None, headers: dict[str, str]
-    ) -> tuple[int, bytes]:
+    ) -> HTTPReply:
         path = urlsplit(url).path.removeprefix("/api/")
         self.counts[f"{method} {path}"] += 1
         reply: object
@@ -132,7 +133,7 @@ class Marketplace:
             reply = {}
         elif path == f"pods/{POD}/statement":
             if self.statement is None:
-                return 404, b""
+                return HTTPReply(404, b"")
             reply = self.statement
         elif path == f"pods/{POD}":
             if method == "DELETE":
@@ -140,12 +141,12 @@ class Marketplace:
                     self.pod = None
                 reply = {}
             elif self.pod is None or not self.visible:
-                return 404, b""
+                return HTTPReply(404, b"")
             else:
                 reply = self.pod
         else:
             raise AssertionError(f"unhandled fixture path: {method} {path}")
-        return 200, json.dumps(reply).encode()
+        return HTTPReply(200, json.dumps(reply).encode())
 
 
 def machines(market: Marketplace, storage: Storage) -> LiumMachines:

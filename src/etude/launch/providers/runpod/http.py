@@ -4,36 +4,22 @@ from __future__ import annotations
 
 import json
 import re
-import urllib.error
 import urllib.parse
-import urllib.request
-from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
 
-from etude.deadline import call, remaining
+from etude.deadline import call
 from etude.launch.errors import ProviderUnavailable
 from etude.launch.measurement import timed
+from etude.launch.providers.http import MAX_REPLY_BYTES, send_to_provider
+from etude.launch.storage.transport import Send
 
 BASE = "https://api.runpod.io/v2/"
 _ID = re.compile(r"[a-zA-Z0-9_-]{1,200}")
-_MAX_REPLY_BYTES = 8 * 1024 * 1024
-
-# Sends one request and returns the status and body. Raises OSError when no reply came.
-Send = Callable[[str, str, bytes | None, dict[str, str]], tuple[int, bytes]]
-
-
-def _send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> tuple[int, bytes]:
-    request = urllib.request.Request(url, data=body, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(request, timeout=remaining()) as reply:  # noqa: S310
-            return reply.status, reply.read(_MAX_REPLY_BYTES + 1)
-    except urllib.error.HTTPError as error:
-        return error.code, b""
 
 
 class PodHTTP:
-    def __init__(self, key: str, send: Send = _send) -> None:
+    def __init__(self, key: str, send: Send = send_to_provider) -> None:
         if not key or any(character.isspace() for character in key):
             raise ValueError("a RunPod API key is required")
         self._headers = {
@@ -57,19 +43,19 @@ class PodHTTP:
         url = BASE + path + ("?" + urllib.parse.urlencode(params) if params else "")
         body = None if payload is None else json.dumps(payload).encode()
         try:
-            status, raw = call(lambda: self._send(method, url, body, self._headers))
+            reply = call(lambda: self._send(method, url, body, self._headers))
         except TimeoutError:
             raise ProviderUnavailable(
                 f"{method} {path}: operation deadline reached; reply unconfirmed"
             ) from None
         except OSError:
             raise ProviderUnavailable(f"{method} {path}: no reply") from None
-        if absent_ok and status == 404:
+        if absent_ok and reply.status == 404:
             return None
-        if not 200 <= status < 300 or len(raw) > _MAX_REPLY_BYTES:
-            raise ProviderUnavailable(f"{method} {path}: status {status}")
+        if not 200 <= reply.status < 300 or len(reply.body) > MAX_REPLY_BYTES:
+            raise ProviderUnavailable(f"{method} {path}: status {reply.status}")
         try:
-            return json.loads(raw, parse_float=Decimal) if raw else None
+            return json.loads(reply.body, parse_float=Decimal) if reply.body else None
         except ValueError:
             raise ProviderUnavailable(f"{method} {path}: unreadable reply") from None
 

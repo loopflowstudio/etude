@@ -17,17 +17,24 @@ from etude.train.records import Step
 from etude.train.run import track
 from tests.experiments import experiment_file
 
+# What reads, schedules or plays evaluations, beside the records a page carries.
+EVAL_READERS = tuple(
+    f"etude.eval.{name}"
+    for name in ("block", "convert", "match", "query", "schedule", "tournament")
+)
+
 
 @pytest.mark.parametrize(
     ("command", "count", "forbidden"),
     [
         (["report", "--help"], 10, ("numpy", "pydantic")),
-        # No eval run and no eval(state), so nothing of evaluation loads. The report
+        # No eval run and no eval(state), so nothing that reads or plays evaluations
+        # loads: only `etude.eval.records`, whose `Gap` a page's points carry. The report
         # recognises experiment files as `etude launch` does (`etude.experiment_file`).
         (
             ["report", "{directory}/pilot.py", "--source", "{directory}"],
-            27,
-            ("boto3", "duckdb", "etude.eval", "etude.train.run"),
+            30,
+            ("boto3", "duckdb", *EVAL_READERS, "etude.train.run"),
         ),
         (
             ["sync", "--directory", "{directory}"],
@@ -152,11 +159,11 @@ def test_serving_an_index_loads_no_evaluation_launcher_or_bucket_client(tmp_path
     loaded = [name for name in modules if name.startswith("etude")]
     # Neither experiment has eval runs or eval(): the index reads training files alone,
     # and recognises experiment files as `etude launch` does (`etude.experiment_file`).
-    assert len(loaded) == 27, loaded
+    assert len(loaded) == 30, loaded
     forbidden = (
         "boto3",
         "duckdb",
-        "etude.eval",
+        *EVAL_READERS,
         "etude.experiment",
         "etude.train.run",
         "etude.launch.client",

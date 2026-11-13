@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -17,13 +18,12 @@ from etude.page import Index, Page, Pages, Server, build, experiment_files, inde
 from etude.report import (
     Anchors,
     Curve,
-    Fraction,
     Matches,
     Matrix,
+    Planned,
+    PlannedPoint,
     Ranking,
     Report,
-    Schedule,
-    SchedulePoint,
 )
 from etude.run.errors import EtudeError
 from etude.run.storage import DirectoryStorage, Storage, storage_from_uri
@@ -67,6 +67,25 @@ def test_the_report_is_the_files_and_the_experiment_is_named_for_it(tmp_path: Pa
     assert (page.experiment, page.origin, page.notes) == ("lab", "lab.py:report", ())
     assert page.report.evals == (Matrix(rows="opponent_deck", columns="deck"),)
     assert [run.name for run in page.training.runs] == ["a"]
+
+
+def test_checkpoints_with_no_etude_clock_are_named_with_the_reason(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    run = track(experiment="lab", run="a", clocks=[Step("updates", "updates")], directory=runs)
+    run.checkpoint("s3://models/10.pt", updates=10)
+    run.finish(timeout=30)
+    file = experiment_file(tmp_path / "experiments", "lab", LAB)
+    assert build(runs, file).notes == ()
+    # As an older client saved it, copied without its attempt records.
+    for path in (runs / "a/checkpoints").glob("*.json"):
+        record = json.loads(path.read_text())
+        record["at"] = {"updates": record["at"]["updates"]}
+        path.write_text(json.dumps(record))
+    for path in (runs / "a/metrics").glob("*.json"):
+        path.unlink()
+    (note,) = build(runs, file).notes
+    assert "No running_hours or hours_since_start for some checkpoints of a" in note
+    assert "attempt records (metrics/WRITER.json) of a are not in this source" in note
 
 
 def test_without_a_report_the_page_is_the_default_and_says_so(tmp_path: Path) -> None:
@@ -233,20 +252,10 @@ def test_a_page_carries_its_charts_and_needs_no_network(tmp_path: Path) -> None:
     assert "uPlot" in html and "<script src" not in html and "<link" not in html
 
 
-def test_a_panels_matches_are_a_matchup_or_a_tag_of_a_tournament_never_both() -> None:
+def test_a_panels_matches_are_a_seating_or_a_tag_of_a_tournament_never_both() -> None:
     assert Curve(matches=Matches(tournament="ladder", tag="anchor")).matches is not None
-    with pytest.raises(ValueError, match="matches_name_a_matchup_or_a_tag_not_both"):
-        Matches(matchup="vs heuristic", tag="anchor")
-
-
-def test_a_curve_against_a_fraction_of_its_position_keeps_that_opponent_through_json() -> None:
-    report = Report(evals=(Curve(opponent=Fraction(clock="updates", value=0.5)),))
-    (curve,) = Report.model_validate_json(report.model_dump_json()).evals
-    assert isinstance(curve, Curve)
-    assert curve.opponent == Fraction(clock="updates", value=0.5)
-    for outside in (0.0, 1.0, 2.0):
-        with pytest.raises(ValueError):
-            Fraction(clock="updates", value=outside)
+    with pytest.raises(ValueError, match="matches_name_a_seating_or_a_tag_not_both"):
+        Matches(seating="vs heuristic", tag="anchor")
 
 
 def test_an_absent_experiments_error_names_the_source_as_it_was_given(tmp_path: Path) -> None:
@@ -360,19 +369,19 @@ def test_served_folder_index_reuses_output_until_refresh(tmp_path: Path) -> None
         assert server.page("/lab") == detail
 
 
-def test_configured_schedule_round_trips_and_rejects_ambiguous_coordinates() -> None:
-    schedule = Schedule(
+def test_planned_values_round_trip_and_reject_ambiguous_points() -> None:
+    planned = Planned(
         title="Learning rate",
         clock="updates",
-        jobs={"large": (SchedulePoint(at=1000, value=0.1), SchedulePoint(at=2000, value=0.01))},
+        jobs={"large": (PlannedPoint(at=1000, value=0.1), PlannedPoint(at=2000, value=0.01))},
     )
-    report = Report(ml=(schedule,))
+    report = Report(ml=(planned,))
     assert Report.model_validate_json(report.model_dump_json()) == report
-    for points in ((), (SchedulePoint(at=1000, value=1), SchedulePoint(at=1000, value=2))):
-        with pytest.raises(ValueError, match="schedule_points_must_increase"):
-            Schedule(title="Bad schedule", clock="updates", jobs={"large": points})
+    for points in ((), (PlannedPoint(at=1000, value=1), PlannedPoint(at=1000, value=2))):
+        with pytest.raises(ValueError, match="planned_points_must_increase"):
+            Planned(title="Bad plan", clock="updates", jobs={"large": points})
     with pytest.raises(ValueError):
-        SchedulePoint(at=float("nan"), value=1)
+        PlannedPoint(at=float("nan"), value=1)
 
 
 def test_http_folder_refresh_keeps_syntax_failures_and_recovers(tmp_path: Path) -> None:
@@ -466,7 +475,7 @@ def test_http_refresh_reports_failures_without_replacing_the_cached_page(tmp_pat
             assert not worker.is_alive()
 
 
-def test_schedule_position_uses_the_current_continuation_not_an_older_overrun(
+def test_planned_marker_uses_the_current_continuation_not_an_older_overrun(
     tmp_path: Path,
 ) -> None:
     runs = tmp_path / "runs"
@@ -483,7 +492,7 @@ def test_schedule_position_uses_the_current_continuation_not_an_older_overrun(
     ) as run:
         run.log({"rl/loss": 0.5}, updates=1200)
     page = build(runs, file)
-    assert page.training.runs[0].reached["updates"] == 1200
+    assert page.training.runs[0].at["updates"] == 1200
     with track(
         experiment="lab",
         run="a",
@@ -491,7 +500,7 @@ def test_schedule_position_uses_the_current_continuation_not_an_older_overrun(
         directory=runs,
     ):
         pass
-    assert build(runs, file).training.runs[0].reached["updates"] == 1200
+    assert build(runs, file).training.runs[0].at["updates"] == 1200
 
 
 def test_a_shared_report_module_of_the_repository_is_reread_on_refresh(

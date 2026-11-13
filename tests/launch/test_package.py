@@ -23,6 +23,7 @@ from etude.launch.providers.vast import instance
 from etude.launch.records import Job
 from etude.launch.schemas import Packet, Result
 from etude.launch.storage.files import read_result
+from etude.launch.storage.transport import HTTPReply
 from tests.launch.counting import job_text
 
 
@@ -85,11 +86,12 @@ def test_guardian_payload_runs_without_site_packages(tmp_path: Path, module: str
 from datetime import UTC, datetime
 from pathlib import Path
 from etude.launch.providers import bootstrap
+from etude.launch.storage.transport import HTTPReply
 import etude.launch.providers.{module} as provider
 
 calls = []
 api = provider.GuardianAPI("fixture", lambda method, *args:
-    (calls.append(method) or (200, b'{{"success":true}}')))
+    (calls.append(method) or HTTPReply(200, b'{{"success":true}}')))
 provider.GuardianAPI = lambda key: api
 bootstrap.GUARDIAN_MARKER = Path("guardian-started")
 os.environ.update(
@@ -203,7 +205,7 @@ def test_stock_boot_requires_guardian_before_download_and_install(
     monkeypatch.setattr(
         bootstrap,
         "send",
-        lambda method, url, body, headers: (200, download(url, timeout=60).read()),
+        lambda method, url, body, headers: HTTPReply(200, download(url, timeout=60).read()),
     )
     monkeypatch.setattr(bootstrap, "install", install)
     monkeypatch.setattr(rental.GuardianAPI, "delete_self", delete)
@@ -275,7 +277,7 @@ def test_ssh_without_account_keys_explains_setup_without_touching_disk(
 def test_pinned_uv_checksum_is_checked_before_install(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("shutil.which", lambda name: None)
     monkeypatch.setattr(
-        bootstrap, "send", lambda method, url, body, headers: (200, b"changed artifact")
+        bootstrap, "send", lambda method, url, body, headers: HTTPReply(200, b"changed artifact")
     )
     with pytest.raises(ValueError, match="checksum"):
         bootstrap.ensure_uv()

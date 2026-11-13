@@ -16,7 +16,6 @@ a job without a smoke form is never recorded as passed beside one that has it.
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import sys
@@ -31,7 +30,7 @@ from etude.launch.database import Database
 from etude.launch.errors import LauncherError
 from etude.launch.executor import local
 from etude.launch.logs import render
-from etude.launch.records import Job, Machine, Pool, Run, Smoke, SmokeStep, job_identity
+from etude.launch.records import Job, Machine, Pool, Run, Smoke, SmokeStep, job_id
 from etude.launch.scheduler import Scheduler
 from etude.launch.source import home
 
@@ -73,21 +72,23 @@ def tiny(job: Job) -> Job | None:
     """The job with its smoke form's overrides, or None when it declares none."""
     if job.smoke is None:
         return None
-    return job.model_copy(update={**job.smoke.model_dump(exclude_none=True), "smoke": None})
+    # The form's own values, not a dump of them: model_copy does not validate.
+    overrides = {name: value for name, value in job.smoke if value is not None}
+    return job.model_copy(update={**overrides, "smoke": None})
 
 
 @dataclass(frozen=True)
 class Trained:
     """A job's train step, with its tiny run while the smoke's home still exists."""
 
-    job: str  # the job's identity, as `job_key` gives it
+    job: str  # `job_id`
     step: SmokeStep
     run: str | None = None  # in the smoke's own launcher, which is deleted with it
 
 
 @dataclass(frozen=True)
 class Smoked:
-    """What a smoke did: each job's train step, by `job_key`, and the file's other steps."""
+    """What a smoke did: each job's train step, by `job_id`, and the file's other steps."""
 
     train: Mapping[str, SmokeStep] = field(default_factory=dict)
     rest: tuple[SmokeStep, ...] = ()
@@ -96,15 +97,10 @@ class Smoked:
         """`runs`, each with its own job's train step and the rest as its smoke."""
         stamped = []
         for run in runs:
-            own = self.train.get(job_key(run.job))
+            own = self.train.get(job_id(run.job))
             steps = [*self.rest] if own is None else [own, *self.rest]
             stamped.append(run.model_copy(update={"smoke": Smoke(steps=tuple(steps))}))
         return stamped
-
-
-def job_key(job: Job) -> str:
-    """The job's identity as one string; seeds of one job share it."""
-    return json.dumps(job_identity(job), sort_keys=True)
 
 
 def smoke_train(runs: Sequence[Run], folder: Path) -> list[Trained]:
@@ -116,7 +112,7 @@ def smoke_train(runs: Sequence[Run], folder: Path) -> list[Trained]:
     """
     distinct: dict[str, Run] = {}
     for run in runs:
-        distinct.setdefault(job_key(run.job), run)
+        distinct.setdefault(job_id(run.job), run)
     store = Database(folder / "launcher.db")
     try:
         service = local(folder / "sessions")

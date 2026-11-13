@@ -74,8 +74,8 @@ Build a lab outside the repo (e.g. `/tmp/lab`) with its own `ETUDE_HOME`:
    os.environ["QA_DEVICE"], ...})` and run `etude eval` once per device. To interrupt a
    pass part way, slow `play` with a sleep and send SIGTERM (`pkill -TERM -f "etude eval
    NAME.py"`): a backgrounded job in a non-interactive shell ignores SIGINT. Results
-   played before the signal are sealed; the next pass plays only the rest. A matchup's
-   name is its identity (`matchup_conflict` if its conditions change): add new matchups
+   played before the signal are sealed; the next pass plays only the rest. A seating's
+   name is its identity (`seating_conflict` if its conditions change): add new seatings
    under the same tag instead. Replay already-played matches on another setup with
    `etude.eval.match.evaluate(experiment=..., matches=..., run="replay-x")`, taking the
    benchmark from `Evaluation.model_validate_json(job.config)` for each job
@@ -89,7 +89,11 @@ Build a lab outside the repo (e.g. `/tmp/lab`) with its own `ETUDE_HOME`:
    `DIR/etude-result.json`'s `tally` with `etude.launch.records.Tally`.
 6. Stop the servers before finishing. In zsh, `$args` does not word-split: call
    commands explicitly rather than looping over argument strings.
-7. `run.checkpoint` needs a value for every declared clock (otherwise
+7. A "still running" lab run must not `os._exit` right after `run.ship()`: with a plain
+   `directory=` there is no destination, so `ship()` is True at once and the background
+   writer has not yet written `checkpoints/NAME.json`. The `.pt` without its manifest reads
+   as no checkpoint (the run vanishes from every curve). Wait until that `.json` exists
+   before exiting. `run.checkpoint` needs a value for every declared clock (otherwise
    `checkpoint_clock_mismatch`, and nothing is recorded). `play` must live in its own module beside
    the experiment file, not in the file itself. The experiment is named for its file, so
    a second report variant goes in another git-tracked folder as `NAME.py`.
@@ -124,6 +128,13 @@ Build a lab outside the repo (e.g. `/tmp/lab`) with its own `ETUDE_HOME`:
    and launch with `executablePath` set to the cached
    `~/Library/Caches/ms-playwright/chromium_headless_shell-*/…/chrome-headless-shell`.
    Click `getByRole("button", {name: "Refresh"})` and read `document.body.innerText`.
+   Gap reasons and point values are only in hover text: `page.mouse.move(x, y - scrollY)` on a
+   point in a full-page screenshot, then read `innerText` of `.u-legend` and `[class*=tip]`.
+   A seating curve's per-checkpoint data is the page JSON's `points`: `selection` indexes
+   `selections`; `at` gives its position, `value` its score, and `gap` (an eval `Gap`; its `missing` is `not_yet` or `never`) why it has none.
+13. The stats database under `ETUDE_HOME/statsdb` rebuilds its derived tables (`players`,
+   `schedule`) only when new data arrives or its `SCHEMA` changes, so after editing
+   `etude/eval/query.py` delete that folder before judging the page.
 
 ## Etude: storage outages on the SDK and a launched worker
 
@@ -180,7 +191,7 @@ repo, with an isolated `ETUDE_HOME`:
   (`job.model_copy(update=...)`). `etude launch FILE.py` defaults unnamed jobs
   to the file stem; recipes call `track()` without an experiment.
 - A `--keep` smoke folder's `track/` holds a tiny tournament (games=1): as an
-  `etude eval --source` it gives `matchup_conflict`. Copy only the training run's
+  `etude eval --source` it gives `seating_conflict`. Copy only the training run's
   folder out for a clean source.
 
 ## Etude: tracking and reading a run against a bucket

@@ -13,8 +13,10 @@ keeps its own change detection and storage I/O. A fresh machine restores
 records, the checkpoint `resume_file` names and every file in `out/`.
 Without shared storage, `restore_set` and `put_back` relay that state between
 hosts; `recorded_file` selects a single checkpoint or out file for an input.
-A checkpoint file's name is never used twice (`taken`), so no key under
-`checkpoints/` ever holds two different files.
+A checkpoint file Etude copied keeps its name wherever it is stored, so any
+address of it gives its key in the run's folder (`checkpoint_key`). A name is
+never used twice (`taken`), so no key under `checkpoints/` ever holds two
+different files. A checkpoint recorded in place names its key under `out/`.
 
 Standard library only, and it imports neither the launcher nor tracking.
 """
@@ -23,7 +25,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Container, Iterable, Mapping
+from collections.abc import Container, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from errno import EEXIST, ENOTEMPTY
 from hashlib import sha256
@@ -34,7 +36,7 @@ from typing import Literal
 CHECKPOINTS = "checkpoints"
 
 
-class Mismatch(ValueError):
+class RecordMismatch(ValueError):
     """Relayed checkpoint bytes that do not match the record naming them."""
 
 
@@ -54,6 +56,20 @@ def checkpoint_file(key: str) -> bool:
         and not name.endswith(".json")
         and not name.startswith(".")
     )
+
+
+def checkpoint_file_name(address: str) -> str:
+    """A checkpoint file's name, from any address or key of it: its last part.
+
+    A file keeps its name wherever it is stored, so the name is what
+    identifies it within its run (`checkpoint_key`).
+    """
+    return address.rpartition("/")[2]
+
+
+def checkpoint_key(address: str) -> str:
+    """Where a recorded checkpoint's file sits in its run's folder, from any address of it."""
+    return f"{CHECKPOINTS}/{checkpoint_file_name(address)}"
 
 
 ARTIFACTS = "artifacts"
@@ -137,8 +153,20 @@ def listing(root: Path, *, tail_seconds: float) -> list[str]:
     return sorted(keys, key=lambda key: (_rank(key), key))
 
 
+def note_retired(root: Path, writer: str, keys: Sequence[str]) -> None:
+    """Append keys `writer` replaced to its `.removed` note, once what replaced them exists.
+
+    Only complete lines count (`retired`), so a carrier never needs to know
+    block names or bytes.
+    """
+    if keys:
+        with (root / "metrics" / f"{writer}.removed").open("a") as note:
+            note.write("".join(key + "\n" for key in keys))
+            note.flush()
+
+
 def retired(root: Path) -> list[str]:
-    """Tracking files a writer has replaced, from its `.removed` notes.
+    """Tracking files a writer has replaced, from its `.removed` notes (`note_retired`).
 
     Read before listing: a file retired during a pass is deleted only once a
     later pass has sent what replaced it. Out absence belongs
@@ -161,25 +189,24 @@ class RecordedFile:
     key: str
     sha256: str
     size_bytes: int
+    # The key of the JSON record that names it.
+    record: str
 
 
-def _recorded(root: Path) -> dict[int, tuple[str, RecordedFile]]:
-    """By ordinal: each checkpoint record's key and the file it names, where Etude stored one.
+def _recorded(root: Path) -> dict[int, RecordedFile]:
+    """By ordinal: the file each checkpoint record names, where Etude stored one.
 
     Reads the records (`etude.train.records.CheckpointRecord`) as plain JSON.
     A record that only references a model elsewhere names no file here.
     """
-    recorded: dict[int, tuple[str, RecordedFile]] = {}
+    recorded: dict[int, RecordedFile] = {}
     for path in (root / CHECKPOINTS).glob("*.json"):
         try:
             record = json.loads(path.read_bytes())
             ordinal, artifact = int(record["ordinal"]), dict(record["artifact"])
         except (OSError, ValueError, KeyError, TypeError):
             continue
-        key = (
-            record.get("file")
-            or f"{CHECKPOINTS}/{PurePosixPath(str(artifact.get('uri', ''))).name}"
-        )
+        key = record.get("file") or checkpoint_key(str(artifact.get("uri", "")))
         if not isinstance(key, str) or not within(key):
             continue
         sha256, size = artifact.get("sha256"), artifact.get("size_bytes")
@@ -188,7 +215,7 @@ def _recorded(root: Path) -> dict[int, tuple[str, RecordedFile]]:
             and isinstance(size, int)
             and (checkpoint_file(key) or key.startswith("out/"))
         ):
-            recorded[ordinal] = (f"{CHECKPOINTS}/{path.name}", RecordedFile(key, sha256, size))
+            recorded[ordinal] = RecordedFile(key, sha256, size, f"{CHECKPOINTS}/{path.name}")
     return recorded
 
 
@@ -199,18 +226,18 @@ def within(key: str) -> bool:
 
 def recorded_files(root: Path) -> dict[str, RecordedFile]:
     """Checkpoint bytes by their portable key, including references inside out."""
-    return {file.key: file for _, file in _recorded(root).values()}
+    return {file.key: file for file in _recorded(root).values()}
 
 
 def resume_file(root: Path) -> RecordedFile | None:
     """The file of the highest-ordinal checkpoint record in `root`, when Etude stored one."""
     recorded = _recorded(root)
-    return recorded[max(recorded)][1] if recorded else None
+    return recorded[max(recorded)] if recorded else None
 
 
 def named_file(root: Path, key: str) -> RecordedFile | None:
     """The checkpoint file `key` as the record in `root` naming it describes it, when one does."""
-    return next((file for _, file in _recorded(root).values() if file.key == key), None)
+    return next((file for file in _recorded(root).values() if file.key == key), None)
 
 
 def _stored(root: Path) -> set[str]:
@@ -239,7 +266,7 @@ def taken(root: Path) -> set[str]:
         {
             path.name
             for path in folder.iterdir()
-            if checkpoint_file(f"{CHECKPOINTS}/{path.name}") and path.suffix != ".partial"
+            if checkpoint_file(checkpoint_key(path.name)) and path.suffix != ".partial"
         }
         if folder.is_dir()
         else set()
@@ -275,9 +302,9 @@ def recorded_file(root: Path, key: str) -> dict[str, bytes]:
     against the record). Raises `FileNotFoundError` when the file is gone or
     a key outside `out/` has no checkpoint record.
     """
-    for record, named in _recorded(root).values():
-        if named.key == key:
-            return {record: (root / record).read_bytes(), key: (root / key).read_bytes()}
+    named = named_file(root, key)
+    if named is not None:
+        return {named.record: (root / named.record).read_bytes(), key: (root / key).read_bytes()}
     if within(key) and key.startswith("out/"):
         return {key: (root / key).read_bytes()}
     raise FileNotFoundError(f"no checkpoint record in {root} names {key}")
@@ -310,10 +337,10 @@ def put_back(root: Path, files: Mapping[str, bytes]) -> None:
     """Restore relayed files, retaining existing records and replacing out files.
 
     Records come first, so each checkpoint file is checked against the digest
-    of the record that names it; a mismatch raises `Mismatch` and writes no file.
+    of the record that names it; a mismatch raises `RecordMismatch` and writes no file.
     """
     if any(not within(key) for key in files):
-        raise Mismatch("a restored file must be within the run folder")
+        raise RecordMismatch("a restored file must be within the run folder")
     # Only a complete relay includes the checkpoint-name ledger. A single
     # input must never clear unrelated out files.
     if STORED in files:
@@ -338,7 +365,7 @@ def put_back(root: Path, files: Mapping[str, bytes]) -> None:
                 or named.size_bytes != len(files[key])
                 or named.sha256 != sha256(files[key]).hexdigest()
             ):
-                raise Mismatch(f"{key} does not match the checkpoint record that names it")
+                raise RecordMismatch(f"{key} does not match the checkpoint record that names it")
         target.parent.mkdir(parents=True, exist_ok=True)
         partial = target.with_name(target.name + ".partial")
         partial.write_bytes(files[key])

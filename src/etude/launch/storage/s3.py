@@ -35,14 +35,8 @@ from etude.deadline import remaining
 from etude.launch.logging import write_log
 from etude.launch.measurement import timed
 from etude.launch.records import Record, Storage
-from etude.launch.storage.transport import attribute, request
+from etude.launch.storage.transport import HTTPReply, Send, attribute, request
 from etude.storage_timeout import StorageUnavailable
-
-
-class Reply(Record):
-    status: int
-    body: bytes
-    headers: dict[str, str] = {}
 
 
 class Version(Record):
@@ -56,7 +50,7 @@ class Version(Record):
     etag: str | None = None
 
 
-def _version(reply: Reply, kept: Version | None, what: str) -> Version | None:
+def _version(reply: HTTPReply, kept: Version | None, what: str) -> Version | None:
     if reply.status == 304 and kept is not None:
         return kept
     if reply.status == 404:
@@ -70,8 +64,6 @@ def _unless(kept: Version | None) -> dict[str, str]:
     return {"If-None-Match": kept.etag} if kept is not None and kept.etag else {}
 
 
-# Custom transports share the enclosing deadline, as the default HTTP transport does.
-Send = Callable[[str, str, bytes | None, dict[str, str]], Reply]
 _NS = "{http://s3.amazonaws.com/doc/2006-03-01/}"
 WEEK = 7 * 24 * 3600  # the longest a link or form signed with these keys may last
 GRANT_LIMIT = 36 * 3600  # the longest AWS federation keys last
@@ -170,7 +162,7 @@ class Grant(Record):
         return self
 
 
-def _send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Reply:
+def _send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> HTTPReply:
     chunks: list[bytes] = []
     metadata: dict[str, str] = {}
 
@@ -188,10 +180,10 @@ def _send(method: str, url: str, body: bytes | None, headers: dict[str, str]) ->
                 raise StorageUnavailable("download source identity changed")
 
     status = request(method, url, body, headers, chunks.append, accept)
-    return Reply(status=status, body=b"".join(chunks), headers=metadata)
+    return HTTPReply(status=status, body=b"".join(chunks), headers=metadata)
 
 
-def _get(url: str, headers: dict[str, str], send: Send) -> Reply:
+def _get(url: str, headers: dict[str, str], send: Send) -> HTTPReply:
     """Three transient read attempts share one allowance, including backoff."""
     for attempt in range(1, 4):
         remaining()
@@ -217,7 +209,7 @@ def _hash(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _quote(text: str, safe: str = "") -> str:
+def _uri_encode(text: str, safe: str = "") -> str:
     return urllib.parse.quote(text, safe="-_.~" + safe)
 
 
@@ -277,7 +269,7 @@ class Bucket:
         body: bytes = b"",
         extra: dict[str, str] | None = None,
         service: str = "s3",
-    ) -> Reply:
+    ) -> HTTPReply:
         """One signed request, to the bucket or, with `service`, to another AWS service."""
         host = self.host if service == "s3" else f"{service}.{self.region}.amazonaws.com"
         stamp = self._stamp()
@@ -287,12 +279,13 @@ class Bucket:
         headers.update({name.lower(): value for name, value in (extra or {}).items()})
         names = sorted(headers)
         text_query = "&".join(
-            f"{_quote(name)}={_quote(value)}" for name, value in sorted((query or {}).items())
+            f"{_uri_encode(name)}={_uri_encode(value)}"
+            for name, value in sorted((query or {}).items())
         )
         canonical = "\n".join(
             (
                 method,
-                "/" + _quote(key, safe="/"),
+                "/" + _uri_encode(key, safe="/"),
                 text_query,
                 "".join(f"{name}:{headers[name].strip()}\n" for name in names),
                 ";".join(names),
@@ -304,7 +297,7 @@ class Bucket:
             f"SignedHeaders={';'.join(names)}, "
             f"Signature={self._signature(stamp, canonical, service)}"
         )
-        url = f"https://{host}/{_quote(key, safe='/')}" + (f"?{text_query}" if query else "")
+        url = f"https://{host}/{_uri_encode(key, safe='/')}" + (f"?{text_query}" if query else "")
         del headers["host"]
         try:
             if method == "GET":
@@ -349,7 +342,7 @@ class Bucket:
             self.put(key, first)
             return
         reply = self._ask("POST", key, query={"uploads": ""})
-        upload = _text(reply.body, "UploadId") if reply.status == 200 else None
+        upload = _xml_text(reply.body, "UploadId") if reply.status == 200 else None
         if upload is None:
             raise _failed(f"start upload of {key}", reply.status)
         try:
@@ -393,15 +386,15 @@ class Bucket:
         caller's own.
         """
         if self.account is not None:
-            return Grant(prefix=prefix, bucket=self._access(self._r2_keys(prefix, seconds)))
+            return Grant(prefix=prefix, bucket=self._bucket_access(self._r2_keys(prefix, seconds)))
         keys = self._federation_keys(prefix, seconds, name)
         return Grant(
             prefix=prefix,
-            bucket=None if keys is None else self._access(keys),
+            bucket=None if keys is None else self._bucket_access(keys),
             form=self.post_form(prefix, seconds),
         )
 
-    def _access(self, keys: Keys) -> BucketAccess:
+    def _bucket_access(self, keys: Keys) -> BucketAccess:
         return BucketAccess(name=self.name, region=self.region, host=self.host, keys=keys)
 
     def _r2_keys(self, prefix: str, seconds: int) -> Keys:
@@ -484,7 +477,8 @@ class Bucket:
         if reply.status != 200:
             return None
         access, secret, token = (
-            _text(reply.body, field) for field in ("AccessKeyId", "SecretAccessKey", "SessionToken")
+            _xml_text(reply.body, field)
+            for field in ("AccessKeyId", "SecretAccessKey", "SessionToken")
         )
         if not (access and secret and token):
             return None
@@ -545,8 +539,10 @@ class Bucket:
         }
         if self._keys.session_token:
             query["X-Amz-Security-Token"] = self._keys.session_token
-        text_query = "&".join(f"{_quote(n)}={_quote(v)}" for n, v in sorted(query.items()))
-        path = "/" + _quote(key, safe="/")
+        text_query = "&".join(
+            f"{_uri_encode(n)}={_uri_encode(v)}" for n, v in sorted(query.items())
+        )
+        path = "/" + _uri_encode(key, safe="/")
         canonical = "\n".join(
             (method, path, text_query, f"host:{self.host}\n", "host", "UNSIGNED-PAYLOAD")
         )
@@ -604,7 +600,7 @@ def open_bucket(storage: Storage, send: Send = _send) -> Bucket:
     return Bucket(storage.bucket, storage.region, keys, send)
 
 
-def _text(body: bytes, name: str) -> str | None:
+def _xml_text(body: bytes, name: str) -> str | None:
     """The first named element's text, regardless of the reply's XML namespace."""
     try:
         root = ET.fromstring(body)  # noqa: S314

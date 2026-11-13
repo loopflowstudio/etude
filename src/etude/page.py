@@ -14,36 +14,46 @@ training runs are drawn by `etude.train.report.training`; an experiment with
 eval runs alone is drawn as evaluation only.
 
 Evals come from the experiment's eval database (`etude.eval.query.statsdb`).
-A model is placed where its seat says it stood (`players.at`, from
-`etude.eval.records.CheckpointRef.at`), else, for a key a training run of the
-experiment recorded, where that run's clocks stood (`players.checkpoint`
-joined to `training_checkpoints`). Where both give a clock and differ, the
-seat's value is drawn and noted. Its line, the learner whose other
-checkpoints `Earlier`, `Fraction`, `At` and `Crosstable` compare it with, is its seat's
-`line`, else its training run's name. A bound model is drawn in its run's
-job; every other placed model is drawn in its line's curve, or in the one
-curve of checkpoints with no line. Two keys holding the same bytes are two
-models. Every unplaced player (code, a checkpoint seated without `at` from
-outside the experiment, an etude-sdk 0.2 digest) is fixed, and drawn once as
-an anchor.
+A model is placed where its seats say it stood (`players.seated_at`, from
+`etude.eval.records.CheckpointRef.at`, merged with the latest winning), else,
+for a key a training run of the experiment recorded, where that run's clocks
+stood (`players.checkpoint` joined to `training_checkpoints`). Where both
+give a clock and differ, the seat's value is drawn and noted. Its line, the
+learner whose other checkpoints `Crosstable` compares it with, is its latest
+seat's (`players.lines`), else its training run's line: the first run of the
+chain of continuations that led to it (`etude.experiment.Checkpoint.line`).
+A bound model is drawn in its run's job; every other placed model is drawn in
+its line's curve, or in the one curve of checkpoints with no line. Two keys
+holding the same bytes are two models. Every unplaced player (code, a
+checkpoint seated with no `at` from outside the experiment, an etude-sdk
+0.2 digest) is fixed, and drawn once as an anchor.
 
 What each tournament has played is `etude.eval.tournament.played`: for a
 tournament `eval(state)` returns, what it wants now; for any other the
-experiment's eval runs hold, everything they were held for. Each delivered
+experiment's eval runs hold, or one `eval(state)` now defines otherwise than
+they were held with, everything they were held for. Each delivered
 match counts once, from the eval run `played` says delivered it last, so at
 its latest version. Matches of eval runs held for no tournament are one more
 selection, each counting once per environment from its latest record. Values
 are computed by `compare` over those matches, once for each selection
-(`Matches`: each tournament, each of its tags, each matchup a panel names,
-the matches outside a tournament, and panels' unions), each score and each combination of
+(`Matches`: each tournament, each of its tags, each seating or tag a panel names,
+over every tournament unless it names one, and panels' unions; and
+`OutsideTournaments`), each score and each combination of
 the columns panels name. So any panel, under any filter the page offers,
-shows a value `compare` computed, never one pooled in the browser. One
-comparison played in several environments shows the environment whose latest
-match is newest, and the page notes the rest.
+shows a value `compare` computed, never one pooled in the browser. A value
+played in several environments shows the environment whose latest match is
+newest, and the page notes the rest.
+
+A curve of seatings draws points (`Point`): each checkpoint a seating was
+held for, where it stood, with the first seat's score against the second
+over that checkpoint's matches, or why it has none. Relative seats find
+their checkpoints among the experiment's training lines
+(`etude.experiment.ExperimentState.lines`), read once with its runs.
 
 Gaps stay visible. A checkpoint nothing played is not evaluated; one with a
-match no eval run delivered is not yet played; failed matches are counted
-and listed.
+match no eval run delivered is not yet played; one whose relative seat has
+no checkpoint says so, not yet or never; failed matches are counted and
+listed.
 
 The index (`index.html`) is a row per experiment file under a folder
 (`experiment_files`), drawn from each one's `Page` with its line data left
@@ -71,38 +81,43 @@ from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.util import cache_from_source
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import JsonValue
 
+from etude.eval.records import Gap, Scheduled, Tournament
 from etude.experiment_file import experiment_named
 from etude.launch.logging import explain
-from etude.report import Curve, Flame, Matches, Report, Score
+from etude.report import Flame, Matches, Report, Score
 from etude.run.errors import EtudeError
 from etude.run.listing import as_storage, declared, run_folders, runs, under
-from etude.run.records import Record
+from etude.run.records import BUILT_IN_NAMES, Record
 from etude.run.storage import DirectoryStorage, S3Storage, Storage, default_root
-from etude.train.read import read_all
-from etude.train.report import WALL_MEANING, Training, training
+from etude.train.read import RunData, read_all
+from etude.train.report import Training, training
 
 if TYPE_CHECKING:
     import duckdb
 
-    from etude.eval.records import Match, Scheduled, Tournament
     from etude.eval.tournament import Played
+    from etude.experiment import ExperimentState
 
 
-class Player(Record):
-    """A player the eval runs seated: a placed checkpoint, or else a fixed one.
+class Placement(Record):
+    """A player the eval runs seated, and where the page draws it: a placed checkpoint, or
+    else a fixed one.
 
     `run` and `ordinal` name the training run's checkpoint its key binds it
-    to, None for any other. `at` is where it is drawn, by clock: its latest
-    seat's position, else its training record's; empty for a fixed player.
-    `line` is the learner it belongs to: its latest seat's, else its training
-    run's name; None for a fixed player or a checkpoint of no line.
+    to, None for any other. `at` is where it is drawn, by clock: its seats'
+    `at`, else its training record's; empty for a fixed player. `line` is
+    the learner it belongs to: its latest seat's, else its training run's
+    line; None for a fixed player or a checkpoint of no line. `placed`: it is
+    drawn on a curve, a job's or one of checkpoints no run saved, so bound
+    to a run or given an `at`; else it is an anchor.
     """
 
     key: str  # its key (`etude.eval.records.Model.key` or `Code.key`), as the database holds it
+    # Every name its seats gave it, the latest first, joined by "/".
     name: str
     run: str | None
     ordinal: int | None
@@ -110,18 +125,54 @@ class Player(Record):
     config: str
     at: dict[str, float] = {}
     line: str | None = None
-
-    @property
-    def placed(self) -> bool:
-        """Whether it is drawn on a curve: a job's, or one of checkpoints no run saved."""
-        return self.run is not None or bool(self.at)
+    placed: bool = False
 
 
-class Environment(Record):
-    """An environment the experiment's matches were played in."""
+class EnvironmentLabel(Record):
+    """An environment the experiment's matches were played in, as the page names it."""
 
     name: str
     config: dict[str, JsonValue]
+
+
+class OutsideTournaments(Record):
+    """The selection of matches eval runs held outside any tournament, each counted once per
+    environment from its latest record. A `Matches` never means these."""
+
+    kind: Literal["outside"] = "outside"
+
+
+# What a selection counts: as a panel names it, a union of several, or the matches outside.
+type Selection = Matches | tuple[Matches, ...] | OutsideTournaments
+
+
+class Drawn(Record):
+    """How a selection is drawn, beside it in `Page.selections`.
+
+    `seated`: every part names a seating, so a curve draws its points
+    (`Point`), each held checkpoint as seated. `tournaments`: those its
+    matches were called for in, whose coverage says why a checkpoint has no
+    value in it.
+    """
+
+    seated: bool
+    tournaments: tuple[str, ...]
+
+
+class PanelSelection(Record):
+    """The selection an eval panel draws, beside it in `Report.evals`: `selection`, or with
+    `control` the one the Evals section's Matches control picks; neither where no
+    selection holds the matches the panel names."""
+
+    selection: int | None = None
+    control: bool = False
+
+
+class Absent(Record):
+    """A column a panel or score names that its table lacks."""
+
+    table: str
+    column: str
 
 
 class Cell(Record):
@@ -147,6 +198,38 @@ class Cell(Record):
     interval: tuple[float, float] | None
     rows: int
     matches: int
+
+
+class Point(Record):
+    """A point of a curve of seatings: a checkpoint a seating was held for, where it
+    stood, and its score or why it has none.
+
+    `selection` indexes `Page.selections`: one of seatings. It is drawn where
+    `run`'s checkpoint `ordinal` stood, or, for one no training run saved, at
+    `at` in `line`. A scored point is the first seat's score against the
+    second, in one view (`commit`), `score` and `split` as a `Cell` is: the
+    mean over `opponents`, the players it met in the second seat, indexing
+    `Page.players`, with `interval` where it met one. A point with no
+    `value` has `gap`, what its relative seat looked for, in every view. `whole` marks a `seeds="one"`
+    seating's point, which stands for its job though one seed's checkpoint
+    was held for it.
+    """
+
+    selection: int
+    run: str | None
+    ordinal: int | None
+    line: str | None
+    at: dict[str, float]
+    whole: bool = False
+    commit: str | None = None
+    score: int | None = None
+    split: dict[str, JsonValue] = {}
+    value: float | None = None
+    interval: tuple[float, float] | None = None
+    rows: int = 0
+    matches: int = 0
+    opponents: tuple[int, ...] = ()
+    gap: Gap | None = None
 
 
 class Commit(Record):
@@ -194,20 +277,22 @@ class Page(Record):
     origin: str | None
     # What the reader must know first, such as why the report is the default.
     notes: tuple[str, ...]
-    wall_meaning: str = WALL_MEANING
     training: Training
     scores: tuple[Score, ...]
-    # Here Matches(tournament=None) means the matches played outside any tournament,
-    # not a report panel's "the section's control".
-    selections: tuple[Matches | tuple[Matches, ...], ...]
-    players: tuple[Player, ...]
-    environments: tuple[Environment, ...]
+    selections: tuple[Selection, ...]
+    # By selection, how it is drawn.
+    drawn: tuple[Drawn, ...]
+    # By eval panel of the report, the selection it draws.
+    panel_selections: tuple[PanelSelection, ...]
+    players: tuple[Placement, ...]
+    environments: tuple[EnvironmentLabel, ...]
     commits: tuple[Commit, ...]
     cells: tuple[Cell, ...]
+    points: tuple[Point, ...] = ()
     coverage: tuple[Coverage, ...]
     failures: tuple[Failure, ...]
     latest_result_ms: int | None
-    absent: tuple[str, ...]  # "TABLE.COLUMN" a panel names that its table lacks
+    absent: tuple[Absent, ...]
 
 
 class Entry(Record):
@@ -359,8 +444,13 @@ def index(
                 for c in built.cells
                 if c.score == 0 and not c.split and not c.fixed and c.commit is None
             )
+            points = tuple(
+                p
+                for p in built.points
+                if p.value is None or (p.score == 0 and not p.split and p.commit is None)
+            )
             lean = built.training.model_copy(update={"series": {}, "bands": {}, "timers": ()})
-            page = built.model_copy(update={"cells": kept, "training": lean})
+            page = built.model_copy(update={"cells": kept, "points": points, "training": lean})
         entries.append(
             Entry(
                 file=str(file),
@@ -415,7 +505,7 @@ def build(source: Storage | Path | str, file: Path) -> Page:
             raise EtudeError("experiment_eval_is_not_a_function", 422) from ValueError(file)
         want = found
     evals = (
-        _read_evals(storage, experiment, report, want)
+        _read_evals(storage, experiment, report, want, data)
         if want is not None or len(trained) < len(data)
         else _Evals()
     )
@@ -430,18 +520,51 @@ def build(source: Storage | Path | str, file: Path) -> Page:
         source=_source_name(storage),
         report=report,
         origin=origin,
-        notes=(*notes, *partial, *evals.notes),
+        notes=(*notes, *partial, *_without_hours(trained), *evals.notes),
         training=training(trained, prefixes=flames),
         scores=evals.scores or ((report.score,) if report.score is not None else ()),
         selections=evals.selections,
+        drawn=evals.drawn,
+        panel_selections=tuple(
+            _panel_selection(panel.matches, evals.selections) for panel in report.evals
+        ),
         players=evals.players,
         environments=evals.environments,
         commits=evals.commits,
         cells=evals.cells,
+        points=evals.points,
         coverage=evals.coverage,
         failures=evals.failures,
         latest_result_ms=evals.latest_result_ms,
         absent=evals.absent,
+    )
+
+
+def _without_hours(trained: Sequence[RunData]) -> tuple[str, ...]:
+    """A note naming the runs whose checkpoints lack Etude's clocks, and why.
+
+    A checkpoint saved before Etude recorded them gets them from its run's
+    attempt records (`etude.train.read`); without those it stands nowhere on
+    them, so an axis or a seat on one leaves it out.
+    """
+    lacking = [
+        run
+        for run in trained
+        if any(clock not in saved.at for saved in run.checkpoints for clock in BUILT_IN_NAMES)
+    ]
+    if not lacking:
+        return ()
+    unread = [run.name for run in lacking if not run.attempts]
+    why = (
+        f" The attempt records (metrics/WRITER.json) of {', '.join(unread)} are not in this"
+        " source to derive them from."
+        if unread
+        else ""
+    )
+    return (
+        f"No {' or '.join(BUILT_IN_NAMES)} for some checkpoints of"
+        f" {', '.join(run.name for run in lacking)}, saved before Etude recorded these clocks:"
+        f" charts and seats on them leave those checkpoints out.{why}",
     )
 
 
@@ -534,32 +657,41 @@ class _Evals:
     """The evals half of a page, empty for an experiment with no eval run and no eval()."""
 
     scores: tuple[Score, ...] = ()
-    selections: tuple[Matches | tuple[Matches, ...], ...] = ()
-    players: tuple[Player, ...] = ()
-    environments: tuple[Environment, ...] = ()
+    selections: tuple[Selection, ...] = ()
+    drawn: tuple[Drawn, ...] = ()
+    players: tuple[Placement, ...] = ()
+    environments: tuple[EnvironmentLabel, ...] = ()
     commits: tuple[Commit, ...] = ()
     cells: tuple[Cell, ...] = ()
+    points: tuple[Point, ...] = ()
     coverage: tuple[Coverage, ...] = ()
     failures: tuple[Failure, ...] = ()
     latest_result_ms: int | None = None
-    absent: tuple[str, ...] = ()
+    absent: tuple[Absent, ...] = ()
     notes: tuple[str, ...] = ()
 
 
 def _read_evals(
-    storage: Storage, experiment: str, report: Report, want: Callable[..., object] | None
+    storage: Storage,
+    experiment: str,
+    report: Report,
+    want: Callable[..., object] | None,
+    data: Sequence[RunData],
 ) -> _Evals:
-    # The optional `eval` extra (DuckDB, and etude.eval over it), imported where it is
-    # used: only an experiment with evaluations reads it, so a report without loads none.
+    # The optional `eval` extra (DuckDB, and the etude.eval modules over it), imported where
+    # it is used: only an experiment with evaluations reads it, so a report without loads none.
     from etude.eval.query import statsdb  # noqa: PLC0415
+    from etude.experiment import state_of  # noqa: PLC0415
 
-    standing, refused = _standing(want, storage, experiment)
+    state = state_of(data, experiment)
+    held, refused = _held_tournaments(want, state, storage, experiment)
     db = statsdb(experiment, storage)
     try:
-        players, placement = _players(db)
-        outside = _load(db, standing, players)
+        saved = _saved_checkpoints(db)
+        players, placement = _players(db, saved, {run.name: run.line for run in state.runs})
+        outside = _load(db, held, players)
         commits = _commits(db)
-        selections, notes = _selections(standing, report, outside=outside)
+        selections, notes = _selections(held, report, outside=outside)
         environments = _environments(db)
         scores, cells, absent, mixed = _cells(
             db, selections, players, environments, commits, report
@@ -568,82 +700,108 @@ def _read_evals(
         return _Evals(
             scores=scores,
             selections=tuple(selections),
+            drawn=tuple(_drawn(selection, held) for selection in selections),
             players=tuple(players),
             environments=tuple(environments.values()),
             commits=commits,
             cells=tuple(cells),
-            coverage=_coverage(db, standing),
-            failures=_failures(db, standing, players),
+            points=_points(held, selections, players, saved, cells),
+            coverage=_coverage(saved, held),
+            failures=_failures(db, held, players),
             latest_result_ms=None if latest is None else latest[0],
             absent=absent,
-            notes=(*refused, *placement, *_opponents_named(report, players), *notes, *mixed),
+            notes=(*refused, *placement, *notes, *mixed),
         )
     finally:
         db.close()
 
 
 @dataclass(frozen=True)
-class _Standing:
-    """One tournament: every match it calls for, with matchup and tags, and how far it got."""
+class _HeldTournament:
+    """One tournament: every match it calls for, with seating and tags, the held checkpoints
+    its relative seats find nothing for, and how far it got."""
 
     name: str
+    tournament: Tournament
     schedule: tuple[Scheduled, ...]
+    gaps: tuple[Gap, ...]
     played: Played
 
 
-def _standing(
-    want: Callable[..., object] | None, storage: Storage, experiment: str
-) -> tuple[list[_Standing], tuple[str, ...]]:
-    """Each tournament's standing, with a note for each one `etude eval` would refuse.
+def _held_tournaments(
+    want: Callable[..., object] | None, state: ExperimentState, storage: Storage, experiment: str
+) -> tuple[list[_HeldTournament], tuple[str, ...]]:
+    """Each tournament as held so far, and a note for each one drawn otherwise than asked.
 
     A tournament `eval(state)` returns is what it wants now; any other the
-    experiment's eval runs hold is everything they were held for.
+    experiment's eval runs hold is everything they were held for. Where
+    `eval(state)` now defines one otherwise than its eval runs were held
+    with, such as a later revision of its file with another environment
+    digest, the page draws what they recorded: reading needs no agreement,
+    only scheduling new games (`etude eval`) does.
     """
     # The optional `eval` extra, imported where it is used (`_read_evals`).
-    from etude.eval.records import assemble  # noqa: PLC0415
-    from etude.eval.tournament import played, tournament_runs  # noqa: PLC0415
+    from etude.eval.records import TournamentRun, assemble  # noqa: PLC0415
+    from etude.eval.tournament import played, stored_runs  # noqa: PLC0415
 
     wanted: dict[str, Tournament] = {}
     if want is not None:
-        for tournament in _wanted(want, storage, experiment):
+        for tournament in _wanted(want, state):
             wanted.setdefault(tournament.definition.name, tournament)
     refused: list[str] = []
-    for name, held in tournament_runs(experiment, storages=[storage]).items():
-        if name in wanted:
-            continue
+    # Read once for every tournament drawn: a page plays nothing, so nothing changes meanwhile.
+    runs = stored_runs(experiment, storages=[storage])
+    for name, held in runs.tournaments().items():
         try:
-            wanted[name] = assemble(held)
+            recorded = assemble(held)
         except EtudeError as error:
+            wanted.pop(name, None)
             refused.append(
                 f"Tournament {name} is not shown: its eval runs disagree ({error.code})."
             )
-    standing = []
-    for name, tournament in sorted(wanted.items()):
+            continue
+        asked = wanted.get(name)
+        if asked is not None:
+            try:
+                assemble([*held, TournamentRun(tournament=asked.definition)])
+                continue
+            except EtudeError as error:
+                refused.append(
+                    f"Tournament {name} is drawn as its eval runs recorded it:"
+                    f" eval(state) now defines it otherwise ({error.code})."
+                )
+        wanted[name] = recorded
+    held_tournaments = []
+    for name, given in sorted(wanted.items()):
         try:
             found = played(
-                tournament.definition,
+                given.definition,
                 experiment=experiment,
-                checkpoints=tournament.checkpoints,
-                enter=tournament.entrants,
-                storages=[storage],
+                checkpoints=given.checkpoints,
+                enter=given.entrants,
+                lines=state.lines,
+                runs=runs,
             )
         except EtudeError as error:
             refused.append(f"Tournament {name} is not shown: it is refused ({error.code}).")
             continue
-        standing.append(_Standing(name, tuple(tournament.schedule()), found))
-    return standing, tuple(refused)
+        tournament, gaps = given.resolve(state.lines)
+        held_tournaments.append(
+            _HeldTournament(name, tournament, tuple(tournament.schedule()), gaps, found)
+        )
+    return held_tournaments, tuple(refused)
 
 
-def _wanted(want: Callable[..., object], storage: Storage, experiment: str) -> list[Tournament]:
+def _wanted(want: Callable[..., object], state: ExperimentState) -> list[Tournament]:
     """The tournaments `eval(state)` returns, each with the checkpoints or entrants it holds."""
     # The optional `eval` extra, imported where it is used (`_read_evals`): eval(state)
     # and its evaluation jobs are built on etude.eval.
     from etude.eval.records import Tournament  # noqa: PLC0415
-    from etude.experiment import asked, observe  # noqa: PLC0415
+    from etude.experiment import asked  # noqa: PLC0415
     from etude.jobs import evaluation_spec  # noqa: PLC0415
 
     wanted = []
-    for job in asked(want, observe(storage, experiment)):
+    for job in asked(want, state):
         spec = evaluation_spec(job)
         wanted.append(
             Tournament(
@@ -655,37 +813,42 @@ def _wanted(want: Callable[..., object], storage: Storage, experiment: str) -> l
     return wanted
 
 
-def _players(db: duckdb.DuckDBPyConnection) -> tuple[list[Player], tuple[str, ...]]:
+def _players(
+    db: duckdb.DuckDBPyConnection, saved: dict[str, _Saved], lines: dict[str, str]
+) -> tuple[list[Placement], tuple[str, ...]]:
     """Every player seated, placed by its seat, else by the training run that saved it;
     and notes on what could not be placed as recorded.
 
-    Where seat and training record differ on a clock, the seat's value is
-    drawn: it is what the evaluation declared. Where seats disagree, on a
-    position or a line, the latest is drawn, so a later evaluation corrects a
-    wrong one.
+    `lines` gives each training run's line. Where seat and training record
+    differ on a clock, the seat's value is drawn: it is what the evaluation
+    declared. Where seats disagree, on an `at` or a line, the latest is
+    drawn, so a later evaluation corrects a wrong one.
     """
-    bound = _checkpoints(db)
     found = db.sql(
-        'select player, name, kind, config, checkpoint, "at", at_conflict, line, line_conflict'
+        "select player, names, kind, config, checkpoint, seated_at, lines"
         " from players order by player"
     ).fetchall()
-    players: list[Player] = []
+    players: list[Placement] = []
     notes: list[str] = []
     unplaced: list[str] = []
-    for key, name, kind, config, checkpoint, at, conflict, line, lines in found:
-        saved = bound.get(checkpoint)
-        recorded = {} if saved is None else saved.clocks
-        seated: dict[str, float] = json.loads(at) if at else {}
-        if conflict:
-            earlier = "; ".join(_position(each) for each in json.loads(conflict) if each != seated)
+    for key, names, kind, config, checkpoint, given, named in found:
+        name = "/".join(json.loads(names))
+        bound = saved.get(checkpoint)
+        recorded = {} if bound is None else bound.at
+        seated_at: list[dict[str, float]] = json.loads(given)
+        seated = _merged(seated_at)
+        if _disagree(seated_at):
+            earlier = "; ".join(_described(each) for each in seated_at if each != seated)
             notes.append(
-                f"{name} is drawn at {_position(seated)}, as its latest seat says;"
+                f"{name} is drawn at {_described(seated)}, as its latest seat says;"
                 f" earlier seats said {earlier}."
             )
-        if lines:
-            earlier = ", ".join(each for each in json.loads(lines) if each != line)
+        seat_lines: list[str] = json.loads(named)
+        line = seat_lines[0] if seat_lines else None
+        if len(seat_lines) > 1:
             notes.append(
-                f"{name} is in line {line}, as its latest seat says; earlier seats said {earlier}."
+                f"{name} is in line {line}, as its latest seat says;"
+                f" earlier seats said {', '.join(seat_lines[1:])}."
             )
         for clock in sorted(seated.keys() & recorded.keys()):
             if seated[clock] != recorded[clock]:
@@ -693,28 +856,51 @@ def _players(db: duckdb.DuckDBPyConnection) -> tuple[list[Player], tuple[str, ..
                     f"{name}: seated at {clock} {seated[clock]:g};"
                     f" its training record says {recorded[clock]:g}."
                 )
-        if kind == "model" and saved is None and not seated:
+        if kind == "model" and bound is None and not seated:
             unplaced.append(name)
+        at = recorded | seated
         players.append(
-            Player(
+            Placement(
                 key=key,
                 name=name,
-                run=None if saved is None else saved.run,
-                ordinal=None if saved is None else saved.ordinal,
+                run=None if bound is None else bound.run,
+                ordinal=None if bound is None else bound.ordinal,
                 config=json.dumps(json.loads(config or "{}"), sort_keys=True),
-                at=recorded | seated,
-                line=line if line is not None else None if saved is None else saved.run,
+                at=at,
+                # A run read after the training runs were is its own line until the next build.
+                line=line if line is not None or bound is None else lines.get(bound.run, bound.run),
+                placed=bound is not None or bool(at),
             )
         )
     if unplaced:
         notes.append(
-            f"Drawn as anchors, seated without a position and saved by no training run of the"
+            f"Drawn as anchors, seated without an `at` and saved by no training run of the"
             f" experiment: {', '.join(unplaced)}."
         )
     return players, tuple(notes)
 
 
-def _position(at: dict[str, float]) -> str:
+def _merged(seated_at: list[dict[str, float]]) -> dict[str, float]:
+    """Where seats put a player, latest first: their `at`s merged, the latest winning, so a
+    match recorded before Etude's built-in hour clocks agrees with one that also says where
+    they stood."""
+    merged: dict[str, float] = {}
+    for at in reversed(seated_at):
+        merged.update(at)
+    return merged
+
+
+def _disagree(seated_at: list[dict[str, float]]) -> bool:
+    """Whether two `at`s give a clock they both name different values."""
+    seen: dict[str, float] = {}
+    for at in seated_at:
+        if any(seen.get(clock, value) != value for clock, value in at.items()):
+            return True
+        seen.update(at)
+    return False
+
+
+def _described(at: dict[str, float]) -> str:
     return ", ".join(f"{clock} {value:g}" for clock, value in sorted(at.items()))
 
 
@@ -724,80 +910,238 @@ class _Saved:
 
     run: str
     ordinal: int
-    clocks: dict[str, float]
+    at: dict[str, float]
 
 
-def _checkpoints(db: duckdb.DuckDBPyConnection) -> dict[str, _Saved]:
+def _saved_checkpoints(db: duckdb.DuckDBPyConnection) -> dict[str, _Saved]:
     """Each checkpoint key, encoded, to the training run's checkpoint that saved it.
 
     A run that saved two ordinals under one file name holds one key; it is
     bound to the later.
     """
     found = db.sql(
-        "select checkpoint, run, max(ordinal), arg_max(clocks, ordinal) from training_checkpoints"
+        'select checkpoint, run, max(ordinal), arg_max("at", ordinal) from training_checkpoints'
         " group by checkpoint, run"
     ).fetchall()
-    return {key: _Saved(run, ordinal, json.loads(clocks)) for key, run, ordinal, clocks in found}
+    return {key: _Saved(run, ordinal, json.loads(at)) for key, run, ordinal, at in found}
 
 
-def _opponents_named(report: Report, players: Sequence[Player]) -> tuple[str, ...]:
-    """A note for each curve whose opponent names no player seated."""
-    names = {each.name for each in players}
-    return tuple(
-        f"A Curve panel ({panel.title}) names opponent {panel.opponent!r}, which no player is called."
-        for panel in report.evals
-        if isinstance(panel, Curve) and isinstance(panel.opponent, str)
-        if panel.opponent not in names
+@dataclass(frozen=True, order=True)
+class _HeldFor:
+    """A seating of a tournament held for one checkpoint, by the checkpoint's key, encoded."""
+
+    tournament: str
+    seating: str
+    checkpoint: str
+
+
+def _points(
+    held: Sequence[_HeldTournament],
+    selections: Sequence[Selection],
+    players: Sequence[Placement],
+    saved: dict[str, _Saved],
+    cells: Sequence[Cell],
+) -> tuple[Point, ...]:
+    """Each selection of seatings' points: per checkpoint a seating was held for, its first
+    seat's score over the matches held for it, or why its relative seat found no checkpoint.
+    A fixed seating is held for its first seat's checkpoint, so a fixed pair is drawn once,
+    where that seat stood; with code in that seat it is not drawn as seated.
+
+    A checkpoint's matches are those the selection's seatings call for it,
+    by their first two seats, each pair once whichever tournaments hold it;
+    their cells are the selection's own, so each view, score and split has
+    its point. Several pairs, such as each line of a job, are their mean.
+    """
+    # The optional `eval` extra, as in `_read_evals`.
+    from etude.eval.records import Benchmark, Model  # noqa: PLC0415
+
+    index = {each.key: i for i, each in enumerate(players)}
+    refs = {str(ref.key): ref for each in held for ref in each.tournament.checkpoints}
+    pairs: dict[_HeldFor, set[tuple[int, int]]] = {}
+    for each in held:
+        for called in each.schedule:
+            if called.seating is None:
+                continue
+            held_for = called.checkpoint
+            if held_for is None:
+                seat = called.match.players[0]
+                if not isinstance(seat, Model):
+                    continue
+                held_for = seat.checkpoint.key
+                refs.setdefault(str(held_for), seat.checkpoint)
+            seated = pairs.setdefault(_HeldFor(each.name, called.seating, str(held_for)), set())
+            # A player no eval run seated yet has played nothing to draw.
+            first, second = (index.get(p.key) for p in called.match.players[:2])
+            if first is not None and second is not None:
+                seated.add((first, second))
+    gaps = {
+        _HeldFor(each.name, gap.seating, str(gap.checkpoint)): gap
+        for each in held
+        for gap in each.gaps
+    }
+    one_seed = {
+        (each.name, seating.name)
+        for each in held
+        if isinstance(each.tournament.definition, Benchmark)
+        for seating in each.tournament.definition.seatings
+        if seating.seeds == "one"
+    }
+    scored: dict[tuple[int, int, int], list[Cell]] = {}
+    for cell in cells:
+        if cell.opponent is not None and not cell.fixed:
+            scored.setdefault((cell.selection, cell.subject, cell.opponent), []).append(cell)
+    points: list[Point] = []
+    for number, selection in enumerate(selections):
+        if not _seated(selection):
+            continue
+        parts = _parts(selection)
+        chosen: dict[str, list[_HeldFor]] = {}
+        for key in sorted(pairs.keys() | gaps.keys()):
+            if any(_holds(part, key.tournament, key.seating) for part in parts):
+                chosen.setdefault(key.checkpoint, []).append(key)
+        for checkpoint, here in chosen.items():
+            ref, place = refs[checkpoint], saved.get(checkpoint)
+            stood = Point(
+                selection=number,
+                run=None if place is None else place.run,
+                ordinal=None if place is None else place.ordinal,
+                line=ref.line,
+                at=ref.at or ({} if place is None else place.at),
+                whole=any((key.tournament, key.seating) in one_seed for key in here),
+            )
+            # By view, score and split: the cells of this checkpoint's pairs.
+            met: dict[tuple[str | None, int, str], list[Cell]] = {}
+            for subject, opponent in sorted({pair for key in here for pair in pairs.get(key, ())}):
+                for cell in scored.get((number, subject, opponent), ()):
+                    view = (cell.commit, cell.score, json.dumps(cell.split, sort_keys=True))
+                    met.setdefault(view, []).append(cell)
+            for counted in met.values():
+                points.append(
+                    stood.model_copy(
+                        update={
+                            "commit": counted[0].commit,
+                            "score": counted[0].score,
+                            "split": counted[0].split,
+                            "value": sum(cell.value for cell in counted) / len(counted),
+                            "interval": counted[0].interval if len(counted) == 1 else None,
+                            "rows": sum(cell.rows for cell in counted),
+                            "matches": sum(cell.matches for cell in counted),
+                            "opponents": tuple(cell.opponent for cell in counted),
+                        }
+                    )
+                )
+            gap = next((gaps[key] for key in here if key in gaps), None)
+            if gap is not None:
+                points.append(stood.model_copy(update={"gap": gap}))
+    return tuple(points)
+
+
+def _parts(selection: Selection) -> tuple[Matches, ...]:
+    """What a selection names, as panels name matches: none for the matches outside."""
+    if isinstance(selection, OutsideTournaments):
+        return ()
+    return selection if isinstance(selection, tuple) else (selection,)
+
+
+def _seated(selection: Selection) -> bool:
+    """Whether every part of a selection names a seating, so it is drawn as seated."""
+    parts = _parts(selection)
+    return bool(parts) and all(part.seating is not None for part in parts)
+
+
+def _holds(part: Matches, tournament: str, seating: str) -> bool:
+    """Whether a selection's part counts what `tournament` called for as `seating`."""
+    return part.seating == seating and part.tournament in (None, tournament)
+
+
+def _drawn(selection: Selection, held: Sequence[_HeldTournament]) -> Drawn:
+    """How a selection is drawn: as seated or not, and the tournaments its matches come from."""
+    parts = _parts(selection)
+    tournaments = [
+        each.name
+        for each in held
+        if any(
+            part.tournament in (None, each.name)
+            and (part.seating is None or any(c.seating == part.seating for c in each.schedule))
+            and (part.tag is None or any(part.tag in c.tags for c in each.schedule))
+            for part in parts
+        )
+    ]
+    return Drawn(seated=_seated(selection), tournaments=tuple(tournaments))
+
+
+def _panel_selection(
+    wanted: Matches | tuple[Matches, ...] | None, selections: Sequence[Selection]
+) -> PanelSelection:
+    """The selection a panel naming `wanted` draws: the control's with none, or naming
+    no part; else the one `_selections` made for it, or the one its parts fit."""
+    if wanted is None or wanted == Matches():
+        return PanelSelection(control=True)
+    if wanted in selections:
+        return PanelSelection(selection=selections.index(wanted))
+    if isinstance(wanted, tuple):
+        return PanelSelection()
+    fits = next(
+        (
+            i
+            for i, s in enumerate(selections)
+            if isinstance(s, Matches)
+            and wanted.tournament in (None, s.tournament)
+            and (s.seating, s.tag) == (wanted.seating, wanted.tag)
+        ),
+        None,
     )
+    return PanelSelection(selection=fits)
 
 
 def _load(
-    db: duckdb.DuckDBPyConnection, standing: Sequence[_Standing], players: Sequence[Player]
+    db: duckdb.DuckDBPyConnection, held: Sequence[_HeldTournament], players: Sequence[Placement]
 ) -> bool:
     """Temp tables `compare` selects rows by; whether any match was held outside a tournament.
 
     `_page_held` (view, tournament, run, match): for view '', each delivered
-    match and the eval run whose rows count, under tournament '' for those
-    held outside any; for a commit, each match as played at it (`_commits`).
-    `_page_scheduled` (tournament, match, matchup, tag): what each match was
+    match and the eval run whose rows count, under tournament '' for those an
+    eval run held outside any (`OutsideTournaments`); for a commit, each match
+    as played at it (`_commits`).
+    `_page_scheduled` (tournament, match, seating, tag): what each match was
     called for as. `_page_checkpoints` (player): the placed models.
     """
-    db.execute(
-        "create or replace temp table _page_held"
-        " (view VARCHAR, tournament VARCHAR, run VARCHAR, match VARCHAR)"
+    # The optional `eval` extra, imported where it is used (`_read_evals`).
+    from etude.eval.block import stage  # noqa: PLC0415
+
+    stage(
+        db,
+        "_page_held",
+        {"view": "VARCHAR", "tournament": "VARCHAR", "run": "VARCHAR", "match": "VARCHAR"},
+        [["", each.name, d.run, d.match.key] for each in held for d in each.played.delivered],
     )
-    db.execute(
-        "create or replace temp table _page_scheduled"
-        " (tournament VARCHAR, match VARCHAR, matchup VARCHAR, tag VARCHAR)"
+    stage(
+        db,
+        "_page_scheduled",
+        {"tournament": "VARCHAR", "match": "VARCHAR", "seating": "VARCHAR", "tag": "VARCHAR"},
+        [
+            [each.name, called.match.key, called.seating, tag]
+            for each in held
+            for called in each.schedule
+            for tag in (called.tags or (None,))
+        ],
     )
-    db.execute("create or replace temp table _page_checkpoints (player VARCHAR)")
-    held = [["", each.name, d.run, d.match.key] for each in standing for d in each.played.delivered]
-    scheduled = [
-        [each.name, called.match.key, called.matchup, tag]
-        for each in standing
-        for called in each.schedule
-        for tag in (called.tags or (None,))
-    ]
-    placed = [[each.key] for each in players if each.placed]
-    for table, rows in (
-        ("_page_held", held),
-        ("_page_scheduled", scheduled),
-        ("_page_checkpoints", placed),
-    ):
-        if rows:  # DuckDB refuses an empty batch
-            db.executemany(f"insert into {table} values ({', '.join('?' * len(rows[0]))})", rows)
-    # Each done match outside a tournament once per environment, from its latest record, in
-    # the order `etude.eval.tournament` takes a tournament's.
+    stage(
+        db,
+        "_page_checkpoints",
+        {"player": "VARCHAR"},
+        [[each.key] for each in players if each.placed],
+    )
+    # Each match an eval run delivered outside a tournament, once per environment from its
+    # latest record (`matches.newest`), as a tournament counts its own.
     db.execute(
         """
         insert into _page_held
-        select '', '', run, match from (
-            select m.run, m.match, row_number() over (
-                partition by r.environment, m.match order by m.wall_ms desc, m.run desc
-            ) as latest
-            from matches m join runs r using (run)
-            where m.state = 'done' and r.tournament is null
-        ) where latest = 1
+        select '', '', m.run, m.match from matches m join runs r using (run)
+        where m.newest = 1 and (r.environment, m.match) in (
+            select e.environment, d.match from matches d join runs e using (run)
+            where d.state = 'done' and e.tournament is null
+        )
         """
     )
     found = db.sql("select count(*) from runs where tournament is null").fetchone()
@@ -816,8 +1160,7 @@ def _commits(db: duckdb.DuckDBPyConnection) -> tuple[Commit, ...]:
         insert into _page_held
         select commit, tournament, run, match from (
             select s.commit, h.tournament, m.run, m.match, row_number() over (
-                partition by s.commit, h.tournament, r.environment, m.match
-                order by m.wall_ms desc, m.run desc
+                partition by s.commit, h.tournament, r.environment, m.match order by m.newest
             ) as latest
             from (select h.tournament, h.match, r.environment
                   from _page_held h join runs r using (run) where h.view = '') h
@@ -843,46 +1186,66 @@ def _literal(text: str) -> str:
     return "'" + text.replace("'", "''") + "'"
 
 
-def _where(selection: Matches | tuple[Matches, ...], *, view: str) -> str:
+def _where(selection: Selection, *, view: str) -> str:
     """The rows of a selection's matches in a view of `_page_held`, as a condition
     `compare` applies to an author table."""
     if isinstance(selection, tuple):
-        where = " or ".join(f"({_where(s, view=view)})" for s in selection) or "false"
         # Two tournaments may hold different deliveries of the same match.
-        # Keep its latest delivery per environment, as a single selection does.
+        return _newest_once(" or ".join(f"({_where(s, view=view)})" for s in selection) or "false")
+    if isinstance(selection, OutsideTournaments):
         return (
-            "(run, match) in (select m.run, m.match from matches m"
-            f" join runs r using (run) where ({where})"
-            " qualify row_number() over (partition by r.environment, m.match"
-            " order by m.wall_ms desc, m.run desc) = 1)"
+            "(run, match) in (select run, match from _page_held"
+            f" where view = {_literal(view)} and tournament = '')"
         )
-    tournament = _literal(selection.tournament or "")
+    if selection.tournament is None:
+        # Every tournament's, whichever tournament called for each match.
+        named = "".join(
+            f" and s.{column} = {_literal(value)}"
+            for column, value in (("seating", selection.seating), ("tag", selection.tag))
+            if value is not None
+        )
+        return _newest_once(
+            "(run, match) in (select h.run, h.match from _page_held h join _page_scheduled s"
+            " on s.tournament = h.tournament and s.match = h.match"
+            f" where h.view = {_literal(view)} and h.tournament != ''{named})"
+        )
+    tournament = _literal(selection.tournament)
     held = (
         "(run, match) in (select run, match from _page_held"
         f" where view = {_literal(view)} and tournament = {tournament})"
     )
     scheduled = f"select match from _page_scheduled where tournament = {tournament}"
-    if selection.matchup is not None:
-        held += f" and match in ({scheduled} and matchup = {_literal(selection.matchup)})"
+    if selection.seating is not None:
+        held += f" and match in ({scheduled} and seating = {_literal(selection.seating)})"
     if selection.tag is not None:
         held += f" and match in ({scheduled} and tag = {_literal(selection.tag)})"
     return held
 
 
-def _selections(
-    standing: Sequence[_Standing], report: Report, *, outside: bool
-) -> tuple[list[Matches | tuple[Matches, ...]], tuple[str, ...]]:
-    """Each tournament, the matches outside one, each tag and each matchup a panel names;
-    and what is amiss."""
-    tournaments = [each.name for each in standing]
-    tags = sorted({(each.name, tag) for each in standing for c in each.schedule for tag in c.tags})
-    matchups = sorted(
-        {(each.name, c.matchup) for each in standing for c in each.schedule if c.matchup}
+def _newest_once(where: str) -> str:
+    """Each match `where` selects once, from its newest delivery in each environment
+    (`matches.newest`), as a single tournament's selection counts it."""
+    return (
+        "(run, match) in (select m.run, m.match from matches m"
+        f" join runs r using (run) where ({where})"
+        " qualify row_number() over (partition by r.environment, m.match"
+        " order by m.newest) = 1)"
     )
-    selections: list[Matches | tuple[Matches, ...]] = [
-        Matches(tournament=name) for name in tournaments
-    ]
-    selections += [Matches()] if outside else []
+
+
+def _selections(
+    held: Sequence[_HeldTournament], report: Report, *, outside: bool
+) -> tuple[list[Selection], tuple[str, ...]]:
+    """Each tournament, the matches outside one, each tag and each seating a panel names;
+    and what is amiss."""
+    tournaments = [each.name for each in held]
+    tags = sorted({(each.name, tag) for each in held for c in each.schedule for tag in c.tags})
+    seatings = sorted(
+        {(each.name, c.seating) for each in held for c in each.schedule if c.seating}
+        | {(each.name, gap.seating) for each in held for gap in each.gaps}
+    )
+    selections: list[Selection] = [Matches(tournament=name) for name in tournaments]
+    selections += [OutsideTournaments()] if outside else []
     selections += [Matches(tournament=t, tag=tag) for t, tag in tags]
     notes: list[str] = []
     requested = [
@@ -894,18 +1257,19 @@ def _selections(
     for chosen, title in requested:
         if chosen.tournament is not None and chosen.tournament not in tournaments:
             notes.append(f"A {title} names tournament {chosen.tournament!r}, which nothing holds.")
-        if chosen.tag is not None and not any(tag == chosen.tag for _, tag in tags):
-            notes.append(f"A {title} names tag {chosen.tag!r}, which no matchup has.")
-        if chosen.matchup is None:
+        if chosen.tag is not None and not any(
+            tag == chosen.tag and chosen.tournament in (None, t) for t, tag in tags
+        ):
+            notes.append(f"A {title} names tag {chosen.tag!r}, which no seating has.")
             continue
-        named = [
-            Matches(tournament=t, matchup=m)
-            for t, m in matchups
-            if m == chosen.matchup and chosen.tournament in (None, t)
-        ]
-        if not named:
-            notes.append(f"A {title} names matchup {chosen.matchup!r}, which nothing holds.")
-        selections += [each for each in named if each not in selections]
+        if chosen.seating is not None and not any(
+            m == chosen.seating and chosen.tournament in (None, t) for t, m in seatings
+        ):
+            notes.append(f"A {title} names seating {chosen.seating!r}, which nothing holds.")
+            continue
+        # A seating or tag named without a tournament covers every tournament holding it.
+        if (chosen.seating, chosen.tag) != (None, None) and chosen not in selections:
+            selections.append(chosen)
     # Union selections follow their components so result-aware resolution can use
     # the component cells. SQL unions rows before compare computes any statistic.
     selections += list(
@@ -915,24 +1279,26 @@ def _selections(
 
 
 def _resolve_matches(
-    wanted: Matches,
-    selections: Sequence[Matches | tuple[Matches, ...]],
-    present: set[int],
+    wanted: Matches, selections: Sequence[Selection], present: set[int]
 ) -> Matches | None:
+    """The selection a union's part counts: itself where the page made it, else one its
+    names fit, preferring one with values in this view and score (`present`)."""
+    if wanted in selections:
+        return wanted
     candidates = [
         (i, s)
         for i, s in enumerate(selections)
         if isinstance(s, Matches)
         and (wanted.tournament is None or s.tournament == wanted.tournament)
         and s.tag == wanted.tag
-        and s.matchup == wanted.matchup
+        and s.seating == wanted.seating
     ]
     return next(
         (s for i, s in candidates if i in present), candidates[0][1] if candidates else None
     )
 
 
-def _environments(db: duckdb.DuckDBPyConnection) -> dict[str, Environment]:
+def _environments(db: duckdb.DuckDBPyConnection) -> dict[str, EnvironmentLabel]:
     """Each environment the eval runs played in, by identity, the newest latest match first."""
     found = db.sql(
         "select r.environment, any_value(r.environment_name), any_value(r.environment_config),"
@@ -940,19 +1306,19 @@ def _environments(db: duckdb.DuckDBPyConnection) -> dict[str, Environment]:
         " group by r.environment order by latest desc nulls last, r.environment"
     ).fetchall()
     return {
-        identity: Environment(name=name, config=json.loads(config or "{}"))
+        identity: EnvironmentLabel(name=name, config=json.loads(config or "{}"))
         for identity, name, config, _ in found
     }
 
 
 def _cells(
     db: duckdb.DuckDBPyConnection,
-    selections: Sequence[Matches | tuple[Matches, ...]],
-    players: Sequence[Player],
-    environments: dict[str, Environment],
+    selections: Sequence[Selection],
+    players: Sequence[Placement],
+    environments: dict[str, EnvironmentLabel],
     commits: Sequence[Commit],
     report: Report,
-) -> tuple[tuple[Score, ...], list[Cell], tuple[str, ...], tuple[str, ...]]:
+) -> tuple[tuple[Score, ...], list[Cell], tuple[Absent, ...], tuple[str, ...]]:
     """Every value the eval panels may show, the scores offered, absent columns, and a note
     for each environment whose values another, newer one hides.
 
@@ -983,14 +1349,14 @@ def _cells(
     anchors = sum(not each.placed for each in players)
     place = {identity: number for number, identity in enumerate(environments)}
     cells: list[Cell] = []
-    absent: list[str] = []
+    absent: list[Absent] = []
     for number, score in enumerate(scores):
         held = columns.get(score.table, {})
         if score.value not in held:
-            absent.append(f"{score.table}.{score.value}")
+            absent.append(Absent(table=score.table, column=score.value))
             continue
         named = [c for c in report.columns() if c in held]
-        absent += [f"{score.table}.{c}" for c in report.columns() if c not in held]
+        absent += [Absent(table=score.table, column=c) for c in report.columns() if c not in held]
         splits = [
             by for size in range(len(named) + 1) for by in itertools.combinations(named, size)
         ]
@@ -1057,32 +1423,33 @@ def _cells(
 
 
 def _newest_environment(
-    cells: Sequence[Cell], environments: Sequence[Environment]
+    cells: Sequence[Cell], environments: Sequence[EnvironmentLabel]
 ) -> tuple[list[Cell], tuple[str, ...]]:
-    """Of one comparison's cells in several environments, the newest environment's; and a
+    """Of a value's cells in several environments, the newest environment's; and a
     note per environment that loses any. Environments are never pooled."""
     # A lower index is a newer environment.
+    keyed = [(_without_environment(cell), cell) for cell in cells]
     newest: dict[tuple[object, ...], int] = {}
-    for cell in cells:
-        same = _comparison(cell)
-        newest[same] = min(cell.environment, newest.get(same, cell.environment))
-    hidden = Counter(c.environment for c in cells if c.environment != newest[_comparison(c)])
-    return [c for c in cells if c.environment == newest[_comparison(c)]], tuple(
+    for key, cell in keyed:
+        newest[key] = min(cell.environment, newest.get(key, cell.environment))
+    kept = [cell for key, cell in keyed if cell.environment == newest[key]]
+    hidden = Counter(cell.environment for key, cell in keyed if cell.environment != newest[key])
+    return kept, tuple(
         f"{count} values were also played in {_environment_name(environments[number])};"
         " the page shows each from the environment whose latest match is newest."
         for number, count in sorted(hidden.items())
     )
 
 
-def _comparison(cell: Cell) -> tuple[object, ...]:
-    """What a cell compares, whatever environment it was played in."""
+def _without_environment(cell: Cell) -> tuple[object, ...]:
+    """A cell's identity, whatever environment it was played in."""
     return (
         cell.selection, cell.commit, cell.score, cell.subject, cell.opponent, cell.fixed,
         json.dumps(cell.split, sort_keys=True),
     )  # fmt: skip
 
 
-def _environment_name(environment: Environment) -> str:
+def _environment_name(environment: EnvironmentLabel) -> str:
     if not environment.config:
         return environment.name
     return f"{environment.name} {json.dumps(environment.config, sort_keys=True)}"
@@ -1093,30 +1460,45 @@ def _met(cell: Cell) -> tuple[int, str | None, int, int]:
     return (cell.selection, cell.commit, cell.score, cell.subject)
 
 
-def _coverage(db: duckdb.DuckDBPyConnection, standing: Sequence[_Standing]) -> tuple[Coverage, ...]:
+@dataclass(frozen=True, order=True)
+class _CheckpointIn:
+    """A training run's checkpoint in one tournament."""
+
+    run: str
+    ordinal: int
+    tournament: str
+
+
+def _coverage(saved: dict[str, _Saved], held: Sequence[_HeldTournament]) -> tuple[Coverage, ...]:
     """Each checkpoint's matches in each tournament: played, failed since, and not yet played."""
-    bound = _checkpoints(db)
-    counts: dict[tuple[str, int, str], list[int]] = {}
-    for each in standing:
-        states: tuple[tuple[int, Sequence[Match]], ...] = (
-            (0, [d.match for d in each.played.delivered]),
-            (1, each.played.failed),
-            (2, each.played.new),
-        )
-        for state, matches in states:
+    played: Counter[_CheckpointIn] = Counter()
+    failed: Counter[_CheckpointIn] = Counter()
+    unplayed: Counter[_CheckpointIn] = Counter()
+    for each in held:
+        for counts, matches in (
+            (played, [d.match for d in each.played.delivered]),
+            (failed, each.played.failed),
+            (unplayed, each.played.new),
+        ):
             for match in matches:
                 keys = {str(s.checkpoint.key) for s in match.players if s.kind == "model"}
-                for key in keys & bound.keys():
-                    saved = bound[key]
-                    counts.setdefault((saved.run, saved.ordinal, each.name), [0, 0, 0])[state] += 1
+                for key in keys & saved.keys():
+                    counts[_CheckpointIn(saved[key].run, saved[key].ordinal, each.name)] += 1
     return tuple(
-        Coverage(run=run, ordinal=ordinal, tournament=name, played=n[0], failed=n[1], unplayed=n[2])
-        for (run, ordinal, name), n in sorted(counts.items())
+        Coverage(
+            run=key.run,
+            ordinal=key.ordinal,
+            tournament=key.tournament,
+            played=played[key],
+            failed=failed[key],
+            unplayed=unplayed[key],
+        )
+        for key in sorted(played.keys() | failed.keys() | unplayed.keys())
     )
 
 
 def _failures(
-    db: duckdb.DuckDBPyConnection, standing: Sequence[_Standing], players: Sequence[Player]
+    db: duckdb.DuckDBPyConnection, held: Sequence[_HeldTournament], players: Sequence[Placement]
 ) -> tuple[Failure, ...]:
     """Each failed match `played` counts, and each outside a tournament that no eval run has
     played since in its environment, with the error its eval run recorded."""
@@ -1126,13 +1508,13 @@ def _failures(
             "select match, max(error) from matches where state = 'failed' group by match"
         ).fetchall()
     )
-    held = tuple(
+    in_tournaments = tuple(
         Failure(
             tournament=each.name,
             players=tuple(index[seat.key] for seat in match.players),
             error=errors.get(match.key),
         )
-        for each in standing
+        for each in held
         for match in each.played.failed
     )
     outside = db.sql(
@@ -1152,7 +1534,7 @@ def _failures(
     unique = {
         (environment, match): (seated, error) for environment, match, seated, error in outside
     }
-    return held + tuple(
+    return in_tournaments + tuple(
         Failure(tournament=None, players=tuple(index[key] for key in seated), error=error)
         for seated, error in unique.values()
     )

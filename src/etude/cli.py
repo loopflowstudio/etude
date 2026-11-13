@@ -476,7 +476,7 @@ def continue_run(
     from etude.carriage import put_back
     from etude.jobs import continue_from, continued_config
     from etude.launch.listing import resolve_runs, show_runs
-    from etude.run.listing import places
+    from etude.run.listing import run_folders
     from etude.run.storage import default_root, storage_from_uri
 
     scheduler = launch_cli.default()
@@ -486,7 +486,7 @@ def continue_run(
     with tempfile.TemporaryDirectory() as relayed:
         if source is None:
             # A parent that ran on another owned host: its records, from there.
-            here = places(storage)
+            here = run_folders(storage.keys(""))
             for parent in parents:
                 files = None if parent.id in here else scheduler.held(parent.id)
                 if files is not None:
@@ -525,27 +525,34 @@ app.command()(kind(Kind.wait)(checkpoints))
 app.command()(kind(Kind.wait)(sync))
 
 # Commands that run on this computer even when a controller is chosen: they read
-# local files, or they choose the controller.
-_LOCAL = ("launch", "queue", "smoke", "source", "fetch", "worker", "logs")
+# local files or a bucket, run a machine's worker, or submit through the controller
+# themselves. Every other command is sent to a chosen controller.
+_HERE = (
+    "launch",
+    "queue",
+    "smoke",
+    "source",
+    "fetch",
+    "worker",
+    "logs",
+    "report",
+    "checkpoints",
+    "sync",
+    "convert-eval",
+    "delete-eval-files",
+)
 
 
 def _main(argv: list[str]) -> int:
     try:
-        if (
-            argv
-            and argv[0]
-            not in ("worker", "report", "checkpoints", "sync", "convert-eval", "delete-eval-files")
-            and not {"--help", "-h"} & set(argv)
-        ):
+        if argv and argv[0] not in _HERE and not {"--help", "-h"} & set(argv):
             # Entry points import only the command being run (AGENTS.md).
             from etude.launch import controller
 
             if argv == ["--controller-request"]:
                 return controller.receive(launch_cli.default())
-            local = argv[0] in _LOCAL or argv[:2] in (
-                ["controller", "set"],
-                ["controller", "unset"],
-            )
+            # The controller command chooses the controller, so `set` and `unset` run here.
+            local = argv[:2] in (["controller", "set"], ["controller", "unset"])
             if not local and (address := controller.selected()):
                 if argv[0] == "controller":
                     print(f"controller: {address}", flush=True)

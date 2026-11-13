@@ -27,7 +27,8 @@ from etude.launch.records import (
     Pool,
     Run,
     Status,
-    job_identity,
+    Until,
+    job_id,
 )
 from etude.launch.scheduler import Scheduler
 from etude.run.listing import runs
@@ -36,6 +37,7 @@ from etude.train.read import read
 from etude.train.records import Step
 from etude.train.report import training
 from etude.train.run import track
+from tests.experiments import authored
 from tests.launch.counting import job_text
 from tests.run.storage import MeasuredStorage
 
@@ -87,7 +89,7 @@ def test_a_run_from_a_commit_reports_progress_and_keeps_its_outputs(
         repo=str(repo),
         revision=revision,
         config="arm = large",
-        until="agent_steps=26000",
+        until=Until.parse("agent_steps=26000"),
         max_hours=0.1,
         max_usd=Decimal(1),
     )
@@ -129,7 +131,7 @@ def test_a_continuation_starts_from_its_parents_recorded_checkpoint(tmp_path: Pa
     (tmp_path / "train.py").write_text(CONTINUED)
     spec = Job(
         command=f"{sys.executable} {tmp_path / 'train.py'}",
-        until="steps=2",
+        until=Until.parse("steps=2"),
         max_hours=0.1,
         max_usd=Decimal(1),
     )
@@ -138,11 +140,14 @@ def test_a_continuation_starts_from_its_parents_recorded_checkpoint(tmp_path: Pa
     tracked = tmp_path / "track"
     with pytest.raises(LauncherError, match="not beyond the checkpoint's steps=2"):
         continue_from(scheduler.record(first), "steps=2", source=tracked)
-    with pytest.raises(LauncherError, match="a clock its checkpoint recorded: steps"):
+    with pytest.raises(
+        LauncherError,
+        match="a clock its checkpoint recorded: hours_since_start, running_hours, steps",
+    ):
         continue_from(scheduler.record(first), "updates=9", source=tracked)
 
     # Tagging the parent's checkpoint later does not make the continuation another job.
-    identity = job_identity(continue_from(scheduler.record(first), "steps=5", source=tracked).job)
+    identity = job_id(continue_from(scheduler.record(first), "steps=5", source=tracked).job)
     parent = track(
         experiment="capacity",
         clocks=[Step("steps", "training steps")],
@@ -158,12 +163,12 @@ def test_a_continuation_starts_from_its_parents_recorded_checkpoint(tmp_path: Pa
     (tracked / "-aside" / first / "environment.json").write_text("{}")
     measured = MeasuredStorage(DirectoryStorage(tracked))
     continued = continue_from(scheduler.record(first), "steps=5", source=measured)
-    assert job_identity(continued.job) == identity
+    assert job_id(continued.job) == identity
     assert {key for key in measured.got if key.endswith("run.json")} == {f"{first}/run.json"}
 
     second = scheduler.launch(continued)
     (status,) = scheduler.wait(second, every=0.05, timeout=30)
-    assert (status.outcome, status.clocks) == ("succeeded", {"steps": 5})
+    assert (status.outcome, authored(status.clocks)) == ("succeeded", {"steps": 5})
     data = read(tracked, "capacity", second)
     (checkpoint,) = data.checkpoints
     assert Path(urlparse(checkpoint.artifact.uri).path).read_text() == (
@@ -203,7 +208,7 @@ def test_a_killed_session_retries_its_run(tmp_path: Path) -> None:
     status = until(scheduler, one, "running")
     session = scheduler.attempts(one)[0].session
     os.kill(
-        int((tmp_path / "sessions" / session / "receipt").read_text()),
+        int((tmp_path / "sessions" / session / "pid").read_text()),
         signal.SIGKILL,
     )
     status = until(scheduler, one, "done")
@@ -275,7 +280,8 @@ def test_a_launched_job_tracks_as_its_run_without_naming_itself(tmp_path: Path) 
         (attempt,) = data.attempts
         assert attempt.attempt == launched.id
         # The script never wrote etude-result.json; tracking reported its progress.
-        assert launched.clocks == {"steps": 2}
+        # With Etude's hours, which a job's `until` may name as it may name its own clocks.
+        assert authored(launched.clocks) == {"steps": 2}
         (checkpoint,) = data.checkpoints
         # Named for where its first clock stood; the launcher holds no copy of it.
         stored = tracked / record.id / "checkpoints" / "steps-2.pt"
@@ -304,7 +310,7 @@ class _Weights:
     def changed(self, etag: str) -> Fetched | None:
         return None
 
-    def reused(self, size_bytes: int, byte_range: str | None) -> None:
+    def reused(self, size_bytes: int, start: int | None, end: int | None) -> None:
         pass
 
 

@@ -33,7 +33,7 @@ from uuid import uuid4
 
 from pydantic import Field
 
-from etude.carriage import Mismatch
+from etude.carriage import RecordMismatch
 from etude.deadline import limit_time, remaining
 from etude.launch import source
 from etude.launch.database import Database
@@ -68,6 +68,7 @@ from etude.launch.records import (
     QuotedMachine,
     Record,
     Rental,
+    RentalCost,
     Run,
     RunAttempt,
     RunRecord,
@@ -78,9 +79,8 @@ from etude.launch.records import (
     Storage,
     Supply,
     Target,
-    job_identity,
-    number,
-    parse_target,
+    job_id,
+    refusal,
 )
 from etude.launch.schemas import (
     Observation,
@@ -88,7 +88,7 @@ from etude.launch.schemas import (
     Progress,
     Work,
 )
-from etude.launch.storage.download import Mismatch as StoredMismatch
+from etude.launch.storage.download import StoredContentMismatch
 from etude.launch.storage.s3 import longest_grant
 from etude.launch.storage.transport import attribute, observe
 from etude.launch.usage import Usage
@@ -100,7 +100,7 @@ Reach = Callable[[Machine | OnDemand], Execution]
 # What a run folder's relay raises while its holder cannot give it; the work waits.
 # An input's file that is gone or does not match its record ends the attempt
 # instead, in `_relay`; a retry's restore set waits on either.
-_RELAY_WAITS = (OSError, Mismatch, LauncherError, StorageUnavailable)
+_RELAY_WAITS = (OSError, RecordMismatch, LauncherError, StorageUnavailable)
 # How often a pass may fetch a running job's log. Reading it over SSH sends it all.
 _JOB_LOG_SECONDS = 30.0
 # A log read without a supply's `log_seconds`: one stalled bucket must not hold
@@ -131,17 +131,34 @@ def _id() -> str:
     return uuid4().hex[:12]
 
 
+def _new_session(id: str, supply: Supply, machine: Machine, now: datetime) -> Session:
+    """A session not yet claimed; only a rented machine's starts by itself."""
+    return Session(
+        id=id,
+        supply=supply.name,
+        machine=machine.name,
+        planned_at=now,
+        claimed_at=None,
+        provider_id=None,
+        started_at=None,
+        refused_at=None,
+        ended_at=None,
+        version=1,
+        autorun=machine.kind == "rented",
+    )
+
+
 def _rental_usd(rental: Rental, machine: Machine, now: datetime) -> Decimal:
     """Estimate an unconfirmed machine through its paid deadline."""
-    if machine.requested_at is None or machine.refused_at is not None:
+    if machine.claimed_at is None or machine.refused_at is not None:
         return Decimal(0)
     end = machine.deleted_at or min(now, rental.deadline)
-    return _cost_between(rental, machine, machine.requested_at, end)
+    return _cost_between(rental, machine, machine.claimed_at, end)
 
 
 def _cost_between(r: Rental, machine: Machine, start: datetime, end: datetime) -> Decimal:
     """Allocate billed coverage by occupied time; estimate uncovered seconds."""
-    origin = machine.requested_at or start
+    origin = machine.claimed_at or start
     through = r.billed_through
     if through is None:
         return _usd(r.usd_per_hour, start, end)
@@ -164,6 +181,13 @@ class PlannedRun(Record):
     cap_usd: Decimal = Field(allow_inf_nan=True)  # unlimited for owned machines
     seconds: int
     limit: Limit
+
+
+class Budget(Record):
+    """What a run has left across all its attempts."""
+
+    seconds: float  # execution time
+    usd: Decimal = Field(allow_inf_nan=True)  # attributed dollars; unlimited without max_usd
 
 
 class Placement(Record):
@@ -212,7 +236,7 @@ class Scheduler:
         rental = self._store.rental_for(session)
         return Decimal(0) if rental is None else rental.usd_per_hour
 
-    def _kept(self, session: Session) -> bool:
+    def _kept_rental(self, session: Session) -> bool:
         rental = self._store.rental_for(session)
         return rental is not None and rental.kept
 
@@ -385,7 +409,7 @@ class Scheduler:
                     f"on-demand {ondemand!r} keeps records in a storage whose grants last at "
                     f"most {longest / 3600:g} hours"
                 )
-            session, rented, rental = self._session(supply, None, price, life, now, kept=True)
+            session, rented, rental = self._make_rental(supply, price, life, now, kept=True)
             self._store.plan(session, (), rented, rental)
             self._tick_supply(supply, self._clock())
             return session.machine
@@ -407,14 +431,14 @@ class Scheduler:
             return self._store.machine(machine)
 
     def _terminate(self, held: Session) -> None:
-        if held.receipt is None:
+        if held.provider_id is None:
             # Its create reply was lost: delete what the provider holds under its
             # identity, or record that it holds nothing.
-            receipt = self._service(held).find(held.id)
-            if receipt is None:
+            provider_id = self._service(held).find(held.id)
+            if provider_id is None:
                 self._store.record_refusal(held, self._clock())
                 return
-            self._store.record_receipt(held, receipt)
+            self._store.record_provider_id(held, provider_id)
             held = self._store.session(held.id)
         self._end_session(held)
         if self._store.session(held.id).ended_at is None:
@@ -424,12 +448,26 @@ class Scheduler:
         """Internal journal session named in a run attempt."""
         return self._store.session(id)
 
-    def rentals(self) -> tuple[tuple[Rental, Decimal], ...]:
+    def rentals(self) -> tuple[RentalCost, ...]:
         """Paid windows and their cost from retained bills, including terminated machines."""
         now = self._clock()
-        return tuple(
-            (r, _rental_usd(r, self._store.machine(r.machine), now)) for r in self._store.rentals()
-        )
+        costs = []
+        for rental in self._store.rentals():
+            usd = _rental_usd(rental, self._store.machine(rental.machine), now)
+            costs.append(
+                RentalCost(
+                    rental=rental,
+                    usd=usd,
+                    estimated=self._estimated(rental, now),
+                    unbilled_usd=usd - rental.billed_usd,
+                    over_cap=rental.billed_usd > rental.cap_usd,
+                )
+            )
+        return tuple(costs)
+
+    def now(self) -> datetime:
+        """The time by the clock this scheduler reads every record against."""
+        return self._clock()
 
     def turn_pool(self, name: str, *, off: bool) -> None:
         """Stop or resume sending new runs to a pool. Runs already there are untouched."""
@@ -459,13 +497,15 @@ class Scheduler:
         ondemand = self._store.ondemand(rent)
         with limit_time(timeout):
             offer = self._reach(ondemand).offer()
+        in_use = self._in_use(ondemand)
         return Availability(
             ondemand=rent,
             offer=offer,
             max_usd_per_hour=ondemand.max_usd_per_hour,
-            in_use=sum(s.supply == rent for s in self._store.unsettled_sessions()),
+            in_use=in_use,
             max_machines=ondemand.max_machines,
             observed_at=self._clock(),
+            refusal=refusal(ondemand, in_use, offer),
         )
 
     def queue(self, run: Run | Job, pool: str | None = None, *, rent: str | None = None) -> str:
@@ -808,14 +848,16 @@ class Scheduler:
                     now = self._clock()
                     if existing is None:
                         supply = self._store.supply(placement.supply)
-                        life = (
-                            self._life(supply, placement.runs, records, cohort, price)
-                            if isinstance(supply, OnDemand)
-                            else 0.0
-                        )
-                        session, rented, rental = self._session(
-                            supply, machine, price, life, now, kept=False
-                        )
+                        rented: Machine | None = None
+                        rental: Rental | None = None
+                        if machine is None:
+                            assert isinstance(supply, OnDemand)  # only an on-demand rents
+                            life = self._life(supply, placement.runs, records, cohort, price)
+                            session, rented, rental = self._make_rental(
+                                supply, price, life, now, kept=False
+                            )
+                        else:
+                            session = _new_session(_id(), supply, machine, now)
                         self._store.plan(session, (), rented, rental, launch=launch)
                         made.append(session)
                         if rented is not None:
@@ -823,7 +865,7 @@ class Scheduler:
                             # the entire first wave has confirmed capacity.
                             self._create(session, now, idle=True)
                             session = self._store.session(session.id)
-                            if session.receipt is None:
+                            if session.provider_id is None:
                                 reason = (
                                     "provider refused capacity"
                                     if session.refused_at
@@ -849,12 +891,12 @@ class Scheduler:
                             limit="out_of_time",
                         )
                         attempts.append(
-                            self._attempt(
+                            self._make_attempt(
                                 planned,
                                 session,
                                 held + index,
                                 now,
-                                added=session.receipt is not None,
+                                added=session.provider_id is not None,
                             )
                         )
                 self._check_locks(names)
@@ -869,7 +911,7 @@ class Scheduler:
                     try:
                         self._check_locks(names)
                         session = self._store.session(session.id)
-                        if session.receipt is not None:
+                        if session.provider_id is not None:
                             self._end_session(session)
                         elif session.claimed_at is None:
                             self._store.record_refusal(session, self._clock())
@@ -1063,7 +1105,11 @@ class Scheduler:
                 StartPhase(name=name, at=at, attempt=attempt.id, evidence=evidence)
                 for name, at, evidence in (
                     ("machine asked for", session.claimed_at, None),
-                    ("machine confirmed", None, "receipt retained" if session.receipt else None),
+                    (
+                        "machine confirmed",
+                        None,
+                        "receipt retained" if session.provider_id else None,
+                    ),
                     ("worker up", session.started_at, None),
                     ("code started", attempt.started_at, None),
                 )
@@ -1355,7 +1401,7 @@ class Scheduler:
             else self._shared(last, session, rental, now),
         )
         if last is not None and session is not None and last.outcome is None:
-            if session.receipt is None:
+            if session.provider_id is None:
                 return seen.model_copy(update={"phase": "renting"})
             if record.cancel_requested_at is not None:
                 return seen.model_copy(
@@ -1376,13 +1422,14 @@ class Scheduler:
             return seen.model_copy(update={"phase": "done", "outcome": "cancelled"})
         if record.cohort is not None and self._cohort_spent(record.cohort, now):
             return seen.model_copy(update={"phase": "done", "outcome": "over_budget"})
-        hours, dollars = self._remaining(record, now)
-        if hours < 1 or dollars <= 0:
-            # A retry cannot fit: say what ended the last attempt beside why no other follows.
+        left = self._remaining(record, now)
+        # Under a second cannot be placed (`_limit`), so no retry can fit: say
+        # what ended the last attempt beside why no other follows.
+        if left.seconds < 1 or left.usd <= 0:
             return seen.model_copy(
                 update={
                     "phase": "done",
-                    "outcome": "out_of_time" if hours < 1 else "over_budget",
+                    "outcome": "out_of_time" if left.seconds < 1 else "over_budget",
                     "cause": None if last is None else last.cause,
                 }
             )
@@ -1453,13 +1500,13 @@ class Scheduler:
                         session=session.id,
                     )
                     continue  # storage or the provider will answer on a later pass
-            elif not self._kept(session) and not self._store.attempts(session=session.id):
+            elif not self._kept_rental(session) and not self._store.attempts(session=session.id):
                 # A crashed admission never asked for this machine. Release its claim.
                 self._store.record_refusal(session, now)
         self._store.check_lock(supply.name)
         self._plan(supply, now)
         for idle in self._idle_sessions(supply, now):
-            if self._kept(idle):
+            if self._kept_rental(idle):
                 continue
             try:
                 # A rented machine delivers its last files and end receipt before it
@@ -1485,7 +1532,7 @@ class Scheduler:
         machine = self._store.machine(rental.machine)
         return (
             rental.usd_per_hour > 0
-            and machine.requested_at is not None
+            and machine.claimed_at is not None
             and machine.refused_at is None
             and (
                 rental.billed_through is None
@@ -1534,7 +1581,7 @@ class Scheduler:
                 if planned is None:
                     break
                 placed = len(self._store.attempts(session=held.id))
-                attempt = self._attempt(planned, held, placed, now, added=True)
+                attempt = self._make_attempt(planned, held, placed, now, added=True)
                 try:
                     self._store.place(held, (attempt,))
                 except Stale:
@@ -1551,7 +1598,7 @@ class Scheduler:
                 batch = self._batch(waiting, Decimal(0), now, supply.slots)
                 if not batch:
                     return
-                session, _, _ = self._session(supply, owned, Decimal(0), 0.0, now, kept=False)
+                session = _new_session(_id(), supply, owned, now)
                 rented, rental = None, None
             else:
                 offer = self._rentable(supply)
@@ -1593,9 +1640,9 @@ class Scheduler:
                 if life < 1:
                     self._trouble[supply.name] = "budget cannot cover the provider fallback timer"
                     return
-                session, rented, rental = self._session(supply, None, price, life, now, kept=False)
+                session, rented, rental = self._make_rental(supply, price, life, now, kept=False)
             attempts = tuple(
-                self._attempt(planned, session, position, now)
+                self._make_attempt(planned, session, position, now)
                 for position, planned in enumerate(batch)
             )
             try:
@@ -1642,39 +1689,30 @@ class Scheduler:
     def _rentable(
         self, ondemand: OnDemand, *, manual: bool = False, additional: int = 0
     ) -> Offer | None:
-        """What the on-demand would rent now, if its budget allows one more machine.
+        """What the on-demand would rent now, if `refusal` allows one more machine.
 
-        None when it may rent no more, its provider has none or asks more than
-        its ceiling; the reason is kept for status. A machine rented by hand is
-        allowed under a zero limit.
+        None when it may not; the reason is kept for status. Its own limits are
+        checked before its provider is asked.
         """
-        live = sum(s.supply == ondemand.name for s in self._store.unsettled_sessions())
-        if live + additional >= ondemand.max_machines and not (
-            manual and ondemand.max_machines == 0
-        ):
-            self._trouble[ondemand.name] = "at its machine limit"
-            return None
-        if ondemand.storage is None:
-            problem = "a rented machine needs a storage"
-            if manual:
-                raise LauncherError(problem)
+        in_use = self._in_use(ondemand) + additional
+        problem = refusal(ondemand, in_use, None, manual=manual)
+        if problem is None:
+            try:
+                offer = self._reach(ondemand).offer()
+            except Exception as trouble:  # noqa: BLE001
+                # No price, no rental: the runs stay queued, and status says why.
+                self._trouble[ondemand.name] = str(trouble) or type(trouble).__name__
+                return None
+            problem = refusal(ondemand, in_use, offer, manual=manual)
+        if problem is not None:
             self._trouble[ondemand.name] = problem
             return None
-        try:
-            offer = self._reach(ondemand).offer()
-        except Exception as trouble:  # noqa: BLE001
-            # No price, no rental: the runs stay queued, and status says why.
-            self._trouble[ondemand.name] = str(trouble) or type(trouble).__name__
-            return None
-        ceiling = ondemand.max_usd_per_hour
-        if not offer.available:
-            self._trouble[ondemand.name] = "provider reports no available machines"
-            return None
-        if ceiling is not None and offer.usd_per_hour > ceiling:
-            self._trouble[ondemand.name] = "price is above its ceiling"
-            return None  # dearer than this on-demand allows: wait for the price to come back
         self._trouble.pop(ondemand.name, None)
         return offer
+
+    def _in_use(self, ondemand: OnDemand) -> int:
+        """The on-demand's machines renting or rented now."""
+        return sum(s.supply == ondemand.name for s in self._store.unsettled_sessions())
 
     def _safeguards(self, supply: OnDemand) -> Safeguards:
         declared: Safeguards = getattr(
@@ -1700,62 +1738,35 @@ class Scheduler:
             hours = (hours / increment).to_integral_value(rounding=ROUND_FLOOR) * increment
         return float(hours * 3600)
 
-    def _session(
-        self,
-        supply: Supply,
-        owned: Machine | None,
-        price: Decimal,
-        life: float,
-        now: datetime,
-        *,
-        kept: bool,
-    ) -> tuple[Session, Machine | None, Rental | None]:
-        """A working session, with a machine and a bounded window only when renting."""
+    def _make_rental(
+        self, ondemand: OnDemand, price: Decimal, life: float, now: datetime, *, kept: bool
+    ) -> tuple[Session, Machine, Rental]:
+        """A new rented machine's one session, the machine and its paid window of `life` seconds."""
         id = _id()
-        rented = None
-        rental = None
-        if owned is None:
-            assert isinstance(supply, OnDemand)  # only an on-demand rents
-            template = supply.template
-            life = min(life, self._longest_rental(supply))
-            rented = Machine(
-                name=f"{supply.name}-{id}",
-                ondemand=supply.name,
-                kind="rented",
-                provider=template.provider,
-                image=template.image
-                or (
-                    STOCK_IMAGE
-                    if self._provider_service(template.provider) in {"runpod", "vast", "lium"}
-                    else None
-                ),
-            )
-            machine = rented
-            rental = Rental(
-                machine=machine.name,
-                usd_per_hour=price,
-                cap_usd=self._rental_cost(supply, price, life),
-                deadline=now + timedelta(seconds=life),
-                kept=kept,
-            )
-        else:
-            machine = owned
-        session = Session(
-            id=id,
-            supply=supply.name,
-            machine=machine.name,
-            planned_at=now,
-            claimed_at=None,
-            receipt=None,
-            started_at=None,
-            refused_at=None,
-            ended_at=None,
-            version=1,
-            autorun=owned is None,
+        template = ondemand.template
+        life = min(life, self._longest_rental(ondemand))
+        machine = Machine(
+            name=f"{ondemand.name}-{id}",
+            ondemand=ondemand.name,
+            kind="rented",
+            provider=template.provider,
+            image=template.image
+            or (
+                STOCK_IMAGE
+                if self._provider_service(template.provider) in {"runpod", "vast", "lium"}
+                else None
+            ),
         )
-        return session, rented, rental
+        rental = Rental(
+            machine=machine.name,
+            usd_per_hour=price,
+            cap_usd=self._rental_cost(ondemand, price, life),
+            deadline=now + timedelta(seconds=life),
+            kept=kept,
+        )
+        return _new_session(id, ondemand, machine, now), machine, rental
 
-    def _attempt(
+    def _make_attempt(
         self,
         planned: PlannedRun,
         session: Session,
@@ -1803,7 +1814,7 @@ class Scheduler:
         for session in self._store.unsettled_sessions():
             if (
                 session.supply != supply.name
-                or session.receipt is None
+                or session.provider_id is None
                 or not self._live(session, now)
             ):
                 continue
@@ -1828,7 +1839,8 @@ class Scheduler:
         machine the cohort already holds.
         """
         for run in waiting:
-            seconds, cap = self._remaining(run, now)
+            budget = self._remaining(run, now)
+            cap = budget.usd
             if run.cohort is not None:
                 cohort = self._store.cohort(run.cohort)
                 holds = session is not None and any(
@@ -1840,7 +1852,7 @@ class Scheduler:
                 left = self._cohort_left(cohort, now)
                 if left is not None:
                     cap = min(cap, left)
-            limit = self._limit(seconds, cap, price)
+            limit = self._limit(budget.seconds, cap, price)
             if limit is None:
                 continue
             if fit is not None and limit[0] > fit:
@@ -1892,7 +1904,7 @@ class Scheduler:
             if seconds is not None and seconds <= 0:
                 raise Refused("startup or rental deadline reached before creation")
             with creation_guard(check), limit_time(seconds):
-                receipt = service.create(
+                provider_id = service.create(
                     packet.model_copy(update={"kept": True}) if idle else packet
                 )
         except Refused as error:
@@ -1914,7 +1926,7 @@ class Scheduler:
             # identity on later ticks and is never asked for a second time.
             return
         try:
-            self._store.record_receipt(session, receipt)
+            self._store.record_provider_id(session, provider_id)
             self._diagnose("machine create", "machine confirmed", session=session.id)
             self._creation_facts(self._store.session(session.id), now)
         except Stale:
@@ -1922,11 +1934,11 @@ class Scheduler:
 
     def _creation_facts(self, session: Session, now: datetime) -> Session:
         service = self._service(session)
-        receipt = service.allocation(session.id)
-        if receipt is not None and receipt.usd_per_hour != self._usd_per_hour(session):
-            self._store.record_price(session, receipt.usd_per_hour)
+        allocation = service.allocation(session.id)
+        if allocation is not None and allocation.usd_per_hour != self._usd_per_hour(session):
+            self._store.record_price(session, allocation.usd_per_hour)
             session = self._store.session(session.id)
-        hardware = None if receipt is None else receipt.hardware
+        hardware = None if allocation is None else allocation.hardware
         if hardware is not None and hardware != session.hardware:
             self._store.record_hardware(session, hardware)
             session = self._store.session(session.id)
@@ -1967,7 +1979,7 @@ class Scheduler:
                         copied.add(given.run)
                 else:
                     self._carry(given.run, session, key=given.key)
-            except (FileNotFoundError, StoredMismatch, Mismatch) as error:
+            except (FileNotFoundError, StoredContentMismatch, RecordMismatch) as error:
                 # The error says whether the file is gone or differs from its record.
                 self._diagnose(
                     "run folder relay",
@@ -2122,10 +2134,10 @@ class Scheduler:
         attempts = self._store.attempts(session=session.id)
         rental = self._store.rental_for(session)
         deadline = None if rental is None else rental.deadline
-        if session.receipt is None:
-            receipt = service.find(session.id)
-            if receipt is not None:
-                self._store.record_receipt(session, receipt)
+        if session.provider_id is None:
+            provider_id = service.find(session.id)
+            if provider_id is not None:
+                self._store.record_provider_id(session, provider_id)
                 self._diagnose(
                     "reconciliation",
                     "existing machine confirmed; no duplicate create",
@@ -2311,7 +2323,7 @@ class Scheduler:
         else:
             if seen is not None:
                 self._store.record_progress(attempt, seen.clocks, seen.tally)
-            if run.cancel_requested_at is not None or self._remaining(run, now)[1] <= 0:
+            if run.cancel_requested_at is not None or self._remaining(run, now).usd <= 0:
                 self._service(session).stop(session.id, attempt.id)
 
     # Reading the records
@@ -2384,23 +2396,17 @@ class Scheduler:
             raise LauncherError("a job's max_usd must be more than zero")
         if job.max_attempts < 1:
             raise LauncherError("a job needs at least one attempt")
-        if job.until is not None:
-            parse_target(job.until)
 
     def _freeze(self, run: Run, target: Target, cohort: str | None) -> RunRecord:
         job = run.job
         self._validate_job(job, target)
         run = source.freeze(run)
         job = run.job
-        if job.until is not None:
-            clock, position = parse_target(job.until)
-            job = job.model_copy(update={"until": f"{clock}={number(position)}"})
-        frozen = json.dumps(job_identity(job), sort_keys=True).encode()
         assert run.id is not None  # source.freeze assigns the submitting client's identity
         return RunRecord(
             id=run.id,
             source=run.source,
-            job=hashlib.sha256(frozen).hexdigest()[:12],
+            job=job_id(job),
             spec=job,
             seed=run.seed,
             pool=target.pool,
@@ -2417,12 +2423,11 @@ class Scheduler:
     def _latest(self, run: str) -> tuple[RunAttempt, Session]:
         for attempt in reversed(self._store.attempts(run=run)):
             session = self._store.session(attempt.session)
-            if session.receipt is not None:
+            if session.provider_id is not None:
                 return attempt, session
         raise LauncherError(f"run {run} has not reached a session")
 
-    def _remaining(self, run: RunRecord, now: datetime) -> tuple[float, Decimal]:
-        """Execution seconds and attributed dollars left across all attempts."""
+    def _remaining(self, run: RunRecord, now: datetime) -> Budget:
         attempts = self._store.attempts(run=run.id)
         seconds = sum(
             max(0, ((a.finished_at or now) - a.started_at).total_seconds())
@@ -2430,8 +2435,9 @@ class Scheduler:
             if a.started_at is not None
         )
         dollars = sum((self._attempt_usd(a, now) for a in attempts), Decimal(0))
-        return max(0, run.spec.max_hours * 3600 - seconds), max(
-            Decimal(0), _limit_usd(run.spec) - dollars
+        return Budget(
+            seconds=max(0, run.spec.max_hours * 3600 - seconds),
+            usd=max(Decimal(0), _limit_usd(run.spec) - dollars),
         )
 
     def _occupied(

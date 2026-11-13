@@ -1,6 +1,5 @@
 """Setup and cleanup are observable attempt phases with bounded, explicit replay."""
 
-import json
 import time
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -8,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from etude.launch.records import Job, job_identity
-from etude.launch.schemas import Packet, Progress, Work
-from etude.launch.worker.attempts import _run
+from etude.launch.records import Job, job_id
+from etude.launch.schemas import Finished, Packet, Work
+from etude.launch.worker.attempts import _attempt
 from tests.launch.counting import job_text
 from tests.launch.test_worker_attempts import local
 
@@ -109,18 +108,12 @@ def test_cleanup_never_extends_paid_window(tmp_path: Path) -> None:
         work=(work,),
         cap_usd=Decimal(1),
     )
-    _run(session, packet, work)
+    _attempt(session, packet, work)
     home = session / "attempts/attempt"
     assert not marker.exists()
     text = (home / "log").read_text()
     assert "phase cleanup: deadline" in text
-    record = Progress.model_validate(
-        {
-            "attempt": "attempt",
-            "started_at": None,
-            **json.loads((home / "finished.json").read_text()),
-        }
-    )
+    record = Finished.model_validate_json((home / "finished.json").read_text())
     assert record.outcome == "lost" and record.cause == "machine_lost"
 
 
@@ -128,5 +121,5 @@ def test_hooks_affect_identity_but_cleanup_allowance_does_not() -> None:
     original = Job(command="train", max_hours=1)
     setup = original.model_copy(update={"setup": "prepare"})
     cleanup = original.model_copy(update={"cleanup": "collect"})
-    assert len({str(job_identity(j)) for j in (original, setup, cleanup)}) == 3
-    assert job_identity(cleanup) == job_identity(cleanup.model_copy(update={"cleanup_seconds": 60}))
+    assert len({job_id(j) for j in (original, setup, cleanup)}) == 3
+    assert job_id(cleanup) == job_id(cleanup.model_copy(update={"cleanup_seconds": 60}))

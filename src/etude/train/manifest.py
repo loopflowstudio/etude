@@ -21,12 +21,13 @@ from etude.run.errors import EtudeError
 from etude.run.records import Record
 from etude.run.storage import DirectoryStorage, Storage
 from etude.train.block import (
+    STATISTICS,
     Array,
+    ArrayLocation,
+    Columns,
     Header,
     Number,
     Reduction,
-    Span,
-    Table,
     decode,
     encode_number,
     header,
@@ -34,6 +35,7 @@ from etude.train.block import (
 )
 
 type Endpoints = tuple[Number, Number]
+# One row group's `etude.train.block` statistics, `MIN` to `COUNT`.
 type Statistics = tuple[Number, Number, Number, Number, Number, Number, Number]
 
 
@@ -75,19 +77,19 @@ class StoredBlock:
     def header(self) -> Header:
         return self.description.header
 
-    def array(self, span: Span, dtype: str, width: int = 1) -> Array:
-        start = self.description.start + span.offset
+    def array(self, location: ArrayLocation, dtype: str, width: int = 1) -> Array:
+        start = self.description.start + location.offset
         data = (
-            self.storage.get_range(self.key, start, span.length)
+            self.storage.get_range(self.key, start, location.length)
             if self.body is None
-            else self.body[start : start + span.length]
+            else self.body[start : start + location.length]
         )
-        if len(data) != span.length or zlib.crc32(data) != span.crc32:
+        if len(data) != location.length or zlib.crc32(data) != location.crc32:
             raise EtudeError("block_array_damaged", 422)
         array = np.frombuffer(data, dtype=dtype)
         return array if width == 1 else array.reshape(-1, width)
 
-    def table(self) -> Table:
+    def columns(self) -> Columns:
         return decode(self.storage.get(self.key) if self.body is None else self.body)
 
 
@@ -143,11 +145,11 @@ def _describe_permanent(storage: Storage, file: BlockFile) -> BlockDescription:
     stored = StoredBlock(storage, file.key, description)
     level = next((level for level in stored.header.rollups if level.factor == 4096), None)
     overview = (
-        reduce(stored.table(), 4096)
+        reduce(stored.columns(), 4096)
         if level is None
         else Reduction(
             clocks={c.name: stored.array(c.data, "<f8", 2) for c in level.clocks},
-            series={c.name: stored.array(c.data, "<f8", 7) for c in level.series},
+            series={c.name: stored.array(c.data, "<f8", STATISTICS) for c in level.series},
         )
     )
     inline = Overview.model_validate(
@@ -167,7 +169,7 @@ def _describe_permanent(storage: Storage, file: BlockFile) -> BlockDescription:
     )
 
 
-def _latest(blocks: Iterable[BlockDescription]) -> dict[str, Number | None]:
+def _latest_values(blocks: Iterable[BlockDescription]) -> dict[str, Number | None]:
     latest: dict[str, Number | None] = {}
     for block in sorted(blocks, key=lambda block: block.header.last):
         latest.update(
@@ -193,7 +195,7 @@ class Index:
         self.writer = writer
         self._permanent: dict[str, BlockDescription] = {}
         self._recent: dict[str, BlockDescription] = {}
-        self._latest: dict[str, Number | None] = {}
+        self._permanent_latest: dict[str, Number | None] = {}
         self._dirty = False
         files = select(
             file
@@ -213,7 +215,7 @@ class Index:
         if file.level >= 2:
             described = _describe_permanent(self.storage, file)
             self._permanent[key] = described
-            self._latest.update(_latest([described]))
+            self._permanent_latest.update(_latest_values([described]))
             self._dirty = True
         else:
             described = describe(self.storage, "", key)
@@ -229,7 +231,9 @@ class Index:
         """Publish indexes after their blocks exist; only permanent additions rewrite history."""
         if self._dirty:
             lasting = Manifest(
-                writer=self.writer, blocks=tuple(self._permanent.values()), latest=self._latest
+                writer=self.writer,
+                blocks=tuple(self._permanent.values()),
+                latest=self._permanent_latest,
             )
             self.storage.put(
                 f"metrics/{self.writer}.permanent.json", lasting.model_dump_json().encode()
@@ -238,7 +242,7 @@ class Index:
         recent = Manifest(
             writer=self.writer,
             blocks=(),
-            latest={**self._latest, **_latest(self._recent.values())},
+            latest={**self._permanent_latest, **_latest_values(self._recent.values())},
         )
         self.storage.put(f"metrics/{self.writer}.index.json", recent.model_dump_json().encode())
 

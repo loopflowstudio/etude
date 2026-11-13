@@ -11,15 +11,8 @@ from urllib.parse import parse_qs
 import pytest
 
 from etude.launch.records import Storage as Place
-from etude.launch.storage.s3 import (
-    AlreadyThere,
-    Bucket,
-    Denied,
-    Keys,
-    Reply,
-    open_bucket,
-    post,
-)
+from etude.launch.storage.s3 import AlreadyThere, Bucket, Denied, Keys, open_bucket, post
+from etude.launch.storage.transport import HTTPReply
 from etude.storage_timeout import StorageUnavailable
 
 # From "Signature Calculations for the Authorization Header" in the S3 API reference.
@@ -30,11 +23,13 @@ WHEN = datetime(2013, 5, 24, tzinfo=UTC)
 
 
 class Storage:
-    def __init__(self, replies: list[Reply]) -> None:
+    def __init__(self, replies: list[HTTPReply]) -> None:
         self.replies = replies
         self.asked: list[tuple[str, str, bytes | None, dict[str, str]]] = []
 
-    def __call__(self, method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Reply:
+    def __call__(
+        self, method: str, url: str, body: bytes | None, headers: dict[str, str]
+    ) -> HTTPReply:
         self.asked.append((method, url, body, headers))
         return self.replies.pop(0)
 
@@ -51,8 +46,8 @@ def bucket(storage: Storage) -> Bucket:
 
 
 def test_a_get_is_signed_as_amazon_documents() -> None:
-    storage = Storage(replies=[Reply(status=200, body=b"hello")])
-    assert bucket(storage)._ask("GET", "test.txt", extra={"Range": "bytes=0-9"}) == Reply(
+    storage = Storage(replies=[HTTPReply(status=200, body=b"hello")])
+    assert bucket(storage)._ask("GET", "test.txt", extra={"Range": "bytes=0-9"}) == HTTPReply(
         status=200, body=b"hello"
     )
     ((method, url, _, headers),) = storage.asked
@@ -75,14 +70,14 @@ def test_a_listing_is_signed_as_amazon_documents_and_follows_pages() -> None:
     )
     storage = Storage(
         replies=[
-            Reply(status=200, body=first.encode()),
-            Reply(status=200, body=page.format(more="false", token="", key="a/2").encode()),
+            HTTPReply(status=200, body=first.encode()),
+            HTTPReply(status=200, body=page.format(more="false", token="", key="a/2").encode()),
         ]
     )
     assert bucket(storage).list("a/") == ["a/1", "a/2"]
     assert "continuation-token=t1" in storage.asked[1][1]
     # Amazon's listing example signs max-keys=2&prefix=J; the same request through `_ask`:
-    again = Storage(replies=[Reply(status=200, body=b"")])
+    again = Storage(replies=[HTTPReply(status=200, body=b"")])
     bucket(again)._ask("GET", "", query={"max-keys": "2", "prefix": "J"})
     assert again.asked[0][3]["authorization"].endswith(
         "Signature=34b48302e7b5fa45bde8084f4b7868a86f0a534bc59db6670ed5711ef69dc6f7"
@@ -99,7 +94,9 @@ def test_a_reading_link_is_signed_as_amazon_documents() -> None:
 
 
 def test_put_once_get_and_absence_mean_what_they_say() -> None:
-    storage = Storage(replies=[Reply(status=s, body=b"") for s in (200, 412, 404, 503, 503, 503)])
+    storage = Storage(
+        replies=[HTTPReply(status=s, body=b"") for s in (200, 412, 404, 503, 503, 503)]
+    )
     held = bucket(storage)
     held.put("r/packet.json", b"{}", once=True)
     assert storage.asked[0][3]["if-none-match"] == "*" and storage.asked[0][2] == b"{}"
@@ -116,7 +113,7 @@ def test_a_writing_form_is_limited_to_its_folder_and_its_time() -> None:
     assert policy["expiration"] == "2013-05-24T01:00:00Z"
     assert ["starts-with", "$key", "etude/r1/out/"] in policy["conditions"]
     assert ["content-length-range", 0, 1000] in policy["conditions"]
-    storage = Storage(replies=[Reply(status=204, body=b"")])
+    storage = Storage(replies=[HTTPReply(status=204, body=b"")])
     post(form, "etude/r1/out/log", b"line\n", storage)
     sent = storage.asked[0][2] or b""
     assert b'name="key"\r\n\r\netude/r1/out/log\r\n' in sent and sent.count(b"line\n") == 1
@@ -132,7 +129,7 @@ GRANTED = (
 
 
 def test_an_s3_grant_asks_sts_for_keys_to_one_folder_and_brings_a_form() -> None:
-    storage = Storage([Reply(status=200, body=GRANTED)])
+    storage = Storage([HTTPReply(status=200, body=GRANTED)])
     grant = bucket(storage).grant("etude/r1/out/", 13 * 3600, "r1/with spaces")
     assert grant.bucket is not None and grant.form is not None
     assert grant.bucket.keys == Keys(access_key="ASIA", secret_key="secret", session_token="token")
@@ -149,7 +146,9 @@ def test_an_s3_grant_asks_sts_for_keys_to_one_folder_and_brings_a_form() -> None
 
 
 def test_an_s3_grant_is_a_form_alone_when_sts_refuses_or_the_caller_holds_temporary_keys() -> None:
-    refused = bucket(Storage([Reply(status=403, body=b"<ErrorResponse/>")])).grant("p/", 3600, "r")
+    refused = bucket(Storage([HTTPReply(status=403, body=b"<ErrorResponse/>")])).grant(
+        "p/", 3600, "r"
+    )
     assert refused.bucket is None and refused.form is not None
     unasked = Storage([])
     borrowed = Bucket(
@@ -167,7 +166,7 @@ def r2(storage: Storage, token: str | None = "cloudflare-token") -> Bucket:
 
 def test_an_r2_grant_is_cloudflare_keys_for_one_folder_and_no_form() -> None:
     issued = {"accessKeyId": "temp", "secretAccessKey": "s", "sessionToken": "t"}
-    storage = Storage([Reply(status=200, body=json.dumps({"result": issued}).encode())])
+    storage = Storage([HTTPReply(status=200, body=json.dumps({"result": issued}).encode())])
     grant = r2(storage).grant("launch/run1/", 13 * 3600, "run1")
     assert grant.form is None and grant.bucket is not None
     assert grant.bucket.keys == Keys(access_key="temp", secret_key="s", session_token="t")
@@ -189,7 +188,7 @@ def test_an_r2_grant_is_cloudflare_keys_for_one_folder_and_no_form() -> None:
         "prefixes": ["launch/run1/"],
     }
     # The machine's bucket signs for R2's region at R2's host.
-    held = Storage([Reply(status=200, body=b"")])
+    held = Storage([HTTPReply(status=200, body=b"")])
     Bucket(
         grant.bucket.name, grant.bucket.region, grant.bucket.keys, held, host=grant.bucket.host
     ).put("launch/run1/x", b"x")
@@ -201,13 +200,13 @@ def test_an_r2_grant_that_cannot_be_issued_fails_rather_than_degrading() -> None
     with pytest.raises(StorageUnavailable, match="R2_API_TOKEN"):
         r2(Storage([]), token=None).grant("p/", 3600, "r")
     with pytest.raises(Denied):
-        r2(Storage([Reply(status=403, body=b"{}")])).grant("p/", 3600, "r")
+        r2(Storage([HTTPReply(status=403, body=b"{}")])).grant("p/", 3600, "r")
     with pytest.raises(StorageUnavailable, match="unreadable"):
-        r2(Storage([Reply(status=200, body=b'{"result": {}}')])).grant("p/", 3600, "r")
+        r2(Storage([HTTPReply(status=200, body=b'{"result": {}}')])).grant("p/", 3600, "r")
 
 
 def test_one_chunk_is_one_put_and_several_are_a_multipart_upload() -> None:
-    single = Storage([Reply(status=200, body=b"")])
+    single = Storage([HTTPReply(status=200, body=b"")])
     bucket(single).put_parts("a", [b"small"])
     assert [(method, body) for method, _, body, _ in single.asked] == [("PUT", b"small")]
 
@@ -216,10 +215,10 @@ def test_one_chunk_is_one_put_and_several_are_a_multipart_upload() -> None:
     )
     storage = Storage(
         [
-            Reply(status=200, body=started),
-            Reply(status=200, body=b"", headers={"etag": '"t1"'}),
-            Reply(status=200, body=b"", headers={"etag": '"t2"'}),
-            Reply(status=200, body=b"<Done/>"),
+            HTTPReply(status=200, body=started),
+            HTTPReply(status=200, body=b"", headers={"etag": '"t1"'}),
+            HTTPReply(status=200, body=b"", headers={"etag": '"t2"'}),
+            HTTPReply(status=200, body=b"<Done/>"),
         ]
     )
     bucket(storage).put_parts("big", [b"first", b"second"])
@@ -241,10 +240,10 @@ def test_a_failed_part_abandons_the_upload_and_refused_keys_are_told_apart() -> 
     started = b"<R><UploadId>u1</UploadId></R>"
     storage = Storage(
         [
-            Reply(status=200, body=started),
-            Reply(status=200, body=b"", headers={"etag": '"t1"'}),
-            Reply(status=500, body=b""),
-            Reply(status=204, body=b""),
+            HTTPReply(status=200, body=started),
+            HTTPReply(status=200, body=b"", headers={"etag": '"t1"'}),
+            HTTPReply(status=500, body=b""),
+            HTTPReply(status=204, body=b""),
         ]
     )
     with pytest.raises(StorageUnavailable):
@@ -253,7 +252,7 @@ def test_a_failed_part_abandons_the_upload_and_refused_keys_are_told_apart() -> 
         "DELETE",
         "?uploadId=u1",
     )
-    held = bucket(Storage([Reply(status=204, body=b""), Reply(status=403, body=b"")]))
+    held = bucket(Storage([HTTPReply(status=204, body=b""), HTTPReply(status=403, body=b"")]))
     held.delete("gone")  # deleting what is not there is not an error
     with pytest.raises(Denied):
         held.delete("kept")
@@ -270,9 +269,9 @@ def test_multipart_failure_does_not_read_the_remaining_checkpoint() -> None:
 
     storage = Storage(
         [
-            Reply(status=200, body=b"<R><UploadId>u1</UploadId></R>"),
-            Reply(status=500, body=b""),
-            Reply(status=204, body=b""),
+            HTTPReply(status=200, body=b"<R><UploadId>u1</UploadId></R>"),
+            HTTPReply(status=500, body=b""),
+            HTTPReply(status=204, body=b""),
         ]
     )
     with pytest.raises(StorageUnavailable):
@@ -284,9 +283,9 @@ def test_multipart_failure_does_not_read_the_remaining_checkpoint() -> None:
 def test_missing_part_etag_abandons_upload() -> None:
     storage = Storage(
         [
-            Reply(status=200, body=b"<R><UploadId>u1</UploadId></R>"),
-            Reply(status=200, body=b""),
-            Reply(status=204, body=b""),
+            HTTPReply(status=200, body=b"<R><UploadId>u1</UploadId></R>"),
+            HTTPReply(status=200, body=b""),
+            HTTPReply(status=204, body=b""),
         ]
     )
     with pytest.raises(StorageUnavailable, match="missing ETag"):

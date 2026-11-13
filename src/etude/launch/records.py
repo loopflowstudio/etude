@@ -17,13 +17,21 @@ Every time is timezone-aware UTC.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from datetime import datetime
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from etude.carriage import within
 from etude.launch.errors import LauncherError as LauncherError
@@ -60,20 +68,52 @@ Phase = Literal["queued", "renting", "setting_up", "running", "stopping", "done"
 
 
 def number(value: float) -> str:
-    """A clock position as written: whole numbers without a decimal point."""
+    """A clock's value as written: whole numbers without a decimal point."""
     return str(int(value)) if float(value).is_integer() else str(value)
 
 
-def parse_target(text: str) -> tuple[str, float]:
-    """Split "clock=value" into the clock's name and a position on it."""
-    clock, equals, value = text.partition("=")
-    try:
-        position = float(value) if "." in value or "e" in value.lower() else int(value)
-    except ValueError:
-        position = None
-    if not equals or not clock.replace("_", "").isalnum() or position is None or position < 0:
-        raise LauncherError(f"{text!r} is not a target; write it as clock=value, like steps=26000")
-    return clock, position
+class Until(Record):
+    """How far a job goes: a value on one of its clocks, absolute also when continuing.
+
+    Written and stored as "clock=value", like `steps=26000`; a whole number is
+    kept as an int, so `steps=26000.0` is the same target.
+    """
+
+    clock: str = Field(pattern=r"^[A-Za-z0-9_]+$")
+    value: int | float = Field(ge=0, allow_inf_nan=False)
+
+    @classmethod
+    def parse(cls, text: str) -> Until:
+        """Read "clock=value"; raises LauncherError for anything else."""
+        return cls.model_validate(text)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _from_text(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        clock, equals, text = value.partition("=")
+        try:
+            parsed = float(text) if "." in text or "e" in text.lower() else int(text)
+        except ValueError:
+            parsed = None
+        if not equals or not clock.replace("_", "").isalnum() or parsed is None or parsed < 0:
+            raise LauncherError(
+                f"{value!r} is not a target; write it as clock=value, like steps=26000"
+            )
+        return {"clock": clock, "value": parsed}
+
+    @field_validator("value")
+    @classmethod
+    def _whole(cls, value: int | float) -> int | float:
+        return int(value) if isinstance(value, float) and value.is_integer() else value
+
+    @model_serializer
+    def _as_text(self) -> str:
+        return str(self)
+
+    def __str__(self) -> str:
+        return f"{self.clock}={number(self.value)}"
 
 
 class Stale(LauncherError):
@@ -204,16 +244,12 @@ class Availability(Record):
     in_use: int  # its machines renting or rented now
     max_machines: int
     observed_at: datetime
+    refusal: str | None  # why a launch could not rent one now (`refusal`); None: it could
 
     @property
     def rentable(self) -> bool:
         """Whether a launch could rent one now."""
-        ceiling = self.max_usd_per_hour
-        return (
-            self.offer.available
-            and (ceiling is None or self.offer.usd_per_hour <= ceiling)
-            and self.in_use < self.max_machines
-        )
+        return self.refusal is None
 
 
 STOCK_IMAGE = Image(
@@ -264,6 +300,29 @@ class OnDemand(Record):
 Supply = Pool | OnDemand
 
 
+def refusal(
+    ondemand: OnDemand, in_use: int, offer: Offer | None, *, manual: bool = False
+) -> str | None:
+    """Why the on-demand may not rent one more machine now; None when it may.
+
+    `in_use` counts its machines renting or rented. Without an offer only its
+    own limits are checked, so a caller can refuse before asking the provider.
+    A machine rented by hand (`manual`) is allowed under a zero machine limit.
+    """
+    if in_use >= ondemand.max_machines and not (manual and ondemand.max_machines == 0):
+        return "at its machine limit"
+    if ondemand.storage is None:
+        return "a rented machine needs a storage"
+    if offer is None:
+        return None
+    if not offer.available:
+        return "provider reports no available machines"
+    ceiling = ondemand.max_usd_per_hour
+    if ceiling is not None and offer.usd_per_hour > ceiling:
+        return "price is above its ceiling"
+    return None
+
+
 class Target(Record):
     """Where a launch's runs may go: a pool's machines, an on-demand's rentals, or both."""
 
@@ -290,8 +349,8 @@ class Machine(Record):
     expires_at: datetime | None = None  # None: an owned machine never expires
     image: Image | None = None
     provider: str | None = None  # account that supplied a rented machine
-    requested_at: datetime | None = None
-    provider_id: str | None = None
+    claimed_at: datetime | None = None  # when its session claimed the right to ask for it
+    provider_id: str | None = None  # the provider's name for it, once its create is confirmed
     hardware: Hardware | None = None  # None: not rented, or found by name without its receipt
     refused_at: datetime | None = None
     address: str | None = None  # SSH address for an added host; never a provider receipt
@@ -418,7 +477,7 @@ class SmokeForm(Record):
 
     command: str | None = None  # a command job's tiny command, such as "manabot train --smoke"
     config: str | None = None  # a typed job's tiny config text (`training(..., smoke=...)`)
-    until: str | None = None  # a tiny target, as "clock=value"
+    until: Until | None = None  # a tiny target
 
 
 class Job(Record):
@@ -442,7 +501,7 @@ class Job(Record):
     max_hours: float
     max_usd: Decimal | None = None  # required when the run may rent
     name: str = ""
-    until: str | None = None  # how far to go, as "clock=value"; absolute, also when continuing
+    until: Until | None = None  # how far to go; absolute, also when continuing
     config: str | None = None  # the config file's text, handed back at ETUDE_CONFIG
     repo: str | None = None  # a local git repository; None runs in an empty directory
     revision: str | None = None  # None snapshots working files; a named revision is exact
@@ -477,36 +536,32 @@ class Job(Record):
         return [Run(job=self, seed=seed, params=dict(params or {})) for seed in seeds]
 
 
-def job_identity(job: Job) -> dict[str, str | int | None]:
-    """The fields that make a job itself. Name and limits are left out on purpose."""
-    identity: dict[str, str | int | None] = {
+def job_id(job: Job) -> str:
+    """What runs of one job share: a digest of the fields that decide the result.
+
+    Name, limits, attempts and the smoke form are left out on purpose. Order
+    does not matter among environment variables, inputs or runtime packages.
+    """
+    identity: dict[str, object] = {
         "command": job.command,
         "config": job.config,
         "repo": job.repo,
         "revision": job.revision,
-        "until": job.until,
+        "until": None if job.until is None else str(job.until),
     }
-    for name, value in (("setup", job.setup), ("cleanup", job.cleanup)):
-        if value is not None:
-            identity[name] = value
-    if job.experiment is not None:
-        identity["experiment"] = job.experiment
+    optional = {"setup": job.setup, "cleanup": job.cleanup, "experiment": job.experiment}
+    identity |= {name: value for name, value in optional.items() if value is not None}
     if job.runtime is not None:
-        identity["runtime"] = json.dumps(job.runtime.model_dump(mode="json"), sort_keys=True)
+        identity["runtime"] = job.runtime.model_dump(mode="json")
     if job.prepare is not None:
-        identity["prepare"] = json.dumps(job.prepare.model_dump(mode="json"), sort_keys=True)
+        identity["prepare"] = job.prepare.model_dump(mode="json")
     if job.environment:
-        identity["environment"] = json.dumps(
-            sorted([v.name, v.value] for v in job.environment), sort_keys=True
-        )
+        identity["environment"] = sorted([v.name, v.value] for v in job.environment)
     if job.inputs:
-        identity["inputs"] = json.dumps(
-            sorted(
-                (given.model_dump(mode="json") for given in job.inputs), key=lambda i: i["name"]
-            ),
-            sort_keys=True,
+        identity["inputs"] = sorted(
+            (given.model_dump(mode="json") for given in job.inputs), key=lambda i: i["name"]
         )
-    return identity
+    return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:12]
 
 
 class SourcePosition(Record):
@@ -585,7 +640,7 @@ class Run(Record):
 
 class RunRecord(Record):
     id: str
-    job: str  # digest of what decides the result; runs of one job share it
+    job: str  # `job_id`: runs of one job share it
     spec: Job  # as launched, with this run's name and limits
     seed: int | None
     pool: str | None  # the pool whose machines it may use
@@ -635,6 +690,16 @@ class Rental(Record):
     kept: bool = False  # stays when idle until its deadline or explicit termination
 
 
+class RentalCost(Record):
+    """A rental's paid window and what it has cost so far (`Scheduler.rentals`)."""
+
+    rental: Rental
+    usd: Decimal  # its retained bills, plus an estimate of any time they do not cover yet
+    estimated: bool  # part of `usd` is an estimate
+    unbilled_usd: Decimal  # the estimated part: `usd` beyond its retained bills
+    over_cap: bool  # its bills exceed its cap
+
+
 class Session(Record):
     """One start of Etude's process on a machine, and the journal folder it writes.
 
@@ -648,9 +713,11 @@ class Session(Record):
     supply: str  # read from its machine: the pool or on-demand it belongs to
     machine: str
     planned_at: datetime
-    claimed_at: datetime | None
+    claimed_at: datetime | None  # the right to create it was taken; only the claimer asks
     startup_deadline: datetime | None = None
-    receipt: str | None
+    # Confirmed creation: the provider's name for a rented machine, and for a
+    # machine you own the session's own id.
+    provider_id: str | None
     started_at: datetime | None
     refused_at: datetime | None
     ended_at: datetime | None
@@ -741,7 +808,7 @@ class Status(Record):
     reason: str | None  # why a queued run is waiting
     outcome: Outcome | None
     cause: Cause | None
-    until: str | None  # the job's target, as "clock=value"
+    until: Until | None  # the job's target
     clocks: dict[str, float]  # where the run last reported each of its clocks
     usd: Decimal
     attempts: int
@@ -768,7 +835,7 @@ class Status(Record):
             head = f"done: {self.outcome}" + (f" ({self.cause})" if self.cause else "")
         else:
             head = self.phase
-        clock = parse_target(self.until)[0] if self.until else next(iter(self.clocks), None)
+        clock = self.until.clock if self.until else next(iter(self.clocks), None)
         at = f", {clock} {number(self.clocks[clock])}" if clock in self.clocks else ""
         if self.tally is not None:
             # A finished job has no time left to give, whatever its last pace.

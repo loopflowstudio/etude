@@ -15,11 +15,11 @@ import pytest
 from etude.cli import main
 from etude.eval.match import environment
 from etude.eval.query import statsdb
-from etude.eval.records import Benchmark, Code, Inference, Matchup, RoundRobin
+from etude.eval.records import Benchmark, Code, Inference, RoundRobin, Seating
 from etude.jobs import JobOptions, evaluation
 from etude.launch.errors import LauncherError
 from etude.launch.job_file import read_job_file
-from etude.launch.records import Input, Job, Runtime, job_identity
+from etude.launch.records import Input, Job, Runtime, SmokeForm, Until, job_id
 from etude.launch.smoke import tiny
 from etude.train.read import read
 from tests.launch.counting import job_text
@@ -216,7 +216,21 @@ def test_a_training_jobs_smoke_form_is_its_smoke_config(tmp_path: Path) -> None:
     assert small is not None and small.smoke is None
     assert (small.command, small.config) == (run.job.command, '{"lr":0.5,"layers":[8]}')
     # The smoke form is not part of what makes the job itself.
-    assert job_identity(run.job) == job_identity(run.job.model_copy(update={"smoke": None}))
+    assert job_id(run.job) == job_id(run.job.model_copy(update={"smoke": None}))
+
+
+def test_a_target_is_read_once_and_one_job_has_one_id_however_it_is_written() -> None:
+    # Written as text, as an experiment file does.
+    written = Job.model_validate({"command": "train", "max_hours": 1, "until": "steps=26000.0"})
+    assert written.until == Until(clock="steps", value=26000)
+    assert str(written.until) == "steps=26000" and written.model_dump()["until"] == "steps=26000"
+    whole = Job(command="train", max_hours=1, until=Until.parse("steps=26000"))
+    assert job_id(written) == job_id(whole)
+    smoked = written.model_copy(update={"smoke": SmokeForm(until=Until.parse("steps=2"))})
+    small = tiny(smoked)
+    assert small is not None and small.until == Until(clock="steps", value=2)
+    with pytest.raises(LauncherError, match="not a target"):
+        Until.parse("steps")
 
 
 def test_a_function_the_job_cannot_import_by_name_is_refused(tmp_path: Path) -> None:
@@ -296,8 +310,8 @@ def test_an_evaluation_job_holds_a_benchmark_for_the_checkpoint_it_is_given(
     progress = Benchmark(
         name="anchors",
         environment=environment("duel"),
-        matchups=(
-            Matchup(
+        seatings=(
+            Seating(
                 name="model vs fixed",
                 players=(
                     Inference(config={"search": 0}),
@@ -366,6 +380,11 @@ def test_an_evaluation_holds_what_its_tournament_takes() -> None:
     weights = Input(name="w", key="w", sha256="0" * 64, size_bytes=1)
     with pytest.raises(LauncherError, match="name the experiment"):
         evaluation(progress, play=lambda match: {}, checkpoint=weights, max_hours=0.1, repo=None)
+    with pytest.raises(
+        LauncherError, match="needs max_hours: the most hours it may hold a machine"
+    ):
+        # The omission under test.
+        evaluation(progress, experiment="ppo", play=lambda match: {}, checkpoint=weights, repo=None)  # type: ignore[call-arg]
     league = RoundRobin(name="league", environment=environment("duel"), conditions=({},), games=1)
     with pytest.raises(LauncherError, match="give it entrants"):
         evaluation(league, experiment="ppo", play=lambda match: {}, max_hours=0.1, repo=None)

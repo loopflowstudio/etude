@@ -30,10 +30,10 @@ def test_row_tables_roundtrip_ship_once_and_relocate(tmp_path: Path) -> None:
         {"deck": "blue", "nested": {"results": [1, False, None, "win"]}},
     ]
     with track(experiment="e", run="r", clocks=CLOCKS, directory=local) as run:
-        run.log_table("matchups", rows, updates=400, seconds=20)
+        run.log_table("decks", rows, updates=400, seconds=20)
         (artifact,) = (local / "r/artifacts").iterdir()
         before = artifact.stat().st_mtime_ns
-        run.log_table("matchups", rows, updates=401, seconds=21)
+        run.log_table("decks", rows, updates=401, seconds=21)
         assert artifact.stat().st_mtime_ns == before
         assert artifact.stem == sha256(artifact.read_bytes()).hexdigest()
         assert not list((local / "r/artifacts").glob("*.partial"))
@@ -43,16 +43,16 @@ def test_row_tables_roundtrip_ship_once_and_relocate(tmp_path: Path) -> None:
     assert run.problems == {} and run.dropped == 0
     data = read(local, "e", "r")
     expected = RowTable.model_validate({"rows": [{**rows[0], "wins": 12}, rows[1]]}).rows
-    assert data.read_table("matchups", "updates") == (
+    assert data.read_table("decks", "updates") == (
         TablePoint(x=400, rows=expected),
         TablePoint(x=401, rows=expected),
     )
-    assert [p.x for p in data.read_table("matchups", "seconds")] == [20, 21]
+    assert [p.x for p in data.read_table("decks", "seconds")] == [20, 21]
     assert data.read_table("empty", "updates") == (TablePoint(x=401, rows=()),)
     assert data.read_table("absent", "updates") == ()
     assert data.metrics() == []
     # Only a digest is retained in the update's text column.
-    assert data.tables[0].row(0)["values"] == {"matchups": artifact.stem}
+    assert data.columns[0].row(0).values == {"decks": artifact.stem}
     key = artifact.relative_to(local / "r").as_posix()
     assert immutable(key) and key in listing(local / "r", tail_seconds=0)
 
@@ -64,7 +64,7 @@ def test_row_tables_roundtrip_ship_once_and_relocate(tmp_path: Path) -> None:
     shutil.rmtree(local)
     relocated = tmp_path / "moved"
     (tmp_path / "bucket").rename(relocated)
-    selected = read(relocated, "e", "r").read_table("matchups", "updates")
+    selected = read(relocated, "e", "r").read_table("decks", "updates")
     assert selected == (TablePoint(x=400, rows=expected), TablePoint(x=401, rows=expected))
 
 
@@ -74,9 +74,9 @@ def test_row_tables_resolve_only_surviving_updates_across_machine_folders(
 ) -> None:
     first = tmp_path / "pool/first/out/track"
     with track(experiment="e", run="r", clocks=CLOCKS, directory=first) as run:
-        run.log_table("matchups", [{"result": "keep"}], updates=1, seconds=1)
-        run.log_table("matchups", [{"result": "checkpoint"}], updates=2, seconds=2)
-        run.log_table("matchups", [{"result": "superseded"}], updates=3, seconds=3)
+        run.log_table("decks", [{"result": "keep"}], updates=1, seconds=1)
+        run.log_table("decks", [{"result": "checkpoint"}], updates=2, seconds=2)
+        run.log_table("decks", [{"result": "superseded"}], updates=3, seconds=3)
     # Damage superseded evidence: selecting history must happen before fetching artifacts.
     for path in (first / "r/artifacts").glob("*.json"):
         if not empty_resume and b"superseded" in path.read_bytes():
@@ -89,8 +89,8 @@ def test_row_tables_resolve_only_surviving_updates_across_machine_folders(
         directory=second,
     ) as resumed:
         if not empty_resume:
-            resumed.log_table("matchups", [{"result": "replaced"}], updates=2, seconds=2)
-            resumed.log_table("matchups", [{"result": "latest"}], updates=2, seconds=2)
+            resumed.log_table("decks", [{"result": "replaced"}], updates=2, seconds=2)
+            resumed.log_table("decks", [{"result": "latest"}], updates=2, seconds=2)
             # Scalar updates after resume must not bring old tables back.
             resumed.log({"loss": 1}, updates=4, seconds=4)
     if not empty_resume:
@@ -103,7 +103,7 @@ def test_row_tables_resolve_only_surviving_updates_across_machine_folders(
     data = read(storage, "e", "r")
     assert data.blocks  # blocks are read when first used
     before = storage.requests
-    assert data.read_table("matchups", "updates") == (
+    assert data.read_table("decks", "updates") == (
         TablePoint(x=1, rows=({"result": "keep"},)),
         TablePoint(x=2, rows=({"result": "checkpoint" if empty_resume else "latest"},)),
         *((TablePoint(x=3, rows=({"result": "superseded"},)),) if empty_resume else ()),
@@ -121,11 +121,11 @@ def test_selected_row_table_damage_is_visible(tmp_path: Path, damage: str) -> No
             body = b'{"rows":[1]}'
             digest = sha256(body).hexdigest()
             DirectoryStorage(tmp_path / "r").put(f"artifacts/{digest}.json", body)
-            run.log({"matchups": digest}, updates=1, seconds=1)
+            run.log({"decks": digest}, updates=1, seconds=1)
         elif damage == "reference":
-            run.log({"matchups": "../../elsewhere"}, updates=1, seconds=1)
+            run.log({"decks": "../../elsewhere"}, updates=1, seconds=1)
         else:
-            run.log_table("matchups", [{"value": 1}], updates=1, seconds=1)
+            run.log_table("decks", [{"value": 1}], updates=1, seconds=1)
     if damage in ("missing", "digest"):
         (artifact,) = (tmp_path / "r/artifacts").iterdir()
         if damage == "missing":
@@ -140,7 +140,7 @@ def test_selected_row_table_damage_is_visible(tmp_path: Path, damage: str) -> No
         else EtudeError
     )
     with pytest.raises(error):
-        read(tmp_path, "e", "r").read_table("matchups", "updates")
+        read(tmp_path, "e", "r").read_table("decks", "updates")
 
 
 def test_row_table_rejects_invalid_rows_clocks_and_existing_damage(tmp_path: Path) -> None:
@@ -175,7 +175,7 @@ def test_metric_name_warning_counts_numeric_names_across_attempts(tmp_path: Path
                 updates=1,
                 seconds=1,
             )
-            run.log_table("matchups", [], updates=1, seconds=1)
+            run.log_table("decks", [], updates=1, seconds=1)
         assert said == []  # Clocks, text, flags and table references do not add numeric names.
         with track(
             experiment="e",

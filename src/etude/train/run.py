@@ -22,7 +22,11 @@ Ownership and invariants:
   destination configured the files are already the record.
 
 Units: wall time is integer milliseconds since the Unix epoch. Clock values
-are whatever the author's clocks count; times are seconds.
+are whatever the author's clocks count; times are seconds. Etude adds its two
+clocks in hours (`etude.run.records.BUILT_IN_CLOCKS`) to every row and
+checkpoint: `running_hours` continues from the resumed checkpoint's value by
+this process's monotonic time, `hours_since_start` is wall time since the
+line's first attempt began.
 """
 
 from __future__ import annotations
@@ -53,13 +57,16 @@ from urllib.parse import unquote
 
 from pydantic import ValidationError
 
-from etude.carriage import OUT_PRESENT, taken
+from etude.carriage import OUT_PRESENT, checkpoint_key, note_retired, taken
 from etude.deadline import limit_time
-from etude.run.block_file import block_key, tail_key
+from etude.run.block_file import block_key, log_key, sealed_as, tail_key
 from etude.run.declaration import declare
 from etude.run.delivery import RunFiles, StorageDestination, destinations, ship
 from etude.run.errors import EtudeError
 from etude.run.records import (
+    BUILT_IN_NAMES,
+    HOURS_SINCE_START,
+    RUNNING_HOURS,
     ArtifactRef,
     Attempt,
     Clock,
@@ -71,7 +78,7 @@ from etude.run.records import (
 )
 from etude.run.storage import DirectoryStorage, Storage, run_prefix
 from etude.stopping import Stopped
-from etude.train.block import Builder, Table, concat
+from etude.train.block import Builder, Columns, Json, LoggedRow, concat
 from etude.train.block import encode as encode_block
 from etude.train.manifest import Index, metric_names
 from etude.train.records import CheckpointRecord, ParentRun, RowTable, checkpoint_name
@@ -90,19 +97,19 @@ def flatten(values: Logged, prefix: str = "") -> Iterator[tuple[str, object]]:
             yield prefix + str(name), value
 
 
-def log_line(wall_ms: int, clocks: Mapping[str, float], values: Mapping[str, object]) -> str:
+def log_line(row: LoggedRow) -> str:
     """One row of the local log: a checksum, then the row, so a torn line is detected."""
-    body = json.dumps({"wall_ms": wall_ms, "clocks": clocks, "values": values})
+    body = row.model_dump_json()
     return f"{zlib.crc32(body.encode()):08x} {body}\n"
 
 
-def write_block(root: Path, key: str, table: Table) -> int:
+def write_block(root: Path, key: str, columns: Columns) -> int:
     """Write one block whole and durably; a reader never sees half of it."""
     target = root / key
     target.parent.mkdir(parents=True, exist_ok=True)
     partial = target.with_suffix(".partial")
     with partial.open("wb") as stream:
-        stream.write(encode_block(table))
+        stream.write(encode_block(columns))
         stream.flush()
         os.fsync(stream.fileno())
     partial.replace(target)
@@ -118,17 +125,24 @@ def seal_logs(root: Path, clocks: Sequence[str]) -> None:
     process later writes the same sequence again, with more rows.
     """
     for log in sorted((root / "metrics").glob("*.open")):
-        sequence, _, writer = log.stem.partition("-")
+        tail = sealed_as(log.relative_to(root).as_posix())
+        if tail is None:
+            continue  # not a log a writer opened
         builder = Builder(clocks)
         for line in log.read_text().splitlines():
             checksum, _, body = line.partition(" ")
             if checksum != f"{zlib.crc32(body.encode()):08x}":
                 break
-            row = json.loads(body)
-            builder.add(row["wall_ms"], row["clocks"], row["values"])
+            row = LoggedRow.model_validate_json(body)
+            builder.add(row.wall_ms, row.clocks, row.values)
         if len(builder):
-            write_block(root, tail_key(int(sequence), writer), builder.table(writer, int(sequence)))
+            write_block(root, tail.key, builder.columns(tail.writer, tail.first))
         log.unlink()
+
+
+def _same_model(a: ArtifactRef, b: ArtifactRef) -> bool:
+    """Whether two references name the same model: by digest, else by address."""
+    return (a.sha256 or a.uri) == (b.sha256 or b.uri)
 
 
 def _suffix(source: Path) -> str:
@@ -168,6 +182,14 @@ def local_launch(*, out: Path | str, experiment: str) -> Iterator[None]:
 
 
 _STOP = object()
+
+
+@dataclass(frozen=True)
+class _Row:
+    """A logged row for the writer: when it was logged, and everything it gave."""
+
+    wall_ms: int
+    values: Logged
 
 
 @dataclass(frozen=True)
@@ -228,6 +250,8 @@ class Run:
         # The highest value this process has logged for each clock.
         self._high: dict[str, float] = {}
         self._clock_names = tuple(clock.name for clock in clocks)
+        # The clock columns every row and checkpoint carries: the author's, then Etude's.
+        self._columns = (*self._clock_names, *BUILT_IN_NAMES)
         # Every checkpoint recorded in this folder, by any attempt on any machine,
         # and the name its record and file are kept under.
         self._recorded: dict[int, CheckpointRecord] = {}
@@ -243,24 +267,33 @@ class Run:
         self._finish_deadline: float | None = None
         self._segment_rows = segment_rows
         self._writer_id = secrets.token_hex(6)
+        # Etude's clocks continue from the latest checkpoint, this run's or
+        # the parent's a continuation was handed, as a step clock does.
+        latest = self._latest_record()
+        started_ms = time.time_ns() // 1_000_000
+        self._ran = 0.0 if latest is None else latest.at.get(RUNNING_HOURS, 0.0)
+        self._began = time.monotonic()
+        self._origin_ms = _origin(latest, root, started_ms)
+        # Its first durable row says where this attempt's rows supersede
+        # earlier attempts' (`first_row`); one that logs nothing replaces nothing.
         self._attempt = Attempt(
             writer=self._writer_id,
-            started_ms=time.time_ns() // 1_000_000,
+            started_ms=started_ms,
             host=socket.gethostname(),
             attempt=os.environ.get("ETUDE_ATTEMPT"),
             pod=os.environ.get("RUNPOD_POD_ID"),
             first_row=True,
         )
         self._save("metrics", self._writer_id, self._attempt)
-        seal_logs(self.files.root, self._clock_names)  # what an earlier process left unsealed
+        seal_logs(self.files.root, self._columns)  # what an earlier process left unsealed
         self._index = Index(root, self._writer_id)
         self._metric_name_limit = metric_name_limit
         self._metric_names = metric_names(root) if metric_name_limit is not None else set()
         self._sequence = 0
         # Only the current compaction window stays in memory.
-        self._tails: list[Table] = []
+        self._tails: list[Columns] = []
         self._tail_bytes = 0
-        self._recent: list[Table] = []
+        self._recent: list[Columns] = []
         self._recent_bytes = 0
         self._folded_at = time.monotonic()
         self._queue: queue.Queue[object] = queue.Queue(maxsize=queue_size)
@@ -334,13 +367,15 @@ class Run:
                         )
                     else:
                         self._high[name] = value
-            self._queue.put_nowait((time.time_ns() // 1_000_000, row))
+            wall_ms, hours = self._now()
+            self._queue.put_nowait(_Row(wall_ms, {**row, **hours}))
+            self._high.update(hours)
         except queue.Full:
-            self._lost()
+            self._count_dropped()
         except Exception:
             if self.strict:
                 raise
-            self._lost()
+            self._count_dropped()
 
     def log_table(self, name: str, rows: Sequence[Mapping[str, object]], **clocks: float) -> None:
         """Store JSON rows locally, then queue their digest at the given clocks.
@@ -391,7 +426,7 @@ class Run:
         except Exception:  # noqa: BLE001, S110 - a warnings filter must not break training
             pass
 
-    def _lost(self) -> None:
+    def _count_dropped(self) -> None:
         self.dropped += 1
         self._warn("dropped", "the log queue is full and a row was dropped", stacklevel=4)
 
@@ -413,8 +448,8 @@ class Run:
         recorded.
 
         Recording is idempotent and nothing recorded is replaced. The same
-        model at the same coordinate returns the existing record's reference.
-        A different one at a recorded coordinate is kept as a new version,
+        model at the same `at` returns the existing record's reference.
+        A different one at a recorded `at` is kept as a new version,
         `CLOCK-VALUE.ordinal-N`, beside the first.
 
         Returns the model's reference: pass it to whatever evaluates the model.
@@ -422,10 +457,12 @@ class Run:
         """
         staged: Path | None = None
         try:
-            coordinate = {**(at or {}), **clocks}
-            if set(coordinate) != set(self._clock_names):
+            given = {**(at or {}), **clocks}
+            if set(given) != set(self._clock_names):
                 raise ValueError("checkpoint_clock_mismatch")
-            at = {name: float(coordinate[name]) for name in self._clock_names}
+            declared = {name: float(given[name]) for name in self._clock_names}
+            wall_ms, hours = self._now()
+            at = {**declared, **hours}
             name = checkpoint_name(at)
             reference, staged = self._stage(artifact, name)
             file = self._file_key(reference)
@@ -434,10 +471,9 @@ class Run:
                     reference.uri == known.artifact.uri or file is not None and file == known.file
                 ) and reference.sha256 != known.artifact.sha256:
                     raise ValueError("checkpoint_file_changed")
-                same = (known.artifact.sha256 or known.artifact.uri) == (
-                    reference.sha256 or reference.uri
-                )
-                if known.at == at and same:
+                # Etude's clocks always move on, so the same `at` is the author's.
+                same = all(known.at.get(n) == v for n, v in declared.items())
+                if same and _same_model(known.artifact, reference):
                     if staged is not None:
                         staged.unlink()
                     return known.artifact
@@ -449,13 +485,13 @@ class Run:
             )
             name = self._unused(name, suffix, ordinal)
             if staged is not None:
-                reference = self._keep(staged, name + suffix, reference)
+                reference = self._rename_staged(staged, name + suffix, reference)
             record = CheckpointRecord(
                 ordinal=ordinal,
                 artifact=reference,
                 file=self._file_key(reference),
                 at=at,
-                wall_ms=time.time_ns() // 1_000_000,
+                wall_ms=wall_ms,
                 tags=tuple(dict.fromkeys(tags)),
             )
         except (ValidationError, ValueError, TypeError, OSError) as error:
@@ -472,6 +508,39 @@ class Run:
         self._offer(_Kept(name, record))
         return record.artifact
 
+    def at(self, clock: str) -> float | None:
+        """Where the run stands on `clock`: Etude's clocks now, an author's the highest
+        value this process logged. None for an author's clock before its first row."""
+        if clock in BUILT_IN_NAMES:
+            return self._now()[1][clock]
+        if clock not in self._clock_names:
+            raise ValueError(f"the run declares no clock {clock!r}")
+        return self._high.get(clock)
+
+    def checkpoint_due(self, every: float, clock: str = RUNNING_HOURS) -> bool:
+        """Whether `clock` has crossed a multiple of `every` since the latest checkpoint.
+
+        `if run.checkpoint_due(1): run.checkpoint(...)` saves every running hour,
+        counted from zero and continuing across resumes and continuations.
+        """
+        if every <= 0:
+            raise ValueError("every must be positive")
+        here, latest = self.at(clock), self._latest_record()
+        there = 0.0 if latest is None else latest.at.get(clock, 0.0)
+        return here is not None and here // every > there // every
+
+    def _now(self) -> tuple[int, dict[str, float]]:
+        """The wall time in milliseconds, and where Etude's clocks stand."""
+        wall_ms = time.time_ns() // 1_000_000
+        return wall_ms, {
+            RUNNING_HOURS: self._ran + (time.monotonic() - self._began) / 3600,
+            HOURS_SINCE_START: (wall_ms - self._origin_ms) / 3_600_000,
+        }
+
+    def _latest_record(self) -> CheckpointRecord | None:
+        """The latest record this run kept, else the parent's it continues from."""
+        return self._recorded[max(self._recorded)] if self._recorded else self._inherited
+
     def latest_checkpoint(self) -> CheckpointRecord | None:
         """The latest checkpoint record, or an inherited parent checkpoint.
 
@@ -479,13 +548,11 @@ class Run:
         is not restored just because its record survives; its recorded address
         may be unavailable. None when there is no record.
         """
-        record = self._recorded[max(self._recorded)] if self._recorded else self._inherited
+        record = self._latest_record()
         if record is None:
             return None
-        # The file keeps its name wherever the record was written.
-        local = self.files.root / (
-            record.file or "checkpoints/" + record.artifact.uri.rpartition("/")[2]
-        )
+        # A copied file keeps its name wherever the record was written.
+        local = self.files.root / (record.file or checkpoint_key(record.artifact.uri))
         if record.artifact.sha256 is None or not local.is_file():
             return record
         artifact = record.artifact.model_copy(update={"uri": local.resolve().as_uri()})
@@ -547,7 +614,7 @@ class Run:
         candidates = chain((name, f"{name}.ordinal-{ordinal}"), versions)
         return next(c for c in candidates if c not in records and c + suffix not in files)
 
-    def _keep(self, staged: Path, filename: str, reference: ArtifactRef) -> ArtifactRef:
+    def _rename_staged(self, staged: Path, filename: str, reference: ArtifactRef) -> ArtifactRef:
         """Give a staged copy its recorded name, which nothing has used before."""
         kept = staged.with_name(filename)
         staged.replace(kept)
@@ -574,9 +641,7 @@ class Run:
                     (
                         known
                         for known in self._recorded.values()
-                        # The same model: the digest, else the URI.
-                        if (known.artifact.sha256 or known.artifact.uri)
-                        == (checkpoint.sha256 or checkpoint.uri)
+                        if _same_model(known.artifact, checkpoint)
                     ),
                     None,
                 )
@@ -598,26 +663,26 @@ class Run:
         try:
             self._queue.put_nowait(item)
         except queue.Full:
-            self._lost()
+            self._count_dropped()
 
     # --- the writer thread ---------------------------------------------------
 
     def _write(self) -> None:
         stream: IO[str] | None = None
         opened_at = 0.0
-        builder = Builder(self._clock_names)
+        builder = Builder(self._columns)
 
         def seal(final: bool = False) -> None:
             nonlocal stream, builder
             if stream is not None:
-                table = builder.table(self._writer_id, self._sequence)
+                columns = builder.columns(self._writer_id, self._sequence)
                 self._tail_bytes += write_block(
-                    self.files.root, tail_key(self._sequence, self._writer_id), table
+                    self.files.root, tail_key(self._sequence, self._writer_id), columns
                 )
                 stream.close()
                 Path(stream.name).unlink()  # The block now holds these rows.
-                self._tails.append(table)
-                stream, builder = None, Builder(self._clock_names)
+                self._tails.append(columns)
+                stream, builder = None, Builder(self._columns)
                 self._sequence += 1
             self._fold(final)
             self._report_progress()
@@ -636,20 +701,21 @@ class Run:
                 if isinstance(item, _Kept):
                     self._save("checkpoints", item.name, item.record)
                     self._dirty = True
-                elif isinstance(item, tuple):
+                elif isinstance(item, _Row):
                     if stream is None:
-                        directory = self.files.root / "metrics"
-                        directory.mkdir(parents=True, exist_ok=True)
-                        name = f"{self._sequence:08d}-{self._writer_id}.open"
-                        stream = (directory / name).open("a")
+                        log = self.files.root / log_key(self._sequence, self._writer_id)
+                        log.parent.mkdir(parents=True, exist_ok=True)
+                        stream = log.open("a")
                         opened_at = time.monotonic()
-                    coordinate, values = self._row(item[1])
-                    stream.write(log_line(item[0], coordinate, values))
+                    row = self._stored(item)
+                    stream.write(log_line(row))
                     stream.flush()
                     if not self._attempt.resumed_at:
-                        self._attempt = self._attempt.model_copy(update={"resumed_at": coordinate})
+                        self._attempt = self._attempt.model_copy(
+                            update={"resumed_at": dict(row.clocks)}
+                        )
                         self._save("metrics", self._writer_id, self._attempt)
-                    builder.add(item[0], coordinate, values)
+                    builder.add(row.wall_ms, row.clocks, row.values)
                 due = stream is not None and (
                     len(builder) >= self._segment_rows
                     or time.monotonic() - opened_at >= self._segment_seconds
@@ -676,23 +742,23 @@ class Run:
             recent = list(self._recent)
             size = self._recent_bytes
             if self._tails:
-                table = concat(self._tails)
-                recent.append(table)
+                columns = concat(self._tails)
+                recent.append(columns)
                 if not final:
-                    key = block_key(1, table.first, table.last, table.writer)
-                    size += write_block(self.files.root, key, table)
+                    key = block_key(1, columns.first, columns.last, columns.writer)
+                    size += write_block(self.files.root, key, columns)
                     self._index.add(key)
             compact = final or size >= PERMANENT_BYTES or len(recent) >= RECENT_BLOCKS
             if compact:
-                table = concat(recent)
-                key = block_key(2, table.first, table.last, table.writer)
-                write_block(self.files.root, key, table)
+                columns = concat(recent)
+                key = block_key(2, columns.first, columns.last, columns.writer)
+                write_block(self.files.root, key, columns)
                 self._index.add(key)
             self._index.write()
             retired = [tail_key(tail.first, tail.writer) for tail in self._tails]
             if compact:
                 retired.extend(
-                    block_key(1, table.first, table.last, table.writer) for table in recent
+                    block_key(1, columns.first, columns.last, columns.writer) for columns in recent
                 )
             retired = [key for key in retired if (self.files.root / key).is_file()]
             # The replacement and manifest exist before the append. Couriers need
@@ -706,11 +772,7 @@ class Run:
                 if not key.endswith(".tail")
                 or time.time() - (self.files.root / key).stat().st_mtime >= self.files.tail_age
             ]
-            if delivered:
-                note = self.files.root / "metrics" / f"{self._writer_id}.removed"
-                with note.open("a") as removed:
-                    removed.write("".join(key + "\n" for key in delivered))
-                    removed.flush()
+            note_retired(self.files.root, self._writer_id, delivered)
             for key in retired:
                 (self.files.root / key).unlink(missing_ok=True)
             self._recent = [] if compact else recent
@@ -735,10 +797,10 @@ class Run:
         )
         self._progress = high
 
-    def _row(self, row: Logged) -> tuple[dict[str, float], dict[str, object]]:
+    def _stored(self, row: _Row) -> LoggedRow:
         """A logged row as its clock values and everything else, ready to store."""
-        values: dict[str, object] = {}
-        for name, value in flatten(row):
+        values: dict[str, Json] = {}
+        for name, value in flatten(row.values):
             if value is None or isinstance(value, (bool, str, int, float)):
                 values[name] = value
             else:
@@ -746,18 +808,18 @@ class Run:
                     values[name] = float(value)  # type: ignore[arg-type]  # numpy and tensor scalars
                 except (TypeError, ValueError):
                     values[name] = type(value).__name__
-        coordinate: dict[str, float] = {}
-        for name in self._clock_names:
+        at: dict[str, float] = {}
+        for name in self._columns:
             value = values.get(name)
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 if math.isfinite(value):
-                    coordinate[name] = float(values.pop(name))  # type: ignore[arg-type]
+                    at[name] = float(values.pop(name))  # type: ignore[arg-type]
                 else:
                     # Not a finite number: stays among the values as written.
                     self._warn(
                         "incomplete", f"a logged row's clock {name!r} is not a finite number"
                     )
-        if len(coordinate) != len(self._clock_names):
+        if len(at) != len(self._columns):
             # Charted against the clocks it does give, and wall time; counted.
             self.incomplete += 1
         if self._metric_name_limit is not None and "metric_names" not in self._warned:
@@ -775,7 +837,7 @@ class Run:
                 )
                 # The one-time warning needs no growing name registry afterward.
                 self._metric_names.clear()
-        return coordinate, values
+        return LoggedRow(wall_ms=row.wall_ms, clocks=at, values=values)
 
     def _save(self, folder: str, name: str, record: Record) -> None:
         """Write one small record whole, so a reader never sees half of it."""
@@ -956,6 +1018,24 @@ def track(
     )
 
 
+def _origin(latest: CheckpointRecord | None, root: Path, started_ms: int) -> int:
+    """When the line's first attempt began, in milliseconds since the epoch.
+
+    The checkpoint resumed says how long after that it was saved, also across a
+    continuation; without one, the earliest attempt recorded in this folder.
+    """
+    if latest is not None and HOURS_SINCE_START in latest.at:
+        return latest.wall_ms - round(latest.at[HOURS_SINCE_START] * 3_600_000)
+    starts = [started_ms]
+    for path in (root / "metrics").glob("*.json"):
+        if re.fullmatch(r"[0-9a-f]{12}", path.stem):
+            try:
+                starts.append(Attempt.model_validate_json(path.read_bytes()).started_ms)
+            except ValidationError:
+                continue
+    return min(starts)
+
+
 def _inherited() -> ParentRun | None:
     """The handed lineage, relocating its checkpoint input onto this machine."""
     given = os.environ.get("ETUDE_CONTINUES")
@@ -980,7 +1060,8 @@ def seal_runs(directory: Path | str) -> None:
     for root in sorted(path.parent for path in Path(directory).glob("*/run.json")):
         declared = RunFiles(root).run_file()
         if declared is not None:
-            seal_logs(root, [clock.name for clock in declared.declaration.clocks])
+            names = [clock.name for clock in declared.declaration.clocks]
+            seal_logs(root, [*names, *BUILT_IN_NAMES])
 
 
 __all__ = [

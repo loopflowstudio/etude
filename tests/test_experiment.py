@@ -14,8 +14,8 @@ import pytest
 import etude.launch.client as client
 from etude.eval.match import environment
 from etude.eval.query import statsdb
-from etude.eval.records import Benchmark, Code, Inference, Matchup
-from etude.eval.tournament import curves
+from etude.eval.records import Benchmark, Code, Inference, Seating
+from etude.eval.tournament import scores
 from etude.experiment import (
     Checkpoint,
     Experiment,
@@ -33,6 +33,7 @@ from etude.train.read import read
 from etude.train.run import Run as Run_
 from etude.train.run import track
 from tests.eval.games import play, play_catching_errors, play_failing_deal_one
+from tests.experiments import authored
 
 WORLD = environment("duel", config={"world": "w6"})
 DEALS = tuple({"deal": deal} for deal in range(2))
@@ -71,7 +72,7 @@ def save(run: Run_, bucket: DirectoryStorage, tmp_path: Path, saves: range) -> N
 
 
 def _saved(run: Run_, bucket: DirectoryStorage) -> tuple[Checkpoint, ...]:
-    found = [each for each in observe(bucket, "ppo").runs if each.name == run.name]
+    found = [each for each in observe(bucket, run.experiment).runs if each.name == run.name]
     return found[0].checkpoints if found else ()
 
 
@@ -84,23 +85,23 @@ def design(tmp_path: Path) -> Experiment:
         run = state.run("ppo-1")
         rated = run.checkpoints.every(2)
         pairs = [
-            Matchup(name=f"{new.name} vs {old.name}", tags=("consecutive",),
+            Seating(name=f"{new.name} vs {old.name}", tags=("consecutive",),
                     players=(new.model(DIRECT), old.model(DIRECT)), conditions=DEALS, games=2)
             for old, new in zip(rated, rated[1:])
         ]  # fmt: skip
         if run.final is not None and run.checkpoints:
             first = run.checkpoints[0]
             pairs.append(
-                Matchup(
+                Seating(
                     name="final vs first",
                     players=(run.final.model(DIRECT), first.model(DIRECT)),
                     conditions=DEALS,
                     games=2,
                 )  # fmt: skip
             )
-        anchors = Matchup(name="vs heuristic", players=(DIRECT, anchor), conditions=DEALS,
+        anchors = Seating(name="vs heuristic", players=(DIRECT, anchor), conditions=DEALS,
                           games=2)  # fmt: skip
-        progress = Benchmark(name="ladder", environment=WORLD, matchups=(anchors, *pairs))
+        progress = Benchmark(name="ladder", environment=WORLD, seatings=(anchors, *pairs))
         return evaluation(progress, play=play, checkpoints=rated, max_hours=0.1)
 
     return Experiment(name="ppo", eval=eval_)
@@ -130,13 +131,13 @@ def test_each_pass_plays_what_the_checkpoints_saved_so_far_call_for(tmp_path: Pa
     assert (third.new, third.played) == (0, 0)
 
     db = statsdb("ppo", bucket)
-    assert sorted(db.sql("select distinct matchup from schedule").fetchall()) == [
+    assert sorted(db.sql("select distinct seating from schedule").fetchall()) == [
         ("final vs first",), ("updates-400.pt vs updates-200.pt",), ("vs heuristic",)
     ]  # fmt: skip
     assert db.sql(
-        "select distinct matchup from schedule where list_contains(tags, 'consecutive')"
+        "select distinct seating from schedule where list_contains(tags, 'consecutive')"
     ).fetchall() == [("updates-400.pt vs updates-200.pt",)]
-    (line,) = curves(db, "ladder", table="plays", value="won")
+    (line,) = scores(db, "ladder", table="plays", value="won")
     assert [p.ordinal for p in line.points] == [2, 4]
     db.close()
 
@@ -145,15 +146,15 @@ def test_each_pass_plays_what_the_checkpoints_saved_so_far_call_for(tmp_path: Pa
     anchor = heuristic(tmp_path)
 
     def post_hoc(state: ExperimentState) -> Job:
-        every = Matchup(name="vs heuristic", players=(DIRECT, anchor), conditions=DEALS, games=2)
-        sweep = Benchmark(name="sweep", environment=WORLD, matchups=(every,))
+        every = Seating(name="vs heuristic", players=(DIRECT, anchor), conditions=DEALS, games=2)
+        sweep = Benchmark(name="sweep", environment=WORLD, seatings=(every,))
         return evaluation(sweep, play=play, checkpoints=state.run("ppo-1").checkpoints,
                           max_hours=0.1)  # fmt: skip
 
     (later,) = advance(Experiment(name="ppo", eval=post_hoc), source=bucket, directory=local)
     assert (later.new, later.played) == (3 * len(DEALS), 3 * len(DEALS))
     with statsdb("ppo", bucket) as db:
-        (swept,) = curves(db, "sweep", table="plays", value="won")
+        (swept,) = scores(db, "sweep", table="plays", value="won")
     assert [p.ordinal for p in swept.points] == [1, 2, 3, 4, 5]
 
 
@@ -166,13 +167,13 @@ def test_a_pass_plays_only_what_eval_returns_now(tmp_path: Path) -> None:
         name="greedy", source=[tmp_path / "players" / "heuristic.py"], config={"strength": 4}
     )
     both = (
-        Matchup(name="vs heuristic", players=(DIRECT, anchor), conditions=DEALS, games=2),
-        Matchup(name="vs greedy", players=(DIRECT, greedy), conditions=DEALS, games=2),
+        Seating(name="vs heuristic", players=(DIRECT, anchor), conditions=DEALS, games=2),
+        Seating(name="vs greedy", players=(DIRECT, greedy), conditions=DEALS, games=2),
     )
 
-    def design(matchups: tuple[Matchup, ...]) -> Experiment:
+    def design(seatings: tuple[Seating, ...]) -> Experiment:
         def eval_(state: ExperimentState) -> Job:
-            ladder = Benchmark(name="ladder", environment=WORLD, matchups=matchups)
+            ladder = Benchmark(name="ladder", environment=WORLD, seatings=seatings)
             return evaluation(ladder, play=play, checkpoints=state.run("ppo-1").checkpoints,
                               max_hours=0.1)  # fmt: skip
 
@@ -194,8 +195,8 @@ def test_a_failed_match_is_counted_and_not_replayed_unless_asked(tmp_path: Path)
     anchor = heuristic(tmp_path)
 
     def eval_(state: ExperimentState) -> Job:
-        vs = Matchup(name="vs heuristic", players=(DIRECT, anchor), conditions=DEALS, games=2)
-        ladder = Benchmark(name="ladder", environment=WORLD, matchups=(vs,))
+        vs = Seating(name="vs heuristic", players=(DIRECT, anchor), conditions=DEALS, games=2)
+        ladder = Benchmark(name="ladder", environment=WORLD, seatings=(vs,))
         return evaluation(ladder, play=play_failing_deal_one,
                           checkpoints=state.run("ppo-1").checkpoints, max_hours=0.1)  # fmt: skip
 
@@ -221,8 +222,8 @@ def test_a_pass_whose_matches_all_return_no_rows_fails_and_a_retry_replays_them(
     games = {"play": play_catching_errors}
 
     def eval_(state: ExperimentState) -> Job:
-        vs = Matchup(name="vs heuristic", players=(DIRECT, anchor), conditions=DEALS, games=2)
-        ladder = Benchmark(name="ladder", environment=WORLD, matchups=(vs,))
+        vs = Seating(name="vs heuristic", players=(DIRECT, anchor), conditions=DEALS, games=2)
+        ladder = Benchmark(name="ladder", environment=WORLD, seatings=(vs,))
         return evaluation(ladder, play=games["play"], checkpoints=state.run("ppo-1").checkpoints,
                           max_hours=0.1)  # fmt: skip
 
@@ -255,9 +256,9 @@ def test_a_pass_whose_matches_all_return_no_rows_fails_and_a_retry_replays_them(
 
 def test_an_eval_job_belongs_to_the_experiment_of_its_file(tmp_path: Path) -> None:
     bucket = DirectoryStorage(tmp_path / "bucket")
-    anchors = Matchup(name="vs heuristic", players=(DIRECT, heuristic(tmp_path)), conditions=DEALS,
+    anchors = Seating(name="vs heuristic", players=(DIRECT, heuristic(tmp_path)), conditions=DEALS,
                       games=2)  # fmt: skip
-    progress = Benchmark(name="ladder", environment=WORLD, matchups=(anchors,))
+    progress = Benchmark(name="ladder", environment=WORLD, seatings=(anchors,))
 
     def elsewhere(state: ExperimentState) -> Job:
         return evaluation(progress, experiment="another", play=play, max_hours=0.1)
@@ -401,7 +402,7 @@ def test_queued_passes_retain_every_job_while_capacity_is_unavailable(
     benchmark = Benchmark(
         name="queued",
         environment=WORLD,
-        matchups=(Matchup(name="anchor", players=(DIRECT, anchor), conditions=DEALS, games=2),),
+        seatings=(Seating(name="anchor", players=(DIRECT, anchor), conditions=DEALS, games=2),),
     )
 
     def choose(state: ExperimentState) -> list[Job]:
@@ -440,8 +441,8 @@ def test_a_tracked_checkpoints_seat_says_where_its_run_stood_and_its_line(tmp_pa
     save(run, bucket, tmp_path, range(1, 2))
     run.finish(timeout=30)
     (saved,) = observe(bucket, "ppo").run("ppo-1").checkpoints
-    assert saved.ref.at == saved.clocks == {"updates": 100}
-    assert saved.model(DIRECT).checkpoint.at == {"updates": 100}
+    assert saved.ref.at == saved.at
+    assert authored(saved.at) == authored(saved.model(DIRECT).checkpoint.at) == {"updates": 100}
     assert saved.ref.line == saved.model(DIRECT).checkpoint.line == "ppo-1"
 
 
@@ -454,6 +455,26 @@ def test_a_checkpoint_carries_the_wall_time_its_record_stored(tmp_path: Path) ->
     assert not observed.ended
     stored = {each.ordinal: each.wall_ms for each in read(bucket, "ppo", "ppo-1").checkpoints}
     assert {each.ordinal: each.wall_ms for each in observed.checkpoints} == stored
+    run.finish(timeout=30)
+
+
+def test_a_run_the_launcher_lost_has_ended_at_its_last_stored_checkpoint(tmp_path: Path) -> None:
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    run = trainer(bucket, tmp_path)
+    save(run, bucket, tmp_path, range(1, 3))
+    # Its process never wrote an end, as when its machine is lost: storage says running.
+    assert observe(bucket, "ppo").run("ppo-1").state == "running"
+    # The launcher's own record of the run, closed without success.
+    import etude.launch.client as client  # noqa: PLC0415 - as the passes above import it
+
+    client.launch(Run(id="ppo-1", job=Job(command="exit 3", max_hours=0.1)), "local")
+    (closed,) = client.wait("ppo-1", timeout=60)
+    assert closed.outcome == "failed"
+    state = observe(bucket, "ppo")
+    assert state.run("ppo-1").state == "failed"
+    (line,) = state.lines
+    # So `Final` seats its last stored checkpoint instead of waiting for good.
+    assert line.ended and authored(line.checkpoints[-1].at) == {"updates": 200}
     run.finish(timeout=30)
 
 
@@ -473,3 +494,129 @@ def test_a_finished_run_without_checkpoints_has_no_final(tmp_path: Path) -> None
     trainer(bucket, tmp_path).finish(timeout=30)
     run = observe(bucket, "ppo").run("ppo-1")
     assert (run.state, run.final, run.checkpoints.last) == ("finished", None, None)
+
+
+CAPACITY = """
+from etude.eval.match import environment
+from etude.eval.records import Aligned, Benchmark, Fraction, Inference, Seating
+from etude.jobs import evaluation
+from etude.report import Curve, Matches, Report, Score
+from tests.eval.games import play
+
+DIRECT = Inference(config={"search": 0})
+DEALS = ({"deal": 0},)
+
+
+def eval(state):
+    seatings = (
+        Seating(
+            name="half-training",
+            players=(DIRECT, Fraction(clock="updates", value=0.5, inference=DIRECT)),
+            conditions=DEALS,
+            games=2,
+        ),
+        Seating(
+            name="large vs small",
+            players=(DIRECT, Aligned(clock="updates", job="small", inference=DIRECT)),
+            conditions=DEALS,
+            games=2,
+        ),
+    )
+    ladder = Benchmark(name="ladder", environment=environment("duel"), seatings=seatings)
+    held = [c for run in state.runs for c in run.checkpoints]
+    return evaluation(ladder, play=play, checkpoints=held, max_hours=0.1)
+
+
+def report():
+    return Report(
+        score=Score(table="plays", value="won"),
+        evals=(
+            Curve(title="Half", matches=Matches(seating="half-training")),
+            Curve(title="Large against small", matches=Matches(seating="large vs small")),
+        ),
+    )
+"""
+
+
+def test_relative_seats_fill_in_as_their_jobs_save_and_the_report_says_what_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Imported here: the page is the report's, and only this test draws one.
+    from etude.page import build  # noqa: PLC0415
+    from etude.report import Matches  # noqa: PLC0415
+
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    file = tmp_path / "experiments" / "capacity.py"
+    file.parent.mkdir()
+    file.write_text(CAPACITY)
+    clocks = [Clock(name="updates", kind="step", meaning="optimizer updates")]
+    runs = {
+        job: track(experiment="capacity", run=f"{job}-1", job=job, clocks=clocks,
+                   directory=tmp_path / job, storages=[bucket])
+        for job in ("small", "large")
+    }  # fmt: skip
+    save(runs["small"], bucket, tmp_path, range(1, 3))
+    save(runs["large"], bucket, tmp_path, range(1, 5))
+    state = observe(bucket, "capacity")
+    assert {run.name: (run.job, run.line) for run in state.runs} == {
+        "small-1": ("small", "small-1"),
+        "large-1": ("large", "large-1"),
+    }
+    experiment = read_experiment(file)
+    local = tmp_path / "evaluator"
+    (first,) = advance(experiment, source=bucket, directory=local)
+    # Half-training for 200 of each and 400 of large; large against small at 100 and 200,
+    # and small against itself at both.
+    assert (first.new, first.played) == (7, 7)
+
+    type Why = tuple[str, str | None, float | None]
+
+    def drawn(seating: str) -> dict[float, float | Why | None]:
+        """Large's points on the seating's curve: each one's score, or why it has none:
+        whether a checkpoint may still appear, the job looked in and the updates looked at."""
+        page = build(bucket, file)
+        chosen = page.selections.index(Matches(seating=seating))
+        return {
+            p.at["updates"]: p.value
+            if p.gap is None
+            else (p.gap.missing, p.gap.seat.job, p.gap.value)
+            for p in page.points
+            if p.selection == chosen and p.run == "large-1"
+        }
+
+    against = drawn("large vs small")
+    assert sorted(against) == [100, 200, 300, 400]
+    assert isinstance(against[100], float) and isinstance(against[200], float)
+    assert against[300] == ("not_yet", "small", 300)
+    half = drawn("half-training")
+    assert half[100] == ("never", None, 50)
+    assert half[300] == ("never", None, 150)
+    assert isinstance(half[200], float) and isinstance(half[400], float)
+
+    # Small catches up to 300 and ends there: 300 is played, for large and against itself;
+    # 400 will never be.
+    save(runs["small"], bucket, tmp_path, range(3, 4))
+    runs["small"].finish(timeout=30)
+    (second,) = advance(experiment, source=bucket, directory=local)
+    assert (second.new, second.played) == (2, 2)
+    against = drawn("large vs small")
+    assert isinstance(against[300], float)
+    assert against[400] == ("never", "small", 400)
+    with statsdb("capacity", bucket) as db:
+        lines = {(s.seating, s.run): s for s in scores(db, "ladder", table="plays", value="won")}
+    assert [p.ordinal for p in lines[("large vs small", "large-1")].points] == [1, 2, 3]
+    half_points = lines[("half-training", "large-1")].points
+    assert [p.ordinal for p in half_points] == [2, 4]
+    # 200 also sits in 400's match, as its earlier partner; its point counts only the
+    # match held for it: one condition, its seat's two games.
+    assert [(p.matches, p.rows) for p in half_points] == [(1, 2), (1, 2)]
+    page = build(bucket, file)
+    (at_200,) = [
+        p for p in page.points
+        if p.selection == page.selections.index(Matches(seating="half-training"))
+        and p.run == "large-1" and p.at["updates"] == 200
+    ]  # fmt: skip
+    (opponent,) = at_200.opponents
+    assert authored(page.players[opponent].at) == {"updates": 100}
+    assert (at_200.matches, at_200.rows) == (1, 2)

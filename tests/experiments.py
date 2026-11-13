@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+from etude.run.records import BUILT_IN_NAMES
+
 
 def experiment_file(folder: Path, name: str, text: str = "") -> Path:
     """`folder/NAME.py` holding `text`; empty, it defines no report(), so the page is the default."""
@@ -9,3 +11,9 @@ def experiment_file(folder: Path, name: str, text: str = "") -> Path:
     path = folder / f"{name}.py"
     path.write_text(text)
     return path
+
+
+def authored(clocks: object) -> dict[str, object]:
+    """A row's or checkpoint's clocks without Etude's, which depend on when it ran."""
+    assert isinstance(clocks, dict)
+    return {k: v for k, v in clocks.items() if k not in BUILT_IN_NAMES}

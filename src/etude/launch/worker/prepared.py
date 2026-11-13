@@ -87,11 +87,11 @@ def key(
             for name in sorted(preparation.inputs)
         },
         environment=hashlib.sha256(variables.encode()).hexdigest(),
-        machine=_machine(),
+        machine=_platform_facts(),
     )
 
 
-def _machine() -> dict[str, str]:
+def _platform_facts() -> dict[str, str]:
     """The platform a build depends on; the kernel release is left out, as it varies by host."""
     libc, version = platform.libc_ver()
     facts = {
@@ -164,7 +164,7 @@ def _remove(directory: Path) -> None:
     shutil.rmtree(directory)
 
 
-def _seal(directory: Path) -> None:
+def _make_read_only(directory: Path) -> None:
     """Make what the build wrote read-only, so a run does not change it by accident."""
     for path in [*directory.rglob("*"), directory]:
         if not path.is_symlink():
@@ -245,7 +245,7 @@ def prepare(
             _remove(directory)
             yield directory, done(outcome, 0, None)
             return
-        _seal(directory)
+        _make_read_only(directory)
         manifest = _manifest(directory)
         size = sum(entry.size_bytes for entry in manifest)
         seconds = time.monotonic() - began
@@ -267,7 +267,7 @@ class _Kept(NamedTuple):
     used: float  # when its receipt was last touched
 
 
-def _kept(root: Path) -> list[_Kept]:
+def _prepared_directories(root: Path) -> list[_Kept]:
     kept = []
     for receipt in root.glob("*.json"):
         try:
@@ -285,7 +285,7 @@ def evict(log: Callable[[str], None]) -> None:
     A directory an attempt is using holds its lock, and is kept.
     """
     root = home()
-    kept = sorted(_kept(root), key=lambda entry: entry.used)
+    kept = sorted(_prepared_directories(root), key=lambda entry: entry.used)
     used = sum(entry.size_bytes for entry in kept)
     allowance = (shutil.disk_usage(root).free + used) // 2
     for entry in kept:

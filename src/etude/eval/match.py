@@ -53,7 +53,7 @@ from etude.eval.block import (
     quote,
     run_blocks,
     seal_abandoned,
-    unnest,
+    stage,
 )
 from etude.eval.records import (
     ADDED,
@@ -67,6 +67,7 @@ from etude.eval.records import (
     MatchRecord,
     Rollup,
     as_config,
+    outcomes,
 )
 from etude.eval.schedule import ordered
 from etude.eval.source import digest_files
@@ -353,13 +354,13 @@ class _Writer:
                 self.columns.setdefault(table, {}).update(columns)
 
     def _stored(self) -> dict[str, MatchRecord]:
-        """Match records of the blocks here and at every destination; a done one wins.
+        """Each match's standing record (`outcomes`) of the blocks here and at every destination.
 
         One listing per place and one read of each block not already read here.
         """
         places: list[tuple[Storage, str]] = [(DirectoryStorage(self.files.root), "")]
         places += [(target.storage, run_prefix(self.name)) for target in self.targets]
-        found: dict[str, MatchRecord] = {}
+        found: list[MatchRecord] = []
         known: dict[str, Block] = {}
         for storage, prefix in places:
             names = (key[len(prefix) :] for key in storage.keys(prefix))
@@ -369,10 +370,8 @@ class _Writer:
                         f"block {block.name} keeps rollups"
                         f" {[rollup.name for rollup in block.rollups]}"
                     )
-                for record in block.matches:
-                    if found.get(record.match.key) is None or record.state == "done":
-                        found[record.match.key] = record
-        return found
+                found += block.matches
+        return outcomes(found)
 
     def fail(self, scheduled: Match, error: BaseException) -> NoReturn:
         detail = f"{type(error).__name__}: {error}"[:2000]
@@ -432,12 +431,15 @@ class _Writer:
         self, target: Path, columns: dict[str, ColumnType], rows: Sequence[Row], match: str
     ) -> None:
         """Write one match's rows of a table to `target` as Parquet; readers never see half a file."""
-        select, values = unnest(
+        stage(
+            self.db,
+            "_match_rows",
             {**columns, "run": "VARCHAR", "match": "VARCHAR"},
             [[row.get(name) for name in columns] + [self.name, match] for row in rows],
         )
         partial = target.with_name(target.name + ".partial")
-        self.db.execute(f"copy ({select}) to {quote(partial)} (format parquet)", values)
+        self.db.execute(f"copy _match_rows to {quote(partial)} (format parquet)")
+        self.db.execute("drop table _match_rows")
         partial.replace(target)
 
     def _seal(self) -> None:

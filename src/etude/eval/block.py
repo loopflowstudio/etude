@@ -38,6 +38,7 @@ import json
 import os
 import re
 import shutil
+import tempfile
 import time
 import zipfile
 from collections.abc import Iterable, Mapping, Sequence
@@ -87,6 +88,11 @@ _WHOLE = frozenset(
 _LOCAL_HEADER = 30
 
 
+def _name(written_ns: int, writer: str) -> str:
+    """A block's name: its zero-padded seal time first, so names order by when they were sealed."""
+    return f"{written_ns:020d}.{writer}"
+
+
 class Span(Record):
     """Where a blob's bytes lie in its block's pack."""
 
@@ -113,7 +119,7 @@ class Block(Record):
 
     @property
     def name(self) -> str:
-        return f"{self.written_ns:020d}.{self.writer}"
+        return _name(self.written_ns, self.writer)
 
     @property
     def summed(self) -> tuple[Rollup, ...]:
@@ -320,7 +326,7 @@ def write(
     numbers in one file and fractions in another becomes fractions.
     """
     written = time.time_ns()
-    name = f"{written:020d}.{writer}"
+    name = _name(written, writer)
     folder = root / EVAL_BLOCKS / name
     folder.mkdir(parents=True)
     pack, spans = (None, {}) if not blobs else _pack(folder / EVAL_BLOCK_PACK, blobs)
@@ -418,29 +424,50 @@ def _joined(
         raise EtudeError("rollup_needs_seat", 422) from ValueError(rollup.name)
     if set(held) & set(ROLLUP_SEATED):
         raise EtudeError("rollup_column_reserved", 422) from ValueError(rollup.name)
-    seated, values = unnest(
-        {"match": "VARCHAR", "seat": "BIGINT", "player": "VARCHAR", "opponents": "VARCHAR"},
+    stage(
+        db,
+        "_seat_players",
+        {"match": "VARCHAR", "seat": "BIGINT", "player": "VARCHAR", "opponents": "VARCHAR[]"},
         [
             [match.key, seat, player.key,
-             ",".join(other.key for at, other in enumerate(match.players) if at != seat)]
+             [other.key for at, other in enumerate(match.players) if at != seat]]
             for match in matches
             for seat, player in enumerate(match.players)
         ],
     )  # fmt: skip
-    db.execute(f"create or replace temp table _seated as {seated}", values)
-    return f"(select * from {source} left join _seated using (match, seat))"
+    return f"(select * from {source} left join _seat_players using (match, seat))"
 
 
-def unnest(
-    columns: Mapping[str, str], rows: Sequence[Sequence[object]]
-) -> tuple[str, list[list[object]]]:
-    """A select of `rows` with `columns` (name: DuckDB type), and its parameters.
+def stage(
+    db: duckdb.DuckDBPyConnection,
+    table: str,
+    columns: Mapping[str, str],
+    rows: Iterable[Sequence[object]],
+) -> None:
+    """Hold `rows` with `columns` (name: DuckDB type) as temporary `table`, replacing it.
 
-    Each column is one list parameter, unnested beside the others, so any
-    number of rows, none included, is one statement.
+    The rows reach DuckDB as a JSON lines file it reads in bulk. Passed as
+    statement parameters instead, each Python value is converted on its own,
+    and DuckDB looks for pandas for every one: without pandas installed, that
+    is a search of the import path per value, most of a statsdb's build.
     """
-    select = ", ".join(f'unnest(?::{kind}[]) as "{name}"' for name, kind in columns.items())
-    return f"select {select}", [[row[at] for row in rows] for at in range(len(columns))]
+    names = [json.dumps(name) for name in columns]
+    raw = [kind == "JSON" for kind in columns.values()]
+    with tempfile.NamedTemporaryFile("w", suffix=".jsonl", encoding="utf-8") as file:
+        for row in rows:
+            fields = (
+                f"{name}:{value if is_raw and isinstance(value, str) else json.dumps(value)}"
+                for name, is_raw, value in zip(names, raw, row, strict=True)
+            )
+            file.write("{" + ",".join(fields) + "}\n")
+        file.flush()
+        kinds = ", ".join(
+            "'" + name.replace("'", "''") + f"': '{kind}'" for name, kind in columns.items()
+        )
+        db.execute(
+            f"create or replace temp table {table} as select * from read_json("
+            f"{quote(Path(file.name))}, format = 'newline_delimited', columns = {{{kinds}}})"
+        )
 
 
 def _parquet(paths: Sequence[Path]) -> str:

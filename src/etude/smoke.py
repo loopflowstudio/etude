@@ -7,7 +7,7 @@
    form on a throwaway local launcher (`etude.launch.smoke.smoke_train`).
 2. Eval: the file's `eval(state)` on what training stored, each tournament it
    returns cut to one game per match, every condition kept, and held here, through
-   `etude.eval.tournament.hold` as `etude eval` holds it.
+   `etude.jobs.hold_evaluation` as `etude eval` holds it.
 3. Report: `report()`, or the default, drawn from those results by `etude.page`.
 
 Everything goes to a temporary ETUDE_HOME (`smoke_home`). Without the train
@@ -25,19 +25,18 @@ import time
 import traceback
 from collections.abc import Callable, Collection, Sequence
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal
 
-from etude.eval.match import Result, Tables
-from etude.eval.records import Benchmark, Match, RoundRobin
-from etude.eval.tournament import hold
-from etude.experiment import asked, observe, read_experiment
+from etude.eval.records import Benchmark, RoundRobin
+from etude.experiment import ExperimentState, asked, observe, read_experiment
 from etude.experiment_file import defined_functions, experiment_named
-from etude.jobs import evaluation_spec
+from etude.jobs import evaluation_spec, hold_evaluation, with_experiment
 from etude.launch.errors import LauncherError
 from etude.launch.job_file import read_job_file
 from etude.launch.records import Job, Run, SmokeStep
 from etude.launch.smoke import Smoked, show, smoke_home, smoke_train
 from etude.page import build, render, write
+from etude.run.errors import EtudeError
 from etude.run.storage import DirectoryStorage, Storage
 
 type Step = Literal["train", "eval", "report"]
@@ -114,29 +113,27 @@ def _evaluate(
         return [
             SmokeStep(step="eval", name="eval", outcome="not_smoked", detail="eval returned none")
         ]
-    return [_hold(job, experiment, store) for job in jobs]
+    return [_smoke_evaluation(job, experiment, store, state) for job in jobs]
 
 
-def _hold(job: Job, experiment: str, store: DirectoryStorage) -> SmokeStep:
+def _smoke_evaluation(
+    job: Job, experiment: str, store: DirectoryStorage, state: ExperimentState
+) -> SmokeStep:
+    """One evaluation job `eval(state)` returned, held tiny into `store`."""
     spec = evaluation_spec(job)
     name = spec.tournament.name
-    if spec.experiment not in (None, experiment):
-        raise LauncherError(f"smoke eval {name}: a job of experiment {spec.experiment!r}")
-    tournament = _tiny_tournament(spec.tournament)
-    # Loaded by import path, typed where `evaluation` was given it.
-    play = cast(Callable[[Match], Tables | Result], spec.play.load(job.repo))
+    try:
+        job = with_experiment(job, experiment)
+    except EtudeError as error:
+        raise LauncherError(
+            f"smoke eval {name}: a job of experiment {spec.experiment!r}"
+        ) from error
+    tiny = evaluation_spec(job).model_copy(
+        update={"tournament": _tiny_tournament(spec.tournament), "lines": state.lines}
+    )
     started = time.monotonic()
     held = _try_step(
-        "eval",
-        name,
-        lambda: hold(
-            tournament,
-            experiment=experiment,
-            play=play,
-            checkpoints=tuple(each.ref for each in spec.checkpoints),
-            enter=spec.entrants,
-            storages=[store],
-        ),
+        "eval", name, lambda: hold_evaluation(tiny, checkout=job.repo, storages=[store])
     )
     plural = "" if held.played == 1 else "es"
     return SmokeStep(
@@ -149,15 +146,15 @@ def _hold(job: Job, experiment: str, store: DirectoryStorage) -> SmokeStep:
 
 
 def _tiny_tournament(tournament: Benchmark | RoundRobin) -> Benchmark | RoundRobin:
-    """The tournament with each of its matchups, or itself, at one game per match.
+    """The tournament with each of its seatings, or itself, at one game per match.
 
     Every condition is kept: a game that breaks under one deal or seating is
     the failure a rented evaluation would otherwise find after training paid.
     """
     if isinstance(tournament, RoundRobin):
         return tournament.model_copy(update={"games": 1})
-    matchups = tuple(each.model_copy(update={"games": 1}) for each in tournament.matchups)
-    return tournament.model_copy(update={"matchups": matchups})
+    seatings = tuple(each.model_copy(update={"games": 1}) for each in tournament.seatings)
+    return tournament.model_copy(update={"seatings": seatings})
 
 
 def _report(

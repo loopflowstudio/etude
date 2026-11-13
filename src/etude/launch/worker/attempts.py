@@ -7,7 +7,7 @@ Installed separately from the job environment. Run as
 `etude session DIRECTORY`. The directory holds
 `packet.json` going in and, coming back:
 
-    receipt                      this process's id, written by whoever started it
+    pid                          this process's id, written by whoever started it
     stop/<attempt>               appears when the attempt should stop
     finish                       appears when no more work will come: end once it is done
     work/<attempt>.json          work added to a kept session after it started
@@ -54,9 +54,9 @@ from typing import BinaryIO, Literal
 
 from etude.cache import Cache, Content
 from etude.launch.logging import Console, explain, log_to, sanitize
-from etude.launch.records import Cause, Input, Outcome, Output, Prepared, Record, Runtime
+from etude.launch.records import Cause, Input, Outcome, Output, Prepared, Record, Runtime, number
 from etude.launch.runtime import PROBE, find_python, select_runtime
-from etude.launch.schemas import Packet, Progress, Work
+from etude.launch.schemas import Finished, Packet, Work
 from etude.launch.storage.files import append_usage, digest, read_result, write
 from etude.launch.storage.transport import attribute, emit, observe
 from etude.launch.worker.prepared import key, prepare
@@ -84,9 +84,7 @@ def _finish(
     )
     result = read_result(outputs)
     prepared = home / "prepared.json"
-    record = Progress(
-        attempt=home.name,
-        started_at=None,
+    record = Finished(
         finished_at=_now(),
         outcome=outcome,
         cause=cause,
@@ -103,7 +101,7 @@ def _finish(
             for p in files
         ),
     )
-    write(home / "finished.json", record.model_dump_json(exclude={"attempt", "started_at"}))
+    write(home / "finished.json", record.model_dump_json())
 
 
 def _lay_out(session: Path, home: Path, work: Work) -> tuple[dict[str, str], dict[str, Path]]:
@@ -175,7 +173,7 @@ def _lay_out(session: Path, home: Path, work: Work) -> tuple[dict[str, str], dic
                     sha256=given.sha256,
                 ),
             ):
-                held[given.name] = _held(session, shared, given)
+                held[given.name] = _input_path(session, shared, given)
             log.write(
                 f"inputs: verified {given.name} ({given.size_bytes} bytes,"
                 f" {time.monotonic() - began:.1f} s)\n"
@@ -184,9 +182,8 @@ def _lay_out(session: Path, home: Path, work: Work) -> tuple[dict[str, str], dic
     if work.seed is not None:
         environment["ETUDE_SEED"] = str(work.seed)
     if work.until is not None:
-        clock, _, target = work.until.partition("=")
-        environment["ETUDE_UNTIL_CLOCK"] = clock
-        environment["ETUDE_UNTIL_VALUE"] = target
+        environment["ETUDE_UNTIL_CLOCK"] = work.until.clock
+        environment["ETUDE_UNTIL_VALUE"] = number(work.until.value)
     return environment, held
 
 
@@ -220,7 +217,7 @@ class Undelivered(ValueError):
     """An input this machine does not hold; another attempt is given it the same way."""
 
 
-def _held(session: Path, shared: Path, given: Input) -> Path:
+def _input_path(session: Path, shared: Path, given: Input) -> Path:
     """Where this machine holds the input's bytes, verified for this attempt before it starts.
 
     The cache's read-only copy, which the courier holds for the session; else
@@ -571,7 +568,7 @@ def _commands(
     return result
 
 
-def _run(session: Path, packet: Packet, work: Work) -> None:
+def _attempt(session: Path, packet: Packet, work: Work) -> None:
     home = session / "attempts" / work.attempt
     stop = session / "stop" / work.attempt
     if (home / "claim").exists() or (home / "finished.json").exists():
@@ -662,7 +659,7 @@ def run(directory: Path) -> int:
         with ThreadPoolExecutor(packet.slots, thread_name_prefix="attempt") as pool:
             try:
                 for work in packet.work:
-                    running[work.attempt] = pool.submit(_run, session, packet, work)
+                    running[work.attempt] = pool.submit(_attempt, session, packet, work)
                 while packet.kept and (packet.deadline is None or _now() < packet.deadline):
                     # Checked before the work, which is handed over before it: what came first runs.
                     finishing = (session / "finish").exists()
@@ -673,7 +670,7 @@ def run(directory: Path) -> int:
                     for path in added:
                         if path.stem not in running:
                             work = Work.model_validate_json(path.read_text())
-                            running[work.attempt] = pool.submit(_run, session, packet, work)
+                            running[work.attempt] = pool.submit(_attempt, session, packet, work)
                     check()
                     if finishing:
                         break
