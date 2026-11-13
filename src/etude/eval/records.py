@@ -434,8 +434,8 @@ NO_ROWS = "match_has_no_rows"
 class MatchRecord(Record):
     """How one match went, kept in its block's index after its tables and blobs.
 
-    A failed match's record is replaced by a later done one, wherever it is kept.
-    A match is done only with rows: Etude refuses one that returns none, and
+    A failed match's record is replaced by a later done one, wherever it is kept
+    (`outcomes`). A match is done only with rows: Etude refuses one that returns none, and
     reads an older run's done record without columns as failed, so its games
     are asked for again rather than counted as played.
     """
@@ -458,6 +458,21 @@ class MatchRecord(Record):
         if isinstance(data, dict) and data.get("state") == "done" and not data.get("columns"):
             return {**data, "state": "failed", "error": f"EtudeError: {NO_ROWS}"}
         return data
+
+
+def outcomes(records: Iterable[MatchRecord]) -> dict[Digest, MatchRecord]:
+    """Each match's record that stands among `records`, by match key, in the order given.
+
+    A done record replaces a failed one; of several done, the first stands, and
+    of failed ones alone, the first. `etude.eval.query.statsdb` keeps the same
+    rule across the blocks of a run, in the order it reads them.
+    """
+    found: dict[Digest, MatchRecord] = {}
+    for record in records:
+        held = found.get(record.match.key)
+        if held is None or (held.state != "done" and record.state == "done"):
+            found[record.match.key] = record
+    return found
 
 
 class Rollup(Record):
@@ -775,7 +790,7 @@ class Seating(Record):
                     checkpoint=checkpoint.key,
                     missing="not_yet" if unknown or "not_yet" in results else "never",
                     seat=relative,
-                    position=_position(relative, checkpoint),
+                    position=_wanted(relative, checkpoint),
                 )
         # Pairs in seed order, (mine, theirs); this checkpoint's are contiguous from `first`.
         pairs = max(len(mine), 1) * len(found)
@@ -836,7 +851,7 @@ def _chosen(
     return mine[one], theirs[other]
 
 
-def _position(seat: Relative, held: CheckpointRef) -> float | None:
+def _wanted(seat: Relative, held: CheckpointRef) -> float | None:
     """Where on its clock the seat looks for `held`; None for `Final`, or with no position."""
     if isinstance(seat, Final):
         return None
@@ -863,7 +878,7 @@ def _find(seat: Relative, held: CheckpointRef, line: Line) -> CheckpointRef | Mi
         if not line.ended:
             return "not_yet"
         return line.checkpoints[-1] if line.checkpoints else "never"
-    wanted = _position(seat, held)
+    wanted = _wanted(seat, held)
     if wanted is None:
         return "never"
     clock, tolerance = seat.clock, _EXACT * max(1.0, abs(wanted))
@@ -1039,10 +1054,10 @@ class Tournament(Record):
                     seated.append(result)
                 elif (seating.name, str(checkpoint.key)) not in recorded:
                     gaps.append(result)
-        return self.model_copy(update={"seated": _merged(seated)}), tuple(gaps)
+        return self.model_copy(update={"seated": _most_lines(seated)}), tuple(gaps)
 
 
-def _merged(seated: Iterable[Seated]) -> tuple[Seated, ...]:
+def _most_lines(seated: Iterable[Seated]) -> tuple[Seated, ...]:
     """One `Seated` per seating and held checkpoint: of two, the one that counted more lines,
     and of those resolved alike, the later."""
     merged: dict[tuple[str, str], Seated] = {}
@@ -1097,5 +1112,5 @@ def assemble(held: Iterable[TournamentRun]) -> Tournament:
         definition=definition,
         checkpoints=tuple(checkpoints[key] for key in sorted(checkpoints)),
         entrants=tuple(entrants[key] for key in sorted(entrants)),
-        seated=_merged(each for run in runs for each in run.seated),
+        seated=_most_lines(each for run in runs for each in run.seated),
     )
