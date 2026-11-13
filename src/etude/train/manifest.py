@@ -137,7 +137,7 @@ def describe(
     return BlockDescription(key=key, header=described, start=start)
 
 
-def _describe_permanent(storage: Storage, file: BlockFile) -> BlockDescription:
+def describe_permanent(storage: Storage, file: BlockFile) -> BlockDescription:
     """One permanent block's header and coarsest row groups."""
     description = describe(storage, "", file.key)
     stored = StoredBlock(storage, file.key, description)
@@ -167,7 +167,7 @@ def _describe_permanent(storage: Storage, file: BlockFile) -> BlockDescription:
     )
 
 
-def _latest(blocks: Iterable[BlockDescription]) -> dict[str, Number | None]:
+def latest(blocks: Iterable[BlockDescription]) -> dict[str, Number | None]:
     latest: dict[str, Number | None] = {}
     for block in sorted(blocks, key=lambda block: block.header.last):
         latest.update(
@@ -191,10 +191,10 @@ class Index:
     def __init__(self, root: Path, writer: str) -> None:
         self.storage: Storage = DirectoryStorage(root)
         self.writer = writer
-        self._permanent: dict[str, BlockDescription] = {}
-        self._recent: dict[str, BlockDescription] = {}
-        self._latest: dict[str, Number | None] = {}
-        self._dirty = False
+        self.permanent: dict[str, BlockDescription] = {}
+        self.recent: dict[str, BlockDescription] = {}
+        self.latest: dict[str, Number | None] = {}
+        self.dirty = False
         files = select(
             file
             for path in root.glob(f"metrics/*-{writer}.blk")
@@ -208,37 +208,37 @@ class Index:
         file = parse(key)
         if file is None or file.writer != self.writer or file.level < 1:
             raise ValueError("index requires a sealed block from its writer")
-        if key in self._permanent or key in self._recent:
+        if key in self.permanent or key in self.recent:
             return
         if file.level >= 2:
-            described = _describe_permanent(self.storage, file)
-            self._permanent[key] = described
-            self._latest.update(_latest([described]))
-            self._dirty = True
+            described = describe_permanent(self.storage, file)
+            self.permanent[key] = described
+            self.latest.update(latest([described]))
+            self.dirty = True
         else:
             described = describe(self.storage, "", key)
-        self._recent = {
+        self.recent = {
             key: block
-            for key, block in self._recent.items()
+            for key, block in self.recent.items()
             if not (file.first <= block.header.first and block.header.last <= file.last)
         }
         if file.level < 2:
-            self._recent[key] = described
+            self.recent[key] = described
 
     def write(self) -> None:
         """Publish indexes after their blocks exist; only permanent additions rewrite history."""
-        if self._dirty:
+        if self.dirty:
             lasting = Manifest(
-                writer=self.writer, blocks=tuple(self._permanent.values()), latest=self._latest
+                writer=self.writer, blocks=tuple(self.permanent.values()), latest=self.latest
             )
             self.storage.put(
                 f"metrics/{self.writer}.permanent.json", lasting.model_dump_json().encode()
             )
-            self._dirty = False
+            self.dirty = False
         recent = Manifest(
             writer=self.writer,
             blocks=(),
-            latest={**self._latest, **_latest(self._recent.values())},
+            latest={**self.latest, **latest(self.recent.values())},
         )
         self.storage.put(f"metrics/{self.writer}.index.json", recent.model_dump_json().encode())
 

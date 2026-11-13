@@ -81,17 +81,17 @@ def key(
     variables = json.dumps(sorted([v.name, v.value] for v in job))
     return Key(
         command=preparation.command,
-        paths={path: _tree(source, path) for path in sorted(preparation.paths)},
+        paths={path: tree(source, path) for path in sorted(preparation.paths)},
         inputs={
             name: f"{given[name].sha256}-{given[name].size_bytes}"
             for name in sorted(preparation.inputs)
         },
         environment=hashlib.sha256(variables.encode()).hexdigest(),
-        machine=_machine(),
+        machine=machine(),
     )
 
 
-def _machine() -> dict[str, str]:
+def machine() -> dict[str, str]:
     """The platform a build depends on; the kernel release is left out, as it varies by host."""
     libc, version = platform.libc_ver()
     facts = {
@@ -112,7 +112,7 @@ def _machine() -> dict[str, str]:
     return facts
 
 
-def _tree(source: Path, path: str) -> str:
+def tree(source: Path, path: str) -> str:
     """The SHA256 of a file, or of a folder's file names and contents."""
     root = source / path
     if root.is_file():
@@ -127,7 +127,7 @@ def _tree(source: Path, path: str) -> str:
     return summary.hexdigest()
 
 
-def _manifest(directory: Path) -> tuple[Entry, ...]:
+def manifest_of(directory: Path) -> tuple[Entry, ...]:
     entries = []
     for path in sorted(directory.rglob("*")):
         name = path.relative_to(directory).as_posix()
@@ -138,7 +138,7 @@ def _manifest(directory: Path) -> tuple[Entry, ...]:
     return tuple(entries)
 
 
-def _mismatch(directory: Path, manifest: tuple[Entry, ...]) -> str | None:
+def mismatch(directory: Path, manifest: tuple[Entry, ...]) -> str | None:
     """The first entry that no longer matches what the build wrote, or None."""
     for entry in manifest:
         path = directory / entry.path
@@ -152,7 +152,7 @@ def _mismatch(directory: Path, manifest: tuple[Entry, ...]) -> str | None:
     return None
 
 
-def _remove(directory: Path) -> None:
+def remove(directory: Path) -> None:
     """Delete a prepared directory, read-only folders included."""
     if not directory.exists():
         return
@@ -164,7 +164,7 @@ def _remove(directory: Path) -> None:
     shutil.rmtree(directory)
 
 
-def _seal(directory: Path) -> None:
+def seal(directory: Path) -> None:
     """Make what the build wrote read-only, so a run does not change it by accident."""
     for path in [*directory.rglob("*"), directory]:
         if not path.is_symlink():
@@ -172,7 +172,7 @@ def _seal(directory: Path) -> None:
 
 
 @contextmanager
-def _lock(path: Path, waiting: Callable[[], bool]) -> Iterator[IO[str] | None]:
+def exclusive_lock(path: Path, waiting: Callable[[], bool]) -> Iterator[IO[str] | None]:
     """An exclusive lock, or None once `waiting` says to give up."""
     with path.open("a") as lock:
         while True:
@@ -217,7 +217,7 @@ def prepare(
             cause=cause,
         )
 
-    with _lock(root / f"{name}.lock", waiting) as held:
+    with exclusive_lock(root / f"{name}.lock", waiting) as held:
         if held is None:
             yield None
             return
@@ -227,7 +227,7 @@ def prepare(
                 kept: Receipt | None = Receipt.model_validate_json(receipt.read_text())
             except ValueError:
                 kept = None
-            cause = "receipt unreadable" if kept is None else _mismatch(directory, kept.manifest)
+            cause = "receipt unreadable" if kept is None else mismatch(directory, kept.manifest)
             if kept is not None and cause is None:
                 os.utime(receipt)  # recently used
                 seconds = time.monotonic() - began
@@ -237,16 +237,16 @@ def prepare(
                 return
             log(f"prepare: rejected {name[:12]} ({cause})")
             receipt.unlink()
-        _remove(directory)  # an interrupted or rejected build's leftovers
+        remove(directory)  # an interrupted or rejected build's leftovers
         directory.mkdir()
         outcome: Literal["built", "rejected"] = "rejected" if cause else "built"
         began = time.monotonic()
         if not build(directory):
-            _remove(directory)
+            remove(directory)
             yield directory, done(outcome, 0, None)
             return
-        _seal(directory)
-        manifest = _manifest(directory)
+        seal(directory)
+        manifest = manifest_of(directory)
         size = sum(entry.size_bytes for entry in manifest)
         seconds = time.monotonic() - began
         write(
@@ -259,7 +259,7 @@ def prepare(
         yield directory, done(outcome, seconds, size)
 
 
-class _Kept(NamedTuple):
+class Kept(NamedTuple):
     """A prepared directory on this machine, as eviction sees it."""
 
     name: str
@@ -267,14 +267,14 @@ class _Kept(NamedTuple):
     used: float  # when its receipt was last touched
 
 
-def _kept(root: Path) -> list[_Kept]:
+def kept_entries(root: Path) -> list[Kept]:
     kept = []
     for receipt in root.glob("*.json"):
         try:
             size = Receipt.model_validate_json(receipt.read_text()).size_bytes
         except ValueError:
             size = 0  # unreadable: its next use rejects and rebuilds it
-        kept.append(_Kept(receipt.name.removesuffix(".json"), size, receipt.stat().st_mtime))
+        kept.append(Kept(receipt.name.removesuffix(".json"), size, receipt.stat().st_mtime))
     return kept
 
 
@@ -285,7 +285,7 @@ def evict(log: Callable[[str], None]) -> None:
     A directory an attempt is using holds its lock, and is kept.
     """
     root = home()
-    kept = sorted(_kept(root), key=lambda entry: entry.used)
+    kept = sorted(kept_entries(root), key=lambda entry: entry.used)
     used = sum(entry.size_bytes for entry in kept)
     allowance = (shutil.disk_usage(root).free + used) // 2
     for entry in kept:
@@ -297,7 +297,7 @@ def evict(log: Callable[[str], None]) -> None:
             except BlockingIOError:
                 continue  # in use
             (root / f"{entry.name}.json").unlink()
-            _remove(root / entry.name)
+            remove(root / entry.name)
             used -= entry.size_bytes
             log(f"prepare: evicted {entry.name[:12]} ({entry.size_bytes} bytes)")
     if used > allowance:

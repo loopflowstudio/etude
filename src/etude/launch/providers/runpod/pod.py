@@ -19,7 +19,7 @@ class GuardianAPI(PodHTTP):
     """Read only the two financial facts needed to shorten this pod's timer."""
 
     def budget_deadline(self, pod: str, max_usd: Decimal) -> datetime | None:
-        raw = self._ask("GET", f"pods/{pod}", absent_ok=True)
+        raw = self.ask("GET", f"pods/{pod}", absent_ok=True)
         if raw is None:
             return None
         price = Decimal(str(raw["cost"]))
@@ -39,7 +39,7 @@ def pod_key() -> str:
     return str(config["apikey"])
 
 
-def _start_ssh() -> None:
+def start_ssh() -> None:
     """Enable key-only inspection without making SSH a requirement for training."""
     keys = os.environ.get("PUBLIC_KEY", "").strip()
     if not keys:
@@ -95,7 +95,7 @@ def main(argv: list[str]) -> int:
         api=GuardianAPI(pod_key()),
         machine=os.environ["RUNPOD_POD_ID"],
         module="etude.launch.providers.runpod.pod",
-        start_ssh=_start_ssh,
+        start_ssh=start_ssh,
     )
 
 

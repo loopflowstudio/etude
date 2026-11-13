@@ -57,10 +57,10 @@ from etude.launch.storage.s3 import (
     Grant,
     Send,
     Version,
-    _send,
     post,
     read,
     read_version,
+    send_request,
 )
 from etude.launch.storage.transport import attribute, deliver, observe
 from etude.storage_timeout import StorageUnavailable
@@ -69,14 +69,14 @@ ROOT = Path("/run/etude/sessions")
 # A log piece waits about a twentieth of its log's age, between 15 seconds and
 # 5 minutes, before it is sealed: new output reaches storage within that, and
 # a 12-hour attempt or session leaves about two hundred pieces, not one per poll.
-_PIECE_LEAST_SECONDS = 15.0
-_PIECE_MOST_SECONDS = 300.0
+PIECE_LEAST_SECONDS = 15.0
+PIECE_MOST_SECONDS = 300.0
 # Small independent evidence objects are latency-bound; cap in-flight files.
-_OUTPUT_UPLOADS = 8
+OUTPUT_UPLOADS = 8
 
 
 @dataclass(frozen=True)
-class _Upload:
+class Upload:
     path: Path
     run: str
     key: str
@@ -85,18 +85,18 @@ class _Upload:
 
 
 @dataclass(frozen=True)
-class _Uploaded:
-    file: _Upload
+class Uploaded:
+    file: Upload
     transfers: tuple[str, ...]
     error: BaseException | None
 
 
-def _diagnose(operation: str, error: BaseException, attempt: str | None = None) -> None:
+def diagnose(operation: str, error: BaseException, attempt: str | None = None) -> None:
     message = bounded(explain(error))
     session = os.environ.get("ETUDE_SESSION")
     diagnostic = Diagnostic(
         id=hashlib.sha256(f"{session}:{attempt}:{operation}:{message}".encode()).hexdigest(),
-        observed_at=_now(),
+        observed_at=now(),
         operation=operation,
         message=message,
         exception=type(error).__name__,
@@ -106,27 +106,27 @@ def _diagnose(operation: str, error: BaseException, attempt: str | None = None) 
     write_log("diagnostic", diagnostic.model_dump_json())
 
 
-def _now() -> datetime:
+def now() -> datetime:
     return datetime.now(UTC)
 
 
-def _until_deadline() -> float | None:
+def until_deadline() -> float | None:
     """Seconds left before the rental's deadline (`ETUDE_DEADLINE`), when it has one."""
     deadline = os.environ.get("ETUDE_DEADLINE")
-    return None if not deadline else (datetime.fromisoformat(deadline) - _now()).total_seconds()
+    return None if not deadline else (datetime.fromisoformat(deadline) - now()).total_seconds()
 
 
-def _chunks(stream: IO[bytes]) -> Iterator[bytes]:
+def chunks(stream: IO[bytes]) -> Iterator[bytes]:
     stream.seek(0)
     while chunk := stream.read(PART_BYTES):
         yield chunk
 
 
-class _Folder:
+class Folder:
     """Where one granted folder's files go, and with what this machine may write them."""
 
     def __init__(self, grant: Grant, send: Send) -> None:
-        self.prefix, self.form, self._send = grant.prefix, grant.form, send
+        self.prefix, self.form, self.send_request = grant.prefix, grant.form, send
         granted = grant.bucket
         self.bucket = (
             None
@@ -139,7 +139,7 @@ class _Folder:
         bucket = self.bucket
         if bucket is not None:
             try:
-                bucket.put_parts(self.prefix + key, _chunks(stream))
+                bucket.put_parts(self.prefix + key, chunks(stream))
                 return
             except Denied:
                 if self.form is None:
@@ -147,7 +147,7 @@ class _Folder:
                 self.bucket = None  # the keys have run out; the form has not
         assert self.form is not None  # a grant holds keys or a form
         stream.seek(0)
-        post(self.form, self.prefix + key, stream.read(), self._send)
+        post(self.form, self.prefix + key, stream.read(), self.send_request)
 
     def write_bytes(self, key: str, body: bytes) -> None:
         self.write(key, io.BytesIO(body))
@@ -164,7 +164,7 @@ class _Folder:
         return True
 
 
-class _Log:
+class Log:
     """One log as carried, an attempt's or the worker's: where its sealed pieces end, and when."""
 
     def __init__(self, now: float) -> None:
@@ -180,7 +180,7 @@ class _Log:
         if self.sealed is None:
             return True
         wait = (now - self.opened) / 20
-        return now - self.sealed >= min(_PIECE_MOST_SECONDS, max(_PIECE_LEAST_SECONDS, wait))
+        return now - self.sealed >= min(PIECE_MOST_SECONDS, max(PIECE_LEAST_SECONDS, wait))
 
 
 class Courier:
@@ -202,68 +202,68 @@ class Courier:
         home: Path,
         out: Grant,
         inbox_url: str,
-        send: Send = _send,
+        send: Send = send_request,
         runs: dict[str, Grant] | None = None,
         worker_log: Path | None = None,
     ) -> None:
-        self._home, self._inbox_url, self._send = home, inbox_url, send
-        self._worker_log = worker_log
-        self._worker_log_carried: _Log | None = None  # from its first output
-        self._out = _Folder(out, send)  # the session's own folder
-        self._runs = {run: _Folder(grant, send) for run, grant in (runs or {}).items()}
-        self._sent: dict[str, tuple[int, float]] = {}
-        self._logs: dict[str, _Log] = {}
-        self._delivered: set[str] = set()  # attempts whose completion record is stored
-        self._console_position = 0
-        self._console = Console("worker output")
-        self._inbox: Version | None = None  # the inbox as last read
-        self._usage_sent = -1  # bytes of the usage journal last delivered
-        self._cache = _cache()
+        self._home, self._inbox_url, self.send_request = home, inbox_url, send
+        self.worker_log = worker_log
+        self.worker_log_carried: Log | None = None  # from its first output
+        self.out = Folder(out, send)  # the session's own folder
+        self.runs = {run: Folder(grant, send) for run, grant in (runs or {}).items()}
+        self.sent: dict[str, tuple[int, float]] = {}
+        self.logs: dict[str, Log] = {}
+        self.delivered: set[str] = set()  # attempts whose completion record is stored
+        self.console_position = 0
+        self.console = Console("worker output")
+        self.inbox: Version | None = None  # the inbox as last read
+        self.usage_sent = -1  # bytes of the usage journal last delivered
+        self.cache = cache()
         # Monotonic time of the last pass that left every file delivered, or the
         # courier's start: a stall is reported from here, not from its first failure.
-        self._delivered_at = time.monotonic()
-        self._pending = False
+        self.delivered_at = time.monotonic()
+        self.pending = False
 
-    def _retain_transfer(self, raw: str) -> None:
+    def retain_transfer(self, raw: str) -> None:
         """Keep a transfer in the session's usage journal, not the worker log.
 
         The log says what changed; usage and diagnostics read this journal.
         """
         append_usage(self._home, raw)
 
-    def _carry_usage(self) -> None:
+    def carry_usage(self) -> None:
         path = self._home / "usage.jsonl"
-        if path.exists() and path.stat().st_size != self._usage_sent:
+        if path.exists() and path.stat().st_size != self.usage_sent:
             body = path.read_bytes()
             # Delivering the journal is not itself journaled: each delivery would
             # change it and need another. A failed delivery raises to the caller.
-            with limit_time(_until_deadline()), observe(lambda raw: None):
-                self._out.write_bytes("usage.jsonl", body)
-            self._usage_sent = len(body)
+            with limit_time(until_deadline()), observe(lambda raw: None):
+                self.out.write_bytes("usage.jsonl", body)
+            self.usage_sent = len(body)
 
     def fetch(self, links: dict[str, Download]) -> None:
         """Verify transport bytes before exposing inputs, including existing paths."""
-        with observe(self._retain_transfer), attribute(session=self._home.name):
+        with observe(self.retain_transfer), attribute(session=self._home.name):
             try:
-                with limit_time(_until_deadline()):
+                with limit_time(until_deadline()):
                     for path, source in links.items():
                         kind = path.split("/")[1]
                         with attribute(purpose="source" if kind == "sources" else "input"):
                             download(
                                 source,
                                 self._home.parent / path,
-                                send=self._send,
-                                cache=self._cache,
+                                send=self.send_request,
+                                cache=self.cache,
                                 # Inputs stay in the cache for this session's attempts to link.
                                 holder=None if kind == "sources" else self._home.name,
                             )
             finally:
                 # Recovery evidence is outside the discretionary input allowance.
-                self._carry_usage()
+                self.carry_usage()
 
     def release(self) -> None:
         """Let the cache evict this session's inputs; attempts' links keep their bytes."""
-        self._cache.release(self._home.name)
+        self.cache.release(self._home.name)
 
     def restore(self, links: dict[str, str]) -> None:
         """Put back what storage holds of a resumed run's folder, before its job starts.
@@ -279,16 +279,16 @@ class Courier:
         for name, url in links.items():
             run, _, key = name.partition("/")
             by_run.setdefault(run, {})[key] = url
-        with observe(self._retain_transfer), attribute(session=self._home.name):
+        with observe(self.retain_transfer), attribute(session=self._home.name):
             try:
-                with limit_time(_until_deadline()):
+                with limit_time(until_deadline()):
                     for run, keys in sorted(by_run.items()):
-                        self._restore(run, keys)
+                        self.restore_run(run, keys)
             finally:
-                self._carry_usage()
+                self.carry_usage()
 
-    def _restore(self, run: str, keys: dict[str, str]) -> None:
-        folder = self._track_root / run
+    def restore_run(self, run: str, keys: dict[str, str]) -> None:
+        folder = self.track_root / run
         # Every checkpoint name storage holds stays taken, restored or not.
         note_stored(folder, [key.rpartition("/")[2] for key in keys if checkpoint_file(key)])
         for key, url in sorted(keys.items()):
@@ -296,14 +296,14 @@ class Courier:
             if checkpoint_file(key) or target.exists():
                 continue
             with attribute(run=run, purpose="report"):
-                body = read(url, self._send)
+                body = read(url, self.send_request)
             if body is None:
                 continue  # listed, then retired
             target.parent.mkdir(parents=True, exist_ok=True)
             partial = target.with_name(target.name + ".partial")
             partial.write_bytes(body)
             partial.replace(target)
-            self._restored(run, key, target)
+            self.restored(run, key, target)
         wanted = resume_file(folder)
         if wanted is None or (folder / wanted.key).exists() or wanted.key not in keys:
             return
@@ -311,16 +311,16 @@ class Courier:
             download(
                 Download(url=keys[wanted.key], sha256=wanted.sha256, size_bytes=wanted.size_bytes),
                 folder / wanted.key,
-                send=self._send,
+                send=self.send_request,
             )
-        self._restored(run, wanted.key, folder / wanted.key)
+        self.restored(run, wanted.key, folder / wanted.key)
 
-    def _restored(self, run: str, key: str, path: Path) -> None:
+    def restored(self, run: str, key: str, path: Path) -> None:
         stat = path.stat()
-        self._sent[f"{run}/{key}"] = (stat.st_size, stat.st_mtime)
+        self.sent[f"{run}/{key}"] = (stat.st_size, stat.st_mtime)
 
     @property
-    def _track_root(self) -> Path:
+    def track_root(self) -> Path:
         """Where jobs on this machine keep their runs' tracked folders (`ETUDE_TRACK_DIR`)."""
         return self._home.parent.parent / "track"
 
@@ -334,20 +334,20 @@ class Courier:
         polled: list[str] = []
         try:
             with observe(polled.append), attribute(session=self._home.name):
-                found = read_version(self._inbox_url, self._inbox, self._send)
+                found = read_version(self._inbox_url, self.inbox, self.send_request)
         except (StorageUnavailable, OSError, ValueError) as error:
             for event in polled:
-                self._retain_transfer(event)
-            _diagnose("inbox read", error)
+                self.retain_transfer(event)
+            diagnose("inbox read", error)
             raise
-        before, self._inbox = self._inbox, found
+        before, self.inbox = self.inbox, found
         unchanged = (found is None and before is None) or (
             found is not None and before is not None and found.body == before.body
         )
         if unchanged:
             return
         for event in polled:
-            self._retain_transfer(event)
+            self.retain_transfer(event)
         if found is None:
             return
         inbox = Inbox.model_validate_json(found.body)
@@ -359,7 +359,7 @@ class Courier:
             attempt = entry.work.attempt
             target = self._home / "work" / f"{attempt}.json"
             if not target.exists():
-                self._runs.setdefault(entry.work.run, _Folder(entry.access, self._send))
+                self.runs.setdefault(entry.work.run, Folder(entry.access, self.send_request))
                 try:
                     # One work's files, so its run's usage counts them.
                     with attribute(run=entry.work.run, attempt=attempt):
@@ -368,45 +368,45 @@ class Courier:
                 except Mismatch as error:
                     # Permanent: hand the work over so its setup fails and says why,
                     # rather than asking for the same wrong bytes until the deadline.
-                    _diagnose("input verification", error, attempt)
+                    diagnose("input verification", error, attempt)
                 except (StorageUnavailable, OSError, ValueError) as error:
-                    _diagnose("source fetch", error, attempt)
+                    diagnose("source fetch", error, attempt)
                     raise
                 write(target, entry.work.model_dump_json())
         if inbox.finish:
             (self._home / "finish").touch()  # after any work, so the session runs it first
 
-    def _unsent(self, path: Path, run: str, key: str) -> _Upload | None:
+    def unsent(self, path: Path, run: str, key: str) -> Upload | None:
         stat = path.stat()
-        sent = self._sent.get(f"{run}/{key}")
+        sent = self.sent.get(f"{run}/{key}")
         if sent is not None and (immutable(key) or sent == (stat.st_size, stat.st_mtime)):
             return None
-        return _Upload(path, run, key, stat.st_size, stat.st_mtime)
+        return Upload(path, run, key, stat.st_size, stat.st_mtime)
 
-    def _upload(self, file: _Upload) -> _Uploaded:
+    def upload(self, file: Upload) -> Uploaded:
         # Network work may run in a thread. The retaining owner receives its
         # observations later, on the thread that invoked output delivery.
         transfers: list[str] = []
         try:
             with observe(transfers.append), file.path.open("rb") as stream:
-                self._runs[file.run].write(file.key, stream)
+                self.runs[file.run].write(file.key, stream)
         except BaseException as error:
-            return _Uploaded(file, tuple(transfers), error)
-        return _Uploaded(file, tuple(transfers), None)
+            return Uploaded(file, tuple(transfers), error)
+        return Uploaded(file, tuple(transfers), None)
 
-    def _accept(self, uploaded: _Uploaded) -> None:
+    def accept(self, uploaded: Uploaded) -> None:
         for raw in uploaded.transfers:
             deliver(raw)
         if uploaded.error is not None:
             raise uploaded.error
         file = uploaded.file
-        self._sent[f"{file.run}/{file.key}"] = (file.size, file.modified)
+        self.sent[f"{file.run}/{file.key}"] = (file.size, file.modified)
 
-    def _put(self, path: Path, run: str, key: str) -> None:
-        if file := self._unsent(path, run, key):
-            self._accept(self._upload(file))
+    def put(self, path: Path, run: str, key: str) -> None:
+        if file := self.unsent(path, run, key):
+            self.accept(self.upload(file))
 
-    def _put_outputs(self, outputs: Path, run: str, attempt: str) -> None:
+    def put_outputs(self, outputs: Path, run: str, attempt: str) -> None:
         paths = iter(
             sorted(
                 p
@@ -418,28 +418,28 @@ class Courier:
             )
         )
         error: BaseException | None = None
-        with ThreadPoolExecutor(max_workers=_OUTPUT_UPLOADS) as pool:
+        with ThreadPoolExecutor(max_workers=OUTPUT_UPLOADS) as pool:
 
-            def submit() -> Future[_Uploaded] | None:
+            def submit() -> Future[Uploaded] | None:
                 nonlocal error
                 if error is not None:
                     return None
                 try:
                     for path in paths:
                         name = path.relative_to(outputs).as_posix()
-                        if file := self._unsent(path, run, f"attempts/{attempt}/{name}"):
-                            return pool.submit(copy_context().run, self._upload, file)
+                        if file := self.unsent(path, run, f"attempts/{attempt}/{name}"):
+                            return pool.submit(copy_context().run, self.upload, file)
                 except BaseException as raised:
                     error = raised
                 return None
 
-            pending = {future for _ in range(_OUTPUT_UPLOADS) if (future := submit()) is not None}
+            pending = {future for _ in range(OUTPUT_UPLOADS) if (future := submit()) is not None}
             try:
                 while pending:
                     completed, pending = wait(pending, return_when=FIRST_COMPLETED)
                     for future in completed:
                         try:
-                            self._accept(future.result())
+                            self.accept(future.result())
                         except BaseException as raised:
                             error = error or raised
                     if error is None:
@@ -453,39 +453,39 @@ class Courier:
                 # Workers share its deadline; no new work starts after failure.
                 for future in pending:
                     try:
-                        self._accept(future.result())
+                        self.accept(future.result())
                     except BaseException as raised:
                         error = error or raised
         if error is not None:
             raise error
 
-    def _clear(self, run: str, removed: list[str]) -> None:
+    def clear(self, run: str, removed: list[str]) -> None:
         """Delete what the job retired, but only what this courier uploaded."""
         for key in removed:
-            if f"{run}/{key}" not in self._sent:
+            if f"{run}/{key}" not in self.sent:
                 continue
-            if not self._runs[run].delete(key):
+            if not self.runs[run].delete(key):
                 return
-            del self._sent[f"{run}/{key}"]
+            del self.sent[f"{run}/{key}"]
 
-    def _track(self, run: str, done: bool) -> None:
+    def track(self, run: str, done: bool) -> None:
         """The job's tracked folder for this run, as it is, then what it retired.
 
         Which files are ready, their order and purpose follow `etude.carriage`.
         Tails wait until the attempt has ended. A retired file is deleted
         once this pass has sent its replacement.
         """
-        folder = self._track_root / run
+        folder = self.track_root / run
         removed = retired(folder) if folder.is_dir() else []
         for key in listing(folder, tail_seconds=0.0 if done else math.inf):
             # Training removes files while this runs. One gone by now is
             # skipped; what replaced it is seen on the next pass.
             try:
                 with attribute(purpose=purpose(key)):
-                    self._put(folder / key, run, key)
+                    self.put(folder / key, run, key)
             except FileNotFoundError:
                 continue
-        self._clear(run, removed)
+        self.clear(run, removed)
 
     def carry_out(self, final: bool = False) -> None:
         """Send changed files before their attempt's completion record, and the worker's log.
@@ -496,28 +496,28 @@ class Courier:
         log and usage are: that log is where its failure is told.
         """
         try:
-            self._carry_files(final)
+            self.carry_files(final)
         except (StorageUnavailable, OSError, ValueError) as error:
-            self._pending = True
+            self.pending = True
             write_log(
                 "output delivery",
-                f"has not succeeded for {self._stalled_minutes():.1f} minutes"
+                f"has not succeeded for {self.stalled_minutes():.1f} minutes"
                 f" ({type(error).__name__}); local files retained",
             )
             raise
         # Final delivery belongs to a producer that has already closed its log.
         # Its end receipt confirms recovery; append no output after EOF.
-        if self._pending and not final:
-            write_log("output delivery", f"recovered after {self._stalled_minutes():.1f} minutes")
-        self._pending = False
-        self._delivered_at = time.monotonic()
+        if self.pending and not final:
+            write_log("output delivery", f"recovered after {self.stalled_minutes():.1f} minutes")
+        self.pending = False
+        self.delivered_at = time.monotonic()
 
-    def _stalled_minutes(self) -> float:
-        return (time.monotonic() - self._delivered_at) / 60
+    def stalled_minutes(self) -> float:
+        return (time.monotonic() - self.delivered_at) / 60
 
-    def _carry_files(self, final: bool) -> None:
+    def carry_files(self, final: bool) -> None:
         failure: Exception | None = None
-        with observe(self._retain_transfer), attribute(session=self._home.name):
+        with observe(self.retain_transfer), attribute(session=self._home.name):
             self.carry_console()
             attempts = self._home / "attempts"
             for home in sorted(attempts.iterdir()) if attempts.is_dir() else []:
@@ -527,28 +527,28 @@ class Courier:
                     with attribute(
                         run=(home / "run").read_text(), attempt=home.name, purpose="result"
                     ):
-                        self._carry_attempt(home, final)
+                        self.carry_attempt(home, final)
                 except (StorageUnavailable, OSError, ValueError) as error:
-                    _diagnose("output delivery", error, home.name)
+                    diagnose("output delivery", error, home.name)
                     failure = failure or error
             with attribute(purpose="control"):
-                self._carry_worker_log(final)
-        self._carry_usage()
+                self.carry_worker_log(final)
+        self.carry_usage()
         if failure is not None:
             raise failure
 
-    def _carry_worker_log(self, final: bool) -> None:
+    def carry_worker_log(self, final: bool) -> None:
         """Seal the worker's new output as pieces, then the record naming them."""
-        log = self._worker_log
+        log = self.worker_log
         if log is None or not log.exists():
             return
-        carried = self._worker_log_carried = self._worker_log_carried or _Log(time.monotonic())
+        carried = self.worker_log_carried = self.worker_log_carried or Log(time.monotonic())
         if not (final or carried.due(time.monotonic())):
             return
         before = carried.ends
-        self._seal(log, self._out, WORKER_LOG, carried)
+        self.seal(log, self.out, WORKER_LOG, carried)
         if carried.ends != before:
-            self._out.write_bytes(
+            self.out.write_bytes(
                 "worker-log.json", WorkerLog(ends=carried.ends).model_dump_json().encode()
             )
 
@@ -561,14 +561,14 @@ class Courier:
         console = self._home / "session.log"
         if final or console.exists():
             with console.open("rb") as output:
-                output.seek(self._console_position)
+                output.seek(self.console_position)
                 while body := output.read(65536):
-                    self._console.write(body)
-                    self._console_position += len(body)
+                    self.console.write(body)
+                    self.console_position += len(body)
             if final:
-                self._console.write(b"", final=True)
+                self.console.write(b"", final=True)
 
-    def _carry_attempt(self, home: Path, final: bool) -> None:
+    def carry_attempt(self, home: Path, final: bool) -> None:
         """Publish how an attempt ended, then its files, then its completion record."""
         run, attempt = (home / "run").read_text(), home.name
         done = (home / "finished.json").exists()
@@ -576,39 +576,39 @@ class Courier:
         entry: dict[str, JsonValue] | None = (
             json.loads((home / "finished.json").read_text()) if done else None
         )
-        carried = self._logs.get(attempt)
+        carried = self.logs.get(attempt)
         record = AttemptRecord(
             started_at=datetime.fromisoformat(claim.read_text()) if claim.exists() else None,
             result=read_result(outputs),
             exited=entry,
             log_ends=None if carried is None else carried.ends,
         )
-        if done and attempt not in self._delivered:
+        if done and attempt not in self.delivered:
             # Before any file: what fails below must not hide how the job ended.
-            self._note(home, run, attempt, record)
-        self._track(run, done or final)
+            self.note(home, run, attempt, record)
+        self.track(run, done or final)
         if (home / "log").exists():
-            log = self._logs.setdefault(attempt, _Log(time.monotonic()))
+            log = self.logs.setdefault(attempt, Log(time.monotonic()))
             if done or final or log.due(time.monotonic()):
-                self._seal(home / "log", self._runs[run], attempt_log(attempt), log)
+                self.seal(home / "log", self.runs[run], attempt_log(attempt), log)
             record = record.model_copy(update={"log_ends": log.ends})
         if done:
-            self._put_outputs(outputs, run, attempt)
+            self.put_outputs(outputs, run, attempt)
             record = record.model_copy(update={"delivered": True})
-        self._note(home, run, attempt, record)
+        self.note(home, run, attempt, record)
         if done:
-            self._delivered.add(attempt)
+            self.delivered.add(attempt)
 
-    def _note(self, home: Path, run: str, attempt: str, record: AttemptRecord) -> None:
+    def note(self, home: Path, run: str, attempt: str, record: AttemptRecord) -> None:
         """Store the attempt's record, when it changed."""
         note = home / "record.json"
         content = record.model_dump_json()
         if not note.exists() or note.read_text() != content:
             write(note, content)
         with attribute(purpose="control"):
-            self._put(note, run, f"attempts/{attempt}.json")
+            self.put(note, run, f"attempts/{attempt}.json")
 
-    def _seal(self, path: Path, folder: _Folder, name: str, log: _Log) -> None:
+    def seal(self, path: Path, folder: Folder, name: str, log: Log) -> None:
         """Store what was written to `path` since the last piece, as new pieces of `name`.
 
         A log is only appended to, so the bytes before `log.sent` are stored
@@ -627,7 +627,7 @@ class Courier:
                 log.sealed = time.monotonic()
 
 
-def _run(
+def run_courier(
     bootstrap_url: str,
     root: Path,
     send: Send,
@@ -642,7 +642,7 @@ def _run(
     delivery_seconds: float | None = None
     try:
         if until := os.environ.get("ETUDE_DEADLINE"):
-            deadline = time.monotonic() + (datetime.fromisoformat(until) - _now()).total_seconds()
+            deadline = time.monotonic() + (datetime.fromisoformat(until) - now()).total_seconds()
         raw = None
         while raw is None:  # startup allowance and the independent rental guardian both apply
             startup_timeout()
@@ -650,7 +650,7 @@ def _run(
                 with limit_time(startup_timeout()):
                     raw = read(bootstrap_url, send)
             except StorageUnavailable as error:
-                _diagnose("bootstrap read", error)
+                diagnose("bootstrap read", error)
                 raise  # GET owns retries; only a missing object remains pending here.
             if raw is None:
                 sleep(every)
@@ -687,7 +687,7 @@ def _run(
         startup_timeout()
         write_log("receipt upload", "publishing start intent")
         with limit_time(startup_timeout()):
-            courier._out.write_bytes("receipt", str(os.getpid()).encode())
+            courier.out.write_bytes("receipt", str(os.getpid()).encode())
         startup_timeout()
         write_log("receipt upload", "confirmed")
         package_root = str(Path(__file__).resolve().parents[3])
@@ -704,7 +704,7 @@ def _run(
         while process.poll() is None:
             for step in (courier.bring_in, courier.carry_out):
                 try:
-                    with limit_time(_until_deadline()):
+                    with limit_time(until_deadline()):
                         step()
                 except (StorageUnavailable, OSError, ValueError) as error:
                     write_log(
@@ -713,44 +713,44 @@ def _run(
                     )
             sleep(every)
     except BaseException as error:
-        _diagnose("worker", error)
+        diagnose("worker", error)
         raise
     finally:
         original_error = sys.exception()
-        left = _allowance(deadline, delivery_seconds)
+        left = allowance(deadline, delivery_seconds)
         collected, failure = False, None
         try:
             if process is not None:
                 assert courier is not None
-                _reap(courier, process, left)
+                reap(courier, process, left)
                 courier.release()
             write_log("cleanup", "finalizing worker output before cleanup")
             write_log("worker", CLOSED)
             collected = True
         except Exception as error:
             failure = error
-            _diagnose("final collection", error)
+            diagnose("final collection", error)
             if courier is not None:
                 try:
                     # Keep complete lines already available, without inventing EOF.
                     courier.carry_console()
                 except Exception as console_error:
-                    _diagnose("console collection", console_error)
+                    diagnose("console collection", console_error)
             write_log("worker", "collection incomplete; final output unconfirmed")
         try:
             if courier is not None:
                 ended = collected and process is not None  # a session ran, and its output is in
-                _deliver(courier, sleep, every, left, closed=collected, ended=ended)
+                deliver_final(courier, sleep, every, left, closed=collected, ended=ended)
             elif log_url:
                 publish(worker_log, log_url)  # no grant was read: the log goes whole, by its link
         except Exception as error:
-            _diagnose("final delivery", error)
+            diagnose("final delivery", error)
             failure = failure or error
         if failure is not None and original_error is None:
             raise failure
 
 
-def _cache() -> Cache:
+def cache() -> Cache:
     """This machine's cache: what it holds plus half the disk free when the session began.
 
     A rental's disk, not a fixed size, decides what fits, so its weights are
@@ -762,7 +762,7 @@ def _cache() -> Cache:
     return Cache(root, max_bytes=held + shutil.disk_usage(root).free // 2)
 
 
-def _allowance(deadline: float | None, seconds: float | None) -> Callable[[], float | None]:
+def allowance(deadline: float | None, seconds: float | None) -> Callable[[], float | None]:
     """Seconds left of the one monotonic allowance that shutdown and final delivery share:
     `seconds` from now, capped by the rental's deadline."""
     if seconds is not None:
@@ -775,7 +775,7 @@ def _allowance(deadline: float | None, seconds: float | None) -> Callable[[], fl
     return left
 
 
-def _reap(
+def reap(
     courier: Courier, process: subprocess.Popen[bytes], left: Callable[[], float | None]
 ) -> None:
     """Reap the owned child and collect its console to EOF before this producer closes."""
@@ -791,7 +791,7 @@ def _reap(
     courier.carry_console(final=True)
 
 
-def _deliver(
+def deliver_final(
     courier: Courier,
     sleep: Callable[[float], None],
     every: float,
@@ -818,11 +818,11 @@ def _deliver(
             with limit_time(allowance):
                 courier.carry_out(final=True)
                 if ended:
-                    at = note.read_text() if note.exists() else _now().isoformat()
-                    courier._out.write_bytes("ended", at.encode())
+                    at = note.read_text() if note.exists() else now().isoformat()
+                    courier.out.write_bytes("ended", at.encode())
             return
         except (StorageUnavailable, OSError, ValueError) as error:
-            _diagnose("final delivery", error)
+            diagnose("final delivery", error)
             if closed:
                 write_log("worker", CLOSED)
             pause = left()
@@ -834,7 +834,7 @@ def run(
     bootstrap_url: str,
     delete_self: Callable[[], None],
     root: Path = ROOT,
-    send: Send = _send,
+    send: Send = send_request,
     sleep: Callable[[float], None] = time.sleep,
     every: float = 3.0,
 ) -> None:
@@ -844,7 +844,7 @@ def run(
     with log_to(log):
         try:
             write_log("worker entry", "client ready")
-            _run(bootstrap_url, root, send, sleep, every, log, url)
+            run_courier(bootstrap_url, root, send, sleep, every, log, url)
         finally:
             original_error = sys.exception()
             try:

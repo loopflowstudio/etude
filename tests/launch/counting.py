@@ -74,12 +74,12 @@ class Counting:
         def statement(sql: str) -> None:
             self.calls["database"] += 1
 
-        self.database._db.set_trace_callback(statement)
+        self.database.db.set_trace_callback(statement)
         try:
             with patch("subprocess.run", run):
                 yield self
         finally:
-            self.database._db.set_trace_callback(None)
+            self.database.db.set_trace_callback(None)
 
 
 def job_text(snapshot: LogSnapshot) -> str:

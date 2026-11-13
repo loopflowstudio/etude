@@ -299,7 +299,7 @@ class Direct(BaseModel):
     search: int = 0
 
 
-def _git(repo: Path, *args: str) -> None:
+def git(repo: Path, *args: str) -> None:
     subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
 
 
@@ -342,9 +342,9 @@ def test_a_code_players_version_is_its_commit_and_tracked_files_in_a_checkout_or
     (repo / "players").mkdir(parents=True)
     (repo / "players" / "greedy.py").write_text("STRENGTH = 4\n")
     (repo / "game.py").write_text("RULES = 1\n")
-    _git(repo, "init", "-q")
-    _git(repo, "add", ".")
-    _git(repo, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", "c")
+    git(repo, "init", "-q")
+    git(repo, "add", ".")
+    git(repo, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", "c")
     # As the launcher extracts a commit: its files without `.git`, somewhere else.
     source = tmp_path / "session" / "src"
     shutil.copytree(repo, source, ignore=shutil.ignore_patterns(".git"))
@@ -431,21 +431,21 @@ def test_intervals_take_numpys_percentiles_of_replicates_missing_a_ratio() -> No
     for each in (samples, small):
         with pytest.warns(RuntimeWarning, match="All-NaN slice"):
             expected = np.nanpercentile(each, [2.5, 97.5], axis=0)
-        np.testing.assert_array_equal(query._percentiles(each, (2.5, 97.5)), expected)
+        np.testing.assert_array_equal(query.percentiles(each, (2.5, 97.5)), expected)
 
 
 def test_estimates_over_a_few_block_counts_draw_each_counts_weights_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     drawn: list[int] = []
-    draw = query._draw
+    draw = query.draw
 
     def counted(n: int) -> npt.NDArray[np.float64]:
         drawn.append(n)
         return draw(n)
 
-    monkeypatch.setattr(query, "_drawn", {})
-    monkeypatch.setattr(query, "_draw", counted)
+    monkeypatch.setattr(query, "drawn", {})
+    monkeypatch.setattr(query, "draw", counted)
 
     def estimates() -> list[list[Estimate | None]]:
         return [

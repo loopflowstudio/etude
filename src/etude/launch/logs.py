@@ -57,7 +57,7 @@ def snapshot_stream(
     )
 
 
-def _render_diagnostic(diagnostic: Diagnostic) -> str:
+def render_diagnostic(diagnostic: Diagnostic) -> str:
     labels = " ".join(
         f"{name}={value}"
         for name, value in (
@@ -73,7 +73,7 @@ def _render_diagnostic(diagnostic: Diagnostic) -> str:
     )
 
 
-def _render_stream_header(stream: LogStream) -> str:
+def render_stream_header(stream: LogStream) -> str:
     state = "collected final output" if stream.complete else "incomplete"
     if not stream.received:
         state = "output not received"
@@ -92,11 +92,11 @@ def render(snapshot: LogSnapshot, *, job_only: bool = False) -> str:
     if not job_only:
         for launch in snapshot.launches:
             lines.append(f"launch {launch.id}: {launch.state}\n")
-        lines.extend(_render_diagnostic(diagnostic) for diagnostic in snapshot.diagnostics)
+        lines.extend(render_diagnostic(diagnostic) for diagnostic in snapshot.diagnostics)
     for stream in snapshot.streams:
         if job_only and stream.producer != "job":
             continue
-        lines.append(_render_stream_header(stream))
+        lines.append(render_stream_header(stream))
         lines.append(stream.text)
         if stream.retrieval_error:
             lines.append(f"\nretrieval failed: {stream.retrieval_error}\n")
@@ -110,29 +110,29 @@ class LogCursor:
     """Positions in sanitized producer text; no cross-producer clock ordering."""
 
     def __init__(self) -> None:
-        self._positions: dict[str, int] = {}
-        self._diagnostics: set[str] = set()
-        self._launches: dict[str, str] = {}
-        self._states: dict[str, tuple[bool, bool, bool, str | None]] = {}
+        self.positions: dict[str, int] = {}
+        self.diagnostics: set[str] = set()
+        self.launches: dict[str, str] = {}
+        self.states: dict[str, tuple[bool, bool, bool, str | None]] = {}
 
     def render(self, snapshot: LogSnapshot, *, job_only: bool = False) -> str:
         output: list[str] = []
         if not job_only:
             for launch in snapshot.launches:
-                if self._launches.get(launch.id) != launch.state:
+                if self.launches.get(launch.id) != launch.state:
                     output.append(f"launch {launch.id}: {launch.state}\n")
-                    self._launches[launch.id] = launch.state
-            fresh = tuple(d for d in snapshot.diagnostics if d.id not in self._diagnostics)
-            output.extend(_render_diagnostic(diagnostic) for diagnostic in fresh)
-            self._diagnostics.update(d.id for d in fresh)
+                    self.launches[launch.id] = launch.state
+            fresh = tuple(d for d in snapshot.diagnostics if d.id not in self.diagnostics)
+            output.extend(render_diagnostic(diagnostic) for diagnostic in fresh)
+            self.diagnostics.update(d.id for d in fresh)
         for stream in snapshot.streams:
             if job_only and stream.producer != "job":
                 continue
-            cursor = self._positions.get(stream.id, 0)
+            cursor = self.positions.get(stream.id, 0)
             end = stream.position
             state = (stream.received, stream.complete, stream.truncated, stream.retrieval_error)
-            if end > cursor or self._states.get(stream.id) != state:
-                output.append(_render_stream_header(stream))
+            if end > cursor or self.states.get(stream.id) != state:
+                output.append(render_stream_header(stream))
                 for chunk in stream.chunks:
                     if chunk.offset + len(chunk.text) <= cursor:
                         continue
@@ -142,6 +142,6 @@ class LogCursor:
                     cursor = chunk.offset + len(chunk.text)
                 if stream.retrieval_error:
                     output.append(f"retrieval failed: {stream.retrieval_error}\n")
-            self._positions[stream.id] = max(cursor, end)
-            self._states[stream.id] = state
+            self.positions[stream.id] = max(cursor, end)
+            self.states[stream.id] = state
         return "".join(output)

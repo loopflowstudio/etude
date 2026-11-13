@@ -16,7 +16,7 @@ Staged matches are sealed into a block every few minutes, on a failure and on
 finish, and each block is offered to every destination once sealed: a run
 delivers a few objects per block, never one per match or blob. SIGTERM, as
 the launcher's termination sends, seals what is staged before the run ends.
-Under `etude launch` a run also says how far it has got (`_Report`), for
+Under `etude launch` a run also says how far it has got (`Report`), for
 `etude status`.
 
 A resume reads the blocks already delivered to any destination, so a
@@ -82,9 +82,9 @@ if TYPE_CHECKING:
 KIND = "evaluation"
 # A running eval run says how far it has got at most this often: each report
 # becomes one write to the run's attempt record in storage.
-_REPORT_SECONDS = 15.0
+REPORT_SECONDS = 15.0
 # Matches a recent pace is taken over.
-_PACE_MATCHES = 50
+PACE_MATCHES = 50
 # Etude's own tables, which `etude.eval.query.statsdb` keeps beside the author's.
 ETUDE_TABLES = (
     "runs",
@@ -187,16 +187,16 @@ def evaluate(
         )
     elif Environment.model_validate_json(path.read_bytes()) != environment:
         raise EtudeError("eval_run_environment_conflict", 409)
-    writer = _Writer(
+    writer = Writer(
         declared.root, declared.name, destinations(declared.base, storages), tuple(rollups)
     )
     pending = [scheduled for scheduled in matches if scheduled.key not in writer.done]
     started = time.monotonic()
-    report = _Report(total=len(matches), done=len(matches) - len(pending))
+    report = Report(total=len(matches), done=len(matches) - len(pending))
     report.write()
     try:
-        with _terminable():
-            for count, (scheduled, outcome) in enumerate(_played(pending, play, workers), 1):
+        with terminable():
+            for count, (scheduled, outcome) in enumerate(played(pending, play, workers), 1):
                 if isinstance(outcome, BaseException):
                     writer.fail(scheduled, outcome)
                 writer.store(scheduled, outcome)
@@ -222,7 +222,7 @@ def evaluate(
     )
 
 
-class _Report:
+class Report:
     """Under `etude launch`, how far the eval run has got, for the launcher's status.
 
     `etude-result.json` in `ETUDE_OUTPUT_DIR` holds a tally, the shape of
@@ -233,7 +233,7 @@ class _Report:
     def __init__(self, *, total: int, done: int) -> None:
         self.total, self.done = total, done
         self.outputs = os.environ.get("ETUDE_OUTPUT_DIR")
-        self.recent: deque[float] = deque(maxlen=_PACE_MATCHES)
+        self.recent: deque[float] = deque(maxlen=PACE_MATCHES)
         self.written = time.monotonic()
 
     def played(self) -> None:
@@ -241,7 +241,7 @@ class _Report:
         self.done += 1
         now = time.monotonic()
         self.recent.append(now)
-        if now - self.written >= _REPORT_SECONDS:
+        if now - self.written >= REPORT_SECONDS:
             self.write()
 
     def write(self, *, failed: int = 0) -> None:
@@ -266,7 +266,7 @@ class Terminated(Exception):
 
 
 @contextmanager
-def _terminable() -> Iterator[None]:
+def terminable() -> Iterator[None]:
     """Turn SIGTERM into `Terminated` while matches are played, on the main thread only."""
     if threading.current_thread() is not threading.main_thread():
         yield
@@ -282,7 +282,7 @@ def _terminable() -> Iterator[None]:
         signal.signal(signal.SIGTERM, before)
 
 
-def _played(
+def played(
     pending: Sequence[Match], play: Callable[[Match], Tables | Result], workers: int
 ) -> Iterator[tuple[Match, Tables | Result | BaseException]]:
     """Each match with its tables or what it raised, in the order they finish.
@@ -322,7 +322,7 @@ def _played(
             pool.shutdown(cancel_futures=True)
 
 
-class _Writer:
+class Writer:
     """One process's matches of an eval run: staged, sealed into blocks and delivered."""
 
     def __init__(
@@ -345,14 +345,14 @@ class _Writer:
         self.db: duckdb.DuckDBPyConnection = duckdb.connect()
         seal_abandoned(root, self.db)
         self.staging = Staging(root, self.id, rollups)
-        stored = self._stored()
+        stored = self.stored_matches()
         self.done = {key for key, record in stored.items() if record.state == "done"}
         self.columns: dict[str, dict[str, ColumnType]] = {}
         for record in stored.values():
             for table, columns in record.columns.items():
                 self.columns.setdefault(table, {}).update(columns)
 
-    def _stored(self) -> dict[str, MatchRecord]:
+    def stored_matches(self) -> dict[str, MatchRecord]:
         """Match records of the blocks here and at every destination; a done one wins.
 
         One listing per place and one read of each block not already read here.
@@ -378,9 +378,9 @@ class _Writer:
         detail = f"{type(error).__name__}: {error}"[:2000]
         self.failed += 1
         self.staging.stage(
-            MatchRecord(match=scheduled, state="failed", error=detail, wall_ms=_now_ms())
+            MatchRecord(match=scheduled, state="failed", error=detail, wall_ms=now_ms())
         )
-        self._seal()
+        self.seal()
         raise EtudeError("match_failed", 500) from error
 
     def store(self, scheduled: Match, outcome: Tables | Result) -> None:
@@ -389,11 +389,11 @@ class _Writer:
         try:
             execution = as_config(result.execution)
             checked = {
-                table: _checked(scheduled, table, rows, self.rollups)
+                table: checked_rows(scheduled, table, rows, self.rollups)
                 for table, rows in result.tables.items()
             }
             types = {
-                table: _types(table, rows, self.columns.get(table, {}))
+                table: column_types(table, rows, self.columns.get(table, {}))
                 for table, rows in checked.items()
                 if rows
             }
@@ -405,7 +405,7 @@ class _Writer:
             self.fail(scheduled, refused)
         staged = {table: [self.staging.table(table, scheduled.key)] for table in types}
         for table, columns in types.items():
-            self._write(staged[table][0], columns, checked[table], scheduled.key)
+            self.write_table(staged[table][0], columns, checked[table], scheduled.key)
         # A match's partial totals are taken now, so a rollup that cannot sum it refuses it.
         try:
             for rollup in self.rollups:
@@ -420,15 +420,15 @@ class _Writer:
             match=scheduled,
             state="done",
             columns=types,
-            wall_ms=_now_ms(),
+            wall_ms=now_ms(),
             blobs=digests,
             execution=execution,
         )
         self.staging.stage(record, result.blobs)
         if self.staging.due():
-            self._seal()
+            self.seal()
 
-    def _write(
+    def write_table(
         self, target: Path, columns: dict[str, ColumnType], rows: Sequence[Row], match: str
     ) -> None:
         """Write one match's rows of a table to `target` as Parquet; readers never see half a file."""
@@ -440,13 +440,13 @@ class _Writer:
         self.db.execute(f"copy ({select}) to {quote(partial)} (format parquet)", values)
         partial.replace(target)
 
-    def _seal(self) -> None:
+    def seal(self) -> None:
         """Seal what is staged into a block and offer it to every destination."""
         with self.files.lock:
             self.staging.seal(self.db)
-        self._ship()
+        self.ship()
 
-    def _ship(self) -> bool:
+    def ship(self) -> bool:
         for target in self.targets:
             reason = ship(self.files, self.name, target)
             if reason is None:
@@ -466,7 +466,7 @@ class _Writer:
             .encode(),
         )
         self.db.close()
-        if not self._ship():
+        if not self.ship():
             print(
                 f"etude: not delivered: {self.problems}. Files are in {self.files.root}; "
                 "deliver them with `etude sync`.",
@@ -474,11 +474,11 @@ class _Writer:
             )
 
 
-def _now_ms() -> int:
+def now_ms() -> int:
     return time.time_ns() // 1_000_000
 
 
-def _checked(
+def checked_rows(
     scheduled: Match, table: str, rows: Sequence[Row], rollups: Sequence[Rollup]
 ) -> list[Row]:
     """The rows, refused unless each names exactly one seat or group of this match."""
@@ -503,7 +503,7 @@ def _checked(
     return list(rows)
 
 
-def _types(
+def column_types(
     table: str, rows: Sequence[Row], known: Mapping[str, ColumnType]
 ) -> dict[str, ColumnType]:
     """Each column's type in this write. Whole numbers may join a column of fractions."""
@@ -517,17 +517,17 @@ def _types(
                 raise EtudeError("column_value_refused", 422) from TypeError(
                     f"table {table!r}, column {column!r}: {type(value).__name__}"
                 )
-            found[column] = _widened(found.get(column, kind), kind, table, column)
+            found[column] = widened(found.get(column, kind), kind, table, column)
     for column, kind in list(found.items()):
         if column in known:
-            found[column] = _widened(known[column], kind, table, column, onto=True)
+            found[column] = widened(known[column], kind, table, column, onto=True)
     # A column given only as nulls here keeps the type an earlier write gave it.
     nulls = {column for row in rows for column in row} - found.keys()
     found.update({column: known[column] for column in nulls if column in known})
     return found
 
 
-def _widened(
+def widened(
     first: ColumnType, then: ColumnType, table: str, column: str, *, onto: bool = False
 ) -> ColumnType:
     if first == then:

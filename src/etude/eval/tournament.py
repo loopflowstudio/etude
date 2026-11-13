@@ -72,7 +72,7 @@ if TYPE_CHECKING:
     import duckdb
 
 # Every eval run's `etude.eval.records.Environment`.
-_ENVIRONMENT_FILE = "environment.json"
+ENVIRONMENT_FILE = "environment.json"
 
 
 def hold(
@@ -133,7 +133,7 @@ def hold(
     if checkpoint is not None and checkpoints:
         raise EtudeError("hold_one_checkpoint_on_the_go_or_add_checkpoints", 422)
     given = (checkpoint,) if checkpoint is not None else tuple(checkpoints)
-    added = _added(tournament, given, enter, share)
+    added = new_run(tournament, given, enter, share)
     if matches is not None:
         resolved, _ = assemble([added]).resolve(lines)
         added = added.model_copy(update={"seated": resolved.seated})
@@ -143,7 +143,7 @@ def hold(
         pending = list(matches)
     else:
         on_the_go = checkpoint is not None or bool(enter)
-        scheduled, added = _scheduled(
+        scheduled, added = schedule_matches(
             added,
             experiment=experiment,
             on_the_go=on_the_go,
@@ -164,7 +164,7 @@ def hold(
     run = os.environ.get("ETUDE_RUN") or (
         f"{folder_name(tournament.name)}.{digest(added.model_dump(mode='json'))[:12]}"
     )
-    _record(added, experiment, run, directory)
+    write_record(added, experiment, run, directory)
     return evaluate(
         experiment=experiment,
         environment=tournament.environment,
@@ -218,8 +218,8 @@ def played(
     Raises as a batch hold does, so a seating name defined two ways is refused.
     Relative seats find their checkpoints among `lines`, as in `hold`.
     """
-    added = _added(tournament, tuple(checkpoints), enter, (0, 1))
-    scheduled, _ = _scheduled(
+    added = new_run(tournament, tuple(checkpoints), enter, (0, 1))
+    scheduled, _ = schedule_matches(
         added,
         experiment=experiment,
         on_the_go=False,
@@ -251,8 +251,8 @@ def tournament_runs(
     found: dict[str, dict[str, TournamentRun]] = {}
     for place in {each.name: each for each in [DirectoryStorage(base), *storages]}.values():
         keys = place.keys("")
-        for folder in sorted(_folders(keys, TOURNAMENT_FILE)):
-            if _experiment(place, folder) != experiment:
+        for folder in sorted(folders(keys, TOURNAMENT_FILE)):
+            if experiment_of(place, folder) != experiment:
                 continue
             added = TournamentRun.model_validate_json(place.get(folder + TOURNAMENT_FILE))
             run = folder.rstrip("/").rsplit("/", 1)[-1]
@@ -260,7 +260,7 @@ def tournament_runs(
     return {name: [runs[run] for run in sorted(runs)] for name, runs in sorted(found.items())}
 
 
-def _added(
+def new_run(
     tournament: Benchmark | RoundRobin,
     checkpoints: tuple[CheckpointRef, ...],
     enter: Sequence[Player],
@@ -275,7 +275,7 @@ def _added(
     )
 
 
-def _scheduled(
+def schedule_matches(
     added: TournamentRun,
     *,
     experiment: str,
@@ -301,16 +301,16 @@ def _scheduled(
     failed: set[Digest] = set()
     if not on_the_go:
         base = Path(directory) if directory is not None else default_root()
-        stored, delivered, failed = _stored(
+        stored, delivered, failed = stored_runs(
             added.tournament, experiment, [DirectoryStorage(base), *storages]
         )
         held = [*stored, added]
     tournament = assemble(held)
-    known = {_found(each) for each in tournament.seated}
+    known = {found_key(each) for each in tournament.seated}
     if wanted_only:
         tournament = assemble([added]).model_copy(update={"seated": tournament.seated})
     tournament, _ = tournament.resolve(lines)
-    found = tuple(each for each in tournament.seated if _found(each) not in known)
+    found = tuple(each for each in tournament.seated if found_key(each) not in known)
     # Two seatings may share a match; it is played once.
     matches = {
         each.match.key: each.match
@@ -328,7 +328,7 @@ def _scheduled(
     return scheduled, added.model_copy(update={"seated": (*added.seated, *found)})
 
 
-def _found(seated: Seated) -> tuple[str, str, tuple[tuple[tuple[str | None, ...], int], ...]]:
+def found_key(seated: Seated) -> tuple[str, str, tuple[tuple[tuple[str | None, ...], int], ...]]:
     """What a `Seated` plays, by key: equal for one found again at another file."""
     pairings = tuple(
         (tuple(None if ref is None else str(ref.key) for ref in each.seats), each.games)
@@ -337,7 +337,9 @@ def _found(seated: Seated) -> tuple[str, str, tuple[tuple[tuple[str | None, ...]
     return seated.seating, str(seated.checkpoint), pairings
 
 
-def _record(added: TournamentRun, experiment: str, run: str, directory: Path | str | None) -> None:
+def write_record(
+    added: TournamentRun, experiment: str, run: str, directory: Path | str | None
+) -> None:
     """Write `tournament.json` in the eval run's folder; a resumed run must have been held alike."""
     declared = declare(experiment=experiment, clocks=(), run=run, kind=KIND, directory=directory)
     if declared.declaration.kind != KIND:
@@ -345,11 +347,11 @@ def _record(added: TournamentRun, experiment: str, run: str, directory: Path | s
     path = declared.root / TOURNAMENT_FILE
     if not path.is_file():
         DirectoryStorage(declared.root).put(TOURNAMENT_FILE, added.model_dump_json().encode())
-    elif _resumed(TournamentRun.model_validate_json(path.read_bytes())) != _resumed(added):
+    elif resumed(TournamentRun.model_validate_json(path.read_bytes())) != resumed(added):
         raise EtudeError("eval_run_tournament_conflict", 409)
 
 
-def _resumed(added: TournamentRun) -> dict[str, object]:
+def resumed(added: TournamentRun) -> dict[str, object]:
     """What a resumed hold must repeat. A checkpoint is its key: a retry on another
     attempt finds the same file at another path."""
     return added.model_dump(
@@ -357,7 +359,7 @@ def _resumed(added: TournamentRun) -> dict[str, object]:
     )
 
 
-def _stored(
+def stored_runs(
     tournament: Benchmark | RoundRobin, experiment: str, places: Sequence[Storage]
 ) -> tuple[list[TournamentRun], dict[Digest, dict[str, int]], set[Digest]]:
     """The tournament's eval runs of the experiment in every place, every match
@@ -378,15 +380,15 @@ def _stored(
         keys = place.keys("")
         ours = {
             folder
-            for folder in _folders(keys, TOURNAMENT_FILE) | _folders(keys, _ENVIRONMENT_FILE)
-            if _experiment(place, folder) == experiment
+            for folder in folders(keys, TOURNAMENT_FILE) | folders(keys, ENVIRONMENT_FILE)
+            if experiment_of(place, folder) == experiment
         }
         # The experiment's eval run folders: those held for a tournament, and the rest.
-        tournaments = _folders(keys, TOURNAMENT_FILE) & ours
+        tournaments = folders(keys, TOURNAMENT_FILE) & ours
         alike = {
             folder
-            for folder in (_folders(keys, _ENVIRONMENT_FILE) & ours) - tournaments
-            if Environment.model_validate_json(place.get(folder + _ENVIRONMENT_FILE)).identity
+            for folder in (folders(keys, ENVIRONMENT_FILE) & ours) - tournaments
+            if Environment.model_validate_json(place.get(folder + ENVIRONMENT_FILE)).identity
             == environment
         }
         for folder in tournaments:
@@ -409,7 +411,7 @@ def _stored(
     return [held[run] for run in sorted(held)], delivered, failed - delivered.keys()
 
 
-def _experiment(place: Storage, folder: str) -> str | None:
+def experiment_of(place: Storage, folder: str) -> str | None:
     """The experiment a run folder's `run.json` names; None before it arrives."""
     try:
         return RunFile.model_validate_json(place.get(folder + "run.json")).experiment
@@ -417,14 +419,14 @@ def _experiment(place: Storage, folder: str) -> str | None:
         return None
 
 
-def _folders(keys: Sequence[str], file: str) -> set[str]:
+def folders(keys: Sequence[str], file: str) -> set[str]:
     """The run folders, at any depth of a listing, that hold `file`."""
     return {key.removesuffix(file) for key in keys if key.endswith("/" + file)}
 
 
 @contextmanager
-def _held(db: duckdb.DuckDBPyConnection, tournament: str) -> Iterator[tuple[int, int]]:
-    """Temp table `_held` (run, match) of each scheduled match held; yields (scheduled, held).
+def held_matches(db: duckdb.DuckDBPyConnection, tournament: str) -> Iterator[tuple[int, int]]:
+    """Temp table `held_matches` (run, match) of each scheduled match held; yields (scheduled, held).
 
     Each scheduled match counts once, from whichever eval run of the
     tournament's environment recorded it last.
@@ -438,7 +440,7 @@ def _held(db: duckdb.DuckDBPyConnection, tournament: str) -> Iterator[tuple[int,
     if found[0] is not None:
         raise EtudeError(found[0], 409) from ValueError(tournament)
     db.execute(
-        "create or replace temp table _held as"
+        "create or replace temp table held_matches as"
         " select arg_max(m.run, m.wall_ms) as run, m.match from matches m join runs r using (run)"
         " where r.environment = (select environment from tournaments where tournament = $1)"
         " and m.state = 'done'"
@@ -449,13 +451,13 @@ def _held(db: duckdb.DuckDBPyConnection, tournament: str) -> Iterator[tuple[int,
     try:
         counted = db.execute(
             "select (select count(distinct match) from schedule where tournament = ?),"
-            " (select count(*) from _held)",
+            " (select count(*) from held_matches)",
             [tournament],
         ).fetchone()
         assert counted is not None
         yield counted[0], counted[1]
     finally:
-        db.execute("drop table _held")
+        db.execute("drop table held_matches")
 
 
 class ScorePoint(Record):
@@ -512,7 +514,7 @@ def scores(
             raise EtudeError("column_name_refused", 422) from ValueError(name)
     if table in ETUDE_TABLES:
         raise EtudeError("scores_need_an_author_table", 422)
-    with _held(db, benchmark):
+    with held_matches(db, benchmark):
         found = db.execute(
             f"""
             with r as (
@@ -527,7 +529,7 @@ def scores(
             )
             select s.seating, t.run, t.experiment, s.checkpoint, n.name, t.ordinal, t.clocks,
                 r.match, sum(r._value), sum(r._per), count(*)
-            from r join _held using (run, match)
+            from r join held_matches using (run, match)
             join schedule s on s.tournament = ? and s.match = r.match
             join named n on n.checkpoint = s.checkpoint
             left join training_checkpoints t on t.checkpoint = s.checkpoint
@@ -572,7 +574,7 @@ def scores(
             seating=seating,
             run=run,
             experiment=experiment,
-            points=tuple(sorted(points, key=_training_order)),
+            points=tuple(sorted(points, key=training_order)),
         )
         for (seating, run, experiment), points in sorted(
             lines.items(), key=lambda item: tuple("" if v is None else v for v in item[0])
@@ -580,7 +582,7 @@ def scores(
     ]
 
 
-def _training_order(point: ScorePoint) -> tuple[bool, int, list[str | int], str]:
+def training_order(point: ScorePoint) -> tuple[bool, int, list[str | int], str]:
     # Digit runs compare as numbers, so `updates-900` comes before `updates-1000`.
     named = [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", point.name)]
     return point.ordinal is None, point.ordinal or 0, named, point.checkpoint
@@ -634,13 +636,13 @@ def standings(
     ).fetchone()
     if found is not None and found[0] != "round_robin":
         raise EtudeError("standings_rank_round_robins", 422)
-    with _held(db, round_robin) as (scheduled, held):
+    with held_matches(db, round_robin) as (scheduled, held):
         compared = compare(
             db,
             table=table,
             value=value,
             per=per,
-            where="run || '/' || match in (select run || '/' || match from _held)"
+            where="run || '/' || match in (select run || '/' || match from held_matches)"
             + (f" and ({where})" if where else ""),
         )
     names: dict[str, str] = dict(db.sql("select player, name from players").fetchall())

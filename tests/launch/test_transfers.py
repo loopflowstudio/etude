@@ -54,8 +54,8 @@ from etude.launch.storage.s3 import (
     Keys,
     PostForm,
     Reply,
-    _send,
     read,
+    send_request,
 )
 from etude.launch.storage.transport import attribute, observe
 from etude.launch.usage import R2, S3_US_WEST_2, Access, Transfer, Usage, reconcile
@@ -191,7 +191,7 @@ class HTTP:
         )
 
     def send(self, method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Reply:
-        return _send(method, self.url + urlsplit(url).path, body, headers)
+        return send_request(method, self.url + urlsplit(url).path, body, headers)
 
 
 @pytest.fixture
@@ -405,14 +405,14 @@ def test_local_expiry_preserves_destination(
     clock = [0.0]
     monkeypatch.setattr(time, "monotonic", lambda: clock[0])
     if phase == "digest":
-        digest = engine._digest
+        digest = engine.digest
 
         def expire_digest(path: Path) -> str:
             result = digest(path)
             clock[0] = 2.0
             return result
 
-        monkeypatch.setattr(engine, "_digest", expire_digest)
+        monkeypatch.setattr(engine, "digest", expire_digest)
     else:
         fsync = os.fsync
 
@@ -765,10 +765,10 @@ def test_completed_workload_before_and_after(
     baseline: list[Transfer] = []
     with observe(lambda raw: baseline.append(Transfer.model_validate_json(raw))):
         for path in ("/runtime", "/source", "/source", "/checkpoint", "/checkpoint"):
-            assert _send("GET", http.url + path, None, {}).body == http.objects[path]
+            assert send_request("GET", http.url + path, None, {}).body == http.objects[path]
         http.objects["/result"] = payload
         for _ in range(4):
-            assert _send("GET", http.url + "/result", None, {}).body == payload
+            assert send_request("GET", http.url + "/result", None, {}).body == payload
     unchanged = tuple(
         e for e in after.events if e.operation != "GET" or e.purpose == "control" or e.status == 403
     )
@@ -866,9 +866,9 @@ def test_the_launcher_fetches_a_multipart_output_and_retains_each_part(
     monkeypatch.setenv("RUNPOD_API_KEY", "fixture")
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "a")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "s")
-    monkeypatch.setattr(client, "_send", http.send)
+    monkeypatch.setattr(client, "send_request", http.send)
     before = {e.id for e in b.store.transfers()}
-    fetched = client._open(tmp_path).fetch(run, "checkpoint.pt", tmp_path / "fetched")
+    fetched = client.open_file(tmp_path).fetch(run, "checkpoint.pt", tmp_path / "fetched")
     assert fetched.read_bytes() == payload
     parts = [e for e in b.store.transfers() if e.id not in before and e.purpose == "result"]
     assert sorted(e.byte_range or "" for e in parts) == [
@@ -897,7 +897,7 @@ def test_active_cache_capacity_streams_another_digest_without_overfilling(
     assert active.read_bytes() == b"reservedsize"
 
 
-class _Bucket:
+class PresignedBucket:
     """Presigned reads served by a moto bucket, so a job's fetch and a report's read
     reach the same object, counted by one client. Links are the launcher's own."""
 
@@ -945,7 +945,7 @@ def test_a_job_fetch_and_a_report_read_download_once_in_either_order(
                 Bucket="lab", CreateBucketConfiguration={"LocationConstraint": region}
             )
         client.put_object(Bucket="lab", Key=key, Body=b"abcdefghijkl")
-        bucket = _Bucket(client, region)
+        bucket = PresignedBucket(client, region)
 
         # Each reader opens this computer's cache afresh, as separate processes do.
         def job() -> bytes:
@@ -1041,7 +1041,7 @@ def test_ranges_of_a_held_block_are_read_locally_until_it_is_corrupted(tmp_path:
         assert not held.exists()
 
 
-class _Held:
+class Held:
     """Content a test already has, read without a network."""
 
     def __init__(self, body: bytes) -> None:
@@ -1069,8 +1069,8 @@ def test_many_small_entries_leave_one_file_each(tmp_path: Path) -> None:
     cache = Cache(tmp_path / "cache")
     bodies = [f"block {n}".encode() for n in range(300)]
     for body in bodies:
-        assert cache.read(_Held(body).artifact, _Held(body)) == body
-    assert cache.read(_Held(bodies[0]).artifact, _Held(bodies[0])) == bodies[0]
+        assert cache.read(Held(body).artifact, Held(body)) == body
+    assert cache.read(Held(bodies[0]).artifact, Held(bodies[0])) == bodies[0]
     # Content, then the capacity lock and the usage note; locks come from a fixed set.
     files = [p for p in cache.root.iterdir() if p.is_file()]
     assert len(files) == len(bodies) + 2
@@ -1081,9 +1081,9 @@ def test_bytes_removed_behind_the_cache_are_measured_before_it_refuses(tmp_path:
     cache = Cache(tmp_path / "cache", max_bytes=24)
     first, second, third = b"abcdefghijkl", b"mnopqrstuvwx", b"yz0123456789"
     for body in (first, second):
-        cache.place(_Held(body).artifact, tmp_path / "out", _Held(body))
+        cache.place(Held(body).artifact, tmp_path / "out", Held(body))
     (cache.root / Content.of(first).name).unlink()
-    cache.place(_Held(third).artifact, tmp_path / "out", _Held(third))
+    cache.place(Held(third).artifact, tmp_path / "out", Held(third))
     assert (cache.root / Content.of(third).name).read_bytes() == third
     held = [p for p in cache.root.iterdir() if p.is_file() and "-" in p.name]
     assert sum(p.stat().st_size for p in held) <= 24
@@ -1094,7 +1094,7 @@ def test_bytes_removed_behind_the_cache_are_measured_before_it_refuses(tmp_path:
 def test_ranges_preserve_requested_versions_at_one_location(
     tmp_path: Path, reverse: bool, max_bytes: int
 ) -> None:
-    sources = [_Held(b"abcdef"), _Held(b"UVWXYZ")]
+    sources = [Held(b"abcdef"), Held(b"UVWXYZ")]
     if reverse:
         sources.reverse()
     artifacts = [
@@ -1116,7 +1116,7 @@ def test_ranges_preserve_requested_versions_at_one_location(
 
 
 def test_a_range_verifies_the_requested_digest_before_exposing_bytes(tmp_path: Path) -> None:
-    expected, wrong = _Held(b"abcdef"), _Held(b"abcdeX")
+    expected, wrong = Held(b"abcdef"), Held(b"abcdeX")
     cache = Cache(tmp_path / "cache", range_bytes=2)
     # The requested range matches; corruption elsewhere still invalidates the version.
     with pytest.raises(engine.Mismatch):
@@ -1125,7 +1125,7 @@ def test_a_range_verifies_the_requested_digest_before_exposing_bytes(tmp_path: P
 
 
 def test_a_range_never_exposes_corrupted_cached_content(tmp_path: Path) -> None:
-    source = _Held(b"abcdef")
+    source = Held(b"abcdef")
     cache = Cache(tmp_path / "cache")
     assert cache.read(source.artifact, source) == source.body
     held = cache.root / Content.of(source.body).name
@@ -1136,14 +1136,14 @@ def test_a_range_never_exposes_corrupted_cached_content(tmp_path: Path) -> None:
 
 
 def test_a_range_past_the_recorded_length_is_refused_before_reading(tmp_path: Path) -> None:
-    source = _Held(b"abcdef")
+    source = Held(b"abcdef")
     with pytest.raises(ValueError, match="past"):
         Cache(tmp_path / "cache").read(source.artifact, source, start=4, length=3)
     assert source.read_bytes == 0
 
 
 def test_one_artifact_at_two_locations_is_read_once(tmp_path: Path) -> None:
-    source = _Held(b"abcdef")
+    source = Held(b"abcdef")
     cache = Cache(tmp_path / "cache")
     elsewhere = source.artifact.model_copy(update={"location": "https://mirror.example/result"})
     assert cache.read(source.artifact, source) == cache.read(elsewhere, source) == source.body
@@ -1155,13 +1155,13 @@ def test_held_content_survives_eviction_until_its_holder_releases_it(tmp_path: P
     cache = Cache(tmp_path / "cache", max_bytes=12)
     first, second = b"abcdefghijkl", b"mnopqrstuvwx"
     kept = Content.of(first)
-    held = cache.hold(_Held(first).artifact, _Held(first), holder="s1", staging=tmp_path / "a")
+    held = cache.hold(Held(first).artifact, Held(first), holder="s1", staging=tmp_path / "a")
     assert held == cache.root / kept.name and held.stat().st_mode & 0o777 == 0o444
-    cache.place(_Held(second).artifact, tmp_path / "second", _Held(second))
+    cache.place(Held(second).artifact, tmp_path / "second", Held(second))
     assert held.read_bytes() == first
     assert not (cache.root / Content.of(second).name).exists()  # streamed, not kept
     cache.release("s1")
-    cache.place(_Held(second).artifact, tmp_path / "second", _Held(second))
+    cache.place(Held(second).artifact, tmp_path / "second", Held(second))
     assert not held.exists()
     assert (cache.root / Content.of(second).name).read_bytes() == second
     assert not (tmp_path / "a").exists()  # held in place: nothing was copied
@@ -1171,7 +1171,7 @@ def test_held_content_is_verified_when_asked_for_and_discarded_when_corrupt(
     tmp_path: Path,
 ) -> None:
     cache = Cache(tmp_path / "cache")
-    source = _Held(b"abcdef")
+    source = Held(b"abcdef")
     held = cache.hold(source.artifact, source, holder="s1", staging=tmp_path / "a")
     content = Content.of(source.body)
     assert cache.held(content) == held
@@ -1184,16 +1184,16 @@ def test_held_content_is_verified_when_asked_for_and_discarded_when_corrupt(
 def test_held_content_is_hashed_once_while_unchanged(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    source = _Held(bytes(range(256)) * 64)
+    source = Held(bytes(range(256)) * 64)
     Cache(tmp_path / "cache").read(source.artifact, source)
     hashed: list[Path] = []
-    digest = engine._digest
+    digest = engine.digest
 
     def counted(path: Path) -> str:
         hashed.append(path)
         return digest(path)
 
-    monkeypatch.setattr(engine, "_digest", counted)
+    monkeypatch.setattr(engine, "digest", counted)
     cache = Cache(tmp_path / "cache")
     content = Content.of(source.body)
     assert cache.read(source.artifact, source) == source.body
@@ -1354,7 +1354,7 @@ def test_a_failed_delivery_leaves_how_the_job_ended_and_says_why(
     def stalled(run: str, done: bool) -> None:
         raise StorageUnavailable("PUT: no reply")
 
-    monkeypatch.setattr(courier, "_track", stalled)
+    monkeypatch.setattr(courier, "track", stalled)
     with log_to(worker_log), pytest.raises(StorageUnavailable):
         courier.carry_out()
     record = AttemptRecord.model_validate_json(http.objects["/pass/attempts/a1.json"])
@@ -1560,10 +1560,10 @@ def test_status_delivery_age_uses_only_retained_successful_writes(tmp_path: Path
     b.store.retain_transfer(good.model_copy(update={"id": "recovered", "observed_at": b.clock()}))
     assert b.scheduler.read(run).delivery_age_seconds == 0
     statements: list[str] = []
-    b.store._db.set_trace_callback(statements.append)
+    b.store.db.set_trace_callback(statements.append)
     assert b.store.last_delivery(attempt.id) == b.clock()
-    b.store._db.set_trace_callback(None)
+    b.store.db.set_trace_callback(None)
     assert len(statements) == 1
-    plan = [row[3] for row in b.store._db.execute("EXPLAIN QUERY PLAN " + statements[0])]
+    plan = [row[3] for row in b.store.db.execute("EXPLAIN QUERY PLAN " + statements[0])]
     assert any("USING INDEX transfers_delivery" in step for step in plan)
     b.store.close()

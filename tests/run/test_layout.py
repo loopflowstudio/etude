@@ -13,7 +13,7 @@ from pathlib import Path
 SOURCE = Path(__file__).resolve().parents[2] / "src"
 
 
-def _imports(package: str) -> dict[Path, set[str]]:
+def imported_modules(package: str) -> dict[Path, set[str]]:
     """Every module each file of a package names in an import, at any depth in the file."""
     found: dict[Path, set[str]] = {}
     for path in (SOURCE / package.replace(".", "/")).rglob("*.py"):
@@ -27,7 +27,7 @@ def _imports(package: str) -> dict[Path, set[str]]:
     return found
 
 
-def _within(name: str, package: str) -> bool:
+def within(name: str, package: str) -> bool:
     return name == package or name.startswith(package + ".")
 
 
@@ -38,10 +38,10 @@ def test_shared_run_code_imports_no_kind_of_run_and_training_imports_no_evaluati
         "etude.eval": ("etude.train", "etude.launch"),
     }
     for package, forbidden in rules.items():
-        imports = _imports(package)
+        imports = imported_modules(package)
         assert imports, package
         for path, names in imports.items():
-            assert not [n for n in names for f in forbidden if _within(n, f)], path
+            assert not [n for n in names for f in forbidden if within(n, f)], path
 
 
 def test_only_the_top_level_command_and_typed_jobs_import_evaluation() -> None:
@@ -52,16 +52,16 @@ def test_only_the_top_level_command_and_typed_jobs_import_evaluation() -> None:
         SOURCE / "etude/page.py",
         SOURCE / "etude/smoke.py",
     }
-    for path, names in _imports("etude").items():
+    for path, names in imported_modules("etude").items():
         if not path.is_relative_to(SOURCE / "etude/eval") and path not in composers:
-            assert not [n for n in names if _within(n, "etude.eval")], path
+            assert not [n for n in names if within(n, "etude.eval")], path
 
 
 def test_the_eval_run_imports_nothing_arranged_on_top_of_it() -> None:
     path = SOURCE / "etude/eval/match.py"
-    names = _imports("etude.eval")[path]
+    names = imported_modules("etude.eval")[path]
     above = ("etude.eval.tournament", "etude.eval.query")
-    assert not [n for n in names for f in above if _within(n, f)]
+    assert not [n for n in names for f in above if within(n, f)]
 
 
 def test_carriage_rules_import_only_the_standard_library() -> None:

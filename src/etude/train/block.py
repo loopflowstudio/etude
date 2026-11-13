@@ -115,19 +115,19 @@ class Builder:
     """Collects rows by column as they are logged."""
 
     def __init__(self, clocks: Sequence[str]) -> None:
-        self._clocks: dict[str, list[float]] = {name: [] for name in clocks}
-        self._wall: list[int] = []
-        self._rows: dict[tuple[str, Kind], list[int]] = {}
-        self._data: dict[tuple[str, Kind], list[float | int]] = {}
-        self._labels: dict[str, dict[str | None, int]] = {}
+        self.clocks: dict[str, list[float]] = {name: [] for name in clocks}
+        self.wall: list[int] = []
+        self.rows: dict[tuple[str, Kind], list[int]] = {}
+        self.data: dict[tuple[str, Kind], list[float | int]] = {}
+        self.labels: dict[str, dict[str | None, int]] = {}
 
     def __len__(self) -> int:
-        return len(self._wall)
+        return len(self.wall)
 
     def add(self, wall_ms: int, clocks: Mapping[str, float], values: Mapping[str, object]) -> None:
-        row = len(self._wall)
-        self._wall.append(wall_ms)
-        for name, column in self._clocks.items():
+        row = len(self.wall)
+        self.wall.append(wall_ms)
+        for name, column in self.clocks.items():
             column.append(clocks.get(name, np.nan))
         for name, value in values.items():
             item: float | int
@@ -138,27 +138,27 @@ class Builder:
                 key, item = (name, "metric"), float(value)
             else:
                 key = (name, "text")
-                labels = self._labels.setdefault(name, {})
+                labels = self.labels.setdefault(name, {})
                 text = None if value is None else str(value)
                 item = labels.setdefault(text, len(labels))
-            self._rows.setdefault(key, []).append(row)
-            self._data.setdefault(key, []).append(item)
+            self.rows.setdefault(key, []).append(row)
+            self.data.setdefault(key, []).append(item)
 
     def table(self, writer: str, sequence: int) -> Table:
-        count = len(self._wall)
+        count = len(self.wall)
         series: dict[tuple[str, Kind], Series] = {}
-        for key, data in self._data.items():
+        for key, data in self.data.items():
             series[key] = Series(
-                rows=None if len(data) == count else np.asarray(self._rows[key], dtype="<u4"),
+                rows=None if len(data) == count else np.asarray(self.rows[key], dtype="<u4"),
                 data=np.asarray(data, dtype=DTYPES[key[1]]),
-                labels=tuple(self._labels.get(key[0], {})) if key[1] == "text" else (),
+                labels=tuple(self.labels.get(key[0], {})) if key[1] == "text" else (),
             )
         return Table(
             writer=writer,
             first=sequence,
             last=sequence,
-            wall_ms=np.asarray(self._wall, dtype="<i8"),
-            clocks={name: np.asarray(column, dtype="<f8") for name, column in self._clocks.items()},
+            wall_ms=np.asarray(self.wall, dtype="<i8"),
+            clocks={name: np.asarray(column, dtype="<f8") for name, column in self.clocks.items()},
             series=series,
         )
 
@@ -267,7 +267,7 @@ class Header(Record):
 
 
 @dataclass
-class _Layout:
+class Layout:
     """Arrays placed one after another on aligned boundaries."""
 
     chunks: list[bytes] = field(default_factory=list)
@@ -339,7 +339,7 @@ def reduce(table: Table, factor: int) -> Reduction:
 
 def encode(table: Table) -> bytes:
     """The table as one block file."""
-    layout = _Layout()
+    layout = Layout()
     rollups: list[RollupColumn] = []
     for factor in (16, 256, 4096):
         if table.rows < factor:

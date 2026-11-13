@@ -37,7 +37,7 @@ def program_archive(*, guardian: bool = False) -> bytes:
     paths = (root / name for name in FILES) if guardian else root.rglob("*.py")
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
         for path in sorted(paths):
-            _write(archive, "etude/" + path.relative_to(root).as_posix(), path.read_bytes())
+            write(archive, "etude/" + path.relative_to(root).as_posix(), path.read_bytes())
         package = root / "_package"
         if not package.exists():
             package = root.parents[1]
@@ -49,11 +49,11 @@ def program_archive(*, guardian: bool = False) -> bytes:
                 # The archive carries code, not the project page the README makes.
                 body = body.replace('readme = "README.md"\n', "")
                 body += '\n[tool.hatch.build.targets.wheel.force-include]\n"pyproject.toml" = "etude/_package/pyproject.toml"\n"uv.lock" = "etude/_package/uv.lock"\n'
-            _write(archive, name, body)
+            write(archive, name, body)
     return out.getvalue()
 
 
-def _write(archive: zipfile.ZipFile, name: str, body: bytes | str) -> None:
+def write(archive: zipfile.ZipFile, name: str, body: bytes | str) -> None:
     # ZipInfo's fixed timestamp keeps digests independent of file mtimes.
     entry = zipfile.ZipInfo(name)
     entry.compress_type = zipfile.ZIP_DEFLATED

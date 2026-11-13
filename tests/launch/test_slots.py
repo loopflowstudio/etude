@@ -15,7 +15,7 @@ from tests.launch.fake import bench, output_bytes
 JOB = Job(command="train", max_hours=1, max_usd=Decimal(1))
 
 
-def _hours_usd(seconds: int, price: str = "0.59") -> Decimal:
+def hours_usd(seconds: int, price: str = "0.59") -> Decimal:
     return Decimal(price) * seconds / 3600
 
 
@@ -63,11 +63,11 @@ def test_runs_sharing_a_machine_split_its_cost_and_cancel_independently(tmp_path
     b.run(400)
     assert b.scheduler.read(second).outcome == "succeeded"
     # Together for 300 s, each pays half; then the second pays its 300 s alone.
-    assert b.scheduler.read(first).usd == _hours_usd(300) / 2
-    assert b.scheduler.read(second).usd == _hours_usd(300) / 2 + _hours_usd(300)
+    assert b.scheduler.read(first).usd == hours_usd(300) / 2
+    assert b.scheduler.read(second).usd == hours_usd(300) / 2 + hours_usd(300)
     # The runs share what they occupied; idle time before the machine ended is the rental's.
     occupied = b.scheduler.read(first).usd + b.scheduler.read(second).usd
-    assert round(occupied, 12) == round(_hours_usd(600), 12) < b.scheduler.rentals()[0][1]
+    assert round(occupied, 12) == round(hours_usd(600), 12) < b.scheduler.rentals()[0][1]
 
 
 def test_each_run_on_a_shared_machine_publishes_its_own_outputs(tmp_path: Path) -> None:
@@ -130,7 +130,7 @@ def test_a_real_worker_runs_two_slots_at_once_with_their_own_outputs(tmp_path: P
     service = local_service(tmp_path / "sessions")
     scheduler = Scheduler(Database(tmp_path / "launcher.db"), {"local": lambda held: service})
     scheduler.add_pool(Pool(name="local", slots=2))
-    scheduler._store.add_machine(Machine(name="local", pool="local", kind="local"))
+    scheduler.store.add_machine(Machine(name="local", pool="local", kind="local"))
     job = Job(command=RENDEZVOUS.format(meet=meet), max_hours=0.1)
     runs = scheduler.queue_cohort("pair", job.runs(1, 2), "local", parallel=1)
     for _ in range(400):

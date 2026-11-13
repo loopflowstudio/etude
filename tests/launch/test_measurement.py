@@ -285,7 +285,7 @@ def test_profile_and_opt_in_spans(
     profile = tmp_path / "help.pstats"
     assert main(["--profile", str(profile), "--help"]) == 0
     assert "track what they record" in capsys.readouterr().out
-    assert "_main" in pstats.Stats(str(profile)).get_stats_profile().func_profiles
+    assert "run_command" in pstats.Stats(str(profile)).get_stats_profile().func_profiles
     destination = tmp_path / "spans.log"
     monkeypatch.setenv("ETUDE_SPANS", str(destination))
     values = iter([10.0, 10.25])

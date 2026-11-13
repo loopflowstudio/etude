@@ -201,7 +201,7 @@ def test_a_pod_is_found_by_name_across_pages_and_absence_needs_the_last_page() -
 
 
 def test_delete_dates_only_the_exact_live_pod() -> None:
-    fact = RunPodAPI._pod(POD)
+    fact = RunPodAPI.pod_fact(POD)
     live = Provider(replies={"GET pods/abc123": (200, POD), "DELETE pods/abc123": (200, None)})
     assert RunPodAPI("key", live).delete(fact).tzinfo is not None
     assert [method for method, _, _ in live.asked] == ["GET", "DELETE"]
@@ -217,7 +217,7 @@ def test_delete_dates_only_the_exact_live_pod() -> None:
 
 
 def test_bills_are_whole_hours_for_this_pod_only() -> None:
-    fact = RunPodAPI._pod(POD)
+    fact = RunPodAPI.pod_fact(POD)
     now = datetime(2026, 10, 11, 14, 30, tzinfo=UTC)
     hour = {
         "podId": "abc123",
@@ -283,7 +283,7 @@ def test_stock_create_counts_package_reuse_without_waiting_for_ssh(tmp_path: Pat
     # Receipt lookup neither polls for an SSH address nor rewrites frozen facts.
     receipt_key = "test/sessions/7f3a/receipt.json"
     for address in (None, "ssh://root@127.0.0.1:22"):
-        receipt = RunPodAPI._pod(POD).model_copy(update={"address": address})
+        receipt = RunPodAPI.pod_fact(POD).model_copy(update={"address": address})
         body = receipt.model_dump_json().encode()
         storage.objects[receipt_key] = body
         with counting.record():

@@ -34,16 +34,16 @@ def resolve_runs(scheduler: Scheduler, names: Sequence[str]) -> list[str]:
     return ids
 
 
-def _here() -> str:
+def here() -> str:
     """What to call the machine that holds the database, as its owner would read it."""
     return "the controller" if os.environ.get("ETUDE_CONTROLLER_LOCAL") else "this computer"
 
 
-def _machine_name(machine: Machine) -> str:
-    return _here() if machine.kind == "local" else machine.name
+def machine_name(machine: Machine) -> str:
+    return here() if machine.kind == "local" else machine.name
 
 
-def _marks(scheduler: Scheduler, name: str) -> str:
+def pool_lines(scheduler: Scheduler, name: str) -> str:
     chosen = scheduler.default_target()
     return " (default)" if name in (chosen.pool, chosen.rent) else ""
 
@@ -51,8 +51,8 @@ def _marks(scheduler: Scheduler, name: str) -> str:
 def show_pools(scheduler: Scheduler) -> None:
     """One line per pool: the machines you own in it."""
     for each in scheduler.pools():
-        owned = ", ".join(_machine_name(m) for m in scheduler.machines(each.name))
-        marks = _marks(scheduler, each.name) + (" (off)" if each.off else "")
+        owned = ", ".join(machine_name(m) for m in scheduler.machines(each.name))
+        marks = pool_lines(scheduler, each.name) + (" (off)" if each.off else "")
         slots = f"; {each.slots} runs at once on each" if each.slots > 1 else ""
         print(each.name, (owned or "no machines") + slots + marks, sep="  ")
 
@@ -77,16 +77,16 @@ def show_ondemands(scheduler: Scheduler) -> None:
         parts.append("safeguards: " + ", ".join(scheduler.safeguards(each.name)))
         if each.storage:
             parts.append(f"records in {each.storage}")
-        print(each.name, "; ".join(parts) + _marks(scheduler, each.name), sep="  ")
+        print(each.name, "; ".join(parts) + pool_lines(scheduler, each.name), sep="  ")
 
 
 def show_machines(scheduler: Scheduler, *, ended: bool, images: bool = False) -> None:
     """One line per machine: owned with its cost and expiry, or rented with its window and cost."""
     windows = {rental.machine: (rental, usd) for rental, usd in scheduler.rentals()}
-    now = scheduler._clock()
+    now = scheduler.clock()
     for each in scheduler.pools():
         for machine in scheduler.machines(each.name):
-            where = f" ({_here()})" if machine.kind == "local" else ""
+            where = f" ({here()})" if machine.kind == "local" else ""
             if machine.expires_at is None:
                 expiry = "never expires"
             elif machine.expired(now):
@@ -104,7 +104,7 @@ def show_machines(scheduler: Scheduler, *, ended: bool, images: bool = False) ->
             if machine.name not in windows or (machine.deleted_at is not None and not ended):
                 continue
             rental, usd = windows[machine.name]
-            estimated = scheduler._estimated(rental, now)
+            estimated = scheduler.estimated(rental, now)
             cost = f"{'~' if estimated else ''}${usd:.2f}"
             if rental.billed_through is not None:
                 cost = f"${rental.billed_usd:.4f} billed" + (

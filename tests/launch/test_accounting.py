@@ -48,7 +48,7 @@ def test_unstarted_machine_is_deleted_after_configured_startup_allowance(tmp_pat
     b.scheduler.set_startup("l4", 600)
 
     b.service.observe = lambda session_id: Observation(  # type: ignore[method-assign]
-        alive=b.service._alive(b.service.sessions[session_id]), progress=()
+        alive=b.service.alive(b.service.sessions[session_id]), progress=()
     )
     b.service.started = lambda session_id: False  # type: ignore[method-assign]
     run = b.scheduler.launch(

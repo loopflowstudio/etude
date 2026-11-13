@@ -20,7 +20,7 @@ from tests.run.storage import MeasuredStorage
 FIRST, LATER = "abcdef123456", "abcdef123457"
 
 
-def _messy_run(root: Path) -> None:
+def messy_run(root: Path) -> None:
     """A clock that went backwards, sparse rows, rows without the clock, and a later writer."""
     builder = Builder(["step"])
     for step in range(10):
@@ -45,18 +45,18 @@ def _messy_run(root: Path) -> None:
     write_block(root, block_key(1, 0, 0, LATER), builder.table(LATER, 0))
 
 
-def _joined(parts: list[Points]) -> Points:
+def joined_points(parts: list[Points]) -> Points:
     return Points(x=np.concatenate([p.x for p in parts]), y=np.concatenate([p.y for p in parts]))
 
 
 def test_batches_join_into_exactly_what_points_returns(tmp_path: Path) -> None:
     clock = "step"
-    _messy_run(tmp_path / run_prefix("r"))
+    messy_run(tmp_path / run_prefix("r"))
     metrics = ["value", "rare"]
     batches = list(read_batches(tmp_path, "e", "r", clock=clock, metrics=metrics))
     data = read(tmp_path, "e", "r")
     for metric in metrics:
-        joined = _joined([batch.points[metric] for batch in batches])
+        joined = joined_points([batch.points[metric] for batch in batches])
         expected = data.points(metric, clock)
         np.testing.assert_array_equal(joined.x, expected.x)
         np.testing.assert_array_equal(joined.y, expected.y)
@@ -66,10 +66,10 @@ def test_batches_join_into_exactly_what_points_returns(tmp_path: Path) -> None:
 
 
 def test_overlapping_blocks_share_a_batch_and_the_latest_write_wins(tmp_path: Path) -> None:
-    _messy_run(tmp_path / run_prefix("r"))
+    messy_run(tmp_path / run_prefix("r"))
     batches = list(read_batches(tmp_path, "e", "r", clock="step", metrics=["value", "rare"]))
     assert len(batches) == 2
-    value = _joined([batch.points["value"] for batch in batches])
+    value = joined_points([batch.points["value"] for batch in batches])
     assert value.x.tolist() == [*range(15), *range(20, 27)]
     assert value.y.tolist() == [
         *range(8),
@@ -78,11 +78,11 @@ def test_overlapping_blocks_share_a_batch_and_the_latest_write_wins(tmp_path: Pa
         21,
         *(200 + s for s in range(22, 27)),
     ]
-    rare = _joined([batch.points["rare"] for batch in batches])
+    rare = joined_points([batch.points["rare"] for batch in batches])
     assert rare.x.tolist() == [0, 3, 6, 9, 20, 21, 22]  # no later row logged rare at 9
 
 
-def _long_run(root: Path, blocks: int, rows: int = 8192) -> None:
+def long_run(root: Path, blocks: int, rows: int = 8192) -> None:
     """Permanent blocks of five metrics, with the writer's index beside them."""
     for sequence in range(blocks):
         x = np.arange(sequence * rows, (sequence + 1) * rows, dtype=np.float64)
@@ -101,8 +101,8 @@ def _long_run(root: Path, blocks: int, rows: int = 8192) -> None:
     Index(root, FIRST).write()
 
 
-def _peak(blocks: int, root: Path, streaming: bool) -> int:
-    _long_run(root / run_prefix("r"), blocks)
+def peak(blocks: int, root: Path, streaming: bool) -> int:
+    long_run(root / run_prefix("r"), blocks)
     tracemalloc.start()
     try:
         if streaming:
@@ -120,7 +120,7 @@ def _peak(blocks: int, root: Path, streaming: bool) -> int:
 
 def test_peak_memory_stays_flat_as_the_run_grows(tmp_path: Path) -> None:
     small, large = (
-        {s: _peak(blocks, tmp_path / f"{blocks}-{s}", s) for s in (True, False)}
+        {s: peak(blocks, tmp_path / f"{blocks}-{s}", s) for s in (True, False)}
         for blocks in (4, 32)
     )
     # Eight times the blocks: the whole-run reader grows with them, batches do not.
@@ -130,7 +130,7 @@ def test_peak_memory_stays_flat_as_the_run_grows(tmp_path: Path) -> None:
 
 
 def test_reads_each_block_twice_and_only_its_selected_arrays(tmp_path: Path) -> None:
-    _long_run(tmp_path / run_prefix("r"), 6)
+    long_run(tmp_path / run_prefix("r"), 6)
     measured = MeasuredStorage(DirectoryStorage(tmp_path))
     metrics = ["rl/metric_0", "rl/metric_1"]
     batches = list(read_batches(measured, "e", "r", clock="updates", metrics=metrics))
@@ -143,7 +143,7 @@ def test_reads_each_block_twice_and_only_its_selected_arrays(tmp_path: Path) -> 
 
 def test_an_unreadable_index_is_never_needed(tmp_path: Path) -> None:
     root = tmp_path / run_prefix("r")
-    _long_run(root, 3, rows=16)
+    long_run(root, 3, rows=16)
     (root / f"metrics/{FIRST}.permanent.json").write_text("not an index")
     batches = read_batches(tmp_path, "e", "r", clock="updates", metrics=["rl/metric_0"])
     assert sum(len(batch.points["rl/metric_0"]) for batch in batches) == 3 * 16
@@ -151,7 +151,7 @@ def test_an_unreadable_index_is_never_needed(tmp_path: Path) -> None:
 
 def test_a_damaged_array_raises_after_the_good_batches(tmp_path: Path) -> None:
     root = tmp_path / run_prefix("r")
-    _long_run(root, 3, rows=16)
+    long_run(root, 3, rows=16)
     key = block_key(2, 2, 2, FIRST)
     described = describe(DirectoryStorage(root), "", key)
     column = next(c for c in described.header.series if c.name == "rl/metric_0")
@@ -168,7 +168,7 @@ def test_a_damaged_array_raises_after_the_good_batches(tmp_path: Path) -> None:
 
 def test_a_sequence_gap_raises(tmp_path: Path) -> None:
     root = tmp_path / run_prefix("r")
-    _long_run(root, 3, rows=16)
+    long_run(root, 3, rows=16)
     (root / block_key(2, 1, 1, FIRST)).unlink()
     with pytest.raises(FileNotFoundError, match="block sequence gap"):
         list(read_batches(tmp_path, "e", "r", clock="updates", metrics=["rl/metric_0"]))
@@ -176,7 +176,7 @@ def test_a_sequence_gap_raises(tmp_path: Path) -> None:
 
 def test_a_compaction_while_reading_resumes_after_the_last_batch(tmp_path: Path) -> None:
     root = tmp_path / run_prefix("r")
-    _long_run(root, 3, rows=16)
+    long_run(root, 3, rows=16)
     batches = read_batches(tmp_path, "e", "r", clock="updates", metrics=["rl/metric_0"])
     parts = [next(batches).points["rl/metric_0"]]
     originals = [root / block_key(2, sequence, sequence, FIRST) for sequence in range(3)]
@@ -185,12 +185,12 @@ def test_a_compaction_while_reading_resumes_after_the_last_batch(tmp_path: Path)
     for path in originals:
         path.unlink()
     parts += [batch.points["rl/metric_0"] for batch in batches]
-    assert _joined(parts).x.tolist() == list(range(3 * 16))
+    assert joined_points(parts).x.tolist() == list(range(3 * 16))
 
 
 def test_a_slow_reader_outlasts_every_compaction_of_a_live_run(tmp_path: Path) -> None:
     root = tmp_path / run_prefix("r")
-    _long_run(root, 6, rows=16)
+    long_run(root, 6, rows=16)
     batches = read_batches(tmp_path, "e", "r", clock="updates", metrics=["rl/metric_0"])
     parts = [next(batches).points["rl/metric_0"]]
     for sequence in range(1, 6):
@@ -198,17 +198,17 @@ def test_a_slow_reader_outlasts_every_compaction_of_a_live_run(tmp_path: Path) -
         path = root / block_key(2, sequence, sequence, FIRST)
         path.rename(root / block_key(3, sequence, sequence, FIRST))
         parts.append(next(batches).points["rl/metric_0"])
-    assert _joined(parts).x.tolist() == list(range(6 * 16))
+    assert joined_points(parts).x.tolist() == list(range(6 * 16))
 
 
 def test_a_metric_no_block_logged_raises_before_any_batch(tmp_path: Path) -> None:
-    _long_run(tmp_path / run_prefix("r"), 2, rows=16)
+    long_run(tmp_path / run_prefix("r"), 2, rows=16)
     batches = read_batches(tmp_path, "e", "r", clock="updates", metrics=["rl/metric_0", "rl/lsos"])
     with pytest.raises(EtudeError, match="metric_not_logged"):
         next(batches)
 
 
 def test_one_name_given_as_a_string_is_refused(tmp_path: Path) -> None:
-    _long_run(tmp_path / run_prefix("r"), 1, rows=16)
+    long_run(tmp_path / run_prefix("r"), 1, rows=16)
     with pytest.raises(TypeError, match=r"\['rl/metric_0'\]"):
         next(read_batches(tmp_path, "e", "r", clock="updates", metrics="rl/metric_0"))

@@ -488,7 +488,7 @@ def test_finish_retries_retained_files_when_storage_recovers(tmp_path: Path) -> 
     )
     run.finish(timeout=2)
     assert not run.problems
-    assert not run._shipper.is_alive()
+    assert not run.shipper.is_alive()
     assert destination.get("final/state.json") == (run.files.root / "state.json").read_bytes()
     assert destination.requests == len(destination.keys("final")) + 1
     assert not run.files.pending(destination.name)

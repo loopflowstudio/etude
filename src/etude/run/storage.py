@@ -73,47 +73,47 @@ class DirectoryStorage:
         self.root = Path(root)
         self.name = "directory-" + self.root.resolve().as_posix().strip("/").replace("/", "-")
 
-    def _path(self, key: str) -> Path:
+    def path_of(self, key: str) -> Path:
         path = Path(key)
         if path.is_absolute() or ".." in path.parts or not path.parts:
             raise EtudeError("storage_key_denied", 403)
         return self.root / path
 
     def put(self, key: str, data: bytes) -> None:
-        target = self._path(key)
+        target = self.path_of(key)
         target.parent.mkdir(parents=True, exist_ok=True)
         partial = target.with_name(target.name + ".partial")
         partial.write_bytes(data)
         partial.replace(target)  # Readers never see half an object.
 
     def put_file(self, key: str, path: Path) -> None:
-        target = self._path(key)
+        target = self.path_of(key)
         target.parent.mkdir(parents=True, exist_ok=True)
         partial = target.with_name(target.name + ".partial")
         shutil.copyfile(path, partial)
         partial.replace(target)
 
     def delete(self, key: str) -> bool:
-        self._path(key).unlink(missing_ok=True)
+        self.path_of(key).unlink(missing_ok=True)
         return True
 
     def get(self, key: str) -> bytes:
-        return self._path(key).read_bytes()
+        return self.path_of(key).read_bytes()
 
     def get_range(self, key: str, start: int, length: int) -> bytes:
-        with self._path(key).open("rb") as stream:
+        with self.path_of(key).open("rb") as stream:
             stream.seek(start)
             return stream.read(length)
 
     def uri(self, key: str) -> str:
-        return self._path(key).resolve().as_uri()
+        return self.path_of(key).resolve().as_uri()
 
     def keys(self, prefix: str) -> list[str]:
         return sorted(self.versions(prefix))
 
     def versions(self, prefix: str) -> dict[str, str]:
         """Each file's modification time and size: a replaced file changes one or both."""
-        base = self._path(prefix) if prefix else self.root
+        base = self.path_of(prefix) if prefix else self.root
         if not base.is_dir():
             return {}
         found = {}
@@ -129,7 +129,7 @@ class DirectoryStorage:
         return found
 
 
-def _storage_request[T](operation: Callable[[], T]) -> T:
+def storage_request[T](operation: Callable[[], T]) -> T:
     # Optional cloud dependency: local storage never loads botocore.
     from botocore.exceptions import (  # type: ignore[import-untyped,import-not-found,unused-ignore]  # noqa: PLC0415
         ConnectionError,
@@ -169,7 +169,7 @@ class S3Storage:
         cache: Cache | None = None,
         provider: Literal["s3", "r2"] = "s3",
     ) -> None:
-        self.client = client or _client(provider)
+        self.client = client or make_client(provider)
         self.bucket, self.provider = bucket, provider
         self.prefix = prefix.strip("/") + "/" if prefix.strip("/") else ""
         self.name = f"{provider}-{bucket}-{self.prefix.strip('/').replace('/', '-')}".rstrip("-")
@@ -183,10 +183,10 @@ class S3Storage:
         host = endpoint.netloc
         if host == "s3.amazonaws.com":
             host = f"s3.{self.client.meta.region_name or 'us-east-1'}.amazonaws.com"
-        self._where = f"{endpoint.scheme}://{bucket}.{host}/"
+        self.where = f"{endpoint.scheme}://{bucket}.{host}/"
 
     def put(self, key: str, data: bytes) -> None:
-        _storage_request(
+        storage_request(
             lambda: self.client.put_object(
                 Bucket=self.bucket, Key=self.prefix + key, Body=data, ChecksumAlgorithm="SHA256"
             )
@@ -194,7 +194,7 @@ class S3Storage:
 
     def put_file(self, key: str, path: Path) -> None:
         # boto3 splits a large file into parts, checksums and retries each itself.
-        _storage_request(
+        storage_request(
             lambda: self.client.upload_file(
                 str(path), self.bucket, self.prefix + key, ExtraArgs={"ChecksumAlgorithm": "SHA256"}
             )
@@ -204,18 +204,18 @@ class S3Storage:
         return f"{self.provider}://{self.bucket}/{self.prefix}{key}"
 
     def get(self, key: str) -> bytes:
-        return self.cache.read(self._artifact(key), _Object(self, key))
+        return self.cache.read(self.artifact(key), Object(self, key))
 
     def get_range(self, key: str, start: int, length: int) -> bytes:
-        return self.cache.read(self._artifact(key), _Object(self, key), start=start, length=length)
+        return self.cache.read(self.artifact(key), Object(self, key), start=start, length=length)
 
-    def _artifact(self, key: str) -> Artifact:
-        location = self._where + quote(self.prefix + key, safe="-_.~/")
+    def artifact(self, key: str) -> Artifact:
+        location = self.where + quote(self.prefix + key, safe="-_.~/")
         return Artifact(location=location, immutable=immutable(key))
 
     def delete(self, key: str) -> bool:
         try:
-            _storage_request(
+            storage_request(
                 lambda: self.client.delete_object(Bucket=self.bucket, Key=self.prefix + key)
             )
         except Exception as error:
@@ -242,10 +242,10 @@ class S3Storage:
                     found[item["Key"][len(self.prefix) :]] = tag
             return found
 
-        return _storage_request(collect)
+        return storage_request(collect)
 
 
-class _Object:
+class Object:
     """One bucket object, read for the cache; reads reused from it go unrecorded."""
 
     def __init__(self, storage: S3Storage, key: str) -> None:
@@ -257,17 +257,17 @@ class _Object:
             options["Range"] = f"bytes={start}-{'' if end is None else end}"
         if etag is not None:
             options["IfMatch"] = etag
-        found = self._get(options)
+        found = self.get(options)
         assert found is not None  # only a conditional read answers "not modified"
         return found
 
     def changed(self, etag: str) -> Fetched | None:
-        return self._get({"IfNoneMatch": etag})
+        return self.get({"IfNoneMatch": etag})
 
     def reused(self, size_bytes: int, byte_range: str | None) -> None:
         pass
 
-    def _get(self, options: dict[str, str]) -> Fetched | None:
+    def get(self, options: dict[str, str]) -> Fetched | None:
         """The body and its ETag; None when `IfNoneMatch` names the current version."""
         # Optional cloud dependency: only bucket reads need streaming exceptions.
         from botocore.exceptions import HTTPClientError  # type: ignore[import-untyped,import-not-found,unused-ignore]  # noqa: PLC0415
@@ -299,7 +299,7 @@ class _Object:
             raise AssertionError("read retry loop exhausted without a result")
 
         try:
-            return _storage_request(fetch)
+            return storage_request(fetch)
         except Exception as error:
             response = getattr(error, "response", {})
             code = response.get("Error", {}).get("Code")
@@ -310,7 +310,7 @@ class _Object:
             raise
 
 
-def _client(provider: Literal["s3", "r2"]) -> Any:
+def make_client(provider: Literal["s3", "r2"]) -> Any:
     try:
         # This cloud entry point loads its SDK; local tracking does not need it.
         import boto3  # type: ignore[import-untyped,import-not-found,unused-ignore]  # noqa: PLC0415

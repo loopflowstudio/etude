@@ -38,7 +38,7 @@ def startup_timeout() -> float | None:
     return left
 
 
-def _remaining(deadline: float | None) -> float | None:
+def remaining(deadline: float | None) -> float | None:
     if (cancel := os.environ.get("ETUDE_STARTUP_CANCEL")) and Path(cancel).exists():
         raise InterruptedError("startup cancelled")
     if deadline is None:
@@ -49,7 +49,7 @@ def _remaining(deadline: float | None) -> float | None:
     return left
 
 
-def _sync(command: list[str], root: Path, deadline: float | None) -> None:
+def sync(command: list[str], root: Path, deadline: float | None) -> None:
     """Collect complete sanitized lines while uv runs; reap its group on failure."""
     console = Console("client install")
     with subprocess.Popen(
@@ -70,12 +70,12 @@ def _sync(command: list[str], root: Path, deadline: float | None) -> None:
             selector.register(child.stdout, selectors.EVENT_READ)
             try:
                 while selector.get_map():
-                    for key, _ in selector.select(min(0.1, _remaining(deadline) or 0.1)):
+                    for key, _ in selector.select(min(0.1, remaining(deadline) or 0.1)):
                         body = os.read(key.fd, 65536)
                         console.write(body, final=not body)
                         if not body:
                             selector.unregister(key.fileobj)
-                status = child.wait(timeout=_remaining(deadline))
+                status = child.wait(timeout=remaining(deadline))
                 if status:
                     raise subprocess.CalledProcessError(status, command)
             except BaseException:
@@ -102,12 +102,12 @@ def install(code: bytes) -> Path:
     root.mkdir(exist_ok=True, mode=0o700)
     with (root / "install.lock").open("w") as lock:
         while True:
-            _remaining(deadline)
+            remaining(deadline)
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
             except BlockingIOError:
-                left = _remaining(deadline)
+                left = remaining(deadline)
                 time.sleep(min(0.05, left) if left is not None else 0.05)
         if not (root / "ready").exists():
             uv = shutil.which("uv")
@@ -117,7 +117,7 @@ def install(code: bytes) -> Path:
                 archive.extractall(root)
             write_log("client install", "starting uv sync")
             try:
-                _sync(
+                sync(
                     [
                         uv,
                         "sync",

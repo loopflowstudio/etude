@@ -9,7 +9,7 @@ folder that is never rewritten:
     blocks/WRITTEN.WRITER/ROLLUP.parquet each match's partial totals of a `Rollup`
     blocks/WRITTEN.WRITER/block.json     the `Block`: its match records, tables and blobs
 
-They are written and delivered in that order (`etude.carriage._rank`), so a
+They are written and delivered in that order (`etude.carriage.rank`), so a
 reader that finds `block.json` finds the rest. WRITTEN is the seal's time in
 zero-padded nanoseconds, so block names order by when they were sealed and a
 match's rows come from the latest block holding them. Plain DuckDB reads a
@@ -72,19 +72,19 @@ SEAL_BYTES = 256 * 2**20
 # Rows per Parquet row group: the unit a filtered read keeps or skips.
 ROW_GROUP_ROWS = 8192
 # A staging folder's rollups, so a dead writer's matches are sealed with its own.
-_ROLLUPS = "rollups.json"
-_ROLLUP_LIST: TypeAdapter[tuple[Rollup, ...]] = TypeAdapter(tuple[Rollup, ...])
+ROLLUPS = "rollups.json"
+ROLLUP_LIST: TypeAdapter[tuple[Rollup, ...]] = TypeAdapter(tuple[Rollup, ...])
 # What a staging folder holds, each in its own folder.
-_PARTS = ("tables", "rollups", "blobs", "records")
+PARTS = ("tables", "rollups", "blobs", "records")
 # Columns a rollup joins tables on, where both have them.
-_JOINED = ("run", "match", "seat", "game")
+JOINED = ("run", "match", "seat", "game")
 # Types a sum totals as whole numbers. A column no row gave is a null, INTEGER.
-_WHOLE = frozenset(
+WHOLE = frozenset(
     ["BOOLEAN", "TINYINT", "SMALLINT", "INTEGER", "BIGINT",
      "UTINYINT", "USMALLINT", "UINTEGER", "UBIGINT", "HUGEINT", "UHUGEINT"]
 )  # fmt: skip
 # A ZIP local file header's fixed part, before the member's name and extra field.
-_LOCAL_HEADER = 30
+LOCAL_HEADER = 30
 
 
 class Span(Record):
@@ -189,18 +189,18 @@ class Staging:
     def __init__(self, root: Path, writer: str, rollups: Sequence[Rollup] = ()) -> None:
         self.root, self.writer, self.rollups = root, writer, tuple(rollups)
         self.path = root / EVAL_BLOCKS / f".{writer}"
-        for part in _PARTS:
+        for part in PARTS:
             (self.path / part).mkdir(parents=True, exist_ok=True)
         # When the open segment's first match was staged here, and its blob bytes.
-        self._opened: float | None = None
-        self._bytes = 0
-        self._lock = os.open(self.path / "lock", os.O_CREAT | os.O_RDWR)
+        self.opened: float | None = None
+        self.bytes = 0
+        self.lock = os.open(self.path / "lock", os.O_CREAT | os.O_RDWR)
         try:
-            fcntl.flock(self._lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(self.lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            os.close(self._lock)
+            os.close(self.lock)
             raise
-        _write(self.path / _ROLLUPS, _ROLLUP_LIST.dump_json(self.rollups))
+        write_whole(self.path / ROLLUPS, ROLLUP_LIST.dump_json(self.rollups))
 
     def table(self, table: str, match: Digest) -> Path:
         """Where a match's rows of `table` are written, as Parquet."""
@@ -217,18 +217,18 @@ class Staging:
     def stage(self, record: MatchRecord, blobs: Sequence[bytes] = ()) -> None:
         """Keep a match's blobs, then its record: the match is staged."""
         for body in blobs:
-            _write(self.path / "blobs" / hashlib.sha256(body).hexdigest(), body)
-        _write(
+            write_whole(self.path / "blobs" / hashlib.sha256(body).hexdigest(), body)
+        write_whole(
             self.path / "records" / f"{record.match.key}.json", record.model_dump_json().encode()
         )
-        if self._opened is None:
-            self._opened = time.monotonic()
-        self._bytes += sum(len(body) for body in blobs)
+        if self.opened is None:
+            self.opened = time.monotonic()
+        self.bytes += sum(len(body) for body in blobs)
 
     def due(self) -> bool:
         """Whether the segment staged here should be sealed: old enough or large enough."""
-        return self._opened is not None and (
-            time.monotonic() - self._opened >= SEAL_SECONDS or self._bytes >= SEAL_BYTES
+        return self.opened is not None and (
+            time.monotonic() - self.opened >= SEAL_SECONDS or self.bytes >= SEAL_BYTES
         )
 
     def seal(self, db: duckdb.DuckDBPyConnection) -> Block | None:
@@ -270,17 +270,17 @@ class Staging:
             rollups=self.rollups,
             partials=partials,
         )
-        for part in _PARTS:
+        for part in PARTS:
             shutil.rmtree(self.path / part)
             (self.path / part).mkdir()
-        self._opened, self._bytes = None, 0
+        self.opened, self.bytes = None, 0
         return block
 
     def close(self) -> None:
         """Release the folder; an empty one is removed."""
         if not any((self.path / "records").iterdir()):
             shutil.rmtree(self.path, ignore_errors=True)
-        os.close(self._lock)
+        os.close(self.lock)
 
 
 def seal_abandoned(root: Path, db: duckdb.DuckDBPyConnection) -> None:
@@ -291,8 +291,8 @@ def seal_abandoned(root: Path, db: duckdb.DuckDBPyConnection) -> None:
     for path in sorted(folder.iterdir()):
         if not (path.is_dir() and path.name.startswith(".")):
             continue
-        kept = path / _ROLLUPS
-        rollups = _ROLLUP_LIST.validate_json(kept.read_bytes()) if kept.is_file() else ()
+        kept = path / ROLLUPS
+        rollups = ROLLUP_LIST.validate_json(kept.read_bytes()) if kept.is_file() else ()
         try:
             staging = Staging(root, path.name[1:], rollups)
         except BlockingIOError:
@@ -323,16 +323,16 @@ def write(
     name = f"{written:020d}.{writer}"
     folder = root / EVAL_BLOCKS / name
     folder.mkdir(parents=True)
-    pack, spans = (None, {}) if not blobs else _pack(folder / EVAL_BLOCK_PACK, blobs)
+    pack, spans = (None, {}) if not blobs else pack_blobs(folder / EVAL_BLOCK_PACK, blobs)
     for table, paths in tables.items():
-        merged = _parquet(paths)
-        order = ", ".join(_quoted(c for c in ("match", "game") if c in _columns(db, merged)))
-        _copy(db, f"select * from {merged} order by {order}", folder / f"{table}.parquet")
+        merged = parquet(paths)
+        order = ", ".join(quoted(c for c in ("match", "game") if c in columns(db, merged)))
+        copy(db, f"select * from {merged} order by {order}", folder / f"{table}.parquet")
     totals = [rollup for rollup in rollups if partials.get(rollup.name)]
     for rollup in totals:
-        order = ", ".join(_quoted(["run", "match", *rollup.by]))
-        merged = _parquet(partials[rollup.name])
-        _copy(db, f"select * from {merged} order by {order}", folder / f"{rollup.name}.parquet")
+        order = ", ".join(quoted(["run", "match", *rollup.by]))
+        merged = parquet(partials[rollup.name])
+        copy(db, f"select * from {merged} order by {order}", folder / f"{rollup.name}.parquet")
     block = Block(
         writer=writer,
         written_ns=written,
@@ -344,7 +344,7 @@ def write(
         rollups=tuple(rollups),
         totals=tuple(rollup.name for rollup in totals),
     )
-    _write(folder / EVAL_BLOCK_INDEX, block.model_dump_json().encode())
+    write_whole(folder / EVAL_BLOCK_INDEX, block.model_dump_json().encode())
     return block
 
 
@@ -369,21 +369,21 @@ def partial_totals(
     if not all(tables.get(table) for table in (rollup.table, *rollup.join)):
         return False
     try:
-        source = _joined(db, rollup, tables, matches)
-        held = _columns(db, source)
+        source = joined_rows(db, rollup, tables, matches)
+        held = columns(db, source)
         expressions = [*rollup.sums.values(), *([rollup.where] if rollup.where else [])]
-        named = {c for each in expressions for c in _referenced(db, rollup, each)}
+        named = {c for each in expressions for c in referenced(db, rollup, each)}
         if absent := sorted(c for c in {*rollup.by, *named} if c not in held):
-            nulls = ", ".join(f"null as {c}" for c in _quoted(absent))
+            nulls = ", ".join(f"null as {c}" for c in quoted(absent))
             source = f"(select *, {nulls} from {source})"
         sums = []
         for column, expression in rollup.sums.items():
-            kind = _sum_type(db, rollup, column, f"select ({expression}) from {source}")
+            kind = sum_type(db, rollup, column, f"select ({expression}) from {source}")
             total = f"coalesce(sum(cast(({expression}) as {kind})), 0)"
             sums.append(f'cast({total} as {kind}) as "{column}"')
         where = f" where ({rollup.where})" if rollup.where else ""
-        keys = ", ".join(_quoted(["run", "match", *rollup.by]))
-        _copy(
+        keys = ", ".join(quoted(["run", "match", *rollup.by]))
+        copy(
             db,
             f"select {keys}, count(*) as {ROLLUP_ROWS}{''.join(', ' + each for each in sums)}"
             f" from {source}{where} group by {keys} order by {keys}",
@@ -394,26 +394,26 @@ def partial_totals(
     return True
 
 
-def _joined(
+def joined_rows(
     db: duckdb.DuckDBPyConnection,
     rollup: Rollup,
     tables: Mapping[str, Sequence[Path]],
     matches: Sequence[Match],
 ) -> str:
     """A rollup's rows: its table joined to the others, with each seat's players when `by` names them."""
-    source = _parquet(tables[rollup.table])
+    source = parquet(tables[rollup.table])
     for table in rollup.join:
-        held, other = _columns(db, source), _columns(db, _parquet(tables[table]))
-        keys = [c for c in _JOINED if c in held and c in other]
+        held, other = columns(db, source), columns(db, parquet(tables[table]))
+        keys = [c for c in JOINED if c in held and c in other]
         shared = [c for c in other if c in held and c not in keys]
-        dropped = f" exclude ({', '.join(_quoted(shared))})" if shared else ""
+        dropped = f" exclude ({', '.join(quoted(shared))})" if shared else ""
         source = (
-            f"(select * from {source} join (select *{dropped} from {_parquet(tables[table])})"
-            f" using ({', '.join(_quoted(keys))}))"
+            f"(select * from {source} join (select *{dropped} from {parquet(tables[table])})"
+            f" using ({', '.join(quoted(keys))}))"
         )
     if not set(rollup.by) & set(ROLLUP_SEATED):
         return source
-    held = _columns(db, source)
+    held = columns(db, source)
     if "seat" not in held:
         raise EtudeError("rollup_needs_seat", 422) from ValueError(rollup.name)
     if set(held) & set(ROLLUP_SEATED):
@@ -427,8 +427,8 @@ def _joined(
             for seat, player in enumerate(match.players)
         ],
     )  # fmt: skip
-    db.execute(f"create or replace temp table _seated as {seated}", values)
-    return f"(select * from {source} left join _seated using (match, seat))"
+    db.execute(f"create or replace temp table seated as {seated}", values)
+    return f"(select * from {source} left join seated using (match, seat))"
 
 
 def unnest(
@@ -443,28 +443,28 @@ def unnest(
     return f"select {select}", [[row[at] for row in rows] for at in range(len(columns))]
 
 
-def _parquet(paths: Sequence[Path]) -> str:
+def parquet(paths: Sequence[Path]) -> str:
     files = ", ".join(quote(path) for path in paths)
     return f"read_parquet([{files}], union_by_name = true)"
 
 
-def _quoted(columns: Iterable[str]) -> list[str]:
+def quoted(columns: Iterable[str]) -> list[str]:
     return [f'"{c}"' for c in columns]
 
 
-def _sum_type(db: duckdb.DuckDBPyConnection, rollup: Rollup, column: str, query: str) -> str:
+def sum_type(db: duckdb.DuckDBPyConnection, rollup: Rollup, column: str, query: str) -> str:
     """BIGINT or DOUBLE: what a sum's expression totals as."""
     ((_, kind, *_),) = db.execute(f"describe {query}").fetchall()
     if kind in ("FLOAT", "DOUBLE") or str(kind).startswith("DECIMAL"):
         return "DOUBLE"
-    if kind in _WHOLE:
+    if kind in WHOLE:
         return "BIGINT"
     raise EtudeError("rollup_sum_not_numeric", 422) from ValueError(
         f"rollup {rollup.name!r}: sum {column!r} is {kind}"
     )
 
 
-def _referenced(db: duckdb.DuckDBPyConnection, rollup: Rollup, expression: str) -> set[str]:
+def referenced(db: duckdb.DuckDBPyConnection, rollup: Rollup, expression: str) -> set[str]:
     """The columns an expression names; raises `rollup_refused` unless it is one expression."""
     found = db.execute("select json_serialize_sql(?)", [f"select ({expression})"]).fetchone()
     tree = json.loads(found[0]) if found else {}
@@ -490,14 +490,14 @@ def _referenced(db: duckdb.DuckDBPyConnection, rollup: Rollup, expression: str) 
     return columns - set(ADDED)
 
 
-def _columns(db: duckdb.DuckDBPyConnection, source: str) -> dict[str, str]:
+def columns(db: duckdb.DuckDBPyConnection, source: str) -> dict[str, str]:
     """Each column of a relation and its type."""
     return {
         name: kind for name, kind, *_ in db.execute(f"describe select * from {source}").fetchall()
     }
 
 
-def _copy(db: duckdb.DuckDBPyConnection, query: str, target: Path) -> None:
+def copy(db: duckdb.DuckDBPyConnection, query: str, target: Path) -> None:
     """Write a query's rows to `target` as Parquet in small row groups; readers never see half a file."""
     partial = target.with_name(target.name + ".partial")
     db.execute(
@@ -506,7 +506,7 @@ def _copy(db: duckdb.DuckDBPyConnection, query: str, target: Path) -> None:
     partial.replace(target)
 
 
-def _pack(target: Path, blobs: Mapping[Digest, Path]) -> tuple[Content, dict[Digest, Span]]:
+def pack_blobs(target: Path, blobs: Mapping[Digest, Path]) -> tuple[Content, dict[Digest, Span]]:
     """Store each blob uncompressed in a zip, so each is one exact range of it."""
     partial = target.with_name(target.name + ".partial")
     with zipfile.ZipFile(partial, "w", compression=zipfile.ZIP_STORED) as pack:
@@ -519,7 +519,7 @@ def _pack(target: Path, blobs: Mapping[Digest, Path]) -> tuple[Content, dict[Dig
             lengths = stream.read(4)
             start = (
                 member.header_offset
-                + _LOCAL_HEADER
+                + LOCAL_HEADER
                 + int.from_bytes(lengths[:2], "little")
                 + int.from_bytes(lengths[2:], "little")
             )
@@ -531,7 +531,7 @@ def _pack(target: Path, blobs: Mapping[Digest, Path]) -> tuple[Content, dict[Dig
     return content, spans
 
 
-def _write(target: Path, body: bytes) -> None:
+def write_whole(target: Path, body: bytes) -> None:
     """Readers never see half a file."""
     partial = target.with_name(target.name + ".partial")
     partial.write_bytes(body)

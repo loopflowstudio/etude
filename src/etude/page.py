@@ -305,79 +305,79 @@ class Pages:
     def __init__(self, source: Storage | Path | str) -> None:
         self.storage = as_storage(source)
         here = DirectoryStorage(default_root())
-        self._places = list({each.name: each for each in (self.storage, here)}.values())
-        self._built: dict[Path, tuple[_Inputs, Page]] = {}
-        self._known: set[Path] = set()
+        self.places = list({each.name: each for each in (self.storage, here)}.values())
+        self.built: dict[Path, tuple[Inputs, Page]] = {}
+        self.known: set[Path] = set()
         # Each run's experiment by place and run, with the version of the declaration read.
-        self._declared: dict[tuple[str, str], tuple[str, str | None]] = {}
+        self.declared: dict[tuple[str, str], tuple[str, str | None]] = {}
 
     def build(self, file: Path) -> Page:
         """`build`'s page, kept from the last call while its inputs are the same."""
-        return self._build(file, self._listings())
+        return self.build_page(file, self.listings())
 
     def find_files(self, directory: Path) -> list[Path]:
         """Discover experiments, retaining known files through incomplete edits."""
-        found = experiment_files(directory, known=self._known)
-        self._known.update(found)
+        found = experiment_files(directory, known=self.known)
+        self.known.update(found)
         return found
 
     def build_each(self, directory: Path) -> dict[Path, Page | str]:
         """Each experiment file's page, or why it could not be built, so one never hides the rest."""
-        listings = self._listings()
+        listings = self.listings()
         built: dict[Path, Page | str] = {}
         for file in self.find_files(directory):
             try:
-                built[file] = self._build(file, listings)
+                built[file] = self.build_page(file, listings)
             except Exception as error:
                 # An author's file may fail in any way; its row says how and the others go on.
                 built[file] = explain(error)
         return built
 
-    def _listings(self) -> list[dict[str, str]]:
-        return [place.versions("") for place in self._places]
+    def listings(self) -> list[dict[str, str]]:
+        return [place.versions("") for place in self.places]
 
-    def _build(self, file: Path, listings: Sequence[dict[str, str]]) -> Page:
+    def build_page(self, file: Path, listings: Sequence[dict[str, str]]) -> Page:
         if not file.is_file():
             return build(self.storage, file)  # which says why there is no page
         runs = tuple(
-            self._versions(place, file.stem, listed)
-            for place, listed in zip(self._places, listings, strict=True)
+            self.versions(place, file.stem, listed)
+            for place, listed in zip(self.places, listings, strict=True)
         )
-        kept = self._built.get(file)
-        if kept is not None and kept[0] == _Inputs(files=_sources(file), runs=runs):
+        kept = self.built.get(file)
+        if kept is not None and kept[0] == Inputs(files=sources(file), runs=runs):
             return kept[1]
         page = build(self.storage, file)
         # After the build, so the neighbours this run imported are among its inputs.
-        self._built[file] = (_Inputs(files=_sources(file), runs=runs), page)
+        self.built[file] = (Inputs(files=sources(file), runs=runs), page)
         return page
 
-    def _versions(
+    def versions(
         self, place: Storage, experiment: str, listed: dict[str, str]
     ) -> tuple[tuple[str, str], ...]:
         """The version of every object in the folders of the experiment's runs in one place."""
         keys = sorted(listed)
         found: list[tuple[str, str]] = []
         for run, folders in sorted(run_folders(keys).items()):
-            if self._experiment(place, run, folders, listed) != experiment:
+            if self.experiment(place, run, folders, listed) != experiment:
                 continue
             found.extend((key, listed[key]) for folder in folders for key in under(keys, folder))
         return tuple(found)
 
-    def _experiment(
+    def experiment(
         self, place: Storage, run: str, folders: Sequence[str], listed: dict[str, str]
     ) -> str | None:
         """The run's experiment, from its declaration, read again only once it has changed."""
         version = next((listed[f + "run.json"] for f in folders if f + "run.json" in listed), "")
-        kept = self._declared.get((place.name, run))
+        kept = self.declared.get((place.name, run))
         if kept is None or kept[0] != version:
             file = declared(place, folders, listed)
             kept = (version, None if file is None else file.experiment)
-            self._declared[place.name, run] = kept
+            self.declared[place.name, run] = kept
         return kept[1]
 
 
 @dataclass(frozen=True)
-class _Inputs:
+class Inputs:
     """What a page is built from, as `Pages` compares it."""
 
     # The experiment file and its imported neighbours: (path, modification time in ns, bytes).
@@ -417,10 +417,10 @@ def index(
                 error=None if isinstance(built, Page) else built,
             )
         )
-    return Index(source=_source_name(storage), entries=tuple(entries))
+    return Index(source=source_name(storage), entries=tuple(entries))
 
 
-def _source_name(storage: Storage) -> str:
+def source_name(storage: Storage) -> str:
     """The source as a person names it: a directory's path or a bucket's URI, else its name."""
     if isinstance(storage, DirectoryStorage):
         return str(storage.root)
@@ -439,8 +439,8 @@ def build(source: Storage | Path | str, file: Path) -> Page:
     """
     storage = as_storage(source)
     experiment = file.stem
-    names = _run_file(file)
-    report, origin, notes = _report(names.get("report"), file)
+    names = run_file(file)
+    report, origin, notes = declared_report(names.get("report"), file)
     flames = tuple(panel.prefix for panel in (*report.perf, *report.ml) if isinstance(panel, Flame))
     data = read_all(
         storage,
@@ -451,7 +451,7 @@ def build(source: Storage | Path | str, file: Path) -> Page:
     if not data:
         held = sorted({name for name, _ in runs(storage)})
         raise ValueError(
-            f"no runs of {experiment!r} in {_source_name(storage)}"
+            f"no runs of {experiment!r} in {source_name(storage)}"
             + (f"; it holds {', '.join(held)}" if held else "; it holds no runs")
         )
     trained = [run for run in data if run.file is None or run.file.declaration.kind != "evaluation"]
@@ -462,9 +462,9 @@ def build(source: Storage | Path | str, file: Path) -> Page:
             raise EtudeError("experiment_eval_is_not_a_function", 422) from ValueError(file)
         want = found
     evals = (
-        _read_evals(storage, experiment, report, want, data)
+        read_evals(storage, experiment, report, want, data)
         if want is not None or len(trained) < len(data)
-        else _Evals()
+        else Evals()
     )
     # Blocks arrive as they are sealed, so a run with no recorded end shows what it played so far.
     unended = [run.name for run in data if run not in trained and run.state is None]
@@ -474,10 +474,10 @@ def build(source: Storage | Path | str, file: Path) -> Page:
     return Page(
         experiment=experiment,
         file=str(file),
-        source=_source_name(storage),
+        source=source_name(storage),
         report=report,
         origin=origin,
-        notes=(*notes, *partial, *_without_hours(trained), *evals.notes),
+        notes=(*notes, *partial, *without_hours(trained), *evals.notes),
         training=training(trained, prefixes=flames),
         scores=evals.scores or ((report.score,) if report.score is not None else ()),
         selections=evals.selections,
@@ -493,7 +493,7 @@ def build(source: Storage | Path | str, file: Path) -> Page:
     )
 
 
-def _without_hours(trained: Sequence[RunData]) -> tuple[str, ...]:
+def without_hours(trained: Sequence[RunData]) -> tuple[str, ...]:
     """A note naming the runs whose checkpoints lack Etude's clocks, and why.
 
     A checkpoint saved before Etude recorded them gets them from its run's
@@ -521,7 +521,7 @@ def _without_hours(trained: Sequence[RunData]) -> tuple[str, ...]:
     )
 
 
-def _run_file(file: Path) -> dict[str, object]:
+def run_file(file: Path) -> dict[str, object]:
     """The file's top-level names, run as `etude eval` runs it: it may import its neighbours."""
     if file.suffix != ".py":
         raise EtudeError("experiment_file_must_be_python", 422) from ValueError(file)
@@ -531,7 +531,7 @@ def _run_file(file: Path) -> dict[str, object]:
     if folder not in sys.path:
         sys.path.insert(0, folder)
     # A neighbour edited since the last build is imported afresh, as the file itself is run.
-    for name, source in _neighbours(file).items():
+    for name, source in neighbours(file).items():
         # Bytecode timestamps have only second precision; same-size edits within
         # that second still need to load the source the page's inputs detected.
         if source.suffix == ".py":
@@ -540,7 +540,7 @@ def _run_file(file: Path) -> dict[str, object]:
     return runpy.run_path(str(file.resolve()))
 
 
-def _neighbours(file: Path) -> dict[str, Path]:
+def neighbours(file: Path) -> dict[str, Path]:
     """Imported modules defined in the file's repository, outside hidden folders and Python installs.
 
     A repository's shared report modules sit beside its experiments' folder, not
@@ -548,7 +548,7 @@ def _neighbours(file: Path) -> dict[str, Path]:
     included: the page's records must stay the classes it checks against, even
     when experiments sit in an Etude checkout.
     """
-    folder = str(_repository(file)) + "/"
+    folder = str(repository(file)) + "/"
     installed = tuple(
         str(Path(p).resolve()) + "/" for p in {sys.prefix, sys.base_prefix, sys.exec_prefix}
     )
@@ -569,7 +569,7 @@ def _neighbours(file: Path) -> dict[str, Path]:
     return found
 
 
-def _repository(file: Path) -> Path:
+def repository(file: Path) -> Path:
     """The nearest folder above the file holding `pyproject.toml` or `.git`, else its own folder."""
     folder = file.resolve().parent
     for candidate in (folder, *folder.parents):
@@ -578,10 +578,10 @@ def _repository(file: Path) -> Path:
     return folder
 
 
-def _sources(file: Path) -> tuple[tuple[str, int, int], ...]:
+def sources(file: Path) -> tuple[tuple[str, int, int], ...]:
     """What a kept page's files are compared by; a deleted neighbour reads as absent."""
     found = []
-    for path in sorted({file.resolve(), *_neighbours(file).values()}):
+    for path in sorted({file.resolve(), *neighbours(file).values()}):
         try:
             stat = path.stat()
         except FileNotFoundError:
@@ -590,7 +590,7 @@ def _sources(file: Path) -> tuple[tuple[str, int, int], ...]:
     return tuple(found)
 
 
-def _report(made: object, file: Path) -> tuple[Report, str | None, tuple[str, ...]]:
+def declared_report(made: object, file: Path) -> tuple[Report, str | None, tuple[str, ...]]:
     if made is None:
         # Nothing is declared, so the page draws everything logged rather than nothing.
         note = f"{file.name} defines no report(), so this is the default report."
@@ -606,7 +606,7 @@ def _report(made: object, file: Path) -> tuple[Report, str | None, tuple[str, ..
 
 
 @dataclass(frozen=True)
-class _Evals:
+class Evals:
     """The evals half of a page, empty for an experiment with no eval run and no eval()."""
 
     scores: tuple[Score, ...] = ()
@@ -623,40 +623,40 @@ class _Evals:
     notes: tuple[str, ...] = ()
 
 
-def _read_evals(
+def read_evals(
     storage: Storage,
     experiment: str,
     report: Report,
     want: Callable[..., object] | None,
     data: Sequence[RunData],
-) -> _Evals:
+) -> Evals:
     # The optional `eval` extra (DuckDB, and the etude.eval modules over it), imported where
     # it is used: only an experiment with evaluations reads it, so a report without loads none.
     from etude.eval.query import statsdb  # noqa: PLC0415
     from etude.experiment import state_of  # noqa: PLC0415
 
-    standing, refused = _standing(want, state_of(data, experiment), storage, experiment)
+    standing, refused = standings(want, state_of(data, experiment), storage, experiment)
     db = statsdb(experiment, storage)
     try:
-        players, placement = _players(db)
-        outside = _load(db, standing, players)
-        commits = _commits(db)
-        selections, notes = _selections(standing, report, outside=outside)
-        environments = _environments(db)
-        scores, cells, absent, mixed = _cells(
+        players, placement = seated_players(db)
+        outside = load(db, standing, players)
+        commits = commit_views(db)
+        selections, notes = panel_selections(standing, report, outside=outside)
+        environments = played_environments(db)
+        scores, cells, absent, mixed = score_cells(
             db, selections, players, environments, commits, report
         )
         latest = db.sql("select max(wall_ms) from matches").fetchone()
-        return _Evals(
+        return Evals(
             scores=scores,
             selections=tuple(selections),
             players=tuple(players),
             environments=tuple(environments.values()),
             commits=commits,
             cells=tuple(cells),
-            points=_points(standing, selections, players, _checkpoints(db), cells),
-            coverage=_coverage(db, standing),
-            failures=_failures(db, standing, players),
+            points=points(standing, selections, players, checkpoints(db), cells),
+            coverage=coverage(db, standing),
+            failures=failures(db, standing, players),
             latest_result_ms=None if latest is None else latest[0],
             absent=absent,
             notes=(*refused, *placement, *notes, *mixed),
@@ -666,7 +666,7 @@ def _read_evals(
 
 
 @dataclass(frozen=True)
-class _Standing:
+class Standing:
     """One tournament: every match it calls for, with seating and tags, the held checkpoints
     its relative seats find nothing for, and how far it got."""
 
@@ -677,9 +677,9 @@ class _Standing:
     played: Played
 
 
-def _standing(
+def standings(
     want: Callable[..., object] | None, state: ExperimentState, storage: Storage, experiment: str
-) -> tuple[list[_Standing], tuple[str, ...]]:
+) -> tuple[list[Standing], tuple[str, ...]]:
     """Each tournament's standing, and a note for each one drawn otherwise than asked.
 
     A tournament `eval(state)` returns is what it wants now; any other the
@@ -695,7 +695,7 @@ def _standing(
 
     wanted: dict[str, Tournament] = {}
     if want is not None:
-        for tournament in _wanted(want, state):
+        for tournament in wanted_tournaments(want, state):
             wanted.setdefault(tournament.definition.name, tournament)
     refused: list[str] = []
     for name, held in tournament_runs(experiment, storages=[storage]).items():
@@ -733,11 +733,11 @@ def _standing(
             refused.append(f"Tournament {name} is not shown: it is refused ({error.code}).")
             continue
         tournament, gaps = given.resolve(state.lines)
-        standing.append(_Standing(name, tournament, tuple(tournament.schedule()), gaps, found))
+        standing.append(Standing(name, tournament, tuple(tournament.schedule()), gaps, found))
     return standing, tuple(refused)
 
 
-def _wanted(want: Callable[..., object], state: ExperimentState) -> list[Tournament]:
+def wanted_tournaments(want: Callable[..., object], state: ExperimentState) -> list[Tournament]:
     """The tournaments `eval(state)` returns, each with the checkpoints or entrants it holds."""
     # The optional `eval` extra, imported where it is used (`_read_evals`): eval(state)
     # and its evaluation jobs are built on etude.eval.
@@ -758,7 +758,7 @@ def _wanted(want: Callable[..., object], state: ExperimentState) -> list[Tournam
     return wanted
 
 
-def _players(db: duckdb.DuckDBPyConnection) -> tuple[list[Player], tuple[str, ...]]:
+def seated_players(db: duckdb.DuckDBPyConnection) -> tuple[list[Player], tuple[str, ...]]:
     """Every player seated, placed by its seat, else by the training run that saved it;
     and notes on what could not be placed as recorded.
 
@@ -767,7 +767,7 @@ def _players(db: duckdb.DuckDBPyConnection) -> tuple[list[Player], tuple[str, ..
     position or a line, the latest is drawn, so a later evaluation corrects a
     wrong one.
     """
-    bound = _checkpoints(db)
+    bound = checkpoints(db)
     found = db.sql(
         'select player, name, kind, config, checkpoint, "at", at_conflict, line, line_conflict'
         " from players order by player"
@@ -780,9 +780,9 @@ def _players(db: duckdb.DuckDBPyConnection) -> tuple[list[Player], tuple[str, ..
         recorded = {} if saved is None else saved.clocks
         seated: dict[str, float] = json.loads(at) if at else {}
         if conflict:
-            earlier = "; ".join(_position(each) for each in json.loads(conflict) if each != seated)
+            earlier = "; ".join(described(each) for each in json.loads(conflict) if each != seated)
             notes.append(
-                f"{name} is drawn at {_position(seated)}, as its latest seat says;"
+                f"{name} is drawn at {described(seated)}, as its latest seat says;"
                 f" earlier seats said {earlier}."
             )
         if lines:
@@ -817,12 +817,12 @@ def _players(db: duckdb.DuckDBPyConnection) -> tuple[list[Player], tuple[str, ..
     return players, tuple(notes)
 
 
-def _position(at: dict[str, float]) -> str:
+def described(at: dict[str, float]) -> str:
     return ", ".join(f"{clock} {value:g}" for clock, value in sorted(at.items()))
 
 
 @dataclass(frozen=True)
-class _Saved:
+class Saved:
     """The training run's checkpoint a key names, and where the run's clocks stood."""
 
     run: str
@@ -830,7 +830,7 @@ class _Saved:
     clocks: dict[str, float]
 
 
-def _checkpoints(db: duckdb.DuckDBPyConnection) -> dict[str, _Saved]:
+def checkpoints(db: duckdb.DuckDBPyConnection) -> dict[str, Saved]:
     """Each checkpoint key, encoded, to the training run's checkpoint that saved it.
 
     A run that saved two ordinals under one file name holds one key; it is
@@ -840,14 +840,14 @@ def _checkpoints(db: duckdb.DuckDBPyConnection) -> dict[str, _Saved]:
         "select checkpoint, run, max(ordinal), arg_max(clocks, ordinal) from training_checkpoints"
         " group by checkpoint, run"
     ).fetchall()
-    return {key: _Saved(run, ordinal, json.loads(clocks)) for key, run, ordinal, clocks in found}
+    return {key: Saved(run, ordinal, json.loads(clocks)) for key, run, ordinal, clocks in found}
 
 
-def _points(
-    standing: Sequence[_Standing],
+def points(
+    standing: Sequence[Standing],
     selections: Sequence[Matches | tuple[Matches, ...]],
     players: Sequence[Player],
-    saved: dict[str, _Saved],
+    saved: dict[str, Saved],
     cells: Sequence[Cell],
 ) -> tuple[Point, ...]:
     """Each selection of seatings' points: per checkpoint a seating was held for, its first
@@ -934,14 +934,14 @@ def _points(
     return tuple(points)
 
 
-def _load(
-    db: duckdb.DuckDBPyConnection, standing: Sequence[_Standing], players: Sequence[Player]
+def load(
+    db: duckdb.DuckDBPyConnection, standing: Sequence[Standing], players: Sequence[Player]
 ) -> bool:
     """Temp tables `compare` selects rows by; whether any match was held outside a tournament.
 
     `_page_held` (view, tournament, run, match): for view '', each delivered
     match and the eval run whose rows count, under tournament '' for those
-    held outside any; for a commit, each match as played at it (`_commits`).
+    held outside any; for a commit, each match as played at it (`commit_views`).
     `_page_scheduled` (tournament, match, seating, tag): what each match was
     called for as. `_page_checkpoints` (player): the placed models.
     """
@@ -987,7 +987,7 @@ def _load(
     return found is not None and found[0] > 0
 
 
-def _commits(db: duckdb.DuckDBPyConnection) -> tuple[Commit, ...]:
+def commit_views(db: duckdb.DuckDBPyConnection) -> tuple[Commit, ...]:
     """Each commit's view in `_page_held`, where the delivered matches were played at several.
 
     A commit's view holds each delivered match some done record seats it
@@ -1022,40 +1022,42 @@ def _commits(db: duckdb.DuckDBPyConnection) -> tuple[Commit, ...]:
     return tuple(Commit(commit=commit, matches=matches) for commit, matches in found)
 
 
-def _literal(text: str) -> str:
+def literal(text: str) -> str:
     return "'" + text.replace("'", "''") + "'"
 
 
-def _where(selection: Matches | tuple[Matches, ...], *, view: str) -> str:
+def condition_rows(selection: Matches | tuple[Matches, ...], *, view: str) -> str:
     """The rows of a selection's matches in a view of `_page_held`, as a condition
     `compare` applies to an author table."""
     if isinstance(selection, tuple):
         # Two tournaments may hold different deliveries of the same match.
-        return _latest(" or ".join(f"({_where(s, view=view)})" for s in selection) or "false")
+        return latest(
+            " or ".join(f"({condition_rows(s, view=view)})" for s in selection) or "false"
+        )
     name = selection.seating if selection.seating is not None else selection.tag
     if selection.tournament is None and name is not None:
         # A seating or tag in every tournament, whichever tournament called for each match.
         column = "seating" if selection.seating is not None else "tag"
-        return _latest(
+        return latest(
             "(run, match) in (select h.run, h.match from _page_held h join _page_scheduled s"
             " on s.tournament = h.tournament and s.match = h.match"
-            f" where h.view = {_literal(view)} and h.tournament != ''"
-            f" and s.{column} = {_literal(name)})"
+            f" where h.view = {literal(view)} and h.tournament != ''"
+            f" and s.{column} = {literal(name)})"
         )
-    tournament = _literal(selection.tournament or "")
+    tournament = literal(selection.tournament or "")
     held = (
         "(run, match) in (select run, match from _page_held"
-        f" where view = {_literal(view)} and tournament = {tournament})"
+        f" where view = {literal(view)} and tournament = {tournament})"
     )
     scheduled = f"select match from _page_scheduled where tournament = {tournament}"
     if selection.seating is not None:
-        held += f" and match in ({scheduled} and seating = {_literal(selection.seating)})"
+        held += f" and match in ({scheduled} and seating = {literal(selection.seating)})"
     if selection.tag is not None:
-        held += f" and match in ({scheduled} and tag = {_literal(selection.tag)})"
+        held += f" and match in ({scheduled} and tag = {literal(selection.tag)})"
     return held
 
 
-def _latest(where: str) -> str:
+def latest(where: str) -> str:
     """Each match `where` selects once, from its latest delivery in each environment,
     as a single tournament's selection counts it."""
     return (
@@ -1066,8 +1068,8 @@ def _latest(where: str) -> str:
     )
 
 
-def _selections(
-    standing: Sequence[_Standing], report: Report, *, outside: bool
+def panel_selections(
+    standing: Sequence[Standing], report: Report, *, outside: bool
 ) -> tuple[list[Matches | tuple[Matches, ...]], tuple[str, ...]]:
     """Each tournament, the matches outside one, each tag and each seating a panel names;
     and what is amiss."""
@@ -1113,7 +1115,7 @@ def _selections(
     return selections, tuple(notes)
 
 
-def _resolve_matches(
+def resolve_matches(
     wanted: Matches,
     selections: Sequence[Matches | tuple[Matches, ...]],
     present: set[int],
@@ -1133,7 +1135,7 @@ def _resolve_matches(
     )
 
 
-def _environments(db: duckdb.DuckDBPyConnection) -> dict[str, Environment]:
+def played_environments(db: duckdb.DuckDBPyConnection) -> dict[str, Environment]:
     """Each environment the eval runs played in, by identity, the newest latest match first."""
     found = db.sql(
         "select r.environment, any_value(r.environment_name), any_value(r.environment_config),"
@@ -1146,7 +1148,7 @@ def _environments(db: duckdb.DuckDBPyConnection) -> dict[str, Environment]:
     }
 
 
-def _cells(
+def score_cells(
     db: duckdb.DuckDBPyConnection,
     selections: Sequence[Matches | tuple[Matches, ...]],
     players: Sequence[Player],
@@ -1203,9 +1205,9 @@ def _cells(
                     selection = tuple(
                         resolved
                         for wanted in selection
-                        if (resolved := _resolve_matches(wanted, selections, recorded)) is not None
+                        if (resolved := resolve_matches(wanted, selections, recorded)) is not None
                     )
-                where = _where(selection, view=commit or "")
+                where = condition_rows(selection, view=commit or "")
                 # An anchor's strength needs two anchors to have met.
                 for fixed, by in itertools.product(
                     (False, True) if anchors > 1 else (False,), splits
@@ -1247,36 +1249,38 @@ def _cells(
                                 matches=found.matches,
                             )
                         )
-    cells, mixed = _newest_environment(cells, list(environments.values()))
+    cells, mixed = newest_environment(cells, list(environments.values()))
     # "Against all" repeats the only opponent a subject met.
     met: dict[tuple[int, str | None, int, int], set[int]] = {}
     for cell in cells:
         if cell.opponent is not None:
-            met.setdefault(_met(cell), set()).add(cell.opponent)
-    kept = [c for c in cells if c.opponent is not None or c.fixed or len(met.get(_met(c), ())) != 1]
+            met.setdefault(met_key(cell), set()).add(cell.opponent)
+    kept = [
+        c for c in cells if c.opponent is not None or c.fixed or len(met.get(met_key(c), ())) != 1
+    ]
     return scores, kept, tuple(dict.fromkeys(absent)), mixed
 
 
-def _newest_environment(
+def newest_environment(
     cells: Sequence[Cell], environments: Sequence[Environment]
 ) -> tuple[list[Cell], tuple[str, ...]]:
     """Of a value's cells in several environments, the newest environment's; and a
     note per environment that loses any. Environments are never pooled."""
     # A lower index is a newer environment.
-    keyed = [(_without_environment(cell), cell) for cell in cells]
+    keyed = [(without_environment(cell), cell) for cell in cells]
     newest: dict[tuple[object, ...], int] = {}
     for key, cell in keyed:
         newest[key] = min(cell.environment, newest.get(key, cell.environment))
     kept = [cell for key, cell in keyed if cell.environment == newest[key]]
     hidden = Counter(cell.environment for key, cell in keyed if cell.environment != newest[key])
     return kept, tuple(
-        f"{count} values were also played in {_environment_name(environments[number])};"
+        f"{count} values were also played in {environment_name(environments[number])};"
         " the page shows each from the environment whose latest match is newest."
         for number, count in sorted(hidden.items())
     )
 
 
-def _without_environment(cell: Cell) -> tuple[object, ...]:
+def without_environment(cell: Cell) -> tuple[object, ...]:
     """A cell's identity, whatever environment it was played in."""
     return (
         cell.selection, cell.commit, cell.score, cell.subject, cell.opponent, cell.fixed,
@@ -1284,20 +1288,20 @@ def _without_environment(cell: Cell) -> tuple[object, ...]:
     )  # fmt: skip
 
 
-def _environment_name(environment: Environment) -> str:
+def environment_name(environment: Environment) -> str:
     if not environment.config:
         return environment.name
     return f"{environment.name} {json.dumps(environment.config, sort_keys=True)}"
 
 
-def _met(cell: Cell) -> tuple[int, str | None, int, int]:
+def met_key(cell: Cell) -> tuple[int, str | None, int, int]:
     """The opponents a subject met are counted within one selection, view and score."""
     return (cell.selection, cell.commit, cell.score, cell.subject)
 
 
-def _coverage(db: duckdb.DuckDBPyConnection, standing: Sequence[_Standing]) -> tuple[Coverage, ...]:
+def coverage(db: duckdb.DuckDBPyConnection, standing: Sequence[Standing]) -> tuple[Coverage, ...]:
     """Each checkpoint's matches in each tournament: played, failed since, and not yet played."""
-    bound = _checkpoints(db)
+    bound = checkpoints(db)
     counts: dict[tuple[str, int, str], list[int]] = {}
     for each in standing:
         states: tuple[tuple[int, Sequence[Match]], ...] = (
@@ -1317,8 +1321,8 @@ def _coverage(db: duckdb.DuckDBPyConnection, standing: Sequence[_Standing]) -> t
     )
 
 
-def _failures(
-    db: duckdb.DuckDBPyConnection, standing: Sequence[_Standing], players: Sequence[Player]
+def failures(
+    db: duckdb.DuckDBPyConnection, standing: Sequence[Standing], players: Sequence[Player]
 ) -> tuple[Failure, ...]:
     """Each failed match `played` counts, and each outside a tournament that no eval run has
     played since in its environment, with the error its eval run recorded."""
@@ -1362,15 +1366,15 @@ def _failures(
 
 def render(page: Page, *, refresh: float | None = None, served: bool = False) -> str:
     """The page as one HTML file; `refresh` is the seconds between the open page reloading."""
-    return _inline("page.html", page.experiment, page.model_dump(mode="json"), refresh, served)
+    return inline("page.html", page.experiment, page.model_dump(mode="json"), refresh, served)
 
 
 def render_index(found: Index, *, refresh: float | None = None, served: bool = False) -> str:
     """The index as one HTML file, like a page."""
-    return _inline("index.html", "Experiments", found.model_dump(mode="json"), refresh, served)
+    return inline("index.html", "Experiments", found.model_dump(mode="json"), refresh, served)
 
 
-def _inline(
+def inline(
     template: str, title: str, data: dict[str, object], refresh: float | None, served: bool
 ) -> str:
     here = Path(__file__).parent
@@ -1425,41 +1429,41 @@ class Server(ThreadingHTTPServer):
         *,
         refresh: float | None = None,
     ) -> None:
-        super().__init__(address, _Handler)
+        super().__init__(address, Handler)
         self.pages, self.path, self.refresh = Pages(source), path, refresh
         # Requests are handled on threads; a page is built by one at a time.
-        self._building = threading.Lock()
-        self._lock = threading.Lock()
-        self._html: dict[str, str] = {}
-        self._pending: dict[str, Future[str | None]] = {}
+        self.building = threading.Lock()
+        self.lock = threading.Lock()
+        self.html: dict[str, str] = {}
+        self.pending: dict[str, Future[str | None]] = {}
 
     def page(self, route: str = "/", *, refresh: bool = False) -> str | None:
         """Reuse a generated page, or join its refresh. A failure preserves the last HTML."""
-        with self._lock:
-            if not refresh and route in self._html:
-                return self._html[route]
-            pending = self._pending.get(route)
+        with self.lock:
+            if not refresh and route in self.html:
+                return self.html[route]
+            pending = self.pending.get(route)
             owner = pending is None
             if pending is None:
                 pending = Future()
-                self._pending[route] = pending
+                self.pending[route] = pending
         if owner:
             try:
                 # Pages shares imported experiment files and input state across routes.
-                with self._building:
-                    html = self._render(route)
-                with self._lock:
+                with self.building:
+                    html = self.render(route)
+                with self.lock:
                     if html is not None:
-                        self._html[route] = html
+                        self.html[route] = html
                     pending.set_result(html)
-                    del self._pending[route]
+                    del self.pending[route]
             except BaseException as error:
-                with self._lock:
+                with self.lock:
                     pending.set_exception(error)
-                    del self._pending[route]
+                    del self.pending[route]
         return pending.result()
 
-    def _render(self, route: str) -> str | None:
+    def render(self, route: str) -> str | None:
         if not self.path.is_dir():
             if route != "/":
                 return None
@@ -1468,12 +1472,10 @@ class Server(ThreadingHTTPServer):
             built = self.pages.build_each(self.path)
             # Index facts and links must describe the same generation. Keep a
             # failed detail's last successful page, while its index row says why.
-            with self._lock:
+            with self.lock:
                 for file, page in built.items():
                     if isinstance(page, Page):
-                        self._html[f"/{file.stem}"] = render(
-                            page, refresh=self.refresh, served=True
-                        )
+                        self.html[f"/{file.stem}"] = render(page, refresh=self.refresh, served=True)
             found = index(self.pages.storage, built, href=lambda stem: f"/{stem}")
             return render_index(found, refresh=self.refresh, served=True)
         for file in self.pages.find_files(self.path):
@@ -1482,16 +1484,16 @@ class Server(ThreadingHTTPServer):
         return None
 
 
-class _Handler(BaseHTTPRequestHandler):
+class Handler(BaseHTTPRequestHandler):
     server: Server
 
     def do_GET(self) -> None:  # noqa: N802 - the name http.server calls
-        self._respond(refresh=False)
+        self.respond(refresh=False)
 
     def do_POST(self) -> None:  # noqa: N802 - the name http.server calls
-        self._respond(refresh=True)
+        self.respond(refresh=True)
 
-    def _respond(self, *, refresh: bool) -> None:
+    def respond(self, *, refresh: bool) -> None:
         try:
             served = self.server.page(self.path.split("?", 1)[0], refresh=refresh)
             found, body = served is not None, (served or "Not found.").encode()

@@ -32,16 +32,16 @@ for name in $(ls "$ETUDE_PREPARED_INPUTS" 2>/dev/null); do echo "saw $name" >> "
 RUN = 'cat "$ETUDE_PREPARED_DIR/lock"'
 
 
-def _repo(tmp_path: Path) -> Path:
+def make_repo(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "lock.txt").write_text("lock 1\n")
     (repo / "other.txt").write_text("other 1\n")
-    _commit(repo)
+    commit(repo)
     return repo
 
 
-def _commit(repo: Path) -> None:
+def commit(repo: Path) -> None:
     for command in (
         ["init", "-q"],
         ["add", "-A"],
@@ -50,7 +50,7 @@ def _commit(repo: Path) -> None:
         subprocess.run(["git", "-C", str(repo), *command], check=True, capture_output=True)
 
 
-def _input(tmp_path: Path, name: str, body: bytes) -> Input:
+def read_input(tmp_path: Path, name: str, body: bytes) -> Input:
     """An input this machine already holds in a run's folder, so no storage is needed."""
     folder = tmp_path / "track" / "given"
     folder.mkdir(parents=True, exist_ok=True)
@@ -64,7 +64,7 @@ def _input(tmp_path: Path, name: str, body: bytes) -> Input:
     )
 
 
-def _job(repo: Path, count: Path, **changes: object) -> Job:
+def make_job(repo: Path, count: Path, **changes: object) -> Job:
     job = Job(
         command=RUN,
         repo=str(repo),
@@ -77,23 +77,23 @@ def _job(repo: Path, count: Path, **changes: object) -> Job:
     return job.model_copy(update=changes)
 
 
-def _launch(scheduler: Scheduler, job: Job) -> tuple[Status, str]:
+def launch(scheduler: Scheduler, job: Job) -> tuple[Status, str]:
     run = scheduler.launch(job)
     (status,) = scheduler.wait(run, every=0.05, timeout=60)
     return status, job_text(scheduler.logs(refresh=True, run=run))
 
 
-def _outcomes(log: str) -> list[str]:
+def outcomes(log: str) -> list[str]:
     return [line.split()[1] for line in log.splitlines() if line.startswith("prepare: ")]
 
 
 def test_a_second_attempt_reuses_the_prepared_directory(tmp_path: Path) -> None:
-    repo, count = _repo(tmp_path), tmp_path / "count"
+    repo, count = make_repo(tmp_path), tmp_path / "count"
     scheduler = local(tmp_path)
-    first, log = _launch(scheduler, _job(repo, count))
-    assert first.outcome == "succeeded" and _outcomes(log) == ["built"]
-    second, log = _launch(scheduler, _job(repo, count))
-    assert second.outcome == "succeeded" and _outcomes(log) == ["reused"]
+    first, log = launch(scheduler, make_job(repo, count))
+    assert first.outcome == "succeeded" and outcomes(log) == ["built"]
+    second, log = launch(scheduler, make_job(repo, count))
+    assert second.outcome == "succeeded" and outcomes(log) == ["reused"]
     assert log.endswith("lock 1\n")
     assert count.read_text() == "built\n"  # the command ran once
 
@@ -102,13 +102,13 @@ def test_status_and_usage_say_what_a_second_attempt_reused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
-    repo, count = _repo(tmp_path), tmp_path / "count"
-    weights = _input(tmp_path / "home", "weights", b"w" * 1000)
-    job = _job(repo, count, inputs=(weights,))
+    repo, count = make_repo(tmp_path), tmp_path / "count"
+    weights = read_input(tmp_path / "home", "weights", b"w" * 1000)
+    job = make_job(repo, count, inputs=(weights,))
     scheduler = default()
     runs = []
     for _ in range(2):
-        status, _log = _launch(scheduler, job)
+        status, _log = launch(scheduler, job)
         assert status.outcome == "succeeded"
         runs.append(status.run)
     capsys.readouterr()
@@ -127,43 +127,46 @@ def test_status_and_usage_say_what_a_second_attempt_reused(
 
 
 def test_only_declared_paths_and_inputs_decide_the_key(tmp_path: Path) -> None:
-    repo, count = _repo(tmp_path), tmp_path / "count"
+    repo, count = make_repo(tmp_path), tmp_path / "count"
     scheduler = local(tmp_path)
-    engine, weights = _input(tmp_path, "engine", b"engine 1"), _input(tmp_path, "weights", b"w1")
+    engine, weights = (
+        read_input(tmp_path, "engine", b"engine 1"),
+        read_input(tmp_path, "weights", b"w1"),
+    )
     prepare = Preparation(
         command=PREPARE.format(count=count), paths=("lock.txt",), inputs=("engine",)
     )
-    job = _job(repo, count, prepare=prepare, inputs=(engine, weights))
-    assert _outcomes(_launch(scheduler, job)[1]) == ["built"]
+    job = make_job(repo, count, prepare=prepare, inputs=(engine, weights))
+    assert outcomes(launch(scheduler, job)[1]) == ["built"]
     assert count.read_text() == "built\nsaw engine\n"  # undeclared inputs are not visible
 
     (repo / "other.txt").write_text("other 2\n")
-    _commit(repo)
-    assert _outcomes(_launch(scheduler, job)[1]) == ["reused"]
+    commit(repo)
+    assert outcomes(launch(scheduler, job)[1]) == ["reused"]
 
-    new_weights = _input(tmp_path, "weights2", b"w2").model_copy(update={"name": "weights"})
-    assert _outcomes(
-        _launch(scheduler, job.model_copy(update={"inputs": (engine, new_weights)}))[1]
+    new_weights = read_input(tmp_path, "weights2", b"w2").model_copy(update={"name": "weights"})
+    assert outcomes(
+        launch(scheduler, job.model_copy(update={"inputs": (engine, new_weights)}))[1]
     ) == ["reused"]
 
-    new_engine = _input(tmp_path, "engine2", b"engine 2").model_copy(update={"name": "engine"})
-    assert _outcomes(
-        _launch(scheduler, job.model_copy(update={"inputs": (new_engine, weights)}))[1]
+    new_engine = read_input(tmp_path, "engine2", b"engine 2").model_copy(update={"name": "engine"})
+    assert outcomes(
+        launch(scheduler, job.model_copy(update={"inputs": (new_engine, weights)}))[1]
     ) == ["built"]
 
     (repo / "lock.txt").write_text("lock 2\n")
-    _commit(repo)
-    status, log = _launch(scheduler, job)
-    assert _outcomes(log) == ["built"] and log.endswith("lock 2\n")
+    commit(repo)
+    status, log = launch(scheduler, job)
+    assert outcomes(log) == ["built"] and log.endswith("lock 2\n")
 
 
 def test_reading_an_undeclared_input_fails_the_build(tmp_path: Path) -> None:
-    repo, count = _repo(tmp_path), tmp_path / "count"
-    weights = _input(tmp_path, "weights", b"w1")
+    repo, count = make_repo(tmp_path), tmp_path / "count"
+    weights = read_input(tmp_path, "weights", b"w1")
     prepare = Preparation(
         command='cat "$ETUDE_INPUTS_DIR/weights" > "$ETUDE_PREPARED_DIR/w"', paths=("lock.txt",)
     )
-    status, log = _launch(local(tmp_path), _job(repo, count, prepare=prepare, inputs=(weights,)))
+    status, log = launch(local(tmp_path), make_job(repo, count, prepare=prepare, inputs=(weights,)))
     assert status.outcome == "failed"
     assert "/weights" in log and "phase prepare: exit 1" in log
     assert not list(home().glob("*.json"))  # no receipt
@@ -179,29 +182,29 @@ def test_an_unknown_input_name_is_refused_at_launch(tmp_path: Path) -> None:
 
 
 def test_a_changed_prepared_file_is_rejected_and_rebuilt(tmp_path: Path) -> None:
-    repo, count = _repo(tmp_path), tmp_path / "count"
+    repo, count = make_repo(tmp_path), tmp_path / "count"
     scheduler = local(tmp_path)
-    assert _outcomes(_launch(scheduler, _job(repo, count))[1]) == ["built"]
+    assert outcomes(launch(scheduler, make_job(repo, count))[1]) == ["built"]
     (prepared,) = (p for p in home().iterdir() if p.is_dir())
     (prepared / "lock").chmod(0o644)
     (prepared / "lock").write_text("lock X\n")
-    status, log = _launch(scheduler, _job(repo, count))
-    assert status.outcome == "succeeded" and _outcomes(log) == ["rejected", "built"]
+    status, log = launch(scheduler, make_job(repo, count))
+    assert status.outcome == "succeeded" and outcomes(log) == ["rejected", "built"]
     assert "(lock digest mismatch)" in log and log.endswith("lock 1\n")
 
 
 def test_a_build_stopped_at_its_deadline_leaves_nothing(tmp_path: Path) -> None:
-    repo, count = _repo(tmp_path), tmp_path / "count"
+    repo, count = make_repo(tmp_path), tmp_path / "count"
     stuck = Preparation(
         command='touch "$ETUDE_PREPARED_DIR/partial"; sleep 30', paths=("lock.txt",)
     )
-    status, log = _launch(local(tmp_path), _job(repo, count, prepare=stuck, max_hours=2 / 3600))
+    status, log = launch(local(tmp_path), make_job(repo, count, prepare=stuck, max_hours=2 / 3600))
     assert status.outcome == "out_of_time" and "phase prepare: deadline" in log
     assert not [p for p in home().iterdir() if p.suffix != ".lock"]
 
 
 def test_a_killed_build_leaves_no_receipt_and_is_built_again(tmp_path: Path) -> None:
-    repo, count = _repo(tmp_path), tmp_path / "count"
+    repo, count = make_repo(tmp_path), tmp_path / "count"
     scheduler = local(tmp_path)
     finish = tmp_path / "finish"
     command = (
@@ -209,7 +212,7 @@ def test_a_killed_build_leaves_no_receipt_and_is_built_again(tmp_path: Path) -> 
         ' else touch "$ETUDE_PREPARED_DIR/partial"; sleep 5; fi'
     )
     prepare = Preparation(command=command, paths=("lock.txt",))
-    run = scheduler.launch(_job(repo, count, prepare=prepare, command="true", max_attempts=2))
+    run = scheduler.launch(make_job(repo, count, prepare=prepare, command="true", max_attempts=2))
     for _ in range(300):
         partial = [p for p in home().glob("*/partial")] if home().exists() else []
         if partial:
@@ -222,33 +225,33 @@ def test_a_killed_build_leaves_no_receipt_and_is_built_again(tmp_path: Path) -> 
     os.kill(int((tmp_path / "sessions" / session / "receipt").read_text()), signal.SIGKILL)
     (status,) = scheduler.wait(run, every=0.05, timeout=60)
     assert (status.outcome, status.attempts) == ("succeeded", 2)
-    assert _outcomes(job_text(scheduler.logs(refresh=True, run=run))) == ["built"]
+    assert outcomes(job_text(scheduler.logs(refresh=True, run=run))) == ["built"]
     assert sorted(p.name for p in leftover.iterdir()) == ["done"]
 
 
 def test_a_reused_runtime_is_still_checked_against_its_pins(tmp_path: Path) -> None:
-    repo, count = _repo(tmp_path), tmp_path / "count"
+    repo, count = make_repo(tmp_path), tmp_path / "count"
     scheduler = local(tmp_path)
     venv = Preparation(
         command='python3 -m venv --without-pip "$ETUDE_PREPARED_DIR/.venv"',
         paths=("lock.txt",),
         python=".venv/bin/python",
     )
-    job = _job(repo, count, prepare=venv, command='"$ETUDE_PYTHON" -c "print(7)"')
-    status, log = _launch(scheduler, job)
+    job = make_job(repo, count, prepare=venv, command='"$ETUDE_PYTHON" -c "print(7)"')
+    status, log = launch(scheduler, job)
     assert status.outcome == "succeeded" and log.endswith("7\n")
     pinned = Runtime(packages={"etude-sdk": "0.0.0"})
-    status, log = _launch(scheduler, job.model_copy(update={"runtime": pinned}))
-    assert status.outcome == "failed" and _outcomes(log) == ["reused"]
+    status, log = launch(scheduler, job.model_copy(update={"runtime": pinned}))
+    assert status.outcome == "failed" and outcomes(log) == ["reused"]
     assert "No package metadata was found for etude-sdk" in log
 
 
 def test_reading_an_undeclared_source_file_fails_the_build(tmp_path: Path) -> None:
-    repo, count = _repo(tmp_path), tmp_path / "count"
+    repo, count = make_repo(tmp_path), tmp_path / "count"
     prepare = Preparation(
         command='cat lock.txt other.txt > "$ETUDE_PREPARED_DIR/both"', paths=("lock.txt",)
     )
-    status, log = _launch(local(tmp_path), _job(repo, count, prepare=prepare))
+    status, log = launch(local(tmp_path), make_job(repo, count, prepare=prepare))
     assert status.outcome == "failed"
     assert "other.txt" in log and "phase prepare: exit 1" in log
     assert not list(home().glob("*.json"))  # no receipt
@@ -265,12 +268,12 @@ def test_the_interpreter_is_named_once() -> None:
 def test_eviction_removes_the_least_recently_used_directory_not_one_in_use(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    repo, count = _repo(tmp_path), tmp_path / "count"
+    repo, count = make_repo(tmp_path), tmp_path / "count"
     scheduler = local(tmp_path)
     for text in ("lock a\n", "lock b\n", "lock c\n"):
         (repo / "lock.txt").write_text(text)
-        _commit(repo)
-        _launch(scheduler, _job(repo, count))
+        commit(repo)
+        launch(scheduler, make_job(repo, count))
     receipts = sorted(home().glob("*.json"), key=lambda p: p.stat().st_mtime)
     oldest, middle, newest = receipts
     assert Receipt.model_validate_json(newest.read_text()).size_bytes > 0
@@ -286,8 +289,8 @@ def test_eviction_removes_the_least_recently_used_directory_not_one_in_use(
 
 
 def test_an_unreadable_receipt_does_not_fail_another_build(tmp_path: Path) -> None:
-    repo, count = _repo(tmp_path), tmp_path / "count"
+    repo, count = make_repo(tmp_path), tmp_path / "count"
     home().mkdir(parents=True)
     (home() / f"{'0' * 64}.json").write_text("{not json")
-    status, log = _launch(local(tmp_path), _job(repo, count))
-    assert status.outcome == "succeeded" and _outcomes(log) == ["built"]
+    status, log = launch(local(tmp_path), make_job(repo, count))
+    assert status.outcome == "succeeded" and outcomes(log) == ["built"]

@@ -53,7 +53,7 @@ def local(tmp_path: Path) -> Scheduler:
     service = local_service(tmp_path / "sessions")
     scheduler = Scheduler(Database(tmp_path / "launcher.db"), {"local": lambda held: service})
     scheduler.add_pool(Pool(name="local"))
-    scheduler._store.add_machine(Machine(name="local", pool="local", kind="local"))
+    scheduler.store.add_machine(Machine(name="local", pool="local", kind="local"))
     return scheduler
 
 
@@ -213,15 +213,15 @@ def test_a_killed_session_retries_its_run(tmp_path: Path) -> None:
     status = until(scheduler, one, "done")
     assert (status.outcome, status.cause, status.attempts) == ("succeeded", None, 2)
     assert status.rental_ended is None
-    assert scheduler._store.session(scheduler.attempts(one)[-1].session).ended_at is not None
+    assert scheduler.store.session(scheduler.attempts(one)[-1].session).ended_at is not None
 
 
 def test_added_work_has_a_session_but_no_rental_or_session_deadline(tmp_path: Path) -> None:
     scheduler = local(tmp_path)
     first = scheduler.launch(Job(command="sleep 2; echo one", max_hours=0.01, max_usd=Decimal(1)))
     attempt = scheduler.attempts(first)[0]
-    session = scheduler._store.session(attempt.session)
-    assert attempt.machine == "local" and scheduler._store.rental_for(session) is None
+    session = scheduler.store.session(attempt.session)
+    assert attempt.machine == "local" and scheduler.store.rental_for(session) is None
     packet = json.loads((tmp_path / "sessions" / session.id / "packet.json").read_text())
     assert packet["deadline"] is None
     assert scheduler.rentals() == ()
@@ -262,7 +262,7 @@ def test_a_launched_job_tracks_as_its_run_without_naming_itself(tmp_path: Path) 
 
     found = []
     for record in [scheduler.record(run) for run in ids]:
-        (launched,) = scheduler._store.attempts(run=record.id)
+        (launched,) = scheduler.store.attempts(run=record.id)
         # One place on the machine for every run; the script named no directory.
         tracked = tmp_path / "track"
         assert ("capacity", record.id) in runs(tracked)
@@ -292,7 +292,7 @@ def test_a_launched_job_tracks_as_its_run_without_naming_itself(tmp_path: Path) 
     assert drawn.name == "hidden256" and drawn.label.startswith("hidden256 · ")
 
 
-class _Weights:
+class Weights:
     """Bytes already on this machine, so a test needs no storage."""
 
     def __init__(self, body: bytes) -> None:
@@ -314,7 +314,7 @@ class _Weights:
 
 
 def test_an_attempt_links_its_held_inputs_read_only_without_copying(tmp_path: Path) -> None:
-    weights = _Weights(b"weights " * 1000)
+    weights = Weights(b"weights " * 1000)
     held = Cache().hold(weights.artifact, weights, holder="session", staging=tmp_path / "x")
     scheduler = local(tmp_path)
     one = scheduler.launch(
@@ -335,7 +335,7 @@ def test_an_attempt_links_its_held_inputs_read_only_without_copying(tmp_path: Pa
 
 
 def test_a_corrupted_held_input_is_refused_before_the_job_starts(tmp_path: Path) -> None:
-    weights = _Weights(b"weights " * 1000)
+    weights = Weights(b"weights " * 1000)
     held = Cache().hold(weights.artifact, weights, holder="session", staging=tmp_path / "x")
     held.chmod(0o644)
     held.write_bytes(b"W" + weights.body[1:])

@@ -49,7 +49,7 @@ def report() -> Report:
 
 
 @pytest.fixture(autouse=True)
-def _restore_imports(monkeypatch: pytest.MonkeyPatch) -> None:
+def restore_imports(monkeypatch: pytest.MonkeyPatch) -> None:
     # Running an experiment file puts its folder on the import path.
     monkeypatch.setattr(sys, "path", list(sys.path))
 

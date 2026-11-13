@@ -32,7 +32,7 @@ class Node(Record):
     country_code: str
 
 
-class _Nodes(Record):
+class Nodes(Record):
     count: int = Field(ge=0)
     generated_at: AwareDatetime
     nodes: tuple[Node, ...]
@@ -94,7 +94,7 @@ class Create(Record):
     initial_port_count: Literal[1] = 1
 
 
-class _Created(Record):
+class Created(Record):
     pod_id: UUID
 
 
@@ -110,7 +110,7 @@ class Pod(Record):
     removal_scheduled_at: AwareDatetime | None
 
     @model_validator(mode="after")
-    def _validate_address(self) -> Pod:
+    def validate_address(self) -> Pod:
         self.address  # validate before a provider-supplied command can be retained
         return self
 
@@ -136,7 +136,7 @@ class Pod(Record):
         return f"ssh://root@{'[' + str(ip) + ']' if ip.version == 6 else ip}:{port}"
 
 
-class _Removal(Record):
+class Removal(Record):
     removal_scheduled_at: datetime
 
 
@@ -155,7 +155,7 @@ class Statement(Record):
     days: tuple[Charge, ...]
 
 
-def _read[T: Record](model: type[T], raw: bytes | None) -> T:
+def read[T: Record](model: type[T], raw: bytes | None) -> T:
     try:
         if raw is None:
             raise ValueError()
@@ -168,7 +168,7 @@ class LiumAPI(LiumHTTP):
     def offers(self, template: MachineTemplate) -> tuple[LiumOffer, ...]:
         if template.gpu is None:
             raise ValueError("Lium rentals need a GPU model")
-        feed = _read(_Nodes, self.ask("GET", "public/v1/nodes"))
+        feed = read(Nodes, self.ask("GET", "public/v1/nodes"))
         if feed.count != len(feed.nodes):
             raise ProviderUnavailable("Lium inventory count does not match its nodes")
         offers: list[LiumOffer] = []
@@ -181,7 +181,7 @@ class LiumAPI(LiumHTTP):
                 or (template.data_center and node.country_code != template.data_center)
             ):
                 continue
-            quote = _read(
+            quote = read(
                 Quote,
                 self.ask(
                     "GET",
@@ -220,8 +220,8 @@ class LiumAPI(LiumHTTP):
         return tuple(sorted(offers, key=lambda offer: (offer.price, str(offer.node.id))))
 
     def create(self, offer: LiumOffer, request: Create, session: str) -> UUID:
-        return _read(
-            _Created,
+        return read(
+            Created,
             self.ask(
                 "POST",
                 f"executors/{offer.node.id}/rent",
@@ -234,7 +234,7 @@ class LiumAPI(LiumHTTP):
         raw = self.ask("GET", f"pods/{id}", absent_ok=True)
         if raw is None:
             return None
-        pod = _read(Pod, raw)
+        pod = read(Pod, raw)
         if pod.id != id:
             raise ProviderUnavailable("Lium returned a different pod id")
         return pod
@@ -256,7 +256,7 @@ class LiumAPI(LiumHTTP):
         self.ask(
             "POST",
             f"pods/{id}/schedule-removal",
-            body=_Removal(removal_scheduled_at=deadline).model_dump_json(),
+            body=Removal(removal_scheduled_at=deadline).model_dump_json(),
         )
         pod = self.pod(id)
         if pod is None or pod.removal_scheduled_at is None or pod.removal_scheduled_at > deadline:
@@ -270,7 +270,7 @@ class LiumAPI(LiumHTTP):
         raw = self.ask("GET", f"pods/{id}/statement", absent_ok=True)
         if raw is None:
             return None
-        statement = _read(Statement, raw)
+        statement = read(Statement, raw)
         if statement.pod_id != id:
             raise ProviderUnavailable("Lium returned a different statement id")
         return statement

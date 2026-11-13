@@ -31,7 +31,7 @@ class GuardianAPI(InstanceHTTP):
             raise ProviderUnavailable("Vast guardian could not read the rental rate") from None
 
 
-def _ssh_ready() -> None:
+def ssh_ready() -> None:
     # ssh_direct has already installed and started SSH before invoking onstart.
     print("SSH managed by Vast: use the instance Connect tab.", flush=True)
 
@@ -42,7 +42,7 @@ def main(argv: list[str]) -> int:
         api=GuardianAPI(os.environ["CONTAINER_API_KEY"]),
         machine=os.environ["CONTAINER_ID"],
         module="etude.launch.providers.vast.instance",
-        start_ssh=_ssh_ready,
+        start_ssh=ssh_ready,
     )
 
 

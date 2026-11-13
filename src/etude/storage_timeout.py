@@ -13,7 +13,7 @@ class StorageUnavailable(Exception):
     """No usable answer from storage. This never means an object is absent."""
 
 
-def _positive(name: str, default: float) -> float:
+def positive(name: str, default: float) -> float:
     value = float(os.environ.get(name, default))
     if not math.isfinite(value) or value <= 0:
         raise ValueError(f"{name} must be positive and finite")
@@ -26,8 +26,8 @@ def socket_timeout(size_bytes: int = 0) -> float:
     ETUDE_STORAGE_TIMEOUT_SECONDS defaults to 60. Whole-body uploads add their
     size divided by ETUDE_STORAGE_BYTES_PER_SECOND (default 1 MiB/s).
     """
-    seconds = _positive("ETUDE_STORAGE_TIMEOUT_SECONDS", 60.0)
-    rate = _positive("ETUDE_STORAGE_BYTES_PER_SECOND", 1024.0**2)
+    seconds = positive("ETUDE_STORAGE_TIMEOUT_SECONDS", 60.0)
+    rate = positive("ETUDE_STORAGE_BYTES_PER_SECOND", 1024.0**2)
     return seconds + size_bytes / rate
 
 

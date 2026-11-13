@@ -24,7 +24,7 @@ from etude.experiment import (
     observe,
     read_experiment,
 )
-from etude.jobs import _hold, evaluation, evaluation_spec
+from etude.jobs import evaluation, evaluation_spec, hold_on_machine
 from etude.launch.records import Job, Outcome, Run, Status
 from etude.run.errors import EtudeError
 from etude.run.records import Clock
@@ -65,13 +65,13 @@ def save(run: Run_, bucket: DirectoryStorage, tmp_path: Path, saves: range) -> N
         run.checkpoint(model, updates=100 * ordinal)
     # Records are written in the background: deliver until the bucket has the last one.
     deadline = time.monotonic() + 30
-    while saves and not any(c.ordinal == saves[-1] for c in _saved(run, bucket)):
+    while saves and not any(c.ordinal == saves[-1] for c in saved(run, bucket)):
         assert time.monotonic() < deadline, "checkpoints never delivered"
         run.ship()
         time.sleep(0.01)
 
 
-def _saved(run: Run_, bucket: DirectoryStorage) -> tuple[Checkpoint, ...]:
+def saved(run: Run_, bucket: DirectoryStorage) -> tuple[Checkpoint, ...]:
     found = [each for each in observe(bucket, run.experiment).runs if each.name == run.name]
     return found[0].checkpoints if found else ()
 
@@ -278,7 +278,7 @@ def test_an_experiment_file_defines_eval(tmp_path: Path) -> None:
         read_experiment(tmp_path / "train_only.py")
 
 
-class _Launcher:
+class Launcher:
     """The launcher's two calls a pass makes, recorded instead of renting anything."""
 
     def __init__(self) -> None:
@@ -307,7 +307,7 @@ class _Launcher:
 def test_a_launched_pass_ships_its_checkpoints_and_is_not_launched_twice(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    launcher = _Launcher()
+    launcher = Launcher()
     monkeypatch.setattr(client, "launch", launcher.launch)
     monkeypatch.setattr(client, "status", launcher.status)
     bucket = DirectoryStorage(tmp_path / "bucket")
@@ -341,7 +341,7 @@ def test_a_launched_pass_ships_its_checkpoints_and_is_not_launched_twice(
     monkeypatch.setenv("ETUDE_RUN", str(run.id))
     monkeypatch.setenv("ETUDE_TRACK_DIR", str(tmp_path / "machine" / "track"))
     spec = evaluation_spec(run.job)
-    _hold(spec)
+    hold_on_machine(spec)
     shutil.copytree(tmp_path / "machine" / "track", tmp_path / "bucket" / "delivered")
     db = statsdb("ppo", bucket)
     uris = {urlparse(u).path for (u,) in db.sql("select uri from players where uri is not null")
@@ -363,7 +363,7 @@ def test_a_launched_pass_ships_its_checkpoints_and_is_not_launched_twice(
 def test_a_failed_launched_pass_stops_only_a_pass_wanting_its_matches(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    launcher = _Launcher()
+    launcher = Launcher()
     monkeypatch.setattr(client, "launch", launcher.launch)
     monkeypatch.setattr(client, "status", launcher.status)
     bucket = DirectoryStorage(tmp_path / "bucket")
@@ -392,7 +392,7 @@ def test_a_failed_launched_pass_stops_only_a_pass_wanting_its_matches(
 def test_queued_passes_retain_every_job_while_capacity_is_unavailable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    launcher = _Launcher()
+    launcher = Launcher()
     monkeypatch.setattr(client, "queue", launcher.queue)
     monkeypatch.setattr(client, "status", launcher.status)
     bucket = DirectoryStorage(tmp_path / "bucket")
@@ -432,7 +432,7 @@ def test_a_pass_job_launched_as_given_is_refused_on_the_machine(tmp_path: Path) 
     job = design(tmp_path).eval(observe(bucket, "ppo"))
     assert isinstance(job, Job)
     with pytest.raises(SystemExit, match="etude eval"):
-        _hold(evaluation_spec(job))
+        hold_on_machine(evaluation_spec(job))
 
 
 def test_a_tracked_checkpoints_seat_says_where_its_run_stood_and_its_line(tmp_path: Path) -> None:

@@ -52,7 +52,7 @@ def bucket(storage: Storage) -> Bucket:
 
 def test_a_get_is_signed_as_amazon_documents() -> None:
     storage = Storage(replies=[Reply(status=200, body=b"hello")])
-    assert bucket(storage)._ask("GET", "test.txt", extra={"Range": "bytes=0-9"}) == Reply(
+    assert bucket(storage).ask("GET", "test.txt", extra={"Range": "bytes=0-9"}) == Reply(
         status=200, body=b"hello"
     )
     ((method, url, _, headers),) = storage.asked
@@ -83,7 +83,7 @@ def test_a_listing_is_signed_as_amazon_documents_and_follows_pages() -> None:
     assert "continuation-token=t1" in storage.asked[1][1]
     # Amazon's listing example signs max-keys=2&prefix=J; the same request through `_ask`:
     again = Storage(replies=[Reply(status=200, body=b"")])
-    bucket(again)._ask("GET", "", query={"max-keys": "2", "prefix": "J"})
+    bucket(again).ask("GET", "", query={"max-keys": "2", "prefix": "J"})
     assert again.asked[0][3]["authorization"].endswith(
         "Signature=34b48302e7b5fa45bde8084f4b7868a86f0a534bc59db6670ed5711ef69dc6f7"
     )

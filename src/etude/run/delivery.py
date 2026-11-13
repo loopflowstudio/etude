@@ -50,15 +50,15 @@ class RunFiles:
         """Every path, relative to the run, that a writer has retired."""
         return retired(self.root)
 
-    def _marker(self, destination: str, key: str) -> Path:
+    def marker(self, destination: str, key: str) -> Path:
         return self.root / ".shipped" / destination / (key.replace("/", "__") + ".sent")
 
     def shipped(self, destination: str, key: str) -> str | None:
-        marker = self._marker(destination, key)
+        marker = self.marker(destination, key)
         return marker.read_text() if marker.is_file() else None
 
     def mark(self, destination: str, key: str, fingerprint: str) -> None:
-        marker = self._marker(destination, key)
+        marker = self.marker(destination, key)
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_text(fingerprint)
 
@@ -113,7 +113,7 @@ class StorageDestination:
             files.mark(self.name, delivery.key, delivery.fingerprint)
         for key in retired:
             if files.shipped(self.name, key) is not None and self.storage.delete(prefix + key):
-                files._marker(self.name, key).unlink(missing_ok=True)
+                files.marker(self.name, key).unlink(missing_ok=True)
 
 
 def ship(files: RunFiles, run: str, destination: StorageDestination) -> str | None:

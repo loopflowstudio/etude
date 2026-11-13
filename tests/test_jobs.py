@@ -102,7 +102,7 @@ def checkout(folder: Path, files: dict[str, str]) -> Path:
 
 
 @pytest.fixture(autouse=True)
-def _restore_imports(monkeypatch: pytest.MonkeyPatch) -> None:
+def restore_imports(monkeypatch: pytest.MonkeyPatch) -> None:
     # Job files put their folder on the import path; each test keeps its own.
     monkeypatch.setattr(sys, "path", list(sys.path))
 

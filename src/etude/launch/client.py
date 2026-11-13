@@ -55,13 +55,13 @@ from etude.launch.smoke import Smoked, show, smoke_home, smoke_train
 from etude.launch.source import home
 from etude.launch.ssh import SSH, SSHJournal, SSHStart
 from etude.launch.storage.bucket import BucketJournal
-from etude.launch.storage.s3 import Reply, _send, open_bucket
+from etude.launch.storage.s3 import Reply, open_bucket, send_request
 from etude.launch.storage.transport import observe
 from etude.launch.usage import Usage
 
 
 @cache
-def _open(home: Path) -> Scheduler:
+def open_file(home: Path) -> Scheduler:
     fresh = not (home / "launcher.db").exists()
     store = Database(home / "launcher.db")
     here = local(home / "sessions")
@@ -71,9 +71,9 @@ def _open(home: Path) -> Scheduler:
         # The store's SQLite connection belongs to the opening thread. A request on
         # another thread, such as a download part, keeps the sink its caller set there.
         if threading.get_ident() != owner:
-            return _send(method, url, body, headers)
+            return send_request(method, url, body, headers)
         with observe(store.retain_transfer_json):
-            return _send(method, url, body, headers)
+            return send_request(method, url, body, headers)
 
     def rented(held: Machine | OnDemand) -> Execution:
         """Construct only the selected provider, when a remote operation needs it."""
@@ -145,15 +145,15 @@ def _open(home: Path) -> Scheduler:
 
 
 def default() -> Scheduler:
-    return _open(home())
+    return open_file(home())
 
 
-def _client() -> Scheduler | PythonClient:
+def client() -> Scheduler | PythonClient:
     address = selected()
     return PythonClient(address) if address else default()
 
 
-def _smoked(runs: Sequence[Run | Job], smoke: bool) -> list[Run]:
+def smoked(runs: Sequence[Run | Job], smoke: bool) -> list[Run]:
     each = [run if isinstance(run, Run) else Run(job=run) for run in runs]
     if not smoke:
         return each
@@ -167,8 +167,8 @@ def _smoked(runs: Sequence[Run | Job], smoke: bool) -> list[Run]:
 def queue(
     run: Run | Job, pool: str | None = None, *, rent: str | None = None, smoke: bool = False
 ) -> str:
-    (smoked_run,) = _smoked([run], smoke)
-    return _client().queue(smoked_run, pool, rent=rent)
+    (smoked_run,) = smoked([run], smoke)
+    return client().queue(smoked_run, pool, rent=rent)
 
 
 def queue_cohort(
@@ -181,16 +181,16 @@ def queue_cohort(
     max_usd: Decimal | None = None,
     smoke: bool = False,
 ) -> tuple[str, ...]:
-    return _client().queue_cohort(
-        name, _smoked(runs, smoke), pool, rent=rent, parallel=parallel, max_usd=max_usd
+    return client().queue_cohort(
+        name, smoked(runs, smoke), pool, rent=rent, parallel=parallel, max_usd=max_usd
     )
 
 
 def launch(
     run: Run | Job, pool: str | None = None, *, rent: str | None = None, smoke: bool = False
 ) -> str:
-    (smoked_run,) = _smoked([run], smoke)
-    return _client().launch(smoked_run, pool, rent=rent)
+    (smoked_run,) = smoked([run], smoke)
+    return client().launch(smoked_run, pool, rent=rent)
 
 
 def launch_cohort(
@@ -203,8 +203,8 @@ def launch_cohort(
     max_usd: Decimal | None = None,
     smoke: bool = False,
 ) -> tuple[str, ...]:
-    return _client().launch_cohort(
-        name, _smoked(runs, smoke), pool, rent=rent, parallel=parallel, max_usd=max_usd
+    return client().launch_cohort(
+        name, smoked(runs, smoke), pool, rent=rent, parallel=parallel, max_usd=max_usd
     )
 
 
@@ -222,28 +222,28 @@ def quote(
     Costs assume the quoted rate and timely deletion, and exclude external storage.
     Provider delays can exceed the admitted rental budget.
     """
-    return _client().quote(runs, pool, rent=rent, cohort=cohort, parallel=parallel, max_usd=max_usd)
+    return client().quote(runs, pool, rent=rent, cohort=cohort, parallel=parallel, max_usd=max_usd)
 
 
 def availability(rent: str, *, timeout: float | None = None) -> Availability:
     """Ask an on-demand's provider what it would rent now, at what price; rents nothing."""
-    return _client().availability(rent, timeout=timeout)
+    return client().availability(rent, timeout=timeout)
 
 
 def status(run: str) -> Status:
-    return _client().status(run)
+    return client().status(run)
 
 
 def wait(*runs: str, every: float = 1.0, timeout: float | None = None) -> list[Status]:
-    return _client().wait(*runs, every=every, timeout=timeout)
+    return client().wait(*runs, every=every, timeout=timeout)
 
 
 def cancel(run: str) -> Status:
-    return _client().cancel(run)
+    return client().cancel(run)
 
 
 def diagnostics(*, run: str | None = None, machine: str | None = None) -> tuple[Diagnostic, ...]:
-    return _client().diagnostics(run=run, machine=machine)
+    return client().diagnostics(run=run, machine=machine)
 
 
 def logs(
@@ -254,23 +254,23 @@ def logs(
     timeout: float | None = None,
 ) -> LogSnapshot:
     """Retained evidence; `refresh` first collects from machines within `timeout`."""
-    return _client().logs(run=run, machine=machine, refresh=refresh, timeout=timeout)
+    return client().logs(run=run, machine=machine, refresh=refresh, timeout=timeout)
 
 
 def fetch(run: str, name: str, destination: Path) -> Path:
-    return _client().fetch(run, name, destination)
+    return client().fetch(run, name, destination)
 
 
 def rent(ondemand: str, hours: float, max_usd: Decimal | None = None) -> str:
     """Rent a machine from an on-demand for a window and return its name."""
-    return _client().rent(ondemand, hours, max_usd)
+    return client().rent(ondemand, hours, max_usd)
 
 
 def terminate(machine: str) -> Machine:
     """Delete an idle rented machine and return its acquisition record."""
-    return _client().terminate(machine)
+    return client().terminate(machine)
 
 
 def usage(*, run: str | None = None, machine: str | None = None) -> Usage:
     """Read retained transfer usage without polling machines or storage."""
-    return _client().usage(run=run, machine=machine)
+    return client().usage(run=run, machine=machine)

@@ -62,14 +62,14 @@ from etude.launch.storage.transport import attribute, emit, observe
 from etude.launch.worker.prepared import key, prepare
 
 # Set when the worker is told to end: running phases stop as they would at SIGTERM.
-_halt = threading.Event()
+halt = threading.Event()
 
 
-def _now() -> datetime:
+def now() -> datetime:
     return datetime.now(UTC)
 
 
-def _finish(
+def finish(
     home: Path, outcome: Outcome, cause: Cause | None = None, code: int | None = None
 ) -> None:
     outputs = home / "outputs"
@@ -87,7 +87,7 @@ def _finish(
     record = Progress(
         attempt=home.name,
         started_at=None,
-        finished_at=_now(),
+        finished_at=now(),
         outcome=outcome,
         cause=cause,
         clocks=result.clocks,
@@ -106,7 +106,7 @@ def _finish(
     write(home / "finished.json", record.model_dump_json(exclude={"attempt", "started_at"}))
 
 
-def _lay_out(session: Path, home: Path, work: Work) -> tuple[dict[str, str], dict[str, Path]]:
+def lay_out(session: Path, home: Path, work: Work) -> tuple[dict[str, str], dict[str, Path]]:
     """Lay out source and config, and verify inputs; the job's environment and where inputs are."""
     source = home / "src"
     source.mkdir()
@@ -172,7 +172,7 @@ def _lay_out(session: Path, home: Path, work: Work) -> tuple[dict[str, str], dic
                     sha256=given.sha256,
                 ),
             ):
-                held[given.name] = _held(session, shared, given)
+                held[given.name] = held_input(session, shared, given)
             log.write(
                 f"inputs: verified {given.name} ({given.size_bytes} bytes,"
                 f" {time.monotonic() - began:.1f} s)\n"
@@ -186,7 +186,7 @@ def _lay_out(session: Path, home: Path, work: Work) -> tuple[dict[str, str], dic
     return environment, held
 
 
-def _link(folder: Path, held: dict[str, Path]) -> Path:
+def link(folder: Path, held: dict[str, Path]) -> Path:
     """A folder of inputs by name, each a link to the one copy this machine holds."""
     folder.mkdir()
     for name, path in held.items():
@@ -204,7 +204,7 @@ class Undelivered(ValueError):
     """An input this machine does not hold; another attempt is given it the same way."""
 
 
-def _held(session: Path, shared: Path, given: Input) -> Path:
+def held_input(session: Path, shared: Path, given: Input) -> Path:
     """Where this machine holds the input's bytes, verified for this attempt before it starts.
 
     The cache's read-only copy, which the courier holds for the session; else
@@ -219,7 +219,7 @@ def _held(session: Path, shared: Path, given: Input) -> Path:
     if given.run is not None:
         places.append(shared / given.run / given.key)
     for path in places:
-        if _matches(path, given):
+        if matches(path, given):
             if path.is_relative_to(shared):
                 # Nothing was received for it: this machine already held the run's file.
                 emit("REUSE", path.as_uri(), reused=given.size_bytes, completed=True)
@@ -230,14 +230,14 @@ def _held(session: Path, shared: Path, given: Input) -> Path:
     )
 
 
-def _matches(path: Path, given: Input) -> bool:
+def matches(path: Path, given: Input) -> bool:
     """Whether a file on this machine holds the input's bytes."""
     return (
         path.is_file() and path.stat().st_size == given.size_bytes and digest(path) == given.sha256
     )
 
 
-def _end(process: subprocess.Popen[bytes], deadline: float | None, seconds: float | None) -> None:
+def end(process: subprocess.Popen[bytes], deadline: float | None, seconds: float | None) -> None:
     """Request termination within the explicit grace and enclosing work deadline."""
     left = None if deadline is None else max(0.0, deadline - time.monotonic())
     allowance = seconds if left is None else left if seconds is None else min(left, seconds)
@@ -266,7 +266,7 @@ class Exit(Record):
     stopped: Literal["cancelled", "deadline"] | None = None
 
 
-def _execute(
+def execute(
     command: list[str],
     *,
     cwd: Path,
@@ -278,11 +278,11 @@ def _execute(
     stop_seconds: float | None = None,
 ) -> Exit:
     latest = (
-        None if deadline is None else time.monotonic() + max(0, (deadline - _now()).total_seconds())
+        None if deadline is None else time.monotonic() + max(0, (deadline - now()).total_seconds())
     )
-    _check_halt(stop)
+    check_halt(stop)
     cancelled = stop is not None and stop.exists()
-    if cancelled or (deadline is not None and _now() >= deadline):
+    if cancelled or (deadline is not None and now() >= deadline):
         return Exit(code=None, stopped="cancelled" if cancelled else "deadline")
     process = subprocess.Popen(
         command,
@@ -296,22 +296,22 @@ def _execute(
     stopped: Literal["cancelled", "deadline"] | None = None
     try:
         while process.poll() is None:
-            _check_halt(stop)
+            check_halt(stop)
             if stop is not None and stop.exists():
                 stopped = "cancelled"
             elif deadline is not None and (
-                _now() >= deadline or (latest is not None and time.monotonic() >= latest)
+                now() >= deadline or (latest is not None and time.monotonic() >= latest)
             ):
                 stopped = "deadline"
             if stopped is not None:
                 break
             time.sleep(0.1)
     finally:
-        _end(process, latest, stop_seconds)
+        end(process, latest, stop_seconds)
     return Exit(code=process.returncode, stopped=stopped)
 
 
-def _runtime(
+def runtime(
     home: Path,
     work: Work,
     runtime: Runtime,
@@ -325,7 +325,7 @@ def _runtime(
     log.write(sanitize(f"runtime: inspecting {executable}\n").encode())
     log.flush()
     with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
-        result = _execute(
+        result = execute(
             [
                 executable,
                 "-I",
@@ -362,7 +362,7 @@ def _runtime(
     return result
 
 
-def _phase(
+def phase(
     name: str,
     command: str,
     *,
@@ -381,7 +381,7 @@ def _phase(
         )
         log.flush()
     try:
-        result = _execute(
+        result = execute(
             ["sh", "-c", command],
             cwd=cwd,
             environment={
@@ -405,7 +405,7 @@ def _phase(
 
 
 @contextmanager
-def _prepared(
+def prepared(
     home: Path,
     work: Work,
     environment: dict[str, str],
@@ -429,14 +429,14 @@ def _prepared(
         log.flush()
 
     declared = {name: held[name] for name in preparation.inputs}
-    inputs = _link(home / "prepared-inputs", declared)
+    inputs = link(home / "prepared-inputs", declared)
     found = key(preparation, home / "src", work.inputs, work.environment)
-    source = _keyed_source(home / "src", home / "prepared-source", preparation.paths)
+    source = keyed_source(home / "src", home / "prepared-source", preparation.paths)
     built = Exit(code=0)
 
     def build(directory: Path) -> bool:
         nonlocal built
-        built = _phase(
+        built = phase(
             "prepare",
             preparation.command,
             cwd=source,
@@ -453,7 +453,7 @@ def _prepared(
         )
         return built.code == 0 and built.stopped is None
 
-    with prepare(found, build, lambda: not stop.exists() and _now() < limit, note) as ready:
+    with prepare(found, build, lambda: not stop.exists() and now() < limit, note) as ready:
         if ready is None:
             yield Exit(code=None, stopped="cancelled" if stop.exists() else "deadline")
             return
@@ -465,18 +465,18 @@ def _prepared(
         environment["ETUDE_PREPARED_DIR"] = str(directory)
         if preparation.python is not None:
             python = str(directory / preparation.python)
-            yield _runtime(
+            yield runtime(
                 home, work, work.runtime or Runtime(), python, environment, log, stop, limit
             )
         elif work.runtime is not None and work.runtime.python is not None:
-            yield _runtime(
+            yield runtime(
                 home, work, work.runtime, work.runtime.python, environment, log, stop, limit
             )
         else:
             yield Exit(code=0)
 
 
-def _keyed_source(source: Path, destination: Path, paths: tuple[str, ...]) -> Path:
+def keyed_source(source: Path, destination: Path, paths: tuple[str, ...]) -> Path:
     """A copy of `source` holding only `paths`, where a preparation runs, so it reads only its key."""
     destination.mkdir()
     for path in paths:
@@ -489,7 +489,7 @@ def _keyed_source(source: Path, destination: Path, paths: tuple[str, ...]) -> Pa
     return destination
 
 
-def _commands(
+def commands(
     home: Path,
     packet: Packet,
     work: Work,
@@ -502,7 +502,7 @@ def _commands(
     result = Exit(code=0)
     try:
         if work.setup is not None:
-            result = _phase(
+            result = phase(
                 "setup",
                 work.setup,
                 cwd=home / "src",
@@ -514,7 +514,7 @@ def _commands(
                 stop_seconds=work.stop_seconds,
             )
         if result.code == 0 and result.stopped is None:
-            result = _phase(
+            result = phase(
                 "run",
                 work.command,
                 cwd=home / "src",
@@ -530,11 +530,11 @@ def _commands(
             deadline = (
                 None
                 if work.cleanup_seconds is None
-                else _now() + timedelta(seconds=work.cleanup_seconds)
+                else now() + timedelta(seconds=work.cleanup_seconds)
             )
             if packet.deadline is not None:
                 deadline = packet.deadline if deadline is None else min(deadline, packet.deadline)
-            cleanup = _phase(
+            cleanup = phase(
                 "cleanup",
                 work.cleanup,
                 cwd=home / "src",
@@ -555,25 +555,25 @@ def _commands(
     return result
 
 
-def _run(session: Path, packet: Packet, work: Work) -> None:
+def run_attempt(session: Path, packet: Packet, work: Work) -> None:
     home = session / "attempts" / work.attempt
     stop = session / "stop" / work.attempt
     if (home / "claim").exists() or (home / "finished.json").exists():
         return  # handled once already; code never starts twice
-    if packet.deadline is not None and _now() >= packet.deadline:
+    if packet.deadline is not None and now() >= packet.deadline:
         return  # no time left: the launcher decides what that means
     home.mkdir(parents=True, exist_ok=True)
     if stop.exists():
-        return _finish(home, "cancelled")
+        return finish(home, "cancelled")
     try:
-        environment, held = _lay_out(session, home, work)
+        environment, held = lay_out(session, home, work)
     except (OSError, ValueError, subprocess.CalledProcessError, tarfile.TarError) as error:
         with (home / "log").open("a") as failed:
             failed.write("source preparation failed: " + explain(error) + "\n")
-        return _finish(
+        return finish(
             home, "lost", "input_undelivered" if isinstance(error, Undelivered) else "setup_failed"
         )
-    started = _now()
+    started = now()
     limit = started + timedelta(seconds=work.limit_seconds)
     if packet.deadline is not None:
         limit = min(limit, packet.deadline)
@@ -584,20 +584,20 @@ def _run(session: Path, packet: Packet, work: Work) -> None:
             if work.runtime is not None and work.prepare is None:
                 # Nothing to prepare: the interpreter is checked before code is claimed.
                 assert work.runtime.python is not None  # Job requires it without prepare.python
-                result = _runtime(
+                result = runtime(
                     home, work, work.runtime, work.runtime.python, environment, log, stop, limit
                 )
             if result.code == 0 and result.stopped is None:
                 # The claim denotes user code, not the read-only runtime probe.
                 with tempfile.NamedTemporaryFile(mode="w", dir=home) as claim:
-                    claim.write(_now().isoformat())
+                    claim.write(now().isoformat())
                     claim.flush()
                     os.link(claim.name, home / "claim")
-                with _prepared(home, work, environment, held, log, stop, limit) as result:
+                with prepared(home, work, environment, held, log, stop, limit) as result:
                     if result.code == 0 and result.stopped is None:
                         if held:
-                            environment["ETUDE_INPUTS_DIR"] = str(_link(home / "inputs", held))
-                        result = _commands(home, packet, work, environment, log, stop, limit)
+                            environment["ETUDE_INPUTS_DIR"] = str(link(home / "inputs", held))
+                        result = commands(home, packet, work, environment, log, stop, limit)
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             log.write(("runtime failed: " + explain(error) + "\n").encode())
             result = Exit(code=1)
@@ -613,26 +613,26 @@ def _run(session: Path, packet: Packet, work: Work) -> None:
         )
     else:
         outcome = "succeeded" if result.code == 0 else "failed"
-    _finish(home, outcome, "machine_lost" if outcome == "lost" else None, code=result.code)
+    finish(home, outcome, "machine_lost" if outcome == "lost" else None, code=result.code)
 
 
-def _check_halt(stop: Path | None) -> None:
+def check_halt(stop: Path | None) -> None:
     """End a stoppable phase once the worker is told to end; cleanup (no stop file) still runs."""
-    if stop is not None and _halt.is_set():
+    if stop is not None and halt.is_set():
         raise SystemExit(128 + signal.SIGTERM)
 
 
-def _terminate(signum: int, frame: FrameType | None) -> None:
+def on_terminate(signum: int, frame: FrameType | None) -> None:
     raise SystemExit(128 + signum)
 
 
 def run(directory: Path) -> int:
     session = directory.expanduser().resolve()
-    signal.signal(signal.SIGTERM, _terminate)
+    signal.signal(signal.SIGTERM, on_terminate)
     packet = Packet.model_validate_json((session / "packet.json").read_text())
     (session / "stop").mkdir(exist_ok=True)
     (session / "work").mkdir(exist_ok=True)
-    _halt.clear()
+    halt.clear()
     running: dict[str, Future[None]] = {}  # by attempt: each is given to a thread once
 
     def check() -> None:
@@ -644,8 +644,8 @@ def run(directory: Path) -> int:
         with ThreadPoolExecutor(packet.slots, thread_name_prefix="attempt") as pool:
             try:
                 for work in packet.work:
-                    running[work.attempt] = pool.submit(_run, session, packet, work)
-                while packet.kept and (packet.deadline is None or _now() < packet.deadline):
+                    running[work.attempt] = pool.submit(run_attempt, session, packet, work)
+                while packet.kept and (packet.deadline is None or now() < packet.deadline):
                     # Checked before the work, which is handed over before it: what came first runs.
                     finishing = (session / "finish").exists()
                     # Work added later arrives as files, taken oldest first; each runs once.
@@ -655,7 +655,7 @@ def run(directory: Path) -> int:
                     for path in added:
                         if path.stem not in running:
                             work = Work.model_validate_json(path.read_text())
-                            running[work.attempt] = pool.submit(_run, session, packet, work)
+                            running[work.attempt] = pool.submit(run_attempt, session, packet, work)
                     check()
                     if finishing:
                         break
@@ -666,9 +666,9 @@ def run(directory: Path) -> int:
                 check()
             except BaseException:
                 # Nothing more starts; what runs stops, keeping its cleanup, before `ended`.
-                _halt.set()
+                halt.set()
                 pool.shutdown(wait=False, cancel_futures=True)
                 raise
     finally:
-        write(session / "ended", _now().isoformat())
+        write(session / "ended", now().isoformat())
     return 0

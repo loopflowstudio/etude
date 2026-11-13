@@ -56,23 +56,23 @@ class Version(Record):
     etag: str | None = None
 
 
-def _version(reply: Reply, kept: Version | None, what: str) -> Version | None:
+def version(reply: Reply, kept: Version | None, what: str) -> Version | None:
     if reply.status == 304 and kept is not None:
         return kept
     if reply.status == 404:
         return None
     if reply.status != 200:
-        raise _failed(what, reply.status)
+        raise failed(what, reply.status)
     return Version(body=reply.body, etag=reply.headers.get("etag"))
 
 
-def _unless(kept: Version | None) -> dict[str, str]:
+def unless(kept: Version | None) -> dict[str, str]:
     return {"If-None-Match": kept.etag} if kept is not None and kept.etag else {}
 
 
 # Custom transports share the enclosing deadline, as the default HTTP transport does.
 Send = Callable[[str, str, bytes | None, dict[str, str]], Reply]
-_NS = "{http://s3.amazonaws.com/doc/2006-03-01/}"
+NS = "{http://s3.amazonaws.com/doc/2006-03-01/}"
 WEEK = 7 * 24 * 3600  # the longest a link or form signed with these keys may last
 GRANT_LIMIT = 36 * 3600  # the longest AWS federation keys last
 PART_BYTES = 64 * 1024**2
@@ -93,7 +93,7 @@ class Denied(StorageUnavailable):
     """Storage refused the keys: they have expired or may not do this."""
 
 
-def _failed(what: str, status: int) -> StorageUnavailable:
+def failed(what: str, status: int) -> StorageUnavailable:
     return (Denied if status == 403 else StorageUnavailable)(f"{what}: status {status}")
 
 
@@ -101,7 +101,7 @@ class AlreadyThere(Exception):
     """An object that must be written only once has been written before."""
 
 
-def _environment(name: str) -> str:
+def environment(name: str) -> str:
     value = os.environ.get(name)
     if not value:
         raise StorageUnavailable(f"{name} is not set")
@@ -121,12 +121,12 @@ class Keys(Record):
         """
         if provider == "r2":
             return Keys(
-                access_key=_environment("R2_ACCESS_KEY_ID"),
-                secret_key=_environment("R2_SECRET_ACCESS_KEY"),
+                access_key=environment("R2_ACCESS_KEY_ID"),
+                secret_key=environment("R2_SECRET_ACCESS_KEY"),
             )
         return Keys(
-            access_key=_environment("AWS_ACCESS_KEY_ID"),
-            secret_key=_environment("AWS_SECRET_ACCESS_KEY"),
+            access_key=environment("AWS_ACCESS_KEY_ID"),
+            secret_key=environment("AWS_SECRET_ACCESS_KEY"),
             session_token=os.environ.get("AWS_SESSION_TOKEN") or None,
         )
 
@@ -164,13 +164,13 @@ class Grant(Record):
     form: PostForm | None = None
 
     @model_validator(mode="after")
-    def _writes_somehow(self) -> Grant:
+    def writes_somehow(self) -> Grant:
         if self.bucket is None and self.form is None:
             raise ValueError("a grant needs keys or a form")
         return self
 
 
-def _send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Reply:
+def send_request(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Reply:
     chunks: list[bytes] = []
     metadata: dict[str, str] = {}
 
@@ -191,7 +191,7 @@ def _send(method: str, url: str, body: bytes | None, headers: dict[str, str]) ->
     return Reply(status=status, body=b"".join(chunks), headers=metadata)
 
 
-def _get(url: str, headers: dict[str, str], send: Send) -> Reply:
+def get(url: str, headers: dict[str, str], send: Send) -> Reply:
     """Three transient read attempts share one allowance, including backoff."""
     for attempt in range(1, 4):
         remaining()
@@ -213,11 +213,11 @@ def _get(url: str, headers: dict[str, str], send: Send) -> Reply:
     raise AssertionError("read retry loop exhausted without a result")
 
 
-def _hash(data: bytes) -> str:
+def content_hash(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _quote(text: str, safe: str = "") -> str:
+def quote(text: str, safe: str = "") -> str:
     return urllib.parse.quote(text, safe="-_.~" + safe)
 
 
@@ -232,16 +232,16 @@ class Bucket:
         name: str,
         region: str,
         keys: Keys,
-        send: Send = _send,
+        send: Send = send_request,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         host: str | None = None,
         *,
         account: str | None = None,
         token: str | None = None,
     ) -> None:
-        self.name, self.region, self._keys = name, region, keys
-        self.send, self._clock = send, clock
-        self.account, self._token = account, token
+        self.name, self.region, self.keys = name, region, keys
+        self.send, self.clock = send, clock
+        self.account, self.token = account, token
         default = (
             f"{name}.s3.{region}.amazonaws.com"
             if account is None
@@ -249,26 +249,28 @@ class Bucket:
         )
         self.host = host or default
 
-    def _signing_key(self, day: str, service: str = "s3") -> bytes:
-        key = ("AWS4" + self._keys.secret_key).encode()
+    def signing_key(self, day: str, service: str = "s3") -> bytes:
+        key = ("AWS4" + self.keys.secret_key).encode()
         for part in (day, self.region, service, "aws4_request"):
             key = hmac.new(key, part.encode(), hashlib.sha256).digest()
         return key
 
-    def _signature(self, stamp: str, canonical_request: str, service: str = "s3") -> str:
+    def signature(self, stamp: str, canonical_request: str, service: str = "s3") -> str:
         scope = f"{stamp[:8]}/{self.region}/{service}/aws4_request"
-        to_sign = "\n".join(("AWS4-HMAC-SHA256", stamp, scope, _hash(canonical_request.encode())))
-        key = self._signing_key(stamp[:8], service)
+        to_sign = "\n".join(
+            ("AWS4-HMAC-SHA256", stamp, scope, content_hash(canonical_request.encode()))
+        )
+        key = self.signing_key(stamp[:8], service)
         return hmac.new(key, to_sign.encode(), hashlib.sha256).hexdigest()
 
-    def _credential(self, stamp: str, service: str = "s3") -> str:
-        return f"{self._keys.access_key}/{stamp[:8]}/{self.region}/{service}/aws4_request"
+    def credential(self, stamp: str, service: str = "s3") -> str:
+        return f"{self.keys.access_key}/{stamp[:8]}/{self.region}/{service}/aws4_request"
 
-    def _stamp(self) -> str:
-        return self._clock().astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
+    def stamp(self) -> str:
+        return self.clock().astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
 
     @timed("bucket.ask")
-    def _ask(
+    def ask(
         self,
         method: str,
         key: str,
@@ -280,19 +282,19 @@ class Bucket:
     ) -> Reply:
         """One signed request, to the bucket or, with `service`, to another AWS service."""
         host = self.host if service == "s3" else f"{service}.{self.region}.amazonaws.com"
-        stamp = self._stamp()
-        headers = {"host": host, "x-amz-content-sha256": _hash(body), "x-amz-date": stamp}
-        if self._keys.session_token:
-            headers["x-amz-security-token"] = self._keys.session_token
+        stamp = self.stamp()
+        headers = {"host": host, "x-amz-content-sha256": content_hash(body), "x-amz-date": stamp}
+        if self.keys.session_token:
+            headers["x-amz-security-token"] = self.keys.session_token
         headers.update({name.lower(): value for name, value in (extra or {}).items()})
         names = sorted(headers)
         text_query = "&".join(
-            f"{_quote(name)}={_quote(value)}" for name, value in sorted((query or {}).items())
+            f"{quote(name)}={quote(value)}" for name, value in sorted((query or {}).items())
         )
         canonical = "\n".join(
             (
                 method,
-                "/" + _quote(key, safe="/"),
+                "/" + quote(key, safe="/"),
                 text_query,
                 "".join(f"{name}:{headers[name].strip()}\n" for name in names),
                 ";".join(names),
@@ -300,15 +302,15 @@ class Bucket:
             )
         )
         headers["authorization"] = (
-            f"AWS4-HMAC-SHA256 Credential={self._credential(stamp, service)}, "
+            f"AWS4-HMAC-SHA256 Credential={self.credential(stamp, service)}, "
             f"SignedHeaders={';'.join(names)}, "
-            f"Signature={self._signature(stamp, canonical, service)}"
+            f"Signature={self.signature(stamp, canonical, service)}"
         )
-        url = f"https://{host}/{_quote(key, safe='/')}" + (f"?{text_query}" if query else "")
+        url = f"https://{host}/{quote(key, safe='/')}" + (f"?{text_query}" if query else "")
         del headers["host"]
         try:
             if method == "GET":
-                return _get(url, headers, self.send)
+                return get(url, headers, self.send)
             return self.send(method, url, body if method in ("PUT", "POST") else None, headers)
         except TimeoutError:
             raise StorageUnavailable(
@@ -323,17 +325,17 @@ class Bucket:
         The request signs the body's SHA256, so storage itself refuses bytes that
         changed on the way; nothing reads an upload back to check it.
         """
-        reply = self._ask("PUT", key, body=body, extra={"if-none-match": "*"} if once else None)
+        reply = self.ask("PUT", key, body=body, extra={"if-none-match": "*"} if once else None)
         if once and reply.status == 412:
             raise AlreadyThere(key)
         if reply.status != 200:
-            raise _failed(f"PUT {key}", reply.status)
+            raise failed(f"PUT {key}", reply.status)
 
     def delete(self, key: str) -> None:
         """Remove an object. Removing one that is not there succeeds, as S3 defines it."""
-        reply = self._ask("DELETE", key)
+        reply = self.ask("DELETE", key)
         if reply.status not in (200, 204):
-            raise _failed(f"DELETE {key}", reply.status)
+            raise failed(f"DELETE {key}", reply.status)
 
     def put_parts(self, key: str, chunks: Iterable[bytes]) -> None:
         """Write chunks without reading the whole file into memory.
@@ -348,18 +350,18 @@ class Bucket:
         if second is None:
             self.put(key, first)
             return
-        reply = self._ask("POST", key, query={"uploads": ""})
-        upload = _text(reply.body, "UploadId") if reply.status == 200 else None
+        reply = self.ask("POST", key, query={"uploads": ""})
+        upload = text(reply.body, "UploadId") if reply.status == 200 else None
         if upload is None:
-            raise _failed(f"start upload of {key}", reply.status)
+            raise failed(f"start upload of {key}", reply.status)
         try:
             parts: list[str] = []
             for number, chunk in enumerate(chain((first, second), waiting), start=1):
-                reply = self._ask(
+                reply = self.ask(
                     "PUT", key, query={"partNumber": str(number), "uploadId": upload}, body=chunk
                 )
                 if reply.status != 200:
-                    raise _failed(f"PUT {key} part {number}", reply.status)
+                    raise failed(f"PUT {key} part {number}", reply.status)
                 tag = reply.headers.get("etag")
                 if not tag:
                     raise StorageUnavailable(f"PUT {key} part {number}: missing ETag")
@@ -367,7 +369,7 @@ class Bucket:
                 parts.append(f"<Part><PartNumber>{number}</PartNumber><ETag>{tag}</ETag></Part>")
             # Without a content type of its own, urllib labels a POST body as a
             # web form, and S3 then refuses the signature (seen against AWS).
-            reply = self._ask(
+            reply = self.ask(
                 "POST",
                 key,
                 query={"uploadId": upload},
@@ -379,7 +381,7 @@ class Bucket:
                 raise StorageUnavailable(f"finish upload of {key}: status {reply.status}")
         except StorageUnavailable:
             try:
-                self._ask("DELETE", key, query={"uploadId": upload})
+                self.ask("DELETE", key, query={"uploadId": upload})
             except StorageUnavailable:
                 pass  # the bucket's own rule for unfinished uploads is the backstop
             raise
@@ -393,34 +395,34 @@ class Bucket:
         caller's own.
         """
         if self.account is not None:
-            return Grant(prefix=prefix, bucket=self._access(self._r2_keys(prefix, seconds)))
-        keys = self._federation_keys(prefix, seconds, name)
+            return Grant(prefix=prefix, bucket=self.access(self.r2_keys(prefix, seconds)))
+        keys = self.federation_keys(prefix, seconds, name)
         return Grant(
             prefix=prefix,
-            bucket=None if keys is None else self._access(keys),
+            bucket=None if keys is None else self.access(keys),
             form=self.post_form(prefix, seconds),
         )
 
-    def _access(self, keys: Keys) -> BucketAccess:
+    def access(self, keys: Keys) -> BucketAccess:
         return BucketAccess(name=self.name, region=self.region, host=self.host, keys=keys)
 
-    def _r2_keys(self, prefix: str, seconds: int) -> Keys:
+    def r2_keys(self, prefix: str, seconds: int) -> Keys:
         """Temporary R2 keys that read and write objects under `prefix` only.
 
         Cloudflare's `temp-access-credentials` call; the keys inherit no more
         than the parent access key the bucket was opened with.
         """
-        if not self._token:
+        if not self.token:
             raise StorageUnavailable("R2_API_TOKEN is not set; R2 grants need a Cloudflare token")
         body = {
             "bucket": self.name,
-            "parentAccessKeyId": self._keys.access_key,
+            "parentAccessKeyId": self.keys.access_key,
             "permission": "object-read-write",
             "ttlSeconds": max(1, min(seconds, WEEK)),
             "prefixes": [prefix],
         }
         url = f"https://api.cloudflare.com/client/v4/accounts/{self.account}/r2/temp-access-credentials"
-        headers = {"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"}
+        headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
         try:
             # The usage journal names the call, not the account in its path.
             with attribute(purpose="control", key="/r2/temp-access-credentials"):
@@ -430,7 +432,7 @@ class Bucket:
         except OSError:
             raise StorageUnavailable("R2 grant: no reply") from None
         if reply.status != 200:
-            raise _failed("R2 grant", reply.status)
+            raise failed("R2 grant", reply.status)
         try:
             result = json.loads(reply.body)["result"]
             return Keys(
@@ -441,14 +443,14 @@ class Bucket:
         except (ValueError, KeyError, TypeError):
             raise StorageUnavailable("R2 grant: unreadable reply") from None
 
-    def _federation_keys(self, prefix: str, seconds: int, name: str) -> Keys | None:
+    def federation_keys(self, prefix: str, seconds: int, name: str) -> Keys | None:
         """Temporary S3 keys that can write, send in parts and delete under `prefix` only.
 
         None when AWS will not issue them: the caller is not an IAM user (keys
         that are themselves temporary cannot ask), or lacks
         `sts:GetFederationToken`.
         """
-        if self._keys.session_token:
+        if self.keys.session_token:
             return None
         policy = {
             "Version": "2012-10-17",
@@ -472,7 +474,7 @@ class Bucket:
             "Policy": json.dumps(policy, separators=(",", ":")),
         }
         try:
-            reply = self._ask(
+            reply = self.ask(
                 "POST",
                 "",
                 body=urllib.parse.urlencode(form).encode(),
@@ -484,7 +486,7 @@ class Bucket:
         if reply.status != 200:
             return None
         access, secret, token = (
-            _text(reply.body, field) for field in ("AccessKeyId", "SecretAccessKey", "SessionToken")
+            text(reply.body, field) for field in ("AccessKeyId", "SecretAccessKey", "SessionToken")
         )
         if not (access and secret and token):
             return None
@@ -497,65 +499,65 @@ class Bucket:
 
     def get_version(self, key: str, kept: Version | None = None) -> Version | None:
         """An object's current version; `kept` itself when it is unchanged, sent without a body."""
-        return _version(self._ask("GET", key, extra=_unless(kept)), kept, f"GET {key}")
+        return version(self.ask("GET", key, extra=unless(kept)), kept, f"GET {key}")
 
     def list(self, prefix: str) -> list[str]:
         """Every key under a prefix, in order."""
         keys: list[str] = []
         query = {"list-type": "2", "prefix": prefix}
         for _ in range(1000):
-            reply = self._ask("GET", "", query=query)
+            reply = self.ask("GET", "", query=query)
             if reply.status != 200:
                 raise StorageUnavailable(f"list {prefix}: status {reply.status}")
             try:
                 page = ET.fromstring(reply.body)  # noqa: S314
             except ET.ParseError:
                 raise StorageUnavailable(f"list {prefix}: unreadable reply") from None
-            keys += [node.text or "" for node in page.iter(f"{_NS}Key")]
-            more = page.findtext(f"{_NS}NextContinuationToken")
-            if page.findtext(f"{_NS}IsTruncated") != "true" or not more:
+            keys += [node.text or "" for node in page.iter(f"{NS}Key")]
+            more = page.findtext(f"{NS}NextContinuationToken")
+            if page.findtext(f"{NS}IsTruncated") != "true" or not more:
                 return keys
             query["continuation-token"] = more
         raise StorageUnavailable(f"list {prefix}: did not end")
 
     def put_url(self, key: str, seconds: int) -> str:
         """Write-only capability for exactly one object, without a prefix grant."""
-        return self._url(key, seconds, "PUT")
+        return self.url(key, seconds, "PUT")
 
     def get_url(self, key: str, seconds: int) -> str:
-        return self._url(key, seconds, "GET")
+        return self.url(key, seconds, "GET")
 
-    def _url(self, key: str, seconds: int, method: str) -> str:
+    def url(self, key: str, seconds: int, method: str) -> str:
         """A capability for one method and object, valid for `seconds`."""
-        stamp = self._stamp()
+        stamp = self.stamp()
         query = {
             "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
-            "X-Amz-Credential": self._credential(stamp),
+            "X-Amz-Credential": self.credential(stamp),
             "X-Amz-Date": stamp,
             "X-Amz-Expires": str(min(seconds, WEEK)),
             "X-Amz-SignedHeaders": "host",
         }
-        if self._keys.session_token:
-            query["X-Amz-Security-Token"] = self._keys.session_token
-        text_query = "&".join(f"{_quote(n)}={_quote(v)}" for n, v in sorted(query.items()))
-        path = "/" + _quote(key, safe="/")
+        if self.keys.session_token:
+            query["X-Amz-Security-Token"] = self.keys.session_token
+        text_query = "&".join(f"{quote(n)}={quote(v)}" for n, v in sorted(query.items()))
+        path = "/" + quote(key, safe="/")
         canonical = "\n".join(
             (method, path, text_query, f"host:{self.host}\n", "host", "UNSIGNED-PAYLOAD")
         )
-        signature = self._signature(stamp, canonical)
+        signature = self.signature(stamp, canonical)
         return f"https://{self.host}{path}?{text_query}&X-Amz-Signature={signature}"
 
     def post_form(self, prefix: str, seconds: int, max_bytes: int = 5 * 1024**3) -> PostForm:
         """A form that writes objects under `prefix` for `seconds`, and nowhere else."""
-        stamp = self._stamp()
+        stamp = self.stamp()
         fields = {
             "x-amz-algorithm": "AWS4-HMAC-SHA256",
-            "x-amz-credential": self._credential(stamp),
+            "x-amz-credential": self.credential(stamp),
             "x-amz-date": stamp,
         }
-        if self._keys.session_token:
-            fields["x-amz-security-token"] = self._keys.session_token
-        expires = self._clock().astimezone(UTC) + timedelta(seconds=min(seconds, WEEK))
+        if self.keys.session_token:
+            fields["x-amz-security-token"] = self.keys.session_token
+        expires = self.clock().astimezone(UTC) + timedelta(seconds=min(seconds, WEEK))
         policy = {
             "expiration": expires.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "conditions": [
@@ -567,7 +569,7 @@ class Bucket:
         }
         encoded = base64.b64encode(json.dumps(policy).encode()).decode()
         signature = hmac.new(
-            self._signing_key(stamp[:8]), encoded.encode(), hashlib.sha256
+            self.signing_key(stamp[:8]), encoded.encode(), hashlib.sha256
         ).hexdigest()
         return PostForm(
             url=f"https://{self.host}/",
@@ -575,7 +577,7 @@ class Bucket:
         )
 
 
-def open_bucket(storage: Storage, send: Send = _send) -> Bucket:
+def open_bucket(storage: Storage, send: Send = send_request) -> Bucket:
     """The storage's bucket, with the launcher's keys from the environment.
 
     S3 reads `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`;
@@ -589,14 +591,14 @@ def open_bucket(storage: Storage, send: Send = _send) -> Bucket:
             "auto",  # R2 signs every request for this region
             keys,
             send,
-            account=_environment("R2_ACCOUNT_ID"),
+            account=environment("R2_ACCOUNT_ID"),
             token=os.environ.get("R2_API_TOKEN") or None,
         )
     assert storage.region is not None  # `Storage` requires one for S3
     return Bucket(storage.bucket, storage.region, keys, send)
 
 
-def _text(body: bytes, name: str) -> str | None:
+def text(body: bytes, name: str) -> str | None:
     """The first named element's text, regardless of the reply's XML namespace."""
     try:
         root = ET.fromstring(body)  # noqa: S314
@@ -609,7 +611,7 @@ def _text(body: bytes, name: str) -> str | None:
 
 
 @timed("bucket.post")
-def post(form: PostForm, key: str, body: bytes, send: Send = _send) -> None:
+def post(form: PostForm, key: str, body: bytes, send: Send = send_request) -> None:
     """Write one object with a form. Storage refuses a key outside the form's prefix."""
     boundary = "etude" + hashlib.sha256(key.encode()).hexdigest()[:24]
     parts: list[bytes] = []
@@ -636,19 +638,19 @@ def post(form: PostForm, key: str, body: bytes, send: Send = _send) -> None:
         raise StorageUnavailable(f"POST {key}: status {status}")
 
 
-def read(url: str, send: Send = _send) -> bytes | None:
+def read(url: str, send: Send = send_request) -> bytes | None:
     """Follow a reading link. None when storage says the object does not exist."""
     found = read_version(url, None, send)
     return None if found is None else found.body
 
 
 @timed("bucket.read")
-def read_version(url: str, kept: Version | None, send: Send = _send) -> Version | None:
+def read_version(url: str, kept: Version | None, send: Send = send_request) -> Version | None:
     """Follow a reading link for the object's current version; `kept` when unchanged."""
     try:
-        reply = _get(url, _unless(kept), send)
+        reply = get(url, unless(kept), send)
     except TimeoutError:
         raise StorageUnavailable("GET by link: storage request timed out") from None
     except OSError:
         raise StorageUnavailable("GET by link: no reply") from None
-    return _version(reply, kept, "GET by link")
+    return version(reply, kept, "GET by link")

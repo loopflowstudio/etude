@@ -69,7 +69,7 @@ class Unreachable(LauncherError):
 # Every invocation selects an immutable program version, so an upgrade cannot
 # change the modules of an already running session.
 # Bootstrap imports only the standard library before the environment is ready.
-_INSTALL_CODE = """import base64,io,json,os,pathlib,sys,zipfile
+INSTALL_CODE = """import base64,io,json,os,pathlib,sys,zipfile
 with zipfile.ZipFile(io.BytesIO(code)) as archive:
     import types
     for name in ("etude", "etude.launch"):
@@ -103,7 +103,7 @@ with contextlib.redirect_stdout(sys.stderr):
             publication.set()
             logging.publish(pathlib.Path(os.environ["ETUDE_LOG_PATH"]), links["log_url"])
 """
-_BOOT = (
+BOOT = (
     """import base64,json,os,sys
 request=json.load(sys.stdin)
 os.environ.update(request.get('storage_environment', {}))
@@ -146,7 +146,7 @@ else:
     os.environ.pop('ETUDE_LOG_PATH',None)
     os.environ['ETUDE_STARTUP_DEADLINE']=request.get('startup_deadline') or ''
 """
-    + _INSTALL_CODE
+    + INSTALL_CODE
     + """
 if request['action']=='start':
     import subprocess
@@ -207,7 +207,7 @@ class SSH:
             raise LauncherError("use one SSH address, with options in ~/.ssh/config")
         self.address, self.root, self.executable = address, root, executable
         self.python = python or remote_python()
-        self._program = base64.b64encode(program_archive()).decode()
+        self.program = base64.b64encode(program_archive()).decode()
 
     @timed("ssh.call")
     def call(
@@ -251,7 +251,7 @@ class SSH:
                 bootstrap=bootstrap,
                 cleanup=cleanup,
             ).model_dump(mode="json"),
-            "program": self._program,
+            "program": self.program,
         }
         allowance = remaining()
         if action == "start" and startup_deadline is not None:
@@ -266,7 +266,7 @@ class SSH:
                     "-o",
                     "BatchMode=yes",
                     self.address,
-                    login_shell(shlex.join([self.python, "-c", _BOOT])),
+                    login_shell(shlex.join([self.python, "-c", BOOT])),
                 ],
                 input=json.dumps(request).encode(),
                 capture_output=True,

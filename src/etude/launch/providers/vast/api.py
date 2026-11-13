@@ -74,23 +74,23 @@ class Instance(Record):
         return datetime.fromtimestamp(self.start_date, UTC)
 
 
-class _Offers(Record):
+class Offers(Record):
     offers: tuple[VastOffer, ...]
 
 
-class _Page(Record):
+class Page(Record):
     next_token: str | None  # absence of this field is not an exhausted result
 
 
-class _Instances(_Page):
+class Instances(Page):
     instances: tuple[Instance, ...]
 
 
-class _Instance(Record):
+class RawInstance(Record):
     instances: Instance | None
 
 
-class _Created(Record):
+class Created(Record):
     success: Literal[True]
     new_contract: int = Field(gt=0)
 
@@ -107,7 +107,7 @@ class Create(Record):
     cancel_unavail: Literal[True] = True
 
 
-class _Charge(Record):
+class Charge(Record):
     start: float = Field(allow_inf_nan=False)
     end: float = Field(allow_inf_nan=False)
     type: str
@@ -115,8 +115,8 @@ class _Charge(Record):
     amount: Decimal = Field(ge=0, allow_inf_nan=False)
 
 
-class _Charges(_Page):
-    results: tuple[_Charge, ...]
+class ChargesPage(Page):
+    results: tuple[Charge, ...]
 
 
 class Charges(Record):
@@ -132,7 +132,7 @@ class Charges(Record):
     observed_at: datetime
 
 
-def _charge_day(timestamp: float) -> date:
+def charge_day(timestamp: float) -> date:
     try:
         value = datetime.fromtimestamp(timestamp, UTC)
     except (ValueError, OverflowError, OSError):
@@ -142,7 +142,7 @@ def _charge_day(timestamp: float) -> date:
     return value.date()
 
 
-def _read[T: Record](model: type[T], raw: bytes | None) -> T:
+def read[T: Record](model: type[T], raw: bytes | None) -> T:
     try:
         if raw is None:
             raise ValueError("missing body")
@@ -153,10 +153,10 @@ def _read[T: Record](model: type[T], raw: bytes | None) -> T:
 
 
 class VastAPI(InstanceHTTP):
-    def _pages[T: _Page](self, model: type[T], path: str, params: dict[str, str]) -> Iterator[T]:
+    def pages[T: Page](self, model: type[T], path: str, params: dict[str, str]) -> Iterator[T]:
         seen: set[str] = set()
         while True:
-            page = _read(model, self.ask("GET", path, params=params))
+            page = read(model, self.ask("GET", path, params=params))
             yield page
             if page.next_token is None:
                 return
@@ -192,7 +192,7 @@ class VastAPI(InstanceHTTP):
         }
         if template.data_center:
             query["geolocation"] = {"eq": template.data_center}
-        page = _read(_Offers, self.ask("POST", "api/v0/bundles/", body=json.dumps(query)))
+        page = read(Offers, self.ask("POST", "api/v0/bundles/", body=json.dumps(query)))
         # Validate the selection locally as well: a server ignoring a filter must
         # not sell the caller a smaller machine or charge unbounded bandwidth.
         offers = (
@@ -219,13 +219,13 @@ class VastAPI(InstanceHTTP):
 
     def create(self, offer: VastOffer, request: Create) -> int:
         reply = self.ask("PUT", f"api/v0/asks/{offer.id}/", body=request.model_dump_json())
-        return _read(_Created, reply).new_contract
+        return read(Created, reply).new_contract
 
     def instance(self, id: int) -> Instance | None:
         if id <= 0:
             raise ValueError("not a Vast instance id")
         reply = self.ask("GET", f"api/v0/instances/{id}/", absent_ok=True)
-        instance = None if reply is None else _read(_Instance, reply).instances
+        instance = None if reply is None else read(RawInstance, reply).instances
         if instance is not None and instance.id != id:
             raise ProviderUnavailable("Vast returned a different instance id")
         return instance
@@ -234,7 +234,7 @@ class VastAPI(InstanceHTTP):
         params = {"limit": "25", "select_filters": json.dumps({"label": {"eq": label}})}
         found = [
             instance
-            for page in self._pages(_Instances, "api/v1/instances/", params)
+            for page in self.pages(Instances, "api/v1/instances/", params)
             for instance in page.instances
             if instance.label == label
         ]
@@ -264,7 +264,7 @@ class VastAPI(InstanceHTTP):
         }
         found = [
             row
-            for page in self._pages(_Charges, "api/v0/charges", params)
+            for page in self.pages(ChargesPage, "api/v0/charges", params)
             for row in page.results
             if row.type == "instance" and row.source == f"instance-{instance.id}"
         ]
@@ -273,7 +273,7 @@ class VastAPI(InstanceHTTP):
         if len(found) != 1:
             raise ProviderUnavailable("duplicate Vast contract charge totals")
         row = found[0]
-        first_day, last_day = _charge_day(row.start), _charge_day(row.end)
+        first_day, last_day = charge_day(row.start), charge_day(row.end)
         if not first.date() <= first_day <= last_day <= last.date():
             raise ProviderUnavailable("Vast charge dates are outside the requested range")
         return Charges(usd=row.amount, first_day=first_day, last_day=last_day, observed_at=now)

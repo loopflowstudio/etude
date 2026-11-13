@@ -32,7 +32,7 @@ def test_queue_grows_after_restart(tmp_path: Path) -> None:
     b.scheduler.tick()
     assert b.scheduler.read(run).phase == "queued"
     # Previously queued rows keep their metadata but gain the corrected scheduling behavior.
-    b.store._db.execute("UPDATE runs SET queued=1 WHERE id=?", (run,))
+    b.store.db.execute("UPDATE runs SET queued=1 WHERE id=?", (run,))
     b.scheduler.set_ondemand_max("l4", 1)
     reopened = Scheduler(
         Database(tmp_path / "launcher.db"), {"runpod": lambda held: b.service}, b.clock
@@ -289,7 +289,7 @@ def test_partial_launch_cleans_up_without_executable_work(
 def test_launch_lock_fences_rivals_and_keeps_other_pools_working(tmp_path: Path) -> None:
     b = bench(tmp_path, max_machines=1)
     b.scheduler.add_machine("shed", "owned")
-    other = Scheduler(Database(tmp_path / "launcher.db"), b.scheduler._services, b.clock)
+    other = Scheduler(Database(tmp_path / "launcher.db"), b.scheduler.services, b.clock)
     create = b.service.create
     queued: list[str] = []
 
@@ -315,7 +315,7 @@ def test_launch_lock_fences_rivals_and_keeps_other_pools_working(tmp_path: Path)
 
 def test_expired_launch_cannot_commit_and_orphan_is_cleaned(tmp_path: Path) -> None:
     b = bench(tmp_path)
-    other = Scheduler(Database(tmp_path / "launcher.db"), b.scheduler._services, b.clock)
+    other = Scheduler(Database(tmp_path / "launcher.db"), b.scheduler.services, b.clock)
     create = b.service.create
 
     def delayed(packet: Packet) -> str:

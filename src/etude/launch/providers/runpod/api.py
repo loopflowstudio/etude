@@ -12,7 +12,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from etude.launch.errors import LauncherError, ProviderUnavailable
-from etude.launch.providers.runpod.http import _ID, PodHTTP
+from etude.launch.providers.runpod.http import ID, PodHTTP
 from etude.launch.records import CPU, GPU, Hardware, Record
 
 
@@ -39,7 +39,7 @@ class HourBill(Record):
 
 class RunPodAPI(PodHTTP):
     @staticmethod
-    def _pod(raw: Any) -> PodFact:
+    def pod_fact(raw: Any) -> PodFact:
         try:
             fact = PodFact(
                 id=str(raw["id"]),
@@ -50,7 +50,7 @@ class RunPodAPI(PodHTTP):
             )
         except (KeyError, TypeError, ValueError, InvalidOperation):
             raise ProviderUnavailable("a pod record was missing its expected fields") from None
-        if not _ID.fullmatch(fact.id) or fact.created_at.tzinfo is None:
+        if not ID.fullmatch(fact.id) or fact.created_at.tzinfo is None:
             raise ProviderUnavailable("a pod record was missing its expected fields")
         return fact
 
@@ -70,8 +70,8 @@ class RunPodAPI(PodHTTP):
         flavors in stock. With a data center named, only stock there counts.
         """
         if gpu is None:
-            return self._cpu_quote(vcpus, memory_gb, data_center)
-        catalog = self._ask(
+            return self.cpu_quote(vcpus, memory_gb, data_center)
+        catalog = self.ask(
             "GET",
             "catalog/gpus",
             params={"include": "AVAILABILITY", "product": "POD", "cloud": "SECURE"},
@@ -79,7 +79,7 @@ class RunPodAPI(PodHTTP):
         try:
             row = next(row for row in catalog["gpus"] if row["id"] == gpu)
             price = Decimal(str(row["price"]["secure"]))
-            available = _available(row, data_center)
+            available = is_available(row, data_center)
         except (KeyError, TypeError, StopIteration, InvalidOperation):
             raise ProviderUnavailable(f"no price for {gpu}") from None
         if price <= 0:
@@ -87,13 +87,13 @@ class RunPodAPI(PodHTTP):
         hardware = GPU(id=gpu, count=gpu_count, min_vcpus=vcpus, min_memory_gb=memory_gb)
         return Quote(hardware=hardware, usd_per_hour=price * gpu_count, available=available)
 
-    def _cpu_quote(self, vcpus: int, memory_gb: int, data_center: str | None) -> Quote:
+    def cpu_quote(self, vcpus: int, memory_gb: int, data_center: str | None) -> Quote:
         # RunPod rents CPU pods in power-of-two vCPU counts, with memory a fixed
         # multiple of them per flavor, and prices them per vCPU.
         smallest = 2
         while smallest < vcpus:
             smallest *= 2
-        catalog = self._ask(
+        catalog = self.ask(
             "GET",
             "catalog/cpus",
             params={"include": "AVAILABILITY", "product": "POD", "vcpuCount": str(smallest)},
@@ -111,7 +111,7 @@ class RunPodAPI(PodHTTP):
                     Quote(
                         hardware=CPU(flavor=str(row["id"]), vcpus=size),
                         usd_per_hour=price,
-                        available=_available(row, data_center),
+                        available=is_available(row, data_center),
                     )
                 )
         except (KeyError, TypeError, ValueError, InvalidOperation):
@@ -122,10 +122,10 @@ class RunPodAPI(PodHTTP):
 
     def pod(self, id: str) -> PodFact | None:
         """One pod by the provider's id, or None when the provider says it does not exist."""
-        if not _ID.fullmatch(id):
+        if not ID.fullmatch(id):
             raise ValueError("not a provider id")
-        raw = self._ask("GET", f"pods/{id}", absent_ok=True)
-        return None if raw is None else self._pod(raw)
+        raw = self.ask("GET", f"pods/{id}", absent_ok=True)
+        return None if raw is None else self.pod_fact(raw)
 
     def named(self, name: str) -> PodFact | None:
         """The pod carrying one session's identity, from the whole inventory.
@@ -135,9 +135,9 @@ class RunPodAPI(PodHTTP):
         params = {"limit": "1000"}
         seen: set[str] = set()
         for _ in range(100):
-            page = self._ask("GET", "pods", params=params)
+            page = self.ask("GET", "pods", params=params)
             try:
-                pods = [self._pod(raw) for raw in page["pods"]]
+                pods = [self.pod_fact(raw) for raw in page["pods"]]
                 more, cursor = page["pagination"]["hasNextPage"], page["pagination"]["nextCursor"]
             except (KeyError, TypeError):
                 raise ProviderUnavailable("the pod inventory was unreadable") from None
@@ -188,7 +188,7 @@ class RunPodAPI(PodHTTP):
             payload["cpu"] = {"id": hardware.flavor, "vcpuCount": hardware.vcpus}
         if data_center is not None:
             payload["dataCenterIds"] = [data_center]
-        pod = self._pod(self._ask("POST", "pods", payload=payload))
+        pod = self.pod_fact(self.ask("POST", "pods", payload=payload))
         if pod.name != name or pod.usd_per_hour <= 0 or pod.status in {"EXITED", "TERMINATED"}:
             raise ProviderUnavailable("the created pod is not the one asked for")
         return pod.model_copy(update={"hardware": hardware})
@@ -204,7 +204,7 @@ class RunPodAPI(PodHTTP):
             raise ProviderUnavailable("the pod is absent, so its deletion cannot be dated")
         if current.name != pod.name or current.created_at != pod.created_at:
             raise ProviderUnavailable("the pod id now names a different pod")
-        self._ask("DELETE", f"pods/{pod.id}")
+        self.ask("DELETE", f"pods/{pod.id}")
         return datetime.now(UTC)
 
     def bills(self, pod: PodFact, now: datetime) -> tuple[HourBill, ...]:
@@ -213,7 +213,7 @@ class RunPodAPI(PodHTTP):
         end = now.astimezone(UTC).replace(minute=0, second=0, microsecond=0)
         if end <= first:
             return ()
-        raw = self._ask(
+        raw = self.ask(
             "GET",
             "billing/pods",
             params={
@@ -241,7 +241,7 @@ class RunPodAPI(PodHTTP):
         return tuple(HourBill(hour=hour, usd=usd) for hour, usd in sorted(bills.items()))
 
 
-def _available(row: Any, data_center: str | None) -> bool:
+def is_available(row: Any, data_center: str | None) -> bool:
     """False only when a catalog row positively reports none, there or anywhere."""
     if data_center is None:
         return bool(row.get("availability") != "NONE")

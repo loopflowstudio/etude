@@ -61,7 +61,7 @@ EVAL_BLOCK_INDEX = "block.json"
 EVAL_BLOCK_PACK = "blobs.zip"
 
 
-def _eval_block(folder: str) -> bool:
+def eval_block(folder: str) -> bool:
     parent, _, name = folder.rpartition("/")
     return parent.rpartition("/")[2] == EVAL_BLOCKS and not name.startswith(".")
 
@@ -81,7 +81,7 @@ def immutable(key: str) -> bool:
         (kind == "metrics" and name.endswith((".blk", ".tail")))
         or (kind == "tables" and name.endswith(".parquet"))
         or checkpoint_file(key)
-        or _eval_block(folder)
+        or eval_block(folder)
         or ARTIFACTS in PurePosixPath(folder).parts
     )
 
@@ -91,12 +91,12 @@ def purpose(key: str) -> Literal["checkpoint", "report"]:
     return "checkpoint" if checkpoint_file(key) else "report"
 
 
-def _rank(key: str) -> int:
+def rank(key: str) -> int:
     # Checkpoint files precede their records, and data the indexes and
     # records that describe it, so a reader never finds a record first.
     if checkpoint_file(key):
         return 0
-    if key.endswith("/" + EVAL_BLOCK_INDEX) and _eval_block(key.rpartition("/")[0]):
+    if key.endswith("/" + EVAL_BLOCK_INDEX) and eval_block(key.rpartition("/")[0]):
         return 2
     if immutable(key):
         return 1
@@ -128,7 +128,7 @@ def listing(root: Path, *, tail_seconds: float) -> list[str]:
         if path.suffix == ".tail" and tail_seconds > 0 and now - stat.st_mtime < tail_seconds:
             continue
         keys.append(name.as_posix())
-    return sorted(keys, key=lambda key: (_rank(key), key))
+    return sorted(keys, key=lambda key: (rank(key), key))
 
 
 def retired(root: Path) -> list[str]:
@@ -153,7 +153,7 @@ class RecordedFile:
     size_bytes: int
 
 
-def _recorded(root: Path) -> dict[int, tuple[str, RecordedFile]]:
+def recorded_files(root: Path) -> dict[int, tuple[str, RecordedFile]]:
     """By ordinal: each checkpoint record's key and the file it names, where Etude stored one.
 
     Reads the records (`etude.train.records.CheckpointRecord`) as plain JSON.
@@ -175,23 +175,23 @@ def _recorded(root: Path) -> dict[int, tuple[str, RecordedFile]]:
 
 def resume_file(root: Path) -> RecordedFile | None:
     """The file of the highest-ordinal checkpoint record in `root`, when Etude stored one."""
-    recorded = _recorded(root)
+    recorded = recorded_files(root)
     return recorded[max(recorded)][1] if recorded else None
 
 
 def named_file(root: Path, key: str) -> RecordedFile | None:
     """The checkpoint file `key` as the record in `root` naming it describes it, when one does."""
-    return next((file for _, file in _recorded(root).values() if file.key == key), None)
+    return next((file for _, file in recorded_files(root).values() if file.key == key), None)
 
 
-def _stored(root: Path) -> set[str]:
+def stored_names(root: Path) -> set[str]:
     note = root / STORED
     return set(note.read_text().split("\n")[:-1]) if note.is_file() else set()
 
 
 def note_stored(root: Path, names: Iterable[str]) -> None:
     """Remember checkpoint file names held elsewhere, so none is used again here."""
-    new = sorted(set(names) - _stored(root))
+    new = sorted(set(names) - stored_names(root))
     if new:
         (root / CHECKPOINTS).mkdir(parents=True, exist_ok=True)
         with (root / STORED).open("a") as note:
@@ -215,7 +215,7 @@ def taken(root: Path) -> set[str]:
         if folder.is_dir()
         else set()
     )
-    return here | _stored(root)
+    return here | stored_names(root)
 
 
 def restore_set(root: Path) -> dict[str, bytes]:
@@ -243,7 +243,7 @@ def recorded_file(root: Path, key: str) -> dict[str, bytes]:
     against the record). Raises `FileNotFoundError` when no record here names
     `key` or its file is gone.
     """
-    for record, named in _recorded(root).values():
+    for record, named in recorded_files(root).values():
         if named.key == key:
             return {record: (root / record).read_bytes(), key: (root / key).read_bytes()}
     raise FileNotFoundError(f"no checkpoint record in {root} names {key}")

@@ -75,32 +75,30 @@ def smoke_file(
             for trained in smoke_train(runs or (), folder):
                 step = trained.step
                 if trained.run is not None and experiment is not None:
-                    step = step.model_copy(
-                        update={"detail": _saved(store, experiment, trained.run)}
-                    )
+                    step = step.model_copy(update={"detail": saved(store, experiment, trained.run)})
                 show(step)
                 train[trained.job] = step
         # What the temporary store holds a run of, so eval and report have something to read.
         stored = any(each.outcome == "passed" for each in train.values())
         if "eval" in steps:
-            for step in _evaluate(path, experiment, source or store, store):
+            for step in evaluate(path, experiment, source or store, store):
                 show(step)
                 done.append(step)
                 stored = stored or step.outcome == "passed"
         if "report" in steps:
-            step = _report(path, experiment, store if stored else source, store)
+            step = smoke_report(path, experiment, store if stored else source, store)
             show(step)
             done.append(step)
     return Smoked(train=train, rest=tuple(done))
 
 
-def _saved(store: Storage, experiment: str, run: str) -> str:
+def saved(store: Storage, experiment: str, run: str) -> str:
     found = [each for each in observe(store, experiment).runs if each.name == run]
     count = len(found[0].checkpoints) if found else 0
     return f"{count} checkpoint{'' if count == 1 else 's'}"
 
 
-def _evaluate(
+def evaluate(
     path: Path, experiment: str | None, source: Storage, store: DirectoryStorage
 ) -> list[SmokeStep]:
     """Each evaluation `eval(state)` asks for on `source`, held tiny into `store`."""
@@ -109,24 +107,26 @@ def _evaluate(
     state = observe(source, experiment)
     if not any(run.checkpoints for run in state.runs):
         return [SmokeStep(step="eval", name="eval", outcome="not_smoked", detail="no checkpoints")]
-    jobs = _try_step("eval", "eval", lambda: asked(read_experiment(path).eval, state))
+    jobs = try_step("eval", "eval", lambda: asked(read_experiment(path).eval, state))
     if not jobs:
         return [
             SmokeStep(step="eval", name="eval", outcome="not_smoked", detail="eval returned none")
         ]
-    return [_hold(job, experiment, store, state) for job in jobs]
+    return [smoke_hold(job, experiment, store, state) for job in jobs]
 
 
-def _hold(job: Job, experiment: str, store: DirectoryStorage, state: ExperimentState) -> SmokeStep:
+def smoke_hold(
+    job: Job, experiment: str, store: DirectoryStorage, state: ExperimentState
+) -> SmokeStep:
     spec = evaluation_spec(job)
     name = spec.tournament.name
     if spec.experiment not in (None, experiment):
         raise LauncherError(f"smoke eval {name}: a job of experiment {spec.experiment!r}")
-    tournament = _tiny_tournament(spec.tournament)
+    tournament = tiny_tournament(spec.tournament)
     # Loaded by import path, typed where `evaluation` was given it.
     play = cast(Callable[[Match], Tables | Result], spec.play.load(job.repo))
     started = time.monotonic()
-    held = _try_step(
+    held = try_step(
         "eval",
         name,
         lambda: hold(
@@ -149,7 +149,7 @@ def _hold(job: Job, experiment: str, store: DirectoryStorage, state: ExperimentS
     )
 
 
-def _tiny_tournament(tournament: Benchmark | RoundRobin) -> Benchmark | RoundRobin:
+def tiny_tournament(tournament: Benchmark | RoundRobin) -> Benchmark | RoundRobin:
     """The tournament with each of its seatings, or itself, at one game per match.
 
     Every condition is kept: a game that breaks under one deal or seating is
@@ -161,7 +161,7 @@ def _tiny_tournament(tournament: Benchmark | RoundRobin) -> Benchmark | RoundRob
     return tournament.model_copy(update={"seatings": seatings})
 
 
-def _report(
+def smoke_report(
     path: Path, experiment: str | None, source: Storage | None, store: DirectoryStorage
 ) -> SmokeStep:
     """`report()` drawn from `source`, written beside the temporary store."""
@@ -172,14 +172,14 @@ def _report(
     if source is None:
         return SmokeStep(step="report", name="report", outcome="not_smoked", detail="no runs")
     started = time.monotonic()
-    page = _try_step("report", "report", lambda: build(source, path))
+    page = try_step("report", "report", lambda: build(source, path))
     write(render(page), store.root.parent / "reports" / f"{experiment}.html")
     return SmokeStep(
         step="report", name="report", outcome="passed", seconds=time.monotonic() - started
     )
 
 
-def _try_step[T](step: Step, name: str, work: Callable[[], T]) -> T:
+def try_step[T](step: Step, name: str, work: Callable[[], T]) -> T:
     """`work()`, or its traceback printed and a `LauncherError` naming the step."""
     started = time.monotonic()
     try:

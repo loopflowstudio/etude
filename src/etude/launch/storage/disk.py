@@ -32,7 +32,7 @@ from etude.launch.usage import Transfer
 
 class DirectoryJournal:
     def __init__(self, root: Path) -> None:
-        self._root = root
+        self.root = root
 
     def prepare(
         self, packet: Packet, *, expires_at: datetime | None = None
@@ -40,24 +40,24 @@ class DirectoryJournal:
         return None
 
     def started(self, session_id: str) -> bool:
-        return (self._root / session_id / "receipt").exists()
+        return (self.root / session_id / "receipt").exists()
 
     def ended(self, session_id: str) -> datetime | None:
-        note = self._root / session_id / "ended"
+        note = self.root / session_id / "ended"
         return datetime.fromisoformat(note.read_text()) if note.exists() else None
 
     def stage(self, repo: str, commit: str) -> None:
         """Nothing to do ahead: a session's source is written beside it when it starts."""
 
     def add(self, session_id: str, work: Work) -> None:
-        added = self._root / session_id / "work"
+        added = self.root / session_id / "work"
         added.mkdir(exist_ok=True)
         if not (added / f"{work.attempt}.json").exists():
-            self._place_source(self._root / session_id, work)
+            self.place_source(self.root / session_id, work)
             write(added / f"{work.attempt}.json", work.model_dump_json())
 
     @staticmethod
-    def _place_source(home: Path, work: Work) -> None:
+    def place_source(home: Path, work: Work) -> None:
         if work.repo is None or work.commit is None:
             return
         archive = home / "sources" / f"{work.commit}.tar"
@@ -67,31 +67,31 @@ class DirectoryJournal:
             partial.write_bytes(source_archive(work.repo, work.commit))
             partial.replace(archive)
 
-    def _folder(self, run: str) -> Path:
+    def folder(self, run: str) -> Path:
         """The run's tracked folder on this host, shared by its sessions (`ETUDE_TRACK_DIR`)."""
-        return self._root.parent / "track" / run
+        return self.root.parent / "track" / run
 
     def held(self, run: str, key: str | None = None) -> dict[str, bytes]:
-        folder = self._folder(run)
+        folder = self.folder(run)
         return restore_set(folder) if key is None else recorded_file(folder, key)
 
     def hold(self, run: str, files: dict[str, bytes]) -> None:
-        put_back(self._folder(run), files)
+        put_back(self.folder(run), files)
 
     def observe(self, session_id: str) -> Observation:
-        home = self._root / session_id
+        home = self.root / session_id
         # Read before the journal, so a dead session's journal is final.
-        alive = self._alive(session_id)
+        alive = self.alive(session_id)
         attempts = home / "attempts"
         names = sorted(p.name for p in attempts.iterdir()) if attempts.is_dir() else []
         return Observation(
             alive=alive,
-            progress=tuple(self._progress(attempts / name) for name in names),
-            transfers=self._transfers(home),
+            progress=tuple(self.progress(attempts / name) for name in names),
+            transfers=self.transfers(home),
         )
 
     @staticmethod
-    def _transfers(home: Path) -> tuple[Transfer, ...]:
+    def transfers(home: Path) -> tuple[Transfer, ...]:
         """What the session's attempts recorded in its usage journal."""
         path = home / "usage.jsonl"
         events = []
@@ -103,22 +103,22 @@ class DirectoryJournal:
         return tuple(events)
 
     def stop(self, session_id: str, attempt: str) -> None:
-        stop = self._root / session_id / "stop"
+        stop = self.root / session_id / "stop"
         stop.mkdir(exist_ok=True)
         (stop / attempt).touch()
 
     def finish(self, session_id: str) -> datetime | None:
-        home = self._root / session_id
+        home = self.root / session_id
         if home.is_dir():  # a session that never started has nothing to finish
             (home / "finish").touch()
         return self.ended(session_id)
 
     def end(self, session_id: str) -> datetime | None:
-        ended = self._root / session_id / "ended"
-        if self._alive(session_id):
-            os.kill(int(self._receipt(session_id)), signal.SIGTERM)
+        ended = self.root / session_id / "ended"
+        if self.alive(session_id):
+            os.kill(int(self.receipt(session_id)), signal.SIGTERM)
             for _ in range(100):
-                if not self._alive(session_id):
+                if not self.alive(session_id):
                     break
                 time.sleep(0.1)
             else:
@@ -130,7 +130,7 @@ class DirectoryJournal:
     def logs(
         self, session_id: str, attempt: str | None = None, *, producer: str = "job"
     ) -> LogStream:
-        home = self._root / session_id
+        home = self.root / session_id
         log = (
             home / "attempts" / attempt / "log"
             if attempt
@@ -146,7 +146,7 @@ class DirectoryJournal:
         return snapshot_stream(session_id, attempt, producer, raw, closed)
 
     def fetch(self, session_id: str, attempt: str, name: str, destination: Path) -> Path:
-        home = self._root / session_id / "attempts" / attempt
+        home = self.root / session_id / "attempts" / attempt
         recorded = progress_from_json(
             json.loads((home / "finished.json").read_text()), attempt, None
         ).outputs
@@ -161,14 +161,14 @@ class DirectoryJournal:
             raise LauncherError(f"output {name!r} no longer matches its recorded digest")
         return copy
 
-    def _receipt(self, session_id: str) -> str:
-        return (self._root / session_id / "receipt").read_text()
+    def receipt(self, session_id: str) -> str:
+        return (self.root / session_id / "receipt").read_text()
 
-    def _alive(self, session_id: str) -> bool:
-        home = self._root / session_id
+    def alive(self, session_id: str) -> bool:
+        home = self.root / session_id
         if (home / "ended").exists() or not (home / "receipt").exists():
             return False
-        pid = int(self._receipt(session_id))
+        pid = int(self.receipt(session_id))
         try:
             os.waitpid(pid, os.WNOHANG)  # collect it if it was ours and has exited
         except ChildProcessError:
@@ -182,7 +182,7 @@ class DirectoryJournal:
         return True
 
     @staticmethod
-    def _progress(home: Path) -> Progress:
+    def progress(home: Path) -> Progress:
         claim, finished, log = home / "claim", home / "finished.json", home / "log"
         started = datetime.fromisoformat(claim.read_text()) if claim.exists() else None
         if not finished.exists():

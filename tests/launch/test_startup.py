@@ -182,7 +182,7 @@ def test_delayed_preparation_cannot_create_after_authority_or_startup_expires(
 
     monkeypatch.setattr(program, "program_archive", prepare)
     monkeypatch.setattr(machines, "datetime", Clock)
-    monkeypatch.setattr(b.scheduler, "_clock", Clock.now)
+    monkeypatch.setattr(b.scheduler, "clock", Clock.now)
     with pytest.raises(LaunchError):
         b.scheduler.launch(Job(command="true", max_hours=1, max_usd=Decimal(1)), rent="l4")
     assert b.provider.creates == 0

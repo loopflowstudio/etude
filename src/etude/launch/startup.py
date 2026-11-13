@@ -23,13 +23,13 @@ from etude.launch.storage.files import write
 class ProcessStart:
     def __init__(self, root: Path) -> None:
         self.root = root
-        self._children: list[subprocess.Popen[bytes]] = []
+        self.children: list[subprocess.Popen[bytes]] = []
 
     def start(self, machine: Allocation, packet: Packet, bootstrap: BootstrapLinks | None) -> str:
         home = self.root / packet.session
         home.mkdir(parents=True, mode=0o700)
         for work in packet.work:
-            DirectoryJournal._place_source(home, work)
+            DirectoryJournal.place_source(home, work)
         write(home / "packet.json", packet.model_dump_json())
         with log_to(home / "bootstrap.log"):
             write_log("bootstrap", "local source preparation completed")
@@ -53,6 +53,6 @@ class ProcessStart:
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
-        self._children.append(child)
+        self.children.append(child)
         write(home / "receipt", str(child.pid))
         return str(child.pid)

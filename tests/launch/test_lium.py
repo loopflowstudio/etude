@@ -15,7 +15,7 @@ from uuid import UUID
 import pytest
 
 from etude.cli import main
-from etude.launch.client import _open
+from etude.launch.client import open_file
 from etude.launch.database import Database
 from etude.launch.errors import LauncherError, ProviderUnavailable
 from etude.launch.executor import Execution, Executor, Refused
@@ -23,7 +23,7 @@ from etude.launch.machines import MachineRequest
 from etude.launch.providers import bootstrap as bootstrap_module
 from etude.launch.providers.bootstrap import guard
 from etude.launch.providers.lium.api import Create, LiumAPI, Pod
-from etude.launch.providers.lium.machines import _START, LiumMachines
+from etude.launch.providers.lium.machines import START, LiumMachines
 from etude.launch.providers.lium.pod import Watchdog
 from etude.launch.providers.lium.pod import main as pod_main
 from etude.launch.records import (
@@ -298,7 +298,7 @@ def test_ssh_bootstrap_starts_once_after_running(monkeypatch: pytest.MonkeyPatch
     def start(pod: Pod, env: dict[str, str]) -> None:
         environments.append(env)
 
-    monkeypatch.setattr("etude.launch.providers.lium.machines._start", start)
+    monkeypatch.setattr("etude.launch.providers.lium.machines.start", start)
     machine.find("session")
     machines(market, storage).find("session")
     assert len(environments) == 1
@@ -359,7 +359,7 @@ def test_offline_configuration_and_safeguards(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("LIUM_API_KEY", raising=False)
-    scheduler = _open(tmp_path)
+    scheduler = open_file(tmp_path)
     try:
         scheduler.add_storage(
             Place(
@@ -372,10 +372,10 @@ def test_offline_configuration_and_safeguards(
         assert scheduler.ondemands()[0].template.gpu_count == 2
         assert scheduler.safeguards("5090") == ("provider lifetime", "launcher cleanup")
     finally:
-        scheduler._store.close()
+        scheduler.store.close()
 
 
-def _scheduler(store: Database, market: Marketplace, storage: Storage) -> Scheduler:
+def make_scheduler(store: Database, market: Marketplace, storage: Storage) -> Scheduler:
     bucket = Bucket(
         "journal", "us-west-2", Keys(access_key="fixture", secret_key="fixture"), storage
     )
@@ -399,7 +399,7 @@ def test_public_rental_budget_covers_fallback_timer(tmp_path: Path) -> None:
     market, storage = Marketplace(), Storage()
     store = Database(tmp_path / "launcher.db")
     try:
-        scheduler = _scheduler(store, market, storage)
+        scheduler = make_scheduler(store, market, storage)
         with pytest.raises(LauncherError):
             scheduler.rent("5090", hours=0.1, max_usd=Decimal("1.51"))
         assert market.created is None
@@ -426,13 +426,13 @@ def test_lium_executes_and_retains_outputs_before_controller_deletion(
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "client"))
     market, storage = Marketplace(), Storage()
     store = Database(tmp_path / "launcher.db")
-    scheduler = _scheduler(store, market, storage)
+    scheduler = make_scheduler(store, market, storage)
     environments: list[dict[str, str]] = []
 
     def start(pod: Pod, env: dict[str, str]) -> None:
         environments.append(env)
 
-    monkeypatch.setattr("etude.launch.providers.lium.machines._start", start)
+    monkeypatch.setattr("etude.launch.providers.lium.machines.start", start)
     errors: list[Exception] = []
 
     def leave_deletion_to_controller() -> None:
@@ -530,7 +530,7 @@ def test_failed_ssh_reply_can_recover_without_renting_again(
         if attempts[0] == 1:
             raise ProviderUnavailable("fixture lost SSH reply")
 
-    monkeypatch.setattr("etude.launch.providers.lium.machines._start", start)
+    monkeypatch.setattr("etude.launch.providers.lium.machines.start", start)
     with pytest.raises(ProviderUnavailable):
         machine.find("session")
     assert machines(market, storage).find("session") is not None
@@ -576,11 +576,11 @@ def test_lium_cli_configuration_is_offline(tmp_path: Path, monkeypatch: pytest.M
         )
         == 0
     )
-    scheduler = _open(tmp_path)
+    scheduler = open_file(tmp_path)
     try:
         assert scheduler.ondemands()[0].template.gpu_count == 2
     finally:
-        scheduler._store.close()
+        scheduler.store.close()
 
 
 @pytest.mark.parametrize("guardian_ready", [False, True])
@@ -631,7 +631,7 @@ def test_replayed_remote_start_cannot_start_a_second_worker(
     payload = json.dumps(
         {"env": {}, "code": f"pathlib.Path({str(output)!r}).write_text('started')"}
     )
-    code = _START.replace("'/run/etude'", repr(str(tmp_path / "run")))
+    code = START.replace("'/run/etude'", repr(str(tmp_path / "run")))
     monkeypatch.setattr("sys.stdin", io.StringIO(payload))
     exec(code, {})
     assert output.read_text() == "started"
@@ -658,8 +658,8 @@ def test_unacknowledged_timer_still_allows_cleanup_at_startup_deadline(
 
     monkeypatch.setattr("etude.launch.providers.lium.machines.datetime", Time)
     store = Database(tmp_path / "launcher.db")
-    scheduler = _scheduler(store, market, storage)
-    monkeypatch.setattr(scheduler, "_clock", lambda: clock[0])
+    scheduler = make_scheduler(store, market, storage)
+    monkeypatch.setattr(scheduler, "clock", lambda: clock[0])
     scheduler.set_startup("5090", 10)
     try:
         name = scheduler.rent("5090", hours=0.1, max_usd=Decimal(2))
