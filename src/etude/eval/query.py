@@ -7,7 +7,7 @@ beside Etude's own tables:
 | table | columns |
 |---|---|
 | `runs` | run, experiment, environment (identity), environment_name, environment_config, tournament, state (`finished` or `failed` from its `state.json`; null while it has not ended, so its results are partial) |
-| `players` | player (its key, encoded), name, kind (`model` or `code`), checkpoint (its key), artifact (digest), uri, config, at, at_conflict, line, line_conflict, and `config.KEY` per scalar config key |
+| `players` | player (its key, encoded), name, kind (`model` or `code`), checkpoint (its key), artifact (digest), uri, config, positions, lines, and `config.KEY` per scalar config key |
 | `matches` | run, match, conditions, games, seed, state, error, wall_ms, execution (result provenance) |
 | `seats` | run, match, seat, player, the version that played: commit, source (digest), at (where its checkpoint stood, or null) and line (the learner it belongs to, or null) |
 | `groups` | run, match, group, seat |
@@ -25,10 +25,9 @@ When its eval runs disagree, `conflict` names how (`tournament_conflict`,
 recorded, read from their stored JSON, so a model joins to where its
 run's clocks stood by key (`players.checkpoint = training_checkpoints.checkpoint`),
 never by its bytes. A seat may say where its checkpoint stood itself
-(`etude.eval.records.CheckpointRef.at`): `players.at` merges the positions match
-records give, the latest winning, and `players.at_conflict` lists every position
-given when two disagree on a clock both name, else null; `players.line` and `players.line_conflict`
-are the same for the learner it belongs to (`CheckpointRef.line`). A match
+(`etude.eval.records.CheckpointRef.at`): `players.positions` lists every distinct
+position match records give it, the latest record's first, and `players.lines` every
+learner they say it belongs to (`CheckpointRef.line`), the same way. A match
 counts once whichever version played it: the latest record holding it
 (`seats.commit` tells which).
 
@@ -942,10 +941,8 @@ def _players_table(db: duckdb.DuckDBPyConnection, players: dict[str, list[Player
     lines = _seated(db, "line")
     db.execute(
         "create or replace table players (player VARCHAR, name VARCHAR, kind VARCHAR,"
-        ' checkpoint VARCHAR, artifact VARCHAR, uri VARCHAR, config JSON, "at" JSON,'
-        " at_conflict JSON, line VARCHAR, line_conflict JSON"
-        + "".join(f', "config.{key}" {kind}' for key, kind in columns.items())
-        + ")"
+        " checkpoint VARCHAR, artifact VARCHAR, uri VARCHAR, config JSON, positions JSON,"
+        " lines JSON" + "".join(f', "config.{key}" {kind}' for key, kind in columns.items()) + ")"
     )
     _put(
         db,
@@ -958,10 +955,8 @@ def _players_table(db: duckdb.DuckDBPyConnection, players: dict[str, list[Player
             "artifact": "VARCHAR",
             "uri": "VARCHAR",
             "config": "VARCHAR",
-            "at": "VARCHAR",
-            "at_conflict": "VARCHAR",
-            "line": "VARCHAR",
-            "line_conflict": "VARCHAR",
+            "positions": "VARCHAR",
+            "lines": "VARCHAR",
             **{f"config.{key}": kind for key, kind in columns.items()},
         },
         [
@@ -971,10 +966,8 @@ def _players_table(db: duckdb.DuckDBPyConnection, players: dict[str, list[Player
                 given[0].kind,
                 *_checkpoint(given[0]),
                 json.dumps(given[0].config),
-                _merged_position(positions[identity]),
-                _conflicting_positions(positions[identity]),
-                lines[identity][0] if lines[identity] else None,
-                json.dumps(sorted(lines[identity])) if len(lines[identity]) > 1 else None,
+                f"[{','.join(positions[identity])}]",
+                json.dumps(lines[identity]),
                 *(flat[identity].get(key) for key in columns),
             ]
             for identity, given in players.items()
@@ -1000,29 +993,6 @@ def _seated(db: duckdb.DuckDBPyConnection, column: str) -> defaultdict[str, list
         if value not in found[identity]:
             found[identity].append(value)
     return found
-
-
-def _merged_position(given: list[str]) -> str | None:
-    """Where seats put a player, the latest record first: their positions merged, the latest
-    winning, so a match recorded before Etude's built-in hour clocks agrees with one that also
-    says where they stood."""
-    if not given:
-        return None
-    drawn: dict[str, float] = {}
-    for encoded in reversed(given):
-        drawn.update(json.loads(encoded))
-    return json.dumps(drawn)
-
-
-def _conflicting_positions(given: list[str]) -> str | None:
-    """Every position seats gave a player, if two disagree on a clock both name."""
-    drawn: dict[str, float] = {}
-    for encoded in given:
-        position: dict[str, float] = json.loads(encoded)
-        if any(clock in drawn and drawn[clock] != value for clock, value in position.items()):
-            return f"[{','.join(sorted(given))}]"
-        drawn.update(position)
-    return None
 
 
 def _flattened(config: dict[str, JsonValue], prefix: str = "") -> dict[str, JsonValue]:

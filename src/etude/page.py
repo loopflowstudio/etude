@@ -769,26 +769,29 @@ def _players(db: duckdb.DuckDBPyConnection) -> tuple[list[Player], tuple[str, ..
     """
     bound = _checkpoints(db)
     found = db.sql(
-        'select player, name, kind, config, checkpoint, "at", at_conflict, line, line_conflict'
+        "select player, name, kind, config, checkpoint, positions, lines"
         " from players order by player"
     ).fetchall()
     players: list[Player] = []
     notes: list[str] = []
     unplaced: list[str] = []
-    for key, name, kind, config, checkpoint, at, conflict, line, lines in found:
+    for key, name, kind, config, checkpoint, given, named in found:
         saved = bound.get(checkpoint)
         recorded = {} if saved is None else saved.clocks
-        seated: dict[str, float] = json.loads(at) if at else {}
-        if conflict:
-            earlier = "; ".join(_described(each) for each in json.loads(conflict) if each != seated)
+        positions: list[dict[str, float]] = json.loads(given)
+        seated = _merged(positions)
+        if _disagree(positions):
+            earlier = "; ".join(_described(each) for each in positions if each != seated)
             notes.append(
                 f"{name} is drawn at {_described(seated)}, as its latest seat says;"
                 f" earlier seats said {earlier}."
             )
-        if lines:
-            earlier = ", ".join(each for each in json.loads(lines) if each != line)
+        lines: list[str] = json.loads(named)
+        line = lines[0] if lines else None
+        if len(lines) > 1:
             notes.append(
-                f"{name} is in line {line}, as its latest seat says; earlier seats said {earlier}."
+                f"{name} is in line {line}, as its latest seat says;"
+                f" earlier seats said {', '.join(lines[1:])}."
             )
         for clock in sorted(seated.keys() & recorded.keys()):
             if seated[clock] != recorded[clock]:
@@ -815,6 +818,26 @@ def _players(db: duckdb.DuckDBPyConnection) -> tuple[list[Player], tuple[str, ..
             f" experiment: {', '.join(unplaced)}."
         )
     return players, tuple(notes)
+
+
+def _merged(positions: list[dict[str, float]]) -> dict[str, float]:
+    """Where seats put a player, latest first: their positions merged, the latest winning, so a
+    match recorded before Etude's built-in hour clocks agrees with one that also says where
+    they stood."""
+    merged: dict[str, float] = {}
+    for position in reversed(positions):
+        merged.update(position)
+    return merged
+
+
+def _disagree(positions: list[dict[str, float]]) -> bool:
+    """Whether two positions give a clock they both name different values."""
+    seen: dict[str, float] = {}
+    for position in positions:
+        if any(seen.get(clock, value) != value for clock, value in position.items()):
+            return True
+        seen.update(position)
+    return False
 
 
 def _described(at: dict[str, float]) -> str:
