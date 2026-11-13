@@ -32,7 +32,7 @@ class DirectoryJournal:
         return None
 
     def started(self, session_id: str) -> bool:
-        return (self._root / session_id / "receipt").exists()
+        return (self._root / session_id / "pid").exists()
 
     def ended(self, session_id: str) -> datetime | None:
         note = self._root / session_id / "ended"
@@ -152,11 +152,11 @@ class DirectoryJournal:
         return copy
 
     def _pid(self, session_id: str) -> str:
-        return (self._root / session_id / "receipt").read_text()
+        return (self._root / session_id / "pid").read_text()
 
     def _alive(self, session_id: str) -> bool:
         home = self._root / session_id
-        if (home / "ended").exists() or not (home / "receipt").exists():
+        if (home / "ended").exists() or not (home / "pid").exists():
             return False
         pid = int(self._pid(session_id))
         try:

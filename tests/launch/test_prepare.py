@@ -219,7 +219,7 @@ def test_a_killed_build_leaves_no_receipt_and_is_built_again(tmp_path: Path) -> 
     assert not list(home().glob("*.json"))
     finish.touch()
     session = scheduler.attempts(run)[0].session
-    os.kill(int((tmp_path / "sessions" / session / "receipt").read_text()), signal.SIGKILL)
+    os.kill(int((tmp_path / "sessions" / session / "pid").read_text()), signal.SIGKILL)
     (status,) = scheduler.wait(run, every=0.05, timeout=60)
     assert (status.outcome, status.attempts) == ("succeeded", 2)
     assert _outcomes(job_text(scheduler.logs(refresh=True, run=run))) == ["built"]

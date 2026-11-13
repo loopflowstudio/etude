@@ -468,7 +468,7 @@ def continue_run(
     from etude.carriage import put_back
     from etude.jobs import continue_from
     from etude.launch.listing import resolve_runs, show_runs
-    from etude.run.listing import places
+    from etude.run.listing import run_folders
     from etude.run.storage import default_root, storage_from_uri
 
     scheduler = launch_cli.default()
@@ -478,7 +478,7 @@ def continue_run(
     with tempfile.TemporaryDirectory() as relayed:
         if source is None:
             # A parent that ran on another owned host: its records, from there.
-            here = places(storage)
+            here = run_folders(storage.keys(""))
             for parent in parents:
                 files = None if parent in here else scheduler.held(parent)
                 if files is not None:

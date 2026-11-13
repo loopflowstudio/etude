@@ -23,6 +23,7 @@ from etude.launch.records import (
     Record,
     Runtime,
     Tally,
+    Until,
     Variable,
 )
 from etude.launch.storage.download import Download
@@ -44,7 +45,7 @@ class Work(Record):
     limit_seconds: int
     limit_kind: Limit
     seed: int | None
-    until: str | None  # the job's target, as "clock=value"
+    until: Until | None  # the job's target; crosses as "clock=value"
     config: str | None
     repo: str | None
     commit: str | None

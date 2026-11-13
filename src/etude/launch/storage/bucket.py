@@ -7,13 +7,14 @@ from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from functools import wraps
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Concatenate
 
 from etude.carriage import (
     CHECKPOINTS,
     checkpoint_file,
+    checkpoint_file_name,
     named_file,
     note_stored,
     recorded_file,
@@ -243,7 +244,7 @@ class BucketJournal:
             (root / CHECKPOINTS).mkdir()
             listed = [name[len(folder) :] for name in self._bucket.list(f"{folder}{CHECKPOINTS}/")]
             note_stored(
-                root, [PurePosixPath(name).name for name in listed if checkpoint_file(name)]
+                root, [checkpoint_file_name(name) for name in listed if checkpoint_file(name)]
             )
             records = [
                 name

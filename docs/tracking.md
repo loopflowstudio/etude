@@ -295,7 +295,9 @@ run.tag(model, "best")  # tags can change later
 import os
 
 run = track(experiment="capacity-pilot", clocks=[Step("updates", "optimizer updates, absolute")])
-hours = float(os.environ["ETUDE_UNTIL_VALUE"])  # the job's until="running_hours=10"
+hours = float(
+    os.environ["ETUDE_UNTIL_VALUE"]
+)  # the job's until=Until(clock="running_hours", value=10)
 while run.at("running_hours") < hours:
     update, loss = train_one_update()
     run.log({"rl/loss": loss}, updates=update)

@@ -7,7 +7,7 @@ Installed separately from the job environment. Run as
 `etude session DIRECTORY`. The directory holds
 `packet.json` going in and, coming back:
 
-    receipt                      this process's id, written by whoever started it
+    pid                          this process's id, written by whoever started it
     stop/<attempt>               appears when the attempt should stop
     finish                       appears when no more work will come: end once it is done
     work/<attempt>.json          work added to a kept session after it started
@@ -54,7 +54,7 @@ from typing import BinaryIO, Literal
 
 from etude.cache import Cache, Content
 from etude.launch.logging import Console, explain, log_to, sanitize
-from etude.launch.records import Cause, Input, Outcome, Output, Prepared, Record, Runtime
+from etude.launch.records import Cause, Input, Outcome, Output, Prepared, Record, Runtime, number
 from etude.launch.runtime import PROBE, find_python, select_runtime
 from etude.launch.schemas import Finished, Packet, Work
 from etude.launch.storage.files import append_usage, digest, read_result, write
@@ -178,9 +178,8 @@ def _lay_out(session: Path, home: Path, work: Work) -> tuple[dict[str, str], dic
     if work.seed is not None:
         environment["ETUDE_SEED"] = str(work.seed)
     if work.until is not None:
-        clock, _, target = work.until.partition("=")
-        environment["ETUDE_UNTIL_CLOCK"] = clock
-        environment["ETUDE_UNTIL_VALUE"] = target
+        environment["ETUDE_UNTIL_CLOCK"] = work.until.clock
+        environment["ETUDE_UNTIL_VALUE"] = number(work.until.value)
     return environment, held
 
 

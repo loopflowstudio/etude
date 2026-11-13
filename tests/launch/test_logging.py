@@ -886,7 +886,7 @@ def test_log_capabilities_cover_final_delivery_but_not_extra_rental_time(
     assert len(storage.asked) == 4
 
 
-@pytest.mark.parametrize("failure", ["receipt", "loop", "console", "none"])
+@pytest.mark.parametrize("failure", ["pid", "loop", "console", "none"])
 def test_courier_owns_child_through_failure_cleanup_and_cached_restart(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -955,7 +955,7 @@ def test_courier_owns_child_through_failure_cleanup_and_cached_restart(
         stdout: IO[bytes],
         stderr: int,
     ) -> subprocess.Popen[bytes]:
-        # Readiness precedes the failing receipt: the real child is alive and
+        # Readiness precedes the failing pid file: the real child is alive and
         # able to emit its final unterminated line when its owner stops it.
         ready, announce = os.pipe()
         code = """
@@ -992,16 +992,16 @@ signal.pause()
             os.close(announce)
         return child
 
-    original = OSError("local receipt failed fixture-sensitive-value")
+    original = OSError("local pid failed fixture-sensitive-value")
 
     def persist(path: Path, text: str) -> None:
-        if path.name == "receipt":
+        if path.name == "pid":
             assert receipts() == ["receipt"]  # durable start intent precedes child execution
             logging.publish(log, "https://fixture/worker.log")
             snapshot = b.scheduler.logs(refresh=True, run=identity)
             assert not next(s for s in snapshot.streams if s.producer == "worker").complete
             earlier.append(cursor.render(snapshot))
-            if failure in {"receipt", "console"}:
+            if failure in {"pid", "console"}:
                 raise original
             if failure == "none":
                 children[0].send_signal(signal.SIGUSR1)
@@ -1020,8 +1020,8 @@ signal.pause()
             assert "late session evidence [redacted]" in local
             assert "exit status 23" in local and local.rstrip().endswith(CLOSED)
         b.service.kill(session.id)
-        if failure == "receipt":
-            raise OSError("cleanup reply unavailable")  # cannot replace the receipt error
+        if failure == "pid":
+            raise OSError("cleanup reply unavailable")  # cannot replace the pid error
 
     monkeypatch.setattr(logging, "urlopen", upload)
     monkeypatch.setattr(courier_module, "read", read)
@@ -1031,7 +1031,7 @@ signal.pause()
     monkeypatch.setattr(subprocess, "Popen", start)
     monkeypatch.setattr(b.service, "logs", logs)
     try:
-        if failure in {"receipt", "console"}:
+        if failure in {"pid", "console"}:
             with pytest.raises(OSError) as caught:
                 courier_module.run("bootstrap", delete, root, every=0.1)
             assert caught.value is original
@@ -1058,8 +1058,8 @@ signal.pause()
     assert worker.complete is (failure != "console")
     output = render(after)
     assert "exit status 23" in output and "fixture-sensitive-value" not in output
-    if failure in {"receipt", "console"}:
-        assert "local receipt failed [redacted]" in output
+    if failure in {"pid", "console"}:
+        assert "local pid failed [redacted]" in output
     elif failure == "loop":
         assert "courier loop failed [redacted]" in output
     if failure == "console":
@@ -1140,10 +1140,10 @@ def test_courier_leaves_collection_incomplete_when_child_exit_is_unconfirmed(
     def post(form: PostForm, key: str, body: bytes, send: object) -> None:
         receipts.append(key)
 
-    original = OSError("local receipt unavailable")
+    original = OSError("local pid unavailable")
 
     def persist(path: Path, text: str) -> None:
-        if path.name == "receipt":
+        if path.name == "pid":
             raise original
         write(path, text)
 
@@ -1167,4 +1167,4 @@ def test_courier_leaves_collection_incomplete_when_child_exit_is_unconfirmed(
     assert "collection incomplete" in stream.text and "exit status" not in stream.text
     assert "last available line" in stream.text and "pending credential fragment" not in stream.text
     assert "fixture-sensitive-argv" not in stream.text
-    assert "local receipt unavailable" in (tmp_path / packet.session / "worker.log").read_text()
+    assert "local pid unavailable" in (tmp_path / packet.session / "worker.log").read_text()

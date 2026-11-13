@@ -182,9 +182,9 @@ home=pathlib.Path(call['root']).expanduser()/request.get('session','')
 if request['action']=='logs' and request['producer']=='bootstrap':
     path=home/'bootstrap.log'
     print(json.dumps({'log':path.read_text() if path.exists() else None})); sys.exit(0)
-if request['action']=='started' and not (home/'receipt').exists():
+if request['action']=='started' and not (home/'pid').exists():
     print(json.dumps({'started':False})); sys.exit(0)
-if request['action']=='observe' and (home/'boot-claim').exists() and not (home/'receipt').exists():
+if request['action']=='observe' and (home/'boot-claim').exists() and not (home/'pid').exists():
     print(json.dumps({'observation':{'alive':not (home/'ended').exists(),'progress':[],'start_unknown':True}})); sys.exit(0)
 if request['action']=='ended':
     path=home/'ended'
@@ -192,7 +192,7 @@ if request['action']=='ended':
 if request['action']=='end':
     home.mkdir(parents=True,exist_ok=True)
     (home/'cancel-start').touch()
-    if not (home/'receipt').exists():
+    if not (home/'pid').exists():
         path=home/'ended'
         print(json.dumps({'ended_at':path.read_text() if path.exists() else None})); sys.exit(0)
 if request['action']=='start':
@@ -346,10 +346,10 @@ class SSHStart:
     def __init__(self, ssh: SSH) -> None:
         self.ssh = ssh
 
-    def start(self, machine: Allocation, packet: Packet, bootstrap: BootstrapLinks | None) -> str:
+    def start(self, machine: Allocation, packet: Packet, bootstrap: BootstrapLinks | None) -> None:
         ssh = self.ssh
         files = {path: body for work in packet.work for path, body in ssh.files(work).items()}
-        reply = ssh.call(
+        ssh.call(
             StartRequest(
                 session=packet.session,
                 packet=packet,
@@ -358,8 +358,6 @@ class SSHStart:
                 cleanup=machine.cleanup,
             )
         )
-        # The host starts its worker after replying, so the process is rarely known yet.
-        return "" if reply.pid is None else str(reply.pid)
 
 
 class SSHJournal:

@@ -141,7 +141,7 @@ def test_detached_ssh_install_is_readable_cancellable_and_not_replayed(
     while not (root / packet.session / "ended").exists() and time.monotonic() < latest:
         time.sleep(0.01)
     assert (root / packet.session / "ended").exists()
-    assert not (root / packet.session / "receipt").exists()
+    assert not (root / packet.session / "pid").exists()
     assert calls.read_text().splitlines() == ["install"]
 
 

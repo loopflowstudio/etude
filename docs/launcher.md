@@ -339,7 +339,7 @@ of the job's own for the smoke run; any it leaves unset keep the job's value:
 | --- | --- | --- |
 | `config` | the typed job's config | `training(train, config=..., smoke=TrainConfig(updates=1))` |
 | `command` | a command job's command | `Job(command="manabot train", smoke=SmokeForm(command="manabot train --smoke"), ...)` |
-| `until` | the target | `SmokeForm(until="steps=1")` |
+| `until` | the target | `SmokeForm(until=Until(clock="steps", value=1))` |
 
 `training(..., smoke=)` takes a config of the same type as `config`, and is
 checked the same way when the job is made. The smoke form is not part of the
@@ -952,12 +952,13 @@ from pathlib import Path
 
 from etude.jobs import continue_from, training
 from etude.launch.client import default, fetch, logs, queue, queue_cohort, wait
+from etude.launch.records import Until
 from train import TrainConfig, train
 
 job = training(
     train,
     config=TrainConfig(hidden=1024),
-    until="steps=26000",
+    until=Until(clock="steps", value=26000),
     max_hours=6,
     max_usd=Decimal(5),
 )
@@ -982,7 +983,7 @@ from decimal import Decimal
 
 from etude.jobs import training
 from etude.launch.client import launch_cohort
-from etude.launch.records import Run
+from etude.launch.records import Run, Until
 from train import TrainConfig, train
 
 
@@ -992,7 +993,7 @@ def runs(hidden: int = 256, seeds: int = 3) -> list[Run]:
         config=TrainConfig(hidden=hidden),
         max_hours=2,
         max_usd=Decimal(1),
-        until="steps=26000",
+        until=Until(clock="steps", value=26000),
         name=f"hidden{hidden}",
     )
     return job.runs(*range(seeds))

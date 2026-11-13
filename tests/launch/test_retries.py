@@ -122,7 +122,7 @@ def test_bootstrap_retries_cannot_renew_startup_allowance(
             "https://storage.invalid/bootstrap", tmp_path, send, sleep, 0.1, tmp_path / "log", ""
         )
     assert len(requests) == 2 and max(requests) <= 0.2
-    assert not list(tmp_path.glob("*/receipt"))
+    assert not list(tmp_path.glob("*/pid"))
 
 
 @pytest.mark.parametrize("status", [403, 503])

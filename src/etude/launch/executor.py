@@ -144,7 +144,7 @@ class Journal(Protocol):
 class Starter(Protocol):
     def start(
         self, machine: Allocation, packet: Packet, bootstrap: BootstrapLinks | None
-    ) -> str: ...
+    ) -> None: ...
 
 
 class Executor:

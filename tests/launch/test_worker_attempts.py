@@ -208,7 +208,7 @@ def test_a_killed_session_retries_its_run(tmp_path: Path) -> None:
     status = until(scheduler, one, "running")
     session = scheduler.attempts(one)[0].session
     os.kill(
-        int((tmp_path / "sessions" / session / "receipt").read_text()),
+        int((tmp_path / "sessions" / session / "pid").read_text()),
         signal.SIGKILL,
     )
     status = until(scheduler, one, "done")

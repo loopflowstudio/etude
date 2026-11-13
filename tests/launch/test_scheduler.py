@@ -323,7 +323,7 @@ def test_manabot_cohort_shape(tmp_path: Path) -> None:
         work = next(
             w for w, _ in b.service.sessions[attempt.session].work() if w.attempt == attempt.id
         )
-        assert (work.until, work.resumes) == ("updates=100000", False)
+        assert (work.until, work.resumes) == (Until.parse("updates=100000"), False)
     spent = sum(b.scheduler.read(j).usd for stage in stages for j in stage)
     assert abs(spent - USD_PER_RUN * 18) < Decimal("0.01")
     assert all(b.scheduler.read(j).rental_ended for stage in stages for j in stage)

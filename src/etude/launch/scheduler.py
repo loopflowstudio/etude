@@ -2042,7 +2042,7 @@ class Scheduler:
             limit_seconds=attempt.limit_seconds,
             limit_kind=attempt.limit_kind,
             seed=run.seed,
-            until=None if spec.until is None else str(spec.until),
+            until=spec.until,
             config=spec.config,
             repo=spec.repo,
             commit=None if spec.repo is None else spec.revision,

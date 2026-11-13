@@ -96,8 +96,8 @@ def _start(root: Path, request: StartRequest) -> RemoteReply:
     # A directory can contain staged source files, but a start is exclusive.
     home.mkdir(parents=True, exist_ok=True, mode=0o700)
     if (home / "start-claim").exists():
-        receipt = home / "receipt"  # the worker's process id, once it is running
-        return RemoteReply(pid=int(receipt.read_text()) if receipt.exists() else None)
+        pid = home / "pid"  # the worker's process id, once it is running
+        return RemoteReply(pid=int(pid.read_text()) if pid.exists() else None)
     with (home / "start-claim").open("x"):
         pass
     if request.bootstrap:
@@ -130,7 +130,7 @@ def _start(root: Path, request: StartRequest) -> RemoteReply:
         return RemoteReply(pid=process.pid)
     # Sources were staged above; this start uses the same process implementation.
     write(home / "packet.json", request.packet.model_dump_json())
-    return RemoteReply(pid=int(ProcessStart(root).spawn(request.packet)))
+    return RemoteReply(pid=ProcessStart(root).spawn(request.packet))
 
 
 if __name__ == "__main__":

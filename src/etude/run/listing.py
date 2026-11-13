@@ -24,18 +24,14 @@ RUN_FOLDERS = ("metrics", "checkpoints", "blocks", "tables", "matches")
 RUN_FILES = ("run.json", "environment.json", "tournament.json", "state.json")
 
 
-def places(storage: Storage) -> dict[str, list[str]]:
-    """Each run's folders, as prefixes, by run name, in listing order.
+def run_folders(keys: Sequence[str]) -> dict[str, list[str]]:
+    """Each run's folders, as prefixes, by run name, in the order `keys` lists them.
 
     A run's folder is named for the run and may sit at any depth, so one
     source can hold several copies of a run, one per machine that wrote to it,
-    and a bucket can hold a launcher's other files beside them.
+    and a bucket can hold a launcher's other files beside them. Taking a
+    listing already made lets a reader list a source once.
     """
-    return run_folders(storage.keys(""))
-
-
-def run_folders(keys: Sequence[str]) -> dict[str, list[str]]:
-    """`places` from a listing already made, so a reader can list a source once."""
     found: dict[str, dict[str, None]] = {}
     for key in keys:
         parts = key.split("/")

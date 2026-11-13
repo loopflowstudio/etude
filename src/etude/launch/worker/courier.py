@@ -25,6 +25,7 @@ from typing import IO
 from etude.cache import Cache
 from etude.carriage import (
     checkpoint_file,
+    checkpoint_file_name,
     immutable,
     listing,
     note_stored,
@@ -292,7 +293,7 @@ class Courier:
     def _restore(self, run: str, keys: dict[str, str]) -> None:
         folder = self._track_root / run
         # Every checkpoint name storage holds stays taken, restored or not.
-        note_stored(folder, [key.rpartition("/")[2] for key in keys if checkpoint_file(key)])
+        note_stored(folder, [checkpoint_file_name(key) for key in keys if checkpoint_file(key)])
         for key, url in sorted(keys.items()):
             target = folder / key
             if checkpoint_file(key) or target.exists():
@@ -700,7 +701,7 @@ def _serve(
                 stdout=log,
                 stderr=subprocess.STDOUT,
             )
-        write(home / "receipt", str(process.pid))
+        write(home / "pid", str(process.pid))
         while process.poll() is None:
             for step in (courier.bring_in, courier.carry_out):
                 try:
