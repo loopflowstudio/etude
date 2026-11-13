@@ -1051,6 +1051,13 @@ naming an experiment. A plain job file preserves explicit `Job.experiment`
 values; a file defining `eval(state)` or `report()` requires its own stem
 and refuses jobs naming another experiment.
 
+Previously, a plain job file left the experiment for the script to name.
+For an existing script using `track(experiment="capacity-pilot", ...)`, set
+`experiment="capacity-pilot"` on its `Job`, or remove the argument from
+`track` to use the file stem. A conflicting name now fails with
+`experiment_differs_from_launch`. The experiment participates in job identity,
+so previously unnamed plain-file jobs also receive new job digests.
+
 TOML job files are no longer accepted. A script may also call `queue` or `launch` from
 `etude.launch.client` directly. Where commands accept run IDs, a cohort name selects
 its runs.
@@ -1924,7 +1931,7 @@ current attempt, or its allocation time before any write is observed. Failed
 requests and successful reads do not reset it. The controller may simply have
 stopped collecting evidence; use the worker log to distinguish that from a
 storage outage. Completed and local-only attempts have no delivery-age warning.
-The launcher database schema is version 14; files from other versions are refused rather
+The launcher database schema is version 16; files from other versions are refused rather
 than modified. Preserve an old database with its matching Etude version when
 reading historical evidence.
 

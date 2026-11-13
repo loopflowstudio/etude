@@ -97,6 +97,8 @@ Rules a caller can rely on:
   everything before. An attempt that logs nothing replaces nothing. The caller
   passes no resume point, whether it restored a checkpoint or its own state
   file. Attempts written before this rule keep the resume point they recorded.
+  Remove `resumed_at=` from existing `track` calls; the argument is no longer
+  accepted. Historical run files remain readable.
 - **Continuation is lineage.** A run may name a parent run, a clock and the
   value it continues from. The parent is unchanged. The report does not join
   the two yet. A launched continuation (`etude continue`) declares this
