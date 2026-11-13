@@ -10,22 +10,11 @@ self-contained ("1b is fine"), the launcher cleans up where a worker cannot
 ("2a is the best of thse options"). The layout below and `docs/training.md`
 show it; `scratch/questions.md` has his words and what is unanswered.
 
-2026-11-13. Written from the day's exploration; every quoted remark is in full
-at `1666be1:scratch/positioning.md`, the ontology review at
-`1666be1:scratch/ontology.md`. Jack Heart asked for it: "Be ambitious. Help us land in the
-new world where we're set up for the most success in terms of adoption by Jace
-and evolution into the Etude Cloud world. Don't worry about requiring a lot of
-churn on existing code of Manabot or sticking with the design as currently
-written or proposed. None of that matters." and "Really lean into all the
-things I emphasize today and write a design for MTG-329 and EXP-56 that helps
-us get there."
-
-This document replaces the client-facing shape of EXP-56 (PR #103 at
-`105abdd`) and the loop and recipe shape of MTG-329. The launcher machinery
-PR #103 built (out carriage, planned-stop retries, attempt cutoffs,
-continuation, digest-checked inputs) is kept and built on. The independent
-Manabot CLI retirement is implemented (plan.md); the new loop and recipe API
-has not been implemented or run.
+Accepted train API design, 2026-11-13. The full request and exploration
+quotes are at `9a762a1:scratch/design-train-api.md` and
+`1666be1:scratch/positioning.md`. Build on PR #103's carriage, retries,
+continuation and verified inputs. Current implementation and remaining work
+are in `exp-56.md`.
 
 ## Where this is going
 
@@ -345,63 +334,20 @@ name its experiment. Launch commands take the name as an argument.
 
 ## Manabot (MTG-329)
 
-Rebuilt against the API above. Frozen evidence, experiment IDs and receipts
-are untouched. Run directories written by the current loop (`state.pt`) are
-not loadable afterwards; the docs name the last revision that reads them. No
-loading path for the old layout.
+Separate Task; do not edit its checkout here. The full loop sketch, recipe
+cutover and adoption checks are preserved at
+`9a762a1:scratch/design-train-api.md` (Manabot). Keep these constraints:
 
-### The loop
-
-`manabot/training/loops/self_play.py` becomes settings, the collector, `step`
-and this:
-
-```python
-def self_play(settings: SelfPlay, run: Run, *, updates: int) -> Path:
-    """Train to the run's update target and return the final policy's path."""
-    with device_settings(settings):
-        learner, ema = create(settings, seed=run.seed)
-        counts = run.resume(learner=learner.agent, optimizer=learner.optimizer, ema=ema, extra=Counts())
-        with self_play_games(settings, run) as collector:
-            for update in run.steps("updates", to=updates):
-                counts, row = step(settings, learner, ema, collector, counts)
-                run.log(row, training_seconds=counts.training_seconds)
-                run.log_table(OUTCOME_TABLE, collector.stats.self_play.drain(), training_seconds=counts.training_seconds)
-                run.save()
-                if is_checkpoint(settings, update):
-                    policy = publish(run, learner, ema, counts)
-        return publish(run, learner, ema, counts)
-```
-
-Removed from the file: the `Tracker` protocol and the untracked path;
-`LoopState` as a saved thing; `load_state`, `save_state`,
-`setting_differences`, `StateMismatch`, the `format` and `world` guards; the
-three hand-written resume cases; the stop check and `raise Stopped`; the
-`Stopped` subclass. `resource_metrics` stays until EXP-58 records machine
-metrics, then goes. `publish` keeps Manabot's own world-bound policy file and
-records it with `run.checkpoint(path)`.
-
-Aim: the file reads top to bottom like a single-file loop, and
-`loops/minimal.py` (PPO, about 90 lines, resumable) is the example the Etude
-README can show.
-
-### Recipes, experiments, command line
-
-- A recipe's `train(config)` opens the run and calls the loop:
-  `with track(clocks=CLOCKS, config=config) as run: self_play(settings, run, updates=config.updates)`.
-- `seed` leaves every config; experiments pass `seeds=(197,)` to `training`.
-- The belief recipe becomes two jobs by the rung 4 rule: the policy run, and a
-  sampler run with `start=` the policy's final checkpoint. Its
-  `if out.exists(): return out` steps go.
-- `manabot train --out` is removed in favour of `etude run`; the guide says so.
-- `manabot/recipes/proposed_etude.py` and any `local_launch` use are deleted.
-
-### Checks
-
-Local, tiny, no induced load: a fresh `etude run` of the Elemental recipe at
-one or two updates; interrupt and `--resume` reading back as one run with
-continuous rows; the learner parity already recorded for seed 197 re-run
-against the new loop; a launched smoke under the launcher's cap. Tests for the
-files changed only.
+- Replace its Tracker/stub, untracked loop and hand-written resume/save/stop
+  branches with `Run`, `resume`, `steps`, `save` and `checkpoint`.
+- Register learner, optimizer, EMA and cumulative counts. Preserve the
+  world-bound policy format and publish it through the path checkpoint form.
+- Remove seed from configs; jobs supply seeds. Split belief policy and sampler
+  into jobs joined by `start=`. Retire `manabot train --out` for `etude run`.
+- Existing Manabot `state.pt` folders have no new loader; document the last
+  revision that reads them. Frozen experiment evidence stays untouched.
+- Verify tiny fresh/stop/resume, seed-197 parity and a capped launched smoke
+  in MTG-329. The tiny resumable PPO loop remains the README candidate.
 
 ## Jace adoption
 

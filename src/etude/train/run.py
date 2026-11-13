@@ -1227,14 +1227,14 @@ def track(
     `etude.tracking.declaration.declare`. Under `etude launch` the files are
     written to `ETUDE_TRACK_DIR`, which the launcher carries to storage as they
     are, and a later attempt finds the run's checkpoints there
-    (`Run.latest_checkpoint`). A continuation (`etude.jobs.continue_from`) is
+    (`Run.checkpoints`). A continuation (`etude.jobs.continue_from`) is
     handed its parent's position and optional checkpoint in `ETUDE_CONTINUES`:
     unless `continues` is given, the run declares that lineage.
 
     A taken name is refused unless `resume=True` or the launcher requests a retry.
     A resumed run's first logged row sets where it supersedes earlier rows.
-    An attempt that logs nothing replaces nothing. `local_launch` supplies a
-    persistent `out` directory and experiment when calling a recipe locally.
+    An attempt that logs nothing replaces nothing. `etude run` (`etude.local.run`)
+    supplies the experiment, identity and persistent `out` for a local call.
     """
     if metric_name_limit is not None and metric_name_limit < 0:
         raise ValueError("metric_name_limit must be nonnegative or None")

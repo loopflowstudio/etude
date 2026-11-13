@@ -42,7 +42,7 @@ etude launch job.py --rent l4              # new runs on rented machines
 ```text
 $ etude run train.py --until updates=300
 train-seed-0
-^C
+^C                                    # finishes the pass, saves, exits 75
 $ etude run train.py --resume train-seed-0 --until updates=300
 train-seed-0
 $ etude report train.py --open        # one run, updates 1 to 300, three checkpoints
@@ -585,8 +585,8 @@ directory that happens to exist.
 ```sh
 etude run train.py --config '{"lr": 0.001}' --seed 7 --name wide --until updates=2000
 etude run train.py --seconds 600        # stop after ten minutes: saved, exit 75
-etude run train.py --resume wide-seed-7
-etude run train.py --json               # one JSON object: run, experiment, outcome
+etude run train.py --config '{"lr": 0.001}' --resume wide-seed-7
+etude run train.py --json               # {"run": "train-seed-0", "experiment": "train", "state": "finished"}
 etude smoke job.py                      # the smoke config, here, spending nothing
 ```
 
@@ -594,11 +594,20 @@ etude smoke job.py                      # the smoke config, here, spending nothi
   config's defaults, changed by `--config`, a JSON object checked against the
   config type. It needs no provider key and no network. It exits 0 when the
   run finished, 75 when it stopped with its state saved, and otherwise
-  nonzero.
+  nonzero. With `--json` the last line of output is one object whose `state`
+  is `finished` or `stopped`, and anything `train` prints goes to standard
+  error; a failed run prints no object.
+- **Ctrl-C asks the run to stop**, as `--seconds` and a `kill` (SIGTERM) do:
+  the pass in progress finishes, `run.save()` writes, and the command exits
+  75. A stop is noticed by `run.steps` or `run.stopping()`, so a loop that
+  asks neither runs on to its end.
 - **`--resume RUN`** is for a run that ended without finishing: it failed and
   you fixed the bug, it ran out of hours, you cancelled it, or you pressed
   Ctrl-C. It takes the file because it runs your current code. It keeps the
-  run's id, config, seed and target.
+  run's id, seed and target; `--name` does not apply. The config is worked
+  out as for a new run, the file's defaults changed by `--config`, and must
+  equal the run's: repeat the `--config` the run was started with, and expect
+  a refusal naming the field if a default in the file has changed since.
 - **`--resume RUN --until updates=6400`** takes the same run further. This
   also works on a finished run, which becomes unfinished again until it
   reaches the new target. Its rows, checkpoints and id go on as one run.
@@ -681,8 +690,8 @@ under a folder whose name starts with `.` stays on the machine.
 | `Path(os.environ["ETUDE_INPUTS_DIR"]) / NAME` | `run.input(NAME)` |
 | a re-used run name resumes | a taken id is refused; `--resume RUN` resumes |
 
-`track(seed=)`, `local_launch` and `run.latest_checkpoint()` still work for
-one release, warn, and name the release that removes them. Runs already stored
+`track(seed=)`, `local_launch` and `run.latest_checkpoint()` still work, warn
+when used, and are removed in 0.5. Runs already stored
 stay readable where they are, including their flat `RUN/` folders and a
 `state.json` that records an outcome; nothing in a bucket is rewritten. A
 state file an older loop kept in `run.out` is not read by `run.resume`: finish

@@ -178,34 +178,15 @@ Not documented: EXP-37's remaining points, which are a separate Task
 declares its restorable state and any discontinuity" point: only registered
 objects are restored, and streams or games in flight start fresh.
 
-## Merge of main at 66ffb28 into this branch (2026-11-13)
+## Merge of main at 66ffb28 (2026-11-13)
 
-Main's #99 and #105 and this branch changed the same tracking and carriage
-code. Resolved as: main's names and types (`RecordMismatch`,
-`StoredContentMismatch`, `checkpoint_key`, `RecordedFile.record`, `Until`,
-`Fetch`, `(run, key)` sent markers, `RunSummary.at`) around this branch's
-behaviour (out carriage, `ReadLink` lengths, `CheckpointRecord.file`,
-`ParentRun`, planned stops). Launcher database version is 18: both sides
-changed the schema from 15.
-
-Behaviour choices made in the merge:
-
-- `track(resumed_at=)` stays removed, as this branch had it (gap 6: "the
-  first `run.log(..., updates=n)` of an attempt sets that point, so a recipe
-  author passes nothing"). Main still had the argument and tested it; those
-  two tests in `tests/train/test_store.py` stay deleted.
-- An attempt's first row now also sets its cut on Etude's two hour clocks.
-  At the merge `running_hours` restarted from the latest checkpoint's value;
-  the state build since continues it from the restored save, falling back to
-  the checkpoint when there is none. `hours_since_start` keeps earlier rows,
-  since wall time moved on (`tests/train/test_hours.py`).
-- `RunData.reached` and `RunSummary.at` include Etude's clocks; tests compare
-  the declared ones through `tests.experiments.authored`.
-
-Checks after the merge: `uv run mypy` clean, `uv run ruff check .` and
-`uv run ruff format --check .` clean; 812 tests passed across two partial
-runs (186 tracking-side, 626 other), then the four launcher files changed
-afterwards passed again (58).
+The field-by-field merge choices and check receipts (812 tests across two
+partial runs, then 58 launcher checks; type/lint clean) are preserved at
+`9a762a1:scratch/questions.md`. Keep the current invariants: first durable
+rows set attempt cutoffs; running hours resume from saved state, falling back
+to a checkpoint; hours since start include gaps. Launcher database version 18
+includes both sides' schema changes. `RunData.reached` and `RunSummary.at`
+include Etude's clocks.
 
 ## `RunRequest` name taken on main (2026-11-13, realign)
 
@@ -227,3 +208,59 @@ currently share one folder group in `read_all`/evaluation queries. Local
 `etude run` writes the designed nested layout; its direct resume reads the
 experiment's own base. Cross-experiment report/query identity remains part of
 the unfinished scoping work, not a supported final implementation.
+
+## Found reading the docs as a user (2026-11-13, write-docs)
+
+Nobody answered these; `docs/training.md` (Running it) states the built
+behaviour for each.
+
+1. **Config on a local `--resume`.** Built and now documented: the config is
+   the file's current defaults overlaid by `--config`, and must equal the
+   stored one, so a run started with `--config '{"lr": 0.001}'` must repeat
+   it on every resume (the page's own example was refused before this edit).
+   The seed and target are instead taken from the run when omitted. Question:
+   should an omitted `--config` on `--resume` mean the run's stored config,
+   like the seed, with the comparison kept only for a `--config` that is
+   given? That would let a changed default in the file go unnoticed.
+2. **Ctrl-C only requests a stop.** The handler touches the stop file, and
+   a second Ctrl-C does the same, so a loop with a long pass, or one that
+   never asks `run.steps`/`run.stopping()`, cannot be interrupted from the
+   keyboard. Question: should a second Ctrl-C interrupt at once (the attempt
+   then ends `failed`, without a save)?
+3. **`--json` key.** The object's key is `state` (`finished`/`stopped`), the
+   field name inside `outcome.json`; the page said "outcome" before. Kept
+   `state`. A failed run prints no object.
+
+## Record unification counterexample (2026-11-13, implement)
+
+The proposed replacement of tracking `Attempt` by launcher `RunAttempt`
+assumes they describe the same execution. They do not: `track` creates a
+writer for each context, while the launcher allocates a whole command.
+
+Controlled local probe at `9a762a1`, with temporary storage and
+`ETUDE_ATTEMPT=allocation-1`, `ETUDE_RUN=allocated-run`: two sequential
+`with track(clocks=[Step("updates", "updates")])` blocks each logged one
+row. `read` returned two distinct writers, both referencing `allocation-1`,
+and two rows. A third block with `run="another-run"` recorded that other
+run under the same allocation. No worker, network or rental was involved.
+Command/result: `uv run python` inline probe; 2 writers / 1 allocation / 2
+rows, then another run / same allocation. All temporary files were removed.
+
+This is a cardinality issue, not just missing fields: merging by allocation
+id loses writer boundaries used for row replacement; counting writers as
+allocations changes retry limits and costs. Command jobs may also never open
+`track`, while evaluation uses its own writers. Do not refuse these contexts
+just to make the proposed record fit.
+
+Proposed correction for review: keep `RunAttempt` for machine allocations;
+replace tracking `Attempt` with `RunWriter`, explicitly the lifetime of one
+tracking context, linked to its optional allocation id. Preserve historical
+writer files and their first-row cutoffs. This is a distinct real concept,
+not a second representation of an allocation. The single stored `RunRecord`
+still needs its ownership specified: launcher `job` is an identity digest,
+but observed `TrainingRun.job` is a report label that can change when another
+config is observed. Do not persist that derived label as the job's identity.
+
+Dependent record/schema work stopped for design review, as implement requires
+when a counterexample breaks the data model. Nothing here changes the accepted
+names or the user docs. Launched resume and experiment scoping remain unbuilt.

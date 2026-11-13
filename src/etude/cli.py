@@ -24,6 +24,11 @@ from etude.train.cli import checkpoints, sync
 app = launch_cli.app
 
 
+ExperimentOption = Annotated[
+    str | None, typer.Option(help="experiment label, defaulting to the file stem")
+]
+
+
 @app.command("run")
 @kind(Kind.wait)
 def run_recipe(
@@ -33,9 +38,7 @@ def run_recipe(
     ] = "{}",
     seed: Annotated[int | None, typer.Option(help="the run's seed")] = None,
     name: Annotated[str | None, typer.Option(help="job name, defaulting to the file stem")] = None,
-    experiment: Annotated[
-        str | None, typer.Option(help="experiment label, defaulting to the file stem")
-    ] = None,
+    experiment: ExperimentOption = None,
     resume: Annotated[str | None, typer.Option(help="resume this run on current source")] = None,
     until: Annotated[str | None, typer.Option(help="absolute target, such as updates=2000")] = None,
     seconds: Annotated[
@@ -169,9 +172,7 @@ def launch(
     ] = False,
     smoke: SmokeOption = False,
     help: FileHelp = False,
-    experiment: Annotated[
-        str | None, typer.Option(help="experiment label, defaulting to the file stem")
-    ] = None,
+    experiment: ExperimentOption = None,
 ) -> None:
     """Queue a file's runs and get the machines to start them now, or fail and queue nothing."""
     _submit(
@@ -205,9 +206,7 @@ def queue(
     max_usd: CohortUsd = None,
     smoke: SmokeOption = False,
     help: FileHelp = False,
-    experiment: Annotated[
-        str | None, typer.Option(help="experiment label, defaulting to the file stem")
-    ] = None,
+    experiment: ExperimentOption = None,
 ) -> None:
     """Add a file's runs to the queue. They start when a machine has room or can be rented."""
     _submit(

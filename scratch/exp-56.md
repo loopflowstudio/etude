@@ -40,6 +40,11 @@ The intended experience, to build against and keep true:
 - `docs/evaluation.md`: players, folder checkpoints, on main's seatings and
   relative seats.
 
+`docs/training.md` Running it now states the built local rules: Ctrl-C and
+SIGTERM as saved stops, the `--json` object, the config a `--resume` must
+repeat, removal in 0.5. Three questions it raised are in `questions.md`
+(Found reading the docs as a user).
+
 The branch holds main at `286e0c5` (v0.3.2, merge `429db8d`; launcher
 database version 18, so its file is `launcher-18.db` under main's per-version
 naming); `questions.md` records how the `66ffb28` merge was reconciled.
@@ -132,6 +137,13 @@ Remaining, before the accepted API can be treated as built:
    controller message is now `RunOperation`, freeing public `RunRequest`.
    Preserve historical file/field readers during the cut. Do not extend the
    separate records as a final API.
+   **Design review needed before this cut:** the local probe in
+   `questions.md` (Record unification counterexample) found two tracking
+   writers and multiple tracked run names sharing one launcher allocation.
+   Tracking `Attempt` is a writer lifetime, not a machine allocation.
+   Review the proposed `RunWriter` distinction and job identity versus
+   derived report label before choosing the shared schema. No production
+   record changes were made in this pass.
 2. Launched `etude launch job.py --resume RUN [--until]`, keeping cumulative
    limits and attempts, current source and the same out. No such CLI or
    scheduler operation exists yet. Names/storage remain globally scoped in
@@ -153,7 +165,10 @@ Compress pass after it (resume checks in `etude.local._resumed`, one outcome-nam
 in `read`, plain job expansion; `ETUDE_SEED` unset for a seedless historical run):
 `uv run --extra train pytest tests/train/test_local.py tests/test_jobs.py
 tests/launch/test_cli.py tests/train/test_lifecycle.py tests/train/test_track.py -q`:
-73 passed; mypy and Ruff clean. Earlier checkpoint/carriage checks and the import-boundary
+73 passed; mypy and Ruff clean. Second compress pass (`track` docstring names
+`etude run` and `Run.checkpoints`; one `ExperimentOption` in `etude.cli`):
+`uv run --extra train pytest tests/train/test_local.py tests/launch/test_cli.py
+tests/train/test_cli.py -q`: 30 passed. Earlier checkpoint/carriage checks and the import-boundary
 repair are recorded at `dda6b17:scratch/exp-56.md` (451 passed, type/lint clean).
 
 Counting pins moved by the state build, each with its reason beside it:
