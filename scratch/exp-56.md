@@ -67,6 +67,36 @@ Preserve stored runs/evaluations, old file/field readers, progress, stop exit
 Do not repair exclusive tests of deleted APIs; move behavior coverage to the
 surviving API. Manabot cutover is MTG-329; do not edit its checkout here.
 
+## Folded in, 2026-11-13 (Task comment, Jack Heart)
+
+**Finished run marked failed.** "This should be part of 56". Manabot QA
+against `105abdd`: a second `track` block on a finished run that raises
+before any row (refused resume, KeyboardInterrupt) turns the run `failed`.
+Still present at `429db8d`: `Run.__exit__` (`src/etude/train/run.py`) calls
+`finish("failed")` for any non-`Stopped` error, and the attempt is recorded
+in `__init__` with `first_row=True`, which is no evidence of a logged row.
+The fix must keep a genuine failure before the first row reportable, so
+skipping every rowless exception is not enough. Planned under step 5.
+
+**EXP-37** "Fold this one into 56"; EXP-37 is closed as folded. What this
+plan answers of its brief, and what it does not:
+
+- Application declares restorable state and discontinuity: answered by the
+  design (only registered objects restore; streams/games in flight restart).
+- Durable checkpoint publication: the save pointer published last (step 1)
+  gives whole-save recovery; *acknowledged* durability is not specified.
+- One cumulative budget: hours, dollars and attempts span attempts, but
+  hours "count code execution" (`docs/launcher.md`); transfer, idle and
+  teardown time count only through dollars. Not planned.
+- Fault fixtures: step 1 covers interrupted saves; loss before/after commit,
+  partial upload, duplicate completion and controller restart are not planned.
+- Recording acquisition mode and telling preemption, host loss, lease expiry
+  and learner failure apart: not planned.
+- Manabot adoption: MTG-329.
+
+Not decided: "whether these hold the release". The unplanned EXP-37 points
+need that decision, or their own Tasks.
+
 ## Remaining implementation
 
 1. Build state publication as the docs describe it, with interruption and
@@ -76,7 +106,8 @@ surviving API. Manabot cutover is MTG-329; do not edit its checkout here.
 4. Carry folder checkpoints through tracking, launch inputs and evaluation;
    add start= and shared checkpoint enumeration.
 5. Add local `etude run`, explicit local/launched --resume, create-only names,
-   config/seed refusals and per-attempt source recording; keep finished runs safe.
+   config/seed refusals and per-attempt source recording; a refused or
+   interrupted attempt never marks a finished run failed (Folded in).
    `etude launch` and `etude run` accept the experiment name; the file's stem
    is only the default (design, Set up for Etude Cloud; `positioning.md`).
 6. Move job seeds and examples; focused acceptance tests, then the caller's

@@ -140,8 +140,7 @@ Assumptions taken (reversible, simpler option):
   kept in `run.out` are not read by `run.resume`.
 
 Not documented, because nothing user-facing is settled: EXP-37's remaining
-points (acquisition mode and loss causes in records, acknowledged checkpoint
-durability, fault-injection fixtures). The docs do state its "application
+points (`exp-56.md`, Folded in). The docs do state its "application
 declares its restorable state and any discontinuity" point: only registered
 objects are restored, and streams or games in flight start fresh.
 
