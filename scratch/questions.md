@@ -1,140 +1,31 @@
-# EXP-56: choices and direction
+# EXP-56 choices
 
-## Decision (2026-11-12)
+The accepted rebuild is `design-train-api.md`; `docs/training.md` describes its
+intended experience. Earlier local_launch/Run.until choices and QA history are
+superseded as API direction, retained in git at `1666be1:scratch/questions.md`.
+They remain evidence about the existing carriage and retry machinery.
 
-Jack Heart: "5b. no opinion on the other stuff". This addressed choice 7 below
-(presented to him as 5): the launch tells the recipe its target, and
-`etude continue --until updates=6400` alone continues without changing config.
-Choices 1–4 and 6 retain their built recommendations under "no opinion".
+## Implementation counterexample: state publication (2026-11-13)
 
-## Choices for demo
+The design promises a whole-or-nothing save of model, optimizer and clocks,
+including after a machine loss. It also keeps the existing out carriage.
+A bounded file fixture through the actual `StorageDestination` delivered save 1,
+then interrupted save 2 after one file. It retained model=save-2,
+optimizer=save-1, metadata=save-1. No training or network was involved.
 
-1. **Placement:** launched out is `RUN/out/`, carried with its run grant.
-   `local_launch(out=DIR)` stores records at `DIR/etude/BASENAME(DIR)/`, matching
-   the manabot stub. Alternative: local records in `~/.etude/track`.
-   Making out itself the record folder would collide with recipe-owned
-   `checkpoints/` and `state.json`. Every `track` in one local block shares
-   the run; `etude report --source DIR` lists out files too.
-2. **Checkpoint references:** files inside out are recorded in place, with
-   digest, without a second copy; bytes must not change. Other local files
-   are copied. Alternative: always copy, paying a second upload.
-3. **Planned stop:** raise `etude.train.run.Stopped` after saving;
-   `etude.call` exits 75, also available to command jobs; outcome `stopped`.
-   Precedent: sysexits' `EX_TEMPFAIL` (temporary failure, retry), Slurm
-   `RequeueExit`, Kubernetes `podFailurePolicy` on exit codes. Inferring this
-   from a true `stopping()` would mislabel a crash while saving.
-4. **Local entry:** `local_launch(out=, experiment=)` preserves `(config)`
-   recipes. Alternative: `track(out=)` requires directory handling in each
-   recipe. Naming remains open: `etude launch job.py` on pool `local` already
-   means a local launch through a worker.
-5. **Config:** CLI takes a typed JSON object (`--config '{"rate":0.001}'`),
-   rejecting unknown fields/invalid values before queueing. Python takes a
-   validated model. This replaces `FIELD=VALUE` to follow `AGENTS.md`;
-   existing `--until` remains a separate target.
-6. **Cancellation:** retain TERM alongside the stop file; saving requires
-   handling TERM. Alternative: allow polling for `stop_seconds` before TERM.
-7. **Target:** `run.until("updates", default=config.updates)`. This supersedes
-   the Task wording "it declares a new run whose update target is the only
-   changed config field". At `bd4a687`, inspection found `--until` alone could
-   return at the old config target; no run was performed for that finding.
+Recovery intentionally accepts newer mutable out bytes than membership: both
+`Courier._restore` and `BucketJournal.held` select membership keys, then read
+current object bytes. Merely adding hashes to state.json or checking out.json
+would detect a mismatch without recovering the previous weights: they were
+already overwritten. Reordering mutable files has the same failure.
 
-8. **A planned stop at the run's own hours limit** (open; found 2026-11-12 at
-   `05b480f`, probe in `exp-56.md`). `ETUDE_DEADLINE` is the earlier of the
-   machine's window and the run's remaining hours, so a recipe also saves and
-   raises `Stopped` just short of the run's own limit. The launcher cannot tell
-   that from a stop for a machine window: it rents again for the leftover
-   reserve (40 s in the probe) and that attempt ends `out_of_time`. Built
-   behaviour kept as the headless assumption: bounded by `max_attempts` and
-   dollars, now documented in `docs/launcher.md` and pinned by a two-rental
-   counting regression. Repeated early stops can instead exhaust attempts;
-   `out_of_time` is not guaranteed for every retry. Alternatives: end the run
-   with its limit kind when the run's own limit bound the stopped attempt
-   (then a job exiting 75 for its own reasons on an owned host never retries,
-   and reads `out_of_time` with hours left); or have the job say why it stopped
-   (a second signal for recipes to learn).
-
-9. **A script that names its experiment, launched from a plain job file** (open;
-   found 2026-11-12 at `6fb164b` by source inspection; confirmed by a local-pool run in QA, `qa.html` section 7). On main a
-   plain `job.py` left `ETUDE_EXPERIMENT` unset, so main's README example
-   (`etude launch job.py` with `track(experiment="capacity-pilot", ...)`) ran
-   and recorded under `capacity-pilot`. Since `b6482b7` the job gets experiment
-   `job`, and `track` raises `experiment_differs_from_launch` in that script:
-   on the worker, after any rental has started. `etude-sdk` 0.2.16 is published
-   with that README. The repair also gives every unnamed plain-file job a new
-   job digest, since the experiment is part of its identity. Built behaviour
-   kept as the headless assumption: the launched file owns the experiment; a
-   script drops `experiment=` or the job sets `Job.experiment`. One rule, and
-   the launcher and tracking never disagree about a run's experiment.
-   Alternative: the stem is only a fallback, so a script's own name wins over
-   a defaulted one (main's behaviour kept; needs the worker to know defaulted
-   from explicit, and the launcher records `job` while tracking records
-   `capacity-pilot`). Whichever holds, the release note must say it; if the
-   built rule holds, the old README example is a breaking change to call out.
-
-## Headless assumptions
-
-Plain training-file launches (QA finding 2): default an unnamed job's
-experiment to its file stem, following the existing experiment-file naming
-rule. Preserve explicit `Job.experiment` values in plain files; keep the
-conflict check for files defining `eval`/`report`. Recipes name no experiment.
-This does not change report discovery or Python launches without a job file.
-
-Keep 1–4 and 6 for demo. `Run.until` follows `Job.until`/`--until` vocabulary,
-accepts fractional clocks, and uses the required default for a missing or
-different-clock launch target. Undeclared requested clocks raise; integer-only
-loops convert to `int`. No config-field inference or extra target record.
-Without a named directory `run.out` raises `out_not_named`; with no
-stop file/deadline `stopping()` is false. First rows set new attempt cutoffs;
-historical cutoffs survive.
-
-Headless concept reviews, 2026-11-12: copied latest checkpoints accompany
-empty or populated out; continuation refuses when neither can seed the child;
-a removed latest out checkpoint never selects an older one implicitly. Docs
-and errors use "out". These preserve existing behavior and naming, without
-changing the API choices above. Repairs, probes and checks are in `exp-56.md`.
-`local_launch` naming remains choice 4.
-
-Restoration is per file as last carried: write atomically and keep one resume's
-needs in one file. Parent mutation after queueing fails input verification.
-Membership follows data-before-index delivery, without deleting retained
-checkpoint objects. Private/unfinished files stay local. The earlier unlink
-failure and checks are in `exp-56.md`; repairing it did not decide API choices.
-
-Out membership implementation: preserve recovery's existing tolerance for a
-mutable save newer than its last membership. Continuation uses the published
-fingerprint and still verifies inputs at delivery. Sync holds temporary hard
-links during a pass, following the existing atomic-save requirement, to keep
-the fingerprint and upload on one saved inode without duplicating bytes.
-
-`Stopped` is defined in `etude/stopping.py` so `etude.call` exits 75 without
-loading tracking, and re-exported from `etude.train.run`. Docs and tests import
-it from `etude.train.run`, as the Task's acceptance check words it ("replacing
-`manabot/recipes/proposed_etude.py` imports by `etude.train.run`"). `AGENTS.md`
-asks for imports from the defining module; the Task wording is kept. Cosmetic,
-reversible: switching is three import lines and the cutover note below.
-
-## Manabot cutover (MTG-329; do not edit here)
-
-- Import `track`, `local_launch`, `Stopped` from `etude.train.run`, and `Step`
-  from `etude.train.records`; delete `manabot/recipes/proposed_etude.py`.
-- Preserve the stub's `track(strict=True)`; Etude defaults to `strict=False`.
-- Pass `updates=int(run.until("updates", default=config.updates))` to the loop.
-- Make `training/loops/self_play.py:Stopped` inherit Etude's, preserving its
-  `update` and message. `cli.py` catches that class; typed jobs call recipes
-  directly.
-
-Open for demo: when a belief continuation extends its policy, should it
-recollect histories and refit the sampler, or deliberately keep both from the
-parent? At `f47e2621d`, `belief_sampler.py:belief` passes `config.updates` to
-both self-play and the sampler checkpoint; `collect_belief` and `train_belief`
-return existing outputs without checking the policy. Merely changing the loop
-target leaves those outputs tied to the old policy. The sampler's checkpoint
-coordinate must describe the policy it actually used, not blindly the config
-or launch target. If recomputing within one run, use an immutable checkpoint
-path: Etude rejects changing bytes at a previously recorded address. This is
-a source inspection finding, not an executed manabot acceptance check.
-
-Affected user docs: `docs/tracking.md`, `docs/launcher.md`, `README.md`.
+This changes the persistence design, not a reversible spelling. Dependent
+implementation is stopped for design review, as implement requires. The
+proposed correction is immutable save generations and a commit manifest
+published last, with reader pinning and explicit generation retention/retirement.
+An alternative is one atomic archive per save, with extraction for the author's
+files. The layout and retention rule must be specified before building either.
+Do not quietly weaken the documented recovery promise to per-file atomicity.
 
 ## Train API docs (2026-11-13): open choices and assumptions
 

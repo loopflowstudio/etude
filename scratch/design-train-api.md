@@ -1,5 +1,13 @@
 # The Etude train API and Manabot's loops: design for EXP-56 and MTG-329
 
+Implementation review, 2026-11-13: the multi-file state layout below cannot
+provide its whole-save recovery promise through the retained mutable out
+carrier. A controlled interrupted delivery retained new weights beside the
+previous optimizer and metadata. `scratch/state-publication.py` reproduces it;
+`scratch/questions.md` records the transport/recovery findings. Dependent
+implementation is stopped for review of a snapshot publication and retention
+protocol. The API described below remains intended, unimplemented behavior.
+
 2026-11-13. Written from the day's exploration (`scratch/positioning.md` holds
 every quoted remark in full; `scratch/explore.html` and `scratch/sketch.html`
 are the pages). Jack Heart asked for it: "Be ambitious. Help us land in the
