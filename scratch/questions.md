@@ -5,27 +5,73 @@ intended experience. Earlier local_launch/Run.until choices and QA history are
 superseded as API direction, retained in git at `1666be1:scratch/questions.md`.
 They remain evidence about the existing carriage and retry machinery.
 
-## Implementation counterexample: state publication (2026-11-13)
+## State publication (2026-11-13): blocked on persistence review
 
 The design promises a whole-or-nothing save of model, optimizer and clocks,
-including after a machine loss. It also keeps the existing out carriage.
-A bounded file fixture through the actual `StorageDestination` delivered save 1,
-then interrupted save 2 after one file. It retained model=save-2,
-optimizer=save-1, metadata=save-1. No training or network was involved.
+including after a machine loss, over the existing out carriage. The carriage
+cannot keep it. Dependent API implementation is stopped until the layout and
+retention rule are specified. Do not weaken the Training page to per-file
+atomicity or to current transport behaviour.
 
-Recovery intentionally accepts newer mutable out bytes than membership: both
-`Courier._restore` and `BucketJournal.held` select membership keys, then read
-current object bytes. Merely adding hashes to state.json or checking out.json
-would detect a mismatch without recovering the previous weights: they were
-already overwritten. Reordering mutable files has the same failure.
+**Counterexample** (`uv run python scratch/state-publication.py`; file
+fixtures through the real `StorageDestination`, no network or training):
+save 1 delivered, save 2 interrupted after one file, leaving model=save-2,
+optimizer=save-1, state.json=save-1, membership unchanged. Recovery accepts
+newer mutable out bytes than membership on purpose: `Courier._restore` and
+`BucketJournal.held` select membership keys, then read current object bytes.
+Hashes in state.json or out.json would detect the mix without recovering the
+overwritten weights; reordering mutable files fails the same way.
 
-This changes the persistence design, not a reversible spelling. Dependent
-implementation is stopped for design review, as implement requires. The
-proposed correction is immutable save generations and a commit manifest
-published last, with reader pinning and explicit generation retention/retirement.
-An alternative is one atomic archive per save, with extraction for the author's
-files. The layout and retention rule must be specified before building either.
-Do not quietly weaken the documented recovery promise to per-file atomicity.
+**Direction.** Each save is a new immutable snapshot, uploaded, then a small
+pointer published last; recovery follows the pointer. Jack Heart on cost:
+"local storage probably fine, but ideally avoid remote extra storage". Read
+as: local snapshots may be kept; remote extra storage is at most transient,
+not a growing history of saves. (Not taken: one atomic archive per save,
+extracted for the author's files.)
+
+**As the docs show it** (`docs/training.md` Carrying on and What is on disk,
+`docs/launcher.md`, `docs/tracking.md`): `out/state/current.json` names the
+save to load; each save is `out/state/save-N/`, written once; delivery sends
+the save's files, then the pointer, then deletes the save before. Reversible
+spellings: named state is `state/NAME/current.json`; folders are numbered
+(`save-00000007`), not named for a clock, because `run.save(fn)` outside
+`run.steps` has no stepped clock.
+
+**Retention probe** (`uv run python scratch/state-retention.py`; three
+complete saves with identical model bytes through `StorageDestination`, on a
+directory fixture whose `delete` returns false as upload-only storage does):
+3 model uploads and 3 remote model copies; membership holds only the pointer
+and save 3 while saves 1 and 2 remain stored. It checks the existing carrier
+against the proposed layout, not a save API or pointer ordering. Why:
+`StorageDestination` fingerprints by destination key, so the same bytes
+under a new save folder upload again; the storage protocol has no copy
+operation; the S3 federation policy grants put/delete/abort without the read
+a copy of a prior object needs.
+
+Open, answered by no one. The first two block the build:
+
+1. **How an unchanged file is not uploaded again.** Either each remote save
+   is self-contained (needs a copy path and its permissions), or manifests
+   share immutable files (`state.json`'s `files` names a file outside its
+   save folder; needs file-level reachability and retirement instead of
+   deleting the whole replaced save). The docs say only that `files` paths
+   are relative to the save's folder.
+2. **Who cleans up under upload-only grants**, and what retention holds
+   while that owner is unavailable. The courier cannot delete there
+   (`docs/launcher.md`: "absence does not depend on deleting bucket
+   objects"); membership only controls restoration. The docs leave replaced
+   saves in the bucket "until someone with delete rights removes them",
+   which conflicts with the Training page's transient remote duplication.
+3. **Local retention.** Keep the previous save on the machine as a second
+   fallback, or one rule everywhere? The docs delete it in both places.
+4. **Running hours across a resume.** `docs/tracking.md` says
+   `running_hours` goes on from the save an attempt resumed; the code still
+   continues it from the latest checkpoint (merge notes below).
+
+Proposal for review, not recorded direction: immutable files owned by the
+state root and shared by save manifests, with launcher-owned cleanup where a
+worker cannot delete; specify reader and active-upload protection before
+building cleanup. It changes the published storage contract.
 
 ## Train API docs (2026-11-13): open choices and assumptions
 
@@ -98,86 +144,6 @@ points (acquisition mode and loss causes in records, acknowledged checkpoint
 durability, fault-injection fixtures). The docs do state its "application
 declares its restorable state and any discontinuity" point: only registered
 objects are restored, and streams or games in flight start fresh.
-
-## State publication direction (2026-11-13)
-
-Proposed: write each save as a new immutable snapshot, upload it, publish a
-small pointer last; recovery follows the pointer. Jack Heart: "local storage
-probably fine, but ideally avoid remote extra storage". So local snapshots may
-be kept freely; remotely, extra storage should be at most transient (e.g.
-content-addressed files so unchanged files are not re-uploaded, and the
-superseded snapshot's objects deleted once the new pointer is published), not
-a growing history of saves.
-
-### What the docs now show, and what the direction leaves open
-
-`docs/training.md` (Carrying on, What is on disk), `docs/launcher.md` and
-`docs/tracking.md` describe it as: `out/state/current.json` names the save to
-load; each save is `out/state/save-N/`, written once; delivery sends the
-save's files, then the pointer, then deletes the save before.
-
-Spellings taken, reversible: the pointer is `current.json` inside `state/`
-(named state: `state/NAME/current.json`); save folders are numbered
-(`save-00000007`), not named for a clock, because `run.save(fn)` in a loop
-without `run.steps` has no stepped clock.
-
-Open, not answered by anyone:
-
-1. **Local retention.** "local storage probably fine" permits keeping older
-   saves on the machine; the docs delete the replaced save in both places,
-   one rule. Question: keep the previous save locally as a second fallback,
-   or one rule everywhere?
-2. **How an unchanged file is not uploaded again.** Either storage copies it
-   into the new save folder (needs a copy the worker's grant allows), or
-   `state.json`'s `files` may name a file in an earlier save folder, which
-   then outlives its save. The docs say only that `files` paths are relative
-   to the save's folder, which holds for both. Question: which?
-3. **Upload-only grants.** The courier cannot delete there
-   (`docs/launcher.md`: "absence does not depend on deleting bucket
-   objects"). The docs say replaced saves stay in the bucket, outside
-   membership, "until someone with delete rights removes them". Question:
-   does the launcher, which holds keys, delete them, or is this left to the
-   owner?
-4. **Running hours across a resume.** `docs/tracking.md` now says
-   `running_hours` goes on from the save an attempt resumed. The merged code
-   still continues it from the latest checkpoint (below).
-
-### Retention and reuse probe (2026-11-13)
-
-`uv run python scratch/state-retention.py` — three complete, tiny saves
-through `StorageDestination`, with identical model bytes and changing
-optimizer bytes: 3 model uploads, 3 remote model copies; membership contains
-only the current pointer and save 3, while retired saves 1 and 2 remain.
-The directory fixture implements the storage protocol's upload-only result
-(`delete` returns false). No network, training or induced load. This checks
-the existing carrier against the proposed layout, not a new save API or
-pointer publication ordering.
-
-The two persistence questions above remain blocking, rather than reversible
-spelling choices. The Training page promises both no repeated upload of
-unchanged files and only transient remote duplication. The Launcher page
-explicitly allows retired bytes to remain indefinitely with upload-only
-grants. `StorageDestination` fingerprints by destination key; different
-save-folder keys upload the same bytes again. The storage protocol has no
-copy operation, and the S3 federation policy grants put/delete/abort, without
-read access for copying a prior object. Referencing a prior save instead
-would require preserving its referenced files when retiring it.
-
-Persistence review must specify:
-
-- Whether each remote save is self-contained (requiring a copy path and its
-  permissions), or manifests share immutable files (requiring file-level
-  reachability and retirement instead of deleting the whole replaced save).
-- Who cleans up under upload-only grants, and what retention promise applies
-  while that owner is unavailable. The carrier cannot guarantee removal by
-  itself; membership only controls restoration.
-
-Recommendation for review: shared immutable files owned by the state root,
-save manifests naming them, and launcher-owned cleanup when a worker cannot
-delete. Specify reader/active-upload protection before implementing cleanup.
-This changes the published storage contract; it is a proposal, not recorded
-direction. Dependent API implementation remains stopped. Do not weaken the
-Training page to match current transport behavior.
 
 ## Merge of main at 66ffb28 into this branch (2026-11-13)
 

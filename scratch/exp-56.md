@@ -19,19 +19,15 @@ commands; EXP-60 evaluation expansion; EXP-61 joinable shared budgets.
 
 ## State publication
 
-The new API promises one atomic save across several model/optimizer files;
+Blocked on persistence review; no replacement API code has been started. The
+new API promises one atomic save across several model/optimizer files, and
 the existing carrier updates each mutable out object separately, so an
-interrupted delivery leaves a mixed save (`questions.md`, reproduced by
-`scratch/state-publication.py`). Direction, 2026-11-13: "snapshot directory +
-pointer published last, recovery follows the pointer"; Jack Heart on cost:
-"local storage probably fine, but ideally avoid remote extra storage".
-
-The docs show it as `out/state/current.json` naming an immutable
-`out/state/save-N/`, with the save before deleted after the pointer moves and
-unchanged files not uploaded again. `questions.md` lists four points the
-direction leaves open (local retention, how unchanged files are shared,
-upload-only grants, running hours across a resume). No replacement API code
-has been started.
+interrupted delivery leaves a mixed save. Direction, 2026-11-13: "snapshot
+directory + pointer published last, recovery follows the pointer"; Jack Heart
+on cost: "local storage probably fine, but ideally avoid remote extra
+storage". `questions.md` (State publication) holds both probes' results, the
+layout the docs show and the four open points; file sharing between saves
+and cleanup under upload-only grants block the build.
 
 ## Docs for the build
 
@@ -74,9 +70,7 @@ surviving API. Manabot cutover is MTG-329; do not edit its checkout here.
 ## Remaining implementation
 
 1. Build state publication as the docs describe it, with interruption and
-   recovery checks; settle the open points in `questions.md` first. Retention
-   review is still required: snapshot folders alone repeat unchanged uploads,
-   and upload-only grants cannot retire remote bytes (bounded probe below).
+   recovery checks, once the persistence review settles `questions.md`.
 2. Unify/rename records and package; wire historical readers and outcome files.
 3. Build state registration, steps, clocks, save cadence, seed and input APIs.
 4. Carry folder checkpoints through tracking, launch inputs and evaluation;
@@ -90,12 +84,11 @@ surviving API. Manabot cutover is MTG-329; do not edit its checkout here.
 
 ## Verification
 
-`uv run python scratch/state-publication.py` — controlled interrupted delivery:
-model=save-2, optimizer=save-1, state.json=save-1; membership unchanged. This
-probe checks the retained transport, not an implementation of the new API.
 After merging main: mypy and ruff clean, 812 tests passed (`questions.md`).
+The two state probes (`scratch/state-publication.py`,
+`scratch/state-retention.py`) check the retained transport, not the new API.
 
-`uv run python scratch/state-retention.py` — 3 unchanged model uploads and
-3 remote copies after 3 saves; only save 3 in membership, with saves 1 and 2
-still stored under upload-only semantics. Persistence review requirements
-and a proposed sharing/cleanup direction are in `questions.md`.
+Compress, 2026-11-13: no code cut; `git status --short src tests docs` empty.
+The branch's source is the retained carriage (out membership, planned stops,
+continuation), whose save path the persistence review will reshape, plus
+tracking code this plan replaces.
