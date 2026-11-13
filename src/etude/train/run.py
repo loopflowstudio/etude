@@ -278,8 +278,9 @@ class Run:
         self._finish_deadline: float | None = None
         self._segment_rows = segment_rows
         self._writer_id = secrets.token_hex(6)
-        # Etude's clocks continue from the latest checkpoint, this run's or
-        # the parent's a continuation was handed, as a step clock does.
+        # Etude's clocks continue from the saved state an attempt restores;
+        # without one, from the latest checkpoint, this run's or the parent's
+        # a continuation was handed.
         latest = self._latest_record()
         started_ms = time.time_ns() // 1_000_000
         self._ran = 0.0 if latest is None else latest.at.get(RUNNING_HOURS, 0.0)

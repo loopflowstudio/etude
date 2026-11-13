@@ -74,8 +74,8 @@ disk; `docs/launcher.md` The run promise, with a retention table):
 2. *Grace* is not a timer: removal happens on the delivery pass after
    confirmation and may lag.
 3. `running_hours` continues from the save an attempt resumed, as
-   `docs/tracking.md` says; the code continues it from the latest checkpoint
-   (merge notes below).
+   `docs/tracking.md` says (built: `Run.__init__` reads `saved_states`;
+   `tests/train/test_state.py::test_running_hours_resume_from_saved_state_instead_of_a_checkpoint`).
 
 **Awkward, found writing the docs.** With an upload-only grant and no
 selected controller, the cleanup loop runs only while a CLI command does. A
@@ -185,11 +185,10 @@ Behaviour choices made in the merge:
   author passes nothing"). Main still had the argument and tested it; those
   two tests in `tests/train/test_store.py` stay deleted.
 - An attempt's first row now also sets its cut on Etude's two hour clocks.
-  `running_hours` restarts from the latest checkpoint's value, so on that
-  axis rows an earlier attempt logged after its last checkpoint are replaced
-  even when the loop resumed from later state. `hours_since_start` keeps
-  them, since wall time moved on (`tests/train/test_hours.py` asserts this).
-  Continuing `running_hours` from the save is part of the rebuild.
+  At the merge `running_hours` restarted from the latest checkpoint's value;
+  the state build since continues it from the restored save, falling back to
+  the checkpoint when there is none. `hours_since_start` keeps earlier rows,
+  since wall time moved on (`tests/train/test_hours.py`).
 - `RunData.reached` and `RunSummary.at` include Etude's clocks; tests compare
   the declared ones through `tests.experiments.authored`.
 

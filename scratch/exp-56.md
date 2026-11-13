@@ -40,8 +40,9 @@ The intended experience, to build against and keep true:
 - `docs/evaluation.md`: players, folder checkpoints, on main's seatings and
   relative seats.
 
-The branch holds main at `66ffb28` (merge `1fae5d9`); `questions.md` records
-how the two sides were reconciled.
+The branch holds main at `286e0c5` (v0.3.2, merge `429db8d`; launcher
+database version 18, so its file is `launcher-18.db` under main's per-version
+naming); `questions.md` records how the `66ffb28` merge was reconciled.
 
 ## Delete — do not maintain
 
@@ -71,7 +72,7 @@ surviving API. Manabot cutover is MTG-329; do not edit its checkout here.
 **Finished run marked failed.** "This should be part of 56". Manabot QA
 against `105abdd`: a second `track` block on a finished run that raises
 before any row (refused resume, KeyboardInterrupt) turns the run `failed`.
-Still present at `429db8d`: `Run.__exit__` (`src/etude/train/run.py`) calls
+Still present at `f410793`: `Run.__exit__` (`src/etude/train/run.py`) calls
 `finish("failed")` for any non-`Stopped` error, and the attempt is recorded
 in `__init__` with `first_row=True`, which is no evidence of a logged row.
 The fix must keep a genuine failure before the first row reportable, so
