@@ -74,7 +74,9 @@ surviving API. Manabot cutover is MTG-329; do not edit its checkout here.
 ## Remaining implementation
 
 1. Build state publication as the docs describe it, with interruption and
-   recovery checks; settle the open points in `questions.md` first.
+   recovery checks; settle the open points in `questions.md` first. Retention
+   review is still required: snapshot folders alone repeat unchanged uploads,
+   and upload-only grants cannot retire remote bytes (bounded probe below).
 2. Unify/rename records and package; wire historical readers and outcome files.
 3. Build state registration, steps, clocks, save cadence, seed and input APIs.
 4. Carry folder checkpoints through tracking, launch inputs and evaluation;
@@ -92,3 +94,8 @@ surviving API. Manabot cutover is MTG-329; do not edit its checkout here.
 model=save-2, optimizer=save-1, state.json=save-1; membership unchanged. This
 probe checks the retained transport, not an implementation of the new API.
 After merging main: mypy and ruff clean, 812 tests passed (`questions.md`).
+
+`uv run python scratch/state-retention.py` — 3 unchanged model uploads and
+3 remote copies after 3 saves; only save 3 in membership, with saves 1 and 2
+still stored under upload-only semantics. Persistence review requirements
+and a proposed sharing/cleanup direction are in `questions.md`.

@@ -142,6 +142,43 @@ Open, not answered by anyone:
    `running_hours` goes on from the save an attempt resumed. The merged code
    still continues it from the latest checkpoint (below).
 
+### Retention and reuse probe (2026-11-13)
+
+`uv run python scratch/state-retention.py` — three complete, tiny saves
+through `StorageDestination`, with identical model bytes and changing
+optimizer bytes: 3 model uploads, 3 remote model copies; membership contains
+only the current pointer and save 3, while retired saves 1 and 2 remain.
+The directory fixture implements the storage protocol's upload-only result
+(`delete` returns false). No network, training or induced load. This checks
+the existing carrier against the proposed layout, not a new save API or
+pointer publication ordering.
+
+The two persistence questions above remain blocking, rather than reversible
+spelling choices. The Training page promises both no repeated upload of
+unchanged files and only transient remote duplication. The Launcher page
+explicitly allows retired bytes to remain indefinitely with upload-only
+grants. `StorageDestination` fingerprints by destination key; different
+save-folder keys upload the same bytes again. The storage protocol has no
+copy operation, and the S3 federation policy grants put/delete/abort, without
+read access for copying a prior object. Referencing a prior save instead
+would require preserving its referenced files when retiring it.
+
+Persistence review must specify:
+
+- Whether each remote save is self-contained (requiring a copy path and its
+  permissions), or manifests share immutable files (requiring file-level
+  reachability and retirement instead of deleting the whole replaced save).
+- Who cleans up under upload-only grants, and what retention promise applies
+  while that owner is unavailable. The carrier cannot guarantee removal by
+  itself; membership only controls restoration.
+
+Recommendation for review: shared immutable files owned by the state root,
+save manifests naming them, and launcher-owned cleanup when a worker cannot
+delete. Specify reader/active-upload protection before implementing cleanup.
+This changes the published storage contract; it is a proposal, not recorded
+direction. Dependent API implementation remains stopped. Do not weaken the
+Training page to match current transport behavior.
+
 ## Merge of main at 66ffb28 into this branch (2026-11-13)
 
 Main's #99 and #105 and this branch changed the same tracking and carriage
