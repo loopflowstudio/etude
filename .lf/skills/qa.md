@@ -203,7 +203,8 @@ Local recipe path: a lab with `train.py` written as `docs/tracking.md` shows
 `local_launch(out=DIR, experiment=NAME)`. Stop it with `ETUDE_STOP_FILE=FILE`
 and `touch FILE` from a background `sleep`; read rows with
 `etude.train.read.read(DIR, NAME, basename(DIR)).points(metric, clock).x`
-(`metrics()` is a method) and attempt starts from `DIR/etude/RUN/metrics/*.json`
+(`metrics()` is a method; a launched run on the local pool reads as
+`read(ETUDE_HOME/track, EXPERIMENT, RUN)`) and attempt starts from `DIR/etude/RUN/metrics/*.json`
 (`resumed_at`). Launch a plain file defining only `runs()` to check that its
 stem supplies the experiment. Also check an explicit `Job.experiment`: plain
 files preserve it, while files defining `report()` or `eval(state)` require
