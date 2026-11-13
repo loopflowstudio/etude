@@ -130,7 +130,8 @@ Rules a caller can rely on:
   `outcome.json` (how its latest attempt ended), `metrics/` (row blocks and
   their indexes, from every attempt), `artifacts/` (immutable files,
   including logged row tables) and `out/` (`run.out`), which holds the saved
-  state in `out/state/` and each published checkpoint in `out/checkpoints/`,
+  state in `out/state/`, one folder per save with `current.json` naming the
+  one to load, and each published checkpoint in `out/checkpoints/`,
   named for where its first clock stood (`updates-00001000/`); a checkpoint
   file copied from outside `out` is in `checkpoints/` with its record.
   [Training](training.md#what-is-on-disk) shows the layout. Under the launcher
@@ -323,18 +324,13 @@ run.tag(model, "best")  # tags can change later
 ### Etude's clocks
 
 ```python
-import os
-
-run = track(experiment="capacity-pilot", clocks=[Step("updates", "optimizer updates, absolute")])
-hours = float(
-    os.environ["ETUDE_UNTIL_VALUE"]
-)  # the job's until=Until(clock="running_hours", value=10)
-while run.at("running_hours") < hours:
-    update, loss = train_one_update()
-    run.log({"rl/loss": loss}, updates=update)
-    if run.checkpoint_due(1):  # every running hour
-        run.checkpoint("out/latest.pt", updates=update)
-run.finish()
+with track(clocks=[Step("updates", "optimizer updates")], config=config) as run:
+    run.resume(model=model, optimizer=optimizer)
+    for update in run.steps("updates", to=config.updates):
+        run.log({"rl/loss": one_update(model, optimizer)})
+        run.save()
+        if run.checkpoint_due(1):  # every running hour
+            run.checkpoint(policy=model)
 ```
 
 Every row and checkpoint of a training run carries two clocks Etude keeps,
@@ -342,9 +338,9 @@ in hours, which no run declares or logs:
 
 - **`running_hours`** is how long the learner line has run. It starts at
   `track(...)`, so installing, booting and queueing never count, and goes on
-  from the resumed checkpoint's value, across attempts and continuations, as
-  `updates` does. What a crashed attempt ran past its last checkpoint is
-  dropped on resume, with its rows.
+  from its value at the save the attempt resumed, or at the checkpoint a
+  continuation started from, as `updates` does. What a crashed attempt ran
+  past its last save is dropped on resume, with its rows.
 - **`hours_since_start`** is wall time since the line's first attempt began,
   gaps between attempts included.
 
@@ -359,8 +355,10 @@ runs: charts and seats on these clocks leave such a checkpoint out.
 passed a multiple of `every` since the latest checkpoint. Either clock can be
 a job's `until`, the page's x axis, or a seat's clock
 (`Earlier(clock="running_hours", by=2, at_or_before=True, ...)`,
-[evaluation](evaluation.md)). Metric timers such as `time/collection` stay
-in seconds.
+[evaluation](evaluation.md)). A loop that runs to an hour target rather than
+a count asks for it with `run.until("running_hours", default=10)`
+([the pieces underneath](training.md#the-pieces-underneath)). Metric timers
+such as `time/collection` stay in seconds.
 
 ### Reading a long run's metrics
 

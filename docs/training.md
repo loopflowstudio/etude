@@ -154,6 +154,13 @@ placed on every declared clock. Declare a second clock when one is not enough.
 Clock values are absolute: a run carried on at update 400 logs 401 next, and a
 continuation of a run that reached 3,200 starts at 3,201.
 
+Etude keeps two more clocks on every row and checkpoint, in hours, which you
+neither declare nor log: `running_hours`, how long the run has trained, and
+`hours_since_start`, wall time since its first attempt began
+([Etude's clocks](tracking.md#etudes-clocks)). `run.at(clock)` says where the
+run stands on any clock, and `if run.checkpoint_due(1): run.checkpoint(policy=model)`
+publishes a checkpoint every running hour.
+
 `config=config` takes the model itself. Etude keeps it with the run, and
 checks it against the run's first attempt each time the run is carried on
 ([Carrying on](#carrying-on)).
@@ -214,10 +221,19 @@ refused at this call.
 `run.save()` writes the registered objects. Call it every pass: Etude writes
 when a save is due, and always on the last pass before a stop. A save is due
 five minutes after the last one; `run.steps("updates", to=n, every=25)` makes
-it every 25 steps instead. Each save replaces the previous one whole or not at
-all, so a machine lost in the middle of a write leaves the earlier save.
+it every 25 steps instead.
+
+Each save replaces the previous one whole or not at all. A save is a new
+folder holding every registered object. Once it is complete, here and in
+your bucket, one small file is rewritten to name it, and only then is the
+save before it deleted. `run.resume` loads the save that file names. A
+machine lost while saving or uploading leaves the earlier save, all of it, so
+the model and optimizer the next attempt loads always come from one save.
+
 Under a launch each save is uploaded, so choose an interval you would pay to
-upload.
+upload. A file whose bytes did not change since the save before is not
+uploaded again, and storage holds a second save only while one is replacing
+the other.
 
 Rules you can rely on:
 
@@ -273,8 +289,9 @@ for update in run.steps("updates", to=config.updates):
     run.save(lambda folder: save_buffer(buffer, folder / "replay.npz"))
 ```
 
-`run.save(fn)` hands `fn` an empty folder when a save is due and keeps what it
-writes there, by the same whole-or-nothing rule.
+`run.save(fn)` hands `fn` the new save's empty folder when a save is due and
+keeps what it writes there, by the same whole-or-nothing rule: several files
+written by one `fn` are restored together or not at all.
 
 ### Phases in one run
 
@@ -468,14 +485,16 @@ EXPERIMENT/RUN/
   outcome.json             how the latest attempt ended
   metrics/  artifacts/     rows and tables (Tracking)
   out/                     run.out: follows the run to every machine
-    state/                 replaced at each save
-      state.json           {"at": {"updates": 400}, "seed": 0, "commit": "8773d51",
+    state/
+      current.json         {"save": "save-00000007"}: the save to load, written last
+      save-00000007/       one save; never changes once written
+        state.json         {"at": {"updates": 400}, "seed": 0, "commit": "8773d51",
                             "extra": {"games": 12800}, "files": {"model": "model.pt", "optimizer": "optimizer.pt"}}
-      model.pt             torch.save(model.state_dict())
-      optimizer.pt
+        model.pt           torch.save(model.state_dict())
+        optimizer.pt
     checkpoints/
       updates-00000100/    never changes
-        checkpoint.json    {"at": {"updates": 100}, "files": {"policy": "policy.pt"}}
+        checkpoint.json    {"at": {"updates": 100}, "files": {"policy": "policy.pt"}}, written last
         policy.pt
 ```
 
@@ -490,9 +509,23 @@ files = json.loads((folder / "checkpoint.json").read_text())["files"]
 weights = torch.load(folder / files["policy"])
 ```
 
-Named state is in `out/state/NAME/`. On this computer runs are under
-`~/.etude/track` (moved by `ETUDE_HOME`); under a launch the same folder is in
-your bucket. Using Etude to write a loop does not tie its results to Etude.
+The saved state is read the same way, through its pointer:
+
+```python
+state = Path("~/.etude/track/train/train-seed-0/out/state").expanduser()
+save = state / json.loads((state / "current.json").read_text())["save"]
+files = json.loads((save / "state.json").read_text())["files"]
+weights = torch.load(save / files["model"])
+```
+
+Always go through `current.json`. A save folder it does not name is one
+being written or one about to be deleted, and may be incomplete. Each entry
+of `files` is a path relative to its save's folder. Named state is in
+`out/state/NAME/`, with its own `current.json`.
+
+On this computer runs are under `~/.etude/track` (moved by `ETUDE_HOME`);
+under a launch the same folder is in your bucket. Using Etude to write a loop
+does not tie its results to Etude.
 
 ## Running it
 
@@ -566,10 +599,12 @@ def train(config: SearchConfig) -> None:
 | `run.stopping()` | true once a stop was asked for, or once the deadline is nearer than the slowest pass so far; ask once per pass |
 | `Stopped` | raised after saving, short of the target: the attempt is recorded `stopped` and the run is called again |
 
-Returning normally short of the target would read as finished. Files in
-`run.out` are carried one at a time, so write each atomically and keep what
-one resume needs in one file; a name ending `.partial` is never sent, and
-anything under a folder whose name starts with `.` stays on the machine.
+Returning normally short of the target would read as finished. Files you
+write in `run.out` yourself are carried one at a time, so write each
+atomically and keep what one resume needs in one file: a machine lost between
+two of them leaves one new and one old. `run.save(fn)` is the way to keep
+several files together. A name ending `.partial` is never sent, and anything
+under a folder whose name starts with `.` stays on the machine.
 
 ## Calls
 
@@ -583,6 +618,7 @@ anything under a folder whose name starts with `.` stays on the machine.
 | `run.log(row, **clocks)`, `run.log_table(name, rows, **clocks)` | rows on the declared clocks |
 | `run.checkpoint(**objects)`, `run.checkpoint(path)`, `run.checkpoint(fn)` | publishes a checkpoint that never changes, with its clocks |
 | `run.checkpoints()` | this run's published checkpoints, oldest first |
+| `run.at(clock)`, `run.checkpoint_due(every, clock="running_hours")` | where the run stands on a clock; whether the clock passed a multiple of `every` since the latest checkpoint |
 | `run.input(name)` | a file or checkpoint folder this run was given |
 | `run.out`, `run.until()`, `run.stopping()`, `Stopped` | [the pieces underneath](#the-pieces-underneath) |
 

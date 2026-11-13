@@ -1127,8 +1127,8 @@ they survive pod deletion. A later attempt on the same machine finds the
 directory where it was; if the directory is gone, as after a wiped disk, it is
 restored like a fresh machine's. On a fresh machine with a bucket it is given back,
 before the job starts, the run's records and its whole `out/` as last
-carried: the saved state in `out/state/` and every checkpoint published under
-`out/checkpoints/`. A historical run's latest checkpoint stored under
+carried: the save `out/state/current.json` names and every checkpoint
+published under `out/checkpoints/`. A historical run's latest checkpoint stored under
 `checkpoints/` is restored too. A checkpoint recorded
 inside `out/` is restored only while it belongs to that directory. To an owned
 host without a bucket, the controller relays the same from the bucket or the
@@ -1158,10 +1158,20 @@ has never seen the run.
 Delivery publishes changed `out.json` membership after its files succeed.
 Each entry names a key, SHA256 digest and byte length.
 Recovery uses membership to select files, checking current listing lengths
-and recorded checkpoint digests. A mutable save can be newer than its
-membership if delivery stopped between the file and the index; recovery
-keeps that newer save. Continuation instead uses the published fingerprints
-and verifies them when delivering the child's inputs.
+and recorded checkpoint digests. A file the job rewrites in place can be
+newer than its membership if delivery stopped between the file and the
+index; recovery keeps that newer file. Continuation instead uses the
+published fingerprints and verifies them when delivering the child's inputs.
+
+State kept with `run.save()` never recovers as a mixture of two saves. Each
+save is a folder of files that are written once
+([Training](training.md#what-is-on-disk)). Delivery sends a save's files
+first, then `out/state/current.json`, the one file that is rewritten, which
+names the save to load. A delivery interrupted before that file leaves it
+naming the save before, whose files are untouched, and recovery restores
+that one. Once the new `current.json` is stored, the courier deletes the
+replaced save's objects, so a bucket holds two saves only between those two
+steps. A file whose digest matches the replaced save's is not uploaded again.
 Recovery and continuation exclude removed files, even if their bytes remain
 in storage. Recovery removes stale out files on a reused host. Deleted
 out checkpoints remain available when selected explicitly. An empty `out`
@@ -1259,7 +1269,8 @@ PREFIX/EXPERIMENT/RUN/           everything about one run
   run.json  outcome.json  metrics/ the run's tracked files, as they are
   checkpoints/                   checkpoint files copied from outside out
   out/                           out (`run.out`), as the job keeps it
-    state/                       what run.save() kept, replaced at each save
+    state/current.json           names the save to load; stored after that save's files
+    state/save-N/                one save by run.save(), never changed; the one before is deleted
     checkpoints/CLOCK-VALUE/     each published checkpoint, never changed
   out.json                       keys, SHA256 digests and byte lengths in the last carried out
 PREFIX/sessions/SESSION/         one machine's instructions, inbox and notes
@@ -1285,7 +1296,9 @@ names, which is sent once before its record like any checkpoint file. The
 membership is published after all files in that pass succeed, including when
 no files remain. A courier restart reconstructs membership from the local
 directory. This also works with upload-only grants; absence does not depend
-on deleting bucket objects.
+on deleting bucket objects. Under such a grant a replaced save's objects stay
+in the bucket, outside membership and never restored, until someone with
+delete rights removes them.
 
 A job reports its progress by atomically replacing `etude-result.json` in the
 output directory; `etude status` shows it:
