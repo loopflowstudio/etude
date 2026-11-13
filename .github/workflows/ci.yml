@@ -20,7 +20,7 @@ jobs:
     outputs:
       candidate: ${{ steps.scratch.outputs.candidate }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Select landing candidates and enforce scratch cleanup
         id: scratch
         env:
@@ -48,8 +48,8 @@ jobs:
     if: ${{ !cancelled() && needs.scratch-clear.outputs.candidate == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
       - run: uv sync --locked
       - run: uv run --no-sync ruff check .
       - run: uv run --no-sync ruff format --check .
@@ -60,12 +60,12 @@ jobs:
     if: ${{ !cancelled() && needs.scratch-clear.outputs.candidate == 'true' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
       - run: node --test tests/test_charts.cjs
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v7
       - run: uv sync --locked
       - name: Run the client tests with the outside network denied
         run: uv run --no-sync python scripts/test_network.py uv run --no-sync pytest
