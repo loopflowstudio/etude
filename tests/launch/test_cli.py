@@ -386,7 +386,7 @@ def test_bootstrap_session_carries_records_without_a_launcher(
     )
     bootstrap = json.dumps(
         {
-            "packet": packet.model_dump_json(),
+            "packet": packet.model_dump(mode="json"),
             "fetch": {},
             "inbox_url": url + "/inbox",
             "out": {"prefix": "out/", "form": {"url": url + "/upload", "fields": {}}},

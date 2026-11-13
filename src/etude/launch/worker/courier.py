@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import hashlib
 import io
-import json
 import math
 import os
 import shutil
@@ -22,8 +21,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO
-
-from pydantic import JsonValue
 
 from etude.cache import Cache
 from etude.carriage import (
@@ -43,6 +40,8 @@ from etude.launch.schemas import (
     WORKER_LOG,
     AttemptRecord,
     Bootstrap,
+    Fetch,
+    Finished,
     Inbox,
     WorkerLog,
     attempt_log,
@@ -55,14 +54,13 @@ from etude.launch.storage.s3 import (
     Bucket,
     Denied,
     Grant,
-    Send,
     Version,
     _send,
     post,
     read,
     read_version,
 )
-from etude.launch.storage.transport import attribute, deliver, observe
+from etude.launch.storage.transport import Send, attribute, deliver, observe
 from etude.storage_timeout import StorageUnavailable
 
 ROOT = Path("/run/etude/sessions")
@@ -211,7 +209,8 @@ class Courier:
         self._worker_log_carried: _Log | None = None  # from its first output
         self._out = _Folder(out, send)  # the session's own folder
         self._runs = {run: _Folder(grant, send) for run, grant in (runs or {}).items()}
-        self._sent: dict[str, tuple[int, float]] = {}
+        # What this courier stored or restored, by run and key: its size and mtime then.
+        self._sent: dict[tuple[str, str], tuple[int, float]] = {}
         self._logs: dict[str, _Log] = {}
         self._delivered: set[str] = set()  # attempts whose completion record is stored
         self._console_position = 0
@@ -241,21 +240,28 @@ class Courier:
                 self._out.write_bytes("usage.jsonl", body)
             self._usage_sent = len(body)
 
-    def fetch(self, links: dict[str, Download]) -> None:
+    def fetch(self, fetch: Fetch) -> None:
         """Verify transport bytes before exposing inputs, including existing paths."""
         with observe(self._retain_transfer), attribute(session=self._home.name):
             try:
                 with limit_time(_until_deadline()):
-                    for path, source in links.items():
-                        kind = path.split("/")[1]
-                        with attribute(purpose="source" if kind == "sources" else "input"):
+                    for commit, source in fetch.sources.items():
+                        with attribute(purpose="source"):
                             download(
                                 source,
-                                self._home.parent / path,
+                                self._home / "sources" / f"{commit}.tar",
+                                send=self._send,
+                                cache=self._cache,
+                            )
+                    for given in fetch.inputs:
+                        with attribute(purpose="input"):
+                            download(
+                                given,
+                                self._home / "inputs" / given.sha256,
                                 send=self._send,
                                 cache=self._cache,
                                 # Inputs stay in the cache for this session's attempts to link.
-                                holder=None if kind == "sources" else self._home.name,
+                                holder=self._home.name,
                             )
             finally:
                 # Recovery evidence is outside the discretionary input allowance.
@@ -265,24 +271,20 @@ class Courier:
         """Let the cache evict this session's inputs; attempts' links keep their bytes."""
         self._cache.release(self._home.name)
 
-    def restore(self, links: dict[str, str]) -> None:
+    def restore(self, links: dict[str, dict[str, str]]) -> None:
         """Put back what storage holds of a resumed run's folder, before its job starts.
 
-        `links` are read links by RUN/KEY. Only what this machine lacks is read:
-        the declaration and every checkpoint record, then the one checkpoint
-        file the latest record names (`etude.carriage.resume_file`), verified
-        by its digest. What is restored counts as sent, so it is not uploaded
+        `links` are read links by run, then by key in its folder. Only what
+        this machine lacks is read: the declaration and every checkpoint
+        record, then the one checkpoint file the latest record names
+        (`etude.carriage.resume_file`), verified by its digest. What is restored counts as sent, so it is not uploaded
         back. The names of the checkpoint files left in storage stay taken
         (`etude.carriage.taken`).
         """
-        by_run: dict[str, dict[str, str]] = {}
-        for name, url in links.items():
-            run, _, key = name.partition("/")
-            by_run.setdefault(run, {})[key] = url
         with observe(self._retain_transfer), attribute(session=self._home.name):
             try:
                 with limit_time(_until_deadline()):
-                    for run, keys in sorted(by_run.items()):
+                    for run, keys in sorted(links.items()):
                         self._restore(run, keys)
             finally:
                 self._carry_usage()
@@ -317,7 +319,7 @@ class Courier:
 
     def _restored(self, run: str, key: str, path: Path) -> None:
         stat = path.stat()
-        self._sent[f"{run}/{key}"] = (stat.st_size, stat.st_mtime)
+        self._sent[run, key] = (stat.st_size, stat.st_mtime)
 
     @property
     def _track_root(self) -> Path:
@@ -378,7 +380,7 @@ class Courier:
 
     def _unsent(self, path: Path, run: str, key: str) -> _Upload | None:
         stat = path.stat()
-        sent = self._sent.get(f"{run}/{key}")
+        sent = self._sent.get((run, key))
         if sent is not None and (immutable(key) or sent == (stat.st_size, stat.st_mtime)):
             return None
         return _Upload(path, run, key, stat.st_size, stat.st_mtime)
@@ -400,7 +402,7 @@ class Courier:
         if uploaded.error is not None:
             raise uploaded.error
         file = uploaded.file
-        self._sent[f"{file.run}/{file.key}"] = (file.size, file.modified)
+        self._sent[file.run, file.key] = (file.size, file.modified)
 
     def _put(self, path: Path, run: str, key: str) -> None:
         if file := self._unsent(path, run, key):
@@ -462,11 +464,11 @@ class Courier:
     def _clear(self, run: str, removed: list[str]) -> None:
         """Delete what the job retired, but only what this courier uploaded."""
         for key in removed:
-            if f"{run}/{key}" not in self._sent:
+            if (run, key) not in self._sent:
                 continue
             if not self._runs[run].delete(key):
                 return
-            del self._sent[f"{run}/{key}"]
+            del self._sent[run, key]
 
     def _track(self, run: str, done: bool) -> None:
         """The job's tracked folder for this run, as it is, then what it retired.
@@ -546,7 +548,7 @@ class Courier:
         if not (final or carried.due(time.monotonic())):
             return
         before = carried.ends
-        self._seal(log, self._out, WORKER_LOG, carried)
+        self._seal_pieces(log, self._out, WORKER_LOG, carried)
         if carried.ends != before:
             self._out.write_bytes(
                 "worker-log.json", WorkerLog(ends=carried.ends).model_dump_json().encode()
@@ -573,9 +575,7 @@ class Courier:
         run, attempt = (home / "run").read_text(), home.name
         done = (home / "finished.json").exists()
         claim, outputs = home / "claim", home / "outputs"
-        entry: dict[str, JsonValue] | None = (
-            json.loads((home / "finished.json").read_text()) if done else None
-        )
+        entry = Finished.model_validate_json((home / "finished.json").read_text()) if done else None
         carried = self._logs.get(attempt)
         record = AttemptRecord(
             started_at=datetime.fromisoformat(claim.read_text()) if claim.exists() else None,
@@ -590,7 +590,7 @@ class Courier:
         if (home / "log").exists():
             log = self._logs.setdefault(attempt, _Log(time.monotonic()))
             if done or final or log.due(time.monotonic()):
-                self._seal(home / "log", self._runs[run], attempt_log(attempt), log)
+                self._seal_pieces(home / "log", self._runs[run], attempt_log(attempt), log)
             record = record.model_copy(update={"log_ends": log.ends})
         if done:
             self._put_outputs(outputs, run, attempt)
@@ -608,7 +608,7 @@ class Courier:
         with attribute(purpose="control"):
             self._put(note, run, f"attempts/{attempt}.json")
 
-    def _seal(self, path: Path, folder: _Folder, name: str, log: _Log) -> None:
+    def _seal_pieces(self, path: Path, folder: _Folder, name: str, log: _Log) -> None:
         """Store what was written to `path` since the last piece, as new pieces of `name`.
 
         A log is only appended to, so the bytes before `log.sent` are stored
@@ -627,7 +627,7 @@ class Courier:
                 log.sealed = time.monotonic()
 
 
-def _run(
+def _serve(
     bootstrap_url: str,
     root: Path,
     send: Send,
@@ -844,7 +844,7 @@ def run(
     with log_to(log):
         try:
             write_log("worker entry", "client ready")
-            _run(bootstrap_url, root, send, sleep, every, log, url)
+            _serve(bootstrap_url, root, send, sleep, every, log, url)
         finally:
             original_error = sys.exception()
             try:

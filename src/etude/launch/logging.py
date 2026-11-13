@@ -17,6 +17,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import NamedTuple
 from urllib.request import Request, urlopen
 
 from etude.deadline import call, limit_time, remaining
@@ -119,23 +120,68 @@ def explain(error: BaseException) -> str:
     return sanitize(f"{type(error).__name__}: {detail}")
 
 
-def portions(text: str) -> tuple[str, str, int]:
-    match = re.search(r"\n\[retention truncated: (\d+) characters\]\n", text)
-    if match is None:
-        return "", text, 0
-    return text[: match.start()], text[match.end() :], int(match.group(1))
+# Named tuples, not dataclasses: SSH's pre-install loader runs this module before
+# it is in `sys.modules`, where a dataclass cannot be made.
+class Bounded(NamedTuple):
+    """Text as retention keeps it: its opening, how many characters after it were
+    omitted, and its tail. Unless something was omitted, all of it is the tail."""
+
+    opening: str
+    omitted: int
+    tail: str
+
+    def text(self) -> str:
+        """The retained form, with the omission marked between opening and tail."""
+        if not self.omitted:
+            return self.opening + self.tail
+        return f"{self.opening}\n[retention truncated: {self.omitted} characters]\n{self.tail}"
+
+
+def bound(text: str) -> Bounded:
+    """Sanitize `text` and keep at most `LIMIT` bytes of it: its opening and its tail.
+
+    Text read back from retention may already be marked (`Bounded.text`); what
+    was omitted from it stays counted.
+    """
+    text = sanitize(text)
+    marked = re.search(r"\n\[retention truncated: (\d+) characters\]\n", text)
+    opening, omitted, tail = (
+        ("", 0, text)
+        if marked is None
+        else (text[: marked.start()], int(marked.group(1)), text[marked.end() :])
+    )
+    raw = (opening + tail).encode()
+    if len(raw) <= LIMIT:
+        return Bounded(opening, omitted, tail)
+    head = raw[:OPENING].decode(errors="ignore")
+    recent = raw[-(LIMIT - OPENING - 100) :].decode(errors="ignore")
+    return Bounded(head, omitted + len(opening + tail) - len(head) - len(recent), recent)
 
 
 def bounded(text: str) -> str:
-    text = sanitize(text)
-    opening, tail, omitted = portions(text)
-    raw = (opening + tail).encode()
-    if len(raw) <= LIMIT and not omitted:
-        return raw.decode()
-    head = raw[:OPENING].decode(errors="ignore")
-    recent = raw[-(LIMIT - OPENING - 100) :].decode(errors="ignore")
-    omitted += len(opening + tail) - len(head) - len(recent)
-    return head + f"\n[retention truncated: {omitted} characters]\n" + recent
+    """`text` sanitized and bounded, in its retained form."""
+    return bound(text).text()
+
+
+class LogLine(NamedTuple):
+    """One line as `write_log` writes it: `{at} {operation}: {message}`."""
+
+    at: datetime
+    operation: str
+    message: str
+
+
+def parse_log_line(line: str) -> LogLine | None:
+    """The parts of a line `write_log` wrote; None for any other, such as captured output."""
+    stamp, _, rest = line.rstrip("\n").partition(" ")
+    operation, separator, message = rest.partition(": ")
+    if not separator:
+        return None
+    try:
+        at = datetime.fromisoformat(stamp)
+    except ValueError:
+        return None
+    return LogLine(at=at, operation=operation, message=message)
 
 
 def write_log(operation: str, message: str) -> None:

@@ -41,6 +41,7 @@ from etude.launch.records import Storage as Place
 from etude.launch.scheduler import Scheduler
 from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.s3 import Bucket, Keys
+from etude.launch.storage.transport import HTTPReply
 from etude.launch.worker.courier import run as run_courier
 from tests.launch.fake import Clock
 from tests.launch.test_runpod_machines import Storage, released, repository, until
@@ -95,7 +96,7 @@ class Marketplace:
 
     def __call__(
         self, method: str, url: str, body: bytes | None, headers: dict[str, str]
-    ) -> tuple[int, bytes]:
+    ) -> HTTPReply:
         self.counts[method] += 1
         if self.offline:
             raise OSError("fixture unavailable")
@@ -142,7 +143,7 @@ class Marketplace:
             reply = {"results": rows, "next_token": None}
         else:
             raise AssertionError(f"unhandled fixture path: {method} {path}")
-        return 200, json.dumps(reply).encode()
+        return HTTPReply(200, json.dumps(reply).encode())
 
 
 def machines(
@@ -441,14 +442,14 @@ def test_charges_exhaust_pages_and_reject_duplicate_contract_totals() -> None:
         "end": 1793750400,
     }
 
-    def send(
-        method: str, url: str, body: bytes | None, headers: dict[str, str]
-    ) -> tuple[int, bytes]:
+    def send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> HTTPReply:
         nonlocal calls
         calls += 1
         later = "after_token" in parse_qs(urlsplit(url).query)
         rows = [row] if later or duplicate else [{**row, "source": "instance-99"}]
-        return 200, json.dumps({"results": rows, "next_token": None if later else "next"}).encode()
+        return HTTPReply(
+            200, json.dumps({"results": rows, "next_token": None if later else "next"}).encode()
+        )
 
     api = VastAPI("fixture", send)
     instance = Instance.model_validate(INSTANCE)
@@ -650,10 +651,8 @@ def test_a_matching_label_without_an_etude_acquisition_is_not_owned() -> None:
 
 @pytest.mark.parametrize("reply", [b"not-json", b'{"offers":null}', b'{"error":"fixture-secret"}'])
 def test_invalid_offers_are_unknown_and_do_not_disclose_provider_bodies(reply: bytes) -> None:
-    def send(
-        method: str, url: str, body: bytes | None, headers: dict[str, str]
-    ) -> tuple[int, bytes]:
-        return 200, reply
+    def send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> HTTPReply:
+        return HTTPReply(200, reply)
 
     with pytest.raises(ProviderUnavailable) as error:
         VastAPI("fixture", send).offers(TEMPLATE)
@@ -666,13 +665,11 @@ def test_pagination_requires_a_terminal_page_and_detects_nonadvancing_cursors(
 ) -> None:
     calls = 0
 
-    def send(
-        method: str, url: str, body: bytes | None, headers: dict[str, str]
-    ) -> tuple[int, bytes]:
+    def send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> HTTPReply:
         nonlocal calls
         calls += 1
         field = "instances" if resource == "inventory" else "results"
-        return 200, json.dumps({field: [], "next_token": "repeated"}).encode()
+        return HTTPReply(200, json.dumps({field: [], "next_token": "repeated"}).encode())
 
     with pytest.raises(ProviderUnavailable, match="pagination"):
         api = VastAPI("fixture", send)
@@ -684,18 +681,23 @@ def test_pagination_requires_a_terminal_page_and_detects_nonadvancing_cursors(
 
 
 def test_quote_prices_the_requested_disk_allocation() -> None:
-    def send(
-        method: str, url: str, body: bytes | None, headers: dict[str, str]
-    ) -> tuple[int, bytes]:
+    def send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> HTTPReply:
         search = json.loads(body or b"{}")
         disk = search["allocated_storage"]
-        return 200, json.dumps(
-            {
-                "offers": [
-                    {**OFFER, "storage_total_cost": disk * 0.0025, "dph_total": 0.5 + disk * 0.0025}
-                ]
-            }
-        ).encode()
+        return HTTPReply(
+            200,
+            json.dumps(
+                {
+                    "offers": [
+                        {
+                            **OFFER,
+                            "storage_total_cost": disk * 0.0025,
+                            "dph_total": 0.5 + disk * 0.0025,
+                        }
+                    ]
+                }
+            ).encode(),
+        )
 
     api = VastAPI("fixture", send)
     assert api.offers(TEMPLATE)[0].dph_total == Decimal("0.6")

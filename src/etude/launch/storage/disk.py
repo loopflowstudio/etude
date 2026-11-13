@@ -6,25 +6,17 @@ its own deadline, and leaves a dated `ended` file when it ends.
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import signal
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 from etude.carriage import put_back, recorded_file, restore_set
 from etude.launch.logs import snapshot_stream
 from etude.launch.records import BootstrapLinks, LauncherError, LogStream
-from etude.launch.schemas import (
-    Observation,
-    Packet,
-    Progress,
-    Work,
-    progress_from_json,
-)
+from etude.launch.schemas import Finished, Observation, Packet, Progress, Work
 from etude.launch.source import source_archive
 from etude.launch.storage.files import digest, read_result, write
 from etude.launch.usage import Transfer
@@ -116,7 +108,7 @@ class DirectoryJournal:
     def end(self, session_id: str) -> datetime | None:
         ended = self._root / session_id / "ended"
         if self._alive(session_id):
-            os.kill(int(self._receipt(session_id)), signal.SIGTERM)
+            os.kill(int(self._pid(session_id)), signal.SIGTERM)
             for _ in range(100):
                 if not self._alive(session_id):
                     break
@@ -147,9 +139,7 @@ class DirectoryJournal:
 
     def fetch(self, session_id: str, attempt: str, name: str, destination: Path) -> Path:
         home = self._root / session_id / "attempts" / attempt
-        recorded = progress_from_json(
-            json.loads((home / "finished.json").read_text()), attempt, None
-        ).outputs
+        recorded = Finished.model_validate_json((home / "finished.json").read_text()).outputs
         expected = next((o.sha256 for o in recorded if o.name == name), None)
         if expected is None:
             raise LauncherError(f"attempt {attempt} recorded no output {name!r}")
@@ -161,14 +151,14 @@ class DirectoryJournal:
             raise LauncherError(f"output {name!r} no longer matches its recorded digest")
         return copy
 
-    def _receipt(self, session_id: str) -> str:
+    def _pid(self, session_id: str) -> str:
         return (self._root / session_id / "receipt").read_text()
 
     def _alive(self, session_id: str) -> bool:
         home = self._root / session_id
         if (home / "ended").exists() or not (home / "receipt").exists():
             return False
-        pid = int(self._receipt(session_id))
+        pid = int(self._pid(session_id))
         try:
             os.waitpid(pid, os.WNOHANG)  # collect it if it was ours and has exited
         except ChildProcessError:
@@ -199,5 +189,4 @@ class DirectoryJournal:
                 tally=result.tally,
                 log_bytes=log.stat().st_size if log.exists() else 0,
             )
-        raw: dict[str, Any] = json.loads(finished.read_text())
-        return progress_from_json(raw, home.name, started)
+        return Finished.model_validate_json(finished.read_text()).progress(home.name, started)

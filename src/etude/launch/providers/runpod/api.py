@@ -13,13 +13,7 @@ from typing import Any
 
 from etude.launch.errors import LauncherError, ProviderUnavailable
 from etude.launch.providers.runpod.http import _ID, PodHTTP
-from etude.launch.records import CPU, GPU, Hardware, Record
-
-
-class Quote(Record):
-    hardware: Hardware  # what was priced; create asks for exactly this
-    usd_per_hour: Decimal
-    available: bool  # False only when the catalog positively reports none
+from etude.launch.records import CPU, GPU, Hardware, Offer, Record
 
 
 class PodFact(Record):
@@ -62,7 +56,7 @@ class RunPodAPI(PodHTTP):
         memory_gb: int,
         data_center: str | None = None,
         gpu_count: int = 1,
-    ) -> Quote:
+    ) -> Offer:
         """The secure-cloud hourly price for one machine, and whether any can be had.
 
         With a GPU named, `gpu_count` of that type with at least `vcpus` and
@@ -85,9 +79,9 @@ class RunPodAPI(PodHTTP):
         if price <= 0:
             raise ProviderUnavailable(f"no price for {gpu}")
         hardware = GPU(id=gpu, count=gpu_count, min_vcpus=vcpus, min_memory_gb=memory_gb)
-        return Quote(hardware=hardware, usd_per_hour=price * gpu_count, available=available)
+        return Offer(hardware=hardware, usd_per_hour=price * gpu_count, available=available)
 
-    def _cpu_quote(self, vcpus: int, memory_gb: int, data_center: str | None) -> Quote:
+    def _cpu_quote(self, vcpus: int, memory_gb: int, data_center: str | None) -> Offer:
         # RunPod rents CPU pods in power-of-two vCPU counts, with memory a fixed
         # multiple of them per flavor, and prices them per vCPU.
         smallest = 2
@@ -98,7 +92,7 @@ class RunPodAPI(PodHTTP):
             "catalog/cpus",
             params={"include": "AVAILABILITY", "product": "POD", "vcpuCount": str(smallest)},
         )
-        quotes: list[Quote] = []
+        quotes: list[Offer] = []
         try:
             for row in catalog["cpus"]:
                 size = max(smallest, int(row["vcpu"]["min"]))
@@ -108,7 +102,7 @@ class RunPodAPI(PodHTTP):
                 if size > int(row["vcpu"]["max"]) or price <= 0:
                     continue
                 quotes.append(
-                    Quote(
+                    Offer(
                         hardware=CPU(flavor=str(row["id"]), vcpus=size),
                         usd_per_hour=price,
                         available=_available(row, data_center),

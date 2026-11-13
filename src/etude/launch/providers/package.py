@@ -13,6 +13,7 @@ FILES = {
     "launch/measurement.py",
     "launch/providers/__init__.py",
     "launch/providers/bootstrap.py",
+    "launch/providers/http.py",
     "launch/providers/lium/__init__.py",
     "launch/providers/lium/pod.py",
     "launch/providers/vast/__init__.py",

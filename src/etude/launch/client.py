@@ -55,8 +55,8 @@ from etude.launch.smoke import Smoked, show, smoke_home, smoke_train
 from etude.launch.source import home
 from etude.launch.ssh import SSH, SSHJournal, SSHStart
 from etude.launch.storage.bucket import BucketJournal
-from etude.launch.storage.s3 import Reply, _send, open_bucket
-from etude.launch.storage.transport import observe
+from etude.launch.storage.s3 import _send, open_bucket
+from etude.launch.storage.transport import HTTPReply, observe
 from etude.launch.usage import Usage
 
 
@@ -67,7 +67,7 @@ def _open(home: Path) -> Scheduler:
     here = local(home / "sessions")
     owner = threading.get_ident()
 
-    def send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Reply:
+    def send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> HTTPReply:
         # The store's SQLite connection belongs to the opening thread. A request on
         # another thread, such as a download part, keeps the sink its caller set there.
         if threading.get_ident() != owner:

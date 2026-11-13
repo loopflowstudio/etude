@@ -135,7 +135,7 @@ def test_failure_diagnostic_precedes_completion_record(
         finish(home, outcome, cause, code)
 
     monkeypatch.setattr(attempts, "_finish", observe_completion)
-    attempts._run(session, packet, work)
+    attempts._attempt(session, packet, work)
     assert (
         len(published) == 1 and "job interpreter" in published[0] and "unavailable" in published[0]
     )

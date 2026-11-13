@@ -7,12 +7,10 @@ arguments identify one working session, on added and rented machines alike.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
 
-from pydantic import Field, FiniteFloat, Json, JsonValue
+from pydantic import Field, FiniteFloat
 
 from etude.launch.records import (
     Cause,
@@ -102,11 +100,44 @@ class Observation(Record):
     start_unknown: bool = False  # durable startup intent, but attempt claims may not have arrived
 
 
-def progress_from_json(
-    raw: Mapping[str, Any], attempt: str, started_at: datetime | None
-) -> Progress:
-    """Claims supply the authoritative attempt and start time; old journal keys survive."""
-    return Progress.model_validate({**raw, "attempt": attempt, "started_at": started_at})
+class Finished(Record):
+    """`attempts/<attempt>/finished.json`: how an attempt ended, written once by its worker.
+
+    Its journal entry without the attempt and start time, which its folder and
+    claim supply (`progress`).
+    """
+
+    finished_at: datetime
+    outcome: Outcome
+    cause: Cause | None
+    clocks: dict[str, float]
+    outputs: tuple[Output, ...]
+    exit_code: int | None
+    prepared: Prepared | None = None
+    tally: Tally | None = None
+
+    def progress(
+        self,
+        attempt: str,
+        started_at: datetime | None,
+        *,
+        delivered: bool = True,
+        log_bytes: int = 0,
+    ) -> Progress:
+        return Progress(
+            attempt=attempt,
+            started_at=started_at,
+            finished_at=self.finished_at,
+            outcome=self.outcome,
+            cause=self.cause,
+            clocks=self.clocks,
+            outputs=self.outputs,
+            exit_code=self.exit_code,
+            prepared=self.prepared,
+            tally=self.tally,
+            delivered=delivered,
+            log_bytes=log_bytes,
+        )
 
 
 class Result(Record):
@@ -116,21 +147,32 @@ class Result(Record):
     tally: Tally | None = None
 
 
+class Fetch(Record):
+    """Read links to the files a session's work needs before it runs, each verified by digest."""
+
+    # By commit, each placed at SESSION/sources/COMMIT.tar.
+    sources: dict[str, Download] = Field(default_factory=dict)
+    # Each placed at SESSION/inputs/SHA256, shared by the attempts given it.
+    inputs: tuple[Download, ...] = ()
+
+
+# `bootstrap.json` and `inbox.json` are read only by the program version that
+# wrote them, so their shape may change with it.
 class Bootstrap(Record):
-    packet: Json[Packet]
+    packet: Packet
     out: Grant  # the session's own folder: its receipt, usage and end note
     runs: dict[str, Grant] = Field(default_factory=dict)  # each run's folder, for the packet's work
     inbox_url: str
-    fetch: dict[str, Download] = Field(default_factory=dict)
-    restore: dict[str, str] = Field(default_factory=dict)  # see Delivery
+    fetch: Fetch = Field(default_factory=Fetch)
+    restore: dict[str, dict[str, str]] = Field(default_factory=dict)  # see Delivery
 
 
 class Delivery(Record):
-    work: Json[Work]
+    work: Work
     access: Grant  # the run's folder
-    fetch: dict[str, Download] = Field(default_factory=dict)
-    # Read links to what storage holds of a resumed run's folder, by RUN/KEY.
-    restore: dict[str, str] = Field(default_factory=dict)
+    fetch: Fetch = Field(default_factory=Fetch)
+    # Read links to what storage holds of each resumed run's folder: run, then key in its folder.
+    restore: dict[str, dict[str, str]] = Field(default_factory=dict)
 
 
 class AttemptRecord(Record):
@@ -148,7 +190,7 @@ class AttemptRecord(Record):
 
     started_at: datetime | None = None
     result: Result = Field(default_factory=Result)
-    exited: dict[str, JsonValue] | None = None
+    exited: Finished | None = None
     delivered: bool = False
     log_ends: tuple[int, ...] | None = None
 

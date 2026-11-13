@@ -29,7 +29,8 @@ from etude.launch.records import Job, Machine, OnDemand
 from etude.launch.scheduler import Scheduler
 from etude.launch.schemas import Packet
 from etude.launch.ssh import SSH
-from etude.launch.storage.s3 import Bucket, Keys, Reply
+from etude.launch.storage.s3 import Bucket, Keys
+from etude.launch.storage.transport import HTTPReply
 from tests.launch.counting import Counting, Counts
 from tests.launch.fake import Bench, bench
 from tests.launch.test_source import repository  # noqa: F401
@@ -150,8 +151,9 @@ def test_cohort_git_and_database_counts(
             ("numpy", "pydantic", "etude.launch.worker", "etude.launch.scheduler"),
         ),
         # Client composition includes four modules each for Vast and Lium, the
-        # storage socket policy it forwards to workers, and its smoke of jobs.
-        (["pools"], 53, ("numpy", "boto3", "etude.launch.worker")),
+        # request every provider shares, the storage socket policy it forwards
+        # to workers, and its smoke of jobs.
+        (["pools"], 54, ("numpy", "boto3", "etude.launch.worker")),
         (
             ["worker", "{directory}"],
             33,  # includes the storage socket policy every request applies
@@ -318,10 +320,8 @@ def test_counting_covers_physical_transports(
     b = bench(tmp_path)
     counting = Counting(b.store, b.service)
 
-    def send(
-        method: str, url: str, body: bytes | None, headers: dict[str, str]
-    ) -> tuple[int, bytes]:
-        return 200, b""
+    def send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> HTTPReply:
+        return HTTPReply(200, b"")
 
     def process(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
         return subprocess.CompletedProcess(args=args[0], returncode=0, stdout=b"{}", stderr=b"")
@@ -331,7 +331,7 @@ def test_counting_covers_physical_transports(
         "fixture",
         "us-west-2",
         Keys(access_key="fixture", secret_key="fixture"),
-        counting.transport("bucket", lambda m, u, b, h: Reply(status=200, body=b"")),
+        counting.transport("bucket", lambda m, u, b, h: HTTPReply(status=200, body=b"")),
     )
     provider = PodHTTP("fixture", counting.transport("provider", send))
     with counting.record():

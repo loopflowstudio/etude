@@ -31,14 +31,8 @@ from etude.cache import Artifact, Cache, Corrupt, Fetched
 from etude.cache import Mismatch as ContentMismatch
 from etude.deadline import limit_time, remaining
 from etude.launch.records import Record
-from etude.launch.storage.s3 import (
-    TRANSIENT_STATUSES,
-    Denied,
-    Reply,
-    Send,
-    _send,
-)
-from etude.launch.storage.transport import attribute, deliver, emit, observe
+from etude.launch.storage.s3 import TRANSIENT_STATUSES, Denied, _send
+from etude.launch.storage.transport import HTTPReply, Send, attribute, deliver, emit, observe
 from etude.storage_timeout import StorageUnavailable
 
 PART_BYTES = 16 * 1024**2
@@ -160,7 +154,7 @@ class _Link:
             raise StorageUnavailable(f"download failed (status {reply.status})")
         return Fetched(body=reply.body, etag=reply.headers.get("etag"))
 
-    def _get(self, headers: dict[str, str]) -> Reply:
+    def _get(self, headers: dict[str, str]) -> HTTPReply:
         while True:
             remaining()
             failure = "transport interrupted"
@@ -184,7 +178,9 @@ class _Link:
         return reply
 
     def reused(self, size_bytes: int, byte_range: str | None) -> None:
-        emit("REUSE", self.source.url, reused=size_bytes, byte_range=byte_range, completed=True)
+        # `etude.cache` names a reused range as a Range header would, "bytes=START-END".
+        start = None if byte_range is None else int(byte_range.removeprefix("bytes=").split("-")[0])
+        emit("REUSE", self.source.url, reused=size_bytes, range_start=start, completed=True)
 
 
 def download(
@@ -212,7 +208,7 @@ def download(
     artifact = Artifact(location=location, sha256=source.sha256, size_bytes=source.size_bytes)
     with (
         limit_time(timeout),
-        attribute(transfer=uuid4().hex, sha256=source.sha256, size_bytes=str(source.size_bytes)),
+        attribute(transfer=uuid4().hex, sha256=source.sha256, size_bytes=source.size_bytes),
     ):
         cache = cache or Cache()
         link = _Link(source, retries, send)

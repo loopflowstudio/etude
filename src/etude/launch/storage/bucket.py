@@ -20,19 +20,20 @@ from etude.carriage import (
     restore_set,
     resume_file,
 )
+from etude.launch.logging import parse_log_line
 from etude.launch.logs import snapshot_stream
 from etude.launch.records import BootstrapLinks, LauncherError, LogStream, Storage
 from etude.launch.schemas import (
     AttemptRecord,
     Bootstrap,
     Delivery,
+    Fetch,
     Inbox,
     Observation,
     Packet,
     Progress,
     Work,
     WorkerLog,
-    progress_from_json,
 )
 from etude.launch.source import source_archive
 from etude.launch.storage.download import Download, download
@@ -99,15 +100,15 @@ class BucketJournal:
         # Staged archives by repository and commit: their key, digest and size.
         self._sources: dict[tuple[str, str], tuple[str, str, int]] = {}
 
-    def _session(self, session_id: str) -> str:
+    def _session_prefix(self, session_id: str) -> str:
         return f"{self._prefix}/sessions/{session_id}/"
 
-    def _run(self, run: str) -> str:
+    def _run_prefix(self, run: str) -> str:
         return f"{self._prefix}/{run}/"
 
-    def _access(self, run: str, seconds: int) -> Grant:
+    def _run_grant(self, run: str, seconds: int) -> Grant:
         """What a machine may write for one run: everything under its folder."""
-        return self._bucket.grant(self._run(run), seconds, run)
+        return self._bucket.grant(self._run_prefix(run), seconds, run)
 
     def prepare(self, packet: Packet, *, expires_at: datetime | None = None) -> BootstrapLinks:
         """Write a session's instructions and grants that last until `expires_at`.
@@ -116,21 +117,19 @@ class BucketJournal:
         last `_GRANT_SECONDS`.
         """
         with attribute(session=packet.session, purpose="control"):
-            root = self._session(packet.session)
+            root = self._session_prefix(packet.session)
             seconds = _seconds_until(expires_at or packet.deadline)
             # Grants first: where none can be issued, nothing is written and nothing rented.
             out = self._bucket.grant(root + "out/", seconds, packet.session)
-            runs = {work.run: self._access(work.run, seconds) for work in packet.work}
+            runs = {work.run: self._run_grant(work.run, seconds) for work in packet.work}
             self._bucket.put(root + "packet.json", packet.model_dump_json().encode(), once=True)
-            bootstrap = Bootstrap.model_validate(
-                {
-                    "packet": packet.model_dump_json(),
-                    "out": out,
-                    "runs": runs,
-                    "inbox_url": self._bucket.get_url(root + "inbox.json", seconds),
-                    "fetch": self._fetches(packet.session, packet.work),
-                    "restore": self._restore(packet.work),
-                }
+            bootstrap = Bootstrap(
+                packet=packet,
+                out=out,
+                runs=runs,
+                inbox_url=self._bucket.get_url(root + "inbox.json", seconds),
+                fetch=self._fetch(packet.work),
+                restore=self._restore(packet.work),
             )
             self._bucket.put(root + "inbox.json", Inbox().model_dump_json().encode())
             self._bucket.put(
@@ -144,11 +143,11 @@ class BucketJournal:
 
     @_attribute_session
     def started(self, session_id: str) -> bool:
-        return self._once(self._session(session_id) + "out/receipt") is not None
+        return self._once(self._session_prefix(session_id) + "out/receipt") is not None
 
     @_attribute_session
     def ended(self, session_id: str) -> datetime | None:
-        raw = self._current(session_id, self._session(session_id) + "out/ended")
+        raw = self._current(session_id, self._session_prefix(session_id) + "out/ended")
         return None if raw is None else datetime.fromisoformat(raw.decode().strip())
 
     @_attribute_session
@@ -162,7 +161,7 @@ class BucketJournal:
         inbox = self._inbox(session_id)
         if not inbox.finish:
             self._bucket.put(
-                self._session(session_id) + "inbox.json",
+                self._session_prefix(session_id) + "inbox.json",
                 inbox.model_copy(update={"finish": True}).model_dump_json(round_trip=True).encode(),
             )
         return self.ended(session_id)
@@ -188,45 +187,44 @@ class BucketJournal:
             url=self._bucket.get_url(key, _GRANT_SECONDS), sha256=digest, size_bytes=size
         )
 
-    def _fetches(self, session_id: str, works: Sequence[Work]) -> dict[str, Download]:
-        """Links to the files this work needs, keyed by where the pod should put them."""
-        links: dict[str, Download] = {}
+    def _fetch(self, works: Sequence[Work]) -> Fetch:
+        """Links to the files this work needs."""
+        sources: dict[str, Download] = {}
+        inputs: dict[str, Download] = {}
         for work in works:
-            if work.repo is not None and work.commit is not None:
-                local = f"{session_id}/sources/{work.commit}.tar"
-                # A cohort shares inputs; prepare each destination only once.
-                if local not in links:
-                    links[local] = self._source(work.repo, work.commit)
+            # A cohort shares sources and inputs; link each only once.
+            if work.repo is not None and work.commit is not None and work.commit not in sources:
+                sources[work.commit] = self._source(work.repo, work.commit)
             for given in work.inputs:
                 # A run's file is where its folder was carried.
-                key = given.key if given.run is None else self._run(given.run) + given.key
+                key = given.key if given.run is None else self._run_prefix(given.run) + given.key
                 # Named by digest, so attempts given the same file share one download.
-                links[f"{session_id}/inputs/{given.sha256}"] = Download(
+                inputs[given.sha256] = Download(
                     url=self._bucket.get_url(key, _GRANT_SECONDS),
                     sha256=given.sha256,
                     size_bytes=given.size_bytes,
                 )
-        return links
+        return Fetch(sources=sources, inputs=tuple(inputs.values()))
 
-    def _restore(self, works: Sequence[Work]) -> dict[str, str]:
-        """Read links to what storage holds of each resumed run's folder, by RUN/KEY.
+    def _restore(self, works: Sequence[Work]) -> dict[str, dict[str, str]]:
+        """Read links to what storage holds of each resumed run's folder, by run then key.
 
         The run's declaration and every object under `checkpoints/`; the
         machine reads only what it lacks, and of the checkpoint files only the
         one its latest record names (`etude.carriage.resume_file`). Linking
         reads nothing: one listing per resumed run.
         """
-        links: dict[str, str] = {}
+        links: dict[str, dict[str, str]] = {}
         for work in works:
             if not work.resumes:
                 continue
-            folder = self._run(work.run)
+            folder = self._run_prefix(work.run)
             with attribute(run=work.run, attempt=work.attempt, purpose="control"):
                 kept = self._bucket.list(f"{folder}{CHECKPOINTS}/")
-            for key in [folder + "run.json", *kept]:
-                links[f"{work.run}/{key[len(folder) :]}"] = self._bucket.get_url(
-                    key, _GRANT_SECONDS
-                )
+            links[work.run] = {
+                key[len(folder) :]: self._bucket.get_url(key, _GRANT_SECONDS)
+                for key in [folder + "run.json", *kept]
+            }
         return links
 
     def held(self, run: str, key: str | None = None) -> dict[str, bytes]:
@@ -239,7 +237,7 @@ class BucketJournal:
         record, so relaying it again reads no more of it. Raises
         `FileNotFoundError` when no record here names `key` or its file is gone.
         """
-        folder = self._run(run)
+        folder = self._run_prefix(run)
         with TemporaryDirectory() as staging, attribute(run=run, purpose="control"):
             root = Path(staging)
             (root / CHECKPOINTS).mkdir()
@@ -272,7 +270,7 @@ class BucketJournal:
     def hold(self, run: str, files: dict[str, bytes]) -> None:
         """Nothing to keep: a machine of this journal restores the run from storage."""
 
-    def _held(self, session_id: str) -> dict[str, Version]:
+    def _session_versions(self, session_id: str) -> dict[str, Version]:
         """What is kept of one session's objects, now its most recently asked about."""
         versions = self._versions.setdefault(session_id, {})
         self._versions.move_to_end(session_id)
@@ -282,7 +280,7 @@ class BucketJournal:
 
     def _current(self, session_id: str, key: str) -> bytes | None:
         """A changing object's bytes; storage sends none while they are those last read."""
-        versions = self._held(session_id)
+        versions = self._session_versions(session_id)
         found = self._bucket.get_version(key, versions.get(key))
         if found is None:
             versions.pop(key, None)
@@ -301,7 +299,7 @@ class BucketJournal:
 
     def _pieces(self, session_id: str, keys: Sequence[str]) -> bytes:
         """The pieces of a log its record names, joined; each is read once."""
-        versions = self._held(session_id)
+        versions = self._session_versions(session_id)
         for key in keys:
             if key not in versions:
                 found = self._bucket.get_version(key)
@@ -313,7 +311,7 @@ class BucketJournal:
     def _worker_log(self, session_id: str) -> bytes | None:
         """The worker's log: the pieces its record names, else the whole log a worker that
         never read its bootstrap, so wrote no receipt, sent by its link."""
-        out = self._session(session_id) + "out/"
+        out = self._session_prefix(session_id) + "out/"
         raw = self._current(session_id, out + "worker-log.json")
         if raw is None:
             return (
@@ -324,14 +322,14 @@ class BucketJournal:
 
     def _runs(self, session_id: str) -> dict[str, str]:
         """Each attempt this session was given, to its run."""
-        raw = self._once(self._session(session_id) + "packet.json")
+        raw = self._once(self._session_prefix(session_id) + "packet.json")
         given = Packet.model_validate_json(raw).work if raw else ()
         added = tuple(entry.work for entry in self._inbox(session_id).work)
         return {work.attempt: work.run for work in (*given, *added)}
 
     def _record(self, session_id: str, run: str, attempt: str) -> AttemptRecord | None:
         with attribute(run=run, attempt=attempt, purpose="control"):
-            raw = self._current(session_id, f"{self._run(run)}attempts/{attempt}.json")
+            raw = self._current(session_id, f"{self._run_prefix(run)}attempts/{attempt}.json")
         return None if raw is None else AttemptRecord.model_validate_json(raw)
 
     @_attribute_session
@@ -347,11 +345,13 @@ class BucketJournal:
                 continue  # not started, or its first report has not arrived
             log_bytes = record.log_ends[-1] if record.log_ends else 0
             if record.exited is not None:
-                done = progress_from_json(record.exited, attempt, record.started_at)
                 if record.delivered:
+                    done = record.exited.progress(attempt, record.started_at)
                     self._finished[attempt] = done  # complete: never read again
                 else:
-                    done = done.model_copy(update={"delivered": False, "log_bytes": log_bytes})
+                    done = record.exited.progress(
+                        attempt, record.started_at, delivered=False, log_bytes=log_bytes
+                    )
                 progress.append(done)
                 continue
             progress.append(
@@ -376,7 +376,7 @@ class BucketJournal:
         )
 
     def _inbox(self, session_id: str) -> Inbox:
-        raw = self._current(session_id, self._session(session_id) + "inbox.json")
+        raw = self._current(session_id, self._session_prefix(session_id) + "inbox.json")
         return Inbox.model_validate_json(raw) if raw else Inbox()
 
     @_attribute_session
@@ -385,7 +385,7 @@ class BucketJournal:
         if attempt not in inbox.stop:
             inbox = inbox.model_copy(update={"stop": (*inbox.stop, attempt)})
             self._bucket.put(
-                self._session(session_id) + "inbox.json",
+                self._session_prefix(session_id) + "inbox.json",
                 inbox.model_dump_json(round_trip=True).encode(),
             )
 
@@ -393,23 +393,21 @@ class BucketJournal:
     def add(self, session_id: str, work: Work) -> None:
         inbox = self._inbox(session_id)
         if all(entry.work.attempt != work.attempt for entry in inbox.work):
-            raw = self._once(self._session(session_id) + "packet.json")
+            raw = self._once(self._session_prefix(session_id) + "packet.json")
             packet = Packet.model_validate_json(raw) if raw else None
             deadline = None
             if packet is not None and packet.deadline is not None:
                 # The machine delivers for this long after the deadline it was given.
                 deadline = packet.deadline + timedelta(seconds=packet.delivery_seconds or 0)
-            entry = Delivery.model_validate(
-                {
-                    "work": work.model_dump_json(),
-                    "access": self._access(work.run, _seconds_until(deadline)),
-                    "fetch": self._fetches(session_id, [work]),
-                    "restore": self._restore([work]),
-                }
+            entry = Delivery(
+                work=work,
+                access=self._run_grant(work.run, _seconds_until(deadline)),
+                fetch=self._fetch([work]),
+                restore=self._restore([work]),
             )
             inbox = inbox.model_copy(update={"work": (*inbox.work, entry)})
             self._bucket.put(
-                self._session(session_id) + "inbox.json",
+                self._session_prefix(session_id) + "inbox.json",
                 inbox.model_dump_json(round_trip=True).encode(),
             )
 
@@ -421,7 +419,9 @@ class BucketJournal:
             raw = (
                 self._worker_log(session_id)
                 if producer == "worker"
-                else self._current(session_id, self._session(session_id) + f"out/{producer}.log")
+                else self._current(
+                    session_id, self._session_prefix(session_id) + f"out/{producer}.log"
+                )
             )
             return snapshot_stream(session_id, None, producer, raw, False)
         run = self._runs(session_id).get(attempt)
@@ -432,7 +432,7 @@ class BucketJournal:
             raw = None
         else:
             with attribute(run=run, attempt=attempt, purpose="result"):
-                pieces = [self._run(run) + piece for piece in record.log_pieces(attempt)]
+                pieces = [self._run_prefix(run) + piece for piece in record.log_pieces(attempt)]
                 raw = self._pieces(session_id, pieces)
         return snapshot_stream(
             session_id,
@@ -448,11 +448,10 @@ class BucketJournal:
         record = None if run is None else self._record(session_id, run, attempt)
         if run is None or record is None or record.exited is None or not record.delivered:
             raise LauncherError(f"attempt {attempt} recorded no output {name!r}")
-        done = progress_from_json(record.exited, attempt, None)
-        expected = next((o for o in done.outputs if o.name == name), None)
+        expected = next((o for o in record.exited.outputs if o.name == name), None)
         if expected is None:
             raise LauncherError(f"attempt {attempt} recorded no output {name!r}")
-        key = f"{self._run(run)}attempts/{attempt}/{name}"
+        key = f"{self._run_prefix(run)}attempts/{attempt}/{name}"
         with attribute(run=run, attempt=attempt, purpose="result"):
             return download(
                 Download(
@@ -466,7 +465,7 @@ class BucketJournal:
 
     def _transfers(self, session_id: str) -> tuple[Transfer, ...]:
         events: dict[str, Transfer] = {}
-        root = self._session(session_id) + "out/"
+        root = self._session_prefix(session_id) + "out/"
         raw = self._current(session_id, root + "usage.jsonl")
         sources = [] if raw is None else raw.decode().splitlines()
         # Bootstrap/early-worker failures precede the courier's usage journal.
@@ -475,10 +474,11 @@ class BucketJournal:
             self._worker_log(session_id),
         ):
             if log is not None:
+                lines = (parse_log_line(line) for line in log.decode(errors="replace").splitlines())
                 sources.extend(
-                    line.partition(" ")[2].removeprefix("transfer: ")
-                    for line in log.decode(errors="replace").splitlines()
-                    if line.partition(" ")[2].startswith("transfer: ")
+                    line.message
+                    for line in lines
+                    if line is not None and line.operation == "transfer"
                 )
         for line in sources:
             try:
