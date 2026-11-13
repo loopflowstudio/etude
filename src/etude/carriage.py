@@ -1,7 +1,7 @@
 """What may leave a run's folder, in what order and as what: one set of rules for both carriers.
 
-A run's folder (`etude.run.storage.run_directory`) reaches storage by one of
-two carriers: the tracker's shipper (`etude.run.delivery`) when a script runs
+A run's folder (`etude.tracking.storage.run_directory`) reaches storage by one of
+two carriers: the tracker's shipper (`etude.tracking.delivery`) when a script runs
 on its own, and the launcher's courier (`etude.launch.worker.courier`) when it
 was launched, so the job's environment never holds bucket credentials. Both
 decide here which files are ready (`listing`), their order, the transfer's
@@ -24,6 +24,8 @@ Standard library only, and it imports neither the launcher nor tracking.
 from __future__ import annotations
 
 import json
+import re
+import shutil
 import time
 from collections.abc import Container, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -124,7 +126,7 @@ def _rank(key: str) -> int:
     return 3
 
 
-def listing(root: Path, *, tail_seconds: float) -> list[str]:
+def _listing(root: Path, *, tail_seconds: float) -> list[str]:
     """Ready files as slash-separated keys, ordered by delivery rank then key.
 
     Out files share the first rank, so their membership is already in key order.
@@ -151,6 +153,150 @@ def listing(root: Path, *, tail_seconds: float) -> list[str]:
             continue
         keys.append(name.as_posix())
     return sorted(keys, key=lambda key: (_rank(key), key))
+
+
+POINTER = "current.json"
+# A numbered save file: its state folder (default or named), save folder and path within.
+_SAVE_FILE = re.compile(r"(out/state/(?:[^/]+/)?)(save-[0-9]+)/.+")
+
+
+def save_number(name: str) -> int | None:
+    """N of a save folder named `save-N`; None for any other name."""
+    match = re.fullmatch(r"save-([0-9]+)", name)
+    return None if match is None else int(match[1])
+
+
+def _save(key: str) -> tuple[str, int] | None:
+    """The pointer owning a numbered save file, and that save's number."""
+    match = _SAVE_FILE.fullmatch(key)
+    if match is None:
+        return None
+    number = save_number(match[2])
+    assert number is not None  # the pattern admits only numbered folders
+    return match[1] + POINTER, number
+
+
+def save_pointer(key: str) -> str | None:
+    """The pointer owning a numbered save file, including named state."""
+    save = _save(key)
+    return None if save is None else save[0]
+
+
+def state_pointer(key: str) -> bool:
+    match = re.fullmatch(r"out/state/(?:([^/]+)/)?current\.json", key)
+    return match is not None and (match[1] is None or valid_state_name(match[1]))
+
+
+def valid_state_name(name: str) -> bool:
+    return (
+        re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*", name) is not None
+        and save_number(name) is None
+        and name != POINTER
+    )
+
+
+def save_name(body: bytes) -> str:
+    """Validate the portable pointer once before using it to select or remove files."""
+    value = json.loads(body)
+    if not isinstance(value, dict) or set(value) != {"save"}:
+        raise ValueError("state pointer must name one save")
+    name = value["save"]
+    if not isinstance(name, str) or save_number(name) is None:
+        raise ValueError("state pointer must name a numbered save")
+    return name
+
+
+def _numbers(pointers: Mapping[str, bytes]) -> dict[str, int]:
+    """The save each pointer names, by number."""
+    return {key: int(save_name(body).removeprefix("save-")) for key, body in pointers.items()}
+
+
+def _committed(keys: Iterable[str], pointers: Mapping[str, bytes]) -> list[str]:
+    """Drop every save file but those the pointers name: orphaned and superseded folders
+    never travel. A pointer whose save lacks its manifest among `keys` raises."""
+    names = {
+        key: key.removesuffix(POINTER) + save_name(body) + "/" for key, body in pointers.items()
+    }
+    selected = [
+        key
+        for key in keys
+        if (pointer := save_pointer(key)) is None
+        or pointer in names
+        and key.startswith(names[pointer])
+    ]
+    present = set(selected)
+    for pointer, folder in names.items():
+        if folder + "state.json" not in present:
+            raise ValueError(f"state pointer {pointer} names an incomplete save")
+    return selected
+
+
+def older_saves(keys: Iterable[str], pointers: Mapping[str, bytes]) -> list[str]:
+    """Files strictly below acknowledged pointers; never remove a newer in-flight save."""
+    numbers = _numbers(pointers)
+    return [
+        key
+        for key in keys
+        if (save := _save(key)) is not None and save[1] < numbers.get(save[0], 0)
+    ]
+
+
+def recovery_files(
+    keys: Iterable[str], members: Container[str] | None, pointers: Mapping[str, bytes]
+) -> list[str]:
+    """State pointers override an older out membership after an interrupted delivery."""
+    return _committed(
+        (
+            key
+            for key in keys
+            if members is None
+            or not key.startswith("out/")
+            or key in members
+            or state_pointer(key)
+            or save_pointer(key) is not None
+        ),
+        pointers,
+    )
+
+
+@dataclass(frozen=True)
+class Publication:
+    """One delivery's selected files and frozen pointers, captured before any upload."""
+
+    keys: tuple[str, ...]
+    pointers: Mapping[str, bytes]
+
+
+def publication(root: Path, *, tail_seconds: float) -> Publication:
+    # Pointers are read before the listing: a save committed in between waits
+    # for the next pass instead of travelling under the pointer before it.
+    bodies = {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in (*root.glob("out/state/current.json"), *root.glob("out/state/*/current.json"))
+        if path.is_file()
+    }
+    keys = _listing(root, tail_seconds=tail_seconds)
+    # The listing follows no link, so a linked pointer or state folder selects nothing.
+    listed = set(keys)
+    pointers = {key: body for key, body in bodies.items() if key in listed and state_pointer(key)}
+    selected = _committed(keys, pointers)
+    # Pointers follow every save file, including arbitrarily named callback files.
+    selected.sort(key=lambda key: (key in pointers, _rank(key), key))
+    return Publication(keys=tuple(selected), pointers=pointers)
+
+
+def listing(root: Path, *, tail_seconds: float) -> list[str]:
+    """Ready files in publication order, with only the selected saves."""
+    return list(publication(root, tail_seconds=tail_seconds).keys)
+
+
+def prune_state(root: Path, pointers: Mapping[str, bytes]) -> None:
+    """Remove only save folders older than acknowledged pointers, including private files."""
+    for key, number in _numbers(pointers).items():
+        for path in (root / key).parent.glob("save-*"):
+            found = save_number(path.name)
+            if found is not None and found < number and path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
 
 
 def note_retired(root: Path, writer: str, keys: Sequence[str]) -> None:
@@ -287,8 +433,12 @@ def restore_set(root: Path) -> dict[str, bytes]:
     wanted = resume_file(root)
     if wanted is not None and (root / wanted.key).is_file():
         keys.append(wanted.key)
-    keys.extend("out/" + key for key in listing(root / "out", tail_seconds=0))
-    files = {key: (root / key).read_bytes() for key in dict.fromkeys(keys)}
+    snapshot = publication(root, tail_seconds=0)
+    keys.extend(key for key in snapshot.keys if key.startswith("out/"))
+    files = {
+        key: snapshot.pointers[key] if key in snapshot.pointers else (root / key).read_bytes()
+        for key in dict.fromkeys(keys)
+    }
     if (root / "out").is_dir() or (root / OUT_PRESENT).is_file():
         files[OUT_PRESENT] = b""
     files[STORED] = "".join(name + "\n" for name in sorted(taken(root))).encode()
@@ -317,7 +467,7 @@ def reconcile_out(root: Path, keys: Container[str]) -> None:
     Empty directories are removed so a restored file can replace a directory.
     """
     out = root / "out"
-    for key in listing(out, tail_seconds=0):
+    for key in _listing(out, tail_seconds=0):
         if "out/" + key not in keys:
             (out / key).unlink(missing_ok=True)
     for path in sorted(out.rglob("*"), reverse=True):

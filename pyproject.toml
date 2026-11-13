@@ -23,6 +23,9 @@ Repository = "https://github.com/loopflowstudio/etude"
 s3 = ["boto3>=1.35,<2"]
 # Tournaments: Parquet tables written and queried with DuckDB.
 eval = ["duckdb>=1.1,<2"]
+train = [
+    "torch>=2.4,<3",
+]
 
 [project.scripts]
 etude = "etude.cli:main"

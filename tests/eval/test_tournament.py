@@ -30,9 +30,9 @@ from etude.eval.records import (
     TournamentRun,
 )
 from etude.eval.tournament import hold, played, scores, standings, stored_runs
-from etude.run.errors import EtudeError
-from etude.run.records import ArtifactRef, Clock
-from etude.run.storage import DirectoryStorage
+from etude.tracking.errors import EtudeError
+from etude.tracking.records import ArtifactRef, Clock
+from etude.tracking.storage import DirectoryStorage
 from etude.train.run import track
 from tests.eval.games import play, play_failing_deal_one
 from tests.experiments import authored

@@ -53,9 +53,9 @@ from etude.launch.errors import LauncherError
 from etude.launch.records import Job, Run, Smoke
 from etude.launch.scheduler import Scheduler
 from etude.launch.source import home
-from etude.run.errors import EtudeError
-from etude.run.records import ArtifactRef, Digest, Record
-from etude.run.storage import Storage
+from etude.tracking.errors import EtudeError
+from etude.tracking.records import ArtifactRef, Digest, Record
+from etude.tracking.storage import Storage
 from etude.train.read import RunData, lines, read_all
 from etude.train.report import job_names
 

@@ -19,7 +19,7 @@ from etude.experiment import observe
 from etude.launch.client import default
 from etude.launch.database import launcher_file
 from etude.launch.schemas import Packet
-from etude.run.storage import default_root
+from etude.tracking.storage import default_root
 from tests.launch.fake import bench
 
 JOB_FILE = r"""

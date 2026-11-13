@@ -15,12 +15,18 @@ from moto import mock_aws
 
 from etude.cache import Cache
 from etude.page import Pages, build
-from etude.run.block_file import block_key, tail_key
-from etude.run.delivery import RunFiles, StorageDestination, sync
-from etude.run.errors import EtudeError
-from etude.run.listing import runs
-from etude.run.records import Attempt, RunDeclaration, RunFile, SourceKey
-from etude.run.storage import DirectoryStorage, S3Storage, Storage, run_prefix, storage_from_uri
+from etude.tracking.block_file import block_key, tail_key
+from etude.tracking.delivery import RunFiles, StorageDestination, sync
+from etude.tracking.errors import EtudeError
+from etude.tracking.listing import runs
+from etude.tracking.records import Attempt, RunDeclaration, RunFile, SourceKey
+from etude.tracking.storage import (
+    DirectoryStorage,
+    S3Storage,
+    Storage,
+    run_prefix,
+    storage_from_uri,
+)
 from etude.train.block import Builder, LoggedRow
 from etude.train.manifest import Index, Manifest
 from etude.train.read import buckets, read, read_all
@@ -118,8 +124,9 @@ def test_a_new_model_at_a_recorded_step_is_a_new_version(
         measured = MeasuredStorage(destination)
         extension = suffix + ".data" if suffix == ".json" else suffix
         # Each process: an attempt record and the state, then any new checkpoint and its record.
+        # Every run has an out, so the first delivery also publishes its (empty) membership.
         kept = {"": b"first", ".ordinal-2": b"other"}
-        for body, uploads, recorded in ((b"first", 5, 1), (b"other", 4, 2), (b"other", 2, 2)):
+        for body, uploads, recorded in ((b"first", 6, 1), (b"other", 4, 2), (b"other", 2, 2)):
             model.write_bytes(body)
             with track(
                 experiment="e", run="r", clocks=[Step("step", "steps")], directory=local

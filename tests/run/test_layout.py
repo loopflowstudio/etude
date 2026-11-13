@@ -33,7 +33,7 @@ def _within(name: str, package: str) -> bool:
 
 def test_shared_run_code_imports_no_kind_of_run_and_training_imports_no_evaluation() -> None:
     rules = {
-        "etude.run": ("etude.train", "etude.eval", "etude.launch"),
+        "etude.tracking": ("etude.train", "etude.eval", "etude.launch"),
         "etude.train": ("etude.eval", "etude.launch"),
         "etude.eval": ("etude.train", "etude.launch"),
     }

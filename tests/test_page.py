@@ -25,8 +25,8 @@ from etude.report import (
     Ranking,
     Report,
 )
-from etude.run.errors import EtudeError
-from etude.run.storage import DirectoryStorage, Storage, storage_from_uri
+from etude.tracking.errors import EtudeError
+from etude.tracking.storage import DirectoryStorage, Storage, storage_from_uri
 from etude.train.records import Step
 from etude.train.run import track
 from tests.experiments import experiment_file

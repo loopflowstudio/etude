@@ -3,8 +3,8 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from etude.run.delivery import RunFiles, StorageDestination, ship
-from etude.run.storage import DirectoryStorage
+from etude.tracking.delivery import RunFiles, StorageDestination, ship
+from etude.tracking.storage import DirectoryStorage
 
 
 class InterruptedStorage(DirectoryStorage):

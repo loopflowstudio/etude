@@ -67,11 +67,11 @@ from etude.eval.records import (
     outcomes,
 )
 from etude.eval.schedule import ordered
-from etude.run.declaration import declare
-from etude.run.errors import EtudeError
-from etude.run.listing import run_folders, under
-from etude.run.records import Digest, Record, RunFile
-from etude.run.storage import DirectoryStorage, Storage, default_root
+from etude.tracking.declaration import declare
+from etude.tracking.errors import EtudeError
+from etude.tracking.listing import run_folders, under
+from etude.tracking.records import Digest, Record, RunFile
+from etude.tracking.storage import DirectoryStorage, Storage, default_root
 
 if TYPE_CHECKING:
     import duckdb

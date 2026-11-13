@@ -17,11 +17,15 @@ from etude.carriage import (
     checkpoint_file_name,
     named_file,
     note_stored,
+    older_saves,
     purpose,
     recorded_file,
     recorded_files,
+    recovery_files,
     restore_set,
     resume_file,
+    save_pointer,
+    state_pointer,
 )
 from etude.launch.logging import parse_log_line
 from etude.launch.logs import snapshot_stream
@@ -105,6 +109,7 @@ class BucketJournal:
         self._finished: dict[str, Progress] = {}
         # Staged archives by repository and commit: their key, digest and size.
         self._sources: dict[tuple[str, str], tuple[str, str, int]] = {}
+        self._state_cleaned: dict[str, dict[str, str]] = {}
 
     def _session_prefix(self, session_id: str) -> str:
         return f"{self._prefix}/sessions/{session_id}/"
@@ -266,16 +271,25 @@ class BucketJournal:
                     raise StorageUnavailable("out membership is missing")
                 members = {file.key for file in OutFiles.model_validate_json(raw).files}
                 (root / "out").mkdir(exist_ok=True)
-                if not members <= listed.keys():
+                ordinary = {name for name in members if save_pointer(name) is None}
+                if not ordinary <= listed.keys():
                     raise StorageUnavailable("out member is missing")
             recorded = recorded_files(root)
-            for name, size in listed.items():
-                if members is not None and name not in members:
-                    continue
+            pointers: dict[str, bytes] = {}
+            if key is None:
+                for name in listed:
+                    if state_pointer(name):
+                        raw = self._bucket.get(folder + name)
+                        if raw is None:
+                            raise StorageUnavailable("state pointer is missing")
+                        pointers[name] = raw
+            selected = recovery_files(listed, members, pointers) if key is None else [key]
+            for name in selected:
+                size = listed[name]
                 if not name.startswith("out/") or key not in (None, name):
                     continue
                 with attribute(purpose=purpose(name, recorded)):
-                    raw = self._bucket.get(folder + name)
+                    raw = pointers[name] if name in pointers else self._bucket.get(folder + name)
                 if raw is None or len(raw) != size:
                     raise StorageUnavailable(
                         f"restored file {name} is missing or has changed length"
@@ -367,11 +381,42 @@ class BucketJournal:
             raw = self._current(session_id, f"{self._run_prefix(run)}attempts/{attempt}.json")
         return None if raw is None else AttemptRecord.model_validate_json(raw)
 
+    def _clear_state(self, session_id: str, run: str) -> None:
+        """Use controller keys to retire saves an upload-only courier cannot delete.
+
+        One conditional membership read per observed run; list state only when a
+        changed membership contains a pointer. A missing acknowledgement never
+        authorizes deletion. Errors leave the next observation free to retry.
+        """
+        folder = self._run_prefix(run)
+        with attribute(run=run, purpose="control"):
+            body = self._current(session_id, folder + MEMBERSHIP)
+            if body is None:
+                return
+            membership = OutFiles.model_validate_json(body)
+            marks = {file.key: file.sha256 for file in membership.files if state_pointer(file.key)}
+            if self._state_cleaned.get(run) == marks:
+                return
+            if marks:
+                pointers: dict[str, bytes] = {}
+                for name in marks:
+                    raw = self._bucket.get(folder + name)
+                    if raw is None:
+                        raise StorageUnavailable("state pointer is missing")
+                    pointers[name] = raw
+                keys = [key[len(folder) :] for key in self._bucket.list(folder + "out/state/")]
+                for key in older_saves(keys, pointers):
+                    self._bucket.delete(folder + key)
+            self._state_cleaned[run] = marks
+
     @_attribute_session
     def observe(self, session_id: str) -> Observation:
         alive = self.ended(session_id) is None
         progress: list[Progress] = []
-        for attempt, run in sorted(self._runs(session_id).items()):
+        runs = self._runs(session_id)
+        for run in sorted(set(runs.values())):
+            self._clear_state(session_id, run)
+        for attempt, run in sorted(runs.items()):
             if attempt in self._finished:
                 progress.append(self._finished[attempt])
                 continue

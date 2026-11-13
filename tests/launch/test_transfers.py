@@ -53,9 +53,9 @@ from etude.launch.storage.s3 import Bucket, Grant, Keys, PostForm, _send, read
 from etude.launch.storage.transport import HTTPReply, attribute, observe
 from etude.launch.usage import R2, S3_US_WEST_2, Access, Transfer, Usage, reconcile
 from etude.launch.worker.courier import Courier
-from etude.run.delivery import RunFiles, StorageDestination, ship
-from etude.run.storage import S3Storage
 from etude.storage_timeout import StorageUnavailable, socket_timeout
+from etude.tracking.delivery import RunFiles, StorageDestination, ship
+from etude.tracking.storage import S3Storage
 from tests.launch.counting import Counting, Counts
 from tests.launch.fake import bench
 from tests.run.storage import CountedClient
@@ -735,8 +735,10 @@ def test_completed_workload_before_and_after(
     assert control.requests > 0 and control.supplied_bytes > 0
     assert bulk.requests == 8  # runtime, failed source, source, input, 2 uploads, 2 parts
     # Worker publication (each attempt says how it ended before its files), scheduler
-    # collection, a running log and public fetches; a start receipt is read once.
-    assert control.requests == 42
+    # collection, a running log and public fetches; a start receipt is read once. Each
+    # observation of a run also asks, conditionally, whether its out membership changed
+    # (`BucketJournal._clear_state`): 8 of these.
+    assert control.requests == 50
 
     assert sum(e.operation == "GET" for e in after.events) == http.requests
     assert after.received_bytes == http.received
@@ -759,7 +761,7 @@ def test_completed_workload_before_and_after(
     assert before.received_bytes - after.received_bytes == len(
         http.objects["/source"]
     ) + 1024**2 + 3 * len(payload)
-    assert (before.requests, after.requests) == (54, 50)
+    assert (before.requests, after.requests) == (62, 58)
     saved = before.estimate(S3_US_WEST_2) - after.estimate(S3_US_WEST_2)
     assert saved == Decimal("0.00707948782")
     assert after.requests == control.requests + bulk.requests

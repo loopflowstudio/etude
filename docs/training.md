@@ -128,8 +128,9 @@ An id is unique within its experiment, and **a taken id is refused, never
 resumed**: starting a run and carrying one on are different commands
 ([below](#running-it)).
 
-An experiment is a label the runs of one file share: `etude launch ppo.py`
-and `etude run ppo.py` both record experiment `ppo`. `train` names none.
+An experiment is a label runs share. It comes from the launch, never from
+`train`: `etude launch ppo.py` and `etude run ppo.py` both record experiment
+`ppo`, and `--experiment NAME` on either gives another.
 
 ## The run and its clocks
 
@@ -224,24 +225,30 @@ five minutes after the last one; `run.steps("updates", to=n, every=25)` makes
 it every 25 steps instead.
 
 Each save replaces the previous one whole or not at all. A save is a new
-folder holding every registered object. Once it is complete, here and in
-your bucket, one small file is rewritten to name it, and only then is the
-save before it deleted. `run.resume` loads the save that file names. A
-machine lost while saving or uploading leaves the earlier save, all of it, so
-the model and optimizer the next attempt loads always come from one save.
+folder holding every registered object, complete in itself. Once it is
+written, one small file is rewritten to name it, and `run.resume` loads the
+save that file names. A machine lost while saving leaves the earlier save,
+all of it, so the model and optimizer the next attempt loads always come from
+one save.
 
-Under a launch each save is uploaded, so choose an interval you would pay to
-upload. A file whose bytes did not change since the save before is not
-uploaded again, and storage holds a second save only while one is replacing
-the other.
+Under a launch the bucket follows the same order: a save's files are
+uploaded, then the file that names it. Each upload is a whole save, including
+files whose bytes did not change, so choose an interval you would pay to
+upload. Only the newest save is sent. With `every=` set shorter than an
+upload takes, the saves in between stay on the machine and cost nothing to
+store.
+
+Etude removes replaced saves itself, on the machine and in the bucket, soon
+after a newer one is in place. You may see an older folder for a short while;
+nothing reads it ([What is on disk](#what-is-on-disk)).
 
 Rules you can rely on:
 
 - **Carrying on restores what was registered, and nothing else.** Weights and
-  optimizer state come back exactly. Random streams, replay data and games in
-  flight come back only if they are in an object you registered; otherwise
-  each attempt starts them fresh. Rows logged after the last save are replaced
-  by the next attempt's rows from where it resumes.
+  optimizer state come back exactly. Random streams, replay data and
+  [games in flight](#games-in-flight) come back only if they are in an object
+  you registered; otherwise each attempt starts them fresh. Rows logged after
+  the last save are replaced by the next attempt's rows from where it resumes.
 - **The config and seed must match.** A run carried on with a different config
   or seed is refused before `train` does any work, naming the fields that
   differ:
@@ -276,6 +283,38 @@ for update in run.steps("updates", to=config.updates):
 `run.resume` returns the `extra` you passed, with the saved values loaded into
 it when there is a save. Etude saves that object as it stands, so change its
 fields in place.
+
+### Games in flight
+
+A loop that plays games across passes can keep the unfinished ones, so an
+attempt goes on with the games the last one was playing. Hold them in an
+object that says how it is saved, and register it like a model:
+
+```python
+class Pending:
+    """Games started and not yet finished."""
+
+    def __init__(self) -> None:
+        self.games: list[Game] = []
+
+    def state_dict(self) -> dict[str, list[dict[str, object]]]:
+        return {"games": [game.to_dict() for game in self.games]}
+
+    def load_state_dict(self, state: dict[str, list[dict[str, object]]]) -> None:
+        self.games = [Game.from_dict(saved) for saved in state["games"]]
+
+
+pending = Pending()
+run.resume(model=model, optimizer=optimizer, pending=pending)
+for update in run.steps("updates", to=config.updates):
+    finished = advance(model, pending.games)  # plays on; returns the games that ended
+    run.log(learn(model, optimizer, finished))
+    run.save()
+```
+
+`pending` is saved with the weights it was played with and comes back with
+them. Leave it out and each attempt starts its games fresh, which costs the
+games in flight at each stop and nothing else.
 
 ### State of another shape
 
@@ -487,8 +526,8 @@ EXPERIMENT/RUN/
   out/                     run.out: follows the run to every machine
     state/
       current.json         {"save": "save-00000007"}: the save to load, written last
-      save-00000007/       one save; never changes once written
-        state.json         {"at": {"updates": 400}, "seed": 0, "commit": "8773d51",
+      save-00000007/       one save, complete in itself; never changes once written
+        state.json         {"at": {"updates": 400}, "wall_ms": 1794600000000, "seed": 0, "commit": "8773d51",
                             "extra": {"games": 12800}, "files": {"model": "model.pt", "optimizer": "optimizer.pt"}}
         model.pt           torch.save(model.state_dict())
         optimizer.pt
@@ -519,9 +558,9 @@ weights = torch.load(save / files["model"])
 ```
 
 Always go through `current.json`. A save folder it does not name is one
-being written or one about to be deleted, and may be incomplete. Each entry
-of `files` is a path relative to its save's folder. Named state is in
-`out/state/NAME/`, with its own `current.json`.
+being written or one waiting to be removed, and may be incomplete. Each entry
+of `files` names a file in its own save's folder; no save reads another's.
+Named state is in `out/state/NAME/`, with its own `current.json`.
 
 On this computer runs are under `~/.etude/track` (moved by `ETUDE_HOME`);
 under a launch the same folder is in your bucket. Using Etude to write a loop
@@ -529,7 +568,8 @@ does not tie its results to Etude.
 
 ## Running it
 
-Three intents, three commands. Which one you mean is never guessed from a
+Starting a run, carrying one on and branching from one are different
+commands. Which one you mean is never guessed from a
 directory that happens to exist.
 
 | You want | Command | What it is |
@@ -538,7 +578,8 @@ directory that happens to exist.
 | a new run, on machines | `etude launch job.py --rent l4` | always new runs |
 | the same run, after a lost machine or `Stopped` | none: the launcher calls `train` again | another attempt of the same run |
 | the same run, after it ended unfinished | `etude run train.py --resume RUN`, `etude launch job.py --resume RUN` | another attempt of the same run, on your current code |
-| to go further, or change something | `etude continue --run RUN --until updates=6400` | a new run that starts from a copy of the first one's state and records it as its parent |
+| the same run, further | `etude run train.py --resume RUN --until updates=6400`, and the same on `etude launch` | another attempt of the same run, to a later target; a finished run too |
+| a changed config, or a branch | `etude continue --run RUN --config ...` | a new run that starts from a copy of the first one's state and records it as its parent |
 
 ```sh
 etude run train.py --config '{"lr": 0.001}' --seed 7 --name wide --until updates=2000
@@ -556,16 +597,20 @@ etude smoke job.py                      # the smoke config, here, spending nothi
 - **`--resume RUN`** is for a run that ended without finishing: it failed and
   you fixed the bug, it ran out of hours, you cancelled it, or you pressed
   Ctrl-C. It takes the file because it runs your current code. It keeps the
-  run's id, config, seed and target; `--until` gives a new target.
-- **What `--resume` refuses**: a finished run, and a config or seed that no
-  longer matches. A refused or interrupted attempt changes nothing already
-  recorded: a finished run stays finished.
+  run's id, config, seed and target.
+- **`--resume RUN --until updates=6400`** takes the same run further. This
+  also works on a finished run, which becomes unfinished again until it
+  reaches the new target. Its rows, checkpoints and id go on as one run.
+- **What `--resume` refuses**: a config or seed that no longer matches, and a
+  finished run given no later target, which has nothing left to do. A refused
+  or interrupted attempt changes nothing already recorded: a finished run
+  stays finished.
 - **A taken id is refused** before `train` is called, and under a launch
   before anything is rented. Choose another `--name` or `--seed`, or mean
   `--resume`.
-- **`etude continue`** goes further than the target or changes the config on
-  purpose, as a new run ([the launcher](launcher.md#progress-and-continuation)).
-  The first run is untouched.
+- **`etude continue`** changes the config on purpose, or goes further while
+  leaving the first run as it is. It makes a new run
+  ([the launcher](launcher.md#progress-and-continuation)).
 
 A run's hours, dollars and attempts span every attempt, whoever asked for it
 ([The run promise](launcher.md#the-run-promise)).

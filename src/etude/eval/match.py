@@ -71,11 +71,11 @@ from etude.eval.records import (
 )
 from etude.eval.schedule import ordered
 from etude.eval.source import digest_files
-from etude.run.declaration import declare
-from etude.run.delivery import RunFiles, StorageDestination, destinations, ship
-from etude.run.errors import EtudeError
-from etude.run.records import Record, RunCounters, RunState
-from etude.run.storage import DirectoryStorage, Storage, run_prefix
+from etude.tracking.declaration import declare
+from etude.tracking.delivery import RunFiles, StorageDestination, destinations, ship
+from etude.tracking.errors import EtudeError
+from etude.tracking.records import Record, RunCounters, RunState
+from etude.tracking.storage import DirectoryStorage, Storage, run_prefix
 
 if TYPE_CHECKING:
     import duckdb
@@ -160,7 +160,7 @@ def evaluate(
     Matches start in the order `etude.eval.schedule.ordered` gives, so
     consecutive matches reuse the checkpoints the author's runtime keeps loaded.
 
-    The eval run is named `run` (see `etude.run.declaration.declare` for its
+    The eval run is named `run` (see `etude.tracking.declaration.declare` for its
     defaults); resuming it requires the same environment and `rollups`
     (`EtudeError("eval_run_rollups_conflict")`): a sealed block's partial
     totals are never taken again. Prints one line to

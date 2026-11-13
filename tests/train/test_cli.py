@@ -12,8 +12,8 @@ import pytest
 from etude.cli import main
 from etude.eval.query import statsdb
 from etude.launch.database import launcher_file
-from etude.run.delivery import sync
-from etude.run.storage import DirectoryStorage
+from etude.tracking.delivery import sync
+from etude.tracking.storage import DirectoryStorage
 from etude.train.records import Step
 from etude.train.run import track
 from tests.experiments import experiment_file
@@ -44,7 +44,7 @@ EVAL_READERS = tuple(
         ),
         (
             ["sync", "--directory", "{directory}", "--seal"],
-            25,  # etude.out, and etude.stopping for Stopped
+            26,  # etude.out, etude.stopping for Stopped and etude.train.state for saves
             ("boto3", "etude.page", "etude.train.report"),
         ),
     ],

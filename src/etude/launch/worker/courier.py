@@ -29,13 +29,18 @@ from etude.carriage import (
     checkpoint_file,
     checkpoint_file_name,
     immutable,
-    listing,
     note_stored,
+    older_saves,
+    prune_state,
+    publication,
     purpose,
     reconcile_out,
     recorded_files,
+    recovery_files,
     resume_file,
     retired,
+    save_pointer,
+    state_pointer,
     within,
 )
 from etude.deadline import limit_time
@@ -333,15 +338,25 @@ class Courier:
         # Every checkpoint name storage holds stays taken, restored or not.
         note_stored(folder, [checkpoint_file_name(key) for key in keys if checkpoint_file(key)])
         membership = None
+        members = None
         if MEMBERSHIP in keys:
             body = read(keys[MEMBERSHIP].url, self._send)
             if body is None:
                 raise StorageUnavailable("out membership is missing")
             membership = OutFiles.model_validate_json(body)
             members = {file.key for file in membership.files}
-            if not members <= keys.keys():
+            ordinary = {name for name in members if save_pointer(name) is None}
+            if not ordinary <= keys.keys():
                 raise StorageUnavailable("out member is missing")
-            keys = {k: v for k, v in keys.items() if not k.startswith("out/") or k in members}
+        pointers: dict[str, bytes] = {}
+        for key, link in keys.items():
+            if state_pointer(key):
+                body = read(link.url, self._send)
+                if body is None:
+                    raise StorageUnavailable("state pointer is missing")
+                pointers[key] = body
+        selected = recovery_files(keys, members, pointers)
+        keys = {key: keys[key] for key in selected}
         reconcile_out(folder, keys)
         recorded: dict[str, RecordedFile] | None = None
         for key, link in sorted(keys.items()):
@@ -359,7 +374,7 @@ class Courier:
                 recorded = recorded_files(folder)
             named = None if recorded is None else recorded.get(key)
             with attribute(run=run, purpose="checkpoint" if named is not None else "report"):
-                body = read(link.url, self._send)
+                body = pointers[key] if key in pointers else read(link.url, self._send)
             if body is None or len(body) != link.size_bytes:
                 raise StorageUnavailable(f"restored file {key} is missing or has changed length")
             # Reuse the received bytes for verification and the sent marker;
@@ -372,7 +387,7 @@ class Courier:
             partial.write_bytes(body)
             partial.replace(target)
             if digest is not None:
-                self._sent[run, key] = digest
+                self._sent[run, key] = pointers[key].decode() if key in pointers else digest
             else:
                 self._restored(run, key, target)
         if membership is not None:
@@ -575,7 +590,13 @@ class Courier:
         removed = retired(folder) if folder.is_dir() else []
         recorded = recorded_files(folder)
         out: list[OutFile] = []
-        for key in listing(folder, tail_seconds=0.0 if done else math.inf):
+        snapshot = publication(folder, tail_seconds=0.0 if done else math.inf)
+        acknowledged = {
+            key: prior.encode()
+            for key in snapshot.pointers
+            if isinstance(prior := self._sent.get((run, key)), str)
+        }
+        for key in snapshot.keys:
             if key == MEMBERSHIP:
                 continue  # only this pass can publish its membership
             # Training removes files while this runs. One gone by now is
@@ -583,10 +604,22 @@ class Courier:
             try:
                 with attribute(purpose=purpose(key, recorded)):
                     if key.startswith("out/"):
-                        out.append(self._put_out(run, key, recorded.get(key)))
+                        if key in snapshot.pointers:
+                            pointer_body = snapshot.pointers[key]
+                            digest = hashlib.sha256(pointer_body).hexdigest()
+                            if self._sent.get((run, key)) != pointer_body.decode():
+                                self._runs[run].write_bytes(key, pointer_body)
+                                self._sent[run, key] = pointer_body.decode()
+                            out.append(
+                                OutFile(key=key, sha256=digest, size_bytes=len(pointer_body))
+                            )
+                        else:
+                            out.append(self._put_out(run, key, recorded.get(key)))
                     else:
                         self._put(folder / key, run, key)
             except FileNotFoundError:
+                if save_pointer(key) is not None:
+                    raise  # never publish a pointer after skipping one of its files
                 continue
         if (folder / "out").is_dir() or (folder / OUT_PRESENT).is_file():
             body = OutFiles(files=tuple(out)).model_dump_json()
@@ -594,7 +627,11 @@ class Courier:
                 self._runs[run].write_bytes(MEMBERSHIP, body.encode())
                 (folder / OUT_PRESENT).touch()
                 self._sent[run, MEMBERSHIP] = body
+        self._clear(
+            run, older_saves((key for owner, key in self._sent if owner == run), acknowledged)
+        )
         self._clear(run, removed)
+        prune_state(folder, acknowledged)
 
     def carry_out(self, final: bool = False) -> None:
         """Send changed files before their attempt's completion record, and the worker's log.

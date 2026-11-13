@@ -1144,10 +1144,12 @@ commit, which is what a fixed bug needs; the attempt records that commit. The
 run keeps its id, seed, config, out and checkpoint ordinals, and the job's
 limits as the file now states them bound the whole run, earlier attempts
 included, so raise `max_hours`, `max_usd` or `max_attempts` there to give it
-more. It is refused before anything is rented when the run finished, when
-the file's config or the seed differs from the run's (the error names the
-fields), or while an attempt of the run is still allocated. A refusal changes
-nothing recorded about the run.
+more. `--resume RUN --until updates=6400` gives the same run a later target,
+and is how a finished run goes further without becoming a new one. A resume
+is refused before anything is rented when the run finished and no later
+target is given, when the file's config or the seed differs from the run's
+(the error names the fields), or while an attempt of the run is still
+allocated. A refusal changes nothing recorded about the run.
 
 A launch whose run id is taken in its experiment is refused the same way,
 before renting: ids are never reused and a taken id is never resumed. The
@@ -1164,14 +1166,39 @@ index; recovery keeps that newer file. Continuation instead uses the
 published fingerprints and verifies them when delivering the child's inputs.
 
 State kept with `run.save()` never recovers as a mixture of two saves. Each
-save is a folder of files that are written once
-([Training](training.md#what-is-on-disk)). Delivery sends a save's files
-first, then `out/state/current.json`, the one file that is rewritten, which
-names the save to load. A delivery interrupted before that file leaves it
-naming the save before, whose files are untouched, and recovery restores
-that one. Once the new `current.json` is stored, the courier deletes the
-replaced save's objects, so a bucket holds two saves only between those two
-steps. A file whose digest matches the replaced save's is not uploaded again.
+save is a folder of files that are written once and complete in itself
+([Training](training.md#what-is-on-disk)). A delivery pass reads
+`out/state/current.json`, sends the files of the save it names, then
+`current.json` itself, the one file that is rewritten. A delivery interrupted
+before that file leaves the stored one naming the save before, whose files
+are untouched, and recovery restores that one.
+
+A save is uploaded once and whole: a file with the same bytes as the save
+before is sent again under the new folder. A save the job replaced before a
+pass reached it is never sent, so saving more often than delivery can keep up
+with adds no uploads.
+
+Replaced saves are removed without the job's help. A save on the machine is
+kept until storage has acknowledged a `current.json` naming it or a later
+one; before that it may be the only copy. Removal happens on the pass after,
+not at a set time, and may lag: nothing depends on a replaced save being
+present or gone.
+
+| Where | Removed | By | Until then |
+| --- | --- | --- | --- |
+| the machine | save folders numbered below the one storage last acknowledged in `current.json`; with no storage, below the one `current.json` names | the courier, or `run.save()` with no storage | the unsent saves since the last delivery |
+| a bucket, grant can delete | save folders numbered below the stored `current.json`'s | the courier, after storing that `current.json` | two saves for about one pass |
+| a bucket, upload-only grant | the same | the controller, with the launcher's own keys, each time its loop looks at the run | one replaced save for each save delivered since the controller last ran |
+
+The last row is the one to know about. The courier cannot delete with an
+upload-only grant (S3 without `sts:GetFederationToken`, or after a grant's
+temporary keys expire), and without a selected controller the loop runs only
+while a command such as `etude launch` or `etude wait` does. A run saving
+every five minutes then leaves twelve replaced saves an hour in the bucket
+until the next such command. `etude controller set` keeps the loop running;
+R2 grants and S3 federation grants delete on the machine and do not wait
+for it.
+
 Recovery and continuation exclude removed files, even if their bytes remain
 in storage. Recovery removes stale out files on a reused host. Deleted
 out checkpoints remain available when selected explicitly. An empty `out`
@@ -1250,9 +1277,10 @@ The job is also told who it is: `ETUDE_RUN` (the run's id), `ETUDE_JOB` (the
 digest its job's runs share), `ETUDE_JOB_NAME` when the job has a name,
 `ETUDE_ATTEMPT`, and `ETUDE_COHORT` when the run has one. It runs in
 `ETUDE_SOURCE_DIR`, its commit's files without `.git`; [evaluation](evaluation.md)
-hashes identity files relative to it. `ETUDE_EXPERIMENT` is the job's explicit
-experiment or the launched file's stem; files defining `eval(state)` or
-`report()` require their own stem. The experiment is part of the job's
+hashes identity files relative to it. `ETUDE_EXPERIMENT` is the launch's
+`--experiment NAME`, else the job's explicit experiment, else the launched
+file's stem; files defining `eval(state)` or `report()` require their own
+stem. The experiment is part of the job's
 identity. [Tracking](tracking.md) reads these, so a launched recipe names
 only its clocks. A tracked script
 does not write `etude-result.json` itself: tracking reports its clocks.
@@ -1270,7 +1298,7 @@ PREFIX/EXPERIMENT/RUN/           everything about one run
   checkpoints/                   checkpoint files copied from outside out
   out/                           out (`run.out`), as the job keeps it
     state/current.json           names the save to load; stored after that save's files
-    state/save-N/                one save by run.save(), never changed; the one before is deleted
+    state/save-N/                one save by run.save(), whole and never changed; replaced ones are removed
     checkpoints/CLOCK-VALUE/     each published checkpoint, never changed
   out.json                       keys, SHA256 digests and byte lengths in the last carried out
 PREFIX/sessions/SESSION/         one machine's instructions, inbox and notes
@@ -1297,8 +1325,8 @@ membership is published after all files in that pass succeed, including when
 no files remain. A courier restart reconstructs membership from the local
 directory. This also works with upload-only grants; absence does not depend
 on deleting bucket objects. Under such a grant a replaced save's objects stay
-in the bucket, outside membership and never restored, until someone with
-delete rights removes them.
+in the bucket, outside membership and never restored, until the controller
+deletes them ([The run promise](#the-run-promise)).
 
 A job reports its progress by atomically replacing `etude-result.json` in the
 output directory; `etude status` shows it:

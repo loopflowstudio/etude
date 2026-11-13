@@ -17,8 +17,8 @@ from etude.carriage import (
     resume_file,
     taken,
 )
-from etude.run.delivery import sync
-from etude.run.storage import DirectoryStorage
+from etude.tracking.delivery import sync
+from etude.tracking.storage import DirectoryStorage
 from etude.train.records import Step
 from etude.train.run import track
 

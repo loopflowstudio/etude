@@ -684,7 +684,7 @@ artifacts name no match), and one table per rollup.
 
 ```python
 from etude.eval.query import read_blobs, statsdb
-from etude.run.storage import storage_from_uri
+from etude.tracking.storage import storage_from_uri
 
 bucket = storage_from_uri("r2://manabot/evaluations")
 db = statsdb("cards", bucket)

@@ -36,10 +36,10 @@ from etude.eval.block import (
 )
 from etude.eval.match import OLD_SEAT
 from etude.eval.records import TABLE_FILE, MatchRecord, Rollup, outcomes
-from etude.run.errors import EtudeError
-from etude.run.listing import as_storage, run_folders
-from etude.run.records import Digest, Record
-from etude.run.storage import Storage
+from etude.tracking.errors import EtudeError
+from etude.tracking.listing import as_storage, run_folders
+from etude.tracking.records import Digest, Record
+from etude.tracking.storage import Storage
 
 if TYPE_CHECKING:
     import duckdb

@@ -13,7 +13,7 @@ from typing import Literal
 from pydantic import Field, JsonValue, field_validator
 
 from etude.carriage import within
-from etude.run.records import ArtifactRef, Clock, Name, Record, SourceKey
+from etude.tracking.records import ArtifactRef, Clock, Name, Record, SourceKey
 
 
 def Step(name: str, meaning: str) -> Clock:  # noqa: N802 - reads as a declaration

@@ -28,9 +28,9 @@ from etude.experiment import (
 from etude.jobs import _hold, evaluation, evaluation_spec
 from etude.launch.records import Job, Outcome, Run, Status
 from etude.launch.source import home
-from etude.run.errors import EtudeError
-from etude.run.records import Clock
-from etude.run.storage import DirectoryStorage
+from etude.tracking.errors import EtudeError
+from etude.tracking.records import Clock
+from etude.tracking.storage import DirectoryStorage
 from etude.train.read import read
 from etude.train.run import Run as Run_
 from etude.train.run import track

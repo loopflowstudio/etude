@@ -8,8 +8,8 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from etude.run.records import RunFile
-from etude.run.storage import Storage, storage_from_uri
+from etude.tracking.records import RunFile
+from etude.tracking.storage import Storage, storage_from_uri
 
 
 def as_storage(source: Storage | Path | str) -> Storage:

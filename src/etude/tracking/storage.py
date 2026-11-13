@@ -28,8 +28,8 @@ from urllib.parse import quote, urlsplit
 from etude.cache import Artifact, Cache, Fetched
 from etude.carriage import immutable
 from etude.deadline import call, remaining
-from etude.run.errors import EtudeError
 from etude.storage_timeout import StorageUnavailable, socket_timeout
+from etude.tracking.errors import EtudeError
 
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._=-]{0,199}$")
 

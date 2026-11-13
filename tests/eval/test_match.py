@@ -32,9 +32,9 @@ from etude.eval.records import (
     Player,
 )
 from etude.launch.storage.files import read_result
-from etude.run.errors import EtudeError
-from etude.run.records import ArtifactRef
-from etude.run.storage import DirectoryStorage, S3Storage
+from etude.tracking.errors import EtudeError
+from etude.tracking.records import ArtifactRef
+from etude.tracking.storage import DirectoryStorage, S3Storage
 from tests.eval.games import (
     play,
     play_seat_and_player,

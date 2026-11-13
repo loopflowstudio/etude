@@ -12,9 +12,9 @@ import pytest
 from pydantic import ValidationError
 
 from etude.carriage import immutable, listing
-from etude.run.delivery import sync
-from etude.run.errors import EtudeError
-from etude.run.storage import DirectoryStorage
+from etude.tracking.delivery import sync
+from etude.tracking.errors import EtudeError
+from etude.tracking.storage import DirectoryStorage
 from etude.train.read import read
 from etude.train.records import RowTable, Step, TablePoint, Time
 from etude.train.run import EtudeWarning, track
@@ -58,9 +58,10 @@ def test_row_tables_roundtrip_ship_once_and_relocate(tmp_path: Path) -> None:
 
     bucket = MeasuredStorage(DirectoryStorage(tmp_path / "bucket"))
     assert sync(local, storages=[bucket]) == {}
-    # One attempt, two indexes, one block, run/state, and two unique table artifacts.
-    assert bucket.uploads == 8
-    assert sync(local, storages=[bucket]) == {} and bucket.uploads == 8
+    # One attempt, two indexes, one block, run/state, two unique table artifacts
+    # and the run's (empty) out membership.
+    assert bucket.uploads == 9
+    assert sync(local, storages=[bucket]) == {} and bucket.uploads == 9
     shutil.rmtree(local)
     relocated = tmp_path / "moved"
     (tmp_path / "bucket").rename(relocated)

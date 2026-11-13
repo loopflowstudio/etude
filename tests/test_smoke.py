@@ -11,8 +11,8 @@ from etude.cli import main
 from etude.launch.client import default, queue_cohort
 from etude.launch.errors import LauncherError
 from etude.launch.records import Job, SmokeForm
-from etude.run.records import Clock
-from etude.run.storage import default_root
+from etude.tracking.records import Clock
+from etude.tracking.storage import default_root
 from etude.train.run import track
 
 # Saves one checkpoint at the given number of updates; refuses a real-sized run, so a
@@ -21,7 +21,7 @@ TRAIN = """
 import sys
 from pathlib import Path
 
-from etude.run.records import Clock
+from etude.tracking.records import Clock
 from etude.train.run import track
 
 updates = int(sys.argv[1])

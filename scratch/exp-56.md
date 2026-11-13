@@ -19,24 +19,23 @@ commands; EXP-60 evaluation expansion; EXP-61 joinable shared budgets.
 
 ## State publication
 
-Blocked on persistence review; no replacement API code has been started. The
-new API promises one atomic save across several model/optimizer files, and
-the existing carrier updates each mutable out object separately, so an
-interrupted delivery leaves a mixed save. Direction, 2026-11-13: "snapshot
-directory + pointer published last, recovery follows the pointer"; Jack Heart
-on cost: "local storage probably fine, but ideally avoid remote extra
-storage". `questions.md` (State publication) holds both probes' results, the
-layout the docs show and the four open points; file sharing between saves
-and cleanup under upload-only grants block the build.
+Unblocked 2026-11-13. Each save is a self-contained folder with the pointer
+published last; delivery sends only the save the pointer names; Etude removes
+replaced saves, the controller doing it under upload-only grants.
+`questions.md` (State publication) has Jack Heart's words, the three choices
+he left unanswered and one awkward case. Publication and registration are now
+implemented; the full train API is still incomplete (remaining work below).
 
 ## Docs for the build
 
 The intended experience, to build against and keep true:
 
 - `docs/training.md`: the whole train API; Carrying on and What is on disk
-  carry the save layout.
-- `docs/launcher.md`: restoration, delivery order of a save and its pointer,
-  the storage layout, upload-only grants.
+  carry the save layout; Games in flight; `--resume RUN --until`;
+  `--experiment`.
+- `docs/launcher.md`: The run promise carries delivery order of a save and
+  its pointer and the retention table (who removes what, what lingers);
+  also restoration, the storage layout, `--resume --until`, `--experiment`.
 - `docs/tracking.md`: Etude's clocks across a resume, the run folder.
 - `docs/evaluation.md`: players, folder checkpoints, on main's seatings and
   relative seats.
@@ -48,7 +47,7 @@ how the two sides were reconciled.
 
 Replace these end to end:
 
-- `etude.run` internals package -> `etude.tracking`, updating all real consumers.
+- `etude.run` internals package -> `etude.tracking`: removed; real consumers moved.
 - Launch `Run` -> `RunRequest`; authors return Jobs with launch seeds instead.
 - Separate tracking `RunDeclaration`/`RunFile` and observed `TrainingRun` ->
   the single stored `RunRecord`, shared with the launcher.
@@ -76,7 +75,7 @@ Still present at `429db8d`: `Run.__exit__` (`src/etude/train/run.py`) calls
 `finish("failed")` for any non-`Stopped` error, and the attempt is recorded
 in `__init__` with `first_row=True`, which is no evidence of a logged row.
 The fix must keep a genuine failure before the first row reportable, so
-skipping every rowless exception is not enough. Planned under step 5.
+skipping every rowless exception is not enough. Planned with explicit resume.
 
 **EXP-37** "Fold this one into 56"; EXP-37 is closed as folded. What this
 plan answers of its brief, and what it does not:
@@ -94,32 +93,51 @@ plan answers of its brief, and what it does not:
   and learner failure apart: not planned.
 - Manabot adoption: MTG-329.
 
-Not decided: "whether these hold the release". The unplanned EXP-37 points
-need that decision, or their own Tasks.
+Jack Heart on the unplanned EXP-37 points: "followup task is fine". They do
+not hold this release and are a separate Task.
 
 ## Remaining implementation
 
-1. Build state publication as the docs describe it, with interruption and
-   recovery checks, once the persistence review settles `questions.md`.
-2. Unify/rename records and package; wire historical readers and outcome files.
-3. Build state registration, steps, clocks, save cadence, seed and input APIs.
-4. Carry folder checkpoints through tracking, launch inputs and evaluation;
+Built: pointer-last publication of the selected save, both carriers, recovery
+independent of stale membership, delayed local/remote cleanup and controller
+cleanup under upload-only grants. Registration, PyTorch serialization, extra
+counts, callback saves, named state, step cadence, stop propagation, seed/input
+access and stepped row clocks are wired into Run. Both hour clocks survive a
+relay without checkpoints. `etude.run` is removed in favor of `etude.tracking`.
+
+1. Unify/rename records; wire historical readers and outcome files. The
+   tracking package move is done; RunRequest and the record unification are not.
+2. Finish default recipe acceptance on the surviving records and commands.
+   The registration API currently has focused Python tests, not CLI acceptance.
+3. Carry folder checkpoints through tracking, launch inputs and evaluation;
    add start= and shared checkpoint enumeration.
-5. Add local `etude run`, explicit local/launched --resume, create-only names,
+4. Add local `etude run`, explicit local/launched --resume (with `--until`
+   extending the same run, finished or not), create-only names,
    config/seed refusals and per-attempt source recording; a refused or
    interrupted attempt never marks a finished run failed (Folded in).
    `etude launch` and `etude run` accept the experiment name; the file's stem
    is only the default (design, Set up for Etude Cloud; `positioning.md`).
-6. Move job seeds and examples; focused acceptance tests, then the caller's
+5. Move job seeds and examples; focused acceptance tests, then the caller's
    gate/demo steps. No publication, landing or Graph changes in implement.
 
 ## Verification
 
-After merging main: mypy and ruff clean, 812 tests passed (`questions.md`).
-The two state probes (`scratch/state-publication.py`,
-`scratch/state-retention.py`) check the retained transport, not the new API.
+2026-11-13, after compress: `uv run --extra train pytest tests/train
+tests/launch/test_state_publication.py tests/launch/test_out.py tests/run
+tests/test_continuation_out.py tests/launch/test_worker_attempts.py
+tests/launch/test_transfers.py tests/launch/test_measurement.py -q`: 248
+passed, 6 skipped. `uv run mypy`, `uv run ruff check .`, `uv run ruff format
+--check .`: clean. No full gate, publication, landing or Graph changes. The
+two historical probes still describe raw mutable out carriage, not registered
+state.
 
-Compress, 2026-11-13: no code cut; `git status --short src tests docs` empty.
-The branch's source is the retained carriage (out membership, planned stops,
-continuation), whose save path the persistence review will reshape, plus
-tracking code this plan replaces.
+Counting pins moved by the state build, each with its reason beside it:
+
+- Every run now has an `out`, so its first delivery uploads an empty
+  `out.json` (`tests/train/test_store.py` 5 -> 6, `test_tables.py` 8 -> 9).
+- `BucketJournal._clear_state` asks for a run's membership, conditionally, on
+  every observation, whether or not the grant is upload-only:
+  `tests/launch/test_transfers.py` control requests 42 -> 50. Unanswered:
+  should that read happen only where the courier cannot delete?
+- `etude sync --seal` loads `etude.train.state` (`tests/train/test_cli.py`
+  25 -> 26).

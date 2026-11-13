@@ -210,9 +210,9 @@ def test_command_import_counts(
         if any(name == prefix or name.startswith(prefix + ".") for prefix in forbidden)
     ]
     # One `etude` command: tracking contributes only its command table.
-    assert {name for name in loaded if name.startswith(("etude.run", "etude.train"))} <= {
-        "etude.run",
-        "etude.run.errors",
+    assert {name for name in loaded if name.startswith(("etude.tracking", "etude.train"))} <= {
+        "etude.tracking",
+        "etude.tracking.errors",
         "etude.train",
         "etude.train.cli",
     }

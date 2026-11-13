@@ -1,77 +1,97 @@
 # EXP-56 choices
 
+## Implementation assumptions (2026-11-13)
+
+- `run.save()` also writes at the loop's final target, so a finished loop has
+  restorable state even when its interval has not elapsed. Reaching the target
+  wins over a simultaneous stop: code after the completed loop may run.
+- Save manifests include `wall_ms` alongside their clocks. A fresh host has
+  no earlier metric-attempt files; the timestamp preserves the origin of
+  `hours_since_start` without a checkpoint.
+- The optional PyTorch serializer is installed as `etude-sdk[train]`.
+  Callback saves need no framework. Registered dictionaries load on CPU;
+  the author's objects own their device transfer and format compatibility.
+- Pointer acknowledgement is kept as its serialized body in existing sent
+  markers, so cleanup on a later pass can retain newer in-flight saves.
+  Standalone local cleanup may lag remote retirement by another pass so it
+  keeps the names needed to retry deletion. Controller cleanup adds one
+  conditional membership read per observed run; a changed state pointer costs
+  one pointer read, one state listing and one deletion per older object.
+
+The default recipe, record unification, folder checkpoints and explicit resume
+commands are still unbuilt; the docs continue to describe the target experience.
+
 The accepted rebuild is `design-train-api.md`; `docs/training.md` describes its
 intended experience. Earlier local_launch/Run.until choices and QA history are
 superseded as API direction, retained in git at `1666be1:scratch/questions.md`.
 They remain evidence about the existing carriage and retry machinery.
 
-## State publication (2026-11-13): blocked on persistence review
+## State publication (2026-11-13): layout settled, two points unanswered
 
-The design promises a whole-or-nothing save of model, optimizer and clocks,
-including after a machine loss, over the existing out carriage. The carriage
-cannot keep it. Dependent API implementation is stopped until the layout and
-retention rule are specified. Do not weaken the Training page to per-file
-atomicity or to current transport behaviour.
+**Why a pointer.** The existing carrier updates each mutable out file
+separately, so an interrupted delivery leaves a mixed save
+(`uv run python scratch/state-publication.py`: model=save-2,
+optimizer=save-1, state.json=save-1, membership unchanged; recovery reads
+current object bytes for membership keys, so hashes would detect and not
+recover). Direction: "snapshot directory + pointer published last, recovery
+follows the pointer". Do not weaken the Training page to per-file atomicity.
 
-**Counterexample** (`uv run python scratch/state-publication.py`; file
-fixtures through the real `StorageDestination`, no network or training):
-save 1 delivered, save 2 interrupted after one file, leaving model=save-2,
-optimizer=save-1, state.json=save-1, membership unchanged. Recovery accepts
-newer mutable out bytes than membership on purpose: `Courier._restore` and
-`BucketJournal.held` select membership keys, then read current object bytes.
-Hashes in state.json or out.json would detect the mix without recovering the
-overwritten weights; reordering mutable files fails the same way.
+**Jack Heart, 2026-11-13**, on the four questions put to him (file sharing;
+who deletes under upload-only grants; local retention; running hours):
 
-**Direction.** Each save is a new immutable snapshot, uploaded, then a small
-pointer published last; recovery follows the pointer. Jack Heart on cost:
-"local storage probably fine, but ideally avoid remote extra storage". Read
-as: local snapshots may be kept; remote extra storage is at most transient,
-not a growing history of saves. (Not taken: one atomic archive per save,
-extracted for the author's files.)
+- "1b is fine, my other feedback was that extra stuff locally we can cleanup
+  automatically is ok, but extra uploads are not". 1b was: each save is
+  self-contained and unchanged files upload again.
+- "2a is the best of thse options". 2a was: the launcher deletes old remote
+  saves when the worker cannot.
+- On keeping the previous save locally: "i dont think it should need to save
+  if its confirmed published online, but i also think we can have some grace
+  in our cleanups".
+- On what counts as confirmed and how long the grace is: "dunno, dunno".
+- Running hours across a resume: not answered.
 
-**As the docs show it** (`docs/training.md` Carrying on and What is on disk,
-`docs/launcher.md`, `docs/tracking.md`): `out/state/current.json` names the
-save to load; each save is `out/state/save-N/`, written once; delivery sends
-the save's files, then the pointer, then deletes the save before. Reversible
-spellings: named state is `state/NAME/current.json`; folders are numbered
-(`save-00000007`), not named for a clock, because `run.save(fn)` outside
-`run.steps` has no stepped clock.
+**As the docs now state it** (`docs/training.md` Carrying on and What is on
+disk; `docs/launcher.md` The run promise, with a retention table):
 
-**Retention probe** (`uv run python scratch/state-retention.py`; three
-complete saves with identical model bytes through `StorageDestination`, on a
-directory fixture whose `delete` returns false as upload-only storage does):
-3 model uploads and 3 remote model copies; membership holds only the pointer
-and save 3 while saves 1 and 2 remain stored. It checks the existing carrier
-against the proposed layout, not a save API or pointer ordering. Why:
-`StorageDestination` fingerprints by destination key, so the same bytes
-under a new save folder upload again; the storage protocol has no copy
-operation; the S3 federation policy grants put/delete/abort without the read
-a copy of a prior object needs.
+- `out/state/current.json` names `out/state/save-N/`; each save holds every
+  registered file and refers to nothing outside its folder. Named state is
+  `state/NAME/`. Folders are numbered because `run.save(fn)` outside
+  `run.steps` has no stepped clock.
+- A delivery pass sends only the save the local pointer names, whole, then
+  the pointer. Saves replaced before a pass reached them are never sent.
+  This is my reading of "extra uploads are not [ok]" beside 1b: no upload
+  beyond one per delivered save; identical bytes are sent again.
+- Local: saves numbered below the one storage last acknowledged a pointer
+  for are removed (no storage: below the local pointer).
+- Remote: the courier deletes below the stored pointer after storing it;
+  under an upload-only grant the controller does, with the launcher's keys,
+  when its loop looks at the run.
 
-Open, answered by no one. The first two block the build:
+**Unanswered, chosen here, reversible:**
 
-1. **How an unchanged file is not uploaded again.** Either each remote save
-   is self-contained (needs a copy path and its permissions), or manifests
-   share immutable files (`state.json`'s `files` names a file outside its
-   save folder; needs file-level reachability and retirement instead of
-   deleting the whole replaced save). The docs say only that `files` paths
-   are relative to the save's folder.
-2. **Who cleans up under upload-only grants**, and what retention holds
-   while that owner is unavailable. The courier cannot delete there
-   (`docs/launcher.md`: "absence does not depend on deleting bucket
-   objects"); membership only controls restoration. The docs leave replaced
-   saves in the bucket "until someone with delete rights removes them",
-   which conflicts with the Training page's transient remote duplication.
-3. **Local retention.** Keep the previous save on the machine as a second
-   fallback, or one rule everywhere? The docs delete it in both places.
-4. **Running hours across a resume.** `docs/tracking.md` says
-   `running_hours` goes on from the save an attempt resumed; the code still
-   continues it from the latest checkpoint (merge notes below).
+1. *Confirmed* means storage acknowledged the `current.json` naming that
+   save or a later one.
+2. *Grace* is not a timer: removal happens on the delivery pass after
+   confirmation and may lag.
+3. `running_hours` continues from the save an attempt resumed, as
+   `docs/tracking.md` says; the code continues it from the latest checkpoint
+   (merge notes below).
 
-Proposal for review, not recorded direction: immutable files owned by the
-state root and shared by save manifests, with launcher-owned cleanup where a
-worker cannot delete; specify reader and active-upload protection before
-building cleanup. It changes the published storage contract.
+**Awkward, found writing the docs.** With an upload-only grant and no
+selected controller, the cleanup loop runs only while a CLI command does. A
+run saving every five minutes leaves twelve replaced saves an hour in the
+bucket until then, against "ideally avoid remote extra storage". The docs
+say so. Question: is that acceptable for upload-only S3, or should such a
+launch warn, or deliver saves less often?
+
+**Probes, re-run 2026-11-13 after the docs change.** Both still describe the
+existing carrier, not the layout to build: `state-publication.py` reproduces
+the mixed save; `state-retention.py` (three saves, identical model bytes,
+`delete` returning false) shows 3 model uploads, 3 remote copies, membership
+holding the pointer and save 3. Under the settled layout the 3 uploads are
+intended; the 2 lingering saves are the controller's to delete. Neither
+probe exercises pointer ordering, skipping unsent saves or controller
+cleanup; step 1's tests must.
 
 ## Train API docs (2026-11-13): open choices and assumptions
 
@@ -101,11 +121,15 @@ Open product choices the design does not spell:
    raising them in the file is how a run that ran out gets more. Alternative:
    limits fixed at first launch, with flags to add.
 
-5. **How a launch names its experiment.** The design now says "Launch
-   commands take the name as an argument" (the launcher is the authority; the
-   stem is the default). No spelling is given and the docs do not show one
-   yet; they still say an `eval(state)`/`report()` file requires its own stem.
-   Simplest reading: `--experiment NAME` on `etude launch` and `etude run`.
+5. **How a launch names its experiment.** The design says "Launch commands
+   take the name as an argument" with no spelling. Docs show `--experiment
+   NAME` on `etude launch` and `etude run`, and still say an
+   `eval(state)`/`report()` file requires its own stem.
+6. **A finished run taken further.** Design Open 2 records "Both":
+   `--resume RUN --until ...` extends the same run, finished or not. Docs
+   say a finished run becomes unfinished until the new target, and that
+   `--resume` on a finished run with no later target is refused. Whether its
+   record reads `finished` in between is not stated anywhere.
 
 Assumptions taken (reversible, simpler option):
 
@@ -139,8 +163,8 @@ Assumptions taken (reversible, simpler option):
   `run.latest_checkpoint()`) warn for one release. State files an older loop
   kept in `run.out` are not read by `run.resume`.
 
-Not documented, because nothing user-facing is settled: EXP-37's remaining
-points (`exp-56.md`, Folded in). The docs do state its "application
+Not documented: EXP-37's remaining points, which are a separate Task
+(`exp-56.md`, Folded in). The docs do state its "application
 declares its restorable state and any discontinuity" point: only registered
 objects are restored, and streams or games in flight start fresh.
 

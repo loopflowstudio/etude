@@ -31,7 +31,7 @@ from etude.eval.records import (
     TournamentRun,
     assemble,
 )
-from etude.run.records import ArtifactRef
+from etude.tracking.records import ArtifactRef
 
 DIGEST = "0" * 64
 WORLD = Environment(name="world", files="1" * 64)

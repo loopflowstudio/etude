@@ -10,9 +10,8 @@ import pytest
 from etude.carriage import put_back, restore_set
 from etude.experiment import observe
 from etude.out import OutFile, OutFiles
-from etude.run.delivery import sync
-from etude.run.errors import EtudeError
-from etude.run.storage import DirectoryStorage
+from etude.tracking.delivery import sync
+from etude.tracking.storage import DirectoryStorage
 from etude.train.read import read
 from etude.train.records import Step, Time
 from etude.train.report import training
@@ -84,9 +83,6 @@ def test_local_recipe_stops_resumes_and_repeats_without_another_checkpoint(tmp_p
     with local_launch(out=tmp_path / "other/run", experiment="recipe"):
         with track(clocks=CLOCKS) as other:
             assert other.latest_checkpoint() is None
-    with track(experiment="recipe", clocks=CLOCKS, directory=tmp_path / "plain") as plain:
-        with pytest.raises(EtudeError, match="out_not_named"):
-            _ = plain.out
 
 
 def test_stopping_reserves_the_slowest_step_and_remembers_a_request(

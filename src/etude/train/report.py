@@ -9,7 +9,7 @@ time to each and the pace of every step clock since the previous one.
 Timers are summed from the metrics logged under a prefix (`etude.report.Flame`).
 
 Every run is drawn on its declared clocks and Etude's two in hours
-(`etude.run.records.BUILT_IN_CLOCKS`). Attempts' times and checkpoint
+(`etude.tracking.records.BUILT_IN_CLOCKS`). Attempts' times and checkpoint
 `elapsed` are seconds since the run first started: its first writer's start
 (`etude.train.read.RunData.writer_starts`).
 """
@@ -24,7 +24,7 @@ from typing import Literal
 
 import numpy as np
 
-from etude.run.records import BUILT_IN_CLOCKS, BUILT_IN_NAMES, HOURS_SINCE_START, Clock, Record
+from etude.tracking.records import BUILT_IN_CLOCKS, BUILT_IN_NAMES, HOURS_SINCE_START, Clock, Record
 from etude.train.read import Floats, RunData, lines
 
 BUCKETS = 120

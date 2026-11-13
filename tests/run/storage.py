@@ -6,7 +6,7 @@ import io
 from pathlib import Path
 from typing import Any
 
-from etude.run.storage import Storage
+from etude.tracking.storage import Storage
 
 
 class MeasuredStorage:

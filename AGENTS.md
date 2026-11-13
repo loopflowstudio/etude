@@ -137,10 +137,16 @@ checkpoint objects are not evidence that they still belong in `out`. Complete
 host relays include `checkpoints/.stored`; single-file inputs do not. Only a
 complete restoration reconciles stale out files.
 
+State delivery freezes `out/state/**/current.json` before enumerating its
+selected save. Recovery follows that pointer even when `out.json` is older.
+A launched training process must not prune saves: its courier owns storage
+acknowledgement and local retention; the controller removes remote saves
+where upload-only grants cannot.
+
 Etude has one cache of storage reads, `etude/cache.py`, keyed by content
 SHA256 and length with locators for where bytes came from. Tracking, reports and
 the launcher all read an `Artifact` named by the object's unsigned URL (never a
-signed link) through transports that perform I/O and keep nothing of their own; it and `deadline.py` sit at the top level because neither `etude.run`
+signed link) through transports that perform I/O and keep nothing of their own; it and `deadline.py` sit at the top level because neither `etude.tracking`
 nor `etude.launch` may import the other.
 
 Check before pushing: `uv run pytest`, `uv run mypy`, `uv run ruff check .` and

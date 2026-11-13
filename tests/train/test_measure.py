@@ -17,9 +17,9 @@ import pytest
 from moto import mock_aws
 
 from etude.page import build
-from etude.run.block_file import block_key
-from etude.run.records import RunDeclaration, RunFile, SourceKey
-from etude.run.storage import DirectoryStorage, S3Storage, Storage, run_prefix
+from etude.tracking.block_file import block_key
+from etude.tracking.records import RunDeclaration, RunFile, SourceKey
+from etude.tracking.storage import DirectoryStorage, S3Storage, Storage, run_prefix
 from etude.train.block import Columns, Series, encode
 from etude.train.manifest import Index
 from etude.train.read import buckets, read

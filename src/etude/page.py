@@ -89,10 +89,10 @@ from etude.eval.records import Gap, Scheduled, Tournament
 from etude.experiment_file import experiment_named
 from etude.launch.logging import explain
 from etude.report import Flame, Matches, Report, Score
-from etude.run.errors import EtudeError
-from etude.run.listing import as_storage, declared, run_folders, runs, under
-from etude.run.records import BUILT_IN_NAMES, Record
-from etude.run.storage import DirectoryStorage, S3Storage, Storage, default_root
+from etude.tracking.errors import EtudeError
+from etude.tracking.listing import as_storage, declared, run_folders, runs, under
+from etude.tracking.records import BUILT_IN_NAMES, Record
+from etude.tracking.storage import DirectoryStorage, S3Storage, Storage, default_root
 from etude.train.read import RunData, read_all
 from etude.train.report import Training, training
 

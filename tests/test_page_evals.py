@@ -28,10 +28,10 @@ from etude.eval.tournament import hold
 from etude.experiment import advance, observe, read_experiment
 from etude.page import Drawn, OutsideTournaments, Page, PanelSelection, build
 from etude.report import Matches
-from etude.run.block_file import parse
-from etude.run.errors import EtudeError
-from etude.run.records import ArtifactRef, Clock, Continuation, SourceKey
-from etude.run.storage import DirectoryStorage, S3Storage, Storage
+from etude.tracking.block_file import parse
+from etude.tracking.errors import EtudeError
+from etude.tracking.records import ArtifactRef, Clock, Continuation, SourceKey
+from etude.tracking.storage import DirectoryStorage, S3Storage, Storage
 from etude.train.run import Run, track
 from tests.eval.games import play, play_failing_deal_one, play_with_evidence
 from tests.experiments import authored, experiment_file

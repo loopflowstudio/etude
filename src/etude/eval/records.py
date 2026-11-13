@@ -61,8 +61,8 @@ from pydantic import (
 )
 
 from etude.eval.source import digest_files, source_commit
-from etude.run.errors import EtudeError
-from etude.run.records import BUILT_IN_NAMES, ArtifactRef, Digest, Name, Record
+from etude.tracking.errors import EtudeError
+from etude.tracking.records import BUILT_IN_NAMES, ArtifactRef, Digest, Name, Record
 
 type Config = dict[str, JsonValue]
 type ColumnType = Literal["BOOLEAN", "BIGINT", "DOUBLE", "VARCHAR"]

@@ -58,9 +58,9 @@ from etude.eval.records import (
     MatchRecord,
     Rollup,
 )
-from etude.run.errors import EtudeError
-from etude.run.records import Digest, Name, Record
-from etude.run.storage import Storage
+from etude.tracking.errors import EtudeError
+from etude.tracking.records import Digest, Name, Record
+from etude.tracking.storage import Storage
 
 if TYPE_CHECKING:
     import duckdb

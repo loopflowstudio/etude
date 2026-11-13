@@ -15,7 +15,7 @@ Ownership and invariants:
   folded into recent blocks, then permanent ones by size or cadence.
   Blocks are immutable and are the unit of delivery.
 - The shipper thread copies blocks, whole, to each destination, the
-  author's directory or bucket (`etude.run.delivery`). A marker per
+  author's directory or bucket (`etude.tracking.delivery`). A marker per
   destination records what arrived, so `sync` can finish the job later from
   the same files and replays are harmless.
 - The local run's folder uses the same layout as a destination, so with no
@@ -23,8 +23,9 @@ Ownership and invariants:
 
 Units: wall time is integer milliseconds since the Unix epoch. Clock values
 are whatever the author's clocks count; times are seconds. Etude adds its two
-clocks in hours (`etude.run.records.BUILT_IN_CLOCKS`) to every row and
-checkpoint: `running_hours` continues from the resumed checkpoint's value by
+clocks in hours (`etude.tracking.records.BUILT_IN_CLOCKS`) to every row and
+checkpoint: `running_hours` continues from the saved state's value (or an
+older run's checkpoint when it has no saved state) by
 this process's monotonic time, `hours_since_start` is wall time since the
 line's first attempt began.
 """
@@ -44,7 +45,7 @@ import threading
 import time
 import warnings
 import zlib
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -52,18 +53,19 @@ from hashlib import file_digest, sha256
 from itertools import chain, count
 from pathlib import Path
 from types import TracebackType
-from typing import IO, Literal, Self
+from typing import IO, Literal, Self, overload
 from urllib.parse import unquote
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from etude.carriage import OUT_PRESENT, checkpoint_key, note_retired, taken
 from etude.deadline import limit_time
-from etude.run.block_file import block_key, log_key, sealed_as, tail_key
-from etude.run.declaration import declare
-from etude.run.delivery import RunFiles, StorageDestination, destinations, ship
-from etude.run.errors import EtudeError
-from etude.run.records import (
+from etude.stopping import Stopped
+from etude.tracking.block_file import block_key, log_key, sealed_as, tail_key
+from etude.tracking.declaration import declare
+from etude.tracking.delivery import RunFiles, StorageDestination, destinations, prune, ship
+from etude.tracking.errors import EtudeError
+from etude.tracking.records import (
     BUILT_IN_NAMES,
     HOURS_SINCE_START,
     RUNNING_HOURS,
@@ -76,12 +78,12 @@ from etude.run.records import (
     RunState,
     SourceKey,
 )
-from etude.run.storage import DirectoryStorage, Storage, run_prefix
-from etude.stopping import Stopped
+from etude.tracking.storage import DirectoryStorage, Storage, run_prefix
 from etude.train.block import Builder, Columns, Json, LoggedRow, concat
 from etude.train.block import encode as encode_block
 from etude.train.manifest import Index, metric_names
 from etude.train.records import CheckpointRecord, ParentRun, RowTable, checkpoint_name
+from etude.train.state import State, saved_states, state_folder
 
 # Compaction is bounded by bytes or elapsed cadence, independent of training steps.
 PERMANENT_BYTES, RECENT_BLOCKS = 8_000_000, 64
@@ -218,7 +220,9 @@ class Run:
         strict: bool,
         metric_name_limit: int | None = 1000,
         inherited: CheckpointRecord | None = None,
+        seed: int = 0,
     ) -> None:
+        self.seed = seed
         self.experiment = experiment
         self.name = name
         self.source_key = SourceKey(namespace=namespace, kind="run", source_id=name)
@@ -233,11 +237,14 @@ class Run:
             and (not math.isfinite(self._until_value) or self._until_value < 0)
         ):
             raise ValueError("a launch target needs a clock and a finite nonnegative value")
-        self._out = Path(given).resolve() if (given := os.environ.get("ETUDE_OUT")) else None
-        if self._out is not None:
-            self._out.mkdir(parents=True, exist_ok=True)
-            if self._out == (root / "out").resolve():
-                (root / OUT_PRESENT).touch()
+        self._out = (
+            Path(given).resolve()
+            if (given := os.environ.get("ETUDE_OUT"))
+            else (root / "out").resolve()
+        )
+        self._out.mkdir(parents=True, exist_ok=True)
+        if self._out == (root / "out").resolve():
+            (root / OUT_PRESENT).touch()
         self._asked: float | None = None
         self._slowest = 0.0
         self._stop_requested = False
@@ -249,6 +256,10 @@ class Run:
         self._warned: set[str] = set()
         # The highest value this process has logged for each clock.
         self._high: dict[str, float] = {}
+        self._states: dict[str | None, State] = {}
+        self._step_clock: str | None = None
+        self._step_target: float | None = None
+        self._save_every: int | None = None
         self._clock_names = tuple(clock.name for clock in clocks)
         # The clock columns every row and checkpoint carries: the author's, then Etude's.
         self._columns = (*self._clock_names, *BUILT_IN_NAMES)
@@ -272,8 +283,18 @@ class Run:
         latest = self._latest_record()
         started_ms = time.time_ns() // 1_000_000
         self._ran = 0.0 if latest is None else latest.at.get(RUNNING_HOURS, 0.0)
+        saved = saved_states(self.out)
+        if saved:
+            self._ran = max(item.at.get(RUNNING_HOURS, 0.0) for item in saved)
+            for item in saved:
+                for clock, position in item.at.items():
+                    self._high[clock] = max(self._high.get(clock, 0.0), position)
         self._began = time.monotonic()
         self._origin_ms = _origin(latest, root, started_ms)
+        if saved:
+            self._origin_ms = min(
+                item.wall_ms - round(item.at[HOURS_SINCE_START] * 3_600_000) for item in saved
+            )
         # Its first durable row says where this attempt's rows supersede
         # earlier attempts' (`first_row`); one that logs nothing replaces nothing.
         self._attempt = Attempt(
@@ -312,6 +333,105 @@ class Run:
 
     # --- the training-side calls -------------------------------------------
 
+    def at(self, clock: str) -> float:
+        """The current absolute position, including time since this attempt started."""
+        if clock in BUILT_IN_NAMES:
+            return self._now()[1][clock]
+        if clock not in self._clock_names:
+            raise ValueError(f"undeclared clock: {clock!r}")
+        return self._high.get(clock, 0.0)
+
+    def steps(self, clock: str, *, to: int, every: int | None = None) -> Iterator[int]:
+        """Count from restored state, saving before a planned stop raises Stopped."""
+        if (
+            clock not in self._clock_names
+            or next(c for c in self.clocks if c.name == clock).kind != "step"
+        ):
+            raise ValueError("steps requires a declared step clock")
+        if every is not None and every < 1:
+            raise ValueError("save cadence must be at least one step")
+        target = self.until(clock, default=to)
+        position = self.at(clock)
+        if target < 0 or not float(target).is_integer() or not float(position).is_integer():
+            raise ValueError("steps requires whole positions and a whole target")
+        self._step_clock, self._save_every = clock, every
+        self._step_target = target
+        for state in self._states.values():
+            state.saved_step = position
+        for value in range(int(position) + 1, int(target) + 1):
+            if self.stopping():
+                for state in self._states.values():
+                    if state.last_at is None or any(
+                        state.last_at.get(name) != self.at(name) for name in self._clock_names
+                    ):
+                        self._save_state(state)
+                raise Stopped()
+            self._high[clock] = float(value)
+            yield value
+
+    @overload
+    def resume[T: BaseModel](
+        self, *, extra: T, name: str | None = None, **objects: object
+    ) -> T: ...
+
+    @overload
+    def resume(
+        self, *, extra: None = None, name: str | None = None, **objects: object
+    ) -> Path | None: ...
+
+    def resume(
+        self, *, extra: BaseModel | None = None, name: str | None = None, **objects: object
+    ) -> BaseModel | Path | None:
+        """Register objects and restore only those objects from the last whole save."""
+        state = State(state_folder(self.out, name), objects, extra)
+        found = state.restore(seed=self.seed)
+        self._states[name] = state
+        return extra if extra is not None else found
+
+    def save(
+        self, export: Callable[[Path], None] | None = None, *, name: str | None = None
+    ) -> None:
+        """Write registered state when due, at the target, or before a planned stop."""
+        if name not in self._states:
+            raise ValueError("register state with run.resume() before saving")
+        state = self._states[name]
+        if export is not None:
+            state.export = export
+        clock = self._step_clock
+        due = (
+            time.monotonic() - state.saved_at >= 300
+            if self._save_every is None
+            else (clock is not None and self.at(clock) - state.saved_step >= self._save_every)
+        )
+        final = (
+            clock is not None
+            and self._step_target is not None
+            and self.at(clock) >= self._step_target
+        )
+        if due or final or self.stopping():
+            self._save_state(state)
+
+    def _save_state(self, state: State) -> None:
+        wall_ms, hours = self._now()
+        at = {**{clock: self.at(clock) for clock in self._clock_names}, **hours}
+        with self.files.lock:
+            state.write(
+                at=at, wall_ms=wall_ms, seed=self.seed, commit=os.environ.get("ETUDE_COMMIT")
+            )
+        if self._step_clock is not None:
+            state.saved_step = self.at(self._step_clock)
+        self._wake.set()
+
+    def input(self, name: str) -> Path:
+        """A given file or folder here; missing inputs raise before the caller opens them."""
+        folder = os.environ.get("ETUDE_INPUTS_DIR")
+        if folder is None or not name or Path(name).name != name:
+            raise ValueError(f"input not given: {name!r}")
+        path = Path(folder) / name
+        if not path.exists():
+            raise ValueError(f"input not given: {name!r}")
+        return path
+
     def until(self, clock: str, *, default: float) -> float:
         """The launch's absolute target for this clock, otherwise the recipe's default.
 
@@ -326,9 +446,7 @@ class Run:
 
     @property
     def out(self) -> Path:
-        """The run's out, named by its launch."""
-        if self._out is None:
-            raise EtudeError("out_not_named", 422)
+        """The run's persistent output folder, shared by its attempts."""
         return self._out
 
     def stopping(self) -> bool:
@@ -348,6 +466,8 @@ class Run:
         """Record one row. Every declared clock must be present, as a key or keyword."""
         try:
             row = {**(values or {}), **clocks}
+            if self._step_clock is not None:
+                row.setdefault(self._step_clock, self.at(self._step_clock))
             for name in self._clock_names:
                 value = row.get(name)
                 if value is None:
@@ -385,6 +505,8 @@ class Run:
         `log`: the reference is dropped and counted, leaving a harmless orphan.
         Do not reuse the table's name for scalar or ordinary text values.
         """
+        if self._step_clock is not None:
+            clocks = {self._step_clock: self.at(self._step_clock), **clocks}
         if not name or name in self._clock_names:
             raise ValueError("table name must be nonempty and distinct from clocks")
         if set(clocks) != set(self._clock_names) or any(
@@ -508,22 +630,13 @@ class Run:
         self._offer(_Kept(name, record))
         return record.artifact
 
-    def at(self, clock: str) -> float | None:
-        """Where the run stands on `clock`: Etude's clocks now, an author's the highest
-        value this process logged. None for an author's clock before its first row."""
-        if clock in BUILT_IN_NAMES:
-            return self._now()[1][clock]
-        if clock not in self._clock_names:
-            raise ValueError(f"the run declares no clock {clock!r}")
-        return self._high.get(clock)
-
     def checkpoint_due(self, every: float, clock: str = RUNNING_HOURS) -> bool:
         """Whether `clock` has crossed a multiple of `every` since the latest checkpoint.
 
         `if run.checkpoint_due(1): run.checkpoint(...)` saves every running hour,
         counted from zero and continuing across resumes and continuations.
         """
-        if every <= 0:
+        if every <= 0 or not math.isfinite(every):
             raise ValueError("every must be positive")
         here, latest = self.at(clock), self._latest_record()
         there = 0.0 if latest is None else latest.at.get(clock, 0.0)
@@ -570,7 +683,7 @@ class Run:
         if isinstance(artifact, str) and "://" in artifact:
             return ArtifactRef(uri=artifact), None
         source = Path(artifact).resolve()
-        if self._out is not None and source.is_relative_to(self._out):
+        if source.is_relative_to(self._out):
             with source.open("rb") as stream:
                 digest = file_digest(stream, "sha256")
                 size = os.fstat(stream.fileno()).st_size
@@ -870,6 +983,9 @@ class Run:
 
     def ship(self) -> bool:
         """One delivery pass over every destination. True when all are current."""
+        # A launched job has no bucket credentials; its courier owns acknowledgement.
+        if not os.environ.get("ETUDE_ATTEMPT"):
+            prune(self.files, self._destinations)
         for destination in self._destinations:
             reason = ship(self.files, self.name, destination)
             if reason is None:
@@ -943,7 +1059,7 @@ def track(
     seed: int | None = None,
     cohort: str | None = None,
     kind: str | None = None,
-    config: Mapping[str, object] | str | None = None,
+    config: BaseModel | Mapping[str, object] | str | None = None,
     continues: Continuation | None = None,
     directory: Path | str | None = None,
     storages: Sequence[Storage] = (),
@@ -961,7 +1077,7 @@ def track(
     another raises `EtudeError("experiment_differs_from_launch")`; naming none
     outside such a launch raises `EtudeError("experiment_not_named")`. The
     run's identity, and whether it resumes, is settled by
-    `etude.run.declaration.declare`. Under `etude launch` the files are
+    `etude.tracking.declaration.declare`. Under `etude launch` the files are
     written to `ETUDE_TRACK_DIR`, which the launcher carries to storage as they
     are, and a later attempt finds the run's checkpoints there
     (`Run.latest_checkpoint`). A continuation (`etude.jobs.continue_from`) is
@@ -997,7 +1113,7 @@ def track(
         seed=seed,
         cohort=cohort,
         kind=kind,
-        config=config,
+        config=config.model_dump(mode="json") if isinstance(config, BaseModel) else config,
         continues=continues,
         directory=directory,
         namespace=namespace,
@@ -1015,6 +1131,7 @@ def track(
         strict=strict,
         metric_name_limit=metric_name_limit,
         inherited=None if handed is None else handed.checkpoint,
+        seed=declared.declaration.seed or 0,
     )
 
 

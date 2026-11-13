@@ -5,8 +5,10 @@ recovery promise through the retained mutable out carrier
 (`scratch/questions.md`, reproduced by `scratch/state-publication.py`).
 Direction given the same day: "snapshot directory + pointer published last,
 recovery follows the pointer", and on cost, Jack Heart: "local storage
-probably fine, but ideally avoid remote extra storage". The layout below and
-`docs/training.md` show it; `scratch/questions.md` lists what it leaves open.
+probably fine, but ideally avoid remote extra storage". Then: saves are
+self-contained ("1b is fine"), the launcher cleans up where a worker cannot
+("2a is the best of thse options"). The layout below and `docs/training.md`
+show it; `scratch/questions.md` has his words and what is unanswered.
 
 2026-11-13. Written from the day's exploration; every quoted remark is in full
 at `1666be1:scratch/positioning.md`, the ontology review at
@@ -190,9 +192,10 @@ Details that matter:
 - **`run.save()`** is called every pass. Etude writes on the last pass before
   a stop and otherwise on an interval (default by wall time, overridable with
   `every=` in steps). The write replaces the previous state whole or not at
-  all: a new immutable save folder, then the pointer naming it, then deletion
-  of the save before. Recovery and `run.resume` follow the pointer. Unchanged
-  files are not uploaded again; a bucket holds two saves only in between.
+  all: a new self-contained save folder, then the pointer naming it.
+  Recovery and `run.resume` follow the pointer. Delivery sends only the save
+  the pointer names, whole, then the pointer; Etude removes replaced saves
+  (the courier, or the controller under upload-only grants).
 - **`run.checkpoint(policy=model)`** writes named objects the same way state
   is written, so "a lot of the exports... look the same". One call is one
   checkpoint and one player, however many models it holds. A single path
@@ -218,7 +221,7 @@ framework, without Etude.
   out/
     state/
       current.json                {"save": "save-00000007"}; the only file rewritten, published last
-      save-00000007/              one save; immutable; the one before is deleted after the pointer moves
+      save-00000007/              one save; self-contained and immutable; replaced ones are removed by Etude
         state.json                {"at": {"updates": 400}, "seed": 0, "commit": "...", "extra": {...}, "files": {"model": "model.pt", ...}}
         model.pt                  the framework's own format (torch.save of a state_dict)
         optimizer.pt
@@ -273,7 +276,8 @@ hand.
 | a new run, on machines | `etude launch job.py [--rent ...]` | always new |
 | the same run, after a lost machine or `Stopped` | none; the launcher calls again | a new attempt of the same run |
 | the same run, after it ended unfinished | `etude run train.py --resume RUN`, `etude launch job.py --resume RUN` | a new attempt of the same run, on current code |
-| further, or changed | `etude continue --run RUN --until ...` | a new run descended from the first (as built) |
+| the same run, further | `--resume RUN --until ...` on either | a new attempt of the same run, finished or not (Open 2) |
+| changed, or a branch | `etude continue --run RUN --config ...` | a new run descended from the first (as built) |
 
 - A run id may be chosen (by default the job's name and seed; `--name` locally; `RunRequest(id=...)` underneath).
   It is unique within its experiment. The authority is the run's folder:
@@ -281,7 +285,8 @@ hand.
   computer. The launcher also refuses early, before renting.
 - A taken name is refused, never resumed. This changes `declare`, which today
   resumes a re-used name.
-- `--resume` refuses a finished run and a changed config or seed.
+- `--resume` refuses a changed config or seed, and a finished run given no
+  later target.
 - `etude run` replaces `local_launch` in user code and Manabot's
   `train --out`. Exit codes: 0 finished, 75 stopped, other failed.
 - New commands print JSON with `--json` from the start (EXP-59 covers the
@@ -443,15 +448,15 @@ population reads and ratings (EXP-60); a spending limit across launches
 
 ## Open
 
-Jack Heart has not settled these; the design takes the first option and the
-change is cheap either way.
-
-1. The name `track`: "tracking doesnt clearly say like 'save logs, and
-   checkpoints, ...'". Kept; alternatives `record`, `open_run`.
-2. `etude continue` with nothing changed but the target: a child run (built)
-   or the same run extended.
-3. Whether the docs show saving games in flight (Jace keeps unfinished games
-   between batches) or say an attempt starts them fresh.
-4. Which public, non-Magic example the docs and the front-page clip use.
-5. How `run.save()` decides it is due when not stopping: wall time (taken) or
-   a count.
+1. The name `track` stands. The concern about two classes named `Run` was
+   resolved with `RunRequest`; Jack Heart did not explicitly choose the name
+   `track`.
+2. Jack Heart chose "Both": `--resume RUN --until ...` extends the same run,
+   including a finished run; `continue` creates a child when config changes.
+   The same config and seed identify the same run.
+3. Jack Heart chose "Show how to keep them" for games in flight. The docs
+   show an object holding pending games passed to `run.resume`.
+4. The public non-Magic example remains unanswered. Use a tiny game shipped
+   with Etude, also for the two-model acceptance example.
+5. Save cadence outside a stop remains unanswered. Use wall time by default,
+   or a step count when `every=` is given.
