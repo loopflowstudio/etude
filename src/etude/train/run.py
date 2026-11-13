@@ -915,7 +915,8 @@ def track(
     launched = os.environ.get("ETUDE_EXPERIMENT") or None
     if experiment is not None and launched not in (None, experiment):
         raise EtudeError("experiment_differs_from_launch", 409) from ValueError(
-            f"track(experiment={experiment!r}) in a run etude launch started for {launched!r}"
+            f"track(experiment={experiment!r}) in a run etude launch started for {launched!r};"
+            " omit experiment= here, or name it on the launched Job"
         )
     experiment = experiment or launched
     if experiment is None:
