@@ -42,8 +42,8 @@ from etude.launch.storage.download import Download, download
 from etude.launch.storage.s3 import Bucket, Grant, Version
 from etude.launch.storage.transport import attribute
 from etude.launch.usage import Transfer
+from etude.out import MEMBERSHIP, OutFiles
 from etude.storage_timeout import StorageUnavailable
-from etude.working import MEMBERSHIP, WorkingFiles
 
 # How long a link lasts where no rental bounds it: a session on a machine you
 # own, and links the launcher reads itself. A rented session's grants last
@@ -73,7 +73,7 @@ def _attribute_session[**P, R](
 
 
 class BucketJournal:
-    """A storage's folder, laid out by run, with each machine's working files apart.
+    """A storage's folder, laid out by run, with each machine's session files apart.
 
         PREFIX/RUN/                     everything about one run, from every attempt
           attempts/ATTEMPT.log/OFFSET   what the job printed, in pieces by first byte
@@ -214,7 +214,7 @@ class BucketJournal:
         return links
 
     def _restore(self, works: Sequence[Work]) -> dict[str, ReadLink]:
-        """One listing per resumed run: records, checkpoints and all working files."""
+        """One listing per resumed run: records, checkpoints and all out files."""
         links: dict[str, ReadLink] = {}
         for work in works:
             if not work.resumes:
@@ -237,10 +237,10 @@ class BucketJournal:
 
         Staged in a folder on this computer, then given as a host holding it
         gives it (`etude.carriage.restore_set`, or with `key` `recorded_file`):
-        one listing, the declaration, checkpoint records and working files.
+        one listing, the declaration, checkpoint records and out files.
         A copied checkpoint passes through the verified cache. With `key`,
         only that file and the checkpoint records are read. Missing or damaged
-        working files raise `StorageUnavailable`; an absent selected checkpoint
+        out files raise `StorageUnavailable`; an absent selected checkpoint
         raises `FileNotFoundError`.
         """
         folder = self._run(run)
@@ -264,11 +264,11 @@ class BucketJournal:
             if key is None and MEMBERSHIP in listed:
                 raw = self._bucket.get(folder + MEMBERSHIP)
                 if raw is None:
-                    raise StorageUnavailable("working directory membership is missing")
-                members = set(WorkingFiles.model_validate_json(raw).files)
+                    raise StorageUnavailable("out membership is missing")
+                members = {file.key for file in OutFiles.model_validate_json(raw).files}
                 (root / "out").mkdir(exist_ok=True)
                 if not members <= listed.keys():
-                    raise StorageUnavailable("working directory member is missing")
+                    raise StorageUnavailable("out member is missing")
             recorded = recorded_files(root)
             for name, size in listed.items():
                 if members is not None and name not in members:

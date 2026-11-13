@@ -16,12 +16,12 @@ from etude.launch.schemas import Delivery, Inbox, Work
 from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.s3 import Bucket, Keys, Reply
 from etude.launch.worker.courier import Courier
+from etude.out import MEMBERSHIP, OutFile, OutFiles
 from etude.run.storage import DirectoryStorage
 from etude.storage_timeout import StorageUnavailable
 from etude.train.read import read
 from etude.train.records import Step
 from etude.train.run import track
-from etude.working import MEMBERSHIP, WorkingFiles
 from tests.launch.test_runpod_machines import BucketObjects, Observed, Storage, machine
 from tests.launch.test_worker_attempts import local
 from tests.run.storage import MeasuredStorage
@@ -106,6 +106,10 @@ def test_courier_hashes_mutable_out_and_restores_every_file_once(
         "etude/run1/out/weights/model.json",
         "etude/run1/run.json",
     ]
+    assert OutFiles.model_validate_json(storage.objects["etude/run1/out.json"]).files == (
+        OutFile(key="out/state", sha256=sha256(b"save two").hexdigest(), size_bytes=8),
+        OutFile(key="out/weights/model.json", sha256=sha256(b"weights").hexdigest(), size_bytes=7),
+    )
     assert (restored / "out/state").read_bytes() == b"save two"
     transfers = [
         json.loads(line) for line in (fresh._home / "usage.jsonl").read_text().splitlines()
@@ -169,7 +173,7 @@ def test_deleted_files_stay_absent_after_restart_recovery_and_continuation(
     courier.carry_out()
     courier.carry_out()
     member = "etude/run1/" + MEMBERSHIP
-    assert WorkingFiles.model_validate_json(storage.objects[member]).files == ()
+    assert OutFiles.model_validate_json(storage.objects[member]).files == ()
     assert storage.objects["etude/run1/out/final.pt"] == b"immutable weights"
     assert storage.writes[member] == 2
     journal = BucketJournal(
@@ -229,7 +233,9 @@ def test_deleted_files_stay_absent_after_restart_recovery_and_continuation(
     # mistake its retained storage object for membership.
     (root / "out/state").write_bytes(b"saved")
     courier.carry_out()
-    assert WorkingFiles.model_validate_json(storage.objects[member]).files == ("out/state",)
+    assert OutFiles.model_validate_json(storage.objects[member]).files == (
+        OutFile(key="out/state", sha256=sha256(b"saved").hexdigest(), size_bytes=5),
+    )
     fresh.restore(journal._restore([work]))
     assert (restored / "out/state").read_bytes() == b"saved"
     assert not (restored / "out/final.pt").exists()
@@ -237,8 +243,10 @@ def test_deleted_files_stay_absent_after_restart_recovery_and_continuation(
     source = MeasuredStorage(BucketObjects(storage, "b"))
     child = continue_from(record, "updates=4", source=source)
     assert [given.out for given in child.job.inputs] == ["state"]
-    assert source.got.count("etude/run1/out/state") == 1
-    assert "etude/run1/out/final.pt" not in source.got
+    assert source.got.count(member) == 1
+    assert not any("/out/" in key for key in source.got)
+    assert child.job.inputs[0].sha256 == sha256(b"saved").hexdigest()
+    assert child.job.inputs[0].size_bytes == 5
     # Direct host relay uses the live directory, not its earlier carried membership.
     (root / "out/state").unlink()
     put_back(restored, restore_set(root))
@@ -312,8 +320,9 @@ def test_continuation_initial_state_is_stored_before_its_first_claim(
     assert sent.count("etude/run1/out/state") == 1
 
 
-def test_failed_membership_delivery_keeps_the_previous_directory_until_replayed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("same_key", [False, True])
+def test_failed_membership_delivery_keeps_the_previous_membership_until_replayed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, same_key: bool
 ) -> None:
     storage = Writes()
     courier, _, root = machine(tmp_path, storage)
@@ -321,7 +330,8 @@ def test_failed_membership_delivery_keeps_the_previous_directory_until_replayed(
     (root / "out/old").write_bytes(b"old")
     courier._track("run1", done=False)
     (root / "out/old").unlink()
-    (root / "out/new").write_bytes(b"new")
+    key = "out/old" if same_key else "out/new"
+    (root / key).write_bytes(b"new")
     folder = courier._runs["run1"]
     write = folder.write_bytes
 
@@ -333,14 +343,46 @@ def test_failed_membership_delivery_keeps_the_previous_directory_until_replayed(
     monkeypatch.setattr(folder, "write_bytes", fail_membership)
     with pytest.raises(StorageUnavailable, match="interrupted"):
         courier._track("run1", done=False)
-    assert storage.objects["etude/run1/out/new"] == b"new"
-    assert WorkingFiles.model_validate_json(storage.objects["etude/run1/out.json"]).files == (
-        "out/old",
+    assert storage.objects["etude/run1/" + key] == b"new"
+    assert OutFiles.model_validate_json(storage.objects["etude/run1/out.json"]).files == (
+        OutFile(key="out/old", sha256=sha256(b"old").hexdigest(), size_bytes=3),
     )
+    # Recovery still uses current bytes and listing lengths. A machine lost
+    # between data and membership delivery can restore the newer save.
+    journal = BucketJournal(
+        Place(name="east", bucket="b", prefix="etude", provider="s3", region="us-east-1"),
+        Bucket("b", "us-east-1", Keys(access_key="AKIA", secret_key="secret"), storage),
+    )
+    assert journal.held("run1")["out/old"] == (b"new" if same_key else b"old")
     monkeypatch.setattr(folder, "write_bytes", write)
     courier._track("run1", done=False)
-    assert WorkingFiles.model_validate_json(storage.objects["etude/run1/out.json"]).files == (
-        "out/new",
+    assert OutFiles.model_validate_json(storage.objects["etude/run1/out.json"]).files == (
+        OutFile(key=key, sha256=sha256(b"new").hexdigest(), size_bytes=3),
     )
-    assert storage.writes["etude/run1/out/new"] == 1
+    assert storage.writes["etude/run1/" + key] == (2 if same_key else 1)
     assert storage.writes["etude/run1/out.json"] == 2
+
+
+def test_courier_carries_a_changed_out_file_before_publishing_its_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = Writes()
+    courier, _, root = machine(tmp_path, storage)
+    monkeypatch.setenv("ETUDE_OUT", str(root / "out"))
+    with track(
+        experiment="e", run="run1", clocks=[Step("updates", "updates")], directory=root.parent
+    ) as run:
+        model = run.out / "model.pt"
+        model.write_bytes(b"draft")
+        courier._track("run1", done=False)
+        partial = model.with_suffix(".partial")
+        partial.write_bytes(b"final weights")
+        partial.replace(model)
+        run.checkpoint(model, updates=2)
+    courier.carry_out()
+    courier.carry_out()
+    assert storage.objects["etude/run1/out/model.pt"] == b"final weights"
+    assert storage.writes["etude/run1/out/model.pt"] == 2
+    assert OutFiles.model_validate_json(storage.objects["etude/run1/out.json"]).files == (
+        OutFile(key="out/model.pt", sha256=sha256(b"final weights").hexdigest(), size_bytes=13),
+    )

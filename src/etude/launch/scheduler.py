@@ -1938,7 +1938,7 @@ class Scheduler:
     def _relay(self, attempt: RunAttempt, run: RunRecord) -> bool:
         """Hand an attempt what it needs of runs' folders from the machines that last ran them.
 
-        A later attempt gets its run's records, working directory and latest
+        A later attempt gets its run's records, out and latest
         checkpoint. Initial directory inputs share one relay of the parent;
         other run inputs get just their named file. A machine that reads the holder's
         storage reads them from there; any other is given them from the

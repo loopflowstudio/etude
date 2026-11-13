@@ -2,6 +2,7 @@
 
 import json
 import sys
+from hashlib import sha256
 from importlib import import_module
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from etude.jobs import continue_from, continued_config
 from etude.launch.errors import LauncherError
 from etude.launch.job_file import read_job_file
 from etude.launch.records import Input, Job
+from etude.run.delivery import sync
 from etude.run.records import Attempt
 from etude.run.storage import DirectoryStorage
 from etude.train.read import read
@@ -53,8 +55,9 @@ def train(config: Config) -> None:
 
 
 @pytest.mark.parametrize("historical", [False, True])
+@pytest.mark.parametrize("carried", [False, True])
 def test_continuation_and_report_use_the_same_position_after_an_empty_attempt(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, historical: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, historical: bool, carried: bool
 ) -> None:
     scheduler = local(tmp_path)
     parent = scheduler.queue(Job(command="train", max_hours=1), "local")
@@ -64,6 +67,8 @@ def test_continuation_and_report_use_the_same_position_after_an_empty_attempt(
         experiment="recipe", run=parent, clocks=[Step("updates", "updates")], directory=source
     ) as run:
         (run.out / "state").write_bytes(b"optimizer state")
+        (run.out / "model").write_bytes(b"weights")
+        run.checkpoint(run.out / "model", updates=6)
         run.log({"loss": 1}, updates=6)
     data = read(source, "recipe", parent)
     # Old records can declare a resume point before logging; new empty attempts cannot.
@@ -76,11 +81,21 @@ def test_continuation_and_report_use_the_same_position_after_an_empty_attempt(
     )
     (source / parent / "metrics/abcdef123456.json").write_text(attempt.model_dump_json())
     position = 4 if historical else 6
-    storage = MeasuredStorage(DirectoryStorage(source))
+    destination = DirectoryStorage(tmp_path / "bucket" if carried else source)
+    if carried:
+        assert sync(source, storages=[destination]) == {}
+    storage = MeasuredStorage(destination)
     child = continue_from(scheduler.record(parent), f"updates={position + 1}", source=storage)
     (lineage,) = child.job.environment
     assert ParentRun.model_validate_json(lineage.value).at == {"updates": position}
-    assert storage.listings == 2 and storage.got.count(f"{parent}/out/state") == 1
+    assert storage.listings == 2
+    assert storage.got.count(f"{parent}/out.json") == int(carried)
+    out_reads = [key for key in storage.got if key.startswith(f"{parent}/out/")]
+    assert out_reads == ([] if carried else [f"{parent}/out/model", f"{parent}/out/state"])
+    assert {i.key: (i.sha256, i.size_bytes) for i in child.job.inputs} == {
+        "out/model": (sha256(b"weights").hexdigest(), len(b"weights")),
+        "out/state": (sha256(b"optimizer state").hexdigest(), len(b"optimizer state")),
+    }
     assert training([read(source, "recipe", parent)]).runs[0].reached == {"updates": position}
 
 

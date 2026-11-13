@@ -201,9 +201,9 @@ path to write or test.
   this loop without changing its config. The clock must be declared in
   `track(clocks=...)`. Values are numeric, including fractional time clocks;
   a loop that requires an integer count can use `int(run.until(...))`.
-- **`run.out` is the run's directory**, a `Path` that exists. It belongs to
-  the run, not to an attempt: every attempt of a run is given the same
-  directory with everything earlier attempts left in it. Keep whatever a later
+- **`run.out` is the run directory**, a `Path` that exists. It belongs to
+  the run, not to an attempt: retries reuse it on the same machine; on another
+  machine they restore its portable files as last carried. Keep whatever a later
   call needs to go on there: learner and optimizer state, replay data, a
   receipt for a check that need not run twice.
 - **Under a launch Etude carries it.** `out` is `RUN/out/` in the run's folder,
@@ -217,7 +217,7 @@ path to write or test.
   would pay to upload it. Anything under a folder whose name starts with `.`
   stays on the machine. Each completed delivery records which files belong
   in `out`: deleting a file removes it from the next recovery or continuation,
-  and recovery clears stale working files on a reused host. Storage retains
+  and recovery clears stale out files on a reused host. Storage retains
   deleted checkpoint bytes for explicit checkpoint reads; they do not reappear
   in `out`. An empty directory stays empty.
 - **Outside a launch the caller names it.** `local_launch(out=DIR,
@@ -385,12 +385,12 @@ run.tag(model, "best")  # tags can change later
   declared clock stood, numbered within the run from one, across every attempt
   on every machine. `checkpoint` returns its reference; pass that to whatever
   evaluates the model.
-- **Etude stores the file, in your storage**, at
-  `PREFIX/RUN/checkpoints/CLOCK-VALUE.EXT`, uploaded in the background before
-  its record. The copy is taken before `checkpoint` returns, so saving over the
-  same path afterwards is safe, and the call takes about as long as writing the
-  file did. A JSON model uses `.json.data` to keep it distinct from the JSON
-  checkpoint record. Removing stored files by rule is not built.
+- **Etude stores the file, in your storage.** A file in `run.out` is recorded
+  in place and must stay unchanged. Other local files are copied to
+  `PREFIX/RUN/checkpoints/CLOCK-VALUE.EXT` before `checkpoint` returns, so the
+  caller can overwrite its source. Both are uploaded before their records.
+  A copied JSON model uses `.json.data` to distinguish it from its record.
+  Removing stored files by rule is not built.
 - **Nothing recorded is replaced.** Recording the same model at the same
   coordinate again returns the existing reference and sends nothing. A
   different model at a recorded coordinate is a new checkpoint,
@@ -399,13 +399,13 @@ run.tag(model, "best")  # tags can change later
   record. Only tags change later.
 - **Resume from the latest**, when the job keeps no state of its own in
   [`run.out`](#a-run-directory-a-stop-signal-and-running-again). A later
-  attempt of a run sees every checkpoint
-  recorded so far; on another machine the launcher restores the records and
-  the latest file before the job starts, and ordinals continue. A continuation
+  attempt sees every checkpoint record, and ordinals continue. On another
+  machine the launcher restores the latest copied checkpoint and files still
+  in out; a removed out checkpoint's record can refer to an unavailable file.
+  A continuation
   started from a chosen checkpoint (`etude continue --ordinal`) gets that
-  checkpoint until it records its own. Its file is on this machine:
-  `latest = run.latest_checkpoint()`, then load
-  `urllib.parse.urlparse(latest.artifact.uri).path`; it is `None` on a first start.
+  checkpoint until it records its own. `run.latest_checkpoint()` relocates
+  the address when its file is present here; it returns `None` with no record.
 - **Readers give storage addresses.** `etude checkpoints --source` and
   `etude.train.read` report each file where it is in the source read, not
   where the machine that wrote it kept it; a record whose file has not arrived

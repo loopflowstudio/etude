@@ -18,7 +18,7 @@ function's parameter type on the machine; a config that would not survive that
 is refused here, before anything is launched.
 
 A continuation (`continue_from`) is a new run of a parent's job and seed with
-a further target, seeded from the parent's working directory, or a selected
+a further target, seeded from the parent's out, or a selected
 checkpoint. This module reads the parent's tracking and hands over verified
 file inputs and lineage in `ETUDE_CONTINUES`.
 
@@ -69,13 +69,13 @@ from etude.launch.records import (
     number,
     parse_target,
 )
+from etude.out import MEMBERSHIP, OutFile, OutFiles
 from etude.run.errors import EtudeError
 from etude.run.listing import as_storage, declared, run_folders
 from etude.run.records import ArtifactRef, Record, SourceKey
 from etude.run.storage import Storage
 from etude.train.read import read
 from etude.train.records import ParentRun
-from etude.working import MEMBERSHIP, WorkingFiles
 
 
 class JobOptions(TypedDict, total=False):
@@ -260,43 +260,19 @@ def continue_from(
     inherited_input = None if previous is None else ParentRun.model_validate_json(previous).input
     inputs = {i.name: i for i in parent.spec.inputs if i.name != inherited_input and i.out is None}
     parent_key = SourceKey(namespace=declaration.namespace, kind="run", source_id=parent.id)
-    # An explicit checkpoint needs no working-directory reads. Otherwise prefer
-    # one physical copy of the run, using its carried membership when present.
-    folder = next(
-        (
-            folder
-            for folder in folders
-            if ordinal is None
-            and (
-                folder + MEMBERSHIP in keys
-                or folder + OUT_PRESENT in keys
-                or any(k.startswith(folder + "out/") for k in keys)
-            )
-        ),
-        None,
-    )
-    if folder is not None:
-        if folder + MEMBERSHIP in keys:
-            files = WorkingFiles.model_validate_json(storage.get(folder + MEMBERSHIP)).files
-        else:
-            files = tuple(
-                key[len(folder) :]
-                for key in sorted(keys)
-                if key.startswith(folder + "out/")
-                and not any(part.startswith(".") for part in key[len(folder) :].split("/"))
-                and not key.endswith((".partial", ".open"))
-            )
+    # An explicit checkpoint needs no out reads, even when the parent has out.
+    out = None if ordinal is not None else _parent_out(storage, folders, keys)
+    if out is not None:
         # A recipe may save a checkpoint without logging scalar rows.
         at = {**(data.checkpoints[-1].at if data.checkpoints else {}), **data.reached}
-        for index, key in enumerate(files):
-            body = storage.get(folder + key)
+        for index, member in enumerate(out.files):
             name = _input_name(f"parent-out-{index}", inputs)
             inputs[name] = Input(
                 name=name,
-                out=key.removeprefix("out/"),
-                key=key,
-                sha256=sha256(body).hexdigest(),
-                size_bytes=len(body),
+                out=member.key.removeprefix("out/"),
+                key=member.key,
+                sha256=member.sha256,
+                size_bytes=member.size_bytes,
                 run=parent.id,
             )
         handed = ParentRun(parent=parent_key, at=at)
@@ -346,6 +322,31 @@ def continue_from(
         }
     )
     return Run(job=job, seed=parent.seed, params=dict(parent.params), source=parent.source)
+
+
+def _parent_out(storage: Storage, folders: Sequence[str], keys: Sequence[str]) -> OutFiles | None:
+    """Choose one physical out; absent membership requires reading and hashing its files.
+
+    None means no out exists, so continuation may use a checkpoint. Empty out
+    is a deliberate state and must not resurrect retained checkpoint bytes.
+    """
+    for folder in folders:
+        if folder + MEMBERSHIP in keys:
+            return OutFiles.model_validate_json(storage.get(folder + MEMBERSHIP))
+        out_keys = sorted(key for key in keys if key.startswith(folder + "out/"))
+        if not out_keys and folder + OUT_PRESENT not in keys:
+            continue
+        files: list[OutFile] = []
+        for full_key in out_keys:
+            key = full_key[len(folder) :]
+            if any(part.startswith(".") for part in key.split("/")) or key.endswith(
+                (".partial", ".open")
+            ):
+                continue
+            body = storage.get(full_key)
+            files.append(OutFile(key=key, sha256=sha256(body).hexdigest(), size_bytes=len(body)))
+        return OutFiles(files=tuple(files))
+    return None
 
 
 def _input_name(name: str, inputs: Mapping[str, Input]) -> str:

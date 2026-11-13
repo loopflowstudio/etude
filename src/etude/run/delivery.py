@@ -9,23 +9,25 @@ may be repeated or interrupted at any point: a replay is harmless.
 from __future__ import annotations
 
 import threading
-from collections.abc import Container, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from hashlib import file_digest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from etude.carriage import (
     EVAL_BLOCK_PACK,
+    RecordedFile,
     checkpoint_file,
     immutable,
     listing,
     recorded_files,
     retired,
 )
+from etude.out import MEMBERSHIP, OutFile, OutFiles
 from etude.run.block_file import parse
 from etude.run.records import RunFile
 from etude.run.storage import DirectoryStorage, Storage, run_prefix
-from etude.working import MEMBERSHIP, WorkingFiles
 
 
 class RunFiles:
@@ -48,13 +50,6 @@ class RunFiles:
         """
         return [key for key in listing(self.root, tail_seconds=self.tail_age) if key != MEMBERSHIP]
 
-    def fingerprint(self, key: str, recorded: Container[str] | None = None) -> str:
-        """Immutable files are sent once; others are hashed, so a change is sent again."""
-        if immutable(key, recorded_files(self.root) if recorded is None else recorded):
-            return "immutable"
-        with (self.root / key).open("rb") as stream:
-            return file_digest(stream, "sha256").hexdigest()
-
     def removed(self) -> list[str]:
         """Every path, relative to the run, that a writer has retired."""
         return retired(self.root)
@@ -71,21 +66,22 @@ class RunFiles:
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_text(fingerprint)
 
-    def pending(self, destination: str, keys: Sequence[str] | None = None) -> list[tuple[str, str]]:
-        pending: list[tuple[str, str]] = []
-        recorded = recorded_files(self.root)
-        for key in self.deliverable() if keys is None else keys:
-            mark = self.fingerprint(key, recorded)
-            if self.shipped(destination, key) != mark:
-                pending.append((key, mark))
-        return pending
-
 
 @dataclass(frozen=True)
 class Delivery:
     key: str
     fingerprint: str
     body: bytes | Path
+
+
+def _fingerprint(key: str, path: Path, recorded: Mapping[str, RecordedFile]) -> str:
+    """Use recorded out digests; hash mutable files and send other immutable files once."""
+    if key.startswith("out/") and key in recorded:
+        return recorded[key].sha256
+    if immutable(key):
+        return "immutable"
+    with path.open("rb") as stream:
+        return file_digest(stream, "sha256").hexdigest()
 
 
 class StorageDestination:
@@ -99,38 +95,60 @@ class StorageDestination:
         prefix = run_prefix(run)
         # Freeze mutable objects together with the permanent-file listing. No
         # network I/O holds the writer's lock, and large immutable files stream.
-        deliveries: list[Delivery] = []
-        with files.lock:
-            retired = files.removed()
-            keys = files.deliverable()
-            working = WorkingFiles(
-                files=tuple(sorted(key for key in keys if key.startswith("out/")))
-            )
-            for key, fingerprint in files.pending(self.name, keys):
-                block = parse(key)
-                body = (
-                    files.root / key
-                    if checkpoint_file(key)
-                    or key.startswith("out/")
-                    or key.endswith("/" + EVAL_BLOCK_PACK)
-                    or block is not None
-                    and block.level >= 2
-                    else (files.root / key).read_bytes()
-                )
-                deliveries.append(Delivery(key, fingerprint, body))
-        for delivery in deliveries:
-            # A missing file aborts the pass too: a concurrent sync/compaction may
-            # have replaced it with a block that was not in this snapshot.
-            if isinstance(delivery.body, Path):
-                self.storage.put_file(prefix + delivery.key, delivery.body)
-            else:
-                self.storage.put(prefix + delivery.key, delivery.body)
-            files.mark(self.name, delivery.key, delivery.fingerprint)
-        if (files.root / "out").is_dir() or files.shipped(self.name, MEMBERSHIP) is not None:
-            membership = working.model_dump_json()
-            if files.shipped(self.name, MEMBERSHIP) != membership:
-                self.storage.put(prefix + MEMBERSHIP, membership.encode())
-                files.mark(self.name, MEMBERSHIP, membership)
+        with TemporaryDirectory(prefix=".out-", dir=files.root) as staging:
+            deliveries: list[Delivery] = []
+            with files.lock:
+                retired = files.removed()
+                keys = files.deliverable()
+                recorded = recorded_files(files.root)
+                out: list[OutFile] = []
+                for index, key in enumerate(keys):
+                    path = files.root / key
+                    if key.startswith("out/"):
+                        # Recipes save by atomic replacement. A link keeps the
+                        # fingerprint and upload on that same inode, without a copy.
+                        saved = Path(staging) / str(index)
+                        saved.hardlink_to(path)
+                        path = saved
+                    fingerprint = _fingerprint(key, path, recorded)
+                    if key.startswith("out/"):
+                        out.append(
+                            OutFile(
+                                key=key,
+                                sha256=fingerprint,
+                                size_bytes=path.stat().st_size,
+                            )
+                        )
+                    if files.shipped(self.name, key) == fingerprint:
+                        continue
+                    block = parse(key)
+                    body = (
+                        path
+                        if checkpoint_file(key)
+                        or key.startswith("out/")
+                        or key.endswith("/" + EVAL_BLOCK_PACK)
+                        or block is not None
+                        and block.level >= 2
+                        else (files.root / key).read_bytes()
+                    )
+                    deliveries.append(Delivery(key, fingerprint, body))
+                if (files.root / "out").is_dir() or files.shipped(
+                    self.name, MEMBERSHIP
+                ) is not None:
+                    membership = OutFiles(
+                        files=tuple(sorted(out, key=lambda file: file.key))
+                    ).model_dump_json()
+                    if files.shipped(self.name, MEMBERSHIP) != membership:
+                        # The same queue publishes membership only after all its files succeed.
+                        deliveries.append(Delivery(MEMBERSHIP, membership, membership.encode()))
+            for delivery in deliveries:
+                # A missing file aborts the pass too: a concurrent sync/compaction may
+                # have replaced it with a block that was not in this snapshot.
+                if isinstance(delivery.body, Path):
+                    self.storage.put_file(prefix + delivery.key, delivery.body)
+                else:
+                    self.storage.put(prefix + delivery.key, delivery.body)
+                files.mark(self.name, delivery.key, delivery.fingerprint)
         for key in retired:
             if files.shipped(self.name, key) is not None and self.storage.delete(prefix + key):
                 files._marker(self.name, key).unlink(missing_ok=True)

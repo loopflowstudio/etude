@@ -293,7 +293,7 @@ class Run:
 
     @property
     def out(self) -> Path:
-        """The run's persistent working directory, named by its launch."""
+        """The run directory (out), named by its launch."""
         if self._out is None:
             raise EtudeError("run_directory_not_named", 422)
         return self._out
@@ -473,12 +473,12 @@ class Run:
         return record.artifact
 
     def latest_checkpoint(self) -> CheckpointRecord | None:
-        """The checkpoint to resume from: the latest this run recorded, on any attempt.
+        """The latest checkpoint record, or an explicitly inherited parent checkpoint.
 
-        A later attempt sees every earlier attempt's records, restored to a
-        fresh machine before the job starts, and its file at the record's
-        `artifact.uri`, which is on this machine. A continuation gets its
-        parent's checkpoint until it records its own. None when there is none.
+        Relocate its address when the file is present here. A removed out file
+        is not restored just because its record survives; its recorded address
+        may be unavailable. A continuation seeded from out inherits out
+        files and lineage, not a checkpoint record. None when there is no record.
         """
         if not self._recorded:
             return self._inherited

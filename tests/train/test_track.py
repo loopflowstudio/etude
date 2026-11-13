@@ -491,7 +491,10 @@ def test_finish_retries_retained_files_when_storage_recovers(tmp_path: Path) -> 
     assert not run._shipper.is_alive()
     assert destination.get("final/state.json") == (run.files.root / "state.json").read_bytes()
     assert destination.requests == len(destination.keys("final")) + 1
-    assert not run.files.pending(destination.name)
+    assert all(
+        destination.get("final/" + key) == (run.files.root / key).read_bytes()
+        for key in run.files.deliverable()
+    )
 
 
 def test_a_job_relaunched_at_another_commit_pools_with_its_seeds(

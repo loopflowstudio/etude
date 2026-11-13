@@ -10,9 +10,9 @@ twice (`immutable`): Etude's own blocks, tables and checkpoints, and any
 file an author writes under a run's `artifacts/` folder. An eval run's
 block (`etude.eval.block`) is sent data first and index last. Each carrier
 keeps its own change detection and storage I/O. A fresh machine restores
-records, the checkpoint `resume_file` names and every working file in `out/`.
+records, the checkpoint `resume_file` names and every file in `out/`.
 Without shared storage, `restore_set` and `put_back` relay that state between
-hosts; `recorded_file` selects a single checkpoint or working file for an input.
+hosts; `recorded_file` selects a single checkpoint or out file for an input.
 A checkpoint file's name is never used twice (`taken`), so no key under
 `checkpoints/` ever holds two different files.
 
@@ -41,7 +41,7 @@ class Mismatch(ValueError):
 # Names of checkpoint files held elsewhere (in storage, on another host) and
 # not here, one per line. A dot-name, so no carrier ever sends it.
 STORED = f"{CHECKPOINTS}/.stored"
-# A complete relay preserves an empty working directory as well as its files.
+# A complete relay preserves an empty out as well as its files.
 OUT_PRESENT = ".out"
 
 
@@ -69,7 +69,7 @@ def _eval_block(folder: str) -> bool:
     return parent.rpartition("/")[2] == EVAL_BLOCKS and not name.startswith(".")
 
 
-def immutable(key: str, recorded: Container[str] = ()) -> bool:
+def immutable(key: str) -> bool:
     """Whether an object never changes once written: a metric block or tail, a
     table, a checkpoint, an eval run's block, or an author's file under `artifacts/`.
 
@@ -78,8 +78,6 @@ def immutable(key: str, recorded: Container[str] = ()) -> bool:
     `artifacts/`, at any depth, once; naming it by its content keeps that
     true. The key may sit under any folders.
     """
-    if key in recorded:
-        return True
     if "out" in PurePosixPath(key).parts:
         return False
     folder, _, name = key.rpartition("/")
@@ -98,10 +96,10 @@ def purpose(key: str, recorded: Container[str] = ()) -> Literal["checkpoint", "r
     return "checkpoint" if key in recorded or checkpoint_file(key) else "report"
 
 
-def _rank(key: str, recorded: Container[str]) -> int:
-    # Checkpoint files precede their records, and data the indexes and
-    # records that describe it, so a reader never finds a record first.
-    if key in recorded or checkpoint_file(key):
+def _rank(key: str) -> int:
+    # All out files precede records, including checkpoints recorded in place.
+    # Ordering needs only paths; carriers read records for verification.
+    if key.startswith("out/") or checkpoint_file(key):
         return 0
     if key.endswith("/" + EVAL_BLOCK_INDEX) and _eval_block(key.rpartition("/")[0]):
         return 2
@@ -135,15 +133,14 @@ def listing(root: Path, *, tail_seconds: float) -> list[str]:
         if path.suffix == ".tail" and tail_seconds > 0 and now - stat.st_mtime < tail_seconds:
             continue
         keys.append(name.as_posix())
-    recorded = recorded_files(root)
-    return sorted(keys, key=lambda key: (_rank(key, recorded), key))
+    return sorted(keys, key=lambda key: (_rank(key), key))
 
 
 def retired(root: Path) -> list[str]:
     """Tracking files a writer has replaced, from its `.removed` notes.
 
     Read before listing: a file retired during a pass is deleted only once a
-    later pass has sent what replaced it. Working-directory absence belongs
+    later pass has sent what replaced it. Out absence belongs
     to membership; recipe files are never interpreted as retirement notes.
     """
     lines: list[str] = []
@@ -253,7 +250,7 @@ def restore_set(root: Path) -> dict[str, bytes]:
     """What a later attempt on another host needs of this folder, by key.
 
     The declaration, every checkpoint record, the file `resume_file` names,
-    the whole working directory, and the note of every checkpoint name
+    all of out, and the note of every checkpoint name
     `taken`. Metric blocks and other copied milestones remain in storage.
     """
     keys = [f"{CHECKPOINTS}/{path.name}" for path in sorted((root / CHECKPOINTS).glob("*.json"))]
@@ -271,7 +268,7 @@ def restore_set(root: Path) -> dict[str, bytes]:
 
 
 def recorded_file(root: Path, key: str) -> dict[str, bytes]:
-    """One checkpoint with its record, or a working file, by key.
+    """One checkpoint with its record, or an out file, by key.
 
     What another host needs to be given that one file (`put_back` checks it
     against the record). Raises `FileNotFoundError` when the file is gone or
@@ -286,7 +283,7 @@ def recorded_file(root: Path, key: str) -> dict[str, bytes]:
 
 
 def reconcile_out(root: Path, keys: Container[str]) -> None:
-    """Remove stale portable files before restoring a complete working directory.
+    """Remove stale portable files before restoring out in full.
 
     Private and unfinished files belong to the local producer and stay local.
     Empty directories are removed so a restored file can replace a directory.
@@ -309,7 +306,7 @@ def reconcile_out(root: Path, keys: Container[str]) -> None:
 
 
 def put_back(root: Path, files: Mapping[str, bytes]) -> None:
-    """Restore relayed files, retaining existing records and replacing working files.
+    """Restore relayed files, retaining existing records and replacing out files.
 
     Records come first, so each checkpoint file is checked against the digest
     of the record that names it; a mismatch raises `Mismatch` and writes no file.
@@ -317,7 +314,7 @@ def put_back(root: Path, files: Mapping[str, bytes]) -> None:
     if any(not within(key) for key in files):
         raise Mismatch("a restored file must be within the run folder")
     # Only a complete relay includes the checkpoint-name ledger. A single
-    # input must never clear unrelated working files.
+    # input must never clear unrelated out files.
     if STORED in files:
         reconcile_out(root, files)
     ordered = sorted(files, key=lambda key: (checkpoint_file(key) or key.startswith("out/"), key))

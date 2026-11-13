@@ -1450,12 +1450,13 @@ def test_sdk_storage_failure_retains_files_and_recovers(
     destination = StorageDestination(storage)
     http.fault = "silent-upload"
     assert ship(files, "run", destination) == "unavailable: StorageUnavailable"
-    assert files.pending(storage.name) == [("run.json", files.fingerprint("run.json"))]
+    assert (root / "run.json").read_bytes() == b'{"retained":true}'
+    assert "/bucket/run/run.json" not in http.objects
     assert http.posts == 1
     http.fault = ""
     assert ship(files, "run", destination) is None
     assert http.objects["/bucket/run/run.json"] == (root / "run.json").read_bytes()
-    assert not files.pending(storage.name)
+    assert ship(files, "run", destination) is None
     assert http.posts == 2
     http.fault = fault
     with pytest.raises(StorageUnavailable):

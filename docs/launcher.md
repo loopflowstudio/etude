@@ -1059,9 +1059,9 @@ etude logs --run RUN                     # every attempt, and how each ended
 ```
 
 A run ends when it reaches its target, fails, is cancelled, or uses up its hours
-or dollars. Losing a machine does not end a run, and neither does a planned
-stop. It is tried again as a new RunAttempt of the same run: the job is called
-again with the run's directory (`run.out`, `ETUDE_OUT`) as earlier attempts
+or dollars, or exhausts its attempts. A lost machine or a planned stop can
+retry within those bounds. The job is called again as a new RunAttempt of the
+same run, with the run directory (`run.out`, `ETUDE_OUT`) as earlier attempts
 left it, and goes on from the state it kept there, or from the latest
 checkpoint its [tracking](tracking.md) recorded.
 
@@ -1077,8 +1077,12 @@ checkpoint its [tracking](tracking.md) recorded.
   run end `failed`, and nothing is called again.
 
 A stopped attempt is followed by another like a lost one, within the same
-bounds: the run's hours, dollars and `max_attempts` span all attempts. Hours
-count code execution; dollars include its attributed setup and failed
+bounds: the run's hours, dollars and `max_attempts` span all attempts.
+The default `max_attempts=3` includes planned stops: a healthy run needing a
+fourth rental window ends `stopped` after its third planned stop. Increase
+`max_attempts` on the job for a longer run.
+
+Hours count code execution; dollars include its attributed setup and failed
 attempts. A machine's window ending stops the job this way when it asks
 `run.stopping()`, and ends the attempt `lost` at the deadline when it does
 not; either starts another attempt if the run has limits and attempts left.
@@ -1091,7 +1095,7 @@ attempt's code starts at most once; uncertain starts remain fenced. `lost`
 denotes exhausted attempts or an unresolved start whose execution cannot
 safely be repeated.
 
-The launcher has no checkpoints of its own: a run's directory and checkpoints
+The launcher has no checkpoints of its own: out and checkpoints
 are its tracked files. They are carried to the bucket as they are written, so
 they survive pod deletion. A later attempt on the same machine finds the
 directory where it was. On a fresh machine with a bucket it is given back,
@@ -1109,8 +1113,9 @@ retains the run ID and seed. `etude continue` instead goes further than the
 target or branches from a completed run, making a new run with a parent.
 
 Delivery publishes changed `out.json` membership after its files succeed.
+Each entry names a key, SHA256 digest and byte length.
 Recovery and continuation exclude removed files, even if their bytes remain
-in storage. Recovery removes stale working files on a reused host. Deleted
+in storage. Recovery removes stale out files on a reused host. Deleted
 checkpoints remain available when selected explicitly;
 an empty `out` does not fall back to the latest checkpoint.
 
@@ -1128,7 +1133,7 @@ Training code reads `ETUDE_OUT`, `ETUDE_OUTPUT_DIR`, `ETUDE_STOP_FILE`,
 
 | Variable | What it is | Tracked code uses |
 | --- | --- | --- |
-| `ETUDE_OUT` | The run's directory, the same on every attempt, carried to storage as it is written and restored before each attempt. | `run.out` |
+| `ETUDE_OUT` | Out, the same on every attempt, carried to storage as it is written and restored before each attempt. | `run.out` |
 | `ETUDE_OUTPUT_DIR` | This attempt's output directory: `etude-result.json` and files to keep under `attempts/ATTEMPT/`. A later attempt does not see it. | nothing; tracking reports progress |
 | `ETUDE_STOP_FILE` | Appears when the attempt should stop. | `run.stopping()` |
 | `ETUDE_DEADLINE` | When the attempt's window ends, as an ISO time. The process is killed then. | `run.stopping()` |
@@ -1185,7 +1190,7 @@ only its clocks, and its experiment when its file is not one. A tracked script
 does not write `etude-result.json` itself: tracking reports its clocks.
 
 A storage holds one folder per run, shared by every attempt on every machine,
-and the machines' own working files apart:
+and the machines' own session files apart:
 
 ```text
 PREFIX/RUN/                      everything about one run
@@ -1194,8 +1199,8 @@ PREFIX/RUN/                      everything about one run
   attempts/ATTEMPT/NAME          files the job left in its output directory
   run.json  state.json  metrics/ the run's tracked files, as they are,
   checkpoints/                     every checkpoint tracking recorded among them
-  out/                           the run's directory (`run.out`), as the job keeps it
-  out.json                       files belonging to the last carried working directory
+  out/                           run directory (`run.out`), as the job keeps it
+  out.json                       keys, SHA256 digests and byte lengths in the last carried out
 PREFIX/sessions/SESSION/         one machine's instructions, inbox and notes
   out/worker.log/OFFSET          the worker's own log, in pieces named by first byte
   out/worker-log.json            where its pieces end
@@ -1286,14 +1291,17 @@ The launch target stays separate from config fields and takes precedence for
 its clock; Etude does not infer a config field from a clock name.
 
 `--ordinal N` starts from one recorded checkpoint instead. A historical parent
-without a working directory also uses its latest checkpoint; a recorded empty
-working directory stays empty. With a checkpoint input, the child's `out` starts empty
+without out also uses its latest checkpoint; a recorded empty
+out stays empty. With a checkpoint input, the child's `out` starts empty
 and the checkpoint file reaches the machine as an input of the parent run
 (`Input(run=PARENT, key=RECORDED_FILE)`), verified by digest, where
 `run.latest_checkpoint()` finds it. That key may be under `out/` when the
 checkpoint was recorded there by reference.
 
-`etude.jobs` reads the parent's files and records from `--source`, where the
+`etude.jobs` reads the parent's records and `out.json` from `--source`.
+Continuation uses those fingerprints without downloading out files; inputs
+are verified when delivered. Sources without membership, such as a local
+run, are hashed while creating the continuation. The source is where the
 parent's tracked folder is (its bucket, or a runs directory). Without
 `--source`, it reads this computer's runs directory, else the records on the
 owned host that last ran the parent. The copy comes from the bucket where the
@@ -1304,8 +1312,9 @@ can be read. Tracking is told the parent and where it stood in
 `ETUDE_CONTINUES`, and the child declares that lineage itself. The `continue`
 command retains the parent's pool and on-demand. With a bucket, the courier
 stores the child's initial directory before allowing the job to start, so an
-immediate machine loss can restore it. Each copied file is a verified input: continuation reads it once to record its digest. Keep the parent still
-until the child starts; if those bytes change before delivery, the child waits
+immediate machine loss can restore it. Each copied file is an input verified
+against its recorded digest and length. Keep the parent still until the child
+starts; if those bytes change before delivery, the child waits
 or reports an undelivered input instead of starting with different state.
 
 ## Ownership and failure behavior
@@ -1812,7 +1821,7 @@ with the same selected runtime and outputs directory, in separate shell processe
 shell exports and `cd` in setup do not alter the training shell. Use files for
 prepared state. Setup runs again on every attempt, including one that
 infrastructure recovery or a planned stop allocates; work to keep and reuse
-belongs in `prepare`, or in the run's directory. A nonzero setup or training
+belongs in `prepare`, or in out. A nonzero setup or training
 exit is terminal and is not replayed automatically, except training's planned
 stop (exit 75, [The run promise](#the-run-promise)).
 

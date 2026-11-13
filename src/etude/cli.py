@@ -453,7 +453,7 @@ def continue_run(
         ),
     ] = None,
     ordinal: Annotated[
-        int | None, typer.Option(help="a checkpoint instead of the parent's working directory")
+        int | None, typer.Option(help="a checkpoint instead of the parent's out")
     ] = None,
     cohort: Annotated[
         str | None, typer.Option(help="the new cohort's name, when continuing a cohort")
@@ -464,7 +464,7 @@ def continue_run(
     ] = None,
     max_usd: Annotated[str | None, typer.Option(help="the new cohort's dollar ceiling")] = None,
 ) -> None:
-    """Go past a run's target from its saved directory. This makes a new run with a parent."""
+    """Go past a run's target from its out. This makes a new run with a parent."""
     # Continuation joins the launcher's runs with tracking's checkpoints.
     import tempfile
     from decimal import Decimal
