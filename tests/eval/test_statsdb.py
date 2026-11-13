@@ -16,10 +16,10 @@ from etude.eval.convert import convert
 from etude.eval.match import Tables, environment, evaluate
 from etude.eval.query import compare, statsdb
 from etude.eval.records import CheckpointPlayer, Code, Inference, Match
+from etude.tracking.checkpoints import CheckpointRef, checkpoint_id
 from etude.tracking.errors import EtudeError
 from etude.tracking.records import ArtifactRef
 from etude.tracking.storage import DirectoryStorage
-from etude.train.records import CheckpointRef, checkpoint_id
 from tests.eval.games import play, play_game_seats
 from tests.eval.per_file import write_per_file
 from tests.run.storage import MeasuredStorage

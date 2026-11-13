@@ -29,8 +29,8 @@ from etude.eval.records import (
     TournamentRun,
     assemble,
 )
+from etude.tracking.checkpoints import CheckpointRef, checkpoint_id
 from etude.tracking.records import ArtifactRef
-from etude.train.records import CheckpointRef, checkpoint_id
 
 DIGEST = "0" * 64
 WORLD = Environment(name="world", files="1" * 64)

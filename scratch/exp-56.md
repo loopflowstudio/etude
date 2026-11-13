@@ -55,7 +55,9 @@ Replace these end to end:
 - Tracking `Attempt` -> the single `RunAttempt`, shared with the launcher.
 - Experiment `Checkpoint` and eval query's `_StoredCheckpoint`/`_StoredArtifact`
   are removed. One `CheckpointRecord` and one `CheckpointRef` live in
-  `etude.train.records`; keys are strings (old structured keys still load).
+  `etude.tracking.checkpoints`, which training and evaluation both import
+  (`tests/run/test_layout.py` forbids either importing the other); keys are
+  strings (old structured keys still load).
 - Eval `Model` -> `CheckpointPlayer`, keeping the `Player` union and stored
   kind; `.player(...)` replaces `.model(...)`. Report line -> job is still open.
 - Root `state.json` writer -> `outcome.json`; retain old outcome readers.
@@ -128,14 +130,18 @@ The query cache rebuilds at schema 14 so folder keys join their seated players.
 
 ## Verification
 
-2026-11-13 checkpoint pass: focused acceptance commands for
-`tests/train/test_checkpoints.py`, folder courier/worker inputs, folder
-continuation, historical keys, relative seats, query joins and immutable file
-versions: `uv run --extra train pytest` on focused checkpoint acceptance
-files/nodes plus `tests/eval/test_records.py -q`: 28 passed. `uv run mypy`,
-`uv run ruff check .` and `uv run ruff format --check .`: clean.
-Earlier 248-pass state check: `a8efc13:scratch/exp-56.md`. No gate, publication,
-landing or Graph changes. PR #103 stays draft.
+2026-11-13 compress pass. At `d3ef6bb` three things failed outside the 28
+focused checkpoint tests: the layout rule (train imported eval, eval imported
+train), `tests/test_page_evals.py` (fixture imported `ArtifactRef` from
+`etude.eval.records`) and so its six dependants. Fixed by the move above.
+Also cut: `carriage.named_file`, `RunFiles.deliverable`, and the out-recovery
+selection duplicated in `BucketJournal.held` and `Courier._restore`, now
+`etude.out.recovery`. `uv run --extra train pytest tests/run tests/eval
+tests/train tests/test_experiment.py tests/test_page_evals.py tests/test_jobs.py
+tests/test_continuation_out.py tests/test_page.py tests/test_smoke.py` plus the
+launch state, out, worker, transfer, layout, planned-stop, queue and
+measurement files: 451 passed, and the 10 that failed or errored (import
+pins, page evals) passed once fixed. mypy, ruff check and format clean. Not run: the rest of `tests/launch`. PR #103 stays draft.
 
 Counting pins moved by the state build, each with its reason beside it:
 
@@ -145,5 +151,6 @@ Counting pins moved by the state build, each with its reason beside it:
   every observation, whether or not the grant is upload-only:
   `tests/launch/test_transfers.py` control requests 42 -> 50. Unanswered:
   should that read happen only where the courier cannot delete?
-- `etude sync --seal` loads `etude.train.state` (`tests/train/test_cli.py`
-  25 -> 26).
+- `etude sync --seal` loads `etude.train.state` and
+  `etude.tracking.checkpoints` (`tests/train/test_cli.py` 25 -> 27); a report
+  loads the latter too (30 -> 31).

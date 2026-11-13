@@ -34,6 +34,7 @@ from pydantic import ConfigDict, PrivateAttr, SkipValidation, ValidationError
 
 from etude.carriage import checkpoint_key
 from etude.tracking.block_file import BlockFile, parse, select
+from etude.tracking.checkpoints import CheckpointRecord
 from etude.tracking.errors import EtudeError
 from etude.tracking.listing import as_storage, declared, run_folders, under
 from etude.tracking.records import (
@@ -60,7 +61,7 @@ from etude.train.block import (
     SeriesColumn,
 )
 from etude.train.manifest import BlockDescription, Manifest, StoredBlock, describe, fetch
-from etude.train.records import CheckpointRecord, RowTable, TablePoint
+from etude.train.records import RowTable, TablePoint
 
 type Floats = npt.NDArray[np.float64]
 

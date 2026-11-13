@@ -66,12 +66,12 @@ from etude.eval.records import (
     outcomes,
 )
 from etude.eval.schedule import ordered
+from etude.tracking.checkpoints import CheckpointRef
 from etude.tracking.declaration import declare
 from etude.tracking.errors import EtudeError
 from etude.tracking.listing import run_folders, under
 from etude.tracking.records import Digest, Record, RunFile
 from etude.tracking.storage import DirectoryStorage, Storage, default_root
-from etude.train.records import CheckpointRef
 
 if TYPE_CHECKING:
     import duckdb

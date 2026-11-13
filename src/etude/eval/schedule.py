@@ -19,7 +19,7 @@ from collections import deque
 from collections.abc import Iterator, Sequence
 
 from etude.eval.records import CheckpointPlayer, Match
-from etude.train.records import CheckpointId
+from etude.tracking.checkpoints import CheckpointId
 
 
 def checkpoints(match: Match) -> frozenset[CheckpointId]:

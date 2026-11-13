@@ -62,9 +62,9 @@ from pydantic import (
 )
 
 from etude.eval.source import digest_files, source_commit
+from etude.tracking.checkpoints import CheckpointId, CheckpointRef, checkpoint_id
 from etude.tracking.errors import EtudeError
 from etude.tracking.records import BUILT_IN_NAMES, Digest, Name, Record
-from etude.train.records import CheckpointId, CheckpointRef, checkpoint_id
 
 type Config = dict[str, JsonValue]
 type ColumnType = Literal["BOOLEAN", "BIGINT", "DOUBLE", "VARCHAR"]
@@ -1110,7 +1110,7 @@ def __getattr__(name: str) -> object:
         return CheckpointPlayer
     if name == "CheckpointKey":
         warnings.warn(
-            "CheckpointKey is now checkpoint_id from etude.train.records; removed in 0.5",
+            "CheckpointKey is now checkpoint_id from etude.tracking.checkpoints; removed in 0.5",
             DeprecationWarning,
             stacklevel=2,
         )

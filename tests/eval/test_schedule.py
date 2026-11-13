@@ -11,8 +11,8 @@ import duckdb
 from etude.eval.match import Tables, environment, evaluate
 from etude.eval.records import CheckpointPlayer, Code, Inference, Match
 from etude.eval.schedule import checkpoints, ordered
+from etude.tracking.checkpoints import CheckpointId, CheckpointRef, checkpoint_id
 from etude.tracking.records import ArtifactRef
-from etude.train.records import CheckpointId, CheckpointRef, checkpoint_id
 from tests.eval.games import play
 
 WORLD = environment("duel", config={"world": "w6"})

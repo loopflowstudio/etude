@@ -16,6 +16,7 @@ from typing import Annotated, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from etude.cache import Content
+from etude.carriage import within
 
 Name = Annotated[str, StringConstraints(min_length=1, max_length=200, pattern=r"^\S+$")]
 Writer = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{12}$")]
@@ -55,7 +56,7 @@ class ArtifactRef(Record):
     @model_validator(mode="after")
     def _portable_members(self) -> Self:
         for key in self.members:
-            if key.startswith("/") or {"", ".", ".."} & set(key.split("/")):
+            if not within(key):
                 raise ValueError("artifact members must be portable relative paths")
         return self
 

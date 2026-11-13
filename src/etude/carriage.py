@@ -342,7 +342,7 @@ class RecordedFile:
 def _recorded(root: Path) -> dict[int, RecordedFile]:
     """By ordinal: the file each checkpoint record names, where Etude stored one.
 
-    Reads the records (`etude.train.records.CheckpointRecord`) as plain JSON.
+    Reads the records (`etude.tracking.checkpoints.CheckpointRecord`) as plain JSON.
     A record that only references a model elsewhere names no file here.
     """
     recorded: dict[int, RecordedFile] = {}
@@ -393,11 +393,6 @@ def resume_file(root: Path) -> RecordedFile | None:
     """The file of the highest-ordinal checkpoint record in `root`, when Etude stored one."""
     recorded = _recorded(root)
     return recorded[max(recorded)] if recorded else None
-
-
-def named_file(root: Path, key: str) -> RecordedFile | None:
-    """The checkpoint file `key` as the record in `root` naming it describes it, when one does."""
-    return recorded_files(root).get(key)
 
 
 def _stored(root: Path) -> set[str]:

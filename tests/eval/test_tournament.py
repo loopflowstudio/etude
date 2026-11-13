@@ -28,10 +28,10 @@ from etude.eval.records import (
     TournamentRun,
 )
 from etude.eval.tournament import hold, played, scores, standings, stored_runs
+from etude.tracking.checkpoints import CheckpointRef, checkpoint_id
 from etude.tracking.errors import EtudeError
 from etude.tracking.records import ArtifactRef, Clock
 from etude.tracking.storage import DirectoryStorage
-from etude.train.records import CheckpointRef, checkpoint_id
 from etude.train.run import track
 from tests.eval.games import play, play_failing_deal_one
 from tests.experiments import authored

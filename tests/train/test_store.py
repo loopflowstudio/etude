@@ -14,6 +14,7 @@ import pytest
 from moto import mock_aws
 
 from etude.cache import Cache
+from etude.carriage import listing
 from etude.page import Pages, build
 from etude.tracking.block_file import block_key, tail_key
 from etude.tracking.delivery import RunFiles, StorageDestination, sync
@@ -191,9 +192,9 @@ def test_stale_tail_and_explicit_sealing(tmp_path: Path) -> None:
     builder.add(1000, {"step": 1}, {"value": 7})
     key = tail_key(0, writer)
     write_block(run.files.root, key, builder.columns(writer, 0))
-    assert key not in RunFiles(run.files.root).deliverable()
+    assert key not in listing(run.files.root, tail_seconds=60)
     os.utime(run.files.root / key, (time.time() - 61, time.time() - 61))
-    assert key in RunFiles(run.files.root).deliverable()
+    assert key in listing(run.files.root, tail_seconds=60)
     os.utime(run.files.root / key, None)
     # A dead process's unsealed log becomes the next block; stopped writers' tails go at once.
     (run.files.root / f"metrics/00000001-{writer}.open").write_text(
@@ -407,7 +408,7 @@ def test_reader_refreshes_vanished_tails_and_sequence_gaps(
     keys = storage.keys
     stale = True
 
-    def listing(prefix: str) -> list[str]:
+    def counted_keys(prefix: str) -> list[str]:
         nonlocal stale
         result = keys(prefix)
         if stale:
@@ -415,7 +416,7 @@ def test_reader_refreshes_vanished_tails_and_sequence_gaps(
             return [key for key in result if "/metrics/1-00000000-" not in key]
         return result
 
-    monkeypatch.setattr(storage, "keys", listing)
+    monkeypatch.setattr(storage, "keys", counted_keys)
     assert read(storage, "e", "r").chart("value", "step").last.tolist() == [1, 2]
 
 

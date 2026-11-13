@@ -15,16 +15,13 @@ from etude.carriage import (
     CHECKPOINTS,
     checkpoint_file,
     checkpoint_file_name,
-    named_file,
     note_stored,
     older_saves,
     purpose,
     recorded_file,
     recorded_files,
-    recovery_files,
     restore_set,
     resume_file,
-    save_pointer,
     state_pointer,
 )
 from etude.launch.logging import parse_log_line
@@ -48,7 +45,7 @@ from etude.launch.storage.download import Download, download
 from etude.launch.storage.s3 import Bucket, Grant, Version
 from etude.launch.storage.transport import attribute
 from etude.launch.usage import Transfer
-from etude.out import MEMBERSHIP, OutFiles
+from etude.out import MEMBERSHIP, OutFiles, recovery
 from etude.storage_timeout import StorageUnavailable
 
 # How long a link lasts where no rental bounds it: a session on a machine you
@@ -264,40 +261,27 @@ class BucketJournal:
             for name in records if key is not None else [*records, "run.json"]:
                 if (raw := self._bucket.get(folder + name)) is not None:
                     (root / name).write_bytes(raw)
-            members: set[str] | None = None
-            if key is None and MEMBERSHIP in listed:
-                raw = self._bucket.get(folder + MEMBERSHIP)
-                if raw is None:
-                    raise StorageUnavailable("out membership is missing")
-                members = {file.key for file in OutFiles.model_validate_json(raw).files}
-                (root / "out").mkdir(exist_ok=True)
-                ordinary = {name for name in members if save_pointer(name) is None}
-                if not ordinary <= listed.keys():
-                    raise StorageUnavailable("out member is missing")
-            recorded = recorded_files(root)
-            pointers: dict[str, bytes] = {}
             if key is None:
-                for name in listed:
-                    if state_pointer(name):
-                        raw = self._bucket.get(folder + name)
-                        if raw is None:
-                            raise StorageUnavailable("state pointer is missing")
-                        pointers[name] = raw
-            selected = recovery_files(listed, members, pointers) if key is None else [key]
+                found = recovery(listed, lambda name: self._bucket.get(folder + name))
+                selected, pointers = found.keys, found.pointers
+                if found.membership is not None:
+                    (root / "out").mkdir(exist_ok=True)
+            else:
+                selected, pointers = [key], {}
+            recorded = recorded_files(root)
             for name in selected:
-                size = listed[name]
-                if not name.startswith("out/") or key not in (None, name):
+                if not name.startswith("out/"):
                     continue
                 with attribute(purpose=purpose(name, recorded)):
                     raw = pointers[name] if name in pointers else self._bucket.get(folder + name)
-                if raw is None or len(raw) != size:
+                if raw is None or len(raw) != listed.get(name):
                     raise StorageUnavailable(
                         f"restored file {name} is missing or has changed length"
                     )
                 target = root / name
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(raw)
-            wanted = resume_file(root) if key is None else named_file(root, key)
+            wanted = resume_file(root) if key is None else recorded.get(key)
             if (
                 wanted is not None
                 and wanted.key in listed

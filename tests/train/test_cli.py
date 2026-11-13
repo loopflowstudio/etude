@@ -34,7 +34,7 @@ EVAL_READERS = tuple(
         # recognises experiment files as `etude launch` does (`etude.experiment_file`).
         (
             ["report", "{directory}/pilot.py", "--source", "{directory}"],
-            30,
+            31,  # etude.tracking.checkpoints: the checkpoint records runs and evals share
             ("boto3", "duckdb", *EVAL_READERS, "etude.train.run"),
         ),
         (
@@ -44,7 +44,9 @@ EVAL_READERS = tuple(
         ),
         (
             ["sync", "--directory", "{directory}", "--seal"],
-            26,  # etude.out, etude.stopping for Stopped and etude.train.state for saves
+            # etude.out, etude.stopping for Stopped, etude.train.state for saves and
+            # etude.tracking.checkpoints for the records a run publishes.
+            27,
             ("boto3", "etude.page", "etude.train.report"),
         ),
     ],
@@ -160,7 +162,7 @@ def test_serving_an_index_loads_no_evaluation_launcher_or_bucket_client(tmp_path
     loaded = [name for name in modules if name.startswith("etude")]
     # Neither experiment has eval runs or eval(): the index reads training files alone,
     # and recognises experiment files as `etude launch` does (`etude.experiment_file`).
-    assert len(loaded) == 30, loaded
+    assert len(loaded) == 31, loaded
     forbidden = (
         "boto3",
         "duckdb",

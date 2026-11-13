@@ -173,7 +173,7 @@ def _lay_out(session: Path, home: Path, work: Work) -> tuple[dict[str, str], dic
                     sha256=given.sha256,
                 ),
             ):
-                held[given.name] = _input_path(session, shared, given)
+                held[given.name] = input_path(session, shared, given)
             log.write(
                 f"inputs: verified {given.name} ({given.size_bytes} bytes,"
                 f" {time.monotonic() - began:.1f} s)\n"
@@ -218,7 +218,7 @@ class Undelivered(ValueError):
     """An input this machine does not hold; another attempt is given it the same way."""
 
 
-def _input_path(session: Path, shared: Path, given: Input) -> Path:
+def input_path(session: Path, shared: Path, given: Input) -> Path:
     """Where this machine holds the input's bytes, verified for this attempt before it starts.
 
     The cache's read-only copy, which the courier holds for the session; else

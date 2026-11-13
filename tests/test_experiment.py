@@ -21,11 +21,11 @@ from etude.experiment import Experiment, ExperimentState, advance, observe, read
 from etude.jobs import _hold, evaluation, evaluation_spec
 from etude.launch.records import Job, Outcome, Run, Status
 from etude.launch.source import home
+from etude.tracking.checkpoints import CheckpointRecord
 from etude.tracking.errors import EtudeError
 from etude.tracking.records import Clock
 from etude.tracking.storage import DirectoryStorage
 from etude.train.read import read
-from etude.train.records import CheckpointRecord
 from etude.train.run import Run as Run_
 from etude.train.run import track
 from tests.eval.games import play, play_catching_errors, play_failing_deal_one

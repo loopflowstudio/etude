@@ -64,6 +64,7 @@ from etude.carriage import OUT_PRESENT, checkpoint_key, note_retired, taken
 from etude.deadline import limit_time
 from etude.stopping import Stopped
 from etude.tracking.block_file import block_key, log_key, sealed_as, tail_key
+from etude.tracking.checkpoints import CheckpointRecord
 from etude.tracking.declaration import declare
 from etude.tracking.delivery import RunFiles, StorageDestination, destinations, prune, ship
 from etude.tracking.errors import EtudeError
@@ -84,7 +85,7 @@ from etude.tracking.storage import DirectoryStorage, Storage, run_prefix
 from etude.train.block import Builder, Columns, Json, LoggedRow, concat
 from etude.train.block import encode as encode_block
 from etude.train.manifest import Index, metric_names
-from etude.train.records import CheckpointRecord, ParentRun, RowTable, checkpoint_name
+from etude.train.records import ParentRun, RowTable, checkpoint_name
 from etude.train.state import State, saved_states, state_folder, write_objects
 
 # Compaction is bounded by bytes or elapsed cadence, independent of training steps.
@@ -167,10 +168,11 @@ def _folder_artifact(folder: Path) -> ArtifactRef:
         if path.is_symlink():
             raise ValueError("a checkpoint must be self-contained, without symbolic links")
         if path.is_file():
-            key = path.relative_to(folder).as_posix()
-            if any(
-                part.startswith(".") for part in path.relative_to(folder).parts
-            ) or path.suffix in (".open", ".partial"):
+            key = path.relative_to(folder)
+            if any(part.startswith(".") for part in key.parts) or path.suffix in (
+                ".open",
+                ".partial",
+            ):
                 raise ValueError(
                     "checkpoint files must use portable published names, without private or unfinished files"
                 )
@@ -180,7 +182,7 @@ def _folder_artifact(folder: Path) -> ArtifactRef:
                     size_bytes=os.fstat(stream.fileno()).st_size,
                 )
                 os.fsync(stream.fileno())
-            members[key] = content
+            members[key.as_posix()] = content
     if not members:
         raise ValueError("a checkpoint folder must hold files")
     manifest = json.dumps(
@@ -330,19 +332,19 @@ class Run:
         # a continuation was handed.
         latest = self._latest_record()
         started_ms = time.time_ns() // 1_000_000
-        self._ran = 0.0 if latest is None else latest.at.get(RUNNING_HOURS, 0.0)
         saved = saved_states(self.out)
         if saved:
-            self._ran = max(item.at.get(RUNNING_HOURS, 0.0) for item in saved)
             for item in saved:
                 for clock, position in item.at.items():
                     self._high[clock] = max(self._high.get(clock, 0.0), position)
-        self._began = time.monotonic()
-        self._origin_ms = _origin(latest, root, started_ms)
-        if saved:
+            self._ran = self._high.get(RUNNING_HOURS, 0.0)
             self._origin_ms = min(
                 item.wall_ms - round(item.at[HOURS_SINCE_START] * 3_600_000) for item in saved
             )
+        else:
+            self._ran = 0.0 if latest is None else latest.at.get(RUNNING_HOURS, 0.0)
+            self._origin_ms = _origin(latest, root, started_ms)
+        self._began = time.monotonic()
         # Its first durable row says where this attempt's rows supersede
         # earlier attempts' (`first_row`); one that logs nothing replaces nothing.
         self._attempt = Attempt(
@@ -772,9 +774,7 @@ class Run:
         objects: Mapping[str, object],
         at: dict[str, float],
     ) -> tuple[ArtifactRef, Path]:
-        folder = self.out / "checkpoints"
-        folder.mkdir(parents=True, exist_ok=True)
-        staged = folder / (".checkpoint-" + secrets.token_hex(6))
+        staged = self._staging()
         staged.mkdir()
         try:
             if export is not None:
@@ -793,6 +793,12 @@ class Run:
             _remove(staged)
             raise
 
+    def _staging(self) -> Path:
+        """An unused private name beside folder checkpoints, which no carrier sends."""
+        folder = self.out / "checkpoints"
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder / (".checkpoint-" + secrets.token_hex(6))
+
     def _stage(
         self, artifact: ArtifactRef | Path | str, name: str
     ) -> tuple[ArtifactRef, Path | None]:
@@ -808,9 +814,7 @@ class Run:
         if source.is_dir():
             if source.is_relative_to(self._out):
                 return _folder_artifact(source), None
-            folder = self.out / "checkpoints"
-            folder.mkdir(parents=True, exist_ok=True)
-            staged = folder / (".checkpoint-" + secrets.token_hex(6))
+            staged = self._staging()
             try:
                 # Validate links before copying, so a directory cannot publish outside bytes.
                 _folder_artifact(source)

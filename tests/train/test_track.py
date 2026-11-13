@@ -19,6 +19,7 @@ import numpy as np
 import pytest
 from moto import mock_aws
 
+from etude.carriage import listing
 from etude.cli import main
 from etude.launch.database import launcher_file
 from etude.page import Server, build
@@ -494,7 +495,7 @@ def test_finish_retries_retained_files_when_storage_recovers(tmp_path: Path) -> 
     assert destination.requests == len(destination.keys("final")) + 1
     assert all(
         destination.get("final/" + key) == (run.files.root / key).read_bytes()
-        for key in run.files.deliverable()
+        for key in listing(run.files.root, tail_seconds=run.files.tail_age)
     )
 
 

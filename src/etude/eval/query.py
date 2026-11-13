@@ -109,11 +109,11 @@ from etude.eval.records import (
     assemble,
     outcomes,
 )
+from etude.tracking.checkpoints import CheckpointRecord, checkpoint_id
 from etude.tracking.errors import EtudeError
 from etude.tracking.listing import as_storage, declared, run_folders, under
 from etude.tracking.records import Digest, Record, RunState
 from etude.tracking.storage import SAFE_NAME, DirectoryStorage, Storage, default_root
-from etude.train.records import CheckpointRecord, checkpoint_id
 
 if TYPE_CHECKING:
     import duckdb

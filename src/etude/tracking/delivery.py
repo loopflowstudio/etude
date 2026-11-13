@@ -20,7 +20,6 @@ from etude.carriage import (
     RecordedFile,
     checkpoint_file,
     immutable,
-    listing,
     older_saves,
     prune_state,
     publication,
@@ -47,14 +46,6 @@ class RunFiles:
     def run_file(self) -> RunFile | None:
         path = self.root / "run.json"
         return RunFile.model_validate_json(path.read_bytes()) if path.is_file() else None
-
-    def deliverable(self) -> list[str]:
-        """Every file a destination should hold, as keys under the run, in sending order.
-
-        The rules are the courier's too (`etude.carriage.listing`). A tail is
-        sent only once it is old enough that its writer has died.
-        """
-        return [key for key in listing(self.root, tail_seconds=self.tail_age) if key != MEMBERSHIP]
 
     def _marker(self, destination: str, key: str) -> Path:
         return self.root / ".shipped" / destination / (key.replace("/", "__") + ".sent")

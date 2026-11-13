@@ -42,11 +42,11 @@ from etude.launch.errors import LauncherError
 from etude.launch.records import Job, Run, Smoke
 from etude.launch.scheduler import Scheduler
 from etude.launch.source import home
+from etude.tracking.checkpoints import CheckpointId, CheckpointRecord
 from etude.tracking.errors import EtudeError
 from etude.tracking.records import Digest, Record
 from etude.tracking.storage import Storage
 from etude.train.read import RunData, lines, read_all
-from etude.train.records import CheckpointId, CheckpointRecord
 from etude.train.report import job_names
 
 # ---------------------------------------------------------------------------
@@ -478,7 +478,7 @@ def _ledger_root(directory: Path | str | None) -> Path:
 def __getattr__(name: str) -> object:
     if name == "Checkpoint":
         warnings.warn(
-            "etude.experiment.Checkpoint is now etude.train.records.CheckpointRecord; removed in 0.5",
+            "etude.experiment.Checkpoint is now etude.tracking.checkpoints.CheckpointRecord; removed in 0.5",
             DeprecationWarning,
             stacklevel=2,
         )

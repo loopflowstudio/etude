@@ -20,6 +20,8 @@
 
 Folder checkpoints and their shared record/reference are built. Run/attempt
 record unification, the default CLI recipe and explicit resume remain unbuilt.
+`CheckpointRecord.player(inference)` takes anything with `player(ref)`, so the
+shared record names no evaluation type.
 
 The accepted rebuild is `design-train-api.md`; `docs/training.md` describes its
 intended experience. Earlier local_launch/Run.until choices and QA history are
@@ -108,7 +110,7 @@ Open product choices the design does not spell:
    and `CheckpointRecord.player` are the taught constructors. Released
    `Model`, `Checkpoint` and `.model(...)` spellings warn, removed in 0.5.
 2. **The one checkpoint reference type.** Chosen here: `CheckpointRef` in
-   `etude.train.records`, with an encoded string key. `checkpoint_id` builds
+   `etude.tracking.checkpoints`, with an encoded string key. `checkpoint_id` builds
    it from run/name or an outside address. Historical structured keys still
    decode; pinned match/seating hashes are unchanged. `CheckpointKey` is a
    deprecated constructor alias, not another record.

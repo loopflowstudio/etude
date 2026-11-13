@@ -36,11 +36,9 @@ from etude.carriage import (
     purpose,
     reconcile_out,
     recorded_files,
-    recovery_files,
     resume_file,
     retired,
     save_pointer,
-    state_pointer,
     within,
 )
 from etude.deadline import limit_time
@@ -74,8 +72,8 @@ from etude.launch.storage.s3 import (
     read_version,
 )
 from etude.launch.storage.transport import Send, attribute, deliver, observe
-from etude.launch.worker.attempts import _input_path, seed_out
-from etude.out import MEMBERSHIP, OutFile, OutFiles
+from etude.launch.worker.attempts import input_path, seed_out
+from etude.out import MEMBERSHIP, OutFile, OutFiles, recovery
 from etude.storage_timeout import StorageUnavailable
 
 ROOT = Path("/run/etude/sessions")
@@ -302,7 +300,7 @@ class Courier:
         ):
             try:
                 files = {
-                    given.name: _input_path(self._home, self._track_root, given) for given in inputs
+                    given.name: input_path(self._home, self._track_root, given) for given in inputs
                 }
                 seed_out(self._track_root / work.run / "out", inputs, files)
                 self._track(work.run, done=False)
@@ -333,30 +331,13 @@ class Courier:
             finally:
                 self._carry_usage()
 
-    def _restore(self, run: str, keys: dict[str, ReadLink]) -> None:
+    def _restore(self, run: str, listed: dict[str, ReadLink]) -> None:
         folder = self._track_root / run
         # Every checkpoint name storage holds stays taken, restored or not.
-        note_stored(folder, [checkpoint_file_name(key) for key in keys if checkpoint_file(key)])
-        membership = None
-        members = None
-        if MEMBERSHIP in keys:
-            body = read(keys[MEMBERSHIP].url, self._send)
-            if body is None:
-                raise StorageUnavailable("out membership is missing")
-            membership = OutFiles.model_validate_json(body)
-            members = {file.key for file in membership.files}
-            ordinary = {name for name in members if save_pointer(name) is None}
-            if not ordinary <= keys.keys():
-                raise StorageUnavailable("out member is missing")
-        pointers: dict[str, bytes] = {}
-        for key, link in keys.items():
-            if state_pointer(key):
-                body = read(link.url, self._send)
-                if body is None:
-                    raise StorageUnavailable("state pointer is missing")
-                pointers[key] = body
-        selected = recovery_files(keys, members, pointers)
-        keys = {key: keys[key] for key in selected}
+        note_stored(folder, [checkpoint_file_name(key) for key in listed if checkpoint_file(key)])
+        found = recovery(listed, lambda key: read(listed[key].url, self._send))
+        membership, pointers = found.membership, found.pointers
+        keys = {key: listed[key] for key in found.keys}
         reconcile_out(folder, keys)
         recorded: dict[str, RecordedFile] | None = None
         for key, link in sorted(keys.items()):

@@ -24,7 +24,7 @@ from etude.eval.records import (
 )
 from etude.eval.tournament import hold, scores, standings
 from etude.experiment import observe
-from etude.train.records import CheckpointRef, checkpoint_id
+from etude.tracking.checkpoints import CheckpointRef, checkpoint_id
 
 world = environment("allies-vs-lessons", files=["game/"], config={"world": "w6"})
 deals = tuple({"deal": 1_910_101_000 + d} for d in range(25))

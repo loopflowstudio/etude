@@ -42,6 +42,7 @@ from typing import Required, TypedDict, Unpack, cast
 
 from pydantic import BaseModel, Field, JsonValue, TypeAdapter, ValidationError
 
+from etude.cache import Content
 from etude.call import Function, config_type
 from etude.carriage import CHECKPOINTS, OUT_PRESENT, checkpoint_file_name, checkpoint_key
 from etude.eval.match import EvalRun, Result, Tables
@@ -62,17 +63,13 @@ from etude.launch.records import (
     number,
 )
 from etude.out import MEMBERSHIP, OutFile, OutFiles
+from etude.tracking.checkpoints import CheckpointRecord, CheckpointRef, checkpoint_id
 from etude.tracking.errors import EtudeError
 from etude.tracking.listing import as_storage, declared, run_folders
 from etude.tracking.records import ArtifactRef, Record, SourceKey
 from etude.tracking.storage import Storage
 from etude.train.read import read
-from etude.train.records import (
-    CheckpointRecord,
-    CheckpointRef,
-    ParentRun,
-    checkpoint_id,
-)
+from etude.train.records import ParentRun
 
 
 class JobOptions(TypedDict, total=False):
@@ -285,26 +282,20 @@ def checkpoint_inputs_for(checkpoint: CheckpointRecord, name: str) -> tuple[Inpu
     artifact = checkpoint.artifact
     key = checkpoint.file or checkpoint_key(artifact.uri)
     if artifact.members:
-        return tuple(
-            Input(
-                name=name + "/" + member,
-                key=key + "/" + member,
-                sha256=content.sha256,
-                size_bytes=content.size_bytes,
-                run=checkpoint.run,
-            )
-            for member, content in sorted(artifact.members.items())
-        )
-    if artifact.sha256 is None or artifact.size_bytes is None:
+        files = {"/" + member: content for member, content in sorted(artifact.members.items())}
+    elif artifact.sha256 is None or artifact.size_bytes is None:
         raise LauncherError("a checkpoint input requires its digest and byte length")
-    return (
+    else:
+        files = {"": Content(sha256=artifact.sha256, size_bytes=artifact.size_bytes)}
+    return tuple(
         Input(
-            name=name,
-            key=key,
-            sha256=artifact.sha256,
-            size_bytes=artifact.size_bytes,
+            name=name + member,
+            key=key + member,
+            sha256=content.sha256,
+            size_bytes=content.size_bytes,
             run=checkpoint.run,
-        ),
+        )
+        for member, content in files.items()
     )
 
 
