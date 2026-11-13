@@ -23,7 +23,8 @@ When code fails because it assumed a fixed context, prefer adapting to the
 context over adding a guard, allowlist or precondition that refuses.
 
 Name things for what they are (`Checkpoint`, not `CheckpointHelper`). Action
-functions start with a verb. Private helpers start with an underscore.
+functions start with a verb. Do not prefix new names with an underscore: a
+leading `_` is a smell, so name a helper for what it is.
 
 ## Python
 
