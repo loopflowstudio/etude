@@ -192,6 +192,24 @@ def test_takeover_waits_for_source_and_wal_to_be_quiet(
         writer.close()
 
 
+def test_takes_over_quiet_wal_file_left_by_a_stopped_etude(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Released etudes write in WAL mode; a stopped one leaves no -wal behind.
+    source = _released(tmp_path, "0.3.2")
+    with sqlite3.connect(source) as db:
+        db.execute("PRAGMA journal_mode=WAL")
+    db.close()
+    assert not source.with_name(source.name + "-wal").exists()
+    os.utime(source, (0, 0))
+    before = source.read_bytes()
+
+    open_home(tmp_path).close()
+
+    assert "took over launcher-17.db" in capsys.readouterr().err
+    assert source.read_bytes() == before
+
+
 def test_unsupported_legacy_stays_with_its_release(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -370,12 +388,23 @@ def test_copy_paid_windows_remain_visible(tmp_path: Path, monkeypatch: pytest.Mo
         )
         branch = open_home(tmp_path)
         path = branch._path
-        branch.close()
         assert copies(tmp_path, datetime(2026, 11, 14, tzinfo=UTC)) == ()
+    # The copy was made with the real file's open rental, which the real file still shows.
+    assert copies(tmp_path, datetime(2026, 11, 14, tzinfo=UTC)) == ()
+    branch._db.execute(
+        "INSERT INTO machines(name,kind,ondemand,cost_usd,provider) "
+        "VALUES ('branch-machine','rented','gpu','0','account')"
+    )
+    branch._db.execute(
+        "INSERT INTO rentals(machine,usd_per_hour,cap_usd,deadline,kept,billed_usd) "
+        "VALUES ('branch-machine','0.44','1','2026-11-14T02:00:00+00:00',0,'0')"
+    )
+    branch._db.commit()
+    branch.close()
     found = copies(tmp_path, datetime(2026, 11, 14, tzinfo=UTC))
     assert len(found) == 1
     assert found[0].path == str(path.parent)
-    assert found[0].rentals == 1 and str(found[0].usd_per_hour) == "0.59"
+    assert found[0].rentals == 1 and str(found[0].usd_per_hour) == "0.44"
     assert found[0].unreleased == ("extra",)
     assert copies(tmp_path, datetime(2026, 11, 15, tzinfo=UTC)) == ()
 

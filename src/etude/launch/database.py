@@ -1519,9 +1519,14 @@ def _predecessor(home: Path) -> Path | None:
 
 def _check_source_writes(source: Path) -> None:
     # Older wait commands schedule without a heartbeat, but every pass writes SQLite.
+    # An empty WAL holds no writes: opening a quiet WAL-mode file, as reading its
+    # schema number just did, creates one. A writer's WAL has frames, and its last
+    # close checkpoints into the main file.
     modified = source.stat().st_mtime
     try:
-        modified = max(modified, source.with_name(source.name + "-wal").stat().st_mtime)
+        wal = source.with_name(source.name + "-wal").stat()
+        if wal.st_size:
+            modified = max(modified, wal.st_mtime)
     except FileNotFoundError:
         pass
     age = time.time() - modified
@@ -1658,8 +1663,17 @@ class Copy(Record):
 
 def copies(home: Path, now: datetime) -> tuple[Copy, ...]:
     """Other copies under `home` holding paid windows that have not ended, read without changing
-    them. The copy this build works on is left out: its runs are already in view."""
+    them. The copy this build works on is left out: its runs are already in view. So are
+    rentals a copy was made with, which the real file still holds."""
     own = _working_file(home)
+    real = launcher_file(home)
+    known: set[str] = set()
+    if real.exists():
+        db = _read_only(real)
+        try:
+            known = {r[0] for r in db.execute("SELECT machine FROM rentals")}
+        finally:
+            db.close()
     found: list[Copy] = []
     for path in sorted((home / "copies").glob("*/launcher.sqlite")):
         if path == own:
@@ -1671,11 +1685,12 @@ def copies(home: Path, now: datetime) -> tuple[Copy, ...]:
             )
             live = [
                 (Decimal(rate), datetime.fromisoformat(deadline))
-                for rate, deadline in db.execute(
-                    """SELECT r.usd_per_hour, r.deadline FROM rentals r
+                for machine, rate, deadline in db.execute(
+                    """SELECT r.machine, r.usd_per_hour, r.deadline FROM rentals r
                     JOIN machines m ON m.name = r.machine
                     WHERE m.deleted_at IS NULL"""
                 )
+                if machine not in known
             ]
         finally:
             db.close()
