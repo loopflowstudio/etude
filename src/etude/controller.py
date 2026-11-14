@@ -5,6 +5,7 @@ new runs. The scheduler's public records are the only memory of a hand-down.
 """
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -34,13 +35,15 @@ from etude.jobs import (
 from etude.launch import client
 from etude.launch.listing import show_quote
 from etude.launch.server import selected
-from etude.records import Record
 from etude.smoke import smoke_file
 from etude.spec import Job, RunRequest, Smoke, Until
 from etude.storage import Storage, default_root
 
 
-class TournamentDecision(Record):
+@dataclass
+class TournamentDecision:
+    """What one pass found and did for a tournament; filled in as the pass decides."""
+
     tournament: str
     new: int
     running: int
@@ -85,6 +88,22 @@ def _fits(job: Job, committed: Decimal, max_usd: Decimal | None) -> bool:
     return max_usd is None or committed + (job.max_usd or Decimal(0)) <= max_usd
 
 
+def _resumed(
+    request: RunRequest, experiment: str, until: Until | None
+) -> tuple[RunRequest, Decimal]:
+    """The request as a resume under its standing record's id, and the dollars that record releases."""
+    request = request.model_copy(
+        update={
+            "resume": True,
+            "job": request.job.model_copy(update={"until": until or request.job.until}),
+        }
+    )
+    for item in client.standing(experiment):
+        if item.record.launch.spec.name == request.job.name and item.record.seed == request.seed:
+            return request.model_copy(update={"id": item.record.id}), item.committed_usd
+    return request, Decimal(0)
+
+
 def _print_lines(lines: dict[str | None, str]) -> None:
     """Print the training lines in declared order, once, and forget them."""
     for line in lines.values():
@@ -100,7 +119,6 @@ def advance(
     rent: str | None = None,
     directory: Path | str | None = None,
     retry_failed: bool = False,
-    smoke: Smoke = Smoke(),
     mode: Literal["local", "launch", "queue"] = "local",
     max_usd: Decimal | None = None,
     quote: bool = False,
@@ -141,27 +159,11 @@ def advance(
             requests = select_runs(requests, job=job, seed=seed)
         if resume and len(requests) != 1:
             raise LauncherError("--resume needs one run; select --job and --seed")
-        resumed = client.standing(experiment.name) if resume else ()
         for request in requests:
             if resume:
-                existing = next(
-                    (
-                        item
-                        for item in resumed
-                        if item.record.launch.spec.name == request.job.name
-                        and item.record.seed == request.seed
-                    ),
-                    None,
-                )
-                if existing is not None:
-                    request = request.model_copy(update={"id": existing.record.id})
-                    committed -= (
-                        existing.status.usd
-                        if existing.status.done
-                        else existing.record.launch.spec.max_usd or Decimal(0)
-                    )
-            known = None if resume else format_known_run(request, find_training_run(request, state))
-            if known is not None:
+                request, released = _resumed(request, experiment.name, until)
+                committed -= released
+            elif known := format_known_run(request, find_training_run(request, state)):
                 lines[request.id] = known
                 continue
             if not _fits(request.job, committed, max_usd):
@@ -169,13 +171,6 @@ def advance(
                     f"{request.id}  new, not queued: --max-usd {max_usd} (${committed:.2f} committed)"
                 )
                 continue
-            if resume:
-                request = request.model_copy(
-                    update={
-                        "resume": True,
-                        "job": request.job.model_copy(update={"until": until or request.job.until}),
-                    }
-                )
             new.append(request)
             lines[request.id] = f"{request.id}  new"
             committed += request.job.max_usd or Decimal(0)
@@ -184,6 +179,7 @@ def advance(
         if experiment.eval is not None and evaluate
         else []
     )
+    smoke = Smoke()
     if smoke_file_first and not quote:
         assert experiment.file is not None
         before = (
@@ -217,45 +213,39 @@ def advance(
             runs=stored,
             lines=state.lines,
         )
-        new_matches = [*found.new, *(found.failed if retry_failed else ())]
-        pending = [match for match in new_matches if match.key not in running]
+        wanted = [*found.new, *(found.failed if retry_failed else ())]
+        pending = [match for match in wanted if match.key not in running]
         done = TournamentDecision(
             tournament=spec.tournament.name,
             new=len(pending),
-            running=len(new_matches) - len(pending),
+            running=len(wanted) - len(pending),
             failed=0 if retry_failed else len(found.failed),
         )
-        stopped = {failed[m.key] for m in pending if m.key in failed}
-        if stopped and not retry_failed:
+        if not retry_failed:
+            # A failed run's undelivered matches wait for an explicit retry.
+            stopped = {failed[m.key] for m in pending if m.key in failed}
             stopped_runs.update(stopped)
-            done = done.model_copy(update={"stopped": tuple(sorted(stopped))})
+            done.stopped = tuple(sorted(stopped))
             pending = [match for match in pending if match.key not in failed]
-        if pending:
-            if mode == "local":
-                count = _play_here(spec, executable, pending, state, source, directory)
-                done = done.model_copy(update={"played": count})
+        if pending and mode == "local":
+            done.played = _play_here(spec, executable, pending, state, source, directory)
+            running.update(m.key for m in pending)
+        elif pending:
+            executable = with_matches(executable, pending, state)
+            if _fits(executable, committed, max_usd):
+                stem = f"{experiment.name}/{folder_name(spec.tournament.name)}-{digest(sorted(m.key for m in pending))[:12]}"
+                done.launched = stem
+                number = 2
+                while done.launched in taken:
+                    done.launched = f"{stem}-{number}"
+                    number += 1
+                planned.append(RunRequest(id=done.launched, job=executable, smoke=smoke))
                 running.update(m.key for m in pending)
+                taken.add(done.launched)
+                committed += executable.max_usd or Decimal(0)
             else:
-                executable = with_matches(executable, pending, state)
-                if _fits(executable, committed, max_usd):
-                    stem = f"{experiment.name}/{folder_name(spec.tournament.name)}-{digest(sorted(m.key for m in pending))[:12]}"
-                    identity = stem
-                    number = 2
-                    while identity in taken:
-                        identity = f"{stem}-{number}"
-                        number += 1
-                    planned.append(RunRequest(id=identity, job=executable, smoke=smoke))
-                    done = done.model_copy(update={"launched": identity})
-                    running.update(m.key for m in pending)
-                    taken.add(identity)
-                    committed += executable.max_usd or Decimal(0)
-                else:
-                    done = done.model_copy(
-                        update={
-                            "state": "not queued",
-                            "reason": f"--max-usd {max_usd} (${committed:.2f} committed)",
-                        }
-                    )
+                done.state = "not queued"
+                done.reason = f"--max-usd {max_usd} (${committed:.2f} committed)"
         decisions.append(done)
     if planned:
         if quote:
@@ -263,25 +253,20 @@ def advance(
                 lines[request.id] = f"{request.id}  new, would launch"
             _print_lines(lines)
             show_quote(client.quote(planned, pool, rent=rent))
-            decisions = [
-                p.model_copy(update={"state": "would launch"}) if p.launched else p
-                for p in decisions
-            ]
+            for decision in decisions:
+                if decision.launched:
+                    decision.state = "would launch"
         else:
             submit = client.queue if mode == "queue" else client.launch
             submit(planned, pool, rent=rent)
             placed: dict[str | None, Literal["queued", "running"]] = {
-                item.record.id: "queued"
-                if item.status.phase in {"queued", "renting"}
-                else "running"
-                for item in client.standing(experiment.name)
+                item.record.id: item.placement for item in client.standing(experiment.name)
             }
             for request in new:
                 lines[request.id] = f"{request.id}  new, {placed[request.id]}"
-            decisions = [
-                p.model_copy(update={"state": placed[p.launched]}) if p.launched else p
-                for p in decisions
-            ]
+            for decision in decisions:
+                if decision.launched:
+                    decision.state = placed[decision.launched]
     _print_lines(lines)
     for decision in decisions:
         _show_tournament(decision)

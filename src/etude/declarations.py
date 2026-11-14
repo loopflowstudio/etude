@@ -137,14 +137,12 @@ def read_training_jobs(
     returned = values[0]
     returned = list(returned) if isinstance(returned, (list, tuple)) else [returned]
     for each in returned:
-        if isinstance(each, TrainingJob):
-            continue
-        if isinstance(each, RunRequest) and " -m etude.call " in each.job.command:
-            try:
-                evaluation_spec(each.job)
-            except EtudeError:
-                continue
-        raise LauncherError(f"{path.name}: training_jobs() must return TrainingJob")
+        if not isinstance(each, TrainingJob) and not (
+            isinstance(each, RunRequest)
+            and " -m etude.call " in each.job.command
+            and not _is_evaluation(each.job)
+        ):
+            raise LauncherError(f"{path.name}: training_jobs() must return TrainingJob")
     plain = [each.plain() if isinstance(each, Job) else each.job for each in returned]
     jobs: list[Job] = []
     for candidate in plain:
@@ -277,17 +275,19 @@ def asked(function: EvalFunction, state: ExperimentState) -> list[Job]:
     for each in given:
         if isinstance(each, EvalJob):
             jobs.append(each.plain())
-            continue
-        if isinstance(each, RunRequest):
-            try:
-                evaluation_spec(each.job)
-            except EtudeError:
-                pass
-            else:
-                jobs.append(each.job)
-                continue
-        defining = function if inspect.isroutine(function) else type(function)
-        raise LauncherError(
-            f"{Path(inspect.getfile(defining)).name}: eval_jobs() must return EvalJob"
-        )
+        elif isinstance(each, RunRequest) and _is_evaluation(each.job):
+            jobs.append(each.job)
+        else:
+            defining = function if inspect.isroutine(function) else type(function)
+            raise LauncherError(
+                f"{Path(inspect.getfile(defining)).name}: eval_jobs() must return EvalJob"
+            )
     return jobs
+
+
+def _is_evaluation(job: Job) -> bool:
+    try:
+        evaluation_spec(job)
+    except EtudeError:
+        return False
+    return True
