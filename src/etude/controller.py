@@ -200,7 +200,10 @@ def advance(
     failed = {
         key: run.name for run in state.eval_runs if run.state == "failed" for key in run.matches
     }
-    taken = {run.name for run in state.eval_runs}
+    taken = {
+        f"{experiment.name}/{run.name.removeprefix(experiment.name + '/')}"
+        for run in state.eval_runs
+    }
     decisions: list[TournamentDecision] = []
     stopped_runs: set[str] = set()
     stored = StoredRuns.read(experiment.name, source, keys=listed) if jobs else None

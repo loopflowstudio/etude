@@ -7,6 +7,7 @@ import sqlite3
 import time
 from decimal import Decimal
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlparse
 
 import pytest
@@ -319,6 +320,7 @@ class _Launcher:
                     id=str(run.id),
                     experiment=experiment,
                     job="eval",
+                    seed=run.seed,
                     submission=RunSubmission(spec=run.job, pool="local"),
                 ),
                 status=self.status(str(run.id)),
@@ -356,7 +358,7 @@ def test_saved_stop_keeps_the_launchers_continuation_state(
     launcher.outcome = "failed" if phase == "failed" else None
     monkeypatch.setattr(client, "standing", launcher.standing)
     (continued,) = observe(bucket, "ppo").runs
-    assert continued.state == ("failed" if phase == "failed" else "running")
+    assert continued.state == phase
 
 
 def test_a_launched_pass_ships_its_checkpoints_and_is_not_launched_twice(
@@ -758,3 +760,78 @@ def test_saved_eval_stop_keeps_the_launchers_continuation_state(
     monkeypatch.setattr(client, "standing", launcher.standing)
     (run,) = observe(bucket, "ppo").eval_runs
     assert run.state == ("stopped" if phase == "absent" else phase)
+
+
+@pytest.mark.parametrize("retained", [False, True], ids=["absent", "done"])
+def test_stopped_eval_undelivered_matches_are_new_on_the_next_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, retained: bool
+) -> None:
+    launcher = _Launcher()
+    monkeypatch.setattr(client, "launch", launcher.launch)
+    monkeypatch.setattr(client, "queue", launcher.queue)
+    monkeypatch.setattr(client, "standing", launcher.standing)
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    experiment = design(tmp_path)
+    training = trainer(bucket, tmp_path)
+    try:
+        save(training, bucket, tmp_path, range(1, 3))
+        advance(experiment, source=bucket, mode="launch")
+        (first,) = launcher.launched
+        spec = evaluation_spec(first.job)
+        with (
+            pytest.raises(Stopped),
+            evaluating(
+                spec.tournament,
+                experiment="ppo",
+                run=str(first.id).removeprefix("ppo/"),
+                directory=tmp_path / "eval",
+                storages=[bucket],
+            ),
+        ):
+            raise Stopped()
+        if retained:
+            launcher.outcome = "succeeded"
+        else:
+            launcher.launched.clear()
+        (stopped,) = observe(bucket, "ppo").eval_runs
+        assert stopped.state == "stopped"
+        (decision,) = advance(experiment, source=bucket, mode="queue")
+        assert decision.new == len(spec.matches or ()) > 0
+        assert decision.running == decision.failed == 0
+        assert decision.launched != first.id
+        assert evaluation_spec(launcher.launched[-1].job).matches == spec.matches
+    finally:
+        training.finish(timeout=30)
+
+
+@pytest.mark.parametrize("phase", ["queued", "running"])
+@pytest.mark.parametrize("outcome", ["stopped", "finished", "failed"])
+def test_launcher_phase_preserves_compact_training_addresses_and_terminal_outcomes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    outcome: Literal["stopped", "finished", "failed"],
+) -> None:
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    training = track(
+        experiment="ppo",
+        run="ppo@0",
+        job="base",
+        seed=0,
+        directory=tmp_path / "training",
+        storages=[bucket],
+    )
+    training.finish(outcome, timeout=30)
+    launcher = _Launcher()
+    launcher.launched.append(
+        RunRequest(
+            id="ppo/base@0",
+            seed=0,
+            job=Job(name="base", experiment="ppo", command="true"),
+        )
+    )
+    launcher.queued = phase == "queued"
+    monkeypatch.setattr(client, "standing", launcher.standing)
+    (run,) = observe(bucket, "ppo").runs
+    assert run.name == "ppo@0"
+    assert run.state == (phase if outcome == "stopped" else outcome)

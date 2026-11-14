@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import warnings
 from collections.abc import Sequence
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Literal
@@ -144,6 +145,8 @@ def state_of(
                         checkpoints=jobs.Checkpoints(),
                     )
                 )
+            elif not status.done and prior_training.state in {"running", "stopped"}:
+                runs[runs.index(prior_training)] = replace(prior_training, state=state)
     return jobs.ExperimentState(
         experiment=experiment, runs=tuple(runs), eval_runs=tuple(eval_runs), committed_usd=committed
     )

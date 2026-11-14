@@ -366,9 +366,10 @@ Three levels do the work, each built only on the one below it:
   `etude runs` and `etude status` show. Each run has one state: `queued`,
   `running`, `stopped`, `finished` or `failed`. The pass keeps no memory of its own and
   writes nothing else. A `stopped` run saved its state short of its target
-  and no launcher on this computer is continuing it; it resumes only when
-  asked. While this computer's launcher owns continuation, it remains
-  `running` (or `queued` for an eval waiting for room).
+  and no launcher on this computer is continuing it. A stopped training run
+  resumes only when asked. A stopped eval needs no action: its undelivered
+  matches are new on the next pass and play in a new run. While this computer's
+  launcher owns continuation, either kind reads its `queued` or `running` phase.
 - **One line for everything considered.** A training run already in the state
   prints that state. A new one prints `new, running` when a machine took it,
   `new, queued` when it waits for room (always, under `etude queue`), or

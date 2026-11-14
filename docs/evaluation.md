@@ -685,6 +685,8 @@ does, unless `--retry-failed`.
   run's clocks stood), tags and `wall_ms`, when it was saved in milliseconds
   since the epoch.
   `stopped` follows the [same state rule as training](launcher.md#one-pass-over-the-file).
+  A stopped eval is never resumed and needs no action: its undelivered matches
+  are new on the next pass and play in a new run, without `--resume`.
   `Checkpoints` is a tuple, so a slice works too; `every(n)`, `at(clock,
   *values)` and `tagged(tag)` choose by ordinal, clock value or tag, and
   `final` is the last checkpoint once a run has finished.
