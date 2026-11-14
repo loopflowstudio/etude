@@ -262,7 +262,7 @@ class Job(Record):
     def runs(self, *seeds: int, params: dict[str, Param] | None = None) -> list[RunRequest]:
         """This job once per given seed, or once per declared seed when none is given.
 
-        A named job's declared seeds are the runs `NAME-seed-N`, created once.
+        A named job's declared seeds are the runs `NAME@N` (the seed suffix is omitted for one seed), created once.
         Given seeds are a caller's own repetitions: they take ids at admission,
         so the same job and seed can be submitted again.
         """
@@ -272,7 +272,8 @@ class Job(Record):
             RunRequest(
                 job=self,
                 seed=seed,
-                id=f"{self.name}-seed-{seed}" if self.name else None,
+                id=(self.name + (f"@{seed}" if len(self.seeds) > 1 else ""))
+                if self.name else None,
                 params=dict(params or {}),
             )
             for seed in self.seeds

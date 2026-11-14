@@ -28,7 +28,7 @@ from etude.cache import Artifact, Cache, Fetched
 from etude.carriage import immutable
 from etude.deadline import call, remaining
 from etude.errors import EtudeError
-from etude.identity import SAFE_NAME
+from etude.identity import SAFE_NAME, run_address
 from etude.records import RunRecord
 from etude.storage_timeout import StorageUnavailable, socket_timeout
 
@@ -365,10 +365,15 @@ def run_directory(directory: Path | str | None, experiment: str, run: str) -> tu
         if not SAFE_NAME.match(name):
             raise EtudeError("unsafe_run_or_experiment_name", 422)
     base = Path(directory) if directory else default_root()
-    root = base / experiment / run
+    root = base / run_address(run, experiment)
     if os.environ.get("ETUDE_ATTEMPT") and os.environ.get("ETUDE_RUN") == run:
         if out := os.environ.get("ETUDE_OUT"):
             root = Path(out).parent
+    qualified = base / experiment / run / "run.json"
+    if not (root / "run.json").is_file() and qualified.is_file():
+        prior = RunRecord.model_validate_json(qualified.read_bytes())
+        if prior.experiment == experiment:
+            return base, qualified.parent
     legacy = base / run / "run.json"
     if not (root / "run.json").is_file() and legacy.is_file():
         prior = RunRecord.model_validate_json(legacy.read_bytes())

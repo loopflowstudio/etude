@@ -10,7 +10,7 @@ import json
 import re
 
 # A run or experiment name that is safe as a folder in any bucket and shell.
-SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._=-]{0,199}$")
+SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._=@-]{0,199}$")
 
 
 def resume_conflicts(
@@ -55,4 +55,8 @@ def run_address(run: str, experiment: str | None) -> str:
     name = run.removeprefix(prefix)
     if not (SAFE_NAME.fullmatch(experiment) and SAFE_NAME.fullmatch(name)):
         raise ValueError("run and experiment must be portable names")
+    if run.startswith(prefix):
+        return run  # Historical qualified addresses keep their stored spelling.
+    if name == experiment or name.startswith(experiment + "@"):
+        return name
     return prefix + name

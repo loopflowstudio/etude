@@ -476,7 +476,7 @@ def continue_from(
     text = (
         parent.launch.spec.config
         if config is None
-        else _config_text(_job_function(parent.launch.spec), config)
+        else _config_text(load_job_function(parent.launch.spec), config)
     )
     job = parent.launch.spec.model_copy(
         update={
@@ -523,7 +523,7 @@ def _input_name(name: str, inputs: Mapping[str, Input]) -> str:
     return name
 
 
-def _job_function(job: Job) -> Callable[..., object]:
+def load_job_function(job: Job) -> Callable[..., object]:
     """Load the function of a typed job; command jobs have no config model."""
     command = shlex.split(job.command)
     if "etude.call" not in command or "--function" not in command:
@@ -536,7 +536,7 @@ def _job_function(job: Job) -> Callable[..., object]:
 
 def continued_config(parent: RunRecord, changes: str) -> BaseModel:
     """Validate a JSON object of changes against the parent's typed config."""
-    kind = config_type(_job_function(parent.launch.spec))
+    kind = config_type(load_job_function(parent.launch.spec))
     try:
         return changed_config(kind, changes, stored=parent.launch.spec.config or "{}")
     except ValueError as error:
