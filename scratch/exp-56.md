@@ -110,15 +110,28 @@ constructor's rental-only requirement are removed. One preflight/execution path
 serves both file forms; launch/queue/smoke still require machine hours and git.
 No SQL or remote-read path changed; no schema increment.
 
-Focused checks (2026-11-13):
-- `uv run pytest tests/train/test_addresses.py tests/train/test_local.py tests/test_page.py -q -k 'selection_preflight or local_declarations or checkpoint_listing or experiment_override or local_selection' --disable-warnings` — 6 passed before the package-source case was added.
-- `uv run pytest tests/train/test_addresses.py tests/train/test_local.py -q -k 'selection or local_stop_resume' --disable-warnings` — 8 passed, including skipped JSON outcomes and untouched-run refusals.
-- `uv run pytest tests/test_jobs.py tests/launch/test_resume.py tests/launch/test_scheduler.py -q -k 'job_file_names or evaluation_holds_what or typed_jobs_take or resume_retains_allocations or refused_resume_preserves or hours_and_dollars or run_longer_than_its_storage or a_job_is_what_decides or assigned_run_name' --disable-warnings` — 14 passed.
-- `uv run pytest tests/train/test_addresses.py -q -k 'local_declarations or local_selection' --disable-warnings` — 3 passed, including package sources outside git and both config remedies.
+Earlier selection check commands and compression receipts remain at
+`9799f9d:scratch/exp-56.md`; full suites and acceptance remain for gate.
 
-Mypy on the 13 touched Python files, ruff check, ruff format --check and
-`git diff --check` pass. Full suites and acceptance remain for gate.
+## Report QA corrections (2026-11-13)
 
-Compression: `_resumed` returns `_Finished` (no refusal text is parsed); both
-file forms run through `_train_each`, which refuses a sole finished run.
-`uv run pytest tests/train/test_addresses.py tests/train/test_local.py tests/test_page.py -q -k 'selection or local_stop_resume or local_declarations or experiment_override'` — 11 passed.
+Delete — do not maintain: restart-to-resumed-coordinate pace estimates,
+unconditional absent default RL panels, and empty evaluation-caption parts.
+Pace is null at a writer boundary and recovers between later checkpoints.
+Default RL panels retain logged keys; explicit panels still diagnose absent
+keys. Evaluation captions join their present parts. No schema, SQL or remote
+read path changed. PR #103 stays draft; full acceptance remains for gate.
+
+Focused verification: `uv run pytest tests/train/test_hours.py tests/test_page.py -q -k 'report_pace or default_rl or without_a_report'` — 4 passed;
+`node --test --test-name-pattern='evaluation captions|explicit absent|section the report|pace plots' tests/test_charts.cjs` — 4 passed.
+Touched-file mypy, ruff check/format, diff whitespace checks and `uv build --wheel` pass.
+
+## Compression (2026-11-13)
+
+Delete — do not maintain: duplicate train/eval stop detectors and parallel
+checkpoint name/record maps plus their ordinal counter. `Run.should_stop` owns
+the shared signal; one `_Kept` collection owns checkpoint records and names.
+Evaluation captions share their present-part join. Behavior and formats stay.
+
+`uv run pytest tests/train/test_checkpoints.py tests/train/test_store.py tests/train/test_lifecycle.py tests/train/test_steps.py tests/eval/test_context.py -q --disable-warnings` — 90 passed.
+`node --test tests/test_charts.cjs` — 24 passed; touched-code mypy, ruff and wheel build pass.

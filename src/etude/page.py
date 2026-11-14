@@ -90,7 +90,7 @@ from etude.eval.records import Gap, Scheduled, Tournament
 from etude.experiment_file import experiment_named
 from etude.launch.logging import explain
 from etude.records import BUILT_IN_NAMES, Record
-from etude.report import Flame, Matches, Report, Score
+from etude.report import Counters, Flame, Matches, Report, Score, Series
 from etude.run import as_storage, declared, run_folders, runs, under
 from etude.storage import DirectoryStorage, S3Storage, Storage, default_root
 from etude.train.read import RunData, read_all
@@ -514,6 +514,20 @@ def build(source: Storage | Path | str, file: Path, *, experiment: str | None = 
     partial = (
         (f"Partial results: no recorded end yet for {', '.join(unended)}.",) if unended else ()
     )
+    measured = training(trained, prefixes=flames)
+    if "ml" not in report.model_fields_set:
+        # Defaults offer the RL metrics that exist; explicit panels still
+        # diagnose missing keys, including a misspelt metric name.
+        report = report.model_copy(
+            update={
+                "ml": tuple(
+                    panel.model_copy(update={"keys": keys})
+                    for panel in report.ml
+                    if isinstance(panel, Series | Counters)
+                    and (keys := tuple(key for key in panel.keys if key in measured.metrics))
+                )
+            }
+        )
     return Page(
         experiment=experiment,
         file=str(file),
@@ -521,7 +535,7 @@ def build(source: Storage | Path | str, file: Path, *, experiment: str | None = 
         report=report,
         origin=origin,
         notes=(*notes, *partial, *_without_hours(trained), *evals.notes),
-        training=training(trained, prefixes=flames),
+        training=measured,
         scores=evals.scores or ((report.score,) if report.score is not None else ()),
         selections=evals.selections,
         drawn=evals.drawn,

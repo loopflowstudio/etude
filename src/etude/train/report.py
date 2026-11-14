@@ -24,6 +24,7 @@ from typing import Literal
 
 import numpy as np
 
+from etude.checkpoints import CheckpointRecord
 from etude.records import BUILT_IN_CLOCKS, BUILT_IN_NAMES, HOURS_SINCE_START, Clock, Record
 from etude.train.read import Floats, RunData, lines
 
@@ -272,31 +273,26 @@ def _marks(run: RunData) -> list[Mark]:
     steps = [clock.name for clock in run.clocks if clock.kind == "step"]
     first = run.clocks[0].name if run.clocks else None
     marks: list[Mark] = []
-    previous = None
+    previous: CheckpointRecord | None = None
     for checkpoint in run.checkpoints:
         if checkpoint.wall_ms is None:
             continue
-        began = [
-            a for a in run.writers if (previous.wall_ms if previous and previous.wall_ms is not None else -1) < a.started_ms
-            and a.started_ms <= checkpoint.wall_ms
-        ]  # fmt: skip
-        # Pace is measured within one attempt: from the previous checkpoint, or
-        # from where the attempt that recorded this one resumed.
-        since = None if began else previous
-        resumed = began[-1] if began else None
+        previous_wall = previous.wall_ms if previous is not None else None
+        restarted = any(
+            (previous_wall is None or previous_wall < writer.started_ms)
+            and writer.started_ms <= checkpoint.wall_ms
+            for writer in run.writers
+        )
+        seconds = (checkpoint.wall_ms - previous_wall) / 1000 if previous_wall is not None else 0
+        # A restart breaks the interval: resumed coordinates do not measure
+        # work across the two processes or the time spent between them.
         pace: dict[str, float | None] = {}
         for clock in steps:
             here = checkpoint.at.get(clock)
-            if since is not None:
-                there, then = since.at.get(clock), since.wall_ms or 0
-            elif resumed is not None:
-                there, then = resumed.resumed_at.get(clock), resumed.started_ms
-            else:
-                there, then = None, 0
-            seconds = (checkpoint.wall_ms - then) / 1000
+            there = previous.at.get(clock) if previous is not None else None
             pace[clock] = (
                 _round((here - there) / seconds)
-                if here is not None and there is not None and seconds > 0
+                if not restarted and here is not None and there is not None and seconds > 0
                 else None
             )
         marks.append(

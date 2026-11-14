@@ -96,6 +96,7 @@ function rampLegend(c, ref, found, tail) {
 }
 
 // ---------------------------------------------------------------- page
+const caption = (...parts) => parts.filter(Boolean).join(" · ");
 function card(host, title, sub, cls = "") { const c = node("div", "card " + cls), h = node("h3", null, title); if (sub) h.appendChild(node("span", null, sub)); c.appendChild(h); host.appendChild(c); return c; }
 function control(host, label, options, key, apply = render) {
   if (options.length < 2) return;
@@ -165,7 +166,7 @@ function render() {
   control(ec, "X axis", CLOCKS, "eclock");
   const body = document.getElementById("evals-body"); body.replaceChildren();
   const scoreName = E.info ? `${E.info.table}.${E.info.value}${E.info.per ? " per " + E.info.per : ""}` : "";
-  document.getElementById("evals-sub").textContent = !M.usesSelection ? "" : E.sel == null ? "no eval run yet" : `${selName(D.selections[E.sel])} · ${scoreName}`;
+  document.getElementById("evals-sub").textContent = !M.usesSelection ? "" : E.sel == null ? "no eval run yet" : caption(selName(D.selections[E.sel]), scoreName);
   const eOpts = {xLabel: S.eclock, yFormat: scoreFormat, ref, sync: "evals"};
   const GAPS = "○ not yet played · × failed · | not evaluated";
   // Only a job averages seeds; a line's curve is its checkpoints' own values.
@@ -178,20 +179,21 @@ function render() {
   if (!D.selections.length) card(body, "No evaluations", "", "full").appendChild(node("div", "na", `${D.file} defines no eval(state) yet. Define one and run etude eval on the file; its matches appear here.`));
   else for (const [k, panel] of R.evals.entries()) {
     const sel = M.panelSelection(k, E.sel), opp = oppFor(E, sel), versus = versusOf(sel, opp), where = sel == null ? "" : selName(D.selections[sel]);
+    const score = [scoreName, versus].filter(Boolean).join(" ");
     if (panel.kind === "curve" && !panel.split) {
-      const c = card(body, panel.title, `${where} · ${scoreName} ${versus} · ${BAND} · ${GAPS}`, "full");
+      const c = card(body, panel.title, caption(where, score, BAND, GAPS), "full");
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
       const host = node("div"); c.appendChild(host);
       later(() => line(host, series(j => curveOf(j, sel, {}, opp), vis), {...eOpts, refs: anchorLines(E, sel, opp), height: 260}));
     } else if (panel.kind === "curve") {
-      const c = card(body, panel.title, `${where} · one chart per ${panel.split} · ${versus}`, "full");
+      const c = card(body, panel.title, caption(where, `one chart per ${panel.split}`, versus), "full");
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
       const vals = values(E, sel, panel.split);
       if (!vals.length) { c.appendChild(node("div", "na", absentNote(panel.split))); continue; }
       const grid = node("div", "grid multiples"); c.appendChild(grid);
       for (const v of vals) { const m = node("div"), host = node("div"); m.append(node("div", "mini-title", `${panel.split} = ${show(v)}`), host); grid.appendChild(m); later(() => line(host, series(j => curveOf(j, sel, {[panel.split]: v}, opp), vis), {...eOpts, refs: anchorLines(E, sel, opp, {[panel.split]: v}), compact: true, height: 140})); }
     } else if (panel.kind === "matrix") {
-      const c = card(body, panel.title || `${panel.columns} × ${panel.rows}`, `${where} · ${panel.columns} across · ${panel.rows} down · ${scoreName} ${versus}`, "full");
+      const c = card(body, panel.title || `${panel.columns} × ${panel.rows}`, caption(where, `${panel.columns} across`, `${panel.rows} down`, score), "full");
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
       const both = (r, col) => ({[panel.rows]: r, [panel.columns]: col});
       const colsAt = values(E, sel, panel.columns, panel.rows), rowsAt = values(E, sel, panel.rows, panel.columns);
@@ -232,7 +234,7 @@ function render() {
       rampLegend(c, ref, found, `· at ${keyName(key)}${key === last ? " (final)" : ""}${ref != null ? " · faded where the band includes " + fmt(ref) : ""} · click a cell to filter`);
     } else if (panel.kind === "ranking") {
       const commonKey = (() => { const sets = vis.map(j => new Set(evaluated(curveOf(j, sel, {}, opp)).map(p => p.key))); const shared = sets.length ? [...sets[0]].filter(k => sets.every(s => s.has(k))) : []; return shared.length ? Math.max(...shared) : null; })();
-      const c = card(body, panel.title || `By ${panel.by}`, `${where} · ${commonKey != null ? `at ${keyName(commonKey)}, which every job evaluated` : "each job at its latest"} · ${versus}`);
+      const c = card(body, panel.title || `By ${panel.by}`, caption(where, commonKey != null ? `at ${keyName(commonKey)}, which every job evaluated` : "each job at its latest", versus));
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
       const vals = values(E, sel, panel.by);
       if (!vals.length) { c.appendChild(node("div", "na", absentNote(panel.by))); continue; }
@@ -260,7 +262,7 @@ function render() {
     } else if (panel.kind === "crosstable") {
       // One line's checkpoints against each other, both axes ordered by the clock: a tab per
       // line of the curves shown, so a job's seeds are each their own.
-      const c = card(body, panel.title, `${where} · ${scoreName} · row against column · ordered by ${S.eclock}`, "full");
+      const c = card(body, panel.title, caption(where, scoreName, "row against column", `ordered by ${S.eclock}`), "full");
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
       const tabsOf = [...new Map(vis.flatMap(j => M.linesOf(j).map(key => [key, {job: j, key, label: j.line == null ? `${j.label} · ${key}` : j.label}]))).values()];
       if (!tabsOf.length) { c.appendChild(node("div", "na", "No checkpoint has a position")); continue; }
@@ -292,7 +294,7 @@ function render() {
       if (found.length) rampLegend(c, ref, found, `· ${chosen.label} · · not played`);
     } else if (panel.kind === "anchors") {
       // Fixed players are not a job's: drawn once, against each other.
-      const c = card(body, panel.title, `${where} · ${scoreName} · row against column · strength: over matches that seat no placed checkpoint`, "full");
+      const c = card(body, panel.title, caption(where, scoreName, "row against column", "strength: over matches that seat no placed checkpoint"), "full");
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
       const met = fixedPlayers.filter(a => D.cells.some(x => x.selection === sel && x.score === E.score && (x.subject === a || x.opponent === a) && (x.fixed || (!placed(x.subject) && x.opponent != null && !placed(x.opponent)))));
       if (!met.length) { c.appendChild(node("div", "na", "No two fixed players played each other in these matches")); continue; }

@@ -167,3 +167,9 @@ The mixed selection was recovered with explicit seed commands, not by
 changing the assumption. Open 6 and 7 remain unanswered product choices;
 the review adds no reply or authorization from Jack Heart. The temporary
 fixture was removed and no processes were left running.
+
+## Report defaults (2026-11-13)
+
+Reversible choice for the QA finding: omitted Report.ml offers only logged RL
+keys and hides wholly unused panels; explicit ml= retains missing-key warnings.
+Selection Open 6 and config-variant Open 7 stay unchanged.

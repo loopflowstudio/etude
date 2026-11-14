@@ -701,7 +701,8 @@ checkpoint), `Attempts` (writer lifetimes), and `Flame`, an icicle of the second
 `time/` (`time/collection`, `time/collection/inference`: seconds since the
 previous row). **ML details** default to reinforcement learning's `Counters`
 and `Series` over `rl/` keys; pass `perf=` or `ml=` to name an experiment's
-own. Keys a panel names that no run logged are listed.
+own. Default RL panels show only logged keys. Explicit panels list keys that no
+run logged. Pace leaves a gap at the first checkpoint after a writer starts.
 
 A report reads and draws only the keys named by `Series` and `Counters` and
 the prefixes named by `Flame`. It reads each immutable block once, whole,

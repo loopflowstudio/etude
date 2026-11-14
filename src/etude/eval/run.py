@@ -22,7 +22,6 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
 from functools import lru_cache
 from hashlib import sha256
 from pathlib import Path
@@ -122,9 +121,6 @@ class EvalRun(Run):
         self.environment = environment
         self.matches = tuple(matches)
         self.workers = workers
-        self._stop_requested = False
-        self._asked: float | None = None
-        self._slowest = 0.0
         self.rollups = rollups
         self.id = secrets.token_hex(6)
         self.writer = RunWriter(
@@ -156,20 +152,6 @@ class EvalRun(Run):
             writer=self.writer,
         )
         self._report.write()
-
-    @property
-    def should_stop(self) -> bool:
-        """A requested stop is observed between matches, after retaining completed tables."""
-        now = time.monotonic()
-        if self._asked is not None:
-            self._slowest = max(self._slowest, now - self._asked)
-        self._asked = now
-        stop = os.environ.get("ETUDE_STOP_FILE")
-        deadline = os.environ.get("ETUDE_DEADLINE")
-        self._stop_requested |= bool(stop and Path(stop).exists()) or bool(
-            deadline and datetime.fromisoformat(deadline).timestamp() - time.time() <= self._slowest
-        )
-        return self._stop_requested
 
     def play[C: BaseModel | Mapping[str, JsonValue]](
         self, play: Callable[[Match[C]], Tables | Result]

@@ -1,6 +1,6 @@
 """Run identity, local files, delivery and discovery, shared by training and evaluation.
 
-Run owns a live run's identity and destinations. Declaration claims run.json
+Run owns a live run's identity, stop signal and destinations. Declaration claims run.json
 before a writer starts; delivery publishes complete files and discovery joins
 historical copies by declared experiment and run.
 """
@@ -12,9 +12,11 @@ import json
 import os
 import secrets
 import threading
+import time
 from bisect import bisect_left
 from collections.abc import Container, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from hashlib import file_digest, sha256
 from pathlib import Path, PurePosixPath
 from tempfile import NamedTemporaryFile, TemporaryDirectory
@@ -55,7 +57,7 @@ from etude.storage import DirectoryStorage, Storage, run_directory, run_prefix, 
 
 
 class Run:
-    """A live run's identity, local files and delivery destinations."""
+    """A live run's identity, stop signal, local files and delivery destinations."""
 
     def __init__(
         self,
@@ -72,6 +74,27 @@ class Run:
         self.address = record.id if record is not None else run_address(name, experiment)
         self._destinations = list(targets)
         self.problems: dict[str, str] = {}
+        self._asked: float | None = None
+        self._slowest = 0.0
+        self._stop_requested = False
+
+    @property
+    def should_stop(self) -> bool:
+        """Whether to save and stop: a request, or less than the slowest pass left.
+
+        Ask between steps or matches. Once observed, a stop stays requested
+        even if its file disappears or the deadline changes.
+        """
+        now = time.monotonic()
+        if self._asked is not None:
+            self._slowest = max(self._slowest, now - self._asked)
+        self._asked = now
+        stop = os.environ.get("ETUDE_STOP_FILE")
+        deadline = os.environ.get("ETUDE_DEADLINE")
+        self._stop_requested |= bool(stop and Path(stop).exists()) or bool(
+            deadline and datetime.fromisoformat(deadline).timestamp() - time.time() <= self._slowest
+        )
+        return self._stop_requested
 
     def ship(self) -> bool:
         """Deliver to every destination once; retain each destination's failure reason."""

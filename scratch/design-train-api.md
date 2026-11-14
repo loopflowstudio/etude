@@ -339,103 +339,31 @@ the stored kinds and names; stored labels survive.
 Steer `cf6392bc-72d6-4aee-a020-909704a9bcb2`: metrics may vary per row;
 missing means null, never zero or carried forward. Evals are separate runs.
 
-## Ninth concept review (2026-11-13): built corrections
+## Selection and review decisions
 
-Walked `etude train` at `ca88f10` on the coin example and a two-job,
-several-seed file; what each command printed is in `questions.md` (Ninth
-concept review). One run, stopped and resumed, reads as designed. Carrying on
-a selection of several runs did not, and four smaller spellings disagreed with
-this design. The corrections below are built; focused receipts are in exp-56.md.
-Settled here from what the design already says; no stored format,
-schema or remote read changes.
+Ninth review corrections and the selection recovery probe are built; full
+rationale remains at `9799f9d:scratch/design-train-api.md` (Ninth concept review
+and Selection recovery decision). Current behavior is in user docs;
+`exp-56.md` lists the cut and `questions.md` preserves the probe receipt.
 
-1. **A several-run selection is checked whole before any run starts, and
-   `--resume` carries it on.** Previously each run was checked as its turn came, so
-   `--resume` over seeds 0-2 refuses at the first finished seed, and
-   `--resume --until` trains two runs and then fails on the third. Check every
-   selected run first; refuse once, naming each address and its reason, before
-   `train` is called. Under `--resume` with several runs selected, a finished
-   run with no later target is skipped with a line saying so
-   (`sweep/narrow@0 finished at updates=6`), not a refusal; with one run
-   selected the refusal stands. Never-started runs under `--resume` are still
-   refused (principle 8), now before any work and naming them; whether
-   `--resume` should start them is Open 6.
-2. **The config-changed refusal names both ways on.** `etude train coin.py
-   --config '{"updates":40}'` on an existing run prints `updates was 20, is 40;
-   choose --experiment NAME`: the move from the Hanabi demo, still not told
-   about `--until`. One refusal owns the wording for new and resumed attempts:
-   the changed fields, then `--resume --until CLOCK=TARGET` to train this run
-   further, then `--experiment NAME` for a changed config. The resumed-attempt
-   form previously gave no remedy at all.
-3. **`etude train` of a `runs()` file asks only what training here needs.** It
-   is refused without `max_hours` and outside a git checkout, though a
-   `train`-only file needs neither and nothing is rented. Local training
-   ignores the hours limit and records a commit when there is one; `launch`,
-   `queue` and `smoke` keep both requirements.
-4. **Output spells the address.** `etude checkpoints` prints `coin/coin` for
-   the run every other command calls `coin`; print the stored address.
-5. **`etude report FILE --experiment NAME`**, as train, launch, queue and eval
-   take it. A run trained with the documented `--experiment wide` has no report
-   command today (`No such option: --experiment`; the file stem is the only
-   experiment it reads).
-6. **Docs.** `--json` prints one object per selected run, in order; the page
-   says one. Say that `--resume` repeats the selection and what it does with
-   finished and never-started members.
+Preflight every selected run before executing any. Multi-run resume skips
+finished members without a later target; a sole finished member refuses.
+Never-started members refuse under resume (Open 6). Config conflicts name
+fields and both remedies: resume with --until, or a new --experiment (Open 7).
+Local training needs no rental hours or git; record a commit when available.
+Checkpoint output and report --experiment follow the compact address.
+JSON emits one object per selected run, in order. Preserve exit codes,
+identity refusals, row replacement, state publication and cumulative budgets.
 
-Keep: single-run behavior, the exit codes, stored ids, state publication, row
-replacement, continuation and budgets. Add focused tests for 1-5 by result
-(printed refusal, exit code, which runs have rows); no new counting path.
-
-## Selection recovery decision (concept review, 2026-11-13)
-
-The single-run experience and model stand: a job plus seed is a run;
-`train(config)` is one attempt; registered state is a whole save selected by
-its pointer; a checkpoint is a separately published player input. A planned
-stop keeps the run and its config, while continuation makes a child. Neither
-writers nor saves need to become another thing the recipe author manages.
-Keep independent writer cutoffs and cumulative allocation/rental limits.
-
-The biggest mismatch is the command over several runs. A controlled CLI
-walkthrough on this tree finished seed 0, saved and stopped seed 1, and left
-seed 2 unstarted. Repeating the selection with `--resume` refused before any
-work; all file bytes were unchanged. Selecting seed 1 resumed its saved counts
-at 2 and finished at 3. Receipt: `questions.md` (Selection recovery probe).
-This preserves each run's identity but makes recovery of the original
-selection require different commands for its started and unstarted members.
-
-Open 6 is a product choice, not a missed preflight fix. The two complete
-experiences are:
-
-- **Existing:** `etude train sweep.py --resume --seed 1`, then
-  `etude train sweep.py --seed 2` (and each remaining seed). New and resumed
-  commands remain distinct for every member.
-- **Proposed, unanswered:** `etude train sweep.py --resume` resumes started
-  members, skips finished ones without a later target, and starts unstarted
-  members. Here `--resume` means finish the selection. It must still preflight
-  every member before executing any, preserve existing config/seed refusals,
-  and stop the selection at the first saved stop or failure. A missing stored
-  run cannot be treated as an empty successful read after an I/O failure.
-
-If the second experience is chosen, the command distinguishes new versus
-resumed per selected member; `RunRecord` remains the only durable identity,
-and a first attempt remains different from another attempt. No sweep record,
-new storage layout, or relaxed identity check follows from this choice.
-The counterexample to keep is a later conflicting member: neither extending
-an earlier member nor creating an unstarted one may happen before refusal.
-
-Open 7 also stands: changing `rate` was refused with the two documented
-remedies; `--experiment wide` created `wide@0`, a separate experiment from
-`sweep`. Keeping variants together would require a new naming interaction;
-do not reinterpret `--job`, which Jack Heart said should select. The existing
-Python route is named jobs in `runs()`. Whether the CLI also needs a quick
-variant route is unanswered, not implied by removing a wrapper or a record.
-
-Next show: the mixed finished/stopped/unstarted selection above, then two
-rates on the same report. Keep the usage docs' existing behavior until these
-choices are answered. When updating the QA skill, replace its obsolete
-`local_launch`/`etude.train.run` recipe walkthrough with the current
-`etude.train.tracking` and `etude train FILE [--resume]` paths; do not teach
-the proposed mixed-selection behavior as built. No code changes here.
+Open 6's alternative is resume meaning finish the whole selection: resume
+started members, skip finished ones, start unstarted ones, with the same
+whole-selection preflight. A later conflict must leave all members untouched;
+I/O failure cannot mean an absent run. No new sweep record or layout follows.
+Open 7's alternative groups quick config variants as jobs in one experiment;
+that needs a naming interaction and must not reinterpret --job selection.
+Neither alternative is chosen. Until answered, recovery uses explicit seed
+commands and variants use new experiments. The QA walkthrough now uses
+etude.train.tracking and etude train FILE [--resume].
 
 ## Manabot (MTG-329)
 

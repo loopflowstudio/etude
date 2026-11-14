@@ -50,7 +50,6 @@ import zlib
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
 from hashlib import file_digest, sha256
 from itertools import chain, count
 from pathlib import Path
@@ -259,7 +258,7 @@ class _Clocks:
 
 @dataclass(frozen=True)
 class _Kept:
-    """A checkpoint record for the writer, and the name it is kept under."""
+    """A checkpoint record and its stored name, also queued to the writer."""
 
     name: str
     record: CheckpointRecord
@@ -306,9 +305,6 @@ class TrainingRun(Run):
         self._out.mkdir(parents=True, exist_ok=True)
         if self._out == (root / "out").resolve():
             (root / OUT_PRESENT).touch()
-        self._asked: float | None = None
-        self._slowest = 0.0
-        self._stop_requested = False
         # Rows refused by the full queue, and rows kept but not chartable.
         self.dropped = 0
         self.incomplete = 0
@@ -325,16 +321,13 @@ class TrainingRun(Run):
         self._columns = (*self._clock_names, *BUILT_IN_NAMES)
         # Every checkpoint recorded in this folder, by any attempt on any machine,
         # and the name its record and file are kept under.
-        self._recorded: dict[int, CheckpointRecord] = {}
-        self._names: dict[int, str] = {}
+        self._checkpoints: dict[int, _Kept] = {}
         for path in sorted((root / "checkpoints").glob("*.json")):
             known = CheckpointRecord.model_validate_json(path.read_bytes())
             known = known.model_copy(
                 update={"run": name, "experiment": experiment, "line": known.line or name}
             )
-            self._recorded[known.ordinal] = known
-            self._names[known.ordinal] = path.stem
-        self._checkpoints = max(self._recorded, default=0)
+            self._checkpoints[known.ordinal] = _Kept(path.stem, known)
         self._inherited = inherited
         self._segment_seconds = segment_seconds
         self._finish_deadline: float | None = None
@@ -556,20 +549,6 @@ class TrainingRun(Run):
         """The run's persistent output folder, shared by its attempts."""
         return self._out
 
-    @property
-    def should_stop(self) -> bool:
-        """Whether to save and stop: a request, or less than the slowest step left."""
-        now = time.monotonic()
-        if self._asked is not None:
-            self._slowest = max(self._slowest, now - self._asked)
-        self._asked = now
-        stop = os.environ.get("ETUDE_STOP_FILE")
-        deadline = os.environ.get("ETUDE_DEADLINE")
-        self._stop_requested |= bool(stop and Path(stop).exists()) or bool(
-            deadline and datetime.fromisoformat(deadline).timestamp() - time.time() <= self._slowest
-        )
-        return self._stop_requested
-
     def _use_clocks(self, clocks: Mapping[str, float]) -> bool:
         unknown = [name for name in clocks if name not in (*self._clock_names, *BUILT_IN_NAMES)]
         if unknown and self._closed_clocks:
@@ -749,7 +728,8 @@ class TrainingRun(Run):
             else:
                 reference, staged = self._stage(artifact, name)
             file = self._file_key(reference)
-            for known in self._recorded.values():
+            for kept in self._checkpoints.values():
+                known = kept.record
                 if (
                     reference.uri == known.artifact.uri or file is not None and file == known.file
                 ) and reference.sha256 != known.artifact.sha256:
@@ -760,7 +740,7 @@ class TrainingRun(Run):
                     if staged is not None:
                         _remove(staged)
                     return known.artifact
-            ordinal = self._checkpoints + 1
+            ordinal = max(self._checkpoints, default=0) + 1
             suffix = (
                 _suffix(Path(artifact))
                 if staged is not None and not staged.is_dir() and isinstance(artifact, (Path, str))
@@ -781,9 +761,9 @@ class TrainingRun(Run):
             )
             if staged is not None:
                 if staged.is_dir():
-                    kept = staged.parent / name
-                    staged.rename(kept)
-                    reference = reference.model_copy(update={"uri": kept.resolve().as_uri()})
+                    target = staged.parent / name
+                    staged.rename(target)
+                    reference = reference.model_copy(update={"uri": target.resolve().as_uri()})
                 else:
                     reference = self._rename_staged(staged, name + suffix, reference)
             record = record.model_copy(
@@ -797,10 +777,9 @@ class TrainingRun(Run):
             self.incomplete += 1
             self._warn("checkpoint", f"a checkpoint was not recorded ({error})")
             return artifact if isinstance(artifact, ArtifactRef) else ArtifactRef(uri=str(artifact))
-        self._checkpoints = ordinal
-        self._recorded[ordinal] = record
-        self._names[ordinal] = name
-        self._offer(_Kept(name, record))
+        kept = _Kept(name, record)
+        self._checkpoints[ordinal] = kept
+        self._offer(kept)
         return record.artifact
 
     def checkpoint_due(self, every: float, clock: str = RUNNING_HOURS) -> bool:
@@ -813,7 +792,7 @@ class TrainingRun(Run):
             raise ValueError("every must be positive")
         here, latest = self.at(clock), self._latest_record()
         there = 0.0 if latest is None else latest.at.get(clock, 0.0)
-        return here is not None and here // every > there // every
+        return here // every > there // every
 
     def _now(self) -> tuple[int, dict[str, float]]:
         """The wall time in milliseconds, and where Etude's clocks stand."""
@@ -825,7 +804,11 @@ class TrainingRun(Run):
 
     def _latest_record(self) -> CheckpointRecord | None:
         """The latest record this run kept, else the parent's it continues from."""
-        return self._recorded[max(self._recorded)] if self._recorded else self._inherited
+        return (
+            self._checkpoints[max(self._checkpoints)].record
+            if self._checkpoints
+            else self._inherited
+        )
 
     def latest_checkpoint(self) -> CheckpointRecord | None:
         """The latest checkpoint record, or an inherited parent checkpoint.
@@ -844,7 +827,9 @@ class TrainingRun(Run):
 
     def checkpoints(self) -> tuple[CheckpointRecord, ...]:
         """Published checkpoints in ordinal order, relocated when their bytes are here."""
-        return tuple(self._checkpoint_here(self._recorded[n]) for n in sorted(self._recorded))
+        return tuple(
+            self._checkpoint_here(self._checkpoints[n].record) for n in sorted(self._checkpoints)
+        )
 
     def _checkpoint_here(self, record: CheckpointRecord) -> CheckpointRecord:
         key = record.file or checkpoint_key(record.artifact.uri)
@@ -950,7 +935,8 @@ class TrainingRun(Run):
         A file counts even without a record, here or where storage or another
         host keeps it (`etude.carriage.taken`), so nothing is ever replaced.
         """
-        files, records = taken(self.files.root), set(self._names.values())
+        files = taken(self.files.root)
+        records = {kept.name for kept in self._checkpoints.values()}
         records.update(path.name for path in (self.out / "checkpoints").glob("*"))
         versions = (f"{name}.ordinal-{ordinal}-{n}" for n in count(2))
         candidates = chain((name, f"{name}.ordinal-{ordinal}"), versions)
@@ -980,30 +966,32 @@ class TrainingRun(Run):
         self, checkpoint: ArtifactRef | int, add: Sequence[str], remove: Sequence[str]
     ) -> None:
         try:
-            record = (
-                self._recorded.get(checkpoint)
+            kept = (
+                self._checkpoints.get(checkpoint)
                 if isinstance(checkpoint, int)
                 else next(
                     (
-                        known
-                        for known in self._recorded.values()
-                        if _same_content(known.artifact, checkpoint)
+                        kept
+                        for kept in self._checkpoints.values()
+                        if _same_content(kept.record.artifact, checkpoint)
                     ),
                     None,
                 )
             )
-            if record is None:
+            if kept is None:
                 raise EtudeError("checkpoint_not_recorded", 404)
-            kept = tuple(t for t in dict.fromkeys((*record.tags, *add)) if t not in remove)
-            changed = CheckpointRecord.model_validate(record.model_dump() | {"tags": kept})
+            record = kept.record
+            tags = tuple(t for t in dict.fromkeys((*record.tags, *add)) if t not in remove)
+            changed = CheckpointRecord.model_validate(record.model_dump() | {"tags": tags})
         except (ValidationError, EtudeError) as error:
             if self.strict:
                 raise
             self.incomplete += 1
             self._warn("tag", f"a checkpoint was not tagged ({error})")
             return
-        self._recorded[changed.ordinal] = changed
-        self._offer(_Kept(self._names[changed.ordinal], changed))
+        updated = _Kept(kept.name, changed)
+        self._checkpoints[changed.ordinal] = updated
+        self._offer(updated)
 
     def _offer(self, item: object) -> None:
         try:

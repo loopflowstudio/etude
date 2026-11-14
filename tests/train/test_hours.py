@@ -152,3 +152,26 @@ def test_checkpoints_saved_before_etudes_clocks_derive_them_from_wall_time(
 
     data = read(tmp_path, "e", "r")
     assert [_hours(c.at) for c in data.checkpoints] == [(1.0, 1.0), (1.25, 3.25)]
+
+
+def test_report_pace_leaves_restart_gaps_and_recovers_within_a_writer(
+    tmp_path: Path, clock: Clockwork
+) -> None:
+    first = _start(tmp_path, "r")
+    for step in (10, 20):
+        clock.run(1)
+        first.checkpoint(f"s3://models/{step}.pt", step=step)
+    first.finish("failed")
+    clock.wait(10)
+    second = _start(tmp_path, "r", resume=True)
+    for step in (30, 40):
+        clock.run(1)
+        second.checkpoint(f"s3://models/{step}.pt", step=step)
+    second.finish()
+    marks = training([read(tmp_path, "e", "r")]).checkpoints
+    assert [mark.pace["step"] for mark in marks] == [
+        None,
+        pytest.approx(10 / 3600, rel=1e-5),
+        None,
+        pytest.approx(10 / 3600, rel=1e-5),
+    ]

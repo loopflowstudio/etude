@@ -25,6 +25,7 @@ from etude.report import (
     PlannedPoint,
     Ranking,
     Report,
+    Series,
 )
 from etude.storage import DirectoryStorage, Storage, storage_from_uri
 from etude.train.records import Step
@@ -94,7 +95,7 @@ def test_without_a_report_the_page_is_the_default_and_says_so(tmp_path: Path) ->
     run.log({"custom/score": 1.0}, updates=1)
     run.finish(timeout=30)
     page = build(runs, experiment_file(tmp_path, "lab", "def train(config: object) -> None: ...\n"))
-    assert page.report == Report(other_metrics=True) and page.origin is None
+    assert page.report == Report(other_metrics=True, ml=()) and page.origin is None
     assert page.notes == ("lab.py defines no report(), so this is the default report.",)
     assert page.report.evals == (Curve(), Anchors())
     assert "custom/score" in page.training.metrics  # nothing declared, so everything is drawn
@@ -577,3 +578,22 @@ def test_report_experiment_override_selects_runs_and_names_the_output(
         server.server_close()
     assert main(["report", str(tmp_path), "--experiment", "wide"]) == 1
     assert "--experiment needs one Python file" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_default_rl_panels_use_logged_keys_but_explicit_panels_keep_missing_keys(
+    tmp_path: Path, explicit: bool
+) -> None:
+    runs = tmp_path / "runs"
+    with track(experiment="lab", run="a", directory=runs) as run:
+        run.log({"rl/loss": 0.5}, updates=1)
+    panels = "ml=(Series(title='Losses', keys=('rl/loss', 'rl/value_loss')),)" if explicit else ""
+    code = (
+        "from etude.report import Report, Series\n"
+        f"def report() -> Report:\n    return Report({panels})\n"
+    )
+    page = build(runs, experiment_file(tmp_path, "lab", code))
+    assert page.report.ml == (
+        Series(title="Losses", keys=("rl/loss", "rl/value_loss") if explicit else ("rl/loss",)),
+    )
+    assert page.training.series["updates"]["rl/loss"][0].mean == [0.5]

@@ -45,7 +45,7 @@ function renderPage(data, hash = "") {
     experiment: "test", notes: [], environments: [], commits: [], failures: [], generated_ms: 0,
     scores: [{table: "games", value: "win", unit: "games"}], ...data,
     report: {evals: [{kind: "curve", title: "Score"}], perf: [], ml: [], ...data.report},
-    training: {...data.training, metrics: [], runs: data.training.runs.map(r => ({rows: 0, writers: [], ...r}))},
+    training: {metrics: [], series: {}, bands: {}, ...data.training, runs: data.training.runs.map(r => ({rows: 0, writers: [], ...r}))},
   };
   document.getElementById("data").textContent = JSON.stringify(full);
   const browser = vm.createContext({
@@ -59,7 +59,7 @@ function renderPage(data, hash = "") {
   });
   const script = fs.readFileSync("src/etude/page.html", "utf8").split("<script>\n")[1].split("</script>")[0];
   vm.runInContext(fs.readFileSync("src/etude/charts.js", "utf8") + "\n" + script, browser);
-  return {text: document.getElementById("evals-body").textContent, plots, display: id => document.getElementById(id).style.display};
+  return {text: document.getElementById("evals-body").textContent, plots, sectionText: id => document.getElementById(id + "-body").textContent, display: id => document.getElementById(id).style.display};
 }
 
 test("a section the report gives no panel is hidden, header and controls with it", () => {
@@ -372,4 +372,39 @@ test("a one-seed seating draws a job's point from the seed that played it, and w
   const every = points(context.model(data), context.model(data).JOBS[0])[0];
   assert.equal(every.missing, true);
   assert.match(every.meta, /1 of 2 seeds evaluated/);
+});
+
+
+test("evaluation captions omit separators for absent score and selection text", () => {
+  const data = page([player("u100", "learner", 100)], [[0, null, 0.5]]);
+  data.scores = [];
+  data.report = {evals: [{kind: "curve", title: "Score", matches: {seating: "missing"}}]};
+  data.panel_selections = [{selection: null, control: false}];
+  const rendered = renderPage(data);
+  assert.doesNotMatch(rendered.text, /Score ·|·\s*·/);
+  assert.match(rendered.text, /vs all opponents · band: 95% interval/);
+});
+
+test("explicit absent metric keys remain visible as report warnings", () => {
+  const data = page([], [], {
+    jobs: [{name: "a", launch: "a", runs: ["a"]}], runs: [{name: "a"}],
+    checkpoints: [], clocks: [{name: "updates"}],
+  });
+  data.report = {ml: [{kind: "series", title: "Loss", keys: ["misspelt/loss"]}]};
+  assert.match(renderPage(data).sectionText("ml"), /Named by a panel but not logged by these runs: misspelt\/loss/);
+});
+
+
+test("pace plots restart boundaries as null gaps between measured intervals", () => {
+  const data = page([], [], {
+    jobs: [{name: "a", launch: "a", label: "A", runs: ["a"]}],
+    runs: [{name: "a"}], clocks: [{name: "updates", kind: "step"}],
+    checkpoints: [null, 10, null, 10].map((pace, i) => ({
+      run: "a", ordinal: i + 1, align: i + 1, at: {updates: i + 1}, pace: {updates: pace},
+    })),
+  });
+  data.report = {clock: "updates", perf: [{kind: "pace", title: "Pace"}]};
+  const rendered = renderPage(data);
+  assert.equal(rendered.plots.length, 1);
+  assert.deepEqual([...rendered.plots[0].values[1]], [null, 10, null, 10]);
 });
