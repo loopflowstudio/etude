@@ -319,8 +319,14 @@ class Courier:
         """
         held = {w.run for w in works if w.here and (self._track_root / w.run).is_dir()}
         by_run: dict[str, dict[str, ReadLink]] = {}
+        # Run addresses may themselves contain slashes; the assigned work owns
+        # the boundary, including when compact and nested runs share a prefix.
+        runs = sorted({work.run for work in works}, key=len, reverse=True)
         for name, url in links.items():
-            run, _, key = name.partition("/")
+            run = next((run for run in runs if name.startswith(run + "/")), None)
+            if run is None:
+                raise StorageUnavailable("restore path does not belong to assigned work")
+            key = name[len(run) + 1 :]
             if run not in held:
                 by_run.setdefault(run, {})[key] = url
         with observe(self._retain_transfer), attribute(session=self._home.name):

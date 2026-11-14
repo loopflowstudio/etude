@@ -158,7 +158,7 @@ def test_cohort_git_and_database_counts(
         (["pools"], 57, ("numpy", "boto3", "etude.launch.worker")),
         (
             ["worker", "{directory}"],
-            34,  # shared run and job records, plus the storage socket policy every request applies
+            35,  # shared run/job records, out membership and storage socket policy
             (
                 "numpy",
                 "boto3",

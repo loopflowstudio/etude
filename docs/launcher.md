@@ -1551,7 +1551,7 @@ Controller selection mutations are asks. `worker` and `controller run` are waits
 because they deliberately execute long-lived loops; they retain their existing
 lifetime rules. Job-file `runs()` is an input function, not a launcher command.
 `smoke` is a wait on this computer alone: it runs the file tiny in a temporary
-home and touches neither the database nor another machine. `run` is the same
+home and touches neither the database nor another machine. `train` is the same
 kind: it calls a file's `train` here, writes the run to this computer's runs
 directory, and needs no provider key, launcher database or network; `--seconds`
 is its optional limit. `queue --smoke` and

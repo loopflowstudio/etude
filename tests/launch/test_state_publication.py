@@ -45,6 +45,48 @@ def _journal(storage: Writes) -> BucketJournal:
     )
 
 
+@pytest.mark.parametrize("address", ["run1", "tiny", "tiny/policy@2"])
+def test_fresh_host_restores_a_whole_save_at_its_run_address(tmp_path: Path, address: str) -> None:
+    storage = Writes()
+    courier, _, root = machine(tmp_path / "old", storage, run=address)
+    saved = _save(root, 2)
+    courier._track(address, done=False)
+    work = Work(
+        attempt="a2",
+        command="true",
+        limit_seconds=30,
+        limit_kind="out_of_time",
+        seed=None,
+        until=None,
+        config=None,
+        repo=None,
+        commit=None,
+        run=address,
+        resumes=True,
+    )
+    fresh, _, restored = machine(tmp_path / "fresh", storage, run=address)
+    stale = restored / "out/stale"
+    stale.parent.mkdir(parents=True)
+    stale.write_bytes(b"superseded local state")
+    before = len(storage.asked)
+    links = _journal(storage)._restore([work])
+    assert Counter(method for method, _ in storage.asked[before:]) == {"GET": 1}
+    before = len(storage.asked)
+    fresh.restore(links, [work])
+    assert Counter(method for method, _ in storage.asked[before:]) == {"GET": 5}
+    assert not stale.exists()
+    assert (restored / "out/state/current.json").read_bytes() == (
+        saved.parent / "current.json"
+    ).read_bytes()
+    for member in saved.iterdir():
+        assert (
+            restored / "out/state" / saved.name / member.name
+        ).read_bytes() == member.read_bytes()
+    before = len(storage.asked)
+    fresh._track(address, done=False)
+    assert storage.asked[before:] == []
+
+
 @pytest.mark.parametrize("name", [None, "policy"])
 def test_only_the_selected_save_travels_and_its_pointer_is_last(
     tmp_path: Path, name: str | None

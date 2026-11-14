@@ -1,7 +1,8 @@
 """File contracts every run shares: its declaration, writers and outcome.
 
-A run declares its clocks once. A clock is a coordinate the run advances: a
-step counts something, a time is a duration (seconds on an author's clocks).
+A run records clocks explicitly or as they are first used. A clock is a
+coordinate the run advances: a step counts something, a time is a duration
+(seconds on an author's clocks).
 A run that logs no rows, such as an evaluation, declares none. Wall time is
 always recorded and never declared, and so are Etude's two clocks in hours
 (`BUILT_IN_CLOCKS`), which a training run gives on every row and checkpoint.
