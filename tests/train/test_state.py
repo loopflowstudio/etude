@@ -11,8 +11,8 @@ from etude.records import HOURS_SINCE_START, RUNNING_HOURS
 from etude.stopping import Stopped
 from etude.train.read import read
 from etude.train.records import Step
-from etude.train.run import track
 from etude.train.state import read_state
+from etude.train.tracking import track
 
 
 class Counts(BaseModel):
@@ -58,10 +58,7 @@ def test_two_models_and_extra_resume_from_one_save(tmp_path: Path) -> None:
         assert list(resumed.steps("updates", to=4, every=1)) == [3, 4]
         assert resumed.seed == 0
     assert read(tmp_path, "e", "r").points("loss", "updates").x.tolist() == [1, 2]
-    assert (
-        json.loads((tmp_path / "r/run.json").read_text())["declaration"]["config_json"]
-        == '{"games": 3}'
-    )
+    assert json.loads((tmp_path / "e/r/run.json").read_text())["config"] == '{"games": 3}'
 
 
 def test_callback_save_failure_leaves_the_previous_save_whole(tmp_path: Path) -> None:
@@ -137,7 +134,7 @@ def test_running_hours_resume_from_saved_state_instead_of_a_checkpoint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     now = 100.0
-    monkeypatch.setattr("etude.train.run.time.monotonic", lambda: now)
+    monkeypatch.setattr("etude.train.tracking.time.monotonic", lambda: now)
     with track(
         experiment="e",
         run="r",
@@ -176,8 +173,8 @@ def test_both_hour_clocks_survive_a_relay_without_checkpoints(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     now, wall_ms = 100.0, 1_000_000_000_000
-    monkeypatch.setattr("etude.train.run.time.monotonic", lambda: now)
-    monkeypatch.setattr("etude.train.run.time.time_ns", lambda: wall_ms * 1_000_000)
+    monkeypatch.setattr("etude.train.tracking.time.monotonic", lambda: now)
+    monkeypatch.setattr("etude.train.tracking.time.time_ns", lambda: wall_ms * 1_000_000)
     with track(
         experiment="e",
         run="r",
@@ -190,7 +187,7 @@ def test_both_hour_clocks_survive_a_relay_without_checkpoints(
             now += 3600
             wall_ms += 3_600_000
             run.save()
-    put_back(tmp_path / "second/r", restore_set(tmp_path / "first/r"))
+    put_back(tmp_path / "second/e/r", restore_set(tmp_path / "first/e/r"))
     now += 1800
     wall_ms += 1_800_000
     with track(

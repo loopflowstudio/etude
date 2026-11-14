@@ -35,13 +35,12 @@ from pathlib import Path
 from typing import Literal, cast
 
 from etude.checkpoints import CheckpointId, CheckpointRecord
-from etude.errors import EtudeError
+from etude.errors import EtudeError, LauncherError
 from etude.eval.records import CheckpointPlayer, Line, Match, digest, folder_name
 from etude.eval.tournament import played
+from etude.job import Job, RunRequest, Smoke
 from etude.launch import client
 from etude.launch.database import Database, launcher_file
-from etude.launch.errors import LauncherError
-from etude.launch.records import Job, RunRequest, Smoke
 from etude.launch.scheduler import Scheduler
 from etude.launch.source import home
 from etude.records import Digest, Record
@@ -76,7 +75,7 @@ class Checkpoints(tuple[CheckpointRecord, ...]):
 
 
 @dataclass(frozen=True)
-class TrainingRun:
+class TrainingRunSummary:
     name: str
     experiment: str
     # Its job as the report names it (`etude.train.report.job_names`): the launch name, with
@@ -106,9 +105,9 @@ class ExperimentState:
     """An experiment's training runs under a source, as a pass found it. Never stored."""
 
     experiment: str
-    runs: tuple[TrainingRun, ...] = ()
+    runs: tuple[TrainingRunSummary, ...] = ()
 
-    def run(self, name: str) -> TrainingRun:
+    def run(self, name: str) -> TrainingRunSummary:
         """The training run named `name`; raises `EtudeError("run_not_found")` without one."""
         for each in self.runs:
             if each.name == name:
@@ -119,7 +118,7 @@ class ExperimentState:
     def lines(self) -> tuple[Line, ...]:
         """Each learner line, as relative seats find checkpoints in it: seeded as its first
         run declared, and ended once every run of it has."""
-        found: dict[str, list[TrainingRun]] = {}
+        found: dict[str, list[TrainingRunSummary]] = {}
         for run in self.runs:
             found.setdefault(run.line, []).append(run)
         made = (
@@ -164,7 +163,7 @@ def state_of(every: Sequence[RunData], experiment: str) -> ExperimentState:
         for data in every
         if data.file is not None
         and data.experiment == experiment
-        and data.file.declaration.kind != "evaluation"
+        and data.file.kind != "evaluation"
     ]
     line = lines(ours)
     job = job_names(ours)
@@ -187,7 +186,7 @@ def state_of(every: Sequence[RunData], experiment: str) -> ExperimentState:
             else "running"
         )
         runs.append(
-            TrainingRun(
+            TrainingRunSummary(
                 name=data.name,
                 experiment=data.experiment,
                 job=job[data.name].name,
@@ -195,7 +194,7 @@ def state_of(every: Sequence[RunData], experiment: str) -> ExperimentState:
                 line=line[data.name],
                 state=state,
                 checkpoints=saved,
-                seed=data.file.declaration.seed if data.file else None,
+                seed=data.file.seed if data.file else None,
             )
         )
     return ExperimentState(experiment=experiment, runs=tuple(runs))
@@ -476,6 +475,13 @@ def _ledger_root(directory: Path | str | None) -> Path:
 
 
 def __getattr__(name: str) -> object:
+    if name == "TrainingRun":
+        warnings.warn(
+            "etude.experiment.TrainingRun is now TrainingRunSummary; removed in 0.5",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return TrainingRunSummary
     if name == "Checkpoint":
         warnings.warn(
             "etude.experiment.Checkpoint is now etude.checkpoints.CheckpointRecord; removed in 0.5",

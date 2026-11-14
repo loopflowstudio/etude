@@ -15,6 +15,8 @@ from pathlib import Path
 import pytest
 
 from etude.cli import main
+from etude.errors import LauncherError
+from etude.job import Job, RunRequest, Until
 from etude.launch.client import (
     _open,
     cancel,
@@ -28,7 +30,7 @@ from etude.launch.client import (
 )
 from etude.launch.controller import FetchRequest, PythonClient, forward, warning
 from etude.launch.database import launcher_file
-from etude.launch.records import Job, LauncherError, Pool, RunRequest, Until
+from etude.launch.records import Pool
 from tests.launch.counting import job_text
 from tests.launch.test_source import git
 from tests.launch.test_source import repository as repository
@@ -38,7 +40,7 @@ TRACKED = """
 import os
 from pathlib import Path
 from etude.train.records import Step
-from etude.train.run import track
+from etude.train.tracking import track
 run = track(experiment="capacity", clocks=[Step("steps", "training steps")])
 latest = run.latest_checkpoint()
 start = 0 if latest is None else int(latest.at["steps"])
@@ -128,7 +130,7 @@ def test_remote_launch_freezes_sources_config_and_returns_outputs(
     assert len(list((remote / "sources").glob("*.tar"))) == 1
     assert [pool.name for pool in _open(remote).pools()] == ["controller"]
     assert _open(remote).record(ids[0]).pool == "controller"
-    frozen = _open(remote).record(ids[0]).spec
+    frozen = _open(remote).record(ids[0]).launch_spec
     assert frozen.repo == str(repo) and frozen.revision != "HEAD"
     # Continuation works without the client's repository: it uses the retained archive.
     continued = command("continue", "--run", ids[0], "--until", "steps=20")
@@ -350,7 +352,7 @@ def test_controller_keeps_source_history_and_checks_out_on_client(
     record = _open(remote).record(id)
     assert record.source is not None and record.source.snapshot
     assert record.source.origin == str(origin)
-    assert git(origin, "rev-parse", f"refs/etude/runs/{id}") == record.spec.revision
+    assert git(origin, "rev-parse", f"refs/etude/runs/{id}") == record.launch_spec.revision
     assert "uncommitted changes" in sent.stdout
     repo.rename(repo.with_name("unavailable"))
     listed = command("runs", "--contains", "v1", "--pool", "waiting")

@@ -14,7 +14,7 @@ from etude.records import HOURS_SINCE_START, RUNNING_HOURS, SourceKey
 from etude.train.read import read
 from etude.train.records import ParentRun, Step
 from etude.train.report import training
-from etude.train.run import Run, track
+from etude.train.tracking import TrainingRun, track
 
 HOUR_MS = 3_600_000
 START_MS = 1_800_000_000_000
@@ -49,11 +49,11 @@ class Clockwork:
 @pytest.fixture
 def clock(monkeypatch: pytest.MonkeyPatch) -> Clockwork:
     fake = Clockwork()
-    monkeypatch.setattr("etude.train.run.time", fake)
+    monkeypatch.setattr("etude.train.tracking.time", fake)
     return fake
 
 
-def _start(directory: Path, name: str, *, resume: bool = False) -> Run:
+def _start(directory: Path, name: str, *, resume: bool = False) -> TrainingRun:
     return track(
         resume=resume,
         experiment="e",
@@ -119,8 +119,8 @@ def test_hours_continue_across_a_resume_and_a_continuation(
     continued.finish()
 
     child = read(tmp_path, "e", "c")
-    assert child.file is not None and child.file.declaration.continues is not None
-    assert child.file.declaration.continues.clock == RUNNING_HOURS
+    assert child.file is not None and child.file.continues is not None
+    assert child.file.continues.clock == RUNNING_HOURS
     assert [_hours(c.at) for c in child.checkpoints] == [(1.75, 5.25)]
 
 

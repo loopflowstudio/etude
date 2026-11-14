@@ -9,15 +9,17 @@ from pathlib import Path
 import pytest
 
 from etude.cli import main
+from etude.errors import LauncherError
+from etude.job import Job, Until
 from etude.launch.client import queue, queue_cohort, wait
 from etude.launch.database import Database, launcher_file
 from etude.launch.errors import LaunchError
 from etude.launch.executor import Refused
-from etude.launch.records import Job, LauncherError, Offer, OnDemand, Pool, Stale, Until
+from etude.launch.records import Offer, OnDemand, Pool, Stale
 from etude.launch.scheduler import Scheduler
 from etude.launch.schemas import Packet, Work
 from etude.train.records import ParentRun, Step
-from etude.train.run import track
+from etude.train.tracking import track
 from tests.experiments import authored
 from tests.launch.fake import L4, bench
 
@@ -214,11 +216,11 @@ def test_cli_continue_waits_without_capacity(
     assert main(argv) == 0
     child = capsys.readouterr().out.split()[0]
     record = b.scheduler.record(child)
-    (given,) = record.spec.environment
+    (given,) = record.launch_spec.environment
     handed = ParentRun.model_validate_json(given.value)
     assert handed.checkpoint is not None
     assert (handed.parent.source_id, authored(handed.checkpoint.at)) == (parent, {"steps": 3})
-    assert str(record.spec.until) == "steps=7" and record.autorun
+    assert str(record.launch_spec.until) == "steps=7" and record.autorun
     assert b.scheduler.read(child).phase == "queued"
 
 

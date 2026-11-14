@@ -12,10 +12,10 @@ from etude.eval.query import statsdb
 from etude.eval.records import Code, Inference, Match
 from etude.experiment import observe
 from etude.jobs import checkpoint_inputs_for, training
+from etude.run import RunFiles
 from etude.storage import DirectoryStorage
-from etude.tracking.delivery import RunFiles
 from etude.train.records import Step
-from etude.train.run import track
+from etude.train.tracking import track
 from tests.eval.games import play_checkpoint_folder
 from tests.run.storage import MeasuredStorage
 
@@ -62,7 +62,7 @@ def test_two_models_publish_one_checkpoint_and_read_the_same_record(
     assert (counted.listings, counted.requests) == (1, 4)
     assert observed is not None
     assert observed.artifact.sha256 == first.sha256
-    assert observed.path == tmp_path / "bucket/seed-0/out/checkpoints/updates-00000002"
+    assert observed.path == tmp_path / "bucket/tiny/seed-0/out/checkpoints/updates-00000002"
     assert observed.player(Inference()).checkpoint == observed.ref
     assert {given.name for given in checkpoint_inputs_for(observed, "start")} == {
         "start/checkpoint.json",
@@ -96,7 +96,7 @@ def test_two_models_publish_one_checkpoint_and_read_the_same_record(
         clocks=[Step("updates", "updates")],
     ) as child:
         recorded = RunFiles(child.files.root).run_file()
-        assert recorded is not None and recorded.declaration.start == observed.key
+        assert recorded is not None and recorded.start == observed.key
     # A relay keeps all folder members and checks each against its recorded digest.
     files = restore_set(run.files.root)
     copied = tmp_path / "relay"

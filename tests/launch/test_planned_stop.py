@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from etude.launch.records import Input, Job
+from etude.job import Input, Job
 from etude.launch.worker.attempts import _lay_out
 from tests.launch.fake import bench
 from tests.launch.test_scheduler import job

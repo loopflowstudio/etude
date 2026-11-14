@@ -17,8 +17,9 @@ from types import SimpleNamespace
 import pytest
 
 from etude.cli import main
+from etude.job import Input, Job, Preparation, Runtime
 from etude.launch.client import default
-from etude.launch.records import Input, Job, Preparation, Runtime, Status
+from etude.launch.records import Status
 from etude.launch.scheduler import Scheduler
 from etude.launch.worker.prepared import Receipt, evict, home
 from tests.launch.counting import job_text

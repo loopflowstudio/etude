@@ -44,7 +44,7 @@ def checkpoint_name(at: dict[str, float], *, padded: bool = False) -> str:
     Safe in any bucket and shell: the clock's name keeps letters, digits, `.`,
     `_` and `-`, anything else becomes `_`, and the value is a plain number. A
     different checkpoint at a coordinate already recorded is kept as
-    `NAME.ordinal-N` (`etude.train.run.Run.checkpoint`). The exact clocks are
+    `NAME.ordinal-N` (`etude.train.tracking.Run.checkpoint`). The exact clocks are
     in the record itself.
     """
     clock, value = next(iter(at.items()))

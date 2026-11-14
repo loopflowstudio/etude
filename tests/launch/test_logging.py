@@ -19,16 +19,18 @@ from urllib.request import Request
 
 import pytest
 
+from etude.errors import LauncherError
+from etude.job import RunRequest
 from etude.launch import logging, source
 from etude.launch.database import Database, launcher_file
 from etude.launch.environment import install
-from etude.launch.errors import LauncherError, LaunchError
+from etude.launch.errors import LaunchError
 from etude.launch.logging import CLOSED, LIMIT, bound, bounded
 from etude.launch.logs import LogCursor, render, snapshot_stream
 from etude.launch.providers import bootstrap
 from etude.launch.providers.package import program_archive
 from etude.launch.providers.runpod import pod
-from etude.launch.records import Diagnostic, LogSnapshot, LogStream, RunRequest
+from etude.launch.records import Diagnostic, LogSnapshot, LogStream
 from etude.launch.records import Storage as StorageRecord
 from etude.launch.scheduler import Scheduler
 from etude.launch.schemas import (
@@ -630,8 +632,8 @@ def test_client_chosen_id_freezes_source_before_admission(
     )
     record = b.scheduler.record(identity)
     assert record.id == "my-scientific-id"
-    assert record.source is not None and record.spec.revision == record.source.commit
-    assert record.spec.revision != "HEAD"
+    assert record.source is not None and record.launch_spec.revision == record.source.commit
+    assert record.launch_spec.revision != "HEAD"
 
 
 def test_remote_preparation_failure_keeps_controller_evidence(

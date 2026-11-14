@@ -1,14 +1,16 @@
 """Explicit resumes keep one run and spend the remaining cumulative allowances."""
 
 import sys
+import time
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
 from etude.cli import main
+from etude.errors import LauncherError
+from etude.job import RunRequest, Until
 from etude.launch.client import default
-from etude.launch.records import LauncherError, RunRequest, Until
 from etude.storage import default_root
 from etude.train.read import read
 from tests.launch.counting import Counting
@@ -119,7 +121,7 @@ def test_cli_resume_runs_current_source_over_the_same_saved_state(
 from pathlib import Path
 from pydantic import BaseModel
 from etude.train.records import Step
-from etude.train.run import track
+from etude.train.tracking import track
 class State(BaseModel):
     steps: int = 0
 with track(clocks=[Step("steps", "training steps")], config=json.loads(Path(os.environ["ETUDE_CONFIG"]).read_text())) as run:
@@ -230,7 +232,7 @@ def test_resume_can_replace_unallocated_queued_work(tmp_path: Path) -> None:
     b.scheduler.tick()
     b.run(601)
     assert b.scheduler.read(identity).outcome == "succeeded"
-    assert b.scheduler.record(identity).spec.command == "fixed recipe"
+    assert b.scheduler.record(identity).launch_spec.command == "fixed recipe"
     assert len(b.scheduler.attempts(identity)) == 1
 
 
@@ -271,3 +273,64 @@ def test_unallocated_resume_keeps_the_cohorts_machine_limit(tmp_path: Path) -> N
     assert b.scheduler.record(identity) == prior
     assert not b.scheduler.attempts(identity)
     assert b.service.creates == 1
+
+
+def test_run_names_are_scoped_before_source_or_capacity_effects(tmp_path: Path) -> None:
+    b = bench(tmp_path)
+    first = RunRequest(job=job(experiment="one"), seed=7, id="baseline-seed-7")
+    second = RunRequest(job=job(experiment="two"), seed=7, id="baseline-seed-7")
+    assert b.scheduler.queue(first, rent="l4") == "one/baseline-seed-7"
+    assert b.scheduler.queue(second, rent="l4") == "two/baseline-seed-7"
+    assert [(item.experiment, item.id) for item in b.scheduler.runs()] == [
+        ("one", "one/baseline-seed-7"),
+        ("two", "two/baseline-seed-7"),
+    ]
+    counts = Counting(b.store, b.service)
+    with counts.record(), pytest.raises(LauncherError, match="already admitted"):
+        b.scheduler.launch(first, rent="l4")
+    seen = counts.snapshot()
+    assert (seen.provider, seen.bucket, seen.ssh, seen.git) == (0, 0, 0, 0)
+    assert not b.scheduler.attempts("one/baseline-seed-7")
+    plan = [
+        row[3]
+        for row in b.store._db.execute(
+            "EXPLAIN QUERY PLAN SELECT 1 FROM runs WHERE id = ?", ("one/baseline-seed-7",)
+        )
+    ]
+    assert any("USING COVERING INDEX sqlite_autoindex_runs_1 (id=?)" in step for step in plan)
+
+
+def test_scoped_run_reads_use_the_experiment_index_at_4096_records(tmp_path: Path) -> None:
+    b = bench(tmp_path)
+    specs = [job(experiment=f"e-{index}").model_dump_json() for index in range(128)]
+    created = b.scheduler.now().isoformat()
+    b.store._db.executemany(
+        "INSERT INTO runs(id, job, spec, seed, rent, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        [
+            (f"e-{index % 128}/r-{index}", "digest", specs[index % 128], 7, "l4", created)
+            for index in range(4096)
+        ],
+    )
+    counts = Counting(b.store, b.service)
+    started = time.perf_counter()
+    with counts.record():
+        assert b.store.run("e-127/r-4095").id == "e-127/r-4095"
+        records = b.store.runs(experiment="e-127")
+    elapsed = time.perf_counter() - started
+    assert len(records) == 32 and all(record.experiment == "e-127" for record in records)
+    assert counts.snapshot().database == 2
+    assert (
+        counts.snapshot().provider,
+        counts.snapshot().bucket,
+        counts.snapshot().ssh,
+        counts.snapshot().git,
+    ) == (0, 0, 0, 0)
+    plan = [
+        row[3]
+        for row in b.store._db.execute(
+            "EXPLAIN QUERY PLAN SELECT * FROM runs WHERE json_extract(spec, '$.experiment') = ? ORDER BY seq",
+            ("e-127",),
+        )
+    ]
+    assert any("USING INDEX runs_experiment" in step for step in plan)
+    print(f"4096 stored runs: existence + 32 scoped records, 2 SQL statements, {elapsed:.6f}s")

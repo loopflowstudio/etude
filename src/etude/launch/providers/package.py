@@ -8,6 +8,7 @@ from pathlib import Path
 
 FILES = {
     "__init__.py",
+    "errors.py",
     "launch/__init__.py",
     "launch/errors.py",
     "launch/measurement.py",

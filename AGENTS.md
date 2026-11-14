@@ -143,10 +143,17 @@ A launched training process must not prune saves: its courier owns storage
 acknowledgement and local retention; the controller removes remote saves
 where upload-only grants cannot.
 
+Launcher references use `EXPERIMENT/RUN`; job code sees the local `ETUDE_RUN`
+name. `Input.run` names the producer for relay; its unsigned `uri` locates the
+actual bytes and is excluded from scientific job identity. `Storage.uri` uses
+literal keys in `s3://` and `r2://` locators, including `%`, `?` and `#`;
+file URIs use normal URL escaping. Fixtures that call `track` as a worker must
+supply its assigned `ETUDE_RUN`, `ETUDE_ATTEMPT` and `ETUDE_OUT` environment.
+
 Etude has one cache of storage reads, `etude/cache.py`, keyed by content
 SHA256 and length with locators for where bytes came from. Tracking, reports and
 the launcher all read an `Artifact` named by the object's unsigned URL (never a
-signed link) through transports that perform I/O and keep nothing of their own; it and `deadline.py` sit at the top level because neither `etude.tracking`
+signed link) through transports that perform I/O and keep nothing of their own; it and `deadline.py` sit at the top level because neither `etude.run`
 nor `etude.launch` may import the other.
 
 Check before pushing: `uv run pytest`, `uv run mypy`, `uv run ruff check .` and

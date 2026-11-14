@@ -3,7 +3,8 @@
 import os
 from collections.abc import Sequence
 
-from etude.launch.errors import LauncherError
+from etude.errors import LauncherError
+from etude.identity import run_address
 from etude.launch.records import Availability, Machine, Quote
 from etude.launch.scheduler import Scheduler
 from etude.launch.source import line
@@ -16,13 +17,15 @@ def show_runs(scheduler: Scheduler, ids: Sequence[str]) -> None:
         where += f" ({status.hardware})" if status.hardware else ""
         record = scheduler.record(run)
         print(run, record.name, str(status) + where, sep="  ")
-        if record.spec.repo is not None:
-            print("  source: " + line(record.source, record.spec.revision or "HEAD"))
+        if record.launch_spec.repo is not None:
+            print("  source: " + line(record.source, record.launch_spec.revision or "HEAD"))
         if record.smoke.outcome != "not_smoked":
             print(f"  smoke: {record.smoke}")
 
 
-def resolve_runs(scheduler: Scheduler, names: Sequence[str]) -> list[str]:
+def resolve_runs(
+    scheduler: Scheduler, names: Sequence[str], *, experiment: str | None = None
+) -> list[str]:
     """Run ids for what was typed: a cohort's name stands for all of its runs."""
 
     ids: list[str] = []
@@ -30,7 +33,7 @@ def resolve_runs(scheduler: Scheduler, names: Sequence[str]) -> list[str]:
         try:
             ids += [run.id for run in scheduler.cohort_runs(name)]
         except LauncherError:
-            ids.append(name)
+            ids.append(run_address(name, experiment))
     return ids
 
 

@@ -24,14 +24,13 @@ from etude.cli import main
 from etude.errors import EtudeError
 from etude.launch.database import launcher_file
 from etude.page import Server, build
+from etude.run import runs, sync
 from etude.storage import DirectoryStorage, S3Storage, default_root
-from etude.tracking.delivery import sync
-from etude.tracking.listing import runs
 from etude.train.block import rows
 from etude.train.read import buckets, read
 from etude.train.records import Step, Time
 from etude.train.report import training
-from etude.train.run import EtudeWarning, Run, track
+from etude.train.tracking import EtudeWarning, TrainingRun, track
 from tests.experiments import authored, experiment_file
 
 CLOCKS = [
@@ -92,7 +91,7 @@ def test_rows_round_trip_through_files_and_a_bucket_directory(tmp_path: Path) ->
     run.finish()
     assert run.dropped == 0 and run.incomplete == 2 and run.problems == {}
 
-    prefix = "training-3f9a/"
+    prefix = "capacity-pilot/training-3f9a/"
     keys = bucket.keys(prefix)
     assert prefix + "run.json" in keys and prefix + "outcome.json" in keys
     # A finished run this small is one block, and its rows read back as logged.
@@ -114,8 +113,8 @@ def test_rows_round_trip_through_files_and_a_bucket_directory(tmp_path: Path) ->
     assert values["availability/rl/loss"] is True and values["ppo/losses/policy"] == pytest.approx(
         0.3
     )
-    declared = json.loads(bucket.get(prefix + "run.json"))["declaration"]
-    assert declared["config_json"] == '{"lr": 0.0003,   "seed": 7}'  # Byte for byte.
+    declared = json.loads(bucket.get(prefix + "run.json"))
+    assert declared["config"] == '{"lr": 0.0003,   "seed": 7}'  # Byte for byte.
 
     # Read from the bucket's copy alone.
     data = read(bucket, "capacity-pilot", "training-3f9a")
@@ -314,7 +313,7 @@ def test_metrics_and_checkpoints_reach_an_s3_bucket_and_read_back(
         run.finish(timeout=30)
         assert run.problems == {} and run.incomplete == 0
 
-        prefix = "team/a/s3/"
+        prefix = "team/a/pilot/s3/"
         assert first.uri == f"s3://runs/{prefix}checkpoints/progress_updates-50.pt"
         assert first.sha256 == sha256(weights).hexdigest() and first.size_bytes == len(weights)
         stored = client.get_object(Bucket="runs", Key=prefix + "checkpoints/progress_updates-50.pt")
@@ -343,7 +342,7 @@ def test_checkpoints_are_stored_locally_and_tagged_after_a_resume(
     model = tmp_path / "step.pt"
     model.write_bytes(b"weights")
 
-    def opened() -> Run:
+    def opened() -> TrainingRun:
         return track(
             experiment="pilot",
             run="local",
@@ -361,7 +360,7 @@ def test_checkpoints_are_stored_locally_and_tagged_after_a_resume(
         run.checkpoint(tmp_path / "absent.pt", AT)
     run.finish()
     assert run.incomplete == 1
-    copied = tmp_path / "copy/local/checkpoints/progress_updates-50.pt"
+    copied = tmp_path / "copy/pilot/local/checkpoints/progress_updates-50.pt"
     assert copied.read_bytes() == b"weights" and stored.uri == copied.resolve().as_uri()
     assert referenced.sha256 is None and referenced.size_bytes is None
 
@@ -391,7 +390,7 @@ def test_logging_from_training_code_imports_no_command_line_library() -> None:
         [
             sys.executable,
             "-c",
-            "import sys, etude.train.run, etude.train.read, etude.train.report; "
+            "import sys, etude.train.tracking, etude.train.read, etude.train.report; "
             "print(sorted(name for name in ('typer', 'rich', 'boto3') if name in sys.modules))",
         ],
         capture_output=True,
@@ -496,10 +495,13 @@ def test_finish_retries_retained_files_when_storage_recovers(tmp_path: Path) -> 
     run.finish(timeout=2)
     assert not run.problems
     assert not run._shipper.is_alive()
-    assert destination.get("final/outcome.json") == (run.files.root / "outcome.json").read_bytes()
-    assert destination.requests == len(destination.keys("final")) + 1
+    assert (
+        destination.get("pilot/final/outcome.json")
+        == (run.files.root / "outcome.json").read_bytes()
+    )
+    assert destination.requests == len(destination.keys("pilot/final")) + 1
     assert all(
-        destination.get("final/" + key) == (run.files.root / key).read_bytes()
+        destination.get("pilot/final/" + key) == (run.files.root / key).read_bytes()
         for key in listing(run.files.root, tail_seconds=run.files.tail_age)
     )
 

@@ -10,15 +10,16 @@ from pathlib import Path
 import pytest
 
 from etude.cli import main
+from etude.job import Job, RunRequest, Until
 from etude.jobs import continue_from
 from etude.launch.database import Database
 from etude.launch.executor import Executor, local
 from etude.launch.machines import OwnedMachine
-from etude.launch.records import Job, Machine, Pool, RunRequest, Until
+from etude.launch.records import Machine, Pool
 from etude.launch.scheduler import Scheduler
 from etude.launch.ssh import SSH, RemoteReply, RemoteRequest, SSHJournal, SSHStart
 from etude.train.records import Step
-from etude.train.run import track
+from etude.train.tracking import track
 from tests.launch.counting import job_text
 
 
@@ -113,7 +114,7 @@ import os
 from pathlib import Path
 from urllib.parse import urlparse
 from etude.train.records import Step
-from etude.train.run import track
+from etude.train.tracking import track
 run = track(experiment="capacity", clocks=[Step("steps", "training steps")])
 latest = run.latest_checkpoint()
 start = 0 if latest is None else int(latest.at["steps"])
@@ -215,15 +216,15 @@ def test_a_runs_folder_relays_between_hosts_over_ssh(tmp_path: Path) -> None:
         SSHJournal(SSH(name, str(tmp_path / name / "sessions"), str(executable), sys.executable))
         for name in ("a", "b")
     ]
-    hosts[1].hold("r", hosts[0].held("r"))
-    there = tmp_path / "b/track/r"
+    hosts[1].hold("lab/r", hosts[0].held("lab/r"))
+    there = tmp_path / "b/track/lab/r"
     assert (there / "checkpoints/steps-1.pt").read_bytes() == b"weights at 1"
     assert sorted(p.name for p in (there / "checkpoints").iterdir()) == [
         ".stored",
         "steps-1.json",
         "steps-1.pt",
     ]
-    assert (there / "run.json").read_bytes() == (tmp_path / "a/track/r/run.json").read_bytes()
+    assert (there / "run.json").read_bytes() == (tmp_path / "a/track/lab/r/run.json").read_bytes()
     # A file the host does not hold is absent, not unreachable.
     with pytest.raises(FileNotFoundError, match="steps-9.pt"):
         hosts[0].held("r", "checkpoints/steps-9.pt")

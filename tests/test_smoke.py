@@ -8,12 +8,12 @@ from pathlib import Path
 import pytest
 
 from etude.cli import main
+from etude.errors import LauncherError
+from etude.job import Job, SmokeForm
 from etude.launch.client import default, queue_cohort
-from etude.launch.errors import LauncherError
-from etude.launch.records import Job, SmokeForm
 from etude.records import Clock
 from etude.storage import default_root
-from etude.train.run import track
+from etude.train.tracking import track
 
 # Saves one checkpoint at the given number of updates; refuses a real-sized run, so a
 # passing smoke shows its smoke form ran rather than the job's own command.
@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 from etude.records import Clock
-from etude.train.run import track
+from etude.train.tracking import track
 
 updates = int(sys.argv[1])
 if updates > 10 or "diverge" in sys.argv:
@@ -157,7 +157,7 @@ def test_a_job_without_a_smoke_form_beside_one_with_it_is_not_recorded_passed(
     said = capsys.readouterr()
     assert "smoke train plain: not smoked (no smoke form)" in said.err
     ppo, plain = (default().record(id) for id in _ids(said.out))
-    assert (ppo.spec.name, plain.spec.name) == ("ppo", "plain")
+    assert (ppo.launch_spec.name, plain.launch_spec.name) == ("ppo", "plain")
     assert ppo.smoke.outcome == "passed"
     assert [(s.step, s.name) for s in ppo.smoke.steps] == [
         ("train", "ppo"),

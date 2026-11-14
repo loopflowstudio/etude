@@ -1,10 +1,16 @@
-"""The config and seed that must agree between attempts of one run.
+"""A run's identity: its address, and the config and seed its attempts must share.
 
-`resume_conflicts` supplies field-level refusals to local and launched callers.
-Source revisions and progress targets may change without changing this identity.
+`run_address` qualifies a run's name by its experiment for storage and the
+launcher. `resume_conflicts` supplies field-level refusals to local and launched
+callers; source revisions and progress targets may change without changing
+this identity.
 """
 
 import json
+import re
+
+# A run or experiment name that is safe as a folder in any bucket and shell.
+SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._=-]{0,199}$")
 
 
 def resume_conflicts(
@@ -35,3 +41,18 @@ def resume_conflicts(
     elif before != after:
         differences.append("config differs")
     return differences
+
+
+def run_address(run: str, experiment: str | None) -> str:
+    """The storage and launcher address of a run, qualified by its experiment.
+
+    Unlabelled command jobs retain a flat address. A qualified address is safe
+    to pass again, and cannot be silently moved into another experiment.
+    """
+    if not experiment:
+        return run
+    prefix = experiment + "/"
+    name = run.removeprefix(prefix)
+    if not (SAFE_NAME.fullmatch(experiment) and SAFE_NAME.fullmatch(name)):
+        raise ValueError("run and experiment must be portable names")
+    return prefix + name

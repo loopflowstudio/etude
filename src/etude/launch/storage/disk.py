@@ -14,8 +14,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from etude.carriage import put_back, recorded_file, restore_set
+from etude.errors import LauncherError
 from etude.launch.logs import snapshot_stream
-from etude.launch.records import BootstrapLinks, LauncherError, LogStream
+from etude.launch.records import BootstrapLinks, LogStream
 from etude.launch.schemas import Finished, Observation, Packet, Progress, Work
 from etude.launch.source import source_archive
 from etude.launch.storage.files import digest, read_result, write

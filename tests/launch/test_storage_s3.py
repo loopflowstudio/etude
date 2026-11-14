@@ -6,11 +6,14 @@ import base64
 import json
 from collections.abc import Iterator
 from datetime import UTC, datetime
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
+from etude.job import Input
 from etude.launch.records import Storage as Place
+from etude.launch.schemas import Work
+from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.s3 import AlreadyThere, Bucket, Denied, Keys, open_bucket, post
 from etude.launch.storage.transport import HTTPReply
 from etude.storage_timeout import StorageUnavailable
@@ -327,3 +330,67 @@ def test_a_storage_opens_its_providers_bucket_with_keys_from_the_environment(
         open_bucket(Place(name="r", bucket="manabot", prefix="launch", provider="r2"))
     with pytest.raises(ValueError, match="region"):
         Place(name="r", bucket="manabot", prefix="launch", provider="r2", region="us-west-2")
+
+
+def test_a_run_grant_cannot_write_to_another_experiments_same_named_run() -> None:
+    transport = Storage([HTTPReply(status=200, body=GRANTED)])
+    journal = BucketJournal(
+        Place(
+            name="fixture",
+            bucket="examplebucket",
+            prefix="runs",
+            provider="s3",
+            region="us-east-1",
+        ),
+        bucket(transport),
+    )
+    grant = journal._run_grant("one/baseline-seed-7", 3600)
+    assert grant.prefix == "runs/one/baseline-seed-7/"
+    form = parse_qs((transport.asked[0][2] or b"").decode())
+    (statement,) = json.loads(form["Policy"][0])["Statement"]
+    assert statement["Resource"] == "arn:aws:s3:::examplebucket/runs/one/baseline-seed-7/*"
+
+
+@pytest.mark.parametrize("scheme", ["s3", "r2"])
+def test_input_links_keep_literal_keys_in_unsigned_source_locators(scheme: str) -> None:
+    transport = Storage([])
+    journal = BucketJournal(
+        Place(
+            name="fixture",
+            bucket="examplebucket",
+            prefix="etude",
+            provider="s3",
+            region="us-east-1",
+        ),
+        bucket(transport),
+    )
+    key = "out/model%20weights?#.bin"
+    given = Input(
+        name="start",
+        run="logical/r",
+        key=key,
+        sha256="a" * 64,
+        size_bytes=7,
+        uri=f"{scheme}://examplebucket/etude/physical/r/{key}",
+    )
+    fetched = journal._fetch(
+        [
+            Work(
+                attempt="a1",
+                command="true",
+                limit_seconds=1,
+                limit_kind="out_of_time",
+                seed=None,
+                until=None,
+                config=None,
+                repo=None,
+                commit=None,
+                run="child",
+                inputs=(given,),
+            )
+        ]
+    )
+    (download,) = fetched.inputs
+    assert urlsplit(download.url).path == "/etude/physical/r/out/model%2520weights%3F%23.bin"
+    assert (download.sha256, download.size_bytes) == ("a" * 64, 7)
+    assert len(transport.asked) == 0

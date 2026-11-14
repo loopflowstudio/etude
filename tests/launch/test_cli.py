@@ -49,7 +49,7 @@ import os
 from pathlib import Path
 from urllib.parse import urlparse
 from etude.train.records import Step
-from etude.train.run import track
+from etude.train.tracking import track
 run = track(experiment="capacity", clocks=[Step("steps", "training steps")])
 latest = run.latest_checkpoint()
 start = 0 if latest is None else int(latest.at["steps"])
@@ -132,7 +132,7 @@ def test_an_experiment_file_launches_runs_of_its_experiment(
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
     (tmp_path / "train.py").write_text(
         "from etude.train.records import Step\n"
-        "from etude.train.run import track\n"
+        "from etude.train.tracking import track\n"
         'run = track(clocks=[Step("steps", "training steps")])\n'
         'run.log({"loss": 0.5}, steps=1)\n'
         "run.finish()\n"
@@ -151,7 +151,9 @@ def test_an_experiment_file_launches_runs_of_its_experiment(
     identity = launched.split()[0]
     assert "done: succeeded" in run(capsys, "wait", identity)[0]
     # What `etude eval ppo.py` and `etude report ppo.py` read: the runs of experiment ppo.
-    assert [each.name for each in observe(default_root(), "ppo").runs] == [identity]
+    assert [each.name for each in observe(default_root(), "ppo").runs] == [
+        identity.rsplit("/", 1)[-1]
+    ]
     # A job of another experiment, such as an evaluation naming one, is refused before launch.
     other = tmp_path / "league.py"
     named = (tmp_path / "ppo.py").read_text().replace(")\n", ", experiment='ppo')\n", 1)

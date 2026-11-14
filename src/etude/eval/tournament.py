@@ -46,7 +46,7 @@ from pydantic import ValidationError
 from etude.checkpoints import CheckpointRef
 from etude.errors import EtudeError
 from etude.eval.block import Block, run_blocks
-from etude.eval.match import ETUDE_TABLES, KIND, EvalRun, Result, Tables, evaluate
+from etude.eval.match import KIND, EvalResult, evaluate
 from etude.eval.query import compare, estimate
 from etude.eval.records import (
     IDENTIFIER,
@@ -67,11 +67,11 @@ from etude.eval.records import (
     folder_name,
     outcomes,
 )
+from etude.eval.run import ETUDE_TABLES, Result, Tables
 from etude.eval.schedule import ordered
-from etude.records import Digest, Record, RunFile
+from etude.records import Digest, Record, RunRecord
+from etude.run import declare, run_folders, under
 from etude.storage import DirectoryStorage, Storage, default_root
-from etude.tracking.declaration import declare
-from etude.tracking.listing import run_folders, under
 
 if TYPE_CHECKING:
     import duckdb
@@ -95,7 +95,7 @@ def hold(
     share: Share = Share(),
     rollups: Sequence[Rollup] = (),
     lines: Sequence[Line] = (),
-) -> EvalRun:
+) -> EvalResult:
     """Play, as one eval run of `experiment`, the matches the tournament adds; the run records what was given.
 
     The tournament only decides which matches to play: its results are the
@@ -417,7 +417,7 @@ def _record(added: TournamentRun, experiment: str, run: str, directory: Path | s
     declared = declare(
         experiment=experiment, clocks=(), run=run, kind=KIND, directory=directory, resume=True
     )
-    if declared.declaration.kind != KIND:
+    if declared.record.kind != KIND:
         raise EtudeError("run_is_not_an_eval_run", 409)
     path = declared.root / TOURNAMENT_FILE
     if not path.is_file():
@@ -483,7 +483,7 @@ def _stored(tournament: Benchmark | RoundRobin, runs: StoredRuns) -> _Stored:
 def _experiment(place: Storage, folder: str) -> str | None:
     """The experiment a run folder's `run.json` names; None before it arrives."""
     try:
-        return RunFile.model_validate_json(place.get(folder + "run.json")).experiment
+        return RunRecord.model_validate_json(place.get(folder + "run.json")).experiment
     except (FileNotFoundError, ValidationError):
         return None
 

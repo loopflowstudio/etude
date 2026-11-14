@@ -15,10 +15,9 @@ from typing import Annotated
 
 import typer
 
-from etude.errors import EtudeError
+from etude.errors import EtudeError, LauncherError
 from etude.launch import cli as launch_cli
 from etude.launch.commands import Kind, kind
-from etude.launch.errors import LauncherError
 from etude.train.cli import checkpoints, sync
 
 app = launch_cli.app
@@ -47,7 +46,7 @@ def run_recipe(
     json_output: Annotated[bool, typer.Option("--json", help="print a JSON result")] = False,
 ) -> None:
     """Run a training recipe on this computer; 0 finished, 75 stopped, other failed."""
-    from etude.launch.records import Until
+    from etude.job import Until
     from etude.local import run
 
     target = Until.model_validate(until) if until is not None else None
@@ -91,10 +90,12 @@ def _submit(
         raise typer.BadParameter("a Python FILE defining runs() is required")
     from decimal import Decimal
 
+    from etude.identity import run_address
+    from etude.job import Until
     from etude.launch import controller
     from etude.launch.job_file import read_job_file
     from etude.launch.listing import show_runs
-    from etude.launch.records import CohortSpec, Until
+    from etude.launch.records import CohortSpec
 
     runs = read_job_file(file, ctx.args, help=help, experiment=experiment)
     if help:
@@ -102,6 +103,7 @@ def _submit(
     if until is not None and resume is None:
         raise LauncherError("--until needs --resume")
     if resume is not None:
+        resume = run_address(resume, experiment or (runs[0].job.experiment if runs else file.stem))
         if quote or cohort is not None:
             raise LauncherError("--resume cannot be combined with --quote or --cohort")
         selected = [run for run in runs if run.id == resume]
@@ -112,7 +114,9 @@ def _submit(
             reader = controller.PythonClient(address) if address else launch_cli.default()
             prior = reader.record(resume)
             selected = [
-                run for run in runs if run.seed == prior.seed and run.job.name == prior.spec.name
+                run
+                for run in runs
+                if run.seed == prior.seed and run.job.name == prior.launch_spec.name
             ]
         if len(selected) != 1:
             raise LauncherError("--resume must select one run from the file's jobs and seeds")
@@ -458,7 +462,7 @@ def eval_experiment(
     import time
 
     from etude.experiment import advance, read_experiment
-    from etude.launch.records import Smoke
+    from etude.job import Smoke
     from etude.smoke import smoke_file
     from etude.storage import default_root, storage_from_uri
 
@@ -501,12 +505,13 @@ def eval_experiment(
 def convert_eval(
     run: Annotated[str, typer.Argument(help="the eval run, by name")],
     source: Annotated[str, typer.Option(help="s3://bucket/prefix or a runs directory")],
+    experiment: ExperimentOption = None,
 ) -> None:
     """Write blocks holding an eval run's per-file records, beside them; nothing is deleted."""
     from etude.eval.convert import convert
     from etude.storage import storage_from_uri
 
-    done = convert(run, storage_from_uri(source))
+    done = convert(run, storage_from_uri(source), experiment=experiment)
     print(
         f"{run}: {done.blocks} blocks, {done.matches} matches, {done.blobs} blobs,"
         f" replacing {done.replaced} files"
@@ -518,12 +523,15 @@ def convert_eval(
 def delete_eval_files(
     run: Annotated[str, typer.Argument(help="the eval run, by name")],
     source: Annotated[str, typer.Option(help="s3://bucket/prefix or a runs directory")],
+    experiment: ExperimentOption = None,
 ) -> None:
     """Delete an eval run's per-file records that its blocks in SOURCE replace; refuses before."""
     from etude.eval.convert import delete_files
     from etude.storage import storage_from_uri
 
-    print(f"{run}: deleted {delete_files(run, storage_from_uri(source))} files")
+    print(
+        f"{run}: deleted {delete_files(run, storage_from_uri(source), experiment=experiment)} files"
+    )
 
 
 @app.command("continue")
@@ -554,6 +562,7 @@ def continue_run(
         typer.Option(help='typed config changes as a JSON object, e.g. {"rate":0.001}'),
     ] = None,
     max_usd: Annotated[str | None, typer.Option(help="the new cohort's dollar ceiling")] = None,
+    experiment: ExperimentOption = None,
 ) -> None:
     """Go past a run's target from its out. This makes a new run with a parent."""
     # Continuation joins the launcher's runs with tracking's checkpoints.
@@ -563,17 +572,19 @@ def continue_run(
     from etude.carriage import put_back
     from etude.jobs import continue_from, continued_config
     from etude.launch.listing import resolve_runs, show_runs
+    from etude.run import located_runs
     from etude.storage import default_root, storage_from_uri
-    from etude.tracking.listing import run_folders
 
     scheduler = launch_cli.default()
     storage = storage_from_uri(source or default_root())
-    parents = [scheduler.record(parent) for parent in resolve_runs(scheduler, [run])]
+    parents = [
+        scheduler.record(parent) for parent in resolve_runs(scheduler, [run], experiment=experiment)
+    ]
     first = parents[0]
     with tempfile.TemporaryDirectory() as relayed:
         if source is None:
             # A parent that ran on another owned host: its records, from there.
-            here = run_folders(storage.keys(""))
+            here = {item.file.id for item in located_runs(storage, storage.keys(""))}
             for parent in parents:
                 files = None if parent.id in here else scheduler.held(parent.id)
                 if files is not None:

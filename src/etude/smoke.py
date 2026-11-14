@@ -27,14 +27,13 @@ from collections.abc import Callable, Collection, Sequence
 from pathlib import Path
 from typing import Literal
 
-from etude.errors import EtudeError
+from etude.errors import EtudeError, LauncherError
 from etude.eval.records import Benchmark, RoundRobin
 from etude.experiment import ExperimentState, asked, observe, read_experiment
 from etude.experiment_file import defined_functions, experiment_named
+from etude.job import Job, RunRequest, SmokeStep
 from etude.jobs import evaluation_spec, hold_evaluation, with_experiment
-from etude.launch.errors import LauncherError
 from etude.launch.job_file import read_job_file
-from etude.launch.records import Job, RunRequest, SmokeStep
 from etude.launch.smoke import Smoked, show, smoke_home, smoke_train
 from etude.page import build, render, write
 from etude.storage import DirectoryStorage, Storage
@@ -94,7 +93,11 @@ def smoke_file(
 
 
 def _saved(store: Storage, experiment: str, run: str) -> str:
-    found = [each for each in observe(store, experiment).runs if each.name == run]
+    found = [
+        each
+        for each in observe(store, experiment).runs
+        if each.name == run.removeprefix(experiment + "/")
+    ]
     count = len(found[0].checkpoints) if found else 0
     return f"{count} checkpoint{'' if count == 1 else 's'}"
 

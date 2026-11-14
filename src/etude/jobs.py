@@ -46,17 +46,17 @@ from etude.cache import Content
 from etude.call import Function, config_type
 from etude.carriage import CHECKPOINTS, OUT_PRESENT, checkpoint_file_name, checkpoint_key
 from etude.checkpoints import CheckpointRecord, CheckpointRef, checkpoint_id
-from etude.errors import EtudeError
-from etude.eval.match import EvalRun, Result, Tables
+from etude.errors import EtudeError, LauncherError
+from etude.eval.match import EvalResult
 from etude.eval.records import Benchmark, CheckpointPlayer, Line, Match, Player, RoundRobin, digest
+from etude.eval.run import Result, Tables
 from etude.eval.tournament import hold
 from etude.experiment import ExperimentState, checkpoint_inputs
-from etude.launch.errors import LauncherError
-from etude.launch.records import (
+from etude.identity import run_address
+from etude.job import (
     Input,
     Job,
     Preparation,
-    RunRecord,
     RunRequest,
     Runtime,
     SmokeForm,
@@ -65,9 +65,9 @@ from etude.launch.records import (
     number,
 )
 from etude.out import MEMBERSHIP, OutFile, OutFiles
-from etude.records import ArtifactRef, Record, SourceKey
+from etude.records import ArtifactRef, Record, RunRecord, SourceKey
+from etude.run import as_storage, located_runs
 from etude.storage import Storage
-from etude.tracking.listing import as_storage, declared, run_folders
 from etude.train.read import read
 from etude.train.records import ParentRun
 
@@ -232,7 +232,7 @@ def hold_evaluation(
     checkpoint: CheckpointRef | None = None,
     directory: Path | str | None = None,
     storages: Sequence[Storage] = (),
-) -> EvalRun:
+) -> EvalResult:
     """Hold what an evaluation job's config describes (`etude.eval.tournament.hold`).
 
     `play` is imported from `checkout`, the job's source, or the working
@@ -292,13 +292,20 @@ def checkpoint_inputs_for(checkpoint: CheckpointRecord, name: str) -> tuple[Inpu
         raise LauncherError("a checkpoint input requires its digest and byte length")
     else:
         files = {"": Content(sha256=artifact.sha256, size_bytes=artifact.size_bytes)}
+    owner = run_address(checkpoint.run, checkpoint.experiment) if checkpoint.run else None
+    if checkpoint.folder is not None and owner is not None:
+        # Released flat and machine-nested folders belonged to globally named
+        # launcher runs; modern copies retain the experiment/run suffix.
+        if checkpoint.folder != owner and not checkpoint.folder.endswith("/" + owner):
+            owner = checkpoint.run
     return tuple(
         Input(
             name=name + member,
             key=key + member,
             sha256=content.sha256,
             size_bytes=content.size_bytes,
-            run=checkpoint.run,
+            run=owner,
+            uri=artifact.uri + member,
         )
         for member, content in files.items()
     )
@@ -325,22 +332,30 @@ def continue_from(
     """
     storage = as_storage(source)
     keys = storage.keys("")
-    folders = run_folders(keys).get(parent.id, [])
-    declaration = declared(storage, folders, set(keys))
-    if declaration is None:
-        raise LauncherError(f"run {parent.id} has no tracked folder in {storage.name}")
-    data = read(storage, declaration.experiment, parent.id)
+    name = parent.id.rsplit("/", 1)[-1]
+    candidates = [
+        item
+        for item in located_runs(storage, keys, run=name)
+        if not parent.experiment or item.file.experiment == parent.experiment
+    ]
+    if len(candidates) != 1:
+        raise LauncherError(f"run {parent.id} has no unambiguous tracked folder in {storage.name}")
+    declaration, folders = candidates[0].file, candidates[0].folders
+    source_run = folders[0].rstrip("/")
+    data = read(storage, declaration.experiment, name)
     target = Until.parse(until)
-    previous = next((v.value for v in parent.spec.environment if v.name == "ETUDE_CONTINUES"), None)
+    previous = next(
+        (v.value for v in parent.launch_spec.environment if v.name == "ETUDE_CONTINUES"), None
+    )
     inherited_input = None if previous is None else ParentRun.model_validate_json(previous).input
     inputs = {
         i.name: i
-        for i in parent.spec.inputs
+        for i in parent.launch_spec.inputs
         if i.name != inherited_input
         and (inherited_input is None or not i.name.startswith(inherited_input + "/"))
         and i.out is None
     }
-    parent_key = SourceKey(namespace=declaration.namespace, kind="run", source_id=parent.id)
+    parent_key = SourceKey(namespace=declaration.namespace, kind="run", source_id=name)
     # An explicit checkpoint needs no out reads, even when the parent has out.
     out = None if ordinal is not None else _parent_out(storage, folders, keys)
     checkpoint = next((r for r in reversed(data.checkpoints) if ordinal in (None, r.ordinal)), None)
@@ -348,7 +363,7 @@ def continue_from(
     if checkpoint is not None:
         file = PurePosixPath(checkpoint.artifact.uri)
         key = checkpoint.file
-        if key is None and file.parent.parts[-2:] == (parent.id, CHECKPOINTS):
+        if key is None and file.parent.parts[-2:] == (name, CHECKPOINTS):
             # Addressed within the parent's folder, so where its records were
             # read from does not make the same continuation a different job.
             key = checkpoint_key(checkpoint.artifact.uri)
@@ -378,6 +393,7 @@ def continue_from(
                 sha256=member.sha256,
                 size_bytes=member.size_bytes,
                 run=parent.id,
+                uri=storage.uri(source_run + "/" + member.key),
             )
         if not copied and not any(
             member.key == key or key is not None and member.key.startswith(key + "/")
@@ -397,9 +413,9 @@ def continue_from(
             raise LauncherError(f"run {parent.id} recorded no stored checkpoint {ordinal or ''}")
         if key is not None:
             given = _input_name(_PARENT_CHECKPOINT + PurePosixPath(key).suffix, inputs)
-            located = checkpoint.model_copy(update={"run": parent.id, "file": key})
+            located = checkpoint.model_copy(update={"run": name, "file": key, "folder": source_run})
             for file_input in checkpoint_inputs_for(located, given):
-                inputs[file_input.name] = file_input
+                inputs[file_input.name] = file_input.model_copy(update={"run": parent.id})
     if target.clock not in at:
         raise LauncherError(
             f"a continuation needs a target on a clock its {origin} recorded: {', '.join(sorted(at))}"
@@ -417,13 +433,15 @@ def continue_from(
         checkpoint = checkpoint.model_copy(update={"artifact": artifact, "tags": ()})
     handed = ParentRun(parent=parent_key, at=at, checkpoint=checkpoint, input=given)
     environment = (
-        *(v for v in parent.spec.environment if v.name != "ETUDE_CONTINUES"),
+        *(v for v in parent.launch_spec.environment if v.name != "ETUDE_CONTINUES"),
         Variable(name="ETUDE_CONTINUES", value=handed.model_dump_json()),
     )
     text = (
-        parent.spec.config if config is None else _config_text(_job_function(parent.spec), config)
+        parent.launch_spec.config
+        if config is None
+        else _config_text(_job_function(parent.launch_spec), config)
     )
-    job = parent.spec.model_copy(
+    job = parent.launch_spec.model_copy(
         update={
             "until": target,
             "inputs": tuple(inputs.values()),
@@ -479,8 +497,8 @@ def _job_function(job: Job) -> Callable[..., object]:
 
 def continued_config(parent: RunRecord, changes: str) -> BaseModel:
     """Validate a JSON object of changes against the parent's typed config."""
-    kind = config_type(_job_function(parent.spec))
-    values = kind.model_validate_json(parent.spec.config or "{}").model_dump(mode="json")
+    kind = config_type(_job_function(parent.launch_spec))
+    values = kind.model_validate_json(parent.launch_spec.config or "{}").model_dump(mode="json")
     try:
         fields = TypeAdapter(dict[str, JsonValue]).validate_json(changes)
     except ValidationError:

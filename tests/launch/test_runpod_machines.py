@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -20,12 +21,15 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import pytest
 from pydantic import ValidationError
 
 from etude.carriage import restore_set
+from etude.errors import LauncherError
+from etude.job import Input, Job, RunRequest, Until
 from etude.jobs import continue_from
 from etude.launch.database import Database, launcher_file
 from etude.launch.executor import Execution, Executor, local
@@ -35,19 +39,7 @@ from etude.launch.providers.bootstrap import guard
 from etude.launch.providers.runpod.api import RunPodAPI
 from etude.launch.providers.runpod.machines import RunPodMachines
 from etude.launch.providers.runpod.pod import GuardianAPI
-from etude.launch.records import (
-    Image,
-    Input,
-    Job,
-    LauncherError,
-    Machine,
-    MachineTemplate,
-    OnDemand,
-    Provider,
-    RunRequest,
-    Status,
-    Until,
-)
+from etude.launch.records import Image, Machine, MachineTemplate, OnDemand, Provider, Status
 from etude.launch.records import Storage as Place
 from etude.launch.scheduler import Scheduler
 from etude.launch.schemas import (
@@ -70,8 +62,8 @@ from etude.launch.worker.courier import run as run_in_pod
 from etude.records import ArtifactRef
 from etude.storage_timeout import StorageUnavailable
 from etude.train.records import Step
-from etude.train.run import Run as TrackedRun
-from etude.train.run import track
+from etude.train.tracking import TrainingRun as TrackedRun
+from etude.train.tracking import track
 from tests.experiments import authored
 from tests.launch.counting import Counting, Counts, job_text
 
@@ -87,7 +79,7 @@ import os
 from pathlib import Path
 from urllib.parse import urlparse
 from etude.train.records import Step
-from etude.train.run import track
+from etude.train.tracking import track
 run = track(experiment="capacity", clocks=[Step("steps", "training steps")])
 latest = run.latest_checkpoint()
 start = 0 if latest is None else int(latest.at["steps"])
@@ -491,7 +483,7 @@ def test_inputs_reach_the_job_by_name_once_and_wrong_bytes_are_refused(tmp_path:
     assert c.scheduler.record(refused).job != c.scheduler.record(run).job  # inputs are identity
     released(c.scheduler, refused)
     assert c.provider.pods == {}
-    with pytest.raises(ValidationError, match="plain file name"):
+    with pytest.raises(ValidationError, match="portable relative path"):
         given.model_validate({**given.model_dump(), "name": "../weights.pt"})
     with pytest.raises(ValidationError, match="its own name"):
         job.model_validate({**job.model_dump(), "inputs": [given.model_dump()] * 2})
@@ -527,7 +519,9 @@ def test_a_run_from_a_commit_runs_in_a_pod_and_continues_in_another(
     c.scheduler.wait(first, every=0.05, timeout=30)
     status = released(c.scheduler, first)
     assert (status.outcome, authored(status.clocks)) == ("succeeded", {"steps": 3})
-    assert job_text(c.scheduler.logs(refresh=True, run=first)) == "seed 7 from 0 to 3\n"
+    assert (
+        job_text(c.scheduler.logs(refresh=True, run=first)).splitlines()[-1] == "seed 7 from 0 to 3"
+    )
     assert c.provider.pods == {}  # the pod deleted itself once its work was delivered
 
     # The parent's checkpoint, resolved from the bucket, reaches the next pod as an input.
@@ -540,7 +534,7 @@ def test_a_run_from_a_commit_runs_in_a_pod_and_continues_in_another(
     assert (status.outcome, authored(status.clocks)) == ("succeeded", {"steps": 7})
     verified, said = job_text(c.scheduler.logs(refresh=True, run=second)).split("\n", 1)
     assert verified.startswith("inputs: verified parent-checkpoint.pt (13 bytes, ")
-    assert said == "seed 7 from 3 to 7\n"
+    assert said.splitlines()[-1] == "seed 7 from 3 to 7"
     copy = c.scheduler.fetch(second, "weights.pt", tmp_path / "out")
     assert copy.read_text() == "trained to 3\ntrained to 7\n"
     assert c.provider.creates == 2 and c.provider.pods == {}
@@ -616,7 +610,7 @@ def test_a_pods_checkpoint_reaches_an_owned_host_without_its_storage_from_the_bu
         assert (status.outcome, authored(status.clocks)) == ("succeeded", {"steps": int(until[6:])})
         verified, said = job_text(c.scheduler.logs(refresh=True, run=run)).split("\n", 1)
         assert verified.startswith("inputs: verified parent-checkpoint.pt (13 bytes, ")
-        assert said == f"seed 7 from 3 to {until[6:]}\n"
+        assert said.splitlines()[-1] == f"seed 7 from 3 to {until[6:]}"
     relayed = tmp_path / "mini" / "track" / first / "checkpoints"
     assert (relayed / "steps-3.pt").read_text() == "trained to 3\n"
     # The controller read the parent's file from storage once, through its cache.
@@ -920,7 +914,7 @@ def test_tracking_files_reach_storage_while_the_job_runs(tmp_path: Path) -> None
     script.write_text(
         "import time\n"
         "from etude.train.records import Step\n"
-        "from etude.train.run import track\n"
+        "from etude.train.tracking import track\n"
         'run = track(experiment="capacity", clocks=[Step("steps", "training steps")],\n'
         "           segment_seconds=0.1)\n"
         'run.log({"loss": 0.5}, steps=1)\n'
@@ -944,20 +938,20 @@ def test_tracking_files_reach_storage_while_the_job_runs(tmp_path: Path) -> None
     assert c.scheduler.wait(run, every=0.05, timeout=10)[0].outcome == "cancelled"
 
 
-def machine(tmp_path: Path, storage: Storage) -> tuple[Courier, Path, Path]:
+def machine(tmp_path: Path, storage: Storage, *, run: str = "run1") -> tuple[Courier, Path, Path]:
     """A courier on a rented machine with one running attempt, and that run's tracking folder."""
     held = Bucket("b", "us-east-1", Keys(access_key="AKIA", secret_key="secret"), storage)
-    access = held.grant("etude/run1/", 3600, "run1")
+    access = held.grant(f"etude/{run}/", 3600, run)
     home = tmp_path / "pod/sessions/r"
     attempt = home / "attempts/a1"
     (attempt / "outputs").mkdir(parents=True)
-    (attempt / "run").write_text("run1")
-    track = tmp_path / "pod/track/run1"
+    (attempt / "run").write_text(run)
+    track = tmp_path / "pod/track" / run
     (track / "metrics").mkdir(parents=True)
     session = Grant(
         prefix="etude/sessions/r/out/", form=held.post_form("etude/sessions/r/out/", 3600)
     )
-    courier = Courier(home, session, "unused", storage, {"run1": access}, home / "worker.log")
+    courier = Courier(home, session, "unused", storage, {run: access}, home / "worker.log")
     return courier, attempt, track
 
 
@@ -1277,13 +1271,21 @@ def test_finished_outputs_go_under_the_attempt_and_checkpoints_under_the_run(
 
 def _tracked(root: Path, run: str = "run1") -> TrackedRun:
     """A tracked run writing into a machine's track folder, as a launched job's would."""
-    return track(
-        experiment="capacity",
-        clocks=[Step("steps", "training steps")],
-        run=run,
-        directory=root,
-        segment_seconds=0.05,
-    )
+    with patch.dict(
+        os.environ,
+        {
+            "ETUDE_RUN": run,
+            "ETUDE_ATTEMPT": "fixture",
+            "ETUDE_OUT": str(root / run / "out"),
+        },
+    ):
+        return track(
+            experiment="capacity",
+            clocks=[Step("steps", "training steps")],
+            run=run,
+            directory=root,
+            segment_seconds=0.05,
+        )
 
 
 def _kept(folder: Path, records: int) -> None:
@@ -1413,6 +1415,7 @@ def test_a_retry_on_a_fresh_machine_resumes_from_the_runs_latest_checkpoint(
     reads = [what.partition("?")[0] for method, what in storage.asked[asked:] if method == "GET"]
     # The declaration and every record, then only the file the latest record names.
     assert reads == [
+        "etude/run1/out.json",
         "etude/run1/checkpoints/steps-1.json",
         "etude/run1/checkpoints/steps-2.json",
         "etude/run1/checkpoints/steps-3.json",

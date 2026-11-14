@@ -27,11 +27,12 @@ from moto import mock_aws
 from etude import cache as engine
 from etude.cache import Artifact, Cache, Content, Fetched
 from etude.deadline import limit_time, remaining
+from etude.job import Job
 from etude.launch import client
 from etude.launch.database import Database, launcher_file
 from etude.launch.logging import log_to
 from etude.launch.providers import bootstrap
-from etude.launch.records import Job, Output, Storage
+from etude.launch.records import Output, Storage
 from etude.launch.scheduler import Scheduler
 from etude.launch.schemas import (
     WORKER_LOG,
@@ -53,9 +54,10 @@ from etude.launch.storage.s3 import Bucket, Grant, Keys, PostForm, _send, read
 from etude.launch.storage.transport import HTTPReply, attribute, observe
 from etude.launch.usage import R2, S3_US_WEST_2, Access, Transfer, Usage, reconcile
 from etude.launch.worker.courier import Courier
+from etude.records import RunRecord
+from etude.run import RunFiles, StorageDestination, ship
 from etude.storage import S3Storage
 from etude.storage_timeout import StorageUnavailable, socket_timeout
-from etude.tracking.delivery import RunFiles, StorageDestination, ship
 from tests.launch.counting import Counting, Counts
 from tests.launch.fake import bench
 from tests.run.storage import CountedClient
@@ -1420,12 +1422,13 @@ def test_sdk_storage_failure_retains_files_and_recovers(
     assert storage.client.meta.config.read_timeout == 0.1
     root = tmp_path / "runs/run"
     root.mkdir(parents=True)
-    (root / "run.json").write_bytes(b'{"retained":true}')
+    body = RunRecord(id="run").model_dump_json().encode()
+    (root / "run.json").write_bytes(body)
     files = RunFiles(root)
     destination = StorageDestination(storage)
     http.fault = "silent-upload"
     assert ship(files, "run", destination) == "unavailable: StorageUnavailable"
-    assert (root / "run.json").read_bytes() == b'{"retained":true}'
+    assert (root / "run.json").read_bytes() == body
     assert "/bucket/run/run.json" not in http.objects
     assert http.posts == 1
     http.fault = ""

@@ -8,3 +8,7 @@ class EtudeError(Exception):
         self.code = code
         self.status = status
         super().__init__(code if detail is None else f"{code}: {detail}")
+
+
+class LauncherError(Exception):
+    """The request cannot be carried out as asked."""

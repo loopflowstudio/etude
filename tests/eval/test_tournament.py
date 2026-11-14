@@ -14,7 +14,7 @@ import pytest
 
 from etude.checkpoints import CheckpointRef, checkpoint_id
 from etude.errors import EtudeError
-from etude.eval.match import Tables, environment, evaluate
+from etude.eval.match import environment, evaluate
 from etude.eval.query import statsdb
 from etude.eval.records import (
     Aligned,
@@ -29,10 +29,11 @@ from etude.eval.records import (
     Share,
     TournamentRun,
 )
+from etude.eval.run import Tables
 from etude.eval.tournament import hold, played, scores, standings, stored_runs
 from etude.records import ArtifactRef, Clock
 from etude.storage import DirectoryStorage
-from etude.train.run import track
+from etude.train.tracking import track
 from tests.eval.games import play, play_failing_deal_one
 from tests.experiments import authored
 from tests.run.storage import MeasuredStorage
@@ -415,8 +416,8 @@ def test_a_hold_launched_on_a_machine_keeps_its_tournament_in_its_own_run(
         monkeypatch.setenv("ETUDE_TRACK_DIR", str(track))
         held = hold(progress, experiment=EXPERIMENT, checkpoint=checkpoint, play=play)
         assert held.name == f"anchors-eval-{ordinal}"
-        assert [path.name for path in track.iterdir()] == [held.name]
-        shutil.copytree(track / held.name, bucket.root / "delivered" / held.name)
+        assert [path.name for path in (track / "ppo").iterdir()] == [held.name]
+        shutil.copytree(track / "ppo" / held.name, bucket.root / "delivered" / held.name)
     monkeypatch.delenv("ETUDE_RUN")
     lines = scores(statsdb(EXPERIMENT, bucket), "anchors", table="plays", value="won")
     assert sorted(line.seating for line in lines) == sorted(m.name for m in progress.seatings)

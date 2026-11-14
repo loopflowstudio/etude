@@ -8,8 +8,8 @@ from hashlib import sha256
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from etude.eval.match import Result, Tables
 from etude.eval.records import CheckpointPlayer, Match, Player
+from etude.eval.run import Result, Tables
 
 type Rows = list[dict[str, bool | int | float | str | None]]
 

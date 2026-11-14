@@ -91,8 +91,8 @@ from etude.experiment_file import experiment_named
 from etude.launch.logging import explain
 from etude.records import BUILT_IN_NAMES, Record
 from etude.report import Flame, Matches, Report, Score
+from etude.run import as_storage, declared, run_folders, runs, under
 from etude.storage import DirectoryStorage, S3Storage, Storage, default_root
-from etude.tracking.listing import as_storage, declared, run_folders, runs, under
 from etude.train.read import RunData, read_all
 from etude.train.report import Training, training
 
@@ -411,7 +411,7 @@ class Pages:
         version = listed.get(folder + "run.json", "")
         kept = self._declared.get((place.name, folder))
         if kept is None or kept[0] != version:
-            file = declared(place, [folder], listed)
+            file = declared(place, folder, listed)
             kept = (version, None if file is None else file.experiment)
             self._declared[place.name, folder] = kept
         return kept[1]
@@ -495,7 +495,7 @@ def build(source: Storage | Path | str, file: Path) -> Page:
             f"no runs of {experiment!r} in {_source_name(storage)}"
             + (f"; it holds {', '.join(held)}" if held else "; it holds no runs")
         )
-    trained = [run for run in data if run.file is None or run.file.declaration.kind != "evaluation"]
+    trained = [run for run in data if run.file is None or run.file.kind != "evaluation"]
     found = names.get("eval")
     want: Callable[..., object] | None = None
     if found is not None:
@@ -1323,8 +1323,8 @@ def _cells(
     `environments` are by identity, the newest latest match first.
     """
     # The optional `eval` extra, imported where it is used (`_read_evals`).
-    from etude.eval.match import ETUDE_TABLES  # noqa: PLC0415
     from etude.eval.query import KEYS, NUMERIC, compare  # noqa: PLC0415
+    from etude.eval.run import ETUDE_TABLES  # noqa: PLC0415
 
     # A rollup's totals have no matches to compare over.
     rollups = {name for (name,) in db.sql("select name from kept.rollups").fetchall()}

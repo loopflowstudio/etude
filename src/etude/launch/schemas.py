@@ -12,20 +12,8 @@ from decimal import Decimal
 
 from pydantic import Field, FiniteFloat
 
-from etude.launch.records import (
-    Cause,
-    Input,
-    Limit,
-    Outcome,
-    Output,
-    Preparation,
-    Prepared,
-    Record,
-    Runtime,
-    Tally,
-    Until,
-    Variable,
-)
+from etude.job import Input, Preparation, Record, Runtime, Until, Variable
+from etude.launch.records import Cause, Limit, Outcome, Output, Prepared, Tally
 from etude.launch.storage.download import Download
 from etude.launch.storage.s3 import Grant
 from etude.launch.usage import Transfer

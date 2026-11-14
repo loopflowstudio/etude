@@ -1,169 +1,116 @@
 # Training API rebuild (EXP-56)
 
-## Outcome and authority
+Build `design-train-api.md` and the corrected user docs. PR #103 stays draft.
+Jack Heart: "#103 was converted to draft; keep it draft, do not mark it ready."
+Manabot adoption is MTG-329; do not edit its checkout.
 
-Build `design-train-api.md` and the edited user docs, preserving existing
-output carriage, planned-stop retries, row replacement and continuation.
-`docs/training.md` is the intended experience, not a description of current code.
-PR #103 stays draft. Jack Heart's recorded steer: "#103 was converted to
-draft; keep it draft, do not mark it ready."
+The accepted surface is in `docs/training.md`, `docs/launcher.md`,
+`docs/tracking.md` and `docs/evaluation.md`. Keep their corrections. The
+state-publication layout is self-contained save folders, pointer published
+last, only the selected save delivered. The courier owns acknowledgement and
+local retention; the controller removes old remote saves under upload-only
+grants. Preserve planned-stop retries, row replacement, continuation,
+cancellation and cumulative hours/dollars/allocation limits.
 
-The complete earlier design, decisions, probes and QA history are in git:
-`1666be1:scratch/exp-56.md` and its siblings `positioning.md` (every dated
-remark), `ontology.md` (the naming exploration) and `etude-readme-draft.md`
-(league-led README; its local_launch/until recipe surface is superseded). The
-earlier 793-pass gate covers `105abdd`, not the unbuilt API.
-
-Later work: EXP-57 live view; EXP-58 machines/metrics; EXP-59 broader JSON
-commands; EXP-60 evaluation expansion; EXP-61 joinable shared budgets.
-
-## State publication
-
-Unblocked 2026-11-13. Each save is a self-contained folder with the pointer
-published last; delivery sends only the save the pointer names; Etude removes
-replaced saves, the controller doing it under upload-only grants.
-`questions.md` (State publication) has Jack Heart's words, the three choices
-he left unanswered and one awkward case. Publication and registration are now
-implemented; the full train API is still incomplete (remaining work below).
-
-## Docs for the build
-
-The intended experience, to build against and keep true:
-
-- `docs/training.md`: the whole train API; Carrying on and What is on disk
-  carry the save layout; Games in flight; `--resume RUN --until`;
-  `--experiment`.
-- `docs/launcher.md`: The run promise carries delivery order of a save and
-  its pointer and the retention table (who removes what, what lingers);
-  also restoration, the storage layout, `--resume --until`, `--experiment`.
-- `docs/tracking.md`: Etude's clocks across a resume, the run folder.
-- `docs/evaluation.md`: players, folder checkpoints, on main's seatings and
-  relative seats.
-
-`docs/training.md` Running it states the built local rules; three questions
-it raised are in `questions.md` (Found reading the docs as a user).
-
-The branch holds main at `286e0c5` (v0.3.2, merge `429db8d`; launcher
-database version 18 on main; this Task now uses version 19 under the same
-per-version naming); `questions.md` records how the `66ffb28` merge was reconciled.
+Earlier design, probes, exact quotes and check receipts are in git:
+`224e45c:scratch/exp-56.md`, `224e45c:scratch/questions.md`,
+`1666be1:scratch/positioning.md`, `1666be1:scratch/ontology.md` and
+`1666be1:scratch/etude-readme-draft.md`. Checks recorded there predate the accepted
+API and prove nothing about the current tree.
 
 ## Delete — do not maintain
 
-Replace these end to end:
+Built in this cut:
 
-- `etude.tracking` goes away (`questions.md`, Package layout). Done: `errors`,
-  `storage`, `records`, `checkpoints` are top-level modules. Remaining:
-  `declaration`, `delivery`, `listing` (with `LocatedRun`/`located_runs`) ->
-  `etude/run.py` under a shared `Run` base; `train/run.py` ->
-  `etude/train/tracking` with `TrainingRun(Run)`; `EvalRun(Run)` in eval.
-  `block_file` has no stated home. `etude.experiment.TrainingRun` ->
-  `TrainingRunSummary`, `eval.match.EvalRun` -> `EvalResult`, warning aliases
-  until 0.5. Then drop `tracking` from `tests/run/test_layout.py` `SHARED`,
-  `tests/launch/test_layout.py` and AGENTS.md's cache paragraph.
-- Launch `Run` -> `RunRequest`; authors return Jobs with launch seeds instead.
-- Separate tracking `RunDeclaration`/`RunFile` and observed `TrainingRun` ->
-  the single stored `RunRecord`, shared with the launcher.
-- Tracking `Attempt` -> `RunWriter` (built, decision open); `RunAttempt`
-  stays the machine allocation.
-- Experiment `Checkpoint` and eval query's `_StoredCheckpoint`/`_StoredArtifact`
-  are removed. One `CheckpointRecord` and one `CheckpointRef` live in
-  `etude.checkpoints`, which training and evaluation both import
-  (`tests/run/test_layout.py` forbids either importing the other); keys are
-  strings (old structured keys still load).
-- Eval `Model` -> `CheckpointPlayer`, keeping the `Player` union and stored
-  kind; `.player(...)` replaces `.model(...)`. Report line -> job is still open.
-- Root `state.json` writer -> `outcome.json`; retain old outcome readers.
-- Implicit resume on taken names -> create-only identity and explicit resume.
-- `local_launch`, `track(seed=)` and `latest_checkpoint()` leave the taught
-  API; the design requires one-release warnings for published spellings.
+- `etude.tracking` is deleted. `etude.run` owns shared declaration, local
+  files, delivery, listing and live `Run`. `TrainingRun(Run)` lives in
+  `etude.train.tracking`; `EvalRun(Run)` in `etude.eval.run`. The latter owns
+  match validation, staging, rollups and delivery; `evaluate` keeps its
+  one-call shape. Lightweight metric filenames live in `etude.block_file`.
+- `RunDeclaration`/`RunFile` and launcher `RunRecord` become the single
+  `etude.records.RunRecord`. Historical nested declarations decode there.
+  The record's launcher specification is absent for standalone writers;
+  `launch_spec` requires one. Each config is stored once (within the
+  specification when launched). The job digest remains identity;
+  `TrainingRunSummary.job` remains a derived report label.
+- Shared job specification types move to `etude.job`, so neither shared run
+  records nor training/evaluation import the launcher. Released
+  `etude.launch.records` imports re-export the same types.
+- The observed `TrainingRun` becomes `TrainingRunSummary`; the result of
+  `evaluate` becomes `EvalResult`. Their old names warn until 0.5.
+  `etude.train.run` is a warning-only import surface until 0.5, with no
+  implementation of its own.
+- Launcher references are `EXPERIMENT/RUN`, yielding that same folder and
+  grant prefix. Worker environment gives training its local run name and
+  experiment. Local writers also use experiment folders; existing flat
+  declarations still select the old folder when their experiment matches.
+- Continuation selects by declaration and experiment, across historical
+  physical copies. Checkpoint inputs retain the resolved source folder;
+  input locators are excluded from scientific job identity.
+  Legacy eval conversion and deletion refuse ambiguous experiment names.
 
-Preserve stored runs/evaluations, old file/field readers, progress, stop exit
-75, cancellation, cross-machine restoration and hours/dollars/attempt limits.
-Do not repair exclusive tests of deleted APIs; move behavior coverage to the
-surviving API. Manabot cutover is MTG-329; do not edit its checkout here.
+Already built before this cut: launch `Run` -> `RunRequest`; checkpoint
+record/reference unification and folder checkpoints; checkpoint `Model` ->
+`CheckpointPlayer` and `.player`; `outcome.json` with old outcome readers;
+create-only run identity and explicit resume; state registration and saves;
+local and launched `--resume RUN --until`; job report labels preserving
+seeded continuation lineage. Deprecated taught spellings warn until 0.5.
+Do not restore deleted implementations or their exclusive tests.
 
-## Folded in, 2026-11-13 (Task comment, Jack Heart)
+`RunWriter` remains a tracking context, distinct from the `RunAttempt`
+machine allocation. See the reproduced many-writers-per-allocation case and
+Jack Heart's contrary "1a" answer in `questions.md`. This implementation
+correction remains open; do not merge the records and lose writer cutoffs or
+inflate rental/attempt accounting.
 
-**Finished run marked failed.** "This should be part of 56". Manabot QA
-against `105abdd`: a second `track` block on a finished run that raises
-before any row (refused resume, KeyboardInterrupt) turns the run `failed`.
-Still present at `f410793`: `Run.__exit__` (`src/etude/train/run.py`) calls
-`finish("failed")` for any non-`Stopped` error, and the attempt is recorded
-in `__init__` with `first_row=True`, which is no evidence of a logged row.
-The fix must keep a genuine failure before the first row reportable, so
-skipping every rowless exception is not enough. Planned with explicit resume.
+Launcher schema remains 19, the single unreleased schema change over main's
+18 (`286e0c5`). New keyed/scoped lookups use indexed SQLite queries. Do not
+stack another migration; the launcher refuses older database files.
 
-**EXP-37** "Fold this one into 56"; EXP-37 is closed as folded. What this
-plan answers of its brief, and what it does not:
+## Remaining work and verification
 
-- Application declares restorable state and discontinuity: answered by the
-  design (only registered objects restore; streams/games in flight restart).
-- Durable checkpoint publication: the save pointer published last (step 1)
-  gives whole-save recovery; *acknowledged* durability is not specified.
-- One cumulative budget: hours, dollars and attempts span attempts, but
-  hours "count code execution" (`docs/launcher.md`); transfer, idle and
-  teardown time count only through dollars. Not planned.
-- Fault fixtures: step 1 covers interrupted saves; loss before/after commit,
-  partial upload, duplicate completion and controller restart are not planned.
-- Recording acquisition mode and telling preemption, host loss, lease expiry
-  and learner failure apart: not planned.
-- Manabot adoption: MTG-329.
+The new eval consistency steer is tentative for demo and is not built.
+`questions.md` records the concrete planning/input-delivery counterexample:
+a Benchmark constructed inside arbitrary author code is unavailable to the
+current pre-launch match planner. Dependent eval API deletion stops until
+that boundary is designed; the current run/record/scope cut remains checkable.
 
-Jack Heart on the unplanned EXP-37 points: "followup task is fine". They do
-not hold this release and are a separate Task.
 
-## Remaining implementation
+Initial run/record/scope acceptance checks pass.
 
-Earlier implementation receipts and built behavior are recorded at
-`f89ae54:scratch/exp-56.md`; the code and current docs remain the reference.
+Checks: full suite **877 passed, 6 skipped (optional PyTorch), 3 deselected**
+before the compress cut: no live `Run.source_key`/`namespace` plumbing (stored
+`RunRecord.source_key` stays), `declared` takes one folder, one `SAFE_NAME`
+(`etude.identity`), `source.freeze` addresses once, flat launcher re-exports.
+After it: 314 focused tests (run, eval, train identity/track/store/local/cli,
+launch source/resume/layout/cli, jobs, continuation, page, experiment), mypy
+(174 files), ruff check and format pass. Full suite not rerun; gate owns it.
 
-Remaining, before the accepted API can be treated as built:
+The 4,096-run fixture selects 32 records plus one keyed row in 2 SQL statements;
+EXPLAIN uses `runs_experiment` and the primary key. Its first pass took
+0.001274 s (before deleting the redundant admission query; fixture cost only).
+Existing count pins pass. PR #103 stays draft.
 
-0. The package layout in the Delete list (shared `Run` base, `etude/run.py`).
-1. Unify records end to end. Launcher `RunRecord`, tracking
-   `RunDeclaration`/`RunFile` and observed `TrainingRun` remain separate.
-   Preserve historical file/field readers during the cut; do not extend the
-   separate records as a final API. Built: `RunWriter` (tracking context,
-   first-row cutoff) beside `RunAttempt` (allocation). This departs from
-   Jack Heart's "1a"; the choice is open in `questions.md` (Record
-   unification). The `RunRecord` cut keeps the job digest as identity and
-   `TrainingRun.job` as a derived report label.
-2. Experiment-scoped identity and `PREFIX/EXPERIMENT/RUN` carriage/grants in
-   the launcher: names, storage and grants are still globally scoped there,
-   and its status fallback, continuation and legacy conversion need
-   experiment selection. Built: the local CLI nests by experiment; training
-   reads, evaluation queries, listing and report refresh select by each
-   folder's declaration, joining flat and machine-nested historical copies;
-   launched explicit resume. Launcher schema is 19, edited in place for this
-   unreleased Task.
-3. Built: report labels use job; crosstables still separate each seeded learner
-   and continuation chain. Internal `Line` and its stored spellings retain
-   lineage semantics. Local CLI acceptance includes two-model save, stop,
-   resume, checkpoint publication and evaluation seating in one test.
-4. The brief's acceptance check (manabot checkout with `proposed_etude`
-   imports swapped to `etude.train.run`) cannot pass as written: the design
-   drops `local_launch`/`run.out`-owned `state.pt` for `etude run` and
-   `run.resume`. Design Order of work moves that check to MTG-329 on an
-   SDK override. Undecided: whether EXP-56 reports manabot's required
-   changes against a probe of its recipe, or leaves it wholly to MTG-329.
+Acceptance remains the design's fresh/stop/resume example; two models in one
+save and checkpoint seated in evaluation; taken-name/config/seed refusals;
+changed-source provenance; `start=` links; stop between phases; a finished
+run not overwritten by a refused attempt. Existing local CLI tests cover
+these, including a genuine learner failure before any row.
 
-## Verification
+The original Manabot stub-swap check is superseded by the accepted API:
+MTG-329 replaces its stand-in, manual state files and `train --out` with
+`etude run`, registration, `steps`, `save` and folder checkpoints. Its actual
+adoption/smoke stays in that Task.
 
-Compress, 2026-11-13, after moving the four shared modules and folding the
-reader's folder selection into `train/read.py::_located`: `uv run pytest
-tests/run tests/train tests/eval tests/launch/test_layout.py
-tests/launch/test_measurement.py` plus the page, experiment, jobs, smoke and
-continuation files: **340 passed**, 6 skipped; the 5 start-up import pins
-that failed passed on a focused rerun after dropping by one each (the
-`etude.tracking` package no longer loads for `EtudeError`). `uv run mypy`, `uv run ruff check .`, `uv run ruff format
---check .`: clean. `node --test tests/test_charts.cjs` passed 21 before this
-step and was not rerun (no JS edit here). Full gate and remaining acceptance
-checks are pending; the accepted API is not complete.
+## Folded and later work
 
-A bounded 4,096-row DuckDB fixture's `EXPLAIN ANALYZE` used index scans for
-both the batched declaration lookup (two folders; 0.0015 s) and the keyed
-run-kind lookup (one row; 0.0002 s): fixture costs, not a production latency
-estimate. Reopening either same-named experiment reads zero source objects.
+Jack Heart: finished-run corruption "This should be part of 56"; EXP-37
+"Fold this one into 56". The durable save layout and restorable-state boundary
+are covered. On EXP-37's other points: "followup task is fine". Remaining
+fault-injection matrix, whole-budget semantics beyond execution hours and
+detailed acquisition/loss causes do not hold this release. Exact scope and
+quotes are retained at `224e45c:scratch/exp-56.md`.
 
-Previous checks and counting-pin changes remain at
-`f89ae54:scratch/exp-56.md`. PR #103 remains draft.
+Later Tasks: EXP-57 live view; EXP-58 machines/metrics; EXP-59 broader JSON;
+EXP-60 population/evaluation expansion; EXP-61 joinable budgets. EXP-64's
+package split is folded into EXP-56.

@@ -10,20 +10,21 @@ from pathlib import Path
 import pytest
 from moto import mock_aws
 
+from etude.block_file import parse
 from etude.carriage import EVAL_BLOCK_PACK, checkpoint_file
 from etude.checkpoints import CheckpointRef, checkpoint_id
 from etude.errors import EtudeError
-from etude.eval.match import Result, environment, evaluate
+from etude.eval.match import environment, evaluate
 from etude.eval.query import compare, statsdb
 from etude.eval.records import Benchmark, CheckpointPlayer, Code, Inference, Match, Player, Seating
+from etude.eval.run import Result
 from etude.eval.tournament import hold
 from etude.experiment import advance, observe, read_experiment
 from etude.page import Drawn, OutsideTournaments, Page, PanelSelection, build
 from etude.records import ArtifactRef, Clock, Continuation, SourceKey
 from etude.report import Matches
 from etude.storage import DirectoryStorage, S3Storage, Storage
-from etude.tracking.block_file import parse
-from etude.train.run import Run, track
+from etude.train.tracking import TrainingRun, track
 from tests.eval.games import play, play_failing_deal_one, play_with_evidence
 from tests.experiments import authored, experiment_file
 from tests.run.storage import CountedClient, MeasuredStorage
@@ -88,7 +89,7 @@ def report():
 CLOCKS = [Clock(name="updates", kind="step", meaning="optimizer updates")]
 
 
-def save(run: Run, tmp_path: Path, updates: range) -> None:
+def save(run: TrainingRun, tmp_path: Path, updates: range) -> None:
     """Checkpoints with the same bytes in every run, as runs warm-started from one file save."""
     for update in updates:
         weights = tmp_path / "weights.pt"
@@ -755,7 +756,7 @@ def test_a_running_eval_runs_results_show_and_are_marked_partial(
         matches=[Match(players=players, conditions={"deal": 0}, games=1)],
         directory=runs,
     )  # fmt: skip
-    (runs / "killed" / "outcome.json").unlink()  # as a machine lost before it ended
+    (runs / "lab/killed" / "outcome.json").unlink()  # as a machine lost before it ended
     built = build(DirectoryStorage(runs), file)
     assert any("Partial results" in note and "killed" in note for note in built.notes)
     assert built.latest_result_ms is not None
@@ -880,6 +881,7 @@ def test_a_page_reads_metrics_from_training_runs_once_and_no_eval_blob(
         "run.json",
         "state.json",
         "environment.json",
+        "outcome.json",
         "tournament.json",
     }
     assert {k.rsplit("/", 1)[1] for k in evals if k.startswith("blocks/")} <= {

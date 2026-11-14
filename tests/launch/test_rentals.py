@@ -9,11 +9,12 @@ from pathlib import Path
 import pytest
 
 from etude.cli import main
+from etude.errors import LauncherError
+from etude.job import Job
 from etude.launch import cli, client
 from etude.launch.controller import PythonClient, RentRequest, Request, TerminateRequest
 from etude.launch.database import Database, launcher_file
-from etude.launch.errors import LauncherError
-from etude.launch.records import Job, Machine
+from etude.launch.records import Machine
 from tests.launch.counting import Counting, Counts
 from tests.launch.fake import bench
 

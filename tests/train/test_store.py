@@ -13,11 +13,13 @@ import numpy as np
 import pytest
 from moto import mock_aws
 
+from etude.block_file import block_key, tail_key
 from etude.cache import Cache
 from etude.carriage import listing
 from etude.errors import EtudeError
 from etude.page import Pages, build
-from etude.records import RunDeclaration, RunFile, RunWriter, SourceKey
+from etude.records import RunWriter
+from etude.run import RunFiles, StorageDestination, runs, sync
 from etude.storage import (
     DirectoryStorage,
     S3Storage,
@@ -25,14 +27,11 @@ from etude.storage import (
     run_prefix,
     storage_from_uri,
 )
-from etude.tracking.block_file import block_key, tail_key
-from etude.tracking.delivery import RunFiles, StorageDestination, sync
-from etude.tracking.listing import runs
 from etude.train.block import Builder, LoggedRow
 from etude.train.manifest import Index, Manifest
 from etude.train.read import buckets, read, read_all
 from etude.train.records import Step
-from etude.train.run import log_line, seal_runs, track, write_block
+from etude.train.tracking import log_line, seal_runs, track, write_block
 from tests.experiments import experiment_file
 from tests.run.storage import CountedClient, MeasuredStorage
 
@@ -73,7 +72,7 @@ def test_a_folder_listed_without_a_declaration_is_not_asked_for_one(tmp_path: Pa
 def test_a_run_whose_declaration_is_invalid_reads_without_one(tmp_path: Path) -> None:
     with track(experiment="e", run="r", clocks=[], directory=tmp_path):
         pass
-    (tmp_path / run_prefix("r") / "run.json").write_text("{}")
+    (tmp_path / run_prefix("e/r") / "run.json").write_text("{}")
     data = read(tmp_path, "e", "r")
     assert data.file is None
     assert len(data.attempts) == 1
@@ -89,7 +88,7 @@ def test_resuming_does_not_inherit_a_previous_attempts_finished_state(
         pass
     if not attributed:
         # Earlier evidence has no writer on its completion; retain those bytes.
-        path = local / "r/outcome.json"
+        path = local / "e/r/outcome.json"
         state = json.loads(path.read_text())
         state.pop("writer")
         path.write_text(json.dumps(state))
@@ -145,7 +144,7 @@ def test_a_new_model_at_a_recorded_step_is_a_new_version(
             assert [c.ordinal for c in checkpoints] == list(range(1, recorded + 1))
             # Nothing delivered is replaced: a new model at the same step is a new version.
             for version, held in list(kept.items())[:recorded]:
-                assert destination.get(f"r/checkpoints/step-10{version}{extension}") == held
+                assert destination.get(f"e/r/checkpoints/step-10{version}{extension}") == held
             assert checkpoints[-1].artifact.size_bytes == len(body)
             before = measured.uploads
             assert sync(local, storages=[measured]) == {}
@@ -155,7 +154,7 @@ def test_a_new_model_at_a_recorded_step_is_a_new_version(
 def test_recent_blocks_compact_and_delete_covered_uploads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("etude.train.run.RECENT_BLOCKS", 2)
+    monkeypatch.setattr("etude.train.tracking.RECENT_BLOCKS", 2)
     bucket = DirectoryStorage(tmp_path / "bucket")
     run = track(
         experiment="e",
@@ -175,7 +174,7 @@ def test_recent_blocks_compact_and_delete_covered_uploads(
         else:
             pytest.fail("recent rows were not delivered")
     run.finish()
-    keys = bucket.keys(run_prefix("r"))
+    keys = bucket.keys(run_prefix("e/r"))
     assert not any(key.endswith(".tail") for key in keys)
     assert len([key for key in keys if "/metrics/2-" in key]) == 2
     assert not any("/metrics/1-" in key for key in keys)
@@ -490,7 +489,7 @@ def test_destination_without_delete_keeps_covered_blocks_readable(tmp_path: Path
         time.sleep(0.01)
     assert read(bucket, "e", "r").rows == 1
     run.finish()
-    keys = bucket.keys(run_prefix("r"))
+    keys = bucket.keys(run_prefix("e/r"))
     assert any("/metrics/1-" in key for key in keys)
     assert any("/metrics/2-" in key for key in keys)
     assert read(bucket, "e", "r").chart("value", "step").count.sum() == 1
@@ -500,7 +499,7 @@ def test_destination_without_delete_keeps_covered_blocks_readable(tmp_path: Path
 def test_size_threshold_promotes_before_finish(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("etude.train.run.PERMANENT_BYTES", 1)
+    monkeypatch.setattr("etude.train.tracking.PERMANENT_BYTES", 1)
     run = track(
         experiment="e",
         run="r",
@@ -739,15 +738,21 @@ def test_a_run_split_across_machine_folders_reads_as_one(tmp_path: Path) -> None
         resumed = {} if machine == "s1" else {"step": 10.0}
         attempt = RunWriter(writer=writer, started_ms=start, host=machine, resumed_at=resumed)
         storage.put(f"metrics/{writer}.json", attempt.model_dump_json().encode())
-        declared = RunFile(
-            experiment="e",
-            namespace="local",
-            declaration=RunDeclaration(
-                source_key=SourceKey(namespace="local", kind="run", source_id="r"),
-                clocks=(Step("step", "steps"),),
-            ),
+        storage.put(
+            "run.json",
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "experiment": "e",
+                    "namespace": "local",
+                    "declaration": {
+                        "schema_version": 1,
+                        "source_key": {"namespace": "local", "kind": "run", "source_id": "r"},
+                        "clocks": [Step("step", "steps").model_dump()],
+                    },
+                }
+            ).encode(),
         )
-        storage.put("run.json", declared.model_dump_json().encode())
         builder = Builder(["step"])
         for step in steps:
             builder.add(
@@ -862,7 +867,7 @@ def test_live_writer_describes_each_permanent_block_only_once(
 
     monkeypatch.setattr("etude.train.manifest.DirectoryStorage", CountedDirectory)
     # Tiny real blocks make each of these three rows a separate permanent fold.
-    monkeypatch.setattr("etude.train.run.PERMANENT_BYTES", 1)
+    monkeypatch.setattr("etude.train.tracking.PERMANENT_BYTES", 1)
     with track(
         experiment="e",
         run="r",
@@ -884,7 +889,7 @@ def test_live_writer_describes_each_permanent_block_only_once(
 def test_selective_report_reads_bound_metadata_and_preserve_absolute_coordinates(
     tmp_path: Path,
 ) -> None:
-    root = tmp_path / "r"
+    root = tmp_path / "e/r"
     with track(experiment="e", run="r", clocks=[Step("step", "steps")], directory=tmp_path):
         pass
     writer = "abcdef123456"
@@ -932,8 +937,10 @@ def report():
 
 def test_a_selective_page_reads_each_block_once_from_a_bucket(tmp_path: Path) -> None:
     writer = "abcdef123456"
-    root = tmp_path / "runs" / "r"
-    with track(experiment="e", run="r", clocks=[Step("step", "steps")], directory=root.parent):
+    root = tmp_path / "runs" / "e/r"
+    with track(
+        experiment="e", run="r", clocks=[Step("step", "steps")], directory=root.parent.parent
+    ):
         pass
     for block in range(4):
         builder = Builder(["step"])

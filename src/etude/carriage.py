@@ -1,7 +1,7 @@
 """What may leave a run's folder, in what order and as what: one set of rules for both carriers.
 
 A run's folder (`etude.storage.run_directory`) reaches storage by one of
-two carriers: the tracker's shipper (`etude.tracking.delivery`) when a script runs
+two carriers: the tracker's shipper (`etude.run`) when a script runs
 on its own, and the launcher's courier (`etude.launch.worker.courier`) when it
 was launched, so the job's environment never holds bucket credentials. Both
 decide here which files are ready (`listing`), their order, the transfer's

@@ -7,9 +7,10 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from etude.errors import LauncherError
 from etude.launch.database import Database, launcher_file
 from etude.launch.images import PreparedRuntime, prepare_pytorch, resolve_image
-from etude.launch.records import Image, LauncherError, MachineTemplate
+from etude.launch.records import Image, MachineTemplate
 from tests.launch.fake import bench
 
 DIGEST = "sha256:" + "a" * 64

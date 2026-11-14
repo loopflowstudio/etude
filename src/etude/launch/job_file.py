@@ -17,9 +17,10 @@ from typing import Any
 
 import typer
 
+from etude.errors import LauncherError
 from etude.experiment_file import experiment_named
-from etude.launch.errors import LauncherError
-from etude.launch.records import Job, RunRequest
+from etude.identity import run_address
+from etude.job import Job, RunRequest
 
 
 def read_job_file(
@@ -133,6 +134,9 @@ def read_job_file(
         run.model_copy(
             update={
                 "params": run.params or params,
+                "id": run_address(run.id, experiment or run.job.experiment or path.stem)
+                if run.id
+                else None,
                 "job": run.job.model_copy(
                     update={
                         "repo": str(Path(run.job.repo).resolve()) if run.job.repo else None,

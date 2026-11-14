@@ -1,16 +1,20 @@
 """Experiment identity survives shared sources and historical copies of run folders."""
 
+import json
+from hashlib import sha256
 from pathlib import Path
 from shutil import copytree
 
+import pytest
+
 from etude.experiment import observe, state_of
 from etude.page import Pages
-from etude.records import Continuation, SourceKey
+from etude.records import Continuation, RunRecord, SourceKey
+from etude.run import runs, sync
 from etude.storage import DirectoryStorage
-from etude.tracking.listing import runs
 from etude.train.read import read, read_all, read_batches
 from etude.train.records import Step
-from etude.train.run import track
+from etude.train.tracking import track
 from tests.experiments import experiment_file
 from tests.run.storage import MeasuredStorage
 
@@ -53,8 +57,8 @@ def test_copies_of_a_historical_flat_run_still_join_once(tmp_path: Path) -> None
         experiment="one", run="r", clocks=[Step("updates", "updates")], directory=source
     ) as run:
         run.log({"score": 10}, updates=1)
+    copytree(source / "one/r", source / "r")
     copytree(source / "r", source / "machines/host/r")
-    copytree(source / "r", source / "one/r")
     every = read_all(source)
     assert len(every) == 1
     assert every[0].points("score", "updates").y.tolist() == [10]
@@ -116,3 +120,43 @@ def test_reading_another_experiment_does_not_return_a_flat_runs_rows(tmp_path: P
         run.log({"score": 10})
     data = read(tmp_path, "two", "r")
     assert data.file is None and data.rows == 0 and data.state is None
+
+
+def test_run_record_reads_historical_identity_and_round_trips_the_exact_config() -> None:
+    config = '{ "lr" : 0.1 }'
+    historical = json.dumps(
+        {
+            "schema_version": 1,
+            "experiment": "pilot",
+            "namespace": "local",
+            "declaration": {
+                "schema_version": 1,
+                "source_key": {"namespace": "local", "kind": "run", "source_id": "r"},
+                "clocks": [],
+                "job": "digest",
+                "seed": 7,
+                "config_json": config,
+                "config_sha256": sha256(config.encode()).hexdigest(),
+            },
+        }
+    )
+    record = RunRecord.model_validate_json(historical)
+    assert (record.id, record.source_key.source_id, record.job) == ("pilot/r", "r", "digest")
+    assert record.config_json == config
+    assert record.config_sha256 == sha256(config.encode()).hexdigest()
+    assert RunRecord.model_validate_json(record.model_dump_json()) == record
+    with pytest.raises(ValueError, match="no launcher specification"):
+        _ = record.launch_spec
+
+
+def test_a_run_json_in_out_is_carried_as_data_and_never_discovered_as_a_run(tmp_path: Path) -> None:
+    from_json = RunRecord(id="pretend/nested", experiment="pretend").model_dump_json()
+    source = tmp_path / "source"
+    with track(experiment="real", run="r", clocks=[], directory=source) as live:
+        nested = live.out / "model"
+        nested.mkdir()
+        (nested / "run.json").write_text(from_json)
+    target = MeasuredStorage(DirectoryStorage(tmp_path / "target"))
+    assert sync(source, storages=[target]) == {}
+    assert runs(source) == runs(target) == [("real", "r")]
+    assert target.storage.get("real/r/out/model/run.json").decode() == from_json

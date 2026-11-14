@@ -115,7 +115,7 @@ stay outside these records.
 ```python
 # job.py
 from etude.jobs import training
-from etude.launch.records import Job
+from etude.job import Job
 
 from train import TrainConfig, train  # train(config: TrainConfig) -> None
 
@@ -212,7 +212,7 @@ temporary keys are kept in the courier's memory and never written to disk.
 from decimal import Decimal
 
 from etude.jobs import evaluation, training
-from etude.launch.records import Input
+from etude.job import Input
 
 job = training(train, config=TrainConfig(lr=1e-3), max_hours=6, max_usd=Decimal(30))
 weights = Input(
@@ -281,7 +281,7 @@ from decimal import Decimal
 
 from etude.experiment import ExperimentState
 from etude.jobs import training
-from etude.launch.records import Job
+from etude.job import Job
 from etude.report import Report
 
 from train import TrainConfig, train
@@ -450,7 +450,8 @@ The equivalent Python path uses the same scheduler and ordinary runs:
 from decimal import Decimal
 
 from etude.launch.client import default, launch_cohort, wait
-from etude.launch.records import Job, MachineTemplate, OnDemand, Provider
+from etude.job import Job
+from etude.launch.records import MachineTemplate, OnDemand, Provider
 
 launcher = default()
 launcher.set_provider(Provider(name="vast", kind="vast", registry="", storage="west"))
@@ -933,10 +934,10 @@ defines it, by its full path, and relative imports are a lint error:
 | Import | What it is |
 | --- | --- |
 | `from etude.jobs import training, evaluation` | typed jobs: Etude decides the command |
-| `from etude.launch.records import Job, Run` | what to run |
+| `from etude.job import Job, RunRequest` | what to run |
 | `from etude.launch.client import queue, launch, status, wait, ...` | the calls a script makes; they go to the controller when one is set |
 | `from etude.launch.database import Database` | the SQLite records in `launcher-<schema>.db` |
-| `from etude.launch.schemas import Packet, Work, Result` | frozen worker messages |
+| `from etude.launch.schemas import Packet, Work, Progress` | frozen worker messages |
 | `from etude.launch.executor import Executor` | machine acquisition, startup and journal composition |
 | `from etude.launch.scheduler import Scheduler` | the owner of one database: queueing, admission, matching runs to machines |
 
@@ -955,7 +956,7 @@ from pathlib import Path
 
 from etude.jobs import continue_from, training
 from etude.launch.client import default, fetch, logs, queue, queue_cohort, wait
-from etude.launch.records import Until
+from etude.job import Until
 from train import TrainConfig, train
 
 job = training(
@@ -988,7 +989,7 @@ from decimal import Decimal
 
 from etude.jobs import training
 from etude.launch.client import launch_cohort
-from etude.launch.records import Job, Until
+from etude.job import Job, Until
 from train import TrainConfig, train
 
 
@@ -1040,7 +1041,7 @@ A sweep is Python that calls the function:
 ```python
 # sweep.py
 import capacity
-from etude.launch.records import Job
+from etude.job import Job
 
 
 def runs() -> list[Job]:
@@ -1092,7 +1093,7 @@ left it, and `run.resume` loads the state `run.save()` kept there
 - **A lost machine** is the launcher's finding: the attempt ends `lost` with
   its cause.
 - **A planned stop** is the job's own: `run.steps` saw the stop, the pass in
-  progress saved, and the next raised `etude.train.run.Stopped`
+  progress saved, and the next raised `etude.train.tracking.Stopped`
   ([Training](training.md#counting)).
   The attempt ends `stopped`. A command job says the same by exiting 75
   (`EX_TEMPFAIL`, "try again later"), which is what a typed job's process
@@ -1150,6 +1151,11 @@ is refused before anything is rented when the run finished and no later
 target is given, when the file's config or the seed differs from the run's
 (the error names the fields), or while an attempt of the run is still
 allocated. A refusal changes nothing recorded about the run.
+
+Launched references print as `EXPERIMENT/RUN`. Commands accept that reference;
+`etude status RUN --experiment EXPERIMENT` and `etude continue RUN --experiment
+EXPERIMENT` also accept the run name alone. `etude launch FILE --resume RUN`
+uses the file’s experiment (or its `--experiment` override).
 
 A launch whose run id is taken in its experiment is refused the same way,
 before renting: ids are never reused and a taken id is never resumed. The
@@ -1231,7 +1237,7 @@ A job can be given files by name:
 
 ```python
 from etude.jobs import training
-from etude.launch.records import Input
+from etude.job import Input
 
 policy = Input(
     name="policy.pt",
@@ -1310,7 +1316,7 @@ PREFIX/sources/SHA256.tar        a commit's source archive, named by its digest
 
 The job is given `ETUDE_TRACK_DIR`, `track` beside the `sessions` directory
 (on this computer `~/.etude/track`), and tracking keeps the run's files in
-`ETUDE_TRACK_DIR/RUN/`. The courier copies that folder into the run's folder
+`ETUDE_TRACK_DIR/EXPERIMENT/RUN/`. The courier copies that folder into the run's folder
 in storage while the job runs; the job still holds no keys. A second attempt,
 on this machine or another, writes into the same run folder. The courier and
 tracking's own `sync` follow one set of rules (`etude.carriage`): files ending
@@ -1822,7 +1828,7 @@ command from installing Torch again. Cold image pulls can still dominate startup
 
 ```python
 from etude.jobs import training
-from etude.launch.records import Runtime
+from etude.job import Runtime
 
 job = training(
     train,
@@ -1856,7 +1862,7 @@ in the checkout and a command runs in the shell's environment.
 ### Prepare a job environment once per machine
 
 ```python
-from etude.launch.records import Preparation, Runtime
+from etude.job import Preparation, Runtime
 
 job = training(
     train,

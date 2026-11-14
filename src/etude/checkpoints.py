@@ -98,10 +98,16 @@ class CheckpointRecord(Record):
     # A stored file's key relative to the run folder. None for older records
     # (beside this record) and references to files outside the tracked folder.
     file: str | None = None
+    # Resolved source prefix, supplied by readers; stored checkpoint identity is unchanged.
+    folder: str | None = Field(default=None, exclude=True)
     at: dict[Name, float]
     wall_ms: int | None = None
     # The author's labels, such as "best". They may be added and removed later.
     tags: tuple[Name, ...] = Field(default=(), max_length=32)
+
+    def __eq__(self, other: object) -> bool:
+        """Resolved source folders are read provenance, not persisted checkpoint data."""
+        return isinstance(other, CheckpointRecord) and self.model_dump() == other.model_dump()
 
     @property
     def name(self) -> str:

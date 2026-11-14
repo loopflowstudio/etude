@@ -10,12 +10,12 @@ import pytest
 from etude.carriage import put_back, restore_set
 from etude.experiment import observe
 from etude.out import OutFile, OutFiles
+from etude.run import sync
 from etude.storage import DirectoryStorage
-from etude.tracking.delivery import sync
 from etude.train.read import read
 from etude.train.records import Step, Time
 from etude.train.report import training
-from etude.train.run import Stopped, local_launch, track
+from etude.train.tracking import Stopped, local_launch, track
 from tests.experiments import authored
 from tests.run.storage import MeasuredStorage
 
@@ -90,8 +90,8 @@ def test_stopping_reserves_the_slowest_step_and_remembers_a_request(
 ) -> None:
     now = [0.0]
     # Monotonic time is shared with writer threads; the fixture only advances it.
-    monkeypatch.setattr("etude.train.run.time.monotonic", lambda: now[0])
-    monkeypatch.setattr("etude.train.run.time.time", lambda: 1000 + now[0])
+    monkeypatch.setattr("etude.train.tracking.time.monotonic", lambda: now[0])
+    monkeypatch.setattr("etude.train.tracking.time.time", lambda: 1000 + now[0])
     monkeypatch.setenv("ETUDE_DEADLINE", datetime.fromtimestamp(1010, UTC).isoformat())
     stop = tmp_path / "stop"
     monkeypatch.setenv("ETUDE_STOP_FILE", str(stop))
@@ -140,9 +140,11 @@ def test_first_row_replaces_history_and_an_empty_attempt_changes_nothing(
 def test_out_checkpoint_is_carried_once_and_relocated_without_a_second_copy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = tmp_path / "track/r"
+    root = tmp_path / "track/e/r"
     monkeypatch.setenv("ETUDE_OUT", str(root / "out"))
-    with track(experiment="e", run="r", clocks=CLOCKS, directory=root.parent, strict=True) as run:
+    with track(
+        experiment="e", run="r", clocks=CLOCKS, directory=root.parent.parent, strict=True
+    ) as run:
         (run.out / "nested").mkdir()
         model = run.out / "nested/model.pt"
         model.write_bytes(b"weights")
@@ -158,7 +160,7 @@ def test_out_checkpoint_is_carried_once_and_relocated_without_a_second_copy(
     os.utime(state, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
     assert sync(root.parent, storages=[storage]) == {}
     assert storage.uploads == first + 2
-    assert storage.storage.get("r/out/state") == b"step two"
+    assert storage.storage.get("e/r/out/state") == b"step two"
     restored = tmp_path / "fresh/r"
     put_back(restored, restore_set(root))
     assert (restored / "out/state").read_bytes() == b"step two"
@@ -179,9 +181,9 @@ def test_out_checkpoint_is_carried_once_and_relocated_without_a_second_copy(
 def test_sync_carries_out_file_deletion_and_recreation_without_duplicate_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = tmp_path / "track/r"
+    root = tmp_path / "track/e/r"
     monkeypatch.setenv("ETUDE_OUT", str(root / "out"))
-    with track(experiment="e", run="r", clocks=CLOCKS, directory=root.parent) as run:
+    with track(experiment="e", run="r", clocks=CLOCKS, directory=root.parent.parent) as run:
         state = run.out / "state"
         state.write_bytes(b"saved")
     storage = MeasuredStorage(DirectoryStorage(tmp_path / "bucket"))
@@ -190,29 +192,29 @@ def test_sync_carries_out_file_deletion_and_recreation_without_duplicate_bytes(
     state.unlink()
     assert sync(root.parent, storages=[storage]) == {}
     assert storage.uploads == count + 1
-    assert OutFiles.model_validate_json(storage.get("r/out.json")).files == ()
+    assert OutFiles.model_validate_json(storage.get("e/r/out.json")).files == ()
     state.write_bytes(b"saved")
     assert sync(root.parent, storages=[storage]) == {}
     assert storage.uploads == count + 2
-    assert OutFiles.model_validate_json(storage.get("r/out.json")).files == (
+    assert OutFiles.model_validate_json(storage.get("e/r/out.json")).files == (
         OutFile(key="out/state", sha256=sha256(b"saved").hexdigest(), size_bytes=5),
     )
-    assert storage.get("r/out/state") == b"saved"
+    assert storage.get("e/r/out/state") == b"saved"
 
 
 def test_sync_membership_describes_the_save_uploaded_during_atomic_replacement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = tmp_path / "track/r"
+    root = tmp_path / "track/e/r"
     monkeypatch.setenv("ETUDE_OUT", str(root / "out"))
-    with track(experiment="e", run="r", clocks=CLOCKS, directory=root.parent) as run:
+    with track(experiment="e", run="r", clocks=CLOCKS, directory=root.parent.parent) as run:
         state = run.out / "state"
         state.write_bytes(b"first")
     storage = MeasuredStorage(DirectoryStorage(tmp_path / "bucket"))
     put_file = storage.put_file
 
     def replace_during_upload(key: str, path: Path) -> None:
-        if key == "r/out/state":
+        if key == "e/r/out/state":
             partial = state.with_suffix(".partial")
             partial.write_bytes(b"second save")
             partial.replace(state)
@@ -220,16 +222,16 @@ def test_sync_membership_describes_the_save_uploaded_during_atomic_replacement(
 
     monkeypatch.setattr(storage, "put_file", replace_during_upload)
     assert sync(root.parent, storages=[storage]) == {}
-    assert storage.get("r/out/state") == b"first"
-    assert OutFiles.model_validate_json(storage.get("r/out.json")).files == (
+    assert storage.get("e/r/out/state") == b"first"
+    assert OutFiles.model_validate_json(storage.get("e/r/out.json")).files == (
         OutFile(key="out/state", sha256=sha256(b"first").hexdigest(), size_bytes=5),
     )
     first = storage.uploads
     monkeypatch.setattr(storage, "put_file", put_file)
     assert sync(root.parent, storages=[storage]) == {}
     assert storage.uploads == first + 2  # the new save, then its membership
-    assert storage.get("r/out/state") == b"second save"
-    assert OutFiles.model_validate_json(storage.get("r/out.json")).files == (
+    assert storage.get("e/r/out/state") == b"second save"
+    assert OutFiles.model_validate_json(storage.get("e/r/out.json")).files == (
         OutFile(key="out/state", sha256=sha256(b"second save").hexdigest(), size_bytes=11),
     )
     assert not list(root.glob(".out-*"))
@@ -238,9 +240,9 @@ def test_sync_membership_describes_the_save_uploaded_during_atomic_replacement(
 def test_recipe_retirement_notes_cannot_delete_tracking_or_retained_checkpoints(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = tmp_path / "track/r"
+    root = tmp_path / "track/e/r"
     monkeypatch.setenv("ETUDE_OUT", str(root / "out"))
-    with track(experiment="e", run="r", clocks=CLOCKS, directory=root.parent) as run:
+    with track(experiment="e", run="r", clocks=CLOCKS, directory=root.parent.parent) as run:
         model = run.out / "model.pt"
         model.write_bytes(b"weights")
         run.checkpoint(model, updates=1)
@@ -250,9 +252,9 @@ def test_recipe_retirement_notes_cannot_delete_tracking_or_retained_checkpoints(
     (root / "metrics/retired.removed").write_text("out/model.pt\n")
     model.unlink()
     assert sync(root.parent, storages=[storage]) == {}
-    assert storage.get("r/run.json") == (root / "run.json").read_bytes()
-    assert storage.get("r/out/model.pt") == b"weights"
-    assert OutFiles.model_validate_json(storage.get("r/out.json")).files == (
+    assert storage.get("e/r/run.json") == (root / "run.json").read_bytes()
+    assert storage.get("e/r/out/model.pt") == b"weights"
+    assert OutFiles.model_validate_json(storage.get("e/r/out.json")).files == (
         OutFile(key="out/recipe.removed", sha256=sha256(b"run.json\n").hexdigest(), size_bytes=9),
     )
 

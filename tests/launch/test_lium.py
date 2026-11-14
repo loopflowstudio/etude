@@ -15,9 +15,11 @@ from uuid import UUID
 import pytest
 
 from etude.cli import main
+from etude.errors import LauncherError
+from etude.job import Job
 from etude.launch.client import _open
 from etude.launch.database import Database, launcher_file
-from etude.launch.errors import LauncherError, ProviderUnavailable
+from etude.launch.errors import ProviderUnavailable
 from etude.launch.executor import Execution, Executor, Refused
 from etude.launch.machines import MachineRequest
 from etude.launch.providers import bootstrap as bootstrap_module
@@ -26,15 +28,7 @@ from etude.launch.providers.lium.api import Create, LiumAPI, Pod
 from etude.launch.providers.lium.machines import _START, LiumMachines
 from etude.launch.providers.lium.pod import Watchdog
 from etude.launch.providers.lium.pod import main as pod_main
-from etude.launch.records import (
-    GPU,
-    BootstrapLinks,
-    Job,
-    Machine,
-    MachineTemplate,
-    OnDemand,
-    Provider,
-)
+from etude.launch.records import GPU, BootstrapLinks, Machine, MachineTemplate, OnDemand, Provider
 from etude.launch.records import Storage as Place
 from etude.launch.scheduler import Scheduler
 from etude.launch.storage.bucket import BucketJournal

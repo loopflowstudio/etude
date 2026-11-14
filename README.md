@@ -7,7 +7,7 @@ Launch training runs on your own or rented machines, and track what they record.
 from decimal import Decimal
 
 from etude.jobs import training
-from etude.launch.records import Job
+from etude.job import Job
 
 from train import TrainConfig, train
 
@@ -29,7 +29,7 @@ import torch
 from pydantic import BaseModel
 
 from etude.train.records import Step
-from etude.train.run import track
+from etude.train.tracking import track
 
 
 class TrainConfig(BaseModel):

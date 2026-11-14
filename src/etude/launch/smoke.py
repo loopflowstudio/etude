@@ -26,11 +26,12 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from etude.errors import LauncherError
+from etude.job import Job, RunRequest, Smoke, SmokeStep, job_id
 from etude.launch.database import Database, launcher_file
-from etude.launch.errors import LauncherError
 from etude.launch.executor import local
 from etude.launch.logs import render
-from etude.launch.records import Job, Machine, Pool, RunRequest, Smoke, SmokeStep, job_id
+from etude.launch.records import Machine, Pool
 from etude.launch.scheduler import Scheduler
 from etude.launch.source import home
 

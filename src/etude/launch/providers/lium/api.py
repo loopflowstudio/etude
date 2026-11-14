@@ -15,9 +15,10 @@ from uuid import UUID
 
 from pydantic import AwareDatetime, Field, TypeAdapter, model_validator
 
+from etude.job import Record
 from etude.launch.errors import ProviderUnavailable
 from etude.launch.providers.lium.http import LiumHTTP
-from etude.launch.records import GPU, MachineTemplate, Record
+from etude.launch.records import GPU, MachineTemplate
 
 
 class Node(Record):

@@ -11,7 +11,7 @@ import torch
 from pydantic import BaseModel
 
 from etude.train.records import Step
-from etude.train.run import track
+from etude.train.tracking import track
 
 
 class TrainConfig(BaseModel):  # yours: any fields you like, and no seed
@@ -101,7 +101,7 @@ Seeds are chosen where the job is launched:
 from decimal import Decimal
 
 from etude.jobs import training
-from etude.launch.records import Job
+from etude.job import Job
 
 from train import TrainConfig, train
 
@@ -631,7 +631,7 @@ A run's hours, dollars and attempts span every attempt, whoever asked for it
 not count on one clock uses them directly:
 
 ```python
-from etude.train.run import Stopped, track
+from etude.train.tracking import Stopped, track
 
 
 def train(config: SearchConfig) -> None:

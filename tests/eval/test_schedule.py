@@ -9,8 +9,9 @@ from pathlib import Path
 import duckdb
 
 from etude.checkpoints import CheckpointId, CheckpointRef, checkpoint_id
-from etude.eval.match import Tables, environment, evaluate
+from etude.eval.match import environment, evaluate
 from etude.eval.records import CheckpointPlayer, Code, Inference, Match
+from etude.eval.run import Tables
 from etude.eval.schedule import checkpoints, ordered
 from etude.records import ArtifactRef
 from tests.eval.games import play

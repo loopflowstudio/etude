@@ -22,7 +22,7 @@ from tests.eval.games import play_checkpoint_folder
 RECIPE = """from pathlib import Path
 from pydantic import BaseModel
 from etude.train.records import Step
-from etude.train.run import track
+from etude.train.tracking import track
 from etude.stopping import Stopped
 
 class Config(BaseModel):

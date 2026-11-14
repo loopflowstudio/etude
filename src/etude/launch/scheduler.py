@@ -35,7 +35,9 @@ from pydantic import Field
 
 from etude.carriage import RecordMismatch
 from etude.deadline import limit_time, remaining
-from etude.identity import resume_conflicts
+from etude.errors import LauncherError
+from etude.identity import resume_conflicts, run_address
+from etude.job import Job, Record, RunRequest, job_id
 from etude.launch import source
 from etude.launch.database import Database
 from etude.launch.errors import LaunchError
@@ -51,9 +53,7 @@ from etude.launch.records import (
     Diagnostic,
     Hardware,
     Image,
-    Job,
     Launch,
-    LauncherError,
     LaunchRequest,
     Limit,
     LogProducer,
@@ -67,12 +67,9 @@ from etude.launch.records import (
     Provider,
     Quote,
     QuotedMachine,
-    Record,
     Rental,
     RentalCost,
     RunAttempt,
-    RunRecord,
-    RunRequest,
     Session,
     Stale,
     StartPhase,
@@ -80,7 +77,6 @@ from etude.launch.records import (
     Storage,
     Supply,
     Target,
-    job_id,
     refusal,
 )
 from etude.launch.schemas import (
@@ -93,6 +89,7 @@ from etude.launch.storage.download import StoredContentMismatch
 from etude.launch.storage.s3 import longest_grant
 from etude.launch.storage.transport import attribute, observe
 from etude.launch.usage import Usage
+from etude.records import RunRecord
 from etude.storage_timeout import StorageUnavailable
 
 Clock = Callable[[], datetime]
@@ -620,8 +617,8 @@ class Scheduler:
             for record in placement.runs:
                 most = share
                 if most is None:
-                    hours = Decimal(str(record.spec.max_hours))
-                    most = min(price * hours, _limit_usd(record.spec))
+                    hours = Decimal(str(record.launch_spec.max_hours))
+                    most = min(price * hours, _limit_usd(record.launch_spec))
                 quoted.append(
                     QuotedMachine(
                         run=record.name,
@@ -633,7 +630,7 @@ class Scheduler:
                         alongside=tuple(r.name for r in placement.runs if r.id != record.id),
                     )
                 )
-        caps = sum((_limit_usd(r.spec) for r in records), Decimal(0))
+        caps = sum((_limit_usd(r.launch_spec) for r in records), Decimal(0))
         if limits is not None and limits.max_usd is not None:
             caps = min(caps, limits.max_usd)
         return Quote(machines=tuple(quoted), limit_usd=None if target.rent is None else caps)
@@ -657,7 +654,10 @@ class Scheduler:
             raise LauncherError("a launch needs at least one run")
         for run in runs:
             self._validate_job(run.job, target)
-        requested = tuple(run.model_copy(update={"id": run.id or _id()}) for run in runs)
+        requested = tuple(
+            run.model_copy(update={"id": run_address(run.id or _id(), run.job.experiment)})
+            for run in runs
+        )
         ids = tuple(str(run.id) for run in requested)
         if len(set(ids)) != len(ids):
             raise LauncherError("a launch cannot request the same run ID twice")
@@ -713,7 +713,9 @@ class Scheduler:
             launch = launch.model_copy(
                 update={
                     "requests": tuple(
-                        request.model_copy(update={"resolved_revision": record.spec.revision})
+                        request.model_copy(
+                            update={"resolved_revision": record.launch_spec.revision}
+                        )
                         for request, record in zip(launch.requests, records, strict=True)
                     )
                 }
@@ -838,7 +840,11 @@ class Scheduler:
         """
         service = self._reach(ondemand)
         for repo, commit in sorted(
-            {(r.spec.repo, r.spec.revision) for r in runs if r.spec.repo and r.spec.revision}
+            {
+                (r.launch_spec.repo, r.launch_spec.revision)
+                for r in runs
+                if r.launch_spec.repo and r.launch_spec.revision
+            }
         ):
             service.stage(repo, commit)
 
@@ -1174,16 +1180,17 @@ class Scheduler:
         rent: str | None = None,
         job: str | None = None,
         contains: str | None = None,
+        experiment: str | None = None,
     ) -> tuple[RunRecord, ...]:
         """Runs oldest first, filtered without advancing execution. `done` includes history."""
         return tuple(
             r
-            for r in self._store.runs()
+            for r in self._store.runs(experiment=experiment)
             if (done or not self.read(r.id).done)
             and (cohort is None or r.cohort == cohort)
             and (pool is None or r.pool == pool)
             and (rent is None or r.rent == rent)
-            and (job is None or r.job == job or r.spec.name == job)
+            and (job is None or r.job == job or r.launch_spec.name == job)
             and (contains is None or source.contains(r, contains))
         )
 
@@ -1419,7 +1426,7 @@ class Scheduler:
             reason=None,
             outcome=None,
             cause=None,
-            until=record.spec.until,
+            until=record.launch_spec.until,
             clocks={} if last is None else last.clocks,
             tally=None if last is None else last.tally,
             usd=sum((self._attempt_usd(a, now) for a in attempts), Decimal(0)),
@@ -1450,7 +1457,7 @@ class Scheduler:
             or superseded
             or (
                 (last.outcome == "stopped" or last.outcome == "lost" and last.cause in RETRYABLE)
-                and len(attempts) < record.spec.max_attempts
+                and len(attempts) < record.launch_spec.max_attempts
             )
         )
         if last is not None and not retry and last.outcome != "stopped":
@@ -1660,7 +1667,7 @@ class Scheduler:
                 now = self._clock()  # the rental's window starts after the upload
                 self._store.check_lock(supply.name)
                 # The window covers the longest run it is given, within their dollars.
-                hours = max(planned.run.spec.max_hours for planned in batch)
+                hours = max(planned.run.launch_spec.max_hours for planned in batch)
                 cap = sum((planned.cap_usd for planned in batch), Decimal(0))
                 machines = 1
                 first = batch[0].run
@@ -1669,9 +1676,10 @@ class Scheduler:
                     machines = max(1, cohort.parallel - self._cohort_live(cohort.name, now))
                     pending = [r for r in waiting if r.cohort == cohort.name]
                     hours = max(
-                        hours, sum(r.spec.max_hours for r in pending) / (machines * supply.slots)
+                        hours,
+                        sum(r.launch_spec.max_hours for r in pending) / (machines * supply.slots),
                     )
-                    cap = sum((_limit_usd(r.spec) for r in pending), Decimal(0))
+                    cap = sum((_limit_usd(r.launch_spec) for r in pending), Decimal(0))
                     remaining = self._cohort_left(
                         cohort, now, renting=bool(self._safeguards(supply).reservation_hours)
                     )
@@ -2079,7 +2087,7 @@ class Scheduler:
     def _work(self, attempt: RunAttempt) -> Work | None:
         """What the attempt's machine is sent; None when the attempt ended undelivered."""
         run = self._store.run(attempt.run)
-        spec = run.spec
+        spec = run.launch_spec
         holder = self._holder(run.id, before=attempt.number) if attempt.number > 1 else None
         # Relay and delivery use the same selection: a claimed child resumes
         # its own state; an unclaimed child still needs the parent's initial out.
@@ -2452,14 +2460,14 @@ class Scheduler:
         differences = resume_conflicts(
             config=job.config,
             seed=request.seed,
-            prior_config=prior.spec.config,
+            prior_config=prior.launch_spec.config,
             prior_seed=prior.seed,
         )
-        if job.experiment != prior.spec.experiment:
+        if job.experiment != prior.launch_spec.experiment:
             differences.append("experiment differs")
         if differences:
             raise LauncherError("run identity conflict: " + "; ".join(differences))
-        target = job.until or prior.spec.until
+        target = job.until or prior.launch_spec.until
         if attempts and attempts[-1].outcome == "succeeded":
             reached = (
                 max((a.clocks.get(target.clock, 0) for a in attempts), default=0)
@@ -2485,7 +2493,9 @@ class Scheduler:
         if prior is not None and cohort is not None:
             raise LauncherError("a resumed run keeps its cohort; omit --cohort")
         if prior is not None and job.until is None:
-            run = run.model_copy(update={"job": job.model_copy(update={"until": prior.spec.until})})
+            run = run.model_copy(
+                update={"job": job.model_copy(update={"until": prior.launch_spec.until})}
+            )
         run = source.freeze(run)
         job = run.job
         assert run.id is not None  # source.freeze assigns the submitting client's identity
@@ -2504,6 +2514,7 @@ class Scheduler:
             )
         return RunRecord(
             id=run.id,
+            experiment=job.experiment or "",
             source=run.source,
             job=job_id(job),
             spec=job,
@@ -2531,7 +2542,7 @@ class Scheduler:
         # previous allocations; fresh work needs no history queries.
         if run.resume_after:
             return self._remaining(run, now)
-        return Budget(seconds=run.spec.max_hours * 3600, usd=_limit_usd(run.spec))
+        return Budget(seconds=run.launch_spec.max_hours * 3600, usd=_limit_usd(run.launch_spec))
 
     def _remaining(self, run: RunRecord, now: datetime) -> Budget:
         attempts = self._store.attempts(run=run.id)
@@ -2542,8 +2553,8 @@ class Scheduler:
         )
         dollars = sum((self._attempt_usd(a, now) for a in attempts), Decimal(0))
         return Budget(
-            seconds=max(0, run.spec.max_hours * 3600 - seconds),
-            usd=max(Decimal(0), _limit_usd(run.spec) - dollars),
+            seconds=max(0, run.launch_spec.max_hours * 3600 - seconds),
+            usd=max(Decimal(0), _limit_usd(run.launch_spec) - dollars),
         )
 
     def _occupied(

@@ -26,11 +26,10 @@ from pydantic import BaseModel
 
 from etude.call import config_type
 from etude.errors import EtudeError
-from etude.launch.records import Until
+from etude.job import Until
+from etude.run import RunFiles, validate_resume
 from etude.stopping import Stopped
 from etude.storage import DirectoryStorage, default_root, run_directory
-from etude.tracking.declaration import validate_resume
-from etude.tracking.delivery import RunFiles
 from etude.train.read import read
 from etude.train.state import saved_states
 
@@ -70,7 +69,7 @@ def run(
         text = settings.model_dump_json(round_trip=True)
         settings = config_type(train).model_validate_json(text)
         label = experiment or file.stem
-        base = default_root() / label
+        base = default_root()
         if resume is not None:
             identity = resume
             seed, until = _resumed(base, label, resume, config=text, seed=seed, until=until)
@@ -145,12 +144,12 @@ def _resumed(
     if prior.experiment != label:
         raise EtudeError("run_name_belongs_to_another_experiment")
     if seed is None:
-        seed = prior.declaration.seed
+        seed = prior.seed
     validate_resume(prior, config=config, seed=seed)
     data = read(DirectoryStorage(base), label, run)
     if until is None and data.attempts and data.attempts[-1].until is not None:
         until = Until.model_validate(data.attempts[-1].until)
-    if until is not None and until.clock not in {clock.name for clock in prior.declaration.clocks}:
+    if until is not None and until.clock not in {clock.name for clock in prior.clocks}:
         raise ValueError(f"undeclared clock: {until.clock!r}")
     if data.state is not None and data.state.state == "finished":
         positions = [

@@ -13,7 +13,7 @@ notebook or another scheduler's job, names its run itself:
 ```python
 from etude.storage import storage_from_uri
 from etude.train.records import Step, Time
-from etude.train.run import track
+from etude.train.tracking import track
 
 run = track(
     experiment="capacity-pilot",
@@ -51,7 +51,7 @@ launcher (`etude.launch`) and tracking share one package and lock file; neither
 imports the other. Tracking is `etude.train` for training runs, built on
 what every run shares: `etude.storage`, `etude.records`, `etude.checkpoints`
 and `etude.errors`, with its declaration, listing and delivery in
-`etude.tracking`.
+`etude.run`.
 Install `etude-sdk[s3]` for tracking against a bucket; local tracking does not
 need boto3. `s3://` uses boto3's own configuration. `r2://` reaches Cloudflare
 R2 at `https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com` with `R2_ACCESS_KEY_ID`
@@ -167,7 +167,7 @@ Rules a caller can rely on:
 
 ```python
 from etude.train.records import Step
-from etude.train.run import track
+from etude.train.tracking import track
 
 with track(
     experiment="self-play",
@@ -547,7 +547,7 @@ addresses both: `baseline="ppo"` dots both, `labels={"ppo": "PPO"}` shows
 "PPO 1a2b3c · 3 seeds", `Planned(jobs={"ppo": ...})` draws the planned values for
 each and `Aligned(job="ppo")` seats each. The full name, `"ppo 1a2b3c"`,
 names one, and a full-name label or plan wins over the launch name's.
-`TrainingRun.job` in `eval(state)` is this same name. Games played on different
+`TrainingRunSummary.job` in `eval(state)` is this same name. Games played on different
 devices, compute setups or code revisions contribute to the same requested
 matches; a replay counts once, from its latest delivered result. There is no Config
 control. Ask for a setup under a config's `setup` key, which is part of no

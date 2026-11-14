@@ -12,10 +12,10 @@ import pytest
 from etude.cli import main
 from etude.eval.query import statsdb
 from etude.launch.database import launcher_file
+from etude.run import sync
 from etude.storage import DirectoryStorage
-from etude.tracking.delivery import sync
 from etude.train.records import Step
-from etude.train.run import track
+from etude.train.tracking import track
 from tests.experiments import experiment_file
 
 # What reads, schedules or plays evaluations, beside the records a page carries.
@@ -28,18 +28,18 @@ EVAL_READERS = tuple(
 @pytest.mark.parametrize(
     ("command", "count", "forbidden"),
     [
-        (["report", "--help"], 9, ("numpy", "pydantic")),
+        (["report", "--help"], 8, ("numpy", "pydantic")),
         # No eval run and no eval(state), so nothing that reads or plays evaluations
         # loads: only `etude.eval.records`, whose `Gap` a page's points carry. The report
         # recognises experiment files as `etude launch` does (`etude.experiment_file`).
         (
             ["report", "{directory}/pilot.py", "--source", "{directory}"],
-            31,  # etude.checkpoints: the checkpoint records runs and evals share
-            ("boto3", "duckdb", *EVAL_READERS, "etude.train.run"),
+            32,  # shared run identity, delivery and job specification: the checkpoint records runs and evals share
+            ("boto3", "duckdb", *EVAL_READERS, "etude.train.tracking"),
         ),
         (
             ["sync", "--directory", "{directory}"],
-            19,  # etude.out: out membership
+            19,  # shared run and job specification: out membership
             ("boto3", "numpy", "etude.page", "etude.train.report"),
         ),
         (
@@ -47,7 +47,7 @@ EVAL_READERS = tuple(
             # etude.out, etude.stopping for Stopped, etude.train.state for saves and
             # etude.checkpoints for the records a run publishes, and
             # etude.identity for config and seed validation shared with the launcher.
-            28,
+            26,
             ("boto3", "etude.page", "etude.train.report"),
         ),
     ],
@@ -89,7 +89,6 @@ def test_tracking_command_import_counts(
         "etude.launch",
         "etude.launch.cli",
         "etude.launch.commands",
-        "etude.launch.errors",
         "etude.launch.logging",
     }
     assert not launcher_file(tmp_path / "home").exists()
@@ -105,17 +104,17 @@ def test_checkpoints_are_listed_at_their_storage_address_while_the_run_goes_on(
         model.write_bytes(f"weights at {step}".encode())
         run.checkpoint(model, step=step)
     deadline = time.monotonic() + 10
-    while len(list((local / "r/checkpoints").glob("*.json"))) < 3:
+    while len(list((local / "e/r/checkpoints").glob("*.json"))) < 3:
         assert time.monotonic() < deadline
         time.sleep(0.01)
     assert sync(local, storages=[DirectoryStorage(bucket)]) == {}
-    assert not (bucket / "r/outcome.json").exists()  # the run has not finished
+    assert not (bucket / "e/r/outcome.json").exists()  # the run has not finished
 
     assert main(["checkpoints", "--source", str(bucket)]) == 0
     listed = [line.split("\t") for line in capsys.readouterr().out.splitlines()]
     # Where each file is in the source read, not where the machine that wrote it kept it.
     assert [(fields[1], fields[-1]) for fields in listed] == [
-        (str(step), (bucket / f"r/checkpoints/step-{step}.pt").resolve().as_uri())
+        (str(step), (bucket / f"e/r/checkpoints/step-{step}.pt").resolve().as_uri())
         for step in (1, 2, 3)
     ]
     pytest.importorskip("duckdb")
@@ -163,13 +162,13 @@ def test_serving_an_index_loads_no_evaluation_launcher_or_bucket_client(tmp_path
     loaded = [name for name in modules if name.startswith("etude")]
     # Neither experiment has eval runs or eval(): the index reads training files alone,
     # and recognises experiment files as `etude launch` does (`etude.experiment_file`).
-    assert len(loaded) == 31, loaded
+    assert len(loaded) == 32, loaded
     forbidden = (
         "boto3",
         "duckdb",
         *EVAL_READERS,
         "etude.experiment",
-        "etude.train.run",
+        "etude.train.tracking",
         "etude.launch.client",
     )
     assert not [n for n in modules if any(n == f or n.startswith(f + ".") for f in forbidden)]

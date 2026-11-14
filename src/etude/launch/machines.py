@@ -10,7 +10,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Protocol
 
-from etude.launch.records import BootstrapLinks, Hardware, Offer, Record
+from etude.job import Record
+from etude.launch.records import BootstrapLinks, Hardware, Offer
 
 
 class Safeguards(Record):

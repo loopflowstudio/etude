@@ -6,9 +6,10 @@ import time
 from decimal import Decimal
 from pathlib import Path
 
+from etude.job import Job
 from etude.launch.database import Database, launcher_file
 from etude.launch.executor import local as local_service
-from etude.launch.records import Job, Machine, Pool
+from etude.launch.records import Machine, Pool
 from etude.launch.scheduler import Scheduler
 from tests.launch.fake import bench, output_bytes
 

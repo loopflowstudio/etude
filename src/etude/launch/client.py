@@ -3,7 +3,7 @@
     from decimal import Decimal
 
     from etude.launch.client import launch_cohort, wait
-    from etude.launch.records import Job
+    from etude.job import Job
 
     job = Job(command="python train.py", max_hours=6, max_usd=Decimal(5))
     runs = launch_cohort("first", job.runs(1, 2, 3))
@@ -27,6 +27,8 @@ from decimal import Decimal
 from functools import cache
 from pathlib import Path
 
+from etude.errors import LauncherError
+from etude.job import Job, RunRequest
 from etude.launch.controller import PythonClient, selected
 from etude.launch.database import Database, launcher_file
 from etude.launch.executor import Execution, Executor, local
@@ -40,14 +42,11 @@ from etude.launch.providers.vast.machines import VastMachines
 from etude.launch.records import (
     Availability,
     Diagnostic,
-    Job,
-    LauncherError,
     LogSnapshot,
     Machine,
     OnDemand,
     Pool,
     Quote,
-    RunRequest,
     Status,
 )
 from etude.launch.scheduler import Scheduler

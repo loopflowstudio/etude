@@ -20,14 +20,15 @@ from etude.eval.query import statsdb
 from etude.eval.records import Benchmark, Code, Inference, Seating
 from etude.eval.tournament import scores
 from etude.experiment import Experiment, ExperimentState, advance, observe, read_experiment
+from etude.job import Job, RunRequest
 from etude.jobs import _hold, evaluation, evaluation_spec
-from etude.launch.records import Job, Outcome, RunRequest, Status
+from etude.launch.records import Outcome, Status
 from etude.launch.source import home
 from etude.records import Clock
 from etude.storage import DirectoryStorage
 from etude.train.read import read
-from etude.train.run import Run as Run_
-from etude.train.run import track
+from etude.train.tracking import TrainingRun as Run_
+from etude.train.tracking import track
 from tests.eval.games import play, play_catching_errors, play_failing_deal_one
 from tests.experiments import authored
 
@@ -319,7 +320,7 @@ def test_a_launched_pass_ships_its_checkpoints_and_is_not_launched_twice(
     assert sorted(i.key for i in run.job.inputs) == [
         "checkpoints/updates-200.pt", "checkpoints/updates-400.pt"
     ]  # fmt: skip
-    assert {i.run for i in run.job.inputs} == {"ppo-1"}
+    assert {i.run for i in run.job.inputs} == {"ppo/ppo-1"}
 
     # While it runs, a pass neither launches it again nor its matches.
     (again,) = advance(eval_, source=bucket, rent="cpu8", directory=local)

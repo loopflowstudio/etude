@@ -35,7 +35,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, Literal, NamedTuple
 
-from etude.launch.records import Input, Preparation, Prepared, Record, Variable
+from etude.job import Input, Preparation, Record, Variable
+from etude.launch.records import Prepared
 from etude.launch.storage.files import digest, write
 
 

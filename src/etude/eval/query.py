@@ -94,7 +94,7 @@ from etude.eval.block import (
     refuse_unconverted,
     stage,
 )
-from etude.eval.match import ETUDE_TABLES, KIND
+from etude.eval.match import KIND
 from etude.eval.records import (
     COLUMN_TYPES,
     IDENTIFIER,
@@ -111,9 +111,11 @@ from etude.eval.records import (
     assemble,
     outcomes,
 )
+from etude.eval.run import ETUDE_TABLES
+from etude.identity import SAFE_NAME
 from etude.records import Digest, Record, RunState
-from etude.storage import SAFE_NAME, DirectoryStorage, Storage, default_root
-from etude.tracking.listing import as_storage, declared, run_folders, under
+from etude.run import as_storage, declared, run_folders, under
+from etude.storage import DirectoryStorage, Storage, default_root
 
 if TYPE_CHECKING:
     import duckdb
@@ -336,7 +338,7 @@ def _ours(
     """Select a folder by its own declaration; retain each declaration once."""
     if folder in declarations:
         return declarations[folder] == experiment
-    declaration = declared(storage, [folder], listed)
+    declaration = declared(storage, folder, listed)
     if declaration is None:
         return False
     db.execute("insert into kept.declarations values (?, ?)", [folder, declaration.experiment])
@@ -344,7 +346,7 @@ def _ours(
         return False
     db.execute(
         "insert into kept.runs values (?, ?, ?, null) on conflict do nothing",
-        [run, experiment, declaration.declaration.kind],
+        [run, experiment, declaration.kind],
     )
     return True
 

@@ -15,13 +15,14 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from etude.deadline import limit_time, remaining
+from etude.job import Record
 from etude.launch.errors import ProviderUnavailable
 from etude.launch.executor import Refused, check_creation
 from etude.launch.machines import Allocation, Bill, MachineRequest, Safeguards
 from etude.launch.measurement import timed
 from etude.launch.providers.lium.api import Create, LiumAPI, LiumOffer, Pod
 from etude.launch.providers.program import Program, boot_source
-from etude.launch.records import STOCK_IMAGE, MachineTemplate, Offer, Record
+from etude.launch.records import STOCK_IMAGE, MachineTemplate, Offer
 from etude.launch.storage.s3 import Bucket
 
 

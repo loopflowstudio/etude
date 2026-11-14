@@ -2,7 +2,7 @@
 
 `training` turns an experiment's training runs (`etude.train.read.RunData`)
 into `Training`, everything the page draws from their files, already
-bucketed. Runs are grouped into jobs (`RunDeclaration.job`); a job with
+bucketed. Runs are grouped into jobs (`RunRecord.job`); a job with
 several seeds is drawn as the mean of its seeds' bucket means, banded by
 their range. Checkpoints are kept at their exact coordinates, with the wall
 time to each and the pace of every step clock since the previous one.
@@ -199,7 +199,7 @@ def job_names(data: Sequence[RunData]) -> dict[str, JobName]:
     """
     keys: dict[str, tuple[str, str | None]] = {}
     for run in data:
-        declaration = run.file.declaration if run.file else None
+        declaration = run.file
         named = declaration.job_name if declaration else None
         config = declaration.config_sha256 if declaration else None
         keys[run.name] = (named or run.job or run.name, config)
@@ -243,7 +243,7 @@ def _summary(run: RunData) -> RunSummary:
     for block in run.blocks:
         writer = block.header.writer
         last[writer] = max(last.get(writer, 0), block.header.wall_last)
-    declaration = run.file.declaration if run.file else None
+    declaration = run.file
     return RunSummary(
         name=run.name,
         started=start,

@@ -35,11 +35,11 @@ from etude.eval.block import (
     sealed,
     write,
 )
-from etude.eval.match import OLD_SEAT
 from etude.eval.records import TABLE_FILE, MatchRecord, Rollup, outcomes
+from etude.eval.run import OLD_SEAT
 from etude.records import Digest, Record
+from etude.run import as_storage, located_runs, run_folders
 from etude.storage import Storage
-from etude.tracking.listing import as_storage, run_folders
 
 if TYPE_CHECKING:
     import duckdb
@@ -60,7 +60,11 @@ class Conversion(Record):
 
 
 def convert(
-    run: str, source: Storage | Path | str, *, rollups: Sequence[Rollup] = ()
+    run: str,
+    source: Storage | Path | str,
+    *,
+    rollups: Sequence[Rollup] = (),
+    experiment: str | None = None,
 ) -> Conversion:
     """Write blocks holding every per-file record of eval run `run` in `source` not yet held.
 
@@ -75,7 +79,7 @@ def convert(
     blocks: list[Block] = []
     db = duckdb.connect()
     try:
-        for folder, names in _run_files(storage, run).items():
+        for folder, names in _run_files(storage, run, experiment).items():
             with tempfile.TemporaryDirectory(prefix="etude-convert-") as scratch:
                 blocks += _convert(storage, folder, names, db, Path(scratch), rollups)
     finally:
@@ -89,7 +93,7 @@ def convert(
     )
 
 
-def delete_files(run: str, source: Storage | Path | str) -> int:
+def delete_files(run: str, source: Storage | Path | str, *, experiment: str | None = None) -> int:
     """Delete the per-file records of eval run `run` in `source` that its blocks there replace.
 
     Refuses with `EtudeError("eval_files_not_converted")`, deleting nothing,
@@ -98,7 +102,7 @@ def delete_files(run: str, source: Storage | Path | str) -> int:
     """
     storage = as_storage(source)
     doomed: list[str] = []
-    for folder, names in _run_files(storage, run).items():
+    for folder, names in _run_files(storage, run, experiment).items():
         replaced = _replaced(storage, folder, names)
         left = [name for name in names if _old(name) and name not in replaced]
         if left:
@@ -111,12 +115,25 @@ def delete_files(run: str, source: Storage | Path | str) -> int:
     return len(doomed)
 
 
-def _run_files(storage: Storage, run: str) -> dict[str, list[str]]:
-    """Each folder of the run in `storage`, with the names of its files."""
+def _run_files(storage: Storage, run: str, experiment: str | None) -> dict[str, list[str]]:
+    """Select one declared identity, refusing ambiguous names before any writes."""
+    if "/" in run:
+        label, run = run.rsplit("/", 1)
+        if experiment not in (None, label):
+            raise EtudeError("run_experiment_conflict", 409)
+        experiment = label
     keys = storage.keys("")
+    identities = located_runs(storage, keys, run=run)
+    selected = [item for item in identities if experiment in (None, item.file.experiment)]
+    if len(selected) > 1:
+        raise EtudeError("run_experiment_ambiguous", 409, detail="supply --experiment")
+    folders = selected[0].folders if selected else ()
+    if not identities and experiment is None:
+        # Pre-declaration historical folders have no experiment to select.
+        folders = tuple(run_folders(keys).get(run, []))
     return {
         folder: [each[len(folder) :] for each in keys if each.startswith(folder)]
-        for folder in run_folders(keys).get(run, [])
+        for folder in folders
     }
 
 

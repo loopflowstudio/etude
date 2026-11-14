@@ -51,10 +51,12 @@ from functools import partial
 from pathlib import Path
 from types import FrameType
 from typing import BinaryIO, Literal
+from urllib.parse import unquote, urlsplit
 
 from etude.cache import Cache, Content
+from etude.job import Input, Record, Runtime, number
 from etude.launch.logging import Console, explain, log_to, sanitize
-from etude.launch.records import Cause, Input, Outcome, Output, Prepared, Record, Runtime, number
+from etude.launch.records import Cause, Outcome, Output, Prepared
 from etude.launch.runtime import PROBE, find_python, select_runtime
 from etude.launch.schemas import Finished, Packet, Work
 from etude.launch.storage.files import append_usage, digest, read_result, write
@@ -143,7 +145,7 @@ def _lay_out(session: Path, home: Path, work: Work) -> tuple[dict[str, str], dic
     write(home / "run", work.run)  # the courier reads it while this runs
     environment["ETUDE_ATTEMPT"] = work.attempt
     for name, value in (
-        ("ETUDE_RUN", work.run),
+        ("ETUDE_RUN", work.run.rsplit("/", 1)[-1]),
         ("ETUDE_JOB", work.job),
         ("ETUDE_JOB_NAME", work.job_name),
         ("ETUDE_COHORT", work.cohort),
@@ -230,6 +232,10 @@ def input_path(session: Path, shared: Path, given: Input) -> Path:
     if held is not None:
         return held
     places = [session / "inputs" / given.sha256]
+    if given.uri is not None:
+        source = urlsplit(given.uri)
+        if source.scheme == "file" and not source.netloc:
+            places.append(Path(unquote(source.path)))
     if given.run is not None:
         places.append(shared / given.run / given.key)
     for path in places:

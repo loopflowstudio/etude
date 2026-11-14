@@ -1,23 +1,8 @@
 # EXP-56 choices
 
-## Implementation assumptions (2026-11-13)
-
-- `run.save()` also writes at the loop's final target, so a finished loop has
-  restorable state even when its interval has not elapsed. Reaching the target
-  wins over a simultaneous stop: code after the completed loop may run.
-- Save manifests include `wall_ms` alongside their clocks. A fresh host has
-  no earlier metric-attempt files; the timestamp preserves the origin of
-  `hours_since_start` without a checkpoint.
-- The optional PyTorch serializer is installed as `etude-sdk[train]`.
-  Callback saves need no framework. Registered dictionaries load on CPU;
-  the author's objects own their device transfer and format compatibility.
-- Standalone local cleanup may lag remote retirement by another pass, so it
-  keeps the names needed to retry deletion. Controller cleanup adds one
-  conditional membership read per observed run; a changed state pointer costs
-  one pointer read, one state listing and one deletion per older object.
-
-`CheckpointRecord.player(inference)` takes anything with `player(ref)`, so the
-shared record names no evaluation type.
+Earlier save/clock implementation assumptions and receipts are retained at
+`224e45c:scratch/questions.md` (Implementation assumptions). The corresponding
+behavior is built and described in the user docs.
 
 The accepted rebuild is `design-train-api.md`; `docs/training.md` describes its
 intended experience. Earlier local_launch/Run.until choices and QA history are
@@ -271,3 +256,80 @@ read-side `etude.experiment.TrainingRun` becomes `TrainingRunSummary` (or
 folds into `train/report.RunSummary`); `etude.eval.match.EvalRun` (result of
 `evaluate`) becomes `EvalResult`. Renamed public names keep a warning alias
 until 0.5. EXP-64 is folded into EXP-56.
+
+## Remaining implementation choices (2026-11-13)
+
+Reversible choices in the current cut: launched references are qualified
+`EXPERIMENT/RUN` strings; file-based resume supplies the experiment for a bare
+run name, and status/continuation take `--experiment` for that selection.
+Unlabelled hand-built command jobs retain flat opaque references. New local
+run folders are experiment-scoped; an existing flat declaration retains its
+physical folder only when its own experiment matches.
+
+`RunRecord.spec` is absent for standalone runs. `launch_spec` raises when a
+caller asks a standalone record for a launcher specification. Config bytes
+have one owner: the specification for launched runs, the run record otherwise.
+`etude.job` owns the shared execution types rather than making shared records
+import the launcher. The source folder a checkpoint reader resolved is a
+read-side locator. Input source URIs are unsigned and excluded from scientific
+job identity; continuation keeps logical run references separate from locations.
+
+## Eval API made consistent with training (2026-11-13)
+
+Jack Heart: "probably worth looking at whether there are any changes to the
+eval API we want to make to make it match the changes to the training API. We
+don't need to do a full redo here but we should try to make it consistent
+where there's no reason not to"; "Can we get the best of both worlds where we
+make it match training but we also make it easy to use our Matchup APIs?";
+"i guess the other thing thats different hre is that EvalConfig would be OUR
+type" / "training config is YOUR type"; on the shape below: "i thik thats
+probably right?" (tentative; show it at demo).
+
+Shape:
+
+    class ArenaConfig(BaseModel): ...          # author's config, like ElementalConfig
+    def arena(config: ArenaConfig) -> None:    # author's function, like train(config)
+        progress = Benchmark(name=..., environment=world, seatings=[...], rollups=[...])
+        with evaluating(progress) as run:      # EvalRun(Run); experiment, storage, checkpoint from the launch
+            run.play(play)                     # play(match) -> Tables; checkpoint= only outside a launch
+    job = evaluation(arena, config=ArenaConfig(), checkpoint=weights)   # same shape as training(train, config=)
+
+- One config per job, as training; several benchmarks = several jobs.
+- An eval run is one tournament (Benchmark or RoundRobin): one environment,
+  many seatings. A plain match list is opened from its environment.
+- `run.play` replaces `hold` and `evaluate`; the run reads the experiment's
+  training lines itself (no `lines=`); `rollups` move onto the Benchmark /
+  RoundRobin (query-time `statsdb(rollups=)` stays).
+- `run.stopping()` checked between matches; stop raises `Stopped`; a retry or
+  `--resume` plays only unstored matches; resume explicit, environment and
+  rollups checked, as today.
+- Unchanged: Benchmark, RoundRobin, Seating, Inference, Code, relative seats,
+  Match, Rollup, play(match) -> Tables, scores/standings/statsdb.
+- No public EvalConfig; `jobs.Evaluation` stays internal. Defaults chosen here,
+  not by Jack: opener name `evaluating`; `evaluation(progress, play=play)` kept
+  as a shortcut on the same path only if it costs little, else warning alias;
+  `hold`/`evaluate` warning aliases until 0.5.
+
+### Eval consistency: planning boundary found during implementation
+
+The new shape cannot replace the current planner unchanged. In
+`experiment.advance`, `evaluation_spec(job)` extracts a tournament and its
+checkpoints **before** starting the job; `played(...)` uses that definition
+to choose only unstored matches and supply only their checkpoint inputs.
+`evaluation(arena, config=...)` instead hides the Benchmark inside arbitrary
+user code. The planner cannot discover it without executing that code during
+submission. Repeated jobs with identical author config can also want new
+matches as implicit training lines grow. The worker's run grant is upload-only;
+its existing Fetch/input path eagerly delivers the inputs selected beforehand,
+so it cannot simply read arbitrary other training lines/checkpoints at runtime.
+
+This is a counterexample to treating the new shape as a signature-only rename,
+not a rejection of the requested shape. Stop dependent deletion of
+hold/evaluate and the declarative planner pending design/demo. A concrete
+choice still needed: preserve pre-launch match planning through an explicit
+benchmark description, or make authored evaluation jobs opaque to the planner
+and define when they run again and how their selected checkpoint inputs arrive.
+The latter fits the requested author-owned function better, but changes the
+league's pre-launch pending-match/gap behavior and needs a runtime context with
+selective input delivery. No unused runtime/context implementation is added.
+The existing live EvalRun/shared Run cut can be checked independently.

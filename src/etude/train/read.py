@@ -32,6 +32,7 @@ import numpy as np
 import numpy.typing as npt
 from pydantic import ConfigDict, PrivateAttr, SkipValidation, ValidationError
 
+from etude.block_file import BlockFile, parse, select
 from etude.carriage import checkpoint_key
 from etude.checkpoints import CheckpointRecord
 from etude.errors import EtudeError
@@ -40,13 +41,12 @@ from etude.records import (
     RUNNING_HOURS,
     Clock,
     Record,
-    RunFile,
+    RunRecord,
     RunState,
     RunWriter,
 )
+from etude.run import as_storage, located_runs, run_folders, under
 from etude.storage import Storage, run_prefix
-from etude.tracking.block_file import BlockFile, parse, select
-from etude.tracking.listing import as_storage, located_runs, run_folders, under
 from etude.train.block import (
     COUNT,
     DTYPES,
@@ -93,7 +93,7 @@ class RunData(Arrays):
 
     experiment: str
     name: str
-    file: RunFile | None
+    file: RunRecord | None
     state: RunState | None
     # In ordinal order, one per ordinal: a later attempt continues its run's ordinals.
     checkpoints: tuple[CheckpointRecord, ...]
@@ -116,11 +116,11 @@ class RunData(Arrays):
 
     @property
     def clocks(self) -> tuple[Clock, ...]:
-        return self.file.declaration.clocks if self.file else ()
+        return self.file.clocks if self.file else ()
 
     @property
     def job(self) -> str | None:
-        return self.file.declaration.job if self.file else None
+        return self.file.job if self.file else None
 
     @property
     def rows(self) -> int:
@@ -693,16 +693,16 @@ def _here(
     if record.artifact.sha256 is None or not present:
         return record
     artifact = record.artifact.model_copy(update={"uri": storage.uri(folder + name)})
-    return record.model_copy(update={"artifact": artifact})
+    return record.model_copy(update={"artifact": artifact, "folder": folder.rstrip("/")})
 
 
 def lines(data: Sequence[RunData]) -> dict[str, str]:
     """Each run's learner line: the first run of the chain of continuations that led to it,
     as far as `data` knows. A run and the runs continuing it are one learner, one seed."""
     parents = {
-        run.name: run.file.declaration.continues.parent.source_id
+        run.name: run.file.continues.parent.source_id
         for run in data
-        if run.file is not None and run.file.declaration.continues is not None
+        if run.file is not None and run.file.continues is not None
     }
     found = {}
     for run in data:
@@ -751,18 +751,20 @@ def read(source: Storage | Path | str, experiment: str, run: str) -> RunData:
     """One run's declaration, state, rows and checkpoints. Rows not yet sealed are not read."""
     storage = as_storage(source)
     keys = sorted(storage.keys(""))
+    run = run.removeprefix(experiment + "/")
     file, folders = _located(storage, keys, experiment, run)
     return _read(storage, experiment, run, folders, keys, run_file=file)
 
 
 def _located(
     storage: Storage, keys: Sequence[str], experiment: str, run: str
-) -> tuple[RunFile | None, Sequence[str]]:
+) -> tuple[RunRecord | None, Sequence[str]]:
     """The run's declaration and folders within one experiment.
 
     Folders another experiment declared are not this run's. A name nobody has
     declared keeps its folders: historical metrics were written without one.
     """
+    run = run.removeprefix(experiment + "/")
     identities = located_runs(storage, keys, run=run)
     for located in identities:
         if located.file.experiment == experiment:
@@ -942,7 +944,7 @@ def _read(
     folders: Sequence[str],
     listing: Sequence[str],
     *,
-    run_file: RunFile | None,
+    run_file: RunRecord | None,
     metrics: frozenset[str] | None = None,
     prefixes: tuple[str, ...] = (),
 ) -> RunData:
@@ -979,7 +981,7 @@ def _read(
         checkpoints=_hours(
             {r.ordinal: r for r in sorted(records.checkpoints, key=_order)}.values(),
             attempts,
-            continued=run_file is not None and run_file.declaration.continues is not None,
+            continued=run_file is not None and run_file.continues is not None,
         ),
         attempts=attempts,
     )

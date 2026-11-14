@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import shutil
 import time
 from collections.abc import Callable
@@ -29,13 +28,13 @@ from etude.cache import Artifact, Cache, Fetched
 from etude.carriage import immutable
 from etude.deadline import call, remaining
 from etude.errors import EtudeError
+from etude.identity import SAFE_NAME
+from etude.records import RunRecord
 from etude.storage_timeout import StorageUnavailable, socket_timeout
-
-SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._=-]{0,199}$")
 
 
 def run_prefix(run: str) -> str:
-    """A run's folder under a root: its name, which is unique there whatever its experiment."""
+    """A folder prefix for a run name or its qualified experiment/run address."""
     return f"{run}/"
 
 
@@ -366,7 +365,16 @@ def run_directory(directory: Path | str | None, experiment: str, run: str) -> tu
         if not SAFE_NAME.match(name):
             raise EtudeError("unsafe_run_or_experiment_name", 422)
     base = Path(directory) if directory else default_root()
-    return base, base / run_prefix(run)
+    root = base / experiment / run
+    if os.environ.get("ETUDE_ATTEMPT") and os.environ.get("ETUDE_RUN") == run:
+        if out := os.environ.get("ETUDE_OUT"):
+            root = Path(out).parent
+    legacy = base / run / "run.json"
+    if not (root / "run.json").is_file() and legacy.is_file():
+        prior = RunRecord.model_validate_json(legacy.read_bytes())
+        if prior.experiment == experiment:
+            return base, legacy.parent
+    return base, root
 
 
 def storage_from_uri(uri: str | Path) -> Storage:

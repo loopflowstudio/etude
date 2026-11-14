@@ -87,7 +87,7 @@ def test_matches_in_two_workers_resumes_from_storage_without_replaying(
     assert len(progress) == 24
     assert progress[-1].startswith("etude: league-1: 24/24 matches played, ")
     # One block: each table merged into one file, then the index; nothing per match.
-    (index,) = (key for key in bucket.keys("league-1/blocks/") if key.endswith("block.json"))
+    (index,) = (key for key in bucket.keys("league/league-1/blocks/") if key.endswith("block.json"))
     folder = index.removesuffix("block.json")
     assert sorted(bucket.keys(folder)) == [
         folder + name for name in ("block.json", "games.parquet", "plays.parquet")

@@ -13,13 +13,13 @@ from pathlib import Path
 import pytest
 
 from etude.cli import main
+from etude.errors import LauncherError
 from etude.eval.match import environment
 from etude.eval.query import statsdb
 from etude.eval.records import Benchmark, Code, Inference, RoundRobin, Seating
+from etude.job import Input, Job, Runtime, SmokeForm, Until, job_id
 from etude.jobs import JobOptions, evaluation
-from etude.launch.errors import LauncherError
 from etude.launch.job_file import read_job_file
-from etude.launch.records import Input, Job, Runtime, SmokeForm, Until, job_id
 from etude.launch.smoke import tiny
 from etude.train.read import read
 from tests.experiments import authored
@@ -146,7 +146,7 @@ def test_a_plain_training_file_supplies_the_recipes_experiment(
             f"{module}.py": """
 from pydantic import BaseModel
 from etude.train.records import Step
-from etude.train.run import track
+from etude.train.tracking import track
 
 class Config(BaseModel):
     value: int = 7
@@ -176,7 +176,7 @@ def runs(python: str) -> Job:
     (record,) = scheduler.runs()
     (status,) = scheduler.wait(record.id, every=0.05, timeout=30)
     assert status.outcome == "succeeded", job_text(scheduler.logs(refresh=True, run=record.id))
-    assert record.spec.experiment == (experiment or "plain")
+    assert record.launch_spec.experiment == (experiment or "plain")
     assert len(scheduler.attempts(record.id)) == 1
     tracked = tmp_path / "track"
     data = read(tracked, experiment or "plain", record.id)
@@ -412,12 +412,12 @@ def test_job_seeds_expand_to_named_requests_without_changing_job_identity(tmp_pa
     )
     requests = read_job_file(file, experiment="chosen")
     assert [(run.id, run.seed, run.job.experiment) for run in requests] == [
-        ("baseline-seed-0", 0, "chosen"),
-        ("baseline-seed-7", 7, "chosen"),
+        ("chosen/baseline-seed-0", 0, "chosen"),
+        ("chosen/baseline-seed-7", 7, "chosen"),
     ]
     first = requests[0].job
     assert job_id(first) == job_id(first.model_copy(update={"seeds": (42,)}))
     file.write_text(
         'from etude.launch.records import Job\ndef runs():\n    return [Job(command="true", max_hours=1), Job(command="true", max_hours=1, name="other")]\n'
     )
-    assert [run.id for run in read_job_file(file)] == ["job-seed-0", "other-seed-0"]
+    assert [run.id for run in read_job_file(file)] == ["job/job-seed-0", "job/other-seed-0"]

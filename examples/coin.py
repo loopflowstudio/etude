@@ -8,7 +8,7 @@ import torch
 from pydantic import BaseModel, Field
 
 from etude.train.records import Step
-from etude.train.run import track
+from etude.train.tracking import track
 
 
 class Config(BaseModel):

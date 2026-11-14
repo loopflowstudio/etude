@@ -32,9 +32,10 @@ from typing import Literal
 from pydantic import model_validator
 
 from etude.deadline import remaining
+from etude.job import Record
 from etude.launch.logging import write_log
 from etude.launch.measurement import timed
-from etude.launch.records import Record, Storage
+from etude.launch.records import Storage
 from etude.launch.storage.transport import HTTPReply, Send, attribute, request
 from etude.storage_timeout import StorageUnavailable
 

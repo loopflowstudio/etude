@@ -17,6 +17,8 @@ from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
+from etude.errors import LauncherError
+from etude.job import Job, Smoke, SourcePosition
 from etude.launch.records import (
     RETRYABLE,
     Cause,
@@ -24,9 +26,7 @@ from etude.launch.records import (
     Diagnostic,
     Hardware,
     Image,
-    Job,
     Launch,
-    LauncherError,
     LogStream,
     Machine,
     OnDemand,
@@ -37,10 +37,7 @@ from etude.launch.records import (
     Provider,
     Rental,
     RunAttempt,
-    RunRecord,
     Session,
-    Smoke,
-    SourcePosition,
     Stale,
     Storage,
     Supply,
@@ -48,6 +45,7 @@ from etude.launch.records import (
     Target,
 )
 from etude.launch.usage import Transfer
+from etude.records import RunRecord
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS transfers(id TEXT PRIMARY KEY, body TEXT NOT NULL);
@@ -118,6 +116,7 @@ CREATE TABLE IF NOT EXISTS attempts(
   version INTEGER NOT NULL DEFAULT 1, planned_at TEXT, added INTEGER NOT NULL DEFAULT 0,
   prepared TEXT, tally TEXT);
 CREATE INDEX IF NOT EXISTS runs_job ON runs(job);
+CREATE INDEX IF NOT EXISTS runs_experiment ON runs(json_extract(spec, '$.experiment'), seq);
 CREATE INDEX IF NOT EXISTS runs_pool ON runs(pool, seq);
 CREATE INDEX IF NOT EXISTS runs_rent ON runs(rent, seq);
 CREATE INDEX IF NOT EXISTS attempts_run ON attempts(run, number);
@@ -148,10 +147,12 @@ _RUNS = "SELECT r.* FROM runs r"
 
 
 def _run_from_row(row: sqlite3.Row) -> RunRecord:
+    spec = Job.model_validate_json(row["spec"])
     return RunRecord.model_validate(
         {
-            **dict(row),
-            "spec": Job.model_validate_json(row["spec"]),
+            **{key: row[key] for key in row.keys() if key not in {"seq", "tries"}},
+            "spec": spec,
+            "experiment": spec.experiment or "",
             "params": json.loads(row["params"]),
             "source": SourcePosition.model_validate_json(row["source"]) if row["source"] else None,
             "smoke": Smoke.model_validate_json(row["smoke"]),
@@ -644,6 +645,8 @@ class Database:
                 else set()
             )
             for run in runs:
+                if run.created_at is None:
+                    raise LauncherError(f"run {run.id!r} has no submission timestamp")
                 if run.id in resuming:
                     previous = self.attempts(run=run.id)
                     if len(previous) != run.resume_after or any(
@@ -655,7 +658,7 @@ class Database:
                         run.id,
                         run.version,
                         job=run.job,
-                        spec=run.spec.model_dump_json(),
+                        spec=run.launch_spec.model_dump_json(),
                         source=run.source.model_dump_json() if run.source else None,
                         pool=run.pool,
                         rent=run.rent,
@@ -672,7 +675,7 @@ class Database:
                     (
                         run.id,
                         run.job,
-                        run.spec.model_dump_json(),
+                        run.launch_spec.model_dump_json(),
                         run.seed,
                         run.pool,
                         run.rent,
@@ -699,8 +702,15 @@ class Database:
             raise LauncherError(f"no run {id!r}")
         return _run_from_row(row)
 
-    def runs(self) -> tuple[RunRecord, ...]:
-        return tuple(_run_from_row(row) for row in self._db.execute(f"{_RUNS} ORDER BY r.seq"))
+    def runs(self, *, experiment: str | None = None) -> tuple[RunRecord, ...]:
+        if experiment is None:
+            rows = self._db.execute(f"{_RUNS} ORDER BY r.seq")
+        else:
+            rows = self._db.execute(
+                f"{_RUNS} WHERE json_extract(r.spec, '$.experiment') = ? ORDER BY r.seq",
+                (experiment,),
+            )
+        return tuple(_run_from_row(row) for row in rows)
 
     def job_runs(self, job: str) -> tuple[RunRecord, ...]:
         """Every run of one job, oldest first: its seeds side by side."""
@@ -743,7 +753,9 @@ class Database:
             (supply, supply, *sorted(RETRYABLE)),
         ).fetchall()
         return tuple(
-            run for row in rows if (run := _run_from_row(row)).spec.max_attempts > row["tries"]
+            run
+            for row in rows
+            if (run := _run_from_row(row)).launch_spec.max_attempts > row["tries"]
         )
 
     # Sessions

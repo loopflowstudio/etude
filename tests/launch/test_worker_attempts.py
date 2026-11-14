@@ -17,27 +17,19 @@ import pytest
 
 from etude.cache import Artifact, Cache, Fetched
 from etude.carriage import put_back, restore_set
+from etude.errors import LauncherError
+from etude.job import Input, Job, RunRequest, Until, job_id
 from etude.jobs import checkpoint_inputs_for, continue_from
 from etude.launch.database import Database, launcher_file
 from etude.launch.executor import local as local_service
-from etude.launch.records import (
-    Input,
-    Job,
-    LauncherError,
-    Machine,
-    Pool,
-    RunRequest,
-    Status,
-    Until,
-    job_id,
-)
+from etude.launch.records import Machine, Pool, Status
 from etude.launch.scheduler import Scheduler
+from etude.run import runs
 from etude.storage import DirectoryStorage
-from etude.tracking.listing import runs
 from etude.train.read import read
 from etude.train.records import Step
 from etude.train.report import training
-from etude.train.run import track
+from etude.train.tracking import track
 from tests.experiments import authored
 from tests.launch.counting import job_text
 from tests.run.storage import MeasuredStorage
@@ -112,7 +104,7 @@ import os
 from pathlib import Path
 from urllib.parse import urlparse
 from etude.train.records import Step
-from etude.train.run import track
+from etude.train.tracking import track
 run = track(experiment="capacity", clocks=[Step("steps", "training steps")])
 latest = run.latest_checkpoint()
 start = 0 if latest is None else int(latest.at["steps"])
@@ -177,8 +169,8 @@ def test_a_continuation_starts_from_its_parents_recorded_checkpoint(tmp_path: Pa
     assert Path(urlparse(checkpoint.artifact.uri).path).read_text() == (
         "trained to 2\ntrained to 5\n"
     )
-    assert data.file is not None and data.file.declaration.continues is not None
-    continues = data.file.declaration.continues
+    assert data.file is not None and data.file.continues is not None
+    continues = data.file.continues
     assert (continues.parent.source_id, continues.clock, continues.value) == (first, "steps", 2)
     assert scheduler.record(second).seed == 3
 
@@ -238,7 +230,7 @@ def test_added_work_has_a_session_but_no_rental_or_session_deadline(tmp_path: Pa
 TRACKED = """
 import os
 from etude.train.records import Step
-from etude.train.run import track
+from etude.train.tracking import track
 run = track(experiment="capacity", clocks=[Step("steps", "training steps")])
 for step in range(3):
     run.log({"loss": 1.0 / (step + 1)}, steps=step)
@@ -273,7 +265,7 @@ def test_a_launched_job_tracks_as_its_run_without_naming_itself(tmp_path: Path) 
         data = read(tracked, "capacity", record.id)
         found.append(data)
         assert data.file is not None and data.rows == 3
-        declared = data.file.declaration
+        declared = data.file
         assert (declared.job, declared.job_name, declared.seed, declared.cohort) == (
             record.job,
             "hidden256",
@@ -378,7 +370,7 @@ def test_a_folder_checkpoint_reaches_a_job_as_verified_nested_inputs(tmp_path: P
     scheduler = local(tmp_path)
     inputs = checkpoint_inputs_for(checkpoint, "start")
     # Put the parent where a machine holds tracked folders; no provider or bucket needed.
-    put_back(tmp_path / "track/r", restore_set(run.files.root))
+    put_back(tmp_path / "track/tiny/r", restore_set(run.files.root))
     one = scheduler.launch(
         Job(
             command='cat "$ETUDE_INPUTS_DIR/start/nested/policy" "$ETUDE_INPUTS_DIR/start/value"',

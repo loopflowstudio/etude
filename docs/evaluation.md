@@ -460,7 +460,7 @@ evaluate(
 from decimal import Decimal
 
 from etude.jobs import evaluation
-from etude.launch.records import Input, Job
+from etude.job import Input, Job
 
 from arena import play, progress  # play(match: Match) -> Tables; progress is a Benchmark
 
@@ -516,7 +516,7 @@ training runs of `capacity`, so `track()` in the training code needs no
 from etude.eval.records import Aligned, Benchmark, Earlier, Final, Fraction, Seating
 from etude.experiment import ExperimentState
 from etude.jobs import evaluation
-from etude.launch.records import Job
+from etude.job import Job
 
 # direct is an Inference, heuristic Code, deals the conditions
 from arena import deals, direct, heuristic, play, world

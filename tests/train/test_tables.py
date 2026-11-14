@@ -13,11 +13,11 @@ from pydantic import ValidationError
 
 from etude.carriage import immutable, listing
 from etude.errors import EtudeError
+from etude.run import sync
 from etude.storage import DirectoryStorage
-from etude.tracking.delivery import sync
 from etude.train.read import read
 from etude.train.records import RowTable, Step, TablePoint, Time
-from etude.train.run import EtudeWarning, track
+from etude.train.tracking import EtudeWarning, track
 from tests.run.storage import MeasuredStorage
 
 CLOCKS = [Step("updates", "optimizer updates"), Time("seconds", "active training")]
@@ -31,12 +31,12 @@ def test_row_tables_roundtrip_ship_once_and_relocate(tmp_path: Path) -> None:
     ]
     with track(experiment="e", run="r", clocks=CLOCKS, directory=local) as run:
         run.log_table("decks", rows, updates=400, seconds=20)
-        (artifact,) = (local / "r/artifacts").iterdir()
+        (artifact,) = (local / "e/r/artifacts").iterdir()
         before = artifact.stat().st_mtime_ns
         run.log_table("decks", rows, updates=401, seconds=21)
         assert artifact.stat().st_mtime_ns == before
         assert artifact.stem == sha256(artifact.read_bytes()).hexdigest()
-        assert not list((local / "r/artifacts").glob("*.partial"))
+        assert not list((local / "e/r/artifacts").glob("*.partial"))
         # Callers can change their input as soon as logging returns.
         rows[0]["wins"] = 99
         run.log_table("empty", [], updates=401, seconds=21)
@@ -53,8 +53,8 @@ def test_row_tables_roundtrip_ship_once_and_relocate(tmp_path: Path) -> None:
     assert data.metrics() == []
     # Only a digest is retained in the update's text column.
     assert data.columns[0].row(0).values == {"decks": artifact.stem}
-    key = artifact.relative_to(local / "r").as_posix()
-    assert immutable(key) and key in listing(local / "r", tail_seconds=0)
+    key = artifact.relative_to(local / "e/r").as_posix()
+    assert immutable(key) and key in listing(local / "e/r", tail_seconds=0)
 
     bucket = MeasuredStorage(DirectoryStorage(tmp_path / "bucket"))
     assert sync(local, storages=[bucket]) == {}
@@ -79,7 +79,7 @@ def test_row_tables_resolve_only_surviving_updates_across_machine_folders(
         run.log_table("decks", [{"result": "checkpoint"}], updates=2, seconds=2)
         run.log_table("decks", [{"result": "superseded"}], updates=3, seconds=3)
     # Damage superseded evidence: selecting history must happen before fetching artifacts.
-    for path in (first / "r/artifacts").glob("*.json"):
+    for path in (first / "e/r/artifacts").glob("*.json"):
         if not empty_resume and b"superseded" in path.read_bytes():
             path.unlink()
     second = tmp_path / "pool/second/out/track"
@@ -95,11 +95,11 @@ def test_row_tables_resolve_only_surviving_updates_across_machine_folders(
             # Scalar updates after resume must not bring old tables back.
             resumed.log({"loss": 1}, updates=4, seconds=4)
     if not empty_resume:
-        for path in (second / "r/artifacts").glob("*.json"):
+        for path in (second / "e/r/artifacts").glob("*.json"):
             if b"replaced" in path.read_bytes():
                 path.write_bytes(b"damaged but superseded")
     # No reference to this corrupt orphan: its bytes must never be read.
-    (first / "r/artifacts/orphan.json").write_bytes(b"not JSON")
+    (first / "e/r/artifacts/orphan.json").write_bytes(b"not JSON")
     storage = MeasuredStorage(DirectoryStorage(tmp_path))
     data = read(storage, "e", "r")
     assert data.blocks  # blocks are read when first used
@@ -121,14 +121,14 @@ def test_selected_row_table_damage_is_visible(tmp_path: Path, damage: str) -> No
         if damage == "schema":
             body = b'{"rows":[1]}'
             digest = sha256(body).hexdigest()
-            DirectoryStorage(tmp_path / "r").put(f"artifacts/{digest}.json", body)
+            DirectoryStorage(tmp_path / "e/r").put(f"artifacts/{digest}.json", body)
             run.log({"decks": digest}, updates=1, seconds=1)
         elif damage == "reference":
             run.log({"decks": "../../elsewhere"}, updates=1, seconds=1)
         else:
             run.log_table("decks", [{"value": 1}], updates=1, seconds=1)
     if damage in ("missing", "digest"):
-        (artifact,) = (tmp_path / "r/artifacts").iterdir()
+        (artifact,) = (tmp_path / "e/r/artifacts").iterdir()
         if damage == "missing":
             artifact.unlink()
         else:
@@ -154,7 +154,7 @@ def test_row_table_rejects_invalid_rows_clocks_and_existing_damage(tmp_path: Pat
         with pytest.raises(ValueError, match="distinct from clocks"):
             run.log_table("updates", [], updates=1, seconds=1)
         run.log_table("t", [], updates=1, seconds=1)
-        (artifact,) = (tmp_path / "r/artifacts").iterdir()
+        (artifact,) = (tmp_path / "e/r/artifacts").iterdir()
         artifact.write_bytes(b"broken")
         with pytest.raises(EtudeError, match="table_artifact_damaged"):
             run.log_table("t", [], updates=2, seconds=2)

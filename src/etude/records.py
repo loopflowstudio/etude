@@ -11,12 +11,15 @@ These models know nothing about research, launching or providers.
 
 from __future__ import annotations
 
+from datetime import datetime
+from hashlib import sha256
 from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from etude.cache import Content
 from etude.carriage import within
+from etude.job import Job, Param, Smoke, SourcePosition
 
 Name = Annotated[str, StringConstraints(min_length=1, max_length=200, pattern=r"^\S+$")]
 Writer = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{12}$")]
@@ -97,29 +100,63 @@ class Continuation(Record):
     value: float
 
 
-class RunDeclaration(Record):
-    """A run's identity, checked before an explicitly resumed attempt starts."""
+class RunRecord(Record):
+    """A run's stored identity, optionally with its launcher submission metadata.
 
-    schema_version: Literal[1] = 1
-    source_key: SourceKey
-    clocks: tuple[Clock, ...] = Field(max_length=16)
-    # The launcher's Job: what this run shares with its siblings, which differ
-    # only by `seed`. Statistics are taken over a job's runs and nothing else.
+    Standalone writers have no execution specification. A launched run's config
+    lives in its specification; its digest is derived from those exact bytes.
+    Historical nested run.json declarations decode here and are never rewritten.
+    """
+
+    schema_version: Literal[2] = 2
+    id: str
+    experiment: str = ""
+    namespace: str = "local"
+    source_kind: str = "run"
+    clocks: tuple[Clock, ...] = Field(default=(), max_length=16)
     job: str | None = Field(default=None, max_length=500)
-    # What the job's author called it, for display. Never used to group runs.
     job_name: str | None = Field(default=None, max_length=500)
     seed: int | None = None
-    # The launcher's cohort: the runs this one was launched with.
     cohort: str | None = Field(default=None, max_length=500)
     kind: str | None = Field(default=None, max_length=200)
-    # The author's exact configuration bytes; never reserialized by Etude.
-    config_json: str | None = Field(default=None, max_length=1024 * 1024)
-    config_sha256: Digest | None = None
+    config: str | None = Field(default=None, max_length=1024 * 1024)
     continues: Continuation | None = None
-    start: str | None = None  # the published checkpoint this run was initialized from
+    start: str | None = None
+    spec: Job | None = None
+    pool: str | None = None
+    rent: str | None = None
+    created_at: datetime | None = None
+    cancel_requested_at: datetime | None = None
+    version: int = 1
+    autorun: bool = False
+    queued: bool = False
+    resume_after: int = 0
+    params: dict[str, Param] = Field(default_factory=dict)
+    source: SourcePosition | None = None
+    smoke: Smoke = Smoke()
+
+    @model_validator(mode="before")
+    @classmethod
+    def _historical(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        declaration = data.pop("declaration", None)
+        if isinstance(declaration, dict):
+            data.update(declaration)
+            source = SourceKey.model_validate(data.pop("source_key"))
+            data.update(
+                id=f"{data['experiment']}/{source.source_id}",
+                source_kind=source.kind,
+                namespace=source.namespace,
+                schema_version=2,
+            )
+            data["config"] = data.pop("config_json", None)
+            data.pop("config_sha256", None)
+        return data
 
     @model_validator(mode="after")
-    def distinct_clocks(self) -> Self:
+    def _identity(self) -> Self:
         names = [clock.name for clock in self.clocks]
         if len(set(names)) != len(names):
             raise ValueError("duplicate_clock")
@@ -127,9 +164,40 @@ class RunDeclaration(Record):
             raise ValueError("clock_name_reserved")
         if self.continues is not None and self.continues.clock not in (*names, *BUILT_IN_NAMES):
             raise ValueError("continuation_clock_undeclared")
-        if (self.config_json is None) != (self.config_sha256 is None):
-            raise ValueError("config_requires_digest")
+        if self.spec is not None and self.config is not None:
+            raise ValueError("launched_config_belongs_to_spec")
         return self
+
+    @property
+    def source_key(self) -> SourceKey:
+        return SourceKey(
+            namespace=self.namespace,
+            kind=self.source_kind,
+            source_id=self.id.removeprefix(self.experiment + "/"),
+        )
+
+    @property
+    def config_json(self) -> str | None:
+        return self.spec.config if self.spec is not None else self.config
+
+    @property
+    def config_sha256(self) -> str | None:
+        text = self.config_json
+        return sha256(text.encode()).hexdigest() if text is not None else None
+
+    @property
+    def launch_spec(self) -> Job:
+        """The submitted execution; standalone runs have no launcher specification."""
+        if self.spec is None:
+            raise ValueError(f"run {self.id!r} has no launcher specification")
+        return self.spec
+
+    @property
+    def name(self) -> str:
+        if self.spec is None:
+            return self.source_key.source_id
+        parts = [self.spec.name] if self.spec.name else []
+        return "-".join(parts + ([] if self.seed is None else [f"seed{self.seed}"])) or self.id
 
 
 class RunCounters(Record):
@@ -139,15 +207,6 @@ class RunCounters(Record):
     dropped: Count = 0
     # Rows missing a declared clock; charted only against the clocks they gave.
     incomplete: Count = 0
-
-
-class RunFile(Record):
-    """`run.json`: everything needed to declare this run somewhere else later."""
-
-    schema_version: Literal[1] = 1
-    experiment: str
-    namespace: str
-    declaration: RunDeclaration
 
 
 class RunState(Record):

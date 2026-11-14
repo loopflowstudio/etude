@@ -14,13 +14,13 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+from etude.job import Job
 from etude.launch.client import _open
 from etude.launch.environment import install
 from etude.launch.providers import bootstrap, package
 from etude.launch.providers.package import program_archive
 from etude.launch.providers.runpod import pod
 from etude.launch.providers.vast import instance
-from etude.launch.records import Job
 from etude.launch.schemas import Packet, Result
 from etude.launch.storage.files import read_result
 from etude.launch.storage.transport import HTTPReply

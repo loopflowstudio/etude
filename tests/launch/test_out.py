@@ -10,9 +10,9 @@ from pathlib import Path
 import pytest
 
 from etude.carriage import put_back, restore_set
+from etude.errors import LauncherError
+from etude.job import Input, Job
 from etude.jobs import continue_from
-from etude.launch.errors import LauncherError
-from etude.launch.records import Input, Job
 from etude.launch.records import Storage as Place
 from etude.launch.schemas import Delivery, Inbox, Work
 from etude.launch.storage.bucket import BucketJournal
@@ -24,7 +24,7 @@ from etude.storage import DirectoryStorage
 from etude.storage_timeout import StorageUnavailable
 from etude.train.read import read
 from etude.train.records import Step
-from etude.train.run import track
+from etude.train.tracking import track
 from tests.launch.test_runpod_machines import BucketObjects, Observed, Storage, machine
 from tests.launch.test_worker_attempts import local
 from tests.run.storage import MeasuredStorage
@@ -54,6 +54,8 @@ def test_courier_hashes_mutable_out_and_restores_every_file_once(
     storage = Observed()
     courier, _, root = machine(tmp_path / "first", storage)
     monkeypatch.setenv("ETUDE_OUT", str(root / "out"))
+    monkeypatch.setenv("ETUDE_RUN", "run1")
+    monkeypatch.setenv("ETUDE_ATTEMPT", "a1")
     with track(
         experiment="e", run="run1", clocks=[Step("updates", "updates")], directory=root.parent
     ) as run:
@@ -149,6 +151,8 @@ def test_a_retry_on_the_same_machine_restores_out_only_when_its_folder_is_gone(
     storage = Observed()
     courier, _, root = machine(tmp_path / "box", storage)
     monkeypatch.setenv("ETUDE_OUT", str(root / "out"))
+    monkeypatch.setenv("ETUDE_RUN", "run1")
+    monkeypatch.setenv("ETUDE_ATTEMPT", "a1")
     with track(
         experiment="e", run="run1", clocks=[Step("updates", "updates")], directory=root.parent
     ) as run:
@@ -196,6 +200,8 @@ def test_deleted_files_stay_absent_after_restart_recovery_and_continuation(
     # The fixture's courier grant names run1; use its tracked run with this job.
     record = scheduler.record(parent).model_copy(update={"id": "run1"})
     monkeypatch.setenv("ETUDE_OUT", str(root / "out"))
+    monkeypatch.setenv("ETUDE_RUN", "run1")
+    monkeypatch.setenv("ETUDE_ATTEMPT", "a1")
     with track(
         experiment="e", run="run1", clocks=[Step("updates", "updates")], directory=root.parent
     ) as run:
@@ -414,6 +420,8 @@ def test_courier_carries_a_changed_out_file_before_publishing_its_checkpoint(
     storage = Writes()
     courier, _, root = machine(tmp_path, storage)
     monkeypatch.setenv("ETUDE_OUT", str(root / "out"))
+    monkeypatch.setenv("ETUDE_RUN", "run1")
+    monkeypatch.setenv("ETUDE_ATTEMPT", "a1")
     with track(
         experiment="e", run="run1", clocks=[Step("updates", "updates")], directory=root.parent
     ) as run:

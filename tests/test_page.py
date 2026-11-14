@@ -28,7 +28,7 @@ from etude.report import (
 )
 from etude.storage import DirectoryStorage, Storage, storage_from_uri
 from etude.train.records import Step
-from etude.train.run import track
+from etude.train.tracking import track
 from tests.experiments import experiment_file
 from tests.run.storage import MeasuredStorage
 
@@ -77,11 +77,11 @@ def test_checkpoints_with_no_etude_clock_are_named_with_the_reason(tmp_path: Pat
     file = experiment_file(tmp_path / "experiments", "lab", LAB)
     assert build(runs, file).notes == ()
     # As an older client saved it, copied without its attempt records.
-    for path in (runs / "a/checkpoints").glob("*.json"):
+    for path in (runs / "lab/a/checkpoints").glob("*.json"):
         record = json.loads(path.read_text())
         record["at"] = {"updates": record["at"]["updates"]}
         path.write_text(json.dumps(record))
-    for path in (runs / "a/metrics").glob("*.json"):
+    for path in (runs / "lab/a/metrics").glob("*.json"):
         path.unlink()
     (note,) = build(runs, file).notes
     assert "No running_hours or hours_since_start for some checkpoints of a" in note

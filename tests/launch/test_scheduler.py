@@ -3,29 +3,29 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import timedelta
 from decimal import Decimal
 from importlib import import_module
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from etude.cli import main
+from etude.errors import LauncherError
+from etude.job import Job, RunRequest, Until
 from etude.launch.database import Database, launcher_file
 from etude.launch.records import (
-    Job,
-    LauncherError,
     LogStream,
     MachineTemplate,
     Offer,
     OnDemand,
     Pool,
-    RunRequest,
     Stale,
     Storage,
     Tally,
     Target,
-    Until,
 )
 from etude.launch.scheduler import Scheduler
 from etude.launch.schemas import Observation
@@ -33,8 +33,8 @@ from etude.launch.ssh import Unreachable
 from etude.launch.storage.disk import DirectoryJournal
 from etude.storage_timeout import StorageUnavailable
 from etude.train.records import Step
-from etude.train.run import Run as TrackedRun
-from etude.train.run import track
+from etude.train.tracking import TrainingRun as TrackedRun
+from etude.train.tracking import track
 from tests.launch.counting import Counting, job_text
 from tests.launch.fake import L4, Bench, Clock, FakeService, bench
 
@@ -293,7 +293,7 @@ def test_manabot_cohort_shape(tmp_path: Path) -> None:
         assert all(s.outcome == "succeeded" for s in b.scheduler.wait(*stages[-1], every=60))
         continued = [
             RunRequest(
-                job=b.store.run(p).spec.model_copy(
+                job=b.store.run(p).launch_spec.model_copy(
                     update={"until": Until.parse(f"updates={target}")}
                 ),
                 seed=b.store.run(p).seed,
@@ -312,13 +312,15 @@ def test_manabot_cohort_shape(tmp_path: Path) -> None:
     assert b.service.most_live == 1 and b.service.creates == 3
     for root, middle, final in zip(*stages, strict=True):
         records = [b.store.run(r) for r in (root, middle, final)]
-        assert len({(r.spec.name, r.seed, r.spec.config) for r in records}) == 1
-        assert [str(r.spec.until) for r in records] == [
+        assert len({(r.launch_spec.name, r.seed, r.launch_spec.config) for r in records}) == 1
+        assert [str(r.launch_spec.until) for r in records] == [
             "updates=26000",
             "updates=63000",
             "updates=100000",
         ]
-        assert len(b.store.job_runs(records[0].job)) == 3  # one job, its three seeds
+        digest = records[0].job
+        assert digest is not None
+        assert len(b.store.job_runs(digest)) == 3  # one job, its three seeds
         attempt = b.scheduler.attempts(final)[0]
         work = next(
             w for w, _ in b.service.sessions[attempt.session].work() if w.attempt == attempt.id
@@ -541,9 +543,10 @@ def test_a_job_is_what_decides_the_result_not_its_name_or_limits(tmp_path: Path)
     b.scheduler.tick()
     same, also, different = (b.scheduler.record(r) for r in (first, second, other))
     assert same.job == also.job != different.job
+    assert same.job is not None
     assert [r.seed for r in b.store.job_runs(same.job)] == [1, 2]
-    assert (also.spec.max_usd, also.name) == (Decimal(9), "small again-seed2")
-    assert same.spec.max_usd == Decimal(5)
+    assert (also.launch_spec.max_usd, also.name) == (Decimal(9), "small again-seed2")
+    assert same.launch_spec.max_usd == Decimal(5)
 
 
 def test_queue_returns_its_id_even_when_the_provider_cannot_quote_a_price(tmp_path: Path) -> None:
@@ -763,7 +766,7 @@ def test_a_job_needs_dollars_only_where_money_can_be_spent(tmp_path: Path) -> No
     assert b.store.runs() == ()
     b.scheduler.add_pool(Pool(name="mine"))  # no template: nothing here can spend
     run = b.scheduler.queue(free, "mine")
-    assert b.scheduler.record(run).spec.max_usd is None
+    assert b.scheduler.record(run).launch_spec.max_usd is None
     with pytest.raises(LauncherError, match="more than zero"):
         b.scheduler.queue(Job(command="train", max_hours=1, max_usd=Decimal(0)), "mine")
 
@@ -789,13 +792,21 @@ class Host(FakeService):
 
 
 def _tracked(directory: Path, run: str, *, resume: bool = False) -> TrackedRun:
-    return track(
-        experiment="lab",
-        clocks=[Step("steps", "training steps")],
-        run=run,
-        directory=directory,
-        resume=resume,
-    )
+    with patch.dict(
+        os.environ,
+        {
+            "ETUDE_RUN": run,
+            "ETUDE_ATTEMPT": "fixture",
+            "ETUDE_OUT": str(directory / run / "out"),
+        },
+    ):
+        return track(
+            experiment="lab",
+            clocks=[Step("steps", "training steps")],
+            run=run,
+            directory=directory,
+            resume=resume,
+        )
 
 
 def test_a_retry_on_another_owned_host_waits_for_and_continues_the_runs_folder(

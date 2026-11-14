@@ -15,9 +15,10 @@ from etude.checkpoints import CheckpointRef, checkpoint_id
 from etude.errors import EtudeError
 from etude.eval import query
 from etude.eval.convert import convert
-from etude.eval.match import Tables, environment, evaluate
+from etude.eval.match import environment, evaluate
 from etude.eval.query import compare, statsdb
 from etude.eval.records import CheckpointPlayer, Code, Inference, Match
+from etude.eval.run import Tables
 from etude.records import ArtifactRef
 from etude.storage import DirectoryStorage
 from tests.eval.games import play, play_game_seats
@@ -131,7 +132,7 @@ def test_a_run_that_has_not_ended_is_partial(tmp_path: Path) -> None:
         evaluate(experiment="cards", environment=DUEL, play=play, matches=deals(players, *numbers),
                  run=run, directory=tmp_path / run, storages=[bucket])  # fmt: skip
     # Killed mid-pass, `b` delivered its blocks but never wrote how it ended.
-    (bucket.root / "b" / "outcome.json").unlink()
+    (bucket.root / "cards" / "b" / "outcome.json").unlink()
     db = statsdb("cards", bucket)
     assert db.sql("select run, state from runs order by run").fetchall() == [
         ("a", "finished"),
@@ -148,7 +149,7 @@ def test_a_match_counts_once_from_the_latest_block_holding_it(tmp_path: Path) ->
     assert held("cards", bucket) == (1, 2, 2 * 2 * 2)
     # The same matches arrive again, in a later block and in an earlier one, as a
     # replayed run's may: each match's rows come from one block.
-    (index,) = (key for key in bucket.keys("a/blocks/") if key.endswith("/block.json"))
+    (index,) = (key for key in bucket.keys("cards/a/blocks/") if key.endswith("/block.json"))
     folder = bucket.root / index.removesuffix("/block.json")
     written, writer = folder.name.split(".")
     for at in (int(written) + 1, int(written) - 1):
@@ -256,7 +257,7 @@ def _published(tmp_path: Path, play: Callable[[Match], Tables]) -> tuple[Path, P
     evaluate(experiment="cards", environment=DUEL, play=play, run="a",
              matches=deals(players, 0, 1, 2), directory=now)  # fmt: skip
     published = tmp_path / "published"
-    write_per_file(now / "a", published / "a")
+    write_per_file(now / "cards/a", published / "a")
     _as_published(published / "a")
     assert all(
         '"agents"' in file.read_text() for file in (published / "a" / "matches").glob("*.json")

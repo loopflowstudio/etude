@@ -24,9 +24,10 @@ from etude.carriage import (
     resume_file,
     state_pointer,
 )
+from etude.errors import LauncherError
 from etude.launch.logging import parse_log_line
 from etude.launch.logs import snapshot_stream
-from etude.launch.records import BootstrapLinks, LauncherError, LogStream, Storage
+from etude.launch.records import BootstrapLinks, LogStream, Storage
 from etude.launch.schemas import (
     AttemptRecord,
     Bootstrap,
@@ -78,7 +79,7 @@ def _attribute_session[**P, R](
 class BucketJournal:
     """A storage's folder, laid out by run, with each machine's session files apart.
 
-        PREFIX/RUN/                     everything about one run, from every attempt
+        PREFIX/EXPERIMENT/RUN/                     everything about one run, from every attempt
           attempts/ATTEMPT.log/OFFSET   what the job printed, in pieces by first byte
           attempts/ATTEMPT.json         start, progress, how it ended, and its pieces
           attempts/ATTEMPT/NAME         files the job left in its output directory
@@ -206,6 +207,17 @@ class BucketJournal:
             for given in work.inputs:
                 # A run's file is where its folder was carried.
                 key = given.key if given.run is None else self._run_prefix(given.run) + given.key
+                if given.uri is not None:
+                    # Storage.uri uses literal object keys for s3/r2 locators;
+                    # percent signs, question marks and hashes belong to the key.
+                    scheme, _, address = given.uri.partition("://")
+                    bucket, _, source_key = address.partition("/")
+                    if (
+                        scheme in ("s3", "r2")
+                        and bucket == self._bucket.name
+                        and (not self._prefix or source_key.startswith(self._prefix + "/"))
+                    ):
+                        key = source_key
                 # Named by digest, so attempts given the same file share one download.
                 inputs[given.sha256] = Download(
                     url=self._bucket.get_url(key, _GRANT_SECONDS),
