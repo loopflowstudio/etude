@@ -172,3 +172,37 @@ fixture was removed and no processes were left running.
 Reversible choice for the QA finding: omitted Report.ml offers only logged RL
 keys and hides wholly unused panels; explicit ml= retains missing-key warnings.
 Selection Open 6 and config-variant Open 7 stay unchanged.
+
+## Concept review check (2026-11-13, `43fe3b8`)
+
+Six controlled cases passed: selection preflight leaves every member untouched
+on a later missing identity; stopped state restores absolute positions; implicit
+clocks save before a planned stop; interruption at model, pointer and membership
+delivery recovers one whole save. Command: `uv run pytest
+tests/train/test_addresses.py::test_selection_preflight_refuses_every_conflict_without_training_any_member
+tests/train/test_steps.py::test_steps_declare_the_clock_and_resume_its_saved_position
+tests/train/test_steps.py::test_implicit_clock_is_saved_before_a_planned_stop
+tests/launch/test_state_publication.py::test_interrupted_delivery_recovers_one_whole_save
+-q --disable-warnings`. No model training, paid service or artificial load.
+This is focused evidence, not gate acceptance. Open 6 and 7 have no new answer;
+the working design and concept-review.html carry the headless handoff.
+
+## Installed CLI QA (2026-11-13)
+
+Reversible scope choice: disclose omitted cooperative team scores in the report;
+do not attribute them to individual players or introduce a team-chart model here.
+The actual Hanabi eval stored eight team rows (mean 1.125); `compare` returned
+two team subjects, values 1.0 and 1.25 over two matches each. The report had
+discarded these and said “Nothing recorded”. It now explains that limitation.
+
+Actual local-launch continuation after a successful saved-stop retry failed with
+`continuation_clock_undeclared` for `track(config=config)` and an implicit
+`run.steps("updates", ...)`. Repair carries the parent's clock declarations in
+ParentRun; omitted recipe clocks inherit them without closing later additions.
+Fresh rebuilt-wheel receipt: stopped attempt at 2, successful retry at 4,
+successful child at 6 with counts 5/6 and parent coordinate 4. No rentals.
+
+Portable transcripts and before/after screenshots: `scratch/qa.html`. Raw lab
+and installed environments: `/tmp/etude-exp56-qa`. Focused final check: 120
+passed; touched Python mypy and ruff checks passed. All started processes ended.
+Open 6/7 remain unchanged; PR #103 stays draft. Full gate acceptance remains.

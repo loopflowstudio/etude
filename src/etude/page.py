@@ -1364,6 +1364,7 @@ def _cells(
     place = {identity: number for number, identity in enumerate(environments)}
     cells: list[Cell] = []
     absent: list[Absent] = []
+    teams: set[str] = set()
     for number, score in enumerate(scores):
         held = columns.get(score.table, {})
         if score.value not in held:
@@ -1404,6 +1405,7 @@ def _cells(
                         by=by,
                     ):
                         if len(found.subject) != 1 or (found.opponent and len(found.opponent) != 1):
+                            teams.add(f"{score.table}.{score.value}")
                             continue  # a team
                         if fixed and found.opponent is not None:
                             continue  # pairs of anchors are in the unrestricted cells
@@ -1433,7 +1435,16 @@ def _cells(
         if cell.opponent is not None:
             met.setdefault(_met(cell), set()).add(cell.opponent)
     kept = [c for c in cells if c.opponent is not None or c.fixed or len(met.get(_met(c), ())) != 1]
-    return scores, kept, tuple(dict.fromkeys(absent)), mixed
+    notes = (
+        (
+            f"Team results for {', '.join(sorted(teams))} are recorded, "
+            "but report charts only draw individual players. "
+            "Read the team scores with etude.eval.query.statsdb or compare.",
+        )
+        if teams
+        else ()
+    )
+    return scores, kept, tuple(dict.fromkeys(absent)), (*mixed, *notes)
 
 
 def _newest_environment(

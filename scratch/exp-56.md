@@ -133,8 +133,8 @@ and `6f70baa:scratch/questions.md`; current state-publication tests own coverage
 
 At `b21bc8d`, folder-checkpoint evaluation and `start=` have a two-model
 integration fixture (`tests/train/test_checkpoints.py`); the design's
-investigation step was stale. Report and compression receipts above remain
-focused evidence; full acceptance stays with gate.
+investigation step was stale. Focused receipts below do not replace gate's
+full acceptance.
 
 Fetched `origin/main` remains `286e0c5`; no upstream commits await reconciliation.
 PR #103 is still draft with no submitted reviews. No Wave is attached.
@@ -142,6 +142,10 @@ Launcher docs' obsolete schema numbers are corrected to the database's 19.
 Open 6 (resume unstarted selection members) and Open 7 (config variants as jobs)
 remain unanswered; preserve their current reversible choices for demo.
 
-The shared-report refresh test's counted wrapper now forwards build's
-`experiment` keyword; its unchanged-generation and edited-helper assertions stay.
-`uv run pytest tests/test_page.py tests/train/test_checkpoints.py tests/train/test_store.py tests/train/test_lifecycle.py tests/train/test_steps.py tests/eval/test_context.py -q --disable-warnings` — 115 passed. All 24 chart tests, wheel build, test_page mypy, touched-file ruff check/format and diff whitespace checks pass.
+The refresh-wrapper repair requested by review is already in `43fe3b8`:
+`tests/test_page.py` forwards build's `experiment` keyword and retains both
+refresh assertions. Rechecked that test at `43fe3b8`: 1 passed.
+
+Earlier receipt at `43fe3b8`: page, checkpoints, store, lifecycle, steps and
+eval-context suites — 115 passed; 24 chart tests, wheel build, test_page mypy
+and touched-file ruff checks passed. Full suites remain for gate.

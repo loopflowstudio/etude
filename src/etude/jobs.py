@@ -473,7 +473,9 @@ def continue_from(
             artifact = artifact.model_copy(update={"uri": key})
         # Mutable parent tags do not change the child's job identity.
         checkpoint = checkpoint.model_copy(update={"artifact": artifact, "tags": ()})
-    handed = ParentRun(parent=parent_key, at=at, checkpoint=checkpoint, input=given)
+    handed = ParentRun(
+        parent=parent_key, at=at, clocks=declaration.clocks, checkpoint=checkpoint, input=given
+    )
     environment = (
         *(v for v in parent.launch.spec.environment if v.name != "ETUDE_CONTINUES"),
         Variable(name="ETUDE_CONTINUES", value=handed.model_dump_json()),

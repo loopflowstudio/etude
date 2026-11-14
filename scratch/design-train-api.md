@@ -365,6 +365,39 @@ Neither alternative is chosen. Until answered, recovery uses explicit seed
 commands and variants use new experiments. The QA walkthrough now uses
 etude.train.tracking and etude train FILE [--resume].
 
+### Concept review handoff (2026-11-13)
+
+Outcome for loop-or-next: **Blocked on Open 6 and Open 7**, not an instruction
+to implement either alternative. No further concept change follows from the
+recorded requirements. The comparison is `scratch/concept-review.html`.
+
+The smallest model remains a labelled job plus seed identifying a run;
+attempts execute it, registered state lets it carry on, and checkpoints are
+immutable outputs for other runs and evaluation. Do not merge state and
+checkpoints: an optimizer save and a playable policy have different consumers
+and retention. A selection is computed from Python declarations, not another
+stored lifecycle. Expansion precedes selection so addresses remain stable.
+
+The concrete counterexample to a frictionless recovery is a selection with a
+finished seed, a stopped seed and an unstarted seed. Current `--resume` refuses
+the selection before changing any member. Open 6's alternative would finish
+that selection with one command, but would make resume create runs. It must
+still preflight all identities, skip finished members without a later target,
+restore stopped members from whole saves, and distinguish unreadable identity
+from absence. Neither option needs another record, schema or storage layout.
+
+Open 7 changes the report grouping: a changed config currently requires a new
+experiment; grouping it as a sibling job needs an explicit Python declaration
+or a new naming interaction. It cannot silently turn `--job` from selection
+into naming. Whichever answer follows, preserve config/seed refusals, source
+provenance, first-row replacement, pointer-last publication, planned-stop
+retries, cancellation and cumulative hours/dollars/allocation limits.
+
+Next show the mixed-selection recovery commands and the two variants' report
+grouping. Existing usage docs and QA guidance describe the current choice;
+leave them unchanged until these product questions have answers. This review
+changes no code and does not supply another answer on Jack Heart's behalf.
+
 ## Manabot (MTG-329)
 
 Separate Task; do not edit its checkout here. The full loop sketch, recipe

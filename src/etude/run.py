@@ -361,6 +361,7 @@ def declare(
     kind: str | None = None,
     config: Mapping[str, object] | str | None = None,
     continues: Continuation | None = None,
+    inherited_clocks: Sequence[Clock] = (),
     directory: Path | str | None = None,
     namespace: str = "local",
     resume: bool = False,
@@ -373,6 +374,7 @@ def declare(
     here wins. Elsewhere `run` defaults to a new random name. Re-using a name
     is refused unless `resume`; its identity must match the first declaration.
     `config` given as text is kept byte for byte; a mapping is written as JSON.
+    Inherited clocks seed a new child's axes without closing its resumed set.
     """
     handed = os.environ
     name = (run or handed.get("ETUDE_RUN") or secrets.token_hex(8)).removeprefix(experiment + "/")
@@ -387,7 +389,7 @@ def declare(
         id=run_address(address, experiment),
         experiment=experiment,
         namespace=namespace,
-        clocks=tuple(clocks or ()),
+        clocks=tuple(inherited_clocks if clocks is None else clocks),
         job=job or handed.get("ETUDE_JOB"),
         job_name=None if job else handed.get("ETUDE_JOB_NAME"),
         seed=seed,

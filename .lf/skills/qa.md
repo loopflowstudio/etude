@@ -241,6 +241,28 @@ stem supplies the experiment. Also check an explicit `Job.experiment`: plain
 files preserve it, while files defining `report()` or `eval(state)` require
 their own stem.
 
+For an installed-package check, build with `uv build --wheel --out-dir /tmp/qa-dist`,
+create an isolated Python 3.12 environment with `uv venv --python 3.12 /tmp/qa-client`,
+and install the wheel's `train,eval,hanabi` extras with `uv pip install --python
+/tmp/qa-client/bin/python '/tmp/qa-dist/etude_sdk-VERSION-py3-none-any.whl[train,eval,hanabi]'`.
+Invoke `/tmp/qa-client/bin/etude` with a separate `ETUDE_HOME`. Copy the examples
+into a temporary git repo before `etude eval`; `Seating` needs `configs=({},)`
+even when the game has no config fields. Hanabi's group scores can be queried
+with `statsdb`/`compare`; current report charts draw individuals and explain when
+team scores are omitted.
+
+To exercise automatic retries without renting, declare a job with `max_hours`,
+`max_attempts=2` and `Runtime(python=...)` pointing to a **separate job environment**
+containing the wheel. Using the client environment as the job runtime is refused.
+Have the real recipe register a counter, save at update 2, and raise `Stopped`;
+its next allocation resumes at 3. Run `etude launch FILE --pool local --cohort C`,
+then `etude wait C`, inspect `etude logs --run ADDRESS`, and require a stopped
+attempt followed by success. Check `etude continue --run ADDRESS --until updates=N`
+too: implicit recipe clocks must work across branching. When ADDRESS is also a
+cohort name, supply `--cohort CHILD` on continue. Check cleanup receipts and ensure
+no owned worker remains after waiting. A wait command's exit 0 alone does not mean
+the run succeeded; read its printed final outcome.
+
 Manabot acceptance without touching its checkout: `git ls-files -z | rsync -a
 --from0 --files-from=- . /tmp/X/` plus the in-tree `managym/_managym.*.so`; then
 `uv venv -p 3.13` and `uv pip install` manabot's dependency list (without

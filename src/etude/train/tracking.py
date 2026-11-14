@@ -1343,6 +1343,7 @@ def track(
         kind=kind,
         config=config.model_dump(mode="json") if isinstance(config, BaseModel) else config,
         continues=continues,
+        inherited_clocks=() if handed is None else handed.clocks,
         directory=directory,
         namespace=namespace,
         resume=resume

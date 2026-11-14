@@ -36,10 +36,12 @@ class ParentRun(Record):
 
     `at` owns the continuation position. An inherited checkpoint carries the
     parent's record without tags; its file arrives in out or as a named input.
+    Clocks retain the parent's kinds and labels when the child declares by use.
     """
 
     parent: SourceKey
     at: dict[Name, float] = Field(min_length=1)
+    clocks: tuple[Clock, ...] = ()
     checkpoint: CheckpointRecord | None = None
     input: str | None = None
 

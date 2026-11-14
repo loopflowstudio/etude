@@ -25,7 +25,7 @@ from etude.records import ArtifactRef, Clock, Continuation, SourceKey
 from etude.report import Matches
 from etude.storage import DirectoryStorage, S3Storage, Storage
 from etude.train.tracking import TrainingRun, track
-from tests.eval.games import play, play_failing_deal_one, play_with_evidence
+from tests.eval.games import play, play_failing_deal_one, play_teams, play_with_evidence
 from tests.experiments import authored, experiment_file
 from tests.run.storage import CountedClient, MeasuredStorage
 
@@ -87,6 +87,41 @@ def report():
 """
 
 CLOCKS = [Clock(name="updates", kind="step", meaning="optimizer updates")]
+
+
+def test_report_explains_recorded_team_scores_it_cannot_draw(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    runs = tmp_path / "runs"
+    file = experiment_file(
+        tmp_path / "experiments",
+        "teams",
+        "from etude.report import Report, Score\n"
+        "def report():\n"
+        "    return Report(score=Score(table='teams', value='won'))\n",
+    )
+    evaluate(
+        experiment="teams",
+        environment=environment("team-game"),
+        matches=[
+            Match(
+                players=tuple(Code(name=f"player-{seat}") for seat in range(4)),
+                groups={"north": (0, 1), "south": (2, 3)},
+                games=4,
+            )
+        ],
+        play=play_teams,
+        directory=runs,
+    )
+    page = build(runs, file)
+    assert page.cells == ()
+    assert (
+        "Team results for teams.won are recorded, but report charts only draw individual players. "
+        "Read the team scores with etude.eval.query.statsdb or compare."
+    ) in page.notes
+    with statsdb("teams", runs) as db:
+        assert db.sql("select count(*) from teams").fetchone() == (8,)
 
 
 def save(run: TrainingRun, tmp_path: Path, updates: range) -> None:

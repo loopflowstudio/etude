@@ -18,7 +18,7 @@ from etude.run import sync
 from etude.spec import Input, Job
 from etude.storage import DirectoryStorage
 from etude.train.read import read
-from etude.train.records import ParentRun, Step
+from etude.train.records import ParentRun, Step, Time
 from etude.train.report import training
 from etude.train.tracking import track
 from tests.experiments import authored
@@ -55,6 +55,36 @@ def train(config: Config) -> None:
         run.log({"loss": 0}, updates=updates)
         run.checkpoint(model, updates=updates)
 """
+
+
+def test_implicit_continuation_keeps_clock_kinds_and_can_add_clocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scheduler = local(tmp_path)
+    parent = scheduler.queue(Job(command="train", max_hours=1, experiment="recipe"), "local")
+    source = tmp_path / "track"
+    with track(
+        experiment="recipe",
+        run=parent,
+        directory=source,
+        clocks=["updates", Time("simulation_seconds", "simulated time")],
+    ) as run:
+        (run.out / "payload").write_bytes(b"state")
+        run.log({"loss": 1}, updates=1, simulation_seconds=3)
+    child = continue_from(scheduler.record(parent), "updates=2", source=source)
+    for variable in child.job.environment:
+        monkeypatch.setenv(variable.name, variable.value)
+    with track(experiment="recipe", run="child", directory=source) as run:
+        run.log({"loss": 0.5}, updates=2, simulation_seconds=4, frames=10)
+    with track(experiment="recipe", run="child", directory=source, resume=True) as run:
+        run.log({"loss": 0.25}, updates=3, simulation_seconds=5, frames=20)
+    data = read(source, "recipe", "child")
+    assert [(clock.name, clock.kind, clock.meaning) for clock in data.clocks] == [
+        ("updates", "step", "updates"),
+        ("simulation_seconds", "time", "simulated time"),
+        ("frames", "step", "frames"),
+    ]
+    assert data.points("loss", "updates").x.tolist() == [2, 3]
 
 
 @pytest.mark.parametrize("historical", [False, True])
@@ -107,14 +137,13 @@ def test_continuation_and_report_use_the_same_position_after_an_empty_attempt(
     (child_out / "model").write_bytes(b"weights")
     monkeypatch.setenv("ETUDE_CONTINUES", lineage.value)
     monkeypatch.setenv("ETUDE_OUT", str(child_out))
-    with track(
-        experiment="recipe", run="child", clocks=[Step("updates", "updates")], directory=source
-    ) as resumed:
+    with track(experiment="recipe", run="child", directory=source) as resumed:
         checkpoint = resumed.latest_checkpoint()
         assert checkpoint is not None
         assert authored(checkpoint.at) == {"updates": 6} and checkpoint.tags == ()
         assert checkpoint.path == child_out / "model"
         assert checkpoint.path.read_bytes() == b"weights"
+    assert read(source, "recipe", "child").clocks == data.clocks
 
 
 @pytest.mark.parametrize(
