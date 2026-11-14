@@ -162,7 +162,7 @@ at the top level of an importable file.
 | --- | --- | --- | --- |
 | `track(clocks=, config=)` | opens the run; takes the config model | launcher, reports | built; takes a dict today |
 | `run.seed` | this run's seed | declaration, reports | new (env var today) |
-| `run.resume(**objects, extra=)` | registers what to keep; loads the last save into it; returns the clocks at that save | launcher carriage, continuation | new |
+| `run.resume(**objects, extra=)` | registers what to keep; loads the last save into it; returns `extra`, else the last saved folder (`run.at(clock)` gives the position) | launcher carriage, continuation | new |
 | `run.steps(clock, to=)` | counts from the resumed position to the target; raises `Stopped` on the pass after a stop is asked for | launcher retry, budgets | new |
 | `run.save()` | writes the registered objects when due, and always before a stop | launcher carriage | new |
 | `run.log(row)`, `run.log_table(name, rows)` | rows on the declared clocks; the stepped clock is filled in | reports, queries, live view | built; clock fill new |
@@ -381,6 +381,43 @@ Review evidence and the detailed direction remain at
   An exact run id without the seed suffix uses `RunRequest(id=)`.
 
 No schema, query or provider count changes.
+
+## Corrections from the third concept review (2026-11-13): to build
+
+Probed with `examples/coin.py` in a temporary `ETUDE_HOME`; output in
+`questions.md` (third pass).
+
+1. **One run reference, here as under a launch.** `etude run --resume`
+   accepts `EXPERIMENT/RUN` as `etude launch --resume` does, through the same
+   `run_address`; a bare name is looked up in `--experiment`, else the file's
+   stem. Today a run started with `--experiment lab` resumes only when
+   `--experiment lab` is repeated: the bare id gives `run_not_found`, and
+   `lab/wide-seed-7` gives `unsafe_run_or_experiment_name`. `run_not_found`
+   names the experiment it looked in. The `run_name_taken` hint prints a
+   command that works (`--resume lab/wide-seed-7`), not the bare id. The
+   printed id and the `--json` fields stay as they are. Training docs
+   (Running it): `--resume` takes the run's id in this file's experiment, or
+   `EXPERIMENT/RUN`. One focused CLI test: start under another experiment,
+   resume by the qualified reference and by `--experiment`, refuse the bare id
+   naming the experiment searched.
+2. **The docs teach a branch command that does not run.** `etude continue
+   --run RUN --config ...` fails with `Missing option '--until'`, and with
+   `--until` it reads only the launcher database, so a run started by
+   `etude run` gives `no run 'coin/coin-seed-0'`. Make the docs true to what
+   is built, and add no command: the Running it row, the `etude continue`
+   bullet and Counting say `etude continue --run RUN --until clock=value
+   [--config ...]`, for a run the launcher started. `docs/launcher.md` (The
+   run promise) spells it `etude continue RUN --experiment`; the option is
+   `--run RUN`. Whether a run started here can be branched is open
+   (`questions.md`).
+3. **The config refusal the docs print is not the one Etude prints.** Built:
+   `etude: run_identity_conflict: lr was 0.1, is 0.2`. The Training page shows
+   a two-line message with the run's name and `etude continue` advice. Show
+   the built line; put the advice in prose (a new `--name` here; `etude
+   continue` for a launched run). Keep the code and the named fields.
+
+Delete — do not maintain: nothing. No schema, query or provider count
+changes; no new command or option.
 
 ## Manabot (MTG-329)
 

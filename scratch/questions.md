@@ -294,3 +294,41 @@ RunAttempt" and `max_attempts` counts allocations. For the default loop
 the docs read fine; they part only in the probe's cases. Whichever of
 (a)/(b)/(c) is taken decides whether `RunData.attempts` and `AttemptSummary`
 are renamed, so they are left as they are until then.
+
+
+## Concept review, third pass (2026-11-13): one new open choice
+
+Three corrections the design implies are in `design-train-api.md` (third
+concept review). What the runs showed at `df734c3`, `examples/coin.py`,
+temporary `ETUDE_HOME`, no network:
+
+    run --experiment lab --name wide --seed 7 --until updates=5 --json
+      {"run": "wide-seed-7", "experiment": "lab", "outcome": "finished"}   exit 0
+    run --resume wide-seed-7 --until updates=8          etude: run_not_found: wide-seed-7   exit 1
+    run --resume lab/wide-seed-7 --until updates=8      etude: unsafe_run_or_experiment_name   exit 1
+    run --experiment lab --resume wide-seed-7 --until updates=8 --json     finished, exit 0
+    run --experiment lab --name wide --seed 7           etude: run_name_taken: wide-seed-7; use --resume wide-seed-7   exit 1
+    run --resume coin-seed-0 --config '{"lr": 0.2}'     etude: run_identity_conflict: lr was 0.1, is 0.2   exit 1
+    continue --run coin-seed-0 --config '{"lr": 0.2}'   etude: Missing option '--until'.   exit 1
+    continue --run coin-seed-0 --experiment coin --until updates=8 --config '{"lr": 0.2}'
+                                                        etude: no run 'coin/coin-seed-0'   exit 1
+
+**Open: branching a run started with `etude run`.** The Training page puts
+`etude continue` in one table with the local commands, and it is the only
+way to change a config on purpose, but it reads the launcher database and
+queues a launched run. A run started here has no branch: a changed config is
+a fresh run from update 1. Options: (a) say so, `etude continue` is for
+launched runs (the docs correction now directed); (b) `etude continue` also
+finds a run in the local runs directory and queues its child on this
+computer; (c) `etude run train.py --from RUN --config ...` starts a child
+here from a copy of the parent's state. Related: should `--until` stay
+required on `etude continue` when only `--config` changes? Matters because
+"try another learning rate from update 400" is the first thing someone does
+after a local run, and the launcher path costs a job file. Does not hold the
+implement direction.
+
+Evidence for EXP-59, not a choice here: with `--json`, every refusal and a
+failed `train` print no object and exit 1 (taken id, bad config, not found,
+already finished, config changed, recipe exception); the code is in the
+stderr line only. `outcome.json` does record `failed`.
+

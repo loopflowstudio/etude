@@ -90,6 +90,13 @@ stop/resume/refusal/failure, reports) **13 passed, 126 deselected**;
 Full acceptance stays with gate. Open writer/allocation and eval planning
 choices remain in `questions.md`; PR #103 stays draft.
 
+Third-review corrections are not built: `etude run --resume EXPERIMENT/RUN`
+and refusals that name a working command; docs for `etude continue` (needs
+`--until`, launched runs only, `--run RUN`); the printed config refusal.
+Direction and probe output: `design-train-api.md` (third concept review),
+`questions.md` (third pass). New open choice there: branching a run started
+with `etude run`.
+
 Earlier checks: `394aa37:scratch/exp-56.md`.
 
 The 4,096-run fixture selects 32 records plus one keyed row in 2 SQL statements;
