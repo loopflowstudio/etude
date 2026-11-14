@@ -23,9 +23,6 @@ from etude.storage import Storage
 from etude.train.read import RunData, lines, read_all
 from etude.train.report import job_names
 
-# ---------------------------------------------------------------------------
-# What declarations choose from
-
 
 def observe(
     source: Storage | Path | str, experiment: str, *, keys: Sequence[str] | None = None
@@ -156,9 +153,6 @@ def state_of(
     return jobs.ExperimentState(
         experiment=experiment, runs=tuple(runs), eval_runs=tuple(eval_runs), committed_usd=committed
     )
-
-
-# ---------------------------------------------------------------------------
 
 
 def __getattr__(name: str) -> object:

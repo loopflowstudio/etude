@@ -78,11 +78,8 @@ def train(
             prepared: list[_Training | _Finished] = []
             refusals: list[str] = []
             for request in requests:
+                assert request.id is not None  # read_training_jobs addresses every run
                 try:
-                    if request.id is None:
-                        raise ValueError(
-                            "local training needs an addressed request; return a Job or give RunRequest.id"
-                        )
                     prior = next(
                         (
                             r
@@ -120,7 +117,7 @@ def train(
                 except (EtudeError, LauncherError, ValueError, TypeError) as error:
                     if len(requests) == 1:
                         raise
-                    refusals.append(f"{request.id or request.job.name}: {error}")
+                    refusals.append(f"{request.id}: {error}")
             if refusals:
                 raise EtudeError("selection_refused", detail="\n".join(refusals))
             return _train_each(prepared, json_output=json_output)
@@ -272,7 +269,18 @@ def _train(attempt: _Training, *, json_output: bool) -> bool:
         values["ETUDE_DEADLINE"] = datetime.fromtimestamp(
             time.time() + attempt.seconds, UTC
         ).isoformat()
-    return _call_training(attempt, values, json_output=json_output)
+    stopped = False
+    with _attempt(values):
+        if not json_output:
+            print(attempt.address, flush=True)
+        try:
+            with redirect_stdout(sys.stderr) if json_output else nullcontext():
+                attempt.recipe(attempt.settings)
+        except Stopped:
+            stopped = True
+    if json_output:
+        _print_outcome(attempt.address, attempt.experiment, stopped=stopped)
+    return stopped
 
 
 def _place_inputs(inputs: tuple[Input, ...], directory: Path, artifacts: Path) -> None:
@@ -305,21 +313,6 @@ def _place_inputs(inputs: tuple[Input, ...], directory: Path, artifacts: Path) -
                 "input_undelivered", 409, detail=f"{given.name}: {uri}: bytes differ"
             ) from None
         (directory / given.name).symlink_to(path)
-
-
-def _call_training(attempt: _Training, values: dict[str, str], *, json_output: bool) -> bool:
-    stopped = False
-    with _attempt(values):
-        if not json_output:
-            print(attempt.address, flush=True)
-        try:
-            with redirect_stdout(sys.stderr) if json_output else nullcontext():
-                attempt.recipe(attempt.settings)
-        except Stopped:
-            stopped = True
-    if json_output:
-        _print_outcome(attempt.address, attempt.experiment, stopped=stopped)
-    return stopped
 
 
 def _print_outcome(address: str, experiment: str, *, stopped: bool) -> None:

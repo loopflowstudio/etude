@@ -45,19 +45,12 @@ def read_training_jobs(
 
     if path.suffix != ".py":
         raise LauncherError("experiment files must be Python (.py), defining training_jobs()")
-    # As `python job.py` would, so the file can import its neighbours: `from train import train`.
-    folder = str(path.resolve().parent)
-    if folder not in sys.path:
-        sys.path.insert(0, folder)
     refuse_renamed(path)
     if function is None:
         found = _namespace(path).get("training_jobs")
         function = cast(Callable[..., object], found) if callable(found) else None
     if not callable(function):
-        missing = "define"
-        raise LauncherError(
-            f"{path.name}: {missing} training_jobs() returning jobs or run requests"
-        )
+        raise LauncherError(f"{path.name}: define training_jobs() returning jobs or run requests")
     signature = inspect.signature(function)
     hints = typing.get_type_hints(function)
     reserved = {
@@ -154,9 +147,9 @@ def read_training_jobs(
         raise LauncherError(
             f"{path.name}: training_jobs() must return TrainingJob or its RunRequest"
         )
+    plain = [each.plain() if isinstance(each, Job) else each.job for each in returned]
     jobs: list[Job] = []
-    for each in returned:
-        candidate = each.plain() if isinstance(each, Job) else each.job
+    for candidate in plain:
         if not local:
             candidate.require_hours()
             if candidate.repo is not None and not any(
@@ -173,8 +166,7 @@ def read_training_jobs(
         name: each for name, each in arguments.items() if isinstance(each, (str, int, float, bool))
     }
     normalized: list[Job | RunRequest] = []
-    for each in returned:
-        job = each.plain() if isinstance(each, Job) else each.job
+    for each, job in zip(returned, plain, strict=True):
         if not job.name:
             raise LauncherError(f"{path.name}: TrainingJob requires name=")
         label = experiment or job.experiment or path.stem
@@ -182,7 +174,6 @@ def read_training_jobs(
             update={
                 "repo": str(Path(job.repo).resolve()) if job.repo else None,
                 "experiment": label,
-                "name": job.name,
             }
         )
         normalized.append(
@@ -230,6 +221,7 @@ class Experiment:
 
 
 def _namespace(path: Path) -> dict[str, Any]:
+    # As `python job.py` would, so the file can import its neighbours: `from train import train`.
     folder = str(path.resolve().parent)
     if folder not in sys.path:
         sys.path.insert(0, folder)

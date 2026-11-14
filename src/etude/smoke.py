@@ -33,7 +33,7 @@ from etude.errors import EtudeError, LauncherError
 from etude.eval.records import Benchmark, RoundRobin
 from etude.eval.tournament import played
 from etude.experiment import observe
-from etude.experiment_file import defined_functions, experiment_named
+from etude.experiment_file import defined_functions, experiment_named, refuse_renamed
 from etude.jobs import (
     ExperimentState,
     evaluation_spec,
@@ -66,15 +66,15 @@ def smoke_file(
     calling, since the temporary home moves the default store. Raises
     `LauncherError` at the first failure, after printing its output.
     """
-    functions = defined_functions(path)
-    if "training_jobs" not in functions:
+    refuse_renamed(path)
+    if "training_jobs" not in defined_functions(path):
         steps = tuple(step for step in steps if step != "train")
         source = source or DirectoryStorage(default_root())
     if "train" in steps and source is not None:
         raise LauncherError("--source is for smoking eval and report without the train step")
     if "train" not in steps and source is None and set(steps) & {"eval", "report"}:
         raise LauncherError("smoking eval or report without train needs --source")
-    if "train" in steps and runs is None and "training_jobs" in defined_functions(path):
+    if "train" in steps and runs is None:
         runs = read_training_jobs(path)
     experiment = experiment_named(path)
     train: dict[str, SmokeStep] = {}
@@ -123,8 +123,7 @@ def _evaluate(
             SmokeStep(step="eval", name="eval", outcome="skipped", detail="no eval_jobs(state)")
         ]
     state = observe(source, experiment)
-    definition = read_experiment(path)
-    function = definition.eval
+    function = read_experiment(path).eval
     assert function is not None
     jobs = _try_step("eval", "eval", lambda: asked(function, state))
     if not jobs:

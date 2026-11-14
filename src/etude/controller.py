@@ -125,14 +125,8 @@ def advance(
         f"{experiment.name}: state from {source.uri('run.json').removesuffix('/run.json')}: {len(state.runs)} training runs, {len(state.eval_runs)} eval runs"
         + (f"; ${committed:.2f} of ${max_usd:.2f} committed" if max_usd is not None else "")
     )
-    evaluate = (
-        experiment.eval is not None
-        and job is None
-        and seed is None
-        and not resume
-        and until is None
-    )
-    before = None
+    # A training selection or resume is a pass over those runs alone.
+    evaluate = job is None and seed is None and not resume and until is None
     new: list[RunRequest] = []
     requests: list[RunRequest] = []
     if mode != "local" and callable(experiment.training):
@@ -185,12 +179,16 @@ def advance(
             committed += request.job.max_usd or Decimal(0)
     jobs = (
         [with_experiment(j, experiment.name) for j in asked(experiment.eval, state)]
-        if evaluate and experiment.eval is not None
+        if experiment.eval is not None and evaluate
         else []
     )
-    if smoke_file_first and callable(experiment.training) and not quote:
+    if smoke_file_first and not quote:
         assert experiment.file is not None
-        before = smoke_file(experiment.file, requests)
+        before = (
+            smoke_file(experiment.file, requests)
+            if callable(experiment.training)
+            else smoke_file(experiment.file, steps=("eval", "report"), source=source)
+        )
         new = before.stamp(new)
         smoke = Smoke(steps=before.rest)
     planned = list(new)
@@ -203,10 +201,6 @@ def advance(
     taken = {run.name for run in state.eval_runs}
     decisions: list[TournamentDecision] = []
     stopped_runs: set[str] = set()
-    if smoke_file_first and before is None and not quote:
-        assert experiment.file is not None
-        before = smoke_file(experiment.file, steps=("eval", "report"), source=source)
-        smoke = Smoke(steps=before.rest)
     stored = StoredRuns.read(experiment.name, source, keys=listed) if jobs else None
     for executable in jobs:
         spec = evaluation_spec(executable)
@@ -270,23 +264,16 @@ def advance(
         else:
             submit = client.queue if mode == "queue" else client.launch
             submit(planned, pool, rent=rent)
-            statuses = {item.record.id: item.status for item in client.standing(experiment.name)}
+            placed: dict[str | None, Literal["queued", "running"]] = {
+                item.record.id: "queued"
+                if item.status.phase in {"queued", "renting"}
+                else "running"
+                for item in client.standing(experiment.name)
+            }
             for request in new:
-                assert request.id is not None
-                status = statuses[request.id]
-                print(
-                    f"{request.id}  new, {'queued' if status.phase in {'queued', 'renting'} else 'running'}"
-                )
+                print(f"{request.id}  new, {placed[request.id]}")
             decisions = [
-                p.model_copy(
-                    update={
-                        "state": "queued"
-                        if statuses[p.launched].phase in {"queued", "renting"}
-                        else "running"
-                    }
-                )
-                if p.launched
-                else p
+                p.model_copy(update={"state": placed[p.launched]}) if p.launched else p
                 for p in decisions
             ]
     for decision in decisions:

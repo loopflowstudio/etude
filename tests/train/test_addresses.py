@@ -212,9 +212,8 @@ def test_selection_preflight_refuses_every_conflict_without_training_any_member(
     assert main([*args, "--resume", "--until", "updates=6"]) == 1
     assert "sweep/small@2: run_not_found" in capsys.readouterr().err
     assert {path: path.read_bytes() for path in source.rglob("*") if path.is_file()} == before
-    # New work preceding a taken address must not run either.
-    file.write_text(SELECTION.replace('("small", "wide")', '("wide", "small")'))
-    assert main(["train", str(file)]) == 1
+    # A selection holding taken addresses trains none of its new members.
+    assert main(args) == 1
     error = capsys.readouterr().err
     assert "sweep/small@0: run_name_taken" in error
     assert "sweep/small@1: run_name_taken" in error
