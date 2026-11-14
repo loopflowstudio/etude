@@ -280,8 +280,9 @@ imports nothing else of Etude before the function's own module.
   settings (`Variable` is from `etude.spec`). Replace edits to `job.command`
   with these fields. Remove `UV_NO_SYNC=1`: Etude owns synchronization and
   uses the prepared interpreter directly when preparation supplies one.
-  An explicit `prepare` with its own interpreter owns its dependencies;
-  include the extras in that preparation's install command. Local `train`
+  An explicit `prepare` with its own interpreter owns its dependencies, so
+  `extras=` beside it raises `LauncherError`; put the extras in that
+  preparation's install command. Local `train`
   and `eval` use the interpreter they were invoked with; select its extras
   with `uv run --extra eval etude ...`.
 - **Every other `Job` field** (`max_hours`, `max_usd`, `until`, `inputs`,
@@ -1256,7 +1257,7 @@ accept run addresses, `--experiment` and `--job` select several.
 | Before | Now |
 | --- | --- |
 | `def runs(...)`, `def training_runs(...)` | `def training_jobs(...)` |
-| `def eval_jobs(state)` | `def eval_jobs(state)` |
+| `def eval(state)` | `def eval_jobs(state)` |
 | `training(train, config=c, ...)` | `TrainingJob(name="...", train=train, config=c, ...)`; `name` is required |
 | `evaluation(benchmark, play=play, ...)` | `EvalJob(play=play, tournament=benchmark, ...)` |
 | `evaluation(arena, config=c, play=play, ...)` | `EvalJob(play=play, tournament=arena(c), ...)` |

@@ -293,6 +293,7 @@ class TrainingJob[C: BaseModel](Job):
             raise LauncherError(
                 "typed jobs derive command; use extras, environment, runtime or prepare"
             )
+        _refuse_unused_extras(self.extras, self.prepare)
         self.plain()
         return self
 
@@ -352,6 +353,7 @@ class EvalJob[M: BaseModel | Mapping[str, JsonValue]](Job):
             raise LauncherError(
                 "typed jobs derive command; use extras, environment, runtime or prepare"
             )
+        _refuse_unused_extras(self.extras, self.prepare)
         self.plain()
         return self
 
@@ -835,6 +837,15 @@ def _require_hours(options: JobOptions) -> None:
     """Refuse a job with no `max_hours` in words, before `Job` refuses it as a missing field."""
     if "max_hours" not in options:
         raise LauncherError("a job needs max_hours: the most hours it may hold a machine")
+
+
+def _refuse_unused_extras(extras: tuple[str, ...], prepare: Preparation | None) -> None:
+    """A preparation naming its own interpreter owns its install, so extras would go unused."""
+    if extras and prepare is not None and prepare.python is not None:
+        raise LauncherError(
+            "extras= is not used when prepare= names its own python; "
+            "install the extras in that preparation's command"
+        )
 
 
 def _job(

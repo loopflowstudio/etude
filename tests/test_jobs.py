@@ -25,7 +25,7 @@ from etude.experiment import observe
 from etude.jobs import EvalJob, JobOptions, TrainingJob, checkpoint_inputs
 from etude.launch.smoke import tiny
 from etude.records import ArtifactRef
-from etude.spec import Input, Job, Runtime, SmokeForm, Until, job_id
+from etude.spec import Input, Job, Preparation, Runtime, SmokeForm, Until, job_id
 from etude.storage import DirectoryStorage
 from etude.train.read import read
 from etude.train.tracking import track
@@ -633,6 +633,27 @@ def test_typed_jobs_declare_uv_extras(tmp_path: Path) -> None:
         extras=("eval",),
     ).plain()
     assert packaged.command.startswith("uv run --extra eval python -m etude.call")
+
+
+def test_typed_jobs_refuse_extras_a_named_preparation_would_drop() -> None:
+    prepared = Preparation(command="make env", paths=("pyproject.toml",), python=".venv/bin/python")
+    with pytest.raises(LauncherError, match="extras= is not used when prepare="):
+        TrainingJob(
+            name="base",
+            train=train_command,
+            config=Command(command="true"),
+            max_hours=1,
+            prepare=prepared,
+            extras=("eval",),
+        )
+    with pytest.raises(LauncherError, match="extras= is not used when prepare="):
+        EvalJob(
+            tournament=Benchmark(name="b", environment=environment("duel")),
+            play=play,
+            max_hours=1,
+            prepare=prepared,
+            extras=("eval",),
+        )
 
 
 @pytest.mark.parametrize("command", ["", "true"])
