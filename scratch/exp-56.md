@@ -102,6 +102,12 @@ queries, reads and exit statuses retained. The refusal lives in
 unknown id show the same remedy. Rechecked at `b2c0e17`: same 28 passed,
 ruff/format/mypy clean.
 
+Seventh-review corrections are the next implement direction (design,
+Corrections from the seventh concept review): `evaluation(checkpoint=)`
+takes a `CheckpointRecord` like `start=`, with the three docs; one JSON
+config validator for `etude run` and `etude continue`; the finished-run
+refusal says where the run stands. No launcher schema change.
+
 Hanabi command receipt and temporary report location are retained at
 `06ff0f6:scratch/exp-56.md`; durable stop/resume evidence is in demo.md.
 

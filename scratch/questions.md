@@ -227,3 +227,32 @@ checkpoint a benchmark's seatings are played for. Only sentences telling the
 reader to call `hold` or `evaluate` are corrected. Open for demo: should the
 prose verb follow the call (`evaluating`, `run.play`), and if so with which
 word? `etude eval` help already says "pass" for one batch run.
+
+## Seventh concept review (2026-11-13)
+
+Run at `c8310bc`, ETUDE_HOME `/tmp/exp56 review7 51152` (removed after), coin
+example with `uv run --extra train etude`:
+`run examples/coin.py --config '{"lrr":1}' --name bad2 --until updates=2` ->
+`bad2-seed-0`, exit 0; its `run.json` config is
+`{"heads": 0.7, "lr": 0.1, "updates": 20}`.
+`run ... --seconds 0.001 --name short --config '{"updates":200}' --json` ->
+`"outcome": "stopped"`, exit 75; `--resume short-seed-0` finished; then
+`--resume short-seed-0 --until updates=150` ->
+`run_already_finished: give --until with a later target`.
+`run ... --until update=5 --name typo` -> `target_clock_undeclared: update`,
+and no `typo-seed-0` folder was left, so the name stayed free.
+A `train` raising at update 4 recorded `failed`; `--resume` without the bug
+finished at 6 with its saved count intact.
+
+Checkpoint given to a job: `observe(default_root(), "coin").run(
+"coin-seed-0").final` has members `checkpoint.json`, `policy.pt`;
+`training(..., start=final)` produced inputs `start/checkpoint.json` and
+`start/policy.pt`. `evaluation(checkpoint=)` is typed `Input | None`
+(`jobs.py`), one key with one digest. The probe passing the record to it
+stopped earlier, on the probe's own unimportable `play`, so the refusal
+itself was not observed; the finding rests on the signature and on `_hold`
+building the key from the input's file name.
+
+Assumptions, reversible: a released `Input` stays accepted without a
+warning; unknown-field refusal is top-level only, nested models keep
+Pydantic's behaviour; a config model with `extra="allow"` keeps its extras.

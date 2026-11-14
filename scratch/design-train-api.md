@@ -355,57 +355,60 @@ and default_root(). Delete the duplicate decoder, hand parses and unreleased
 singular collection config keyword. Keys, seeds and stored bytes stay stable;
 the configs spelling remains a worker choice to show at demo.
 
-## Corrections from the sixth concept review (2026-11-13): built
+## Sixth concept review (2026-11-13): built
 
-Walked at `67ebe7c` in a fresh ETUDE_HOME whose path has a space: coin new
-(exit 0), the same again (`run_name_taken: coin-seed-0; use --resume
-coin/coin-seed-0`), `--resume` of the finished run (`run_already_finished:
-give --until with a later target`), `--resume --until updates=20 --json`,
-report. All as documented. The mismatches are in reading a local run back.
+`etude checkpoints` defaults to where runs are written here; a missing
+launcher run names the local remedies; evaluation docs name the current
+calls. "Hold" stays as prose (assumption, `questions.md`). Full text at
+`c8310bc:scratch/design-train-api.md`.
 
-1. **`etude checkpoints` is the one reader that must be told where this
-   computer's runs are.** Run right after `etude run`: `etude: Missing
-   option '--source'`. `etude report`, `etude eval`, `etude continue` and
-   `statsdb` all default to where runs are written here, and the docs teach
-   `etude checkpoints --source ~/.etude/track` (`docs/training.md`,
-   `docs/launcher.md`), which is the wrong folder once `ETUDE_HOME` is set,
-   the same fault the fifth review fixed in `docs/hanabi.md`. Build:
-   `--source` optional, defaulting to `default_root()` with the other
-   readers' help wording; the docs' local spelling becomes bare
-   `etude checkpoints` (bucket examples keep `--source`). It also exits 1
-   printing nothing when no run matches: say what was looked for and where.
-   No new read: the same listing, one default.
-2. **`etude continue` answers a local run's id with `no run 'coin-seed-0'`.**
-   `etude run` printed that id a moment earlier, and `coin/coin-seed-0`,
-   the spelling the taken-name refusal teaches, gets the same answer.
-   `docs/training.md` says such a run cannot be branched; the command does
-   not. Build: where a launched run is looked up by a typed reference and
-   not found, the refusal says it is the launcher that has none and names
-   the remedy for a run started with `etude run` (`etude report FILE` to
-   read it; a new `--name` to try a changed config), as the fourth review
-   did for `experiment_not_named`. Text only: no folder probe, no storage
-   read, so the answer costs the same for a bucket source. Also
-   `etude continue --experiment` says "defaulting to the file stem" and
-   takes no file: give it help that says what it does there (qualifies a
-   bare run id).
-3. **The evaluation page still tells the reader to call `evaluate` and
-   `hold`.** Both are warning wrappers; the page's own examples use
-   `evaluating(...)` and `run.play(play)`. Stale: "Calling `evaluate` again
-   with the same `run`" (Resume), "the next `evaluate` in the folder seals
-   them" (Storage), "Each eval run a `hold` starts" (Stored in its eval
-   runs). Build: those sentences name the calls that exist; the
-   `resume=True` rule from Run names moves into Resume so one bullet says
-   how an eval run is carried on. Docs only.
+## Corrections from the seventh concept review (2026-11-13): to build
 
-Not changed, an assumption to show at demo (`questions.md`): the page's verb
-"hold" and "the held checkpoint" stay. They name a real thing, the
-checkpoint a benchmark's seatings are being played for, the report docs use
-the same words, and no replacement was said by anyone.
+Walked at `c8310bc` in a fresh ETUDE_HOME: new, `--seconds` stop (exit 75),
+resume, finished-run and taken-name refusals, a mistyped `--until` clock
+(refused, nothing left on disk), a `train` that raised and was resumed after
+the fix. All as documented. Evidence for the three below is in
+`questions.md` (Seventh concept review).
 
-Delete — do not maintain: the required `--source` on `etude checkpoints`
-and its hard-coded `~/.etude/track` doc spellings; the stale `evaluate` and
-`hold` call references. No schema, stored-format, query or provider-count
-change; no new command.
+1. **A one-checkpoint evaluation job cannot be given the checkpoint the
+   taught loop writes.** `run.checkpoint(policy=model)` writes a folder.
+   `training(start=)` and `evaluation(checkpoints=)` take its
+   `CheckpointRecord` and deliver each member verified. `evaluation(
+   checkpoint=)` alone takes a hand-built `Input`: one key, one SHA256, one
+   length. README, `docs/launcher.md` (Typed jobs) and `docs/evaluation.md`
+   (eval.py) teach typing `updates-00000500` with `--sha256 … --size-bytes`
+   for it, which names a folder. Pointing the `Input` at `policy.pt` inside
+   would hand `play` a file where `checkpoint.path` is documented as the
+   folder, under a key that is not the checkpoint's. Build:
+   `evaluation(..., checkpoint=)` accepts a `CheckpointRecord`, expanded by
+   the same `checkpoint_inputs_for` as `start=`; on the machine the player's
+   checkpoint keeps the record's own key and its `path` is the delivered
+   folder or file. The three docs get the record the way Starting from
+   another run does (`observe(SOURCE, "ppo").run("ppo-seed-0").final`), with
+   no digest or length typed by a person. A released `Input` is still
+   accepted for a single file, unchanged and unwarned. Eval rows for the
+   same checkpoint must carry the same key whichever way it was given.
+   Counting test: the job's inputs are exactly the record's members; no
+   read is added on the machine. No launcher schema change (the spec is
+   JSON text).
+2. **`etude run --config` drops a field the config does not have.**
+   `--config '{"lrr":1}'` starts a run with the default `lr`, stores the
+   default config and exits 0; `etude continue --config` refuses the same
+   mistake (`unknown continuation config fields`). The training page calls
+   `--config` "checked against the config type". Build: one function owns
+   "JSON changes over a config type" for `etude run` (new and `--resume`)
+   and `etude continue`: unknown top-level fields are refused by name unless
+   the author's model allows extras, and problems print as one line per
+   field (`lr: Input should be greater than 0`), not Pydantic's block with
+   its URL. Stored configs are read as before; this checks only what a
+   person typed.
+3. **`run_already_finished: give --until with a later target` is the answer
+   to a `--until` that was given** but is not past where the run stands. Say
+   where it stands (`finished at updates=200`). Text only.
+
+Delete — do not maintain: the hand-built folder `Input` and
+`--checkpoint/--sha256/--size-bytes` spellings in the three docs; the second
+JSON-config validator and its separate wording.
 
 ## Manabot (MTG-329)
 
