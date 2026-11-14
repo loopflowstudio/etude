@@ -90,8 +90,12 @@ def status(
     ] = None,
 ) -> None:
     """Show where runs stand, as of the controller loop's last pass."""
+    from datetime import UTC, datetime
+
     from etude.launch import controller
+    from etude.launch.database import copies
     from etude.launch.listing import resolve_runs, show_runs
+    from etude.launch.source import home
 
     scheduler = default()
     selected = resolve_runs(scheduler, runs or [], experiment=experiment) or [
@@ -107,6 +111,12 @@ def status(
         return
     show_runs(scheduler, selected)
     controller.show_freshness(scheduler)
+    for copy in copies(home(), datetime.now(UTC)):
+        print(
+            f"copy {Path(copy.path).name} ({', '.join(copy.unreleased)}): "
+            f"{copy.rentals} rental{'s' if copy.rentals != 1 else ''}, "
+            f"${copy.usd_per_hour}/h, ends {copy.ends:%Y-%m-%d %H:%M} UTC"
+        )
 
 
 @app.command("runs")

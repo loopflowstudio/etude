@@ -833,9 +833,6 @@ Preparation intent is recorded there before the submitting client publishes its
 source. A disconnected submitting client can leave a preparing launch; it is
 reported as unresolved and does not authorize automatic resubmission.
 
-This prototype schema is version 2. As with other launcher schema changes, an
-older database is refused; there is no migration path in the prototype.
-
 ## The controller
 
 The controller holds the database and matches waiting runs to machines. No
@@ -863,7 +860,8 @@ It is never advertised as the client's local machine.
 client's own package over SSH, where it and its environment are kept by digest under
 `ETUDE_HOME/programs`, and every later command runs that exact version. The two
 sides therefore cannot be different versions; after the client changes, the
-next command sends the new code first. The controller needs Python 3.12, uv
+next command sends the new code first, and that command upgrades the
+controller's launcher file ([Upgrading Etude](#upgrading-etude)). The controller needs Python 3.12, uv
 and working SSH keys. If it cannot take the program, `controller set` fails
 with the reason and the setting is not changed.
 
@@ -901,6 +899,159 @@ has completed in 30 seconds. Slow provider operations may also cause this
 warning. `wait` still exits when its runs finish. Workers read their own disk or
 bucket inboxes; they never need a reachable address for the controller.
 
+## Upgrading Etude
+
+Upgrade while runs are active. The launcher's records follow, and the first
+command afterwards says what it did:
+
+```
+$ uv sync --upgrade-package etude-sdk
+$ etude status
+launcher: took over launcher-17.db as launcher.sqlite (23 runs, 3 open sessions); applied run_resume_and_writers
+launcher: launcher-17.db is left as it was and is no longer read; launcher.db (schema 13) is not read, use etude 0.2.15 for it
+RUN            STATUS
+sweep/base@7   running   updates 1400, ~$0.61
+...
+```
+
+Every provider, storage, pool, run, rental and setting the older etude showed
+is there with the status it had: a run that was running reads `running`, and a
+queued one is still queued. The `launcher:` lines go to standard error, once;
+the next `etude status` prints only the runs.
+
+Runs already on machines are not interrupted. Their workers stay the etude
+that started them, and the upgraded launcher reads the journals a previous
+release's worker writes.
+
+Before upgrading, stop commands of the older etude that are still running on
+this computer or the controller (`etude wait`, `etude controller run`). They
+would keep writing to the file they opened, which nothing reads afterwards.
+Start them again with the new etude.
+
+### The file
+
+The records are one SQLite file, `$ETUDE_HOME/launcher.sqlite` (default
+`~/.etude`). Its schema is the named SQL files in `etude/launch/migrations/`,
+and its `migrations` table records which of them it holds. Any command opens
+it the same way:
+
+- **No `launcher.sqlite` yet.** The newest file an earlier etude left is
+  taken over: `launcher-19.db` (0.4.0), else `launcher-17.db` (0.3.2), else a
+  `launcher.db` written by 0.3.1. It is copied, so it needs that much free
+  disk again, and the copy is upgraded. The older file is never changed.
+  With none of them, a new empty file is made.
+- **A `launcher.sqlite` missing migrations.** It is backed up beside itself as
+  `launcher.sqlite.backup-<UTC time>`, keeping the two newest, and then
+  upgraded.
+- **An up-to-date `launcher.sqlite`.** It is opened; nothing is copied or
+  printed.
+
+An upgrade applies the missing migrations and checks every row against the
+current records in one transaction. If anything fails the command exits with
+the reason and the file is exactly as it was.
+
+Files from before 0.3.1 are not taken over. They are named once, with the
+etude that reads them, and stay usable from that version:
+
+```sh
+uvx --from etude-sdk==0.2.15 etude status
+```
+
+### When the upgrade refuses
+
+| Message | Meaning | Do |
+| --- | --- | --- |
+| `launcher: a controller loop of an older etude is running on launcher-17.db (last pass 4s ago); stop it, then run this again` | Taking the file over now would leave two loops placing the same queued runs and renting twice. | Stop that `etude controller run`, repeat the command, then start the loop with the new etude. |
+| `launcher.sqlite needs etude >= 0.5.0 (raised by: rental_regions)` | A newer etude upgraded this file past what this one can read. | Upgrade this etude, or restore a backup (below). |
+| `etude was upgraded while this ran; run it again` | This process opened the file before such an upgrade; it writes nothing more. | Run the command again. |
+| `launcher: migration remove_cohorts needs SQLite >= 3.35; this Python has 3.31.1` | The Python on this machine carries an older SQLite. Nothing was changed. | Use a Python with a newer SQLite, on a controller through `ETUDE_REMOTE_PYTHON`. |
+
+### Older and newer etude on one file
+
+Each released migration records a reader floor: the oldest etude that can
+still open a file holding it.
+
+- **Additive migrations keep the floor.** They only add tables, non-unique indexes or
+  columns an older writer can omit. An older etude keeps reading and writing the
+  file, including processes already running.
+- **Any other migration raises the floor to its release.** The upgrade line
+  ends `; etude < 0.5.0 can no longer open it`, and the release notes say the
+  same. An etude below the floor is refused with the message above.
+- **Processes open across such an upgrade write nothing more**, and
+  `etude controller run` replaces itself with the newer program's loop, so a
+  supervised loop needs no restart.
+
+Etude 0.4.0 and earlier know nothing of `launcher.sqlite` or of this handover.
+They keep using their own file, and their loops are stopped and started by
+hand as above.
+
+### Going back
+
+- **After a take-over.** The older file is as the older etude left it:
+  install that etude again and it reads its own file. Runs and rentals made
+  since are only in `launcher.sqlite`; each rental still ends at its
+  deadline. To take the older file over afresh, delete `launcher.sqlite`.
+- **After an upgrade of `launcher.sqlite`.** Additive upgrades need nothing:
+  install the older etude. From a release that raised the floor, the backup
+  is the only way back: stop every etude command, move the backup over
+  `launcher.sqlite` and install the older etude. Records written after the
+  backup are lost.
+
+### Unreleased builds use a copy
+
+A migration may still change until a release records it, so an etude carrying
+one that no release has recorded (a branch, or `main` between releases) never
+writes to `launcher.sqlite`:
+
+```
+$ etude status
+launcher: launcher.sqlite is behind this unreleased etude (pool_quota); using copy ~/.etude/copies/3f2a91c04b1e/. Runs and rentals made here are not in launcher.sqlite
+```
+
+- The copy is taken once for each set of unreleased migrations, from
+  `launcher.sqlite` or, without one, from the file a release would take over.
+  Editing a migration starts a fresh copy.
+- Runs and rentals made in a copy stay there. A released `etude status` lists
+  the copies that still hold paid windows:
+
+  ```
+  copy 3f2a91c04b1e (pool_quota): 1 rental, $0.89/h, ends 2026-11-15 14:20 UTC
+  ```
+
+- Each window still ends at its deadline.
+- A copy is never refreshed. To pick up later changes to the real file,
+  delete the copy.
+
+Launch real work from a release. A project pinned to a branch commit that
+adds a migration runs in a copy.
+
+### Writing a migration
+
+The launcher's schema changes only through a new SQL file in
+`src/etude/launch/migrations/`, named for what it does and never numbered, so
+two branches never contend for a version:
+
+```sql
+-- after: run_resume_and_writers
+-- breaks: etude 0.4.0 inserts runs.cohort
+ALTER TABLE runs DROP COLUMN cohort;
+DROP TABLE cohorts;
+CREATE INDEX runs_name ON runs(json_extract(spec, '$.name'), seq);
+```
+
+`-- after:` names the migrations it builds on, including any other that
+touches the same table. `-- breaks:` marks a change older readers cannot take
+even though its schema looks additive, such as a new value in a status column
+or a new shape inside a JSON column, which a schema comparison cannot see.
+Rewrite old rows in the same file: the row check fails an upgrade that leaves
+one the current records cannot decode.
+
+`lf release run` records the release's migrations and their floors in
+`migrations/released.json`
+(`uv run python scripts/release_migrations.py --version X`), computing each
+floor by comparing schemas. From then on the file never changes;
+`uv run python scripts/check_migrations.py` holds that in CI.
+
 ## Safeguards and bills
 
 `etude ondemands` lists each on-demand's safeguards. Providers declare lifetime
@@ -937,7 +1088,7 @@ defines it, by its full path, and relative imports are a lint error:
 | `from etude.jobs import training, evaluation` | typed jobs: Etude decides the command |
 | `from etude.spec import Job, RunRequest` | what to run |
 | `from etude.launch.client import queue, launch, status, wait, ...` | the calls a script makes; they go to the controller when one is set |
-| `from etude.launch.database import Database` | the SQLite records in `launcher-<schema>.db` |
+| `from etude.launch.database import Database` | the SQLite records in `launcher.sqlite` |
 | `from etude.launch.schemas import Packet, Work, Progress` | frozen worker messages |
 | `from etude.launch.executor import Executor` | machine acquisition, startup and journal composition |
 | `from etude.launch.scheduler import Scheduler` | the owner of one database: queueing, admission, matching runs to machines |
@@ -1462,10 +1613,8 @@ The code has three layers:
    `scheduler.py` owns jobs, runs, cohorts, queue placement and limits in `database.py`. Lower layers are public Python types and can be used without
    the run scheduler.
 
-The SQLite file is `$ETUDE_HOME/launcher-<schema>.db` (default `~/.etude`), one
-per schema version: the launcher never migrates, so a client of another version
-keeps its own file, rentals and records beside this one. Delete an old version's
-file once nothing of that version is running. Versioned
+The SQLite file is `$ETUDE_HOME/launcher.sqlite` (default `~/.etude`), carried
+across releases by migrations; see [Upgrading Etude](#upgrading-etude). Versioned
 writes claim each session once. A lost create reply is looked up, never
 repeated; if the provider still has no such machine at the rental's deadline,
 or when it is terminated, it is recorded as never acquired: it costs nothing and
@@ -1476,9 +1625,6 @@ provider machine is gone. Infrastructure losses retry up to `max_attempts`,
 including confirmed loss after code started. If startup intent reached storage
 but an attempt claim did not, its start is uncertain and it is not retried.
 
-The database has no migrations while the launcher is a prototype. The file
-carries a schema version; a file written by another version is refused with a
-message naming it, and is left untouched. Move or delete it to start again.
 Tables are `machines`, `sessions`, `rentals` (one per rented machine, keyed by
 machine) and `attempts`. What the provider said about making and deleting a
 rented machine is stored on that machine's one session and read as Machine.
@@ -2040,9 +2186,6 @@ current attempt, or its allocation time before any write is observed. Failed
 requests and successful reads do not reset it. The controller may simply have
 stopped collecting evidence; use the worker log to distinguish that from a
 storage outage. Completed and local-only attempts have no delivery-age warning.
-The launcher database schema is version 19; files from other versions are refused rather
-than modified. Preserve an old database with its matching Etude version when
-reading historical evidence.
 
 Finite HTTP operations also bound waiting for the complete response, even when
 a connection keeps streaming bytes. Expiry leaves the in-flight outcome unknown:
@@ -2221,10 +2364,7 @@ is not by itself proof of billable internet egress. Reconciliation does not
 change observed transport totals or turn them into billed amounts.
 
 Adoption requires the SDK revision containing these APIs on both controller
-and worker; generated archives include the same revision automatically. The
-controller uses that same launcher schema and deliberately refuses older prototype
-files. Preserve the old database and retained journals before choosing a fresh
-controller home; this change does not migrate or modify live experiment files.
+and worker; generated archives include the same revision automatically.
 Use a fresh `ETUDE_HOME` for offline integration proof and install the reviewed
 PR commit with `uv add 'etude-sdk @ git+https://github.com/loopflowstudio/etude@COMMIT'`.
 

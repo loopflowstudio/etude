@@ -234,5 +234,15 @@ only a paid window, keyed by its machine; RunAttempt is the allocation on any
 machine. Session is internal: one start of Etude's process on a machine, and its
 journal folder. The process itself is the worker (`etude worker`). Use rent and
 terminate for making and deleting paid machines. A record refers to another by
-its name or id as a plain `str`. While the launcher is a prototype its database
-has no migrations: change the schema version and refuse older files.
+its name or id as a plain `str`.
+
+The launcher database changes only through a new SQL file in
+`src/etude/launch/migrations/`, named for what it does and never numbered;
+`docs/launcher.md` ("Writing a migration") shows one. It may change until a
+release records it in `migrations/released.json`, and reaches only copies
+before then; afterwards it never changes (`scripts/check_migrations.py`).
+Inserts name their columns. Old row shapes are rewritten by a migration, never
+tolerated in Python, and no second schema definition sits beside the SQL
+files. An older etude may keep writing after an additive release, so new
+columns must read sensibly when empty; journal records a previous release's
+worker writes must still decode, so new fields on them take defaults.

@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from etude.errors import LauncherError
-from etude.launch.database import Database, launcher_file
+from etude.launch.database import open_home
 from etude.launch.executor import local
 from etude.launch.logs import render
 from etude.launch.records import Machine, Pool
@@ -115,7 +115,7 @@ def smoke_train(runs: Sequence[RunRequest], folder: Path) -> list[Trained]:
     for run in runs:
         run.job.require_hours()
         distinct.setdefault(job_id(run.job), run)
-    store = Database(launcher_file(folder))
+    store = open_home(folder)
     try:
         service = local(folder / "sessions")
         scheduler = Scheduler(store, {"local": lambda machine: service})

@@ -3,4 +3,6 @@ release:
     default:
       manifests:
       - pyproject.toml
+      prepare:
+      - uv run python scripts/release_migrations.py --version {version}
       workflow: .github/workflows/release.yml

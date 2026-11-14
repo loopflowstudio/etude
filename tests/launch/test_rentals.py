@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 from decimal import Decimal
 from pathlib import Path
 
@@ -12,7 +11,7 @@ from etude.cli import main
 from etude.errors import LauncherError
 from etude.launch import cli, client
 from etude.launch.controller import PythonClient, RentRequest, Request, TerminateRequest
-from etude.launch.database import Database, launcher_file
+from etude.launch.database import launcher_file
 from etude.launch.records import Machine
 from etude.spec import Job
 from tests.launch.counting import Counting, Counts
@@ -25,7 +24,7 @@ def test_rent_refuses_a_pool_without_external_calls(tmp_path: Path) -> None:
     counting = Counting(b.store, b.service)
     with counting.record(), pytest.raises(LauncherError, match="no on-demand named 'bench'"):
         b.scheduler.rent("bench", 1)
-    assert counting.snapshot() == Counts(database=5)
+    assert counting.snapshot() == Counts(database=9)
     assert b.store.rentals() == ()
     assert b.store.sessions() == ()
 
@@ -117,36 +116,3 @@ def test_added_session_reuses_capacity_without_a_paid_window(tmp_path: Path) -> 
     assert placed.machine == "bench" and placed.session == attempt.session
     assert b.store.rental_for(b.store.session(placed.session)) is None
     assert b.service.creates == 0
-
-
-@pytest.mark.parametrize("version", [10, 11, 12, 13, 14])
-def test_old_database_evidence_is_refused_without_migration(tmp_path: Path, version: int) -> None:
-    path = launcher_file(tmp_path)
-    Database(path).close()
-    with sqlite3.connect(path) as db:
-        db.execute("DROP INDEX transfers_delivery")
-        db.execute("INSERT INTO settings VALUES ('kept', 'historical evidence')")
-        db.execute(f"PRAGMA user_version = {version}")
-    with pytest.raises(LauncherError, match="another version"):
-        Database(path)
-    with sqlite3.connect(path) as db:
-        assert db.execute("PRAGMA user_version").fetchone() == (version,)
-        assert db.execute("SELECT value FROM settings WHERE name = 'kept'").fetchone() == (
-            "historical evidence",
-        )
-        assert (
-            db.execute("SELECT 1 FROM sqlite_master WHERE name='transfers_delivery'").fetchone()
-            is None
-        )
-
-
-def test_a_database_from_another_version_is_refused_and_left_alone(tmp_path: Path) -> None:
-    path = launcher_file(tmp_path)
-    Database(path).close()
-    with sqlite3.connect(path) as db:
-        db.execute("PRAGMA user_version = 0")
-        before = tuple(db.iterdump())
-    with pytest.raises(LauncherError, match="another version of etude"):
-        Database(path)
-    with sqlite3.connect(path) as db:
-        assert tuple(db.iterdump()) == before

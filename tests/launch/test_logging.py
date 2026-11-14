@@ -477,7 +477,7 @@ def test_log_reads_and_phases_never_drive_execution(tmp_path: Path) -> None:
     with counting.record():
         b.scheduler.logs(refresh=True, run=run)
         count = counting.snapshot()
-    assert count == Counts(bucket=3, database=17)
+    assert count == Counts(bucket=3, database=26)
     with counting.record():
         assert b.scheduler.diagnostics(run=run)
         assert b.scheduler.start_phases(run)

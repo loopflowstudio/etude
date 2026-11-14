@@ -21,13 +21,13 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from functools import cache
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, NoReturn
 
 from pydantic import Field, RootModel, TypeAdapter
 
 from etude.deadline import limit_time, remaining
 from etude.errors import LauncherError
-from etude.launch.errors import LaunchError
+from etude.launch.errors import LaunchError, SchemaAdvanced
 from etude.launch.listing import show_runs
 from etude.launch.logging import explain
 from etude.launch.measurement import timed
@@ -681,11 +681,25 @@ def receive(scheduler: Scheduler) -> int:
 
 
 def loop(scheduler: Scheduler, every: float = 1.0) -> None:
-    """Keep matching even when the queue empties; heartbeat means a completed tick."""
+    """Keep matching even when the queue empties; heartbeat means a completed tick.
+
+    When a newer etude migrates the database, this loop replaces itself with that
+    program's loop, so running rentals keep a controller through an upgrade.
+    """
     while True:
-        scheduler.tick()
+        try:
+            scheduler.tick()
+        except SchemaAdvanced as advanced:
+            _hand_over(advanced.program)
         write(home() / "controller-heartbeat", datetime.now(UTC).isoformat())
         time.sleep(every)
+
+
+def _hand_over(program: str | None) -> NoReturn:
+    # Without a recorded program the newer etude was installed in place: run this one again.
+    python = str(Path(program) / ".venv" / "bin" / "python") if program else sys.executable
+    print(f"etude was upgraded; the loop continues in {python}", file=sys.stderr, flush=True)
+    os.execv(python, [python, "-m", "etude", "controller", "run"])
 
 
 def warning(scheduler: Scheduler) -> str | None:

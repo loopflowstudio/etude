@@ -3,21 +3,34 @@
 Every session, attempt and run row carries a version. A write names the version it
 read and raises Stale if the row has moved, so two processes working the same
 file cannot both take one step. Status and spend are computed, never stored.
+
+open_home selects one launcher.sqlite, taking over a released predecessor or
+isolating unreleased SQL in a copy. Named migrations are applied transactionally;
+their ledger fences writers when a later release raises the reader floor.
 """
 
 from __future__ import annotations
 
+import fcntl
+import hashlib
 import json
 import math
+import re
 import sqlite3
+import sys
+import tempfile
+import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from functools import cache, partial
+from importlib.metadata import version
 from pathlib import Path
 from uuid import uuid4
 
 from etude.errors import LauncherError
+from etude.launch.errors import SchemaAdvanced
 from etude.launch.records import (
     RETRYABLE,
     Cause,
@@ -44,96 +57,241 @@ from etude.launch.records import (
 )
 from etude.launch.usage import Transfer
 from etude.records import RunRecord, RunWriter, Tally
-from etude.spec import Job, Smoke, SourcePosition
+from etude.spec import Job, Record, Smoke, SourcePosition
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS transfers(id TEXT PRIMARY KEY, body TEXT NOT NULL);
-CREATE INDEX IF NOT EXISTS transfers_delivery ON transfers(
-  json_extract(body, '$.attempt'), julianday(json_extract(body, '$.observed_at')) DESC)
-  WHERE json_extract(body, '$.completed') = 1
-    AND json_extract(body, '$.status') BETWEEN 200 AND 299
-    AND json_extract(body, '$.operation') IN ('PUT', 'POST');
-CREATE TABLE IF NOT EXISTS launches(id TEXT PRIMARY KEY, body TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS launch_runs(launch TEXT NOT NULL, run TEXT NOT NULL,
-  PRIMARY KEY(launch, run));
-CREATE INDEX IF NOT EXISTS launch_runs_run ON launch_runs(run);
-CREATE TABLE IF NOT EXISTS launch_sessions(launch TEXT NOT NULL, session TEXT NOT NULL, acquired INTEGER NOT NULL,
-  PRIMARY KEY(launch, session));
-CREATE TABLE IF NOT EXISTS diagnostics(id TEXT PRIMARY KEY, body TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS log_streams(id TEXT PRIMARY KEY, body TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS locks(
-  supply TEXT PRIMARY KEY, owner TEXT NOT NULL, expires_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS settings(name TEXT PRIMARY KEY, value TEXT NOT NULL);
-INSERT OR IGNORE INTO settings VALUES ('default_pool', 'local');
-INSERT OR IGNORE INTO settings VALUES ('default_rent', '');
-CREATE TABLE IF NOT EXISTS cohorts(
-  name TEXT PRIMARY KEY, parallel INTEGER NOT NULL, max_usd TEXT,
-  created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS providers(
-  name TEXT PRIMARY KEY, kind TEXT NOT NULL, registry TEXT NOT NULL, storage TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS storages(
-  name TEXT PRIMARY KEY, bucket TEXT NOT NULL, prefix TEXT NOT NULL, provider TEXT NOT NULL,
-  region TEXT);
-CREATE TABLE IF NOT EXISTS pools(
-  name TEXT PRIMARY KEY, off INTEGER NOT NULL DEFAULT 0,
-  startup_seconds REAL, delivery_seconds REAL, log_seconds REAL,
-  slots INTEGER NOT NULL DEFAULT 1);
-CREATE TABLE IF NOT EXISTS ondemands(name TEXT PRIMARY KEY, body TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS machines(
-  name TEXT PRIMARY KEY, kind TEXT NOT NULL,
-  pool TEXT REFERENCES pools(name), ondemand TEXT REFERENCES ondemands(name),
-  cost_usd TEXT NOT NULL DEFAULT '0', expires_at TEXT,
-  provider TEXT, address TEXT, storage TEXT, deleted_at TEXT, image TEXT,
-  CHECK ((pool IS NULL) != (ondemand IS NULL)));
-CREATE TABLE IF NOT EXISTS runs(
-  seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
-  job TEXT NOT NULL, spec TEXT NOT NULL, seed INTEGER,
-  pool TEXT REFERENCES pools(name), rent TEXT REFERENCES ondemands(name),
-  cohort TEXT REFERENCES cohorts(name),
-  created_at TEXT NOT NULL,
-  cancel_requested_at TEXT, version INTEGER NOT NULL DEFAULT 1,
-  autorun INTEGER NOT NULL DEFAULT 0, queued INTEGER NOT NULL DEFAULT 0,
-  resume_after INTEGER NOT NULL DEFAULT 0,
-  params TEXT NOT NULL DEFAULT '{}', source TEXT, smoke TEXT NOT NULL DEFAULT '{}',
-  CHECK (pool IS NOT NULL OR rent IS NOT NULL));
-CREATE TABLE IF NOT EXISTS sessions(
-  seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
-  machine TEXT NOT NULL REFERENCES machines(name), planned_at TEXT NOT NULL,
-  claimed_at TEXT, startup_deadline TEXT, provider_id TEXT, started_at TEXT, refused_at TEXT, ended_at TEXT,
-  version INTEGER NOT NULL DEFAULT 1, autorun INTEGER NOT NULL DEFAULT 0, hardware TEXT,
-  finish_requested_at TEXT);
-CREATE TABLE IF NOT EXISTS rentals(
-  machine TEXT PRIMARY KEY REFERENCES machines(name), usd_per_hour TEXT NOT NULL,
-  cap_usd TEXT NOT NULL, deadline TEXT NOT NULL, kept INTEGER NOT NULL DEFAULT 0,
-  billed_usd TEXT NOT NULL DEFAULT '0', billed_through TEXT);
-CREATE TABLE IF NOT EXISTS attempts(
-  seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
-  run TEXT NOT NULL REFERENCES runs(id), session TEXT NOT NULL REFERENCES sessions(id), machine TEXT NOT NULL REFERENCES machines(name),
-  number INTEGER NOT NULL, position INTEGER NOT NULL, limit_seconds INTEGER NOT NULL,
-  limit_kind TEXT NOT NULL, started_at TEXT, finished_at TEXT, outcome TEXT, cause TEXT,
-  clocks TEXT NOT NULL DEFAULT '{}', outputs TEXT NOT NULL DEFAULT '[]', exit_code INTEGER,
-  version INTEGER NOT NULL DEFAULT 1, planned_at TEXT, added INTEGER NOT NULL DEFAULT 0,
-  prepared TEXT, tally TEXT, writers TEXT NOT NULL DEFAULT '[]');
-CREATE INDEX IF NOT EXISTS runs_job ON runs(job);
-CREATE INDEX IF NOT EXISTS runs_experiment ON runs(json_extract(spec, '$.experiment'), seq);
-CREATE INDEX IF NOT EXISTS runs_pool ON runs(pool, seq);
-CREATE INDEX IF NOT EXISTS runs_rent ON runs(rent, seq);
-CREATE INDEX IF NOT EXISTS attempts_run ON attempts(run, number);
-CREATE INDEX IF NOT EXISTS attempts_session ON attempts(session);
-"""
+Fact = str | int | float | None
 
-Fact = str | int | None
-# Prototype databases from another schema version are refused, never migrated.
-_VERSION = 19
+# The schema is the packaged migrations, applied in order and recorded in this ledger.
+# PRAGMA user_version counts its rows: one pragma tells a process the file moved on.
+# A NULL floor marks an unreleased migration, which only a copy ever holds.
+_FOLDER = Path(__file__).with_name("migrations")
+_LEDGER = """CREATE TABLE migrations(
+  name TEXT PRIMARY KEY, sha256 TEXT NOT NULL, applied_at TEXT NOT NULL,
+  floor TEXT, program TEXT)"""
+# Released files from before the ledger, by user_version, and the migrations they hold.
+_ADOPTED = {17: ("baseline",), 19: ("baseline", "run_resume_and_writers")}
+
+
+class Released(Record):
+    """A migration as its release recorded it, in `migrations/released.json`."""
+
+    name: str
+    sha256: str
+    floor: str  # the oldest etude that can open a file holding this migration
+
+
+class Migration(Record):
+    """One packaged SQL file. Its stem is its name. Header lines `-- after: a, b` name the
+    migrations it must follow, and `-- breaks: reason` makes it raise the reader floor
+    even when its schema change looks additive."""
+
+    name: str
+    after: tuple[str, ...]
+    breaks: str | None
+    sql: str
+    sha256: str
+    floor: str | None  # None until a release records it
+
+
+@cache
+def released() -> tuple[Released, ...]:
+    """What every release so far recorded, oldest first."""
+    raw = json.loads((_FOLDER / "released.json").read_text())
+    return tuple(Released.model_validate(entry) for entry in raw)
+
+
+def _header(sql: str, key: str) -> str | None:
+    for line in sql.splitlines():
+        if not line.startswith("--"):
+            return None
+        if line.startswith(f"-- {key}:"):
+            return line.removeprefix(f"-- {key}:").strip()
+    return None
+
+
+@cache
+def migrations() -> tuple[Migration, ...]:
+    """Every packaged migration, dependencies first and otherwise by name.
+
+    Raises LauncherError when a released migration's file no longer matches its release.
+    """
+    floors = {r.name: r for r in released()}
+    found: dict[str, Migration] = {}
+    for entry in _FOLDER.iterdir():
+        if not entry.name.endswith(".sql"):
+            continue
+        body = entry.read_bytes()
+        sql = body.decode()
+        name = entry.name.removesuffix(".sql")
+        digest = hashlib.sha256(body).hexdigest()
+        if name in floors and floors[name].sha256 != digest:
+            raise LauncherError(f"released migration {name} was edited; add a new one instead")
+        found[name] = Migration(
+            name=name,
+            after=tuple(n.strip() for n in (_header(sql, "after") or "").split(",") if n.strip()),
+            breaks=_header(sql, "breaks"),
+            sql=sql,
+            sha256=digest,
+            floor=floors[name].floor if name in floors else None,
+        )
+    if missing := sorted(floors.keys() - found.keys()):
+        raise LauncherError(f"released migrations are missing: {', '.join(missing)}")
+    unknown = sorted({a for m in found.values() for a in m.after} - found.keys())
+    if unknown:
+        raise LauncherError(f"migrations name unknown predecessors: {', '.join(unknown)}")
+    ordered: list[Migration] = []
+    while len(ordered) < len(found):
+        done = {m.name for m in ordered}
+        ready = [m for m in found.values() if m.name not in done and set(m.after) <= done]
+        if not ready:
+            raise LauncherError(
+                f"migrations form a cycle: {', '.join(sorted(found.keys() - done))}"
+            )
+        ordered.append(min(ready, key=lambda m: m.name))
+    return tuple(ordered)
+
+
+def _statements(migration: Migration) -> Iterator[str]:
+    # executescript would commit the open transaction; run one complete statement at a time.
+    pending = ""
+    for character in migration.sql:
+        pending += character
+        if character == ";" and sqlite3.complete_statement(pending):
+            code = "\n".join(line.partition("--")[0] for line in pending.splitlines()).strip()
+            if re.match(
+                r"(?:BEGIN|COMMIT|END|ROLLBACK|SAVEPOINT|RELEASE|ATTACH|DETACH|VACUUM)\b",
+                code,
+                re.IGNORECASE,
+            ):
+                raise LauncherError(f"migration {migration.name} must stay inside its transaction")
+            yield pending
+            pending = ""
+    if any(line.strip() and not line.lstrip().startswith("--") for line in pending.splitlines()):
+        raise LauncherError(f"migration {migration.name} ends inside a statement")
+
+
+def _version(text: str) -> tuple[int, ...]:
+    """A release version's numbers, ignoring any local or development suffix."""
+    found = re.match(r"\d+(?:\.\d+)*", text)
+    if found is None:
+        raise LauncherError(f"{text!r} is not an etude version")
+    return tuple(int(part) for part in found.group().split("."))
+
+
+def _too_new(rows: Sequence[sqlite3.Row], file: str) -> str | None:
+    """Why ledger rows this etude does not know keep it from the file, or None if they are
+    all additive changes it can still read and write."""
+    if unreleased := [r["name"] for r in rows if r["floor"] is None]:
+        return f"{file} was migrated by an unreleased etude ({', '.join(unreleased)})"
+    if not rows:
+        return None
+    floor = max((r["floor"] for r in rows), key=_version)
+    if _version(floor) <= _version(version("etude-sdk")):
+        return None
+    raised = ", ".join(r["name"] for r in rows if _version(r["floor"]) == _version(floor))
+    return f"{file} needs etude >= {floor} (raised by: {raised})"
+
+
+def _schema(db: sqlite3.Connection) -> tuple[dict[str, frozenset[tuple[object, ...]]], set[str]]:
+    """Each table's columns, as a set because column order is not schema, and every index."""
+    tables = [
+        r[0]
+        for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        if not r[0].startswith("sqlite_")
+    ]
+    columns = {
+        t: frozenset(
+            tuple(row)[1:] for row in db.execute(f"SELECT * FROM pragma_table_xinfo('{t}')")
+        )
+        for t in tables
+    }
+    indexes = {r[0] for r in db.execute("SELECT sql FROM sqlite_master WHERE type='index'") if r[0]}
+    return columns, indexes
+
+
+def _reference(migrations: Sequence[Migration]) -> sqlite3.Connection:
+    """An empty database holding exactly these migrations."""
+    db = sqlite3.connect(":memory:")
+    for migration in migrations:
+        for statement in _statements(migration):
+            db.execute(statement)
+    return db
+
+
+_ADDITIVE = re.compile(r"^(CREATE TABLE|CREATE INDEX|ALTER TABLE \w+ ADD COLUMN)\b", re.IGNORECASE)
+
+
+def additive(migration: Migration, before: Sequence[Migration]) -> bool:
+    """Whether a file holding `before` stays readable by their etude once this is applied.
+
+    Proven, never declared: every statement only creates a table or index or adds a
+    column, nothing that existed changes, and every new column can be left out.
+    """
+    if migration.breaks is not None:
+        return False
+    for statement in _statements(migration):
+        code = "\n".join(line.partition("--")[0] for line in statement.splitlines()).strip()
+        code = " ".join(code.split())
+        if not _ADDITIVE.match(code):
+            return False
+        if code.upper().startswith("ALTER TABLE") and re.search(
+            r"\b(CHECK|REFERENCES|UNIQUE|PRIMARY|GENERATED)\b", code, re.IGNORECASE
+        ):
+            return False
+    db = _reference(before)
+    try:
+        old_columns, old_indexes = _schema(db)
+        for statement in _statements(migration):
+            db.execute(statement)
+        new_columns, new_indexes = _schema(db)
+        for table, columns in old_columns.items():
+            if not columns <= new_columns.get(table, frozenset()):
+                return False
+            # xinfo after cid: name, type, notnull, default, pk, hidden.
+            if any(
+                c[2] and (c[3] is None or str(c[3]).strip("() ").upper() == "NULL")
+                for c in new_columns[table] - columns
+            ):
+                return False
+        return old_indexes <= new_indexes
+    finally:
+        db.close()
+
+
+def release(at: str) -> tuple[Released, ...]:
+    """Record every unreleased migration as released at version `at`, for the release cut.
+
+    Each keeps the previous floor when it is additive and is raised to `at` otherwise.
+    """
+    recorded = released()
+    floor = max((r.floor for r in recorded), key=_version, default=at)
+    applied: list[Migration] = []
+    added: list[Released] = []
+    for migration in migrations():
+        if migration.floor is None:
+            if not additive(migration, applied):
+                floor = at
+            added.append(Released(name=migration.name, sha256=migration.sha256, floor=floor))
+        applied.append(migration)
+    return (*recorded, *added)
+
+
+def _program(path: Path) -> str | None:
+    """The controller program running this process, when it is one kept in the file's home."""
+    program = Path(sys.prefix).resolve().parent  # programs/<digest>/.venv
+    homes = path.resolve().parents
+    return (
+        str(program) if program.parent.name == "programs" and program.parents[1] in homes else None
+    )
+
+
+def _body(record: type[Record], row: sqlite3.Row) -> Record:
+    return record.model_validate_json(row["body"])
 
 
 def launcher_file(home: Path) -> Path:
-    """The launcher database under `home` for this schema version.
-
-    Each version has its own file, so a client of another version keeps its own
-    records and its live rentals beside this one; neither reads the other's.
-    """
-    return home / f"launcher-{_VERSION}.db"
+    """The released launcher file; use open_home to select a development copy."""
+    return home / "launcher.sqlite"
 
 
 def _iso(at: datetime | None) -> str | None:
@@ -210,33 +368,229 @@ def _attempt_from_row(row: sqlite3.Row) -> RunAttempt:
 
 
 class Database:
-    def __init__(self, path: Path, *, timeout: float = 30) -> None:
-        """Open local state; timeout bounds SQLite lock contention, in seconds."""
+    def __init__(self, path: Path, *, timeout: float = 30, backup: bool = True) -> None:
+        """Open local state, migrating it first; timeout bounds SQLite lock contention, in seconds.
+
+        A staging snapshot may omit a backup; its source remains the recovery file.
+        Raises LauncherError, changing nothing, for a file a newer etude migrated, a
+        migration edited after it was applied, or rows the current records reject.
+        """
         if not math.isfinite(timeout) or timeout < 0:
             raise ValueError("database timeout must be nonnegative and finite")
         self._locks: dict[str, tuple[str, Callable[[], datetime]]] = {}
+        self._path = path
+        self._timeout = timeout
+        self._backup = backup
+        self._notice: str | None = None
         path.parent.mkdir(parents=True, exist_ok=True)
         self._db = sqlite3.connect(path, isolation_level=None, timeout=timeout)
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode = WAL")
-        with self._together():
-            made = self._db.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone() is not None
-            version = int(self._db.execute("PRAGMA user_version").fetchone()[0])
-            if made and version != _VERSION:
+        self.fresh = False  # whether opening created the file's schema
+        try:
+            if self._db.execute("SELECT 1 FROM sqlite_master WHERE name='migrations'").fetchone():
+                rows = self._db.execute(
+                    "SELECT name, sha256, floor FROM migrations ORDER BY rowid"
+                ).fetchall()
+                known = {m.name: m for m in migrations()}
+                if reason := _too_new([r for r in rows if r["name"] not in known], path.name):
+                    raise LauncherError(reason)
+                for row in rows:
+                    if row["name"] in known and row["sha256"] != known[row["name"]].sha256:
+                        raise LauncherError(
+                            f"migration {row['name']} changed after it was applied to {path}"
+                        )
+                if set(known) <= {r["name"] for r in rows}:
+                    self._generation = len(rows)
+                    return
+            with self._transaction():
+                self._generation = self._migrate()
+            if self._notice is not None:
+                print(self._notice, file=sys.stderr)
+        except BaseException:
+            self._db.close()
+            raise
+
+    def _migrate(self) -> int:
+        """Apply what the file lacks and return its generation. Runs inside a write transaction,
+        so a second etude opening the file waits and then finds nothing left to do."""
+        known = {m.name: m for m in migrations()}
+        file = self._path.name
+        ledger = self._db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='migrations'"
+        ).fetchone()
+        newer: list[sqlite3.Row] = []
+        if ledger:
+            applied: tuple[str, ...] = ()
+            for row in self._db.execute(
+                "SELECT name, sha256, floor FROM migrations ORDER BY rowid"
+            ):
+                if row["name"] not in known:
+                    newer.append(row)
+                elif row["sha256"] != known[row["name"]].sha256:
+                    raise LauncherError(
+                        f"migration {row['name']} changed after it was applied to {self._path}; "
+                        f"restore the newest {file}.backup-* or move the file away"
+                    )
+                else:
+                    applied += (row["name"],)
+            if reason := _too_new(newer, file):
+                raise LauncherError(reason)
+        else:
+            made = self._db.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+            adopted = int(self._db.execute("PRAGMA user_version").fetchone()[0])
+            if made and adopted not in _ADOPTED:
                 raise LauncherError(
-                    f"{path} was written by another version of etude; move or delete it to start again"
+                    f"{self._path} was written by an unreleased etude (schema {adopted}); "
+                    "move or delete it to start again"
                 )
-            for statement in _SCHEMA.split(";"):
-                if statement.strip():
+            applied = _ADOPTED[adopted] if made else ()
+            self.fresh = not made
+        pending = [m for name, m in known.items() if name not in applied]
+        if newer:
+            # A newer etude made only additive changes: this one reads and writes what it knows.
+            if pending:
+                raise LauncherError(
+                    f"{file} has migrations from a newer etude but lacks "
+                    f"{', '.join(m.name for m in pending)}; upgrade etude"
+                )
+            return len(applied) + len(newer)
+        if ledger and not pending:
+            return len(applied)
+        backup = self._back_up() if ledger and pending and self._backup else None
+        program = _program(self._path)
+        if not ledger:
+            self._db.execute(_LEDGER)
+            for name in applied:  # adopted from a released file's user_version
+                self._ledger(known[name], program)
+        for migration in pending:
+            _check_sqlite(migration)
+            try:
+                for statement in _statements(migration):
                     self._db.execute(statement)
-            self._db.execute(f"PRAGMA user_version = {_VERSION}")
+            except sqlite3.Error as error:
+                raise LauncherError(
+                    f"launcher: migration {migration.name} failed: {error}"
+                ) from error
+            self._ledger(migration, program)
+        problems = self._invalid_records()
+        if problems:
+            raise LauncherError(
+                f"{file} cannot be migrated; these rows do not validate:\n" + "\n".join(problems)
+            )
+        generation = len(applied) + len(pending)
+        self._db.execute(f"PRAGMA user_version = {generation}")
+        if backup is not None:
+            names = ", ".join(m.name for m in pending)
+            self._notice = (
+                f"launcher: {file}: applied {names} (backup {backup.name}){self._lockout(applied)}"
+            )
+        return generation
+
+    def _lockout(self, applied: Sequence[str]) -> str:
+        """The clause naming who can no longer open the file, when this migration raised its floor."""
+        floors = [m.floor for m in migrations() if m.floor is not None]
+        before = [m.floor for m in migrations() if m.name in applied and m.floor is not None]
+        if not floors:
+            return ""
+        now = max(floors, key=_version)
+        if before and _version(now) <= _version(max(before, key=_version)):
+            return ""
+        return f"; etude < {now} can no longer open it"
+
+    def _ledger(self, migration: Migration, program: str | None) -> None:
+        self._db.execute(
+            "INSERT INTO migrations(name, sha256, applied_at, floor, program) VALUES (?,?,?,?,?)",
+            (
+                migration.name,
+                migration.sha256,
+                datetime.now(UTC).isoformat(),
+                migration.floor,
+                program,
+            ),
+        )
+
+    def _back_up(self) -> Path:
+        """Copy the file as it is before migrating, keeping the two newest copies.
+
+        A second connection reads it: this one holds the write lock, and WAL lets
+        a reader see the last committed state.
+        """
+        target = self._path.with_name(
+            f"{self._path.name}.backup-{datetime.now(UTC):%Y%m%dT%H%M%S%fZ}"
+        )
+        source = sqlite3.connect(self._path, timeout=self._timeout)
+        copy = sqlite3.connect(target)
+        try:
+            source.backup(copy)
+        finally:
+            copy.close()
+            source.close()
+        target.chmod(0o600)
+        backups = sorted(
+            (p for p in self._path.parent.glob(f"{self._path.name}.backup-*")),
+            key=lambda p: p.name,
+        )
+        for old in backups[:-2]:
+            old.unlink()
+        return target
+
+    def _invalid_records(self) -> list[str]:
+        """Every row that the current records reject, so a migration can be refused whole."""
+        rows: dict[str, tuple[str, Callable[[sqlite3.Row], object]]] = {
+            "pools": ("SELECT * FROM pools", lambda row: Pool.model_validate(dict(row))),
+            "machines": (_MACHINES, _machine_from_row),
+            "runs": (_RUNS, _run_from_row),
+            "sessions": (_SESSIONS, _session_from_row),
+            "rentals": (_RENTALS, lambda row: Rental.model_validate(dict(row))),
+            "attempts": ("SELECT * FROM attempts", _attempt_from_row),
+            "providers": (
+                "SELECT * FROM providers",
+                lambda row: Provider.model_validate(dict(row)),
+            ),
+            "storages": ("SELECT * FROM storages", lambda row: Storage.model_validate(dict(row))),
+            "cohorts": ("SELECT * FROM cohorts", lambda row: Cohort.model_validate(dict(row))),
+        }
+        bodies: dict[str, type[Record]] = {
+            "launches": Launch,
+            "diagnostics": Diagnostic,
+            "log_streams": LogStream,
+            "transfers": Transfer,
+            "ondemands": OnDemand,
+        }
+        for table, record in bodies.items():
+            rows[table] = (f"SELECT * FROM {table}", partial(_body, record))
+        problems: list[str] = []
+        for table, (query, read) in rows.items():
+            for row in self._db.execute(query):
+                try:
+                    read(row)
+                except ValueError as error:
+                    problems.append(f"  {table}: invalid record ({type(error).__name__})")
+        return problems
+
+    def check_schema(self) -> None:
+        """Raise SchemaAdvanced if another etude raised the file's floor past this one since it
+        opened it. Additive migrations by a newer etude are taken in stride."""
+        generation = int(self._db.execute("PRAGMA user_version").fetchone()[0])
+        if generation == self._generation:
+            return
+        rows = self._db.execute(
+            "SELECT name, floor, program FROM migrations WHERE rowid > ? ORDER BY rowid",
+            (self._generation,),
+        ).fetchall()
+        known = {m.name for m in migrations()}
+        if _too_new([r for r in rows if r["name"] not in known], self._path.name):
+            raise SchemaAdvanced(rows[-1]["program"] if rows else None)
+        self._generation = generation
 
     def retain_transfer_json(self, raw: str) -> None:
         self.retain_transfer(Transfer.model_validate_json(raw))
 
     def retain_transfer(self, event: Transfer) -> None:
-        self._db.execute(
-            "INSERT OR IGNORE INTO transfers VALUES (?, ?)", (event.id, event.model_dump_json())
+        self._write(
+            "INSERT OR IGNORE INTO transfers(id, body) VALUES (?, ?)",
+            (event.id, event.model_dump_json()),
         )
 
     def transfers(self) -> tuple[Transfer, ...]:
@@ -282,7 +636,7 @@ class Database:
                         )
             self.save_launch(launch)
             self._db.executemany(
-                "INSERT INTO launch_runs VALUES (?, ?)",
+                "INSERT INTO launch_runs(launch, run) VALUES (?, ?)",
                 ((launch.id, r.run) for r in launch.requests),
             )
 
@@ -304,8 +658,9 @@ class Database:
             return launch
 
     def save_launch(self, launch: Launch) -> None:
-        self._db.execute(
-            "INSERT OR REPLACE INTO launches VALUES (?, ?)", (launch.id, launch.model_dump_json())
+        self._write(
+            "INSERT OR REPLACE INTO launches(id, body) VALUES (?, ?)",
+            (launch.id, launch.model_dump_json()),
         )
 
     def launches(self, run: str) -> tuple[Launch, ...]:
@@ -319,8 +674,8 @@ class Database:
         )
 
     def link_launch(self, launch: str, session: str, *, acquired: bool = False) -> None:
-        self._db.execute(
-            "INSERT OR IGNORE INTO launch_sessions VALUES (?, ?, ?)",
+        self._write(
+            "INSERT OR IGNORE INTO launch_sessions(launch, session, acquired) VALUES (?, ?, ?)",
             (launch, session, int(acquired)),
         )
 
@@ -334,8 +689,8 @@ class Database:
         )
 
     def retain_diagnostic(self, diagnostic: Diagnostic) -> None:
-        self._db.execute(
-            "INSERT OR IGNORE INTO diagnostics VALUES (?, ?)",
+        self._write(
+            "INSERT OR IGNORE INTO diagnostics(id, body) VALUES (?, ?)",
             (diagnostic.id, diagnostic.model_dump_json()),
         )
 
@@ -346,8 +701,8 @@ class Database:
         )
 
     def retain_log(self, stream: LogStream) -> None:
-        self._db.execute(
-            "INSERT OR REPLACE INTO log_streams VALUES (?, ?)",
+        self._write(
+            "INSERT OR REPLACE INTO log_streams(id, body) VALUES (?, ?)",
             (stream.id, stream.model_dump_json()),
         )
 
@@ -359,8 +714,7 @@ class Database:
         self._db.close()
 
     @contextmanager
-    def _together(self) -> Iterator[None]:
-        """Several statements that land together or not at all."""
+    def _transaction(self) -> Iterator[None]:
         self._db.execute("BEGIN IMMEDIATE")
         try:
             yield
@@ -368,6 +722,24 @@ class Database:
             self._db.execute("ROLLBACK")
             raise
         self._db.execute("COMMIT")
+
+    @contextmanager
+    def _together(self) -> Iterator[None]:
+        """Several statements that land together or not at all, on the schema this process knows.
+
+        Inside an open transaction it adds nothing: the outer one already checked.
+        """
+        if self._db.in_transaction:
+            yield
+            return
+        with self._transaction():
+            self.check_schema()
+            yield
+
+    def _write(self, sql: str, parameters: Sequence[Fact] = ()) -> sqlite3.Cursor:
+        """One write statement, refused once the schema has moved on."""
+        with self._together():
+            return self._db.execute(sql, parameters)
 
     @contextmanager
     def lock(self, supply: str, clock: Callable[[], datetime]) -> Iterator[bool]:
@@ -381,8 +753,8 @@ class Database:
         now = clock()
         with self._together():
             acquired = (
-                self._db.execute(
-                    """INSERT INTO locks VALUES (?,?,?) ON CONFLICT(supply) DO UPDATE
+                self._write(
+                    """INSERT INTO locks(supply, owner, expires_at) VALUES (?,?,?) ON CONFLICT(supply) DO UPDATE
                 SET owner=excluded.owner, expires_at=excluded.expires_at
                 WHERE locks.expires_at <= ?""",
                     (supply, owner, (now + timedelta(minutes=5)).isoformat(), now.isoformat()),
@@ -397,7 +769,7 @@ class Database:
             yield True
         finally:
             self._locks.pop(supply)
-            self._db.execute("DELETE FROM locks WHERE supply=? AND owner=?", (supply, owner))
+            self._write("DELETE FROM locks WHERE supply=? AND owner=?", (supply, owner))
 
     def check_lock(self, supply: str) -> None:
         """Fence stale processes before effects and inside placement transactions."""
@@ -406,7 +778,7 @@ class Database:
             raise Stale(f"{supply!r} has no placement lock")
         owner, clock = held
         now = clock()
-        changed = self._db.execute(
+        changed = self._write(
             "UPDATE locks SET expires_at=? WHERE supply=? AND owner=? AND expires_at>?",
             ((now + timedelta(minutes=5)).isoformat(), supply, owner, now.isoformat()),
         )
@@ -415,7 +787,7 @@ class Database:
 
     def _change(self, table: str, id: str | str | str, version: int, **facts: Fact) -> None:
         sets = "".join(f"{name} = ?, " for name in facts)
-        done = self._db.execute(
+        done = self._write(
             f"UPDATE {table} SET {sets}version = version + 1 WHERE id = ? AND version = ?",
             (*facts.values(), id, version),
         )
@@ -427,8 +799,8 @@ class Database:
     def set_provider(self, provider: Provider) -> None:
         """Record a provider's settings, replacing any it had. Pools already added keep their storage."""
         self.storage(provider.storage)  # raises if no such storage
-        self._db.execute(
-            "INSERT OR REPLACE INTO providers VALUES (?,?,?,?)",
+        self._write(
+            "INSERT OR REPLACE INTO providers(name, kind, registry, storage) VALUES (?,?,?,?)",
             tuple(provider.model_dump().values()),
         )
 
@@ -446,8 +818,8 @@ class Database:
 
     def add_storage(self, storage: Storage) -> None:
         """Record a storage. Adding the same one again changes nothing; it never changes."""
-        self._db.execute(
-            "INSERT OR IGNORE INTO storages VALUES (?,?,?,?,?)",
+        self._write(
+            "INSERT OR IGNORE INTO storages(name, bucket, prefix, provider, region) VALUES (?,?,?,?,?)",
             tuple(storage.model_dump().values()),
         )
         if self.storage(storage.name) != storage:
@@ -475,8 +847,8 @@ class Database:
         with self._together():
             if not self._db.execute("SELECT 1 FROM pools WHERE name=?", (pool.name,)).fetchone():
                 self._unnamed(pool.name)
-                self._db.execute(
-                    "INSERT INTO pools VALUES (?,?,?,?,?,?)",
+                self._write(
+                    "INSERT INTO pools(name, off, startup_seconds, delivery_seconds, log_seconds, slots) VALUES (?,?,?,?,?,?)",
                     (
                         pool.name,
                         int(pool.off),
@@ -507,8 +879,8 @@ class Database:
                 "SELECT 1 FROM ondemands WHERE name=?", (ondemand.name,)
             ).fetchone():
                 self._unnamed(ondemand.name)
-                self._db.execute(
-                    "INSERT INTO ondemands VALUES (?,?)",
+                self._write(
+                    "INSERT INTO ondemands(name, body) VALUES (?,?)",
                     (ondemand.name, ondemand.model_dump_json()),
                 )
         if self.ondemand(ondemand.name) != ondemand:
@@ -517,7 +889,7 @@ class Database:
     def change_ondemand(self, ondemand: OnDemand) -> None:
         """Replace an on-demand's settings; machines it already rented keep their windows."""
         self.ondemand(ondemand.name)  # raises if no such on-demand
-        self._db.execute(
+        self._write(
             "UPDATE ondemands SET body=? WHERE name=?", (ondemand.model_dump_json(), ondemand.name)
         )
 
@@ -551,17 +923,17 @@ class Database:
                 " WHERE name='controller'"
             ).fetchone():
                 raise LauncherError("cannot rename local pool: 'controller' is already named")
-            self._db.execute("UPDATE pools SET name='controller' WHERE name='local'")
+            self._write("UPDATE pools SET name='controller' WHERE name='local'")
             for table in ("machines", "runs"):
-                self._db.execute(f"UPDATE {table} SET pool='controller' WHERE pool='local'")
-            self._db.execute(
+                self._write(f"UPDATE {table} SET pool='controller' WHERE pool='local'")
+            self._write(
                 "UPDATE settings SET value='controller' WHERE name='default_pool' AND value='local'"
             )
 
     def set_pool_startup(self, name: str, seconds: float | None) -> None:
         pool = self.pool(name)
         checked = Pool.model_validate({**pool.model_dump(), "startup_seconds": seconds})
-        self._db.execute(
+        self._write(
             "UPDATE pools SET startup_seconds=? WHERE name=?", (checked.startup_seconds, name)
         )
 
@@ -577,11 +949,11 @@ class Database:
             if target.rent is not None:
                 self.ondemand(target.rent)
             for name, value in (("default_pool", target.pool), ("default_rent", target.rent)):
-                self._db.execute("UPDATE settings SET value=? WHERE name=?", (value or "", name))
+                self._write("UPDATE settings SET value=? WHERE name=?", (value or "", name))
 
     def turn_pool(self, name: str, *, off: bool) -> None:
         self.pool(name)  # raises if no such pool
-        self._db.execute("UPDATE pools SET off = ? WHERE name = ?", (int(off), name))
+        self._write("UPDATE pools SET off = ? WHERE name = ?", (int(off), name))
 
     def add_machine(self, machine: Machine) -> None:
         """Record a machine in its pool or on-demand. Adding the same one again changes nothing."""
@@ -589,7 +961,7 @@ class Database:
             self.pool(machine.pool)  # raises if no such pool
         if machine.ondemand is not None:
             self.ondemand(machine.ondemand)
-        self._db.execute(
+        self._write(
             "INSERT OR IGNORE INTO machines(name, kind, pool, ondemand, cost_usd, expires_at,"
             " provider, address, storage, image) VALUES (?,?,?,?,?,?,?,?,?,?)",
             (
@@ -636,8 +1008,8 @@ class Database:
                 self.check_lock(supply)
             if cohort is not None:
                 try:
-                    self._db.execute(
-                        "INSERT INTO cohorts VALUES (?, ?, ?, ?)",
+                    self._write(
+                        "INSERT INTO cohorts(name, parallel, max_usd, created_at) VALUES (?, ?, ?, ?)",
                         (
                             cohort.name,
                             cohort.parallel,
@@ -677,7 +1049,7 @@ class Database:
                         smoke=run.launch.smoke.model_dump_json(),
                     )
                     continue
-                self._db.execute(
+                self._write(
                     """INSERT INTO runs(id, job, spec, seed, pool, rent, cohort,
                        created_at, autorun, queued, params, source, smoke)
                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
@@ -798,7 +1170,7 @@ class Database:
                 if not manual and len(live) >= limit:
                     raise Stale(f"on-demand {session.supply!r} is at its machine limit")
                 self.add_machine(rented)
-            self._db.execute(
+            self._write(
                 """INSERT INTO sessions(id,machine,planned_at,autorun) VALUES (?,?,?,?)""",
                 (
                     session.id,
@@ -809,8 +1181,8 @@ class Database:
             )
             if rental is not None:
                 r = rental
-                self._db.execute(
-                    "INSERT INTO rentals VALUES (?,?,?,?,?,?,?)",
+                self._write(
+                    "INSERT INTO rentals(machine, usd_per_hour, cap_usd, deadline, kept, billed_usd, billed_through) VALUES (?,?,?,?,?,?,?)",
                     (
                         r.machine,
                         str(r.usd_per_hour),
@@ -850,7 +1222,7 @@ class Database:
                 raise Stale(f"run {a.run} already has an attempt in hand")
             if held >= slots:
                 raise Stale(f"machine {a.machine!r} has no free slot")
-            self._db.execute(
+            self._write(
                 """INSERT INTO attempts(id, run, session, machine, number, position, limit_seconds,
                    limit_kind, planned_at, added) VALUES (?,?,?,?,?,?,?,?,?,?)""",
                 (
@@ -899,14 +1271,14 @@ class Database:
     def record_price(self, session: Session, price: Decimal) -> None:
         with self._together():
             self._change("sessions", session.id, session.version)
-            self._db.execute(
+            self._write(
                 "UPDATE rentals SET usd_per_hour=? WHERE machine=?", (str(price), session.machine)
             )
 
     def record_bill(self, session: Session, usd: Decimal, through: datetime) -> None:
         with self._together():
             self._change("sessions", session.id, session.version)
-            self._db.execute(
+            self._write(
                 "UPDATE rentals SET billed_usd=?,billed_through=? WHERE machine=?",
                 (str(usd), through.isoformat(), session.machine),
             )
@@ -957,11 +1329,13 @@ class Database:
         self._change("sessions", session.id, session.version, finish_requested_at=at.isoformat())
 
     def confirm_ended(self, session: Session, at: datetime) -> None:
-        self._change("sessions", session.id, session.version, ended_at=at.isoformat())
-        self._db.execute(  # a rented machine is gone with it; one you added remains
-            "UPDATE machines SET deleted_at = ? WHERE name = ? AND kind = 'rented'",
-            (at.isoformat(), session.machine),
-        )
+        with self._together():
+            self._change("sessions", session.id, session.version, ended_at=at.isoformat())
+            # A rented machine is gone with its session; one you added remains.
+            self._write(
+                "UPDATE machines SET deleted_at = ? WHERE name = ? AND kind = 'rented'",
+                (at.isoformat(), session.machine),
+            )
 
     def session(self, id: str) -> Session:
         row = self._db.execute(f"{_SESSIONS} WHERE w.id = ?", (id,)).fetchone()
@@ -1070,3 +1444,231 @@ class Database:
             f"SELECT * FROM attempts WHERE {column} = ? ORDER BY {order}", (value,)
         )
         return tuple(_attempt_from_row(row) for row in rows)
+
+
+def _check_sqlite(migration: Migration) -> None:
+    if re.search(
+        r"\bDROP\s+COLUMN\b", migration.sql, re.IGNORECASE
+    ) and sqlite3.sqlite_version_info < (3, 35):
+        raise LauncherError(
+            f"launcher: migration {migration.name} needs SQLite >= 3.35; "
+            f"this Python has {sqlite3.sqlite_version}"
+        )
+
+
+def _snapshot(source: Path, target: Path, timeout: float) -> None:
+    """Read a consistent WAL snapshot without modifying the source's records."""
+    reader = sqlite3.connect(source.as_uri() + "?mode=ro", uri=True, timeout=timeout)
+    writer = sqlite3.connect(target)
+    try:
+        reader.backup(writer)
+    finally:
+        writer.close()
+        reader.close()
+
+
+def _predecessor(home: Path) -> Path | None:
+    for name, expected in (("launcher-19.db", 19), ("launcher-17.db", 17), ("launcher.db", 17)):
+        path = home / name
+        if not path.exists():
+            continue
+        reader = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+        try:
+            schema = reader.execute("PRAGMA user_version").fetchone()[0]
+        finally:
+            reader.close()
+        if schema == expected:
+            return path
+        if name != "launcher.db":
+            raise LauncherError(
+                f"launcher: {name} holds unexpected schema {schema}; open it with its matching etude"
+            )
+    return None
+
+
+def _check_heartbeat(home: Path, source: Path) -> None:
+    try:
+        at = datetime.fromisoformat((home / "controller-heartbeat").read_text().strip())
+    except FileNotFoundError:
+        return
+    except ValueError as error:
+        raise LauncherError(
+            "launcher: cannot read controller heartbeat; stop the older loop and remove it"
+        ) from error
+    age = (datetime.now(UTC) - at).total_seconds()
+    if age < 30:
+        raise LauncherError(
+            f"launcher: a controller loop of an older etude is running on {source.name} "
+            f"(last pass {max(0, int(age))}s ago); stop it, then run this again"
+        )
+
+
+def _older_files(home: Path, source: Path | None) -> str:
+    versions = {
+        1: "0.1.1",
+        2: "0.1.2",
+        8: "0.2.0",
+        10: "0.2.6",
+        11: "0.2.14",
+        13: "0.2.15",
+        14: "0.2.16",
+        15: "0.3.0",
+        17: "0.3.2",
+        19: "0.4.0",
+    }
+    messages: list[str] = []
+    for path in sorted(home.glob("launcher*.db")):
+        if path == source:
+            messages.append(f"{path.name} is left as it was and is no longer read")
+            continue
+        reader = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+        try:
+            schema = reader.execute("PRAGMA user_version").fetchone()[0]
+        except sqlite3.DatabaseError:
+            messages.append(f"{path.name} is not read (cannot inspect its schema)")
+            continue
+        finally:
+            reader.close()
+        matching = versions.get(schema)
+        suffix = f", use etude {matching} for it" if matching else ""
+        messages.append(f"{path.name} (schema {schema}) is not read{suffix}")
+    return "; ".join(messages)
+
+
+def _working_file(home: Path, unreleased: Sequence[Migration]) -> Path:
+    real = launcher_file(home)
+    return home / "copies" / _unreleased_digest(unreleased) / real.name if unreleased else real
+
+
+def has_launcher(home: Path) -> bool:
+    """Whether this build has launcher evidence to read, without creating a home."""
+    unreleased = [m for m in migrations() if m.floor is None]
+    return (
+        _working_file(home, unreleased).exists()
+        or launcher_file(home).exists()
+        or _predecessor(home) is not None
+    )
+
+
+def open_home(home: Path, *, timeout: float = 30) -> Database:
+    """Open the home's launcher, taking over a released predecessor or isolating a branch.
+
+    Creation is serialized across processes. A staged snapshot is fully migrated
+    before publication, so a failed takeover leaves no half-created launcher.
+    """
+    if not math.isfinite(timeout) or timeout < 0:
+        raise ValueError("database timeout must be nonnegative and finite")
+    home = home.resolve()
+    home.mkdir(parents=True, exist_ok=True)
+    real = launcher_file(home)
+    unreleased = [m for m in migrations() if m.floor is None]
+    target = _working_file(home, unreleased)
+    if target.exists():
+        return Database(target, timeout=timeout)
+    with (home / ".launcher-open").open("a") as lock:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise LauncherError(
+                        "launcher: another process is opening this home; run this again"
+                    ) from None
+                time.sleep(min(0.05, left))
+        if target.exists():
+            return Database(target, timeout=timeout)
+        source = real if real.exists() else _predecessor(home)
+        if source is not None and not unreleased:
+            _check_heartbeat(home, source)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".launcher-", dir=target.parent) as temporary:
+            staging = Path(temporary) / real.name
+            if source is not None:
+                _snapshot(source, staging, timeout)
+            store = Database(staging, timeout=timeout, backup=False)
+            fresh = store.fresh
+            runs = store._db.execute("SELECT count(*) FROM runs").fetchone()[0]
+            sessions = store._db.execute(
+                "SELECT count(*) FROM sessions WHERE ended_at IS NULL"
+            ).fetchone()[0]
+            applied = tuple(
+                r[0] for r in store._db.execute("SELECT name FROM migrations ORDER BY rowid")
+            )
+            store.close()  # checkpoint WAL before publishing the one file
+            staging.chmod(0o600)
+            staging.replace(target)
+        if unreleased:
+            names = ", ".join(m.name for m in unreleased)
+            print(
+                f"launcher: launcher.sqlite is behind this unreleased etude ({names}); using copy {target.parent}/. Runs and rentals made here are not in launcher.sqlite",
+                file=sys.stderr,
+            )
+        elif source is not None:
+            previous = _ADOPTED[19 if source.name == "launcher-19.db" else 17]
+            missing = ", ".join(n for n in applied if n not in previous)
+            suffix = f"; applied {missing}" if missing else ""
+            print(
+                f"launcher: took over {source.name} as launcher.sqlite ({runs} runs, {sessions} open sessions){suffix}",
+                file=sys.stderr,
+            )
+        if not unreleased and (other := _older_files(home, source)):
+            print("launcher: " + other, file=sys.stderr)
+        result = Database(target, timeout=timeout)
+        result.fresh = fresh
+        return result
+
+
+class Copy(Record):
+    """A copy an unreleased etude works on, as seen from outside it."""
+
+    path: str
+    unreleased: tuple[str, ...]  # the migrations that sent its etude to a copy
+    rentals: int  # paid windows not yet ended
+    usd_per_hour: Decimal
+    ends: datetime  # the latest of their deadlines
+
+
+def _unreleased_digest(unreleased: Sequence[Migration]) -> str:
+    joined = "".join(f"{m.name}:{m.sha256}\n" for m in unreleased)
+    return hashlib.sha256(joined.encode()).hexdigest()[:12]
+
+
+def copies(home: Path, now: datetime) -> tuple[Copy, ...]:
+    """Other copies under `home` holding paid windows that have not ended, read without changing
+    them. The copy this build works on is left out: its runs are already in view."""
+    unreleased = [m for m in migrations() if m.floor is None]
+    own = _unreleased_digest(unreleased) if unreleased else None
+    found: list[Copy] = []
+    for path in sorted((home / "copies").glob("*/launcher.sqlite")):
+        if path.parent.name == own:
+            continue
+        db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+        try:
+            names = tuple(
+                r[0] for r in db.execute("SELECT name FROM migrations WHERE floor IS NULL")
+            )
+            live = [
+                (Decimal(rate), datetime.fromisoformat(deadline))
+                for rate, deadline in db.execute(
+                    """SELECT r.usd_per_hour, r.deadline FROM rentals r
+                    JOIN machines m ON m.name = r.machine
+                    WHERE m.deleted_at IS NULL"""
+                )
+            ]
+        finally:
+            db.close()
+        live = [(rate, deadline) for rate, deadline in live if deadline > now]
+        if live:
+            found.append(
+                Copy(
+                    path=str(path.parent),
+                    unreleased=names,
+                    rentals=len(live),
+                    usd_per_hour=sum((rate for rate, _ in live), Decimal(0)),
+                    ends=max(deadline for _, deadline in live),
+                )
+            )
+    return tuple(found)

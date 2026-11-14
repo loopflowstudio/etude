@@ -29,7 +29,7 @@ from pathlib import Path
 
 from etude.errors import LauncherError
 from etude.launch.controller import PythonClient, selected
-from etude.launch.database import Database, launcher_file
+from etude.launch.database import open_home
 from etude.launch.executor import Execution, Executor, local
 from etude.launch.machines import Machines, OwnedMachine, Safeguards
 from etude.launch.providers.lium.api import LiumAPI
@@ -61,8 +61,7 @@ from etude.spec import Job, RunRequest, expand_runs
 
 @cache
 def _open(home: Path) -> Scheduler:
-    fresh = not launcher_file(home).exists()
-    store = Database(launcher_file(home))
+    store = open_home(home)
     here = local(home / "sessions")
     owner = threading.get_ident()
 
@@ -135,7 +134,7 @@ def _open(home: Path) -> Scheduler:
         store,
         {"local": lambda machine: here, "ssh": ssh, "runpod": rented, "vast": rented, "lium": lium},
     )
-    if fresh:  # this computer is offered once; `etude pool off local` withdraws it
+    if store.fresh:  # this computer is offered once; `etude pool off local` withdraws it
         scheduler.add_pool(Pool(name="local"))
         store.add_machine(Machine(name="local", pool="local", kind="local"))
     if os.environ.get("ETUDE_CONTROLLER_LOCAL"):

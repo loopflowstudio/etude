@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import zipfile
+from itertools import chain
 from pathlib import Path
 
 FILES = {
@@ -36,7 +37,12 @@ def program_archive(*, guardian: bool = False) -> bytes:
     """Stable ZIP bytes, including when an installed client forwards itself."""
     out = io.BytesIO()
     root = Path(__file__).resolve().parents[2]
-    paths = (root / name for name in FILES) if guardian else root.rglob("*.py")
+    migrations = root / "launch" / "migrations"
+    paths = (
+        (root / name for name in FILES)
+        if guardian
+        else chain(root.rglob("*.py"), migrations.glob("*.sql"), (migrations / "released.json",))
+    )
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
         for path in sorted(paths):
             _write(archive, "etude/" + path.relative_to(root).as_posix(), path.read_bytes())

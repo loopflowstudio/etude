@@ -103,7 +103,8 @@ uv add 'etude-sdk[s3]'             # with S3 or R2 storage
 - [Tracking](docs/tracking.md): rows, row tables, storage, reading runs back, reports.
 - [Evaluation](docs/evaluation.md): players (checkpoints and code) playing each other in parallel, benchmarks and round robins, queried with DuckDB.
 - [The launcher](docs/launcher.md): typed jobs, pools, SSH hosts, rented
-  machines, cohorts, limits and recovery.
+  machines, cohorts, limits, recovery and
+  [upgrading with runs active](docs/launcher.md#upgrading-etude).
 
 ## Develop
 

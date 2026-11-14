@@ -39,7 +39,7 @@ from etude.errors import EtudeError, LauncherError
 from etude.eval.records import CheckpointPlayer, Line, Match, digest, folder_name
 from etude.eval.tournament import played
 from etude.launch import client
-from etude.launch.database import Database, launcher_file
+from etude.launch.database import has_launcher, open_home
 from etude.launch.scheduler import Scheduler
 from etude.launch.source import home
 from etude.records import Digest, Record
@@ -210,12 +210,11 @@ def _closed_without_success(runs: Sequence[str]) -> set[str]:
     launcher's database is read as it stands: no provider or controller is
     asked, so a loss this computer's launcher has not seen yet is not known.
     """
-    database = launcher_file(home())
-    if not runs or not database.exists():
+    if not runs or not has_launcher(home()):
         return set()
     # Its own connection, for this thread: a served page is built on whichever thread asks,
     # and with no services, since a read reaches no machine.
-    store = Database(database)
+    store = open_home(home())
     try:
         launcher = Scheduler(store, {})
         lost = set()
