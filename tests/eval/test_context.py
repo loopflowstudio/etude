@@ -27,7 +27,7 @@ def test_evaluation_stop_resume_and_refused_attempt_preserve_results(
             Seating(
                 name="pair",
                 players=(Code(name="a"), Code(name="b")),
-                config=({"deal": 0}, {"deal": 1}),
+                configs=({"deal": 0}, {"deal": 1}),
                 games=1,
             ),
         ),
@@ -80,7 +80,7 @@ def test_a_tournaments_rollups_are_stored_once_and_checked_on_resume(tmp_path: P
         name="totals",
         environment=environment("duel"),
         seatings=(
-            Seating(name="pair", players=(Code(name="a"), Code(name="b")), config=({},), games=1),
+            Seating(name="pair", players=(Code(name="a"), Code(name="b")), configs=({},), games=1),
         ),
         rollups=(Rollup(name="totals", table="scores", by=("player",), sums={"score": "score"}),),
     )
@@ -123,8 +123,8 @@ def test_author_match_config_reaches_play_and_keeps_its_historical_key(
     old = Match.model_validate({"players": players, "conditions": {"deal": 7}, "games": 1})
     assert typed.key == old.key and typed.seed == old.seed
     assert typed.model_dump_json() == old.model_dump_json()
-    seating = Seating(name="pair", players=players, config=(Deal(deal=7), Deal(deal=9)), games=1)
-    assert isinstance(seating.config[0], Deal)
+    seating = Seating(name="pair", players=players, configs=(Deal(deal=7), Deal(deal=9)), games=1)
+    assert isinstance(seating.configs[0], Deal)
     restored = Seating.model_validate_json(seating.model_dump_json())
     assert seating.definition == restored.definition
     assert restored.matches()[0].key == old.key

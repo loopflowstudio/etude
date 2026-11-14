@@ -54,7 +54,7 @@ OUTSIDE = CheckpointPlayer(
 
 
 def versus(name, first, second):
-    return Seating(name=name, players=(first, second), config=DEALS, games=2, tags=("anchor",))
+    return Seating(name=name, players=(first, second), configs=DEALS, games=2, tags=("anchor",))
 
 
 def eval(state):
@@ -66,7 +66,7 @@ def eval(state):
         versus("outside vs weak", OUTSIDE, WEAK),
     ))
     corrupt = Benchmark(name="corrupt", environment=DUEL, seatings=(
-        Seating(name="deal 1", players=(DIRECT, WEAK), config=({"deal": 1},), games=3),
+        Seating(name="deal 1", players=(DIRECT, WEAK), configs=({"deal": 1},), games=3),
     ))
     return [
         evaluation(ladder, play=play, checkpoints=rated, max_hours=0.1),
@@ -257,7 +257,7 @@ WEAK = Code(name="weak", source=[__file__], config={"strength": 0})
 
 def eval(state):
     rated = [each for run in state.runs for each in run.checkpoints]
-    versus = Seating(name="vs weak", players=(DIRECT, WEAK), config=({"deal": 0},), games=2)
+    versus = Seating(name="vs weak", players=(DIRECT, WEAK), configs=({"deal": 0},), games=2)
     ladder = Benchmark(name="ladder", environment=environment("duel"), seatings=(versus,))
     return [evaluation(ladder, play=play, checkpoints=rated, max_hours=0.1)]
 """
@@ -359,7 +359,7 @@ def test_mixed_execution_fills_requested_games_and_replays_count_once(
         seating = Seating(
             name="vs heuristic",
             players=(Inference(source=[file], config={"search": 0}), HEURISTIC),
-            config=({"deal": 0}, {"deal": 1}),
+            configs=({"deal": 0}, {"deal": 1}),
             games=2,
         )
         benchmark = Benchmark(name="mixed", environment=DUEL, seatings=(seating,))
@@ -916,7 +916,7 @@ WEAK = Code(name="weak", source=[__file__], config={"strength": 0})
 def eval(state):
     held = [each for run in state.runs for each in run.checkpoints]
     ladder = Benchmark(name="ladder", environment=DUEL, seatings=(
-        Seating(name="vs weak", players=(DIRECT, WEAK), config=({"deal": 0},), games=2),
+        Seating(name="vs weak", players=(DIRECT, WEAK), configs=({"deal": 0},), games=2),
     ))
     return evaluation(ladder, play=play, checkpoints=held, max_hours=0.1)
 
@@ -973,7 +973,7 @@ def ladder(name, device):
     duel = environment("duel", config={"world": "w6", "setup": {"device": device}})
     direct = Inference(config={"search": 0, "setup": {"device": device}})
     weak = Code(name="weak", config={"strength": 0, "setup": {"device": device}})
-    seating = Seating(name="vs weak", players=(direct, weak), config=({"deal": 0},), games=2)
+    seating = Seating(name="vs weak", players=(direct, weak), configs=({"deal": 0},), games=2)
     return Benchmark(name=name, environment=duel, seatings=(seating,))
 
 
@@ -1053,7 +1053,7 @@ def test_fixed_pairs_are_drawn_once_where_their_first_seat_stood(
                 outside(f"large-{n}", {"updates": n}, "large", strength=9),
                 outside(f"small-{n}", {"updates": n // 2}, "small"),
             ),
-            config=({"deal": 0},),
+            configs=({"deal": 0},),
             games=2,
         )
         for n in (100, 200)

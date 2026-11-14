@@ -9,8 +9,6 @@ from __future__ import annotations
 import random
 from collections.abc import Sequence
 from dataclasses import dataclass
-from pathlib import Path
-from urllib.parse import unquote, urlparse
 
 import pyspiel
 import torch
@@ -48,11 +46,11 @@ class Counts(BaseModel):
 
 
 class Deal(BaseModel):
-    seed: int
+    deal: int
 
 
 class ArenaConfig(BaseModel):
-    deals: tuple[Deal, ...] = (Deal(seed=101), Deal(seed=102))
+    deals: tuple[Deal, ...] = (Deal(deal=101), Deal(deal=102))
     games: int = Field(default=2, ge=1)
 
 
@@ -159,13 +157,13 @@ def arena(config: ArenaConfig) -> Benchmark:
             Seating(
                 name="self-play",
                 players=(Inference(), Inference()),
-                config=config.deals,
+                configs=config.deals,
                 games=config.games,
             ),
             Seating(
                 name="random teammate",
                 players=(Inference(), Code(name="random")),
-                config=config.deals,
+                configs=config.deals,
                 games=config.games,
             ),
         ),
@@ -179,7 +177,7 @@ def play(match: Match[Deal]) -> Tables:
     for player in match.players:
         if isinstance(player, CheckpointPlayer):
             policy = _policy(game)
-            folder = Path(unquote(urlparse(player.checkpoint.artifact.uri).path))
+            folder = player.checkpoint.path
             policy.load_state_dict(
                 torch.load(folder / "policy.pt", map_location="cpu", weights_only=True)
             )
@@ -190,14 +188,14 @@ def play(match: Match[Deal]) -> Tables:
     rows: list[dict[str, bool | int | float | str | None]] = []
     with torch.no_grad():
         for game_index in range(match.games):
-            episode = _episode(game, policies, seed=match.config.seed + game_index)
+            episode = _episode(game, policies, seed=match.config.deal + game_index)
             rows.append(
                 {
                     "game": game_index,
                     "group": "all",
                     "score": episode.score,
                     "transitions": episode.transitions,
-                    "deal": match.config.seed,
+                    "deal": match.config.deal,
                 }
             )
     return {"teams": rows}

@@ -112,13 +112,12 @@ class CountedSSH(SSH):
 TRAIN = """
 import os
 from pathlib import Path
-from urllib.parse import urlparse
 from etude.train.records import Step
 from etude.train.tracking import track
 run = track(experiment="capacity", clocks=[Step("steps", "training steps")])
 latest = run.latest_checkpoint()
 start = 0 if latest is None else int(latest.at["steps"])
-kept = "" if latest is None else Path(urlparse(latest.artifact.uri).path).read_text()
+kept = "" if latest is None else latest.path.read_text()
 target = int(os.environ["ETUDE_UNTIL_VALUE"])
 weights = Path(os.environ["ETUDE_OUTPUT_DIR"]) / "weights.pt"
 for step in range(start + 1, target + 1):

@@ -58,7 +58,7 @@ def eval(state: ExperimentState) -> Job:
     chosen = [saved for run in state.runs for saved in run.checkpoints]
     anchor = Code(name="heuristic", source=[__file__], config={{"strength": 0}})
     vs = Seating(name="vs heuristic", players=(Inference(config={{"search": 0}}), anchor),
-                 config=({{"deal": 0}}, {{"deal": 1}}), games=4)
+                 configs=({{"deal": 0}}, {{"deal": 1}}), games=4)
     ladder = Benchmark(name="ladder", environment=environment("duel"), seatings=(vs,))
     return evaluation(ladder, play={play}, checkpoints=chosen, max_hours=0.1,
                       repo=None)

@@ -77,13 +77,12 @@ printf '{"clocks": {"steps": %s}}' "$ETUDE_UNTIL_VALUE" > "$ETUDE_OUTPUT_DIR/etu
 TRACKED = """
 import os
 from pathlib import Path
-from urllib.parse import urlparse
 from etude.train.records import Step
 from etude.train.tracking import track
 run = track(experiment="capacity", clocks=[Step("steps", "training steps")])
 latest = run.latest_checkpoint()
 start = 0 if latest is None else int(latest.at["steps"])
-kept = "" if latest is None else Path(urlparse(latest.artifact.uri).path).read_text()
+kept = "" if latest is None else latest.path.read_text()
 target = int(os.environ["ETUDE_UNTIL_VALUE"])
 print(f"seed {os.environ['ETUDE_SEED']} from {start} to {target}")
 for step in range(start + 1, target + 1):
@@ -1264,7 +1263,7 @@ def test_finished_outputs_go_under_the_attempt_and_checkpoints_under_the_run(
     stored = sorted(key.removeprefix("etude/run1/") for key in storage.objects)
     assert stored == ["attempts/a1.json", "attempts/a1/weights.pt", "checkpoints/steps-10.pt"]
     recorded = json.loads(storage.objects["etude/run1/attempts/a1.json"])
-    assert recorded["result"] == {"clocks": {"steps": 10.0}, "tally": None}
+    assert recorded["result"] == {"clocks": {"steps": 10.0}, "tally": None, "writers": []}
     courier.carry_out()
     assert storage.asked.count(("PUT", "etude/run1/checkpoints/steps-10.pt")) == 1
 
@@ -1427,7 +1426,7 @@ def test_a_retry_on_a_fresh_machine_resumes_from_the_runs_latest_checkpoint(
     resumed = _tracked(there.parent)
     latest = resumed.latest_checkpoint()
     assert latest is not None and latest.ordinal == 3
-    assert Path(urlsplit(latest.artifact.uri).path).read_bytes() == b"weights at 3" * 100
+    assert latest.path.read_bytes() == b"weights at 3" * 100
     weights.write_bytes(b"weights at 4")
     resumed.checkpoint(weights, steps=4)
     _kept(there, 4)

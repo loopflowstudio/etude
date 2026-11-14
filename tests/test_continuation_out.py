@@ -5,7 +5,6 @@ import sys
 from hashlib import sha256
 from importlib import import_module
 from pathlib import Path
-from urllib.parse import urlparse
 
 import pytest
 
@@ -114,8 +113,8 @@ def test_continuation_and_report_use_the_same_position_after_an_empty_attempt(
         checkpoint = resumed.latest_checkpoint()
         assert checkpoint is not None
         assert authored(checkpoint.at) == {"updates": 6} and checkpoint.tags == ()
-        assert Path(urlparse(checkpoint.artifact.uri).path) == child_out / "model"
-        assert Path(urlparse(checkpoint.artifact.uri).path).read_bytes() == b"weights"
+        assert checkpoint.path == child_out / "model"
+        assert checkpoint.path.read_bytes() == b"weights"
 
 
 @pytest.mark.parametrize(
@@ -207,7 +206,7 @@ def test_out_carries_copied_latest_checkpoint(
     ) as resumed:
         checkpoint = resumed.latest_checkpoint()
         assert checkpoint is not None and authored(checkpoint.at) == {"updates": 2}
-        assert Path(urlparse(checkpoint.artifact.uri).path).read_bytes() == b"saved at 2"
+        assert checkpoint.path.read_bytes() == b"saved at 2"
         if populated:
             assert (resumed.out / "samples.txt").read_bytes() == b"samples"
         else:

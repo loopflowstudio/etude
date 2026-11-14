@@ -260,7 +260,7 @@ imports nothing else of Etude before the function's own module.
 - **An evaluation** holds a [tournament](evaluation.md#tournaments) as one eval
   run, which is the launched run. A benchmark's `checkpoint` is an `Input`: it
   reaches the machine verified by digest and fills every inference seat, where
-  `play` finds the folder or file at the player's `checkpoint.artifact.uri`. A round robin
+  `play` finds the folder or file at the player's `checkpoint.path`. A round robin
   takes `enter=` players. Holding nothing new (batch) is refused, since a launched job reads no
   other eval run. `workers=` plays matches in parallel processes. The job's
   environment needs `etude-sdk[eval]`.

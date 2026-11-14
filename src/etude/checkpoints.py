@@ -72,6 +72,14 @@ class CheckpointRef(Record):
             raise ValueError("model_checkpoint_requires_digest")
         return self
 
+    @property
+    def path(self) -> Path:
+        """This checkpoint on the current machine; remote addresses need an input first."""
+        parsed = urlparse(self.artifact.uri)
+        if parsed.scheme not in ("", "file") or parsed.netloc:
+            raise ValueError("checkpoint is not on this machine; give it to a job as an input")
+        return Path(unquote(parsed.path))
+
 
 class _Inference[P](Protocol):
     """How a checkpoint plays (`etude.eval.records.Inference`); evaluation is not imported here."""
@@ -130,10 +138,7 @@ class CheckpointRecord(Record):
     @property
     def path(self) -> Path:
         """This checkpoint on the current machine; remote addresses need an input first."""
-        parsed = urlparse(self.artifact.uri)
-        if parsed.scheme not in ("", "file") or parsed.netloc:
-            raise ValueError("checkpoint is not on this machine; give it to a job as an input")
-        return Path(unquote(parsed.path))
+        return self.ref.path
 
     def player[P](self, inference: _Inference[P]) -> P:
         return inference.player(self.ref)

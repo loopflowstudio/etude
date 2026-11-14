@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 import re
 from hashlib import sha256
-from pathlib import Path
-from urllib.parse import unquote, urlparse
 
 from etude.eval.records import CheckpointPlayer, Config, Match, Player
 from etude.eval.run import Result, Tables
@@ -151,7 +149,7 @@ def play_checkpoint_folder(match: Match) -> Tables:
     for seat, player in enumerate(match.players):
         if not isinstance(player, CheckpointPlayer):
             continue
-        folder = Path(unquote(urlparse(player.checkpoint.artifact.uri).path))
+        folder = player.checkpoint.path
         manifest = json.loads((folder / "checkpoint.json").read_text())
         files = manifest["files"]
         if set(files) != {"policy", "value"}:

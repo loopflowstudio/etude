@@ -92,7 +92,7 @@ def design(tmp_path: Path) -> Experiment:
         rated = run.checkpoints.every(2)
         pairs = [
             Seating(name=f"{new.name} vs {old.name}", tags=("consecutive",),
-                    players=(new.player(DIRECT), old.player(DIRECT)), config=DEALS, games=2)
+                    players=(new.player(DIRECT), old.player(DIRECT)), configs=DEALS, games=2)
             for old, new in zip(rated, rated[1:])
         ]  # fmt: skip
         if run.final is not None and run.checkpoints:
@@ -101,11 +101,11 @@ def design(tmp_path: Path) -> Experiment:
                 Seating(
                     name="final vs first",
                     players=(run.final.player(DIRECT), first.player(DIRECT)),
-                    config=DEALS,
+                    configs=DEALS,
                     games=2,
                 )  # fmt: skip
             )
-        anchors = Seating(name="vs heuristic", players=(DIRECT, anchor), config=DEALS,
+        anchors = Seating(name="vs heuristic", players=(DIRECT, anchor), configs=DEALS,
                           games=2)  # fmt: skip
         return evaluation(
             arena,
@@ -157,7 +157,7 @@ def test_each_pass_plays_what_the_checkpoints_saved_so_far_call_for(tmp_path: Pa
     anchor = heuristic(tmp_path)
 
     def post_hoc(state: ExperimentState) -> Job:
-        every = Seating(name="vs heuristic", players=(DIRECT, anchor), config=DEALS, games=2)
+        every = Seating(name="vs heuristic", players=(DIRECT, anchor), configs=DEALS, games=2)
         sweep = Benchmark(name="sweep", environment=WORLD, seatings=(every,))
         return evaluation(sweep, play=play, checkpoints=state.run("ppo-1").checkpoints,
                           max_hours=0.1)  # fmt: skip
@@ -178,8 +178,8 @@ def test_a_pass_plays_only_what_eval_returns_now(tmp_path: Path) -> None:
         name="greedy", source=[tmp_path / "players" / "heuristic.py"], config={"strength": 4}
     )
     both = (
-        Seating(name="vs heuristic", players=(DIRECT, anchor), config=DEALS, games=2),
-        Seating(name="vs greedy", players=(DIRECT, greedy), config=DEALS, games=2),
+        Seating(name="vs heuristic", players=(DIRECT, anchor), configs=DEALS, games=2),
+        Seating(name="vs greedy", players=(DIRECT, greedy), configs=DEALS, games=2),
     )
 
     def design(seatings: tuple[Seating, ...]) -> Experiment:
@@ -206,7 +206,7 @@ def test_a_failed_match_is_counted_and_not_replayed_unless_asked(tmp_path: Path)
     anchor = heuristic(tmp_path)
 
     def eval_(state: ExperimentState) -> Job:
-        vs = Seating(name="vs heuristic", players=(DIRECT, anchor), config=DEALS, games=2)
+        vs = Seating(name="vs heuristic", players=(DIRECT, anchor), configs=DEALS, games=2)
         ladder = Benchmark(name="ladder", environment=WORLD, seatings=(vs,))
         return evaluation(ladder, play=play_failing_deal_one,
                           checkpoints=state.run("ppo-1").checkpoints, max_hours=0.1)  # fmt: skip
@@ -233,7 +233,7 @@ def test_a_pass_whose_matches_all_return_no_rows_fails_and_a_retry_replays_them(
     games = {"play": play_catching_errors}
 
     def eval_(state: ExperimentState) -> Job:
-        vs = Seating(name="vs heuristic", players=(DIRECT, anchor), config=DEALS, games=2)
+        vs = Seating(name="vs heuristic", players=(DIRECT, anchor), configs=DEALS, games=2)
         ladder = Benchmark(name="ladder", environment=WORLD, seatings=(vs,))
         return evaluation(ladder, play=games["play"], checkpoints=state.run("ppo-1").checkpoints,
                           max_hours=0.1)  # fmt: skip
@@ -267,7 +267,7 @@ def test_a_pass_whose_matches_all_return_no_rows_fails_and_a_retry_replays_them(
 
 def test_an_eval_job_belongs_to_the_experiment_of_its_file(tmp_path: Path) -> None:
     bucket = DirectoryStorage(tmp_path / "bucket")
-    anchors = Seating(name="vs heuristic", players=(DIRECT, heuristic(tmp_path)), config=DEALS,
+    anchors = Seating(name="vs heuristic", players=(DIRECT, heuristic(tmp_path)), configs=DEALS,
                       games=2)  # fmt: skip
     progress = Benchmark(name="ladder", environment=WORLD, seatings=(anchors,))
 
@@ -413,7 +413,7 @@ def test_queued_passes_retain_every_job_while_capacity_is_unavailable(
     benchmark = Benchmark(
         name="queued",
         environment=WORLD,
-        seatings=(Seating(name="anchor", players=(DIRECT, anchor), config=DEALS, games=2),),
+        seatings=(Seating(name="anchor", players=(DIRECT, anchor), configs=DEALS, games=2),),
     )
 
     def choose(state: ExperimentState) -> list[Job]:
@@ -523,13 +523,13 @@ def eval(state):
         Seating(
             name="half-training",
             players=(DIRECT, Fraction(clock="updates", value=0.5, inference=DIRECT)),
-            config=DEALS,
+            configs=DEALS,
             games=2,
         ),
         Seating(
             name="large vs small",
             players=(DIRECT, Aligned(clock="updates", job="small", inference=DIRECT)),
-            config=DEALS,
+            configs=DEALS,
             games=2,
         ),
     )

@@ -345,7 +345,7 @@ Refusal remedy for a direct `train` call, local-versus-launched reader words
 and the stored layout's checkpoint records and qualified id. Full text at
 `cb0e1fd:scratch/design-train-api.md`.
 
-## Corrections from the fifth concept review (2026-11-13): to build
+## Corrections from the fifth concept review (2026-11-13): built
 
 Walked at `cb0e1fd` in a fresh ETUDE_HOME: coin new / taken / resume /
 `--resume --until updates=60`; Hanabi `run`, `eval` (8 new), `eval` again
@@ -389,7 +389,11 @@ at the join to the league, in what the playing code and the tournament write.
    for every command, then reads `Path.home() / ".etude/track"`. Use the
    same home in the snippet.
 
-No schema, query, provider-count or stored-format change; no new command.
+Built: one path decoder on CheckpointRef; configs on the tournament collections,
+with historical conditions serialization and warnings preserved; Deal.deal;
+Hanabi reads default_root(). The old collection config keyword and hand parses
+are deleted. No schema, query, provider-count or stored-format change; no new
+command. Focused receipts are in exp-56.md; full acceptance stays with gate.
 
 ## Manabot (MTG-329)
 

@@ -56,9 +56,6 @@ def runs(python: str) -> Job:
 """
 
 PLAY = """
-from pathlib import Path
-from urllib.parse import urlparse
-
 from etude.eval.match import Tables
 from etude.eval.records import Match, CheckpointPlayer
 
@@ -66,7 +63,7 @@ from etude.eval.records import Match, CheckpointPlayer
 def play(match: Match) -> Tables:
     # A model's checkpoint file is on this machine; the row says how big it is.
     sizes = [
-        len(Path(urlparse(seated.checkpoint.artifact.uri).path).read_bytes())
+        len(seated.checkpoint.path.read_bytes())
         if isinstance(seated, CheckpointPlayer)
         else 0
         for seated in match.players
@@ -321,7 +318,7 @@ class ArenaConfig(BaseModel):
 def arena(config: ArenaConfig) -> Benchmark:
     return Benchmark(name="anchors", environment=environment("duel"), seatings=(
         Seating(name="model vs fixed", players=(Inference(config={"search": 0}), Code(name="fixed")),
-                config=({"deal": 1}, {"deal": 2}), games=config.games),))
+                configs=({"deal": 1}, {"deal": 2}), games=config.games),))
 """
         },
     )
@@ -392,7 +389,7 @@ def test_an_evaluation_holds_what_its_tournament_takes() -> None:
         # The omission under test.
         evaluation(progress, experiment="ppo", play=lambda match: {}, checkpoint=weights, repo=None)  # type: ignore[call-arg]
     league: RoundRobin = RoundRobin(
-        name="league", environment=environment("duel"), config=({},), games=1
+        name="league", environment=environment("duel"), configs=({},), games=1
     )
     with pytest.raises(LauncherError, match="give it entrants"):
         evaluation(league, experiment="ppo", play=lambda match: {}, max_hours=0.1, repo=None)

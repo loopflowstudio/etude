@@ -36,11 +36,10 @@ seat won. Evaluation chooses the first and final checkpoint of each run and
 plays only matches not yet stored. A repeated eval pass prints zero new matches.
 
 ```python
-from pathlib import Path
-
 from etude.eval.query import statsdb
+from etude.storage import default_root
 
-db = statsdb("hanabi", Path.home() / ".etude/track")
+db = statsdb("hanabi", default_root())
 print(db.sql("select avg(score), count(*) from teams").fetchall())
 ```
 

@@ -11,7 +11,6 @@ import sys
 import time
 from decimal import Decimal
 from pathlib import Path
-from urllib.parse import urlparse
 
 import pytest
 
@@ -102,13 +101,12 @@ def test_a_run_from_a_commit_reports_progress_and_keeps_its_outputs(
 CONTINUED = """
 import os
 from pathlib import Path
-from urllib.parse import urlparse
 from etude.train.records import Step
 from etude.train.tracking import track
 run = track(experiment="capacity", clocks=[Step("steps", "training steps")])
 latest = run.latest_checkpoint()
 start = 0 if latest is None else int(latest.at["steps"])
-kept = "" if latest is None else Path(urlparse(latest.artifact.uri).path).read_text()
+kept = "" if latest is None else latest.path.read_text()
 target = int(os.environ["ETUDE_UNTIL_VALUE"])
 for step in range(start + 1, target + 1):
     run.log({"loss": 1.0 / step}, steps=step)
@@ -166,9 +164,7 @@ def test_a_continuation_starts_from_its_parents_recorded_checkpoint(tmp_path: Pa
     assert (status.outcome, authored(status.clocks)) == ("succeeded", {"steps": 5})
     data = read(tracked, "capacity", second)
     (checkpoint,) = data.checkpoints
-    assert Path(urlparse(checkpoint.artifact.uri).path).read_text() == (
-        "trained to 2\ntrained to 5\n"
-    )
+    assert checkpoint.path.read_text() == ("trained to 2\ntrained to 5\n")
     assert data.file is not None and data.file.continues is not None
     continues = data.file.continues
     assert (continues.parent.source_id, continues.clock, continues.value) == (first, "steps", 2)

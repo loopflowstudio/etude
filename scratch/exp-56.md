@@ -82,12 +82,28 @@ Fourth-review corrections (refusal remedies, local-versus-launched docs, stored
 layout) are built; receipt at `416847a:scratch/exp-56.md`. Local
 listing/branching, direct calls and id/name choices remain in `questions.md`.
 
-Next to build: the fifth concept review's four corrections
-(`design-train-api.md`, fifth concept review): `CheckpointRef.path` replacing
-hand URL parsing in playing code, `configs=` on Seating/RoundRobin, the Hanabi
-`Deal.deal` field and the Hanabi doc's ETUDE_HOME snippet. Focused checks:
-eval match/tournament/records tests, the historical match-key test, a path
-with a space through `CheckpointRef.path`, and the Hanabi doc commands.
+Fifth-review corrections are built: CheckpointRef owns local path decoding;
+CheckpointRecord delegates to it and playing consumers use checkpoint.path.
+Seating/RoundRobin expose configs, serialize conditions, and retain only the
+released conditions warning alias. Hanabi uses Deal.deal and default_root().
+Delete — do not maintain: hand URL parses in playing fixtures/docs/example,
+the record's duplicate decoder and the unreleased collection config spelling.
+No schema or query changes. Gate still owns full acceptance; PR #103 stays draft.
+
+Check: ruff, format, `uv run mypy` (175 files) pass; `uv run pytest` over
+tests/eval/{test_match,test_tournament,test_records,test_context}.py,
+tests/test_{continuation_out,experiment,jobs,page_evals,smoke}.py and
+tests/launch/{test_worker_attempts,test_ssh,test_runpod_machines}.py — 200
+passed. Covers pinned historical keys, stored conditions JSON/warnings, paths
+with spaces and remote-path refusals. Test readers of a checkpoint record use
+`.path` too; one stored-attempt expectation gained `writers: []` (stale since
+`620bfd6`).
+
+Hanabi command receipt: isolated ETUDE_HOME with spaces; run updates=2,
+resume --until updates=3, eval (8 new/8 played), eval (0 new), report, and
+the docs' statsdb(default_root()) query (16 team rows, mean score 0.9375).
+Report: `/var/folders/m6/r3tllnrs1yq7yfbwm680tss40000gn/T/exp56 Hanabi mstut3r3/track/reports/hanabi.html`.
+No process remains. Earlier stop/resume evidence stays in demo.md.
 
 Compress pass: one writer merge in the launcher database, `RunProgress` under
 one name, resume identity resolved once in `etude.local`; no behavior change.
@@ -103,12 +119,8 @@ etude.spec, local resume defaults to stored config, and a second Ctrl-C exits.
 Optional Hanabi (OpenSpiel/PyTorch) is ready for a person's demo; no PufferLib
 adoption or EXP-62 work is included. docs/hanabi.md gives the commands.
 
-Focused receipt: `uv run pytest tests/test_jobs.py tests/test_experiment.py tests/eval/test_match.py tests/eval/test_context.py tests/train/test_local.py -k 'test_one_allocation_owns_many_writers_without_changing_its_limits or test_an_evaluation_job_holds_a_benchmark_for_the_checkpoint_it_is_given or test_a_launched_pass_ships_its_checkpoints_and_is_not_launched_twice or test_matches_in_two_workers_resumes_from_storage_without_replaying or test_author_match_config_reaches_play_and_keeps_its_historical_key or test_old_condition_keyword_warns_but_keeps_the_same_match or test_resume_uses_stored_config_when_defaults_change'` — 8 passed, 64 deselected.
-Other focused checks: stop/resume/refusal preservation, rollups, second Ctrl-C,
-shared import boundaries, two-write eval progress, CLI-file function imports, historical pinned match
-keys and checkpoint resume all passed. `uv run mypy` passed (175 files);
-`node --test tests/test_charts.cjs` passed (21 checks). Full acceptance stays
-with gate. PR #103 stays draft.
+Earlier typed-match, writer/allocation, stop/resume and CLI-file import checks
+are retained at `e40e1a2:scratch/exp-56.md`; full acceptance stays with gate.
 
 Earlier checks and indexed-query receipts: `ef6099a:scratch/exp-56.md`.
 

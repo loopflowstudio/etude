@@ -36,55 +36,10 @@ Open: without a selected controller, upload-only remote cleanup runs only
 while a CLI command does. At five-minute saves, twelve replaced saves/hour
 remain until then. Accept, warn, or reduce delivery cadence?
 
-## Train API implementation choices
-
-Earlier doc-drafting choices and built implementation assumptions are retained
-at `18537b0:scratch/questions.md` (Train API docs). The accepted design and
-current user docs now describe those APIs. Still open: whether local resume
-uses current or stored config defaults, upload-only cleanup without a controller,
-and the second Ctrl-C behaviour (below). The default public example and save
-cadence choices remain in the design's Open list.
-
-Merge history and preserved clock/cutoff invariants: `394aa37:scratch/questions.md`.
-
-## `RunRequest` name taken on main (2026-11-13, realign)
-
-Main's `afcda22` (#105) used `RunRequest` for the controller's message; the
-design gives that name to launch `Run` (Jack Heart: "ok, RunRequest works").
-Assumed, reversible, implemented: the controller message is `RunOperation`.
-
-Local CLI choices (2026-11-13): an omitted `--seed` on resume uses the stored
-seed; config defaults come from the current recipe, overlaid by `--config`,
-then must match the stored config. An omitted `--until` keeps the previous
-attempt's target. SIGINT/SIGTERM request a saved stop. Python callers can opt
-in with `track(resume=True)`; launcher attempts opt in via their allocation.
-
-Experiment-scoped reads (built): each folder's own declaration selects its
-experiment. Reversible assumption: a folder with no declaration cannot claim
-a declared run's experiment; raw single-run reads still support wholly
-undeclared historical metric fixtures (`train/read.py::_located`).
-
-## Found reading the docs as a user (2026-11-13, write-docs)
-
-Nobody answered these; `docs/training.md` (Running it) states the built
-behaviour for each.
-
-1. **Config on a local `--resume`.** Built and now documented: the config is
-   the file's current defaults overlaid by `--config`, and must equal the
-   stored one, so a run started with `--config '{"lr": 0.001}'` must repeat
-   it on every resume (the page's own example was refused before this edit).
-   The seed and target are instead taken from the run when omitted. Question:
-   should an omitted `--config` on `--resume` mean the run's stored config,
-   like the seed, with the comparison kept only for a `--config` that is
-   given? That would let a changed default in the file go unnoticed.
-2. **Ctrl-C only requests a stop.** The handler touches the stop file, and
-   a second Ctrl-C does the same, so a loop with a long pass, or one that
-   never asks `run.steps`/`run.stopping()`, cannot be interrupted from the
-   keyboard. Question: should a second Ctrl-C interrupt at once (the attempt
-   then ends `failed`, without a save)?
-3. **`--json` key.** Superseded by concept review: the new local command
-   prints `outcome`; the stored field inside `outcome.json` stays `state`.
-   A failed run prints no object.
+Earlier CLI choices and unanswered questions (superseded by Decisions through
+demo below) remain at `e40e1a2:scratch/questions.md`. Experiment-scoped reads
+select folders by their own declarations; wholly undeclared historical metric
+fixtures remain readable.
 
 ## Writer/allocation evidence
 
@@ -241,7 +196,7 @@ Choices made here:
   coin as the smallest introductory example. Hanabi is the optional demo.
 
 Match config is built end to end: Match[AuthorModel], generic Seating and
-RoundRobin, config keyword and callback validation in each worker. Python
+RoundRobin, configs collection keyword and callback validation in each worker. Python
 models survive author construction; records keep JSON under the released
 `conditions` spelling and match keys/seeds remain equal. Old keyword/property
 warn until 0.5. statsdb exposes matches.config; its unreleased schema cut stays
