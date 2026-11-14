@@ -89,12 +89,7 @@ Finished-run refusals include actual clock positions. README and training,
 launcher and evaluation docs match. No schema, SQL or new remote reads.
 
 Eighth-review corrections are built (design, "Corrections from the eighth
-concept review"): Job.runs owns seed expansion for file/Python clients;
-singular clients refuse multiple seeds; cohort clients accept Jobs and mixed
-requests. Docs teach cohort launches and one experiment; missing-run config
-advice stays on continue. The file reader's seed loop is deleted. No schema,
-SQL or provider-count change. Fetch's separate refusal is preserved; see
-questions.md for the contrary evidence. Full acceptance remains with gate.
+concept review"). Fetch's separate refusal is preserved (questions.md).
 Compress: `_one` holds the singular refusal for queue/launch. Seeds given to
 `Job.runs(1, 2)` keep admission-time ids (ids for them broke resubmission in
 test_smoke/test_cli); only declared seeds are `NAME-seed-N`.
@@ -106,7 +101,8 @@ addresses").
 Check: `uv run pytest tests/test_jobs.py tests/test_smoke.py
 tests/launch/test_queue.py tests/launch/test_cli.py tests/train/test_local.py
 tests/train/test_track.py tests/launch/test_lium.py` — 158 passed; mypy,
-ruff check and format pass.
+ruff check and format pass. Realign: writer warnings read `etude: run
+NAME:`; design says `etude train`; test_track.py 14 passed.
 
 Compress: `_resumed` computes the reached positions once; `_hold` and
 `evaluation` share `_BENCHMARK_CHECKPOINT`; the test `play` reads weights
@@ -115,19 +111,15 @@ tests/train/test_local.py tests/test_continuation_out.py` — 61 passed; mypy
 clean on jobs/local/call and tests/test_jobs.py; ruff check, format and
 `git diff --check` pass. Gate owns full acceptance. PR #103 remains draft.
 
-Hanabi command receipt and temporary report location are retained at
-`06ff0f6:scratch/exp-56.md`; durable stop/resume evidence is in demo.md.
-
-Compress pass and its 139-test receipt: `06ff0f6:scratch/exp-56.md`.
+Hanabi command receipt and the compress pass's 139-test receipt:
+`06ff0f6:scratch/exp-56.md`; stop/resume evidence is in demo.md.
 
 Writer/eval and typed-match cuts are built. questions.md holds decisions;
 docs/hanabi.md prepares the optional OpenSpiel/PyTorch demo. No PufferLib
 adoption or EXP-62 work is included.
 
-Earlier typed-match, writer/allocation, stop/resume and CLI-file import checks
-are retained at `e40e1a2:scratch/exp-56.md`; full acceptance stays with gate.
-
-Indexed-query receipts: `ef6099a:scratch/exp-56.md`.
+Older check receipts: `e40e1a2:scratch/exp-56.md` (typed-match, writer,
+stop/resume, CLI imports) and `ef6099a:scratch/exp-56.md` (indexed queries).
 
 Acceptance remains the design's fresh/stop/resume example; two models in one
 save and checkpoint seated in evaluation; taken-name/config/seed refusals;

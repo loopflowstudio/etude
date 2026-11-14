@@ -209,10 +209,10 @@ hand.
 
 | Intent | Command | Result |
 | --- | --- | --- |
-| a new run, here | `etude run train.py [--config JSON] [--seed N] [--name NAME] [--until clock=value] [--seconds N]` | always new; prints the id |
+| a new run, here | `etude train train.py [--config JSON] [--seed N] [--name NAME] [--until clock=value] [--seconds N]` | always new; prints the id |
 | a new run, on machines | `etude launch job.py [--rent ...]` | always new |
 | the same run, after a lost machine or `Stopped` | none; the launcher calls again | a new attempt of the same run |
-| the same run, after it ended unfinished | `etude run train.py --resume RUN`, `etude launch job.py --resume RUN` | a new attempt of the same run, on current code |
+| the same run, after it ended unfinished | `etude train train.py --resume RUN`, `etude launch job.py --resume RUN` | a new attempt of the same run, on current code |
 | the same run, further | `--resume RUN --until ...` on either | a new attempt of the same run, finished or not (Open 2) |
 | changed, or a branch of a launched run | `etude continue --run RUN --until clock=value [--config ...]` | a new run descended from the first |
 
@@ -225,7 +225,7 @@ hand.
   resumes a re-used name.
 - `--resume` refuses a changed config or seed, and a finished run given no
   later target.
-- `etude run` replaces `local_launch` in user code and Manabot's
+- `etude train` replaces `local_launch` in user code and Manabot's
   `train --out`. Exit codes: 0 finished, 75 stopped, other failed.
 - New commands print JSON with `--json` from the start (EXP-59 covers the
   rest).
@@ -349,7 +349,7 @@ Walked at `c8310bc` in a fresh ETUDE_HOME; evidence is in `questions.md`
    The job's inputs are exactly the record's members; no launcher schema
    change.
 2. `etude.call.changed_config` owns "JSON changes over a config type" for
-   `etude run` (new and `--resume`) and `etude continue`: unknown top-level
+   `etude train` (new and `--resume`) and `etude continue`: unknown top-level
    fields are refused by name unless the model allows extras; problems
    print one line per field. Stored configs are read as before.
 3. A finished run's refusal says where it stands (`finished at
@@ -425,7 +425,7 @@ cutover and adoption checks are preserved at
 - Register learner, optimizer, EMA and cumulative counts. Preserve the
   world-bound policy format and publish it through the path checkpoint form.
 - Remove seed from configs; jobs supply seeds. Split belief policy and sampler
-  into jobs joined by `start=`. Retire `manabot train --out` for `etude run`.
+  into jobs joined by `start=`. Retire `manabot train --out` for `etude train`.
 - Existing Manabot `state.pt` folders have no new loader; document the last
   revision that reads them. Frozen experiment evidence stays untouched.
 - Verify tiny fresh/stop/resume, seed-197 parity and a capped launched smoke
@@ -444,7 +444,7 @@ without reading Manabot.
 
 ## Order of work
 
-1. **EXP-56**: the calls, the on-disk layout, PyTorch writer, `etude run`,
+1. **EXP-56**: the calls, the on-disk layout, PyTorch writer, `etude train`,
    `--resume`, names, config and seed checks, folder checkpoints through
    evaluation, `start=`; the Training page (`docs/training.md`, drafted); a
    tiny non-Magic example. Old spellings
@@ -457,7 +457,7 @@ without reading Manabot.
 
 ## Acceptance for EXP-56
 
-- The default example above runs with `etude run`, is interrupted, resumes
+- The default example above runs with `etude train`, is interrupted, resumes
   with `--resume`, and reads back as one run.
 - A two-model example saves, resumes and publishes one checkpoint that an
   evaluation seats.

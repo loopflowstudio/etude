@@ -596,7 +596,7 @@ class TrainingRun(Run):
         self._warned.add(kind)
         try:
             warnings.warn(
-                f"etude run {self.name}: {message}.",
+                f"etude: run {self.name}: {message}.",
                 EtudeWarning,
                 stacklevel=stacklevel,
             )
