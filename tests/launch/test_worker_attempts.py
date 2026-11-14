@@ -268,7 +268,7 @@ def test_a_launched_job_tracks_as_its_run_without_naming_itself(tmp_path: Path) 
             record.job,
             "hidden256",
             record.seed,
-            "seeds",
+            None,
         )
         (attempt,) = data.attempts
         assert attempt.attempt == launched.id

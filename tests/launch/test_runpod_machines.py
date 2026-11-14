@@ -690,7 +690,7 @@ def test_machines_and_status_show_the_hardware_rented(
     show_machines(c.scheduler, ended=True)
     run_line, machine_line = capsys.readouterr().out.splitlines()
     assert f"machine {status.machine} ({shown})" in run_line
-    assert machine_line.startswith(f"{status.machine}  l4  {shown}, rented")
+    assert machine_line.startswith(f"{status.machine}  l4  available, {shown}, rented")
 
 
 def test_no_stock_is_a_refusal_and_cancel_reaches_a_running_pod(tmp_path: Path) -> None:

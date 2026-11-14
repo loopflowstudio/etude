@@ -158,8 +158,6 @@ def test_runs_filters_and_source_cli_are_read_only(
         main(
             [
                 "runs",
-                "--cohort",
-                "pair",
                 "--pool",
                 "waiting",
                 "--job",
