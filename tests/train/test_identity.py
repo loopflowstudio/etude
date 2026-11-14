@@ -146,7 +146,7 @@ def test_run_record_reads_historical_identity_and_round_trips_the_exact_config()
     assert record.config_sha256 == sha256(config.encode()).hexdigest()
     assert RunRecord.model_validate_json(record.model_dump_json()) == record
     with pytest.raises(ValueError, match="no launcher specification"):
-        _ = record.launch_spec
+        _ = record.launch.spec
 
 
 def test_a_run_json_in_out_is_carried_as_data_and_never_discovered_as_a_run(tmp_path: Path) -> None:

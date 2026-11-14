@@ -130,7 +130,7 @@ def test_remote_launch_freezes_sources_config_and_returns_outputs(
     assert len(list((remote / "sources").glob("*.tar"))) == 1
     assert [pool.name for pool in _open(remote).pools()] == ["controller"]
     assert _open(remote).record(ids[0]).launch.pool == "controller"
-    frozen = _open(remote).record(ids[0]).launch_spec
+    frozen = _open(remote).record(ids[0]).launch.spec
     assert frozen.repo == str(repo) and frozen.revision != "HEAD"
     # Continuation works without the client's repository: it uses the retained archive.
     continued = command("continue", "--run", ids[0], "--until", "steps=20")
@@ -352,7 +352,7 @@ def test_controller_keeps_source_history_and_checks_out_on_client(
     record = _open(remote).record(id)
     assert record.launch.source is not None and record.launch.source.snapshot
     assert record.launch.source.origin == str(origin)
-    assert git(origin, "rev-parse", f"refs/etude/runs/{id}") == record.launch_spec.revision
+    assert git(origin, "rev-parse", f"refs/etude/runs/{id}") == record.launch.spec.revision
     assert "uncommitted changes" in sent.stdout
     repo.rename(repo.with_name("unavailable"))
     listed = command("runs", "--contains", "v1", "--pool", "waiting")

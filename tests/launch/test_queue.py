@@ -216,11 +216,11 @@ def test_cli_continue_waits_without_capacity(
     assert main(argv) == 0
     child = capsys.readouterr().out.split()[0]
     record = b.scheduler.record(child)
-    (given,) = record.launch_spec.environment
+    (given,) = record.launch.spec.environment
     handed = ParentRun.model_validate_json(given.value)
     assert handed.checkpoint is not None
     assert (handed.parent.source_id, authored(handed.checkpoint.at)) == (parent, {"steps": 3})
-    assert str(record.launch_spec.until) == "steps=7" and record.launch.autorun
+    assert str(record.launch.spec.until) == "steps=7" and record.launch.autorun
     assert b.scheduler.read(child).phase == "queued"
 
 

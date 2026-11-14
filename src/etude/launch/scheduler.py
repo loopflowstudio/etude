@@ -604,8 +604,6 @@ class Scheduler:
                         pool=target.pool,
                         rent=target.rent,
                         created_at=self._clock(),
-                        cancel_requested_at=None,
-                        version=1,
                     ),
                     seed=run.seed,
                     cohort=cohort,
@@ -625,8 +623,8 @@ class Scheduler:
             for record in placement.runs:
                 most = share
                 if most is None:
-                    hours = Decimal(str(record.launch_spec.max_hours))
-                    most = min(price * hours, _limit_usd(record.launch_spec))
+                    hours = Decimal(str(record.launch.spec.max_hours))
+                    most = min(price * hours, _limit_usd(record.launch.spec))
                 quoted.append(
                     QuotedMachine(
                         run=record.name,
@@ -638,7 +636,7 @@ class Scheduler:
                         alongside=tuple(r.name for r in placement.runs if r.id != record.id),
                     )
                 )
-        caps = sum((_limit_usd(r.launch_spec) for r in records), Decimal(0))
+        caps = sum((_limit_usd(r.launch.spec) for r in records), Decimal(0))
         if limits is not None and limits.max_usd is not None:
             caps = min(caps, limits.max_usd)
         return Quote(machines=tuple(quoted), limit_usd=None if target.rent is None else caps)
@@ -722,7 +720,7 @@ class Scheduler:
                 update={
                     "requests": tuple(
                         request.model_copy(
-                            update={"resolved_revision": record.launch_spec.revision}
+                            update={"resolved_revision": record.launch.spec.revision}
                         )
                         for request, record in zip(launch.requests, records, strict=True)
                     )
@@ -852,9 +850,9 @@ class Scheduler:
         service = self._reach(ondemand)
         for repo, commit in sorted(
             {
-                (r.launch_spec.repo, r.launch_spec.revision)
+                (r.launch.spec.repo, r.launch.spec.revision)
                 for r in runs
-                if r.launch_spec.repo and r.launch_spec.revision
+                if r.launch.spec.repo and r.launch.spec.revision
             }
         ):
             service.stage(repo, commit)
@@ -1201,7 +1199,7 @@ class Scheduler:
             and (cohort is None or r.cohort == cohort)
             and (pool is None or r.launch.pool == pool)
             and (rent is None or r.launch.rent == rent)
-            and (job is None or r.job == job or r.launch_spec.name == job)
+            and (job is None or r.job == job or r.launch.spec.name == job)
             and (contains is None or source.contains(r, contains))
         )
 
@@ -1437,7 +1435,7 @@ class Scheduler:
             reason=None,
             outcome=None,
             cause=None,
-            until=record.launch_spec.until,
+            until=record.launch.spec.until,
             clocks={} if last is None else last.clocks,
             tally=None if last is None else last.tally,
             usd=sum((self._attempt_usd(a, now) for a in attempts), Decimal(0)),
@@ -1468,7 +1466,7 @@ class Scheduler:
             or superseded
             or (
                 (last.outcome == "stopped" or last.outcome == "lost" and last.cause in RETRYABLE)
-                and len(attempts) < record.launch_spec.max_attempts
+                and len(attempts) < record.launch.spec.max_attempts
             )
         )
         if last is not None and not retry and last.outcome != "stopped":
@@ -1678,7 +1676,7 @@ class Scheduler:
                 now = self._clock()  # the rental's window starts after the upload
                 self._store.check_lock(supply.name)
                 # The window covers the longest run it is given, within their dollars.
-                hours = max(planned.run.launch_spec.max_hours for planned in batch)
+                hours = max(planned.run.launch.spec.max_hours for planned in batch)
                 cap = sum((planned.cap_usd for planned in batch), Decimal(0))
                 machines = 1
                 first = batch[0].run
@@ -1688,9 +1686,9 @@ class Scheduler:
                     pending = [r for r in waiting if r.cohort == cohort.name]
                     hours = max(
                         hours,
-                        sum(r.launch_spec.max_hours for r in pending) / (machines * supply.slots),
+                        sum(r.launch.spec.max_hours for r in pending) / (machines * supply.slots),
                     )
-                    cap = sum((_limit_usd(r.launch_spec) for r in pending), Decimal(0))
+                    cap = sum((_limit_usd(r.launch.spec) for r in pending), Decimal(0))
                     remaining = self._cohort_left(
                         cohort, now, renting=bool(self._safeguards(supply).reservation_hours)
                     )
@@ -2098,7 +2096,7 @@ class Scheduler:
     def _work(self, attempt: RunAttempt) -> Work | None:
         """What the attempt's machine is sent; None when the attempt ended undelivered."""
         run = self._store.run(attempt.run)
-        spec = run.launch_spec
+        spec = run.launch.spec
         holder = self._holder(run.id, before=attempt.number) if attempt.number > 1 else None
         # Relay and delivery use the same selection: a claimed child resumes
         # its own state; an unclaimed child still needs the parent's initial out.
@@ -2471,14 +2469,14 @@ class Scheduler:
         differences = resume_conflicts(
             config=job.config,
             seed=request.seed,
-            prior_config=prior.launch_spec.config,
+            prior_config=prior.launch.spec.config,
             prior_seed=prior.seed,
         )
-        if job.experiment != prior.launch_spec.experiment:
+        if job.experiment != prior.launch.spec.experiment:
             differences.append("experiment differs")
         if differences:
             raise LauncherError("run identity conflict: " + "; ".join(differences))
-        target = job.until or prior.launch_spec.until
+        target = job.until or prior.launch.spec.until
         if attempts and attempts[-1].outcome == "succeeded":
             reached = (
                 max((a.clocks.get(target.clock, 0) for a in attempts), default=0)
@@ -2507,7 +2505,7 @@ class Scheduler:
             raise LauncherError("a resumed run keeps its cohort; omit --cohort")
         if prior is not None and job.until is None:
             run = run.model_copy(
-                update={"job": job.model_copy(update={"until": prior.launch_spec.until})}
+                update={"job": job.model_copy(update={"until": prior.launch.spec.until})}
             )
         run = source.freeze(run)
         job = run.job
@@ -2538,8 +2536,6 @@ class Scheduler:
                 pool=target.pool,
                 rent=target.rent,
                 created_at=self._clock(),
-                cancel_requested_at=None,
-                version=1,
                 autorun=True,
                 params=dict(run.params),
                 smoke=run.smoke,
@@ -2561,7 +2557,7 @@ class Scheduler:
         # previous allocations; fresh work needs no history queries.
         if run.launch.resume_after:
             return self._remaining(run, now)
-        return Budget(seconds=run.launch_spec.max_hours * 3600, usd=_limit_usd(run.launch_spec))
+        return Budget(seconds=run.launch.spec.max_hours * 3600, usd=_limit_usd(run.launch.spec))
 
     def _remaining(self, run: RunRecord, now: datetime) -> Budget:
         attempts = self._store.attempts(run=run.id)
@@ -2572,8 +2568,8 @@ class Scheduler:
         )
         dollars = sum((self._attempt_usd(a, now) for a in attempts), Decimal(0))
         return Budget(
-            seconds=max(0, run.launch_spec.max_hours * 3600 - seconds),
-            usd=max(Decimal(0), _limit_usd(run.launch_spec) - dollars),
+            seconds=max(0, run.launch.spec.max_hours * 3600 - seconds),
+            usd=max(Decimal(0), _limit_usd(run.launch.spec) - dollars),
         )
 
     def _occupied(

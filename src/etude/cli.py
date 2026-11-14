@@ -116,7 +116,7 @@ def _submit(
             selected = [
                 run
                 for run in runs
-                if run.seed == prior.seed and run.job.name == prior.launch_spec.name
+                if run.seed == prior.seed and run.job.name == prior.launch.spec.name
             ]
         if len(selected) != 1:
             raise LauncherError("--resume must select one run from the file's jobs and seeds")

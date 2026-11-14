@@ -352,7 +352,7 @@ def runs(python: str) -> Job:
         with pytest.raises(LauncherError, match="expected a JSON object"):
             continued_config(record, changes)
     next_run = continue_from(record, "updates=4", source=source)
-    assert next_run.job.config == record.launch_spec.config
+    assert next_run.job.config == record.launch.spec.config
     assert source.listings == 2
     assert source.got.count(f"{parent}/out/state.json") == 1
     assert source.got.count(f"{parent}/out/model-3.pt") == 1
@@ -380,7 +380,7 @@ def runs(python: str) -> Job:
     named = record.model_copy(
         update={
             "submission": record.launch.model_copy(
-                update={"spec": record.launch_spec.model_copy(update={"inputs": original})}
+                update={"spec": record.launch.spec.model_copy(update={"inputs": original})}
             )
         }
     )
@@ -405,7 +405,7 @@ def runs(python: str) -> Job:
         == 0
     )
     queued = capsys.readouterr().out.split()[0]
-    assert scheduler.record(queued).launch_spec.config == record.launch_spec.config
+    assert scheduler.record(queued).launch.spec.config == record.launch.spec.config
     assert scheduler.read(queued).phase == "queued"
     status = scheduler.wait(queued, every=0.05, timeout=30)[0]
     assert status.outcome == "succeeded", job_text(scheduler.logs(refresh=True, run=queued))

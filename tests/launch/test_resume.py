@@ -232,7 +232,7 @@ def test_resume_can_replace_unallocated_queued_work(tmp_path: Path) -> None:
     b.scheduler.tick()
     b.run(601)
     assert b.scheduler.read(identity).outcome == "succeeded"
-    assert b.scheduler.record(identity).launch_spec.command == "fixed recipe"
+    assert b.scheduler.record(identity).launch.spec.command == "fixed recipe"
     assert len(b.scheduler.attempts(identity)) == 1
 
 

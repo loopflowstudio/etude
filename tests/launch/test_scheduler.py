@@ -294,7 +294,7 @@ def test_manabot_cohort_shape(tmp_path: Path) -> None:
         assert all(s.outcome == "succeeded" for s in b.scheduler.wait(*stages[-1], every=60))
         continued = [
             RunRequest(
-                job=b.store.run(p).launch_spec.model_copy(
+                job=b.store.run(p).launch.spec.model_copy(
                     update={"until": Until.parse(f"updates={target}")}
                 ),
                 seed=b.store.run(p).seed,
@@ -313,8 +313,8 @@ def test_manabot_cohort_shape(tmp_path: Path) -> None:
     assert b.service.most_live == 1 and b.service.creates == 3
     for root, middle, final in zip(*stages, strict=True):
         records = [b.store.run(r) for r in (root, middle, final)]
-        assert len({(r.launch_spec.name, r.seed, r.launch_spec.config) for r in records}) == 1
-        assert [str(r.launch_spec.until) for r in records] == [
+        assert len({(r.launch.spec.name, r.seed, r.launch.spec.config) for r in records}) == 1
+        assert [str(r.launch.spec.until) for r in records] == [
             "updates=26000",
             "updates=63000",
             "updates=100000",
@@ -549,8 +549,8 @@ def test_a_job_is_what_decides_the_result_not_its_name_or_limits(tmp_path: Path)
     assert same.job == also.job != different.job
     assert same.job is not None
     assert [r.seed for r in b.store.job_runs(same.job)] == [1, 2]
-    assert (also.launch_spec.max_usd, also.name) == (Decimal(9), also.id)
-    assert same.launch_spec.max_usd == Decimal(5)
+    assert (also.launch.spec.max_usd, also.name) == (Decimal(9), also.id)
+    assert same.launch.spec.max_usd == Decimal(5)
 
 
 def test_queue_returns_its_id_even_when_the_provider_cannot_quote_a_price(tmp_path: Path) -> None:
@@ -773,7 +773,7 @@ def test_a_job_needs_dollars_only_where_money_can_be_spent(tmp_path: Path) -> No
     assert b.store.runs() == ()
     b.scheduler.add_pool(Pool(name="mine"))  # no template: nothing here can spend
     run = b.scheduler.queue(free, "mine")
-    assert b.scheduler.record(run).launch_spec.max_usd is None
+    assert b.scheduler.record(run).launch.spec.max_usd is None
     with pytest.raises(LauncherError, match="more than zero"):
         b.scheduler.queue(Job(command="train", max_hours=1, max_usd=Decimal(0)), "mine")
 

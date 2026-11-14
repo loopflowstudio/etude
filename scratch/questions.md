@@ -197,7 +197,7 @@ Unlabelled hand-built command jobs retain flat opaque references. New local
 run folders are experiment-scoped; an existing flat declaration retains its
 physical folder only when its own experiment matches.
 
-`RunRecord.spec` is absent for standalone runs. `launch_spec` raises when a
+`RunRecord.submission` is absent for standalone runs. `launch` raises when a
 caller asks a standalone record for a launcher specification. Config bytes
 have one owner: the specification for launched runs, the run record otherwise.
 `etude.job` owns the shared execution types rather than making shared records

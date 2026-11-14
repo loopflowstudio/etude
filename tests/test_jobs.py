@@ -176,7 +176,7 @@ def runs(python: str) -> Job:
     (record,) = scheduler.runs()
     (status,) = scheduler.wait(record.id, every=0.05, timeout=30)
     assert status.outcome == "succeeded", job_text(scheduler.logs(refresh=True, run=record.id))
-    assert record.launch_spec.experiment == (experiment or "plain")
+    assert record.launch.spec.experiment == (experiment or "plain")
     assert len(scheduler.attempts(record.id)) == 1
     tracked = tmp_path / "track"
     data = read(tracked, experiment or "plain", record.id)

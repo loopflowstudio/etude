@@ -17,8 +17,8 @@ def show_runs(scheduler: Scheduler, ids: Sequence[str]) -> None:
         where += f" ({status.hardware})" if status.hardware else ""
         record = scheduler.record(run)
         print(run, record.name, str(status) + where, sep="  ")
-        if record.launch_spec.repo is not None:
-            print("  source: " + line(record.launch.source, record.launch_spec.revision or "HEAD"))
+        if record.launch.spec.repo is not None:
+            print("  source: " + line(record.launch.source, record.launch.spec.revision or "HEAD"))
         if record.launch.smoke.outcome != "not_smoked":
             print(f"  smoke: {record.launch.smoke}")
 

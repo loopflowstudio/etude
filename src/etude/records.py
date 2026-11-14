@@ -200,11 +200,6 @@ class RunRecord(Record):
         return sha256(text.encode()).hexdigest() if text is not None else None
 
     @property
-    def launch_spec(self) -> Job:
-        """The submitted execution; standalone runs have no launcher specification."""
-        return self.launch.spec
-
-    @property
     def launch(self) -> RunSubmission:
         """Required launcher facts; standalone declarations have none."""
         if self.submission is None:

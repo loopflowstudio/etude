@@ -157,7 +157,7 @@ def test_a_job_without_a_smoke_form_beside_one_with_it_is_not_recorded_passed(
     said = capsys.readouterr()
     assert "smoke train plain: not smoked (no smoke form)" in said.err
     ppo, plain = (default().record(id) for id in _ids(said.out))
-    assert (ppo.launch_spec.name, plain.launch_spec.name) == ("ppo", "plain")
+    assert (ppo.launch.spec.name, plain.launch.spec.name) == ("ppo", "plain")
     assert ppo.launch.smoke.outcome == "passed"
     assert [(s.step, s.name) for s in ppo.launch.smoke.steps] == [
         ("train", "ppo"),

@@ -31,7 +31,7 @@ Built in this cut (committed at `dbf799e`; grep finds no `etude.tracking`,
 - `RunDeclaration`/`RunFile` and launcher `RunRecord` become the single
   `etude.records.RunRecord`. Historical nested declarations decode there.
   The record's launcher specification is absent for standalone writers;
-  `launch_spec` requires one. Each config is stored once (within the
+  `RunRecord.launch` requires one. Each config is stored once (within the
   specification when launched). The job digest remains identity;
   `TrainingRunSummary.job` remains a derived report label.
 - Shared job specification types move to `etude.job`, so neither shared run
@@ -90,7 +90,9 @@ continuation and `Stopped`; `uv run mypy` (174 files), `uv run ruff check .`,
 `uv run ruff format --check .` and `git diff --check` pass. The stale `seed3`
 quote expectation was corrected to `seed-3` and its focused test passes.
 No queries or schema changed; the existing quote provider-count pin passes.
-
+Compress then removed the `launch_spec` alias (`record.launch.spec`) and
+default-valued submission arguments: 227 focused tests in the touched launch,
+identity, continuation, jobs and smoke files, mypy and ruff pass.
 
 Checks: full suite **877 passed, 6 skipped (optional PyTorch), 3 deselected**
 before the compress cut: no live `Run.source_key`/`namespace` plumbing (stored

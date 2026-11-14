@@ -345,12 +345,12 @@ def continue_from(
     data = read(storage, declaration.experiment, name)
     target = Until.parse(until)
     previous = next(
-        (v.value for v in parent.launch_spec.environment if v.name == "ETUDE_CONTINUES"), None
+        (v.value for v in parent.launch.spec.environment if v.name == "ETUDE_CONTINUES"), None
     )
     inherited_input = None if previous is None else ParentRun.model_validate_json(previous).input
     inputs = {
         i.name: i
-        for i in parent.launch_spec.inputs
+        for i in parent.launch.spec.inputs
         if i.name != inherited_input
         and (inherited_input is None or not i.name.startswith(inherited_input + "/"))
         and i.out is None
@@ -433,15 +433,15 @@ def continue_from(
         checkpoint = checkpoint.model_copy(update={"artifact": artifact, "tags": ()})
     handed = ParentRun(parent=parent_key, at=at, checkpoint=checkpoint, input=given)
     environment = (
-        *(v for v in parent.launch_spec.environment if v.name != "ETUDE_CONTINUES"),
+        *(v for v in parent.launch.spec.environment if v.name != "ETUDE_CONTINUES"),
         Variable(name="ETUDE_CONTINUES", value=handed.model_dump_json()),
     )
     text = (
-        parent.launch_spec.config
+        parent.launch.spec.config
         if config is None
-        else _config_text(_job_function(parent.launch_spec), config)
+        else _config_text(_job_function(parent.launch.spec), config)
     )
-    job = parent.launch_spec.model_copy(
+    job = parent.launch.spec.model_copy(
         update={
             "until": target,
             "inputs": tuple(inputs.values()),
@@ -499,8 +499,8 @@ def _job_function(job: Job) -> Callable[..., object]:
 
 def continued_config(parent: RunRecord, changes: str) -> BaseModel:
     """Validate a JSON object of changes against the parent's typed config."""
-    kind = config_type(_job_function(parent.launch_spec))
-    values = kind.model_validate_json(parent.launch_spec.config or "{}").model_dump(mode="json")
+    kind = config_type(_job_function(parent.launch.spec))
+    values = kind.model_validate_json(parent.launch.spec.config or "{}").model_dump(mode="json")
     try:
         fields = TypeAdapter(dict[str, JsonValue]).validate_json(changes)
     except ValidationError:

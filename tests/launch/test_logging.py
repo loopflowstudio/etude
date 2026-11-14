@@ -634,9 +634,9 @@ def test_client_chosen_id_freezes_source_before_admission(
     assert record.id == "my-scientific-id"
     assert (
         record.launch.source is not None
-        and record.launch_spec.revision == record.launch.source.commit
+        and record.launch.spec.revision == record.launch.source.commit
     )
-    assert record.launch_spec.revision != "HEAD"
+    assert record.launch.spec.revision != "HEAD"
 
 
 def test_remote_preparation_failure_keeps_controller_evidence(

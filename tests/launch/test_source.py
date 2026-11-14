@@ -78,7 +78,7 @@ def test_position_snapshot_publication_and_checkout(repository: tuple[Path, Path
     run = scheduler.record(first)
     position = run.launch.source
     assert position is not None
-    assert position.commit == scheduler.record(second).launch_spec.revision
+    assert position.commit == scheduler.record(second).launch.spec.revision
     assert position.base_commit == head and position.base_subject == "Base training"
     assert position.base_date and position.ahead == 2 and position.release is not None
     assert position.release.startswith("v1-2-")
@@ -112,7 +112,7 @@ def test_explicit_revision_and_failed_push(repository: tuple[Path, Path]) -> Non
     )
     run = scheduler.record(id)
     assert (
-        run.launch_spec.revision == head
+        run.launch.spec.revision == head
         and run.launch.source is not None
         and not run.launch.source.snapshot
     )
@@ -136,7 +136,7 @@ def test_local_only_snapshot(
     id = scheduler.queue(Job(command="true", max_hours=1, repo=str(repo)), "waiting")
     record = scheduler.record(id)
     assert record.launch.source is not None and record.launch.source.origin is None
-    assert git(repo, "rev-parse", f"refs/etude/runs/{id}") == record.launch_spec.revision
+    assert git(repo, "rev-parse", f"refs/etude/runs/{id}") == record.launch.spec.revision
     assert main(["status", id]) == 0
     assert "local-only" in capsys.readouterr().out
     assert (checkout(record, repo.parent / "copy") / "new").read_text() == "retained locally\n"

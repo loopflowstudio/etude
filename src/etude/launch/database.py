@@ -658,7 +658,7 @@ class Database:
                         run.id,
                         run.launch.version,
                         job=run.job,
-                        spec=run.launch_spec.model_dump_json(),
+                        spec=run.launch.spec.model_dump_json(),
                         source=run.launch.source.model_dump_json() if run.launch.source else None,
                         pool=run.launch.pool,
                         rent=run.launch.rent,
@@ -675,7 +675,7 @@ class Database:
                     (
                         run.id,
                         run.job,
-                        run.launch_spec.model_dump_json(),
+                        run.launch.spec.model_dump_json(),
                         run.seed,
                         run.launch.pool,
                         run.launch.rent,
@@ -755,7 +755,7 @@ class Database:
         return tuple(
             run
             for row in rows
-            if (run := _run_from_row(row)).launch_spec.max_attempts > row["tries"]
+            if (run := _run_from_row(row)).launch.spec.max_attempts > row["tries"]
         )
 
     # Sessions
