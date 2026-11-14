@@ -290,3 +290,21 @@ never declared lost (no deadline): the run stays `running`, and cancelling
 leaves it `stopping`. Use a fresh `ETUDE_HOME` and prefix after installing an
 interim schema. Afterwards remove the containers and delete the prefixes
 (`aws s3 rm --recursive` under Doppler, as above).
+
+## Driving Etude
+
+- Point every command at a scratch home: `ETUDE_HOME=/tmp/<name>/home uv run etude status`.
+  Read the real `~/.etude` only, and do it through a SQLite backup-API snapshot
+  (`sqlite3.connect("file:...?mode=ro", uri=True).backup(dst)`), since live
+  files are WAL-mode and may be open.
+- For a released baseline, run `ETUDE_HOME=<copy> uvx --from etude-sdk==X.Y.Z etude runs`
+  on a separate copy, because an old etude writes the file it opens.
+- Take-over refuses a source written in the last 30 s. A fresh copy counts, so
+  age it with `touch -t 202611141300 launcher-17.db*` and don't wait.
+- A real local run needs a small git project with a `pyproject.toml` depending on
+  `etude-sdk @ file://<worktree>`, plus a `job.py` like the README's. `max_usd`
+  must be above zero, and `run.save()` needs `run.resume(...)` first. Then use
+  `uv run etude launch job.py --experiment NAME` and `uv run etude wait NAME`.
+- To simulate a branch build, drop an unreleased `src/etude/launch/migrations/<name>.sql`
+  (`-- after: run_resume_and_writers`) into the worktree. For a released one,
+  also append `{name, sha256, floor}` to `released.json`. Remove both afterwards.
