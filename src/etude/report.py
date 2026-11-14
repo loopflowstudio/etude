@@ -1,6 +1,6 @@
 """What an experiment's report shows, declared in Python in the experiment file.
 
-    # ppo.py: experiment "ppo", beside its train() and eval(state)
+    # ppo.py: experiment "ppo", beside its training_jobs() and eval_jobs(state)
     def report() -> Report:
         return Report(
             score=Score(table="plays", value="won", reference=0.5),
@@ -21,7 +21,7 @@ Panels name data, never rendering, and draw; seatings say who plays whom
 (`etude.eval.records.Seating`). Eval panels name columns of the score's eval
 table (`Matrix(rows=..., columns=...)`, `Ranking(by=...)`, `Curve(split=...)`)
 and which matches they count (`Matches`): a tournament's, or one seating or
-tag of it, by the names `eval(state)` gives them. A curve of seatings draws
+tag of it, by the names `eval_jobs(state)` gives them. A curve of seatings draws
 each held checkpoint's seating value where that checkpoint stood. Matches
 held outside any tournament are offered by the Evals section's Matches control.
 Metric panels name logged metric keys. The defaults are reinforcement learning's:
@@ -61,7 +61,7 @@ class Matches(Record):
     of a benchmark, and `tag` the seatings tagged with it (`Seating.tags`). With
     no `tournament`, a seating or tag covers every tournament holding it, each
     match counted once, and otherwise the section's control picks one. Give the names the experiment's
-    `eval(state)` gives, such as `LADDER.name`.
+    `eval_jobs(state)` gives, such as `LADDER.name`.
     """
 
     tournament: str | None = None

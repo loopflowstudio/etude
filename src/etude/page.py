@@ -7,7 +7,7 @@
     write(render_index(index(storage, pages, href=lambda stem: f"{stem}.html")), target(storage, "index"))
 
 The file defaults the experiment to its stem; an explicit name overrides it. It may define `report()`
-(`etude.report.Report`) and `eval(state)` (`etude.experiment`). Without
+(`etude.report.Report`) and `eval_jobs(state)` (`etude.experiment`). Without
 `report()` the page is `Report(other_metrics=True)`, drawing every metric its
 runs logged, and says so at its top. The experiment's
 training runs are drawn by `etude.train.report.training`; an experiment with
@@ -29,8 +29,8 @@ checkpoint seated with no `at` from outside the experiment, an etude-sdk
 0.2 digest) is fixed, and drawn once as an anchor.
 
 What each tournament has played is `etude.eval.tournament.played`: for a
-tournament `eval(state)` returns, what it wants now; for any other the
-experiment's eval runs hold, or one `eval(state)` now defines otherwise than
+tournament `eval_jobs(state)` returns, what it wants now; for any other the
+experiment's eval runs hold, or one `eval_jobs(state)` now defines otherwise than
 they were held with, everything they were held for. Each delivered
 match counts once, from the eval run `played` says delivered it last, so at
 its latest version. Matches of eval runs held for no tournament are one more
@@ -254,7 +254,7 @@ class Coverage(Record):
     played: int
     # Failed, and not played since.
     failed: int
-    # Wanted by `eval(state)` and delivered by no eval run.
+    # Wanted by `eval_jobs(state)` and delivered by no eval run.
     unplayed: int
 
 
@@ -748,9 +748,9 @@ def _held_tournaments(
 ) -> tuple[list[_HeldTournament], tuple[str, ...]]:
     """Each tournament as held so far, and a note for each one drawn otherwise than asked.
 
-    A tournament `eval(state)` returns is what it wants now; any other the
+    A tournament `eval_jobs(state)` returns is what it wants now; any other the
     experiment's eval runs hold is everything they were held for. Where
-    `eval(state)` now defines one otherwise than its eval runs were held
+    `eval_jobs(state)` now defines one otherwise than its eval runs were held
     with, such as a later revision of its file with another environment
     digest, the page draws what they recorded: reading needs no agreement,
     only scheduling new games (`etude eval`) does.
@@ -783,7 +783,7 @@ def _held_tournaments(
             except EtudeError as error:
                 refused.append(
                     f"Tournament {name} is drawn as its eval runs recorded it:"
-                    f" eval(state) now defines it otherwise ({error.code})."
+                    f" eval_jobs(state) now defines it otherwise ({error.code})."
                 )
         wanted[name] = recorded
     held_tournaments = []
@@ -808,8 +808,8 @@ def _held_tournaments(
 
 
 def _wanted(want: Callable[..., object], state: ExperimentState) -> list[Tournament]:
-    """The tournaments `eval(state)` returns, each with the checkpoints or entrants it holds."""
-    # The optional `eval` extra, imported where it is used (`_read_evals`): eval(state)
+    """The tournaments `eval_jobs(state)` returns, each with the checkpoints or entrants it holds."""
+    # The optional `eval` extra, imported where it is used (`_read_evals`): eval_jobs(state)
     # and its evaluation jobs are built on etude.eval.
     from etude.declarations import asked  # noqa: PLC0415
     from etude.eval.records import Tournament  # noqa: PLC0415

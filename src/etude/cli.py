@@ -302,10 +302,11 @@ def smoke_experiment(
     if file is None:
         if help:
             return
-        raise typer.BadParameter("a Python FILE defining training_jobs() is required")
+        raise typer.BadParameter("an experiment FILE is required")
     from typing import cast
 
     from etude.declarations import read_training_jobs
+    from etude.experiment_file import defined_functions
     from etude.smoke import STEPS, Step, smoke_file
     from etude.storage import storage_from_uri
 
@@ -313,7 +314,11 @@ def smoke_experiment(
     unknown = sorted(set(steps) - set(STEPS))
     if unknown:
         raise typer.BadParameter(f"--step is train, eval or report, not {', '.join(unknown)}")
-    runs = read_training_jobs(file, ctx.args, help=help) if "train" in steps else None
+    runs = (
+        read_training_jobs(file, ctx.args, help=help)
+        if "train" in steps and "training_jobs" in defined_functions(file)
+        else None
+    )
     if help:
         return
     smoke_file(

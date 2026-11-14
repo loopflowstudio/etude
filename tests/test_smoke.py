@@ -292,3 +292,50 @@ def test_the_python_client_smokes_when_asked(tmp_path: Path) -> None:
     fine = broken.model_copy(update={"smoke": SmokeForm(command="true")})
     (smoked,) = queue(fine.runs(1), "local", smoke=True)
     assert default().record(smoked).launch.smoke.outcome == "passed"
+
+
+@pytest.mark.parametrize("steps", [[], ["--step", "eval", "--step", "report"]])
+@pytest.mark.parametrize("source_given", [False, True])
+def test_eval_only_smoke_uses_outside_checkpoints_and_this_computers_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    steps: list[str],
+    source_given: bool,
+) -> None:
+    source = tmp_path / "source"
+    with track(experiment="producer", run="base@0", directory=source, clocks=["updates"]) as run:
+        path = run.out / "weights.pt"
+        path.write_bytes(b"outside weights")
+        run.checkpoint(path, updates=1)
+    file = tmp_path / "outside_smoke.py"
+    monkeypatch.setenv("EVAL_TEST_KEY", "local fixture credential")
+    file.write_text(f"""
+import os
+from etude.experiment import observe
+from etude.jobs import EvalJob
+from etude.eval.records import RoundRobin, Inference, Code
+from etude.eval.match import environment
+
+def play(match):
+    assert os.environ["EVAL_TEST_KEY"] == "local fixture credential"
+    model = next(p for p in match.players if hasattr(p, "checkpoint"))
+    assert model.checkpoint.path.read_bytes() == b"outside weights"
+    return {{"games": [{{"seat": 0, "won": 1}}]}}
+
+def eval_jobs(state):
+    checkpoint = observe({str(source)!r}, "producer").runs[0].final
+    return EvalJob(tournament=RoundRobin(name="outside", environment=environment("game"),
+        configs=({{}},), games=3), enter=(checkpoint.player(Inference()), Code(name="fixed")),
+        play=play, max_hours=0.1)
+""")
+    before = sorted(source.rglob("*"))
+    assert (
+        main(["smoke", str(file), *steps, *(["--source", str(source)] if source_given else [])])
+        == 0
+    )
+    error = capsys.readouterr().err
+    assert "smoke eval outside: passed" in error
+    assert "smoke report: passed" in error
+    assert sorted(source.rglob("*")) == before
+    assert not default_root().exists()

@@ -67,7 +67,7 @@ function render() {
   const q = S.q.toLowerCase(), host = document.getElementById("rows"); host.replaceChildren();
   const draws = [];
   const shown = rows.filter(r => !q || `${r.e.experiment} ${r.e.file}`.toLowerCase().includes(q));
-  if (!shown.length) host.appendChild(node("div", "na", D.entries.length ? "No experiment matches the filter" : "No experiment file here: a .py file defining eval(state) or report()"));
+  if (!shown.length) host.appendChild(node("div", "na", D.entries.length ? "No experiment matches the filter" : "No experiment file here: a .py file defining training_jobs(), eval_jobs(state) or report()"));
   for (const r of shown) {
     const row = node("div", "row" + (r.bad ? " bad" : r.live ? " live" : "")), name = node("div");
     const h = node("h2"), a = node("a", null, r.e.experiment); a.href = r.e.href; h.appendChild(a);

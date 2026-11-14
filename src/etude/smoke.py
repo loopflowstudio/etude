@@ -5,7 +5,7 @@
 
 1. Train: each distinct job `training_jobs()` returns, run once with its declared tiny
    form on a throwaway local launcher (`etude.launch.smoke.smoke_train`).
-2. Eval: the file's `eval(state)` on what training stored, each tournament it
+2. Eval: the file's `eval_jobs(state)` on what training stored, each tournament it
    returns cut to one game per match, every condition kept, and held here, through
    `etude.jobs.hold_group` as `etude eval` holds it.
 3. Report: `report()`, or the default, drawn from those results by `etude.page`.
@@ -26,26 +26,30 @@ import traceback
 from collections.abc import Callable, Collection, Sequence
 from concurrent.futures.process import _RemoteTraceback
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Literal
 
 from etude.declarations import asked, read_experiment, read_training_jobs
-from etude.errors import LauncherError
+from etude.errors import EtudeError, LauncherError
 from etude.eval.records import Benchmark, RoundRobin
+from etude.eval.tournament import played
 from etude.experiment import observe
-from etude.experiment_file import defined_functions, experiment_named
+from etude.experiment_file import defined_functions, experiment_named, refuse_renamed
 from etude.jobs import (
     EvalGroup,
     Evaluation,
     _group_key,
+    _relocated,
     _servers,
     evaluation_group,
+    fetch_checkpoints,
     hold_group,
     with_experiment,
 )
 from etude.launch.smoke import Smoked, show, smoke_home, smoke_train
 from etude.page import build, render, write
 from etude.spec import Job, RunRequest, SmokeStep
-from etude.storage import DirectoryStorage, Storage
+from etude.storage import DirectoryStorage, Storage, default_root
 
 type Step = Literal["train", "eval", "report"]
 STEPS: tuple[Step, ...] = ("train", "eval", "report")
@@ -67,11 +71,15 @@ def smoke_file(
     calling, since the temporary home moves the default store. Raises
     `LauncherError` at the first failure, after printing its output.
     """
+    refuse_renamed(path)
+    if "training_jobs" not in defined_functions(path):
+        steps = tuple(step for step in steps if step != "train")
+        source = source or DirectoryStorage(default_root())
     if "train" in steps and source is not None:
         raise LauncherError("--source is for smoking eval and report without the train step")
     if "train" not in steps and source is None and set(steps) & {"eval", "report"}:
         raise LauncherError("smoking eval or report without train needs --source")
-    if "train" in steps and runs is None and "training_jobs" in defined_functions(path):
+    if "train" in steps and runs is None:
         runs = read_training_jobs(path)
     experiment = experiment_named(path)
     train: dict[str, SmokeStep] = {}
@@ -114,9 +122,11 @@ def _saved(store: Storage, experiment: str, run: str) -> str:
 def _evaluate(
     path: Path, experiment: str | None, source: Storage, store: DirectoryStorage
 ) -> list[SmokeStep]:
-    """Each evaluation `eval(state)` asks for on `source`, held tiny into `store`."""
+    """Each evaluation `eval_jobs(state)` asks for on `source`, held tiny into `store`."""
     if experiment is None or "eval_jobs" not in defined_functions(path):
-        return [SmokeStep(step="eval", name="eval", outcome="skipped", detail="no eval(state)")]
+        return [
+            SmokeStep(step="eval", name="eval", outcome="skipped", detail="no eval_jobs(state)")
+        ]
     state = observe(source, experiment)
     definition = read_experiment(path)
     function = definition.eval
@@ -135,7 +145,14 @@ def _evaluate(
     for batch in batches.values():
         tiny: list[Evaluation] = []
         for job in batch:
-            for spec in evaluation_group(with_experiment(job, experiment)).evaluations:
+            spec = evaluation_group(job).evaluations[0]
+            try:
+                job = with_experiment(job, experiment)
+            except EtudeError as error:
+                raise LauncherError(
+                    f"smoke eval {spec.tournament.name}: a job of experiment {spec.experiment!r}"
+                ) from error
+            for spec in evaluation_group(job).evaluations:
                 tiny.append(
                     spec.model_copy(
                         update={
@@ -145,13 +162,45 @@ def _evaluate(
                     )
                 )
         started = time.monotonic()
-        held = _try_step(
-            "eval",
-            tiny[0].tournament.name if len(tiny) == 1 else "eval",
-            lambda: hold_group(
-                EvalGroup(evaluations=tuple(tiny)), checkout=batch[0].repo, storages=[store]
-            ),
-        )
+        matches = [
+            played(
+                spec.tournament,
+                experiment=experiment,
+                checkpoints=tuple(c.ref for c in spec.checkpoints),
+                enter=spec.entrants,
+                lines=state.lines,
+                storages=[store],
+            ).new
+            for spec in tiny
+        ]
+        name = tiny[0].tournament.name if len(tiny) == 1 else "eval"
+        with TemporaryDirectory(prefix="etude-smoke-inputs-") as folder:
+            files = _try_step(
+                "eval",
+                name,
+                lambda: fetch_checkpoints(
+                    tuple(match for pending in matches for match in pending),
+                    state,
+                    tuple(c for spec in tiny for c in spec.checkpoints),
+                    Path(folder),
+                ),
+            )
+            held = _try_step(
+                "eval",
+                name,
+                lambda: hold_group(
+                    EvalGroup(
+                        evaluations=tuple(
+                            spec.model_copy(
+                                update={"matches": tuple(_relocated(m, files) for m in pending)}
+                            )
+                            for spec, pending in zip(tiny, matches, strict=True)
+                        )
+                    ),
+                    checkout=batch[0].repo,
+                    storages=[store],
+                ),
+            )
         for spec, result in zip(tiny, held, strict=True):
             steps.append(
                 SmokeStep(

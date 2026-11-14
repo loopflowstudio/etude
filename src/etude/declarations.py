@@ -22,7 +22,7 @@ from etude.errors import EtudeError, LauncherError
 from etude.experiment import observe
 from etude.experiment_file import refuse_renamed
 from etude.identity import run_address
-from etude.jobs import EvalJob, ExperimentState, TrainingJob, evaluation_group
+from etude.jobs import EvalJob, ExperimentState, TrainingJob, TrainingRunSummary, evaluation_group
 from etude.spec import Job, RunRequest, expand_runs
 from etude.storage import default_root
 
@@ -45,19 +45,12 @@ def read_training_jobs(
 
     if path.suffix != ".py":
         raise LauncherError("experiment files must be Python (.py), defining training_jobs()")
-    # As `python job.py` would, so the file can import its neighbours: `from train import train`.
-    folder = str(path.resolve().parent)
-    if folder not in sys.path:
-        sys.path.insert(0, folder)
     refuse_renamed(path)
     if function is None:
         found = _namespace(path).get("training_jobs")
         function = cast(Callable[..., object], found) if callable(found) else None
     if not callable(function):
-        missing = "define"
-        raise LauncherError(
-            f"{path.name}: {missing} training_jobs() returning jobs or run requests"
-        )
+        raise LauncherError(f"{path.name}: define training_jobs() returning jobs or run requests")
     signature = inspect.signature(function)
     hints = typing.get_type_hints(function)
     reserved = {
@@ -151,12 +144,10 @@ def read_training_jobs(
                 evaluation_group(each.job)
             except EtudeError:
                 continue
-        raise LauncherError(
-            f"{path.name}: training_jobs() must return TrainingJob or its RunRequest"
-        )
+        raise LauncherError(f"{path.name}: training_jobs() must return TrainingJob")
+    plain = [each.plain() if isinstance(each, Job) else each.job for each in returned]
     jobs: list[Job] = []
-    for each in returned:
-        candidate = each.plain() if isinstance(each, Job) else each.job
+    for candidate in plain:
         if not local:
             candidate.require_hours()
             if candidate.repo is not None and not any(
@@ -173,8 +164,7 @@ def read_training_jobs(
         name: each for name, each in arguments.items() if isinstance(each, (str, int, float, bool))
     }
     normalized: list[Job | RunRequest] = []
-    for each in returned:
-        job = each.plain() if isinstance(each, Job) else each.job
+    for each, job in zip(returned, plain, strict=True):
         if not job.name:
             raise LauncherError(f"{path.name}: TrainingJob requires name=")
         label = experiment or job.experiment or path.stem
@@ -182,7 +172,6 @@ def read_training_jobs(
             update={
                 "repo": str(Path(job.repo).resolve()) if job.repo else None,
                 "experiment": label,
-                "name": job.name,
             }
         )
         normalized.append(
@@ -200,6 +189,32 @@ def read_training_jobs(
             )
         )
     return expand_runs(normalized, params=params)
+
+
+def find_training_run(request: RunRequest, state: ExperimentState) -> TrainingRunSummary | None:
+    """Find a declared address, including stored compact job/seed spellings."""
+    return next(
+        (
+            run
+            for run in state.runs
+            if (
+                request.id is not None
+                and run.name == request.id.removeprefix(state.experiment + "/")
+            )
+            or (run.launch == request.job.name and run.seed == request.seed)
+        ),
+        None,
+    )
+
+
+def format_known_run(request: RunRequest, prior: TrainingRunSummary | None) -> str | None:
+    """The pass's line for a known run; None when the address is new."""
+    if prior is None:
+        return None
+    line = f"{request.id}  {prior.state}"
+    if prior.state in {"failed", "stopped"}:
+        line += f"; --job {request.job.name} --seed {request.seed} --resume"
+    return line
 
 
 def select_runs(
@@ -230,6 +245,7 @@ class Experiment:
 
 
 def _namespace(path: Path) -> dict[str, Any]:
+    # As `python job.py` would, so the file can import its neighbours: `from train import train`.
     folder = str(path.resolve().parent)
     if folder not in sys.path:
         sys.path.insert(0, folder)
@@ -261,12 +277,17 @@ def asked(function: EvalFunction, state: ExperimentState) -> list[Job]:
     for each in given:
         if isinstance(each, EvalJob):
             jobs.append(each.plain())
-        elif isinstance(each, RunRequest):
+            continue
+        if isinstance(each, RunRequest):
             try:
                 evaluation_group(each.job)
             except EtudeError:
-                raise LauncherError("eval_jobs() must return EvalJob or its RunRequest") from None
-            jobs.append(each.job)
-        else:
-            raise LauncherError("eval_jobs() must return EvalJob or its RunRequest")
+                pass
+            else:
+                jobs.append(each.job)
+                continue
+        defining = function if inspect.isroutine(function) else type(function)
+        raise LauncherError(
+            f"{Path(inspect.getfile(defining)).name}: eval_jobs() must return EvalJob"
+        )
     return jobs

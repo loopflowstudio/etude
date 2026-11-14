@@ -289,3 +289,25 @@ never declared lost (no deadline): the run stays `running`, and cancelling
 leaves it `stopping`. Use a fresh `ETUDE_HOME` and prefix after installing an
 interim schema. Afterwards remove the containers and delete the prefixes
 (`aws s3 rm --recursive` under Doppler, as above).
+
+## Etude: one pass over an experiment file (train, eval, launch, queue)
+
+Lab as in "launching an experiment file on this computer", with `two.py` declaring
+`training_jobs(state)` (base, seeds 0 and 1; then `fine` with `start=` base@0's
+`final` once it is finished) and `eval_jobs(state)` (a `Benchmark` over every
+`run.final`). Use a recipe that checkpoints a folder (`run.checkpoint(policy=...)`):
+single-file checkpoints hide nested input names (`start/checkpoint.json`).
+
+- Here: `etude train two.py` three times (stage one, stage two, all `finished`),
+  `etude eval two.py` twice (`N new ... N played`, then `nothing to play`), `etude report two.py`.
+- Launched: fresh `ETUDE_HOME`, `etude launch two.py --max-usd 5`, then
+  `perl -e 'alarm 240; exec @ARGV' uv run etude wait --experiment two` (wait drives the
+  local pool), and `launch` again, immediately and after waiting. In-flight matches read
+  `0 new, N running`. `--max-usd 1.5` with `max_usd=1` per job holds the second seed.
+- Ctrl-C: a slower copy of the file (`pause=0.5`) under the `Popen`/`SIGINT` driver after
+  ~7 s gives exit 75; the next pass prints the stopped run as `running`; resume with
+  `--job base --seed 1 --resume`.
+- Returning user: `git worktree add --detach /tmp/X main`, a lab whose pyproject points
+  at it, train `runs()` files (compact `ppo@0`, `solo`) and `etude queue` (makes
+  `launcher-19.db`). Repoint the pyproject at this checkout, `uv lock`, rename per
+  `release/UNRELEASED.md`, and check stored runs read `finished`.

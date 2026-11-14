@@ -1156,17 +1156,50 @@ def _most_lines(seated: Iterable[Seated]) -> tuple[Seated, ...]:
     return tuple(merged[key] for key in sorted(merged))
 
 
+def validate_checkpoints(checkpoints: Iterable[CheckpointRef]) -> None:
+    """Refuse different checkpoint contents under one portable key, even after relocation."""
+    found: dict[str, CheckpointRef] = {}
+    for checkpoint in checkpoints:
+        prior = found.setdefault(checkpoint.key, checkpoint)
+        a, b = prior.artifact, checkpoint.artifact
+        if a.sha256 != b.sha256 or (
+            a.size_bytes is not None and b.size_bytes is not None and a.size_bytes != b.size_bytes
+        ):
+            raise EtudeError(
+                "checkpoint_key_conflict", 409, detail=f"{checkpoint.key}: {a.uri} and {b.uri}"
+            )
+
+
+def _checkpoint_refs(run: TournamentRun) -> Iterable[CheckpointRef]:
+    """Every checkpoint a tournament record can seat, before deduplication."""
+    yield from run.checkpoints
+    for seated in run.seated:
+        for pairing in seated.pairings:
+            yield from (c for c in pairing.seats if c is not None)
+    players = list(run.entrants)
+    if isinstance(run.tournament, Benchmark):
+        players.extend(
+            p
+            for seating in run.tournament.seatings
+            for p in seating.players
+            if isinstance(p, CheckpointPlayer)
+        )
+    yield from (p.checkpoint for p in players if isinstance(p, CheckpointPlayer))
+
+
 def assemble(held: Iterable[TournamentRun]) -> Tournament:
     """The tournament its eval runs make together, from the first of them on.
 
     Raises `EtudeError("tournament_conflict")` when they disagree on its
     format or environment (its setup aside), or a round robin's configs or games, and
     `EtudeError("seating_conflict")` when they define one seating name two ways.
+    Different contents under one checkpoint key raise `checkpoint_key_conflict`.
     Versions are not definitions: a later run's seating, checkpoint or entrant
     with the same key replaces an earlier one, so what is played next records
     the version that plays it.
     """
     runs = list(held)
+    validate_checkpoints(c for run in runs for c in _checkpoint_refs(run))
     first = runs[0].tournament
     seatings: dict[str, Seating] = {}
     checkpoints: dict[str, CheckpointRef] = {}

@@ -274,6 +274,18 @@ imports nothing else of Etude before the function's own module.
   type, raises `LauncherError` where the job is written, before any quote,
   launch or rental. A copy made with `model_copy(update=...)` is checked when
   the file is read.
+- **Project extras.** Set `extras=("eval",)` on `TrainingJob` or `EvalJob`
+  to select uv project extras. Etude includes them in `uv run` or its derived
+  `uv sync` preparation; the preparation key includes that selection. Use
+  `environment=(Variable(name="NAME", value="value"),)` for ordinary job
+  settings (`Variable` is from `etude.spec`). Replace edits to `job.command`
+  with these fields. Remove `UV_NO_SYNC=1`: Etude owns synchronization and
+  uses the prepared interpreter directly when preparation supplies one.
+  An explicit `prepare` with its own interpreter owns its dependencies, so
+  `extras=` beside it raises `LauncherError`; put the extras in that
+  preparation's install command. Local `train`
+  and `eval` use the interpreter they were invoked with; select its extras
+  with `uv run --extra eval etude ...`.
 - **Every other `Job` field** (`max_hours`, `max_usd`, `until`, `inputs`,
   `runtime`, `setup`, `seeds`, ...) is a field of both. Neither takes
   `command=`.
@@ -347,7 +359,7 @@ Three levels do the work, each built only on the one below it:
 
 | Level | What it does | What it knows |
 | --- | --- | --- |
-| **Controller** | One pass: reads the file and the state, calls the declarations, hands down each new run once. Owns the experiment's dollar limit. | Experiments, and a run as `queued`, `running`, `finished` or `failed` |
+| **Controller** | One pass: reads the file and the state, calls the declarations, hands down each new run once. Owns the experiment's dollar limit. | Experiments, and a run as `queued`, `running`, `stopped`, `finished` or `failed` |
 | **Scheduler** | Queues runs and starts each on a machine with room. Owns a job's `max_hours`, `max_usd` and `max_attempts`. | Runs and machines; an experiment's name is a label |
 | **Provisioner** | Rents and terminates machines within an on-demand's `--max` and price ceiling. | Machines: `starting`, `available`, `unavailable`, `deleted` |
 
@@ -361,8 +373,14 @@ Three levels do the work, each built only on the one below it:
   stored something come from the source; queued runs, and running ones that
   have stored nothing yet, come from the scheduler's records, the ones
   `etude runs` and `etude status` show. Each run has one state: `queued`,
-  `running`, `finished` or `failed`. The pass keeps no memory of its own and
-  writes nothing else.
+  `running`, `stopped`, `finished` or `failed`. The pass keeps no memory of its own and
+  writes nothing else. A `stopped` run saved its state short of its target
+  and no launcher on this computer is continuing it. A stopped training run
+  resumes only when asked. A stopped eval needs no action: its undelivered
+  matches are new on the next pass and play in a new run. While this computer's
+  launcher owns continuation, either kind reads its `queued` or `running` phase.
+  If the launcher ends without success, it reads `failed`; a stored `finished`
+  or `failed` outcome always wins.
 - **One line for everything considered.** A training run already in the state
   prints that state. A new one prints `new, running` when a machine took it,
   `new, queued` when it waits for room (always, under `etude queue`), or
@@ -1256,7 +1274,7 @@ setting is a function or class method returning one, such as
 
 `etude launch job.py` supplies experiment `job` to every job that names
 none, even when the file defines only `training_jobs()`. A `train` function calls
-`track(clocks=..., config=config)` without naming an experiment. A plain experiment file preserves explicit `Job.experiment`
+`track(clocks=..., config=config)` without naming an experiment. A file defining only `training_jobs()` preserves explicit `Job.experiment`
 values; a file defining `eval_jobs(state)` or `report()` requires its own stem
 and refuses jobs naming another experiment.
 
@@ -1703,7 +1721,7 @@ Karpenter and SkyPilot call the third a provisioner.
 
 | Level | Modules | States it owns |
 | --- | --- | --- |
-| Controller | `etude/controller.py` (the pass), `experiment.py` (state), `declarations.py` (reads an experiment file), `jobs.py`, `smoke.py`, `local.py` | a run's `queued`, `running`, `finished`, `failed` |
+| Controller | `etude/controller.py` (the pass), `experiment.py` (state), `declarations.py` (reads an experiment file), `jobs.py`, `smoke.py`, `local.py` | a run's `queued`, `running`, `stopped`, `finished`, `failed` |
 | Scheduler | `etude/launch/`, apart from the provisioner's modules | `Phase`, `Outcome`, `Cause`, `Status` |
 | Provisioner | `launch/machines.py`, `launch/providers/`, `launch/images.py` | `Machine.state`: `starting`, `available`, `unavailable`, `deleted` |
 

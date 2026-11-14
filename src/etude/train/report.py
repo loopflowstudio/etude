@@ -196,7 +196,7 @@ def job_names(data: Sequence[RunData]) -> dict[str, JobName]:
     job's runs across commits and devices with its seeds: these are provenance,
     and a report addresses jobs by name. A config is scientific: a name launched
     with several configs becomes one job per config, "ppo 1a2b3c"; a report
-    naming "ppo" addresses all of them. `eval(state)` names jobs by this too.
+    naming "ppo" addresses all of them. `eval_jobs(state)` names jobs by this too.
     """
     keys: dict[str, tuple[str, str | None]] = {}
     for run in data:

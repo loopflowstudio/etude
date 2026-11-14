@@ -830,14 +830,19 @@ matches, as a launched one does, unless `--retry-failed`.
   unplayed.
 - **State.** What the experiment's runs have stored, together with the
   scheduler's records of those queued or only just started, read fresh each
-  pass and never stored itself. `state.eval_runs` is its eval runs, each with
-  its name and whether it is `queued`, `running`, `finished` or `failed`. `state.runs` is
+  pass and never stored itself. Summary names are local (`base@0`,
+  `ladder-1a2b3c4d5e6f`) in both cases; `state.run("capacity/base@0")` and
+  `state.run("base@0")` find the same training run. `state.eval_runs` is its eval runs, each with
+  its name and whether it is `queued`, `running`, `stopped`, `finished` or `failed`. `state.runs` is
   its training runs under the source: each one's name, its `job` (the name the report gives it: the
   launch name, with its config digest when one name ran two configs),
-  whether it is `queued`, `running`, `finished` or `failed`,
+  whether it is `queued`, `running`, `stopped`, `finished` or `failed`,
   and the checkpoints it stored, each with its ordinal, `at` (where its
   run's clocks stood), tags and `wall_ms`, when it was saved in milliseconds
   since the epoch.
+  `stopped` follows the [same state rule as training](launcher.md#one-pass-over-the-file).
+  A stopped eval is never resumed and needs no action: its undelivered matches
+  are new on the next pass and play in a new run, without `--resume`.
   `Checkpoints` is a tuple, so a slice works too; `every(n)`, `at(clock,
   *values)` and `tagged(tag)` choose by ordinal, clock value or tag, and
   `final` is the last checkpoint once a run has finished.
@@ -851,12 +856,26 @@ matches, as a launched one does, unless `--retry-failed`.
   fixed players, played once rather than per checkpoint. `tags` mark
   seatings for readers, such as pairs a rating fit leaves out.
 - **Other experiments' checkpoints.** A file may define only `eval_jobs`.
-  Read a producer's checkpoints with `etude.train.read.read(source, experiment,
-  run)` and give its `checkpoints` records to a benchmark's `checkpoints=`,
-  or use `checkpoint.player(inference)` in a round robin's `enter=`.
+  Read a producer with `observe(source, "producer")` and give its checkpoint
+  records to a benchmark's `checkpoints=`, or use
+  `checkpoint.player(inference)` in a round robin's `enter=`.
+
+  ```python
+  def eval_jobs(state):
+      checkpoint = observe(source, "producer").run("producer/base@0").final
+      return EvalJob(tournament=ladder, play=play, checkpoints=(checkpoint,), max_hours=1)
+  ```
+
+  Import `observe` from `etude.experiment`. It lists the producer's source
+  on every pass, including each `--watch` round.
   The evaluating experiment's state need not contain the producer. `eval`,
   `launch` and `queue` use the checkpoint artifact's location and verify
   its digest and byte length; folder checkpoints verify every member.
+  Two different artifacts with the same checkpoint key are refused with
+  `checkpoint_key_conflict`, naming the key and both locations, including
+  when an earlier delivered evaluation seated the other artifact.
+  Local evaluation inherits this computer's environment, including API keys;
+  it fetches the checkpoints here and rents nothing.
 - **A pass.** For each job, the matches exactly what `eval_jobs` returned calls
   for, the seatings it gave for the checkpoints it gave, that no eval run of
   the experiment in its environment delivered. `etude eval` plays them here

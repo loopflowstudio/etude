@@ -1,12 +1,14 @@
-"""Experiments end to end: eval(state) chooses checkpoints, and each pass plays only what is new."""
+"""Experiments end to end: eval_jobs(state) chooses checkpoints, and each pass plays only what is new."""
 
 from __future__ import annotations
 
 import shutil
 import sqlite3
 import time
+from contextlib import nullcontext
 from decimal import Decimal
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlparse
 
 import pytest
@@ -20,13 +22,14 @@ from etude.errors import EtudeError, LauncherError
 from etude.eval.match import environment
 from etude.eval.query import statsdb
 from etude.eval.records import Benchmark, Code, Inference, Seating
-from etude.eval.tournament import scores
+from etude.eval.tournament import evaluating, scores
 from etude.experiment import observe
 from etude.jobs import EvalJob, ExperimentState, _hold, evaluation_group
 from etude.launch.records import Outcome, Standing, Status
 from etude.launch.source import home
 from etude.records import Clock, RunRecord, RunSubmission
 from etude.spec import Job, RunRequest
+from etude.stopping import Stopped
 from etude.storage import DirectoryStorage
 from etude.train.read import read
 from etude.train.tracking import TrainingRun as Run_
@@ -318,6 +321,7 @@ class _Launcher:
                     id=str(run.id),
                     experiment=experiment,
                     job="eval",
+                    seed=run.seed,
                     submission=RunSubmission(spec=run.job, pool="local"),
                 ),
                 status=self.status(str(run.id)),
@@ -333,6 +337,29 @@ class _Launcher:
             outcome=self.outcome, cause=None, until=None, clocks={}, usd=Decimal(0), attempts=1,
             rental_ended=None,
         )  # fmt: skip
+
+
+@pytest.mark.parametrize("phase", ["running", "queued", "failed"])
+def test_saved_stop_keeps_the_launchers_continuation_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    training = trainer(bucket, tmp_path)
+    training.finish("stopped", timeout=30)
+    (stopped,) = observe(bucket, "ppo").runs
+    assert stopped.state == "stopped"
+    launcher = _Launcher()
+    launcher.launched.append(
+        RunRequest(
+            id=f"ppo/{stopped.name}",
+            job=Job(name=stopped.launch, experiment="ppo", command="true"),
+        )
+    )
+    launcher.queued = phase == "queued"
+    launcher.outcome = "failed" if phase == "failed" else None
+    monkeypatch.setattr(client, "standing", launcher.standing)
+    (continued,) = observe(bucket, "ppo").runs
+    assert continued.state == phase
 
 
 def test_a_launched_pass_ships_its_checkpoints_and_is_not_launched_twice(
@@ -362,7 +389,7 @@ def test_a_launched_pass_ships_its_checkpoints_and_is_not_launched_twice(
     (again,) = advance(
         eval_, source=bucket, mode="launch", min_eval_hours=0, rent="cpu8", directory=local
     )
-    assert (again.new, again.running, again.launched) == (3 * len(DEALS), 3 * len(DEALS), None)
+    assert (again.new, again.running, again.launched) == (0, 3 * len(DEALS), None)
     assert len(launcher.launched) == 1
 
     # The machine: inputs in their folder, the eval run delivered to the bucket.
@@ -733,3 +760,160 @@ def test_a_failed_eval_holds_only_its_matches_within_the_same_tournament(
         assert len(new_keys) == 2 * len(DEALS)
     finally:
         training.finish(timeout=30)
+
+
+@pytest.mark.parametrize("phase", ["absent", "running", "queued", "failed", "succeeded"])
+@pytest.mark.parametrize("outcome", ["stopped", "finished", "failed"])
+def test_saved_eval_outcomes_keep_the_launchers_continuation_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str, outcome: str
+) -> None:
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    tournament = Benchmark(name="ladder", environment=WORLD)
+    with (
+        pytest.raises(Stopped if outcome == "stopped" else ValueError)
+        if outcome != "finished"
+        else nullcontext(),
+        evaluating(
+            tournament,
+            experiment="ppo",
+            run="ladder",
+            directory=tmp_path / "eval",
+            storages=[bucket],
+        ),
+    ):
+        if outcome == "stopped":
+            raise Stopped()
+        if outcome == "failed":
+            raise ValueError("evaluation failed")
+    launcher = _Launcher()
+    if phase != "absent":
+        launcher.launched.append(
+            RunRequest(
+                id="ppo/ladder",
+                job=EvalJob(
+                    tournament=tournament, play=play, experiment="ppo", repo=None, max_hours=1
+                ).plain(),
+            )
+        )
+    launcher.queued = phase == "queued"
+    launcher.outcome = (
+        "failed" if phase == "failed" else "succeeded" if phase == "succeeded" else None
+    )
+    monkeypatch.setattr(client, "standing", launcher.standing)
+    (run,) = observe(bucket, "ppo").eval_runs
+    assert run.name == "ladder"
+    assert run.state == (
+        phase if outcome == "stopped" and phase not in {"absent", "succeeded"} else outcome
+    )
+
+
+@pytest.mark.parametrize("retained", [False, True], ids=["absent", "done"])
+def test_stopped_eval_undelivered_matches_are_new_on_the_next_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, retained: bool
+) -> None:
+    launcher = _Launcher()
+    monkeypatch.setattr(client, "launch", launcher.launch)
+    monkeypatch.setattr(client, "queue", launcher.queue)
+    monkeypatch.setattr(client, "standing", launcher.standing)
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    experiment = design(tmp_path)
+    training = trainer(bucket, tmp_path)
+    try:
+        save(training, bucket, tmp_path, range(1, 3))
+        advance(experiment, source=bucket, mode="launch")
+        (first,) = launcher.launched
+        spec = evaluation_group(first.job).evaluations[0]
+        with (
+            pytest.raises(Stopped),
+            evaluating(
+                spec.tournament,
+                experiment="ppo",
+                run=str(first.id).removeprefix("ppo/"),
+                directory=tmp_path / "eval",
+                storages=[bucket],
+            ),
+        ):
+            raise Stopped()
+        if retained:
+            launcher.outcome = "succeeded"
+        else:
+            launcher.launched.clear()
+        (stopped,) = observe(bucket, "ppo").eval_runs
+        assert stopped.state == "stopped"
+        (decision,) = advance(experiment, source=bucket, mode="queue")
+        assert decision.new == len(spec.matches or ()) > 0
+        assert decision.running == decision.failed == 0
+        assert decision.launched != first.id
+        assert evaluation_group(launcher.launched[-1].job).evaluations[0].matches == spec.matches
+    finally:
+        training.finish(timeout=30)
+
+
+@pytest.mark.parametrize("phase", ["queued", "running", "failed", "succeeded"])
+@pytest.mark.parametrize("outcome", ["stopped", "finished", "failed"])
+def test_launcher_phase_preserves_compact_training_addresses_and_terminal_outcomes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    outcome: Literal["stopped", "finished", "failed"],
+) -> None:
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    training = track(
+        experiment="ppo",
+        run="ppo@0",
+        job="base",
+        seed=0,
+        directory=tmp_path / "training",
+        storages=[bucket],
+    )
+    training.finish(outcome, timeout=30)
+    launcher = _Launcher()
+    launcher.launched.append(
+        RunRequest(
+            id="ppo/base@0",
+            seed=0,
+            job=Job(name="base", experiment="ppo", command="true"),
+        )
+    )
+    launcher.queued = phase == "queued"
+    launcher.outcome = (
+        "failed" if phase == "failed" else "succeeded" if phase == "succeeded" else None
+    )
+    monkeypatch.setattr(client, "standing", launcher.standing)
+    (run,) = observe(bucket, "ppo").runs
+    assert run.name == "ppo@0"
+    assert run.state == (phase if outcome == "stopped" and phase != "succeeded" else outcome)
+
+
+@pytest.mark.parametrize("phase", ["queued", "running"])
+def test_unstored_summaries_use_local_names_and_accept_both_lookup_spellings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    launcher = _Launcher()
+    launcher.launched.extend(
+        [
+            RunRequest(
+                id="ppo/base@0",
+                seed=0,
+                job=Job(name="base", experiment="ppo", command="true"),
+            ),
+            RunRequest(
+                id="ppo/ladder-123",
+                job=EvalJob(
+                    tournament=Benchmark(name="ladder", environment=WORLD),
+                    play=play,
+                    experiment="ppo",
+                    repo=None,
+                    max_hours=1,
+                ).plain(),
+            ),
+        ]
+    )
+    launcher.queued = phase == "queued"
+    monkeypatch.setattr(client, "standing", launcher.standing)
+    state = observe(DirectoryStorage(tmp_path / "bucket"), "ppo")
+    run = state.run("ppo/base@0")
+    assert state.run("base@0") == run
+    assert (run.name, run.line, run.state) == ("base@0", "base@0", phase)
+    (evaluation,) = state.eval_runs
+    assert (evaluation.name, evaluation.state) == ("ladder-123", phase)

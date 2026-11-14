@@ -11,8 +11,14 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal
 
-from etude.cache import Artifact, ContentMismatch, Corrupt
-from etude.declarations import Experiment, asked, read_training_jobs, select_runs
+from etude.declarations import (
+    Experiment,
+    asked,
+    find_training_run,
+    format_known_run,
+    read_training_jobs,
+    select_runs,
+)
 from etude.errors import EtudeError, LauncherError
 from etude.eval.records import digest
 from etude.eval.result import EvalResult
@@ -25,8 +31,7 @@ from etude.jobs import (
     _group_key,
     _relocated,
     _servers,
-    checkpoint_inputs,
-    checkpoint_inputs_for,
+    fetch_checkpoints,
     evaluation_group,
     group_evaluations,
     hold_group,
@@ -39,7 +44,7 @@ from etude.launch.server import selected
 from etude.records import Record
 from etude.smoke import smoke_file
 from etude.spec import Job, RunRequest, Smoke, Until
-from etude.storage import Storage, default_root, place_artifact
+from etude.storage import Storage, default_root
 
 
 class TournamentDecision(Record):
@@ -87,22 +92,11 @@ def _fits(job: Job, committed: Decimal, max_usd: Decimal | None) -> bool:
     return max_usd is None or committed + (job.max_usd or Decimal(0)) <= max_usd
 
 
-def _show_training(request: RunRequest, state: ExperimentState) -> bool:
-    prior = next(
-        (
-            r
-            for r in state.runs
-            if r.name == request.id or (r.launch == request.job.name and r.seed == request.seed)
-        ),
-        None,
-    )
-    if prior is None:
-        return False
-    line = f"{request.id}  {prior.state}"
-    if prior.state == "failed":
-        line += f"; --job {request.job.name} --seed {request.seed} --resume"
-    print(line)
-    return True
+def _print_lines(lines: dict[str | None, str]) -> None:
+    """Print the training lines in declared order, once, and forget them."""
+    for line in lines.values():
+        print(line)
+    lines.clear()
 
 
 def advance(
@@ -134,19 +128,16 @@ def advance(
     state = observe(source, experiment.name, keys=listed)
     committed = state.committed_usd
     print(
-        f"{experiment.name}: state from {source.uri('run.json').removesuffix('/run.json')}: {len(state.runs)} training runs, {len(state.eval_runs)} eval runs"
+        f"{experiment.name}: state from {source.uri('run.json').removesuffix('/run.json')}: "
+        f"{_count(len(state.runs), 'training run')}, {_count(len(state.eval_runs), 'eval run')}"
         + (f"; ${committed:.2f} of ${max_usd:.2f} committed" if max_usd is not None else "")
     )
-    evaluate = (
-        experiment.eval is not None
-        and job is None
-        and seed is None
-        and not resume
-        and until is None
-    )
-    before = None
+    # A training selection or resume is a pass over those runs alone.
+    evaluate = job is None and seed is None and not resume and until is None
     new: list[RunRequest] = []
     requests: list[RunRequest] = []
+    # One line per declared run, keyed by address; a new run's line waits for its placement.
+    lines: dict[str | None, str] = {}
     if mode != "local" and callable(experiment.training):
         assert experiment.file is not None
         requests = read_training_jobs(
@@ -179,10 +170,12 @@ def advance(
                         if existing.status.done
                         else existing.record.launch.spec.max_usd or Decimal(0)
                     )
-            if not resume and _show_training(request, state):
+            known = None if resume else format_known_run(request, find_training_run(request, state))
+            if known is not None:
+                lines[request.id] = known
                 continue
             if not _fits(request.job, committed, max_usd):
-                print(
+                lines[request.id] = (
                     f"{request.id}  new, not queued: --max-usd {max_usd} (${committed:.2f} committed)"
                 )
                 continue
@@ -194,16 +187,21 @@ def advance(
                     }
                 )
             new.append(request)
+            lines[request.id] = f"{request.id}  new"
             committed += request.job.max_usd or Decimal(0)
     jobs = (
         [with_experiment(j, experiment.name) for j in asked(experiment.eval, state)]
-        if evaluate and experiment.eval is not None
+        if experiment.eval is not None and evaluate
         else []
     )
     _servers(tuple(spec for job in jobs for spec in evaluation_group(job).evaluations))
-    if smoke_file_first and callable(experiment.training) and not quote:
+    if smoke_file_first and not quote:
         assert experiment.file is not None
-        before = smoke_file(experiment.file, requests)
+        before = (
+            smoke_file(experiment.file, requests)
+            if callable(experiment.training)
+            else smoke_file(experiment.file, steps=("eval", "report"), source=source)
+        )
         new = before.stamp(new)
         smoke = Smoke(steps=before.rest)
     planned = list(new)
@@ -211,15 +209,14 @@ def advance(
         key for run in state.eval_runs if run.state in {"queued", "running"} for key in run.matches
     }
     failed = {
-        key: run.name for run in state.eval_runs if run.state == "failed" for key in run.matches
+        key: f"{experiment.name}/{run.name}"
+        for run in state.eval_runs
+        if run.state == "failed"
+        for key in run.matches
     }
-    taken = {run.name for run in state.eval_runs}
+    taken = {f"{experiment.name}/{run.name}" for run in state.eval_runs}
     decisions: list[TournamentDecision] = []
     stopped_runs: set[str] = set()
-    if smoke_file_first and before is None and not quote:
-        assert experiment.file is not None
-        before = smoke_file(experiment.file, steps=("eval", "report"), source=source)
-        smoke = Smoke(steps=before.rest)
     stored = StoredRuns.read(experiment.name, source, keys=listed) if jobs else None
     pending_jobs: list[Job] = []
     pending_specs: list[Evaluation] = []
@@ -240,7 +237,7 @@ def advance(
         pending = [match for match in new_matches if match.key not in running]
         done = TournamentDecision(
             tournament=spec.tournament.name,
-            new=len(new_matches),
+            new=len(pending),
             running=len(new_matches) - len(pending),
             failed=0 if retry_failed else len(found.failed),
         )
@@ -328,7 +325,8 @@ def advance(
     if planned:
         if quote:
             for request in new:
-                print(f"{request.id}  new, would launch")
+                lines[request.id] = f"{request.id}  new, would launch"
+            _print_lines(lines)
             show_quote(client.quote(planned, pool, rent=rent))
             decisions = [
                 p.model_copy(update={"state": "would launch"}) if p.launched else p
@@ -337,25 +335,19 @@ def advance(
         else:
             submit = client.queue if mode == "queue" else client.launch
             submit(planned, pool, rent=rent)
-            statuses = {item.record.id: item.status for item in client.standing(experiment.name)}
+            placed: dict[str | None, Literal["queued", "running"]] = {
+                item.record.id: "queued"
+                if item.status.phase in {"queued", "renting"}
+                else "running"
+                for item in client.standing(experiment.name)
+            }
             for request in new:
-                assert request.id is not None
-                status = statuses[request.id]
-                print(
-                    f"{request.id}  new, {'queued' if status.phase in {'queued', 'renting'} else 'running'}"
-                )
+                lines[request.id] = f"{request.id}  new, {placed[request.id]}"
             decisions = [
-                p.model_copy(
-                    update={
-                        "state": "queued"
-                        if statuses[p.launched].phase in {"queued", "renting"}
-                        else "running"
-                    }
-                )
-                if p.launched
-                else p
+                p.model_copy(update={"state": placed[p.launched]}) if p.launched else p
                 for p in decisions
             ]
+    _print_lines(lines)
     for decision in decisions:
         _show_tournament(decision)
     if stopped_runs and not quote:
@@ -371,27 +363,13 @@ def _play_here(
     directory: Path | str | None,
 ) -> tuple[EvalResult, ...]:
     """Play with the same verified artifacts a launched run receives as inputs."""
-    saved = {
-        key: value
-        for spec in specs
-        for key, value in checkpoint_inputs(spec.matches or (), state, spec.checkpoints).items()
-    }
     with TemporaryDirectory(prefix="etude-eval-") as folder:
-        here: dict[str, str] = {}
-        for key, checkpoint in saved.items():
-            name = digest(key)[:16]
-            for file in checkpoint_inputs_for(checkpoint, name):
-                assert file.uri is not None
-                try:
-                    place_artifact(
-                        Artifact(location=file.uri, sha256=file.sha256, size_bytes=file.size_bytes),
-                        Path(folder) / file.name,
-                    )
-                except FileNotFoundError:
-                    raise EtudeError("checkpoint_not_stored", 404, detail=key) from None
-                except (ContentMismatch, Corrupt):
-                    raise EtudeError("checkpoint_content_mismatch", 409, detail=key) from None
-            here[key] = (Path(folder) / name).as_uri()
+        here = fetch_checkpoints(
+            tuple(match for spec in specs for match in spec.matches or ()),
+            state,
+            tuple(checkpoint for spec in specs for checkpoint in spec.checkpoints),
+            Path(folder),
+        )
         return hold_group(
             EvalGroup(
                 evaluations=tuple(
@@ -426,3 +404,7 @@ def _show_tournament(done: TournamentDecision) -> None:
     if done.stopped:
         line += f"; failed runs {', '.join(done.stopped)} (--retry-failed retries them)"
     print(line, flush=True)
+
+
+def _count(number: int, noun: str) -> str:
+    return f"{number} {noun}" if number == 1 else f"{number} {noun}s"

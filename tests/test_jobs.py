@@ -25,12 +25,14 @@ from etude.experiment import observe
 from etude.jobs import EvalJob, JobOptions, TrainingJob, checkpoint_inputs
 from etude.launch.smoke import tiny
 from etude.records import ArtifactRef
-from etude.spec import Input, Job, Runtime, SmokeForm, Until, job_id
+from etude.spec import Input, Job, Preparation, Runtime, SmokeForm, Until, job_id
 from etude.storage import DirectoryStorage
 from etude.train.read import read
 from etude.train.tracking import track
+from tests.eval.games import play
 from tests.experiments import authored
 from tests.launch.counting import job_text
+from tests.launch.tasks import Command, train_command
 from tests.launch.test_runpod_machines import cloud
 from tests.launch.test_worker_attempts import local
 
@@ -588,3 +590,86 @@ def test_a_seated_artifact_wins_over_a_local_checkpoint_with_the_same_compact_ke
     match = Match(players=(checkpoint.player(Inference()), Code(name="fixed")), games=1)
     saved = checkpoint_inputs([match], state, [checkpoint] if declared else [])
     assert saved[checkpoint.key].artifact == checkpoint.artifact
+
+
+def test_typed_jobs_declare_uv_extras(tmp_path: Path) -> None:
+    module = f"extras_{tmp_path.name}".replace("-", "_")
+    repo = checkout(
+        tmp_path / "lab",
+        {
+            "pyproject.toml": UNPACKAGED,
+            "uv.lock": "version = 1\n",
+            f"{module}.py": TRAIN,
+            "job.py": TYPED.format(module=module, options=", extras=('eval',)"),
+        },
+    )
+    (run,) = read_training_jobs(repo / "job.py")
+    assert run.job.prepare is not None
+    assert "--extra eval" in run.job.prepare.command
+    assert '"$ETUDE_PYTHON" -m etude.call' in run.job.command
+    evaluation = EvalJob(
+        tournament=Benchmark(name="b", environment=environment("duel")),
+        play=play,
+        max_hours=1,
+        repo=str(repo),
+        extras=("eval",),
+    ).plain()
+    assert evaluation.prepare is not None
+    assert "--extra eval" in evaluation.prepare.command
+    other = EvalJob(
+        tournament=Benchmark(name="b", environment=environment("duel")),
+        play=play,
+        max_hours=1,
+        repo=str(repo),
+        extras=("train",),
+    ).plain()
+    assert job_id(other) != job_id(evaluation)
+    packaged = TrainingJob(
+        name="b",
+        train=train_command,
+        config=Command(command="true"),
+        max_hours=1,
+        repo=None,
+        extras=("eval",),
+    ).plain()
+    assert packaged.command.startswith("uv run --extra eval python -m etude.call")
+
+
+def test_typed_jobs_refuse_extras_a_named_preparation_would_drop() -> None:
+    prepared = Preparation(command="make env", paths=("pyproject.toml",), python=".venv/bin/python")
+    with pytest.raises(LauncherError, match="extras= is not used when prepare="):
+        TrainingJob(
+            name="base",
+            train=train_command,
+            config=Command(command="true"),
+            max_hours=1,
+            prepare=prepared,
+            extras=("eval",),
+        )
+    with pytest.raises(LauncherError, match="extras= is not used when prepare="):
+        EvalJob(
+            tournament=Benchmark(name="b", environment=environment("duel")),
+            play=play,
+            max_hours=1,
+            prepare=prepared,
+            extras=("eval",),
+        )
+
+
+@pytest.mark.parametrize("command", ["", "true"])
+def test_typed_jobs_refuse_command_overrides(command: str) -> None:
+    with pytest.raises(LauncherError, match="typed jobs derive command"):
+        TrainingJob(
+            name="base",
+            train=train_command,
+            config=Command(command="true"),
+            max_hours=1,
+            command=command,
+        )
+    with pytest.raises(LauncherError, match="typed jobs derive command"):
+        EvalJob(
+            tournament=Benchmark(name="b", environment=environment("duel")),
+            play=play,
+            max_hours=1,
+            command=command,
+        )

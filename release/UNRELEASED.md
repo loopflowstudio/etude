@@ -29,7 +29,13 @@ run and tournament; typing the command again launches only what is new.
 
 Eval-only files can seat checkpoints from any experiment, in benchmark
 `checkpoints=` or round-robin `enter=`. Local evals fetch and verify their
-checkpoint inputs too. A failed launched eval holds only its undelivered
+checkpoint inputs too; local eval inherits this computer's environment. Eval-only
+files smoke their declared evals and report against outside checkpoints. Different
+artifacts under one checkpoint key are refused, including delivered matches.
+Unselected local training passes report existing runs and train new stages with
+their verified inputs and environment. Typed jobs select uv extras with
+`extras=("eval",)`; remove command rewrites and `UV_NO_SYNC=1`.
+A failed launched eval holds only its undelivered
 matches: the pass hands down unaffected work and prints all decisions before
 returning `launched_pass_failed`. `--quote` reports the hold without failing.
 
@@ -98,8 +104,10 @@ experiment; cohorts, which sat between, are removed.
 - **The SSH controller is the server.** `etude server set HOST`; the setting
   file is `~/.etude/server`, and a selection is set again after upgrading.
   "Controller" now means the pass over an experiment file.
-- **The launcher database is a new version.** An older file is refused and
-  left untouched; let its runs finish under the version that made it.
+- **The launcher database is a new version**, `launcher-20.db`. This
+  version neither reads nor changes `launcher-19.db`, so `etude status`
+  does not list the runs queued or running there: let them finish under the
+  version that made them.
   Stored runs, including a `run.json` that names a cohort, still read.
 - **`~/.etude/experiments/launched.json` is gone.** In-flight eval matches
   are read from the launcher's run records; delete the file.

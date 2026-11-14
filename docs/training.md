@@ -154,10 +154,16 @@ with an error naming `training_jobs` and the type it takes.
   ([One pass over the file](launcher.md#one-pass-over-the-file)).
 
 On this computer, `etude train job.py` trains the declared runs in order;
-`--job` and `--seed` select a subset. Selection never changes an address:
+a later pass reports existing runs and trains only new ones, so typing it
+again advances a staged declaration. `--job` and `--seed` explicitly select a
+subset and refuse a taken address unless resumed. Selection never changes an address:
 `--job wide --seed 1` selects what `training_jobs()` declares. Local training
 needs neither `max_hours` nor a git checkout; launch, queue and smoke need
 both. When git is available, local attempts record the current commit.
+
+After Ctrl-C, the next pass lists the run as `stopped` with
+`--job NAME --seed N --resume` to carry on from its last save. It leaves
+stopped and failed runs alone until explicitly resumed.
 
 A file with only `train(config)` and no `training_jobs` still trains with
 `etude train train.py`: one run with seed 0, addressed by the experiment
@@ -165,7 +171,7 @@ alone (`train`).
 
 `--experiment NAME` names the experiment on train, launch, queue, eval and
 report; the file stem is its default. `--job` and `--seed` select, never
-rename. `etude train` refuses a taken address: use `--resume` for the same
+rename. `etude train` with an explicit selection refuses a taken address: use `--resume` for the same
 selection, and `--resume --until updates=300` to train it further. `etude
 launch` and `etude queue` leave a run they already know alone and say so
 ([One pass over the file](launcher.md#one-pass-over-the-file)).
@@ -617,6 +623,19 @@ checkpoint it started from, so a report or an evaluation can say which run a
 checkpoint descends from. A name the run was not given raises. Other files a
 job is given (`inputs=`, [the launcher](launcher.md#progress-and-continuation))
 are read the same way.
+
+Local training resolves an input's `uri`, or its `run` and `key` in this
+computer's runs directory. A bucket-only input needs `uri` or `run` before
+it can be used here (`input_not_located`). Missing or mismatched bytes raise
+`input_undelivered`, naming the input, location and whether the file is
+missing or its bytes differ. Every selected run's inputs are checked before
+any training starts. With several runs selected, every refusal is reported
+together under `selection_refused`; one selected run reports its own error.
+Either way every selected run is left untouched, with new run addresses still
+available.
+
+Local training places each distinct input once for the selected runs. Their
+input names link to that read-only copy until the pass ends.
 
 To start from a run of another experiment, read that experiment yourself:
 `start=observe("s3://my-bucket/runs", "imitate").run("imitate/base@0").final`

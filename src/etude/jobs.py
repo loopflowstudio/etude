@@ -26,7 +26,7 @@ from typing import Literal, TypedDict, cast
 
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
-from etude.cache import Content
+from etude.cache import Artifact, Content, ContentMismatch, Corrupt
 from etude.call import Function, changed_config, config_type
 from etude.carriage import CHECKPOINTS, OUT_PRESENT, checkpoint_file_name, checkpoint_key
 from etude.checkpoints import CheckpointId, CheckpointRecord, CheckpointRef, checkpoint_id
@@ -39,6 +39,8 @@ from etude.eval.records import (
     Match,
     Player,
     RoundRobin,
+    TournamentRun,
+    assemble,
     digest,
     folder_name,
 )
@@ -67,7 +69,7 @@ from etude.spec import (
     Variable,
     number,
 )
-from etude.storage import Storage, default_root
+from etude.storage import Storage, default_root, place_artifact
 from etude.train.read import read
 from etude.train.records import ParentRun
 
@@ -105,7 +107,7 @@ class TrainingRunSummary:
     launch: str
     # Its learner: the first run of the chain of continuations that led to it.
     line: str
-    state: Literal["queued", "running", "finished", "failed"]
+    state: Literal["queued", "running", "stopped", "finished", "failed"]
     checkpoints: Checkpoints
     # The seed it declared, if any.
     seed: int | None = None
@@ -123,7 +125,7 @@ class TrainingRunSummary:
 @dataclass(frozen=True)
 class EvalRunSummary:
     name: str
-    state: Literal["queued", "running", "finished", "failed"]
+    state: Literal["queued", "running", "stopped", "finished", "failed"]
     matches: tuple[str, ...] = ()
 
 
@@ -139,7 +141,7 @@ class ExperimentState:
     def run(self, name: str) -> TrainingRunSummary:
         """The training run named `name`; raises `EtudeError("run_not_found")` without one."""
         for each in self.runs:
-            if each.name == name:
+            if each.name == name.removeprefix(self.experiment + "/"):
                 return each
         raise EtudeError("run_not_found", 404) from ValueError(name)
 
@@ -196,6 +198,31 @@ def checkpoint_inputs(
                 raise EtudeError("checkpoint_not_stored", 404, detail=ref.key)
             found[ref.key] = saved
     return found
+
+
+def fetch_checkpoints(
+    matches: Sequence[Match],
+    state: ExperimentState,
+    checkpoints: Sequence[CheckpointRecord],
+    folder: Path,
+) -> dict[str, str]:
+    """Verify seated artifacts into a caller-owned folder and return their local URIs by key."""
+    here: dict[str, str] = {}
+    for key, checkpoint in checkpoint_inputs(matches, state, checkpoints).items():
+        name = digest(key)[:16]
+        for file in checkpoint_inputs_for(checkpoint, name):
+            assert file.uri is not None
+            try:
+                place_artifact(
+                    Artifact(location=file.uri, sha256=file.sha256, size_bytes=file.size_bytes),
+                    folder / file.name,
+                )
+            except FileNotFoundError:
+                raise EtudeError("checkpoint_not_stored", 404, detail=key) from None
+            except (ContentMismatch, Corrupt):
+                raise EtudeError("checkpoint_content_mismatch", 409, detail=key) from None
+        here[key] = (folder / name).as_uri()
+    return here
 
 
 class JobOptions(TypedDict, total=False):
@@ -305,6 +332,7 @@ class TrainingJob[C: BaseModel](Job):
     config: C  # type: ignore[assignment]  # Lowered to JSON text only by plain().
     smoke: C | None = Field(default=None, exclude=True)  # type: ignore[assignment]
     start: CheckpointRecord | None = Field(default=None, exclude=True)
+    extras: tuple[str, ...] = Field(default=(), exclude=True)
     command: str = ""
 
     @model_validator(mode="before")
@@ -316,6 +344,11 @@ class TrainingJob[C: BaseModel](Job):
 
     @model_validator(mode="after")
     def _validate_training(self) -> TrainingJob[C]:
+        if "command" in self.model_fields_set:
+            raise LauncherError(
+                "typed jobs derive command; use extras, environment, runtime or prepare"
+            )
+        _refuse_unused_extras(self.extras, self.prepare)
         self.plain()
         return self
 
@@ -330,7 +363,12 @@ class TrainingJob[C: BaseModel](Job):
                 Variable(name="ETUDE_START", value=self.start.key),
             )
         job = _job(
-            self.train, self.config, origin=self.train, options=options, experiment=self.experiment
+            self.train,
+            self.config,
+            origin=self.train,
+            options=options,
+            experiment=self.experiment,
+            extras=self.extras,
         )
         if self.smoke is not None:
             job = job.model_copy(
@@ -350,6 +388,7 @@ class EvalJob(Job):
     enter: Sequence[Player] = Field(default=(), exclude=True)
     workers: int = Field(default=1, ge=1, exclude=True)
     server: InferenceServer | None = Field(default=None, exclude=True)
+    extras: tuple[str, ...] = Field(default=(), exclude=True)
     command: str = ""
 
     @field_validator("tournament", mode="before")
@@ -366,6 +405,11 @@ class EvalJob(Job):
         if self.name and self.name != self.tournament.name:
             raise LauncherError("an EvalJob is named by its tournament")
         object.__setattr__(self, "name", self.tournament.name)
+        if "command" in self.model_fields_set:
+            raise LauncherError(
+                "typed jobs derive command; use extras, environment, runtime or prepare"
+            )
+        _refuse_unused_extras(self.extras, self.prepare)
         self.plain()
         return self
 
@@ -407,12 +451,22 @@ class EvalJob(Job):
             workers=self.workers,
             server=None if self.server is None else self.server.plain(repo),
         )
+        assemble(
+            [
+                TournamentRun(
+                    tournament=self.tournament,
+                    checkpoints=tuple(c.ref for c in spec.checkpoints),
+                    entrants=spec.entrants,
+                )
+            ]
+        )
         return _job(
             _hold,
             EvalGroup(evaluations=(spec,)),
             origin=self.play,
             options=options,
             experiment=self.experiment,
+            extras=self.extras,
         )
 
 
@@ -989,6 +1043,15 @@ def _require_hours(options: JobOptions) -> None:
         raise LauncherError("a job needs max_hours: the most hours it may hold a machine")
 
 
+def _refuse_unused_extras(extras: tuple[str, ...], prepare: Preparation | None) -> None:
+    """A preparation naming its own interpreter owns its install, so extras would go unused."""
+    if extras and prepare is not None and prepare.python is not None:
+        raise LauncherError(
+            "extras= is not used when prepare= names its own python; "
+            "install the extras in that preparation's command"
+        )
+
+
 def _job(
     function: Callable[..., object],
     config: BaseModel,
@@ -996,6 +1059,7 @@ def _job(
     origin: Callable[..., object],
     options: JobOptions,
     experiment: str | None = None,
+    extras: tuple[str, ...] = (),
 ) -> Job:
     """The job that calls `function(config)`; `origin` is the author's function it brings."""
     text = _config_text(function, config)
@@ -1003,7 +1067,7 @@ def _job(
     called = _function(function, repo)
     sourced: JobOptions = {**options, "repo": None if repo is None else str(repo)}
     if "prepare" not in options and options.get("runtime") is None and repo is not None:
-        derived = _uv_preparation(repo)
+        derived = _uv_preparation(repo, extras)
         if derived is not None:
             sourced["prepare"] = derived
     prepared = sourced.get("prepare")
@@ -1012,6 +1076,9 @@ def _job(
         prepared is not None and prepared.python is not None
     )
     python = '"$ETUDE_PYTHON"' if named else "uv run python"
+    if extras and (prepared is None or prepared.python is None):
+        flags = " ".join(f"--extra {shlex.quote(extra)}" for extra in extras)
+        python = f"uv run {flags}" + (' --python "$ETUDE_PYTHON"' if named else "") + " python"
     command = f"{python} -m etude.call {_called(called)}"
     if called.path:
         command += f" --path {shlex.quote(called.path)}"
@@ -1043,7 +1110,7 @@ def _config_text(function: Callable[..., object], config: BaseModel) -> str:
     return text
 
 
-def _uv_preparation(repo: Path) -> Preparation | None:
+def _uv_preparation(repo: Path, extras: tuple[str, ...]) -> Preparation | None:
     """The dependency environment of an unpackaged uv project, prepared once per lock.
 
     uv installs only the dependencies of a project it does not package (no build
@@ -1070,6 +1137,7 @@ def _uv_preparation(repo: Path) -> Preparation | None:
         command=(
             'UV_PROJECT_ENVIRONMENT="$ETUDE_PREPARED_DIR/.venv"'
             " uv sync --frozen --no-install-project"
+            + "".join(f" --extra {shlex.quote(extra)}" for extra in extras)
         ),
         # uv chooses the interpreter from .python-version, so it decides the result too.
         paths=("pyproject.toml", "uv.lock", *_present(repo, ".python-version")),

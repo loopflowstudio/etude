@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Sequence
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Literal
@@ -18,12 +19,10 @@ from etude.checkpoints import CheckpointRecord
 from etude.errors import EtudeError
 from etude.launch import client
 from etude.launch.records import Standing
+from etude.records import RunOutcome
 from etude.storage import Storage
 from etude.train.read import RunData, lines, read_all
 from etude.train.report import job_names
-
-# ---------------------------------------------------------------------------
-# What declarations choose from
 
 
 def observe(
@@ -60,12 +59,6 @@ def state_of(
     line = lines(ours)
     job = job_names(ours)
     retained = client.standing(experiment, local=True) if retained is None else retained
-    statuses = {r.record.id: r.status for r in retained}
-    lost = {
-        name.removeprefix(experiment + "/")
-        for name, status in statuses.items()
-        if status.done and status.outcome != "succeeded"
-    }
     runs = []
     for data in ours:
         saved = jobs.Checkpoints(
@@ -75,14 +68,6 @@ def state_of(
             for record in data.checkpoints
             if record.artifact.sha256 is not None and record.artifact.size_bytes is not None
         )
-        # A planned stop is not an end: the launcher calls the recipe again.
-        state: Literal["queued", "running", "finished", "failed"] = (
-            data.outcome.state
-            if data.outcome is not None and data.outcome.state != "stopped"
-            else "failed"
-            if data.name in lost
-            else "running"
-        )
         runs.append(
             jobs.TrainingRunSummary(
                 name=data.name,
@@ -90,7 +75,7 @@ def state_of(
                 job=job[data.name].name,
                 launch=job[data.name].launch,
                 line=line[data.name],
-                state=state,
+                state=_stored_state(data.outcome),
                 checkpoints=saved,
                 seed=data.file.seed if data.file else None,
             )
@@ -98,9 +83,7 @@ def state_of(
     eval_runs = [
         jobs.EvalRunSummary(
             name=d.name,
-            state="running"
-            if d.outcome is None or d.outcome.state == "stopped"
-            else d.outcome.state,
+            state=_stored_state(d.outcome),
         )
         for d in every
         if d.file is not None and d.experiment == experiment and d.file.kind == "evaluation"
@@ -109,15 +92,7 @@ def state_of(
     for item in retained:
         record, status = item.record, item.status
         committed += status.usd if status.done else record.launch.spec.max_usd or Decimal(0)
-        state = (
-            "queued"
-            if status.phase in {"queued", "renting"}
-            else "failed"
-            if status.done and status.outcome != "succeeded"
-            else "finished"
-            if status.done
-            else "running"
-        )
+        name = record.id.removeprefix(experiment + "/")
         # Evaluation matches are part of the executable job's public config.
         try:
             group = jobs.evaluation_group(record.launch.spec)
@@ -127,20 +102,29 @@ def state_of(
             group = None
         if group is not None:
             matches = tuple(m.key for spec in group.evaluations for m in spec.matches or ())
-            prior = next(
-                (r for r in eval_runs if r.name == record.id.removeprefix(experiment + "/")), None
-            )
+            prior = next((r for r in eval_runs if r.name == name), None)
             if prior is not None:
                 eval_runs.remove(prior)
-                if prior.state in {"finished", "failed"}:
-                    state = prior.state
-            eval_runs.append(jobs.EvalRunSummary(name=record.id, state=state, matches=matches))
+            eval_runs.append(
+                jobs.EvalRunSummary(
+                    name=name,
+                    state=_launcher_state(
+                        prior.state
+                        if prior
+                        else "finished"
+                        if status.done and status.outcome == "succeeded"
+                        else "running",
+                        item,
+                    ),
+                    matches=matches,
+                )
+            )
         else:
             prior_training = next(
                 (
                     r
                     for r in runs
-                    if r.name in {record.id, record.id.removeprefix(experiment + "/")}
+                    if r.name == name
                     or (r.launch == record.launch.spec.name and r.seed == record.seed)
                 ),
                 None,
@@ -148,22 +132,40 @@ def state_of(
             if prior_training is None:
                 runs.append(
                     jobs.TrainingRunSummary(
-                        name=record.id,
+                        name=name,
                         experiment=experiment,
                         job=record.launch.spec.name,
                         launch=record.launch.spec.name,
-                        line=record.id,
+                        line=name,
                         seed=record.seed,
-                        state=state,
+                        state=_launcher_state("running", item),
                         checkpoints=jobs.Checkpoints(),
                     )
+                )
+            else:
+                runs[runs.index(prior_training)] = replace(
+                    prior_training, state=_launcher_state(prior_training.state, item)
                 )
     return jobs.ExperimentState(
         experiment=experiment, runs=tuple(runs), eval_runs=tuple(eval_runs), committed_usd=committed
     )
 
 
-# ---------------------------------------------------------------------------
+def _stored_state(
+    outcome: RunOutcome | None,
+) -> Literal["running", "stopped", "finished", "failed"]:
+    return outcome.state if outcome is not None else "running"
+
+
+def _launcher_state(
+    state: Literal["queued", "running", "stopped", "finished", "failed"], item: Standing
+) -> Literal["queued", "running", "stopped", "finished", "failed"]:
+    """Stored terminal outcomes win; the launcher owns continuation after a stop."""
+    if state in {"finished", "failed"}:
+        return state
+    if item.status.done:
+        return state if item.status.outcome == "succeeded" else "failed"
+    return "queued" if item.status.phase in {"queued", "renting"} else "running"
 
 
 def __getattr__(name: str) -> object:
