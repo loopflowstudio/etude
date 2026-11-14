@@ -68,8 +68,35 @@ _FOLDER = Path(__file__).with_name("migrations")
 _LEDGER = """CREATE TABLE migrations(
   name TEXT PRIMARY KEY, sha256 TEXT NOT NULL, applied_at TEXT NOT NULL,
   floor TEXT, program TEXT)"""
-# Released files from before the ledger, by user_version, and the migrations they hold.
-_ADOPTED = {17: ("baseline",), 19: ("baseline", "run_resume_and_writers")}
+
+
+class Predecessor(Record):
+    """A pre-ledger schema, its released file names and the etude that reads it."""
+
+    files: tuple[str, ...] = ()
+    migrations: tuple[str, ...] = ()
+    etude: str
+
+
+# Newest first: selection, ledger seeding and older-file notices share these facts.
+_PREDECESSORS = {
+    19: Predecessor(
+        files=("launcher-19.db",),
+        migrations=("baseline", "run_resume_and_writers"),
+        etude="0.4.0",
+    ),
+    17: Predecessor(
+        files=("launcher-17.db", "launcher.db"), migrations=("baseline",), etude="0.3.2"
+    ),
+    15: Predecessor(etude="0.3.0"),
+    14: Predecessor(etude="0.2.16"),
+    13: Predecessor(etude="0.2.15"),
+    11: Predecessor(etude="0.2.14"),
+    10: Predecessor(etude="0.2.6"),
+    8: Predecessor(etude="0.2.0"),
+    2: Predecessor(etude="0.1.2"),
+    1: Predecessor(etude="0.1.1"),
+}
 
 
 class Released(Record):
@@ -438,13 +465,13 @@ class Database:
                 raise LauncherError(reason)
         else:
             made = self._db.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
-            adopted = int(self._db.execute("PRAGMA user_version").fetchone()[0])
-            if made and adopted not in _ADOPTED:
+            schema = int(self._db.execute("PRAGMA user_version").fetchone()[0])
+            if made and (schema not in _PREDECESSORS or not _PREDECESSORS[schema].migrations):
                 raise LauncherError(
-                    f"{self._path} was written by an unreleased etude (schema {adopted}); "
+                    f"{self._path} was written by an unreleased etude (schema {schema}); "
                     "move or delete it to start again"
                 )
-            applied = _ADOPTED[adopted] if made else ()
+            applied = _PREDECESSORS[schema].migrations if made else ()
             self.fresh = not made
         pending = [m for name, m in known.items() if name not in applied]
         if newer:
@@ -461,7 +488,7 @@ class Database:
         program = _program(self._path)
         if not ledger:
             self._db.execute(_LEDGER)
-            for name in applied:  # adopted from a released file's user_version
+            for name in applied:  # taken over from a released file's user_version
                 self._ledger(known[name], program)
         for migration in pending:
             _check_sqlite(migration)
@@ -1468,54 +1495,41 @@ def _snapshot(source: Path, target: Path, timeout: float) -> None:
 
 
 def _predecessor(home: Path) -> Path | None:
-    for name, expected in (("launcher-19.db", 19), ("launcher-17.db", 17), ("launcher.db", 17)):
-        path = home / name
-        if not path.exists():
-            continue
-        reader = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
-        try:
-            schema = reader.execute("PRAGMA user_version").fetchone()[0]
-        finally:
-            reader.close()
-        if schema == expected:
-            return path
-        if name != "launcher.db":
-            raise LauncherError(
-                f"launcher: {name} holds unexpected schema {schema}; open it with its matching etude"
-            )
+    for expected, predecessor in _PREDECESSORS.items():
+        for name in predecessor.files:
+            path = home / name
+            if not path.exists():
+                continue
+            reader = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+            try:
+                schema = reader.execute("PRAGMA user_version").fetchone()[0]
+            finally:
+                reader.close()
+            if schema == expected:
+                return path
+            if name != "launcher.db":
+                raise LauncherError(
+                    f"launcher: {name} holds unexpected schema {schema}; open it with its matching etude"
+                )
     return None
 
 
-def _check_heartbeat(home: Path, source: Path) -> None:
+def _check_source_writes(source: Path) -> None:
+    # Older wait commands schedule without a heartbeat, but every pass writes SQLite.
+    modified = source.stat().st_mtime
     try:
-        at = datetime.fromisoformat((home / "controller-heartbeat").read_text().strip())
+        modified = max(modified, source.with_name(source.name + "-wal").stat().st_mtime)
     except FileNotFoundError:
-        return
-    except ValueError as error:
-        raise LauncherError(
-            "launcher: cannot read controller heartbeat; stop the older loop and remove it"
-        ) from error
-    age = (datetime.now(UTC) - at).total_seconds()
+        pass
+    age = time.time() - modified
     if age < 30:
         raise LauncherError(
-            f"launcher: a controller loop of an older etude is running on {source.name} "
-            f"(last pass {max(0, int(age))}s ago); stop it, then run this again"
+            f"launcher: an older etude wrote {source.name} {max(0, int(age))}s ago; "
+            "stop its commands (etude wait, etude controller run), then run this again"
         )
 
 
 def _older_files(home: Path, source: Path | None) -> str:
-    versions = {
-        1: "0.1.1",
-        2: "0.1.2",
-        8: "0.2.0",
-        10: "0.2.6",
-        11: "0.2.14",
-        13: "0.2.15",
-        14: "0.2.16",
-        15: "0.3.0",
-        17: "0.3.2",
-        19: "0.4.0",
-    }
     messages: list[str] = []
     for path in sorted(home.glob("launcher*.db")):
         if path == source:
@@ -1529,8 +1543,8 @@ def _older_files(home: Path, source: Path | None) -> str:
             continue
         finally:
             reader.close()
-        matching = versions.get(schema)
-        suffix = f", use etude {matching} for it" if matching else ""
+        matching = _PREDECESSORS.get(schema)
+        suffix = f", use etude {matching.etude} for it" if matching else ""
         messages.append(f"{path.name} (schema {schema}) is not read{suffix}")
     return "; ".join(messages)
 
@@ -1582,7 +1596,7 @@ def open_home(home: Path, *, timeout: float = 30) -> Database:
             return Database(target, timeout=timeout)
         source = real if real.exists() else _predecessor(home)
         if source is not None and not unreleased:
-            _check_heartbeat(home, source)
+            _check_source_writes(source)
         target.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix=".launcher-", dir=target.parent) as temporary:
             staging = Path(temporary) / real.name
@@ -1607,7 +1621,7 @@ def open_home(home: Path, *, timeout: float = 30) -> Database:
                 file=sys.stderr,
             )
         elif source is not None:
-            previous = _ADOPTED[19 if source.name == "launcher-19.db" else 17]
+            previous = next(p.migrations for p in _PREDECESSORS.values() if source.name in p.files)
             missing = ", ".join(n for n in applied if n not in previous)
             suffix = f"; applied {missing}" if missing else ""
             print(

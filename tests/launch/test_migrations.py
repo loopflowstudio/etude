@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
 import sqlite3
 import subprocess
+import time
 import zipfile
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
@@ -37,6 +39,7 @@ def _released(home: Path, version: str, name: str | None = None) -> Path:
     path = home / (name or f"launcher-{'17' if version == '0.3.2' else '19'}.db")
     with sqlite3.connect(path) as db:
         db.executescript((FIXTURES / f"launcher-{version}.sql").read_text())
+    os.utime(path, (0, 0))  # Released fixture has been quiet long enough for takeover.
     return path
 
 
@@ -117,6 +120,7 @@ def test_takes_over_newest_and_names_others_once(
     _released(tmp_path, "0.4.0")
     with sqlite3.connect(tmp_path / "launcher-19.db") as db:
         db.execute("INSERT INTO settings(name,value) VALUES ('marker','newest')")
+    os.utime(tmp_path / "launcher-19.db", (0, 0))
     store = open_home(tmp_path)
     assert (
         store._db.execute("SELECT value FROM settings WHERE name='marker'").fetchone()[0]
@@ -129,18 +133,60 @@ def test_takes_over_newest_and_names_others_once(
     assert capsys.readouterr().err == ""
 
 
-def test_takes_over_refuses_fresh_heartbeat(tmp_path: Path) -> None:
-    source = _released(tmp_path, "0.3.2")
-    before = source.read_bytes()
-    (tmp_path / "controller-heartbeat").write_text(datetime.now(UTC).isoformat())
-    with pytest.raises(LauncherError, match="stop it, then run this again"):
-        open_home(tmp_path)
-    assert not launcher_file(tmp_path).exists()
-    assert source.read_bytes() == before
-    (tmp_path / "controller-heartbeat").write_text(
-        (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
-    )
-    open_home(tmp_path).close()
+@pytest.mark.parametrize("fresh", ["source", "wal"])
+@pytest.mark.parametrize("heartbeat", [None, "stale", "fresh", "malformed"])
+@pytest.mark.parametrize(
+    "version,name", [("0.3.2", None), ("0.4.0", None), ("0.3.2", "launcher.db")]
+)
+def test_takeover_waits_for_source_and_wal_to_be_quiet(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fresh: str,
+    heartbeat: str | None,
+    version: str,
+    name: str | None,
+) -> None:
+    source = _released(tmp_path, version, name)
+    now = datetime(2026, 11, 14, tzinfo=UTC).timestamp()
+    monkeypatch.setattr(time, "time", lambda: now)
+    if heartbeat is not None:
+        value = {
+            "stale": datetime.fromtimestamp(now - 60, UTC).isoformat(),
+            "fresh": datetime.fromtimestamp(now, UTC).isoformat(),
+            "malformed": "unreadable heartbeat",
+        }[heartbeat]
+        (tmp_path / "controller-heartbeat").write_text(value)
+    # Keep a real WAL open, as an older wait command does between scheduling passes.
+    writer = sqlite3.connect(source)
+    try:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("INSERT INTO settings(name,value) VALUES ('marker','older wait')")
+        writer.commit()
+        wal = source.with_name(source.name + "-wal")
+        before = source.read_bytes(), wal.read_bytes()
+        for path in (source, wal):
+            os.utime(path, (now - 60, now - 60))
+        changed = source if fresh == "source" else wal
+        os.utime(changed, (now - 2, now - 2))
+        with pytest.raises(
+            LauncherError,
+            match=rf"an older etude wrote {source.name} 2s ago; stop its commands "
+            r"\(etude wait, etude controller run\), then run this again",
+        ):
+            open_home(tmp_path)
+        assert not launcher_file(tmp_path).exists()
+        assert (source.read_bytes(), wal.read_bytes()) == before
+        for path in (source, wal):
+            os.utime(path, (now - 30, now - 30))
+        store = open_home(tmp_path)
+        assert (
+            store._db.execute("SELECT value FROM settings WHERE name='marker'").fetchone()[0]
+            == "older wait"
+        )
+        store.close()
+        assert (source.read_bytes(), wal.read_bytes()) == before
+    finally:
+        writer.close()
 
 
 def test_unsupported_legacy_stays_with_its_release(

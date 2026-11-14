@@ -926,7 +926,10 @@ release's worker writes.
 Before upgrading, stop commands of the older etude that are still running on
 this computer or the controller (`etude wait`, `etude controller run`). They
 would keep writing to the file they opened, which nothing reads afterwards.
-Start them again with the new etude.
+Start them again with the new etude. Another project on the same `ETUDE_HOME`
+still pinned to etude ≤ 0.4.0 keeps launching into its own file, which the
+upgraded launcher does not show. Starting both can schedule the same queued
+runs or retries twice.
 
 ### The file
 
@@ -961,7 +964,7 @@ uvx --from etude-sdk==0.2.15 etude status
 
 | Message | Meaning | Do |
 | --- | --- | --- |
-| `launcher: a controller loop of an older etude is running on launcher-17.db (last pass 4s ago); stop it, then run this again` | Taking the file over now would leave two loops placing the same queued runs and renting twice. | Stop that `etude controller run`, repeat the command, then start the loop with the new etude. |
+| `launcher: an older etude wrote launcher-17.db 2s ago; stop its commands (etude wait, etude controller run), then run this again` | The file or its WAL was written in the last 30 seconds. Taking it over now could leave two schedulers placing the same queued runs and renting twice. | Stop the older commands, wait until the file has been quiet for 30 seconds, repeat the command, then start them with the new etude. |
 | `launcher.sqlite needs etude >= 0.5.0 (raised by: rental_regions)` | A newer etude upgraded this file past what this one can read. | Upgrade this etude, or restore a backup (below). |
 | `etude was upgraded while this ran; run it again` | This process opened the file before such an upgrade; it writes nothing more. | Run the command again. |
 | `launcher: migration remove_cohorts needs SQLite >= 3.35; this Python has 3.31.1` | The Python on this machine carries an older SQLite. Nothing was changed. | Use a Python with a newer SQLite, on a controller through `ETUDE_REMOTE_PYTHON`. |
@@ -1018,6 +1021,9 @@ launcher: launcher.sqlite is behind this unreleased etude (pool_quota); using co
   copy 3f2a91c04b1e (pool_quota): 1 rental, $0.89/h, ends 2026-11-15 14:20 UTC
   ```
 
+- A copy includes unfinished runs from its source. Scheduling in both files can
+  place the same queued runs or retries twice; use a separate home for branch
+  experiments while real work is active.
 - Each window still ends at its deadline.
 - A copy is never refreshed. To pick up later changes to the real file,
   delete the copy.
