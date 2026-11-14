@@ -97,7 +97,10 @@ and cut the new tests to one case per behavior; docs unchanged by it.
 Check: `uv run pytest tests/train/test_cli.py tests/launch/test_cli.py` —
 28 passed; ruff check and format --check pass; mypy passes on the 4 files.
 Maintainer review: one default and refusal wording only; existing listings,
-queries, reads and exit statuses retained.
+queries, reads and exit statuses retained. The refusal lives in
+`launch.database.Database.run`, so `status`, `cancel` and `logs` given an
+unknown id show the same remedy. Rechecked at `b2c0e17`: same 28 passed,
+ruff/format/mypy clean.
 
 Hanabi command receipt and temporary report location are retained at
 `06ff0f6:scratch/exp-56.md`; durable stop/resume evidence is in demo.md.
