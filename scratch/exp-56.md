@@ -82,6 +82,13 @@ Fourth-review corrections (refusal remedies, local-versus-launched docs, stored
 layout) are built; receipt at `416847a:scratch/exp-56.md`. Local
 listing/branching, direct calls and id/name choices remain in `questions.md`.
 
+Next to build: the fifth concept review's four corrections
+(`design-train-api.md`, fifth concept review): `CheckpointRef.path` replacing
+hand URL parsing in playing code, `configs=` on Seating/RoundRobin, the Hanabi
+`Deal.deal` field and the Hanabi doc's ETUDE_HOME snippet. Focused checks:
+eval match/tournament/records tests, the historical match-key test, a path
+with a space through `CheckpointRef.path`, and the Hanabi doc commands.
+
 Compress pass: one writer merge in the launcher database, `RunProgress` under
 one name, resume identity resolved once in `etude.local`; no behavior change.
 Check: ruff, format, `uv run mypy` (175 files) pass; `uv run pytest

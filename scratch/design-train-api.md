@@ -339,41 +339,57 @@ Detailed direction, evidence and deletion lists are retained at
 `6f70baa:scratch/design-train-api.md` (first through third concept reviews).
 No schema, query or provider-count changes in those corrections.
 
-## Corrections from the fourth concept review (2026-11-13): built
+## Fourth concept review (2026-11-13): built
 
-Probe evidence at `cbdefd7` is in `questions.md` (fourth pass).
+Refusal remedy for a direct `train` call, local-versus-launched reader words
+and the stored layout's checkpoint records and qualified id. Full text at
+`cb0e1fd:scratch/design-train-api.md`.
 
-1. **Calling `train` yourself is refused without saying what to do.**
-   `python -c "import coin; coin.train(coin.Config())"` raises a bare
-   `EtudeError: experiment_not_named`. The Training page never says `train`
-   must be called by `etude run` or the launcher, and it is the first thing a
-   test, a debugger or a notebook does. Keep the refusal (principle 8: nothing
-   inferred); give it a detail naming the remedy (`etude run FILE`, or
-   `track(experiment=, run=)` for a process Etude did not start), and say so
-   in Training (One function, one config), linking Tracking's opening
-   example. One focused test asserting the refusal's detail. Whether a direct
-   call should instead start a run is open (`questions.md`).
-2. **Where a run started here can be seen.** `etude runs` ("List every run,
-   finished ones included") and `etude status` print nothing after
-   `etude run`: they read the launcher database, which `etude run` never
-   writes. Make the words true and add no command: Training (Running it) says
-   a run started here is its folder under `~/.etude/track/EXPERIMENT/`, read
-   by `etude report FILE` and `etude checkpoints --source`, and that
-   `etude runs`, `status`, `cancel` and `continue` are for launched runs; the
-   `runs` help and `docs/launcher.md` say "every launched run". Whether local
-   runs should be listed is open with local branching (`questions.md`).
-3. **The on-disk contract leaves out what is there.** The Training page's
-   layout omits `checkpoints/CLOCK-VALUE.json` (each checkpoint's record,
-   which Tracking mentions), and says a run's id is `train-seed-0` while
-   `run.json`, in the folder the reader is told to open with `json`, has
-   `"id": "train/train-seed-0"`. Add the records line and say `run.json`'s
-   `id` is the reference `EXPERIMENT/RUN`. Use "id" for the run part in the
-   two places that say "run name" (`docs/tracking.md` The files are the
-   record; `docs/launcher.md` on `etude status RUN --experiment`). The stored
-   field is not changed here (`questions.md`).
+## Corrections from the fifth concept review (2026-11-13): to build
 
-Delete — do not maintain: nothing. No schema, query or provider count
-changes; no new command or option.
+Walked at `cb0e1fd` in a fresh ETUDE_HOME: coin new / taken / resume /
+`--resume --until updates=60`; Hanabi `run`, `eval` (8 new), `eval` again
+(0 new), `report`, `statsdb`. All behaved as documented. The mismatches are
+at the join to the league, in what the playing code and the tournament write.
+
+1. **A seated checkpoint has no path.** Training reads a checkpoint as
+   `rival.path` (`CheckpointRecord.path`). Playing code, the same checkpoint
+   one page later, is taught
+   `Path(urlparse(player.checkpoint.artifact.uri).path)`
+   (`docs/evaluation.md`, `docs/launcher.md`, `tests/eval/games.py`,
+   `examples/hanabi.py`). The docs' spelling is also wrong: with no
+   `unquote`, a folder under `/tmp/Application Support/` comes back as
+   `/tmp/Application%20Support/x` (run here). This design already says the
+   playing code "is handed the folder" and that `run.checkpoints()` and
+   evaluation read the same records. Build: `CheckpointRef.path`, the one
+   owner of that parse, with the record's `path` reading through it and the
+   same refusal for an address not on this machine; `play` and every doc
+   and example use `player.checkpoint.path`. No other accessor, no helper
+   function. Delete — do not maintain: the hand parse in docs, tests'
+   playing fixtures and the example, and the record's own copy of it.
+2. **`Seating(config=deals)` is several configs under a singular name.**
+   Every other `config=` in the same file is one model
+   (`evaluation(arena, config=ArenaConfig())`, `environment(..., config=)`,
+   `Inference(config=)`, `Match.config`); on `Seating` and `RoundRobin` it
+   is a tuple making one match each, and the docs say both "one match per
+   condition" and "a match for each config". Jack Heart's words were about
+   the author's class ("and be like MatchConfig or something"); the field
+   spelling on `Seating` was the worker's reading, and `config=` there is
+   unreleased. Build: `configs=` on `Seating` and `RoundRobin` (attribute
+   and keyword), `Match.config` unchanged, stored JSON still `conditions`,
+   released `conditions=` still warning until 0.5, with no alias for the
+   unreleased singular. Docstrings and `docs/evaluation.md` say "config"
+   wherever they still say "condition" for this. Keys, seeds and stored
+   bytes must not move (the existing historical-key test holds this). This
+   is the review's reading, not Jack Heart's words: show it at demo.
+3. **The Hanabi example carries two seeds.** `Deal(seed=101)` is the deal;
+   `match.seed` is Etude's seed for the match and the example ignores it,
+   then stores the deal as column `deal`. Name the field `deal`.
+4. **`docs/hanabi.md` reads the wrong folder.** It says to set `ETUDE_HOME`
+   for every command, then reads `Path.home() / ".etude/track"`. Use the
+   same home in the snippet.
+
+No schema, query, provider-count or stored-format change; no new command.
 
 ## Manabot (MTG-329)
 
