@@ -31,7 +31,7 @@ from etude.launch.schemas import Observation
 from etude.launch.ssh import Unreachable
 from etude.launch.storage.disk import DirectoryJournal
 from etude.records import RunRecord
-from etude.spec import Job, RunRequest, Until
+from etude.spec import Job, RunRequest
 from etude.storage_timeout import StorageUnavailable
 from etude.train.records import Step
 from etude.train.tracking import TrainingRun as TrackedRun
@@ -54,7 +54,7 @@ def job(**changes: object) -> Job:
 
 def test_one_run_finishes_and_its_session_is_confirmed_ended(tmp_path: Path) -> None:
     b = bench(tmp_path)
-    one = b.scheduler.queue(job(until="steps=26000"), rent="l4")
+    (one,) = b.scheduler.queue(job(until="steps=26000"), rent="l4")
     b.scheduler.tick()
     assert b.scheduler.read(one).phase == "setting_up"
     b.run(1)
@@ -71,7 +71,7 @@ def test_one_run_finishes_and_its_session_is_confirmed_ended(tmp_path: Path) -> 
 def test_a_lost_create_reply_is_looked_up_and_never_asked_twice(tmp_path: Path) -> None:
     b = bench(tmp_path)
     b.service.lose_reply = 1
-    one = b.scheduler.queue(job(), rent="l4")
+    (one,) = b.scheduler.queue(job(), rent="l4")
     b.scheduler.tick()
     assert b.scheduler.read(one).phase == "renting"
     b.run(1)
@@ -86,13 +86,13 @@ def test_a_create_that_never_appears_is_lost_after_the_rental_deadline_and_frees
 ) -> None:
     b = bench(tmp_path, max_machines=1)
     b.service.lose_reply = 1
-    one = b.scheduler.queue(job(), rent="l4")
+    (one,) = b.scheduler.queue(job(), rent="l4")
     b.scheduler.tick()
     held = b.scheduler.attempts(one)[0].session
     del b.service.sessions[held]  # the provider has no such session
     b.run(3599)
     assert b.scheduler.read(one).phase == "renting"
-    two = b.scheduler.queue(job(), rent="l4")
+    (two,) = b.scheduler.queue(job(), rent="l4")
     b.run(1)
     status = b.scheduler.read(one)
     assert (status.outcome, status.cause, status.rental_ended) == (
@@ -122,7 +122,7 @@ def test_terminate_releases_a_rental_whose_lost_create_left_no_machine(tmp_path:
 def test_refused_capacity_is_retried_up_to_the_jobs_allowed_attempts(tmp_path: Path) -> None:
     b = bench(tmp_path)
     b.service.refuse = 1
-    one = b.scheduler.queue(job(), rent="l4")
+    (one,) = b.scheduler.queue(job(), rent="l4")
     b.scheduler.tick()
     assert str(b.scheduler.read(one)) == "queued (retrying after capacity_refused), $0.00"
     b.run(1)
@@ -131,7 +131,7 @@ def test_refused_capacity_is_retried_up_to_the_jobs_allowed_attempts(tmp_path: P
     assert (status.outcome, status.attempts) == ("succeeded", 2)
 
     b.service.refuse = 9
-    two = b.scheduler.queue(job(max_attempts=2), rent="l4")
+    (two,) = b.scheduler.queue(job(max_attempts=2), rent="l4")
     b.scheduler.tick()
     b.run(1)
     b.run(1)
@@ -142,7 +142,7 @@ def test_refused_capacity_is_retried_up_to_the_jobs_allowed_attempts(tmp_path: P
 
 def test_a_lost_machine_retries_the_same_run_with_remaining_hours(tmp_path: Path) -> None:
     b = bench(tmp_path)
-    one = b.scheduler.queue(job(), rent="l4")
+    (one,) = b.scheduler.queue(job(), rent="l4")
     b.scheduler.tick()
     b.run(100)
     first = b.scheduler.attempts(one)[0]
@@ -161,7 +161,7 @@ def test_a_lost_machine_is_settled_even_when_its_final_read_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     b = bench(tmp_path)
-    one = b.scheduler.queue(job(), rent="l4")
+    (one,) = b.scheduler.queue(job(), rent="l4")
     b.scheduler.tick()
     b.run(100)
     first = b.scheduler.attempts(one)[0]
@@ -187,9 +187,9 @@ def test_a_lost_machine_is_settled_even_when_its_final_read_fails(
 
 def test_cancel_before_and_during_a_run(tmp_path: Path) -> None:
     b = bench(tmp_path, max_machines=1)
-    running = b.scheduler.queue(job(), rent="l4")
+    (running,) = b.scheduler.queue(job(), rent="l4")
     b.scheduler.tick()
-    queued = b.scheduler.queue(job(), rent="l4")
+    (queued,) = b.scheduler.queue(job(), rent="l4")
     b.scheduler.tick()
     assert str(b.scheduler.read(queued)) == "queued (waiting for l4: at its machine limit), $0.00"
     status = b.scheduler.cancel(queued)
@@ -206,9 +206,9 @@ def test_cancel_before_and_during_a_run(tmp_path: Path) -> None:
 def test_hours_and_dollars_each_end_a_run_under_their_own_name(tmp_path: Path) -> None:
     b = bench(tmp_path)
     b.service.seconds = 7200
-    slow = b.scheduler.queue(job(), rent="l4")
+    (slow,) = b.scheduler.queue(job(), rent="l4")
     b.scheduler.tick()
-    dear = b.scheduler.queue(job(max_usd=Decimal("0.10")), rent="l4")
+    (dear,) = b.scheduler.queue(job(max_usd=Decimal("0.10")), rent="l4")
     b.scheduler.tick()
     b.run(3600)
     assert b.scheduler.read(slow).outcome == "out_of_time"
@@ -216,25 +216,9 @@ def test_hours_and_dollars_each_end_a_run_under_their_own_name(tmp_path: Path) -
     assert status.outcome == "over_budget" and status.usd <= Decimal("0.10")
 
 
-def test_a_cohort_runs_one_at_a_time_and_stops_at_its_dollar_ceiling(tmp_path: Path) -> None:
-    b = bench(tmp_path)
-    ids = b.scheduler.queue_cohort(
-        "capacity", job().runs(1, 2, 3), rent="l4", parallel=1, max_usd=USD_PER_RUN * 2
-    )
-    b.scheduler.tick()
-    assert str(b.scheduler.read(ids[1])) == "queued (cohort runs 1 at a time), $0.00"
-    statuses = b.scheduler.wait(*ids, every=60)
-    assert [s.outcome for s in statuses] == ["succeeded", "succeeded", "over_budget"]
-    assert statuses[2].attempts == 0
-    assert sum(s.usd for s in statuses) <= USD_PER_RUN * 2
-    assert b.service.most_live == 1 and b.service.creates == 1
-    with pytest.raises(LauncherError, match="already exists"):
-        b.scheduler.queue_cohort("capacity", [RunRequest(job=job())], rent="l4")
-
-
 def test_several_runs_share_one_session_and_split_its_cost(tmp_path: Path) -> None:
-    b = bench(tmp_path)
-    ids = b.scheduler.queue_cohort("packed", job().runs(1, 2, 3), rent="l4")
+    b = bench(tmp_path, max_machines=1)
+    ids = b.scheduler.queue(job().runs(1, 2, 3), rent="l4")
     b.scheduler.tick()
     statuses = b.scheduler.wait(*ids, every=60)
     assert [s.outcome for s in statuses] == ["succeeded"] * 3
@@ -246,11 +230,11 @@ def test_several_runs_share_one_session_and_split_its_cost(tmp_path: Path) -> No
 def test_a_machine_told_to_finish_is_given_no_more_work(tmp_path: Path) -> None:
     b = bench(tmp_path, max_machines=1)
     b.service.finish_seconds = 60  # delivering its last files
-    one = b.scheduler.queue(job(), rent="l4")
+    (one,) = b.scheduler.queue(job(), rent="l4")
     b.scheduler.tick()
     b.run(600)
     assert b.scheduler.read(one).outcome == "succeeded"  # and its idle machine was told to finish
-    two = b.scheduler.queue(job(max_hours=0.5), rent="l4")  # it fits what is left of that rental
+    (two,) = b.scheduler.queue(job(max_hours=0.5), rent="l4")  # it fits what is left of that rental
     b.run(1)
     assert b.scheduler.read(two).phase == "queued"  # the one machine allowed is still ending
     (status,) = b.scheduler.wait(two, every=60)
@@ -259,7 +243,7 @@ def test_a_machine_told_to_finish_is_given_no_more_work(tmp_path: Path) -> None:
 
 def test_a_write_from_an_old_read_is_refused(tmp_path: Path) -> None:
     b = bench(tmp_path)
-    one = b.scheduler.queue(job(), rent="l4")
+    (one,) = b.scheduler.queue(job(), rent="l4")
     b.scheduler.tick()
     attempt = b.scheduler.attempts(one)[0]
     session = b.store.session(attempt.session)
@@ -269,67 +253,6 @@ def test_a_write_from_an_old_read_is_refused(tmp_path: Path) -> None:
     b.run(600)
     with pytest.raises(Stale):
         b.store.confirm_ended(session, b.clock())
-
-
-def test_manabot_cohort_shape(tmp_path: Path) -> None:
-    """Two jobs by three seeds, one run at a time on an L4, continued at absolute positions on its clock."""
-    b = bench(tmp_path)
-    configs = {"small": "hidden = 256\n", "large": "hidden = 1024\n"}
-    jobs = [
-        Job(
-            command="python -m manabot.train",
-            name=name,
-            config=config,
-            until=Until.parse("updates=26000"),
-            max_hours=11.9,
-            max_usd=Decimal(5),
-        )
-        for name, config in configs.items()
-    ]
-    first = [run for each in jobs for run in each.runs(1, 2, 3)]
-    assert len({r.job for r in first}) == 2
-    stages = [b.scheduler.queue_cohort("capacity-26k", first, rent="l4", max_usd=Decimal(30))]
-    b.scheduler.tick()
-    for target in (63_000, 100_000):
-        assert all(s.outcome == "succeeded" for s in b.scheduler.wait(*stages[-1], every=60))
-        continued = [
-            RunRequest(
-                job=b.store.run(p).launch.spec.model_copy(
-                    update={"until": Until.parse(f"updates={target}")}
-                ),
-                seed=b.store.run(p).seed,
-            )
-            for p in stages[-1]
-        ]
-        stages.append(
-            b.scheduler.queue_cohort(
-                f"capacity-{target // 1000}k", continued, rent="l4", max_usd=Decimal(30)
-            )
-        )
-        b.scheduler.tick()
-    last = b.scheduler.wait(*stages[-1], every=60)
-
-    assert [s.clocks for s in last] == [{"updates": 100_000}] * 6
-    assert b.service.most_live == 1 and b.service.creates == 3
-    for root, middle, final in zip(*stages, strict=True):
-        records = [b.store.run(r) for r in (root, middle, final)]
-        assert len({(r.launch.spec.name, r.seed, r.launch.spec.config) for r in records}) == 1
-        assert [str(r.launch.spec.until) for r in records] == [
-            "updates=26000",
-            "updates=63000",
-            "updates=100000",
-        ]
-        digest = records[0].job
-        assert digest is not None
-        assert len(b.store.job_runs(digest)) == 3  # one job, its three seeds
-        attempt = b.scheduler.attempts(final)[0]
-        work = next(
-            w for w, _ in b.service.sessions[attempt.session].work() if w.attempt == attempt.id
-        )
-        assert (work.until, work.resumes) == (Until.parse("updates=100000"), False)
-    spent = sum(b.scheduler.read(j).usd for stage in stages for j in stage)
-    assert abs(spent - USD_PER_RUN * 18) < Decimal("0.01")
-    assert all(b.scheduler.read(j).rental_ended for stage in stages for j in stage)
 
 
 def test_supplies_are_stored_and_a_run_names_where_it_may_go(tmp_path: Path) -> None:
@@ -350,7 +273,7 @@ def test_supplies_are_stored_and_a_run_names_where_it_may_go(tmp_path: Path) -> 
         b.scheduler.queue(job(), pool="shed")
     with pytest.raises(LauncherError, match="no on-demand named"):
         b.scheduler.queue(job(), rent="shed")
-    one = b.scheduler.queue(job(), rent="l4")
+    (one,) = b.scheduler.queue(job(), rent="l4")
     b.scheduler.tick()
     assert (b.scheduler.record(one).launch.pool, b.scheduler.record(one).launch.rent) == (
         None,
@@ -387,7 +310,7 @@ def test_a_launch_with_a_pool_and_rent_uses_free_owned_machines_before_renting(
     b.scheduler.add_machine("bench", "owned", pool="lab")
     b.scheduler.add_machine("shed", "owned")  # no pool named: a pool of one
     assert [p.name for p in b.scheduler.pools()] == ["lab", "shed"]
-    first, second, third = (b.scheduler.queue(job(), "lab", rent="l4") for _ in range(3))
+    first, second, third = (b.scheduler.queue(job(), "lab", rent="l4")[0] for _ in range(3))
     b.scheduler.tick()
 
     assert not b.store.session(b.scheduler.attempts(first)[0].session).autorun
@@ -407,7 +330,7 @@ def test_a_launch_with_a_pool_and_rent_uses_free_owned_machines_before_renting(
     b.run(1)  # the finished rental ended; the limit allows another
     assert _holds(b, third) == (None, Decimal("0.59"))  # the off pool gave nothing; it rented
     assert b.store.machine("bench").deleted_at is None  # owned: it remains
-    assert len(b.store.machines("l4")) == 2
+    assert len(b.store.machines("l4")) == 1
 
 
 def test_a_pool_alone_never_rents_and_rent_alone_never_takes_owned_machines(
@@ -415,8 +338,8 @@ def test_a_pool_alone_never_rents_and_rent_alone_never_takes_owned_machines(
 ) -> None:
     b = bench(tmp_path)
     b.scheduler.add_machine("shed", "owned")
-    owned = [b.scheduler.queue(job(), "shed") for _ in range(2)]
-    rented = b.scheduler.queue(job(), rent="l4")
+    owned = [b.scheduler.queue(job(), "shed")[0] for _ in range(2)]
+    (rented,) = b.scheduler.queue(job(), rent="l4")
     b.scheduler.tick()
     assert _holds(b, owned[0]) == ("shed", Decimal(0))
     assert str(b.scheduler.read(owned[1])) == "queued (waiting for shed: no free machine), $0.00"
@@ -434,7 +357,7 @@ def test_an_owned_machine_leaves_its_pool_at_expiry_and_its_run_retries_elsewher
     b.scheduler.add_pool(Pool(name="lab"))
     expiry = b.clock.now + timedelta(seconds=100)
     b.scheduler.add_machine("window", "owned", pool="lab", cost_usd=Decimal(3), expires_at=expiry)
-    run = b.scheduler.queue(job(), "lab", rent="l4")
+    (run,) = b.scheduler.queue(job(), "lab", rent="l4")
     b.scheduler.tick()
     assert _holds(b, run) == ("window", Decimal(0))
     b.run(1)
@@ -446,7 +369,7 @@ def test_an_owned_machine_leaves_its_pool_at_expiry_and_its_run_retries_elsewher
     assert b.store.machine(second.machine).kind == "rented" and b.service.creates == 1
     b.run(601)
     assert b.scheduler.read(run).outcome == "succeeded"
-    later = b.scheduler.queue(job(), "lab")  # the pool has no machine left to give
+    (later,) = b.scheduler.queue(job(), "lab")  # the pool has no machine left to give
     b.run(1)
     assert b.scheduler.read(later).phase == "queued"
     assert b.store.machine("window").deleted_at is None  # owned machines are never deleted
@@ -459,32 +382,33 @@ def test_quote_prints_planned_first_wave_costs_and_rents_nothing(
     b.scheduler.add_pool(Pool(name="lab"))
     b.scheduler.add_machine("mini", "owned", pool="lab")
     monkeypatch.setattr(import_module("etude.launch.cli"), "default", lambda: b.scheduler)
+    monkeypatch.setattr(import_module("etude.launch.client"), "default", lambda: b.scheduler)
+    monkeypatch.setattr(
+        "etude.controller.source_for",
+        lambda pool, rent, source=None: source or str(tmp_path / "track"),
+    )
+    monkeypatch.setattr(
+        "etude.launch.client.standing", lambda experiment: b.scheduler.standing(experiment)
+    )
+    monkeypatch.setattr(import_module("etude.launch.client"), "_client", lambda: b.scheduler)
     path = tmp_path / "job.py"
     path.write_text(
-        "from etude.launch.records import Job\n"
-        "def training_runs(): return Job(command='train', max_hours=1, max_usd=2).runs(1, 2, 3)\n"
+        "from etude.jobs import TrainingJob\nfrom tests.launch.tasks import Command, RUNTIME, train_command\nfrom etude.launch.records import Job\ndef training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command='train'), max_hours=1, max_usd=2, name=\"base\", repo=None).runs(1, 2, 3)\n"
     )
     counting = Counting(b.store, b.service)
     with counting.record():
-        code = main(
-            ["launch", str(path), "--pool", "lab", "--rent", "l4"]
-            + ["--cohort", "three", "--parallel", "2", "--quote"]
-        )
+        code = main(["launch", str(path), "--pool", "lab", "--rent", "l4"] + ["--quote"])
     assert code == 0
     assert counting.snapshot().provider == 1  # one price; nothing created
-    assert capsys.readouterr().out.splitlines() == [
-        "job@1  machine mini  planned rental cost $0.00",
-        "job@2  rent NVIDIA L4 with at least 6 vCPUs, 48 GB at $0.59/hour  planned rental cost $0.88",
-        "planned first-wave rental cost: $0.88; nothing rented",
-        "job/cohort rental budget: $6.00",
-        "Rental costs assume deletion on time. Provider delays can exceed the budget; "
-        "external storage charges are excluded.",
-    ]
+    output = capsys.readouterr().out
+    assert "job/base@1  new, would launch" in output
+    assert "machine mini  planned rental cost $0.00" in output
+    assert "planned first-wave rental cost: $1.18; nothing rented" in output
+    assert "job rental budget: $6.00" in output
     assert b.service.creates == 0 and not b.store.runs() and not b.store.sessions()
-    assert not b.store.cohort_exists("three")
     b.scheduler.set_ondemand_max("l4", 0)
-    with pytest.raises(LauncherError, match="at its machine limit"):
-        b.scheduler.quote(job().runs(1, 2), "lab", rent="l4", cohort="three", parallel=2)
+    quoted = b.scheduler.quote(job().runs(1, 2), "lab", rent="l4")
+    assert len(quoted.machines) == 1 and quoted.machines[0].machine == "mini"
 
 
 def test_availability_asks_the_provider_once_and_rents_nothing(
@@ -493,6 +417,15 @@ def test_availability_asks_the_provider_once_and_rents_nothing(
     b = bench(tmp_path, max_machines=2)
     b.scheduler.rent("l4", hours=1)
     monkeypatch.setattr(import_module("etude.launch.cli"), "default", lambda: b.scheduler)
+    monkeypatch.setattr(import_module("etude.launch.client"), "default", lambda: b.scheduler)
+    monkeypatch.setattr(
+        "etude.controller.source_for",
+        lambda pool, rent, source=None: source or str(tmp_path / "track"),
+    )
+    monkeypatch.setattr(
+        "etude.launch.client.standing", lambda experiment: b.scheduler.standing(experiment)
+    )
+    monkeypatch.setattr(import_module("etude.launch.client"), "_client", lambda: b.scheduler)
     counting = Counting(b.store, b.service)
     with counting.record():
         assert main(["availability", "l4"]) == 0
@@ -513,6 +446,15 @@ def test_machines_shows_an_owned_machines_cost_and_expiry(
     b = bench(tmp_path)
     b.scheduler.add_pool(Pool(name="lab"))
     monkeypatch.setattr(import_module("etude.launch.cli"), "default", lambda: b.scheduler)
+    monkeypatch.setattr(import_module("etude.launch.client"), "default", lambda: b.scheduler)
+    monkeypatch.setattr(
+        "etude.controller.source_for",
+        lambda pool, rent, source=None: source or str(tmp_path / "track"),
+    )
+    monkeypatch.setattr(
+        "etude.launch.client.standing", lambda experiment: b.scheduler.standing(experiment)
+    )
+    monkeypatch.setattr(import_module("etude.launch.client"), "_client", lambda: b.scheduler)
     assert main(["machine", "add", "mini", "me@mini.local", "--pool", "lab"]) == 0
     assert (
         main(
@@ -524,26 +466,26 @@ def test_machines_shows_an_owned_machines_cost_and_expiry(
     capsys.readouterr()
     assert main(["machines"]) == 0
     assert capsys.readouterr().out.splitlines() == [
-        "mini  lab  owned, $0.00 committed, never expires",
-        "window  lab  owned, $12.50 committed, expires 2026-10-12 00:00 UTC",
+        "mini  lab  available, owned, $0.00 committed, never expires",
+        "window  lab  available, owned, $12.50 committed, expires 2026-10-12 00:00 UTC",
     ]
     b.clock.advance(24 * 3600)
     assert main(["machines"]) == 0
-    assert "window  lab  owned, $12.50 committed, expired 2026-10-12 00:00 UTC" in (
+    assert "window  lab  unavailable, owned, $12.50 committed, expired 2026-10-12 00:00 UTC" in (
         capsys.readouterr().out
     )
 
 
 def test_a_job_is_what_decides_the_result_not_its_name_or_limits(tmp_path: Path) -> None:
     b = bench(tmp_path)
-    first = b.scheduler.queue(
+    (first,) = b.scheduler.queue(
         RunRequest(job=job(config="hidden = 256", name="small"), seed=1), rent="l4"
     )
     b.scheduler.tick()
     richer = job(config="hidden = 256", name="small again", max_usd=Decimal(9), max_hours=2.0)
-    second = b.scheduler.queue(RunRequest(job=richer, seed=2), rent="l4")
+    (second,) = b.scheduler.queue(RunRequest(job=richer, seed=2), rent="l4")
     b.scheduler.tick()
-    other = b.scheduler.queue(RunRequest(job=job(config="hidden = 1024"), seed=1), rent="l4")
+    (other,) = b.scheduler.queue(RunRequest(job=job(config="hidden = 1024"), seed=1), rent="l4")
     b.scheduler.tick()
     same, also, different = (b.scheduler.record(r) for r in (first, second, other))
     assert same.job == also.job != different.job
@@ -561,7 +503,7 @@ def test_queue_returns_its_id_even_when_the_provider_cannot_quote_a_price(tmp_pa
         raise ConnectionError("pricing is down")
 
     b.service.offer = no_quote  # type: ignore[method-assign]
-    one = b.scheduler.queue(job(), rent="l4")
+    (one,) = b.scheduler.queue(job(), rent="l4")
     b.scheduler.tick()
     assert str(b.scheduler.read(one)) == "queued (waiting for l4: pricing is down), $0.00"
     b.service.offer = quote  # type: ignore[method-assign]
@@ -574,7 +516,7 @@ def test_an_ondemand_rents_nothing_above_its_price_ceiling(tmp_path: Path) -> No
     capped = OnDemand(name="capped", template=L4, max_usd_per_hour=Decimal("0.50"), setup_seconds=0)
     b.scheduler.add_ondemand(capped)
     assert b.store.ondemand("capped") == capped.model_copy(update={"storage": "test"})
-    one = b.scheduler.queue(job(), rent="capped")  # the fake provider asks $0.59
+    (one,) = b.scheduler.queue(job(), rent="capped")  # the fake provider asks $0.59
     b.scheduler.tick()
     assert b.scheduler.read(one).phase == "queued" and b.service.creates == 0
     b.service.usd_per_hour = Decimal("0.49")
@@ -590,7 +532,7 @@ def test_a_rental_made_by_hand_takes_several_launches_and_one_setup(tmp_path: Pa
     assert b.service.creates == 1 and b.store.rental(machine).kept
     assert b.service.sessions[held].packet.autorun
 
-    first = b.scheduler.queue(job(), rent="l4")
+    (first,) = b.scheduler.queue(job(), rent="l4")
     b.scheduler.tick()
     b.run(1)  # the work is handed over
     b.run(1)
@@ -598,9 +540,9 @@ def test_a_rental_made_by_hand_takes_several_launches_and_one_setup(tmp_path: Pa
     b.run(600)
     assert b.scheduler.read(first).outcome == "succeeded"
     b.run(100)  # idle: the rental stays, and nobody's run pays for it
-    second = b.scheduler.queue(job(), rent="l4")
+    (second,) = b.scheduler.queue(job(), rent="l4")
     b.scheduler.tick()
-    too_long = b.scheduler.queue(job(max_hours=3.0), rent="l4")  # more time than it has left
+    (too_long,) = b.scheduler.queue(job(max_hours=3.0), rent="l4")  # more time than it has left
     b.scheduler.tick()
     b.run(1)
     b.run(601)
@@ -627,7 +569,7 @@ def test_a_rented_machine_cannot_be_terminated_under_a_run_and_ends_at_its_deadl
     machine = b.scheduler.rent("l4", hours=1, max_usd=Decimal("0.59") / 2)  # dollars buy 30 min
     held = b.store.rented_session(machine).id
     assert b.store.rental(machine).deadline == b.clock.now + timedelta(minutes=30)
-    one = b.scheduler.queue(job(max_hours=0.2), rent="l4")
+    (one,) = b.scheduler.queue(job(max_hours=0.2), rent="l4")
     b.scheduler.tick()
     b.run(1)
     with pytest.raises(LauncherError, match="still has a run"):
@@ -642,7 +584,7 @@ def test_a_rented_machine_cannot_be_terminated_under_a_run_and_ends_at_its_deadl
 def test_pool_limit_can_stop_and_resume_automatic_growth(tmp_path: Path) -> None:
     b = bench(tmp_path)
     b.scheduler.set_ondemand_max("l4", 0)
-    waiting = b.scheduler.queue(job(), rent="l4")
+    (waiting,) = b.scheduler.queue(job(), rent="l4")
     b.scheduler.tick()
     assert b.service.creates == 0 and b.scheduler.read(waiting).phase == "queued"
     b.scheduler.set_ondemand_max("l4", 1)
@@ -661,7 +603,7 @@ def test_the_default_target_is_persistent_and_off_default_pool_requires_one(
     b = bench(tmp_path)
     b.scheduler.add_machine("shed", "owned")
     b.scheduler.set_default("shed", rent="l4")
-    one = b.scheduler.queue(job())
+    (one,) = b.scheduler.queue(job())
     b.scheduler.tick()
     assert (b.scheduler.record(one).launch.pool, b.scheduler.record(one).launch.rent) == (
         "shed",
@@ -669,7 +611,7 @@ def test_the_default_target_is_persistent_and_off_default_pool_requires_one(
     )
     assert Database(launcher_file(tmp_path)).default_target() == Target(pool="shed", rent="l4")
     b.scheduler.turn_pool("shed", off=True)
-    assert b.scheduler.record(b.scheduler.queue(job())).launch.pool is None  # rents only
+    assert b.scheduler.record(b.scheduler.queue(job())[0]).launch.pool is None  # rents only
     b.scheduler.set_default("shed")
     with pytest.raises(LauncherError, match="name a pool"):
         b.scheduler.queue(job())
@@ -677,7 +619,7 @@ def test_the_default_target_is_persistent_and_off_default_pool_requires_one(
 
 def test_completion_between_progress_and_machine_reads_uses_final_journal(tmp_path: Path) -> None:
     b = bench(tmp_path)
-    run = b.scheduler.queue(job(until="steps=42"), rent="l4")
+    (run,) = b.scheduler.queue(job(until="steps=42"), rent="l4")
     b.scheduler.tick()
     b.clock.advance(599)
     observe = b.service.observe
@@ -703,7 +645,7 @@ def test_completion_between_progress_and_machine_reads_uses_final_journal(tmp_pa
 def test_a_retry_resumes_its_run_without_creating_a_parent_run(tmp_path: Path) -> None:
     """The launcher hands a later attempt its run, and says it resumes; tracking does the rest."""
     b = bench(tmp_path)
-    run = b.scheduler.queue(job(until="steps=100"), rent="l4")
+    (run,) = b.scheduler.queue(job(until="steps=100"), rent="l4")
     b.scheduler.tick()
     first = b.scheduler.attempts(run)[0]
     b.run(100)
@@ -726,7 +668,7 @@ def test_a_rental_on_r2_lasts_as_long_as_its_run_beyond_twelve_hours(tmp_path: P
     b.scheduler.add_ondemand(
         b.store.ondemand("l4").model_copy(update={"name": "long", "storage": "r2"})
     )
-    run = b.scheduler.queue(job(max_hours=48, max_usd=Decimal(100)), rent="long")
+    (run,) = b.scheduler.queue(job(max_hours=48, max_usd=Decimal(100)), rent="long")
     b.scheduler.tick()
     held = b.store.session(b.scheduler.attempts(run)[0].session)
     rental = b.store.rental_for(held)
@@ -747,7 +689,7 @@ def test_a_run_longer_than_its_storage_grants_is_refused_before_renting(tmp_path
 def test_retries_share_the_runs_dollar_limit(tmp_path: Path) -> None:
     b = bench(tmp_path, usd_per_hour="1")
     b.service.seconds = 1000
-    run = b.scheduler.queue(job(max_usd=Decimal(200) / 3600), rent="l4")
+    (run,) = b.scheduler.queue(job(max_usd=Decimal(200) / 3600), rent="l4")
     b.scheduler.tick()
     b.run(100)
     b.service.kill(b.scheduler.attempts(run)[0].session)
@@ -772,7 +714,7 @@ def test_a_job_needs_dollars_only_where_money_can_be_spent(tmp_path: Path) -> No
         b.scheduler.queue(free, rent="l4")
     assert b.store.runs() == ()
     b.scheduler.add_pool(Pool(name="mine"))  # no template: nothing here can spend
-    run = b.scheduler.queue(free, "mine")
+    (run,) = b.scheduler.queue(free, "mine")
     assert b.scheduler.record(run).launch.spec.max_usd is None
     with pytest.raises(LauncherError, match="more than zero"):
         b.scheduler.queue(Job(command="train", max_hours=1, max_usd=Decimal(0)), "mine")
@@ -826,7 +768,7 @@ def test_a_retry_on_another_owned_host_waits_for_and_continues_the_runs_folder(
     scheduler.add_pool(Pool(name="lab"))
     scheduler.add_machine("first", "owned", pool="lab", expires_at=clock() + timedelta(seconds=150))
     scheduler.add_machine("second", "owned", pool="lab")
-    run = scheduler.queue(job(until="steps=100", max_usd=None), "lab")
+    (run,) = scheduler.queue(job(until="steps=100", max_usd=None), "lab")
     scheduler.tick()
     first = scheduler.attempts(run)[0]
     assert store.session(first.session).machine == "first"
@@ -897,7 +839,7 @@ def _reporting(b: Bench, **changes: object) -> None:
 
 def test_status_says_how_far_a_running_job_has_got_through_its_work(tmp_path: Path) -> None:
     b = bench(tmp_path)
-    one = b.scheduler.queue(job(), rent="l4")
+    (one,) = b.scheduler.queue(job(), rent="l4")
     b.scheduler.tick()
     tally = Tally(unit="matches", done=412, total=1800, failed=1, per_hour=940.0)
     _reporting(b, tally=tally)
@@ -918,7 +860,7 @@ def test_a_tally_under_an_hour_left_is_in_minutes_and_a_finished_one_has_no_pace
 def test_a_job_that_exited_is_not_lost_when_its_files_never_arrive(tmp_path: Path) -> None:
     """The machine outlives the job, its completion record never lands, and it ends at last."""
     b = bench(tmp_path)
-    one = b.scheduler.queue(job(), rent="l4")
+    (one,) = b.scheduler.queue(job(), rent="l4")
     b.scheduler.tick()
     b.run(1)
     _reporting(
@@ -936,7 +878,7 @@ def test_a_job_that_exited_is_not_lost_when_its_files_never_arrive(tmp_path: Pat
 
 def test_a_lost_run_with_no_time_to_retry_says_what_ended_it(tmp_path: Path) -> None:
     b = bench(tmp_path)
-    one = b.scheduler.queue(job(max_hours=0.1), rent="l4")
+    (one,) = b.scheduler.queue(job(max_hours=0.1), rent="l4")
     b.scheduler.tick()
     b.run(1)
     observe = b.service.observe
@@ -955,7 +897,7 @@ def test_a_read_shows_a_running_jobs_output_and_a_pass_fetches_it_only_as_it_gro
     tmp_path: Path,
 ) -> None:
     b = bench(tmp_path)
-    one = b.scheduler.queue(job(), rent="l4")
+    (one,) = b.scheduler.queue(job(), rent="l4")
     b.scheduler.tick()
     b.run(1)
     attempt = b.scheduler.attempts(one)[0]
@@ -987,7 +929,7 @@ def test_assigned_run_name_agrees_with_quote_and_stored_record(tmp_path: Path) -
     request = RunRequest(job=spec, seed=7, id="baseline-seed-7")
     quote = b.scheduler.quote([request], rent="l4")
     assert [machine.run for machine in quote.machines] == ["baseline-seed-7"]
-    identity = b.scheduler.queue(request, rent="l4")
+    (identity,) = b.scheduler.queue(request, rent="l4")
     record = b.scheduler.record(identity)
     assert record.name == "baseline-seed-7"
     assert record.config_json == '{ "lr": 0.1 }'
@@ -1006,8 +948,8 @@ def test_unassigned_hand_built_requests_have_seeded_quote_labels_and_opaque_ids(
     spec = job(name="baseline")
     quote = b.scheduler.quote([RunRequest(job=spec, seed=7)], rent="l4")
     assert [machine.run for machine in quote.machines] == ["baseline@7"]
-    identity = b.scheduler.queue(RunRequest(job=spec, seed=7), rent="l4")
+    (identity,) = b.scheduler.queue(RunRequest(job=spec, seed=7), rent="l4")
     assert b.scheduler.record(identity).name == identity
-    unnamed = b.scheduler.queue(Job(command="true", max_hours=1, max_usd=Decimal(1)), rent="l4")
+    (unnamed,) = b.scheduler.queue(Job(command="true", max_hours=1, max_usd=Decimal(1)), rent="l4")
     assert b.scheduler.record(unnamed).name == unnamed
     assert b.service.creates == 0

@@ -3,7 +3,7 @@
 `smoke_file` is the whole chain, as `etude smoke` runs it and `etude launch
 --smoke` and `etude queue --smoke` run it before submitting:
 
-1. Train: each distinct job `training_runs()` returns, run once with its declared tiny
+1. Train: each distinct job `training_jobs()` returns, run once with its declared tiny
    form on a throwaway local launcher (`etude.launch.smoke.smoke_train`).
 2. Eval: the file's `eval(state)` on what training stored, each tournament it
    returns cut to one game per match, every condition kept, and held here, through
@@ -27,12 +27,12 @@ from collections.abc import Callable, Collection, Sequence
 from pathlib import Path
 from typing import Literal
 
+from etude.declarations import asked, read_experiment, read_job_file
 from etude.errors import EtudeError, LauncherError
 from etude.eval.records import Benchmark, RoundRobin
-from etude.experiment import ExperimentState, asked, observe, read_experiment
+from etude.experiment import observe
 from etude.experiment_file import defined_functions, experiment_named
-from etude.jobs import evaluation_spec, hold_evaluation, with_experiment
-from etude.launch.job_file import read_job_file
+from etude.jobs import ExperimentState, evaluation_spec, hold_evaluation, with_experiment
 from etude.launch.smoke import Smoked, show, smoke_home, smoke_train
 from etude.page import build, render, write
 from etude.spec import Job, RunRequest, SmokeStep
@@ -52,7 +52,7 @@ def smoke_file(
 ) -> Smoked:
     """Smoke the experiment file's `steps`, in order, and return what each did.
 
-    `runs` are what its `training_runs()` returned, as `read_job_file` read them; read
+    `runs` are what its `training_jobs()` returned, as `read_job_file` read them; read
     with its defaults when not given. Without the train step, `source` holds
     the checkpoints to evaluate and the runs to report on; resolve it before
     calling, since the temporary home moves the default store. Raises
@@ -62,7 +62,7 @@ def smoke_file(
         raise LauncherError("--source is for smoking eval and report without the train step")
     if "train" not in steps and source is None and set(steps) & {"eval", "report"}:
         raise LauncherError("smoking eval or report without train needs --source")
-    if "train" in steps and runs is None:
+    if "train" in steps and runs is None and "training_jobs" in defined_functions(path):
         runs = read_job_file(path)
     experiment = experiment_named(path)
     train: dict[str, SmokeStep] = {}
@@ -106,12 +106,15 @@ def _evaluate(
     path: Path, experiment: str | None, source: Storage, store: DirectoryStorage
 ) -> list[SmokeStep]:
     """Each evaluation `eval(state)` asks for on `source`, held tiny into `store`."""
-    if experiment is None or "eval" not in defined_functions(path):
+    if experiment is None or "eval_jobs" not in defined_functions(path):
         return [SmokeStep(step="eval", name="eval", outcome="skipped", detail="no eval(state)")]
     state = observe(source, experiment)
     if not any(run.checkpoints for run in state.runs):
         return [SmokeStep(step="eval", name="eval", outcome="not_smoked", detail="no checkpoints")]
-    jobs = _try_step("eval", "eval", lambda: asked(read_experiment(path).eval, state))
+    definition = read_experiment(path)
+    function = definition.eval
+    assert function is not None
+    jobs = _try_step("eval", "eval", lambda: asked(function, state))
     if not jobs:
         return [
             SmokeStep(step="eval", name="eval", outcome="not_smoked", detail="eval returned none")

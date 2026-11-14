@@ -1,8 +1,8 @@
-"""Optional SSH controller: command transport, frozen inputs and a standing loop.
+"""Optional SSH server: command transport, frozen inputs and a standing loop.
 
 SSH supplies authentication and streams ordinary command output. Only launch
 inputs and fetched files need a wire envelope. Provider/storage keys stay in the
-controller's environment. The local setting never opens the launcher database.
+server's environment. The local setting never opens the launcher database.
 """
 
 from __future__ import annotations
@@ -34,13 +34,12 @@ from etude.launch.measurement import timed
 from etude.launch.providers.package import program_archive
 from etude.launch.records import (
     Availability,
-    Cohort,
-    CohortSpec,
     Diagnostic,
     Launch,
     LogSnapshot,
     Machine,
     Quote,
+    Standing,
     Status,
     Target,
 )
@@ -55,7 +54,7 @@ from etude.launch.ssh import (
 from etude.launch.storage.files import write
 from etude.launch.usage import Usage
 from etude.records import RunRecord
-from etude.spec import Job, Record, RunRequest
+from etude.spec import Job, Record, RunRequest, expand_runs
 
 
 class Source(Record):
@@ -67,7 +66,6 @@ class Source(Record):
 
 class LaunchInput(Record):
     runs: tuple[RunRequest, ...]
-    cohort: CohortSpec | None
     pool: str | None
     rent: str | None = None
     sources: tuple[Source, ...] = ()
@@ -81,7 +79,7 @@ class FetchRequest(Record):
     destination: Path
 
 
-# Controller operations, one record per shape of request. No credentials or
+# Server operations, one record per shape of request. No credentials or
 # provider authority cross this wire; both ends run the same program.
 
 
@@ -108,6 +106,11 @@ class RunOperation(Record):
     run: str
 
 
+class StandingRequest(Record):
+    operation: Literal["standing"] = "standing"
+    experiment: str
+
+
 class WaitRequest(Record):
     operation: Literal["wait"] = "wait"
     runs: tuple[str, ...]
@@ -127,11 +130,6 @@ class LogsRequest(Record):
     machine: str | None = None
     refresh: bool = False
     timeout: float | None = None
-
-
-class CohortRequest(Record):
-    operation: Literal["cohort_runs"] = "cohort_runs"
-    cohort: str
 
 
 class RentRequest(Record):
@@ -157,10 +155,10 @@ type Request = Annotated[
     | FailLaunchRequest
     | OutputRequest
     | RunOperation
+    | StandingRequest
     | WaitRequest
     | EvidenceRequest
     | LogsRequest
-    | CohortRequest
     | RentRequest
     | TerminateRequest
     | AvailabilityRequest,
@@ -181,6 +179,7 @@ type Response = (
     | LogSnapshot
     | tuple[Diagnostic, ...]
     | tuple[RunRecord, ...]
+    | tuple[Standing, ...]
     | Launch
     | Quote
     | Availability
@@ -188,32 +187,32 @@ type Response = (
 )
 
 
-class ControllerReply(RootModel[Response]):
+class ServerReply(RootModel[Response]):
     model_config = {"frozen": True}
 
 
 def selected() -> str | None:
-    if os.environ.get("ETUDE_CONTROLLER_LOCAL"):
+    if os.environ.get("ETUDE_SERVER_LOCAL"):
         return None
-    path = home() / "controller"
+    path = home() / "server"
     return path.read_text().strip() if path.exists() else None
 
 
 def set_address(address: str, *, startup_seconds: float | None = None) -> None:
     if not address or address.startswith("-") or any(c.isspace() for c in address):
-        raise LauncherError("controller needs an SSH address, such as user@host or an SSH alias")
+        raise LauncherError("server needs an SSH address, such as user@host or an SSH alias")
     install(
         address, startup_seconds=startup_seconds
-    )  # fails here, with a reason, if the machine cannot be a controller
+    )  # fails here, with a reason, if the machine cannot be a server
     home().mkdir(parents=True, exist_ok=True, mode=0o700)
-    write(home() / "controller", address)
+    write(home() / "server", address)
 
 
 def unset() -> None:
-    (home() / "controller").unlink(missing_ok=True)
+    (home() / "server").unlink(missing_ok=True)
 
 
-# The controller runs the client's own code, sent over SSH and kept by digest
+# The server runs the client's own code, sent over SSH and kept by digest
 # beside its database, installed with uv in its own environment. The two sides
 # always use the same source and dependency lock.
 _MISSING = 97  # the remote exit status meaning "that program is not here yet"
@@ -236,14 +235,14 @@ def _command(address: str, argv: Sequence[str]) -> list[str]:
         address,
         login_shell(
             f"test -f {root}/ready || exit {_MISSING}; "
-            f"ETUDE_CONTROLLER_LOCAL=1 exec {run} {shlex.join(argv)}"
+            f"ETUDE_SERVER_LOCAL=1 exec {run} {shlex.join(argv)}"
         ),
     ]
 
 
-@timed("ssh.controller.install")
+@timed("ssh.server.install")
 def install(address: str, *, startup_seconds: float | None = None) -> None:
-    """Send this client's code to the controller. Safe to repeat."""
+    """Send this client's code to the server. Safe to repeat."""
     if startup_seconds is not None and (not math.isfinite(startup_seconds) or startup_seconds <= 0):
         raise ValueError("startup_seconds must be positive and finite, or None")
     allowance = remaining(startup_seconds)
@@ -261,19 +260,19 @@ def install(address: str, *, startup_seconds: float | None = None) -> None:
             timeout=allowance,
         )
     except (OSError, subprocess.TimeoutExpired):
-        raise LauncherError(f"controller {address!r} did not answer over SSH") from None
+        raise LauncherError(f"server {address!r} did not answer over SSH") from None
     if done.returncode:
         said = done.stderr.decode(errors="replace").strip().splitlines()
         raise LauncherError(
-            f"controller {address!r} could not take the program"
+            f"server {address!r} could not take the program"
             + (f": {said[-1]}" if said else "")
             + f". It needs {remote_python()} and uv on its login shell's PATH and working SSH keys"
         )
 
 
-@timed("ssh.controller.command")
+@timed("ssh.server.command")
 def _ssh(address: str, argv: Sequence[str], **options: Any) -> subprocess.CompletedProcess[bytes]:
-    """Run one command on the controller, sending the program first if it is not there.
+    """Run one command on the server, sending the program first if it is not there.
 
     Exit status 97 means the command did not start, so running it again is safe.
     """
@@ -307,7 +306,7 @@ def prepare(address: str, submission: LaunchInput) -> LaunchInput:
         try:
             client._request(FailLaunchRequest(launch=launch.id, message=message))
         except Exception:
-            message += "; controller evidence update unconfirmed"
+            message += "; server evidence update unconfirmed"
         raise LaunchError(launch.id, tuple(r.run for r in launch.requests), message) from error
 
 
@@ -333,51 +332,19 @@ def _with_sources(submission: LaunchInput) -> LaunchInput:
 
 
 def submit(scheduler: Scheduler, submission: LaunchInput) -> Sequence[str]:
-    cohort = submission.cohort
     if submission.launch is not None:
-        limits = (
-            None
-            if cohort is None
-            else Cohort(
-                name=cohort.name,
-                parallel=cohort.parallel,
-                max_usd=cohort.max_usd,
-                created_at=datetime.now(UTC),
-            )
-        )
         return scheduler.submit_launch(
             submission.launch,
             submission.runs,
             Target(pool=submission.pool, rent=submission.rent),
-            limits,
             queued=submission.queued,
         )
-    if cohort is None:
-        if len(submission.runs) != 1:
-            raise LauncherError("several runs need a cohort")
-        send_run = scheduler.queue if submission.queued else scheduler.launch
-        return [send_run(submission.runs[0], submission.pool, rent=submission.rent)]
-    send_cohort = scheduler.queue_cohort if submission.queued else scheduler.launch_cohort
-    return send_cohort(
-        cohort.name,
-        submission.runs,
-        submission.pool,
-        rent=submission.rent,
-        parallel=cohort.parallel,
-        max_usd=cohort.max_usd,
-    )
+    send = scheduler.queue if submission.queued else scheduler.launch
+    return send(submission.runs, submission.pool, rent=submission.rent)
 
 
 def quote(scheduler: Scheduler | PythonClient, submission: LaunchInput) -> Quote:
-    cohort = submission.cohort
-    return scheduler.quote(
-        submission.runs,
-        submission.pool,
-        rent=submission.rent,
-        cohort=None if cohort is None else cohort.name,
-        parallel=1 if cohort is None else cohort.parallel,
-        max_usd=None if cohort is None else cohort.max_usd,
-    )
+    return scheduler.quote(submission.runs, submission.pool, rent=submission.rent)
 
 
 def forward(
@@ -396,7 +363,7 @@ def forward(
         request = OutputRequest(run=fetch.run, output=fetch.name)
     done = _ssh(
         address,
-        ["--controller-request"],
+        ["--server-request"],
         input=_REQUEST.dump_json(request),
         stdout=subprocess.PIPE if fetch is not None else None,
     )
@@ -429,7 +396,7 @@ def _save_output(raw: EncodedOutput, request: FetchRequest) -> Path:
 
 
 class PythonClient:
-    """Typed Python calls over the same SSH controller protocol as the CLI.
+    """Typed Python calls over the same SSH server protocol as the CLI.
 
     Each request is sent once. In particular a lost launch reply never resubmits.
     Explicit Launcher instances continue to own only their local database.
@@ -441,7 +408,7 @@ class PythonClient:
     def _request(self, request: Request) -> bytes:
         done = _ssh(
             self.address,
-            ["--controller-request"],
+            ["--server-request"],
             input=_REQUEST.dump_json(request),
             capture_output=True,
             **(
@@ -452,14 +419,13 @@ class PythonClient:
         )
         if done.returncode:
             raise LauncherError(
-                done.stderr.decode().strip() or "controller request failed; outcome unknown"
+                done.stderr.decode().strip() or "server request failed; outcome unknown"
             )
         return done.stdout
 
     def _submit(
         self,
         runs: Sequence[RunRequest],
-        cohort: CohortSpec | None,
         target: Target,
         queued: bool,
     ) -> tuple[str, ...]:
@@ -467,7 +433,6 @@ class PythonClient:
             self.address,
             LaunchInput(
                 runs=tuple(runs),
-                cohort=cohort,
                 pool=target.pool,
                 rent=target.rent,
                 queued=queued,
@@ -486,42 +451,24 @@ class PythonClient:
             ) from error
 
     def queue(
-        self, run: RunRequest | Job, pool: str | None = None, *, rent: str | None = None
-    ) -> str:
-        one = [RunRequest(job=run) if isinstance(run, Job) else run]
-        return self._submit(one, None, Target(pool=pool, rent=rent), True)[0]
+        self,
+        runs: RunRequest | Job | Sequence[RunRequest | Job],
+        pool: str | None = None,
+        *,
+        rent: str | None = None,
+    ) -> tuple[str, ...]:
+        given = [runs] if isinstance(runs, (Job, RunRequest)) else runs
+        return self._submit(expand_runs(given), Target(pool=pool, rent=rent), True)
 
     def launch(
-        self, run: RunRequest | Job, pool: str | None = None, *, rent: str | None = None
-    ) -> str:
-        one = [RunRequest(job=run) if isinstance(run, Job) else run]
-        return self._submit(one, None, Target(pool=pool, rent=rent), False)[0]
-
-    def queue_cohort(
         self,
-        name: str,
-        runs: Sequence[RunRequest],
+        runs: RunRequest | Job | Sequence[RunRequest | Job],
         pool: str | None = None,
         *,
         rent: str | None = None,
-        parallel: int = 1,
-        max_usd: Decimal | None = None,
     ) -> tuple[str, ...]:
-        cohort = CohortSpec(name=name, parallel=parallel, max_usd=max_usd)
-        return self._submit(runs, cohort, Target(pool=pool, rent=rent), True)
-
-    def launch_cohort(
-        self,
-        name: str,
-        runs: Sequence[RunRequest],
-        pool: str | None = None,
-        *,
-        rent: str | None = None,
-        parallel: int = 1,
-        max_usd: Decimal | None = None,
-    ) -> tuple[str, ...]:
-        cohort = CohortSpec(name=name, parallel=parallel, max_usd=max_usd)
-        return self._submit(runs, cohort, Target(pool=pool, rent=rent), False)
+        given = [runs] if isinstance(runs, (Job, RunRequest)) else runs
+        return self._submit(expand_runs(given), Target(pool=pool, rent=rent), False)
 
     def quote(
         self,
@@ -529,14 +476,8 @@ class PythonClient:
         pool: str | None = None,
         *,
         rent: str | None = None,
-        cohort: str | None = None,
-        parallel: int = 1,
-        max_usd: Decimal | None = None,
     ) -> Quote:
-        spec = (
-            None if cohort is None else CohortSpec(name=cohort, parallel=parallel, max_usd=max_usd)
-        )
-        submission = LaunchInput(runs=tuple(runs), cohort=spec, pool=pool, rent=rent)
+        submission = LaunchInput(runs=tuple(runs), pool=pool, rent=rent)
         return Quote.model_validate_json(
             self._request(SubmissionRequest(operation="quote", submission=submission))
         )
@@ -544,6 +485,11 @@ class PythonClient:
     def availability(self, rent: str, *, timeout: float | None = None) -> Availability:
         return Availability.model_validate_json(
             self._request(AvailabilityRequest(ondemand=rent, timeout=timeout))
+        )
+
+    def standing(self, experiment: str) -> tuple[Standing, ...]:
+        return TypeAdapter(tuple[Standing, ...]).validate_json(
+            self._request(StandingRequest(experiment=experiment))
         )
 
     def record(self, run: str) -> RunRecord:
@@ -561,11 +507,6 @@ class PythonClient:
 
     def cancel(self, run: str) -> Status:
         return Status.model_validate_json(self._request(RunOperation(operation="cancel", run=run)))
-
-    def cohort_runs(self, name: str) -> tuple[RunRecord, ...]:
-        return TypeAdapter(tuple[RunRecord, ...]).validate_json(
-            self._request(CohortRequest(cohort=name))
-        )
 
     def diagnostics(
         self, *, run: str | None = None, machine: str | None = None
@@ -592,7 +533,7 @@ class PythonClient:
                 return LogSnapshot.model_validate_json(self._request(request))
         except (subprocess.TimeoutExpired, TimeoutError):
             raise LauncherError(
-                "controller log retrieval time limit reached; evidence remains on controller"
+                "server log retrieval time limit reached; evidence remains on server"
             ) from None
 
     def usage(self, *, run: str | None = None, machine: str | None = None) -> Usage:
@@ -653,14 +594,14 @@ def receive(scheduler: Scheduler) -> int:
             response = scheduler.status(request.run)
         case RunOperation(operation="cancel"):
             response = scheduler.cancel(request.run)
+        case StandingRequest():
+            response = scheduler.standing(request.experiment)
         case WaitRequest():
             response = scheduler.wait(*request.runs, every=request.every, timeout=request.timeout)
         case EvidenceRequest(operation="usage"):
             response = scheduler.usage(run=request.run, machine=request.machine)
         case EvidenceRequest(operation="diagnostics"):
             response = scheduler.diagnostics(run=request.run, machine=request.machine)
-        case CohortRequest():
-            response = scheduler.cohort_runs(request.cohort)
         case LogsRequest():
             response = scheduler.logs(
                 run=request.run,
@@ -675,8 +616,8 @@ def receive(scheduler: Scheduler) -> int:
         case TerminateRequest():
             response = scheduler.terminate(request.machine)
         case _:
-            raise LauncherError(f"unknown controller operation {request.operation!r}")
-    print(ControllerReply(response).model_dump_json())
+            raise LauncherError(f"unknown server operation {request.operation!r}")
+    print(ServerReply(response).model_dump_json())
     return 0
 
 
@@ -684,12 +625,12 @@ def loop(scheduler: Scheduler, every: float = 1.0) -> None:
     """Keep matching even when the queue empties; heartbeat means a completed tick."""
     while True:
         scheduler.tick()
-        write(home() / "controller-heartbeat", datetime.now(UTC).isoformat())
+        write(home() / "server-heartbeat", datetime.now(UTC).isoformat())
         time.sleep(every)
 
 
 def warning(scheduler: Scheduler) -> str | None:
-    path = home() / "controller-heartbeat"
+    path = home() / "server-heartbeat"
     try:
         at = datetime.fromisoformat(path.read_text())
         age = (datetime.now(UTC) - at).total_seconds()
@@ -697,14 +638,14 @@ def warning(scheduler: Scheduler) -> str | None:
     except (OSError, ValueError, TypeError):
         recent = False
     if not recent and any(scheduler.read(run.id).phase == "queued" for run in scheduler.runs()):
-        return "work is waiting; no controller loop has run recently (etude controller run)"
+        return "work is waiting; no server loop has run recently (etude server run)"
     return None
 
 
 def show_freshness(scheduler: Scheduler) -> None:
-    """Print when the controller loop last passed: how fresh the database's answers are."""
+    """Print when the server loop last passed: how fresh the database's answers are."""
     try:
-        at = datetime.fromisoformat((home() / "controller-heartbeat").read_text().strip())
+        at = datetime.fromisoformat((home() / "server-heartbeat").read_text().strip())
         age = int((datetime.now(UTC) - at).total_seconds())
         said = f"{age} seconds ago" if 0 <= age < 120 else f"{at:%Y-%m-%d %H:%M} UTC"
     except (OSError, ValueError, TypeError):
@@ -715,6 +656,6 @@ def show_freshness(scheduler: Scheduler) -> None:
 
 
 def show(scheduler: Scheduler) -> None:
-    if not os.environ.get("ETUDE_CONTROLLER_LOCAL"):
-        print("controller: this machine")  # a client has already named the controller
+    if not os.environ.get("ETUDE_SERVER_LOCAL"):
+        print("server: this machine")  # a client has already named the server
     show_freshness(scheduler)

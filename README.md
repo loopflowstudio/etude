@@ -6,21 +6,23 @@ Launch training runs on your own or rented machines, and track what they record.
 # job.py
 from decimal import Decimal
 
-from etude.jobs import training
-from etude.spec import Job
+from etude.jobs import TrainingJob
 
 from train import TrainConfig, train
 
 
-def training_runs() -> Job:
-    return training(
-        train,
-        config=TrainConfig(lr=1e-3),
-        smoke=TrainConfig(updates=1),  # how to run it tiny, for `etude smoke`
-        seeds=(0, 1, 2),  # three runs of one job
-        max_hours=2,
-        max_usd=Decimal(4),
-    )
+def training_jobs() -> list[TrainingJob]:
+    return [
+        TrainingJob(
+            name="base",
+            train=train,
+            config=TrainConfig(lr=1e-3),
+            smoke=TrainConfig(updates=1),  # how to run it tiny, for `etude smoke`
+            seeds=(0, 1, 2),  # three runs of one job
+            max_hours=2,
+            max_usd=Decimal(4),
+        )
+    ]
 ```
 
 ```python
@@ -52,8 +54,9 @@ def train(config: TrainConfig) -> None:
 ```sh
 etude train train.py         # one new run on this computer, without the launcher
 etude smoke job.py           # one tiny update here, spending nothing
-etude launch job.py --cohort baseline   # its three runs, on this computer; --smoke smokes
-                             # first, --pool P for machines you own, --rent R to rent, or both
+etude launch job.py          # what has not been run: job/base@0, @1 and @2, on this
+                             # computer; --smoke smokes first, --pool P for machines you
+                             # own, --rent R to rent, or both
 etude status                 # where runs stand
 etude logs --run RUN         # preparation, every attempt, cleanup
 etude report job.py --open   # experiment job's evals, perf and ML details, as one page
@@ -68,19 +71,39 @@ the experiment name `job`; `train` names none.
 
 Etude decides the job's command: on the machine it imports `train` from your
 checkout and calls it with the config, validated back into a `TrainConfig`. A
-config `train` cannot take is refused before anything launches. An evaluation
-job holds a tournament ([evaluation](docs/evaluation.md)) for one checkpoint
-the same way, with your `play`:
+config `train` cannot take is refused where the job is written, before
+anything launches.
+
+The same file says what to evaluate. An eval job holds a tournament
+([evaluation](docs/evaluation.md)) with your `play` for the checkpoints it
+names, chosen from what the experiment's runs have stored so far:
 
 ```python
-from etude.experiment import observe
-from etude.jobs import evaluation
+# job.py, continued
+from etude.jobs import ExperimentState
+from etude.jobs import EvalJob
 
-weights = observe("s3://my-bucket/runs", "job").run("job").final
-evaluation(
-    progress, experiment="job", play=play, checkpoint=weights, max_hours=0.5, max_usd=Decimal(1)
-)
+from arena import play, progress  # play(match) -> Tables; progress is a Benchmark
+
+
+def eval_jobs(state: ExperimentState) -> list[EvalJob]:
+    saved = [checkpoint for run in state.runs for checkpoint in run.checkpoints]
+    return [
+        EvalJob(
+            play=play,
+            tournament=progress,
+            checkpoints=saved,
+            max_hours=0.5,
+            max_usd=Decimal(1),
+        )
+    ]
 ```
+
+Each declaration returns every job that should have been run, or can be run,
+by now. `etude launch job.py` reads both and gets machines for what has not
+been run, so the same command launches training first and, typed again as
+checkpoints arrive, the matches nobody has played. `etude eval job.py` plays
+them on this computer instead.
 
 Everything a run records goes to your own directory or S3 bucket. There is no
 server to run and no account to make. Saved state and checkpoints are JSON
@@ -102,8 +125,8 @@ uv add 'etude-sdk[s3]'             # with S3 or R2 storage
   on, checkpoints, `etude train`.
 - [Tracking](docs/tracking.md): rows, row tables, storage, reading runs back, reports.
 - [Evaluation](docs/evaluation.md): players (checkpoints and code) playing each other in parallel, benchmarks and round robins, queried with DuckDB.
-- [The launcher](docs/launcher.md): typed jobs, pools, SSH hosts, rented
-  machines, cohorts, limits and recovery.
+- [The launcher](docs/launcher.md): experiment files, typed jobs, pools, SSH
+  hosts, rented machines, limits and recovery.
 
 ## Develop
 

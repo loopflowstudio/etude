@@ -26,11 +26,12 @@ from typing import cast
 from pydantic import BaseModel
 
 from etude.call import changed_config, config_type
+from etude.declarations import read_job_file, select_runs
 from etude.errors import EtudeError, LauncherError
-from etude.experiment_file import defined_functions
+from etude.experiment import observe
+from etude.experiment_file import defined_functions, refuse_renamed
 from etude.identity import run_address
 from etude.jobs import load_job_function
-from etude.launch.job_file import read_job_file, select_runs
 from etude.records import RunRecord
 from etude.run import RunFiles, run_name_taken, validate_resume
 from etude.spec import Until
@@ -55,22 +56,20 @@ def train(
     """Train the selected jobs' seeds here, stopping the selection after a saved stop.
 
     Files with only `train(config)` define one job with seed 0. Files with
-    `training_runs()` use exactly the same declarations and addresses as a launch.
+    `training_jobs()` use exactly the same declarations and addresses as a launch.
     """
     if seconds is not None and (not math.isfinite(seconds) or seconds <= 0):
         raise ValueError("--seconds must be finite and positive")
     if file.suffix != ".py":
-        raise ValueError("a Python file defining train(config) or training_runs() is required")
+        raise ValueError("a Python file defining train(config) or training_jobs() is required")
     file = file.resolve()
     label = experiment or file.stem
     functions = defined_functions(file)
-    if "runs" in functions and "training_runs" not in functions:
-        raise LauncherError(
-            f"{file.name}: rename runs() to training_runs() returning jobs or run requests"
-        )
-    if "training_runs" in functions:
+    refuse_renamed(file)
+    if "training_jobs" in functions:
+        state = observe(default_root(), label)
         requests = select_runs(
-            read_job_file(file, experiment=experiment, local=True), job=job, seed=seed
+            read_job_file(file, experiment=experiment, local=True, state=state), job=job, seed=seed
         )
         prepared: list[_Training | _Finished] = []
         refusals: list[str] = []
@@ -80,12 +79,21 @@ def train(
                     raise ValueError(
                         "local training needs an addressed request; return a Job or give RunRequest.id"
                     )
+                prior = next(
+                    (
+                        r
+                        for r in state.runs
+                        if r.launch == request.job.name and r.seed == request.seed
+                    ),
+                    None,
+                )
+                identity = run_address(prior.name, label) if prior is not None else request.id
                 prepared.append(
                     _prepare(
                         file,
                         load_job_function(request.job, current=True),
                         label=request.job.experiment or label,  # a job may name its own
-                        identity=request.id,
+                        identity=identity,
                         job=request.job.name,
                         initial=request.job.config,
                         config=config,
@@ -104,13 +112,13 @@ def train(
         return _train_each(prepared, json_output=json_output)
     if job not in (None, file.stem) or seed not in (None, 0):
         raise ValueError(
-            "select the file's sole job and seed 0; define training_runs() for other jobs or seeds"
+            "select the file's sole job and seed 0; define training_jobs() for other jobs or seeds"
         )
     sys.path.insert(0, str(file.parent))
     try:
         found = runpy.run_path(str(file)).get("train")
         if not callable(found):
-            raise ValueError(f"{file.name}: define train(config) or training_runs()")
+            raise ValueError(f"{file.name}: define train(config) or training_jobs()")
         return _train_each(
             [
                 _prepare(

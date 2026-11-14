@@ -22,8 +22,8 @@ from etude.errors import LauncherError
 from etude.launch.client import _open
 from etude.launch.database import Database, launcher_file
 from etude.launch.errors import ProviderUnavailable
-from etude.launch.executor import Executor, Refused
-from etude.launch.machines import MachineRequest
+from etude.launch.executor import Executor
+from etude.launch.machines import MachineRequest, Refused
 from etude.launch.providers.bootstrap import guard
 from etude.launch.providers.cleanup import command
 from etude.launch.providers.vast.api import Create, Instance, VastAPI
@@ -294,7 +294,7 @@ def test_scheduler_retains_uncertain_acquisition_until_owned_deletion(
         intent = storage.objects[f"test/sessions/{held.id}/offer.json"]
         assert 12 in market.instances and market.counts == {"POST": 1, "PUT": 1}
 
-        # Rebuild the controller from retained evidence; process-local state cannot
+        # Rebuild the server from retained evidence; process-local state cannot
         # prove ownership or preserve the reservation after a lost create reply.
         store.close()
         store = Database(launcher_file(tmp_path))
@@ -555,7 +555,7 @@ def test_vast_cohort_uses_the_worker_and_retains_outputs_before_deletion(
         max_usd=Decimal(1),
         max_attempts=1,
     )
-    runs = scheduler.launch_cohort("vast-cohort", job.runs(17), rent="4090", max_usd=Decimal(1))
+    runs = scheduler.launch(job.runs(17), rent="4090")
     try:
         worker = threading.Thread(target=run_worker)
         worker.start()

@@ -2,17 +2,17 @@
 
     from decimal import Decimal
 
-    from etude.launch.client import launch_cohort, wait
+    from etude.launch.client import launch, wait
     from etude.spec import Job
 
     job = Job(command="python train.py", max_hours=6, max_usd=Decimal(5))
-    runs = launch_cohort("first", job.runs(1, 2, 3))
+    runs = launch(job.runs(1, 2, 3))
     print(wait(*runs))
 
-Each function uses the selected SSH controller, or a launcher under ETUDE_HOME
+Each function uses the selected SSH server, or a launcher under ETUDE_HOME
 (default ~/.etude) with an initial pool, "local", holding this computer. A
 call names a pool (`pool=`), an on-demand to rent from (`rent=`), or both.
-With `smoke=True`, `queue`, `queue_cohort`, `launch` and `launch_cohort` first
+With `smoke=True`, `queue` and `launch` first
 run each job's smoke form here (`etude.launch.smoke`) and submit nothing if one
 fails; each run records what its smoke did. `etude.smoke.smoke_file` smokes a
 whole experiment file, evaluation and report too.
@@ -28,7 +28,6 @@ from functools import cache
 from pathlib import Path
 
 from etude.errors import LauncherError
-from etude.launch.controller import PythonClient, selected
 from etude.launch.database import Database, launcher_file
 from etude.launch.executor import Execution, Executor, local
 from etude.launch.machines import Machines, OwnedMachine, Safeguards
@@ -46,9 +45,11 @@ from etude.launch.records import (
     OnDemand,
     Pool,
     Quote,
+    Standing,
     Status,
 )
 from etude.launch.scheduler import Scheduler
+from etude.launch.server import PythonClient, selected
 from etude.launch.smoke import Smoked, show, smoke_home, smoke_train
 from etude.launch.source import home
 from etude.launch.ssh import SSH, SSHJournal, SSHStart
@@ -138,8 +139,8 @@ def _open(home: Path) -> Scheduler:
     if fresh:  # this computer is offered once; `etude pool off local` withdraws it
         scheduler.add_pool(Pool(name="local"))
         store.add_machine(Machine(name="local", pool="local", kind="local"))
-    if os.environ.get("ETUDE_CONTROLLER_LOCAL"):
-        store.name_controller_pool()
+    if os.environ.get("ETUDE_SERVER_LOCAL"):
+        store.name_server_pool()
     return scheduler
 
 
@@ -152,8 +153,8 @@ def _client() -> Scheduler | PythonClient:
     return PythonClient(address) if address else default()
 
 
-def _smoked(runs: Job | Sequence[RunRequest | Job], smoke: bool) -> list[RunRequest]:
-    given = [runs] if isinstance(runs, Job) else runs
+def _smoked(runs: RunRequest | Job | Sequence[RunRequest | Job], smoke: bool) -> list[RunRequest]:
+    given = [runs] if isinstance(runs, (Job, RunRequest)) else runs
     each = expand_runs(given)
     if not smoke:
         return each
@@ -164,54 +165,24 @@ def _smoked(runs: Job | Sequence[RunRequest | Job], smoke: bool) -> list[RunRequ
     return Smoked(train={one.job: one.step for one in trained}).stamp(each)
 
 
-def _one(run: RunRequest | Job, cohort_call: str, smoke: bool) -> RunRequest:
-    """The single run given, refusing a several-seed Job before smoke or submission."""
-    if isinstance(run, Job) and len(run.seeds) > 1:
-        raise LauncherError(f"{len(run.seeds)} runs need {cohort_call}(NAME, job)")
-    (smoked_run,) = _smoked([run], smoke)
-    return smoked_run
-
-
 def queue(
-    run: RunRequest | Job, pool: str | None = None, *, rent: str | None = None, smoke: bool = False
-) -> str:
-    return _client().queue(_one(run, "queue_cohort", smoke), pool, rent=rent)
-
-
-def queue_cohort(
-    name: str,
-    runs: Job | Sequence[RunRequest | Job],
+    runs: RunRequest | Job | Sequence[RunRequest | Job],
     pool: str | None = None,
     *,
     rent: str | None = None,
-    parallel: int = 1,
-    max_usd: Decimal | None = None,
     smoke: bool = False,
 ) -> tuple[str, ...]:
-    return _client().queue_cohort(
-        name, _smoked(runs, smoke), pool, rent=rent, parallel=parallel, max_usd=max_usd
-    )
+    return _client().queue(_smoked(runs, smoke), pool, rent=rent)
 
 
 def launch(
-    run: RunRequest | Job, pool: str | None = None, *, rent: str | None = None, smoke: bool = False
-) -> str:
-    return _client().launch(_one(run, "launch_cohort", smoke), pool, rent=rent)
-
-
-def launch_cohort(
-    name: str,
-    runs: Job | Sequence[RunRequest | Job],
+    runs: RunRequest | Job | Sequence[RunRequest | Job],
     pool: str | None = None,
     *,
     rent: str | None = None,
-    parallel: int = 1,
-    max_usd: Decimal | None = None,
     smoke: bool = False,
 ) -> tuple[str, ...]:
-    return _client().launch_cohort(
-        name, _smoked(runs, smoke), pool, rent=rent, parallel=parallel, max_usd=max_usd
-    )
+    return _client().launch(_smoked(runs, smoke), pool, rent=rent)
 
 
 def quote(
@@ -219,16 +190,9 @@ def quote(
     pool: str | None = None,
     *,
     rent: str | None = None,
-    cohort: str | None = None,
-    parallel: int = 1,
-    max_usd: Decimal | None = None,
 ) -> Quote:
-    """The machines a launch would take now and planned rental costs; rents nothing.
-
-    Costs assume the quoted rate and timely deletion, and exclude external storage.
-    Provider delays can exceed the admitted rental budget.
-    """
-    return _client().quote(runs, pool, rent=rent, cohort=cohort, parallel=parallel, max_usd=max_usd)
+    """Quote first-wave placements and rental costs without renting."""
+    return _client().quote(runs, pool, rent=rent)
 
 
 def availability(rent: str, *, timeout: float | None = None) -> Availability:
@@ -280,3 +244,18 @@ def terminate(machine: str) -> Machine:
 def usage(*, run: str | None = None, machine: str | None = None) -> Usage:
     """Read retained transfer usage without polling machines or storage."""
     return _client().usage(run=run, machine=machine)
+
+
+def standing(experiment: str, *, local: bool = False) -> tuple[Standing, ...]:
+    """Retained runs and statuses; a page can explicitly read only this computer."""
+    address = None if local else selected()
+    if address:
+        return PythonClient(address).standing(experiment)
+    path = launcher_file(home())
+    if not path.exists():
+        return ()
+    store = Database(path)
+    try:
+        return Scheduler(store, {}).standing(experiment)
+    finally:
+        store.close()

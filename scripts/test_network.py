@@ -52,7 +52,7 @@ def _isolated(arguments: list[str]) -> None:
         os.setgid(gid)
         os.setuid(uid)
     _probe()
-    # Environments a test builds (a stand-in controller's) come from uv's cache,
+    # Environments a test builds (a stand-in server's) come from uv's cache,
     # which `uv sync` filled before isolation.
     os.environ["UV_OFFLINE"] = "1"
     os.environ["GIT_ALLOW_PROTOCOL"] = "file"

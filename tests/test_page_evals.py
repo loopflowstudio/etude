@@ -13,13 +13,15 @@ from moto import mock_aws
 from etude.block_file import parse
 from etude.carriage import EVAL_BLOCK_PACK, checkpoint_file
 from etude.checkpoints import CheckpointRef, checkpoint_id
+from etude.controller import advance
+from etude.declarations import read_experiment
 from etude.errors import EtudeError
 from etude.eval.match import environment, evaluate
 from etude.eval.query import compare, statsdb
 from etude.eval.records import Benchmark, CheckpointPlayer, Code, Inference, Match, Player, Seating
 from etude.eval.run import Result
 from etude.eval.tournament import hold
-from etude.experiment import advance, observe, read_experiment
+from etude.experiment import observe
 from etude.page import Drawn, OutsideTournaments, Page, PanelSelection, build
 from etude.records import ArtifactRef, Clock, Continuation, SourceKey
 from etude.report import Matches
@@ -34,7 +36,7 @@ from etude.eval.match import environment
 from etude.eval.records import (Benchmark, Code, Inference, Seating, CheckpointPlayer)
 from etude.checkpoints import CheckpointId, checkpoint_id, CheckpointRef
 from etude.records import ArtifactRef
-from etude.jobs import evaluation
+from etude.jobs import EvalJob
 from etude.report import Anchors, Curve, Matches, Report, Score
 from tests.eval.games import play, play_failing_deal_one
 
@@ -57,7 +59,7 @@ def versus(name, first, second):
     return Seating(name=name, players=(first, second), configs=DEALS, games=2, tags=("anchor",))
 
 
-def eval(state):
+def eval_jobs(state):
     rated = [each for run in state.runs for each in run.checkpoints.every(2)]
     ladder = Benchmark(name="ladder", environment=DUEL, seatings=(
         versus("vs weak", DIRECT, WEAK),
@@ -69,8 +71,8 @@ def eval(state):
         Seating(name="deal 1", players=(DIRECT, WEAK), configs=({"deal": 1},), games=3),
     ))
     return [
-        evaluation(ladder, play=play, checkpoints=rated, max_hours=0.1),
-        evaluation(corrupt, play=play_failing_deal_one, checkpoints=rated[:1], max_hours=0.1),
+        EvalJob(tournament=ladder, play=play, checkpoints=rated, max_hours=0.1),
+        EvalJob(tournament=corrupt, play=play_failing_deal_one, checkpoints=rated[:1], max_hours=0.1),
     ]
 
 
@@ -283,18 +285,18 @@ def test_a_report_reads_no_checkpoint_bytes(lab: tuple[Path, Path], page: Page) 
 VERSIONED = """
 from etude.eval.match import environment
 from etude.eval.records import Benchmark, Code, Inference, Seating
-from etude.jobs import evaluation
+from etude.jobs import EvalJob
 from tests.eval.games import play
 
 DIRECT = Inference(config={"search": 0})
 WEAK = Code(name="weak", source=[__file__], config={"strength": 0})
 
 
-def eval(state):
+def eval_jobs(state):
     rated = [each for run in state.runs for each in run.checkpoints]
     versus = Seating(name="vs weak", players=(DIRECT, WEAK), configs=({"deal": 0},), games=2)
     ladder = Benchmark(name="ladder", environment=environment("duel"), seatings=(versus,))
-    return [evaluation(ladder, play=play, checkpoints=rated, max_hours=0.1)]
+    return [EvalJob(tournament=ladder, play=play, checkpoints=rated, max_hours=0.1)]
 """
 
 
@@ -871,12 +873,12 @@ class KeysRead(MeasuredStorage):
 
 
 SCHEDULED = """
-def eval(state):
+def eval_jobs(state):
     return []
 """
 
 
-def test_a_page_reads_metrics_from_training_runs_once_and_no_eval_blob(
+def test_a_page_reads_metrics_from_training_jobs_once_and_no_eval_blob(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
@@ -938,7 +940,7 @@ def _attempt(key: str) -> bool:
 REVISED = """
 from etude.eval.match import environment
 from etude.eval.records import Benchmark, Code, Inference, Seating
-from etude.jobs import evaluation
+from etude.jobs import EvalJob
 from etude.report import Curve, Matches, Report, Score
 from tests.eval.games import play
 
@@ -948,12 +950,12 @@ DIRECT = Inference(config={"search": 0})
 WEAK = Code(name="weak", source=[__file__], config={"strength": 0})
 
 
-def eval(state):
+def eval_jobs(state):
     held = [each for run in state.runs for each in run.checkpoints]
     ladder = Benchmark(name="ladder", environment=DUEL, seatings=(
         Seating(name="vs weak", players=(DIRECT, WEAK), configs=({"deal": 0},), games=2),
     ))
-    return evaluation(ladder, play=play, checkpoints=held, max_hours=0.1)
+    return EvalJob(tournament=ladder, play=play, checkpoints=held, max_hours=0.1)
 
 
 def report():
@@ -998,7 +1000,7 @@ def test_a_report_draws_what_eval_runs_recorded_after_the_file_changes(
 SETUPS = """
 from etude.eval.match import environment
 from etude.eval.records import Benchmark, Code, Inference, Seating
-from etude.jobs import evaluation
+from etude.jobs import EvalJob
 from etude.report import Curve, Matches, Report, Score
 from tests.eval.games import play
 
@@ -1012,11 +1014,11 @@ def ladder(name, device):
     return Benchmark(name=name, environment=duel, seatings=(seating,))
 
 
-def eval(state):
+def eval_jobs(state):
     (run,) = state.runs
     return [
-        evaluation(ladder("cpu", "cpu"), play=play, checkpoints=run.checkpoints[:1], max_hours=0.1),
-        evaluation(ladder("cuda", "cuda"), play=play, checkpoints=run.checkpoints, max_hours=0.1),
+        EvalJob(tournament=ladder("cpu", "cpu"), play=play, checkpoints=run.checkpoints[:1], max_hours=0.1),
+        EvalJob(tournament=ladder("cuda", "cuda"), play=play, checkpoints=run.checkpoints, max_hours=0.1),
     ]
 
 

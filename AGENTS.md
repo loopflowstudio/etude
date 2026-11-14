@@ -93,7 +93,7 @@ fixture inputs below its private root home, then copy journals out after executi
 Worker deadline tests resolve runner dependencies from the fixture image's local
 wheelhouse with networking disabled; downloading packages must not consume the
 short execution window used to test partial-output retention.
-Controller fixtures call the CLI entry point in process and pass its explicit
+Server fixtures call the CLI entry point in process and pass its explicit
 startup allowance: the installer must own its deadline and child cleanup, rather
 than an outer test timeout killing the client while installation continues.
 
@@ -140,11 +140,12 @@ complete restoration reconciles stale out files.
 State delivery freezes `out/state/**/current.json` before enumerating its
 selected save. Recovery follows that pointer even when `out.json` is older.
 A launched training process must not prune saves: its courier owns storage
-acknowledgement and local retention; the controller removes remote saves
+acknowledgement and local retention; the scheduler removes remote saves
 where upload-only grants cannot.
 
-Run addresses use `EXPERIMENT[/JOB][@SEED]`, omitting a sole job or seed
-before selection. Job code sees the local `ETUDE_RUN` name;
+A declared run's address is always `EXPERIMENT/JOB@SEED`; a plain
+`train(config)` file trained with `etude train` is `EXPERIMENT`, and stored
+compact spellings stay readable, matched by their recorded job name and seed. Job code sees the local `ETUDE_RUN` name;
 `ETUDE_RUN_ADDRESS` preserves its full storage address, including when a job
 is named for its experiment. Discovery permits sibling runs below a compact
 run address while excluding its `out`, `artifacts` and metric data. `Input.run` names the producer for relay; its unsigned `uri` locates the

@@ -14,7 +14,7 @@ from tests.launch.test_worker_attempts import local
 
 def test_exit_75_retries_with_the_same_directory_and_setup_runs_again(tmp_path: Path) -> None:
     scheduler = local(tmp_path)
-    run = scheduler.launch(
+    (run,) = scheduler.launch(
         Job(
             setup='echo setup >> "$ETUDE_OUT/setups"',
             command='if test -f "$ETUDE_OUT/state"; then cat "$ETUDE_OUT/state" > "$ETUDE_OUTPUT_DIR/result"; else echo saved > "$ETUDE_OUT/state"; exit 75; fi',
@@ -35,7 +35,7 @@ def test_exit_75_retries_with_the_same_directory_and_setup_runs_again(tmp_path: 
 def test_exit_75_outside_training_is_a_failure(tmp_path: Path, phase: str, command: str) -> None:
     scheduler = local(tmp_path)
     spec = Job(command=command, max_hours=0.01)
-    run = scheduler.launch(spec.model_copy(update={phase: "exit 75"}))
+    (run,) = scheduler.launch(spec.model_copy(update={phase: "exit 75"}))
     status = scheduler.wait(run, every=0.05, timeout=15)[0]
     assert (status.outcome, status.attempts) == ("failed", 1)
 
@@ -44,7 +44,7 @@ def test_exit_75_outside_training_is_a_failure(tmp_path: Path, phase: str, comma
 def test_stopped_attempts_obey_remaining_limits(tmp_path: Path, ending: str) -> None:
     b = bench(tmp_path)
     b.service.outcome = lambda work: "stopped"
-    run = b.scheduler.queue(
+    (run,) = b.scheduler.queue(
         job(
             max_attempts=1 if ending == "attempts" else 3,
             max_hours=600 / 3600 if ending == "hours" else 1,
@@ -68,7 +68,7 @@ def test_stopped_near_hours_limit_rents_again_for_the_remaining_time(tmp_path: P
     b = bench(tmp_path)
     b.service.seconds = 560
     b.service.outcome = lambda work: "stopped"
-    run = b.scheduler.queue(job(max_hours=600 / 3600), rent="l4")
+    (run,) = b.scheduler.queue(job(max_hours=600 / 3600), rent="l4")
     b.scheduler.tick()
     b.run(600)
     assert [attempt.limit_seconds for attempt in b.scheduler.attempts(run)] == [600, 40]
@@ -91,7 +91,7 @@ def test_failed_input_delivery_retries_the_whole_initial_directory(tmp_path: Pat
         size_bytes=len(body),
     )
     b = bench(tmp_path)
-    run = b.scheduler.queue(job(inputs=(seed,)), rent="l4")
+    (run,) = b.scheduler.queue(job(inputs=(seed,)), rent="l4")
     b.scheduler.tick()
     first = b.scheduler.attempts(run)[0]
     b.store.fail_before_start(first, "input_undelivered", b.clock())

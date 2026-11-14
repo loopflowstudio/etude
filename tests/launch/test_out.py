@@ -196,7 +196,7 @@ def test_deleted_files_stay_absent_after_restart_recovery_and_continuation(
     storage.grants = grants
     courier, _, root = machine(tmp_path / "first", storage)
     scheduler = local(tmp_path / "client")
-    parent = scheduler.queue(Job(command="train", max_hours=1), "local")
+    (parent,) = scheduler.queue(Job(command="train", max_hours=1), "local")
     # The fixture's courier grant names run1; use its tracked run with this job.
     record = scheduler.record(parent).model_copy(update={"id": "run1"})
     monkeypatch.setenv("ETUDE_OUT", str(root / "out"))

@@ -73,8 +73,8 @@ def test_position_snapshot_publication_and_checkout(repository: tuple[Path, Path
     index = (repo / ".git/index").read_bytes()
     scheduler = _open(repo.parent / "launcher")
     scheduler.add_pool(Pool(name="waiting"))
-    first = scheduler.queue(Job(command="true", max_hours=1, repo=str(repo)), "waiting")
-    second = scheduler.queue(Job(command="true", max_hours=1, repo=str(repo)), "waiting")
+    (first,) = scheduler.queue(Job(command="true", max_hours=1, repo=str(repo)), "waiting")
+    (second,) = scheduler.queue(Job(command="true", max_hours=1, repo=str(repo)), "waiting")
     run = scheduler.record(first)
     position = run.launch.source
     assert position is not None
@@ -107,7 +107,7 @@ def test_explicit_revision_and_failed_push(repository: tuple[Path, Path]) -> Non
     (repo / "train").write_text("not part of explicit HEAD\n")
     scheduler = _open(repo.parent / "launcher")
     scheduler.add_pool(Pool(name="waiting"))
-    id = scheduler.queue(
+    (id,) = scheduler.queue(
         Job(command="true", max_hours=1, repo=str(repo), revision="HEAD"), "waiting"
     )
     run = scheduler.record(id)
@@ -133,7 +133,7 @@ def test_local_only_snapshot(
     (repo / "new").write_text("retained locally\n")
     scheduler = default()
     scheduler.add_pool(Pool(name="waiting"))
-    id = scheduler.queue(Job(command="true", max_hours=1, repo=str(repo)), "waiting")
+    (id,) = scheduler.queue(Job(command="true", max_hours=1, repo=str(repo)), "waiting")
     record = scheduler.record(id)
     assert record.launch.source is not None and record.launch.source.origin is None
     assert git(repo, "rev-parse", f"refs/etude/runs/{id}") == record.launch.spec.revision
@@ -150,10 +150,10 @@ def test_runs_filters_and_source_cli_are_read_only(
     scheduler.add_pool(Pool(name="waiting"))
     head = git(repo, "rev-parse", "HEAD")
     job = Job(command="true", max_hours=1, repo=str(repo), name="training")
-    first, second = scheduler.queue_cohort("pair", job.runs(1, 2), "waiting")
+    first, second = scheduler.queue(job.runs(1, 2), "waiting")
     scheduler.cancel(first)
     # This queued local job would execute if history commands ticked the scheduler.
-    local = scheduler.queue(Job(command="true", max_hours=1))
+    (local,) = scheduler.queue(Job(command="true", max_hours=1))
     assert (
         main(
             [
@@ -194,7 +194,7 @@ def test_containment_distinguishes_squashed_history(repository: tuple[Path, Path
     feature = git(repo, "rev-parse", "HEAD")
     scheduler = _open(repo.parent / "launcher")
     scheduler.add_pool(Pool(name="waiting"))
-    id = scheduler.queue(Job(command="true", max_hours=1, repo=str(repo)), "waiting")
+    (id,) = scheduler.queue(Job(command="true", max_hours=1, repo=str(repo)), "waiting")
     run = scheduler.record(id)
     git(repo, "switch", "main")
     git(repo, "merge", "--squash", "feature")
@@ -203,7 +203,7 @@ def test_containment_distinguishes_squashed_history(repository: tuple[Path, Path
     assert contains(run, feature) and not contains(run, squash)
     # A local-only tag must not be mistaken for publication on origin.
     git(repo, "tag", "unpublished")
-    new = scheduler.queue(Job(command="true", max_hours=1, repo=str(repo)), "waiting")
+    (new,) = scheduler.queue(Job(command="true", max_hours=1, repo=str(repo)), "waiting")
     assert git(repository[1], "rev-parse", f"refs/etude/runs/{new}") == squash
 
 

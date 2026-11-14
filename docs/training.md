@@ -35,7 +35,7 @@ def train(config: TrainConfig) -> None:
 ```sh
 etude train train.py                             # a new run on this computer; prints its id
 etude train train.py --resume       # the same run, from its last save
-etude launch job.py --cohort baseline --rent l4  # new runs on rented machines
+etude launch job.py --rent l4                    # the file's runs, on rented machines
 ```
 
 ```text
@@ -88,63 +88,97 @@ Calling `train` is one attempt at the whole job. It ends in one of three ways:
 
 ## Jobs, runs and seeds
 
-A **job** is what to run: your function and its config. A **run** is a job
-with a seed: the thing that is launched, named, carried on and reported. So
-the seed is not a config field. The config says what is being tried; the seed
-says which repetition this is. Read it from the run:
+A **training job** is one training function called with one config, over some
+seeds. A **run** is one seed of a job: the thing that is launched, named,
+carried on and reported. So the seed is not a config field. The config says
+what is being tried; the seed says which repetition this is. Read it from the
+run:
 
 ```python
 with track(config=config) as run:
     torch.manual_seed(run.seed)
 ```
 
-Seeds are chosen where the job is launched:
+Jobs are written in the experiment's file, in a function named
+`training_jobs`:
 
 ```python
 # job.py
 from decimal import Decimal
 
-from etude.jobs import training
-from etude.spec import Job
+from etude.jobs import TrainingJob
 
 from train import TrainConfig, train
 
 
-def training_runs() -> Job:
-    return training(
-        train,
-        config=TrainConfig(),
-        smoke=TrainConfig(updates=1),  # how to run it tiny, for `etude smoke`
-        seeds=(0, 1, 2),
-        name="baseline",
-        max_hours=2,
-        max_usd=Decimal(4),
-    )
+def training_jobs() -> list[TrainingJob]:
+    return [
+        TrainingJob(
+            name="baseline",
+            train=train,
+            config=TrainConfig(),
+            smoke=TrainConfig(updates=1),  # how to run it tiny, for `etude smoke`
+            seeds=(0, 1, 2),
+            max_hours=2,
+            max_usd=Decimal(4),
+        )
+    ]
 ```
 
-One job with three seeds in `job.py` has addresses `job@0`, `job@1`
-and `job@2`. Launch them with `etude launch job.py --cohort baseline --rent l4`.
-A cohort names runs launched together; `--parallel` sets machines at once
-(one unless given). Without `seeds`, the job has one run with seed 0.
+```text
+$ etude launch job.py --rent l4
+job/baseline@0  new, running
+job/baseline@1  new, queued
+job/baseline@2  new, queued
+```
 
-An address is `experiment/job@seed`. Omit the job when the file defines one
-job, and the seed when that job defines one seed: `hanabi`, `sweep@1`,
-`sweep/wide@1`. Selection never changes the spelling: `--job wide --seed 1`
-selects what `training_runs()` defines. On this computer, `etude train job.py` trains
-the declared runs in order; `--job` and `--seed` select a subset. Local training
-needs neither `max_hours` nor a git checkout; launch, queue and smoke need both.
-When git is available, local attempts record the current commit. A file with
-only `train(config)` defines one job, named for the file, with seed 0.
+`training_jobs()` returns every training job of the experiment that should
+have been run, or can be run, by now: the whole list each time it is called,
+not only what is new. Etude works out which of its runs have not been run and
+runs those, so adding a job or a seed and launching again starts only the new
+runs. It returns `TrainingJob`s (one, or a list); anything else is refused
+with an error naming `training_jobs` and the type it takes.
 
-A file still declaring `runs` must rename it to `training_runs` before training.
-Even if it also defines `train(config)`, Etude refuses it rather than selecting
-the recipe instead. See the [job-file upgrade instructions](launcher.md#cohorts-and-python).
+- **A job has a name.** `name` is required, and an unnamed `TrainingJob` is
+  refused where it is written. The name is half of each run's address, so it
+  must not depend on what else the file declares.
+- **Seeds are chosen on the job.** Without `seeds`, the job has one run with
+  seed 0.
+- **An address is `experiment/job@seed`, always in full**: `job/baseline@0`,
+  `sweep/wide@1`. The experiment is the file's stem. A run's address never
+  changes when a job or a seed is added beside it.
+- **Queued runs start by themselves.** `l4` rents one machine at a time
+  here, so the other two seeds wait and each starts when the machine has
+  room. How many go at once is the on-demand's `--max` machines and `--slots`;
+  `--max-usd D` on the command bounds what the whole experiment may commit
+  ([One pass over the file](launcher.md#one-pass-over-the-file)).
 
-`--experiment NAME` names the experiment on train, launch, queue, eval and report;
-the file stem is its default. `--job` and `--seed` select, never rename.
-A taken address is refused. Use `--resume` for the same selection, and
-`--resume --until updates=300` to train it further. Historical runs stay
-readable under their stored names.
+On this computer, `etude train job.py` trains the declared runs in order;
+`--job` and `--seed` select a subset. Selection never changes an address:
+`--job wide --seed 1` selects what `training_jobs()` declares. Local training
+needs neither `max_hours` nor a git checkout; launch, queue and smoke need
+both. When git is available, local attempts record the current commit.
+
+A file with only `train(config)` and no `training_jobs` still trains with
+`etude train train.py`: one run with seed 0, addressed by the experiment
+alone (`train`).
+
+`--experiment NAME` names the experiment on train, launch, queue, eval and
+report; the file stem is its default. `--job` and `--seed` select, never
+rename. `etude train` refuses a taken address: use `--resume` for the same
+selection, and `--resume --until updates=300` to train it further. `etude
+launch` and `etude queue` leave a run they already know alone and say so
+([One pass over the file](launcher.md#one-pass-over-the-file)).
+
+Runs stored before addresses were always written in full (`job`, `job@1`)
+stay readable where they are, and are recognised by the job name and seed
+their `run.json` recorded: a run stored as `ppo@1` is job `ppo`, seed 1, and
+is not trained again when a job named `ppo` declares seed 1.
+
+A file still declaring `runs` or `training_runs` is refused with
+`job.py: rename runs() to training_jobs()`. Even if it also defines
+`train(config)`, Etude refuses it rather than selecting the recipe instead.
+See [upgrading an experiment file](launcher.md#upgrading-an-experiment-file).
 
 ## The run and its clocks
 
@@ -508,24 +542,43 @@ other.
 ## Starting from another run
 
 A later stage that starts from an earlier one is a second job, given the
-earlier run's checkpoint by name:
+earlier run's checkpoint. `training_jobs` may take the experiment's state,
+and returns the second job once the first has stored what it needs:
 
 ```python
 # job.py
-from etude.experiment import observe
+from decimal import Decimal
 
-imitation = observe("s3://my-bucket/runs", "imitate").run("imitate").final
+from etude.jobs import ExperimentState
+from etude.jobs import TrainingJob
+
+from train import ImitateConfig, SelfPlayConfig, imitate, self_play
 
 
-def training_runs() -> Job:
-    return training(
-        self_play,
-        config=SelfPlayConfig(),
-        start=imitation,
-        seeds=(0, 1, 2),
-        max_hours=6,
-        max_usd=Decimal(20),
-    )
+def training_jobs(state: ExperimentState) -> list[TrainingJob]:
+    jobs = [
+        TrainingJob(
+            name="imitate",
+            train=imitate,
+            config=ImitateConfig(),
+            max_hours=2,
+            max_usd=Decimal(5),
+        )
+    ]
+    imitation = next((run.final for run in state.runs if run.job == "imitate" and run.final), None)
+    if imitation is not None:
+        jobs.append(
+            TrainingJob(
+                name="self-play",
+                train=self_play,
+                config=SelfPlayConfig(),
+                start=imitation,
+                seeds=(0, 1, 2),
+                max_hours=6,
+                max_usd=Decimal(20),
+            )
+        )
+    return jobs
 ```
 
 ```python
@@ -538,6 +591,26 @@ def self_play(config: SelfPlayConfig) -> None:
         ...
 ```
 
+```text
+$ etude launch job.py --rent l4
+job: state from s3://my-bucket/runs: 0 training runs, 0 eval runs
+job/imitate@0  new, running
+$ etude launch job.py --rent l4                        # once imitate has finished
+job: state from s3://my-bucket/runs: 1 training run, 0 eval runs
+job/imitate@0    finished
+job/self-play@0  new, running
+job/self-play@1  new, queued
+job/self-play@2  new, queued
+```
+
+The state is Etude's: what the experiment's training and eval runs have
+stored, read fresh each time the file is read
+([Experiments](evaluation.md#experiments)). Anything a later stage should
+know, an earlier run records. The declaration still returns the whole list:
+`imitate` stays in it after it has finished, and is left alone. A file whose
+`training_jobs` takes no `state` is never given one, and no storage is read
+for it.
+
 `run.input(name)` is the path of a file or checkpoint folder the run was
 given. The launcher delivers the exact bytes, checked by digest, to whatever
 machine the run lands on, before `train` is called. The run records the
@@ -545,6 +618,10 @@ checkpoint it started from, so a report or an evaluation can say which run a
 checkpoint descends from. A name the run was not given raises. Other files a
 job is given (`inputs=`, [the launcher](launcher.md#progress-and-continuation))
 are read the same way.
+
+To start from a run of another experiment, read that experiment yourself:
+`start=observe("s3://my-bucket/runs", "imitate").run("imitate/base@0").final`
+(`etude.experiment.observe`).
 
 Split work into two runs when the stages want different machines or budgets,
 when several runs start from one, or when the earlier result is evaluated on
@@ -557,7 +634,7 @@ This layout is a contract. Everything in it reads with `json` and your own
 framework, without Etude installed.
 
 ```text
-EXPERIMENT[/JOB][@SEED]/
+EXPERIMENT/JOB@SEED/         a plain train(config) file's run is EXPERIMENT/
   run.json                 job, seed, config, clocks, parent run and inputs
   outcome.json             how the latest attempt ended
   metrics/  artifacts/     rows and tables (Tracking)
@@ -577,7 +654,8 @@ EXPERIMENT[/JOB][@SEED]/
         policy.pt
 ```
 
-`run.json` stores its `id` as the address, such as `train` or `sweep/wide@1`.
+`run.json` stores its `id` as the address, such as `sweep/wide@1`, or `train`
+for a plain `train(config)` file.
 The same spelling is its folder below the runs directory and its bucket prefix.
 
 ```python
@@ -618,7 +696,7 @@ directory that happens to exist.
 | You want | Command | What it is |
 | --- | --- | --- |
 | a new run, here | `etude train train.py` | always a new run; prints its id |
-| a new run, on machines | `etude launch job.py --cohort baseline --rent l4` | always new runs |
+| the file's runs, on machines | `etude launch job.py --rent l4` | every declared run that has not been run; the rest are left alone |
 | the same run, after a lost machine or `Stopped` | none: the launcher calls `train` again | another attempt of the same run |
 | the same run, after it ended unfinished | `etude train train.py --resume`, `etude launch job.py --resume` | another attempt of the same run, on your current code |
 | the same run, further | `etude train train.py --resume --until updates=6400`, and the same on `etude launch` | another attempt of the same run, to a later target; a finished run too |
@@ -632,7 +710,7 @@ etude train train.py --json             # {"run": "train", "experiment": "train"
 etude smoke job.py                      # the smoke config, here, spending nothing
 ```
 
-- **`etude train FILE`** trains the selected `training_runs()` jobs here, or calls
+- **`etude train FILE`** trains the selected `training_jobs()` jobs here, or calls
   `train` when the file defines only a recipe. `--config` changes its config, a JSON object checked against the
   config type. Unknown top-level fields are refused by name unless your model
   allows extras. Validation problems print one line per field, such as
@@ -667,9 +745,11 @@ etude smoke job.py                      # the smoke config, here, spending nothi
   says where it finished, such as `finished at updates=200`. A refused
   or interrupted attempt changes nothing already recorded: a finished run
   stays finished.
-- **A taken id is refused** before `train` is called, and under a launch
-  before anything is rented. Choose another `--experiment`, or mean
-  `--resume`.
+- **A taken address is never trained twice.** `etude train` refuses it before
+  `train` is called: choose another `--experiment`, or mean `--resume`.
+  `etude launch` and `etude queue` leave it alone and print where it stands;
+  a failed run is listed with its `--resume` line and is never relaunched
+  implicitly.
 - **`etude continue --run RUN --until clock=value [--config ...]`** branches
   a run the launcher started, optionally changing its config. It makes a new
   run, leaving the first as it is
@@ -744,7 +824,7 @@ under a folder whose name starts with `.` stays on the machine.
 
 | Before | Now |
 | --- | --- |
-| `seed` in the config, `track(seed=config.seed)` | `training(..., seeds=(...))` or `etude train --seed`; read `run.seed` |
+| `seed` in the config, `track(seed=config.seed)` | `TrainingJob(..., seeds=(...))` or `etude train --seed`; read `run.seed` |
 | `track(config=config.model_dump())` | `track(config=config)` |
 | `with local_launch(out=DIR, experiment=NAME): train(config)` | `etude train train.py` |
 | a state file in `run.out`, `while ... and not run.should_stop`, `raise Stopped` | `run.resume(...)`, `run.steps(...)`, `run.save()` |

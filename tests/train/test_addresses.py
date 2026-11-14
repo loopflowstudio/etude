@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 
 from etude.cli import main
+from etude.declarations import read_job_file, select_runs
 from etude.jobs import checkpoint_inputs_for
-from etude.launch.job_file import read_job_file, select_runs
 from etude.records import RunRecord
 from etude.run import RunFiles, declare, run_directories, runs, sync
 from etude.spec import Job, expand_runs
@@ -21,9 +21,9 @@ from tests.run.storage import MeasuredStorage
 @pytest.mark.parametrize(
     ("names", "seeds", "expected"),
     [
-        (("wide",), (7,), ["sweep"]),
-        (("wide",), (0, 7), ["sweep@0", "sweep@7"]),
-        (("small", "wide"), (7,), ["sweep/small", "sweep/wide"]),
+        (("wide",), (7,), ["sweep/wide@7"]),
+        (("wide",), (0, 7), ["sweep/wide@0", "sweep/wide@7"]),
+        (("small", "wide"), (7,), ["sweep/small@7", "sweep/wide@7"]),
         (
             ("sweep", "wide"),
             (0, 7),
@@ -40,9 +40,9 @@ def test_file_and_python_addresses_use_the_full_declaration_before_selection(
     ]
     file = tmp_path / "sweep.py"
     file.write_text(
-        "from etude.spec import Job\ndef training_runs():\n    return [\n"
-        + ",\n".join(f"        Job.model_validate_json({job.model_dump_json()!r})" for job in jobs)
-        + "\n    ]\n"
+        "from etude.jobs import TrainingJob\nfrom tests.launch.tasks import Command, train_command\n"
+        "def training_jobs():\n"
+        f"    return [TrainingJob(name=n, train=train_command, config=Command(command='true'), repo=None, seeds={seeds!r}, max_hours=1) for n in {names!r}]\n"
     )
     requests = read_job_file(file)
     assert [run.id for run in requests] == expected
@@ -59,7 +59,7 @@ def test_local_selection_resumes_current_source_and_refuses_changed_config(
     file = tmp_path / "selection.py"
     recipe = """from pathlib import Path
 from pydantic import BaseModel
-from etude.jobs import training
+from etude.jobs import TrainingJob
 from etude.train.tracking import track
 from etude.train.records import Step
 class Config(BaseModel):
@@ -72,8 +72,8 @@ def train(config: Config) -> None:
             run.log({"revision": 1})
             run.save()
 
-def training_runs():
-    return [training(train, config=Config(), name=name, seeds=(0, 7),
+def training_jobs():
+    return [TrainingJob(train=train, config=Config(), name=name, seeds=(0, 7),
                      repo=str(Path(__file__).parent), max_hours=1) for name in ("small", "wide")]
 """
     file.write_text(recipe)
@@ -139,17 +139,15 @@ def test_queue_status_and_logs_use_the_selected_address(
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
     file = tmp_path / "sweep.py"
     file.write_text(
-        "from etude.spec import Job\ndef training_runs():\n"
-        "    return [Job(command='true', name=name, seeds=(0, 7), max_hours=1) "
-        "for name in ('small', 'wide')]\n"
+        "from etude.jobs import TrainingJob\nfrom tests.launch.tasks import Command, RUNTIME, train_command\nfrom etude.spec import Job\ndef training_jobs():\n    return [TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command='true'), name=name, seeds=(0, 7), max_hours=1, repo=None) for name in ('small', 'wide')]\n"
     )
     assert main(["queue", str(file), "--job", "wide", "--seed", "7"]) == 0
-    assert capsys.readouterr().out.startswith("sweep/wide@7 ")
+    assert "sweep/wide@7  new, queued" in capsys.readouterr().out
     assert main(["status", "sweep/wide@7"]) == 0
     assert "queued" in capsys.readouterr().out
     assert main(["logs", "--run", "sweep/wide@7"]) == 0
-    assert main(["queue", str(file), "--job", "wide", "--seed", "7"]) == 1
-    assert "--resume --until" in capsys.readouterr().err
+    assert main(["queue", str(file), "--job", "wide", "--seed", "7"]) == 0
+    assert "wide@7  queued" in capsys.readouterr().out
     assert main(["status", "sweep@7"]) == 1
     assert "no run 'sweep@7'" in capsys.readouterr().err
 
@@ -171,7 +169,7 @@ def test_a_job_named_for_its_experiment_keeps_its_qualified_address(tmp_path: Pa
 
 
 SELECTION = """from pydantic import BaseModel
-from etude.jobs import training
+from etude.jobs import TrainingJob
 from etude.train.tracking import track
 from etude.stopping import Stopped
 class Config(BaseModel):
@@ -188,8 +186,8 @@ def train(config: Config) -> None:
                 (run.out / "stopped").touch()
                 raise Stopped()
 
-def training_runs():
-    return [training(train, config=Config(), name=name, seeds=(0, 1, 2))
+def training_jobs():
+    return [TrainingJob(train=train, config=Config(), name=name, seeds=(0, 1, 2))
             for name in ("small", "wide")]
 """
 
@@ -257,11 +255,11 @@ def test_local_declarations_need_no_hours_or_git_but_submission_and_smoke_do(
         package = tmp_path / "local_recipe"
         package.mkdir()
         (package / "__init__.py").touch()
-        (package / "loop.py").write_text(SELECTION.split("def training_runs():")[0])
+        (package / "loop.py").write_text(SELECTION.split("def training_jobs():")[0])
         file.write_text(
-            "from local_recipe.loop import train, Config\nfrom etude.jobs import training\n\n"
-            + "def training_runs():"
-            + SELECTION.split("def training_runs():")[1]
+            "from local_recipe.loop import train, Config\nfrom etude.jobs import TrainingJob\n\n"
+            + "def training_jobs():"
+            + SELECTION.split("def training_jobs():")[1]
         )
     args = [str(file), "--job", "wide", "--seed", "0"]
     assert main(["train", *args]) == 0
@@ -303,6 +301,6 @@ def test_local_training_uses_new_declaration_when_both_names_exist(
     file.write_text(
         SELECTION + "\ndef runs() -> object:\n    raise AssertionError('legacy declaration ran')\n"
     )
-    assert main(["train", str(file), "--job", "wide", "--seed", "0", "--json"]) == 0
-    assert json.loads(capsys.readouterr().out)["run"] == "sweep/wide@0"
-    assert read(tmp_path / "home/track", "sweep", "wide@0").rows == 4
+    assert main(["train", str(file), "--job", "wide", "--seed", "0", "--json"]) == 1
+    assert "rename runs()" in capsys.readouterr().err
+    assert not (tmp_path / "home/track").exists()

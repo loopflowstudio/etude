@@ -3,7 +3,7 @@
 Each half registers its own commands (`etude.launch.cli`, `etude.train.cli`);
 this module joins them, adds `etude report` (`etude.page`), which draws
 training and evaluation together, sends launcher commands to a chosen
-controller, and turns expected failures into one line on stderr.
+server, and turns expected failures into one line on stderr.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from __future__ import annotations
 import sys
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 
@@ -19,6 +19,9 @@ from etude.errors import EtudeError, LauncherError
 from etude.launch import cli as launch_cli
 from etude.launch.commands import Kind, kind
 from etude.train.cli import checkpoints, sync
+
+if TYPE_CHECKING:
+    from etude.controller import Pass
 
 app = launch_cli.app
 
@@ -32,13 +35,13 @@ ExperimentOption = Annotated[
 @kind(Kind.wait)
 def train_recipe(
     file: Annotated[
-        Path, typer.Argument(help="a Python file defining train(config) or training_runs()")
+        Path, typer.Argument(help="a Python file defining train(config) or training_jobs()")
     ],
     config: Annotated[
         str | None, typer.Option(help="JSON config fields; omitted on resume keeps stored config")
     ] = None,
     seed: Annotated[int | None, typer.Option(help="the run's seed")] = None,
-    job: Annotated[str | None, typer.Option(help="select a job defined in training_runs()")] = None,
+    job: Annotated[str | None, typer.Option(help="select a job defined in training_jobs()")] = None,
     experiment: ExperimentOption = None,
     resume: Annotated[
         bool, typer.Option(help="resume the selected runs on current source")
@@ -74,8 +77,6 @@ def _submit(
     file: Path | None,
     pool: str | None,
     rent: str | None,
-    cohort: str | None,
-    parallel: int,
     max_usd: str | None,
     help: bool,
     *,
@@ -87,74 +88,76 @@ def _submit(
     job: str | None = None,
     seed: int | None = None,
     until: str | None = None,
+    source: str | None = None,
+    watch: float | None = None,
+    retry_failed: bool = False,
 ) -> None:
     if help:
         print(ctx.get_help())
     if file is None:
         if help:
             return
-        raise typer.BadParameter("a Python FILE defining training_runs() is required")
+        raise typer.BadParameter("a Python experiment FILE is required")
+    import time
     from decimal import Decimal
 
-    from etude.launch import controller
-    from etude.launch.job_file import read_job_file, select_runs
-    from etude.launch.listing import show_runs
-    from etude.launch.records import CohortSpec
+    from etude.controller import advance, source_for
+    from etude.declarations import read_experiment, read_job_file
     from etude.spec import Until
+    from etude.storage import storage_from_uri
 
-    runs = read_job_file(file, ctx.args, help=help, experiment=experiment)
+    definition = read_experiment(file, experiment=experiment)
     if help:
+        if callable(definition.training):
+            read_job_file(file, ctx.args, help=True, function=definition.training)
         return
-    runs = select_runs(runs, job=job, seed=seed)
     if until is not None and not resume:
         raise LauncherError("--until needs --resume")
-    if resume:
-        if quote or cohort is not None:
-            raise LauncherError("--resume cannot be combined with --quote or --cohort")
-        if len(runs) != 1:
-            raise LauncherError("--resume needs one run; select --job and --seed")
-        request = runs[0]
-        if until is not None:
-            request = request.model_copy(
-                update={"job": request.job.model_copy(update={"until": Until.parse(until)})}
+    if resume and quote:
+        raise LauncherError("--resume cannot be combined with --quote")
+    storage = storage_from_uri(source_for(pool, rent, source))
+    try:
+        while True:
+            results = advance(
+                definition,
+                source=storage,
+                pool=pool,
+                rent=rent,
+                mode="queue" if queued else "launch",
+                max_usd=None if max_usd is None else Decimal(max_usd),
+                quote=quote,
+                smoke_file_first=smoke,
+                given=ctx.args,
+                job=job,
+                seed=seed,
+                resume=resume,
+                until=None if until is None else Until.parse(until),
+                retry_failed=retry_failed,
             )
-        runs = [request.model_copy(update={"resume": True})]
-    if cohort is None:
-        if len(runs) > 1:
-            raise LauncherError(f"{len(runs)} runs need --cohort NAME")
-        if parallel != 1 or max_usd is not None:
-            raise LauncherError("cohort limits need --cohort NAME")
-    spec = (
-        CohortSpec(name=cohort, parallel=parallel, max_usd=Decimal(max_usd) if max_usd else None)
-        if cohort
-        else None
-    )
-    if not quote:
-        # Before anything is queued, rented or published: a failure raises and submits nothing.
-        if smoke:
-            from etude.smoke import smoke_file
-
-            runs = smoke_file(file, runs).stamp(runs)
-    submission = controller.LaunchInput(
-        runs=tuple(runs), cohort=spec, pool=pool, rent=rent, queued=queued
-    )
-    address = controller.selected()
-    if quote:
-        from etude.launch.listing import show_quote
-
-        show_quote(
-            controller.quote(
-                controller.PythonClient(address) if address else launch_cli.default(), submission
-            )
-        )
+            for done in results:
+                _show_pass(done)
+            if watch is None:
+                break
+            time.sleep(watch)
+    except KeyboardInterrupt:
         return
-    if address:
-        raise typer.Exit(controller.forward(address, [], submission))
-    scheduler = launch_cli.default()
-    show_runs(scheduler, controller.submit(scheduler, submission))
 
 
-FileArgument = Annotated[Path | None, typer.Argument(help="a Python file defining training_runs()")]
+def _show_pass(done: Pass) -> None:
+    if not (done.new or done.running or done.failed):
+        print(f"eval {done.tournament}: nothing to play")
+        return
+    line = f"eval {done.tournament}: {done.new} new, {done.running} running, {done.failed} failed"
+    if done.launched:
+        line += f", {done.state} {done.launched}"
+    elif done.played:
+        line += f", {done.played} played"
+    elif done.state:
+        line += f", {done.state}"
+    print(line, flush=True)
+
+
+FileArgument = Annotated[Path | None, typer.Argument(help="a Python file defining training_jobs()")]
 PoolOption = Annotated[
     str | None,
     typer.Option(help="the pool of machines you own to use; the default when neither is named"),
@@ -163,11 +166,6 @@ RentOption = Annotated[
     str | None,
     typer.Option(help="the on-demand to rent from, after the pool's free machines"),
 ]
-CohortOption = Annotated[
-    str | None, typer.Option(help="a name for these runs together; required for several runs")
-]
-ParallelOption = Annotated[int, typer.Option(help="machines at once for this cohort")]
-CohortUsd = Annotated[str | None, typer.Option(help="dollar ceiling for the whole cohort")]
 SmokeOption = Annotated[
     bool,
     typer.Option(
@@ -189,9 +187,6 @@ def launch(
     file: FileArgument = None,
     pool: PoolOption = None,
     rent: RentOption = None,
-    cohort: CohortOption = None,
-    parallel: ParallelOption = 1,
-    max_usd: CohortUsd = None,
     quote: Annotated[
         bool, typer.Option(help="print the machines and planned rental costs; rent nothing")
     ] = False,
@@ -204,6 +199,12 @@ def launch(
         bool, typer.Option(help="resume the selected runs on current source")
     ] = False,
     until: Annotated[str | None, typer.Option(help="absolute target for the resumed run")] = None,
+    max_usd: Annotated[
+        str | None, typer.Option(help="experiment commitment limit in dollars")
+    ] = None,
+    source: Annotated[str | None, typer.Option(help="where experiment runs are delivered")] = None,
+    retry_failed: Annotated[bool, typer.Option(help="retry failed eval matches")] = False,
+    watch: Annotated[float | None, typer.Option(min=1, help="pass again every SECONDS")] = None,
 ) -> None:
     """Queue a file's runs and get the machines to start them now, or fail and queue nothing."""
     _submit(
@@ -211,8 +212,6 @@ def launch(
         file,
         pool,
         rent,
-        cohort,
-        parallel,
         max_usd,
         help,
         queued=False,
@@ -223,6 +222,9 @@ def launch(
         seed=seed,
         resume=resume,
         until=until,
+        source=source,
+        retry_failed=retry_failed,
+        watch=watch,
     )
 
 
@@ -236,14 +238,16 @@ def queue(
     file: FileArgument = None,
     pool: PoolOption = None,
     rent: RentOption = None,
-    cohort: CohortOption = None,
-    parallel: ParallelOption = 1,
-    max_usd: CohortUsd = None,
     smoke: SmokeOption = False,
     help: FileHelp = False,
     experiment: ExperimentOption = None,
     job: Annotated[str | None, typer.Option(help="select a declared job")] = None,
     seed: Annotated[int | None, typer.Option(help="select a declared seed")] = None,
+    max_usd: Annotated[
+        str | None, typer.Option(help="experiment commitment limit in dollars")
+    ] = None,
+    source: Annotated[str | None, typer.Option(help="where experiment runs are delivered")] = None,
+    retry_failed: Annotated[bool, typer.Option(help="retry failed eval matches")] = False,
 ) -> None:
     """Add a file's runs to the queue. They start when a machine has room or can be rented."""
     _submit(
@@ -251,8 +255,6 @@ def queue(
         file,
         pool,
         rent,
-        cohort,
-        parallel,
         max_usd,
         help,
         experiment=experiment,
@@ -260,6 +262,8 @@ def queue(
         seed=seed,
         queued=True,
         smoke=smoke,
+        source=source,
+        retry_failed=retry_failed,
     )
 
 
@@ -294,10 +298,10 @@ def smoke_experiment(
     if file is None:
         if help:
             return
-        raise typer.BadParameter("a Python FILE defining training_runs() is required")
+        raise typer.BadParameter("a Python FILE defining training_jobs() is required")
     from typing import cast
 
-    from etude.launch.job_file import read_job_file
+    from etude.declarations import read_job_file
     from etude.smoke import STEPS, Step, smoke_file
     from etude.storage import storage_from_uri
 
@@ -435,7 +439,9 @@ def report(
 def eval_experiment(
     file: Annotated[
         Path,
-        typer.Argument(help="a Python file defining eval(state); the experiment is named for it"),
+        typer.Argument(
+            help="a Python file defining eval_jobs(state); the experiment is named for it"
+        ),
     ],
     experiment: ExperimentOption = None,
     source: Annotated[
@@ -444,12 +450,6 @@ def eval_experiment(
             help="where training and eval runs are: s3://bucket/prefix or a runs directory; "
             "default: where runs are written on this computer"
         ),
-    ] = None,
-    pool: Annotated[
-        str | None, typer.Option(help="launch on this pool of machines you own")
-    ] = None,
-    rent: Annotated[
-        str | None, typer.Option(help="launch on machines rented from this on-demand")
     ] = None,
     watch: Annotated[
         float | None, typer.Option(min=1, help="pass again every SECONDS until Ctrl-C")
@@ -461,42 +461,23 @@ def eval_experiment(
             "what a failed launched pass left unplayed"
         ),
     ] = False,
-    smoke: Annotated[
-        bool,
-        typer.Option(
-            help="with --pool or --rent, smoke eval and report here first against SOURCE "
-            "and launch nothing if it fails"
-        ),
-    ] = False,
-    queue: Annotated[
-        bool, typer.Option(help="queue jobs until the chosen pool or on-demand has capacity")
-    ] = False,
 ) -> None:
-    """Play, or with --pool or --rent launch, the matches eval(state) wants that no run delivered."""
+    """Play here the matches eval_jobs(state) wants that no run delivered."""
     # Experiments join tracking, evaluation and the launcher.
     import time
 
-    from etude.experiment import advance, read_experiment
-    from etude.smoke import smoke_file
-    from etude.spec import Smoke
+    from etude.controller import advance
+    from etude.declarations import read_experiment
     from etude.storage import default_root, storage_from_uri
 
     definition = read_experiment(file, experiment=experiment)
     storage = storage_from_uri(source or default_root())
-    before = Smoke()
-    if smoke and (pool or rent):
-        # Before a launch spends anything: a failure raises and launches nothing.
-        before = Smoke(steps=smoke_file(file, steps=("eval", "report"), source=storage).rest)
     try:
         while True:
             for done in advance(
                 definition,
                 source=storage,
-                pool=pool,
-                rent=rent,
                 retry_failed=retry_failed,
-                smoke=before,
-                queue=queue,
             ):
                 line = f"{done.tournament}: {done.new} new"
                 if done.failed:
@@ -552,7 +533,7 @@ def delete_eval_files(
 @app.command("continue")
 @kind(Kind.wait)
 def continue_run(
-    run: Annotated[str, typer.Option(help="a run id, or a cohort name for all of its runs")],
+    run: Annotated[str, typer.Option(help="a run address")],
     until: Annotated[str, typer.Option(help="how far to go, as clock=value, such as steps=63000")],
     source: Annotated[
         str | None,
@@ -569,14 +550,10 @@ def continue_run(
             "checkpoint when out is empty"
         ),
     ] = None,
-    cohort: Annotated[
-        str | None, typer.Option(help="the new cohort's name, when continuing a cohort")
-    ] = None,
     config: Annotated[
         str | None,
         typer.Option(help='typed config changes as a JSON object, e.g. {"rate":0.001}'),
     ] = None,
-    max_usd: Annotated[str | None, typer.Option(help="the new cohort's dollar ceiling")] = None,
     experiment: Annotated[
         str | None, typer.Option(help="experiment label qualifying a bare run id")
     ] = None,
@@ -584,7 +561,6 @@ def continue_run(
     """Go past a run's target from its out. This makes a new run with a parent."""
     # Continuation joins the launcher's runs with tracking's checkpoints.
     import tempfile
-    from decimal import Decimal
 
     from etude.carriage import put_back
     from etude.jobs import continue_from, continued_config
@@ -620,22 +596,7 @@ def continue_run(
             )
             for parent in parents
         ]
-    if first.cohort != run:
-        ids = [scheduler.queue(again[0], first.launch.pool, rent=first.launch.rent)]
-    elif cohort is None:
-        raise LauncherError("continuing a cohort needs --cohort with the new cohort's name")
-    else:
-        old = scheduler.cohort(run)
-        ids = list(
-            scheduler.queue_cohort(
-                cohort,
-                again,
-                first.launch.pool,
-                rent=first.launch.rent,
-                parallel=old.parallel,
-                max_usd=Decimal(max_usd) if max_usd else old.max_usd,
-            )
-        )
+    ids = scheduler.queue(again[0], first.launch.pool, rent=first.launch.rent)
     show_runs(scheduler, ids)
 
 
@@ -643,9 +604,9 @@ def continue_run(
 app.command()(kind(Kind.wait)(checkpoints))
 app.command()(kind(Kind.wait)(sync))
 
-# Commands that run on this computer even when a controller is chosen: they read
-# local files or a bucket, run a machine's worker, or submit through the controller
-# themselves. Every other command is sent to a chosen controller.
+# Commands that run on this computer even when a server is chosen: they read
+# local files or a bucket, run a machine's worker, or submit through the server
+# themselves. Every other command is sent to a chosen server.
 _HERE = (
     "launch",
     "queue",
@@ -666,16 +627,16 @@ def _main(argv: list[str]) -> int:
     try:
         if argv and argv[0] not in _HERE and not {"--help", "-h"} & set(argv):
             # Entry points import only the command being run (AGENTS.md).
-            from etude.launch import controller
+            from etude.launch import server
 
-            if argv == ["--controller-request"]:
-                return controller.receive(launch_cli.default())
-            # The controller command chooses the controller, so `set` and `unset` run here.
-            local = argv[:2] in (["controller", "set"], ["controller", "unset"])
-            if not local and (address := controller.selected()):
-                if argv[0] == "controller":
-                    print(f"controller: {address}", flush=True)
-                return controller.forward(address, argv)
+            if argv == ["--server-request"]:
+                return server.receive(launch_cli.default())
+            # The server command chooses the server, so `set` and `unset` run here.
+            local = argv[:2] in (["server", "set"], ["server", "unset"])
+            if not local and (address := server.selected()):
+                if argv[0] == "server":
+                    print(f"server: {address}", flush=True)
+                return server.forward(address, argv)
         result = app(args=argv, prog_name="etude", standalone_mode=False)
         return result if isinstance(result, int) else 0
     except typer.Exit as error:

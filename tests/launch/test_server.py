@@ -21,19 +21,25 @@ from etude.launch.client import (
     cancel,
     fetch,
     launch,
-    launch_cohort,
     logs,
-    queue_cohort,
+    queue,
     status,
     wait,
 )
-from etude.launch.controller import FetchRequest, PythonClient, forward, warning
 from etude.launch.database import launcher_file
 from etude.launch.records import Pool
-from etude.spec import Job, RunRequest, Until
+from etude.launch.server import FetchRequest, PythonClient, forward, warning
+from etude.spec import Job, RunRequest, Runtime, Until
 from tests.launch.counting import job_text
 from tests.launch.test_source import git
 from tests.launch.test_source import repository as repository
+
+
+@pytest.fixture(autouse=True)
+def _command_environment(command_python: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ETUDE_TEST_PYTHON", command_python)
+    monkeypatch.setattr("tests.launch.tasks.RUNTIME", Runtime(python=command_python))
+
 
 # A tracked job: it records a checkpoint, and a continuation starts from its parent's.
 TRACKED = """
@@ -54,44 +60,54 @@ run.finish()
 
 
 def command(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    if args and args[0] in {"launch", "queue"}:
+        args = (*args, "--source", os.environ["ETUDE_TEST_SOURCE"])
+    result = subprocess.run(
         [sys.executable, "-m", "etude", *args], capture_output=True, text=True, env=env, timeout=15
+    )
+    return subprocess.CompletedProcess(
+        result.args,
+        result.returncode,
+        "\n".join(line for line in result.stdout.splitlines() if ": state from " not in line)
+        + ("\n" if result.stdout.endswith("\n") else ""),
+        result.stderr,
     )
 
 
 @pytest.fixture
-def controller(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
+def server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
     client, remote = tmp_path / "client", tmp_path / "remote"
     remote.mkdir()
+    monkeypatch.setenv("ETUDE_TEST_SOURCE", str(remote / "track"))
     monkeypatch.setenv("ETUDE_HOME", str(client))
-    monkeypatch.delenv("ETUDE_CONTROLLER_LOCAL", raising=False)
+    monkeypatch.delenv("ETUDE_SERVER_LOCAL", raising=False)
     scripts = tmp_path / "bin"
     scripts.mkdir()
     ssh = scripts / "ssh"
     ssh.write_text(
         f"#!{sys.executable}\n"
         "import os, subprocess, sys\n"
-        "assert sys.argv[1:3] == ['--', 'controller-alias']\n"
+        "assert sys.argv[1:3] == ['--', 'server-alias']\n"
         f"os.environ['ETUDE_HOME'] = {str(remote)!r}\n"
         f"os.chdir({str(remote)!r})\n"
         "raise SystemExit(subprocess.call(sys.argv[3], shell=True))\n"
     )
     ssh.chmod(0o700)
-    # Nothing is installed on the stand-in controller: the client sends its own code.
+    # Nothing is installed on the stand-in server: the client sends its own code.
     monkeypatch.setenv("ETUDE_REMOTE_PYTHON", sys.executable)
     monkeypatch.setenv("PATH", str(scripts) + os.pathsep + os.environ["PATH"])
     # The installer owns its deadline and child cleanup; an outer CLI timeout
     # can expire during cold imports and leave the remote installation running.
-    assert main(["controller", "set", "controller-alias", "--startup-seconds", "15"]) == 0
+    assert main(["server", "set", "server-alias", "--startup-seconds", "15"]) == 0
     assert not launcher_file(client).exists()
     return client, remote
 
 
 def test_remote_launch_freezes_sources_config_and_returns_outputs(
-    controller: tuple[Path, Path],
+    server: tuple[Path, Path],
     tmp_path: Path,
 ) -> None:
-    client, remote = controller
+    client, remote = server
     repo = tmp_path / "source with spaces"
     repo.mkdir()
     (repo / "train.sh").write_text(
@@ -115,21 +131,21 @@ def test_remote_launch_freezes_sources_config_and_returns_outputs(
     (tmp_path / "config.txt").write_text("frozen config\n")
     job = tmp_path / "job.py"
     job.write_text(
-        'from etude.launch.records import Job, RunRequest\nfrom pathlib import Path\nhere = Path(__file__).parent\ndef training_runs(): return Job(command="sh train.sh", experiment="capacity", max_hours=0.01, max_usd=1, repo=str(here / "source with spaces"), config=(here / "config.txt").read_text(), until="steps=10").runs(1, 2)\n'
+        'from etude.jobs import TrainingJob\nfrom tests.launch.tasks import Command, RUNTIME, train_command\nfrom etude.launch.records import Job, RunRequest\nfrom pathlib import Path\nhere = Path(__file__).parent\ndef training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="sh train.sh", text=(here / "config.txt").read_text()), experiment="capacity", max_hours=0.01, max_usd=1, repo=str(here / "source with spaces"), until="steps=10", name="base").runs(1, 2)\n'
     )
-    launched = command("launch", str(job), "--cohort", "pair")
+    launched = command("launch", str(job), "--experiment", "capacity")
     assert launched.returncode == 0, launched.stderr
     ids = [line.split()[0] for line in launched.stdout.splitlines() if not line.startswith("  ")]
     assert len(ids) == 2
     repo.rename(tmp_path / "unavailable-source")
     (tmp_path / "config.txt").unlink()
-    assert command("wait", "pair").returncode == 0
-    logs = command("logs", "--cohort", "pair", "--job-only")
+    assert command("wait", "--experiment", "capacity").returncode == 0
+    logs = command("logs", "--experiment", "capacity", "--job-only")
     assert "frozen config\n1\n" in logs.stdout and "frozen config\n2\n" in logs.stdout, logs.stderr
     assert not launcher_file(client).exists()
     assert len(list((remote / "sources").glob("*.tar"))) == 1
-    assert [pool.name for pool in _open(remote).pools()] == ["controller"]
-    assert _open(remote).record(ids[0]).launch.pool == "controller"
+    assert [pool.name for pool in _open(remote).pools()] == ["server"]
+    assert _open(remote).record(ids[0]).launch.pool == "server"
     frozen = _open(remote).record(ids[0]).launch.spec
     assert frozen.repo == str(repo) and frozen.revision != "HEAD"
     # Continuation works without the client's repository: it uses the retained archive.
@@ -141,32 +157,32 @@ def test_remote_launch_freezes_sources_config_and_returns_outputs(
     fetched = command("fetch", next_id, "weights.pt", str(destination))
     assert fetched.returncode == 0, fetched.stderr
     assert (destination / "weights.pt").read_text() == "from 10 to 20\n"
-    assert command("controller").stdout.startswith("controller: controller-alias\nlast loop: ")
-    assert command("controller", "unset").returncode == 0
+    assert command("server").stdout.startswith("server: server-alias\nlast loop: ")
+    assert command("server", "unset").returncode == 0
     assert command("pools").stdout == "local  this computer (default)\n"
     assert launcher_file(client).exists()
 
 
 def test_loop_survives_an_empty_queue_and_places_later_work(
-    controller: tuple[Path, Path],
+    server: tuple[Path, Path],
     tmp_path: Path,
 ) -> None:
-    _, remote = controller
-    env = {**os.environ, "ETUDE_HOME": str(remote), "ETUDE_CONTROLLER_LOCAL": "1"}
+    _, remote = server
+    env = {**os.environ, "ETUDE_HOME": str(remote), "ETUDE_SERVER_LOCAL": "1"}
     with subprocess.Popen(
-        [sys.executable, "-m", "etude", "controller", "run"],
+        [sys.executable, "-m", "etude", "server", "run"],
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
     ) as process:
         try:
-            heartbeat = remote / "controller-heartbeat"
+            heartbeat = remote / "server-heartbeat"
             _until_while_alive(process, heartbeat.exists)
             job = tmp_path / "job.py"
             job.write_text(
-                'from etude.launch.records import Job, RunRequest\ndef training_runs(): return Job(command="sleep 0.2", max_hours=0.01, max_usd=1).runs(1, 2)\n'
+                'from etude.jobs import TrainingJob\nfrom tests.launch.tasks import Command, RUNTIME, train_command\nfrom etude.launch.records import Job, RunRequest\ndef training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="sleep 0.2"), max_hours=0.01, max_usd=1, name="base", repo=None).runs(1, 2)\n'
             )
-            assert command("launch", str(job), "--cohort", "later").returncode == 0
+            assert command("launch", str(job)).returncode == 0
             scheduler = _open(remote)
             # Read only: the standing loop must finish both runs.
             _until_while_alive(process, lambda: not scheduler.runs())
@@ -188,7 +204,7 @@ def _until_while_alive(process: subprocess.Popen[bytes], done: Callable[[], bool
     give_up = time.monotonic() + 300
     while not done():
         assert process.poll() is None, process.stderr.read() if process.stderr else ""
-        assert time.monotonic() < give_up, "the controller loop made no progress"
+        assert time.monotonic() < give_up, "the server loop made no progress"
         time.sleep(0.05)
 
 
@@ -204,11 +220,11 @@ def test_waiting_work_warns_when_loop_is_absent_or_stale(
     scheduler.queue(Job(command="true", max_hours=1, max_usd=Decimal(1)), pool="waiting")
     scheduler.tick()
     assert warning(scheduler) is not None
-    assert main(["controller"]) == 0
-    assert "no controller loop" in capsys.readouterr().err
-    (tmp_path / "controller-heartbeat").write_text("2000-01-01T00:00:00+00:00")
+    assert main(["server"]) == 0
+    assert "no server loop" in capsys.readouterr().err
+    (tmp_path / "server-heartbeat").write_text("2000-01-01T00:00:00+00:00")
     assert main(["status"]) == 0
-    assert "no controller loop" in capsys.readouterr().err
+    assert "no server loop" in capsys.readouterr().err
 
 
 def test_fetch_checks_digest_before_replacing_client_file(
@@ -229,16 +245,16 @@ def test_fetch_checks_digest_before_replacing_client_file(
 
 
 def test_remote_queue_preserves_choice_without_local_database(
-    controller: tuple[Path, Path],
+    server: tuple[Path, Path],
     tmp_path: Path,
 ) -> None:
-    client, remote = controller
+    client, remote = server
     assert command("pool", "add", "waiting").returncode == 0
     path = tmp_path / "queued.py"
     path.write_text(
-        'from etude.launch.records import Job, RunRequest\ndef training_runs(): return Job(command="true", max_hours=1, max_usd=1).runs(1, 2)\n'
+        'from etude.jobs import TrainingJob\nfrom tests.launch.tasks import Command, RUNTIME, train_command\nfrom etude.launch.records import Job, RunRequest\ndef training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="true"), max_hours=1, max_usd=1, name="base", repo=None).runs(1, 2)\n'
     )
-    result = command("queue", str(path), "--pool", "waiting", "--cohort", "queued")
+    result = command("queue", str(path), "--pool", "waiting")
     assert result.returncode == 0, result.stderr
     ids = [line.split()[0] for line in result.stdout.splitlines()]
     assert len(ids) == 2
@@ -248,11 +264,11 @@ def test_remote_queue_preserves_choice_without_local_database(
     assert not launcher_file(client).exists()
 
 
-def test_python_api_uses_controller_and_preserves_checkpoint_ancestry(
-    controller: tuple[Path, Path],
+def test_python_api_uses_server_and_preserves_checkpoint_ancestry(
+    server: tuple[Path, Path],
     tmp_path: Path,
 ) -> None:
-    client, remote = controller
+    client, remote = server
     job = Job(
         command='echo "to $ETUDE_UNTIL_VALUE"; '
         'echo weights > "$ETUDE_OUTPUT_DIR/weights"; '
@@ -262,35 +278,35 @@ def test_python_api_uses_controller_and_preserves_checkpoint_ancestry(
         max_usd=Decimal(1),
         until=Until.parse("steps=10"),
     )
-    first = launch(job)
+    (first,) = launch(job)
     assert wait(first, every=0.02, timeout=10)[0].outcome == "succeeded"
     assert status(first).clocks == {"steps": 10}
     assert job_text(logs(run=first, refresh=True)) == "to 10\n"
     assert fetch(first, "weights", tmp_path / "out").read_text() == "weights\n"
-    pair = launch_cohort("python-pair", job.runs(1, 2))
+    pair = launch(job.runs(1, 2))
     assert all(s.outcome == "succeeded" for s in wait(*pair, every=0.02, timeout=10))
     assert command("pool", "add", "waiting").returncode == 0
-    queued = queue_cohort("python-waiting", job.runs(3, 4), pool="waiting")
+    queued = queue(job.runs(3, 4), pool="waiting")
     assert all(cancel(run).outcome == "cancelled" for run in queued)
     assert not launcher_file(client).exists()
 
 
-def test_the_controller_is_sent_the_program_and_gets_it_again_if_it_goes_missing(
-    controller: tuple[Path, Path],
+def test_the_server_is_sent_the_program_and_gets_it_again_if_it_goes_missing(
+    server: tuple[Path, Path],
 ) -> None:
-    client, remote = controller
-    (installed,) = (remote / "programs").iterdir()  # sent by `controller set`
+    client, remote = server
+    (installed,) = (remote / "programs").iterdir()  # sent by `server set`
     assert (installed / "etude" / "launch" / "cli.py").exists()
-    assert command("pools").stdout == "controller  the controller (default)\n"
+    assert command("pools").stdout == "server  the server (default)\n"
     shutil.rmtree(installed)
     again = command("pools")  # the command did not start, so it is sent and run again
-    assert again.returncode == 0 and again.stdout == "controller  the controller (default)\n"
+    assert again.returncode == 0 and again.stdout == "server  the server (default)\n"
     assert (installed / "etude" / "launch" / "cli.py").exists()
     assert not launcher_file(client).exists()
 
 
 @pytest.mark.parametrize("install_seconds, expected_calls", [(20.0, 2), (3.0, 3)])
-def test_log_deadline_includes_missing_controller_installation(
+def test_log_deadline_includes_missing_server_installation(
     monkeypatch: pytest.MonkeyPatch, install_seconds: float, expected_calls: int
 ) -> None:
     elapsed = 0.0
@@ -310,40 +326,40 @@ def test_log_deadline_includes_missing_controller_installation(
     monkeypatch.setattr(time, "monotonic", lambda: elapsed)
     monkeypatch.setattr(subprocess, "run", transport)
     with pytest.raises(LauncherError, match="did not answer|time limit reached"):
-        PythonClient("fixture-controller").logs(run="chosen", refresh=True, timeout=5)
+        PythonClient("fixture-server").logs(run="chosen", refresh=True, timeout=5)
     assert elapsed == 5
     assert calls == expected_calls
 
 
-def test_a_machine_that_cannot_be_a_controller_is_refused_with_a_reason(
+def test_a_machine_that_cannot_be_a_server_is_refused_with_a_reason(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "client"))
-    monkeypatch.delenv("ETUDE_CONTROLLER_LOCAL", raising=False)
+    monkeypatch.delenv("ETUDE_SERVER_LOCAL", raising=False)
     scripts = tmp_path / "bin"
     scripts.mkdir()
     ssh = scripts / "ssh"
     ssh.write_text("#!/bin/sh\necho 'python3.12: command not found' >&2\nexit 127\n")
     ssh.chmod(0o700)
     monkeypatch.setenv("PATH", str(scripts) + os.pathsep + os.environ["PATH"])
-    refused = command("controller", "set", "no-python")
+    refused = command("server", "set", "no-python")
     assert refused.returncode == 1
     assert "could not take the program: python3.12: command not found" in refused.stderr
-    assert command("controller").stdout.startswith("controller: this machine")
+    assert command("server").stdout.startswith("server: this machine")
 
 
-def test_controller_keeps_source_history_and_checks_out_on_client(
-    controller: tuple[Path, Path],
+def test_server_keeps_source_history_and_checks_out_on_client(
+    server: tuple[Path, Path],
     repository: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client, remote = controller
+    client, remote = server
     repo, origin = repository
     monkeypatch.setenv("ETUDE_HOME", str(client))
     (repo / "train").write_text("client snapshot\n")
     job = repo.parent / "snapshot.py"
     job.write_text(
-        f'from etude.launch.records import Job, RunRequest\ndef training_runs(): return Job(command="true", max_hours=1, repo={str(repo)!r})\n'
+        f'from etude.jobs import TrainingJob\nfrom tests.launch.tasks import Command, RUNTIME, train_command\ndef training_jobs(): return TrainingJob(name="base", train=train_command, config=Command(command="true"), runtime=RUNTIME, max_hours=1, repo={str(repo)!r})\n'
     )
     assert command("pool", "add", "waiting").returncode == 0
     sent = command("queue", str(job), "--pool", "waiting")
@@ -353,7 +369,6 @@ def test_controller_keeps_source_history_and_checks_out_on_client(
     assert record.launch.source is not None and record.launch.source.snapshot
     assert record.launch.source.origin == str(origin)
     assert git(origin, "rev-parse", f"refs/etude/runs/{id}") == record.launch.spec.revision
-    assert "uncommitted changes" in sent.stdout
     repo.rename(repo.with_name("unavailable"))
     listed = command("runs", "--contains", "v1", "--pool", "waiting")
     assert listed.returncode == 0 and id in listed.stdout, listed.stderr
@@ -366,16 +381,16 @@ def test_controller_keeps_source_history_and_checks_out_on_client(
 
 
 def test_remote_resume_keeps_one_run_and_its_previous_attempt(
-    controller: tuple[Path, Path],
+    server: tuple[Path, Path],
     tmp_path: Path,
 ) -> None:
-    client, remote = controller
+    client, remote = server
     spec = Job(
         command='echo "$ETUDE_UNTIL_VALUE" > "$ETUDE_OUTPUT_DIR/result"; printf \'{"clocks":{"steps":%s}}\' "$ETUDE_UNTIL_VALUE" > "$ETUDE_OUTPUT_DIR/etude-result.json"',
         max_hours=0.01,
         until=Until(clock="steps", value=10),
     )
-    identity = launch(RunRequest(job=spec, seed=7))
+    (identity,) = launch(RunRequest(job=spec, seed=7))
     assert wait(identity, every=0.02, timeout=10)[0].outcome == "succeeded"
     resumed = RunRequest(
         job=spec.model_copy(update={"until": Until(clock="steps", value=20)}),
@@ -383,7 +398,7 @@ def test_remote_resume_keeps_one_run_and_its_previous_attempt(
         id=identity,
         resume=True,
     )
-    assert launch(resumed) == identity
+    assert launch(resumed)[0] == identity
     seen = wait(identity, every=0.02, timeout=10)[0]
     assert (seen.outcome, seen.attempts, seen.clocks) == ("succeeded", 2, {"steps": 20})
     assert fetch(identity, "result", tmp_path / "resumed").read_text() == "20\n"

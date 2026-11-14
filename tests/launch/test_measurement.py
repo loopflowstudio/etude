@@ -56,11 +56,9 @@ def baseline(count: int) -> dict[str, Counts]:
 
 def sessions(tmp_path: Path, count: int) -> tuple[Bench, tuple[str, ...], Counting]:
     b = bench(tmp_path, max_machines=count)
-    ids = b.scheduler.queue_cohort(
-        "baseline",
+    ids = b.scheduler.queue(
         Job(command="true", max_hours=1, max_usd=Decimal(1)).runs(*range(count)),
         rent="l4",
-        parallel=count,
     )
     b.scheduler.tick()
     b.clock.advance(1)
@@ -101,19 +99,19 @@ def test_command_kinds() -> None:
         cli.machine_app,
         cli.provider_app,
         cli.storage_app,
-        cli.controller_app,
+        cli.server_app,
     ):
         for command in app.registered_commands:
             assert command.callback is not None
             assert isinstance(getattr(command.callback, "command_kind", None), Kind)
-    assert getattr(cli.controller_show, "command_kind") == Kind.read
+    assert getattr(cli.server_show, "command_kind") == Kind.read
 
 
 def test_ask_wait_counts(tmp_path: Path) -> None:
     b = bench(tmp_path)
     counting = Counting(b.store, b.service)
     with counting.record():
-        id = b.scheduler.queue(Job(command="true", max_hours=1, max_usd=Decimal(1)), rent="l4")
+        (id,) = b.scheduler.queue(Job(command="true", max_hours=1, max_usd=Decimal(1)), rent="l4")
         ask = counting.snapshot()
     with counting.record():
         with pytest.raises(TimeoutError):
@@ -133,11 +131,9 @@ def test_cohort_git_and_database_counts(
     b = bench(tmp_path)
     counting = Counting(b.store, b.service)
     with counting.record():
-        b.scheduler.queue_cohort(
-            "cohort",
+        b.scheduler.queue(
             Job(command="true", repo=str(repo), max_hours=1, max_usd=Decimal(1)).runs(1, 2, 3),
             rent="l4",
-            parallel=3,
         )
         result = counting.snapshot()
     assert result == Counts(git=57, database=35)  # known debt: 19 git calls per run
@@ -164,7 +160,7 @@ def test_cohort_git_and_database_counts(
                 "boto3",
                 "etude.launch.scheduler",
                 "etude.launch.client",
-                "etude.launch.controller",
+                "etude.launch.server",
             ),
         ),
     ],
@@ -258,7 +254,7 @@ def test_reads_need_no_provider_key(
         "machines": ["machines", "--all", "--images"],
         "providers": ["providers"],
         "storages": ["storages"],
-        "controller_show": ["controller"],
+        "server_show": ["server"],
         "usage": ["usage", "--machine", machine],
         "logs": ["logs", "--run", ids[0]],
     }
@@ -268,7 +264,7 @@ def test_reads_need_no_provider_key(
         for command in app.registered_commands
         if command.callback is not None
         and getattr(command.callback, "command_kind", None) == Kind.read
-    } | {"controller_show"}
+    } | {"server_show"}
     assert set(reads) == declared
     with counting.record():
         for argv in reads.values():

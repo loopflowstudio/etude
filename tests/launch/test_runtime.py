@@ -29,7 +29,7 @@ def python(tmp_path: Path) -> str:
 def test_selected_runtime_runs_without_dependency_installation(tmp_path: Path, python: str) -> None:
     scheduler = local(tmp_path)
     command = """"$ETUDE_PYTHON" -c 'import json,os,sys; print("selected="+sys.executable); print("environment="+os.environ["VIRTUAL_ENV"])' """
-    run = scheduler.launch(
+    (run,) = scheduler.launch(
         Job(command=command, max_hours=0.01, runtime=Runtime(python=python, python_version="3.12"))
     )
     status = scheduler.wait(run, every=0.05, timeout=10)[0]
@@ -51,7 +51,7 @@ def test_runtime_failure_does_not_start_or_retry_training(
     )
     scheduler = local(tmp_path)
     marker = tmp_path / "training-started"
-    run = scheduler.launch(Job(command=f'touch "{marker}"', max_hours=0.01, runtime=runtime))
+    (run,) = scheduler.launch(Job(command=f'touch "{marker}"', max_hours=0.01, runtime=runtime))
     status = scheduler.wait(run, every=0.05, timeout=10)[0]
     assert status.outcome == "failed" and not marker.exists()
     attempts = scheduler.attempts(run)
@@ -91,7 +91,7 @@ def test_runtime_probe_shares_attempt_deadline(tmp_path: Path) -> None:
     interpreter.chmod(0o755)
     scheduler = local(tmp_path)
     marker = tmp_path / "training"
-    run = scheduler.launch(
+    (run,) = scheduler.launch(
         Job(
             command=f'touch "{marker}"',
             max_hours=1 / 3600,

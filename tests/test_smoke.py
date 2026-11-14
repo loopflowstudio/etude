@@ -9,7 +9,7 @@ import pytest
 
 from etude.cli import main
 from etude.errors import LauncherError
-from etude.launch.client import default, queue_cohort
+from etude.launch.client import default, queue
 from etude.records import Clock
 from etude.spec import Job, SmokeForm
 from etude.storage import default_root
@@ -38,29 +38,36 @@ from pathlib import Path
 
 from etude.eval.match import environment
 from etude.eval.records import Benchmark, Code, Inference, Seating
-from etude.experiment import ExperimentState
-from etude.jobs import evaluation
+from etude.jobs import ExperimentState
+from etude.jobs import EvalJob, TrainingJob
+from tests.launch.tasks import Command, RUNTIME, train_command
 from etude.launch.records import Job, SmokeForm
 from etude.report import Report
 from tests.eval.games import {play}
 
+@pytest.fixture(autouse=True)
+def _command_environment(command_python: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ETUDE_TEST_PYTHON", command_python)
+    monkeypatch.setattr("tests.launch.tasks.RUNTIME", Runtime(python=command_python))
+
+
 TRAIN = "{python} " + str(Path(__file__).parent / "train.py")
 
 
-def training_runs(seeds: int = 1, tiny: str = "1", bare: bool = False) -> list:
-    smoke = SmokeForm(command=f"{{TRAIN}} {{tiny}}") if tiny else None
-    ppo = Job(command=TRAIN + " 1000", name="ppo", max_hours=0.1, smoke=smoke).runs(*range(seeds))
-    plain = Job(command=TRAIN + " 2000", name="plain", max_hours=0.1).runs(0) if bare else []
+def training_jobs(seeds: int = 1, tiny: str = "1", bare: bool = False) -> list:
+    smoke = Command(command=f"{{TRAIN}} {{tiny}}") if tiny else None
+    ppo = TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command=TRAIN + " 1000"), repo=None, name="ppo", max_hours=0.1, smoke=smoke).runs(*range(seeds))
+    plain = TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command=TRAIN + " 2000"), repo=None, name="plain", max_hours=0.1).runs(0) if bare else []
     return ppo + plain
 
 
-def eval(state: ExperimentState) -> Job:
+def eval_jobs(state: ExperimentState) -> Job:
     chosen = [saved for run in state.runs for saved in run.checkpoints]
     anchor = Code(name="heuristic", source=[__file__], config={{"strength": 0}})
     vs = Seating(name="vs heuristic", players=(Inference(config={{"search": 0}}), anchor),
                  configs=({{"deal": 0}}, {{"deal": 1}}), games=4)
     ladder = Benchmark(name="ladder", environment=environment("duel"), seatings=(vs,))
-    return evaluation(ladder, play={play}, checkpoints=chosen, max_hours=0.1,
+    return EvalJob(tournament=ladder, play={play}, checkpoints=chosen, max_hours=0.1,
                       repo=None)
 
 
@@ -269,10 +276,10 @@ def test_a_launched_eval_run_records_its_smoke(
 def test_the_python_client_smokes_when_asked(tmp_path: Path) -> None:
     broken = Job(command="true", name="broken", max_hours=0.1, smoke=SmokeForm(command="exit 3"))
     with pytest.raises(LauncherError, match="smoke train broken: .*nothing was submitted"):
-        queue_cohort("refused", broken.runs(1, 2), "local", smoke=True)
+        queue(broken.runs(1, 2), "local", smoke=True)
     assert default().runs(done=True) == ()
-    (plain,) = queue_cohort("plain", broken.runs(1), "local")
+    (plain,) = queue(broken.runs(1), "local")
     assert default().record(plain).launch.smoke.outcome == "not_smoked"
     fine = broken.model_copy(update={"smoke": SmokeForm(command="true")})
-    (smoked,) = queue_cohort("kept", fine.runs(1), "local", smoke=True)
+    (smoked,) = queue(fine.runs(1), "local", smoke=True)
     assert default().record(smoked).launch.smoke.outcome == "passed"

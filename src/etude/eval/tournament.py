@@ -311,6 +311,30 @@ class StoredRuns:
         self._records: dict[tuple[str, str], list[MatchRecord]] = {}
         self._blocks: dict[str, dict[str, Block]] = {}
 
+    @classmethod
+    def read(
+        cls, experiment: str, place: Storage, *, keys: Sequence[str] | None = None
+    ) -> StoredRuns:
+        """Read one source, optionally using the caller's existing listing."""
+        keys = sorted(place.keys("") if keys is None else keys)
+        listed = set(keys)
+        folders: list[_Folder] = []
+        for run, held_in in sorted(run_folders(keys).items()):
+            for folder in held_in:
+                held_file = folder + TOURNAMENT_FILE in listed
+                if not held_file and folder + _ENVIRONMENT_FILE not in listed:
+                    continue
+                if _experiment(place, folder) != experiment:
+                    continue
+                names = tuple(key[len(folder) :] for key in under(keys, folder))
+                if held_file:
+                    held = TournamentRun.model_validate_json(place.get(folder + TOURNAMENT_FILE))
+                    folders.append(_Folder(place, run, folder, names, held, None))
+                else:
+                    given = Environment.model_validate_json(place.get(folder + _ENVIRONMENT_FILE))
+                    folders.append(_Folder(place, run, folder, names, None, given.identity))
+        return cls(experiment, folders)
+
     def tournaments(self) -> dict[str, list[TournamentRun]]:
         """What each eval run held for a tournament added, by tournament, in run order."""
         found: dict[str, dict[str, TournamentRun]] = {}
@@ -345,24 +369,11 @@ def stored_runs(
 ) -> StoredRuns:
     """The experiment's eval runs in this computer's eval folder and `storages`."""
     base = Path(directory) if directory is not None else default_root()
-    folders: list[_Folder] = []
-    for place in {each.name: each for each in [DirectoryStorage(base), *storages]}.values():
-        keys = sorted(place.keys(""))
-        listed = set(keys)
-        for run, held_in in sorted(run_folders(keys).items()):
-            for folder in held_in:
-                held_file = folder + TOURNAMENT_FILE in listed
-                if not held_file and folder + _ENVIRONMENT_FILE not in listed:
-                    continue
-                if _experiment(place, folder) != experiment:
-                    continue
-                names = tuple(key[len(folder) :] for key in under(keys, folder))
-                if held_file:
-                    held = TournamentRun.model_validate_json(place.get(folder + TOURNAMENT_FILE))
-                    folders.append(_Folder(place, run, folder, names, held, None))
-                else:
-                    given = Environment.model_validate_json(place.get(folder + _ENVIRONMENT_FILE))
-                    folders.append(_Folder(place, run, folder, names, None, given.identity))
+    folders = [
+        folder
+        for place in {each.name: each for each in [DirectoryStorage(base), *storages]}.values()
+        for folder in StoredRuns.read(experiment, place).folders()
+    ]
     return StoredRuns(experiment, folders)
 
 

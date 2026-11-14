@@ -17,8 +17,7 @@ from pydantic import BaseModel, Field
 from etude.eval.match import environment
 from etude.eval.records import Benchmark, CheckpointPlayer, Code, Inference, Match, Seating
 from etude.eval.run import Tables
-from etude.experiment import ExperimentState
-from etude.jobs import evaluation
+from etude.jobs import EvalJob, ExperimentState
 from etude.spec import Job
 from etude.train.tracking import track
 
@@ -200,10 +199,10 @@ def play(match: Match[Deal]) -> Tables:
     return {"teams": rows}
 
 
-def eval(state: ExperimentState) -> Job:
+def eval_jobs(state: ExperimentState) -> Job:
     checkpoints = tuple(
         c for run in state.runs for c in run.checkpoints if c.ordinal == 1 or c == run.final
     )
-    return evaluation(
-        arena, config=ArenaConfig(), play=play, checkpoints=checkpoints, max_hours=0.01
+    return EvalJob(
+        tournament=arena(ArenaConfig()), play=play, checkpoints=checkpoints, max_hours=0.01
     )

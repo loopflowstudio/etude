@@ -235,7 +235,7 @@ def test_invalid_pointer_never_selects_or_deletes_files(tmp_path: Path, value: s
     assert folder.exists()
 
 
-def test_controller_retires_remote_saves_under_an_upload_only_grant(tmp_path: Path) -> None:
+def test_server_retires_remote_saves_under_an_upload_only_grant(tmp_path: Path) -> None:
     storage = Writes()
     storage.grants = False
     courier, _, root = machine(tmp_path, storage)

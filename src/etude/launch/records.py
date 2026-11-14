@@ -7,7 +7,7 @@ added or rented computer; Rental describes only its paid window. RunAttempt allo
 a run to either kind of machine. Session is internal: one start of Etude's
 process on a machine, and its journal folder.
 Jobs describe what runs and its limits (`etude.jobs` makes them from Python
-functions); cohorts group runs.
+functions).
 
 Units: a clock is any named count of progress a job keeps, such as steps,
 agent_steps or wall_time_ms. Positions on a clock are absolute. Hours and US
@@ -316,15 +316,23 @@ class Machine(Record):
         assert supply is not None  # the database stores exactly one
         return supply
 
+    def state(
+        self,
+        now: datetime,
+        *,
+        off: bool = False,
+    ) -> Literal["starting", "available", "unavailable", "deleted"]:
+        """Acquisition state at `now`; pool withdrawal also makes a machine unavailable."""
+        if self.deleted_at is not None:
+            return "deleted"
+        if off or self.refused_at is not None or self.expired(now):
+            return "unavailable"
+        if self.kind == "rented" and self.provider_id is None:
+            return "starting"
+        return "available"
+
     def expired(self, now: datetime) -> bool:
         return self.expires_at is not None and now >= self.expires_at
-
-
-class Cohort(Record):
-    name: str
-    parallel: int  # rentals at once
-    max_usd: Decimal | None  # shared budget for admitting rental allocations
-    created_at: datetime
 
 
 class Output(Record):
@@ -485,14 +493,6 @@ class Status(Record):
         return f"{head}{at}{shared}, {'~' if self.estimated else ''}${self.usd:.2f}{delivery}"
 
 
-class CohortSpec(Record):
-    """Named limits shared by a submitted group of runs."""
-
-    name: str
-    parallel: int = 1
-    max_usd: Decimal | None = None
-
-
 class QuotedMachine(Record):
     """One first-wave run's placement and its maximum admitted rental allocation.
 
@@ -515,7 +515,7 @@ class Quote(Record):
     """What a launch would take now, without taking it."""
 
     machines: tuple[QuotedMachine, ...]  # the first wave, as a launch would place it
-    limit_usd: Decimal | None  # job/cohort rental admission budget; None: it cannot rent
+    limit_usd: Decimal | None  # job rental admission budget; None: it cannot rent
 
     @property
     def max_usd(self) -> Decimal:
@@ -632,3 +632,10 @@ def __getattr__(name: str) -> object:
         )
         return RunRequest
     raise AttributeError(name)
+
+
+class Standing(Record):
+    """One run and the scheduler's retained status, without remote observation."""
+
+    record: RunRecord
+    status: Status

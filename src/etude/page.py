@@ -87,7 +87,7 @@ from pydantic import JsonValue
 
 from etude.errors import EtudeError
 from etude.eval.records import Gap, Scheduled, Tournament
-from etude.experiment_file import experiment_named
+from etude.experiment_file import experiment_named, refuse_renamed
 from etude.launch.logging import explain
 from etude.records import BUILT_IN_NAMES, Record
 from etude.report import Counters, Flame, Matches, Report, Score, Series
@@ -100,7 +100,7 @@ if TYPE_CHECKING:
     import duckdb
 
     from etude.eval.tournament import Played
-    from etude.experiment import ExperimentState
+    from etude.jobs import ExperimentState
 
 
 class Placement(Record):
@@ -498,7 +498,7 @@ def build(source: Storage | Path | str, file: Path, *, experiment: str | None = 
             + (f"; it holds {', '.join(held)}" if held else "; it holds no runs")
         )
     trained = [run for run in data if run.file is None or run.file.kind != "evaluation"]
-    found = names.get("eval")
+    found = names.get("eval_jobs")
     want: Callable[..., object] | None = None
     if found is not None:
         if not callable(found):
@@ -588,6 +588,7 @@ def _run_file(file: Path) -> dict[str, object]:
         raise EtudeError("experiment_file_must_be_python", 422) from ValueError(file)
     if not file.is_file():
         raise EtudeError("experiment_file_not_found", 404) from FileNotFoundError(file)
+    refuse_renamed(file)
     folder = str(file.resolve().parent)
     if folder not in sys.path:
         sys.path.insert(0, folder)
@@ -810,8 +811,8 @@ def _wanted(want: Callable[..., object], state: ExperimentState) -> list[Tournam
     """The tournaments `eval(state)` returns, each with the checkpoints or entrants it holds."""
     # The optional `eval` extra, imported where it is used (`_read_evals`): eval(state)
     # and its evaluation jobs are built on etude.eval.
+    from etude.declarations import asked  # noqa: PLC0415
     from etude.eval.records import Tournament  # noqa: PLC0415
-    from etude.experiment import asked  # noqa: PLC0415
     from etude.jobs import evaluation_spec  # noqa: PLC0415
 
     wanted = []

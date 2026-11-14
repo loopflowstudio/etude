@@ -528,7 +528,7 @@ def test_runtime_bootstrap_failure_reaches_retained_session_usage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     b = bench(tmp_path)
-    run = b.scheduler.launch(Job(command="true", max_hours=1, max_usd=Decimal(1)), rent="l4")
+    (run,) = b.scheduler.launch(Job(command="true", max_hours=1, max_usd=Decimal(1)), rent="l4")
     session = b.scheduler.attempts(run)[0].session
     monkeypatch.setattr("shutil.which", lambda name: None)
     monkeypatch.setattr(bootstrap, "UV_URL", http.url + "/payload")
@@ -555,8 +555,8 @@ def test_completed_workload_before_and_after(
     # Real transport and publication; only provisioning and job execution are fake.
     b = bench(tmp_path, max_machines=1)
     b.scheduler.rent("l4", 1)
-    runs = b.scheduler.queue_cohort(
-        "experiment", Job(command="true", max_hours=0.25, max_usd=Decimal(1)).runs(1, 2), rent="l4"
+    runs = b.scheduler.queue(
+        Job(command="true", max_hours=0.25, max_usd=Decimal(1)).runs(1, 2), rent="l4"
     )
     b.scheduler.tick()
     first = b.scheduler.attempts(runs[0])[0]
@@ -685,8 +685,8 @@ def test_completed_workload_before_and_after(
     assert {e.id for e in worker_events} <= {e.id for e in collected.events}
     assert all(e.machine == attempts[0].machine for e in collected.events)
 
-    # A different machine's cache cannot make the first controller download warm.
-    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "controller-cache"))
+    # A different machine's cache cannot make the first server download warm.
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "server-cache"))
     for index, run in enumerate(runs):
         assert (
             b.scheduler.fetch(run, "checkpoint.pt", tmp_path / f"cold-{index}").read_bytes()
@@ -804,7 +804,7 @@ def test_the_launcher_fetches_a_multipart_output_and_retains_each_part(
     monkeypatch.setattr(downloads, "PART_BYTES", 16)
     b = bench(tmp_path)
     b.scheduler.rent("l4", 1)
-    run = b.scheduler.queue(Job(command="true", max_hours=0.25, max_usd=Decimal(1)), rent="l4")
+    (run,) = b.scheduler.queue(Job(command="true", max_hours=0.25, max_usd=Decimal(1)), rent="l4")
     b.scheduler.tick()
     attempt = b.scheduler.attempts(run)[0]
     session = attempt.session
@@ -1249,7 +1249,7 @@ def test_unchanged_inbox_polls_leave_no_log_lines_or_usage(http: HTTP, tmp_path:
 
 def test_polling_a_session_reads_each_version_of_its_files_once(http: HTTP, tmp_path: Path) -> None:
     b = bench(tmp_path)
-    run = b.scheduler.launch(Job(command="true", max_hours=1, max_usd=Decimal(1)), rent="l4")
+    (run,) = b.scheduler.launch(Job(command="true", max_hours=1, max_usd=Decimal(1)), rent="l4")
     attempt = b.scheduler.attempts(run)[0]
     b.scheduler.tick()
     fake = b.service.sessions[attempt.session]
@@ -1507,7 +1507,7 @@ def test_storage_socket_allowance_scales_whole_body_uploads(
 
 def test_status_delivery_age_uses_only_retained_successful_writes(tmp_path: Path) -> None:
     b = bench(tmp_path)
-    run = b.scheduler.queue(Job(command="train", max_hours=1, max_usd=Decimal(1)), rent="l4")
+    (run,) = b.scheduler.queue(Job(command="train", max_hours=1, max_usd=Decimal(1)), rent="l4")
     b.scheduler.tick()
     attempt = b.scheduler.attempts(run)[0]
     good = Transfer(
