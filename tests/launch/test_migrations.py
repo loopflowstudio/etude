@@ -329,11 +329,9 @@ def test_loop_hands_over_before_tick(tmp_path: Path) -> None:
     script = """
 import sys
 from pathlib import Path
-from typing import Literal
 from etude.launch.database import open_home
 from etude.launch.controller import loop
 from etude.launch.scheduler import Scheduler
-from etude.launch.schemas import Finished
 store = open_home(Path(sys.argv[1]))
 store._db.execute("INSERT INTO migrations(name,sha256,applied_at,floor,program) VALUES ('future','digest','now','999.0.0',?)", (sys.argv[2],))
 store._db.execute("PRAGMA user_version=3")

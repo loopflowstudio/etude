@@ -14,7 +14,7 @@ from typing import Annotated
 
 import typer
 
-from etude.launch.database import additive, migrations, release, released
+from etude.launch.database import migrations, release, released
 
 RELEASED = Path("src/etude/launch/migrations/released.json")
 
@@ -30,12 +30,8 @@ def main(version: Annotated[str, typer.Option("--version")]) -> None:
         "[\n" + ",\n".join(f"  {json.dumps(r.model_dump())}" for r in after) + "\n]\n"
     )
     print(f"released {', '.join(r.name for r in added)}")
-    ordered = migrations()
-    raised = [
-        m.name
-        for i, m in enumerate(ordered)
-        if m.name in {r.name for r in added} and not additive(m, ordered[:i])
-    ]
+    # The same names a refused older etude is shown: every migration carrying the new floor.
+    raised = [r.name for r in added if r.floor not in {b.floor for b in before}]
     if raised:
         line = (
             f"etude < {version} can no longer open launcher.sqlite (raised by: {', '.join(raised)})"

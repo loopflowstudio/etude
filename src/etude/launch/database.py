@@ -184,22 +184,26 @@ def migrations() -> tuple[Migration, ...]:
     return tuple(ordered)
 
 
+def _code(statement: str) -> str:
+    """A statement on one line, without its comments."""
+    return " ".join(" ".join(line.partition("--")[0] for line in statement.splitlines()).split())
+
+
 def _statements(migration: Migration) -> Iterator[str]:
     # executescript would commit the open transaction; run one complete statement at a time.
     pending = ""
     for character in migration.sql:
         pending += character
         if character == ";" and sqlite3.complete_statement(pending):
-            code = "\n".join(line.partition("--")[0] for line in pending.splitlines()).strip()
             if re.match(
                 r"(?:BEGIN|COMMIT|END|ROLLBACK|SAVEPOINT|RELEASE|ATTACH|DETACH|VACUUM)\b",
-                code,
+                _code(pending),
                 re.IGNORECASE,
             ):
                 raise LauncherError(f"migration {migration.name} must stay inside its transaction")
             yield pending
             pending = ""
-    if any(line.strip() and not line.lstrip().startswith("--") for line in pending.splitlines()):
+    if _code(pending):
         raise LauncherError(f"migration {migration.name} ends inside a statement")
 
 
@@ -263,8 +267,7 @@ def additive(migration: Migration, before: Sequence[Migration]) -> bool:
     if migration.breaks is not None:
         return False
     for statement in _statements(migration):
-        code = "\n".join(line.partition("--")[0] for line in statement.splitlines()).strip()
-        code = " ".join(code.split())
+        code = _code(statement)
         if not _ADDITIVE.match(code):
             return False
         if code.upper().startswith("ALTER TABLE") and re.search(
@@ -421,21 +424,11 @@ class Database:
         self._db.execute("PRAGMA journal_mode = WAL")
         self.fresh = False  # whether opening created the file's schema
         try:
-            if self._db.execute("SELECT 1 FROM sqlite_master WHERE name='migrations'").fetchone():
-                rows = self._db.execute(
-                    "SELECT name, sha256, floor FROM migrations ORDER BY rowid"
-                ).fetchall()
-                known = {m.name: m for m in migrations()}
-                if reason := _too_new([r for r in rows if r["name"] not in known], path.name):
-                    raise LauncherError(reason)
-                for row in rows:
-                    if row["name"] in known and row["sha256"] != known[row["name"]].sha256:
-                        raise LauncherError(
-                            f"migration {row['name']} changed after it was applied to {path}"
-                        )
-                if set(known) <= {r["name"] for r in rows}:
-                    self._generation = len(rows)
-                    return
+            # An up-to-date file is opened without the write lock.
+            held = self._applied()
+            if held is not None and len(held[0]) == len(migrations()):
+                self._generation = held[1]
+                return
             with self._transaction():
                 self._generation = self._migrate()
             if self._notice is not None:
@@ -444,32 +437,37 @@ class Database:
             self._db.close()
             raise
 
+    def _applied(self) -> tuple[tuple[str, ...], int] | None:
+        """The ledger's migrations this etude knows and its row count; None without a ledger.
+
+        The rest are a newer etude's additive changes, which this one reads and writes
+        past. Raises LauncherError when they raise the floor past this etude, or when
+        a known migration's file changed after it was applied.
+        """
+        if not self._db.execute("SELECT 1 FROM sqlite_master WHERE name='migrations'").fetchone():
+            return None
+        rows = self._db.execute(
+            "SELECT name, sha256, floor FROM migrations ORDER BY rowid"
+        ).fetchall()
+        known = {m.name: m.sha256 for m in migrations()}
+        file = self._path.name
+        if reason := _too_new([r for r in rows if r["name"] not in known], file):
+            raise LauncherError(reason)
+        for row in rows:
+            if known.get(row["name"], row["sha256"]) != row["sha256"]:
+                raise LauncherError(
+                    f"migration {row['name']} changed after it was applied to {self._path}; "
+                    f"restore the newest {file}.backup-* or move the file away"
+                )
+        return tuple(r["name"] for r in rows if r["name"] in known), len(rows)
+
     def _migrate(self) -> int:
         """Apply what the file lacks and return its generation. Runs inside a write transaction,
         so a second etude opening the file waits and then finds nothing left to do."""
         known = {m.name: m for m in migrations()}
         file = self._path.name
-        ledger = self._db.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='migrations'"
-        ).fetchone()
-        newer: list[sqlite3.Row] = []
-        if ledger:
-            applied: tuple[str, ...] = ()
-            for row in self._db.execute(
-                "SELECT name, sha256, floor FROM migrations ORDER BY rowid"
-            ):
-                if row["name"] not in known:
-                    newer.append(row)
-                elif row["sha256"] != known[row["name"]].sha256:
-                    raise LauncherError(
-                        f"migration {row['name']} changed after it was applied to {self._path}; "
-                        f"restore the newest {file}.backup-* or move the file away"
-                    )
-                else:
-                    applied += (row["name"],)
-            if reason := _too_new(newer, file):
-                raise LauncherError(reason)
-        else:
+        held = self._applied()
+        if held is None:
             made = self._db.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
             schema = int(self._db.execute("PRAGMA user_version").fetchone()[0])
             if made and (schema not in _PREDECESSORS or not _PREDECESSORS[schema].migrations):
@@ -479,20 +477,21 @@ class Database:
                 )
             applied = _PREDECESSORS[schema].migrations if made else ()
             self.fresh = not made
+        else:
+            applied, rows = held
         pending = [m for name, m in known.items() if name not in applied]
-        if newer:
-            # A newer etude made only additive changes: this one reads and writes what it knows.
-            if pending:
+        if held is not None:
+            if not pending:
+                return rows
+            if rows > len(applied):
+                # Additive rows from a newer etude are fine alone, but not under older gaps.
                 raise LauncherError(
                     f"{file} has migrations from a newer etude but lacks "
                     f"{', '.join(m.name for m in pending)}; upgrade etude"
                 )
-            return len(applied) + len(newer)
-        if ledger and not pending:
-            return len(applied)
-        backup = self._back_up() if ledger and pending and self._backup else None
+        backup = self._back_up() if held is not None and self._backup else None
         program = _program(self._path)
-        if not ledger:
+        if held is None:
             self._db.execute(_LEDGER)
             for name in applied:  # taken over from a released file's user_version
                 self._ledger(known[name], program)
@@ -552,19 +551,9 @@ class Database:
         target = self._path.with_name(
             f"{self._path.name}.backup-{datetime.now(UTC):%Y%m%dT%H%M%S%fZ}"
         )
-        source = sqlite3.connect(self._path, timeout=self._timeout)
-        copy = sqlite3.connect(target)
-        try:
-            source.backup(copy)
-        finally:
-            copy.close()
-            source.close()
+        _snapshot(self._path, target, self._timeout)
         target.chmod(0o600)
-        backups = sorted(
-            (p for p in self._path.parent.glob(f"{self._path.name}.backup-*")),
-            key=lambda p: p.name,
-        )
-        for old in backups[:-2]:
+        for old in sorted(self._path.parent.glob(f"{self._path.name}.backup-*"))[:-2]:
             old.unlink()
         return target
 
@@ -1489,9 +1478,21 @@ def _check_sqlite(migration: Migration) -> None:
         )
 
 
+def _read_only(path: Path, timeout: float = 5) -> sqlite3.Connection:
+    return sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=timeout)
+
+
+def _schema_number(path: Path) -> int:
+    reader = _read_only(path)
+    try:
+        return int(reader.execute("PRAGMA user_version").fetchone()[0])
+    finally:
+        reader.close()
+
+
 def _snapshot(source: Path, target: Path, timeout: float) -> None:
     """Read a consistent WAL snapshot without modifying the source's records."""
-    reader = sqlite3.connect(source.as_uri() + "?mode=ro", uri=True, timeout=timeout)
+    reader = _read_only(source, timeout)
     writer = sqlite3.connect(target)
     try:
         reader.backup(writer)
@@ -1506,11 +1507,7 @@ def _predecessor(home: Path) -> Path | None:
             path = home / name
             if not path.exists():
                 continue
-            reader = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
-            try:
-                schema = reader.execute("PRAGMA user_version").fetchone()[0]
-            finally:
-                reader.close()
+            schema = _schema_number(path)
             if schema == expected:
                 return path
             if name != "launcher.db":
@@ -1541,14 +1538,11 @@ def _older_files(home: Path, source: Path | None) -> str:
         if path == source:
             messages.append(f"{path.name} is left as it was and is no longer read")
             continue
-        reader = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
         try:
-            schema = reader.execute("PRAGMA user_version").fetchone()[0]
+            schema = _schema_number(path)
         except sqlite3.DatabaseError:
             messages.append(f"{path.name} is not read (cannot inspect its schema)")
             continue
-        finally:
-            reader.close()
         matching = _PREDECESSORS.get(schema)
         reader_etude = matching.files.get(path.name, matching.etude) if matching else None
         suffix = f", use etude {reader_etude} for it" if reader_etude else ""
@@ -1556,16 +1550,26 @@ def _older_files(home: Path, source: Path | None) -> str:
     return "; ".join(messages)
 
 
-def _working_file(home: Path, unreleased: Sequence[Migration]) -> Path:
+def _unreleased() -> list[Migration]:
+    return [m for m in migrations() if m.floor is None]
+
+
+def _working_file(home: Path) -> Path:
+    """The real file, or the copy a build carrying unreleased migrations works on instead.
+
+    The copy is named for those migrations' contents: editing one starts another copy.
+    """
     real = launcher_file(home)
-    return home / "copies" / _unreleased_digest(unreleased) / real.name if unreleased else real
+    if not (unreleased := _unreleased()):
+        return real
+    joined = "".join(f"{m.name}:{m.sha256}\n" for m in unreleased)
+    return home / "copies" / hashlib.sha256(joined.encode()).hexdigest()[:12] / real.name
 
 
 def has_launcher(home: Path) -> bool:
     """Whether this build has launcher evidence to read, without creating a home."""
-    unreleased = [m for m in migrations() if m.floor is None]
     return (
-        _working_file(home, unreleased).exists()
+        _working_file(home).exists()
         or launcher_file(home).exists()
         or _predecessor(home) is not None
     )
@@ -1582,8 +1586,8 @@ def open_home(home: Path, *, timeout: float = 30) -> Database:
     home = home.resolve()
     home.mkdir(parents=True, exist_ok=True)
     real = launcher_file(home)
-    unreleased = [m for m in migrations() if m.floor is None]
-    target = _working_file(home, unreleased)
+    unreleased = _unreleased()
+    target = _working_file(home)
     if target.exists():
         return Database(target, timeout=timeout)
     with (home / ".launcher-open").open("a") as lock:
@@ -1652,21 +1656,15 @@ class Copy(Record):
     ends: datetime  # the latest of their deadlines
 
 
-def _unreleased_digest(unreleased: Sequence[Migration]) -> str:
-    joined = "".join(f"{m.name}:{m.sha256}\n" for m in unreleased)
-    return hashlib.sha256(joined.encode()).hexdigest()[:12]
-
-
 def copies(home: Path, now: datetime) -> tuple[Copy, ...]:
     """Other copies under `home` holding paid windows that have not ended, read without changing
     them. The copy this build works on is left out: its runs are already in view."""
-    unreleased = [m for m in migrations() if m.floor is None]
-    own = _unreleased_digest(unreleased) if unreleased else None
+    own = _working_file(home)
     found: list[Copy] = []
     for path in sorted((home / "copies").glob("*/launcher.sqlite")):
-        if path.parent.name == own:
+        if path == own:
             continue
-        db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+        db = _read_only(path)
         try:
             names = tuple(
                 r[0] for r in db.execute("SELECT name FROM migrations WHERE floor IS NULL")
