@@ -339,6 +339,52 @@ the stored kinds and names; stored labels survive.
 Steer `cf6392bc-72d6-4aee-a020-909704a9bcb2`: metrics may vary per row;
 missing means null, never zero or carried forward. Evals are separate runs.
 
+## Ninth concept review (2026-11-13): next implement direction
+
+Walked `etude train` at `ca88f10` on the coin example and a two-job,
+several-seed file; what each command printed is in `questions.md` (Ninth
+concept review). One run, stopped and resumed, reads as designed. Carrying on
+a selection of several runs does not, and four smaller spellings disagree with
+this design. Settled here from what the design already says; no stored format,
+schema or remote read changes.
+
+1. **A several-run selection is checked whole before any run starts, and
+   `--resume` carries it on.** Today each run is checked as its turn comes, so
+   `--resume` over seeds 0-2 refuses at the first finished seed, and
+   `--resume --until` trains two runs and then fails on the third. Check every
+   selected run first; refuse once, naming each address and its reason, before
+   `train` is called. Under `--resume` with several runs selected, a finished
+   run with no later target is skipped with a line saying so
+   (`sweep/narrow@0 finished at updates=6`), not a refusal; with one run
+   selected the refusal stands. Never-started runs under `--resume` are still
+   refused (principle 8), now before any work and naming them; whether
+   `--resume` should start them is Open 6.
+2. **The config-changed refusal names both ways on.** `etude train coin.py
+   --config '{"updates":40}'` on an existing run prints `updates was 20, is 40;
+   choose --experiment NAME`: the move from the Hanabi demo, still not told
+   about `--until`. One refusal owns the wording for new and resumed attempts:
+   the changed fields, then `--resume --until CLOCK=TARGET` to train this run
+   further, then `--experiment NAME` for a changed config. The resumed-attempt
+   form currently gives no remedy at all.
+3. **`etude train` of a `runs()` file asks only what training here needs.** It
+   is refused without `max_hours` and outside a git checkout, though a
+   `train`-only file needs neither and nothing is rented. Local training
+   ignores the hours limit and records a commit when there is one; `launch`,
+   `queue` and `smoke` keep both requirements.
+4. **Output spells the address.** `etude checkpoints` prints `coin/coin` for
+   the run every other command calls `coin`; print the stored address.
+5. **`etude report FILE --experiment NAME`**, as train, launch, queue and eval
+   take it. A run trained with the documented `--experiment wide` has no report
+   command today (`No such option: --experiment`; the file stem is the only
+   experiment it reads).
+6. **Docs.** `--json` prints one object per selected run, in order; the page
+   says one. Say that `--resume` repeats the selection and what it does with
+   finished and never-started members.
+
+Keep: single-run behavior, the exit codes, stored ids, state publication, row
+replacement, continuation and budgets. Add focused tests for 1-5 by result
+(printed refusal, exit code, which runs have rows); no new counting path.
+
 ## Manabot (MTG-329)
 
 Separate Task; do not edit its checkout here. The full loop sketch, recipe
@@ -413,3 +459,18 @@ population reads and ratings (EXP-60); a spending limit across launches
    with Etude, also for the two-model acceptance example.
 5. Save cadence: answered "1a" (`save_every=`/`save_every_seconds=` on
    `run.steps`); built as described under Loop ergonomics.
+6. Unanswered. After `etude train sweep.py` is stopped partway (seed 0
+   finished, seed 1 saved, seeds 2-9 never started), should
+   `etude train sweep.py --resume` also start the never-started runs? Principle
+   8 says new and resumed are different commands, which leaves no single
+   command that finishes the selection: `--seed` takes one seed, so the rest
+   are eight commands. Assumed until answered: refuse them by name before any
+   work. The alternative reads `--resume` over a selection as "bring every
+   selected run to its target".
+7. Unanswered. Is a quick config variant a new experiment or a new job in the
+   same experiment? The operator's choice (Run addresses) sends a changed
+   `--config` to `--experiment NAME`, so each variant is its own experiment and
+   its own report page; nothing draws `wide` beside `coin`. Jack Heart called
+   `--experiment` the "overall experiment name". The alternative puts variants
+   in one experiment as jobs, which needs a way to name a job from the command
+   line, where he said `--job` selects.

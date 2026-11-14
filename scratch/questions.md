@@ -150,3 +150,32 @@ Manabot check steer `9f5a3e52-f52e-458a-9c62-51efc6b0cb10`, source branch
 moves. Jack Heart: "i think we dont need warnings, were teh only users".
 No aliases for moved paths. Malformed nested declarations now raise a Pydantic
 validation error rather than KeyError. Minimal id-only records remain valid.
+
+## Ninth concept review (2026-11-13)
+
+Probed at `ca88f10` with an empty `ETUDE_HOME`; direction is in
+design-train-api.md (Ninth concept review), open choices in its Open 6 and 7.
+
+`examples/coin.py`, after `etude train examples/coin.py --until updates=10`:
+- `--config '{"updates":40}'` -> `run_identity_conflict: updates was 20, is 40;
+  choose --experiment NAME`
+- no flags -> `run_name_taken: coin; use --resume; to train further give
+  --resume --until CLOCK=TARGET`
+- `--resume` -> `run_already_finished: finished at updates=10; give --until
+  with a later target`; `--resume --until updates=20` trained on, exit 0
+- `--resume --config '{"lr":0.2}'` -> `run_identity_conflict: lr was 0.1, is 0.2`
+- `etude checkpoints` lists the run as `coin/coin`
+- `etude report examples/coin.py --experiment wide` -> `No such option`
+
+A file with `runs()`: two jobs, `narrow` seeds 0-2 and `wide` seeds 0-1:
+- without `max_hours`: `a job needs max_hours`; outside git: `is in no git
+  checkout; name the job's source with repo=`
+- with `narrow@0` finished, `narrow@1` ended at 3, `narrow@2` never started:
+  `etude train F` -> `run_name_taken: sweep/narrow@0`; `--resume` and `--job
+  narrow --resume` -> `run_already_finished: finished at updates=6`;
+  `--job narrow --resume --until updates=8` trained `@0` and `@1`, then
+  `run_not_found: sweep/narrow@2`, exit 1
+- `--job wide --json` printed two objects, one per run
+
+Assumption, reversible: never-started runs under `--resume` stay refused
+(Open 6); a changed config still points to `--experiment` (Open 7).

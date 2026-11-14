@@ -137,3 +137,8 @@ direction remains. Quote labels for id-less requests now read `JOB@SEED`
 `tests/launch/test_scheduler.py` — 42 passed; mypy and ruff clean. Still
 spelled `NAME-seed-N` by choice: explicit standalone `track(run=...)` names in
 `docs/tracking.md` and historical-id fixtures.
+
+Ninth concept review: next implement direction is design-train-api.md (Ninth
+concept review), six items on several-run selections, refusal wording, local
+requirements of a `runs()` file, printed addresses and `report --experiment`.
+Unbuilt. Open 6 and 7 there are unanswered and do not hold the build.
