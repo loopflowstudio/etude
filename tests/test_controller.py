@@ -12,9 +12,10 @@ from etude.controller import advance
 from etude.declarations import read_experiment
 from etude.errors import LauncherError
 from etude.eval.match import environment
-from etude.eval.records import Benchmark
+from etude.eval.records import Benchmark, CheckpointPlayer
+from etude.eval.tournament import StoredRuns
 from etude.experiment import observe
-from etude.jobs import EvalJob, Evaluation, ExperimentState, TrainingJob
+from etude.jobs import EvalJob, Evaluation, ExperimentState, TrainingJob, with_experiment
 from etude.launch import client
 from etude.launch.records import Pool
 from etude.records import RunRecord
@@ -239,9 +240,8 @@ def test_declaration_types_are_defined_in_one_module() -> None:
 
 def test_eval_job_lowering_preserves_the_executable_record() -> None:
     tournament = Benchmark(name="ladder", environment=environment("duel"))
-    typed = EvalJob(
-        tournament=tournament, play=play, experiment="two", workers=2, repo=None, max_hours=1
-    )
+    typed = EvalJob(tournament=tournament, play=play, workers=2, repo=None, max_hours=1)
+    executable = with_experiment(typed, "two")
     config = Evaluation(
         tournament=tournament,
         experiment="two",
@@ -256,8 +256,8 @@ def test_eval_job_lowering_preserves_the_executable_record() -> None:
         experiment="two",
         max_hours=1,
     )
-    assert RunRequest(job=typed).model_dump_json() == RunRequest(job=plain).model_dump_json()
-    assert job_id(typed) == job_id(plain)
+    assert RunRequest(job=executable).model_dump_json() == RunRequest(job=plain).model_dump_json()
+    assert job_id(executable) == job_id(plain)
 
 
 def test_unnamed_training_job_and_callable_tournament_are_refused() -> None:
@@ -514,7 +514,7 @@ from etude.eval.records import Benchmark, RoundRobin, Inference, Code, Seating
 from tests.eval.games import play
 
 def eval_jobs(state):
-    checkpoints = tuple(observe({str(source.root)!r}, name).runs[0].final for name in ("a", "b"))
+    checkpoints = tuple(observe({str(source.root)!r}, name).runs[0].final.model_copy(update={{"experiment": "a"}}) for name in ("a", "b"))
     if {format!r} == "benchmark":
         tournament = Benchmark(name="ladder", environment=environment("duel"),
             seatings=(Seating(name="anchor", players=(Inference(), Code(name="fixed")), configs=({{}},), games=1),))
@@ -551,7 +551,7 @@ from etude.eval.records import RoundRobin, Inference, Code
 from tests.eval.games import play
 
 def eval_jobs(state):
-    checkpoint = observe({str(source.root)!r}, "a").runs[0].final
+    checkpoint = observe({str(source.root)!r}, "a").runs[0].final.model_copy(update={{"experiment": "a"}})
     return EvalJob(tournament=RoundRobin(name="first", environment=environment("duel"),
         configs=({{}},), games=1), enter=(checkpoint.player(Inference(config={{"strength": 1}})), Code(name="fixed", config={{"strength": 0}})),
         play=play, max_hours=0.1)
@@ -562,7 +562,7 @@ def eval_jobs(state):
     file.write_text(text.replace(', "a")', ', "b")').replace('name="first"', 'name="second"'))
     assert main([command, str(file), "--source", str(source.root)]) == 1
     error = capsys.readouterr().err
-    assert "checkpoint_key_conflict: base@0/out/weights.pt" in error
+    assert "checkpoint_key_conflict: a/base@0/out/weights.pt" in error
     assert client.default().runs(done=True) == ()
 
 
@@ -660,3 +660,61 @@ def training_jobs() -> list[TrainingJob]:
     assert main(["train", str(file), "--job", "base", "--seed", "0", "--resume"]) == 0
     (run,) = observe(default_root(), "cancelled").runs
     assert run.state == "finished"
+
+
+def test_policy_key_cross_experiment_seats_split_seeds_and_do_not_replay(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = DirectoryStorage(tmp_path / "source")
+    for experiment, seed in (("tla-frontier", 0), ("tla-frontier", 1), ("rival", 0)):
+        with track(
+            experiment=experiment,
+            run=f"small@{seed}",
+            job="small",
+            seed=seed,
+            directory=source.root,
+            clocks=["updates"],
+            strict=True,
+        ) as run:
+            path = run.out / "weights.pt"
+            path.write_text(f"{experiment} {seed}")
+            run.checkpoint(path, updates=100)
+    file = tmp_path / "rival.py"
+    file.write_text("""
+from etude.checkpoints import PolicyKey
+from etude.eval.match import environment
+from etude.eval.records import Benchmark, Final, Inference, Seating
+from etude.jobs import EvalJob
+from tests.eval.games import play
+
+def eval_jobs(state):
+    direct = Inference(config={"strength": 1})
+    tournament = Benchmark(name="frontier", environment=environment("duel"), seatings=(
+        Seating(name="vs frontier", players=(direct, Final(experiment="tla-frontier", job="small", inference=direct)),
+                configs=({},), games=8),))
+    return EvalJob(tournament=tournament, checkpoints=state.policy(PolicyKey()).checkpoints,
+                   play=play, repo=None, max_hours=1)
+""")
+    measured = MeasuredStorage(source)
+    decisions = advance(read_experiment(file), source=measured, directory=tmp_path / "evals")
+    assert [(d.new, d.played) for d in decisions] == [(2, 2)]
+    assert measured.listings == 2  # one discovery, one check of the eval run's own output prefix
+    assert measured.requests == 12  # three declarations, writers, checkpoints and outcomes
+    assert all(measured.got.count(key) == 1 for key in measured.got)
+    assert not any(key.endswith("weights.pt") for key in measured.got)
+    stored = StoredRuns.read("rival", source)
+    matches = [record.match for folder in stored.folders() for record in stored.records(folder)]
+    assert {
+        tuple(
+            player.checkpoint.key
+            for player in match.players
+            if isinstance(player, CheckpointPlayer)
+        ): match.games
+        for match in matches
+    } == {
+        ("rival/small@0/out/weights.pt", f"tla-frontier/small@{seed}/out/weights.pt"): 4
+        for seed in (0, 1)
+    }
+    # The second pass reads delivery under experiment-qualified identities.
+    advance(read_experiment(file), source=source, directory=tmp_path / "evals")
+    assert "eval frontier: nothing to play" in capsys.readouterr().out

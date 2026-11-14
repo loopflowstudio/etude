@@ -28,8 +28,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal
 
+from etude.checkpoints import CheckpointRecord
 from etude.declarations import asked, read_experiment, read_training_jobs
-from etude.errors import EtudeError, LauncherError
+from etude.errors import LauncherError
 from etude.eval.records import Benchmark, RoundRobin
 from etude.eval.tournament import played
 from etude.experiment import observe
@@ -139,12 +140,7 @@ def _smoke_evaluation(
     """One evaluation job `eval_jobs(state)` returned, held tiny into `store`."""
     spec = evaluation_spec(job)
     name = spec.tournament.name
-    try:
-        job = with_experiment(job, experiment)
-    except EtudeError as error:
-        raise LauncherError(
-            f"smoke eval {name}: a job of experiment {spec.experiment!r}"
-        ) from error
+    job = with_experiment(job, experiment)
     tiny = evaluation_spec(job).model_copy(
         update={"tournament": _tiny_tournament(spec.tournament), "lines": state.lines}
     )
@@ -152,7 +148,9 @@ def _smoke_evaluation(
     matches = played(
         tiny.tournament,
         experiment=experiment,
-        checkpoints=tuple(c.ref for c in tiny.checkpoints),
+        checkpoints=tuple(
+            c.ref if isinstance(c, CheckpointRecord) else c for c in tiny.checkpoints
+        ),
         enter=tiny.entrants,
         lines=state.lines,
         storages=[store],

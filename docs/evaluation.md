@@ -94,9 +94,11 @@ progress = Benchmark(
 )
 
 # On the go: as each checkpoint is saved, one small eval run plays every seating.
-# A checkpoint is its key, its run and file name, with the saved file to read.
+# A checkpoint is its key (its experiment, run and file name) with the saved file to read.
 # Relative seats find theirs among the experiment's training lines.
-ref = CheckpointRef(key=checkpoint_id(run="ppo-1", name="updates-500.pt"), artifact=saved)
+ref = CheckpointRef(
+    key=checkpoint_id(experiment="ppo", run="base@1", name="updates-500.pt"), artifact=saved
+)
 lines = observe(bucket, "ppo").lines
 with evaluating(progress, experiment="ppo", checkpoint=ref, storages=[bucket], lines=lines) as run:
     run.play(play)
@@ -158,11 +160,15 @@ with evaluating(
   key is the checkpoint's own key plus its inference config; code's is its
   name plus its config. A config is free JSON or a Pydantic model. One
   checkpoint at two search budgets is two players. A checkpoint's key
-  (`CheckpointRef.key`) is its training run and name
-  (`ppo-1/checkpoints/updates-00000500`) or, for any other, its address; never
-  its bytes, so two runs started from one file hold two checkpoints,
-  each evaluated. An outside player is one whose checkpoint is an
-  address. `Inference(source=["players/net.py"], config=...).player(ref)` and
+  (`CheckpointRef.key`) is its experiment, training run and name
+  (`ppo/base@1/checkpoints/updates-00000500`) or, for any other, its address;
+  never its bytes, so two runs started from one file hold two checkpoints,
+  each evaluated. The experiment is part of the key, so two experiments'
+  `base@1` are different checkpoints, and a match seating the same players
+  has one key in every experiment that plays it ([Policies](#policies)).
+  `checkpoint_id(experiment=..., run=..., name=...)` spells one by hand; a
+  run without its experiment is refused. An outside player is one whose
+  checkpoint is an address. `Inference(source=["players/net.py"], config=...).player(ref)` and
   `Code(name="heuristic", source=[...])` name the code that plays: its commit
   and source digest are its `Version`, recorded with each match
   (`seats.commit`, `seats.source`) but not part of the key, so changed code
@@ -212,9 +218,11 @@ with evaluating(
   to, such as a seed or a recipe: `CheckpointRef(..., at={"updates": 600},
   line="seed-1")`. A report compares a checkpoint with earlier ones, and
   draws its curve, only within its line. A tracked checkpoint's `ref` fills
-  `line` with the first run of its run's chain of continuations, so a
-  continued learner is one line. Like `at`, it is carried to the seats
-  (`seats.line`, `players.lines`) and is part of no key.
+  `line` with the first run of its run's chain of continuations (plus
+  `/roles/ROLE` for a nondefault role), so each continued policy is one
+  line, and `policy` with the complete
+  [`PolicyKey`](#policies) of that line. Like `at`, both are carried to the
+  seats (`seats.line`, `players.lines`) and are part of no key.
 - **Source files.** A directory stands for the files below it. In a git
   checkout only tracked files count, named by their path in the checkout, so
   caches and scratch files never change a version; an uncommitted edit does,
@@ -355,18 +363,37 @@ with evaluating(
   | `Final(inference=direct)` | its line's last checkpoint, once its run has ended |
   | `Aligned(clock="updates", job="small", inference=direct)` | job `small` at exactly the held checkpoint's updates |
   | `Aligned(clock="running_hours", job="small", at_or_before=True, inference=direct)` | job `small`'s latest checkpoint at or before the held checkpoint's running hours |
+  | `Final(experiment="tla-frontier", job="small", inference=direct)` | the final checkpoint of job `small` of another experiment, `tla-frontier` |
+  | `Final(policy=PolicyKey(experiment="tla-frontier", job="small"), inference=direct)` | the final checkpoint of that one policy: the job's lowest seed |
 
   The remaining rows are relative seats: each names a checkpoint by where it
   stands relative to the one held, and plays it with its own `inference`.
   `Earlier`, `Fraction`, `At` and `Final` look in the held checkpoint's own
-  line unless given a `job`: `Final(job="small", inference=direct)` seats
+  line unless given a policy selector: `Final(job="small", inference=direct)` seats
   job `small`'s final checkpoint, `At(clock="updates", value=0, job="small",
-  ...)` its initial one. `Aligned` always names a job, as the report names it
+  ...)` its initial one. `Aligned` uses the held checkpoint's clock value
+  on the selected policy. A `job` is named as the report names it
   ([tracking](tracking.md#reports)): its launch name, or the full name with
-  its config digest. Leave `job` out to mean the held checkpoint's own line.
-  A job seat fills from each of that job's lines (see Seeds). A hold finds relative seats' checkpoints among
-  its `lines`, the experiment's training lines (`observe(source,
-  experiment).lines`), held or not; `etude eval` and `etude launch` pass them themselves.
+  its config digest. Leave all policy selectors out to mean the held
+  checkpoint's own line.
+  A job seat fills from each of that job's lines (see Seeds).
+
+  Beside `job`, every relative seat takes `experiment=`, `seed=` and
+  `role=`, the parts of a [policy's name](#policies). A seat given any of
+  them leaves the held checkpoint's line, and the parts it leaves out are
+  filled as a key's are: this file's experiment, the experiment's only
+  training job, the run's only role. The seed is the exception: left out, the
+  seat fills from every seed, and `seed=1` keeps it to one. So
+  `Final(experiment="tla-frontier", job="small", inference=direct)` seats the
+  final checkpoint of each seed of another experiment's job. `policy=` takes
+  a `PolicyKey` instead and seats that one policy; a seat given `policy=`
+  and any of the four parts is refused when it is built. An experiment with
+  no runs under the source yet is a gap, as an unstarted job is.
+
+  A hold finds relative seats' checkpoints among its `lines`: the training
+  lines of the experiment and of every other experiment a seat names
+  (`observe(source, experiment).lines` for each), held or not; `etude eval`
+  and `etude launch` pass them themselves.
   A seating against a fixed player and one against a relative seat are held,
   scored and drawn alike. A seating with a relative seat needs an inference
   seat to be relative to. A seating of two fixed players, such as two jobs'
@@ -406,10 +433,11 @@ with evaluating(
   `Aligned(job="small")` fills in as the small job catches up. A relative
   seat resolves to the same checkpoint whenever it is held, so a played
   match never moves as runs save more.
-- **Seeds.** A seating never names a seed. `games` is per config and
+- **Seeds.** A seating need not name a seed. `games` is per config and
   point, a position of the held checkpoint's job: by default the point
   plays every pair of a seed of that job and a seed of the other seat's
-  (its own line, or a fixed player, counting as one), the games split
+  (its own line, a fixed player, or a seat given `seed=` or `policy=`,
+  counting as one), the games split
   evenly over the pairs, the remainder to the lowest by seed, and pooled.
   A job seat waits while any of its seeds may still save there. A seed is a
   line, with the seed its first run declared. `seeds="one"` plays all of a
@@ -529,8 +557,10 @@ type it takes.
 - **`checkpoints=` are the checkpoints a benchmark is held for**, chosen from
   the state. `checkpoint=` names one. A round robin takes `enter=` players
   instead.
-- **`experiment=` holds it for another experiment's runs.** Without it the
-  job belongs to the file's experiment.
+- **It belongs to its file's experiment.** Its eval runs are that
+  experiment's. It reaches another experiment's runs through what it seats:
+  a seat's `experiment=` or `policy=` ([Policies](#policies)), or checkpoints
+  read with `observe`. `EvalJob(experiment=...)` is refused, saying so.
 
 On the machine Etude opens `evaluating(tournament)` and calls `run.play(play)`,
 with `play` imported by name from your checkout and every checkpoint member
@@ -692,6 +722,8 @@ does, unless `--retry-failed`.
   `Checkpoints` is a tuple, so a slice works too; `every(n)`, `at(clock,
   *values)` and `tagged(tag)` choose by ordinal, clock value or tag, and
   `final` is the last checkpoint once a run has finished.
+  `state.policy(PolicyKey(job="small"))` is one policy's line, with its
+  checkpoints in the order they were saved ([Policies](#policies)).
 - **What `eval_jobs` returns.** Every evaluation job the experiment should
   have run or can run by now, each holding a benchmark for the checkpoints it
   chose: the whole list on every call, not only what is new. The pass works
@@ -717,7 +749,9 @@ does, unless `--retry-failed`.
   The evaluating experiment's state need not contain the producer. `eval`,
   `launch` and `queue` use the checkpoint artifact's location and verify
   its digest and byte length; folder checkpoints verify every member.
-  Two different artifacts with the same checkpoint key are refused with
+  A checkpoint's key includes its experiment, so the producer's `base@0` and
+  this experiment's are two checkpoints and are seated together freely. One
+  key with two different artifacts is still refused with
   `checkpoint_key_conflict`, naming the key and both locations, including
   when an earlier delivered evaluation seated the other artifact.
   Local evaluation inherits this computer's environment, including API keys;
@@ -783,6 +817,97 @@ matches were played at several commits (`seats.commit`), "Played at" offers
 each: that commit's view counts every match as played at it. A delivered
 match is not played again for a new commit, so a commit's view holds the
 matches first played at it, and any held again there.
+
+## Policies
+
+```python
+# rival.py: experiment "rival", one job "small", seed 0
+from etude.checkpoints import PolicyKey
+from etude.eval.records import Benchmark, Final, Seating
+from etude.jobs import EvalJob, ExperimentState
+
+from arena import deals, direct, play, world
+
+
+def eval_jobs(state: ExperimentState) -> list[EvalJob]:
+    frontier = Benchmark(
+        name="frontier",
+        environment=world,
+        seatings=(
+            Seating(
+                name="vs tla-frontier small",
+                players=(direct, Final(experiment="tla-frontier", job="small", inference=direct)),
+                configs=deals,
+                games=8,
+            ),
+        ),
+    )
+    mine = state.policy(PolicyKey()).checkpoints  # rival/small@0, by defaults
+    return [EvalJob(play=play, tournament=frontier, checkpoints=mine, max_hours=1)]
+```
+
+```text
+$ etude eval rival.py --source s3://bucket/etude/launch
+rival: state from s3://bucket/etude/launch: 1 training run, 0 eval runs
+eval frontier: 100 new, 0 running, 0 failed
+$ etude eval rival.py --source s3://bucket/etude/launch
+eval frontier: nothing to play
+```
+
+A **policy** is what one run of a job trained: a line of checkpoints over
+training, continuations included. A `PolicyKey` names exactly one, in four
+parts, each with a default:
+
+| Part | Left out |
+|---|---|
+| `experiment` | this file's experiment |
+| `job` | the experiment's only training job |
+| `seed` | the job's lowest seed |
+| `role` | the run's only role |
+
+```python
+PolicyKey(experiment="tla-frontier", job="small", seed=0, role="policy")
+PolicyKey(experiment="tla-frontier", job="small")  # the same policy, by the defaults
+```
+
+- **A key names one policy; a seat selects one or more.** A seat that names
+  a job without a seed fills from every seed of it, the games split over the
+  seed pairs and pooled in the report (Seeds, under
+  [Tournaments](#tournaments)). Above, `tla-frontier`'s `small` has seeds 0
+  and 1, so each point's 8 games per deal are 4 against each. Give the seat
+  `seed=` or `policy=` to meet one.
+- **`state.policy(key)` is the policy's line**: its complete key
+  (`line.policy`, every part filled) and its `checkpoints`. `state` is this
+  file's experiment; for another's, `observe(source,
+  "tla-frontier").policy(PolicyKey(job="small"))`. `job` is the name a seat's
+  `job=` takes: the launch name, or the full name with its config digest.
+- **A default that would have to choose refuses.** With several training
+  jobs and none named, or several roles and none named, the key is refused
+  with an error listing them. So is a job, seed or role the experiment does
+  not have, naming the key. A run that saves every checkpoint without a
+  `role` has the one role `"policy"`, so a key need never say it; a run that
+  later saves a second role ([Training](training.md#several-policies)) makes
+  keys that left `role` out refuse until they name one.
+- **Identity nests.** A policy key names a line of checkpoints; a
+  checkpoint's key is its experiment, run and file
+  (`tla-frontier/small@0/checkpoints/updates-00000500`). A nondefault role
+  adds `/roles/ROLE` after the run, including when two roles reference the
+  same file; `checkpoint_id(role=...)` spells it. A player is a
+  checkpoint and its `Inference`. Results are stored under those keys, so
+  the same players meeting under the same config are one match in every
+  experiment that seats them, and any query that reads several experiments'
+  eval runs pools them. Each experiment's pass and its database still read
+  only that experiment's eval runs: a match another experiment delivered is
+  played again here.
+- **Runs of two experiments never collide.** `tla-frontier/small@0` and
+  `rival/small@0` are different policies with different keys, seated in one
+  tournament like any other two.
+- **Results stored before experiments were part of the key still count.**
+  An eval run that recorded `small@0/checkpoints/updates-00000500` is read
+  as its own experiment's run, the only kind such an eval could seat, so an
+  experiment evaluated earlier shows the same points and its next pass plays
+  nothing again. Stored files are not rewritten. A kept `statsdb` database
+  rebuilds itself once from storage.
 
 ## Querying
 

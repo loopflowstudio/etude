@@ -67,7 +67,9 @@ def trained(tmp_path: Path, bucket: DirectoryStorage) -> list[CheckpointRef]:
         model = tmp_path / "latest.pt"
         model.write_bytes(f"weights {ordinal}".encode())
         artifact = run.checkpoint(model, updates=100 * ordinal)
-        key = checkpoint_id(run="ppo-1", name=PurePosixPath(artifact.uri).name)
+        key = checkpoint_id(
+            experiment=EXPERIMENT, run="ppo-1", name=PurePosixPath(artifact.uri).name
+        )
         saved.append(CheckpointRef(key=key, artifact=artifact))
     run.finish(timeout=30)
     return saved
@@ -96,7 +98,7 @@ def test_a_relative_seat_waits_for_its_checkpoint_and_a_batch_hold_plays_it_once
     saved = trained(tmp_path, bucket)
     # Two learners' checkpoints at the same positions, as two training runs would key them.
     small, large = (
-        [ref.model_copy(update={"key": checkpoint_id(run=line, name=ref.key.rsplit("/", 1)[-1]),
+        [ref.model_copy(update={"key": checkpoint_id(experiment=EXPERIMENT, run=line, name=ref.key.rsplit("/", 1)[-1]),
                                 "at": {"updates": 100 * n}, "line": line})
          for n, ref in enumerate(saved, 1)]
         for line in ("small-1", "large-1")
@@ -156,7 +158,7 @@ def test_an_aligned_hours_seat_takes_the_other_jobs_latest_checkpoint_once_it_ha
     saved = trained(tmp_path, bucket)
     # No checkpoint is saved at an exact hour: small saves a little before each, large on it.
     small, large = (
-        [ref.model_copy(update={"key": checkpoint_id(run=line, name=ref.key.rsplit("/", 1)[-1]),
+        [ref.model_copy(update={"key": checkpoint_id(experiment=EXPERIMENT, run=line, name=ref.key.rsplit("/", 1)[-1]),
                                 "at": {"running_hours": hours}, "line": line})
          for ref, hours in zip(saved, positions, strict=True)]
         for line, positions in (("small-1", (0.9, 1.8, 2.7)), ("large-1", (1.0, 2.0, 3.0)))
@@ -567,7 +569,7 @@ def test_a_seed_added_splits_the_point_again_and_counts_only_the_new_split(
     bucket = DirectoryStorage(tmp_path / "bucket")
     saved = trained(tmp_path, bucket)[:1]
     small, small_2, large = (
-        ref.model_copy(update={"key": checkpoint_id(run=line, name=ref.key.rsplit("/", 1)[-1]),
+        ref.model_copy(update={"key": checkpoint_id(experiment=EXPERIMENT, run=line, name=ref.key.rsplit("/", 1)[-1]),
                                "at": {"updates": 100}, "line": line})
         for ref in saved
         for line in ("small-1", "small-2", "large-1")
@@ -690,7 +692,9 @@ def test_two_keys_holding_the_same_bytes_are_two_models_each_played(tmp_path: Pa
     # Two runs warm-started from one file: the same bytes, two checkpoints.
     file = ArtifactRef(uri="s3://models/init.pt", sha256=sha256(b"init").hexdigest())
     starts = [
-        CheckpointRef(key=checkpoint_id(run=run, name="updates-100.pt"), artifact=file)
+        CheckpointRef(
+            key=checkpoint_id(experiment=EXPERIMENT, run=run, name="updates-100.pt"), artifact=file
+        )
         for run in ("ppo-1", "ppo-2")
     ]
     played = hold(ladder, experiment=EXPERIMENT, checkpoints=starts, play=play,

@@ -85,6 +85,7 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import JsonValue
 
+from etude.checkpoints import CheckpointRecord
 from etude.errors import EtudeError
 from etude.eval.records import Gap, Scheduled, Tournament
 from etude.experiment_file import experiment_named, refuse_renamed
@@ -800,7 +801,7 @@ def _held_tournaments(
         except EtudeError as error:
             refused.append(f"Tournament {name} is not shown: it is refused ({error.code}).")
             continue
-        tournament, gaps = given.resolve(state.lines)
+        tournament, gaps = given.resolve(state.lines, experiment=state.experiment)
         held_tournaments.append(
             _HeldTournament(name, tournament, tuple(tournament.schedule()), gaps, found)
         )
@@ -821,7 +822,10 @@ def _wanted(want: Callable[..., object], state: ExperimentState) -> list[Tournam
         wanted.append(
             Tournament(
                 definition=spec.tournament,
-                checkpoints=tuple(each.ref for each in spec.checkpoints),
+                checkpoints=tuple(
+                    each.ref if isinstance(each, CheckpointRecord) else each
+                    for each in spec.checkpoints
+                ),
                 entrants=spec.entrants,
             )
         )

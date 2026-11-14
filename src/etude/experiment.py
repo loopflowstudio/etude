@@ -16,18 +16,23 @@ from pathlib import Path
 from typing import Literal
 
 import etude.jobs as jobs
-from etude.checkpoints import CheckpointRecord
+from etude.checkpoints import CheckpointRecord, PolicyKey
 from etude.eval.records import Match
 from etude.launch import client
 from etude.launch.records import Standing
 from etude.records import RunOutcome
+from etude.run import LocatedRun
 from etude.storage import Storage
 from etude.train.read import RunData, lines, read_all
 from etude.train.report import job_names
 
 
 def observe(
-    source: Storage | Path | str, experiment: str, *, keys: Sequence[str] | None = None
+    source: Storage | Path | str,
+    experiment: str,
+    *,
+    keys: Sequence[str] | None = None,
+    declarations: Sequence[LocatedRun] | None = None,
 ) -> jobs.ExperimentState:
     """The experiment's training runs under a directory or bucket and their stored checkpoints.
 
@@ -36,7 +41,7 @@ def observe(
     no metric block or index.
     """
     return state_of(
-        read_all(source, experiment, metrics=frozenset(), keys=keys),
+        read_all(source, experiment, metrics=frozenset(), keys=keys, declarations=declarations),
         experiment,
         retained=client.standing(experiment),
     )
@@ -59,12 +64,24 @@ def state_of(
     ]
     line = lines(ours)
     job = job_names(ours)
+    by_name = {data.name: data for data in ours}
     retained = client.standing(experiment, local=True) if retained is None else retained
     runs = []
     for data in ours:
+        first = by_name.get(line[data.name], data)
         saved = jobs.Checkpoints(
             record.model_copy(
-                update={"run": data.name, "experiment": data.experiment, "line": line[data.name]}
+                update={
+                    "run": data.name,
+                    "experiment": data.experiment,
+                    "line": line[data.name],
+                    "policy": PolicyKey(
+                        experiment=data.experiment,
+                        job=job[first.name].name,
+                        seed=first.file.seed if first.file else None,
+                        role=record.role,
+                    ),
+                }
             )
             for record in data.checkpoints
             if record.artifact.sha256 is not None and record.artifact.size_bytes is not None
@@ -98,7 +115,10 @@ def state_of(
         text = record.launch.spec.config
         config = json.loads(text) if text else {}
         if "tournament" in config and "matches" in config:
-            matches = tuple(Match.model_validate(m).key for m in config.get("matches") or ())
+            matches = tuple(
+                Match.model_validate(m, context={"experiment": experiment}).key
+                for m in config.get("matches") or ()
+            )
             prior = next((r for r in eval_runs if r.name == name), None)
             if prior is not None:
                 eval_runs.remove(prior)

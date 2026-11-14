@@ -24,6 +24,7 @@ from etude.eval.records import (
     Inference,
     Line,
     Match,
+    Relative,
     RoundRobin,
     Seated,
     Seating,
@@ -36,7 +37,7 @@ from etude.records import ArtifactRef
 DIGEST = "0" * 64
 WORLD = Environment(name="world", files="1" * 64)
 U500 = CheckpointRef(
-    key=checkpoint_id(run="ppo-1", name="updates-500.pt"),
+    key=checkpoint_id(experiment="", run="ppo-1", name="updates-500.pt"),
     artifact=ArtifactRef(uri="s3://b/updates-500.pt", sha256=DIGEST),
 )
 SEARCH = Inference(config={"sims": 64})
@@ -137,7 +138,7 @@ def test_etude_sdk_0_2_players_load_and_equal_no_player_since() -> None:
     assert model.checkpoint.artifact.uri == "s3://models/updates-100.pt"
     now = Inference(config={"search": 0}).player(
         CheckpointRef(
-            key=checkpoint_id(run="ppo-1", name="updates-100.pt"),
+            key=checkpoint_id(experiment="", run="ppo-1", name="updates-100.pt"),
             artifact=ArtifactRef(uri="s3://models/updates-100.pt", sha256=sha),
         )
     )
@@ -151,7 +152,7 @@ def test_a_model_needs_its_checkpoint_digest() -> None:
 
 def _ref(run: str, updates: float) -> CheckpointRef:
     return CheckpointRef(
-        key=checkpoint_id(run=run, name=f"updates-{updates:g}.pt"),
+        key=checkpoint_id(experiment="", run=run, name=f"updates-{updates:g}.pt"),
         artifact=ArtifactRef(uri=f"file:///{run}/{updates:g}.pt", sha256=DIGEST),
         at={"updates": updates},
         line=run,
@@ -425,3 +426,49 @@ def test_tournament_configs_keep_released_conditions_bytes_and_warnings() -> Non
             assert old.conditions == current.configs
         with pytest.raises(ValidationError):
             type(current).model_validate({**current.model_dump(), "config": current.configs})
+
+
+@pytest.mark.parametrize(
+    "seat",
+    [
+        Final(inference=SEARCH),
+        At(clock="updates", value=100, inference=SEARCH),
+        Earlier(clock="updates", by=100, inference=SEARCH),
+        Fraction(clock="updates", value=0.5, inference=SEARCH),
+        Aligned(clock="updates", inference=SEARCH),
+    ],
+)
+def test_policy_seat_key_selects_one_seed_and_parts_select_every_seed(seat: Relative) -> None:
+    mine = _line("mine", "mine", 200, seed=0, ended=True).model_copy(update={"experiment": "rival"})
+    other = [
+        _line(f"small@{seed}", "small", 100, 200, seed=seed, ended=True).model_copy(
+            update={"experiment": "frontier"}
+        )
+        for seed in (0, 1)
+    ]
+    named = seat.model_copy(update={"experiment": "frontier", "job": "small"})
+    seating: Seating[dict[str, JsonValue]] = Seating(
+        name="named", players=(SEARCH, named), configs=({},), games=8
+    )
+    found = seating.resolve(mine.checkpoints[0], [mine, *other])
+    assert isinstance(found, Seated) and [p.games for p in found.pairings] == [4, 4]
+    keyed = type(seat).model_validate(
+        {**seat.model_dump(), "policy": {"experiment": "frontier", "job": "small"}}
+    )
+    found = seating.model_copy(update={"players": (SEARCH, keyed)}).resolve(
+        mine.checkpoints[0], [mine, *other]
+    )
+    assert isinstance(found, Seated) and [p.games for p in found.pairings] == [8]
+    assert found.pairings[0].seats[1] in other[0].checkpoints
+    with pytest.raises(ValidationError, match="a seat takes policy="):
+        type(seat).model_validate({**named.model_dump(), "policy": {"job": "small"}})
+
+
+def test_legacy_structured_keys_qualify_only_with_read_context() -> None:
+    old = Match.model_validate_json(OLD_MATCH)
+    qualified = Match.model_validate_json(OLD_MATCH, context={"experiment": "frontier"})
+    assert isinstance(qualified.players[0], CheckpointPlayer)
+    assert qualified.players[0].checkpoint.key == "frontier/ppo-1/checkpoints/updates-500.pt"
+    assert qualified.key != old.key
+    with pytest.raises(ValueError, match="needs experiment="):
+        checkpoint_id(run="small@0", name="updates-100")

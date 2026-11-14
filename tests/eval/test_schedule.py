@@ -47,7 +47,7 @@ class Runtime:
 def checkpoint(updates: int) -> CheckpointPlayer:
     name = f"updates-{updates}.pt"
     artifact = ArtifactRef(uri=f"s3://models/{name}", sha256=sha256(name.encode()).hexdigest())
-    ref = CheckpointRef(key=checkpoint_id(run="ppo-1", name=name), artifact=artifact)
+    ref = CheckpointRef(key=checkpoint_id(experiment="", run="ppo-1", name=name), artifact=artifact)
     return Inference().player(ref)
 
 
@@ -128,7 +128,7 @@ def test_two_checkpoint_keys_holding_the_same_bytes_are_two_checkpoints() -> Non
     file = ArtifactRef(uri="s3://models/init.pt", sha256=sha256(b"init").hexdigest())
     starts = [
         Inference().player(CheckpointRef(
-            key=checkpoint_id(run=run, name="updates-100.pt"), artifact=file))
+            key=checkpoint_id(experiment="", run=run, name="updates-100.pt"), artifact=file))
         for run in ("ppo-1", "ppo-2")
     ]  # fmt: skip
     assert len(checkpoints(Match(players=(starts[0], starts[1])))) == 2

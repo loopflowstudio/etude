@@ -7,6 +7,8 @@ import pytest
 from pydantic import BaseModel
 
 from etude.carriage import RecordMismatch, put_back, recorded_file, recorded_files, restore_set
+from etude.checkpoints import PolicyKey
+from etude.errors import EtudeError
 from etude.eval.match import environment, evaluate
 from etude.eval.query import statsdb
 from etude.eval.records import Code, Inference, Match
@@ -140,3 +142,85 @@ def test_exported_folder_is_immutable_and_a_failed_export_publishes_nothing(tmp_
             run.checkpoint(failed, updates=2)
         assert len(run.checkpoints()) == 2
         assert not list((run.out / "checkpoints").glob(".*"))
+
+
+def test_policy_key_defaults_and_roles_keep_separate_checkpoint_lines(tmp_path: Path) -> None:
+    def export(folder: Path) -> None:
+        (folder / "weights.bin").write_bytes(b"same weights")
+
+    for seed in (2, 0):
+        with track(
+            experiment="league",
+            run=f"small@{seed}",
+            job="small",
+            seed=seed,
+            directory=tmp_path,
+            clocks=["updates"],
+            strict=True,
+        ) as run:
+            run.checkpoint(export, updates=100)
+            run.checkpoint(export, updates=100, role="exploiter")
+            assert len(run.checkpoints()) == 2
+    state = observe(tmp_path, "league")
+    with pytest.raises(EtudeError, match="ambiguous_policy.*"):
+        state.policy(PolicyKey())
+    line = state.policy(PolicyKey(role="exploiter"))
+    assert line.policy == PolicyKey(experiment="league", job="small", seed=0, role="exploiter")
+    assert len(line.checkpoints) == 1
+    assert "exploiter.updates-00000100" in line.checkpoints[0].key
+    assert line.checkpoints[0].policy == line.policy
+    with pytest.raises(EtudeError, match="policy_not_found"):
+        state.policy(PolicyKey(job="missing"))
+
+
+def test_policy_key_defaults_choose_lowest_seed_and_list_ambiguous_jobs(tmp_path: Path) -> None:
+    for job, seed in (("small", 2), ("small", 0)):
+        with track(
+            experiment="defaults",
+            run=f"{job}@{seed}",
+            job=job,
+            seed=seed,
+            directory=tmp_path,
+            clocks=["updates"],
+            strict=True,
+        ) as run:
+            path = run.out / "weights.pt"
+            path.write_bytes(b"weights")
+            run.checkpoint(path, updates=1)
+    assert observe(tmp_path, "defaults").policy(PolicyKey()).policy == PolicyKey(
+        experiment="defaults", job="small", seed=0, role="policy"
+    )
+    with track(
+        experiment="defaults",
+        run="large@0",
+        job="large",
+        seed=0,
+        directory=tmp_path,
+        clocks=["updates"],
+        strict=True,
+    ):
+        pass
+    with pytest.raises(EtudeError, match="choose job from.*large.*small"):
+        observe(tmp_path, "defaults").policy(PolicyKey())
+
+
+def test_policy_roles_reference_one_out_file_without_sharing_identity(tmp_path: Path) -> None:
+    with track(
+        experiment="roles",
+        run="small@0",
+        job="small",
+        directory=tmp_path,
+        clocks=["updates"],
+        strict=True,
+    ) as run:
+        path = run.out / "weights.pt"
+        path.write_bytes(b"shared weights")
+        run.checkpoint(path, updates=1)
+        run.checkpoint(path, updates=1, role="exploiter")
+    state = observe(tmp_path, "roles")
+    main = state.policy(PolicyKey(role="policy"))
+    exploiter = state.policy(PolicyKey(role="exploiter"))
+    assert main.checkpoints[0].artifact == exploiter.checkpoints[0].artifact
+    assert main.checkpoints[0].key == "roles/small@0/out/weights.pt"
+    assert exploiter.checkpoints[0].key == "roles/small@0/roles/exploiter/out/weights.pt"
+    assert main.checkpoints[0].line != exploiter.checkpoints[0].line

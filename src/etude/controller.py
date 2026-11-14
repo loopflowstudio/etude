@@ -11,6 +11,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal
 
+from etude.checkpoints import CheckpointRecord
 from etude.declarations import (
     Experiment,
     asked,
@@ -20,7 +21,17 @@ from etude.declarations import (
     select_runs,
 )
 from etude.errors import EtudeError, LauncherError
-from etude.eval.records import Match, digest, folder_name
+from etude.eval.records import (
+    Aligned,
+    At,
+    Benchmark,
+    Earlier,
+    Final,
+    Fraction,
+    Match,
+    digest,
+    folder_name,
+)
 from etude.eval.tournament import StoredRuns, played
 from etude.experiment import observe
 from etude.jobs import (
@@ -35,6 +46,7 @@ from etude.jobs import (
 from etude.launch import client
 from etude.launch.listing import show_quote
 from etude.launch.server import selected
+from etude.run import located_runs
 from etude.smoke import smoke_file
 from etude.spec import Job, RunRequest, Smoke, Until
 from etude.storage import Storage, default_root
@@ -133,7 +145,8 @@ def advance(
     if max_usd is not None and (not max_usd.is_finite() or max_usd < 0):
         raise LauncherError("--max-usd must be a finite, nonnegative dollar limit")
     listed = source.keys("")
-    state = observe(source, experiment.name, keys=listed)
+    declarations = located_runs(source, listed)
+    state = observe(source, experiment.name, keys=listed, declarations=declarations)
     committed = state.committed_usd
     print(
         f"{experiment.name}: state from {source.uri('run.json').removesuffix('/run.json')}: "
@@ -179,6 +192,31 @@ def advance(
         if experiment.eval is not None and evaluate
         else []
     )
+    # Discover only experiments named by a held checkpoint or a relative seat. All
+    # observations share the same declarations and listing; no declaration is read twice.
+    named: set[str] = set()
+    for executable in jobs:
+        spec = evaluation_spec(executable)
+        if not isinstance(spec.tournament, Benchmark) or not any(
+            s.relative for s in spec.tournament.seatings
+        ):
+            continue
+        named.update(
+            c.policy.experiment
+            for c in spec.checkpoints
+            if c.policy is not None and c.policy.experiment is not None
+        )
+        if isinstance(spec.tournament, Benchmark):
+            for seating in spec.tournament.seatings:
+                for seat in seating.players:
+                    if not isinstance(seat, (Aligned, At, Earlier, Final, Fraction)):
+                        continue
+                    name = seat.policy.experiment if seat.policy is not None else seat.experiment
+                    if name is not None:
+                        named.add(name)
+    policy_lines = list(state.lines)
+    for name in sorted(named - {experiment.name}):
+        policy_lines.extend(observe(source, name, keys=listed, declarations=declarations).lines)
     smoke = Smoke()
     if smoke_file_first and not quote:
         assert experiment.file is not None
@@ -202,16 +240,23 @@ def advance(
     taken = {f"{experiment.name}/{run.name}" for run in state.eval_runs}
     decisions: list[TournamentDecision] = []
     stopped_runs: set[str] = set()
-    stored = StoredRuns.read(experiment.name, source, keys=listed) if jobs else None
+    stored = (
+        StoredRuns.read(experiment.name, source, keys=listed, declarations=declarations)
+        if jobs
+        else None
+    )
     for executable in jobs:
         spec = evaluation_spec(executable)
         found = played(
             spec.tournament,
             experiment=experiment.name,
-            checkpoints=tuple(each.ref for each in spec.checkpoints),
+            checkpoints=tuple(
+                each.ref if isinstance(each, CheckpointRecord) else each
+                for each in spec.checkpoints
+            ),
             enter=spec.entrants,
             runs=stored,
-            lines=state.lines,
+            lines=policy_lines,
         )
         wanted = [*found.new, *(found.failed if retry_failed else ())]
         pending = [match for match in wanted if match.key not in running]
@@ -228,10 +273,19 @@ def advance(
             done.stopped = tuple(sorted(stopped))
             pending = [match for match in pending if match.key not in failed]
         if pending and mode == "local":
-            done.played = _play_here(spec, executable, pending, state, source, directory)
+            done.played = _play_here(
+                spec.model_copy(update={"lines": tuple(policy_lines)}),
+                executable,
+                pending,
+                state,
+                source,
+                directory,
+            )
             running.update(m.key for m in pending)
         elif pending:
             executable = with_matches(executable, pending, state)
+            expanded = evaluation_spec(executable).model_copy(update={"lines": tuple(policy_lines)})
+            executable = executable.model_copy(update={"config": expanded.model_dump_json()})
             if _fits(executable, committed, max_usd):
                 stem = f"{experiment.name}/{folder_name(spec.tournament.name)}-{digest(sorted(m.key for m in pending))[:12]}"
                 done.launched = stem
@@ -290,7 +344,7 @@ def _play_here(
             spec.model_copy(
                 update={
                     "matches": tuple(pending),
-                    "lines": state.lines,
+                    "lines": spec.lines or state.lines,
                 }
             ),
             files=here,

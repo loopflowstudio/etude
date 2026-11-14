@@ -73,7 +73,7 @@ from etude.eval.records import (
 from etude.eval.run import ETUDE_TABLES, EvalResult, EvalRun, Result, Tables, _evaluating_matches
 from etude.eval.schedule import ordered
 from etude.records import Digest, Record, RunRecord
-from etude.run import declare, run_folders, under
+from etude.run import LocatedRun, declare, run_folders, under
 from etude.storage import DirectoryStorage, Storage, default_root
 
 if TYPE_CHECKING:
@@ -134,7 +134,7 @@ def evaluating(
     given = (checkpoint,) if checkpoint is not None else tuple(checkpoints)
     added = _added(tournament, given, enter, share)
     if matches is not None:
-        resolved, _ = assemble([added]).resolve(lines)
+        resolved, _ = assemble([added]).resolve(lines, experiment=experiment)
         added = added.model_copy(update={"seated": resolved.seated})
         called = {each.match.key for each in resolved.schedule()}
         if not all(each.key in called for each in matches):
@@ -315,22 +315,34 @@ class StoredRuns:
 
     @classmethod
     def read(
-        cls, experiment: str, place: Storage, *, keys: Sequence[str] | None = None
+        cls,
+        experiment: str,
+        place: Storage,
+        *,
+        keys: Sequence[str] | None = None,
+        declarations: Sequence[LocatedRun] | None = None,
     ) -> StoredRuns:
         """Read one source, optionally using the caller's existing listing."""
         keys = sorted(place.keys("") if keys is None else keys)
         listed = set(keys)
+        declared = {
+            folder: item.file.experiment for item in declarations or () for folder in item.folders
+        }
         folders: list[_Folder] = []
         for run, held_in in sorted(run_folders(keys).items()):
             for folder in held_in:
                 held_file = folder + TOURNAMENT_FILE in listed
                 if not held_file and folder + _ENVIRONMENT_FILE not in listed:
                     continue
-                if _experiment(place, folder) != experiment:
+                if (
+                    declared.get(folder) if declarations is not None else _experiment(place, folder)
+                ) != experiment:
                     continue
                 names = tuple(key[len(folder) :] for key in under(keys, folder))
                 if held_file:
-                    held = TournamentRun.model_validate_json(place.get(folder + TOURNAMENT_FILE))
+                    held = TournamentRun.model_validate_json(
+                        place.get(folder + TOURNAMENT_FILE), context={"experiment": experiment}
+                    )
                     folders.append(_Folder(place, run, folder, names, held, None))
                 else:
                     given = Environment.model_validate_json(place.get(folder + _ENVIRONMENT_FILE))
@@ -360,6 +372,7 @@ class StoredRuns:
                     each.run,
                     each.names,
                     self._blocks.setdefault(each.run, {}),
+                    experiment=self.experiment,
                 )
                 for record in block.matches
             ]
@@ -428,7 +441,7 @@ def _called(
     known = {_found(each) for each in tournament.seated}
     if wanted_only:
         tournament = assemble([added]).model_copy(update={"seated": tournament.seated})
-    tournament, _ = tournament.resolve(lines)
+    tournament, _ = tournament.resolve(lines, experiment=experiment)
     found = tuple(each for each in tournament.seated if _found(each) not in known)
     # Two seatings may share a match; it is played once.
     matches = {

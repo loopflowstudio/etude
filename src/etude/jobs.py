@@ -27,7 +27,13 @@ from pydantic import BaseModel, Field, JsonValue, ValidationError, field_validat
 from etude.cache import Artifact, Content, ContentMismatch, Corrupt
 from etude.call import Function, changed_config, config_type
 from etude.carriage import CHECKPOINTS, OUT_PRESENT, checkpoint_file_name, checkpoint_key
-from etude.checkpoints import CheckpointId, CheckpointRecord, CheckpointRef, checkpoint_id
+from etude.checkpoints import (
+    CheckpointId,
+    CheckpointRecord,
+    CheckpointRef,
+    PolicyKey,
+    checkpoint_id,
+)
 from etude.errors import EtudeError, LauncherError
 from etude.eval.match import EvalResult
 from etude.eval.records import (
@@ -40,6 +46,7 @@ from etude.eval.records import (
     TournamentRun,
     assemble,
     digest,
+    select_policies,
 )
 from etude.eval.run import Result, Tables
 from etude.eval.tournament import evaluating
@@ -134,6 +141,14 @@ class ExperimentState:
                 return each
         raise EtudeError("run_not_found", 404) from ValueError(name)
 
+    def policy(self, key: PolicyKey) -> Line:
+        found = select_policies(self.lines, key, experiment=self.experiment)
+        if len(found) != 1:
+            raise EtudeError(
+                "policy_not_found" if not found else "ambiguous_policy", 422, detail=str(key)
+            )
+        return found[0]
+
     @property
     def lines(self) -> tuple[Line, ...]:
         """Each learner line, as relative seats find checkpoints in it: seeded as its first
@@ -141,17 +156,25 @@ class ExperimentState:
         found: dict[str, list[TrainingRunSummary]] = {}
         for run in self.runs:
             found.setdefault(run.line, []).append(run)
-        made = (
-            Line(
-                name=name,
-                seed=next((run.seed for run in runs if run.name == name), runs[0].seed),
-                job=runs[0].job,
-                launch=runs[0].launch,
-                ended=all(run.ended for run in runs),
-                checkpoints=tuple(c.ref for run in runs for c in run.checkpoints),
-            )
-            for name, runs in found.items()
-        )
+        made = []
+        for name, runs in found.items():
+            first = next((run for run in runs if run.name == name), runs[0])
+            roles = {c.role for run in runs for c in run.checkpoints} or {"policy"}
+            for role in sorted(roles):
+                made.append(
+                    Line(
+                        name=name + ("/roles/" + role if role != "policy" else ""),
+                        experiment=self.experiment,
+                        role=role,
+                        seed=first.seed,
+                        job=first.job,
+                        launch=first.launch,
+                        ended=all(run.ended for run in runs),
+                        checkpoints=tuple(
+                            c.ref for run in runs for c in run.checkpoints if c.role == role
+                        ),
+                    )
+                )
         return tuple(sorted(made, key=lambda line: line.order))
 
     def checkpoint(self, key: CheckpointId) -> CheckpointRecord | None:
@@ -165,7 +188,7 @@ class ExperimentState:
 def checkpoint_inputs(
     matches: Iterable[Match],
     state: ExperimentState,
-    checkpoints: Sequence[CheckpointRecord] = (),
+    checkpoints: Sequence[CheckpointRecord | CheckpointRef] = (),
 ) -> dict[str, CheckpointRecord | CheckpointRef]:
     """The checkpoints seated, keeping producer records where available.
 
@@ -180,9 +203,7 @@ def checkpoint_inputs(
                 continue
             ref = player.checkpoint
             record = declared.get(ref.key) or state.checkpoint(ref.key)
-            # Compact checkpoint keys can coincide across experiments. The
-            # seated artifact, not this experiment's matching spelling, owns the bytes.
-            saved = record if record is not None and record.artifact == ref.artifact else ref
+            saved = record or ref
             if saved.artifact.sha256 is None or saved.artifact.size_bytes is None:
                 raise EtudeError("checkpoint_not_stored", 404, detail=ref.key)
             found[ref.key] = saved
@@ -192,7 +213,7 @@ def checkpoint_inputs(
 def fetch_checkpoints(
     matches: Sequence[Match],
     state: ExperimentState,
-    checkpoints: Sequence[CheckpointRecord],
+    checkpoints: Sequence[CheckpointRecord | CheckpointRef],
     folder: Path,
 ) -> dict[str, str]:
     """Verify seated artifacts into a caller-owned folder and return their local URIs by key."""
@@ -256,7 +277,7 @@ class Evaluation(Record):
     # A benchmark's checkpoint; released single-file inputs remain readable.
     checkpoint: CheckpointRecord | Input | None = None
     # Checkpoints an experiment's eval chose to hold the benchmark for.
-    checkpoints: tuple[CheckpointRecord, ...] = ()
+    checkpoints: tuple[CheckpointRecord | CheckpointRef, ...] = ()
     # A round robin's entrants.
     entrants: tuple[Player, ...] = ()
     workers: int = Field(default=1, ge=1)
@@ -329,7 +350,7 @@ class EvalJob[M: BaseModel | Mapping[str, JsonValue]](Job):
     play: Callable[[Match[M]], Tables | Result] = Field(exclude=True)
     tournament: Benchmark | RoundRobin = Field(exclude=True)
     checkpoint: CheckpointRecord | Input | None = Field(default=None, exclude=True)
-    checkpoints: Sequence[CheckpointRecord] = Field(default=(), exclude=True)
+    checkpoints: Sequence[CheckpointRecord | CheckpointRef] = Field(default=(), exclude=True)
     enter: Sequence[Player] = Field(default=(), exclude=True)
     workers: int = Field(default=1, ge=1, exclude=True)
     extras: tuple[str, ...] = Field(default=(), exclude=True)
@@ -346,6 +367,10 @@ class EvalJob[M: BaseModel | Mapping[str, JsonValue]](Job):
 
     @model_validator(mode="after")
     def _validate_evaluation(self) -> EvalJob[M]:
+        if self.experiment is not None:
+            raise LauncherError(
+                "EvalJob belongs to its file's experiment; use experiment= or policy= on a seat"
+            )
         if self.name and self.name != self.tournament.name:
             raise LauncherError("an EvalJob is named by its tournament")
         object.__setattr__(self, "name", self.tournament.name)
@@ -393,7 +418,9 @@ class EvalJob[M: BaseModel | Mapping[str, JsonValue]](Job):
             [
                 TournamentRun(
                     tournament=self.tournament,
-                    checkpoints=tuple(c.ref for c in spec.checkpoints),
+                    checkpoints=tuple(
+                        c.ref if isinstance(c, CheckpointRecord) else c for c in spec.checkpoints
+                    ),
                     entrants=spec.entrants,
                 )
             ]
@@ -434,14 +461,10 @@ def evaluation_spec(job: Job) -> Evaluation:
 def with_experiment(job: Job, experiment: str) -> Job:
     """The evaluation job an experiment's `eval_jobs(state)` returned, as one of `experiment`.
 
-    Raises `EtudeError("eval_job_of_another_experiment")` for a job naming
-    another experiment, and `EtudeError("not_an_evaluation_job")` for one that
-    is not an evaluation.
+    Raises `EtudeError("not_an_evaluation_job")` for a non-evaluation job.
     """
     job = job.plain()
     spec = evaluation_spec(job)
-    if spec.experiment not in (None, experiment):
-        raise EtudeError("eval_job_of_another_experiment", 422) from ValueError(spec.experiment)
     spec = spec.model_copy(update={"experiment": experiment})
     return job.model_copy(update={"config": spec.model_dump_json(), "experiment": experiment})
 
@@ -469,13 +492,41 @@ def hold_evaluation(
         spec = spec.model_copy(
             update={"matches": tuple(_relocated(m, files) for m in spec.matches)}
         )
+    checkpoints = tuple(
+        each.ref if isinstance(each, CheckpointRecord) else each for each in spec.checkpoints
+    )
+    if spec.matches is not None:
+        # A queued job may predate experiment-qualified identity. Its explicit
+        # matches own the spelling used by that worker and its earlier blocks.
+        references = {
+            player.checkpoint.key: player.checkpoint
+            for match in spec.matches
+            for player in match.players
+            if isinstance(player, CheckpointPlayer)
+        }
+        seated: dict[str, CheckpointRef] = {}
+        for ref in references.values():
+            qualified = CheckpointRef.model_validate(
+                ref.model_dump(), context={"experiment": spec.experiment}
+            )
+            if qualified.key != ref.key:
+                seated[qualified.key] = ref
+        if seated:
+            checkpoints = tuple(
+                seated.get(ref.key, ref).model_copy(update={"artifact": ref.artifact})
+                for ref in checkpoints
+            )
+            if checkpoint is not None:
+                checkpoint = seated.get(checkpoint.key, checkpoint).model_copy(
+                    update={"artifact": checkpoint.artifact}
+                )
     # Loaded by import path: the function `evaluation` was given, typed there.
     play = cast(Callable[[Match], Tables | Result], spec.play.load(checkout))
     with evaluating(
         spec.tournament,
         experiment=spec.experiment,
         checkpoint=checkpoint,
-        checkpoints=tuple(each.ref for each in spec.checkpoints),
+        checkpoints=checkpoints,
         enter=spec.entrants,
         matches=spec.matches,
         workers=spec.workers,
@@ -790,13 +841,19 @@ def _hold(evaluation: Evaluation) -> None:
     if isinstance(given, CheckpointRecord):
         # The record keeps its own key; only its bytes moved, to this input.
         uri = (Path(str(folder)) / _BENCHMARK_CHECKPOINT).as_uri()
-        checkpoint = given.ref.model_copy(
+        ref = (
+            given.ref
+            if given.experiment
+            else given.model_copy(update={"experiment": evaluation.experiment}).ref
+        )
+        checkpoint = ref.model_copy(
             update={"artifact": given.artifact.model_copy(update={"uri": uri})}
         )
     elif given is not None:
         # A training run's file is keyed by its run and name; any other, by where it lies.
         key = (
             checkpoint_id(
+                experiment=evaluation.experiment if "/" not in given.run else "",
                 run=given.run,
                 name=given.key if given.key.startswith("out/") else checkpoint_file_name(given.key),
             )

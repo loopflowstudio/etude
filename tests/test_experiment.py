@@ -277,7 +277,7 @@ def test_an_eval_job_belongs_to_the_experiment_of_its_file(tmp_path: Path) -> No
     def elsewhere(state: ExperimentState) -> Job:
         return EvalJob(tournament=progress, experiment="another", play=play, max_hours=0.1)
 
-    with pytest.raises(EtudeError, match="eval_job_of_another_experiment"):
+    with pytest.raises(LauncherError, match="EvalJob belongs to its file"):
         advance(Experiment(name="ppo", eval=elsewhere), source=bucket, directory=tmp_path / "e")
 
 

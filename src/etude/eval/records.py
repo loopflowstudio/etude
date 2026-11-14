@@ -66,7 +66,7 @@ from pydantic import (
 )
 from typing_extensions import TypeVar
 
-from etude.checkpoints import CheckpointId, CheckpointRef, checkpoint_id
+from etude.checkpoints import CheckpointId, CheckpointRef, PolicyKey, checkpoint_id
 from etude.errors import EtudeError
 from etude.eval.source import digest_files, source_commit
 from etude.records import BUILT_IN_NAMES, Digest, Name, Record
@@ -525,7 +525,31 @@ class Rollup(Record):
         return self
 
 
-class _OnClock(Record):
+class _PolicySeat(Record):
+    """A named policy selection; absent parts retain the released relative-seat definition."""
+
+    experiment: str | None = None
+    job: str | None = None
+    seed: int | None = None
+    role: str | None = None
+    policy: PolicyKey | None = None
+
+    @model_validator(mode="after")
+    def _one_selection(self) -> Self:
+        if self.policy is not None and any(
+            value is not None for value in (self.experiment, self.job, self.seed, self.role)
+        ):
+            raise ValueError("a seat takes policy= or experiment/job/seed/role, not both")
+        return self
+
+    @property
+    def named(self) -> bool:
+        return self.policy is not None or any(
+            value is not None for value in (self.experiment, self.job, self.seed, self.role)
+        )
+
+
+class _OnClock(_PolicySeat):
     """A relative seat that looks for a value of `clock`, playing as `inference`.
 
     It looks in the held checkpoint's line, or with `job` in each of that
@@ -540,7 +564,6 @@ class _OnClock(Record):
 
     clock: str
     inference: Inference
-    job: str | None = None
     at_or_before: bool = False
     trained: bool = False
 
@@ -569,19 +592,17 @@ class At(_OnClock):
     value: float
 
 
-class Final(Record):
+class Final(_PolicySeat):
     """The held checkpoint's line's last checkpoint, once its run has ended, finished or failed."""
 
     kind: Literal["final"] = "final"
     inference: Inference
-    job: str | None = None
 
 
 class Aligned(_OnClock):
     """Each of job `job`'s lines at exactly where the held checkpoint stood on `clock`."""
 
     kind: Literal["aligned"] = "aligned"
-    job: str
 
 
 # A seat naming a checkpoint by where it stands relative to the one a seating is held for.
@@ -599,7 +620,8 @@ _EXACT = 1e-9
 class Line(Record):
     """A learner line as relative seats find it: a training run and the runs continuing it.
 
-    `name` is its first run, as `CheckpointRef.line` names it; `seed` the
+    `name` is its first run (with `/roles/ROLE` for a nondefault role), as
+    `CheckpointRef.line` names it; `seed` the
     seed that run declared; `job` the full name the report gives its job,
     `launch` its launch name; `ended` whether its latest run has ended, so it
     saves no more. `checkpoints` are its stored checkpoints in the order they
@@ -607,6 +629,8 @@ class Line(Record):
     """
 
     name: str
+    experiment: str = ""
+    role: str = "policy"
     seed: int | None = None
     job: str | None = None
     launch: str | None = None
@@ -614,9 +638,45 @@ class Line(Record):
     checkpoints: tuple[CheckpointRef, ...] = ()
 
     @property
+    def policy(self) -> PolicyKey:
+        return PolicyKey(experiment=self.experiment, job=self.job, seed=self.seed, role=self.role)
+
+    @property
     def order(self) -> tuple[bool, int, str]:
         """Lines sort by seed, then name; one with no declared seed after those with one."""
         return self.seed is None, self.seed or 0, self.name
+
+
+def select_policies(
+    lines: Sequence[Line], key: PolicyKey, *, experiment: str, every_seed: bool = False
+) -> tuple[Line, ...]:
+    """Resolve policy defaults within one experiment; absent runs remain an empty selection."""
+    candidates = [
+        line for line in lines if (line.experiment or experiment) == (key.experiment or experiment)
+    ]
+    for part in ("job", "seed", "role"):
+        given = getattr(key, part)
+        if part == "job" and given is not None:
+            candidates = [line for line in candidates if given in (line.job, line.launch)]
+            continue
+        values = {getattr(line, part) for line in candidates}
+        if given is None:
+            if part == "seed":
+                if every_seed:
+                    continue
+                given = (
+                    min(values, key=lambda value: (value is None, value or 0)) if values else None
+                )
+            elif len(values) > 1:
+                raise EtudeError(
+                    "ambiguous_policy",
+                    422,
+                    detail=f"{key}: choose {part} from {sorted(str(v) for v in values)}",
+                )
+            elif values:
+                given = next(iter(values))
+        candidates = [line for line in candidates if getattr(line, part) == given]
+    return tuple(candidates)
 
 
 class Pairing(Record):
@@ -641,7 +701,7 @@ class Seated(Record):
     seating: str
     checkpoint: CheckpointId
     pairings: tuple[Pairing, ...]
-    # The lines of both sides it counted, by name.
+    # The lines of both sides it counted, qualified by experiment and role.
     lines: tuple[str, ...] = ()
 
 
@@ -782,7 +842,9 @@ class Seating(Record, Generic[_SeatingConfig]):
             for given in self.configs
         ]
 
-    def resolve(self, checkpoint: CheckpointRef, lines: Sequence[Line]) -> Seated | Gap:
+    def resolve(
+        self, checkpoint: CheckpointRef, lines: Sequence[Line], *, experiment: str | None = None
+    ) -> Seated | Gap:
         """The pairings this seating plays for `checkpoint`, one seed of its job, among the
         experiment's `lines`; or why its relative seat finds nothing to play yet.
 
@@ -791,7 +853,20 @@ class Seating(Record, Generic[_SeatingConfig]):
         one. A seat that finds the held checkpoint itself seats it: self-play is
         a match like any other.
         """
-        held = next((line for line in lines if line.name == checkpoint.line), None)
+        candidates = [
+            line
+            for line in lines
+            if line.name == checkpoint.line
+            and (checkpoint.policy is None or line.policy == checkpoint.policy)
+        ]
+        held = next(
+            (
+                line
+                for line in candidates
+                if any(ref.key == checkpoint.key for ref in line.checkpoints)
+            ),
+            candidates[0] if len(candidates) == 1 else None,
+        )
         ordered = sorted(lines, key=lambda line: line.order)
         # The held checkpoint's side: its job's seeds, or its own line with no job.
         mine = (
@@ -799,16 +874,46 @@ class Seating(Record, Generic[_SeatingConfig]):
             if held is None
             else [held]
             if held.job is None
-            else [line for line in ordered if line.job == held.job]
+            else [
+                line
+                for line in ordered
+                if line.job == held.job
+                and line.experiment == held.experiment
+                and line.role == held.role
+            ]
         )
         relative = next((each for each in self.players if isinstance(each, _RELATIVE)), None)
         # The other side's seeds: the lines of the job a relative seat names; its own line,
         # or a fixed player, counts as one (None).
         theirs: list[Line | None] = [None]
-        if relative is not None and relative.job is not None:
-            job = relative.job
-            theirs = [line for line in ordered if job in (line.job, line.launch)]
-        counted = tuple(sorted({line.name for line in (*mine, *theirs) if line is not None}))
+        if relative is not None and relative.named:
+            theirs = list(
+                select_policies(
+                    ordered,
+                    relative.policy
+                    or PolicyKey(
+                        experiment=relative.experiment,
+                        job=relative.job,
+                        seed=relative.seed,
+                        role=relative.role,
+                    ),
+                    experiment=experiment
+                    if experiment is not None
+                    else held.experiment
+                    if held
+                    else "",
+                    every_seed=relative.policy is None,
+                )
+            )
+        counted = tuple(
+            sorted(
+                {
+                    f"{line.experiment}/{line.name}/{line.role}" if line.experiment else line.name
+                    for line in (*mine, *theirs)
+                    if line is not None
+                }
+            )
+        )
         if self.seeds == "one" and mine and theirs:
             chosen, pick = _chosen(self.name, mine, theirs)
             if held != chosen:
@@ -819,12 +924,12 @@ class Seating(Record, Generic[_SeatingConfig]):
         found: list[CheckpointRef | None] = [None]
         if relative is not None:
             # A seat with no job looks in the held checkpoint's own line.
-            looked = [held] if relative.job is None else theirs
+            looked = theirs if relative.named else [held]
             results = [_find(relative, checkpoint, line) for line in looked if line is not None]
             found = [each for each in results if isinstance(each, CheckpointRef)]
             if not found or "not_yet" in results:
                 # No line yet: the job has not started, or the held one's line is unknown.
-                unknown = not results and checkpoint.line is not None
+                unknown = not results and (relative.named or checkpoint.line is not None)
                 return Gap(
                     seating=self.name,
                     checkpoint=checkpoint.key,
@@ -851,6 +956,9 @@ class Seating(Record, Generic[_SeatingConfig]):
 def _relative_definition(seat: Relative) -> dict[str, JsonValue]:
     """A relative seat as a seating's definition takes it: its inference by config, less setup."""
     found = seat.model_dump(mode="json", exclude={"inference"})
+    for part in ("experiment", "seed", "role", "policy"):
+        if found.get(part) is None:
+            found.pop(part, None)
     return {**found, "inference": {"config": identifying(seat.inference.config)}}
 
 
@@ -1115,7 +1223,9 @@ class Tournament(Record):
                 ]
         return scheduled
 
-    def resolve(self, lines: Sequence[Line]) -> tuple[Tournament, tuple[Gap, ...]]:
+    def resolve(
+        self, lines: Sequence[Line], *, experiment: str | None = None
+    ) -> tuple[Tournament, tuple[Gap, ...]]:
         """The tournament with each held checkpoint's pairings among `lines` in `seated`, each
         replacing what was recorded; and each held checkpoint a relative seat still finds
         nothing for. A gap keeps a recorded resolution: it stands until the new one plays."""
@@ -1128,7 +1238,7 @@ class Tournament(Record):
             if seating.fixed:
                 continue
             for checkpoint in self.checkpoints:
-                result = seating.resolve(checkpoint, lines)
+                result = seating.resolve(checkpoint, lines, experiment=experiment)
                 if isinstance(result, Seated):
                     seated.append(result)
                 elif (seating.name, str(checkpoint.key)) not in recorded:

@@ -1,8 +1,8 @@
 """Checkpoint contracts shared by every kind of run: identity, reference and record.
 
 Training publishes `CheckpointRecord`s; evaluation seats their `CheckpointRef`s.
-A checkpoint's identity is its key (`checkpoint_id`): its run and portable
-name, or an outside address. Its digest verifies bytes and names nothing.
+A checkpoint's identity is its key (`checkpoint_id`): its experiment, run,
+role and portable name, or an outside address. Its digest verifies bytes and names nothing.
 """
 
 from __future__ import annotations
@@ -12,14 +12,19 @@ from pathlib import Path
 from typing import Annotated, Literal, Protocol, Self
 from urllib.parse import unquote, urlparse
 
-from pydantic import BeforeValidator, Field, field_validator, model_validator
+from pydantic import BeforeValidator, Field, ValidationInfo, field_validator, model_validator
 
 from etude.carriage import checkpoint_file_name, within
 from etude.records import ArtifactRef, Name, Record
 
 
 def checkpoint_id(
-    *, run: str | None = None, name: str | None = None, address: str | None = None
+    *,
+    experiment: str | None = None,
+    run: str | None = None,
+    name: str | None = None,
+    address: str | None = None,
+    role: str = "policy",
 ) -> str:
     """A checkpoint's identity by run and portable name, or an outside address."""
     if (run is None) != (name is None) or (run is None) == (address is None):
@@ -29,13 +34,18 @@ def checkpoint_id(
             raise ValueError("checkpoint address must not be empty")
         return address
     assert run is not None and name is not None
-    if not within(run) or not within(name):
+    if experiment is None:
+        raise ValueError("checkpoint identity needs experiment= for a run")
+    if not within(run) or not within(name) or (experiment and not within(experiment)):
         raise ValueError("checkpoint identity must use portable relative names")
     key = name if name.startswith("out/") else "checkpoints/" + name
-    return run + "/" + key
+    if not role or "/" in role or not within(role):
+        raise ValueError("checkpoint role must be a portable name")
+    policy = run + ("/roles/" + role if role != "policy" else "")
+    return (experiment + "/" if experiment else "") + policy + "/" + key
 
 
-def _identity(value: object) -> object:
+def _identity(value: object, info: ValidationInfo) -> object:
     # Released evaluations stored a structured key; identity remains its encoded text.
     if isinstance(value, dict):
         if set(value) - {"run", "name", "address"}:
@@ -43,11 +53,27 @@ def _identity(value: object) -> object:
         fields = {name: value.get(name) for name in ("run", "name", "address")}
         if not all(each is None or isinstance(each, str) for each in fields.values()):
             raise ValueError("checkpoint identity fields must be strings")
-        return checkpoint_id(run=fields["run"], name=fields["name"], address=fields["address"])
+        value = checkpoint_id(
+            experiment="", run=fields["run"], name=fields["name"], address=fields["address"]
+        )
+    if isinstance(value, str) and info.context:
+        experiment = info.context.get("experiment")
+        parts = value.split("/", 2)
+        if experiment and len(parts) == 3 and parts[1] in ("checkpoints", "out"):
+            return str(experiment) + "/" + value
     return value
 
 
 CheckpointId = Annotated[str, BeforeValidator(_identity), Field(min_length=1)]
+
+
+class PolicyKey(Record):
+    """One policy: an experiment, job, seed and role, with defaults filled by its state."""
+
+    experiment: str | None = None
+    job: str | None = None
+    seed: int | None = None
+    role: Name | None = None
 
 
 class CheckpointRef(Record):
@@ -65,6 +91,7 @@ class CheckpointRef(Record):
     artifact: ArtifactRef
     at: dict[str, float] = {}
     line: str | None = None
+    policy: PolicyKey | None = None
 
     @model_validator(mode="after")
     def verifiable(self) -> Self:
@@ -101,6 +128,8 @@ class CheckpointRecord(Record):
     run: str = ""
     experiment: str = ""
     line: str = ""
+    role: Name = "policy"
+    policy: PolicyKey | None = None
     ordinal: int = Field(ge=1)
     artifact: ArtifactRef
     # A stored file's key relative to the run folder. None for older records
@@ -127,12 +156,18 @@ class CheckpointRecord(Record):
 
     @property
     def key(self) -> str:
-        return checkpoint_id(run=self.run, name=self.name)
+        return checkpoint_id(
+            experiment=self.experiment, run=self.run, name=self.name, role=self.role
+        )
 
     @property
     def ref(self) -> CheckpointRef:
         return CheckpointRef(
-            key=self.key, artifact=self.artifact, at=self.at, line=self.line or self.run
+            key=self.key,
+            artifact=self.artifact,
+            at=self.at,
+            line=(self.line or self.run) + ("/roles/" + self.role if self.role != "policy" else ""),
+            policy=self.policy,
         )
 
     @property

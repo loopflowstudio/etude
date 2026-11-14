@@ -297,7 +297,9 @@ def _git(repo: Path, *args: str) -> None:
 
 def test_a_models_inference_code_is_its_version_not_its_key(tmp_path: Path) -> None:
     file = ArtifactRef(uri="s3://models/updates-100.pt", sha256=sha256(b"a").hexdigest())
-    checkpoint = CheckpointRef(key=checkpoint_id(run="ppo-1", name="updates-100.pt"), artifact=file)
+    checkpoint = CheckpointRef(
+        key=checkpoint_id(experiment="", run="ppo-1", name="updates-100.pt"), artifact=file
+    )
     inference = tmp_path / "inference.py"
     inference.write_text("def act(state): return 0\n")
     before = Inference(source=[inference], config=Direct()).player(checkpoint)
@@ -308,7 +310,9 @@ def test_a_models_inference_code_is_its_version_not_its_key(tmp_path: Path) -> N
     assert changed.key == before.key
     assert changed.version.source != before.version.source
     # The same bytes under another key are another model.
-    copied = CheckpointRef(key=checkpoint_id(run="ppo-2", name="updates-100.pt"), artifact=file)
+    copied = CheckpointRef(
+        key=checkpoint_id(experiment="", run="ppo-2", name="updates-100.pt"), artifact=file
+    )
     assert Inference(config=Direct()).player(copied).key != before.key
 
 
