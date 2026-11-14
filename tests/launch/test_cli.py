@@ -1,4 +1,4 @@
-"""The `etude` command over a job file, running real local processes."""
+"""The `etude` command over an experiment file, running real local processes."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from threading import Thread
 import pytest
 
 from etude.cli import main
-from etude.declarations import read_job_file
+from etude.declarations import read_training_jobs
 from etude.errors import LauncherError
 from etude.experiment import observe
 from etude.launch.client import default
@@ -631,7 +631,7 @@ def test_legacy_declarations_refuse_before_training_or_submission(
     assert not launcher_file(home).exists()
     assert not (home / "track").exists()
     with pytest.raises(LauncherError, match=r"rename runs\(\) to training_jobs\(\)"):
-        read_job_file(path)
+        read_training_jobs(path)
     with pytest.raises(LauncherError, match=r"rename runs\(\) to training_jobs\(\)"):
         train(path)
 
@@ -665,7 +665,7 @@ def training_jobs(width: int = 32) -> list[Job]:
     assert "--width" in capsys.readouterr().out
     assert not path.with_suffix(".called").exists()
     assert not launcher_file(home).exists()
-    requests = read_job_file(path, ["--width", "64"])
+    requests = read_training_jobs(path, ["--width", "64"])
     assert [request.id for request in requests] == [
         "sweep/small@0",
         "sweep/small@7",

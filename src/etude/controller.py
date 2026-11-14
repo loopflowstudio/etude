@@ -7,15 +7,21 @@ new runs. The scheduler's public records are the only memory of a hand-down.
 from collections.abc import Sequence
 from decimal import Decimal
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Literal
 
-from etude.declarations import Experiment, asked, read_job_file, select_runs
+from etude.cache import Artifact, ContentMismatch, Corrupt
+from etude.declarations import Experiment, asked, read_training_jobs, select_runs
 from etude.errors import EtudeError, LauncherError
-from etude.eval.records import digest, folder_name
+from etude.eval.records import Match, digest, folder_name
 from etude.eval.tournament import StoredRuns, played
 from etude.experiment import observe
 from etude.jobs import (
+    Evaluation,
     ExperimentState,
+    _relocated,
+    checkpoint_inputs,
+    checkpoint_inputs_for,
     evaluation_spec,
     hold_evaluation,
     with_experiment,
@@ -27,10 +33,10 @@ from etude.launch.server import selected
 from etude.records import Record
 from etude.smoke import smoke_file
 from etude.spec import Job, RunRequest, Smoke, Until
-from etude.storage import Storage, default_root
+from etude.storage import Storage, default_root, place_artifact
 
 
-class Pass(Record):
+class TournamentDecision(Record):
     tournament: str
     new: int
     running: int
@@ -39,6 +45,7 @@ class Pass(Record):
     launched: str | None = None
     state: Literal["queued", "running", "would launch", "not queued"] | None = None
     reason: str | None = None
+    stopped: tuple[str, ...] = ()
 
 
 def source_for(pool: str | None, rent: str | None, source: str | None = None) -> str:
@@ -110,7 +117,7 @@ def advance(
     seed: int | None = None,
     resume: bool = False,
     until: Until | None = None,
-) -> list[Pass]:
+) -> list[TournamentDecision]:
     """One pass. Existing addresses stay put; explicit retries preserve delivered matches."""
     if max_usd is not None and (not max_usd.is_finite() or max_usd < 0):
         raise LauncherError("--max-usd must be a finite, nonnegative dollar limit")
@@ -133,7 +140,7 @@ def advance(
     requests: list[RunRequest] = []
     if mode != "local" and callable(experiment.training):
         assert experiment.file is not None
-        requests = read_job_file(
+        requests = read_training_jobs(
             experiment.file,
             given,
             experiment=experiment.name,
@@ -197,7 +204,8 @@ def advance(
         key: run.name for run in state.eval_runs if run.state == "failed" for key in run.matches
     }
     taken = {run.name for run in state.eval_runs}
-    passes: list[Pass] = []
+    decisions: list[TournamentDecision] = []
+    stopped_runs: set[str] = set()
     if smoke_file_first and before is None and not quote:
         assert experiment.file is not None
         before = smoke_file(experiment.file, steps=("eval", "report"), source=source)
@@ -215,7 +223,7 @@ def advance(
         )
         new_matches = [*found.new, *(found.failed if retry_failed else ())]
         pending = [match for match in new_matches if match.key not in running]
-        done = Pass(
+        done = TournamentDecision(
             tournament=spec.tournament.name,
             new=len(new_matches),
             running=len(new_matches) - len(pending),
@@ -223,16 +231,13 @@ def advance(
         )
         stopped = {failed[m.key] for m in pending if m.key in failed}
         if stopped and not retry_failed:
-            raise EtudeError("launched_pass_failed", 409, detail=", ".join(sorted(stopped)))
+            stopped_runs.update(stopped)
+            done = done.model_copy(update={"stopped": tuple(sorted(stopped))})
+            pending = [match for match in pending if match.key not in failed]
         if pending:
             if mode == "local":
-                held = hold_evaluation(
-                    spec.model_copy(update={"matches": tuple(pending), "lines": state.lines}),
-                    checkout=executable.repo,
-                    directory=directory,
-                    storages=[source],
-                )
-                done = done.model_copy(update={"played": held.played})
+                count = _play_here(spec, executable, pending, state, source, directory)
+                done = done.model_copy(update={"played": count})
                 running.update(m.key for m in pending)
             else:
                 executable = with_matches(executable, pending, state)
@@ -255,14 +260,15 @@ def advance(
                             "reason": f"--max-usd {max_usd} (${committed:.2f} committed)",
                         }
                     )
-        passes.append(done)
+        decisions.append(done)
     if planned:
         if quote:
             for request in new:
                 print(f"{request.id}  new, would launch")
             show_quote(client.quote(planned, pool, rent=rent))
-            passes = [
-                p.model_copy(update={"state": "would launch"}) if p.launched else p for p in passes
+            decisions = [
+                p.model_copy(update={"state": "would launch"}) if p.launched else p
+                for p in decisions
             ]
         else:
             submit = client.queue if mode == "queue" else client.launch
@@ -274,7 +280,7 @@ def advance(
                 print(
                     f"{request.id}  new, {'queued' if status.phase in {'queued', 'renting'} else 'running'}"
                 )
-            passes = [
+            decisions = [
                 p.model_copy(
                     update={
                         "state": "queued"
@@ -284,6 +290,68 @@ def advance(
                 )
                 if p.launched
                 else p
-                for p in passes
+                for p in decisions
             ]
-    return passes
+    for decision in decisions:
+        _show_tournament(decision)
+    if stopped_runs and not quote:
+        raise EtudeError("launched_pass_failed", 409, detail=", ".join(sorted(stopped_runs)))
+    return decisions
+
+
+def _play_here(
+    spec: Evaluation,
+    executable: Job,
+    pending: Sequence[Match],
+    state: ExperimentState,
+    source: Storage,
+    directory: Path | str | None,
+) -> int:
+    """Play with the same verified artifacts a launched run receives as inputs."""
+    saved = checkpoint_inputs(pending, state, spec.checkpoints)
+    with TemporaryDirectory(prefix="etude-eval-") as folder:
+        here: dict[str, str] = {}
+        for key, checkpoint in saved.items():
+            name = digest(key)[:16]
+            for file in checkpoint_inputs_for(checkpoint, name):
+                assert file.uri is not None
+                try:
+                    place_artifact(
+                        Artifact(location=file.uri, sha256=file.sha256, size_bytes=file.size_bytes),
+                        Path(folder) / file.name,
+                    )
+                except FileNotFoundError:
+                    raise EtudeError("checkpoint_not_stored", 404, detail=key) from None
+                except (ContentMismatch, Corrupt):
+                    raise EtudeError("checkpoint_content_mismatch", 409, detail=key) from None
+            here[key] = (Path(folder) / name).as_uri()
+        held = hold_evaluation(
+            spec.model_copy(
+                update={
+                    "matches": tuple(_relocated(m, here) for m in pending),
+                    "lines": state.lines,
+                }
+            ),
+            checkout=executable.repo,
+            directory=directory,
+            storages=[source],
+        )
+        return held.played
+
+
+def _show_tournament(done: TournamentDecision) -> None:
+    if not (done.new or done.running or done.failed):
+        print(f"eval {done.tournament}: nothing to play")
+        return
+    line = f"eval {done.tournament}: {done.new} new, {done.running} running, {done.failed} failed"
+    if done.launched:
+        line += f", {done.state} {done.launched}"
+    elif done.played:
+        line += f", {done.played} played"
+    elif done.state:
+        line += f", {done.state}"
+        if done.reason:
+            line += f": {done.reason}"
+    if done.stopped:
+        line += f"; failed runs {', '.join(done.stopped)} (--retry-failed retries them)"
+    print(line, flush=True)

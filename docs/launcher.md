@@ -389,8 +389,10 @@ Three levels do the work, each built only on the one below it:
   whatever the pass.
 - **A failed run is left alone.** A failed training run is printed with the
   command that resumes it (`etude launch two.py --job base --seed 1
-  --resume`). An eval pass that would replay a failed run's matches stops
-  with `launched_pass_failed` until `--retry-failed`
+  --resume`). A pass leaves a failed eval run's undelivered matches alone,
+  hands down unaffected training and eval work, and prints every decision.
+  Then it stops with `launched_pass_failed` until `--retry-failed`;
+  `--quote` prints the same decisions without failing
   ([Experiments](evaluation.md#experiments)).
 - **Dropped work is never cancelled.** A job that leaves a declaration stays
   queued or running until it ends or you `etude cancel` it.
@@ -544,12 +546,12 @@ it:
 ```python
 from pathlib import Path
 
-from etude.declarations import read_job_file
+from etude.declarations import read_training_jobs
 from etude.smoke import smoke_file
 
 path = Path("ppo.py")
 # Call training_jobs() with these flags; omit them to use its defaults.
-runs = read_job_file(path, ["--seeds", "2"])
+runs = read_training_jobs(path, ["--seeds", "2"])
 result = smoke_file(path, runs)  # raises LauncherError on the first failure
 for run in result.stamp(runs):  # each run with its own job's smoke, as submitted
     print(run.job.name, run.seed, run.smoke)
@@ -571,7 +573,7 @@ etude launch job.py --rent l4
 
 For Vast.ai, inject `VAST_API_KEY` in the launcher's environment (RunPod uses
 `RUNPOD_API_KEY`). Register an SSH public key in the Vast account before renting.
-Use the same job file and storage, with an explicit provider:
+Use the same experiment file and storage, with an explicit provider:
 
 ```sh
 etude provider set vast --kind vast --storage west
@@ -1213,7 +1215,7 @@ def training_jobs() -> list[TrainingJob]:
 
 How many runs go at once belongs to the pool and on-demand, and the
 experiment's dollar limit to `--max-usd`
-([One pass over the file](#one-pass-over-the-file)); neither is in the file. A job file's folder is on the import path, as for `python job.py`, so it
+([One pass over the file](#one-pass-over-the-file)); neither is in the file. An experiment file's folder is on the import path, as for `python job.py`, so it
 imports its neighbours. A relative `repo` is relative to the directory the
 command is run from, exactly as when Python calls the launcher directly. A
 config is a Pydantic model in Python, not a file beside the job: a named
@@ -1222,18 +1224,18 @@ setting is a function or class method returning one, such as
 
 `etude launch job.py` supplies experiment `job` to every job that names
 none, even when the file defines only `training_jobs()`. A `train` function calls
-`track(clocks=..., config=config)` without naming an experiment. A plain job file preserves explicit `Job.experiment`
+`track(clocks=..., config=config)` without naming an experiment. A plain experiment file preserves explicit `Job.experiment`
 values; a file defining `eval_jobs(state)` or `report()` requires its own stem
 and refuses jobs naming another experiment.
 
-Previously, a plain job file left the experiment for the script to name.
+Previously, a plain experiment file left the experiment for the script to name.
 For an existing script using `track(experiment="capacity-pilot", ...)`, set
 `experiment="capacity-pilot"` on its `Job`, or remove the argument from
 `track` to use the file stem. A conflicting name now fails with
 `experiment_differs_from_launch`. The experiment participates in job identity,
 so previously unnamed plain-file jobs also receive new job digests.
 
-TOML job files are no longer accepted. A script may also call `queue` or `launch` from
+TOML experiment files are no longer accepted. A script may also call `queue` or `launch` from
 `etude.launch.client` directly; that is how a command job
 (`Job(command=...)`) is launched. Where commands
 accept run addresses, `--experiment` and `--job` select several.

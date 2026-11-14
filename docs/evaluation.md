@@ -696,6 +696,13 @@ does, unless `--retry-failed`.
   chosen checkpoint with `checkpoint.player(inference)` to make a seating of
   fixed players, played once rather than per checkpoint. `tags` mark
   seatings for readers, such as pairs a rating fit leaves out.
+- **Other experiments' checkpoints.** A file may define only `eval_jobs`.
+  Read a producer's checkpoints with `etude.train.read.read(source, experiment,
+  run)` and give its `checkpoints` records to a benchmark's `checkpoints=`,
+  or use `checkpoint.player(inference)` in a round robin's `enter=`.
+  The evaluating experiment's state need not contain the producer. `eval`,
+  `launch` and `queue` use the checkpoint artifact's location and verify
+  its digest and byte length; folder checkpoints verify every member.
 - **A pass.** For each job, the matches exactly what `eval_jobs` returned calls
   for, the seatings it gave for the checkpoints it gave, that no eval run of
   the experiment in its environment delivered. `etude eval` plays them here
@@ -708,10 +715,11 @@ does, unless `--retry-failed`.
   (`capacity/ladder-1a2b3c4d5e6f`) and its record carries them, so a later
   pass neither launches it again nor plays its matches while it is queued or
   running. Nothing else remembers a pass: there is no file to lose or repair.
-  A pass that would launch matches a failed run was given stops with
-  `launched_pass_failed`, so a watch never spends again unattended; look,
-  then `--retry-failed`. What the failed run delivered is kept, and other
-  experiments' passes are unaffected.
+  A pass leaves a failed run's undelivered matches alone, hands down
+  unaffected training runs and matches, and prints every decision before
+  stopping with `launched_pass_failed`. A watch ends there; look, then
+  `--retry-failed`. What the failed run delivered is kept. `--quote` shows
+  the held run and retry flag without failing.
 - **While it runs.** `etude status RUN` gives the matches played, the recent
   pace and the time left; `etude logs --run RUN` the job's recent output.
   Sealed blocks reach storage every few minutes, so `etude report` and

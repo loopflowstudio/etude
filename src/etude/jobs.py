@@ -161,23 +161,29 @@ class ExperimentState:
 
 
 def checkpoint_inputs(
-    matches: Iterable[Match], state: ExperimentState
-) -> dict[str, CheckpointRecord]:
-    """Each checkpoint the matches seat, by its key encoded, as `state` found it stored.
+    matches: Iterable[Match],
+    state: ExperimentState,
+    checkpoints: Sequence[CheckpointRecord] = (),
+) -> dict[str, CheckpointRecord | CheckpointRef]:
+    """The checkpoints seated, keeping producer records where available.
 
-    Raises `EtudeError("checkpoint_not_stored")` for a seated checkpoint no
-    training run of the experiment stored, such as one by an outside address.
+    A seat's artifact locates its bytes even when another experiment saved it.
+    Missing verification metadata fails with the checkpoint's key.
     """
-    found: dict[str, CheckpointRecord] = {}
+    declared = {each.key: each for each in checkpoints}
+    found: dict[str, CheckpointRecord | CheckpointRef] = {}
     for match in matches:
         for player in match.players:
-            if not isinstance(player, CheckpointPlayer) or str(player.checkpoint.key) in found:
+            if not isinstance(player, CheckpointPlayer) or player.checkpoint.key in found:
                 continue
-            key = player.checkpoint.key
-            saved = state.checkpoint(key)
-            if saved is None:
-                raise EtudeError("checkpoint_not_stored", 404) from ValueError(str(key))
-            found[str(key)] = saved
+            ref = player.checkpoint
+            record = declared.get(ref.key) or state.checkpoint(ref.key)
+            # Compact checkpoint keys can coincide across experiments. The
+            # seated artifact, not this experiment's matching spelling, owns the bytes.
+            saved = record if record is not None and record.artifact == ref.artifact else ref
+            if saved.artifact.sha256 is None or saved.artifact.size_bytes is None:
+                raise EtudeError("checkpoint_not_stored", 404, detail=ref.key)
+            found[ref.key] = saved
     return found
 
 
@@ -185,7 +191,7 @@ class JobOptions(TypedDict, total=False):
     """How a typed job is launched: every `Job` field except those it derives.
 
     It derives the command and config, the experiment (an evaluation's own,
-    else the one `etude launch` reads from the job file's name) and the
+    else the one `etude launch` reads from the experiment file's name) and the
     smoke form: a training job's `smoke` config; an evaluation's is Etude's.
     """
 
@@ -366,7 +372,7 @@ def evaluation_spec(job: Job) -> Evaluation:
 
 
 def with_experiment(job: Job, experiment: str) -> Job:
-    """The evaluation job an experiment's `eval(state)` returned, as one of `experiment`.
+    """The evaluation job an experiment's `eval_jobs(state)` returned, as one of `experiment`.
 
     Raises `EtudeError("eval_job_of_another_experiment")` for a job naming
     another experiment, and `EtudeError("not_an_evaluation_job")` for one that
@@ -424,10 +430,12 @@ def with_matches(job: Job, matches: Sequence[Match], state: ExperimentState) -> 
     """
     job = job.plain()
     spec = evaluation_spec(job)
-    saved = checkpoint_inputs(matches, state)
+    saved = checkpoint_inputs(matches, state, spec.checkpoints)
     # One input per checkpoint key, even where two keys hold the same bytes.
-    files = {key: f"checkpoint-{digest(key)[:16]}{PurePosixPath(each.name).suffix}"
-             for key, each in saved.items()}  # fmt: skip
+    files = {
+        key: f"checkpoint-{digest(key)[:16]}{PurePosixPath(checkpoint_file_name(each.artifact.uri)).suffix}"
+        for key, each in saved.items()
+    }
     inputs = tuple(
         given
         for key, each in sorted(saved.items())
@@ -439,18 +447,30 @@ def with_matches(job: Job, matches: Sequence[Match], state: ExperimentState) -> 
     )
 
 
-def checkpoint_inputs_for(checkpoint: CheckpointRecord, name: str) -> tuple[Input, ...]:
+def checkpoint_inputs_for(
+    checkpoint: CheckpointRecord | CheckpointRef, name: str
+) -> tuple[Input, ...]:
     """The individually verified files of one checkpoint, under one input name."""
     artifact = checkpoint.artifact
-    key = checkpoint.file or checkpoint_key(artifact.uri)
+    key = (checkpoint.file if isinstance(checkpoint, CheckpointRecord) else None) or checkpoint_key(
+        artifact.uri
+    )
     if artifact.members:
         files = {"/" + member: content for member, content in sorted(artifact.members.items())}
     elif artifact.sha256 is None or artifact.size_bytes is None:
         raise LauncherError("a checkpoint input requires its digest and byte length")
     else:
         files = {"": Content(sha256=artifact.sha256, size_bytes=artifact.size_bytes)}
-    owner = run_address(checkpoint.run, checkpoint.experiment) if checkpoint.run else None
-    if checkpoint.folder is not None and owner is not None:
+    owner = (
+        run_address(checkpoint.run, checkpoint.experiment)
+        if isinstance(checkpoint, CheckpointRecord) and checkpoint.run
+        else None
+    )
+    if (
+        isinstance(checkpoint, CheckpointRecord)
+        and checkpoint.folder is not None
+        and owner is not None
+    ):
         # Stored folders distinguish a compact sole job from an explicitly
         # qualified job bearing the experiment's name, including historical copies.
         qualified = f"{checkpoint.experiment}/{checkpoint.run}"

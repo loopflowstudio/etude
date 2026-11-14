@@ -16,16 +16,19 @@ import pytest
 from etude.cache import Content
 from etude.checkpoints import CheckpointRecord
 from etude.cli import main
-from etude.declarations import read_job_file
+from etude.declarations import read_training_jobs
 from etude.errors import LauncherError
 from etude.eval.match import environment
 from etude.eval.query import statsdb
-from etude.eval.records import Benchmark, Code, RoundRobin
-from etude.jobs import EvalJob, JobOptions, TrainingJob
+from etude.eval.records import Benchmark, Code, Inference, Match, RoundRobin
+from etude.experiment import observe
+from etude.jobs import EvalJob, JobOptions, TrainingJob, checkpoint_inputs
 from etude.launch.smoke import tiny
 from etude.records import ArtifactRef
 from etude.spec import Input, Job, Runtime, SmokeForm, Until, job_id
+from etude.storage import DirectoryStorage
 from etude.train.read import read
+from etude.train.tracking import track
 from tests.experiments import authored
 from tests.launch.counting import job_text
 from tests.launch.test_runpod_machines import cloud
@@ -122,7 +125,7 @@ def _restore_imports(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_a_training_job_calls_its_function_with_its_typed_config(
     tmp_path: Path, job_python: str
 ) -> None:
-    # The job file sits beside its training code, below the checkout's root.
+    # The experiment file sits beside its training code, below the checkout's root.
     repo = checkout(
         tmp_path / "lab",
         {
@@ -130,7 +133,7 @@ def test_a_training_job_calls_its_function_with_its_typed_config(
             "experiments/job.py": JOB.format(module="lab_train", config="TrainConfig(lr=0.25)"),
         },
     )
-    (run,) = read_job_file(repo / "experiments" / "job.py", ["--python", job_python])
+    (run,) = read_training_jobs(repo / "experiments" / "job.py", ["--python", job_python])
     assert run.job.repo == str(repo)
     scheduler = local(tmp_path)
     (launched,) = scheduler.launch(run)
@@ -221,7 +224,7 @@ def test_a_config_the_function_cannot_take_is_refused_before_anything_launches(
         {f"{module}.py": TRAIN, "job.py": JOB.format(module=module, config=config)},
     )
     with pytest.raises(LauncherError, match=refusal):
-        read_job_file(repo / "job.py", ["--python", "python3.12"])
+        read_training_jobs(repo / "job.py", ["--python", "python3.12"])
 
 
 def test_a_training_jobs_smoke_form_is_its_smoke_config(tmp_path: Path) -> None:
@@ -230,7 +233,7 @@ def test_a_training_jobs_smoke_form_is_its_smoke_config(tmp_path: Path) -> None:
         tmp_path / "lab",
         {"tiny_train.py": TRAIN, "job.py": JOB.format(module="tiny_train", config=config)},
     )
-    (run,) = read_job_file(repo / "job.py", ["--python", "python3.12"])
+    (run,) = read_training_jobs(repo / "job.py", ["--python", "python3.12"])
     small = tiny(run.job)
     assert small is not None and small.smoke is None
     assert (small.command, small.config) == (run.job.command, '{"lr":0.5,"layers":[8]}')
@@ -266,7 +269,7 @@ def training_jobs() -> object:
             + "    return TrainingJob(name='base', train=train, config=TrainConfig(lr=1), max_hours=0.1)\n"
         },
     )
-    (request,) = read_job_file(repo / "job.py")
+    (request,) = read_training_jobs(repo / "job.py")
     assert "--function job:train" in request.job.command
     assert request.job.repo == str(repo)
 
@@ -308,7 +311,7 @@ def test_an_unpackaged_uv_project_prepares_its_environment_once_per_lock(
             "job.py": TYPED.format(module=module, options=options),
         },
     )
-    (run,) = read_job_file(repo / "job.py")
+    (run,) = read_training_jobs(repo / "job.py")
     prepare = run.job.prepare
     if derived:
         assert prepare is not None
@@ -487,7 +490,7 @@ def training_jobs():
     return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="true"), max_hours=1, name="baseline", seeds=(0, 7), repo=None)
 """
     )
-    requests = read_job_file(file, experiment="chosen")
+    requests = read_training_jobs(file, experiment="chosen")
     assert [(run.id, run.seed, run.job.experiment) for run in requests] == [
         ("chosen/baseline@0", 0, "chosen"),
         ("chosen/baseline@7", 7, "chosen"),
@@ -509,7 +512,7 @@ def training_jobs():
     return [TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="true"), max_hours=1, name="first", repo=None), TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="true"), max_hours=1, name="other", repo=None)]
 """
     )
-    assert [run.id for run in read_job_file(file)] == ["job/first@0", "job/other@0"]
+    assert [run.id for run in read_training_jobs(file)] == ["job/first@0", "job/other@0"]
 
 
 def test_one_allocation_owns_many_writers_without_changing_its_limits(
@@ -563,3 +566,25 @@ def write(config: TrainConfig) -> None:
     assert list(points.x) == [1, 2, 3]
     assert list(points.y) == [10, 200, 300]
     assert [writer.first_row for writer in data.writers] == [True, True, False]
+
+
+@pytest.mark.parametrize("declared", [False, True])
+def test_a_seated_artifact_wins_over_a_local_checkpoint_with_the_same_compact_key(
+    tmp_path: Path,
+    declared: bool,
+) -> None:
+    source = DirectoryStorage(tmp_path)
+    for experiment, body in (("producer", b"earlier weights"), ("review", b"local weights")):
+        with track(
+            experiment=experiment, run="base@0", directory=tmp_path, clocks=["updates"], strict=True
+        ) as run:
+            path = run.out / "weights.pt"
+            path.write_bytes(body)
+            run.checkpoint(path, updates=1)
+    checkpoint = observe(source, "producer").runs[0].final
+    assert checkpoint is not None
+    state = observe(source, "review")
+    assert state.checkpoint(checkpoint.key) is not None
+    match = Match(players=(checkpoint.player(Inference()), Code(name="fixed")), games=1)
+    saved = checkpoint_inputs([match], state, [checkpoint] if declared else [])
+    assert saved[checkpoint.key].artifact == checkpoint.artifact

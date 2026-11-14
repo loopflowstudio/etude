@@ -26,7 +26,7 @@ from typing import cast
 from pydantic import BaseModel
 
 from etude.call import changed_config, config_type
-from etude.declarations import read_job_file, select_runs
+from etude.declarations import read_training_jobs, select_runs
 from etude.errors import EtudeError, LauncherError
 from etude.experiment import observe
 from etude.experiment_file import defined_functions, refuse_renamed
@@ -69,7 +69,9 @@ def train(
     if "training_jobs" in functions:
         state = observe(default_root(), label)
         requests = select_runs(
-            read_job_file(file, experiment=experiment, local=True, state=state), job=job, seed=seed
+            read_training_jobs(file, experiment=experiment, local=True, state=state),
+            job=job,
+            seed=seed,
         )
         prepared: list[_Training | _Finished] = []
         refusals: list[str] = []

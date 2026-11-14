@@ -27,6 +27,12 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
 machines for what has not been run, printing a decision for every declared
 run and tournament; typing the command again launches only what is new.
 
+Eval-only files can seat checkpoints from any experiment, in benchmark
+`checkpoints=` or round-robin `enter=`. Local evals fetch and verify their
+checkpoint inputs too. A failed launched eval holds only its undelivered
+matches: the pass hands down unaffected work and prints all decisions before
+returning `launched_pass_failed`. `--quote` reports the hold without failing.
+
 Launching has three levels, each built on the one below: the **controller**
 makes that pass over an experiment file, the **scheduler** queues runs and
 starts each on a machine with room, and the **provisioner** rents and
@@ -37,6 +43,7 @@ experiment; cohorts, which sat between, are removed.
 
 | Before | Now |
 | --- | --- |
+| `etude.declarations.read_job_file` | `etude.declarations.read_training_jobs` |
 | `def runs(...)` | `def training_jobs(...)` |
 | `def eval(state)` | `def eval_jobs(state)` |
 | `training(train, config=c, ...)` | `TrainingJob(name="...", train=train, config=c, ...)`; `name` is required |

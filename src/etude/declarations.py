@@ -1,8 +1,8 @@
-"""Read a Python job file and validate its training_jobs() flags before submission.
+"""Execute experiment files and validate their typed training and eval declarations.
 
 The file supplies the experiment's default name and expands all declarations
 before job/seed selection. An explicit experiment override wins. Explicit
-RunRequests preserve their ids; Jobs use the shared compact address expansion.
+RunRequests preserve their ids; Jobs expand to full experiment/job@seed addresses.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from etude.spec import Job, RunRequest, expand_runs
 from etude.storage import default_root
 
 
-def read_job_file(
+def read_training_jobs(
     path: Path,
     given: Sequence[str] = (),
     *,
@@ -44,7 +44,7 @@ def read_job_file(
     """
 
     if path.suffix != ".py":
-        raise LauncherError("job files must be Python (.py), defining training_jobs()")
+        raise LauncherError("experiment files must be Python (.py), defining training_jobs()")
     # As `python job.py` would, so the file can import its neighbours: `from train import train`.
     folder = str(path.resolve().parent)
     if folder not in sys.path:

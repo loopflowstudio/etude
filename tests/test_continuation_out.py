@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from etude.cli import main
-from etude.declarations import read_job_file
+from etude.declarations import read_training_jobs
 from etude.errors import LauncherError
 from etude.jobs import continue_from, continued_config
 from etude.out import MEMBERSHIP, OutFiles
@@ -367,7 +367,7 @@ def training_jobs(python: str) -> Job:
     )
     # The file reader imports the recipe; include its source in the launched job.
     monkeypatch.setattr(sys, "path", list(sys.path))
-    (given,) = read_job_file(repo / "job.py", ["--python", job_python])
+    (given,) = read_training_jobs(repo / "job.py", ["--python", job_python])
     spec = given.job.model_copy(
         update={"repo": str(repo), "experiment": "recipe", "until": "updates=3"}
     )

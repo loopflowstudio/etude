@@ -24,7 +24,7 @@ from etude.train.read import RunData, lines, read_all
 from etude.train.report import job_names
 
 # ---------------------------------------------------------------------------
-# What eval(state) chooses from
+# What declarations choose from
 
 
 def observe(
@@ -49,7 +49,7 @@ def state_of(
     """The experiment's training runs among runs already read, as `observe` finds them.
 
     A run that recorded no end has failed once this computer's launcher says
-    so (`_closed_without_success`), and so ends at its last stored checkpoint.
+    so, and so ends at its last stored checkpoint.
     """
     ours = [
         data

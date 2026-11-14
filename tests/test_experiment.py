@@ -674,3 +674,29 @@ def test_another_versions_launcher_database_is_left_beside_this_ones(tmp_path: P
     with sqlite3.connect(older) as db:
         assert tuple(db.iterdump()) == before
     run.finish(timeout=30)
+
+
+def test_a_failed_eval_holds_only_its_matches_within_the_same_tournament(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    launcher = _Launcher()
+    monkeypatch.setattr(client, "launch", launcher.launch)
+    monkeypatch.setattr(client, "standing", launcher.standing)
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    experiment = design(tmp_path)
+    training = trainer(bucket, tmp_path)
+    try:
+        save(training, bucket, tmp_path, range(1, 3))
+        advance(experiment, source=bucket, mode="launch")
+        (first,) = launcher.launched
+        first_keys = {match.key for match in evaluation_spec(first.job).matches or ()}
+        launcher.outcome = "failed"
+        save(training, bucket, tmp_path, range(3, 5))
+        with pytest.raises(EtudeError, match="launched_pass_failed"):
+            advance(experiment, source=bucket, mode="launch")
+        assert len(launcher.launched) == 2
+        new_keys = {match.key for match in evaluation_spec(launcher.launched[1].job).matches or ()}
+        assert new_keys and new_keys.isdisjoint(first_keys)
+        assert len(new_keys) == 2 * len(DEALS)
+    finally:
+        training.finish(timeout=30)

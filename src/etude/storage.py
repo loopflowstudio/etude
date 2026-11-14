@@ -22,7 +22,7 @@ from collections.abc import Callable
 from pathlib import Path
 from stat import S_ISREG
 from typing import Any, Literal, Protocol
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 from etude.cache import Artifact, Cache, Fetched
 from etude.carriage import immutable
@@ -392,3 +392,44 @@ def storage_from_uri(uri: str | Path) -> Storage:
             bucket, _, prefix = text.removeprefix(f"{provider}://").partition("/")
             return S3Storage(bucket, prefix, provider=provider)
     return DirectoryStorage(text)
+
+
+class _StoredFile:
+    """Transport for a file with a declared length; the cache verifies its content."""
+
+    def __init__(self, storage: Storage, key: str, size: int) -> None:
+        self.storage, self.key, self.size = storage, key, size
+
+    def read(self, start: int, end: int | None, etag: str | None) -> Fetched:
+        stop = self.size if end is None else min(end + 1, self.size)
+        return Fetched(self.storage.get_range(self.key, start, stop - start), None)
+
+    def changed(self, etag: str) -> Fetched | None:
+        return self.read(0, None, None)
+
+    def reused(self, size_bytes: int, start: int | None, end: int | None) -> None:
+        pass
+
+
+def place_artifact(artifact: Artifact, destination: Path) -> Path:
+    """Fetch a file or bucket artifact through the shared cache, verifying its content."""
+    if artifact.content is None:
+        raise ValueError("placing an artifact requires its digest and byte length")
+    uri = artifact.location
+    if uri.startswith(("s3://", "r2://")):
+        provider, _, address = uri.partition("://")
+        bucket, _, key = address.partition("/")
+        storage = S3Storage(bucket, provider="r2" if provider == "r2" else "s3")
+        located = storage._artifact(key).model_copy(
+            update={"sha256": artifact.sha256, "size_bytes": artifact.size_bytes}
+        )
+        return storage.cache.place(located, destination, _Object(storage, key))
+    parsed = urlsplit(uri)
+    if parsed.scheme not in ("", "file") or parsed.netloc:
+        raise ValueError(f"unsupported artifact location: {parsed.scheme}")
+    path = Path(unquote(parsed.path))
+    return Cache().place(
+        artifact,
+        destination,
+        _StoredFile(DirectoryStorage(path.parent), path.name, artifact.content.size_bytes),
+    )
