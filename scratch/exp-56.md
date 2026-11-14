@@ -76,36 +76,27 @@ a Benchmark constructed inside arbitrary author code is unavailable to the
 current pre-launch match planner. Dependent eval API deletion stops until
 that boundary is designed; the current run/record/scope cut remains checkable.
 
-Initial run/record/scope acceptance checks pass.
+Initial run/record/scope acceptance and the first three review corrections
+are built. Exact focused check receipts and earlier API corrections remain at
+`6f70baa:scratch/exp-56.md`; they do not replace gate's full acceptance.
 
-Record/API corrections are built: optional launcher submission metadata,
-one run name, `RunOutcome`, and `Stopped` from `etude.stopping`.
+Fourth-review corrections built: `experiment_not_named` names `etude run
+FILE`, `etude launch FILE` and explicit `track(experiment=..., run=...)`;
+the focused test asserts the remedy. Training explains who calls `train`,
+local files outside the launcher database and their report/checkpoint reads;
+launcher help says every launched run. The layout includes checkpoint records
+and `run.json`'s qualified id. Local listing/branching, direct calls and id/name
+choices remain in `questions.md`.
+Check: `uv run pytest tests/train/test_track.py -k test_a_launched_run_is_its_experiment_files_and_refuses_another`
+— **1 passed, 13 deselected**; focused ruff check/format and diff check pass.
+Full acceptance stays with gate; PR #103 stays draft.
 
-Second-review corrections built: `RunData.outcome` with a warning `state`
-property until 0.5, all internal consumers moved, local planned-stop docs
-corrected, `--name` described as a job name, eval outcome filename corrected.
-Check: focused pytest filter (outcome alias/current and historical files,
-stop/resume/refusal/failure, reports) **13 passed, 126 deselected**;
-`uv run mypy` (174 files), ruff check/format and diff check pass.
-Full acceptance stays with gate. Open writer/allocation and eval planning
-choices remain in `questions.md`; PR #103 stays draft.
-
-Third-review corrections built: local `--resume EXPERIMENT/RUN` uses
-`run_address`; missing-run refusals name the searched experiment and taken-name
-hints give a qualified reference. Training and launcher docs show `--run` and
-required `--until` for launched continuation, plus the actual config refusal.
-Local branching, writer/allocation and eval planning stay open in `questions.md`.
-Check: `uv run pytest tests/train/test_local.py` — **10 passed**; mypy on
-`local.py`, ruff check/format and diff check pass.
-Full acceptance stays with gate; PR #103 remains draft.
-
-Fourth-review corrections to build (`design-train-api.md`): the
-`experiment_not_named` refusal names its remedy and Training says who calls
-`train`; docs and `runs` help say local runs are files outside the launcher
-database; the on-disk layout shows checkpoint records and `run.json`'s
-qualified `id`. Docs, one error detail, one help string, one focused test.
-Open in `questions.md`: what a local run is to the launcher, a direct call of
-`train`, the id/name words.
+New steers received during this correction slice, implementation remaining:
+writers become a sub-part of `RunAttempt` (tentative; show at demo), preserving
+writer cutoffs and allocation accounting; eval author functions return the
+pure tournament, retaining pre-launch match/input planning. Exact quotes and
+shapes are in `questions.md`. These replace the earlier open choices above;
+the existing implementations have not yet been cut over.
 
 Earlier checks and indexed-query receipts: `ef6099a:scratch/exp-56.md`.
 

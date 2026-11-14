@@ -72,6 +72,11 @@ Etude asks three things of `train` and its config:
 - **`train` takes that one parameter**, annotated with the config's type, and
   is defined at the top level of a file your project can import.
 
+`etude run FILE` or the launcher calls `train` and supplies the run's identity
+and experiment. Calling the example's `train(config)` directly is refused
+with `experiment_not_named`. A process Etude did not start names these with
+`track(experiment=..., run=...)`, as in [Tracking's opening example](tracking.md).
+
 Calling `train` is one attempt at the whole job. It ends in one of three ways:
 
 | `train` | Means | Etude then |
@@ -528,6 +533,8 @@ EXPERIMENT/RUN/
   run.json                 job, seed, config, clocks, parent run and inputs
   outcome.json             how the latest attempt ended
   metrics/  artifacts/     rows and tables (Tracking)
+  checkpoints/
+    CLOCK-VALUE.json       each checkpoint's record, pointing to its files
   out/                     run.out: follows the run to every machine
     state/
       current.json         {"save": "save-00000007"}: the save to load, written last
@@ -541,6 +548,9 @@ EXPERIMENT/RUN/
         checkpoint.json    {"at": {"updates": 100}, "files": {"policy": "policy.pt"}}, written last
         policy.pt
 ```
+
+`run.json` stores its `id` as the qualified reference `EXPERIMENT/RUN`, such
+as `train/train-seed-0`; the run's id within that experiment is `train-seed-0`.
 
 ```python
 import json
@@ -633,6 +643,12 @@ etude smoke job.py                      # the smoke config, here, spending nothi
 
 A run's hours, dollars and attempts span every attempt, whoever asked for it
 ([The run promise](launcher.md#the-run-promise)).
+
+A run started with `etude run` is files under
+`~/.etude/track/EXPERIMENT/` (moved by `ETUDE_HOME`), outside the launcher
+database. Read it with `etude report FILE` or
+`etude checkpoints --source ~/.etude/track`. `etude runs`, `etude status`,
+`etude cancel` and `etude continue` work on launched runs.
 
 ## The pieces underneath
 

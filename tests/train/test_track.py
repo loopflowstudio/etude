@@ -55,8 +55,12 @@ def manabot_row(update: int) -> dict[str, object]:
 def test_a_launched_run_is_its_experiment_files_and_refuses_another(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    with pytest.raises(EtudeError, match="experiment_not_named"):
+    with pytest.raises(EtudeError, match="experiment_not_named") as refusal:
         track(clocks=CLOCKS, directory=tmp_path)
+    assert str(refusal.value) == (
+        "experiment_not_named: use etude run FILE or etude launch FILE; "
+        "for a process Etude did not start, name the run with track(experiment=..., run=...)"
+    )
     monkeypatch.setenv("ETUDE_EXPERIMENT", "ppo")
     with pytest.raises(EtudeError, match="experiment_differs_from_launch"):
         track(experiment="capacity", clocks=CLOCKS, directory=tmp_path)

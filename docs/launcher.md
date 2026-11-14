@@ -1154,7 +1154,7 @@ allocated. A refusal changes nothing recorded about the run.
 
 Launched references print as `EXPERIMENT/RUN`. Commands accept that reference;
 `etude status RUN --experiment EXPERIMENT` and `etude continue --run RUN --experiment
-EXPERIMENT --until clock=value` also accept the run name alone.
+EXPERIMENT --until clock=value` also accept the run id alone.
 `etude launch FILE --resume RUN` uses the file’s experiment (or its
 `--experiment` override).
 
@@ -1705,8 +1705,11 @@ A run displayed by `etude status` includes a source line, for example:
   source: 79e54361b230 on distributed, main@3f2a1c9 "Add replay buffer sharding", v0.3.0 + 14, 2 commits ahead, plus uncommitted changes
 ```
 
-`status` defaults to unfinished runs. `runs` lists all runs, including finished
-ones, and replaces `status --all`. Filters combine with AND; `--job` accepts a
+`status` defaults to unfinished launched runs. `runs` lists every launched run,
+finished ones included, and replaces `status --all`. Runs started with
+`etude run` are files outside the launcher database; read them with
+`etude report FILE` or `etude checkpoints --source ~/.etude/track`.
+Filters combine with AND; `--job` accepts a
 job digest or display name. An unknown revision is an error.
 
 ```sh

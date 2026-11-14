@@ -1251,7 +1251,14 @@ def track(
         )
     experiment = experiment or launched
     if experiment is None:
-        raise EtudeError("experiment_not_named", 422)
+        raise EtudeError(
+            "experiment_not_named",
+            422,
+            detail=(
+                "use etude run FILE or etude launch FILE; for a process Etude did not start, "
+                "name the run with track(experiment=..., run=...)"
+            ),
+        )
     handed = _inherited()
     if handed is not None and continues is None:
         at = handed.at

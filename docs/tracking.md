@@ -126,8 +126,8 @@ Rules a caller can rely on:
   A full queue drops the row and counts it in
   `run.dropped`. `track` is strict and raises on a bad declaration.
 - **The files are the record.** Everything about a run is in one folder named
-  for the run, `EXPERIMENT/RUN/`, in the runs directory and in each storage it
-  delivers to: `run.json` (its job, seed, config, clocks, parent and inputs),
+  for its experiment and id, `EXPERIMENT/RUN/`, in the runs directory and in
+  each storage it delivers to: `run.json` (its job, seed, config, clocks, parent and inputs),
   `outcome.json` (how its latest attempt ended), `metrics/` (row blocks and
   their indexes, from every attempt), `artifacts/` (immutable files,
   including logged row tables) and `out/` (`run.out`), which holds the saved
@@ -138,7 +138,7 @@ Rules a caller can rely on:
   [Training](training.md#what-is-on-disk) shows the layout. Under the launcher
   the same folder in the bucket also holds `attempts/ATTEMPT.json` and the
   pieces of the job's log it names, under `attempts/ATTEMPT.log/`.
-  A run's name is unique within its experiment. Runs stored before this
+  A run's id is unique within its experiment. Runs stored before this
   layout, in a flat `RUN/` folder with a `state.json` outcome, read the same.
   Config, outcome, state and checkpoint records are JSON. Rows are columnar block files (the
   layout is described at the top of `src/etude/train/block.py`),

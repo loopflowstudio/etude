@@ -277,91 +277,33 @@ the authority for a run's experiment: a name given at launch wins, the file's
 stem is only the default when none is given, and training code never needs to
 name its experiment. Launch commands take the name as an argument.
 
-## Record corrections (concept review, 2026-11-13): built
+## Later steers (2026-11-13): implementation remaining
 
-1. **`run.json` holds only declared facts.** `RunRecord` has an optional
-   `RunSubmission` for specification and scheduling facts, absent from new
-   standalone and worker declarations. The launcher database owns those facts;
-   controller replies carry the submission. Historical nested declarations,
-   default-filled files and flat launcher records still decode. Schema stays 19.
-2. **A run has one name.** `RunRecord.name` is the id's run part, including
-   its `-seed-N` spelling. Quotes use that same name when assigned; only
-   hand-built requests with no id get a derived label. Unlabelled command
-   jobs keep opaque references.
-3. **Outcome and state are different words.** `RunOutcome` replaces
-   `RunState`. The stored `outcome.json` field stays `state`; the new
-   `etude run --json` command prints `outcome`.
-4. **Imports name the defining module.** Training teaches `Stopped` from
-   `etude.stopping`; tracking no longer exports it. Deprecated
-   `etude.train.run` keeps its alias until 0.5.
+`questions.md` records the exact replies. Writers become a sub-part of the
+allocation's `RunAttempt`, preserving their separate first-row cutoffs and
+excluding them from allocation limits/accounting (tentative; show at demo).
+The eval author function instead returns a pure tournament;
+`evaluation(arena, config=..., play=play)` calls it at submission, preserving
+pending-match planning and selected checkpoint inputs. The worker uses
+`evaluating(benchmark)` and `run.play(play)`. These supersede the earlier
+writer choice and eval planning sketch; the cutovers remain to be built.
 
-Delete — do not maintain: the flat launcher fields on `RunRecord`, its
-second derived run name, `RunState`, and tracking's public `Stopped` export.
-Keep historical decoding, remote controller record replies, planned-stop
-retries, row replacement, continuation and cumulative limits. Eval planner
-changes remain blocked on the planning boundary in `questions.md`.
+## Built review corrections (2026-11-13)
 
-## Corrections from the second concept review (2026-11-13): built
+The first three review passes are built: declaration-only `RunRecord` with
+optional `RunSubmission`; one run name; `RunOutcome` and `RunData.outcome`;
+`Stopped` from `etude.stopping`; local exit 75 followed by explicit resume;
+`--name` names the job; qualified local resume and actionable refusal hints;
+launched-only continuation with required `--run` and `--until`. Historical
+outcome files and warning aliases until 0.5 remain readable.
 
-Review evidence and the detailed direction remain at
-`394aa37:scratch/design-train-api.md` (second concept review).
+Detailed direction, evidence and deletion lists are retained at
+`6f70baa:scratch/design-train-api.md` (first through third concept reviews).
+No schema, query or provider-count changes in those corrections.
 
-- The training docs distinguish launcher retries inside the run's limits
-  from local `etude run`: exit 75, then explicit `--resume RUN`. No local
-  retry loop, which would undo Ctrl-C or `--seconds`.
-- `RunData.outcome` holds the `RunOutcome`; `state` is a warning property
-  until 0.5. Internal readers use `outcome`. Stored `outcome.json` still
-  has its `state` field; SQL and lifecycle summaries keep `state` too.
-  Historical `state.json` outcomes remain readable. The tracking docs name
-  evaluation's current `outcome.json` file.
-- `--name` names the job: `--name wide --seed 7` starts `wide-seed-7`.
-  An exact run id without the seed suffix uses `RunRequest(id=)`.
+## Corrections from the fourth concept review (2026-11-13): built
 
-No schema, query or provider count changes.
-
-## Corrections from the third concept review (2026-11-13): built
-
-Probed with `examples/coin.py` in a temporary `ETUDE_HOME`; output in
-`questions.md` (third pass).
-
-1. **One run reference, here as under a launch.** `etude run --resume`
-   accepts `EXPERIMENT/RUN` as `etude launch --resume` does, through the same
-   `run_address`; a bare name is looked up in `--experiment`, else the file's
-   stem. Today a run started with `--experiment lab` resumes only when
-   `--experiment lab` is repeated: the bare id gives `run_not_found`, and
-   `lab/wide-seed-7` gives `unsafe_run_or_experiment_name`. `run_not_found`
-   names the experiment it looked in. The `run_name_taken` hint prints a
-   command that works (`--resume lab/wide-seed-7`), not the bare id. The
-   printed id and the `--json` fields stay as they are. Training docs
-   (Running it): `--resume` takes the run's id in this file's experiment, or
-   `EXPERIMENT/RUN`. One focused CLI test: start under another experiment,
-   resume by the qualified reference and by `--experiment`, refuse the bare id
-   naming the experiment searched.
-2. **The docs teach a branch command that does not run.** `etude continue
-   --run RUN --config ...` fails with `Missing option '--until'`, and with
-   `--until` it reads only the launcher database, so a run started by
-   `etude run` gives `no run 'coin/coin-seed-0'`. Make the docs true to what
-   is built, and add no command: the Running it row, the `etude continue`
-   bullet and Counting say `etude continue --run RUN --until clock=value
-   [--config ...]`, for a run the launcher started. `docs/launcher.md` (The
-   run promise) spells it `etude continue RUN --experiment`; the option is
-   `--run RUN`. Whether a run started here can be branched is open
-   (`questions.md`).
-3. **The config refusal the docs print is not the one Etude prints.** Built:
-   `etude: run_identity_conflict: lr was 0.1, is 0.2`. The Training page shows
-   a two-line message with the run's name and `etude continue` advice. Show
-   the built line; put the advice in prose (a new `--name` here; `etude
-   continue` for a launched run). Keep the code and the named fields.
-
-Delete — do not maintain: nothing. No schema, query or provider count
-changes; no new command or option.
-
-## Corrections from the fourth concept review (2026-11-13): to build
-
-Probed at `cbdefd7` with `examples/coin.py` and a failing recipe in a
-temporary `ETUDE_HOME`; output in `questions.md` (fourth pass). Fresh, timed
-stop, failure, `--resume` and `--resume --until` on a finished run all behave
-as the Training page says. What follows is what a person meets next.
+Probe evidence at `cbdefd7` is in `questions.md` (fourth pass).
 
 1. **Calling `train` yourself is refused without saying what to do.**
    `python -c "import coin; coin.train(coin.Config())"` raises a bare

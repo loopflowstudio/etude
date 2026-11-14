@@ -123,7 +123,7 @@ def history(
     ] = None,
     experiment: Annotated[str | None, typer.Option(help="only runs of this experiment")] = None,
 ) -> None:
-    """List every run, finished ones included."""
+    """List every launched run, finished ones included."""
     from etude.launch.listing import show_runs
 
     scheduler = default()

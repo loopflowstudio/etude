@@ -9,54 +9,32 @@ intended experience. Earlier local_launch/Run.until choices and QA history are
 superseded as API direction, retained in git at `1666be1:scratch/questions.md`.
 They remain evidence about the existing carriage and retry machinery.
 
-## State publication (2026-11-13): layout settled, two points unanswered
+## State publication (2026-11-13)
 
-**Why a pointer.** The existing carrier updates each mutable out file
-separately, so an interrupted delivery leaves a mixed save
-(`uv run python scratch/state-publication.py`: model=save-2,
-optimizer=save-1, state.json=save-1, membership unchanged; recovery reads
-current object bytes for membership keys, so hashes would detect and not
-recover). Direction: "snapshot directory + pointer published last, recovery
-follows the pointer". Do not weaken the Training page to per-file atomicity.
+An interrupted mutable-file delivery reproduced a mixed save: model=save-2,
+optimizer=save-1, state.json=save-1, membership unchanged. Command:
+`uv run python scratch/state-publication.py`. Full evidence and exact answers
+are retained at `6f70baa:scratch/questions.md` (State publication).
 
-**Jack Heart, 2026-11-13**, on the four questions put to him (file sharing;
-who deletes under upload-only grants; local retention; running hours):
+Jack Heart: "snapshot directory + pointer published last, recovery follows
+the pointer"; "local storage probably fine, but ideally avoid remote extra
+storage". On self-contained saves: "1b is fine, my other feedback was that
+extra stuff locally we can cleanup automatically is ok, but extra uploads
+are not". On controller deletion under upload-only grants: "2a is the best
+of thse options". On local retention: "i dont think it should need to save
+if its confirmed published online, but i also think we can have some grace
+in our cleanups". Confirmation/grace: "dunno, dunno". Running hours unanswered.
 
-- "1b is fine, my other feedback was that extra stuff locally we can cleanup
-  automatically is ok, but extra uploads are not". 1b was: each save is
-  self-contained and unchanged files upload again.
-- "2a is the best of thse options". 2a was: the launcher deletes old remote
-  saves when the worker cannot.
-- On keeping the previous save locally: "i dont think it should need to save
-  if its confirmed published online, but i also think we can have some grace
-  in our cleanups".
-- On what counts as confirmed and how long the grace is: "dunno, dunno".
-- Running hours across a resume: not answered.
+Built assumptions, reversible: confirmed means storage acknowledged the
+selected `current.json` or a later one; grace is the following delivery pass,
+not a timer; running hours resume from the saved state. Self-contained saves
+repeat unchanged bytes on delivery, but saves superseded before delivery are
+skipped. Courier owns local acknowledgement/retention; controller removes old
+remote saves under upload-only grants. The docs show this behavior.
 
-`docs/training.md` (Carrying on; What is on disk) and `docs/launcher.md`
-(The run promise) carry the built layout and retention table. Each save is
-self-contained, only the pointer-selected save is delivered, and the pointer
-is published last. Courier cleanup follows acknowledgement; the controller
-owns remote deletion under upload-only grants. Skipping saves replaced before
-a delivery pass is the implementation's reading of "extra uploads are not
-[ok]"; identical bytes within successive delivered saves upload again.
-
-**Unanswered, chosen here, reversible:**
-
-1. *Confirmed* means storage acknowledged the `current.json` naming that
-   save or a later one.
-2. *Grace* is not a timer: removal happens on the delivery pass after
-   confirmation and may lag.
-3. `running_hours` continues from the save an attempt resumed, as
-   `docs/tracking.md` says (built: `Run.__init__` reads `saved_states`;
-   `tests/train/test_state.py::test_running_hours_resume_from_saved_state_instead_of_a_checkpoint`).
-
-**Awkward, found writing the docs.** With an upload-only grant and no
-selected controller, the cleanup loop runs only while a CLI command does. A
-run saving every five minutes leaves twelve replaced saves an hour in the
-bucket until then, against "ideally avoid remote extra storage". The docs
-say so. Question: is that acceptable for upload-only S3, or should such a
-launch warn, or deliver saves less often?
+Open: without a selected controller, upload-only remote cleanup runs only
+while a CLI command does. At five-minute saves, twelve replaced saves/hour
+remain until then. Accept, warn, or reduce delivery cadence?
 
 ## Train API implementation choices
 
@@ -243,46 +221,16 @@ the constructors into one module, `etude.jobs` re-exporting until 0.5;
 (c) another name for the shared types' module. Built: (a). Does not hold
 the implement direction in `design-train-api.md`.
 
-Standing open choices, unchanged and for the demo: `RunWriter` beside
-`RunAttempt` against the "1a" answer; the eval planning boundary; cleanup
-under upload-only grants with no controller; config on a local `--resume`;
-a second Ctrl-C.
+Remaining choices: upload-only cleanup without a controller, local resume
+config and second Ctrl-C. Later steers below supersede the writer and eval
+planning choices; their implementation remains to be built.
 
-## Concept review, second pass (2026-11-13): no new open choice
+## Concept review, second and third passes (2026-11-13)
 
-Three corrections the design already implies are in `design-train-api.md`
-(second concept review): the docs' local repeat-call promise, `RunData.state`
--> `outcome`, and what `--name` names.
-
-Evidence added to the standing `RunWriter`/`RunAttempt` choice, not an
-answer. The word people are taught has both meanings at `394aa37`:
-`docs/training.md` says "Calling `train` is one attempt" and "Leaving the
-block records how the attempt ended" (a tracking context: `RunWriter`,
-`RunData.attempts: tuple[RunWriter, ...]`, `AttemptSummary`,
-`outcome.json`), while `docs/launcher.md` says "called again as a new
-RunAttempt" and `max_attempts` counts allocations. For the default loop
-(one `track` per call, one call per allocation) they coincide, which is why
-the docs read fine; they part only in the probe's cases. Whichever of
-(a)/(b)/(c) is taken decides whether `RunData.attempts` and `AttemptSummary`
-are renamed, so they are left as they are until then.
-
-
-## Concept review, third pass (2026-11-13): one new open choice
-
-Three corrections the design implies are in `design-train-api.md` (third
-concept review). What the runs showed at `df734c3`, `examples/coin.py`,
-temporary `ETUDE_HOME`, no network:
-
-    run --experiment lab --name wide --seed 7 --until updates=5 --json
-      {"run": "wide-seed-7", "experiment": "lab", "outcome": "finished"}   exit 0
-    run --resume wide-seed-7 --until updates=8          etude: run_not_found: wide-seed-7   exit 1
-    run --resume lab/wide-seed-7 --until updates=8      etude: unsafe_run_or_experiment_name   exit 1
-    run --experiment lab --resume wide-seed-7 --until updates=8 --json     finished, exit 0
-    run --experiment lab --name wide --seed 7           etude: run_name_taken: wide-seed-7; use --resume wide-seed-7   exit 1
-    run --resume coin-seed-0 --config '{"lr": 0.2}'     etude: run_identity_conflict: lr was 0.1, is 0.2   exit 1
-    continue --run coin-seed-0 --config '{"lr": 0.2}'   etude: Missing option '--until'.   exit 1
-    continue --run coin-seed-0 --experiment coin --until updates=8 --config '{"lr": 0.2}'
-                                                        etude: no run 'coin/coin-seed-0'   exit 1
+The second pass's local stop/resume, outcome and job-name corrections and
+third pass's qualified resume and launched-only branch docs are built.
+Exact CLI output at `df734c3` and the writer/attempt vocabulary evidence are
+retained at `6f70baa:scratch/questions.md` (second and third passes).
 
 **Open: branching a run started with `etude run`.** The Training page puts
 `etude continue` in one table with the local commands, and it is the only
@@ -352,3 +300,22 @@ the code's word for the short form is `RunRecord.name`, while `--name` names
 the job. Options: (a) keep, with the docs saying what the file holds (now
 directed); (b) store the short id beside `experiment`; (c) teach "name" for
 the short form and rename `--name`. Does not hold the implement direction.
+
+## RunAttempt and writers (2026-11-13)
+
+Options put to Jack Heart: (a) keep `RunWriter` beside `RunAttempt`; (b) one
+`RunAttempt` with writers as a part of it (Slurm job/steps shape); (c) another
+name for the writer. He answered: "- b. one RunAttempt with writers as a part
+of it i think  probably?" (tentative; show at demo). Keep the many-writers-
+per-allocation behaviour: each writer keeps its own first-row cutoff, and
+writers do not count against attempt limits or rental accounting.
+
+## Eval planning boundary: the author function returns the tournament (2026-11-13)
+
+Proposed: `def arena(config: ArenaConfig) -> Benchmark` is pure (no I/O);
+`evaluation(arena, config=ArenaConfig(), play=play)` makes the job; the planner
+calls `arena(config)` at submission and plans pending matches and checkpoint
+inputs as today; on the machine Etude runs `with evaluating(benchmark) as run:
+run.play(play)`. Prior art: Inspect AI `@task -> Task`, HELM
+`run_spec_function -> RunSpec`. Jack Heart: "I guess thats fine." This
+replaces the earlier sketch where the author function ran the eval itself.
