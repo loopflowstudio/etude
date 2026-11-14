@@ -197,7 +197,10 @@ def find_training_run(request: RunRequest, state: ExperimentState) -> TrainingRu
         (
             run
             for run in state.runs
-            if run.name == request.id
+            if (
+                request.id is not None
+                and run.name == request.id.removeprefix(state.experiment + "/")
+            )
             or (run.launch == request.job.name and run.seed == request.seed)
         ),
         None,

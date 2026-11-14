@@ -370,6 +370,8 @@ Three levels do the work, each built only on the one below it:
   resumes only when asked. A stopped eval needs no action: its undelivered
   matches are new on the next pass and play in a new run. While this computer's
   launcher owns continuation, either kind reads its `queued` or `running` phase.
+  If the launcher ends without success, it reads `failed`; a stored `finished`
+  or `failed` outcome always wins.
 - **One line for everything considered.** A training run already in the state
   prints that state. A new one prints `new, running` when a machine took it,
   `new, queued` when it waits for room (always, under `etude queue`), or

@@ -676,7 +676,9 @@ does, unless `--retry-failed`.
   unplayed.
 - **State.** What the experiment's runs have stored, together with the
   scheduler's records of those queued or only just started, read fresh each
-  pass and never stored itself. `state.eval_runs` is its eval runs, each with
+  pass and never stored itself. Summary names are local (`base@0`,
+  `ladder-1a2b3c4d5e6f`) in both cases; `state.run("capacity/base@0")` and
+  `state.run("base@0")` find the same training run. `state.eval_runs` is its eval runs, each with
   its name and whether it is `queued`, `running`, `stopped`, `finished` or `failed`. `state.runs` is
   its training runs under the source: each one's name, its `job` (the name the report gives it: the
   launch name, with its config digest when one name ran two configs),
