@@ -123,6 +123,36 @@ def test_checkpoints_are_listed_at_their_storage_address_while_the_run_goes_on(
     run.finish()
 
 
+def test_checkpoints_default_to_this_computers_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = tmp_path / "home with spaces"
+    monkeypatch.setenv("ETUDE_HOME", str(home))
+    model = tmp_path / "model.pt"
+    model.write_bytes(b"weights")
+    with track(experiment="e", run="r", clocks=[Step("step", "steps")]) as run:
+        run.checkpoint(model, step=3)
+    assert main(["checkpoints"]) == 0
+    (listed,) = capsys.readouterr().out.splitlines()
+    fields = listed.split("\t")
+    assert fields[:2] == ["e/r", "1"]
+    assert "step=3" in fields[2].split()
+    assert fields[-1] == (home / "track/e/r/checkpoints/step-3.pt").as_uri()
+
+
+def test_checkpoints_explains_an_empty_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = tmp_path / "home with spaces"
+    monkeypatch.setenv("ETUDE_HOME", str(home))
+    assert main(["checkpoints"]) == 1
+    assert f"no runs in {home / 'track'}" in capsys.readouterr().err
+    with track(experiment="e", run="r", clocks=[Step("step", "steps")]):
+        pass
+    assert main(["checkpoints", "--experiment", "missing"]) == 1
+    assert f"no runs for experiment 'missing' in {home / 'track'}" in capsys.readouterr().err
+
+
 SERVE_INDEX = """
 import json, sys, threading
 from pathlib import Path

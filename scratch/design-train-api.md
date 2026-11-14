@@ -345,57 +345,17 @@ Refusal remedy for a direct `train` call, local-versus-launched reader words
 and the stored layout's checkpoint records and qualified id. Full text at
 `cb0e1fd:scratch/design-train-api.md`.
 
-## Corrections from the fifth concept review (2026-11-13): built
+## Fifth concept review (2026-11-13): built
 
-Walked at `cb0e1fd` in a fresh ETUDE_HOME: coin new / taken / resume /
-`--resume --until updates=60`; Hanabi `run`, `eval` (8 new), `eval` again
-(0 new), `report`, `statsdb`. All behaved as documented. The mismatches are
-at the join to the league, in what the playing code and the tournament write.
+Full evidence and direction: `06ff0f6:scratch/design-train-api.md` (fifth
+concept review). Built: CheckpointRef owns path decoding, playing consumers
+use checkpoint.path, Seating/RoundRobin expose configs while preserving
+historical conditions JSON and released warning aliases, Hanabi uses Deal.deal
+and default_root(). Delete the duplicate decoder, hand parses and unreleased
+singular collection config keyword. Keys, seeds and stored bytes stay stable;
+the configs spelling remains a worker choice to show at demo.
 
-1. **A seated checkpoint has no path.** Training reads a checkpoint as
-   `rival.path` (`CheckpointRecord.path`). Playing code, the same checkpoint
-   one page later, is taught
-   `Path(urlparse(player.checkpoint.artifact.uri).path)`
-   (`docs/evaluation.md`, `docs/launcher.md`, `tests/eval/games.py`,
-   `examples/hanabi.py`). The docs' spelling is also wrong: with no
-   `unquote`, a folder under `/tmp/Application Support/` comes back as
-   `/tmp/Application%20Support/x` (run here). This design already says the
-   playing code "is handed the folder" and that `run.checkpoints()` and
-   evaluation read the same records. Build: `CheckpointRef.path`, the one
-   owner of that parse, with the record's `path` reading through it and the
-   same refusal for an address not on this machine; `play` and every doc
-   and example use `player.checkpoint.path`. No other accessor, no helper
-   function. Delete — do not maintain: the hand parse in docs, tests'
-   playing fixtures and the example, and the record's own copy of it.
-2. **`Seating(config=deals)` is several configs under a singular name.**
-   Every other `config=` in the same file is one model
-   (`evaluation(arena, config=ArenaConfig())`, `environment(..., config=)`,
-   `Inference(config=)`, `Match.config`); on `Seating` and `RoundRobin` it
-   is a tuple making one match each, and the docs say both "one match per
-   condition" and "a match for each config". Jack Heart's words were about
-   the author's class ("and be like MatchConfig or something"); the field
-   spelling on `Seating` was the worker's reading, and `config=` there is
-   unreleased. Build: `configs=` on `Seating` and `RoundRobin` (attribute
-   and keyword), `Match.config` unchanged, stored JSON still `conditions`,
-   released `conditions=` still warning until 0.5, with no alias for the
-   unreleased singular. Docstrings and `docs/evaluation.md` say "config"
-   wherever they still say "condition" for this. Keys, seeds and stored
-   bytes must not move (the existing historical-key test holds this). This
-   is the review's reading, not Jack Heart's words: show it at demo.
-3. **The Hanabi example carries two seeds.** `Deal(seed=101)` is the deal;
-   `match.seed` is Etude's seed for the match and the example ignores it,
-   then stores the deal as column `deal`. Name the field `deal`.
-4. **`docs/hanabi.md` reads the wrong folder.** It says to set `ETUDE_HOME`
-   for every command, then reads `Path.home() / ".etude/track"`. Use the
-   same home in the snippet.
-
-Built: one path decoder on CheckpointRef; configs on the tournament collections,
-with historical conditions serialization and warnings preserved; Deal.deal;
-Hanabi reads default_root(). The old collection config keyword and hand parses
-are deleted. No schema, query, provider-count or stored-format change; no new
-command. Focused receipts are in exp-56.md; full acceptance stays with gate.
-
-## Corrections from the sixth concept review (2026-11-13): to build
+## Corrections from the sixth concept review (2026-11-13): built
 
 Walked at `67ebe7c` in a fresh ETUDE_HOME whose path has a space: coin new
 (exit 0), the same again (`run_name_taken: coin-seed-0; use --resume

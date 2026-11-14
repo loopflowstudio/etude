@@ -82,54 +82,36 @@ Fourth-review corrections (refusal remedies, local-versus-launched docs, stored
 layout) are built; receipt at `416847a:scratch/exp-56.md`. Local
 listing/branching, direct calls and id/name choices remain in `questions.md`.
 
-Fifth-review corrections are built: CheckpointRef owns local path decoding;
-CheckpointRecord delegates to it and playing consumers use checkpoint.path.
-Seating/RoundRobin expose configs, serialize conditions, and retain only the
-released conditions warning alias. Hanabi uses Deal.deal and default_root().
-Delete — do not maintain: hand URL parses in playing fixtures/docs/example,
-the record's duplicate decoder and the unreleased collection config spelling.
-No schema or query changes. Gate still owns full acceptance; PR #103 stays draft.
+Fifth-review corrections and their 200-test receipt are retained at
+`06ff0f6:scratch/exp-56.md`. Checkpoint paths, collection configs and Hanabi
+folder/seed corrections are built; no schema or query changes.
 
-Check: ruff, format, `uv run mypy` (175 files) pass; `uv run pytest` over
-tests/eval/{test_match,test_tournament,test_records,test_context}.py,
-tests/test_{continuation_out,experiment,jobs,page_evals,smoke}.py and
-tests/launch/{test_worker_attempts,test_ssh,test_runpod_machines}.py — 200
-passed. Covers pinned historical keys, stored conditions JSON/warnings, paths
-with spaces and remote-path refusals. Test readers of a checkpoint record use
-`.path` too; one stored-attempt expectation gained `writers: []` (stale since
-`620bfd6`).
+Sixth-review corrections are built: checkpoints defaults to default_root()
+and explains empty selections; missing launcher runs name local read/retry
+remedies; continue help qualifies bare ids; evaluation docs name current calls.
+No schema, query, stored-format or provider-count change. Gate owns full
+acceptance; PR #103 stays draft.
 
-Sixth-review corrections are the next build (design, "sixth concept review"):
-`etude checkpoints` defaults its source like the other readers; launched-run
-lookups that find nothing name the remedy for a local run; evaluation.md
-stops naming `evaluate`/`hold` as calls. Text and one default: no schema,
-query or stored-format change. Focused checks: tests/train/test_cli.py,
-tests/launch/test_cli.py and the docs formatter.
+Compress reworded the missing-run refusal ("the launcher has no run ...")
+and cut the new tests to one case per behavior; docs unchanged by it.
+Check: `uv run pytest tests/train/test_cli.py tests/launch/test_cli.py` —
+28 passed; ruff check and format --check pass; mypy passes on the 4 files.
+Maintainer review: one default and refusal wording only; existing listings,
+queries, reads and exit statuses retained.
 
-Hanabi command receipt: isolated ETUDE_HOME with spaces; run updates=2,
-resume --until updates=3, eval (8 new/8 played), eval (0 new), report, and
-the docs' statsdb(default_root()) query (16 team rows, mean score 0.9375).
-Report: `/var/folders/m6/r3tllnrs1yq7yfbwm680tss40000gn/T/exp56 Hanabi mstut3r3/track/reports/hanabi.html`.
-No process remains. Earlier stop/resume evidence stays in demo.md.
+Hanabi command receipt and temporary report location are retained at
+`06ff0f6:scratch/exp-56.md`; durable stop/resume evidence is in demo.md.
 
-Compress pass: one writer merge in the launcher database, `RunProgress` under
-one name, resume identity resolved once in `etude.local`; no behavior change.
-Check: ruff, format, `uv run mypy` (175 files) pass; `uv run pytest
-tests/test_jobs.py tests/eval/test_context.py tests/eval/test_match.py
-tests/train/test_local.py tests/launch/test_worker_attempts.py
-tests/launch/test_scheduler.py tests/train/test_tables.py tests/test_page.py`
-— 139 passed.
+Compress pass and its 139-test receipt: `06ff0f6:scratch/exp-56.md`.
 
-Writer/eval cutovers and the later typed-match-config steer are built. Remaining
-choices have been made in questions.md; the unreleased type module is now
-etude.spec, local resume defaults to stored config, and a second Ctrl-C exits.
-Optional Hanabi (OpenSpiel/PyTorch) is ready for a person's demo; no PufferLib
-adoption or EXP-62 work is included. docs/hanabi.md gives the commands.
+Writer/eval and typed-match cuts are built. questions.md holds decisions;
+docs/hanabi.md prepares the optional OpenSpiel/PyTorch demo. No PufferLib
+adoption or EXP-62 work is included.
 
 Earlier typed-match, writer/allocation, stop/resume and CLI-file import checks
 are retained at `e40e1a2:scratch/exp-56.md`; full acceptance stays with gate.
 
-Earlier checks and indexed-query receipts: `ef6099a:scratch/exp-56.md`.
+Indexed-query receipts: `ef6099a:scratch/exp-56.md`.
 
 Acceptance remains the design's fresh/stop/resume example; two models in one
 save and checkpoint seated in evaluation; taken-name/config/seed refusals;

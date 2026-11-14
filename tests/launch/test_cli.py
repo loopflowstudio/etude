@@ -69,6 +69,38 @@ def run(capsys: pytest.CaptureFixture[str], *argv: str) -> list[str]:
     return capsys.readouterr().out.splitlines()
 
 
+@pytest.mark.parametrize(
+    ("reference", "identity"),
+    [
+        (("coin-seed-0",), "coin-seed-0"),
+        (("coin/coin-seed-0",), "coin/coin-seed-0"),
+        (("coin-seed-0", "--experiment", "coin"), "coin/coin-seed-0"),
+    ],
+)
+def test_continue_explains_how_to_read_or_change_a_local_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    reference: tuple[str, ...],
+    identity: str,
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    assert main(["continue", "--run", *reference, "--until", "updates=30"]) == 1
+    error = capsys.readouterr().err
+    assert f"the launcher has no run {identity!r}" in error
+    assert "etude report FILE" in error
+    assert "new --name" in error
+
+
+def test_continue_help_explains_experiment_without_a_file(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["continue", "--help"]) == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "experiment label qualifying a bare run id" in help_text
+    assert "file stem" not in help_text
+
+
 def test_a_job_file_launches_a_cohort_and_each_verb_reads_it_back(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

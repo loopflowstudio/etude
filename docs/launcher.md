@@ -1712,7 +1712,7 @@ A run displayed by `etude status` includes a source line, for example:
 `status` defaults to unfinished launched runs. `runs` lists every launched run,
 finished ones included, and replaces `status --all`. Runs started with
 `etude run` are files outside the launcher database; read them with
-`etude report FILE` or `etude checkpoints --source ~/.etude/track`.
+`etude report FILE` or `etude checkpoints`.
 Filters combine with AND; `--job` accepts a
 job digest or display name. An unknown revision is an error.
 

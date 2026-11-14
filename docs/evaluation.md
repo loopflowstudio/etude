@@ -128,8 +128,7 @@ db.sql("""select a.name, avg(score) from plays
 
 `evaluating` opens one `EvalRun`. Pass a tournament, or an environment with
 an explicit match list; `run.play(play)` plays its unstored matches.
-Outside a launch, give `experiment=` and use `resume=True` to carry on an
-existing run. A launched retry resumes automatically. `run.stopping()` checks
+Outside a launch, give `experiment=`. `run.stopping()` checks
 stop requests between matches; a planned stop seals completed tables and
 raises `Stopped`. `hold` and `evaluate` are warning wrappers until 0.5.
 
@@ -305,8 +304,10 @@ with evaluating(
   still refused (`match_has_no_rows`), never stored as a result.
 - **Environments are never pooled.** An eval run has one environment;
   resuming with another is refused, and a report shows each value from one environment.
-- **Resume.** Calling `evaluate` again with the same `run` skips every match
-  already delivered to any of `storages`, even on a machine with an empty disk.
+- **Resume.** Outside a launch, reopen the same eval run with
+  `evaluating(..., resume=True)` and call `run.play(play)` to carry on.
+  A launched retry resumes automatically. Matches already delivered to any
+  of `storages` are skipped, even on a machine with an empty disk.
 - **Progress.** Each stored match prints one line to stderr:
   `etude: RUN: 12/36 matches played, 220s elapsed`.
 - **Storage.** Stored matches are sealed into blocks every five minutes (or
@@ -319,8 +320,8 @@ with evaluating(
   rows, so a read filtered to a few matches skips most of a file. Plain
   DuckDB reads a run's tables without Etude:
   `read_parquet('RUN/blocks/*/plays.parquet')`. A process killed before it
-  seals leaves its matches staged on disk; the next `evaluate` in the folder
-  seals them. SIGTERM seals before the run ends.
+  seals leaves its matches staged on disk; reopening with
+  `evaluating(..., resume=True)` in the folder seals them. SIGTERM seals before the run ends.
 - **Older eval runs.** Runs written before blocks kept a file per match,
   table and artifact. Readers refuse them (`eval_run_not_converted`) until
   `etude convert-eval RUN --source URI` writes blocks beside the old files,
@@ -432,7 +433,7 @@ with evaluating(
   play. `evaluating(..., experiment=...)` makes its eval run the experiment's, so
   its results sit beside the experiment's training runs and their
   checkpoints in the experiment's database.
-- **Stored in its eval runs.** Each eval run a `hold` starts keeps
+- **Stored in its eval runs.** Each eval run `evaluating` opens keeps
   `tournament.json` in its own folder: the definition it was held with, and
   the checkpoint or entrants it added. A tournament is every eval run naming
   it, so a hold on a rented machine delivers its part like any other run, and
@@ -452,7 +453,8 @@ with evaluating(
   draws what they recorded and says so.
 - **Run names.** Under `etude launch` the eval run is the launched run
   (`ETUDE_RUN`), so `etude logs` and `status` lead to it and a retry resumes
-  it, finding the same checkpoint (by its key) wherever the retry put it. Elsewhere it is named for the tournament and what is given; a repeated call needs `resume=True`.
+  it, finding the same checkpoint (by its key) wherever the retry put it.
+  Elsewhere it is named for the tournament and what is given.
 - **Splitting.** `share=Share(index=k, count=n)` plays part k (from 0) of
   n disjoint parts, for n machines: contiguous runs of the scheduled matches
   in play order, so parts differ by at most one match and each seats only

@@ -37,14 +37,21 @@ def sync(
 
 
 def checkpoints(
-    source: Annotated[str, typer.Option(help="a runs directory or s3://bucket/prefix")],
+    source: Annotated[
+        str | None,
+        typer.Option(
+            help="a runs directory, s3://bucket/prefix or r2://bucket/prefix; "
+            "default: where runs are written on this computer"
+        ),
+    ] = None,
     experiment: Annotated[str | None, typer.Option(help="only this experiment")] = None,
 ) -> None:
     """List recorded checkpoints."""
     from etude.run import runs
-    from etude.storage import storage_from_uri
+    from etude.storage import default_root, storage_from_uri
     from etude.train.read import read
 
+    source = source or str(default_root())
     storage = storage_from_uri(source)
     found = [pair for pair in runs(storage) if experiment in (None, pair[0])]
     for name, run in found:
@@ -55,4 +62,6 @@ def checkpoints(
             tags = ",".join(record.tags) or "-"
             print(f"{name}/{run}\t{record.ordinal}\t{at}\t{tags}\t{size}\t{artifact.uri}")
     if not found:
+        selection = f" for experiment {experiment!r}" if experiment is not None else ""
+        print(f"no runs{selection} in {source}", file=sys.stderr)
         raise typer.Exit(1)

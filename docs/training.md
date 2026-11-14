@@ -647,7 +647,7 @@ A run's hours, dollars and attempts span every attempt, whoever asked for it
 A run started with `etude run` is files under
 `~/.etude/track/EXPERIMENT/` (moved by `ETUDE_HOME`), outside the launcher
 database. Read it with `etude report FILE` or
-`etude checkpoints --source ~/.etude/track`. `etude runs`, `etude status`,
+`etude checkpoints`. `etude runs`, `etude status`,
 `etude cancel` and `etude continue` work on launched runs.
 
 ## The pieces underneath

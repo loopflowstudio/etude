@@ -562,7 +562,9 @@ def continue_run(
         typer.Option(help='typed config changes as a JSON object, e.g. {"rate":0.001}'),
     ] = None,
     max_usd: Annotated[str | None, typer.Option(help="the new cohort's dollar ceiling")] = None,
-    experiment: ExperimentOption = None,
+    experiment: Annotated[
+        str | None, typer.Option(help="experiment label qualifying a bare run id")
+    ] = None,
 ) -> None:
     """Go past a run's target from its out. This makes a new run with a parent."""
     # Continuation joins the launcher's runs with tracking's checkpoints.
