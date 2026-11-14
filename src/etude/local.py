@@ -25,6 +25,7 @@ from typing import cast
 
 from pydantic import BaseModel
 
+from etude.cache import Artifact
 from etude.call import changed_config, config_type
 from etude.declarations import read_training_jobs, select_runs
 from etude.errors import EtudeError, LauncherError
@@ -34,9 +35,9 @@ from etude.identity import run_address
 from etude.jobs import load_job_function
 from etude.records import RunRecord
 from etude.run import RunFiles, run_name_taken, validate_resume
-from etude.spec import Until
+from etude.spec import Input, Until, Variable
 from etude.stopping import Stopped
-from etude.storage import DirectoryStorage, default_root, run_directory
+from etude.storage import DirectoryStorage, default_root, place_artifact, run_directory
 from etude.train.read import read
 from etude.train.state import saved_states
 
@@ -89,6 +90,12 @@ def train(
                     ),
                     None,
                 )
+                if prior is not None and job is None and seed is None and not resume:
+                    print(
+                        f"{request.id}  {prior.state}",
+                        file=sys.stderr if json_output else sys.stdout,
+                    )
+                    continue
                 identity = run_address(prior.name, label) if prior is not None else request.id
                 prepared.append(
                     _prepare(
@@ -103,6 +110,8 @@ def train(
                         resume=resume,
                         until=until or request.job.until,
                         seconds=seconds,
+                        inputs=request.job.inputs,
+                        environment=request.job.environment,
                     )
                 )
             except (EtudeError, LauncherError, ValueError, TypeError) as error:
@@ -156,6 +165,8 @@ def _prepare(
     resume: bool,
     until: Until | None,
     seconds: float | None,
+    inputs: tuple[Input, ...] = (),
+    environment: tuple[Variable, ...] = (),
 ) -> _Training | _Finished:
     """Check one run's identity and build its attempt, touching nothing stored."""
     base = default_root()
@@ -185,6 +196,7 @@ def _prepare(
         check=False,
     )
     values = {
+        **{v.name: v.value for v in environment},
         "ETUDE_EXPERIMENT": label,
         "ETUDE_RUN": identity.rsplit("/", 1)[-1],
         "ETUDE_RUN_ADDRESS": run_address(identity, label),
@@ -208,6 +220,7 @@ def _prepare(
         address=run_address(identity, label),
         experiment=label,
         seconds=seconds,
+        inputs=inputs,
     )
 
 
@@ -228,6 +241,7 @@ class _Training:
     address: str
     experiment: str
     seconds: float | None
+    inputs: tuple[Input, ...]
 
 
 def _train_each(attempts: list[_Training | _Finished], *, json_output: bool) -> int:
@@ -250,12 +264,30 @@ def _train_each(attempts: list[_Training | _Finished], *, json_output: bool) -> 
 
 def _train(attempt: _Training, *, json_output: bool) -> bool:
     """Call the recipe as one attempt; true when it stopped after saving."""
-    stopped = False
     values = dict(attempt.values)
     if attempt.seconds is not None:
         values["ETUDE_DEADLINE"] = datetime.fromtimestamp(
             time.time() + attempt.seconds, UTC
         ).isoformat()
+    with TemporaryDirectory(prefix="etude-inputs-") as folder:
+        for given in attempt.inputs:
+            uri = given.uri
+            if uri is None:
+                uri = (
+                    DirectoryStorage(default_root()).uri(f"{given.run}/{given.key}")
+                    if given.run is not None
+                    else given.key
+                )
+            place_artifact(
+                Artifact(location=uri, sha256=given.sha256, size_bytes=given.size_bytes),
+                Path(folder) / given.name,
+            )
+        values["ETUDE_INPUTS_DIR"] = folder
+        return _call_training(attempt, values, json_output=json_output)
+
+
+def _call_training(attempt: _Training, values: dict[str, str], *, json_output: bool) -> bool:
+    stopped = False
     with _attempt(values):
         if not json_output:
             print(attempt.address, flush=True)
@@ -328,7 +360,8 @@ def _resumed(
 @contextmanager
 def _attempt(values: dict[str, str]) -> Iterator[None]:
     # Clear inherited launch settings: a local call is its own attempt.
-    prior = {key: value for key, value in os.environ.items() if key.startswith("ETUDE_")}
+    names = set(values) | {key for key in os.environ if key.startswith("ETUDE_")}
+    prior = {key: os.environ[key] for key in names if key in os.environ}
     signals = (signal.SIGINT, signal.SIGTERM)
     handlers = {sig: signal.getsignal(sig) for sig in signals}
     with TemporaryDirectory(prefix="etude-stop-") as folder:
@@ -350,6 +383,6 @@ def _attempt(values: dict[str, str]) -> Iterator[None]:
             for sig, handler in handlers.items():
                 signal.signal(sig, handler)
             for key in list(os.environ):
-                if key.startswith("ETUDE_"):
+                if key in names or key.startswith("ETUDE_"):
                     os.environ.pop(key)
             os.environ.update(prior)

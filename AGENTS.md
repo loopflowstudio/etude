@@ -76,7 +76,9 @@ Test behaviour a user would care about, and assert on results. Mock side
 effects (network, subprocesses, paid services) but never assert on how a mock
 was called. Do not reshape production code for a test: no interface, factory
 or extra parameter that exists only for test doubles. Delete a flaky test
-instead of adding retries.
+instead of adding retries. Experiment fixtures whose functions are imported by
+module name use distinct module names for distinct implementations: Python's
+import cache outlives a test's temporary files.
 
 ## Development
 

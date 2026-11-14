@@ -1,4 +1,4 @@
-"""Experiments end to end: eval(state) chooses checkpoints, and each pass plays only what is new."""
+"""Experiments end to end: eval_jobs(state) chooses checkpoints, and each pass plays only what is new."""
 
 from __future__ import annotations
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 from collections.abc import Iterator
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -139,7 +140,13 @@ def lab(tmp_path_factory: pytest.TempPathFactory) -> Iterator[tuple[Path, Path]]
     """Two runs of `lab`, four checkpoints each, evaluated once; then `a` saves two more."""
     tmp_path = tmp_path_factory.mktemp("lab")
     runs = tmp_path / "runs"
-    file = experiment_file(tmp_path / "experiments", "lab", LAB)
+    outside = tmp_path / "outside.pt"
+    outside.write_bytes(b"outside weights")
+    declaration = LAB.replace(
+        'ArtifactRef(uri="hf://lab/outside.pt", sha256="ab" * 32)',
+        f"ArtifactRef(uri={outside.as_uri()!r}, sha256={sha256(outside.read_bytes()).hexdigest()!r}, size_bytes={outside.stat().st_size})",
+    )
+    file = experiment_file(tmp_path / "experiments", "lab", declaration)
     with pytest.MonkeyPatch.context() as patch:
         patch.setenv("ETUDE_HOME", str(tmp_path / "home"))
         # Running an experiment file puts its folder on the import path.
@@ -208,7 +215,7 @@ def test_a_page_shows_what_was_not_evaluated_not_yet_played_and_failed(page: Pag
     # Every second checkpoint is rated; the others were not evaluated.
     assert not [key for key in coverage if key[1] % 2]
     assert (coverage[("a", 2, "ladder")].played, coverage[("a", 2, "ladder")].unplayed) == (4, 0)
-    # Saved after the pass: eval(state) wants it, and nothing has played it yet.
+    # Saved after the pass: eval_jobs(state) wants it, and nothing has played it yet.
     assert (coverage[("a", 6, "ladder")].played, coverage[("a", 6, "ladder")].unplayed) == (0, 4)
     # The failed match is counted and listed as failed, never as not yet played.
     failed = coverage[("a", 2, "corrupt")]
@@ -258,7 +265,7 @@ def test_a_watched_page_reads_each_bucket_file_once_per_computer(
         local = DirectoryStorage(runs)
         for key in local.keys(""):
             S3Storage("lab", client=client).put(key, local.get(key))
-        # `etude report --watch` builds the page every few seconds, eval(state) included.
+        # `etude report --watch` builds the page every few seconds, eval_jobs(state) included.
         first = build(S3Storage("lab", client=client), file)
         assert first.cells == page.cells and first.coverage == page.coverage
         read_once = client.bytes
@@ -901,7 +908,7 @@ def test_a_page_reads_metrics_from_training_jobs_once_and_no_eval_blob(
     storage = KeysRead(DirectoryStorage(runs))
     assert [key for key in storage.keys("") if key.endswith(EVAL_BLOCK_PACK)]
 
-    # eval(state) is given the experiment's checkpoints: no metric block or index is read.
+    # eval_jobs(state) is given the experiment's checkpoints: no metric block or index is read.
     state = observe(storage, "lab")
     assert [len(run.checkpoints) for run in state.runs] == [2]
     metrics = [key for key in storage.read if "/metrics/" in key]
@@ -987,7 +994,7 @@ def test_a_report_draws_what_eval_runs_recorded_after_the_file_changes(
     assert page.cells == drawn.cells and page.points == drawn.points
     assert [note for note in page.notes if "ladder" in note] == [
         "Tournament ladder is drawn as its eval runs recorded it:"
-        " eval(state) now defines it otherwise (tournament_conflict)."
+        " eval_jobs(state) now defines it otherwise (tournament_conflict)."
     ]
     # What the report path lists and reads for one training run and one eval run, pinned;
     # the eval run's tables come from the cache the first build filled.

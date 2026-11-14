@@ -273,6 +273,17 @@ imports nothing else of Etude before the function's own module.
   type, raises `LauncherError` where the job is written, before any quote,
   launch or rental. A copy made with `model_copy(update=...)` is checked when
   the file is read.
+- **Project extras.** Set `extras=("eval",)` on `TrainingJob` or `EvalJob`
+  to select uv project extras. Etude includes them in `uv run` or its derived
+  `uv sync` preparation; the preparation key includes that selection. Use
+  `environment=(Variable(name="NAME", value="value"),)` for ordinary job
+  settings (`Variable` is from `etude.spec`). Replace edits to `job.command`
+  with these fields. Remove `UV_NO_SYNC=1`: Etude owns synchronization and
+  uses the prepared interpreter directly when preparation supplies one.
+  An explicit `prepare` with its own interpreter owns its dependencies;
+  include the extras in that preparation's install command. Local `train`
+  and `eval` use the interpreter they were invoked with; select its extras
+  with `uv run --extra eval etude ...`.
 - **Every other `Job` field** (`max_hours`, `max_usd`, `until`, `inputs`,
   `runtime`, `setup`, `seeds`, ...) is a field of both. Neither takes
   `command=`.
@@ -1224,7 +1235,7 @@ setting is a function or class method returning one, such as
 
 `etude launch job.py` supplies experiment `job` to every job that names
 none, even when the file defines only `training_jobs()`. A `train` function calls
-`track(clocks=..., config=config)` without naming an experiment. A plain experiment file preserves explicit `Job.experiment`
+`track(clocks=..., config=config)` without naming an experiment. A file defining only `training_jobs()` preserves explicit `Job.experiment`
 values; a file defining `eval_jobs(state)` or `report()` requires its own stem
 and refuses jobs naming another experiment.
 
@@ -1245,7 +1256,7 @@ accept run addresses, `--experiment` and `--job` select several.
 | Before | Now |
 | --- | --- |
 | `def runs(...)`, `def training_runs(...)` | `def training_jobs(...)` |
-| `def eval(state)` | `def eval_jobs(state)` |
+| `def eval_jobs(state)` | `def eval_jobs(state)` |
 | `training(train, config=c, ...)` | `TrainingJob(name="...", train=train, config=c, ...)`; `name` is required |
 | `evaluation(benchmark, play=play, ...)` | `EvalJob(play=play, tournament=benchmark, ...)` |
 | `evaluation(arena, config=c, play=play, ...)` | `EvalJob(play=play, tournament=arena(c), ...)` |

@@ -357,7 +357,7 @@ class SmokeStep(Record):
 
     step: Literal["train", "eval", "report"]
     name: str  # what ran: the job's or tournament's name, or "report"
-    # skipped: the file has no such step (no eval(state), not an experiment file).
+    # skipped: the file has no such step (no eval_jobs(state), not an experiment file).
     # not_smoked: the file has one that the smoke did not run (no smoke form, no checkpoints).
     outcome: Literal["passed", "not_smoked", "skipped"]
     seconds: float | None = None  # on the submitting machine; None when it did not run

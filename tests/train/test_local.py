@@ -412,3 +412,55 @@ def test_second_interrupt_exits_a_loop_that_has_not_observed_its_stop(
     assert data.outcome is not None and data.outcome.state == "failed"
     assert data.reached["updates"] == 2
     assert not (tmp_path / "home/track/train/out/phase-two").exists()
+
+
+@pytest.mark.parametrize("selected", [False, True])
+def test_declared_training_advances_stages_with_inputs_and_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    selected: bool,
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("RECIPE_SETTING", "caller")
+    file = tmp_path / "stages.py"
+    file.write_text("""
+import os
+from pydantic import BaseModel
+from etude.jobs import TrainingJob
+from etude.spec import Variable
+from etude.train.tracking import track
+
+class Config(BaseModel):
+    second: bool = False
+
+def train(config: Config) -> None:
+    with track(config=config, clocks=["updates"]) as run:
+        if config.second:
+            assert os.environ["RECIPE_SETTING"] == "job"
+            assert run.input("start").read_bytes() == b"first stage"
+        path = run.out / "weights.pt"
+        path.write_bytes(b"second stage" if config.second else b"first stage")
+        run.checkpoint(path, updates=1)
+
+def training_jobs(state):
+    jobs = [TrainingJob(name="first", train=train, config=Config())]
+    finished = [r.final for r in state.runs if r.launch == "first" and r.final]
+    if finished:
+        jobs.append(TrainingJob(name="second", train=train, config=Config(second=True),
+            start=finished[0], environment=(Variable(name="RECIPE_SETTING", value="job"),)))
+    return jobs
+""")
+    args = ["train", str(file)]
+    assert main(args) == 0
+    assert main([*args, *(["--job", "second"] if selected else [])]) == 0
+    output = capsys.readouterr().out
+    if not selected:
+        assert "stages/first@0  finished" in output
+    assert main(args) == 0
+    state = observe(tmp_path / "home/track", "stages")
+    assert {r.launch for r in state.runs} == {"first", "second"}
+    assert all(r.state == "finished" for r in state.runs)
+    assert os.environ["RECIPE_SETTING"] == "caller"
+    assert main([*args, "--job", "first"]) == 1
+    assert "run_name_taken" in capsys.readouterr().err

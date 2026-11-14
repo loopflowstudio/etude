@@ -29,7 +29,13 @@ run and tournament; typing the command again launches only what is new.
 
 Eval-only files can seat checkpoints from any experiment, in benchmark
 `checkpoints=` or round-robin `enter=`. Local evals fetch and verify their
-checkpoint inputs too. A failed launched eval holds only its undelivered
+checkpoint inputs too; local eval inherits this computer's environment. Eval-only
+files smoke their declared evals and report against outside checkpoints. Different
+artifacts under one checkpoint key are refused, including delivered matches.
+Unselected local training passes report existing runs and train new stages with
+their verified inputs and environment. Typed jobs select uv extras with
+`extras=("eval",)`; remove command rewrites and `UV_NO_SYNC=1`.
+A failed launched eval holds only its undelivered
 matches: the pass hands down unaffected work and prints all decisions before
 returning `launched_pass_failed`. `--quote` reports the hold without failing.
 

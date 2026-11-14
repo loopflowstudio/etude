@@ -154,7 +154,9 @@ with an error naming `training_jobs` and the type it takes.
   ([One pass over the file](launcher.md#one-pass-over-the-file)).
 
 On this computer, `etude train job.py` trains the declared runs in order;
-`--job` and `--seed` select a subset. Selection never changes an address:
+a later pass reports existing runs and trains only new ones, so typing it
+again advances a staged declaration. `--job` and `--seed` explicitly select a
+subset and refuse a taken address unless resumed. Selection never changes an address:
 `--job wide --seed 1` selects what `training_jobs()` declares. Local training
 needs neither `max_hours` nor a git checkout; launch, queue and smoke need
 both. When git is available, local attempts record the current commit.
@@ -165,7 +167,7 @@ alone (`train`).
 
 `--experiment NAME` names the experiment on train, launch, queue, eval and
 report; the file stem is its default. `--job` and `--seed` select, never
-rename. `etude train` refuses a taken address: use `--resume` for the same
+rename. `etude train` with an explicit selection refuses a taken address: use `--resume` for the same
 selection, and `--resume --until updates=300` to train it further. `etude
 launch` and `etude queue` leave a run they already know alone and say so
 ([One pass over the file](launcher.md#one-pass-over-the-file)).

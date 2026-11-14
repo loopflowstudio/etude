@@ -5,7 +5,7 @@
 
 1. Train: each distinct job `training_jobs()` returns, run once with its declared tiny
    form on a throwaway local launcher (`etude.launch.smoke.smoke_train`).
-2. Eval: the file's `eval(state)` on what training stored, each tournament it
+2. Eval: the file's `eval_jobs(state)` on what training stored, each tournament it
    returns cut to one game per match, every condition kept, and held here, through
    `etude.jobs.hold_evaluation` as `etude eval` holds it.
 3. Report: `report()`, or the default, drawn from those results by `etude.page`.
@@ -25,18 +25,26 @@ import time
 import traceback
 from collections.abc import Callable, Collection, Sequence
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Literal
 
 from etude.declarations import asked, read_experiment, read_training_jobs
 from etude.errors import EtudeError, LauncherError
 from etude.eval.records import Benchmark, RoundRobin
+from etude.eval.tournament import played
 from etude.experiment import observe
 from etude.experiment_file import defined_functions, experiment_named
-from etude.jobs import ExperimentState, evaluation_spec, hold_evaluation, with_experiment
+from etude.jobs import (
+    ExperimentState,
+    evaluation_spec,
+    fetch_checkpoints,
+    hold_evaluation,
+    with_experiment,
+)
 from etude.launch.smoke import Smoked, show, smoke_home, smoke_train
 from etude.page import build, render, write
 from etude.spec import Job, RunRequest, SmokeStep
-from etude.storage import DirectoryStorage, Storage
+from etude.storage import DirectoryStorage, Storage, default_root
 
 type Step = Literal["train", "eval", "report"]
 STEPS: tuple[Step, ...] = ("train", "eval", "report")
@@ -58,6 +66,10 @@ def smoke_file(
     calling, since the temporary home moves the default store. Raises
     `LauncherError` at the first failure, after printing its output.
     """
+    functions = defined_functions(path)
+    if "training_jobs" not in functions:
+        steps = tuple(step for step in steps if step != "train")
+        source = source or DirectoryStorage(default_root())
     if "train" in steps and source is not None:
         raise LauncherError("--source is for smoking eval and report without the train step")
     if "train" not in steps and source is None and set(steps) & {"eval", "report"}:
@@ -105,12 +117,12 @@ def _saved(store: Storage, experiment: str, run: str) -> str:
 def _evaluate(
     path: Path, experiment: str | None, source: Storage, store: DirectoryStorage
 ) -> list[SmokeStep]:
-    """Each evaluation `eval(state)` asks for on `source`, held tiny into `store`."""
+    """Each evaluation `eval_jobs(state)` asks for on `source`, held tiny into `store`."""
     if experiment is None or "eval_jobs" not in defined_functions(path):
-        return [SmokeStep(step="eval", name="eval", outcome="skipped", detail="no eval(state)")]
+        return [
+            SmokeStep(step="eval", name="eval", outcome="skipped", detail="no eval_jobs(state)")
+        ]
     state = observe(source, experiment)
-    if not any(run.checkpoints for run in state.runs):
-        return [SmokeStep(step="eval", name="eval", outcome="not_smoked", detail="no checkpoints")]
     definition = read_experiment(path)
     function = definition.eval
     assert function is not None
@@ -125,7 +137,7 @@ def _evaluate(
 def _smoke_evaluation(
     job: Job, experiment: str, store: DirectoryStorage, state: ExperimentState
 ) -> SmokeStep:
-    """One evaluation job `eval(state)` returned, held tiny into `store`."""
+    """One evaluation job `eval_jobs(state)` returned, held tiny into `store`."""
     spec = evaluation_spec(job)
     name = spec.tournament.name
     try:
@@ -138,9 +150,30 @@ def _smoke_evaluation(
         update={"tournament": _tiny_tournament(spec.tournament), "lines": state.lines}
     )
     started = time.monotonic()
-    held = _try_step(
-        "eval", name, lambda: hold_evaluation(tiny, checkout=job.repo, storages=[store])
-    )
+    matches = played(
+        tiny.tournament,
+        experiment=experiment,
+        checkpoints=tuple(c.ref for c in tiny.checkpoints),
+        enter=tiny.entrants,
+        lines=state.lines,
+        storages=[store],
+    ).new
+    if not matches:
+        return SmokeStep(step="eval", name="eval", outcome="not_smoked", detail="no checkpoints")
+    with TemporaryDirectory(prefix="etude-smoke-inputs-") as folder:
+        files = _try_step(
+            "eval", name, lambda: fetch_checkpoints(matches, state, tiny.checkpoints, Path(folder))
+        )
+        held = _try_step(
+            "eval",
+            name,
+            lambda: hold_evaluation(
+                tiny.model_copy(update={"matches": tuple(matches)}),
+                files=files,
+                checkout=job.repo,
+                storages=[store],
+            ),
+        )
     plural = "" if held.played == 1 else "es"
     return SmokeStep(
         step="eval",

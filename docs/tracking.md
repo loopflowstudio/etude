@@ -66,7 +66,7 @@ The run, job and seed come from the command (`ETUDE_RUN`,
 The experiment is the launched file's stem (`ETUDE_EXPERIMENT`):
 `etude launch ppo.py` supplies `ppo`, including when the file defines only
 `training_jobs()`. An explicit `--experiment` overrides the file and its job labels;
-without it a plain experiment file preserves an explicit `Job.experiment`. Naming another
+without it a file defining only `training_jobs()` preserves an explicit `Job.experiment`. Naming another
 experiment in `track` is refused (`experiment_differs_from_launch`), so a
 reusable training function names none. A process started by another
 scheduler sets the same variables to say which run it is.
@@ -507,9 +507,9 @@ snapshot with no timer; `render(page, refresh=5)` opts into browser reloads.
 Rendering alone never rebuilds the page's data.
 
 **A folder** is every experiment file in it, at any depth outside hidden
-folders: a `.py` file defining `eval_jobs(state)` or `report()` at its top level,
-recognised without running it, so helper modules and experiment files are left
-alone. It is drawn as a page per experiment and an index: written as
+folders: a `.py` file defining `training_jobs()`, `eval_jobs(state)` or
+`report()` at its top level, recognised without running it, so helper modules
+are left alone. It is drawn as a page per experiment and an index: written as
 `reports/index.html` beside the pages, or served at `/` with each page at
 `/STEM`. The index has a row per experiment showing its runs (running,
 finished, failed, restarted), its latest checkpoint, each job's latest score

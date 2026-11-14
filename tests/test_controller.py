@@ -300,6 +300,7 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
     source = DirectoryStorage(tmp_path / "source")
     measured = MeasuredStorage(source)
     monkeypatch.setattr("etude.storage.storage_from_uri", lambda uri: measured)
+    monkeypatch.setattr("etude.run.storage_from_uri", lambda uri: measured)
     args = ["queue", str(file), "--pool", "waiting", "--source", str(source.root)]
     assert main(args) == 0
     (held,) = b.scheduler.runs()
@@ -344,6 +345,7 @@ def test_cli_eval_only_file_plays_a_checkpoint_from_another_experiment(
     command: str,
     format: str,
 ) -> None:
+    monkeypatch.setenv("EVAL_TEST_KEY", "local fixture credential")
     source = DirectoryStorage(default_root())
     with track(
         experiment="producer", run="base@0", directory=source.root, clocks=["updates"], strict=True
@@ -359,24 +361,27 @@ def test_cli_eval_only_file_plays_a_checkpoint_from_another_experiment(
             {
                 "review.py": f"""
 from pathlib import Path
-from etude.checkpoints import CheckpointRecord
+import os
+from etude.experiment import observe
 from etude.jobs import EvalJob, ExperimentState
 from etude.spec import Runtime
 from etude.eval.match import environment
 from etude.eval.records import Benchmark, RoundRobin, Seating, Inference, Code, CheckpointPlayer, Match
 from etude.eval.run import Tables
 
-CHECKPOINT = CheckpointRecord.model_validate_json({checkpoint.model_dump_json()!r})
 
 def play(match: Match) -> Tables:
     players = [p for p in match.players if isinstance(p, CheckpointPlayer)]
     assert players
+    if {command!r} == "eval":
+        assert os.environ["EVAL_TEST_KEY"] == "local fixture credential"
     for player in players:
-        assert player.checkpoint.key == CHECKPOINT.key
+        assert player.checkpoint.key == {checkpoint.key!r}
         assert player.checkpoint.path.read_bytes() == b"earlier experiment weights"
     return {{"read_weights": [{{"seat": 0, "bytes": len(players[0].checkpoint.path.read_bytes())}}]}}
 
 def eval_jobs(state: ExperimentState) -> list[EvalJob]:
+    CHECKPOINT = observe({str(source.root)!r}, "producer").run("producer/base@0").final
     fixed = Code(name="fixed", source=[__file__], config={{"strength": 0}})
     if {format!r} == "benchmark":
         tournament = Benchmark(name="ladder", environment=environment("duel"),
@@ -400,9 +405,11 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
     counts = Counting(scheduler._store)
     measured = MeasuredStorage(source)
     monkeypatch.setattr("etude.storage.storage_from_uri", lambda uri: measured)
+    monkeypatch.setattr("etude.run.storage_from_uri", lambda uri: measured)
     try:
         with counts.record():
             assert main([command, str(file), "--source", str(source.root)]) == 0
+        assert measured.listings == 2
         observed_counts = counts.snapshot()
         output = capsys.readouterr()
         assert "0 training runs" in output.out
@@ -415,9 +422,9 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
         assert main([command, str(file), "--source", str(source.root)]) == 0
         assert "nothing to play" in capsys.readouterr().out
         if command == "eval":
-            assert observed_counts == Counts(git=2, database=1)
+            assert observed_counts == Counts(git=2, database=2)
         elif command == "queue":
-            assert observed_counts == Counts(git=12, database=28)
+            assert observed_counts == Counts(git=12, database=29)
         else:
             assert observed_counts.model_copy(update={"database": 0}) == Counts(git=13)
         assert all(not key.endswith("weights.pt") for key in measured.got)
@@ -459,3 +466,77 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
     error = capsys.readouterr().err
     code = "checkpoint_not_stored" if contents is None else "checkpoint_content_mismatch"
     assert code in error and "producer/base@0/out/weights.pt" in error
+
+
+@pytest.mark.parametrize("command", ["eval", "queue", "launch"])
+@pytest.mark.parametrize("format", ["benchmark", "round_robin"])
+def test_eval_refuses_different_artifacts_with_one_checkpoint_key(
+    tmp_path: Path, command: str, format: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = DirectoryStorage(default_root())
+    for experiment in ("a", "b"):
+        with track(
+            experiment=experiment, run="base@0", directory=source.root, clocks=["updates"]
+        ) as run:
+            path = run.out / "weights.pt"
+            path.write_text(experiment)
+            run.checkpoint(path, updates=1)
+    file = tmp_path / "review.py"
+    file.write_text(f"""
+from etude.experiment import observe
+from etude.jobs import EvalJob
+from etude.eval.match import environment
+from etude.eval.records import Benchmark, RoundRobin, Inference, Code, Seating
+from tests.eval.games import play
+
+def eval_jobs(state):
+    checkpoints = tuple(observe({str(source.root)!r}, name).runs[0].final for name in ("a", "b"))
+    if {format!r} == "benchmark":
+        tournament = Benchmark(name="ladder", environment=environment("duel"),
+            seatings=(Seating(name="anchor", players=(Inference(), Code(name="fixed")), configs=({{}},), games=1),))
+        return EvalJob(tournament=tournament, checkpoints=checkpoints, play=play, max_hours=0.1)
+    return EvalJob(tournament=RoundRobin(name="ladder", environment=environment("duel"),
+        configs=({{}},), games=1), enter=tuple(c.player(Inference()) for c in checkpoints),
+        play=play, max_hours=0.1)
+""")
+    assert main([command, str(file), "--source", str(source.root)]) == 1
+    error = capsys.readouterr().err
+    assert "checkpoint_key_conflict" in error
+    assert "base@0/out/weights.pt" in error
+    for experiment in ("a", "b"):
+        assert (source.root / experiment / "base@0/out/weights.pt").as_uri() in error
+    assert client.default().runs(done=True) == ()
+
+
+@pytest.mark.parametrize("command", ["eval", "queue", "launch"])
+def test_a_delivered_match_cannot_hide_another_artifact_under_its_key(
+    tmp_path: Path, command: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = DirectoryStorage(default_root())
+    for name in ("a", "b"):
+        with track(experiment=name, run="base@0", directory=source.root, clocks=["updates"]) as run:
+            path = run.out / "weights.pt"
+            path.write_text(name)
+            run.checkpoint(path, updates=1)
+    file = tmp_path / "review.py"
+    text = f"""
+from etude.experiment import observe
+from etude.jobs import EvalJob
+from etude.eval.match import environment
+from etude.eval.records import RoundRobin, Inference, Code
+from tests.eval.games import play
+
+def eval_jobs(state):
+    checkpoint = observe({str(source.root)!r}, "a").runs[0].final
+    return EvalJob(tournament=RoundRobin(name="first", environment=environment("duel"),
+        configs=({{}},), games=1), enter=(checkpoint.player(Inference(config={{"strength": 1}})), Code(name="fixed", config={{"strength": 0}})),
+        play=play, max_hours=0.1)
+"""
+    file.write_text(text)
+    assert main(["eval", str(file), "--source", str(source.root)]) == 0
+    capsys.readouterr()
+    file.write_text(text.replace(', "a")', ', "b")').replace('name="first"', 'name="second"'))
+    assert main([command, str(file), "--source", str(source.root)]) == 1
+    error = capsys.readouterr().err
+    assert "checkpoint_key_conflict: base@0/out/weights.pt" in error
+    assert client.default().runs(done=True) == ()

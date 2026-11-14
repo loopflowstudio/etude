@@ -24,7 +24,7 @@ from typing import Literal, TypedDict, cast
 
 from pydantic import BaseModel, Field, JsonValue, ValidationError, field_validator, model_validator
 
-from etude.cache import Content
+from etude.cache import Artifact, Content, ContentMismatch, Corrupt
 from etude.call import Function, changed_config, config_type
 from etude.carriage import CHECKPOINTS, OUT_PRESENT, checkpoint_file_name, checkpoint_key
 from etude.checkpoints import CheckpointId, CheckpointRecord, CheckpointRef, checkpoint_id
@@ -37,6 +37,8 @@ from etude.eval.records import (
     Match,
     Player,
     RoundRobin,
+    TournamentRun,
+    assemble,
     digest,
 )
 from etude.eval.run import Result, Tables
@@ -56,7 +58,7 @@ from etude.spec import (
     Variable,
     number,
 )
-from etude.storage import Storage
+from etude.storage import Storage, place_artifact
 from etude.train.read import read
 from etude.train.records import ParentRun
 
@@ -128,7 +130,7 @@ class ExperimentState:
     def run(self, name: str) -> TrainingRunSummary:
         """The training run named `name`; raises `EtudeError("run_not_found")` without one."""
         for each in self.runs:
-            if each.name == name:
+            if each.name == name.removeprefix(self.experiment + "/"):
                 return each
         raise EtudeError("run_not_found", 404) from ValueError(name)
 
@@ -185,6 +187,31 @@ def checkpoint_inputs(
                 raise EtudeError("checkpoint_not_stored", 404, detail=ref.key)
             found[ref.key] = saved
     return found
+
+
+def fetch_checkpoints(
+    matches: Sequence[Match],
+    state: ExperimentState,
+    checkpoints: Sequence[CheckpointRecord],
+    folder: Path,
+) -> dict[str, str]:
+    """Verify seated artifacts into a caller-owned folder and return their local URIs by key."""
+    here: dict[str, str] = {}
+    for key, checkpoint in checkpoint_inputs(matches, state, checkpoints).items():
+        name = digest(key)[:16]
+        for file in checkpoint_inputs_for(checkpoint, name):
+            assert file.uri is not None
+            try:
+                place_artifact(
+                    Artifact(location=file.uri, sha256=file.sha256, size_bytes=file.size_bytes),
+                    folder / file.name,
+                )
+            except FileNotFoundError:
+                raise EtudeError("checkpoint_not_stored", 404, detail=key) from None
+            except (ContentMismatch, Corrupt):
+                raise EtudeError("checkpoint_content_mismatch", 409, detail=key) from None
+        here[key] = (folder / name).as_uri()
+    return here
 
 
 class JobOptions(TypedDict, total=False):
@@ -250,6 +277,7 @@ class TrainingJob[C: BaseModel](Job):
     config: C  # type: ignore[assignment]  # Lowered to JSON text only by plain().
     smoke: C | None = Field(default=None, exclude=True)  # type: ignore[assignment]
     start: CheckpointRecord | None = Field(default=None, exclude=True)
+    extras: tuple[str, ...] = Field(default=(), exclude=True)
     command: str = ""
 
     @model_validator(mode="before")
@@ -261,6 +289,10 @@ class TrainingJob[C: BaseModel](Job):
 
     @model_validator(mode="after")
     def _validate_training(self) -> TrainingJob[C]:
+        if "command" in self.model_fields_set:
+            raise LauncherError(
+                "typed jobs derive command; use extras, environment, runtime or prepare"
+            )
         self.plain()
         return self
 
@@ -275,7 +307,12 @@ class TrainingJob[C: BaseModel](Job):
                 Variable(name="ETUDE_START", value=self.start.key),
             )
         job = _job(
-            self.train, self.config, origin=self.train, options=options, experiment=self.experiment
+            self.train,
+            self.config,
+            origin=self.train,
+            options=options,
+            experiment=self.experiment,
+            extras=self.extras,
         )
         if self.smoke is not None:
             job = job.model_copy(
@@ -294,6 +331,7 @@ class EvalJob[M: BaseModel | Mapping[str, JsonValue]](Job):
     checkpoints: Sequence[CheckpointRecord] = Field(default=(), exclude=True)
     enter: Sequence[Player] = Field(default=(), exclude=True)
     workers: int = Field(default=1, ge=1, exclude=True)
+    extras: tuple[str, ...] = Field(default=(), exclude=True)
     command: str = ""
 
     @field_validator("tournament", mode="before")
@@ -310,6 +348,10 @@ class EvalJob[M: BaseModel | Mapping[str, JsonValue]](Job):
         if self.name and self.name != self.tournament.name:
             raise LauncherError("an EvalJob is named by its tournament")
         object.__setattr__(self, "name", self.tournament.name)
+        if "command" in self.model_fields_set:
+            raise LauncherError(
+                "typed jobs derive command; use extras, environment, runtime or prepare"
+            )
         self.plain()
         return self
 
@@ -345,7 +387,23 @@ class EvalJob[M: BaseModel | Mapping[str, JsonValue]](Job):
             entrants=tuple(self.enter),
             workers=self.workers,
         )
-        return _job(_hold, spec, origin=self.play, options=options, experiment=self.experiment)
+        assemble(
+            [
+                TournamentRun(
+                    tournament=self.tournament,
+                    checkpoints=tuple(c.ref for c in spec.checkpoints),
+                    entrants=spec.entrants,
+                )
+            ]
+        )
+        return _job(
+            _hold,
+            spec,
+            origin=self.play,
+            options=options,
+            experiment=self.experiment,
+            extras=self.extras,
+        )
 
 
 def _options(job: Job) -> JobOptions:
@@ -391,18 +449,24 @@ def hold_evaluation(
     *,
     checkout: str | None = None,
     checkpoint: CheckpointRef | None = None,
+    files: Mapping[str, str] = {},
     directory: Path | str | None = None,
     storages: Sequence[Storage] = (),
 ) -> EvalResult:
     """Hold what an evaluation job's config describes (`etude.eval.tournament.hold`).
 
     `play` is imported from `checkout`, the job's source, or the working
-    directory as on the job's machine. `checkpoint` is a benchmark's one
+    directory as on the job's machine. `files` maps checkpoint keys to their
+    verified local URIs for explicit matches. `checkpoint` is a benchmark's one
     checkpoint where it lies here. Raises `EtudeError("evaluation_names_no_experiment")`
     for a config whose experiment is not yet named (`with_experiment`).
     """
     if spec.experiment is None:
         raise EtudeError("evaluation_names_no_experiment", 422)
+    if spec.matches is not None:
+        spec = spec.model_copy(
+            update={"matches": tuple(_relocated(m, files) for m in spec.matches)}
+        )
     # Loaded by import path: the function `evaluation` was given, typed there.
     play = cast(Callable[[Match], Tables | Result], spec.play.load(checkout))
     with evaluating(
@@ -745,9 +809,9 @@ def _hold(evaluation: Evaluation) -> None:
         checkpoint = CheckpointRef(key=key, artifact=artifact)
     if evaluation.matches is not None:
         here = {key: (Path(str(folder)) / name).as_uri() for key, name in evaluation.files.items()}
-        matches = tuple(_relocated(match, here) for match in evaluation.matches)
-        evaluation = evaluation.model_copy(update={"matches": matches})
-    hold_evaluation(evaluation, checkpoint=checkpoint)
+    else:
+        here = {}
+    hold_evaluation(evaluation, checkpoint=checkpoint, files=here)
 
 
 def _relocated(match: Match, here: Mapping[str, str]) -> Match:
@@ -780,6 +844,7 @@ def _job(
     origin: Callable[..., object],
     options: JobOptions,
     experiment: str | None = None,
+    extras: tuple[str, ...] = (),
 ) -> Job:
     """The job that calls `function(config)`; `origin` is the author's function it brings."""
     text = _config_text(function, config)
@@ -787,7 +852,7 @@ def _job(
     called = _function(function, repo)
     sourced: JobOptions = {**options, "repo": None if repo is None else str(repo)}
     if "prepare" not in options and options.get("runtime") is None and repo is not None:
-        derived = _uv_preparation(repo)
+        derived = _uv_preparation(repo, extras)
         if derived is not None:
             sourced["prepare"] = derived
     prepared = sourced.get("prepare")
@@ -796,6 +861,9 @@ def _job(
         prepared is not None and prepared.python is not None
     )
     python = '"$ETUDE_PYTHON"' if named else "uv run python"
+    if extras and (prepared is None or prepared.python is None):
+        flags = " ".join(f"--extra {shlex.quote(extra)}" for extra in extras)
+        python = f"uv run {flags}" + (' --python "$ETUDE_PYTHON"' if named else "") + " python"
     command = f"{python} -m etude.call {_called(called)}"
     if called.path:
         command += f" --path {shlex.quote(called.path)}"
@@ -827,7 +895,7 @@ def _config_text(function: Callable[..., object], config: BaseModel) -> str:
     return text
 
 
-def _uv_preparation(repo: Path) -> Preparation | None:
+def _uv_preparation(repo: Path, extras: tuple[str, ...]) -> Preparation | None:
     """The dependency environment of an unpackaged uv project, prepared once per lock.
 
     uv installs only the dependencies of a project it does not package (no build
@@ -854,6 +922,7 @@ def _uv_preparation(repo: Path) -> Preparation | None:
         command=(
             'UV_PROJECT_ENVIRONMENT="$ETUDE_PREPARED_DIR/.venv"'
             " uv sync --frozen --no-install-project"
+            + "".join(f" --extra {shlex.quote(extra)}" for extra in extras)
         ),
         # uv chooses the interpreter from .python-version, so it decides the result too.
         paths=("pyproject.toml", "uv.lock", *_present(repo, ".python-version")),

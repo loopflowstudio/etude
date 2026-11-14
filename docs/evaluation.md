@@ -697,12 +697,26 @@ does, unless `--retry-failed`.
   fixed players, played once rather than per checkpoint. `tags` mark
   seatings for readers, such as pairs a rating fit leaves out.
 - **Other experiments' checkpoints.** A file may define only `eval_jobs`.
-  Read a producer's checkpoints with `etude.train.read.read(source, experiment,
-  run)` and give its `checkpoints` records to a benchmark's `checkpoints=`,
-  or use `checkpoint.player(inference)` in a round robin's `enter=`.
+  Read a producer with `observe(source, "producer")` and give its checkpoint
+  records to a benchmark's `checkpoints=`, or use
+  `checkpoint.player(inference)` in a round robin's `enter=`.
+
+  ```python
+  def eval_jobs(state):
+      checkpoint = observe(source, "producer").run("producer/base@0").final
+      return EvalJob(tournament=ladder, play=play, checkpoints=(checkpoint,), max_hours=1)
+  ```
+
+  Import `observe` from `etude.experiment`. It lists the producer's source
+  on every pass, including each `--watch` round.
   The evaluating experiment's state need not contain the producer. `eval`,
   `launch` and `queue` use the checkpoint artifact's location and verify
   its digest and byte length; folder checkpoints verify every member.
+  Two different artifacts with the same checkpoint key are refused with
+  `checkpoint_key_conflict`, naming the key and both locations, including
+  when an earlier delivered evaluation seated the other artifact.
+  Local evaluation inherits this computer's environment, including API keys;
+  it fetches the checkpoints here and rents nothing.
 - **A pass.** For each job, the matches exactly what `eval_jobs` returned calls
   for, the seatings it gave for the checkpoints it gave, that no eval run of
   the experiment in its environment delivered. `etude eval` plays them here

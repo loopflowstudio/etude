@@ -1,7 +1,7 @@
 """Which Python files are experiment files, recognised by their text without running them.
 
 `etude launch`, `etude report` and a folder's index agree on it: a file
-defining `eval(state)` or `report()` at its top level is the experiment named
+defining `training_jobs()`, `eval_jobs(state)` or `report()` at its top level is the experiment named
 for its stem. Standard library only, so neither the launcher nor a report
 loads anything more for it.
 """
@@ -13,7 +13,7 @@ from pathlib import Path
 
 from etude.errors import LauncherError
 
-# What makes a Python file an experiment's: a top-level eval(state) or report().
+# What makes a Python file an experiment's: a top-level training_jobs(), eval_jobs(state) or report().
 EXPERIMENT_FUNCTIONS = ("training_jobs", "eval_jobs", "report")
 
 

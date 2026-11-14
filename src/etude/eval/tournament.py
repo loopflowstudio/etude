@@ -53,6 +53,7 @@ from etude.eval.records import (
     IDENTIFIER,
     TOURNAMENT_FILE,
     Benchmark,
+    CheckpointPlayer,
     Environment,
     Line,
     Match,
@@ -67,6 +68,7 @@ from etude.eval.records import (
     digest,
     folder_name,
     outcomes,
+    validate_checkpoints,
 )
 from etude.eval.run import ETUDE_TABLES, EvalResult, EvalRun, Result, Tables, _evaluating_matches
 from etude.eval.schedule import ordered
@@ -434,6 +436,11 @@ def _called(
         for each in tournament.schedule()
         if not on_the_go or each.checkpoint is not None or not added.checkpoints
     }
+    seated = tuple(
+        p.checkpoint for m in matches.values() for p in m.players if isinstance(p, CheckpointPlayer)
+    )
+    keys = {c.key for c in seated}
+    validate_checkpoints((*seated, *(c for c in stored.checkpoints if c.key in keys)))
     ordered_keys = sorted(matches)
     played = Played(
         delivered=tuple(
@@ -498,6 +505,7 @@ class _Stored:
     delivered: dict[Digest, str]
     # Each match that failed there, with no done record anywhere.
     failed: set[Digest]
+    checkpoints: tuple[CheckpointRef, ...] = ()
 
 
 def _stored(tournament: Benchmark | RoundRobin, runs: StoredRuns) -> _Stored:
@@ -529,6 +537,13 @@ def _stored(tournament: Benchmark | RoundRobin, runs: StoredRuns) -> _Stored:
         held=tuple(held[run] for run in sorted(held)),
         delivered={key: run for key, (_, run) in newest.items()},
         failed=failed - newest.keys(),
+        checkpoints=tuple(
+            p.checkpoint
+            for items in records.values()
+            for record in items
+            for p in record.match.players
+            if isinstance(p, CheckpointPlayer)
+        ),
     )
 
 

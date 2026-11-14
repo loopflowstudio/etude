@@ -10,7 +10,6 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal
 
-from etude.cache import Artifact, ContentMismatch, Corrupt
 from etude.declarations import Experiment, asked, read_training_jobs, select_runs
 from etude.errors import EtudeError, LauncherError
 from etude.eval.records import Match, digest, folder_name
@@ -19,10 +18,8 @@ from etude.experiment import observe
 from etude.jobs import (
     Evaluation,
     ExperimentState,
-    _relocated,
-    checkpoint_inputs,
-    checkpoint_inputs_for,
     evaluation_spec,
+    fetch_checkpoints,
     hold_evaluation,
     with_experiment,
     with_matches,
@@ -33,7 +30,7 @@ from etude.launch.server import selected
 from etude.records import Record
 from etude.smoke import smoke_file
 from etude.spec import Job, RunRequest, Smoke, Until
-from etude.storage import Storage, default_root, place_artifact
+from etude.storage import Storage, default_root
 
 
 class TournamentDecision(Record):
@@ -308,30 +305,16 @@ def _play_here(
     directory: Path | str | None,
 ) -> int:
     """Play with the same verified artifacts a launched run receives as inputs."""
-    saved = checkpoint_inputs(pending, state, spec.checkpoints)
     with TemporaryDirectory(prefix="etude-eval-") as folder:
-        here: dict[str, str] = {}
-        for key, checkpoint in saved.items():
-            name = digest(key)[:16]
-            for file in checkpoint_inputs_for(checkpoint, name):
-                assert file.uri is not None
-                try:
-                    place_artifact(
-                        Artifact(location=file.uri, sha256=file.sha256, size_bytes=file.size_bytes),
-                        Path(folder) / file.name,
-                    )
-                except FileNotFoundError:
-                    raise EtudeError("checkpoint_not_stored", 404, detail=key) from None
-                except (ContentMismatch, Corrupt):
-                    raise EtudeError("checkpoint_content_mismatch", 409, detail=key) from None
-            here[key] = (Path(folder) / name).as_uri()
+        here = fetch_checkpoints(pending, state, spec.checkpoints, Path(folder))
         held = hold_evaluation(
             spec.model_copy(
                 update={
-                    "matches": tuple(_relocated(m, here) for m in pending),
+                    "matches": tuple(pending),
                     "lines": state.lines,
                 }
             ),
+            files=here,
             checkout=executable.repo,
             directory=directory,
             storages=[source],
