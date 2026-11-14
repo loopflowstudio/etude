@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,6 +19,89 @@ from etude.storage import DirectoryStorage
 from etude.train.read import read
 from etude.train.state import read_state
 from tests.eval.games import play_checkpoint_folder
+
+
+@pytest.mark.parametrize(
+    ("location", "failure"),
+    [
+        ("uri", "missing"),
+        ("run", "missing"),
+        ("uri", "digest"),
+        ("run", "digest"),
+        ("uri", "length"),
+        ("run", "length"),
+        ("bucket", "missing"),
+    ],
+)
+def test_local_input_refusals_leave_the_address_available(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    location: str,
+    failure: str,
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    content = b"initial weights"
+    source = tmp_path / "home/track/producer/base@0/out/weights.pt"
+    source.parent.mkdir(parents=True)
+    if failure != "missing":
+        source.write_bytes(b"changed weights" if failure == "digest" else b"short")
+    # A bucket key must never be mistaken for an existing local path.
+    key = "out/weights.pt"
+    if location == "bucket":
+        Path(key).parent.mkdir()
+        Path(key).write_bytes(content)
+    file = tmp_path / f"input_{location}_{failure}.py"
+    recipe = f"""
+from pydantic import BaseModel
+from etude.jobs import TrainingJob
+from etude.spec import Input
+from etude.train.tracking import track
+
+class Config(BaseModel):
+    pass
+
+def train(config: Config) -> None:
+    with track(config=config) as run:
+        assert run.input("weights").read_bytes() == {content!r}
+
+def training_jobs() -> list[TrainingJob]:
+    return [TrainingJob(name="fit", train=train, config=Config(), inputs=(
+        Input(name="weights", key={key!r}, sha256={sha256(content).hexdigest()!r},
+              size_bytes={len(content)}, LOCATION),))]
+"""
+    locator = {
+        "uri": f"uri={source.as_uri()!r}",
+        "run": 'run="producer/base@0"',
+        "bucket": "",
+    }[location]
+    file.write_text(recipe.replace("LOCATION", locator))
+    args = ["train", str(file)]
+    assert main(args) == 1
+    error = capsys.readouterr().err
+    assert "weights" in error
+    if location == "bucket":
+        assert "input_not_located" in error
+        assert key in error
+        assert "uri" in error and "run" in error
+    else:
+        assert (
+            "checkpoint_not_stored" if failure == "missing" else "checkpoint_content_mismatch"
+        ) in error
+        assert source.as_uri() in error
+    root = tmp_path / "home/track" / file.stem / "fit@0"
+    assert not (root / "run.json").exists()
+    assert observe(tmp_path / "home/track", file.stem).runs == ()
+
+    source.write_bytes(content)
+    if location == "bucket":
+        file.write_text(recipe.replace("LOCATION", f"uri={source.as_uri()!r}"))
+    assert main(args) == 0
+    state = observe(tmp_path / "home/track", file.stem)
+    assert len(state.runs) == 1
+    assert state.runs[0].state == "finished"
+
 
 RECIPE = """from pathlib import Path
 from pydantic import BaseModel

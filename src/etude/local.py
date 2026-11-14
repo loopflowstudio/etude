@@ -25,7 +25,7 @@ from typing import cast
 
 from pydantic import BaseModel
 
-from etude.cache import Artifact
+from etude.cache import Artifact, ContentMismatch, Corrupt
 from etude.call import changed_config, config_type
 from etude.declarations import read_training_jobs, select_runs
 from etude.errors import EtudeError, LauncherError
@@ -273,15 +273,25 @@ def _train(attempt: _Training, *, json_output: bool) -> bool:
         for given in attempt.inputs:
             uri = given.uri
             if uri is None:
-                uri = (
-                    DirectoryStorage(default_root()).uri(f"{given.run}/{given.key}")
-                    if given.run is not None
-                    else given.key
+                if given.run is None:
+                    raise EtudeError(
+                        "input_not_located",
+                        detail=f"{given.name}: bucket key {given.key!r}; give uri or run for local training",
+                    )
+                uri = DirectoryStorage(default_root()).uri(f"{given.run}/{given.key}")
+            try:
+                place_artifact(
+                    Artifact(location=uri, sha256=given.sha256, size_bytes=given.size_bytes),
+                    Path(folder) / given.name,
                 )
-            place_artifact(
-                Artifact(location=uri, sha256=given.sha256, size_bytes=given.size_bytes),
-                Path(folder) / given.name,
-            )
+            except FileNotFoundError:
+                raise EtudeError(
+                    "checkpoint_not_stored", 404, detail=f"{given.name}: {uri}"
+                ) from None
+            except (ContentMismatch, Corrupt):
+                raise EtudeError(
+                    "checkpoint_content_mismatch", 409, detail=f"{given.name}: {uri}"
+                ) from None
         values["ETUDE_INPUTS_DIR"] = folder
         return _call_training(attempt, values, json_output=json_output)
 

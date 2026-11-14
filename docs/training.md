@@ -620,6 +620,11 @@ checkpoint descends from. A name the run was not given raises. Other files a
 job is given (`inputs=`, [the launcher](launcher.md#progress-and-continuation))
 are read the same way.
 
+Local training resolves an input's `uri`, or its `run` and `key` in this
+computer's runs directory. A bucket-only input needs `uri` or `run` before
+it can be used here. Missing or mismatched bytes report the input's name
+and location before training starts, leaving the run address available.
+
 To start from a run of another experiment, read that experiment yourself:
 `start=observe("s3://my-bucket/runs", "imitate").run("imitate/base@0").final`
 (`etude.experiment.observe`).
