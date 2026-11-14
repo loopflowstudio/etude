@@ -500,9 +500,7 @@ def test_backups_keep_two_and_restore_previous_schema(
     backups = sorted(tmp_path.glob("launcher.sqlite.backup-*"))
     assert len(backups) == 2
     with sqlite3.connect(backups[-1]) as previous:
-        assert previous.execute("SELECT count(*) FROM migrations").fetchone() == (
-            len(applied) - 1,
-        )
+        assert previous.execute("SELECT count(*) FROM migrations").fetchone() == (len(applied) - 1,)
         assert (
             previous.execute("SELECT name FROM sqlite_master WHERE name='extra2'").fetchone()
             is None
