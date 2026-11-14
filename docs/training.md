@@ -625,9 +625,10 @@ computer's runs directory. A bucket-only input needs `uri` or `run` before
 it can be used here (`input_not_located`). Missing or mismatched bytes raise
 `input_undelivered`, naming the input, location and whether the file is
 missing or its bytes differ. Every selected run's inputs are checked before
-any training starts. A refused selection reports its conflicting addresses
-together (`selection_refused`) and leaves every selected run untouched, with
-new run addresses still available.
+any training starts. With several runs selected, every refusal is reported
+together under `selection_refused`; one selected run reports its own error.
+Either way every selected run is left untouched, with new run addresses still
+available.
 
 To start from a run of another experiment, read that experiment yourself:
 `start=observe("s3://my-bucket/runs", "imitate").run("imitate/base@0").final`
