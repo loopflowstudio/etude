@@ -625,3 +625,38 @@ def test_known_run_address_survives_a_changed_job_name(
     assert main([command, str(file)]) == 0
     assert "two/base@0  queued" in capsys.readouterr().out
     assert [run.id for run in b.scheduler.runs(done=True)] == ["two/base@0"]
+
+
+def test_a_launch_cancelled_before_its_first_save_resumes_here(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    b = bench(tmp_path)
+    b.scheduler.add_pool(Pool(name="waiting"))
+    monkeypatch.setattr(client, "_client", lambda: b.scheduler)
+    monkeypatch.setattr(client, "standing", b.scheduler.standing)
+    recipe = """
+from pydantic import BaseModel
+from etude.jobs import TrainingJob
+from etude.train.tracking import track
+
+class Config(BaseModel):
+    pass
+
+def train(config: Config) -> None:
+    with track(config=config, clocks=["updates"]) as run:
+        run.log({"value": 1}, updates=1)
+
+def training_jobs() -> list[TrainingJob]:
+    return [TrainingJob(name="base", train=train, config=Config(), max_hours=1)]
+"""
+    file = checkout(tmp_path / "repo", {"cancelled.py": recipe}) / "cancelled.py"
+    assert main(["queue", str(file), "--pool", "waiting"]) == 0
+    (queued,) = b.scheduler.runs()
+    b.scheduler.cancel(queued.id)
+    capsys.readouterr()
+    assert main(["train", str(file)]) == 0
+    assert "cancelled/base@0  failed; --job base --seed 0 --resume" in capsys.readouterr().out
+    assert main(["train", str(file), "--job", "base", "--seed", "0", "--resume"]) == 0
+    (run,) = observe(default_root(), "cancelled").runs
+    assert run.state == "finished"

@@ -749,7 +749,8 @@ etude smoke job.py                      # the smoke config, here, spending nothi
   run's address, seed and target. Repeat the experiment, job and seed selection
   from the original command; `--resume` takes no run name. The whole selection
   is checked before any recipe runs: a refusal lists every conflicting address
-  and leaves all selected runs untouched. Never-started members are refused.
+  and leaves all selected runs untouched. Never-started members are refused;
+  a launched run that ended before its first save starts its first attempt.
   With several runs selected, finished members without a later target are
   skipped with their address and final clocks; unfinished members carry on.
   With no `--config`, it uses the stored config, checked against the current

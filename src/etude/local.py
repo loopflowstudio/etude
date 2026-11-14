@@ -99,6 +99,7 @@ def train(
                         resume=resume,
                         until=until or request.job.until,
                         seconds=seconds,
+                        known=prior is not None,
                         environment=request.job.environment,
                         inputs_directory=directory,
                     )
@@ -156,16 +157,23 @@ def _prepare(
     resume: bool,
     until: Until | None,
     seconds: float | None,
+    known: bool = False,
     environment: tuple[Variable, ...] = (),
     inputs_directory: Path | None = None,
 ) -> _Training | _Finished:
-    """Check one run's identity and build its attempt, touching nothing stored."""
+    """Check one run's identity and build its attempt, touching nothing stored.
+
+    A known run that stored nothing here (a launch cancelled or lost before its
+    first save) has no attempt to resume, so `resume` starts its first one.
+    """
     base = default_root()
     root = run_directory(base, label, identity)[1]
     prior = RunFiles(root).run_file()
     kind = config_type(recipe)
     if resume and prior is None:
-        raise EtudeError("run_not_found", 404, detail=run_address(identity, label))
+        if not known:
+            raise EtudeError("run_not_found", 404, detail=run_address(identity, label))
+        resume = False
     # Given fields change the declared config; an omitted config resumes the stored one.
     stored = prior.config_json if prior is not None and resume and config is None else initial
     settings = changed_config(kind, "{}" if config is None else config, stored=stored)
