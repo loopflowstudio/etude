@@ -31,7 +31,9 @@ ExperimentOption = Annotated[
 @app.command("train")
 @kind(Kind.wait)
 def train_recipe(
-    file: Annotated[Path, typer.Argument(help="a Python file defining train(config)")],
+    file: Annotated[
+        Path, typer.Argument(help="a Python file defining train(config) or training_runs()")
+    ],
     config: Annotated[
         str | None, typer.Option(help="JSON config fields; omitted on resume keeps stored config")
     ] = None,

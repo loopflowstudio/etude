@@ -110,7 +110,7 @@ def train(
     try:
         found = runpy.run_path(str(file)).get("train")
         if not callable(found):
-            raise ValueError(f"{file.name}: define train(config)")
+            raise ValueError(f"{file.name}: define train(config) or training_runs()")
         return _train_each(
             [
                 _prepare(

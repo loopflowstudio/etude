@@ -42,9 +42,13 @@ def read_job_file(
     folder = str(path.resolve().parent)
     if folder not in sys.path:
         sys.path.insert(0, folder)
-    function = runpy.run_path(str(path.resolve())).get("training_runs")
+    namespace = runpy.run_path(str(path.resolve()))
+    function = namespace.get("training_runs")
     if not callable(function):
-        raise LauncherError(f"{path.name}: define training_runs() returning jobs or run requests")
+        missing = "rename runs() to" if callable(namespace.get("runs")) else "define"
+        raise LauncherError(
+            f"{path.name}: {missing} training_runs() returning jobs or run requests"
+        )
     signature = inspect.signature(function)
     hints = typing.get_type_hints(function)
     reserved = {

@@ -584,13 +584,13 @@ def test_legacy_declarations_refuse_before_training_or_submission(
         )
     )
     assert main([command, str(path)]) == 1
-    assert "training_runs" in capsys.readouterr().err
+    assert "rename runs() to training_runs()" in capsys.readouterr().err
     assert not path.with_suffix(".called").exists()
     assert not launcher_file(home).exists()
     assert not (home / "track").exists()
-    with pytest.raises(LauncherError, match="training_runs"):
+    with pytest.raises(LauncherError, match=r"rename runs\(\) to training_runs\(\)"):
         read_job_file(path)
-    with pytest.raises(LauncherError, match="training_runs"):
+    with pytest.raises(LauncherError, match=r"rename runs\(\) to training_runs\(\)"):
         train(path)
 
 
