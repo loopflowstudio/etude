@@ -114,7 +114,7 @@ class TrainingRunSummary:
 @dataclass(frozen=True)
 class EvalRunSummary:
     name: str
-    state: Literal["queued", "running", "finished", "failed"]
+    state: Literal["queued", "running", "stopped", "finished", "failed"]
     matches: tuple[str, ...] = ()
 
 

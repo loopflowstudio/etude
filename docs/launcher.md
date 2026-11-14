@@ -350,7 +350,7 @@ Three levels do the work, each built only on the one below it:
 
 | Level | What it does | What it knows |
 | --- | --- | --- |
-| **Controller** | One pass: reads the file and the state, calls the declarations, hands down each new run once. Owns the experiment's dollar limit. | Experiments, and a run as `queued`, `running`, `finished` or `failed` |
+| **Controller** | One pass: reads the file and the state, calls the declarations, hands down each new run once. Owns the experiment's dollar limit. | Experiments, and a run as `queued`, `running`, `stopped`, `finished` or `failed` |
 | **Scheduler** | Queues runs and starts each on a machine with room. Owns a job's `max_hours`, `max_usd` and `max_attempts`. | Runs and machines; an experiment's name is a label |
 | **Provisioner** | Rents and terminates machines within an on-demand's `--max` and price ceiling. | Machines: `starting`, `available`, `unavailable`, `deleted` |
 
@@ -364,8 +364,11 @@ Three levels do the work, each built only on the one below it:
   stored something come from the source; queued runs, and running ones that
   have stored nothing yet, come from the scheduler's records, the ones
   `etude runs` and `etude status` show. Each run has one state: `queued`,
-  `running`, `finished` or `failed`. The pass keeps no memory of its own and
-  writes nothing else.
+  `running`, `stopped`, `finished` or `failed`. The pass keeps no memory of its own and
+  writes nothing else. A `stopped` run saved its state short of its target
+  and no launcher on this computer is continuing it; it resumes only when
+  asked. While this computer's launcher owns continuation, it remains
+  `running` (or `queued` for an eval waiting for room).
 - **One line for everything considered.** A training run already in the state
   prints that state. A new one prints `new, running` when a machine took it,
   `new, queued` when it waits for room (always, under `etude queue`), or
@@ -1682,7 +1685,7 @@ Karpenter and SkyPilot call the third a provisioner.
 
 | Level | Modules | States it owns |
 | --- | --- | --- |
-| Controller | `etude/controller.py` (the pass), `experiment.py` (state), `declarations.py` (reads an experiment file), `jobs.py`, `smoke.py`, `local.py` | a run's `queued`, `running`, `finished`, `failed` |
+| Controller | `etude/controller.py` (the pass), `experiment.py` (state), `declarations.py` (reads an experiment file), `jobs.py`, `smoke.py`, `local.py` | a run's `queued`, `running`, `stopped`, `finished`, `failed` |
 | Scheduler | `etude/launch/`, apart from the provisioner's modules | `Phase`, `Outcome`, `Cause`, `Status` |
 | Provisioner | `launch/machines.py`, `launch/providers/`, `launch/images.py` | `Machine.state`: `starting`, `available`, `unavailable`, `deleted` |
 

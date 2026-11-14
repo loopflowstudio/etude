@@ -20,13 +20,14 @@ from etude.errors import EtudeError, LauncherError
 from etude.eval.match import environment
 from etude.eval.query import statsdb
 from etude.eval.records import Benchmark, Code, Inference, Seating
-from etude.eval.tournament import scores
+from etude.eval.tournament import evaluating, scores
 from etude.experiment import observe
 from etude.jobs import EvalJob, ExperimentState, _hold, evaluation_spec
 from etude.launch.records import Outcome, Standing, Status
 from etude.launch.source import home
 from etude.records import Clock, RunRecord, RunSubmission
 from etude.spec import Job, RunRequest
+from etude.stopping import Stopped
 from etude.storage import DirectoryStorage
 from etude.train.read import read
 from etude.train.tracking import TrainingRun as Run_
@@ -723,3 +724,37 @@ def test_a_failed_eval_holds_only_its_matches_within_the_same_tournament(
         assert len(new_keys) == 2 * len(DEALS)
     finally:
         training.finish(timeout=30)
+
+
+@pytest.mark.parametrize("phase", ["absent", "running", "queued", "failed"])
+def test_saved_eval_stop_keeps_the_launchers_continuation_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    tournament = Benchmark(name="ladder", environment=WORLD)
+    with (
+        pytest.raises(Stopped),
+        evaluating(
+            tournament,
+            experiment="ppo",
+            run="ladder",
+            directory=tmp_path / "eval",
+            storages=[bucket],
+        ),
+    ):
+        raise Stopped()
+    launcher = _Launcher()
+    if phase != "absent":
+        launcher.launched.append(
+            RunRequest(
+                id="ppo/ladder",
+                job=EvalJob(
+                    tournament=tournament, play=play, experiment="ppo", repo=None, max_hours=1
+                ).plain(),
+            )
+        )
+    launcher.queued = phase == "queued"
+    launcher.outcome = "failed" if phase == "failed" else None
+    monkeypatch.setattr(client, "standing", launcher.standing)
+    (run,) = observe(bucket, "ppo").eval_runs
+    assert run.state == ("stopped" if phase == "absent" else phase)

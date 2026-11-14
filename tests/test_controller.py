@@ -119,7 +119,7 @@ def test_a_pass_prints_one_line_per_run_in_declared_order(
 def test_wrong_eval_kind_refuses_before_training_is_submitted(tmp_path: Path) -> None:
     file = tmp_path / "two.py"
     file.write_text(FILE + "\ndef eval_jobs(state):\n    return training_jobs(state)\n")
-    with pytest.raises(LauncherError, match="eval_jobs.*EvalJob"):
+    with pytest.raises(LauncherError, match=r"^two\.py: eval_jobs\(\) must return EvalJob$"):
         advance(read_experiment(file), source=DirectoryStorage(tmp_path / "source"), mode="queue")
 
 
@@ -564,3 +564,64 @@ def eval_jobs(state):
     error = capsys.readouterr().err
     assert "checkpoint_key_conflict: base@0/out/weights.pt" in error
     assert client.default().runs(done=True) == ()
+
+
+@pytest.mark.parametrize("command", ["train", "queue", "launch"])
+def test_wrong_training_kind_names_the_file_and_author_type(
+    tmp_path: Path, command: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    file = tmp_path / "wrong_training.py"
+    file.write_text("def training_jobs():\n    return 123\n")
+    assert main([command, str(file)]) == 1
+    assert "wrong_training.py: training_jobs() must return TrainingJob" in capsys.readouterr().err
+    assert client.default().runs(done=True) == ()
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize("command", ["eval", "queue", "launch"])
+def test_wrong_eval_kind_names_the_file_and_author_type(
+    tmp_path: Path, command: str, wrapped: bool, capsys: pytest.CaptureFixture[str]
+) -> None:
+    file = tmp_path / "wrong_eval.py"
+    returned = "RunRequest(job=job)" if wrapped else "job"
+    file.write_text(
+        FILE + f"\nfrom etude.spec import RunRequest\n"
+        f"def eval_jobs(state):\n    job = training_jobs(state)[0]\n    return {returned}\n"
+    )
+    assert main([command, str(file)]) == 1
+    assert "wrong_eval.py: eval_jobs() must return EvalJob" in capsys.readouterr().err
+    assert client.default().runs(done=True) == ()
+
+
+@pytest.mark.parametrize("command", ["train", "queue", "launch"])
+def test_known_run_address_survives_a_changed_job_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+) -> None:
+    b = bench(tmp_path)
+    b.scheduler.add_pool(Pool(name="waiting"))
+    monkeypatch.setattr(client, "_client", lambda: b.scheduler)
+    monkeypatch.setattr(client, "standing", b.scheduler.standing)
+    b.scheduler.queue(
+        [
+            RunRequest(
+                id="two/base@0",
+                seed=0,
+                job=Job(name="before", experiment="two", command="true", repo=None, max_hours=1),
+            )
+        ],
+        "waiting",
+    )
+    file = tmp_path / "two.py"
+    file.write_text(
+        FILE + "\nfrom etude.spec import RunRequest\n"
+        "def training_jobs():\n"
+        "    job = TrainingJob(name='after', train=train_command, "
+        "config=Command(command='true'), repo=None, max_hours=1)\n"
+        "    return RunRequest(id='two/base@0', job=job, seed=0)\n"
+    )
+    assert main([command, str(file)]) == 0
+    assert "two/base@0  queued" in capsys.readouterr().out
+    assert [run.id for run in b.scheduler.runs(done=True)] == ["two/base@0"]

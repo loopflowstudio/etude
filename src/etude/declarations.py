@@ -22,7 +22,7 @@ from etude.errors import EtudeError, LauncherError
 from etude.experiment import observe
 from etude.experiment_file import refuse_renamed
 from etude.identity import run_address
-from etude.jobs import EvalJob, ExperimentState, TrainingJob, evaluation_spec
+from etude.jobs import EvalJob, ExperimentState, TrainingJob, TrainingRunSummary, evaluation_spec
 from etude.spec import Job, RunRequest, expand_runs
 from etude.storage import default_root
 
@@ -144,9 +144,7 @@ def read_training_jobs(
                 evaluation_spec(each.job)
             except EtudeError:
                 continue
-        raise LauncherError(
-            f"{path.name}: training_jobs() must return TrainingJob or its RunRequest"
-        )
+        raise LauncherError(f"{path.name}: training_jobs() must return TrainingJob")
     plain = [each.plain() if isinstance(each, Job) else each.job for each in returned]
     jobs: list[Job] = []
     for candidate in plain:
@@ -191,6 +189,29 @@ def read_training_jobs(
             )
         )
     return expand_runs(normalized, params=params)
+
+
+def find_training_run(request: RunRequest, state: ExperimentState) -> TrainingRunSummary | None:
+    """Find a declared address, including stored compact job/seed spellings."""
+    return next(
+        (
+            run
+            for run in state.runs
+            if run.name == request.id
+            or (run.launch == request.job.name and run.seed == request.seed)
+        ),
+        None,
+    )
+
+
+def format_known_run(request: RunRequest, prior: TrainingRunSummary | None) -> str | None:
+    """The pass's line for a known run; None when the address is new."""
+    if prior is None:
+        return None
+    line = f"{request.id}  {prior.state}"
+    if prior.state in {"failed", "stopped"}:
+        line += f"; --job {request.job.name} --seed {request.seed} --resume"
+    return line
 
 
 def select_runs(
@@ -253,12 +274,17 @@ def asked(function: EvalFunction, state: ExperimentState) -> list[Job]:
     for each in given:
         if isinstance(each, EvalJob):
             jobs.append(each.plain())
-        elif isinstance(each, RunRequest):
+            continue
+        if isinstance(each, RunRequest):
             try:
                 evaluation_spec(each.job)
             except EtudeError:
-                raise LauncherError("eval_jobs() must return EvalJob or its RunRequest") from None
-            jobs.append(each.job)
-        else:
-            raise LauncherError("eval_jobs() must return EvalJob or its RunRequest")
+                pass
+            else:
+                jobs.append(each.job)
+                continue
+        defining = function if inspect.isroutine(function) else type(function)
+        raise LauncherError(
+            f"{Path(inspect.getfile(defining)).name}: eval_jobs() must return EvalJob"
+        )
     return jobs

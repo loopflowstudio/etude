@@ -27,7 +27,7 @@ from pydantic import BaseModel
 
 from etude.cache import Artifact, Content, ContentMismatch, Corrupt
 from etude.call import changed_config, config_type
-from etude.declarations import read_training_jobs, select_runs
+from etude.declarations import find_training_run, format_known_run, read_training_jobs, select_runs
 from etude.errors import EtudeError, LauncherError
 from etude.experiment import observe
 from etude.experiment_file import defined_functions, refuse_renamed
@@ -80,22 +80,10 @@ def train(
             for request in requests:
                 assert request.id is not None  # read_training_jobs addresses every run
                 try:
-                    prior = next(
-                        (
-                            r
-                            for r in state.runs
-                            if r.launch == request.job.name and r.seed == request.seed
-                        ),
-                        None,
-                    )
-                    if prior is not None and job is None and seed is None and not resume:
-                        line = f"{request.id}  {prior.state}"
-                        if prior.state in {"stopped", "failed"}:
-                            line += f"; --job {request.job.name} --seed {request.seed} --resume"
-                        print(
-                            line,
-                            file=sys.stderr if json_output else sys.stdout,
-                        )
+                    prior = find_training_run(request, state)
+                    known = format_known_run(request, prior)
+                    if known is not None and job is None and seed is None and not resume:
+                        print(known, file=sys.stderr if json_output else sys.stdout)
                         continue
                     identity = run_address(prior.name, label) if prior is not None else request.id
                     directory = Path(folder) / "runs" / request.id

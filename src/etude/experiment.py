@@ -19,6 +19,7 @@ from etude.checkpoints import CheckpointRecord
 from etude.eval.records import Match
 from etude.launch import client
 from etude.launch.records import Standing
+from etude.records import RunOutcome
 from etude.storage import Storage
 from etude.train.read import RunData, lines, read_all
 from etude.train.report import job_names
@@ -76,16 +77,6 @@ def state_of(
             for record in data.checkpoints
             if record.artifact.sha256 is not None and record.artifact.size_bytes is not None
         )
-        state: Literal["queued", "running", "stopped", "finished", "failed"]
-        if data.outcome is not None and data.outcome.state != "stopped":
-            state = data.outcome.state
-        elif data.name in lost:
-            state = "failed"
-        elif data.outcome is not None:
-            # Only an active launcher owns automatic continuation after a saved stop.
-            state = "running" if data.name in active else "stopped"
-        else:
-            state = "running"
         runs.append(
             jobs.TrainingRunSummary(
                 name=data.name,
@@ -93,7 +84,7 @@ def state_of(
                 job=job[data.name].name,
                 launch=job[data.name].launch,
                 line=line[data.name],
-                state=state,
+                state=_stored_state(data.name, data.outcome, active=active, lost=lost),
                 checkpoints=saved,
                 seed=data.file.seed if data.file else None,
             )
@@ -101,9 +92,7 @@ def state_of(
     eval_runs = [
         jobs.EvalRunSummary(
             name=d.name,
-            state="running"
-            if d.outcome is None or d.outcome.state == "stopped"
-            else d.outcome.state,
+            state=_stored_state(d.name, d.outcome, active=active, lost=lost),
         )
         for d in every
         if d.file is not None and d.experiment == experiment and d.file.kind == "evaluation"
@@ -112,7 +101,7 @@ def state_of(
     for item in retained:
         record, status = item.record, item.status
         committed += status.usd if status.done else record.launch.spec.max_usd or Decimal(0)
-        state = (
+        state: Literal["queued", "running", "stopped", "finished", "failed"] = (
             "queued"
             if status.phase in {"queued", "renting"}
             else "failed"
@@ -129,7 +118,7 @@ def state_of(
             )
             if prior is not None:
                 eval_runs.remove(prior)
-                if prior.state in {"finished", "failed"}:
+                if prior.state in {"finished", "failed", "stopped"}:
                     state = prior.state
             eval_runs.append(jobs.EvalRunSummary(name=record.id, state=state, matches=matches))
         else:
@@ -158,6 +147,19 @@ def state_of(
     return jobs.ExperimentState(
         experiment=experiment, runs=tuple(runs), eval_runs=tuple(eval_runs), committed_usd=committed
     )
+
+
+def _stored_state(
+    name: str, outcome: RunOutcome | None, *, active: set[str], lost: set[str]
+) -> Literal["running", "stopped", "finished", "failed"]:
+    """Only an active launcher owns continuation after a saved stop."""
+    if outcome is not None and outcome.state != "stopped":
+        return outcome.state
+    if name in lost:
+        return "failed"
+    if outcome is not None and name not in active:
+        return "stopped"
+    return "running"
 
 
 def __getattr__(name: str) -> object:

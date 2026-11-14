@@ -558,13 +558,14 @@ def test_interrupted_declared_run_reports_stopped_and_can_resume(
     json_output: bool,
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
     file = tmp_path / "interrupted.py"
     recipe = RECIPE.replace("from pathlib import Path", "import signal\nfrom pathlib import Path")
     recipe = recipe.replace("raise Stopped()", "signal.raise_signal(signal.SIGINT)")
     file.write_text(
         recipe + "\nfrom etude.jobs import TrainingJob\n"
         "def training_jobs():\n"
-        "    return [TrainingJob(name='base', train=train, config=Config(), seeds=(1,))]\n"
+        "    return [TrainingJob(name='base', train=train, config=Config(), seeds=(1,), max_hours=1)]\n"
     )
     args = ["train", str(file), *(["--json"] if json_output else [])]
     assert main(args) == 75
@@ -580,6 +581,12 @@ def test_interrupted_declared_run_reports_stopped_and_can_resume(
         output.err if json_output else output.out
     )
     assert read(tmp_path / "home/track", "interrupted", "base@1").writers == before.writers
+    for command in ("queue", "launch"):
+        assert main([command, str(file), "--source", str(tmp_path / "home/track")]) == 0
+        assert (
+            "interrupted/base@1  stopped; --job base --seed 1 --resume" in capsys.readouterr().out
+        )
+        assert read(tmp_path / "home/track", "interrupted", "base@1").writers == before.writers
     assert main([*args, "--job", "base", "--seed", "1", "--resume"]) == 0
     resumed = read(tmp_path / "home/track", "interrupted", "base@1")
     assert resumed.outcome is not None and resumed.outcome.state == "finished"

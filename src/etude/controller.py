@@ -10,7 +10,14 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal
 
-from etude.declarations import Experiment, asked, read_training_jobs, select_runs
+from etude.declarations import (
+    Experiment,
+    asked,
+    find_training_run,
+    format_known_run,
+    read_training_jobs,
+    select_runs,
+)
 from etude.errors import EtudeError, LauncherError
 from etude.eval.records import Match, digest, folder_name
 from etude.eval.tournament import StoredRuns, played
@@ -76,24 +83,6 @@ def source_for(pool: str | None, rent: str | None, source: str | None = None) ->
 
 def _fits(job: Job, committed: Decimal, max_usd: Decimal | None) -> bool:
     return max_usd is None or committed + (job.max_usd or Decimal(0)) <= max_usd
-
-
-def _known_line(request: RunRequest, state: ExperimentState) -> str | None:
-    """The pass's line for a run the state already holds, or None for a new run."""
-    prior = next(
-        (
-            r
-            for r in state.runs
-            if r.name == request.id or (r.launch == request.job.name and r.seed == request.seed)
-        ),
-        None,
-    )
-    if prior is None:
-        return None
-    line = f"{request.id}  {prior.state}"
-    if prior.state in {"failed", "stopped"}:
-        line += f"; --job {request.job.name} --seed {request.seed} --resume"
-    return line
 
 
 def _print_lines(lines: dict[str | None, str]) -> None:
@@ -171,7 +160,7 @@ def advance(
                         if existing.status.done
                         else existing.record.launch.spec.max_usd or Decimal(0)
                     )
-            known = None if resume else _known_line(request, state)
+            known = None if resume else format_known_run(request, find_training_run(request, state))
             if known is not None:
                 lines[request.id] = known
                 continue

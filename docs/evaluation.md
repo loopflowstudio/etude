@@ -677,13 +677,14 @@ does, unless `--retry-failed`.
 - **State.** What the experiment's runs have stored, together with the
   scheduler's records of those queued or only just started, read fresh each
   pass and never stored itself. `state.eval_runs` is its eval runs, each with
-  its name and whether it is `queued`, `running`, `finished` or `failed`. `state.runs` is
+  its name and whether it is `queued`, `running`, `stopped`, `finished` or `failed`. `state.runs` is
   its training runs under the source: each one's name, its `job` (the name the report gives it: the
   launch name, with its config digest when one name ran two configs),
-  whether it is `queued`, `running`, `finished` or `failed`,
+  whether it is `queued`, `running`, `stopped`, `finished` or `failed`,
   and the checkpoints it stored, each with its ordinal, `at` (where its
   run's clocks stood), tags and `wall_ms`, when it was saved in milliseconds
   since the epoch.
+  `stopped` follows the [same state rule as training](launcher.md#one-pass-over-the-file).
   `Checkpoints` is a tuple, so a slice works too; `every(n)`, `at(clock,
   *values)` and `tagged(tag)` choose by ordinal, clock value or tag, and
   `final` is the last checkpoint once a run has finished.
