@@ -86,35 +86,13 @@ behaviour for each.
    prints `outcome`; the stored field inside `outcome.json` stays `state`.
    A failed run prints no object.
 
-## Record unification counterexample (2026-11-13, implement)
+## Writer/allocation evidence
 
-The proposed replacement of tracking `Attempt` by launcher `RunAttempt`
-assumes they describe the same execution. They do not: `track` creates a
-writer for each context, while the launcher allocates a whole command.
-
-Controlled local probe at `9a762a1`, with temporary storage and
-`ETUDE_ATTEMPT=allocation-1`, `ETUDE_RUN=allocated-run`: two sequential
-`with track(clocks=[Step("updates", "updates")])` blocks each logged one
-row. `read` returned two distinct writers, both referencing `allocation-1`,
-and two rows. A third block with `run="another-run"` recorded that other
-run under the same allocation. No worker, network or rental was involved.
-Command/result: `uv run python` inline probe; 2 writers / 1 allocation / 2
-rows, then another run / same allocation. All temporary files were removed.
-
-Merging by allocation loses the writer boundaries row replacement uses;
-counting writers as allocations changes retry limits and cost. Command jobs
-may never open `track`; evaluation has its own writers. Do not refuse these
-contexts to make one record fit.
-
-**Open decision against Jack Heart's answer.** His "1a -- i think RunAttempt
-is probably better than Attempt though" answered "two classes for an
-attempt" by merging them under `RunAttempt`. The probe above contradicts that
-merge, so the branch keeps two records: `RunWriter` (a tracking context, with
-its first-row cutoff, linked to an optional allocation id) and `RunAttempt`
-(the allocation). Built and reversible; nobody has accepted it. Choice left
-open: (a) keep `RunWriter` beside `RunAttempt`; (b) one `RunAttempt` with
-writers as a sub-part of it; (c) another name for the writer. The single
-stored `etude.records.RunRecord` is separate and built (`dbf799e`).
+At `9a762a1`, two sequential tracking contexts wrote two writers and two rows
+under `allocation-1`; a third context wrote another run under that allocation.
+No worker, network or rental was involved. The full probe and contrary early
+"1a" answer are retained at `416847a:scratch/questions.md` (Record unification).
+The later answer below chooses writers as sub-parts of the allocation.
 
 The shared `RunRecord` must own the persisted job digest. The observed
 `TrainingRun.job` is a report label derived from configs seen and can change;
@@ -149,157 +127,26 @@ launch; train and eval do not import each other. Public warning aliases end
 in 0.5. Unlabelled command jobs retain flat addresses; historical flat run
 folders remain selected only by a matching declaration.
 
-## Eval API made consistent with training (2026-11-13)
+## Eval consistency history
 
 Jack Heart: "probably worth looking at whether there are any changes to the
 eval API we want to make to make it match the changes to the training API. We
 don't need to do a full redo here but we should try to make it consistent
 where there's no reason not to"; "Can we get the best of both worlds where we
-make it match training but we also make it easy to use our Matchup APIs?";
-"i guess the other thing thats different hre is that EvalConfig would be OUR
-type" / "training config is YOUR type"; on the shape below: "i thik thats
-probably right?" (tentative; show it at demo).
+make it match training but we also make it easy to use our Matchup APIs?".
 
-Shape:
+The earlier author-owned execution sketch and the pre-launch input-planning
+counterexample are retained at `416847a:scratch/questions.md` (Eval API and
+planning boundary). The later pure tournament reply below supersedes that
+sketch: submission must see the tournament before planning inputs, since the
+worker has upload-only grants and cannot fetch arbitrary checkpoints.
 
-    class ArenaConfig(BaseModel): ...          # author's config, like ElementalConfig
-    def arena(config: ArenaConfig) -> None:    # author's function, like train(config)
-        progress = Benchmark(name=..., environment=world, seatings=[...], rollups=[...])
-        with evaluating(progress) as run:      # EvalRun(Run); experiment, storage, checkpoint from the launch
-            run.play(play)                     # play(match) -> Tables; checkpoint= only outside a launch
-    job = evaluation(arena, config=ArenaConfig(), checkpoint=weights)   # same shape as training(train, config=)
+## Earlier review evidence
 
-- One config per job, as training; several benchmarks = several jobs.
-- An eval run is one tournament (Benchmark or RoundRobin): one environment,
-  many seatings. A plain match list is opened from its environment.
-- `run.play` replaces `hold` and `evaluate`; the run reads the experiment's
-  training lines itself (no `lines=`); `rollups` move onto the Benchmark /
-  RoundRobin (query-time `statsdb(rollups=)` stays).
-- `run.stopping()` checked between matches; stop raises `Stopped`; a retry or
-  `--resume` plays only unstored matches; resume explicit, environment and
-  rollups checked, as today.
-- Unchanged: Benchmark, RoundRobin, Seating, Inference, Code, relative seats,
-  Match, Rollup, play(match) -> Tables, scores/standings/statsdb.
-- No public EvalConfig; `jobs.Evaluation` stays internal. Defaults chosen here,
-  not by Jack: opener name `evaluating`; `evaluation(progress, play=play)` kept
-  as a shortcut on the same path only if it costs little, else warning alias;
-  `hold`/`evaluate` warning aliases until 0.5.
-
-### Eval consistency: planning boundary found during implementation
-
-The new shape cannot replace the current planner unchanged. In
-`experiment.advance`, `evaluation_spec(job)` extracts a tournament and its
-checkpoints **before** starting the job; `played(...)` uses that definition
-to choose only unstored matches and supply only their checkpoint inputs.
-`evaluation(arena, config=...)` instead hides the Benchmark inside arbitrary
-user code. The planner cannot discover it without executing that code during
-submission. Repeated jobs with identical author config can also want new
-matches as implicit training lines grow. The worker's run grant is upload-only;
-its existing Fetch/input path eagerly delivers the inputs selected beforehand,
-so it cannot simply read arbitrary other training lines/checkpoints at runtime.
-
-This is a counterexample to treating the new shape as a signature-only rename,
-not a rejection of the requested shape. Stop dependent deletion of
-hold/evaluate and the declarative planner pending design/demo. A concrete
-choice still needed: preserve pre-launch match planning through an explicit
-benchmark description, or make authored evaluation jobs opaque to the planner
-and define when they run again and how their selected checkpoint inputs arrive.
-The latter fits the requested author-owned function better, but changes the
-league's pre-launch pending-match/gap behavior and needs a runtime context with
-selective input delivery. No unused runtime/context implementation is added.
-The existing live EvalRun/shared Run cut can be checked independently.
-
-## Concept review (2026-11-13): one new open name
-
-`etude.job` (new on this branch: `Job`, `RunRequest`, `Input`, `Until`,
-`Runtime`) sits beside released `etude.jobs` (`training`, `evaluation`,
-`continue_from`). A job file imports from both; the docs do so seven times.
-They differ by one letter, against "every word in a path ... should be
-different from its neighbours". Not settled here because it is a public
-import path. Options: (a) keep both; (b) move the constructors' types and
-the constructors into one module, `etude.jobs` re-exporting until 0.5;
-(c) another name for the shared types' module. Built: (a). Does not hold
-the implement direction in `design-train-api.md`.
-
-Remaining choices: upload-only cleanup without a controller, local resume
-config and second Ctrl-C. Later steers below supersede the writer and eval
-planning choices; their implementation remains to be built.
-
-## Concept review, second and third passes (2026-11-13)
-
-The second pass's local stop/resume, outcome and job-name corrections and
-third pass's qualified resume and launched-only branch docs are built.
-Exact CLI output at `df734c3` and the writer/attempt vocabulary evidence are
-retained at `6f70baa:scratch/questions.md` (second and third passes).
-
-**Open: branching a run started with `etude run`.** The Training page puts
-`etude continue` in one table with the local commands, and it is the only
-way to change a config on purpose, but it reads the launcher database and
-queues a launched run. A run started here has no branch: a changed config is
-a fresh run from update 1. Options: (a) say so, `etude continue` is for
-launched runs (the docs correction now directed); (b) `etude continue` also
-finds a run in the local runs directory and queues its child on this
-computer; (c) `etude run train.py --from RUN --config ...` starts a child
-here from a copy of the parent's state. Related: should `--until` stay
-required on `etude continue` when only `--config` changes? Matters because
-"try another learning rate from update 400" is the first thing someone does
-after a local run, and the launcher path costs a job file. Does not hold the
-implement direction.
-
-Evidence for EXP-59, not a choice here: with `--json`, every refusal and a
-failed `train` print no object and exit 1 (taken id, bad config, not found,
-already finished, config changed, recipe exception); the code is in the
-stderr line only. `outcome.json` does record `failed`.
-
-
-## Concept review, fourth pass (2026-11-13): one open choice widened, one new name
-
-Three corrections the design implies are in `design-train-api.md` (fourth
-concept review). What the runs showed at `cbdefd7`, temporary `ETUDE_HOME`,
-no network, `examples/coin.py` unless said:
-
-    run --until updates=10                              coin-seed-0            exit 0
-    run --name slow --seconds 0.001 --json              outcome "stopped"      exit 75
-    run --resume slow-seed-0 --json                     outcome "finished"     exit 0
-    run --resume coin-seed-0                            etude: run_already_finished: give --until with a later target   exit 1
-    run --resume coin-seed-0 --until updates=20         coin-seed-0            exit 0
-    recipe raising at update 3 (saves every step)       traceback; outcome.json failed; current.json save-00000003
-    run --resume of it, after the fix                   finished; writers resumed_at updates 1 and 4; one run, reached 6
-    runs                                                (no output)            exit 0
-    status                                              last loop: never       exit 0
-    checkpoints --source HOME/track                     eight lines, both runs
-    report examples/coin.py                             HOME/track/reports/coin.html
-    python -c "import coin; coin.train(coin.Config())"  etude.errors.EtudeError: experiment_not_named
-    run.json                                            "id": "coin/slow-seed-0", "job_name": "slow", "seed": 0
-
-**Open, widening the third pass's branching question: what is a run started
-with `etude run` to the rest of Etude?** It is files only. The launcher
-database never hears of it, so `etude runs`, `status`, `cancel` and
-`continue` do not see it, and nothing lists local runs but `ls`, a report or
-`checkpoints --source`. Options: (a) files only, said plainly (the docs
-correction now directed); (b) `etude run` records the run in the launcher
-database as a run on this computer, so the same reads and `continue` work
-for it; (c) the reads take the runs directory (`etude runs --source DIR`)
-and branching stays as the third pass's (b)/(c). Matters because the page
-teaches one word, run, for both, and the first run anyone makes is a local
-one. Does not hold the implement direction.
-
-**Open: what a direct call of `train(config)` means.** Today it is refused
-(`experiment_not_named`); the directed correction only makes the refusal
-say what to do. Options: (a) keep refusing; (b) a direct call is a new run
-as `etude run FILE` would make it (experiment from the module's file, seed
-0, a taken id refused), so a test or debugger needs nothing else; (c) a
-Python entry taking the function and a config object, since
-`etude.local.run` takes a file path and a JSON string. Evidence: Jack Heart's
-"You can just call our code" (principle 1) against "Nothing is inferred"
-(principle 8). Does not hold the implement direction.
-
-**Open name, small.** The docs' "id" is `train-seed-0`; the code's
-`RunRecord.id` and the stored `run.json` field are `train/train-seed-0`, and
-the code's word for the short form is `RunRecord.name`, while `--name` names
-the job. Options: (a) keep, with the docs saying what the file holds (now
-directed); (b) store the short id beside `experiment`; (c) teach "name" for
-the short form and rename `--name`. Does not hold the implement direction.
+The local branching/listing, direct-call and id/name probes and prior module
+naming choices are retained at `416847a:scratch/questions.md` (concept reviews
+one through four). Those observations remain true; the decisions below choose
+what to ship rather than adding more local-launcher integration in this cut.
 
 ## RunAttempt and writers (2026-11-13)
 
@@ -319,3 +166,94 @@ inputs as today; on the machine Etude runs `with evaluating(benchmark) as run:
 run.play(play)`. Prior art: Inspect AI `@task -> Task`, HELM
 `run_spec_function -> RunSpec`. Jack Heart: "I guess thats fine." This
 replaces the earlier sketch where the author function ran the eval itself.
+
+## Typed match conditions (2026-11-13)
+
+Jack Heart: "i do think conditions should be pydantic". Proposed shape (not
+his words): `Seating.conditions` takes the author's Pydantic models (e.g.
+`Deal(deal=7)`); stored and hashed as their JSON, so a match key and stored
+data are unchanged for the same values and historical dict conditions stay
+readable; `play` sees them validated back into its type, the way `etude.call`
+validates a config into the function's parameter type (e.g. `play(match:
+Match[Deal])`). `play(match) -> Tables` keeps `Match` as its one argument.
+Then: "and be like MatchConfig or something". Read as: the field is the
+match's config, the author's own Pydantic type, named like the training
+config (`conditions` -> `config` on Seating and Match; the author's class is
+e.g. `MatchConfig`; Etude defines no class of that name). Stored `conditions`
+stays readable.
+Then: "but only i guess similar to TrainConfig, doesnt need to be named by
+us" and "just needs to be a pydantic model". Confirms: Etude names no match
+config class; any Pydantic model of the author's.
+
+## Implementation choices for demo (2026-11-13)
+
+Built: `RunAttempt.writers` contains the tracking/eval contexts. Each keeps its
+own id and first-row cutoff; `RunData.writers` reads the contexts of one run.
+The observed old `RunData.attempts` accessor warns until 0.5. Reports label
+these as writers rather than counting them as allocations. The allocation
+still has one id, machine, number, rental share and attempt-limit charge.
+Schema 19 is edited in place; no additional migration. No new database query
+or remote read is added: metadata rides the existing progress/finished journal.
+
+Simpler reversible choice: authored evaluation jobs use the planner's existing
+selected matches, lines and input mapping. The low-level `evaluating` opener
+retains explicit `lines=` for relative seats outside that path; it does not
+import training or read arbitrary remote training files on a worker. Show this
+at demo alongside the pure `arena(config) -> Benchmark | RoundRobin` shape.
+Empty tournament rollups are omitted from serialization to preserve historical
+hold names. Ready-made tournament jobs remain a shortcut on the same path.
+
+Controlled checks: one real local allocation with four contexts (another run
+and a silent context included) finished with one attempt and zero dollars;
+its metric points were `[10, 200, 300]` at updates `[1, 2, 3]`. A pure eval
+function's launched pass delivered only its selected checkpoint inputs and a
+second pass launched nothing. Planned eval stop retained one match; explicit
+resume played the other, and incompatible/taken-name refusals kept the finished
+outcome bytes. Rollup resume retained one total rather than adding it twice.
+
+## Decisions through demo (2026-11-13)
+
+Jack Heart: "i tink iwant to see this go all the way to demo now, with decisions
+made by you / the worker until we're ready to demo it using some pufferlib
+thing". Then: "maybe we need something else for hte demo. i liked hanabi but
+we dont do jax yet". The later steer replaces PufferLib with OpenSpiel Hanabi
+and PyTorch, with cooperative group rows; EXP-62 remains separate.
+
+Choices made here:
+- Keep allocation-owned writers with individual cutoffs and a flat per-run
+  reader view; the four-writer/one-allocation check proves no inflated limits.
+- Move the unreleased `etude.job` types to `etude.spec`, beside constructors in
+  `etude.jobs`. This matches the existing `RunSubmission.spec` fact and keeps
+  low-dependency types out of the constructor module's train/eval imports.
+  Delete `etude.job`; published launcher type imports still re-export one owner.
+- Omitted local resume config uses the stored JSON, validated by the current
+  recipe type. Explicit config uses current defaults and must still match.
+  This avoids repeating overrides; source compatibility remains the author's.
+- First Ctrl-C requests a saved stop; the second interrupts immediately and
+  fails that attempt, leaving the last whole save available. Repeated SIGTERM
+  remains a stop request. The focused signal check uses no artificial load.
+- Upload-only remote cleanup waits for a controller or the next observation
+  command. Document it; start no hidden daemon and hand out no delete grant.
+- Keep direct calls explicit (`track(experiment=, run=)`); local runs remain
+  files, launched continuation stays the branching path, ids stay qualified
+  in run.json. These avoid implicit identity or a new persistence path.
+- Keep opener `evaluating`, five-minute default saves (or every= steps), and
+  coin as the smallest introductory example. Hanabi is the optional demo.
+
+Match config is built end to end: Match[AuthorModel], generic Seating and
+RoundRobin, config keyword and callback validation in each worker. Python
+models survive author construction; records keep JSON under the released
+`conditions` spelling and match keys/seeds remain equal. Old keyword/property
+warn until 0.5. statsdb exposes matches.config; its unreleased schema cut stays
+14 over released 13, with no new query shape or I/O. `typing-extensions` provides
+Python 3.12's generic default support; it was already required by Pydantic.
+
+A single-file example exposed an existing refusal: runpy-loaded top-level play
+was treated as unimportable. The job builder now names that function from the
+file's real path; nested functions remain unimportable. Its old exclusive
+refusal test is replaced by the import-path result test.
+
+Outside evidence: OpenSpiel 2.0.2's CPython 3.12 bindings installed and imported
+on macOS arm64 and Linux amd64 (uv's Python 3.12 Debian container). PyPI wheel
+index: https://pypi.org/project/open-spiel/2.0.2/ . Native Hanabi accepted small
+colors/ranks/hands and two players. No fallback game or JAX was needed.

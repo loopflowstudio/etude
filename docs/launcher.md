@@ -115,7 +115,7 @@ stay outside these records.
 ```python
 # job.py
 from etude.jobs import training
-from etude.job import Job
+from etude.spec import Job
 
 from train import TrainConfig, train  # train(config: TrainConfig) -> None
 
@@ -212,7 +212,7 @@ temporary keys are kept in the courier's memory and never written to disk.
 from decimal import Decimal
 
 from etude.jobs import evaluation, training
-from etude.job import Input
+from etude.spec import Input
 
 job = training(train, config=TrainConfig(lr=1e-3), max_hours=6, max_usd=Decimal(30))
 weights = Input(
@@ -273,6 +273,10 @@ To evaluate as training goes, an experiment file's `eval(state)` chooses the
 checkpoints and `etude eval` launches what is new
 ([Experiments](evaluation.md#experiments)).
 
+A run attempt is one machine allocation. Its `writers` are the training or
+evaluation contexts opened inside it, each with its own row cutoff. Opening
+more writers does not consume more attempts or change the allocation's cost.
+
 ## Smoke before you spend
 
 ```python
@@ -281,7 +285,7 @@ from decimal import Decimal
 
 from etude.experiment import ExperimentState
 from etude.jobs import training
-from etude.job import Job
+from etude.spec import Job
 from etude.report import Report
 
 from train import TrainConfig, train
@@ -450,7 +454,7 @@ The equivalent Python path uses the same scheduler and ordinary runs:
 from decimal import Decimal
 
 from etude.launch.client import default, launch_cohort, wait
-from etude.job import Job
+from etude.spec import Job
 from etude.launch.records import MachineTemplate, OnDemand, Provider
 
 launcher = default()
@@ -934,7 +938,7 @@ defines it, by its full path, and relative imports are a lint error:
 | Import | What it is |
 | --- | --- |
 | `from etude.jobs import training, evaluation` | typed jobs: Etude decides the command |
-| `from etude.job import Job, RunRequest` | what to run |
+| `from etude.spec import Job, RunRequest` | what to run |
 | `from etude.launch.client import queue, launch, status, wait, ...` | the calls a script makes; they go to the controller when one is set |
 | `from etude.launch.database import Database` | the SQLite records in `launcher-<schema>.db` |
 | `from etude.launch.schemas import Packet, Work, Progress` | frozen worker messages |
@@ -956,7 +960,7 @@ from pathlib import Path
 
 from etude.jobs import continue_from, training
 from etude.launch.client import default, fetch, logs, queue, queue_cohort, wait
-from etude.job import Until
+from etude.spec import Until
 from train import TrainConfig, train
 
 job = training(
@@ -989,7 +993,7 @@ from decimal import Decimal
 
 from etude.jobs import training
 from etude.launch.client import launch_cohort
-from etude.job import Job, Until
+from etude.spec import Job, Until
 from train import TrainConfig, train
 
 
@@ -1041,7 +1045,7 @@ A sweep is Python that calls the function:
 ```python
 # sweep.py
 import capacity
-from etude.job import Job
+from etude.spec import Job
 
 
 def runs() -> list[Job]:
@@ -1238,7 +1242,7 @@ A job can be given files by name:
 
 ```python
 from etude.jobs import training
-from etude.job import Input
+from etude.spec import Input
 
 policy = Input(
     name="policy.pt",
@@ -1832,7 +1836,7 @@ command from installing Torch again. Cold image pulls can still dominate startup
 
 ```python
 from etude.jobs import training
-from etude.job import Runtime
+from etude.spec import Runtime
 
 job = training(
     train,
@@ -1866,7 +1870,7 @@ in the checkout and a command runs in the shell's environment.
 ### Prepare a job environment once per machine
 
 ```python
-from etude.job import Preparation, Runtime
+from etude.spec import Preparation, Runtime
 
 job = training(
     train,
@@ -2218,3 +2222,8 @@ files. Preserve the old database and retained journals before choosing a fresh
 controller home; this change does not migrate or modify live experiment files.
 Use a fresh `ETUDE_HOME` for offline integration proof and install the reviewed
 PR commit with `uv add 'etude-sdk @ git+https://github.com/loopflowstudio/etude@COMMIT'`.
+
+Replaced remote training saves are removed by the controller when worker grants
+only permit uploads. Keep `etude controller run` or `etude wait` running for
+prompt cleanup; with neither, they remain until the next command that observes
+the worker journal. No hidden background process starts to remove them.

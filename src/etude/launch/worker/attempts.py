@@ -54,7 +54,6 @@ from typing import BinaryIO, Literal
 from urllib.parse import unquote, urlsplit
 
 from etude.cache import Cache, Content
-from etude.job import Input, Record, Runtime, number
 from etude.launch.logging import Console, explain, log_to, sanitize
 from etude.launch.records import Cause, Outcome, Output, Prepared
 from etude.launch.runtime import PROBE, find_python, select_runtime
@@ -62,6 +61,7 @@ from etude.launch.schemas import Finished, Packet, Work
 from etude.launch.storage.files import append_usage, digest, read_result, write
 from etude.launch.storage.transport import attribute, emit, observe
 from etude.launch.worker.prepared import key, prepare
+from etude.spec import Input, Record, Runtime, number
 
 # Set when the worker is told to end: running phases stop as they would at SIGTERM.
 _halt = threading.Event()
@@ -92,6 +92,7 @@ def _finish(
         cause=cause,
         clocks=result.clocks,
         tally=result.tally,
+        writers=result.writers,
         exit_code=code,
         prepared=Prepared.model_validate_json(prepared.read_text()) if prepared.exists() else None,
         outputs=tuple(

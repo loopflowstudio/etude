@@ -34,7 +34,7 @@ Built in this cut (committed at `dbf799e`; grep finds no `etude.tracking`,
   `RunRecord.launch` requires one. Each config is stored once (within the
   specification when launched). The job digest remains identity;
   `TrainingRunSummary.job` remains a derived report label.
-- Shared job specification types move to `etude.job`, so neither shared run
+- Shared job specification types move to `etude.spec`, so neither shared run
   records nor training/evaluation import the launcher. Released
   `etude.launch.records` imports re-export the same types.
 - The observed `TrainingRun` becomes `TrainingRunSummary`; the result of
@@ -58,11 +58,9 @@ local and launched `--resume RUN --until`; job report labels preserving
 seeded continuation lineage. Deprecated taught spellings warn until 0.5.
 Do not restore deleted implementations or their exclusive tests.
 
-`RunWriter` remains a tracking context, distinct from the `RunAttempt`
-machine allocation. See the reproduced many-writers-per-allocation case and
-Jack Heart's contrary "1a" answer in `questions.md`. This implementation
-correction remains open; do not merge the records and lose writer cutoffs or
-inflate rental/attempt accounting.
+`RunAttempt.writers` now holds its tracking/eval contexts. Each `RunWriter`
+keeps its own first-row cutoff; contexts never inflate allocation or rental
+accounting. The tentative shape stays for demo (`questions.md`).
 
 Launcher schema remains 19, the single unreleased schema change over main's
 18 (`286e0c5`). New keyed/scoped lookups use indexed SQLite queries. Do not
@@ -70,11 +68,11 @@ stack another migration; the launcher refuses older database files.
 
 ## Remaining work and verification
 
-The new eval consistency steer is tentative for demo and is not built.
-`questions.md` records the concrete planning/input-delivery counterexample:
-a Benchmark constructed inside arbitrary author code is unavailable to the
-current pre-launch match planner. Dependent eval API deletion stops until
-that boundary is designed; the current run/record/scope cut remains checkable.
+The eval consistency steer is built: pure author functions return the tournament
+at submission, before match/input planning. `evaluating` opens the live run;
+`run.play` executes it. `hold`/`evaluate` warn and delegate until 0.5. Relative
+seats in authored jobs use the existing planner's lines and selected inputs;
+the low-level opener retains explicit `lines=` (demo detail in questions.md).
 
 Initial run/record/scope acceptance and the first three review corrections
 are built. Exact focused check receipts and earlier API corrections remain at
@@ -91,12 +89,18 @@ Check: `uv run pytest tests/train/test_track.py -k test_a_launched_run_is_its_ex
 — **1 passed, 13 deselected**; focused ruff check/format and diff check pass.
 Full acceptance stays with gate; PR #103 stays draft.
 
-New steers received during this correction slice, implementation remaining:
-writers become a sub-part of `RunAttempt` (tentative; show at demo), preserving
-writer cutoffs and allocation accounting; eval author functions return the
-pure tournament, retaining pre-launch match/input planning. Exact quotes and
-shapes are in `questions.md`. These replace the earlier open choices above;
-the existing implementations have not yet been cut over.
+Writer/eval cutovers and the later typed-match-config steer are built. Remaining
+choices have been made in questions.md; the unreleased type module is now
+etude.spec, local resume defaults to stored config, and a second Ctrl-C exits.
+Optional Hanabi (OpenSpiel/PyTorch) is ready for a person's demo; no PufferLib
+adoption or EXP-62 work is included. docs/hanabi.md gives the commands.
+
+Focused receipt: `uv run pytest tests/test_jobs.py tests/test_experiment.py tests/eval/test_match.py tests/eval/test_context.py tests/train/test_local.py -k 'test_one_allocation_owns_many_writers_without_changing_its_limits or test_an_evaluation_job_holds_a_benchmark_for_the_checkpoint_it_is_given or test_a_launched_pass_ships_its_checkpoints_and_is_not_launched_twice or test_matches_in_two_workers_resumes_from_storage_without_replaying or test_author_match_config_reaches_play_and_keeps_its_historical_key or test_old_condition_keyword_warns_but_keeps_the_same_match or test_resume_uses_stored_config_when_defaults_change'` — 8 passed, 64 deselected.
+Other focused checks: stop/resume/refusal preservation, rollups, second Ctrl-C,
+shared import boundaries, two-write eval progress, CLI-file function imports, historical pinned match
+keys and checkpoint resume all passed. `uv run mypy` passed (175 files);
+`node --test tests/test_charts.cjs` passed (21 checks). Full acceptance stays
+with gate. PR #103 stays draft.
 
 Earlier checks and indexed-query receipts: `ef6099a:scratch/exp-56.md`.
 

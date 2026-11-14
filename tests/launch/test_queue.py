@@ -10,7 +10,6 @@ import pytest
 
 from etude.cli import main
 from etude.errors import LauncherError
-from etude.job import Job, Until
 from etude.launch.client import queue, queue_cohort, wait
 from etude.launch.database import Database, launcher_file
 from etude.launch.errors import LaunchError
@@ -18,6 +17,7 @@ from etude.launch.executor import Refused
 from etude.launch.records import Offer, OnDemand, Pool, Stale
 from etude.launch.scheduler import Scheduler
 from etude.launch.schemas import Packet, Work
+from etude.spec import Job, Until
 from etude.train.records import ParentRun, Step
 from etude.train.tracking import track
 from tests.experiments import authored

@@ -16,11 +16,11 @@ from etude.cli import main
 from etude.errors import LauncherError
 from etude.eval.match import environment
 from etude.eval.query import statsdb
-from etude.eval.records import Benchmark, Code, Inference, RoundRobin, Seating
-from etude.job import Input, Job, Runtime, SmokeForm, Until, job_id
-from etude.jobs import JobOptions, evaluation
+from etude.eval.records import Benchmark, Code, RoundRobin
+from etude.jobs import JobOptions, evaluation, training
 from etude.launch.job_file import read_job_file
 from etude.launch.smoke import tiny
+from etude.spec import Input, Job, Runtime, SmokeForm, Until, job_id
 from etude.train.read import read
 from tests.experiments import authored
 from tests.launch.counting import job_text
@@ -234,7 +234,7 @@ def test_a_target_is_read_once_and_one_job_has_one_id_however_it_is_written() ->
         Until.parse("steps")
 
 
-def test_a_function_the_job_cannot_import_by_name_is_refused(tmp_path: Path) -> None:
+def test_a_job_file_names_its_own_top_level_function(tmp_path: Path) -> None:
     repo = checkout(
         tmp_path / "lab",
         {
@@ -243,8 +243,9 @@ def test_a_function_the_job_cannot_import_by_name_is_refused(tmp_path: Path) -> 
             + "    return training(train, config=TrainConfig(lr=1), max_hours=0.1)\n"
         },
     )
-    with pytest.raises(LauncherError, match="importable module"):
-        read_job_file(repo / "job.py")
+    (request,) = read_job_file(repo / "job.py")
+    assert "--function job:train" in request.job.command
+    assert request.job.repo == str(repo)
 
 
 UNPACKAGED = '[project]\nname = "lab"\nversion = "0"\ndependencies = []\n'
@@ -305,24 +306,27 @@ def test_typed_jobs_take_every_job_field_but_what_they_derive() -> None:
 def test_an_evaluation_job_holds_a_benchmark_for_the_checkpoint_it_is_given(
     tmp_path: Path, job_python: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    repo = checkout(tmp_path / "arena", {"arena_duel.py": PLAY})
+    repo = checkout(
+        tmp_path / "arena",
+        {
+            "arena_duel.py": """from pydantic import BaseModel
+from etude.eval.match import environment
+from etude.eval.records import Benchmark, Code, Inference, Seating
+"""
+            + PLAY
+            + """
+class ArenaConfig(BaseModel):
+    games: int = 2
+
+def arena(config: ArenaConfig) -> Benchmark:
+    return Benchmark(name="anchors", environment=environment("duel"), seatings=(
+        Seating(name="model vs fixed", players=(Inference(config={"search": 0}), Code(name="fixed")),
+                config=({"deal": 1}, {"deal": 2}), games=config.games),))
+"""
+        },
+    )
     monkeypatch.syspath_prepend(str(repo))
     duel = importlib.import_module("arena_duel")
-    progress = Benchmark(
-        name="anchors",
-        environment=environment("duel"),
-        seatings=(
-            Seating(
-                name="model vs fixed",
-                players=(
-                    Inference(config={"search": 0}),
-                    Code(name="fixed", source=[repo / "arena_duel.py"]),
-                ),
-                conditions=({"deal": 1}, {"deal": 2}),
-                games=2,
-            ),
-        ),
-    )
     c = cloud(tmp_path)
     weights = b"weights at updates 100\n"
     c.storage.objects["etude/t/ppo-1/checkpoints/updates-100"] = weights
@@ -333,7 +337,8 @@ def test_an_evaluation_job_holds_a_benchmark_for_the_checkpoint_it_is_given(
         size_bytes=len(weights),
     )
     job = evaluation(
-        progress,
+        duel.arena,
+        config=duel.ArenaConfig(),
         experiment="ppo",
         play=duel.play,
         checkpoint=given,
@@ -386,7 +391,9 @@ def test_an_evaluation_holds_what_its_tournament_takes() -> None:
     ):
         # The omission under test.
         evaluation(progress, experiment="ppo", play=lambda match: {}, checkpoint=weights, repo=None)  # type: ignore[call-arg]
-    league = RoundRobin(name="league", environment=environment("duel"), conditions=({},), games=1)
+    league: RoundRobin = RoundRobin(
+        name="league", environment=environment("duel"), config=({},), games=1
+    )
     with pytest.raises(LauncherError, match="give it entrants"):
         evaluation(league, experiment="ppo", play=lambda match: {}, max_hours=0.1, repo=None)
 
@@ -421,3 +428,55 @@ def test_job_seeds_expand_to_named_requests_without_changing_job_identity(tmp_pa
         'from etude.launch.records import Job\ndef runs():\n    return [Job(command="true", max_hours=1), Job(command="true", max_hours=1, name="other")]\n'
     )
     assert [run.id for run in read_job_file(file)] == ["job/job-seed-0", "job/other-seed-0"]
+
+
+def test_one_allocation_owns_many_writers_without_changing_its_limits(
+    tmp_path: Path, job_python: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = (
+        """from etude.records import Clock
+from etude.train.tracking import track
+"""
+        + TRAIN
+        + """
+def write(config: TrainConfig) -> None:
+    clocks = [Clock(name="updates", kind="step", meaning="optimizer updates")]
+    with track(clocks=clocks) as run:
+        run.log({"loss": 10}, updates=1)
+        run.log({"loss": 20}, updates=2)
+        run.log({"loss": 30}, updates=3)
+    with track(clocks=clocks) as run:
+        run.log({"loss": 200}, updates=2)
+        run.log({"loss": 300}, updates=3)
+    with track(clocks=clocks, run="another") as run:
+        run.log({"loss": 4}, updates=1)
+    with track(clocks=clocks):
+        pass
+"""
+    )
+    repo = checkout(tmp_path / "writers", {"allocation_writers.py": source})
+    monkeypatch.syspath_prepend(str(repo))
+    author = importlib.import_module("allocation_writers")
+    scheduler = local(tmp_path)
+    job = training(
+        author.write,
+        config=author.TrainConfig(lr=0.1),
+        max_hours=0.01,
+        max_attempts=1,
+        runtime=Runtime(python=job_python),
+    )
+    run = scheduler.launch(job.model_copy(update={"experiment": "pilot"}))
+    (status,) = scheduler.wait(run, every=0.05, timeout=30)
+    assert (status.outcome, status.attempts, status.usd) == ("succeeded", 1, Decimal(0)), str(
+        scheduler.logs(refresh=True, run=run)
+    )
+    (attempt,) = scheduler.attempts(run)
+    assert len(attempt.writers) == 4
+    assert len({writer.writer for writer in attempt.writers}) == 4
+    assert {writer.attempt for writer in attempt.writers} == {attempt.id}
+    assert {writer.run for writer in attempt.writers} == {run, "pilot/another"}
+    data = read(tmp_path / "track", "pilot", run.removeprefix("pilot/"))
+    points = data.points("loss", "updates")
+    assert list(points.x) == [1, 2, 3]
+    assert list(points.y) == [10, 200, 300]
+    assert [writer.first_row for writer in data.writers] == [True, True, False]

@@ -35,9 +35,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, Literal, NamedTuple
 
-from etude.job import Input, Preparation, Record, Variable
 from etude.launch.records import Prepared
 from etude.launch.storage.files import digest, write
+from etude.spec import Input, Preparation, Record, Variable
 
 
 class Entry(Record):

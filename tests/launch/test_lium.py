@@ -16,7 +16,6 @@ import pytest
 
 from etude.cli import main
 from etude.errors import LauncherError
-from etude.job import Job
 from etude.launch.client import _open
 from etude.launch.database import Database, launcher_file
 from etude.launch.errors import ProviderUnavailable
@@ -35,6 +34,7 @@ from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.s3 import Bucket, Keys
 from etude.launch.storage.transport import HTTPReply
 from etude.launch.worker.courier import run as run_courier
+from etude.spec import Job
 from tests.launch.test_runpod_machines import Storage, released, repository, until
 
 NODE = "89044090-3d31-4c5a-a388-0d0a30aef107"

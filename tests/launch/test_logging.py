@@ -20,7 +20,6 @@ from urllib.request import Request
 import pytest
 
 from etude.errors import LauncherError
-from etude.job import RunRequest
 from etude.launch import logging, source
 from etude.launch.database import Database, launcher_file
 from etude.launch.environment import install
@@ -52,6 +51,7 @@ from etude.launch.storage.transport import HTTPReply
 from etude.launch.worker import courier as courier_module
 from etude.launch.worker.courier import Courier
 from etude.launch.worker.main import work
+from etude.spec import RunRequest
 from tests.launch.counting import Counting, Counts, job_text
 from tests.launch.fake import bench
 from tests.launch.test_runpod_machines import Storage as MemoryStorage

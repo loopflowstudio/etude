@@ -6,11 +6,11 @@ import time
 from decimal import Decimal
 from pathlib import Path
 
-from etude.job import Job
 from etude.launch.database import Database, launcher_file
 from etude.launch.executor import local as local_service
 from etude.launch.records import Machine, Pool
 from etude.launch.scheduler import Scheduler
+from etude.spec import Job
 from tests.launch.fake import bench, output_bytes
 
 JOB = Job(command="train", max_hours=1, max_usd=Decimal(1))

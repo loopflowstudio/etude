@@ -11,7 +11,6 @@ from typing import Self
 import pytest
 from pydantic import ValidationError
 
-from etude.job import Job
 from etude.launch.database import Database, launcher_file
 from etude.launch.environment import install, startup_timeout
 from etude.launch.errors import LaunchError
@@ -22,6 +21,7 @@ from etude.launch.providers.runpod import machines
 from etude.launch.records import Pool
 from etude.launch.schemas import Observation, Packet
 from etude.launch.ssh import SSH, LogsRequest, SessionRequest, StartRequest
+from etude.spec import Job
 from tests.launch.fake import bench
 from tests.launch.test_runpod_machines import cloud
 

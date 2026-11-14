@@ -25,24 +25,26 @@ from typing import Literal
 from pydantic import Field, field_validator, model_validator
 
 from etude.errors import LauncherError as LauncherError
-
-# Shared job records live in `etude.job`; released imports from here keep working.
-from etude.job import Input as Input
-from etude.job import Job as Job
-from etude.job import Param as Param
-from etude.job import Preparation as Preparation
-from etude.job import Record as Record
-from etude.job import RunRequest as RunRequest
-from etude.job import Runtime as Runtime
-from etude.job import Smoke as Smoke
-from etude.job import SmokeForm as SmokeForm
-from etude.job import SmokeStep as SmokeStep
-from etude.job import SourcePosition as SourcePosition
-from etude.job import Until as Until
-from etude.job import Variable as Variable
-from etude.job import job_id as job_id
-from etude.job import number as number
 from etude.records import RunRecord as RunRecord
+from etude.records import RunWriter
+from etude.records import Tally as Tally
+
+# Shared job records live in `etude.spec`; released imports from here keep working.
+from etude.spec import Input as Input
+from etude.spec import Job as Job
+from etude.spec import Param as Param
+from etude.spec import Preparation as Preparation
+from etude.spec import Record as Record
+from etude.spec import RunRequest as RunRequest
+from etude.spec import Runtime as Runtime
+from etude.spec import Smoke as Smoke
+from etude.spec import SmokeForm as SmokeForm
+from etude.spec import SmokeStep as SmokeStep
+from etude.spec import SourcePosition as SourcePosition
+from etude.spec import Until as Until
+from etude.spec import Variable as Variable
+from etude.spec import job_id as job_id
+from etude.spec import number as number
 
 Outcome = Literal[
     "succeeded", "failed", "cancelled", "over_budget", "out_of_time", "lost", "stopped"
@@ -400,33 +402,6 @@ class Prepared(Record):
     cause: str | None = None  # why a kept directory was rejected
 
 
-class Tally(Record):
-    """How far a job has got through work it counted, as the job last reported it.
-
-    A clock says where a job stands; a tally also says how much there is, so
-    it gives a fraction and, with a recent pace, a time left.
-    """
-
-    unit: str  # what is counted, plural: "matches"
-    done: int = Field(ge=0)
-    total: int = Field(ge=0)
-    failed: int = Field(default=0, ge=0)
-    # Recent pace, in `unit` per hour; None until the job has seen enough to say.
-    per_hour: float | None = Field(default=None, gt=0, allow_inf_nan=False)
-
-    def __str__(self) -> str:
-        said = f"{self.done}/{self.total} {self.unit}"
-        if self.failed:
-            said += f" ({self.failed} failed)"
-        left = self.total - self.done - self.failed
-        if self.per_hour is not None and left > 0:
-            hours = left / self.per_hour
-            minutes = max(1, round(hours * 60))
-            when = f"{hours:.1f} hours" if hours >= 1 else f"{minutes} minute{'s' * (minutes > 1)}"
-            said += f", {self.per_hour:.0f}/hour, ~{when} left"
-        return said
-
-
 class RunAttempt(Record):
     """Allocation of one run to one machine for a bounded execution window.
 
@@ -434,6 +409,7 @@ class RunAttempt(Record):
     The internal session identifies its journal; it is not the allocation.
     """
 
+    writers: tuple[RunWriter, ...] = ()
     id: str
     run: str
     session: str

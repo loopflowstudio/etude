@@ -224,10 +224,10 @@ class Elapsed(Record):
 
 
 class Attempts(Record):
-    """Each run's attempts: when each started, on which host, and until its last row."""
+    """Writer lifetimes: starts, hosts and last rows (the historical panel name)."""
 
     kind: Literal["attempts"] = "attempts"
-    title: str = "Attempts"
+    title: str = "Writers"
 
 
 type EvalPanel = Annotated[

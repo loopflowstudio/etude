@@ -38,7 +38,7 @@ def pair(tmp_path: Path) -> tuple[Code, Code]:
 
 
 def deals(players: tuple[Code, Code], count: int) -> list[Match]:
-    return [Match(players=players, conditions={"deal": deal}, games=2) for deal in range(count)]
+    return [Match(players=players, config={"deal": deal}, games=2) for deal in range(count)]
 
 
 def rows(db: duckdb.DuckDBPyConnection) -> dict[str, list[tuple[object, ...]]]:

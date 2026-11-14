@@ -11,12 +11,12 @@ import pytest
 
 from etude.cli import main
 from etude.errors import LauncherError
-from etude.job import Input, Job
 from etude.jobs import continue_from, continued_config
 from etude.launch.job_file import read_job_file
 from etude.out import MEMBERSHIP, OutFiles
 from etude.records import RunWriter
 from etude.run import sync
+from etude.spec import Input, Job
 from etude.storage import DirectoryStorage
 from etude.train.read import read
 from etude.train.records import ParentRun, Step

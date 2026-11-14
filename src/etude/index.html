@@ -78,9 +78,9 @@ function render() {
     // Runs and evaluation.
     const facts = node("div", "facts"), fact = (k, v, cls) => { facts.append(node("span", null, k), node("b", cls, v)); };
     const count = s => runs.filter(x => x.state === s).length, other = runs.length - count("finished") - count("failed");
-    const restarted = runs.filter(x => x.attempts.length > 1).length;
+    const severalWriters = runs.filter(x => x.writers.length > 1).length;
     const states = node("b");
-    for (const [n, label, cls] of [[other, "running", "live-text"], [count("finished"), "finished", null], [count("failed"), "failed", "bad-text"], [restarted, "restarted", null]])
+    for (const [n, label, cls] of [[other, "running", "live-text"], [count("finished"), "finished", null], [count("failed"), "failed", "bad-text"], [severalWriters, "several writers", null]])
       if (n) { if (states.childNodes.length) states.append(" · "); states.appendChild(node("span", cls, `${n} ${label}`)); }
     if (!runs.length) states.append("evaluation only");
     facts.append(node("span", null, "Runs"), states);

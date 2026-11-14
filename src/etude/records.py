@@ -16,11 +16,11 @@ from datetime import datetime
 from hashlib import sha256
 from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, StringConstraints, model_validator
 
 from etude.cache import Content
 from etude.carriage import within
-from etude.job import Job, Param, Smoke, SourcePosition
+from etude.spec import Job, Param, Smoke, SourcePosition
 
 Name = Annotated[str, StringConstraints(min_length=1, max_length=200, pattern=r"^\S+$")]
 Writer = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{12}$")]
@@ -239,6 +239,7 @@ class RunWriter(Record):
 
     schema_version: Literal[1] = 1
     writer: Writer
+    run: str | None = None
     started_ms: int
     host: str
     # The launcher's RunAttempt, when it started this process.
@@ -250,3 +251,38 @@ class RunWriter(Record):
     # fill this from their first durable row and supersede that coordinate too.
     resumed_at: dict[str, float] = Field(default_factory=dict)
     first_row: bool = False
+
+
+class Tally(Record):
+    """How far a job has got through work it counted, as the job last reported it.
+
+    A clock says where a job stands; a tally also says how much there is, so
+    it gives a fraction and, with a recent pace, a time left.
+    """
+
+    unit: str  # what is counted, plural: "matches"
+    done: int = Field(ge=0)
+    total: int = Field(ge=0)
+    failed: int = Field(default=0, ge=0)
+    # Recent pace, in `unit` per hour; None until the job has seen enough to say.
+    per_hour: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+
+    def __str__(self) -> str:
+        said = f"{self.done}/{self.total} {self.unit}"
+        if self.failed:
+            said += f" ({self.failed} failed)"
+        left = self.total - self.done - self.failed
+        if self.per_hour is not None and left > 0:
+            hours = left / self.per_hour
+            minutes = max(1, round(hours * 60))
+            when = f"{hours:.1f} hours" if hours >= 1 else f"{minutes} minute{'s' * (minutes > 1)}"
+            said += f", {self.per_hour:.0f}/hour, ~{when} left"
+        return said
+
+
+class RunProgress(Record):
+    """The job-owned progress report shared by training, evaluation and the worker."""
+
+    clocks: dict[str, FiniteFloat] = Field(default_factory=dict)
+    tally: Tally | None = None
+    writers: tuple[RunWriter, ...] = ()

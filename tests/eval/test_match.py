@@ -58,11 +58,11 @@ def roster(tmp_path: Path) -> list[Player]:
     ]
 
 
-def seatings(players: Sequence[Player], *, conditions: Sequence[Config], games: int) -> list[Match]:
+def seatings(players: Sequence[Player], *, config: Sequence[Config], games: int) -> list[Match]:
     """Every ordered seating of two distinct players, under each condition."""
     return [
-        Match(players=seated, conditions=given, games=games)
-        for given in conditions
+        Match(players=seated, config=given, games=games)
+        for given in config
         for seated in permutations(players, 2)
     ]
 
@@ -74,7 +74,7 @@ def test_matches_in_two_workers_resumes_from_storage_without_replaying(
     # One checkpoint at two search budgets is two models; one script at two strengths too.
     assert len({each.key for each in players}) == 4
     world = environment("duel", config={"world": "w6"})
-    matches = seatings(players, conditions=[{"deal": 0}, {"deal": 1}], games=4)
+    matches = seatings(players, config=[{"deal": 0}, {"deal": 1}], games=4)
     assert len(matches) == 24
     bucket = DirectoryStorage(tmp_path / "bucket")
     first = evaluate(
@@ -113,7 +113,7 @@ def test_sql_joins_results_to_players_by_config_key(tmp_path: Path) -> None:
     players = roster(tmp_path)
     evaluate(
         experiment="league", environment=environment("duel"), play=play,
-        matches=seatings(players, conditions=[{"deal": 0}], games=6), directory=tmp_path,
+        matches=seatings(players, config=[{"deal": 0}], games=6), directory=tmp_path,
     )  # fmt: skip
     db = statsdb("league", tmp_path)
     found = db.sql(
@@ -138,7 +138,7 @@ def test_compare_gives_a_rate_with_an_interval_that_resamples_matches(tmp_path: 
     players = roster(tmp_path)
     evaluate(
         experiment="league", environment=environment("duel"), play=play,
-        matches=seatings(players[:2], conditions=[{"deal": d} for d in range(5)], games=6),
+        matches=seatings(players[:2], config=[{"deal": d} for d in range(5)], games=6),
         directory=tmp_path,
     )  # fmt: skip
     db = statsdb("league", tmp_path)
@@ -176,7 +176,7 @@ def test_a_row_without_seat_or_group_is_refused_and_nothing_of_its_match_is_stor
     with pytest.raises(EtudeError) as refused:
         evaluate(
             experiment="league", environment=environment("duel"), play=play_unkeyed,
-            matches=seatings(players[:2], conditions=[{}], games=1), directory=tmp_path,
+            matches=seatings(players[:2], config=[{}], games=1), directory=tmp_path,
         )  # fmt: skip
     assert refused.value.code == "match_failed"
     cause = refused.value.__cause__
@@ -193,7 +193,7 @@ def test_a_row_naming_a_player_column_is_refused(tmp_path: Path) -> None:
     with pytest.raises(EtudeError) as refused:
         evaluate(
             experiment="league", environment=environment("duel"), play=play_seat_and_player,
-            matches=seatings(roster(tmp_path)[:2], conditions=[{}], games=1), directory=tmp_path,
+            matches=seatings(roster(tmp_path)[:2], config=[{}], games=1), directory=tmp_path,
         )  # fmt: skip
     cause = refused.value.__cause__
     assert isinstance(cause, EtudeError) and cause.code == "column_name_refused"
@@ -202,7 +202,7 @@ def test_a_row_naming_a_player_column_is_refused(tmp_path: Path) -> None:
 def test_a_column_keeps_its_type_through_an_eval_run(tmp_path: Path) -> None:
     players = roster(tmp_path)
 
-    matches = seatings(players[:2], conditions=[{}], games=1)
+    matches = seatings(players[:2], config=[{}], games=1)
     evaluate(experiment="league", environment=environment("duel"), play=play, matches=matches[:1],
              run="typed", directory=tmp_path)  # fmt: skip
     with pytest.raises(EtudeError) as refused:
@@ -214,7 +214,7 @@ def test_a_column_keeps_its_type_through_an_eval_run(tmp_path: Path) -> None:
 
 def test_two_environments_are_never_pooled(tmp_path: Path) -> None:
     players = roster(tmp_path)[:2]
-    matches = seatings(players, conditions=[{}], games=6)
+    matches = seatings(players, config=[{}], games=6)
     six, seven = (
         environment("duel", config={"world": "w6"}),
         environment("duel", config={"world": "w7"}),
@@ -264,7 +264,7 @@ def test_an_eval_run_delivered_to_a_bucket_is_queried_from_it(
         bucket = S3Storage("runs", "evals", client=client)
         evaluate(
             experiment="league", environment=environment("duel"), play=play,
-            matches=seatings(roster(tmp_path), conditions=[{}], games=4),
+            matches=seatings(roster(tmp_path), config=[{}], games=4),
             directory=tmp_path / "local", storages=[bucket],
         )  # fmt: skip
         db = statsdb("league", bucket)
@@ -459,7 +459,7 @@ def test_queries_reports_and_resumes_read_each_bucket_file_once_per_computer(
     with mock_aws():
         client = CountedClient(boto3.client("s3", region_name="us-east-1"))
         client.create_bucket(Bucket="runs")
-        matches = seatings(roster(tmp_path), conditions=[{}], games=4)
+        matches = seatings(roster(tmp_path), config=[{}], games=4)
         evaluate(
             experiment="league", environment=environment("duel"), play=play, matches=matches,
             run="league-1", directory=tmp_path / "local", storages=[S3Storage("runs", client=client)],
@@ -498,7 +498,7 @@ def test_a_launched_eval_run_reports_its_tally_a_few_times_not_once_per_match(
         put(self, key, body)
 
     monkeypatch.setattr(DirectoryStorage, "put", counted)
-    matches = seatings(roster(tmp_path), conditions=[{"deal": d} for d in range(3)], games=1)
+    matches = seatings(roster(tmp_path), config=[{"deal": d} for d in range(3)], games=1)
     evaluate(
         experiment="league", environment=environment("duel"), play=play,
         matches=matches, directory=tmp_path,
@@ -515,7 +515,7 @@ def test_a_launched_eval_run_that_fails_reports_what_it_played_and_what_failed(
     outputs = tmp_path / "outputs"
     outputs.mkdir()
     monkeypatch.setenv("ETUDE_OUTPUT_DIR", str(outputs))
-    matches = seatings(roster(tmp_path)[:2], conditions=[{}], games=1)
+    matches = seatings(roster(tmp_path)[:2], config=[{}], games=1)
     with pytest.raises(EtudeError):
         evaluate(
             experiment="league", environment=environment("duel"), play=play_unkeyed,

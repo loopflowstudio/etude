@@ -8,10 +8,10 @@ import pytest
 
 from etude.cli import main
 from etude.errors import LauncherError
-from etude.job import Job, SourcePosition
 from etude.launch.client import _open, default
 from etude.launch.records import Pool
 from etude.launch.source import checkout, contains, line, retain, source_archive, stored
+from etude.spec import Job, SourcePosition
 
 
 def test_concurrent_archives_cannot_replace_frozen_source(

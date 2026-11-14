@@ -188,6 +188,7 @@ class DirectoryJournal:
                 outputs=(),
                 exit_code=None,
                 tally=result.tally,
+                writers=result.writers,
                 log_bytes=log.stat().st_size if log.exists() else 0,
             )
         return Finished.model_validate_json(finished.read_text()).progress(home.name, started)

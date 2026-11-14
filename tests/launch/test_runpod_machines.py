@@ -29,7 +29,6 @@ from pydantic import ValidationError
 
 from etude.carriage import restore_set
 from etude.errors import LauncherError
-from etude.job import Input, Job, RunRequest, Until
 from etude.jobs import continue_from
 from etude.launch.database import Database, launcher_file
 from etude.launch.executor import Execution, Executor, local
@@ -60,6 +59,7 @@ from etude.launch.worker import courier as courier_module
 from etude.launch.worker.courier import Courier
 from etude.launch.worker.courier import run as run_in_pod
 from etude.records import ArtifactRef
+from etude.spec import Input, Job, RunRequest, Until
 from etude.storage_timeout import StorageUnavailable
 from etude.train.records import Step
 from etude.train.tracking import TrainingRun as TrackedRun

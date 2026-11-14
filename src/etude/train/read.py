@@ -4,7 +4,7 @@ The files are the record, so this reader is the reference for what they mean.
 A run's rows are one set across the processes that wrote them. For one metric
 against one clock: a row counts when it gives that clock; an earlier process's
 rows count strictly before a later attempt's first logged value on that clock.
-Historical attempts with checkpoint-based resume coordinates keep their old
+Historical writers with checkpoint-based resume coordinates keep their old
 inclusive cutoff. An attempt with no rows and no recorded cutoff hides nothing.
 A later write at the same clock value replaces an earlier one.
 Superseded rows stay on disk. Buckets keep their extremes.
@@ -14,7 +14,7 @@ Rows are read by column (`etude.train.block`), so a chart costs two arrays.
 stretch of overlapping blocks at a time, planned from headers (`_stretches`),
 so it holds one stretch's arrays plus a few numbers per block.
 `RunData.points` is the same plan read all at once.
-A run's records (declaration, outcome, attempts, checkpoints) are read when it
+A run's records (declaration, outcome, writers, checkpoints) are read when it
 is read; its metric blocks only the first time `RunData.blocks` is used, so a
 reader of checkpoints, or of an eval run, reads no metric data.
 """
@@ -99,8 +99,18 @@ class RunData(Arrays):
     # In ordinal order, one per ordinal: a later attempt continues its run's ordinals.
     checkpoints: tuple[CheckpointRecord, ...]
     # Every process that wrote to this run, in start order.
-    attempts: tuple[RunWriter, ...]
+    writers: tuple[RunWriter, ...]
     _read_blocks: Callable[[], tuple[StoredBlock, ...]] = PrivateAttr()
+
+    @property
+    def attempts(self) -> tuple[RunWriter, ...]:
+        """Deprecated writer accessor, removed in 0.5; allocations own attempts."""
+        warnings.warn(
+            "RunData.attempts is now RunData.writers; removed in 0.5",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.writers
 
     @property
     def state(self) -> RunOutcome | None:
@@ -145,7 +155,7 @@ class RunData(Arrays):
         attempt, the earliest wall time its blocks give.
         """
         return _writer_starts(
-            self.attempts, ((b.header.writer, b.header.wall_first) for b in self.blocks)
+            self.writers, ((b.header.writer, b.header.wall_first) for b in self.blocks)
         )
 
     @property
@@ -155,12 +165,12 @@ class RunData(Arrays):
 
     @property
     def reached(self) -> dict[str, float]:
-        """Latest position per clock, with later attempts superseding earlier ones.
+        """Latest position per clock, with later writers superseding earlier ones.
 
         Historical resume coordinates count even before a row. An empty new
         attempt leaves the previous position intact.
         """
-        positions = {attempt.writer: dict(attempt.resumed_at) for attempt in self.attempts}
+        positions = {attempt.writer: dict(attempt.resumed_at) for attempt in self.writers}
         starts = self.writer_starts
         for block in self.blocks:
             position = positions.setdefault(block.header.writer, {})
@@ -189,7 +199,7 @@ class RunData(Arrays):
         placed = [_place(block, clock) for block in self.blocks]
         parts = [
             _batch(stretch, located.__getitem__, (metric,), clock).points[metric]
-            for stretch in _stretches(placed, self.attempts, clock)
+            for stretch in _stretches(placed, self.writers, clock)
         ]
         return _latest_writes([p.x for p in parts], [p.y for p in parts])
 
@@ -202,7 +212,7 @@ class RunData(Arrays):
         located = {block.key: block for block in self.blocks}
         placed = [_place(block, clock) for block in self.blocks]
         points: list[TablePoint] = []
-        for stretch in _stretches(placed, self.attempts, clock):
+        for stretch in _stretches(placed, self.writers, clock):
             # Counted rows in write order: their clock values, and each one's block and digest.
             xs: list[Floats] = []
             tables: list[tuple[StoredBlock, str | None]] = []
@@ -241,7 +251,7 @@ class RunData(Arrays):
         if limit < 1:
             raise ValueError("chart limit must be positive")
         located = {block.key: block for block in self.blocks}
-        stretches = _stretches([_place(b, clock) for b in self.blocks], self.attempts, clock)
+        stretches = _stretches([_place(b, clock) for b in self.blocks], self.writers, clock)
         # Blocks whose counted rows overlap repeat clock values, and only the
         # exact path picks the latest write among them.
         if any(len(stretch) > 1 for stretch in stretches):
@@ -502,7 +512,7 @@ def _place(block: StoredBlock, clock: str) -> _Placed:
 
 
 def _writer_starts(
-    attempts: Sequence[RunWriter], blocks: Iterable[tuple[str, int]]
+    writers: Sequence[RunWriter], blocks: Iterable[tuple[str, int]]
 ) -> dict[str, int]:
     """When each writer started: its attempt's `started_ms`, else its blocks' earliest wall time.
 
@@ -512,27 +522,27 @@ def _writer_starts(
     unrecorded: dict[str, int] = {}
     for writer, wall_first in blocks:
         unrecorded[writer] = min(unrecorded.get(writer, wall_first), wall_first)
-    return unrecorded | {attempt.writer: attempt.started_ms for attempt in attempts}
+    return unrecorded | {attempt.writer: attempt.started_ms for attempt in writers}
 
 
 def _stretches(
-    placed: Sequence[_Placed], attempts: Sequence[RunWriter], clock: str
+    placed: Sequence[_Placed], writers: Sequence[RunWriter], clock: str
 ) -> list[list[_Extent]]:
     """The blocks whose rows count on the clock, ascending, grouped where their ranges overlap.
 
     `placed` is in write order. Each group keeps it, so the latest write of a
     clock value wins within the group, and no value appears in two groups.
     """
-    writers: dict[str, list[_Placed]] = {}
+    blocks_by_writer: dict[str, list[_Placed]] = {}
     for block in placed:
-        writers.setdefault(block.writer, []).append(block)
-    recorded = {attempt.writer: attempt for attempt in attempts}
-    for attempt in attempts:
-        writers.setdefault(attempt.writer, [])
-    # Historical attempts may have a cutoff even without any logged rows.
-    starts = _writer_starts(attempts, ((block.writer, block.wall_first) for block in placed))
-    ordered = sorted(writers, key=starts.__getitem__)
-    # Work backwards so each writer sees the earliest cutoff of all later attempts.
+        blocks_by_writer.setdefault(block.writer, []).append(block)
+    recorded = {attempt.writer: attempt for attempt in writers}
+    for attempt in writers:
+        blocks_by_writer.setdefault(attempt.writer, [])
+    # Historical writers may have a cutoff even without any logged rows.
+    starts = _writer_starts(writers, ((block.writer, block.wall_first) for block in placed))
+    ordered = sorted(blocks_by_writer, key=starts.__getitem__)
+    # Work backwards so each writer sees the earliest cutoff of all later writers.
     cutoffs: dict[str, float | None] = {}
     cutoff: float | None = None
     for writer in reversed(ordered):
@@ -540,7 +550,9 @@ def _stretches(
         record = recorded.get(writer)
         resumed = record.resumed_at.get(clock) if record is not None else None
         if resumed is None:
-            resumed = next((b.given.first for b in writers[writer] if b.given is not None), None)
+            resumed = next(
+                (b.given.first for b in blocks_by_writer[writer] if b.given is not None), None
+            )
         if resumed is not None:
             # Old checkpoint cuts retained the coordinate itself. New first-row
             # cuts replace it even when that row omits a particular metric.
@@ -649,7 +661,7 @@ def _order(record: CheckpointRecord) -> tuple[int, int]:
 
 
 def _hours(
-    records: Iterable[CheckpointRecord], attempts: Sequence[RunWriter], *, continued: bool
+    records: Iterable[CheckpointRecord], writers: Sequence[RunWriter], *, continued: bool
 ) -> tuple[CheckpointRecord, ...]:
     """Records in ordinal order, where one saved before Etude's clocks gets them from `wall_ms`.
 
@@ -664,9 +676,9 @@ def _hours(
             done.append(record)
             continue
         at = dict(record.at)
-        began = [a for a in attempts if a.started_ms <= record.wall_ms]
+        began = [a for a in writers if a.started_ms <= record.wall_ms]
         if began and not continued:
-            at.setdefault(HOURS_SINCE_START, (record.wall_ms - attempts[0].started_ms) / 3_600_000)
+            at.setdefault(HOURS_SINCE_START, (record.wall_ms - writers[0].started_ms) / 3_600_000)
         if began and RUNNING_HOURS not in at:
             attempt = began[-1]
             if not attempt.resumed_at:
@@ -823,7 +835,7 @@ def read_batches(
     while True:
         try:
             keys = _listing(storage, folders)
-            attempts = _records(storage, keys).attempts
+            writers = _records(storage, keys).writers
             logged: set[str] = set()
             placed: list[_Placed] = []
             for chosen in _selected(storage, keys, indexes=False):
@@ -836,9 +848,9 @@ def read_batches(
                 placed.append(_place(whole, clock))
             if missing := sorted(selected - logged):
                 raise EtudeError("metric_not_logged", 404) from KeyError(", ".join(missing))
-            starts = _writer_starts(attempts, ((p.writer, p.wall_first) for p in placed))
+            starts = _writer_starts(writers, ((p.writer, p.wall_first) for p in placed))
             placed.sort(key=lambda p: (starts[p.writer], p.sequence))
-            for stretch in _stretches(placed, attempts, clock):
+            for stretch in _stretches(placed, writers, clock):
                 high = max(extent.high for extent in stretch)
                 if done is not None and high <= done:
                     continue
@@ -871,16 +883,16 @@ class _Records:
 
     checkpoints: list[CheckpointRecord]
     # Every process that wrote to the run, once each, in start order.
-    attempts: tuple[RunWriter, ...]
+    writers: tuple[RunWriter, ...]
     # By writer, the folder its attempt record was first found in.
     folder_of: dict[str, str]
 
 
 def _records(storage: Storage, keys: Sequence[tuple[str, str]]) -> _Records:
-    """The run's checkpoint records and its attempts, with their folders."""
+    """The run's checkpoint records and its writers, with their folders."""
     present = set(keys)
     checkpoints: list[CheckpointRecord] = []
-    attempts: dict[str, RunWriter] = {}
+    writers: dict[str, RunWriter] = {}
     folder_of: dict[str, str] = {}
     for folder, name in keys:
         kind, _, leaf = name.partition("/")
@@ -898,12 +910,12 @@ def _records(storage: Storage, keys: Sequence[tuple[str, str]]) -> _Records:
                 )
             else:
                 attempt = RunWriter.model_validate_json(body)
-                attempts.setdefault(attempt.writer, attempt)
+                writers.setdefault(attempt.writer, attempt)
                 folder_of.setdefault(attempt.writer, folder)
         except ValidationError:
             continue
-    ordered = tuple(sorted(attempts.values(), key=lambda attempt: attempt.started_ms))
-    return _Records(checkpoints=checkpoints, attempts=ordered, folder_of=folder_of)
+    ordered = tuple(sorted(writers.values(), key=lambda attempt: attempt.started_ms))
+    return _Records(checkpoints=checkpoints, writers=ordered, folder_of=folder_of)
 
 
 @dataclass(frozen=True)
@@ -963,7 +975,7 @@ def _read(
     keys = _named(listing, folders)
     present = set(keys)
     records = _records(storage, keys)
-    attempts = records.attempts
+    writers = records.writers
     # The outcome the latest attempt left, where it left one.
     # `state.json` is the historical name; where both exist `outcome.json` wins.
     ended = {
@@ -972,17 +984,17 @@ def _read(
         for name in ("state.json", "outcome.json")
         if (folder, name) in present
     }
-    left = (records.folder_of[attempt.writer] for attempt in reversed(attempts))
+    left = (records.folder_of[attempt.writer] for attempt in reversed(writers))
     latest = next((folder for folder in left if folder in ended), None)
     folder = latest or (next(reversed(ended)) if ended else None)
     outcome = (
         RunOutcome.model_validate_json(storage.get(folder + ended[folder])) if folder else None
     )
-    if outcome is not None and attempts:
+    if outcome is not None and writers:
         # A completion belongs to one writer, not every later resume. Older
         # evidence without attribution is conclusive only for a single attempt.
-        current = outcome.writer == attempts[-1].writer
-        unattributed = outcome.writer is None and len(attempts) == 1
+        current = outcome.writer == writers[-1].writer
+        unattributed = outcome.writer is None and len(writers) == 1
         if not current and not unattributed:
             outcome = None
     data = RunData(
@@ -993,12 +1005,12 @@ def _read(
         # A later attempt continues its run's ordinals; each is kept once.
         checkpoints=_hours(
             {r.ordinal: r for r in sorted(records.checkpoints, key=_order)}.values(),
-            attempts,
+            writers,
             continued=run_file is not None and run_file.continues is not None,
         ),
-        attempts=attempts,
+        writers=writers,
     )
-    data._read_blocks = lambda: _blocks(storage, folders, keys, attempts, metrics, prefixes)
+    data._read_blocks = lambda: _blocks(storage, folders, keys, writers, metrics, prefixes)
     return data
 
 
@@ -1006,7 +1018,7 @@ def _blocks(
     storage: Storage,
     folders: Sequence[str],
     keys: list[tuple[str, str]],
-    attempts: Sequence[RunWriter],
+    writers: Sequence[RunWriter],
     metrics: frozenset[str] | None,
     prefixes: tuple[str, ...],
 ) -> tuple[StoredBlock, ...]:
@@ -1031,6 +1043,6 @@ def _blocks(
             if retry == 2:
                 raise
             keys = _listing(storage, folders)
-    starts = _writer_starts(attempts, ((b.header.writer, b.header.wall_first) for b in blocks))
+    starts = _writer_starts(writers, ((b.header.writer, b.header.wall_first) for b in blocks))
     blocks.sort(key=lambda block: (starts[block.header.writer], block.header.first))
     return tuple(blocks)

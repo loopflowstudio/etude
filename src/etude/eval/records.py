@@ -48,18 +48,23 @@ from collections.abc import Iterable, Mapping, Sequence
 from hashlib import sha256
 from itertools import combinations
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, Literal, Self
+from typing import TYPE_CHECKING, Annotated, Any, Generic, Literal, Self
 
 from pydantic import (
+    AliasChoices,
     BaseModel,
     BeforeValidator,
+    ConfigDict,
     Field,
     JsonValue,
+    SerializeAsAny,
     TypeAdapter,
     ValidationError,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
+from typing_extensions import TypeVar
 
 from etude.checkpoints import CheckpointId, CheckpointRef, checkpoint_id
 from etude.errors import EtudeError
@@ -341,7 +346,22 @@ class Environment(Record):
         return digest([self.name, self.files, identifying(self.config)])
 
 
-class Match(Record):
+def _match_config_name(data: object, info: ValidationInfo) -> object:
+    # JSON retains the released field name so match keys and wire data stay stable.
+    if info.mode == "python" and isinstance(data, dict) and "conditions" in data:
+        warnings.warn("conditions is now config; removed in 0.5", DeprecationWarning, stacklevel=3)
+    return data
+
+
+_MatchConfig = TypeVar(
+    "_MatchConfig",
+    bound=BaseModel | Mapping[str, JsonValue],
+    default=Mapping[str, JsonValue] | BaseModel,
+    covariant=True,
+)
+
+
+class Match(Record, Generic[_MatchConfig]):
     """Players in their seats under fixed conditions, played for some games.
 
     The unit Etude schedules, resumes and resamples. Group `all` holds every
@@ -351,8 +371,28 @@ class Match(Record):
     # By seat: `seat` in a row is a position here.
     players: tuple[Player, ...] = Field(min_length=1)
     groups: dict[Name, tuple[int, ...]] = {}
-    conditions: Config = {}
+    model_config = ConfigDict(validate_by_name=True, serialize_by_alias=True)
+    # The empty JSON default is validated into the specialized author type too.
+    config: SerializeAsAny[_MatchConfig] = Field(
+        default_factory=dict,
+        validate_default=True,
+        validation_alias=AliasChoices("config", "conditions"),
+        serialization_alias="conditions",
+    )
+
     games: int = Field(default=1, ge=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _config_name(cls, data: object, info: ValidationInfo) -> object:
+        return _match_config_name(data, info)
+
+    @property
+    def conditions(self) -> _MatchConfig:
+        warnings.warn(
+            "Match.conditions is now Match.config; removed in 0.5", DeprecationWarning, stacklevel=2
+        )
+        return self.config
 
     @model_validator(mode="before")
     @classmethod
@@ -381,7 +421,7 @@ class Match(Record):
         """Identifies the match wherever it is played."""
         seating = [player.key for player in self.players]
         groups = {name: list(seats) for name, seats in self.groups.items()}
-        return digest([seating, groups, self.conditions, self.games])
+        return digest([seating, groups, as_config(self.config), self.games])
 
     @property
     def seed(self) -> int:
@@ -617,7 +657,15 @@ class Gap(Record):
     value: float | None = None
 
 
-class Seating(Record):
+_SeatingConfig = TypeVar(
+    "_SeatingConfig",
+    bound=BaseModel | Mapping[str, JsonValue],
+    default=Mapping[str, JsonValue] | BaseModel,
+    covariant=True,
+)
+
+
+class Seating(Record, Generic[_SeatingConfig]):
     """The rule for who meets whom: `players` in seat order, played under each of `conditions`.
 
     A seat is a fixed player, an `Inference` that each checkpoint the
@@ -640,7 +688,23 @@ class Seating(Record):
     name: str = Field(min_length=1, max_length=200)
     players: tuple[Player | Inference | Relative, Player | Inference | Relative]
     # Mapping, so a literal like `{"deal": 1}` type-checks as a condition.
-    conditions: tuple[Mapping[str, JsonValue], ...] = Field(min_length=1)
+    model_config = ConfigDict(validate_by_name=True, serialize_by_alias=True)
+    config: tuple[SerializeAsAny[_SeatingConfig], ...] = Field(
+        min_length=1,
+        validation_alias=AliasChoices("config", "conditions"),
+        serialization_alias="conditions",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _config_name(cls, data: object, info: ValidationInfo) -> object:
+        return _match_config_name(data, info)
+
+    @property
+    def conditions(self) -> tuple[_SeatingConfig, ...]:
+        warnings.warn("conditions is now config; removed in 0.5", DeprecationWarning, stacklevel=2)
+        return self.config
+
     games: int = Field(ge=1)
     # The author's labels, such as "anchor" or "held-out", for choosing
     # which seatings a reading counts; `schedule` carries them.
@@ -678,7 +742,16 @@ class Seating(Record):
         ]
         # Default seeds leave the definition every seating was first held with.
         seeds = [] if self.seeds == "every" else [self.seeds]
-        return digest([self.name, players, self.conditions, self.games, self.tags, *seeds])
+        return digest(
+            [
+                self.name,
+                players,
+                [as_config(each) for each in self.config],
+                self.games,
+                self.tags,
+                *seeds,
+            ]
+        )
 
     def matches(
         self, checkpoint: CheckpointRef | None = None, seated: Seated | None = None
@@ -700,11 +773,11 @@ class Seating(Record):
                     _seat(each, checkpoint, found)
                     for each, found in zip(self.players, pairing.seats, strict=True)
                 ),
-                conditions=dict(given),
+                config=as_config(given),
                 games=pairing.games,
             )
             for pairing in pairings
-            for given in self.conditions
+            for given in self.config
         ]
 
     def resolve(self, checkpoint: CheckpointRef, lines: Sequence[Line]) -> Seated | Gap:
@@ -882,6 +955,7 @@ class Benchmark(Record):
 
     name: str = Field(min_length=1, max_length=200)
     environment: Environment
+    rollups: tuple[Rollup, ...] = Field(default=(), exclude_if=lambda rollups: not rollups)
     seatings: tuple[Seating, ...] = ()
 
     @model_validator(mode="before")
@@ -899,7 +973,7 @@ class Benchmark(Record):
         return self
 
 
-class RoundRobin(Record):
+class RoundRobin(Record, Generic[_SeatingConfig]):
     """Hand-picked players, every two of them once per condition.
 
     Its entrants are every player any of its eval runs entered. Seat swaps
@@ -908,17 +982,34 @@ class RoundRobin(Record):
 
     name: str = Field(min_length=1, max_length=200)
     environment: Environment
+    rollups: tuple[Rollup, ...] = Field(default=(), exclude_if=lambda rollups: not rollups)
     # Mapping, so a literal like `{"deal": 1}` type-checks as a condition.
-    conditions: tuple[Mapping[str, JsonValue], ...] = Field(min_length=1)
+    model_config = ConfigDict(validate_by_name=True, serialize_by_alias=True)
+    config: tuple[SerializeAsAny[_SeatingConfig], ...] = Field(
+        min_length=1,
+        validation_alias=AliasChoices("config", "conditions"),
+        serialization_alias="conditions",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _config_name(cls, data: object, info: ValidationInfo) -> object:
+        return _match_config_name(data, info)
+
+    @property
+    def conditions(self) -> tuple[_SeatingConfig, ...]:
+        warnings.warn("conditions is now config; removed in 0.5", DeprecationWarning, stacklevel=2)
+        return self.config
+
     games: int = Field(ge=1)
 
     def matches(self, entrants: Iterable[Player]) -> list[Match]:
         """Each pair once per condition, in key order; of two entrants with one key, the later."""
         ordered = sorted({each.key: each for each in entrants}.items())
         return [
-            Match(players=(a, b), conditions=dict(given), games=self.games)
+            Match(players=(a, b), config=as_config(given), games=self.games)
             for (_, a), (_, b) in combinations(ordered, 2)
-            for given in self.conditions
+            for given in self.config
         ]
 
 
@@ -1077,10 +1168,9 @@ def assemble(held: Iterable[TournamentRun]) -> Tournament:
             or given.environment.identity != first.environment.identity
         ):
             raise EtudeError("tournament_conflict", 409) from ValueError(first.name)
-        if (
-            isinstance(given, RoundRobin)
-            and given.model_copy(update={"environment": first.environment}) != first
-        ):
+        if isinstance(given, RoundRobin) and given.model_copy(
+            update={"environment": first.environment}
+        ).model_dump(mode="json") != first.model_dump(mode="json"):
             raise EtudeError("tournament_conflict", 409) from ValueError(first.name)
         if isinstance(given, Benchmark):
             for each in given.seatings:

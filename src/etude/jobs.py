@@ -48,12 +48,23 @@ from etude.carriage import CHECKPOINTS, OUT_PRESENT, checkpoint_file_name, check
 from etude.checkpoints import CheckpointRecord, CheckpointRef, checkpoint_id
 from etude.errors import EtudeError, LauncherError
 from etude.eval.match import EvalResult
-from etude.eval.records import Benchmark, CheckpointPlayer, Line, Match, Player, RoundRobin, digest
+from etude.eval.records import (
+    Benchmark,
+    CheckpointPlayer,
+    Line,
+    Match,
+    Player,
+    RoundRobin,
+    digest,
+)
 from etude.eval.run import Result, Tables
-from etude.eval.tournament import hold
+from etude.eval.tournament import evaluating
 from etude.experiment import ExperimentState, checkpoint_inputs
 from etude.identity import run_address
-from etude.job import (
+from etude.out import MEMBERSHIP, OutFile, OutFiles
+from etude.records import ArtifactRef, Record, RunRecord, SourceKey
+from etude.run import as_storage, located_runs
+from etude.spec import (
     Input,
     Job,
     Preparation,
@@ -64,9 +75,6 @@ from etude.job import (
     Variable,
     number,
 )
-from etude.out import MEMBERSHIP, OutFile, OutFiles
-from etude.records import ArtifactRef, Record, RunRecord, SourceKey
-from etude.run import as_storage, located_runs
 from etude.storage import Storage
 from etude.train.read import read
 from etude.train.records import ParentRun
@@ -151,10 +159,11 @@ class Evaluation(Record):
     lines: tuple[Line, ...] = ()
 
 
-def evaluation(
-    tournament: Benchmark | RoundRobin,
+def evaluation[C: BaseModel, M: BaseModel | Mapping[str, JsonValue]](
+    tournament: Benchmark | RoundRobin | Callable[[C], Benchmark | RoundRobin],
     *,
-    play: Callable[[Match], Tables | Result],
+    play: Callable[[Match[M]], Tables | Result],
+    config: C | None = None,
     experiment: str | None = None,
     checkpoint: Input | None = None,
     checkpoints: Sequence[CheckpointRecord] = (),
@@ -162,7 +171,11 @@ def evaluation(
     workers: int = 1,
     **options: Unpack[JobOptions],
 ) -> Job:
-    """A job that holds `tournament` with the author's `play`, as one eval run of `experiment`.
+    """Plan a pure tournament function and its config, then play it as one eval run.
+
+    A ready-made Benchmark or RoundRobin is also accepted. An author function
+    takes one annotated Pydantic config and returns its tournament without I/O;
+    it is called here, before pending-match and checkpoint-input planning.
 
     A benchmark is held for `checkpoint`, which reaches the machine as the
     job's input and fills every inference seat; a round robin plays every pair
@@ -179,6 +192,19 @@ def evaluation(
     is new. Any other job names its `experiment`.
     """
     _require_hours(options)
+    origin: Callable[..., object] = play
+    if callable(tournament):
+        if config is None:
+            raise LauncherError("an evaluation function needs config=")
+        origin = tournament
+        # Materialize the pure tournament before match/input planning. The worker
+        # executes this exact description, never arbitrary author code again.
+        text = _config_text(tournament, config)
+        tournament = tournament(type(config).model_validate_json(text))
+        if not isinstance(tournament, (Benchmark, RoundRobin)):
+            raise LauncherError("an evaluation function must return a Benchmark or RoundRobin")
+    elif config is not None:
+        raise LauncherError("config= belongs to an evaluation function")
     if isinstance(tournament, Benchmark) and enter:
         raise LauncherError(f"{tournament.name} is a benchmark: give it checkpoints, no entrants")
     if checkpoint is not None and checkpoints:
@@ -198,7 +224,7 @@ def evaluation(
         entrants=tuple(enter),
         workers=workers,
     )
-    return _job(_hold, spec, origin=play, options=options, experiment=experiment)
+    return _job(_hold, spec, origin=origin, options=options, experiment=experiment)
 
 
 def evaluation_spec(job: Job) -> Evaluation:
@@ -244,10 +270,9 @@ def hold_evaluation(
         raise EtudeError("evaluation_names_no_experiment", 422)
     # Loaded by import path: the function `evaluation` was given, typed there.
     play = cast(Callable[[Match], Tables | Result], spec.play.load(checkout))
-    return hold(
+    with evaluating(
         spec.tournament,
         experiment=spec.experiment,
-        play=play,
         checkpoint=checkpoint,
         checkpoints=tuple(each.ref for each in spec.checkpoints),
         enter=spec.entrants,
@@ -256,7 +281,9 @@ def hold_evaluation(
         directory=directory,
         storages=storages,
         lines=spec.lines,
-    )
+        resume=True,
+    ) as active:
+        return active.play(play)
 
 
 def with_matches(job: Job, matches: Sequence[Match], state: ExperimentState) -> Job:
@@ -689,6 +716,16 @@ def _function(function: Callable[..., object], repo: Path | None) -> Function:
     the job's; one in the checkout is imported from the folder its name starts in.
     """
     module, name = function.__module__, function.__qualname__
+    if module == "<run_path>" and "<" not in name:
+        # CLI files are executed by runpy. Their top-level functions are still
+        # importable from the source checkout under the actual file's name.
+        where = Path(inspect.getfile(function)).resolve()
+        if repo is not None and where.is_relative_to(repo) and where.stem.isidentifier():
+            return Function(
+                module=where.stem,
+                name=name,
+                path=where.parent.relative_to(repo).as_posix().removesuffix("."),
+            )
     if module in ("__main__", "<run_path>") or "<" in name:
         raise LauncherError(
             f"{name} must be defined at the top of an importable module, so the job can import it"

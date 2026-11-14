@@ -11,7 +11,6 @@ import pytest
 
 from etude.carriage import put_back, restore_set
 from etude.errors import LauncherError
-from etude.job import Input, Job
 from etude.jobs import continue_from
 from etude.launch.records import Storage as Place
 from etude.launch.schemas import Delivery, Inbox, Work
@@ -20,6 +19,7 @@ from etude.launch.storage.s3 import Bucket, Keys
 from etude.launch.storage.transport import HTTPReply
 from etude.launch.worker.courier import Courier
 from etude.out import MEMBERSHIP, OutFile, OutFiles
+from etude.spec import Input, Job
 from etude.storage import DirectoryStorage
 from etude.storage_timeout import StorageUnavailable
 from etude.train.read import read

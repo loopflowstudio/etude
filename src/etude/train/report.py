@@ -43,8 +43,8 @@ class JobGroup(Record):
     runs: tuple[str, ...]
 
 
-class AttemptSummary(Record):
-    """One attempt, in seconds since its run first started."""
+class WriterSummary(Record):
+    """One writer, in seconds since its run first started."""
 
     host: str
     pod: str | None
@@ -61,7 +61,7 @@ class RunSummary(Record):
     rows: int
     incomplete: int
     dropped: int | None
-    attempts: tuple[AttemptSummary, ...]
+    writers: tuple[WriterSummary, ...]
     # Where each clock last stood across attempts (`etude.train.read.RunData.reached`).
     at: dict[str, float]
 
@@ -254,14 +254,14 @@ def _summary(run: RunData) -> RunSummary:
         rows=run.rows,
         incomplete=run.incomplete,
         dropped=run.outcome.counters.dropped if run.outcome else None,
-        attempts=tuple(
-            AttemptSummary(
+        writers=tuple(
+            WriterSummary(
                 host=attempt.host,
                 pod=attempt.pod,
                 started=attempt.started_ms / 1000 - start,
                 last_row=last[attempt.writer] / 1000 - start if attempt.writer in last else None,
             )
-            for attempt in run.attempts
+            for attempt in run.writers
         ),
         at=run.reached,
     )
@@ -277,7 +277,7 @@ def _marks(run: RunData) -> list[Mark]:
         if checkpoint.wall_ms is None:
             continue
         began = [
-            a for a in run.attempts if (previous.wall_ms if previous and previous.wall_ms is not None else -1) < a.started_ms
+            a for a in run.writers if (previous.wall_ms if previous and previous.wall_ms is not None else -1) < a.started_ms
             and a.started_ms <= checkpoint.wall_ms
         ]  # fmt: skip
         # Pace is measured within one attempt: from the previous checkpoint, or

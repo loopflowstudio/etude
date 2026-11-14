@@ -31,11 +31,11 @@ from etude.errors import EtudeError, LauncherError
 from etude.eval.records import Benchmark, RoundRobin
 from etude.experiment import ExperimentState, asked, observe, read_experiment
 from etude.experiment_file import defined_functions, experiment_named
-from etude.job import Job, RunRequest, SmokeStep
 from etude.jobs import evaluation_spec, hold_evaluation, with_experiment
 from etude.launch.job_file import read_job_file
 from etude.launch.smoke import Smoked, show, smoke_home, smoke_train
 from etude.page import build, render, write
+from etude.spec import Job, RunRequest, SmokeStep
 from etude.storage import DirectoryStorage, Storage
 
 type Step = Literal["train", "eval", "report"]

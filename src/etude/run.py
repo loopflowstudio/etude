@@ -7,6 +7,7 @@ historical copies by declared experiment and run.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import secrets
@@ -45,7 +46,10 @@ from etude.records import (
     Record,
     RunCounters,
     RunOutcome,
+    RunProgress,
     RunRecord,
+    RunWriter,
+    Tally,
 )
 from etude.storage import DirectoryStorage, Storage, run_directory, run_prefix, storage_from_uri
 
@@ -504,3 +508,29 @@ def located_runs(
         LocatedRun(name=name, file=file, folders=tuple(folders))
         for (_, name), (file, folders) in sorted(found.items(), key=lambda item: item[0])
     ]
+
+
+def report_progress(
+    *, writer: RunWriter, clocks: dict[str, float], tally: Tally | None = None
+) -> None:
+    """Merge this writer into its allocation's report, also when it has no rows.
+
+    The output directory belongs to one allocation. Locking it serializes
+    concurrent contexts without adding another persistent file or store.
+    """
+    outputs = os.environ.get("ETUDE_OUTPUT_DIR")
+    if outputs is None:
+        return
+    descriptor = os.open(outputs, os.O_RDONLY)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        path = Path(outputs) / "etude-result.json"
+        previous = (
+            RunProgress.model_validate_json(path.read_bytes()) if path.exists() else RunProgress()
+        )
+        writers = {record.writer: record for record in previous.writers}
+        writers[writer.writer] = writer
+        current = RunProgress(clocks=clocks, tally=tally, writers=tuple(writers.values()))
+        DirectoryStorage(Path(outputs)).put("etude-result.json", current.model_dump_json().encode())
+    finally:
+        os.close(descriptor)

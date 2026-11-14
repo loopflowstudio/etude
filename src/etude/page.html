@@ -417,11 +417,11 @@ function render() {
       } else if (panel.kind === "attempts") {
         const c = card(host, panel.title, "each attempt from its start to its last row · hours since the run first started");
         const runs = T.runs.filter(r => vis.some(j => j.runs.includes(r.name)));
-        const span = Math.max(1e-9, ...runs.flatMap(r => r.attempts.map(a => a.last_row ?? a.started)));
+        const span = Math.max(1e-9, ...runs.flatMap(r => r.writers.map(a => a.last_row ?? a.started)));
         for (const r of runs) {
           const j = jobOfRun(r.name), row = node("div", "att"), lane = node("div", "lane");
-          row.append(node("span", null, `${r.name}${r.attempts.length > 1 ? ` · ${r.attempts.length} attempts` : ""}`), lane);
-          for (const a of r.attempts) {
+          row.append(node("span", null, `${r.name}${r.writers.length > 1 ? ` · ${r.writers.length} writers` : ""}`), lane);
+          for (const a of r.writers) {
             const b = node("b"); b.style.left = (a.started / span * 100) + "%"; b.style.width = (((a.last_row ?? a.started) - a.started) / span * 100) + "%"; b.style.background = color(j);
             b.onpointermove = evt => showTip(evt, [{value: dur(Math.max(0, (a.last_row ?? a.started) - a.started)), label: a.last_row == null ? "logged no row" : "to its last row"}, {value: a.host, label: a.pod ? "pod " + a.pod : ""}], `${r.name} · from ${dur(a.started)}`);
             b.onpointerleave = hideTip; lane.appendChild(b);
@@ -502,8 +502,8 @@ function flame(c, panel, vis, color, swatch) {
 function tables() {
   const t = document.getElementById("runs"); t.replaceChildren();
   document.getElementById("runs-box").hidden = !TRAINED;
-  const head = node("tr"); for (const h of ["Run", "Job", "Seed", "State", "Rows", "Attempts", "Incomplete", "Dropped"]) head.appendChild(node("th", null, h)); t.appendChild(head);
-  for (const r of T.runs) { const row = node("tr"); for (const [v, n] of [[r.name], [jobOfRun(r.name)?.label], [r.seed ?? "–", 1], [r.state], [r.rows.toLocaleString(), 1], [r.attempts.length, 1], [r.incomplete, 1], [r.dropped ?? "–", 1]]) row.appendChild(node("td", n ? "n" : "", String(v))); t.appendChild(row); }
+  const head = node("tr"); for (const h of ["Run", "Job", "Seed", "State", "Rows", "Writers", "Incomplete", "Dropped"]) head.appendChild(node("th", null, h)); t.appendChild(head);
+  for (const r of T.runs) { const row = node("tr"); for (const [v, n] of [[r.name], [jobOfRun(r.name)?.label], [r.seed ?? "–", 1], [r.state], [r.rows.toLocaleString(), 1], [r.writers.length, 1], [r.incomplete, 1], [r.dropped ?? "–", 1]]) row.appendChild(node("td", n ? "n" : "", String(v))); t.appendChild(row); }
   const q = document.getElementById("coverage"); q.replaceChildren();
   document.getElementById("coverage-box").hidden = !D.coverage.length;
   const h2 = node("tr"); for (const h of ["Training run", "Checkpoint", "Where it stood", "Tournament", "Played", "Failed", "Not yet played"]) h2.appendChild(node("th", null, h)); q.appendChild(h2);

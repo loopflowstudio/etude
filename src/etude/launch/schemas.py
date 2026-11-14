@@ -10,13 +10,15 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
-from pydantic import Field, FiniteFloat
+from pydantic import Field
 
-from etude.job import Input, Preparation, Record, Runtime, Until, Variable
-from etude.launch.records import Cause, Limit, Outcome, Output, Prepared, Tally
+from etude.launch.records import Cause, Limit, Outcome, Output, Prepared
 from etude.launch.storage.download import Download
 from etude.launch.storage.s3 import Grant
 from etude.launch.usage import Transfer
+from etude.records import RunProgress as Result
+from etude.records import RunWriter, Tally
+from etude.spec import Input, Preparation, Record, Runtime, Until, Variable
 
 
 class Work(Record):
@@ -78,6 +80,7 @@ class Progress(Record):
     exit_code: int | None
     prepared: Prepared | None = None
     tally: Tally | None = None
+    writers: tuple[RunWriter, ...] = ()
     # False when the job's end is known but its files are not confirmed stored:
     # the launcher waits for them while the machine lives, and settles without them after.
     delivered: bool = True
@@ -107,6 +110,7 @@ class Finished(Record):
     exit_code: int | None
     prepared: Prepared | None = None
     tally: Tally | None = None
+    writers: tuple[RunWriter, ...] = ()
 
     def progress(
         self,
@@ -127,16 +131,10 @@ class Finished(Record):
             exit_code=self.exit_code,
             prepared=self.prepared,
             tally=self.tally,
+            writers=self.writers,
             delivered=delivered,
             log_bytes=log_bytes,
         )
-
-
-class Result(Record):
-    """`etude-result.json`: the progress a job reports, where each of its clocks stands."""
-
-    clocks: dict[str, FiniteFloat] = Field(default_factory=dict)
-    tally: Tally | None = None
 
 
 class ReadLink(Record):

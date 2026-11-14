@@ -8,7 +8,7 @@ beside Etude's own tables:
 |---|---|
 | `runs` | run, experiment, environment (identity), environment_name, environment_config, tournament, state (`finished` or `failed` from its `outcome.json`; null while it has not ended, so its results are partial) |
 | `players` | player (its key, encoded), name (the latest its seats give), names (every one, the latest first), kind (`model` or `code`), checkpoint (its key), artifact (digest), uri, config, seated_at, lines, and `config.KEY` per scalar config key |
-| `matches` | run, match, conditions, games, seed, state, error, wall_ms, execution (result provenance), newest (of the match's done records in its environment, 1 for the latest recorded, the one that counts; null for a failure) |
+| `matches` | run, match, config, games, seed, state, error, wall_ms, execution (result provenance), newest (of the match's done records in its environment, 1 for the latest recorded, the one that counts; null for a failure) |
 | `seats` | run, match, seat, player, name (what the record calls it), the version that played: commit, source (digest), at (where its checkpoint stood, or null) and line (the learner it belongs to, or null) |
 | `groups` | run, match, group, seat |
 | `tournaments` | tournament, format (`benchmark` or `round_robin`), environment, conflict |
@@ -108,6 +108,7 @@ from etude.eval.records import (
     Rollup,
     Scheduled,
     TournamentRun,
+    as_config,
     assemble,
     outcomes,
 )
@@ -240,7 +241,7 @@ def _create(db: duckdb.DuckDBPyConnection, experiment: str, storage: Storage) ->
     db.execute("create table kept.summed (name VARCHAR, run VARCHAR, block VARCHAR)")
     db.execute("create table blobs (run VARCHAR, match VARCHAR, sha256 VARCHAR, size_bytes BIGINT)")
     db.execute(
-        "create table matches (run VARCHAR, match VARCHAR, conditions JSON, games BIGINT,"
+        "create table matches (run VARCHAR, match VARCHAR, config JSON, games BIGINT,"
         " seed BIGINT, state VARCHAR, error VARCHAR, wall_ms BIGINT, execution JSON,"
         " newest BIGINT)"
     )
@@ -510,10 +511,10 @@ def _matches(db: duckdb.DuckDBPyConnection, run: str, block: Block) -> None:
     stage(
         db,
         "_arrived_matches",
-        {"record": "BIGINT", "match": "VARCHAR", "conditions": "VARCHAR", "games": "BIGINT",
+        {"record": "BIGINT", "match": "VARCHAR", "config": "VARCHAR", "games": "BIGINT",
          "seed": "BIGINT", "state": "VARCHAR", "error": "VARCHAR", "wall_ms": "BIGINT",
          "execution": "VARCHAR"},
-        [[index, record.match.key, json.dumps(record.match.conditions), record.match.games,
+        [[index, record.match.key, json.dumps(as_config(record.match.config)), record.match.games,
           record.match.seed, record.state, record.error, record.wall_ms,
           json.dumps(record.execution)]
          for index, record in enumerate(records)],
@@ -530,7 +531,7 @@ def _matches(db: duckdb.DuckDBPyConnection, run: str, block: Block) -> None:
         )
     # `newest` is ranked once everything has arrived (`_summaries`).
     db.execute(
-        "insert into matches select ?, match, conditions, games, seed, state, error, wall_ms,"
+        "insert into matches select ?, match, config, games, seed, state, error, wall_ms,"
         " execution, null from _taken order by record",
         [run],
     )

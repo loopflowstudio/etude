@@ -38,7 +38,7 @@ def pair(tmp_path: Path) -> tuple[Code, Code]:
 
 
 def deals(players: tuple[Code, Code], *numbers: int) -> list[Match]:
-    return [Match(players=players, conditions={"deal": deal}, games=2) for deal in numbers]
+    return [Match(players=players, config={"deal": deal}, games=2) for deal in numbers]
 
 
 def held(experiment: str, bucket: DirectoryStorage) -> tuple[int, int, int]:
@@ -195,7 +195,7 @@ def test_a_match_two_runs_played_counts_from_the_later_under_its_latest_name(
             name=name, checkpoint=ref, inference=Inference(config={"strength": 3})
         )
         evaluate(experiment="cards", environment=DUEL, play=play, run=run,
-                 matches=[Match(players=(model, rival), conditions={"deal": 0}, games=2)],
+                 matches=[Match(players=(model, rival), config={"deal": 0}, games=2)],
                  directory=tmp_path / run, storages=[bucket])  # fmt: skip
     db = statsdb("cards", bucket)
     try:

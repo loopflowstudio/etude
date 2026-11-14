@@ -106,7 +106,7 @@ Seeds are chosen where the job is launched:
 from decimal import Decimal
 
 from etude.jobs import training
-from etude.job import Job
+from etude.spec import Job
 
 from train import TrainConfig, train
 
@@ -599,7 +599,7 @@ directory that happens to exist.
 ```sh
 etude run train.py --config '{"lr": 0.001}' --seed 7 --name wide --until updates=2000
 etude run train.py --seconds 600        # stop after ten minutes: saved, exit 75
-etude run train.py --config '{"lr": 0.001}' --resume wide-seed-7
+etude run train.py --resume wide-seed-7
 etude run train.py --json               # {"run": "train-seed-0", "experiment": "train", "outcome": "finished"}
 etude smoke job.py                      # the smoke config, here, spending nothing
 ```
@@ -614,16 +614,16 @@ etude smoke job.py                      # the smoke config, here, spending nothi
 - **Ctrl-C asks the run to stop**, as `--seconds` and a `kill` (SIGTERM) do:
   the pass in progress finishes, `run.save()` writes, and the command exits
   75. A stop is noticed by `run.steps` or `run.stopping()`, so a loop that
-  asks neither runs on to its end.
+  asks neither runs on to its end. A second Ctrl-C interrupts immediately;
+  that attempt ends failed and can resume from its last whole save.
 - **`--resume RUN`** is for a run that ended without finishing: it failed and
   you fixed the bug, it ran out of hours, you cancelled it, or you pressed
   Ctrl-C. It takes the file because it runs your current code. It keeps the
   run's id, seed and target; `--name` does not apply. The reference is its id
   in `--experiment` (defaulting to the file's stem), or `EXPERIMENT/RUN`.
-  The config is worked out as for a new run, the file's defaults changed by
-  `--config`, and must equal the run's: repeat the `--config` the run was
-  started with, and expect a refusal naming the field if a default in the
-  file has changed since.
+  With no `--config`, it uses the stored config, checked against the current
+  recipe's type. An explicit `--config` is applied to the current defaults
+  and must equal the stored config; a refusal names the changed fields.
 - **`--resume RUN --until updates=6400`** takes the same run further. This
   also works on a finished run, which becomes unfinished again until it
   reaches the new target. Its rows, checkpoints and id go on as one run.

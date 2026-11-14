@@ -93,13 +93,11 @@ The full naming table is retained at `ef6099a:scratch/design-train-api.md`.
   the file; no limits, nothing formal. **Cohort**: a named envelope of limits
   (`parallel`, `max_usd`) that runs are admitted under. A later launch adding
   to an existing cohort is EXP-61, not this work.
-- One stored `RunRecord` describes a run. `RunAttempt` describes a machine
-  allocation; `RunWriter` describes a tracking context linked to an optional
-  allocation. This correction follows the reproduced many-writers-per-allocation
-  case in `questions.md`: merging them would lose row-replacement boundaries
-  or inflate retry counts and cost. It is an implementation design correction,
-  not a new decision attributed to a person, and it departs from the "1a"
-  answer above; the choice is open in `questions.md`. The job digest stays an identity;
+- One stored `RunRecord` describes a run. `RunAttempt` is one machine
+  allocation and owns its `writers`, the tracking/eval contexts with separate
+  first-row cutoffs. Writers do not count against allocation limits or rental
+  accounting. `RunData.writers` reads a run's contexts; its historical
+  `attempts` accessor warns until 0.5. The job digest stays identity, while
   the report's config-disambiguated job label is derived when reading.
 - Runs and evaluations already stored stay readable: readers accept the old
   file name (`state.json` as an outcome) and old field spellings. Nothing
@@ -194,8 +192,14 @@ dollars; they are not part of what the job is.
 ```python
 # job.py
 def runs() -> Job:
-    return training(train, config=TrainConfig(), smoke=TrainConfig(updates=1),
-                    seeds=(0, 1, 2), max_hours=2, max_usd=Decimal(4))
+    return training(
+        train,
+        config=TrainConfig(),
+        smoke=TrainConfig(updates=1),
+        seeds=(0, 1, 2),
+        max_hours=2,
+        max_usd=Decimal(4),
+    )
 ```
 
 One job with three seeds is three runs. Without `seeds`, one run with seed 0.
@@ -277,16 +281,50 @@ the authority for a run's experiment: a name given at launch wins, the file's
 stem is only the default when none is given, and training code never needs to
 name its experiment. Launch commands take the name as an argument.
 
-## Later steers (2026-11-13): implementation remaining
+## Later steers (2026-11-13): built, writer shape for demo
 
-`questions.md` records the exact replies. Writers become a sub-part of the
-allocation's `RunAttempt`, preserving their separate first-row cutoffs and
-excluding them from allocation limits/accounting (tentative; show at demo).
-The eval author function instead returns a pure tournament;
-`evaluation(arena, config=..., play=play)` calls it at submission, preserving
-pending-match planning and selected checkpoint inputs. The worker uses
-`evaluating(benchmark)` and `run.play(play)`. These supersede the earlier
-writer choice and eval planning sketch; the cutovers remain to be built.
+`questions.md` records the exact replies. Writers are sub-parts of the
+allocation's `RunAttempt`, with separate first-row cutoffs and no effect on
+allocation limits or cost. Existing metric files remain the writer evidence;
+the progress/finished journals carry their metadata to the allocation record.
+
+The eval author returns a pure tournament:
+`evaluation(arena, config=..., play=play)` validates config and calls it at
+submission, preserving pending-match planning and selected checkpoint inputs.
+The worker opens `evaluating(benchmark)` and calls `run.play(play)`. Rollups
+belong to Benchmark/RoundRobin. Planned stops seal results and raise Stopped;
+resume is explicit outside launched retries. Low-level relative-seat contexts
+retain `lines=`; authored jobs carry the planner's lines without runtime
+training reads. This detail and the tentative writer shape stay for demo.
+
+Delete — do not maintain: match execution, worker pool and progress ownership
+in `eval.match.evaluate`; it and `hold` are warning-only wrappers until 0.5.
+The execution owner is `EvalRun`. Remove the launch-only progress/Tally record
+implementations; shared `RunProgress` and `Tally` own the journal data.
+Readers and reports use writers rather than treating contexts as allocations.
+Preserve old records, cutoffs, command jobs with no contexts, multiple contexts
+and runs in one allocation, row replacement, planned-stop retries and costs.
+Schema stays 19 (edited in place); full acceptance stays with gate.
+
+## Typed match config and demo (2026-11-13): built
+
+`questions.md` holds the exact new words and chosen defaults. Match[AuthorModel]
+receives config validated at the playing boundary, including worker processes;
+Seating/RoundRobin accept author models. Python config fields serialize under
+historical conditions, so keys and stored JSON stay stable. Old keyword and
+property warn until 0.5. statsdb calls its column config (same unreleased schema
+14 cut). No Etude-owned MatchConfig class or stored Python type name.
+
+Delete — do not maintain: mapping-only Python conditions fields and their
+live consumers; the unreleased etude.job module; the CLI-file top-level
+function refusal. Shared types live in etude.spec, constructors in etude.jobs.
+Preserve historical JSON, keys, seeds, scheduling and selected inputs.
+
+The optional Hanabi example is examples/hanabi.py and docs/hanabi.md. OpenSpiel
+is an optional extra, absent from required/test dependencies. It trains one
+small shared PyTorch policy, stops/resumes whole episodes and evaluates a pure
+benchmark with typed match configs and team group rows. The demo must be felt
+by a person; headless checks prepare it without inventing reactions.
 
 ## Built review corrections (2026-11-13)
 

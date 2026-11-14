@@ -18,7 +18,6 @@ from pathlib import Path
 from uuid import uuid4
 
 from etude.errors import LauncherError
-from etude.job import Job, Smoke, SourcePosition
 from etude.launch.records import (
     RETRYABLE,
     Cause,
@@ -41,11 +40,11 @@ from etude.launch.records import (
     Stale,
     Storage,
     Supply,
-    Tally,
     Target,
 )
 from etude.launch.usage import Transfer
-from etude.records import RunRecord
+from etude.records import RunRecord, RunWriter, Tally
+from etude.spec import Job, Smoke, SourcePosition
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS transfers(id TEXT PRIMARY KEY, body TEXT NOT NULL);
@@ -114,7 +113,7 @@ CREATE TABLE IF NOT EXISTS attempts(
   limit_kind TEXT NOT NULL, started_at TEXT, finished_at TEXT, outcome TEXT, cause TEXT,
   clocks TEXT NOT NULL DEFAULT '{}', outputs TEXT NOT NULL DEFAULT '[]', exit_code INTEGER,
   version INTEGER NOT NULL DEFAULT 1, planned_at TEXT, added INTEGER NOT NULL DEFAULT 0,
-  prepared TEXT, tally TEXT);
+  prepared TEXT, tally TEXT, writers TEXT NOT NULL DEFAULT '[]');
 CREATE INDEX IF NOT EXISTS runs_job ON runs(job);
 CREATE INDEX IF NOT EXISTS runs_experiment ON runs(json_extract(spec, '$.experiment'), seq);
 CREATE INDEX IF NOT EXISTS runs_pool ON runs(pool, seq);
@@ -196,6 +195,7 @@ def _attempt_from_row(row: sqlite3.Row) -> RunAttempt:
         {
             **dict(row),
             "clocks": json.loads(row["clocks"]),
+            "writers": json.loads(row["writers"]),
             "outputs": json.loads(row["outputs"]),
             "prepared": None if row["prepared"] is None else json.loads(row["prepared"]),
             "tally": None if row["tally"] is None else json.loads(row["tally"]),
@@ -997,7 +997,11 @@ class Database:
         self._change("attempts", attempt.id, attempt.version, started_at=at.isoformat())
 
     def record_progress(
-        self, attempt: RunAttempt, clocks: dict[str, float], tally: Tally | None
+        self,
+        attempt: RunAttempt,
+        clocks: dict[str, float],
+        tally: Tally | None,
+        writers: tuple[RunWriter, ...] = (),
     ) -> None:
         """Retain where the job last said its clocks and counted work stood."""
         self._change(
@@ -1006,6 +1010,12 @@ class Database:
             attempt.version,
             clocks=json.dumps(clocks),
             tally=None if tally is None else tally.model_dump_json(),
+            writers=json.dumps(
+                [
+                    writer.model_dump(mode="json")
+                    for writer in {w.writer: w for w in (*attempt.writers, *writers)}.values()
+                ]
+            ),
         )
 
     def finish(
@@ -1020,6 +1030,7 @@ class Database:
         exit_code: int | None = None,
         prepared: Prepared | None = None,
         tally: Tally | None = None,
+        writers: tuple[RunWriter, ...] = (),
     ) -> None:
         self._change(
             "attempts",
@@ -1033,6 +1044,12 @@ class Database:
             exit_code=exit_code,
             prepared=None if prepared is None else prepared.model_dump_json(),
             tally=None if tally is None else tally.model_dump_json(),
+            writers=json.dumps(
+                [
+                    writer.model_dump(mode="json")
+                    for writer in {w.writer: w for w in (*attempt.writers, *writers)}.values()
+                ]
+            ),
         )
 
     def fail_before_start(self, attempt: RunAttempt, cause: Cause, at: datetime) -> None:

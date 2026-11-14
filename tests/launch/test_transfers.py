@@ -27,7 +27,6 @@ from moto import mock_aws
 from etude import cache as engine
 from etude.cache import Artifact, Cache, Content, Fetched
 from etude.deadline import limit_time, remaining
-from etude.job import Job
 from etude.launch import client
 from etude.launch.database import Database, launcher_file
 from etude.launch.logging import log_to
@@ -41,7 +40,6 @@ from etude.launch.schemas import (
     Fetch,
     Finished,
     Inbox,
-    Result,
     WorkerLog,
     attempt_log,
     log_piece,
@@ -54,8 +52,10 @@ from etude.launch.storage.s3 import Bucket, Grant, Keys, PostForm, _send, read
 from etude.launch.storage.transport import HTTPReply, attribute, observe
 from etude.launch.usage import R2, S3_US_WEST_2, Access, Transfer, Usage, reconcile
 from etude.launch.worker.courier import Courier
+from etude.records import RunProgress as Result
 from etude.records import RunRecord
 from etude.run import RunFiles, StorageDestination, ship
+from etude.spec import Job
 from etude.storage import S3Storage
 from etude.storage_timeout import StorageUnavailable, socket_timeout
 from tests.launch.counting import Counting, Counts
@@ -227,6 +227,7 @@ def test_cold_warm_concurrent_and_new_process_retrieval(http: HTTP, tmp_path: Pa
     script = """from pathlib import Path
 import sys
 from etude.cache import Cache
+from etude.records import RunProgress as Result
 from etude.launch.storage import download as downloads
 from etude.launch.storage.download import Download, download
 download(Download.model_validate_json(sys.argv[2]), Path(sys.argv[3]), cache=Cache(Path(sys.argv[1])))

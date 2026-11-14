@@ -27,7 +27,6 @@ from pydantic import Field, RootModel, TypeAdapter
 
 from etude.deadline import limit_time, remaining
 from etude.errors import LauncherError
-from etude.job import Job, Record, RunRequest
 from etude.launch.errors import LaunchError
 from etude.launch.listing import show_runs
 from etude.launch.logging import explain
@@ -56,6 +55,7 @@ from etude.launch.ssh import (
 from etude.launch.storage.files import write
 from etude.launch.usage import Usage
 from etude.records import RunRecord
+from etude.spec import Job, Record, RunRequest
 
 
 class Source(Record):

@@ -15,9 +15,9 @@ from pydantic import Field
 
 from etude.deadline import limit_time, remaining
 from etude.errors import LauncherError
-from etude.job import Record, Runtime
 from etude.launch.logging import explain
 from etude.launch.records import Image
+from etude.spec import Record, Runtime
 
 
 class Platform(Record):

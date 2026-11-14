@@ -455,11 +455,11 @@ function progress(D, M) {
 }
 const progressText = p => [`${p.evaluated} of ${p.checkpoints} evaluated`, ...(p.pending ? [`${p.pending} not yet played`] : []), ...(p.failed ? [`${p.failed} failed match${p.failed > 1 ? "es" : ""}`] : [])].join(", ");
 // Seconds the runs' attempts were active, from each start to its last row.
-const trained = D => D.training.runs.reduce((t, r) => t + r.attempts.reduce((a, s) => a + Math.max(0, (s.last_row ?? s.started) - s.started), 0), 0);
+const trained = D => D.training.runs.reduce((t, r) => t + r.writers.reduce((a, s) => a + Math.max(0, (s.last_row ?? s.started) - s.started), 0), 0);
 // The latest moment anything of the experiment was recorded, in epoch milliseconds.
 function latestActivity(D) {
   const times = [D.latest_result_ms ?? 0];
-  for (const r of D.training.runs) for (const s of r.attempts) times.push((r.started + (s.last_row ?? s.started)) * 1000);
+  for (const r of D.training.runs) for (const s of r.writers) times.push((r.started + (s.last_row ?? s.started)) * 1000);
   const started = new Map(D.training.runs.map(r => [r.name, r.started]));
   for (const m of D.training.checkpoints) times.push(((started.get(m.run) ?? 0) + m.elapsed) * 1000);
   return Math.max(...times) || null;

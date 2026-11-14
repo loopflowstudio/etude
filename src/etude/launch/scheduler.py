@@ -37,7 +37,6 @@ from etude.carriage import RecordMismatch
 from etude.deadline import limit_time, remaining
 from etude.errors import LauncherError
 from etude.identity import resume_conflicts, run_address
-from etude.job import Job, Record, RunRequest, job_id
 from etude.launch import source
 from etude.launch.database import Database
 from etude.launch.errors import LaunchError
@@ -90,6 +89,7 @@ from etude.launch.storage.s3 import longest_grant
 from etude.launch.storage.transport import attribute, observe
 from etude.launch.usage import Usage
 from etude.records import RunRecord, RunSubmission
+from etude.spec import Job, Record, RunRequest, job_id
 from etude.storage_timeout import StorageUnavailable
 
 Clock = Callable[[], datetime]
@@ -2346,6 +2346,7 @@ class Scheduler:
                 exit_code=seen.exit_code,
                 prepared=seen.prepared,
                 tally=seen.tally,
+                writers=seen.writers,
             )
             self._diagnose(
                 "execution",
@@ -2373,6 +2374,7 @@ class Scheduler:
                 outputs=seen.outputs if seen else attempt.outputs,
                 prepared=seen.prepared if seen else None,
                 tally=seen.tally if seen else attempt.tally,
+                writers=seen.writers if seen else attempt.writers,
             )
             self._diagnose(
                 "execution",
@@ -2382,7 +2384,7 @@ class Scheduler:
             )
         else:
             if seen is not None:
-                self._store.record_progress(attempt, seen.clocks, seen.tally)
+                self._store.record_progress(attempt, seen.clocks, seen.tally, seen.writers)
             if run.launch.cancel_requested_at is not None or self._remaining(run, now).usd <= 0:
                 self._service(session).stop(session.id, attempt.id)
 

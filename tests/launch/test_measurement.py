@@ -20,7 +20,6 @@ import pytest
 
 from etude.cli import main
 from etude.errors import LauncherError
-from etude.job import Job
 from etude.launch import cli, client
 from etude.launch.commands import Kind
 from etude.launch.database import launcher_file
@@ -33,6 +32,7 @@ from etude.launch.schemas import Packet
 from etude.launch.ssh import SSH, SessionRequest
 from etude.launch.storage.s3 import Bucket, Keys
 from etude.launch.storage.transport import HTTPReply
+from etude.spec import Job
 from tests.launch.counting import Counting, Counts
 from tests.launch.fake import Bench, bench
 from tests.launch.test_source import repository  # noqa: F401

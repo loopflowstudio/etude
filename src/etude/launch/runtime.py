@@ -11,7 +11,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from etude.job import Record, Runtime
+from etude.spec import Record, Runtime
 
 PROBE = """import importlib.metadata,json,sys
 names=json.loads(sys.argv[1])

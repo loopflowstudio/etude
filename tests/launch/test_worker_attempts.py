@@ -18,13 +18,13 @@ import pytest
 from etude.cache import Artifact, Cache, Fetched
 from etude.carriage import put_back, restore_set
 from etude.errors import LauncherError
-from etude.job import Input, Job, RunRequest, Until, job_id
 from etude.jobs import checkpoint_inputs_for, continue_from
 from etude.launch.database import Database, launcher_file
 from etude.launch.executor import local as local_service
 from etude.launch.records import Machine, Pool, Status
 from etude.launch.scheduler import Scheduler
 from etude.run import runs
+from etude.spec import Input, Job, RunRequest, Until, job_id
 from etude.storage import DirectoryStorage
 from etude.train.read import read
 from etude.train.records import Step

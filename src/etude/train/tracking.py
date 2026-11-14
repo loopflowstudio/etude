@@ -84,6 +84,7 @@ from etude.run import (
     declare,
     destinations,
     prune,
+    report_progress,
     run_directories,
 )
 from etude.stopping import Stopped
@@ -350,8 +351,9 @@ class TrainingRun(Run):
         self._began = time.monotonic()
         # Its first durable row says where this attempt's rows supersede
         # earlier attempts' (`first_row`); one that logs nothing replaces nothing.
-        self._attempt = RunWriter(
+        self._writer_record = RunWriter(
             writer=self._writer_id,
+            run=f"{experiment}/{name}",
             started_ms=started_ms,
             host=socket.gethostname(),
             attempt=os.environ.get("ETUDE_ATTEMPT"),
@@ -359,7 +361,7 @@ class TrainingRun(Run):
             commit=os.environ.get("ETUDE_COMMIT"),
             until=None if self._until_clock is None else f"{self._until_clock}={self._until_value}",
         )
-        self._save("metrics", self._writer_id, self._attempt)
+        self._save("metrics", self._writer_id, self._writer_record)
         seal_logs(self.files.root, self._columns)  # what an earlier process left unsealed
         self._index = Index(root, self._writer_id)
         self._metric_name_limit = metric_name_limit
@@ -378,9 +380,9 @@ class TrainingRun(Run):
         # Checkpoint changes not yet sealed; only the writer thread touches it.
         self._dirty = False
         # The clocks last written to the launcher's progress file.
-        self._progress: dict[str, float] = {}
         self._writer = threading.Thread(target=self._write, name="etude-writer", daemon=True)
         self._shipper = threading.Thread(target=self._deliver, name="etude-shipper", daemon=True)
+        self._report_progress()
         self._writer.start()
         self._shipper.start()
         atexit.register(self.finish)
@@ -975,11 +977,11 @@ class TrainingRun(Run):
                     row = self._stored(item)
                     stream.write(log_line(row))
                     stream.flush()
-                    if not self._attempt.resumed_at:
-                        self._attempt = self._attempt.model_copy(
+                    if not self._writer_record.resumed_at:
+                        self._writer_record = self._writer_record.model_copy(
                             update={"resumed_at": dict(row.clocks), "first_row": True}
                         )
-                        self._save("metrics", self._writer_id, self._attempt)
+                        self._save("metrics", self._writer_id, self._writer_record)
                     builder.add(row.wall_ms, row.clocks, row.values)
                 due = stream is not None and (
                     len(builder) >= self._segment_rows
@@ -1053,14 +1055,7 @@ class TrainingRun(Run):
         logged on each clock. It is progress only: checkpoints are this
         run's records, never the launcher's.
         """
-        outputs = os.environ.get("ETUDE_OUTPUT_DIR")
-        high = dict(self._high)
-        if outputs is None or high == self._progress:
-            return
-        DirectoryStorage(Path(outputs)).put(
-            "etude-result.json", json.dumps({"clocks": high}).encode()
-        )
-        self._progress = high
+        report_progress(writer=self._writer_record, clocks=dict(self._high))
 
     def _stored(self, row: _Row) -> LoggedRow:
         """A logged row as its clock values and everything else, ready to store."""

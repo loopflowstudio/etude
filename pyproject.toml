@@ -12,6 +12,7 @@ requires-python = ">=3.12"
 dependencies = [
     "numpy>=1.26,<3",
     "pydantic>=2.12,<3",
+    "typing-extensions>=4.12,<5",
     # typer 0.28+ imports pydantic to parse arguments; `etude worker` must start without it.
     "typer>=0.27,<0.28",
 ]
@@ -20,6 +21,8 @@ dependencies = [
 Repository = "https://github.com/loopflowstudio/etude"
 
 [project.optional-dependencies]
+# Local cooperative-game example only; never installed by the offline test workflow.
+hanabi = ["open-spiel==2.0.2"]
 s3 = ["boto3>=1.35,<2"]
 # Tournaments: Parquet tables written and queried with DuckDB.
 eval = ["duckdb>=1.1,<2"]

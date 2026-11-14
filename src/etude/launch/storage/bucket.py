@@ -441,6 +441,7 @@ class BucketJournal:
                     outputs=(),
                     exit_code=None,
                     tally=record.result.tally,
+                    writers=record.result.writers,
                     log_bytes=log_bytes,
                 )
             )

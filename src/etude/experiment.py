@@ -38,12 +38,12 @@ from etude.checkpoints import CheckpointId, CheckpointRecord
 from etude.errors import EtudeError, LauncherError
 from etude.eval.records import CheckpointPlayer, Line, Match, digest, folder_name
 from etude.eval.tournament import played
-from etude.job import Job, RunRequest, Smoke
 from etude.launch import client
 from etude.launch.database import Database, launcher_file
 from etude.launch.scheduler import Scheduler
 from etude.launch.source import home
 from etude.records import Digest, Record
+from etude.spec import Job, RunRequest, Smoke
 from etude.storage import Storage
 from etude.train.read import RunData, lines, read_all
 from etude.train.report import job_names

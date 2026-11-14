@@ -20,7 +20,7 @@ import typer
 from etude.errors import LauncherError
 from etude.experiment_file import experiment_named
 from etude.identity import run_address
-from etude.job import Job, RunRequest
+from etude.spec import Job, RunRequest
 
 
 def read_job_file(

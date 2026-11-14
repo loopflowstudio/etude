@@ -10,7 +10,6 @@ from pathlib import Path
 import pytest
 
 from etude.cli import main
-from etude.job import Job, RunRequest, Until
 from etude.jobs import continue_from
 from etude.launch.database import Database
 from etude.launch.executor import Executor, local
@@ -18,6 +17,7 @@ from etude.launch.machines import OwnedMachine
 from etude.launch.records import Machine, Pool
 from etude.launch.scheduler import Scheduler
 from etude.launch.ssh import SSH, RemoteReply, RemoteRequest, SSHJournal, SSHStart
+from etude.spec import Job, RunRequest, Until
 from etude.train.records import Step
 from etude.train.tracking import track
 from tests.launch.counting import job_text

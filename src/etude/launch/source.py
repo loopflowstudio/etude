@@ -19,9 +19,9 @@ from uuid import uuid4
 
 from etude.errors import LauncherError
 from etude.identity import run_address
-from etude.job import RunRequest, SourcePosition
 from etude.launch.measurement import timed
 from etude.records import RunRecord
+from etude.spec import RunRequest, SourcePosition
 
 
 def home() -> Path:

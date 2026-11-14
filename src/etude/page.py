@@ -552,7 +552,7 @@ def _without_hours(trained: Sequence[RunData]) -> tuple[str, ...]:
     ]
     if not lacking:
         return ()
-    unread = [run.name for run in lacking if not run.attempts]
+    unread = [run.name for run in lacking if not run.writers]
     why = (
         f" The attempt records (metrics/WRITER.json) of {', '.join(unread)} are not in this"
         " source to derive them from."

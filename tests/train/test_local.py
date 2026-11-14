@@ -313,3 +313,45 @@ def test_two_model_cli_recipe_resumes_and_its_checkpoint_can_be_seated(
         directory=tmp_path / "eval",
     )
     assert played.played == 1
+
+
+def test_resume_uses_stored_config_when_defaults_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    file = tmp_path / "train.py"
+    file.write_text(RECIPE)
+    assert main(["run", str(file), "--config", '{"lr":0.2}']) == 75
+    file.write_text(RECIPE.replace("lr: float = 0.1", "lr: float = 0.9"))
+    assert main(["run", str(file), "--resume", "train-seed-0"]) == 0
+    data = read(tmp_path / "home/track", "train", "train-seed-0")
+    assert data.file is not None and data.file.config_json is not None
+    assert json.loads(data.file.config_json)["lr"] == 0.2
+    assert (
+        main(
+            ["run", str(file), "--resume", "train-seed-0", "--config", "{}", "--until", "updates=6"]
+        )
+        == 1
+    )
+    assert "lr was 0.2, is 0.9" in capsys.readouterr().err
+    assert data.outcome is not None and data.outcome.state == "finished"
+
+
+def test_second_interrupt_exits_a_loop_that_has_not_observed_its_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    file = tmp_path / "train.py"
+    recipe = RECIPE.replace("from pathlib import Path", "import signal\nfrom pathlib import Path")
+    start = recipe.index("            if update == 2")
+    end = recipe.index('        (run.out / "phase-two")', start)
+    file.write_text(
+        recipe[:start] + "            if update == 2:\n"
+        "                signal.raise_signal(signal.SIGINT)\n"
+        "                signal.raise_signal(signal.SIGINT)\n" + recipe[end:]
+    )
+    assert main(["run", str(file)]) != 0
+    data = read(tmp_path / "home/track", "train", "train-seed-0")
+    assert data.outcome is not None and data.outcome.state == "failed"
+    assert data.reached["updates"] == 2
+    assert not (tmp_path / "home/track/train/train-seed-0/out/phase-two").exists()

@@ -8,7 +8,7 @@ import hashlib
 import os
 from pathlib import Path
 
-from etude.launch.schemas import Result
+from etude.records import RunProgress as Result
 
 RESULT = "etude-result.json"
 

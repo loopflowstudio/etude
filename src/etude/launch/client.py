@@ -3,7 +3,7 @@
     from decimal import Decimal
 
     from etude.launch.client import launch_cohort, wait
-    from etude.job import Job
+    from etude.spec import Job
 
     job = Job(command="python train.py", max_hours=6, max_usd=Decimal(5))
     runs = launch_cohort("first", job.runs(1, 2, 3))
@@ -28,7 +28,6 @@ from functools import cache
 from pathlib import Path
 
 from etude.errors import LauncherError
-from etude.job import Job, RunRequest
 from etude.launch.controller import PythonClient, selected
 from etude.launch.database import Database, launcher_file
 from etude.launch.executor import Execution, Executor, local
@@ -57,6 +56,7 @@ from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.s3 import _send, open_bucket
 from etude.launch.storage.transport import HTTPReply, observe
 from etude.launch.usage import Usage
+from etude.spec import Job, RunRequest
 
 
 @cache

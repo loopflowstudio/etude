@@ -21,7 +21,6 @@ from pydantic import Field
 
 from etude.deadline import remaining
 from etude.errors import LauncherError
-from etude.job import Record
 from etude.launch.logs import snapshot_stream
 from etude.launch.machines import Allocation
 from etude.launch.measurement import timed
@@ -29,6 +28,7 @@ from etude.launch.providers.package import program_archive
 from etude.launch.records import BootstrapLinks, LogProducer, LogStream
 from etude.launch.schemas import Observation, Packet, Work
 from etude.launch.source import source_archive
+from etude.spec import Record
 from etude.storage_timeout import storage_environment
 
 # What the host is asked to do, one record per shape of request. Both ends run

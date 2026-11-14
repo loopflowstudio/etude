@@ -7,7 +7,7 @@ Launch training runs on your own or rented machines, and track what they record.
 from decimal import Decimal
 
 from etude.jobs import training
-from etude.job import Job
+from etude.spec import Job
 
 from train import TrainConfig, train
 
@@ -117,6 +117,9 @@ uv run ruff check . && uv run ruff format --check .
 ```
 
 [AGENTS.md](AGENTS.md) holds the conventions, for people and coding agents.
+
+For a small cooperative game, [train and evaluate Hanabi](docs/hanabi.md) with
+the optional OpenSpiel and PyTorch dependencies.
 
 ## Licence
 

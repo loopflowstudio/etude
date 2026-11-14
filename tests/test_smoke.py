@@ -9,9 +9,9 @@ import pytest
 
 from etude.cli import main
 from etude.errors import LauncherError
-from etude.job import Job, SmokeForm
 from etude.launch.client import default, queue_cohort
 from etude.records import Clock
+from etude.spec import Job, SmokeForm
 from etude.storage import default_root
 from etude.train.tracking import track
 
@@ -58,7 +58,7 @@ def eval(state: ExperimentState) -> Job:
     chosen = [saved for run in state.runs for saved in run.checkpoints]
     anchor = Code(name="heuristic", source=[__file__], config={{"strength": 0}})
     vs = Seating(name="vs heuristic", players=(Inference(config={{"search": 0}}), anchor),
-                 conditions=({{"deal": 0}}, {{"deal": 1}}), games=4)
+                 config=({{"deal": 0}}, {{"deal": 1}}), games=4)
     ladder = Benchmark(name="ladder", environment=environment("duel"), seatings=(vs,))
     return evaluation(ladder, play={play}, checkpoints=chosen, max_hours=0.1,
                       repo=None)

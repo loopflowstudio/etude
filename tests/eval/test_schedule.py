@@ -60,12 +60,12 @@ def rating(checkpoints: int, deals: int, paired: int) -> list[Match]:
     rated = [checkpoint(50 * ordinal) for ordinal in range(1, checkpoints + 1)]
     heuristic = code("heuristic", 3)
     grid = [
-        Match(players=(each, heuristic), conditions={"deal": deal}, games=2)
+        Match(players=(each, heuristic), config={"deal": deal}, games=2)
         for each in rated
         for deal in range(deals)
     ]
     pairs = [
-        Match(players=pair, conditions={"deal": deal}, games=2)
+        Match(players=pair, config={"deal": deal}, games=2)
         for pair in zip(rated, rated[1:], strict=False)
         for deal in range(paired)
     ]
@@ -112,7 +112,7 @@ def test_evaluate_plays_in_scheduled_order_and_order_changes_no_row(tmp_path: Pa
 def test_a_queue_of_code_players_plays_in_the_callers_order(tmp_path: Path) -> None:
     field = [code(f"script{strength}", strength) for strength in range(4)]
     given: Sequence[Match] = [
-        Match(players=(field[a], field[b]), conditions={"deal": deal})
+        Match(players=(field[a], field[b]), config={"deal": deal})
         for deal in range(3)
         for a in range(4)
         for b in range(4)

@@ -13,9 +13,9 @@ from contextlib import contextmanager
 from typing import Any, Literal
 from unittest.mock import patch
 
-from etude.job import Record
 from etude.launch.database import Database
 from etude.launch.records import LogSnapshot
+from etude.spec import Record
 from tests.launch.fake import FakeService
 
 

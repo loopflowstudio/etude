@@ -33,8 +33,8 @@ ExperimentOption = Annotated[
 def run_recipe(
     file: Annotated[Path, typer.Argument(help="a Python file defining train(config)")],
     config: Annotated[
-        str, typer.Option(help="JSON config fields; omitted fields use defaults")
-    ] = "{}",
+        str | None, typer.Option(help="JSON config fields; omitted on resume keeps stored config")
+    ] = None,
     seed: Annotated[int | None, typer.Option(help="the run's seed")] = None,
     name: Annotated[str | None, typer.Option(help="job name, defaulting to the file stem")] = None,
     experiment: ExperimentOption = None,
@@ -46,8 +46,8 @@ def run_recipe(
     json_output: Annotated[bool, typer.Option("--json", help="print a JSON result")] = False,
 ) -> None:
     """Run a training recipe on this computer; 0 finished, 75 stopped, other failed."""
-    from etude.job import Until
     from etude.local import run
+    from etude.spec import Until
 
     target = Until.model_validate(until) if until is not None else None
     raise typer.Exit(
@@ -91,11 +91,11 @@ def _submit(
     from decimal import Decimal
 
     from etude.identity import run_address
-    from etude.job import Until
     from etude.launch import controller
     from etude.launch.job_file import read_job_file
     from etude.launch.listing import show_runs
     from etude.launch.records import CohortSpec
+    from etude.spec import Until
 
     runs = read_job_file(file, ctx.args, help=help, experiment=experiment)
     if help:
@@ -462,8 +462,8 @@ def eval_experiment(
     import time
 
     from etude.experiment import advance, read_experiment
-    from etude.job import Smoke
     from etude.smoke import smoke_file
+    from etude.spec import Smoke
     from etude.storage import default_root, storage_from_uri
 
     experiment = read_experiment(file)

@@ -10,11 +10,11 @@ import pytest
 
 from etude.cli import main
 from etude.errors import LauncherError
-from etude.job import Job
 from etude.launch import cli, client
 from etude.launch.controller import PythonClient, RentRequest, Request, TerminateRequest
 from etude.launch.database import Database, launcher_file
 from etude.launch.records import Machine
+from etude.spec import Job
 from tests.launch.counting import Counting, Counts
 from tests.launch.fake import bench
 

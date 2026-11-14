@@ -16,7 +16,6 @@ import pytest
 
 from etude.cli import main
 from etude.errors import LauncherError
-from etude.job import Job, RunRequest, Until
 from etude.launch.client import (
     _open,
     cancel,
@@ -31,6 +30,7 @@ from etude.launch.client import (
 from etude.launch.controller import FetchRequest, PythonClient, forward, warning
 from etude.launch.database import launcher_file
 from etude.launch.records import Pool
+from etude.spec import Job, RunRequest, Until
 from tests.launch.counting import job_text
 from tests.launch.test_source import git
 from tests.launch.test_source import repository as repository

@@ -12,10 +12,10 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from etude.errors import LauncherError
-from etude.job import Record
 from etude.launch.errors import ProviderUnavailable
 from etude.launch.providers.runpod.http import _ID, PodHTTP
 from etude.launch.records import CPU, GPU, Hardware, Offer
+from etude.spec import Record
 
 
 class PodFact(Record):

@@ -27,13 +27,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from etude.errors import LauncherError
-from etude.job import Job, RunRequest, Smoke, SmokeStep, job_id
 from etude.launch.database import Database, launcher_file
 from etude.launch.executor import local
 from etude.launch.logs import render
 from etude.launch.records import Machine, Pool
 from etude.launch.scheduler import Scheduler
 from etude.launch.source import home
+from etude.spec import Job, RunRequest, Smoke, SmokeStep, job_id
 
 # Kept under ETUDE_HOME by content key with their own locks: shared with the real home.
 _SHARED = ("prepared", "programs")

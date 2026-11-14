@@ -10,12 +10,12 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from etude.job import Input
 from etude.launch.records import Storage as Place
 from etude.launch.schemas import Work
 from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.s3 import AlreadyThere, Bucket, Denied, Keys, open_bucket, post
 from etude.launch.storage.transport import HTTPReply
+from etude.spec import Input
 from etude.storage_timeout import StorageUnavailable
 
 # From "Signature Calculations for the Authorization Header" in the S3 API reference.

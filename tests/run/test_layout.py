@@ -15,7 +15,7 @@ from etude.run import Run
 from etude.train.tracking import TrainingRun
 
 SOURCE = Path(__file__).resolve().parents[2] / "src"
-SHARED = ("run", "job", "block_file", "errors", "storage", "records", "checkpoints")
+SHARED = ("run", "spec", "block_file", "errors", "storage", "records", "checkpoints")
 
 
 def _imports(package: str) -> dict[Path, set[str]]:

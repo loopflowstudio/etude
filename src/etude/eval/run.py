@@ -1,19 +1,35 @@
 """A live evaluation run: match validation, staging, rollups and outcome publication.
 
-EvalRun owns its local DuckDB connection until finish; match.evaluate owns
-scheduling and worker processes. Result is the playing code's returned data.
+EvalRun owns match execution, worker processes and its local DuckDB connection
+until finish. Result is the playing code's returned data; EvalResult counts
+what play completed. Tournament scheduling lives in eval.tournament.
 """
 
 from __future__ import annotations
 
+import inspect
+import multiprocessing
+import os
 import secrets
+import signal
+import socket
 import sys
+import threading
 import time
-from collections.abc import Mapping, Sequence
+import typing
+from collections import deque
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime
+from functools import lru_cache
 from hashlib import sha256
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, NoReturn
+from types import FrameType
+from typing import TYPE_CHECKING, Literal, NoReturn, cast
+
+from pydantic import BaseModel, JsonValue
 
 from etude.errors import EtudeError
 from etude.eval.block import (
@@ -32,15 +48,18 @@ from etude.eval.records import (
     NO_ROWS,
     ColumnType,
     Config,
+    Environment,
     Match,
     MatchRecord,
     Rollup,
     as_config,
     outcomes,
 )
+from etude.eval.schedule import ordered
 from etude.identity import run_address
-from etude.records import RunCounters
-from etude.run import Run, StorageDestination
+from etude.records import Record, RunCounters, RunWriter, Tally
+from etude.run import Run, StorageDestination, declare, destinations, report_progress
+from etude.stopping import Stopped
 from etude.storage import DirectoryStorage, Storage, run_prefix
 
 if TYPE_CHECKING:
@@ -93,23 +112,105 @@ class EvalRun(Run):
         rollups: tuple[Rollup, ...],
         *,
         experiment: str,
+        environment: Environment,
+        matches: Sequence[Match],
+        workers: int,
     ) -> None:
         # Imported here: DuckDB is the optional `eval` extra.
         import duckdb  # noqa: PLC0415
 
         super().__init__(experiment=experiment, name=name, root=root, targets=targets)
+        self.environment = environment
+        self.matches = tuple(matches)
+        self.workers = workers
+        self._stop_requested = False
+        self._asked: float | None = None
+        self._slowest = 0.0
         self.rollups = rollups
         self.id = secrets.token_hex(6)
+        self.writer = RunWriter(
+            writer=self.id,
+            run=f"{experiment}/{name}",
+            started_ms=_now_ms(),
+            host=socket.gethostname(),
+            attempt=os.environ.get("ETUDE_ATTEMPT"),
+            commit=os.environ.get("ETUDE_COMMIT"),
+        )
         self.failed = 0  # `fail` is also how `store` refuses a match
         self.db: duckdb.DuckDBPyConnection = duckdb.connect()
-        seal_abandoned(root, self.db)
+        try:
+            seal_abandoned(root, self.db)
+            stored = self._stored()
+        except BaseException:
+            self.db.close()
+            raise
         self.staging = Staging(root, self.id, rollups)
-        stored = self._stored()
         self.done = {key for key, record in stored.items() if record.state == "done"}
         self.columns: dict[str, dict[str, ColumnType]] = {}
         for record in stored.values():
             for table, columns in record.columns.items():
                 self.columns.setdefault(table, {}).update(columns)
+
+        self._report = _Report(
+            total=len(self.matches),
+            done=sum(match.key in self.done for match in self.matches),
+            writer=self.writer,
+        )
+        self._report.write()
+
+    def stopping(self) -> bool:
+        """A requested stop is observed between matches, after retaining completed tables."""
+        now = time.monotonic()
+        if self._asked is not None:
+            self._slowest = max(self._slowest, now - self._asked)
+        self._asked = now
+        stop = os.environ.get("ETUDE_STOP_FILE")
+        deadline = os.environ.get("ETUDE_DEADLINE")
+        self._stop_requested |= bool(stop and Path(stop).exists()) or bool(
+            deadline and datetime.fromisoformat(deadline).timestamp() - time.time() <= self._slowest
+        )
+        return self._stop_requested
+
+    def play[C: BaseModel | Mapping[str, JsonValue]](
+        self, play: Callable[[Match[C]], Tables | Result]
+    ) -> EvalResult:
+        """Play the selected matches once, skipping this run's durable results on resume."""
+        pending = [match for match in self.matches if match.key not in self.done]
+        skipped = len(self.matches) - len(pending)
+        played = 0
+        report = self._report
+
+        def pending_matches() -> Iterator[Match]:
+            for match in pending:
+                if self.stopping():
+                    raise Stopped()
+                yield match
+
+        started = time.monotonic()
+        try:
+            with _terminable():
+                for scheduled, outcome in _played(pending_matches(), play, self.workers):
+                    if isinstance(outcome, BaseException):
+                        self.fail(scheduled, outcome)
+                    self.store(scheduled, outcome)
+                    self.done.add(scheduled.key)
+                    played += 1
+                    report.played()
+                    print(
+                        f"etude: {self.name}: {played}/{len(pending)} matches played, "
+                        f"{time.monotonic() - started:.0f}s elapsed",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+        finally:
+            report.write(failed=self.failed)
+        return EvalResult(
+            experiment=self.experiment,
+            name=self.name,
+            environment=self.environment,
+            played=played,
+            skipped=skipped,
+        )
 
     def _stored(self) -> dict[str, MatchRecord]:
         """Each match's standing record (`outcomes`) of the blocks here and at every destination.
@@ -209,7 +310,7 @@ class EvalRun(Run):
             self.staging.seal(self.db)
         self.ship()
 
-    def finish(self, state: Literal["finished", "failed"]) -> None:
+    def finish(self, state: Literal["finished", "failed", "stopped"]) -> None:
         with self.files.lock:
             self.staging.seal(self.db)
         self.staging.close()
@@ -286,3 +387,197 @@ def _widened(
     raise EtudeError("column_type_conflict", 422) from TypeError(
         f"table {table!r}, column {column!r}: {first} then {then}"
     )
+
+
+_REPORT_SECONDS = 15.0
+_PACE_MATCHES = 50
+
+
+class _Report:
+    """Under `etude launch`, how far the eval run has got, for the launcher's status.
+
+    `etude-result.json` in `ETUDE_OUTPUT_DIR` holds a tally, the shape of
+    `etude.records.Tally`; evaluation does not import the launcher.
+    It is progress only: results are the run's blocks.
+    """
+
+    def __init__(self, *, total: int, done: int, writer: RunWriter) -> None:
+        self.writer = writer
+        self.total, self.done = total, done
+        self.outputs = os.environ.get("ETUDE_OUTPUT_DIR")
+        self.recent: deque[float] = deque(maxlen=_PACE_MATCHES)
+        self.written = time.monotonic()
+
+    def played(self) -> None:
+        """Count one stored match, and report when the last report is old enough."""
+        self.done += 1
+        now = time.monotonic()
+        self.recent.append(now)
+        if now - self.written >= _REPORT_SECONDS:
+            self.write()
+
+    def write(self, *, failed: int = 0) -> None:
+        if self.outputs is None:
+            return
+        elapsed = self.recent[-1] - self.recent[0] if self.recent else 0.0
+        tally = Tally(
+            unit="matches",
+            done=self.done,
+            total=self.total,
+            failed=failed,
+            per_hour=(len(self.recent) - 1) / elapsed * 3600 if elapsed > 0 else None,
+        )
+        report_progress(writer=self.writer, clocks={}, tally=tally)
+        self.written = time.monotonic()
+
+
+class Terminated(Exception):
+    """SIGTERM reached an eval run: what is staged is sealed before it ends."""
+
+
+@contextmanager
+def _terminable() -> Iterator[None]:
+    """Turn SIGTERM into `Terminated` while matches are played, on the main thread only."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def terminated(signum: int, frame: FrameType | None) -> NoReturn:
+        raise Terminated()
+
+    before = signal.signal(signal.SIGTERM, terminated)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, before)
+
+
+def _played[C: BaseModel | Mapping[str, JsonValue]](
+    pending: Iterator[Match], play: Callable[[Match[C]], Tables | Result], workers: int
+) -> Iterator[tuple[Match, Tables | Result | BaseException]]:
+    """Each match with its tables or what it raised, in the order they finish.
+
+    Matches start in `etude.eval.schedule` order, at most `workers` at once, so
+    the order they start in is the order an author's runtime loads checkpoints in.
+    """
+    order = pending
+    if workers == 1:
+        for scheduled in order:
+            try:
+                yield scheduled, _play(play, scheduled)
+            except Exception as error:  # noqa: BLE001 - recorded with the match, then raised
+                yield scheduled, error
+        return
+    # Fresh processes everywhere, so an eval run behaves alike on Linux and macOS.
+    context = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(workers, mp_context=context) as pool:
+        running: dict[Future[Tables | Result], Match] = {}
+
+        def start() -> None:
+            scheduled = next(order, None)
+            if scheduled is not None:
+                running[pool.submit(_play, play, scheduled)] = scheduled
+
+        for _ in range(workers):
+            start()
+        try:
+            while running:
+                finished, _ = wait(running, return_when=FIRST_COMPLETED)
+                for future in finished:
+                    raised = future.exception()
+                    yield running.pop(future), raised if raised is not None else future.result()
+                    # Started only once the last is stored: a failure stops the run.
+                    start()
+        finally:
+            pool.shutdown(cancel_futures=True)
+
+
+class EvalResult(Record):
+    """What one call to `evaluate` did."""
+
+    experiment: str
+    name: str
+    environment: Environment
+    played: int
+    # Matches already stored by an earlier attempt.
+    skipped: int
+
+
+@contextmanager
+def _evaluating_matches(
+    *,
+    experiment: str,
+    environment: Environment,
+    matches: Sequence[Match],
+    workers: int = 1,
+    run: str | None = None,
+    directory: Path | str | None = None,
+    storages: Sequence[Storage] = (),
+    rollups: Sequence[Rollup] = (),
+    resume: bool = False,
+) -> Iterator[EvalRun]:
+    if workers < 1:
+        raise EtudeError("workers_must_be_positive", 422)
+    if len({scheduled.key for scheduled in matches}) != len(matches):
+        raise EtudeError("duplicate_match", 422)
+    names = [rollup.name for rollup in rollups]
+    if len(set(names)) != len(names) or set(names) & set(ETUDE_TABLES):
+        raise EtudeError("rollup_name_refused", 422) from ValueError(names)
+    declared = declare(
+        experiment=experiment,
+        clocks=(),
+        run=run,
+        kind="evaluation",
+        directory=directory,
+        resume=resume,
+    )
+    if declared.record.kind != "evaluation":
+        raise EtudeError("run_is_not_an_eval_run", 409)
+    path = declared.root / "environment.json"
+    if not path.is_file():
+        DirectoryStorage(declared.root).put(
+            "environment.json", environment.model_dump_json().encode()
+        )
+    elif Environment.model_validate_json(path.read_bytes()) != environment:
+        raise EtudeError("eval_run_environment_conflict", 409)
+    writer = EvalRun(
+        declared.root,
+        declared.name,
+        destinations(declared.base, storages),
+        tuple(rollups),
+        experiment=experiment,
+        environment=environment,
+        matches=list(ordered(matches)),
+        workers=workers,
+    )
+    try:
+        yield writer
+    except Stopped:
+        writer.finish("stopped")
+        raise
+    except BaseException:
+        writer.finish("failed")
+        raise
+    else:
+        writer.finish("finished")
+
+
+@lru_cache(maxsize=128)
+def _match_type(play: Callable[..., object]) -> type[Match]:
+    parameters = list(inspect.signature(play).parameters.values())
+    if len(parameters) != 1:
+        raise TypeError("play must take exactly one Match parameter")
+    kind = typing.get_type_hints(play).get(parameters[0].name, Match)
+    if not isinstance(kind, type) or not issubclass(kind, Match):
+        raise TypeError("play's parameter must be annotated with Match[YourConfig]")
+    return kind
+
+
+def _play[C: BaseModel | Mapping[str, JsonValue]](
+    play: Callable[[Match[C]], Tables | Result], match: Match
+) -> Tables | Result:
+    kind = _match_type(play)
+    # The author's generic annotation is the validation boundary, just as the
+    # config parameter is for etude.call. Stored matches retain portable JSON.
+    checked = kind.model_validate_json(match.model_dump_json()) if kind is not Match else match
+    return play(cast(Match[C], checked))

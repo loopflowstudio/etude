@@ -14,7 +14,6 @@ import pytest
 
 from etude.cli import main
 from etude.errors import LauncherError
-from etude.job import Job, RunRequest, Until
 from etude.launch.database import Database, launcher_file
 from etude.launch.records import (
     LogStream,
@@ -32,6 +31,7 @@ from etude.launch.schemas import Observation
 from etude.launch.ssh import Unreachable
 from etude.launch.storage.disk import DirectoryJournal
 from etude.records import RunRecord
+from etude.spec import Job, RunRequest, Until
 from etude.storage_timeout import StorageUnavailable
 from etude.train.records import Step
 from etude.train.tracking import TrainingRun as TrackedRun

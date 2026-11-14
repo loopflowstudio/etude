@@ -8,7 +8,7 @@ from hashlib import sha256
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from etude.eval.records import CheckpointPlayer, Match, Player
+from etude.eval.records import CheckpointPlayer, Config, Match, Player
 from etude.eval.run import Result, Tables
 
 type Rows = list[dict[str, bool | int | float | str | None]]
@@ -81,9 +81,9 @@ def play_teams(match: Match) -> Tables:
     }
 
 
-def play_failing_deal_one(match: Match) -> Tables:
+def play_failing_deal_one(match: Match[Config]) -> Tables:
     """`play`, except that deal 1 raises, as a game with a bug in one deal would."""
-    if match.conditions.get("deal") == 1:
+    if match.config.get("deal") == 1:
         raise RuntimeError("deal 1 crashed")
     return play(match)
 
@@ -104,12 +104,12 @@ def play_with_evidence(match: Match) -> Result:
     return Result(tables={"plays": tables["plays"], "games": games}, blobs=evidence)
 
 
-def play_cards(match: Match) -> Tables:
+def play_cards(match: Match[Config]) -> Tables:
     """manabot's card tables: one `card_plays` row per game and seat, `card_counts` per card.
 
     Deal 2's games have no winner, so no row of that match gives `win`.
     """
-    deal = int(str(match.conditions["deal"]))
+    deal = int(str(match.config["deal"]))
     plays: Rows = []
     counts: Rows = []
     for game in range(match.games):

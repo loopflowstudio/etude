@@ -27,8 +27,8 @@ from pydantic import BaseModel
 from etude.call import config_type
 from etude.errors import EtudeError
 from etude.identity import run_address
-from etude.job import Until
 from etude.run import RunFiles, validate_resume
+from etude.spec import Until
 from etude.stopping import Stopped
 from etude.storage import DirectoryStorage, default_root, run_directory
 from etude.train.read import read
@@ -38,7 +38,7 @@ from etude.train.state import saved_states
 def run(
     file: Path,
     *,
-    config: str = "{}",
+    config: str | None = None,
     seed: int | None = None,
     name: str | None = None,
     experiment: str | None = None,
@@ -65,15 +65,23 @@ def run(
         if not callable(found):
             raise ValueError(f"{file.name}: define train(config)")
         train = cast(Callable[[BaseModel], object], found)
-        settings = config_type(train).model_validate_json(config)
-        # Validate the actual JSON that another machine would receive.
-        text = settings.model_dump_json(round_trip=True)
-        settings = config_type(train).model_validate_json(text)
         label = experiment or file.stem
         base = default_root()
         if resume is not None:
-            if experiment is None:  # EXPERIMENT/RUN names its own experiment
+            if experiment is None:
                 label = resume.rpartition("/")[0] or label
+            if config is None:
+                stored = RunFiles(
+                    run_directory(base, label, resume.removeprefix(label + "/"))[1]
+                ).run_file()
+                if stored is None:
+                    raise EtudeError("run_not_found", 404, detail=run_address(resume, label))
+                config = stored.config_json
+        settings = config_type(train).model_validate_json(config if config is not None else "{}")
+        # Validate the actual JSON that another machine would receive.
+        text = settings.model_dump_json(round_trip=True)
+        settings = config_type(train).model_validate_json(text)
+        if resume is not None:
             identity = run_address(resume, label).removeprefix(f"{label}/")
             seed, until = _resumed(base, label, identity, config=text, seed=seed, until=until)
         else:
@@ -152,8 +160,8 @@ def _resumed(
         seed = prior.seed
     validate_resume(prior, config=config, seed=seed)
     data = read(DirectoryStorage(base), label, run)
-    if until is None and data.attempts and data.attempts[-1].until is not None:
-        until = Until.model_validate(data.attempts[-1].until)
+    if until is None and data.writers and data.writers[-1].until is not None:
+        until = Until.model_validate(data.writers[-1].until)
     if until is not None and until.clock not in {clock.name for clock in prior.clocks}:
         raise ValueError(f"undeclared clock: {until.clock!r}")
     if data.outcome is not None and data.outcome.state == "finished":
@@ -177,6 +185,8 @@ def _attempt(values: dict[str, str]) -> Iterator[None]:
         stop = Path(folder) / "stop"
 
         def request_stop(signum: int, frame: FrameType | None) -> None:
+            if signum == signal.SIGINT and stop.exists():
+                raise KeyboardInterrupt()
             stop.touch()
 
         try:

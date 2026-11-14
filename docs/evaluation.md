@@ -11,6 +11,8 @@ uv add 'etude-sdk[eval]'   # DuckDB, for writing and querying tables
 ```
 
 ```python
+from pydantic import BaseModel
+
 from etude.eval.match import Tables, environment
 from etude.eval.query import statsdb
 from etude.eval.records import (
@@ -22,20 +24,24 @@ from etude.eval.records import (
     RoundRobin,
     Seating,
 )
-from etude.eval.tournament import hold, scores, standings
+from etude.eval.tournament import evaluating, scores, standings
 from etude.experiment import observe
 from etude.checkpoints import CheckpointRef, checkpoint_id
 
 world = environment("allies-vs-lessons", files=["game/"], config={"world": "w6"})
-deals = tuple({"deal": 1_910_101_000 + d} for d in range(25))
+
+
+class Deal(BaseModel):
+    deal: int
+
+
+deals = tuple(Deal(deal=1_910_101_000 + d) for d in range(25))
 heuristic = Code(name="heuristic", source=["players/heuristic.py"])
 greedy = Code(name="greedy", source=["players/greedy.py"])
 
 
-def play(match: Match) -> Tables:  # importable by name: workers are fresh processes
-    results = play_deal(
-        match.players, deal=match.conditions["deal"], games=match.games, seed=match.seed
-    )
+def play(match: Match[Deal]) -> Tables:  # importable by name: workers are fresh processes
+    results = play_deal(match.players, deal=match.config.deal, games=match.games, seed=match.seed)
     return {
         "plays": [
             {
@@ -62,26 +68,26 @@ progress = Benchmark(
         Seating(
             name="no search vs heuristic",
             players=(direct, heuristic),
-            conditions=deals,
+            config=deals,
             games=8,
         ),
         Seating(
             name="no search vs greedy",
             players=(direct, greedy),
-            conditions=deals,
+            config=deals,
             games=8,
         ),
         Seating(
             name="search vs no search",
             players=(Inference(source=net, config=PUCT(simulations=64)), direct),
-            conditions=deals[:10],
+            config=deals[:10],
             games=4,
         ),
         # A relative seat: the held checkpoint against its own learner at half its updates.
         Seating(
             name="half-training",
             players=(direct, Fraction(clock="updates", value=0.5, inference=direct)),
-            conditions=deals[:10],
+            config=deals[:10],
             games=4,
         ),
     ),
@@ -92,15 +98,18 @@ progress = Benchmark(
 # Relative seats find theirs among the experiment's training lines.
 ref = CheckpointRef(key=checkpoint_id(run="ppo-1", name="updates-500.pt"), artifact=saved)
 lines = observe(bucket, "ppo").lines
-hold(progress, experiment="ppo", checkpoint=ref, play=play, storages=[bucket], lines=lines)
+with evaluating(progress, experiment="ppo", checkpoint=ref, storages=[bucket], lines=lines) as run:
+    run.play(play)
 
 # Batch: add a seating to the definition; holding with no checkpoint plays every
 # missing match, so the new seating is played for every checkpoint held so far.
-hold(progress, experiment="ppo", play=play, workers=8, storages=[bucket], lines=lines)
+with evaluating(progress, experiment="ppo", workers=8, storages=[bucket], lines=lines) as run:
+    run.play(play)
 
 # Batch: hand-picked players, each against every other.
-league = RoundRobin(name="finals-1", environment=world, conditions=deals, games=8)
-hold(league, experiment="ppo", enter=finals, play=play, workers=8, storages=[bucket])
+league = RoundRobin(name="finals-1", environment=world, config=deals, games=8)
+with evaluating(league, experiment="ppo", enter=finals, workers=8, storages=[bucket]) as run:
+    run.play(play)
 
 db = statsdb("ppo", bucket)  # or "s3://my-bucket/runs", a directory, or nothing: ~/.etude/track
 for each in scores(db, "anchors", table="plays", value="score"):
@@ -117,20 +126,31 @@ db.sql("""select a.name, avg(score) from plays
 
 ## Eval runs
 
-`etude.eval.match.evaluate` is the general eval run: it plays the matches it
-is given and knows nothing of tournaments.
+`evaluating` opens one `EvalRun`. Pass a tournament, or an environment with
+an explicit match list; `run.play(play)` plays its unstored matches.
+Outside a launch, give `experiment=` and use `resume=True` to carry on an
+existing run. A launched retry resumes automatically. `run.stopping()` checks
+stop requests between matches; a planned stop seals completed tables and
+raises `Stopped`. `hold` and `evaluate` are warning wrappers until 0.5.
 
 ```python
-from etude.eval.match import evaluate
+from etude.eval.tournament import evaluating
 
-evaluate(
+with evaluating(
+    world,
     experiment="mirror",
-    environment=world,
-    play=play,
-    matches=[Match(players=(a, b, c, d), groups={"north": (0, 2), "south": (1, 3)}, games=4)],
+    matches=[
+        Match(
+            players=(a, b, c, d),
+            config=Deal(deal=7),
+            groups={"north": (0, 2), "south": (1, 3)},
+            games=4,
+        )
+    ],
     workers=4,
     storages=[bucket],
-)
+) as run:
+    run.play(play)
 ```
 
 - **Players.** A player is whatever takes a seat: a checkpoint and the code
@@ -210,7 +230,13 @@ evaluate(
   0.2 were identified by a digest; they load as `etude-sdk-0.2:DIGEST`, which
   no key since equals, so their results stay readable and nothing new counts
   them as played.
-- **Matches.** Players in their seats under fixed `conditions`, played for
+- **Match config.** Your Pydantic model, such as `Deal`, describes one
+  match's settings. `Seating(config=(Deal(deal=7), ...))` makes a match for
+  each config. Annotate `play(match: Match[Deal])` to receive that type,
+  including in worker processes. Etude defines no match config base class.
+  The JSON values identify the match; the Python class name does not. Stored
+  `conditions` still reads, and the old keyword/property warns until 0.5.
+- **Matches.** Players in their seats under fixed `config`, played for
   `games`: the unit Etude schedules, resumes and resamples. A tournament's
   `Seating` makes one match per condition. Seat swaps belong
   inside `play`. Group `all` holds every seat; a player may sit in two seats.
@@ -242,7 +268,9 @@ evaluate(
       sums={"gih": "gih_copies", "gih_wins": "gih_copies * win"},
       where="eligible",
   )
-  evaluate(..., rollups=[cards])
+  progress = Benchmark(name="cards", environment=world, seatings=seatings, rollups=(cards,))
+  with evaluating(progress, experiment="cards") as run:
+      run.play(play)
   ```
 
   `statsdb` then has table `card_deals`: per run and value of `by`, `rows`
@@ -307,8 +335,8 @@ evaluate(
 
 - **Benchmarks.** Named seatings, each its own line over training. A
   seating is the rule for who meets whom: `players` in seat order, with its
-  own `conditions` and `games`, and it makes one match per condition. A
-  seating's value is its first player's. `hold(benchmark, checkpoint=ref)`
+  own `config` and `games`, and it makes one match per condition. A
+  seating's value is its first player's. `evaluating(benchmark, checkpoint=ref)`
   fills the seats for the checkpoint (by its key) and plays each given
   seating; with no checkpoint it plays every seating ever defined for every
   checkpoint held, skipping what is delivered.
@@ -396,12 +424,12 @@ evaluate(
   appear; each pass plays only the pairs not yet delivered. A hold on the go
   leaves these seatings to batch. Their rows are `schedule` rows with no
   `checkpoint`; `scores` follows only seatings with an inference seat.
-- **Round robins.** `hold(round_robin, enter=players)` plays every pair of
+- **Round robins.** `evaluating(round_robin, enter=players)` plays every pair of
   the players given once per condition; seat swaps belong inside `play`.
-  `hold(round_robin)` then plays every pair of every entrant so far that no
+  `evaluating(round_robin)` then plays every pair of every entrant so far that no
   eval run delivered, such as a late entrant against the earlier ones.
 - **Held for an experiment.** A tournament only decides which matches to
-  play. `hold(..., experiment=...)` makes its eval run the experiment's, so
+  play. `evaluating(..., experiment=...)` makes its eval run the experiment's, so
   its results sit beside the experiment's training runs and their
   checkpoints in the experiment's database.
 - **Stored in its eval runs.** Each eval run a `hold` starts keeps
@@ -424,8 +452,7 @@ evaluate(
   draws what they recorded and says so.
 - **Run names.** Under `etude launch` the eval run is the launched run
   (`ETUDE_RUN`), so `etude logs` and `status` lead to it and a retry resumes
-  it, finding the same checkpoint (by its key) wherever the retry put it. Elsewhere it is named for the tournament and what is given; the same
-  call resumes it.
+  it, finding the same checkpoint (by its key) wherever the retry put it. Elsewhere it is named for the tournament and what is given; a repeated call needs `resume=True`.
 - **Splitting.** `share=Share(index=k, count=n)` plays part k (from 0) of
   n disjoint parts, for n machines: contiguous runs of the scheduled matches
   in play order, so parts differ by at most one match and each seats only
@@ -456,13 +483,32 @@ evaluate(
 ## Evaluation jobs
 
 ```python
+# arena.py, beside play(match: Match[Deal])
+class ArenaConfig(BaseModel):
+    games: int = 8
+
+
+def arena(config: ArenaConfig) -> Benchmark:
+    return Benchmark(
+        name="progress",
+        environment=world,
+        seatings=(
+            Seating(
+                name="vs heuristic", players=(direct, heuristic), config=deals, games=config.games
+            ),
+        ),
+    )
+```
+
+
+```python
 # eval.py
 from decimal import Decimal
 
 from etude.jobs import evaluation
-from etude.job import Input, Job
+from etude.spec import Input, Job
 
-from arena import play, progress  # play(match: Match) -> Tables; progress is a Benchmark
+from arena import ArenaConfig, arena, play  # arena(config) -> Benchmark; play(match) -> Tables
 
 
 def runs(checkpoint: str, sha256: str, size_bytes: int) -> Job:
@@ -474,7 +520,8 @@ def runs(checkpoint: str, sha256: str, size_bytes: int) -> Job:
         run="ppo-1",  # the checkpoint's key: its run, and the file's name
     )
     return evaluation(
-        progress,
+        arena,
+        config=ArenaConfig(),
         experiment="ppo",
         play=play,
         checkpoint=weights,
@@ -488,9 +535,15 @@ def runs(checkpoint: str, sha256: str, size_bytes: int) -> Job:
 etude launch eval.py --rent cpu8 --checkpoint updates-00000500 --sha256 … --size-bytes 1048576
 ```
 
-An evaluation job holds a tournament on a launched machine, and nobody writes
-its command: Etude calls `hold` there with `play`, imported by name from your
-checkout, and the checkpoint, which reaches the machine as the job's input,
+Write `arena(config: ArenaConfig) -> Benchmark | RoundRobin` as a pure
+function: no playing, storage reads or other I/O. Its config is your Pydantic
+type, as in training. `evaluation(arena, config=ArenaConfig(), play=play)`
+validates the config and calls the function at submission. The planner sees
+the tournament before choosing pending matches and checkpoint inputs. A
+ready-made tournament also works as `evaluation(progress, play=play, ...)`.
+
+On the machine Etude opens `evaluating(tournament)` and calls `run.play(play)`,
+with `play` imported by name from your checkout and the checkpoint as a job input,
 verified by digest. The input's run and file name are the checkpoint's key,
 and its folder or file is each player's `checkpoint.artifact.uri`, which `play` opens. A
 round robin takes `enter=` players instead. The eval run is the launched run, so its tables reach the
@@ -516,7 +569,7 @@ training runs of `capacity`, so `track()` in the training code needs no
 from etude.eval.records import Aligned, Benchmark, Earlier, Final, Fraction, Seating
 from etude.experiment import ExperimentState
 from etude.jobs import evaluation
-from etude.job import Job
+from etude.spec import Job
 
 # direct is an Inference, heuristic Code, deals the conditions
 from arena import deals, direct, heuristic, play, world
@@ -528,11 +581,11 @@ def eval(state: ExperimentState) -> list[Job]:
         name="ladder",
         environment=world,
         seatings=(
-            Seating(name="vs heuristic", players=(direct, heuristic), conditions=deals, games=8),
+            Seating(name="vs heuristic", players=(direct, heuristic), config=deals, games=8),
             Seating(
                 name="vs previous",
                 players=(direct, Earlier(clock="updates", by=1_000, inference=direct)),
-                conditions=deals,
+                config=deals,
                 games=8,
             ),
             Seating(
@@ -541,7 +594,7 @@ def eval(state: ExperimentState) -> list[Job]:
                     direct,
                     Fraction(clock="running_hours", value=0.5, at_or_before=True, inference=direct),
                 ),
-                conditions=deals,
+                config=deals,
                 games=8,
             ),
         ),
@@ -554,13 +607,13 @@ def eval(state: ExperimentState) -> list[Job]:
             Seating(
                 name="large vs small",
                 players=(direct, Aligned(clock="updates", job="small", inference=direct)),
-                conditions=deals,
+                config=deals,
                 games=8,
             ),
             Seating(
                 name="large vs final small",
                 players=(direct, Final(job="small", inference=direct)),
-                conditions=deals,
+                config=deals,
                 games=8,
             ),
         ),

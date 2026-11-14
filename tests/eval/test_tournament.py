@@ -80,11 +80,11 @@ def anchors(tmp_path: Path) -> Benchmark:
         environment=WORLD,
         seatings=(
             Seating(name="no search vs heuristic", players=(DIRECT, heuristic),
-                    conditions=DEALS, games=4),
+                    config=DEALS, games=4),
             Seating(name="no search vs greedy", players=(DIRECT, greedy),
-                    conditions=DEALS[:2], games=2),
+                    config=DEALS[:2], games=2),
             Seating(name="search vs no search", players=(SEARCH, DIRECT),
-                    conditions=DEALS[:1], games=6),
+                    config=DEALS[:1], games=6),
         ),
     )  # fmt: skip
 
@@ -104,7 +104,7 @@ def test_a_relative_seat_waits_for_its_checkpoint_and_a_batch_hold_plays_it_once
     seating = Seating(
         name="large vs small",
         players=(DIRECT, Aligned(clock="updates", job="small", inference=DIRECT)),
-        conditions=DEALS[:1],
+        config=DEALS[:1],
         games=2,
     )
     # A tournament's name may hold spaces, as a seating's may.
@@ -162,7 +162,7 @@ def test_an_aligned_hours_seat_takes_the_other_jobs_latest_checkpoint_once_it_ha
         for line, positions in (("small-1", (0.9, 1.8, 2.7)), ("large-1", (1.0, 2.0, 3.0)))
     )  # fmt: skip
     seat = Aligned(clock="running_hours", job="small", at_or_before=True, inference=DIRECT)
-    seating = Seating(name="large vs small", players=(DIRECT, seat), conditions=DEALS[:1], games=2)
+    seating = Seating(name="large vs small", players=(DIRECT, seat), config=DEALS[:1], games=2)
     benchmark = Benchmark(name="paired", environment=WORLD, seatings=(seating,))
 
     def lines(saved: int) -> list[Line]:
@@ -222,7 +222,7 @@ def test_checkpoints_held_on_the_go_then_a_seating_added_in_batch(tmp_path: Path
     assert on_the_go(checkpoints[0], again, "retry") == 0
 
     greedy = scripted(tmp_path, "greedy", 4)
-    added = Seating(name="search vs greedy", players=(SEARCH, greedy), conditions=DEALS, games=2)
+    added = Seating(name="search vs greedy", players=(SEARCH, greedy), config=DEALS, games=2)
     grown = progress.model_copy(update={"seatings": (*progress.seatings, added)})
     batch = hold(
         grown,
@@ -274,7 +274,7 @@ def test_a_batch_hold_skips_what_any_eval_run_of_its_environment_delivered(tmp_p
     # Eval runs held for no tournament already played a seating about to be added:
     # two checkpoints' matches in this environment, the third's in another.
     added = Seating(name="search vs greedy", players=(SEARCH, scripted(tmp_path, "greedy", 4)),
-                    conditions=DEALS, games=2)  # fmt: skip
+                    config=DEALS, games=2)  # fmt: skip
     for run, world, held in (
         ("adhoc", WORLD, checkpoints[:2]),
         ("elsewhere", OTHER, checkpoints[2:]),
@@ -448,7 +448,7 @@ def test_a_retried_hold_finds_its_checkpoint_by_digest_wherever_it_lies(
 
 def test_a_round_robin_held_as_two_shares_stands_as_one(tmp_path: Path) -> None:
     finals = [scripted(tmp_path, f"final{strength}", strength) for strength in range(4)]
-    league = RoundRobin(name="finals", environment=WORLD, conditions=DEALS, games=4)
+    league = RoundRobin(name="finals", environment=WORLD, config=DEALS, games=4)
     split, whole = DirectoryStorage(tmp_path / "split"), DirectoryStorage(tmp_path / "whole")
     halves = [
         hold(
@@ -485,10 +485,10 @@ def test_a_round_robin_held_as_two_shares_stands_as_one(tmp_path: Path) -> None:
 
 def test_a_tournament_of_the_same_name_with_other_rules_is_refused(tmp_path: Path) -> None:
     entrant = scripted(tmp_path, "s", 1)
-    hold(RoundRobin(name="finals", environment=WORLD, conditions=DEALS, games=4),
+    hold(RoundRobin(name="finals", environment=WORLD, config=DEALS, games=4),
          experiment=EXPERIMENT, enter=[entrant], play=play, directory=tmp_path)  # fmt: skip
     others: list[Benchmark | RoundRobin] = [
-        RoundRobin(name="finals", environment=WORLD, conditions=DEALS, games=8),
+        RoundRobin(name="finals", environment=WORLD, config=DEALS, games=8),
         Benchmark(name="finals", environment=WORLD),
     ]
     for other in others:
@@ -501,7 +501,7 @@ def test_round_robin_shares_differ_by_at_most_one_and_count_matches_any_run_held
     tmp_path: Path,
 ) -> None:
     finals = [scripted(tmp_path, f"final{strength}", strength) for strength in range(4)]
-    league = RoundRobin(name="finals", environment=WORLD, conditions=DEALS, games=4)
+    league = RoundRobin(name="finals", environment=WORLD, config=DEALS, games=4)
     bucket = DirectoryStorage(tmp_path / "bucket")
 
     def share(k: int) -> int:
@@ -575,7 +575,7 @@ def test_a_seed_added_splits_the_point_again_and_counts_only_the_new_split(
     seating = Seating(
         name="large vs small",
         players=(DIRECT, Aligned(clock="updates", job="small", inference=DIRECT)),
-        conditions=DEALS[:1],
+        config=DEALS[:1],
         games=4,
     )
     benchmark = Benchmark(name="paired", environment=WORLD, seatings=(seating,))
@@ -634,10 +634,10 @@ def test_pairs_of_checkpoints_named_as_they_appear_are_each_played_once(tmp_path
         """Each checkpoint against the heuristic, and each against the one before it."""
         consecutive = [
             Seating(name=f"{DIRECT.player(new).name} vs {DIRECT.player(old).name}",
-                    players=(DIRECT.player(new), DIRECT.player(old)), conditions=DEALS, games=2)
+                    players=(DIRECT.player(new), DIRECT.player(old)), config=DEALS, games=2)
             for old, new in zip(saved, saved[1:])
         ]  # fmt: skip
-        anchor = Seating(name="vs heuristic", players=(DIRECT, heuristic), conditions=DEALS,
+        anchor = Seating(name="vs heuristic", players=(DIRECT, heuristic), config=DEALS,
                          games=2)  # fmt: skip
         return Benchmark(name="ladder", environment=WORLD, seatings=(anchor, *consecutive))
 
@@ -685,7 +685,7 @@ def test_pairs_of_checkpoints_named_as_they_appear_are_each_played_once(tmp_path
 def test_two_keys_holding_the_same_bytes_are_two_models_each_played(tmp_path: Path) -> None:
     bucket = DirectoryStorage(tmp_path / "bucket")
     heuristic = scripted(tmp_path, "heuristic", 0)
-    vs = Seating(name="vs heuristic", players=(DIRECT, heuristic), conditions=DEALS, games=2)
+    vs = Seating(name="vs heuristic", players=(DIRECT, heuristic), config=DEALS, games=2)
     ladder = Benchmark(name="ladder", environment=WORLD, seatings=(vs,))
     # Two runs warm-started from one file: the same bytes, two checkpoints.
     file = ArtifactRef(uri="s3://models/init.pt", sha256=sha256(b"init").hexdigest())
@@ -710,7 +710,7 @@ def test_a_new_version_of_a_players_code_reuses_what_an_older_one_played(tmp_pat
 
     def ladder() -> Benchmark:
         heuristic = scripted(tmp_path, "heuristic", 0)
-        vs = Seating(name="vs heuristic", players=(DIRECT, heuristic), conditions=DEALS, games=2)
+        vs = Seating(name="vs heuristic", players=(DIRECT, heuristic), config=DEALS, games=2)
         return Benchmark(name="ladder", environment=WORLD, seatings=(vs,))
 
     first = ladder()
@@ -780,7 +780,7 @@ def test_played_says_who_delivered_each_match_last_what_failed_and_what_is_new(
     third = played(progress, experiment=EXPERIMENT, checkpoints=checkpoints[2:],
                    storages=[bucket], directory=reader)  # fmt: skip
     (failed,) = third.failed
-    assert failed.conditions == {"deal": 1} and not third.delivered
+    assert failed.config == {"deal": 1} and not third.delivered
 
 
 def test_stored_runs_read_once_answer_played_for_every_tournament_asked(tmp_path: Path) -> None:
@@ -791,7 +791,7 @@ def test_stored_runs_read_once_answer_played_for_every_tournament_asked(tmp_path
          storages=[bucket], directory=tmp_path / "first")  # fmt: skip
     evaluate(experiment=EXPERIMENT, environment=WORLD, play=play, run="other",
              matches=[Match(players=(scripted(tmp_path, "a", 1), scripted(tmp_path, "b", 2)),
-                            conditions={"deal": 9}, games=1)],
+                            config={"deal": 9}, games=1)],
              storages=[bucket], directory=tmp_path / "other")  # fmt: skip
     reader = tmp_path / "reader"
     measured = MeasuredStorage(bucket)

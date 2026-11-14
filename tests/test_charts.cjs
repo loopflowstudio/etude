@@ -45,7 +45,7 @@ function renderPage(data, hash = "") {
     experiment: "test", notes: [], environments: [], commits: [], failures: [], generated_ms: 0,
     scores: [{table: "games", value: "win", unit: "games"}], ...data,
     report: {evals: [{kind: "curve", title: "Score"}], perf: [], ml: [], ...data.report},
-    training: {...data.training, metrics: [], runs: data.training.runs.map(r => ({rows: 0, attempts: [], ...r}))},
+    training: {...data.training, metrics: [], runs: data.training.runs.map(r => ({rows: 0, writers: [], ...r}))},
   };
   document.getElementById("data").textContent = JSON.stringify(full);
   const browser = vm.createContext({

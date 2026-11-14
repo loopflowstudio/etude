@@ -9,8 +9,8 @@ import pytest
 
 from etude.cli import main
 from etude.errors import LauncherError
-from etude.job import RunRequest, Until
 from etude.launch.client import default
+from etude.spec import RunRequest, Until
 from etude.storage import default_root
 from etude.train.read import read
 from tests.launch.counting import Counting

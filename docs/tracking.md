@@ -138,6 +138,10 @@ Rules a caller can rely on:
   [Training](training.md#what-is-on-disk) shows the layout. Under the launcher
   the same folder in the bucket also holds `attempts/ATTEMPT.json` and the
   pieces of the job's log it names, under `attempts/ATTEMPT.log/`.
+  The allocation's `RunAttempt.writers` holds each tracking context's metadata,
+  including its run and first-row cutoff. Several writers still use one attempt
+  and one share of the machine's cost. `read(...).writers` gives the contexts
+  that wrote a run; historical `read(...).attempts` warns until 0.5.
   A run's id is unique within its experiment. Runs stored before this
   layout, in a flat `RUN/` folder with a `state.json` outcome, read the same.
   Config, outcome, state and checkpoint records are JSON. Rows are columnar block files (the
@@ -693,7 +697,7 @@ seating or tag a panel names that nothing holds is said so.
 
 **Perf** draws what Etude records for training runs: `Pace` (each step clock
 per wall second between checkpoints), `Elapsed` (wall hours to each
-checkpoint), `Attempts`, and `Flame`, an icicle of the seconds logged under
+checkpoint), `Attempts` (writer lifetimes), and `Flame`, an icicle of the seconds logged under
 `time/` (`time/collection`, `time/collection/inference`: seconds since the
 previous row). **ML details** default to reinforcement learning's `Counters`
 and `Series` over `rl/` keys; pass `perf=` or `ml=` to name an experiment's
