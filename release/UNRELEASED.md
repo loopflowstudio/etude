@@ -104,8 +104,10 @@ experiment; cohorts, which sat between, are removed.
 - **The SSH controller is the server.** `etude server set HOST`; the setting
   file is `~/.etude/server`, and a selection is set again after upgrading.
   "Controller" now means the pass over an experiment file.
-- **The launcher database is a new version.** An older file is refused and
-  left untouched; let its runs finish under the version that made it.
+- **The launcher database is a new version**, `launcher-20.db`. This
+  version neither reads nor changes `launcher-19.db`, so `etude status`
+  does not list the runs queued or running there: let them finish under the
+  version that made them.
   Stored runs, including a `run.json` that names a cohort, still read.
 - **`~/.etude/experiments/launched.json` is gone.** In-flight eval matches
   are read from the launcher's run records; delete the file.

@@ -78,7 +78,8 @@ def _fits(job: Job, committed: Decimal, max_usd: Decimal | None) -> bool:
     return max_usd is None or committed + (job.max_usd or Decimal(0)) <= max_usd
 
 
-def _show_training(request: RunRequest, state: ExperimentState) -> bool:
+def _known_line(request: RunRequest, state: ExperimentState) -> str | None:
+    """The pass's line for a run the state already holds, or None for a new run."""
     prior = next(
         (
             r
@@ -88,12 +89,18 @@ def _show_training(request: RunRequest, state: ExperimentState) -> bool:
         None,
     )
     if prior is None:
-        return False
+        return None
     line = f"{request.id}  {prior.state}"
-    if prior.state == "failed":
+    if prior.state in {"failed", "stopped"}:
         line += f"; --job {request.job.name} --seed {request.seed} --resume"
-    print(line)
-    return True
+    return line
+
+
+def _print_lines(lines: dict[str | None, str]) -> None:
+    """Print the training lines in declared order, once, and forget them."""
+    for line in lines.values():
+        print(line)
+    lines.clear()
 
 
 def advance(
@@ -122,13 +129,16 @@ def advance(
     state = observe(source, experiment.name, keys=listed)
     committed = state.committed_usd
     print(
-        f"{experiment.name}: state from {source.uri('run.json').removesuffix('/run.json')}: {len(state.runs)} training runs, {len(state.eval_runs)} eval runs"
+        f"{experiment.name}: state from {source.uri('run.json').removesuffix('/run.json')}: "
+        f"{_count(len(state.runs), 'training run')}, {_count(len(state.eval_runs), 'eval run')}"
         + (f"; ${committed:.2f} of ${max_usd:.2f} committed" if max_usd is not None else "")
     )
     # A training selection or resume is a pass over those runs alone.
     evaluate = job is None and seed is None and not resume and until is None
     new: list[RunRequest] = []
     requests: list[RunRequest] = []
+    # One line per declared run, keyed by address; a new run's line waits for its placement.
+    lines: dict[str | None, str] = {}
     if mode != "local" and callable(experiment.training):
         assert experiment.file is not None
         requests = read_training_jobs(
@@ -161,10 +171,12 @@ def advance(
                         if existing.status.done
                         else existing.record.launch.spec.max_usd or Decimal(0)
                     )
-            if not resume and _show_training(request, state):
+            known = None if resume else _known_line(request, state)
+            if known is not None:
+                lines[request.id] = known
                 continue
             if not _fits(request.job, committed, max_usd):
-                print(
+                lines[request.id] = (
                     f"{request.id}  new, not queued: --max-usd {max_usd} (${committed:.2f} committed)"
                 )
                 continue
@@ -176,6 +188,7 @@ def advance(
                     }
                 )
             new.append(request)
+            lines[request.id] = f"{request.id}  new"
             committed += request.job.max_usd or Decimal(0)
     jobs = (
         [with_experiment(j, experiment.name) for j in asked(experiment.eval, state)]
@@ -216,7 +229,7 @@ def advance(
         pending = [match for match in new_matches if match.key not in running]
         done = TournamentDecision(
             tournament=spec.tournament.name,
-            new=len(new_matches),
+            new=len(pending),
             running=len(new_matches) - len(pending),
             failed=0 if retry_failed else len(found.failed),
         )
@@ -255,7 +268,8 @@ def advance(
     if planned:
         if quote:
             for request in new:
-                print(f"{request.id}  new, would launch")
+                lines[request.id] = f"{request.id}  new, would launch"
+            _print_lines(lines)
             show_quote(client.quote(planned, pool, rent=rent))
             decisions = [
                 p.model_copy(update={"state": "would launch"}) if p.launched else p
@@ -271,11 +285,12 @@ def advance(
                 for item in client.standing(experiment.name)
             }
             for request in new:
-                print(f"{request.id}  new, {placed[request.id]}")
+                lines[request.id] = f"{request.id}  new, {placed[request.id]}"
             decisions = [
                 p.model_copy(update={"state": placed[p.launched]}) if p.launched else p
                 for p in decisions
             ]
+    _print_lines(lines)
     for decision in decisions:
         _show_tournament(decision)
     if stopped_runs and not quote:
@@ -325,3 +340,7 @@ def _show_tournament(done: TournamentDecision) -> None:
     if done.stopped:
         line += f"; failed runs {', '.join(done.stopped)} (--retry-failed retries them)"
     print(line, flush=True)
+
+
+def _count(number: int, noun: str) -> str:
+    return f"{number} {noun}" if number == 1 else f"{number} {noun}s"

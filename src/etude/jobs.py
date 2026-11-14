@@ -96,7 +96,7 @@ class TrainingRunSummary:
     launch: str
     # Its learner: the first run of the chain of continuations that led to it.
     line: str
-    state: Literal["queued", "running", "finished", "failed"]
+    state: Literal["queued", "running", "stopped", "finished", "failed"]
     checkpoints: Checkpoints
     # The seed it declared, if any.
     seed: int | None = None

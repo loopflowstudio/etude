@@ -89,8 +89,11 @@ def train(
                         None,
                     )
                     if prior is not None and job is None and seed is None and not resume:
+                        line = f"{request.id}  {prior.state}"
+                        if prior.state in {"stopped", "failed"}:
+                            line += f"; --job {request.job.name} --seed {request.seed} --resume"
                         print(
-                            f"{request.id}  {prior.state}",
+                            line,
                             file=sys.stderr if json_output else sys.stdout,
                         )
                         continue
@@ -312,7 +315,9 @@ def _place_inputs(inputs: tuple[Input, ...], directory: Path, artifacts: Path) -
             raise EtudeError(
                 "input_undelivered", 409, detail=f"{given.name}: {uri}: bytes differ"
             ) from None
-        (directory / given.name).symlink_to(path)
+        link = directory / given.name  # a checkpoint folder's members are FOLDER/MEMBER
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(path)
 
 
 def _print_outcome(address: str, experiment: str, *, stopped: bool) -> None:

@@ -161,6 +161,10 @@ subset and refuse a taken address unless resumed. Selection never changes an add
 needs neither `max_hours` nor a git checkout; launch, queue and smoke need
 both. When git is available, local attempts record the current commit.
 
+After Ctrl-C, the next pass lists the run as `stopped` with
+`--job NAME --seed N --resume` to carry on from its last save. It leaves
+stopped and failed runs alone until explicitly resumed.
+
 A file with only `train(config)` and no `training_jobs` still trains with
 `etude train train.py`: one run with seed 0, addressed by the experiment
 alone (`train`).

@@ -64,6 +64,9 @@ def state_of(
         for name, status in statuses.items()
         if status.done and status.outcome != "succeeded"
     }
+    active = {
+        name.removeprefix(experiment + "/") for name, status in statuses.items() if not status.done
+    }
     runs = []
     for data in ours:
         saved = jobs.Checkpoints(
@@ -73,14 +76,16 @@ def state_of(
             for record in data.checkpoints
             if record.artifact.sha256 is not None and record.artifact.size_bytes is not None
         )
-        # A planned stop is not an end: the launcher calls the recipe again.
-        state: Literal["queued", "running", "finished", "failed"] = (
-            data.outcome.state
-            if data.outcome is not None and data.outcome.state != "stopped"
-            else "failed"
-            if data.name in lost
-            else "running"
-        )
+        state: Literal["queued", "running", "stopped", "finished", "failed"]
+        if data.outcome is not None and data.outcome.state != "stopped":
+            state = data.outcome.state
+        elif data.name in lost:
+            state = "failed"
+        elif data.outcome is not None:
+            # Only an active launcher owns automatic continuation after a saved stop.
+            state = "running" if data.name in active else "stopped"
+        else:
+            state = "running"
         runs.append(
             jobs.TrainingRunSummary(
                 name=data.name,

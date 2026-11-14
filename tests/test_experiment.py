@@ -335,6 +335,29 @@ class _Launcher:
         )  # fmt: skip
 
 
+@pytest.mark.parametrize("phase", ["running", "queued", "failed"])
+def test_saved_stop_keeps_the_launchers_continuation_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    training = trainer(bucket, tmp_path)
+    training.finish("stopped", timeout=30)
+    (stopped,) = observe(bucket, "ppo").runs
+    assert stopped.state == "stopped"
+    launcher = _Launcher()
+    launcher.launched.append(
+        RunRequest(
+            id=f"ppo/{stopped.name}",
+            job=Job(name=stopped.launch, experiment="ppo", command="true"),
+        )
+    )
+    launcher.queued = phase == "queued"
+    launcher.outcome = "failed" if phase == "failed" else None
+    monkeypatch.setattr(client, "standing", launcher.standing)
+    (continued,) = observe(bucket, "ppo").runs
+    assert continued.state == ("failed" if phase == "failed" else "running")
+
+
 def test_a_launched_pass_ships_its_checkpoints_and_is_not_launched_twice(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -358,7 +381,7 @@ def test_a_launched_pass_ships_its_checkpoints_and_is_not_launched_twice(
 
     # While it runs, a pass neither launches it again nor its matches.
     (again,) = advance(eval_, source=bucket, mode="launch", rent="cpu8", directory=local)
-    assert (again.new, again.running, again.launched) == (3 * len(DEALS), 3 * len(DEALS), None)
+    assert (again.new, again.running, again.launched) == (0, 3 * len(DEALS), None)
     assert len(launcher.launched) == 1
 
     # The machine: inputs in their folder, the eval run delivered to the bucket.

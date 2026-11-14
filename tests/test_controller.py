@@ -1,5 +1,6 @@
 """One pass deduplicates addresses using only storage and public scheduler records."""
 
+import re
 from decimal import Decimal
 from pathlib import Path
 
@@ -91,6 +92,28 @@ def test_an_experiment_limit_refuses_hand_down_before_any_rental(
     assert b.scheduler.runs() == ()
     assert b.service.creates == 0
     assert "not queued: --max-usd 0.5 ($0.00 committed)" in capsys.readouterr().out
+
+
+def test_a_pass_prints_one_line_per_run_in_declared_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    b = bench(tmp_path)
+    b.scheduler.add_pool(Pool(name="waiting"))
+    monkeypatch.setattr(client, "_client", lambda: b.scheduler)
+    monkeypatch.setattr(client, "standing", b.scheduler.standing)
+    file = tmp_path / "two.py"
+    file.write_text(FILE)
+    advance(
+        read_experiment(file),
+        source=DirectoryStorage(tmp_path / "source"),
+        pool="waiting",
+        mode="queue",
+        max_usd=Decimal("1.5"),
+    )
+    assert capsys.readouterr().out.splitlines()[1:] == [
+        "two/base@0  new, queued",
+        "two/base@1  new, not queued: --max-usd 1.5 ($1.00 committed)",
+    ]
 
 
 def test_wrong_eval_kind_refuses_before_training_is_submitted(tmp_path: Path) -> None:
@@ -325,6 +348,7 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
     assert measured.listings == 1 and measured.requests == 0
     second = capsys.readouterr()
     assert "two/fine@0  queued" in second.out
+    assert re.search(r"eval free: 0 new, [1-9]\d* running", second.out)
     assert "launched_pass_failed" in second.err
     assert len(b.scheduler.runs(done=True)) == 3
     assert first_counts == Counts(database=39)
