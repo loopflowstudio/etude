@@ -118,3 +118,7 @@ Focused checks (2026-11-13):
 
 Mypy on the 13 touched Python files, ruff check, ruff format --check and
 `git diff --check` pass. Full suites and acceptance remain for gate.
+
+Compression: `_resumed` returns `_Finished` (no refusal text is parsed); both
+file forms run through `_train_each`, which refuses a sole finished run.
+`uv run pytest tests/train/test_addresses.py tests/train/test_local.py tests/test_page.py -q -k 'selection or local_stop_resume or local_declarations or experiment_override'` — 11 passed.

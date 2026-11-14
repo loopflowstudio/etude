@@ -382,9 +382,8 @@ class Pages:
 
     def _build(self, file: Path, listings: Sequence[dict[str, str]]) -> Page:
         if not file.is_file():
-            return build(
-                self.storage, file, experiment=self.experiment
-            )  # which says why there is no page
+            # The build says why there is no page.
+            return build(self.storage, file, experiment=self.experiment)
         runs = tuple(
             self._versions(place, self.experiment or file.stem, listed)
             for place, listed in zip(self._places, listings, strict=True)

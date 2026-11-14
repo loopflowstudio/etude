@@ -70,19 +70,17 @@ def train(
         prepared: list[_Training | _Finished] = []
         refusals: list[str] = []
         for request in requests:
-            address = request.id
             try:
-                recipe = load_job_function(request.job, current=True)
-                if address is None:
+                if request.id is None:
                     raise ValueError(
                         "local training needs an addressed request; return a Job or give RunRequest.id"
                     )
                 prepared.append(
                     _prepare(
                         file,
-                        recipe,
-                        label=request.job.experiment or label,
-                        identity=address,
+                        load_job_function(request.job, current=True),
+                        label=request.job.experiment or label,  # a job may name its own
+                        identity=request.id,
                         job=request.job.name,
                         initial=request.job.config,
                         config=config,
@@ -95,32 +93,10 @@ def train(
             except (EtudeError, LauncherError, ValueError, TypeError) as error:
                 if len(requests) == 1:
                     raise
-                if isinstance(error, EtudeError) and error.code == "run_already_finished":
-                    assert address is not None  # _prepare reached the stored run's outcome.
-                    prepared.append(
-                        _Finished(
-                            address=address,
-                            experiment=request.job.experiment or label,
-                            position=str(error).split(": ", 1)[1].split(";", 1)[0],
-                        )
-                    )
-                else:
-                    refusals.append(f"{address or request.job.name}: {error}")
+                refusals.append(f"{request.id or request.job.name}: {error}")
         if refusals:
             raise EtudeError("selection_refused", detail="\n".join(refusals))
-        for attempt in prepared:
-            if isinstance(attempt, _Finished):
-                print(
-                    f"{attempt.address} {attempt.position}",
-                    file=sys.stderr if json_output else sys.stdout,
-                )
-                if json_output:
-                    _print_outcome(attempt.address, attempt.experiment, stopped=False)
-                continue
-            result = _train(attempt, json_output=json_output)
-            if result:
-                return result
-        return 0
+        return _train_each(prepared, json_output=json_output)
     if job not in (None, file.stem) or seed not in (None, 0):
         raise ValueError(
             "select the file's sole job and seed 0; define runs() for other jobs or seeds"
@@ -130,20 +106,22 @@ def train(
         found = runpy.run_path(str(file)).get("train")
         if not callable(found):
             raise ValueError(f"{file.name}: define train(config)")
-        return _train(
-            _prepare(
-                file,
-                cast(Callable[[BaseModel], object], found),
-                label=label,
-                identity=label,
-                job=file.stem,
-                initial=None,
-                config=config,
-                seed=0,
-                resume=resume,
-                until=until,
-                seconds=seconds,
-            ),
+        return _train_each(
+            [
+                _prepare(
+                    file,
+                    cast(Callable[[BaseModel], object], found),
+                    label=label,
+                    identity=label,
+                    job=file.stem,
+                    initial=None,
+                    config=config,
+                    seed=0,
+                    resume=resume,
+                    until=until,
+                    seconds=seconds,
+                )
+            ],
             json_output=json_output,
         )
     finally:
@@ -163,7 +141,8 @@ def _prepare(
     resume: bool,
     until: Until | None,
     seconds: float | None,
-) -> _Training:
+) -> _Training | _Finished:
+    """Check one run's identity and build its attempt, touching nothing stored."""
     base = default_root()
     root = run_directory(base, label, identity)[1]
     prior = RunFiles(root).run_file()
@@ -177,9 +156,10 @@ def _prepare(
     text = settings.model_dump_json(round_trip=True)
     settings = kind.model_validate_json(text)
     if prior is not None and resume:
-        seed, until = _resumed(
-            base, root, prior, label, identity, config=text, seed=seed, until=until
-        )
+        resumed = _resumed(base, root, prior, label, identity, config=text, seed=seed, until=until)
+        if isinstance(resumed, _Finished):
+            return resumed
+        seed, until = resumed
     elif prior is not None:
         validate_resume(prior, config=text, seed=seed)
         raise run_name_taken(run_address(identity, label))
@@ -218,9 +198,11 @@ def _prepare(
 
 @dataclass(frozen=True)
 class _Finished:
+    """A finished run with no later target: skipped in a selection, refused alone."""
+
     address: str
     experiment: str
-    position: str
+    position: str  # every clock's furthest value, as `updates=6`
 
 
 @dataclass(frozen=True)
@@ -233,8 +215,27 @@ class _Training:
     seconds: float | None
 
 
-def _train(attempt: _Training, *, json_output: bool) -> int:
-    result = 0
+def _train_each(attempts: list[_Training | _Finished], *, json_output: bool) -> int:
+    """Train the checked runs in order, ending at the first saved stop."""
+    for attempt in attempts:
+        if isinstance(attempt, _Training):
+            if _train(attempt, json_output=json_output):
+                return 75
+            continue
+        finished = f"finished at {attempt.position}"
+        if len(attempts) == 1:
+            raise EtudeError(
+                "run_already_finished", detail=f"{finished}; give --until with a later target"
+            )
+        print(f"{attempt.address} {finished}", file=sys.stderr if json_output else sys.stdout)
+        if json_output:
+            _print_outcome(attempt.address, attempt.experiment, stopped=False)
+    return 0
+
+
+def _train(attempt: _Training, *, json_output: bool) -> bool:
+    """Call the recipe as one attempt; true when it stopped after saving."""
+    stopped = False
     values = dict(attempt.values)
     if attempt.seconds is not None:
         values["ETUDE_DEADLINE"] = datetime.fromtimestamp(
@@ -247,10 +248,10 @@ def _train(attempt: _Training, *, json_output: bool) -> int:
             with redirect_stdout(sys.stderr) if json_output else nullcontext():
                 attempt.recipe(attempt.settings)
         except Stopped:
-            result = 75
+            stopped = True
     if json_output:
-        _print_outcome(attempt.address, attempt.experiment, stopped=result == 75)
-    return result
+        _print_outcome(attempt.address, attempt.experiment, stopped=stopped)
+    return stopped
 
 
 def _print_outcome(address: str, experiment: str, *, stopped: bool) -> None:
@@ -275,8 +276,8 @@ def _resumed(
     config: str,
     seed: int | None,
     until: Until | None,
-) -> tuple[int | None, Until | None]:
-    """The seed and target a resumed attempt uses, or the refusal that leaves the run as it is.
+) -> tuple[int | None, Until | None] | _Finished:
+    """The seed and target a resumed attempt uses, or where the run already finished.
 
     An omitted seed or target is the stored one. A finished run resumes only
     towards a target beyond everything it has logged, saved or published.
@@ -301,10 +302,10 @@ def _resumed(
             clock.name: max(at.get(clock.name, 0) for at in positions) for clock in prior.clocks
         }
         if until is None or until.value <= reached[until.clock]:
-            position = ", ".join(f"{clock}={value:g}" for clock, value in reached.items())
-            raise EtudeError(
-                "run_already_finished",
-                detail=f"finished at {position}; give --until with a later target",
+            return _Finished(
+                address=run_address(run, label),
+                experiment=label,
+                position=", ".join(f"{clock}={value:g}" for clock, value in reached.items()),
             )
     return seed, until
 
