@@ -209,8 +209,8 @@ merge, so the branch keeps two records: `RunWriter` (a tracking context, with
 its first-row cutoff, linked to an optional allocation id) and `RunAttempt`
 (the allocation). Built and reversible; nobody has accepted it. Choice left
 open: (a) keep `RunWriter` beside `RunAttempt`; (b) one `RunAttempt` with
-writers as a sub-part of it; (c) another name for the writer. This does not
-touch the single stored `RunRecord`, which remains accepted and unbuilt.
+writers as a sub-part of it; (c) another name for the writer. The single
+stored `etude.records.RunRecord` is separate and built (`dbf799e`).
 
 The shared `RunRecord` must own the persisted job digest. The observed
 `TrainingRun.job` is a report label derived from configs seen and can change;

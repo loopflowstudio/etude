@@ -20,7 +20,8 @@ API and prove nothing about the current tree.
 
 ## Delete — do not maintain
 
-Built in this cut:
+Built in this cut (committed at `dbf799e`; grep finds no `etude.tracking`,
+`RunDeclaration` or `RunFile` left in src, tests or docs):
 
 - `etude.tracking` is deleted. `etude.run` owns shared declaration, local
   files, delivery, listing and live `Run`. `TrainingRun(Run)` lives in
@@ -87,8 +88,7 @@ launch source/resume/layout/cli, jobs, continuation, page, experiment), mypy
 (174 files), ruff check and format pass. Full suite not rerun; gate owns it.
 
 The 4,096-run fixture selects 32 records plus one keyed row in 2 SQL statements;
-EXPLAIN uses `runs_experiment` and the primary key. Its first pass took
-0.001274 s (before deleting the redundant admission query; fixture cost only).
+EXPLAIN uses `runs_experiment` and the primary key.
 Existing count pins pass. PR #103 stays draft.
 
 Acceptance remains the design's fresh/stop/resume example; two models in one
