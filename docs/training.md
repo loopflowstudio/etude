@@ -630,6 +630,9 @@ together under `selection_refused`; one selected run reports its own error.
 Either way every selected run is left untouched, with new run addresses still
 available.
 
+Local training places each distinct input once for the selected runs. Their
+input names link to that read-only copy until the pass ends.
+
 To start from a run of another experiment, read that experiment yourself:
 `start=observe("s3://my-bucket/runs", "imitate").run("imitate/base@0").final`
 (`etude.experiment.observe`).

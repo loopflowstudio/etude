@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from functools import partial
 from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from etude.cache import Cache
 from etude.cli import main
 from etude.eval.match import environment, evaluate
 from etude.eval.records import Code, Inference, Match
@@ -19,6 +21,69 @@ from etude.storage import DirectoryStorage
 from etude.train.read import read
 from etude.train.state import read_state
 from tests.eval.games import play_checkpoint_folder
+
+
+def test_local_seeds_share_one_input_copy_per_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    # Larger-than-cache inputs must also be read and placed just once per pass.
+    monkeypatch.setattr("etude.storage.Cache", partial(Cache, max_bytes=0))
+    content = b"initial weights"
+    source = tmp_path / "weights.pt"
+    source.write_bytes(content)
+    reads: list[int] = []
+    get_range = DirectoryStorage.get_range
+
+    def measured(storage: DirectoryStorage, key: str, start: int, length: int) -> bytes:
+        body = get_range(storage, key, start, length)
+        if storage.root / key == source:
+            reads.append(len(body))
+        return body
+
+    monkeypatch.setattr(DirectoryStorage, "get_range", measured)
+    file = tmp_path / "shared_inputs.py"
+    file.write_text(f"""
+import json
+from pydantic import BaseModel
+from etude.jobs import TrainingJob
+from etude.spec import Input
+from etude.train.tracking import track
+
+class Config(BaseModel):
+    pass
+
+def train(config: Config) -> None:
+    with track(config=config) as run:
+        weights = run.input("weights")
+        alias = run.input("alias")
+        assert weights.read_bytes() == alias.read_bytes() == {content!r}
+        assert weights.is_symlink() and alias.is_symlink()
+        assert weights.samefile(alias)
+        held = weights.resolve()
+        (run.out / "input.json").write_text(json.dumps({{
+            "held": str(held), "directory": str(weights.parent),
+            "copies": len(list(held.parent.iterdir())),
+        }}))
+
+def training_jobs() -> list[TrainingJob]:
+    return [TrainingJob(name="fit", train=train, config=Config(), seeds=(0, 1), inputs=tuple(
+        Input(name=name, key="weights.pt", uri={source.as_uri()!r},
+              sha256={sha256(content).hexdigest()!r}, size_bytes={len(content)})
+        for name in ("weights", "alias")))]
+""")
+    assert main(["train", str(file)]) == 0
+    records = [
+        json.loads((tmp_path / f"home/track/shared_inputs/fit@{seed}/out/input.json").read_text())
+        for seed in (0, 1)
+    ]
+    assert reads == [len(content)]
+    assert records[0]["held"] == records[1]["held"]
+    assert records[0]["directory"] != records[1]["directory"]
+    assert all(record["copies"] == 1 for record in records)
+    assert all(not Path(record["directory"]).exists() for record in records)
+    assert not Path(records[0]["held"]).exists()
+    assert source.read_bytes() == content
 
 
 @pytest.mark.parametrize(

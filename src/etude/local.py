@@ -25,7 +25,7 @@ from typing import cast
 
 from pydantic import BaseModel
 
-from etude.cache import Artifact, ContentMismatch, Corrupt
+from etude.cache import Artifact, Content, ContentMismatch, Corrupt
 from etude.call import changed_config, config_type
 from etude.declarations import read_training_jobs, select_runs
 from etude.errors import EtudeError, LauncherError
@@ -98,6 +98,7 @@ def train(
                         )
                         continue
                     identity = run_address(prior.name, label) if prior is not None else request.id
+                    directory = Path(folder) / "runs" / request.id
                     attempt = _prepare(
                         file,
                         load_job_function(request.job, current=True),
@@ -111,11 +112,10 @@ def train(
                         until=until or request.job.until,
                         seconds=seconds,
                         environment=request.job.environment,
+                        inputs_directory=directory,
                     )
                     if isinstance(attempt, _Training):
-                        directory = Path(folder) / request.id
-                        _place_inputs(request.job.inputs, directory)
-                        attempt.values["ETUDE_INPUTS_DIR"] = str(directory)
+                        _place_inputs(request.job.inputs, directory, Path(folder) / "artifacts")
                     prepared.append(attempt)
                 except (EtudeError, LauncherError, ValueError, TypeError) as error:
                     if len(requests) == 1:
@@ -169,6 +169,7 @@ def _prepare(
     until: Until | None,
     seconds: float | None,
     environment: tuple[Variable, ...] = (),
+    inputs_directory: Path | None = None,
 ) -> _Training | _Finished:
     """Check one run's identity and build its attempt, touching nothing stored."""
     base = default_root()
@@ -209,6 +210,8 @@ def _prepare(
     }
     if "ETUDE_HOME" in os.environ:
         values["ETUDE_HOME"] = os.environ["ETUDE_HOME"]
+    if inputs_directory is not None:
+        values["ETUDE_INPUTS_DIR"] = str(inputs_directory)
     if seed is not None:  # a historical run may have declared none
         values["ETUDE_SEED"] = str(seed)
     if commit.returncode == 0:
@@ -269,13 +272,11 @@ def _train(attempt: _Training, *, json_output: bool) -> bool:
         values["ETUDE_DEADLINE"] = datetime.fromtimestamp(
             time.time() + attempt.seconds, UTC
         ).isoformat()
-    with TemporaryDirectory(prefix="etude-inputs-") as folder:
-        values.setdefault("ETUDE_INPUTS_DIR", folder)
-        return _call_training(attempt, values, json_output=json_output)
+    return _call_training(attempt, values, json_output=json_output)
 
 
-def _place_inputs(inputs: tuple[Input, ...], directory: Path) -> None:
-    """Locate and verify inputs during the pass check, retaining them for training."""
+def _place_inputs(inputs: tuple[Input, ...], directory: Path, artifacts: Path) -> None:
+    """Verify each distinct input once per pass and link the run's names to it."""
     directory.mkdir(parents=True)
     for given in inputs:
         uri = given.uri
@@ -286,11 +287,15 @@ def _place_inputs(inputs: tuple[Input, ...], directory: Path) -> None:
                     detail=f"{given.name}: bucket key {given.key!r}; give uri or run for local training",
                 )
             uri = DirectoryStorage(default_root()).uri(f"{given.run}/{given.key}")
+        content = Content(sha256=given.sha256, size_bytes=given.size_bytes)
+        path = artifacts / content.name
         try:
-            place_artifact(
-                Artifact(location=uri, sha256=given.sha256, size_bytes=given.size_bytes),
-                directory / given.name,
-            )
+            if not path.exists():
+                place_artifact(
+                    Artifact(location=uri, sha256=given.sha256, size_bytes=given.size_bytes),
+                    path,
+                )
+                path.chmod(0o444)
         except FileNotFoundError:
             raise EtudeError(
                 "input_undelivered", 404, detail=f"{given.name}: {uri}: file is missing"
@@ -299,6 +304,7 @@ def _place_inputs(inputs: tuple[Input, ...], directory: Path) -> None:
             raise EtudeError(
                 "input_undelivered", 409, detail=f"{given.name}: {uri}: bytes differ"
             ) from None
+        (directory / given.name).symlink_to(path)
 
 
 def _call_training(attempt: _Training, values: dict[str, str], *, json_output: bool) -> bool:
