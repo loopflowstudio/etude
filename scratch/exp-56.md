@@ -99,6 +99,13 @@ with spaces and remote-path refusals. Test readers of a checkpoint record use
 `.path` too; one stored-attempt expectation gained `writers: []` (stale since
 `620bfd6`).
 
+Sixth-review corrections are the next build (design, "sixth concept review"):
+`etude checkpoints` defaults its source like the other readers; launched-run
+lookups that find nothing name the remedy for a local run; evaluation.md
+stops naming `evaluate`/`hold` as calls. Text and one default: no schema,
+query or stored-format change. Focused checks: tests/train/test_cli.py,
+tests/launch/test_cli.py and the docs formatter.
+
 Hanabi command receipt: isolated ETUDE_HOME with spaces; run updates=2,
 resume --until updates=3, eval (8 new/8 played), eval (0 new), report, and
 the docs' statsdb(default_root()) query (16 team rows, mean score 0.9375).

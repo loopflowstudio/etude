@@ -212,3 +212,18 @@ Outside evidence: OpenSpiel 2.0.2's CPython 3.12 bindings installed and imported
 on macOS arm64 and Linux amd64 (uv's Python 3.12 Debian container). PyPI wheel
 index: https://pypi.org/project/open-spiel/2.0.2/ . Native Hanabi accepted small
 colors/ranks/hands and two players. No fallback game or JAX was needed.
+
+## Sixth concept review (2026-11-13)
+
+Run at `67ebe7c`, ETUDE_HOME `/tmp/exp56 review6 8zKT` (removed after):
+`etude checkpoints` -> `etude: Missing option '--source'.` (exit 1);
+`etude continue --run coin-seed-0 --until updates=30` and the same with
+`coin/coin-seed-0` -> `etude: no run '...'`; `etude runs` printed nothing.
+`etude checkpoints --source "$ETUDE_HOME/track"` listed four checkpoints.
+
+Assumption, reversible: `hold` the function is deprecated, but the
+evaluation and report docs keep "hold" / "held checkpoint" as prose for the
+checkpoint a benchmark's seatings are played for. Only sentences telling the
+reader to call `hold` or `evaluate` are corrected. Open for demo: should the
+prose verb follow the call (`evaluating`, `run.play`), and if so with which
+word? `etude eval` help already says "pass" for one batch run.
