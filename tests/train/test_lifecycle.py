@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from etude.carriage import put_back, restore_set
+from etude.errors import EtudeError
 from etude.experiment import observe
 from etude.out import OutFile, OutFiles
 from etude.run import sync
@@ -38,6 +39,19 @@ def test_recipe_uses_launch_target_for_its_clock_or_its_local_default(
             assert run.until("updates", default=3) == 3
             with pytest.raises(ValueError, match="undeclared clock"):
                 run.until("typo", default=2)
+
+
+def test_target_for_a_clock_the_run_never_counts_stops_before_the_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ETUDE_UNTIL_CLOCK", "steps")
+    monkeypatch.setenv("ETUDE_UNTIL_VALUE", "5")
+    with local_launch(out=tmp_path / "run", experiment="recipe"):
+        with pytest.raises(EtudeError, match="until_clock_undeclared"):
+            with track() as run:
+                for _ in run.steps("updates", to=20):
+                    run.log({"loss": 1.0})
+    assert run.at("updates") == 0
 
 
 @pytest.mark.parametrize(

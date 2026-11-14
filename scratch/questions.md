@@ -139,3 +139,31 @@ misprinted compact addresses and no report override; the design lists the fixes.
 
 Assumption, reversible: never-started runs under `--resume` stay refused
 (Open 6); a changed config still points to `--experiment` (Open 7).
+
+## Selection recovery probe (2026-11-13)
+
+Concept review on `822eb553`: `uv run python` called `etude.cli.main` against
+a temporary recipe, isolated `ETUDE_HOME`, three seeds and three steps.
+Only a Pydantic counter was saved; no model training, rental, network or
+artificial load. Seed 1 raised `Stopped` once after saving step 1.
+
+Observed command receipt:
+
+```text
+etude train sweep.py                         exit 75; sweep@0 finished, sweep@1 stopped
+etude train sweep.py --resume                exit 1
+etude: selection_refused: sweep@2: run_not_found: sweep@2
+refusal_preserved_all_files=True
+etude train sweep.py --resume --seed 1        exit 0; coordinates and counts [1, 2, 3]
+etude train sweep.py --seed 2                 exit 0
+etude train sweep.py --resume --json          exit 0; three finished objects, selection order
+etude train sweep.py --seed 0 --config '{"rate":0.2}'
+etude: run_identity_conflict: rate was 0.1, is 0.2; use --resume --until CLOCK=TARGET to train this run further; choose --experiment NAME for a changed config
+etude train sweep.py --seed 0 --config '{"rate":0.2}' --experiment wide
+exit 0; experiment labels ["sweep", "wide"]
+```
+
+The mixed selection was recovered with explicit seed commands, not by
+changing the assumption. Open 6 and 7 remain unanswered product choices;
+the review adds no reply or authorization from Jack Heart. The temporary
+fixture was removed and no processes were left running.

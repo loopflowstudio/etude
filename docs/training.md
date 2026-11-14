@@ -209,7 +209,9 @@ carried on from a save at 400 it starts at 401.
 - **The target is the launch's when it gave one**, else `to`. `etude train
   train.py --until updates=2000`, a job's `until` and `etude continue --run
   RUN --until updates=6400` (for a launched run) all set it without changing
-  the config.
+  the config. A target on a clock the run does not count fails before the
+  loop with `until_clock_undeclared`; a later loop's clock that is the target
+  must be named in `track(clocks=)`.
 - **Inside the loop the stepped clock is filled in**: `run.log(metrics)` and
   `run.checkpoint(policy=model)` are placed at the current value. Other
   declared clocks are yours to give: `run.log(metrics, training_seconds=t)`.

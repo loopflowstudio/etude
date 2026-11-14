@@ -386,6 +386,57 @@ Keep: single-run behavior, the exit codes, stored ids, state publication, row
 replacement, continuation and budgets. Add focused tests for 1-5 by result
 (printed refusal, exit code, which runs have rows); no new counting path.
 
+## Selection recovery decision (concept review, 2026-11-13)
+
+The single-run experience and model stand: a job plus seed is a run;
+`train(config)` is one attempt; registered state is a whole save selected by
+its pointer; a checkpoint is a separately published player input. A planned
+stop keeps the run and its config, while continuation makes a child. Neither
+writers nor saves need to become another thing the recipe author manages.
+Keep independent writer cutoffs and cumulative allocation/rental limits.
+
+The biggest mismatch is the command over several runs. A controlled CLI
+walkthrough on this tree finished seed 0, saved and stopped seed 1, and left
+seed 2 unstarted. Repeating the selection with `--resume` refused before any
+work; all file bytes were unchanged. Selecting seed 1 resumed its saved counts
+at 2 and finished at 3. Receipt: `questions.md` (Selection recovery probe).
+This preserves each run's identity but makes recovery of the original
+selection require different commands for its started and unstarted members.
+
+Open 6 is a product choice, not a missed preflight fix. The two complete
+experiences are:
+
+- **Existing:** `etude train sweep.py --resume --seed 1`, then
+  `etude train sweep.py --seed 2` (and each remaining seed). New and resumed
+  commands remain distinct for every member.
+- **Proposed, unanswered:** `etude train sweep.py --resume` resumes started
+  members, skips finished ones without a later target, and starts unstarted
+  members. Here `--resume` means finish the selection. It must still preflight
+  every member before executing any, preserve existing config/seed refusals,
+  and stop the selection at the first saved stop or failure. A missing stored
+  run cannot be treated as an empty successful read after an I/O failure.
+
+If the second experience is chosen, the command distinguishes new versus
+resumed per selected member; `RunRecord` remains the only durable identity,
+and a first attempt remains different from another attempt. No sweep record,
+new storage layout, or relaxed identity check follows from this choice.
+The counterexample to keep is a later conflicting member: neither extending
+an earlier member nor creating an unstarted one may happen before refusal.
+
+Open 7 also stands: changing `rate` was refused with the two documented
+remedies; `--experiment wide` created `wide@0`, a separate experiment from
+`sweep`. Keeping variants together would require a new naming interaction;
+do not reinterpret `--job`, which Jack Heart said should select. The existing
+Python route is named jobs in `runs()`. Whether the CLI also needs a quick
+variant route is unanswered, not implied by removing a wrapper or a record.
+
+Next show: the mixed finished/stopped/unstarted selection above, then two
+rates on the same report. Keep the usage docs' existing behavior until these
+choices are answered. When updating the QA skill, replace its obsolete
+`local_launch`/`etude.train.run` recipe walkthrough with the current
+`etude.train.tracking` and `etude train FILE [--resume]` paths; do not teach
+the proposed mixed-selection behavior as built. No code changes here.
+
 ## Manabot (MTG-329)
 
 Separate Task; do not edit its checkout here. The full loop sketch, recipe

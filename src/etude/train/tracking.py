@@ -533,9 +533,20 @@ class TrainingRun(Run):
 
         Clock values are numeric, including fractional time clocks. An undeclared
         clock raises, so a misspelled name cannot silently ignore a launch target.
+        A target for a clock the run has not declared raises too: a loop over a
+        clock first declared later must name it in `track(clocks=)`.
         """
         if clock not in self._clock_names:
             raise ValueError(f"undeclared clock: {clock!r}")
+        if self._until_clock is not None and self._until_clock not in self._clock_names:
+            raise EtudeError(
+                "until_clock_undeclared",
+                422,
+                detail=(
+                    f"the target names {self._until_clock}; this run counts "
+                    f"{', '.join(self._clock_names)}"
+                ),
+            )
         if clock == self._until_clock and self._until_value is not None:
             return self._until_value
         return default

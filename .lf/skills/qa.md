@@ -59,7 +59,7 @@ publish, land or choose the next Graph step from here.
 
 Build a lab outside the repo (e.g. `/tmp/lab`) with its own `ETUDE_HOME`:
 
-1. Write training runs with `etude.train.run.track(experiment=..., run=..., job=...,
+1. Write training runs with `etude.train.tracking.track(experiment=..., run=..., job=...,
    clocks=[...], directory=RUNS)`, `run.log(...)`, `run.checkpoint(file, updates=N)`,
    `run.finish(timeout=60)`, via `uv run --project REPO python script.py`. Track the
    same run again to make a resumed attempt.
@@ -209,14 +209,34 @@ so bucket reads take minutes there. `tests.run.storage.MeasuredStorage` counts r
 
 ## Etude: a recipe's out, planned stops and retries on a fresh host
 
-Local recipe path: a lab with `train.py` written as `docs/tracking.md` shows
-(state in `run.out`, `raise Stopped`) and a driver calling it under
-`local_launch(out=DIR, experiment=NAME)`. Stop it with `ETUDE_STOP_FILE=FILE`
-and `touch FILE` from a background `sleep`; read rows with
-`etude.train.read.read(DIR, NAME, basename(DIR)).points(metric, clock).x`
-(`metrics()` is a method; a launched run on the local pool reads as
-`read(ETUDE_HOME/track, EXPERIMENT, RUN)`) and attempt starts from `DIR/etude/RUN/metrics/*.json`
-(`resumed_at`). Launch a plain file defining only `runs()` to check that its
+Local recipe path: a lab outside the repo with its own `ETUDE_HOME` and a
+wrapper script `bin/etude` that runs `exec uv run --project REPO --extra train
+etude "$@"` (zsh will not split a command held in a variable). Copy
+`examples/coin.py`, or write a recipe as `docs/training.md` shows
+(`track(config=config)`, `run.resume(...)`, `run.steps(...)`, `run.save()`),
+with a `time.sleep` per step so a stop lands mid-run. Then:
+
+- `etude train FILE [--until clock=N]` (0 finished, 75 stopped); runs land in
+  `ETUDE_HOME/track/ADDRESS/` (`run.json`, `outcome.json`, `metrics/`, `out/`).
+- Ctrl-C: a background job in a non-interactive shell ignores SIGINT, so send it
+  from a tiny Python driver (`Popen(argv)`, `sleep`, `send_signal(SIGINT)`,
+  print `wait()`). `--seconds 2` gives a deadline stop instead.
+- `etude train FILE --resume [--until ...]`; refusals to check: rerun without
+  `--resume` (`run_name_taken`), resume a finished run (`run_already_finished`),
+  changed `--config` (`run_identity_conflict`), a target on a clock the recipe
+  does not count (`until_clock_undeclared`). Never pipe a run into `head`: the
+  SIGPIPE fails the run.
+- A `runs()` file with `seeds=(0, 1, 2)` trains `NAME@0..2` in order; `--job`
+  and `--seed` select. Do not teach `--resume` as finishing a partly started
+  selection (an unstarted member is refused; Open 6).
+- Read rows with `etude.train.read.read(ETUDE_HOME/track, EXPERIMENT, ADDRESS)
+  .points(metric, clock).x`; `etude checkpoints` lists stored checkpoints;
+  `etude report FILE` writes `ETUDE_HOME/track/reports/NAME.html`.
+- Hanabi: `bin/hetude` running `uv run --extra train --extra eval --extra hanabi
+  etude` from the repo root, then `docs/hanabi.md`'s commands; 2000 updates take
+  long enough to interrupt at ~5 s.
+
+Launch a plain file defining only `runs()` to check that its
 stem supplies the experiment. Also check an explicit `Job.experiment`: plain
 files preserve it, while files defining `report()` or `eval(state)` require
 their own stem.
