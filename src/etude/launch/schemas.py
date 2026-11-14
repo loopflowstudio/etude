@@ -16,8 +16,7 @@ from etude.launch.records import Cause, Limit, Outcome, Output, Prepared
 from etude.launch.storage.download import Download
 from etude.launch.storage.s3 import Grant
 from etude.launch.usage import Transfer
-from etude.records import RunProgress as Result
-from etude.records import RunWriter, Tally
+from etude.records import RunProgress, RunWriter, Tally
 from etude.spec import Input, Preparation, Record, Runtime, Until, Variable
 
 
@@ -186,7 +185,7 @@ class AttemptRecord(Record):
     """
 
     started_at: datetime | None = None
-    result: Result = Field(default_factory=Result)
+    result: RunProgress = Field(default_factory=RunProgress)
     exited: Finished | None = None
     delivered: bool = False
     log_ends: tuple[int, ...] | None = None

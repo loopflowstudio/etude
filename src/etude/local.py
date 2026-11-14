@@ -68,12 +68,11 @@ def run(
         label = experiment or file.stem
         base = default_root()
         if resume is not None:
-            if experiment is None:
+            if experiment is None:  # EXPERIMENT/RUN names its own experiment
                 label = resume.rpartition("/")[0] or label
-            if config is None:
-                stored = RunFiles(
-                    run_directory(base, label, resume.removeprefix(label + "/"))[1]
-                ).run_file()
+            identity = run_address(resume, label).removeprefix(f"{label}/")
+            if config is None:  # the run's own config, like its seed and target
+                stored = RunFiles(run_directory(base, label, identity)[1]).run_file()
                 if stored is None:
                     raise EtudeError("run_not_found", 404, detail=run_address(resume, label))
                 config = stored.config_json
@@ -82,7 +81,6 @@ def run(
         text = settings.model_dump_json(round_trip=True)
         settings = config_type(train).model_validate_json(text)
         if resume is not None:
-            identity = run_address(resume, label).removeprefix(f"{label}/")
             seed, until = _resumed(base, label, identity, config=text, seed=seed, until=until)
         else:
             seed = 0 if seed is None else seed

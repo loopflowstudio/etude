@@ -256,12 +256,12 @@ def _summary(run: RunData) -> RunSummary:
         dropped=run.outcome.counters.dropped if run.outcome else None,
         writers=tuple(
             WriterSummary(
-                host=attempt.host,
-                pod=attempt.pod,
-                started=attempt.started_ms / 1000 - start,
-                last_row=last[attempt.writer] / 1000 - start if attempt.writer in last else None,
+                host=writer.host,
+                pod=writer.pod,
+                started=writer.started_ms / 1000 - start,
+                last_row=last[writer.writer] / 1000 - start if writer.writer in last else None,
             )
-            for attempt in run.writers
+            for writer in run.writers
         ),
         at=run.reached,
     )

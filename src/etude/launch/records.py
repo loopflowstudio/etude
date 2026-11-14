@@ -409,7 +409,6 @@ class RunAttempt(Record):
     The internal session identifies its journal; it is not the allocation.
     """
 
-    writers: tuple[RunWriter, ...] = ()
     id: str
     run: str
     session: str
@@ -431,6 +430,8 @@ class RunAttempt(Record):
     added: bool = False  # placed on a session that already existed
     prepared: Prepared | None = None  # from the finished journal, when the job prepares
     tally: Tally | None = None  # where the job last said its counted work stood
+    # Tracking and eval contexts this allocation ran; they add no attempt or cost.
+    writers: tuple[RunWriter, ...] = ()
 
 
 class Status(Record):

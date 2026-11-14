@@ -379,7 +379,6 @@ class TrainingRun(Run):
         self._finished = False
         # Checkpoint changes not yet sealed; only the writer thread touches it.
         self._dirty = False
-        # The clocks last written to the launcher's progress file.
         self._writer = threading.Thread(target=self._write, name="etude-writer", daemon=True)
         self._shipper = threading.Thread(target=self._deliver, name="etude-shipper", daemon=True)
         self._report_progress()

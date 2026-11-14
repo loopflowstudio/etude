@@ -78,16 +78,17 @@ Initial run/record/scope acceptance and the first three review corrections
 are built. Exact focused check receipts and earlier API corrections remain at
 `6f70baa:scratch/exp-56.md`; they do not replace gate's full acceptance.
 
-Fourth-review corrections built: `experiment_not_named` names `etude run
-FILE`, `etude launch FILE` and explicit `track(experiment=..., run=...)`;
-the focused test asserts the remedy. Training explains who calls `train`,
-local files outside the launcher database and their report/checkpoint reads;
-launcher help says every launched run. The layout includes checkpoint records
-and `run.json`'s qualified id. Local listing/branching, direct calls and id/name
-choices remain in `questions.md`.
-Check: `uv run pytest tests/train/test_track.py -k test_a_launched_run_is_its_experiment_files_and_refuses_another`
-— **1 passed, 13 deselected**; focused ruff check/format and diff check pass.
-Full acceptance stays with gate; PR #103 stays draft.
+Fourth-review corrections (refusal remedies, local-versus-launched docs, stored
+layout) are built; receipt at `416847a:scratch/exp-56.md`. Local
+listing/branching, direct calls and id/name choices remain in `questions.md`.
+
+Compress pass: one writer merge in the launcher database, `RunProgress` under
+one name, resume identity resolved once in `etude.local`; no behavior change.
+Check: ruff, format, `uv run mypy` (175 files) pass; `uv run pytest
+tests/test_jobs.py tests/eval/test_context.py tests/eval/test_match.py
+tests/train/test_local.py tests/launch/test_worker_attempts.py
+tests/launch/test_scheduler.py tests/train/test_tables.py tests/test_page.py`
+— 139 passed.
 
 Writer/eval cutovers and the later typed-match-config steer are built. Remaining
 choices have been made in questions.md; the unreleased type module is now

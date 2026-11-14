@@ -190,6 +190,12 @@ def _hardware(row: sqlite3.Row) -> object:  # validated by the record holding it
     return json.loads(row["hardware"]) if row["hardware"] else None
 
 
+def _writers_json(attempt: RunAttempt, reported: tuple[RunWriter, ...]) -> str:
+    """The allocation's writers with the latest report of each, in first-seen order."""
+    merged = {writer.writer: writer for writer in (*attempt.writers, *reported)}
+    return json.dumps([writer.model_dump(mode="json") for writer in merged.values()])
+
+
 def _attempt_from_row(row: sqlite3.Row) -> RunAttempt:
     return RunAttempt.model_validate(
         {
@@ -1010,12 +1016,7 @@ class Database:
             attempt.version,
             clocks=json.dumps(clocks),
             tally=None if tally is None else tally.model_dump_json(),
-            writers=json.dumps(
-                [
-                    writer.model_dump(mode="json")
-                    for writer in {w.writer: w for w in (*attempt.writers, *writers)}.values()
-                ]
-            ),
+            writers=_writers_json(attempt, writers),
         )
 
     def finish(
@@ -1044,12 +1045,7 @@ class Database:
             exit_code=exit_code,
             prepared=None if prepared is None else prepared.model_dump_json(),
             tally=None if tally is None else tally.model_dump_json(),
-            writers=json.dumps(
-                [
-                    writer.model_dump(mode="json")
-                    for writer in {w.writer: w for w in (*attempt.writers, *writers)}.values()
-                ]
-            ),
+            writers=_writers_json(attempt, writers),
         )
 
     def fail_before_start(self, attempt: RunAttempt, cause: Cause, at: datetime) -> None:

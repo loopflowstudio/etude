@@ -389,7 +389,10 @@ def _widened(
     )
 
 
+# A running eval run says how far it has got at most this often: each report
+# rewrites the allocation's progress file.
 _REPORT_SECONDS = 15.0
+# Matches a recent pace is taken over.
 _PACE_MATCHES = 50
 
 
@@ -460,9 +463,8 @@ def _played[C: BaseModel | Mapping[str, JsonValue]](
     Matches start in `etude.eval.schedule` order, at most `workers` at once, so
     the order they start in is the order an author's runtime loads checkpoints in.
     """
-    order = pending
     if workers == 1:
-        for scheduled in order:
+        for scheduled in pending:
             try:
                 yield scheduled, _play(play, scheduled)
             except Exception as error:  # noqa: BLE001 - recorded with the match, then raised
@@ -474,7 +476,7 @@ def _played[C: BaseModel | Mapping[str, JsonValue]](
         running: dict[Future[Tables | Result], Match] = {}
 
         def start() -> None:
-            scheduled = next(order, None)
+            scheduled = next(pending, None)
             if scheduled is not None:
                 running[pool.submit(_play, play, scheduled)] = scheduled
 
@@ -493,7 +495,7 @@ def _played[C: BaseModel | Mapping[str, JsonValue]](
 
 
 class EvalResult(Record):
-    """What one call to `evaluate` did."""
+    """What one `EvalRun.play` did."""
 
     experiment: str
     name: str
