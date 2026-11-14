@@ -40,15 +40,14 @@ from etude.identity import resume_conflicts, run_address
 from etude.launch import source
 from etude.launch.database import Database
 from etude.launch.errors import LaunchError
-from etude.launch.executor import Execution, Refused, creation_guard
+from etude.launch.executor import Execution
 from etude.launch.logging import bounded, explain, sanitize
-from etude.launch.machines import Safeguards
+from etude.launch.machines import Refused, Safeguards, creation_guard
 from etude.launch.records import (
     RETRYABLE,
     STOCK_IMAGE,
     Availability,
     Cause,
-    Cohort,
     Diagnostic,
     Hardware,
     Image,
@@ -71,6 +70,7 @@ from etude.launch.records import (
     RunAttempt,
     Session,
     Stale,
+    Standing,
     StartPhase,
     Status,
     Storage,
@@ -89,7 +89,7 @@ from etude.launch.storage.s3 import longest_grant
 from etude.launch.storage.transport import attribute, observe
 from etude.launch.usage import Usage
 from etude.records import RunRecord, RunSubmission
-from etude.spec import Job, Record, RunRequest, job_id
+from etude.spec import Job, Record, RunRequest, expand_runs, job_id
 from etude.storage_timeout import StorageUnavailable
 
 Clock = Callable[[], datetime]
@@ -263,13 +263,6 @@ class Scheduler:
 
     def storages(self) -> tuple[Storage, ...]:
         return self._store.storages()
-
-    def cohort_runs(self, name: str) -> tuple[RunRecord, ...]:
-        """A cohort's runs in the order launched."""
-        return self._store.cohort_runs(name)
-
-    def cohort(self, name: str) -> Cohort:
-        return self._store.cohort(name)
 
     def add_pool(self, pool: Pool) -> None:
         """Make a pool of machines you own available to launch on."""
@@ -507,65 +500,26 @@ class Scheduler:
         )
 
     def queue(
-        self, run: RunRequest | Job, pool: str | None = None, *, rent: str | None = None
-    ) -> str:
-        """Queue one run; it waits for a free machine, or for its on-demand to rent one."""
-        return self._submit(
-            (run if isinstance(run, RunRequest) else RunRequest(job=run),),
-            self._target(pool, rent),
-            None,
-            queued=True,
-        )[0]
-
-    def queue_cohort(
         self,
-        name: str,
-        runs: Sequence[RunRequest],
+        runs: RunRequest | Job | Sequence[RunRequest | Job],
         pool: str | None = None,
         *,
         rent: str | None = None,
-        parallel: int = 1,
-        max_usd: Decimal | None = None,
     ) -> tuple[str, ...]:
-        """Queue a cohort under its shared limits; capacity shortages wait."""
-        cohort = self._new_cohort(name, runs, parallel, max_usd)
-        return self._submit(runs, self._target(pool, rent), cohort, queued=True)
-
-    def _new_cohort(
-        self,
-        name: str,
-        runs: Sequence[RunRequest],
-        parallel: int,
-        max_usd: Decimal | None,
-    ) -> Cohort:
-        if not runs or parallel < 1 or (max_usd is not None and max_usd <= 0):
-            raise LauncherError("a cohort needs runs and positive limits")
-        return Cohort(name=name, parallel=parallel, max_usd=max_usd, created_at=self._clock())
+        """Record runs for the next free slots, without requiring capacity now."""
+        given = [runs] if isinstance(runs, (Job, RunRequest)) else runs
+        return self._submit(expand_runs(given), self._target(pool, rent), queued=True)
 
     def launch(
-        self, run: RunRequest | Job, pool: str | None = None, *, rent: str | None = None
-    ) -> str:
-        """Acquire confirmed capacity, then record and hand over one run."""
-        return self._submit(
-            (run if isinstance(run, RunRequest) else RunRequest(job=run),),
-            self._target(pool, rent),
-            None,
-            queued=False,
-        )[0]
-
-    def launch_cohort(
         self,
-        name: str,
-        runs: Sequence[RunRequest],
+        runs: RunRequest | Job | Sequence[RunRequest | Job],
         pool: str | None = None,
         *,
         rent: str | None = None,
-        parallel: int = 1,
-        max_usd: Decimal | None = None,
     ) -> tuple[str, ...]:
-        """Record a named set of runs sharing rentals-at-once and total-dollar limits."""
-        cohort = self._new_cohort(name, runs, parallel, max_usd)
-        return self._submit(runs, self._target(pool, rent), cohort, queued=False)
+        """Place the runs that fit now and queue the rest; refuse if none fit."""
+        given = [runs] if isinstance(runs, (Job, RunRequest)) else runs
+        return self._submit(expand_runs(given), self._target(pool, rent), queued=False)
 
     def quote(
         self,
@@ -573,9 +527,6 @@ class Scheduler:
         pool: str | None = None,
         *,
         rent: str | None = None,
-        cohort: str | None = None,
-        parallel: int = 1,
-        max_usd: Decimal | None = None,
     ) -> Quote:
         """The machines a launch would take now and planned rental costs. Rents nothing.
 
@@ -585,7 +536,6 @@ class Scheduler:
         can exceed the admitted rental budget.
         """
         target = self._target(pool, rent)
-        limits = None if cohort is None else self._new_cohort(cohort, runs, parallel, max_usd)
         records = []
         for index, run in enumerate(runs):
             self._validate_job(run.job, target)
@@ -606,20 +556,21 @@ class Scheduler:
                         created_at=self._clock(),
                     ),
                     seed=run.seed,
-                    cohort=cohort,
                 )
             )
         if not records:
             raise LauncherError("a launch needs at least one run")
         quoted = []
-        for placement in self._capacity(records, limits):
+        pending = list(records)
+        for placement in self._capacity(records):
             price = placement.price
             share = None
             if placement.machine is None:
                 ondemand = self._store.ondemand(placement.supply)
-                life = self._life(ondemand, placement.runs, records, limits, price)
+                life = self._life(ondemand, placement.runs, pending, price)
                 seconds = min(life, self._longest_rental(ondemand))
                 share = self._rental_cost(ondemand, price, seconds) / len(placement.runs)
+            pending = [r for r in pending if r not in placement.runs]
             for record in placement.runs:
                 most = share
                 if most is None:
@@ -627,29 +578,27 @@ class Scheduler:
                     most = min(price * hours, _limit_usd(record.launch.spec))
                 quoted.append(
                     QuotedMachine(
-                        run=record.name,
+                        run=record.id,
                         machine=placement.machine.name if placement.machine else None,
                         hardware=placement.hardware,
                         usd_per_hour=price,
                         max_usd=most,
                         slots=self._store.supply(placement.supply).slots,
-                        alongside=tuple(r.name for r in placement.runs if r.id != record.id),
+                        alongside=tuple(r.id for r in placement.runs if r.id != record.id),
                     )
                 )
         caps = sum((_limit_usd(r.launch.spec) for r in records), Decimal(0))
-        if limits is not None and limits.max_usd is not None:
-            caps = min(caps, limits.max_usd)
         return Quote(machines=tuple(quoted), limit_usd=None if target.rent is None else caps)
 
     def _submit(
-        self, runs: Sequence[RunRequest], target: Target, cohort: Cohort | None, *, queued: bool
+        self, runs: Sequence[RunRequest], target: Target, *, queued: bool
     ) -> tuple[str, ...]:
         launch = self.prepare_launch(runs, target.pool, rent=target.rent)
         requested = tuple(
             run.model_copy(update={"id": request.run})
             for run, request in zip(runs, launch.requests, strict=True)
         )
-        return self.submit_launch(launch.id, requested, target, cohort, queued=queued)
+        return self.submit_launch(launch.id, requested, target, queued=queued)
 
     def prepare_launch(
         self, runs: Sequence[RunRequest], pool: str | None = None, *, rent: str | None = None
@@ -697,7 +646,6 @@ class Scheduler:
         identity: str,
         runs: Sequence[RunRequest],
         target: Target,
-        cohort: Cohort | None,
         *,
         queued: bool,
     ) -> tuple[str, ...]:
@@ -713,9 +661,7 @@ class Scheduler:
             operation, "preparing requested work; job command not started", launch=launch.id
         )
         try:
-            records = tuple(
-                self._freeze(run, selected, cohort.name if cohort else None) for run in requested
-            )
+            records = tuple(self._freeze(run, selected) for run in requested)
             launch = launch.model_copy(
                 update={
                     "requests": tuple(
@@ -735,9 +681,9 @@ class Scheduler:
             self._store.save_launch(launch)
             operation = "admission"
             if queued:
-                self._store.launch(records, cohort, launch=launch.id)
+                self._store.launch(records, launch=launch.id)
             else:
-                self._admit(records, cohort, launch.id)
+                self._admit(records, launch.id)
         except BaseException as error:
             if self._store.launch_evidence(launch.id).state == "admitted":
                 self._diagnose(
@@ -813,30 +759,26 @@ class Scheduler:
         ondemand: OnDemand,
         placed: Sequence[RunRecord],
         records: Sequence[RunRecord],
-        cohort: Cohort | None,
         price: Decimal,
     ) -> float:
         """Seconds a first-wave rental is held: its share of the hours, within the dollars.
 
-        A rental shared by `placed` runs lasts at least as long as the longest of them.
+        The target covers the longest placed run; the available dollars may shorten it.
         """
-        machines = cohort.parallel if cohort else 1
+        machines = max(
+            1,
+            min(
+                ondemand.max_machines - self._in_use(ondemand),
+                (len(records) + ondemand.slots - 1) // ondemand.slots,
+            ),
+        )
         now = self._clock()
         budgets = {r.id: self._admission_budget(r, now) for r in records}
         hours = max(
             sum(budgets[r.id].seconds / 3600 for r in records) / (machines * ondemand.slots),
             max(budgets[r.id].seconds / 3600 for r in placed),
         )
-        cap = (
-            cohort.max_usd
-            if cohort and cohort.max_usd is not None
-            else sum((budgets[r.id].usd for r in records), Decimal(0))
-        ) / machines
-        for run in records:
-            if cohort is None and run.cohort is not None:
-                left = self._cohort_left(self._store.cohort(run.cohort), now, renting=True)
-                if left is not None:
-                    cap = min(cap, left)
+        cap = sum((budgets[r.id].usd for r in records), Decimal(0)) / machines
         return min(
             hours * 3600 + ondemand.setup_seconds,
             self._affordable_seconds(ondemand, price, cap),
@@ -857,7 +799,7 @@ class Scheduler:
         ):
             service.stage(repo, commit)
 
-    def _admit(self, records: Sequence[RunRecord], cohort: Cohort | None, launch: str) -> None:
+    def _admit(self, records: Sequence[RunRecord], launch: str) -> None:
         target = Target(pool=records[0].launch.pool, rent=records[0].launch.rent)
         names = [name for name in (target.pool, target.rent) if name is not None]
         if target.rent is not None:
@@ -869,9 +811,10 @@ class Scheduler:
                     raise LauncherError(
                         f"cannot launch on {name!r}: it is busy; etude queue would wait"
                     )
-            placements = self._capacity(records, cohort)
+            placements = self._capacity(records)
             made: list[Session] = []
             attempts: list[RunAttempt] = []
+            pending = list(records)
             try:
                 for placement in placements:
                     existing = placement.session
@@ -884,7 +827,7 @@ class Scheduler:
                         rental: Rental | None = None
                         if machine is None:
                             assert isinstance(supply, OnDemand)  # only an on-demand rents
-                            life = self._life(supply, placement.runs, records, cohort, price)
+                            life = self._life(supply, placement.runs, pending, price)
                             session, rented, rental = self._make_rental(
                                 supply, price, life, now, kept=False
                             )
@@ -898,6 +841,8 @@ class Scheduler:
                             self._create(session, now, idle=True)
                             session = self._store.session(session.id)
                             if session.provider_id is None:
+                                if attempts:
+                                    break  # keep confirmed placements; later runs stay queued
                                 reason = (
                                     "provider refused capacity"
                                     if session.refused_at
@@ -913,6 +858,7 @@ class Scheduler:
                             raise LauncherError(
                                 "rented machine expired during launch; etude queue would wait"
                             )
+                    pending = [r for r in pending if r not in placement.runs]
                     self._store.link_launch(launch, session.id)
                     held = len(self._store.attempts(session=session.id))
                     for index, run in enumerate(placement.runs):
@@ -938,7 +884,7 @@ class Scheduler:
                 ):
                     raise LauncherError("capacity expired during launch; etude queue would wait")
                 # Runs and claims become visible together, under the same locks.
-                self._store.launch(records, cohort, attempts, launch=launch)
+                self._store.launch(records, attempts, launch=launch)
             except BaseException:
                 for session in made:
                     try:
@@ -974,13 +920,12 @@ class Scheduler:
     def _capacity(
         self,
         records: Sequence[RunRecord],
-        cohort: Cohort | None,
     ) -> list[Placement]:
         """Choose the first wave, checking all limits before spending.
 
         A chosen machine's free slots fill before another is taken. Machines
         with free slots come first, then the pool's free machines, then rentals
-        from the on-demand, up to one machine or the cohort's parallel machines.
+        from the on-demand, up to its remaining machine capacity.
         Runs left over wait in the queue. Nothing is claimed here.
         """
         placements: list[Placement] = []
@@ -992,12 +937,8 @@ class Scheduler:
         budgets = {r.id: self._admission_budget(r, now) for r in records}
         used: set[str] = set()
         made = 0
-        left = None if cohort is None else cohort.max_usd
-        machines = 1 if cohort is None else cohort.parallel
         if pool is not None and pool.off:
             raise LauncherError(f"pool {pool.name!r} is turned off")
-        if cohort is not None and self._store.cohort_exists(cohort.name):
-            raise LauncherError(f"cohort {cohort.name!r} already exists")
         opened = [
             each
             for supply in (pool, ondemand)
@@ -1012,20 +953,14 @@ class Scheduler:
                 rental is None or (rental.deadline - now).total_seconds() >= budgets[run.id].seconds
             )
 
-        def cost(placement: Placement, runs: Sequence[RunRecord]) -> Decimal:
-            """What `runs` on this machine would be admitted at: a new rental's window,
-            or each run's hours at the machine's price."""
+        def cost(placement: Placement, run: RunRecord) -> Decimal:
+            hours = Decimal(str(budgets[run.id].seconds)) / 3600
             if placement.machine is None and ondemand is not None:
-                if not runs:
-                    return Decimal(0)
-                hours = max(Decimal(str(budgets[r.id].seconds)) / 3600 for r in runs)
                 hours += Decimal(ondemand.setup_seconds) / 3600
                 return self._rental_cost(ondemand, placement.price, hours * 3600)
-            return sum(
-                (placement.price * Decimal(str(budgets[r.id].seconds)) / 3600 for r in runs),
-                Decimal(0),
-            )
+            return placement.price * hours
 
+        reason = "no free machine"
         for run in records:
             reason = "no free machine"
             joined = next(
@@ -1039,8 +974,6 @@ class Scheduler:
             held: Placement | None = None
             if joined is not None:
                 held = placements[joined]
-            elif len(placements) >= machines:
-                break  # the first wave is full; the rest wait in the queue
             else:
                 for session, free in opened:
                     if session.id in used:
@@ -1076,7 +1009,6 @@ class Scheduler:
                     offer = self._rentable(ondemand, additional=made)
                     reason = self._trouble.get(ondemand.name, reason)
                     if offer is not None:
-                        made += 1
                         held = Placement(
                             runs=(),
                             free=ondemand.slots,
@@ -1086,37 +1018,26 @@ class Scheduler:
                             price=offer.usd_per_hour,
                             hardware=offer.hardware,
                         )
-            if held is not None and cohort is None and run.cohort is not None:
-                shared = self._store.cohort(run.cohort)
-                if self._cohort_live(shared.name, now) >= shared.parallel and (
-                    held.session is None
-                    or not any(
-                        a.session == held.session.id and a.outcome is None
-                        for a in self._store.cohort_attempts(shared.name)
-                    )
-                ):
-                    raise LauncherError("run cohort is at its machine limit")
-                available = self._cohort_left(shared, now, renting=held.machine is None)
-                if available is not None and cost(held, (run,)) > available:
-                    raise LauncherError("run cohort dollars do not cover the hours")
             if held is not None:
                 # A run is admitted only if its dollars would cover it alone on this machine.
-                added = cost(held, (*held.runs, run)) - cost(held, held.runs)
-                if cost(held, (run,)) > budgets[run.id].usd:
+                if cost(held, run) > budgets[run.id].usd:
                     reason = "job dollars do not cover the hours"
+                    if held.session is not None:
+                        used.discard(held.session.id)
+                    elif held.machine is not None:
+                        used.discard(held.machine.name)
                     held = None
-                elif left is not None and added > left:
-                    reason = "cohort dollars do not cover the hours"
-                    held = None
-                elif left is not None:
-                    left -= added
             if held is None:
-                raise LauncherError(f"cannot launch on {label}: {reason}; etude queue would wait")
+                continue
             held = held.model_copy(update={"runs": (*held.runs, run)})
             if joined is None:
+                if held.machine is None:
+                    made += 1
                 placements.append(held)
             else:
                 placements[joined] = held
+        if not placements:
+            raise LauncherError(f"cannot launch on {label}: {reason}; etude queue would wait")
         return placements
 
     def start_phases(self, run: str) -> tuple[StartPhase, ...]:
@@ -1180,11 +1101,19 @@ class Scheduler:
         self.tick()
         return self.read(run)
 
+    def standing(
+        self, experiment: str | None = None, *, job: str | None = None
+    ) -> tuple[Standing, ...]:
+        """Read all runs labelled with this experiment, including completed runs."""
+        return tuple(
+            Standing(record=r, status=self.read(r.id))
+            for r in self._store.runs(experiment=experiment, job=job)
+        )
+
     def runs(
         self,
         *,
         done: bool = False,
-        cohort: str | None = None,
         pool: str | None = None,
         rent: str | None = None,
         job: str | None = None,
@@ -1194,12 +1123,10 @@ class Scheduler:
         """Runs oldest first, filtered without advancing execution. `done` includes history."""
         return tuple(
             r
-            for r in self._store.runs(experiment=experiment)
+            for r in self._store.runs(experiment=experiment, job=job)
             if (done or not self.read(r.id).done)
-            and (cohort is None or r.cohort == cohort)
             and (pool is None or r.launch.pool == pool)
             and (rent is None or r.launch.rent == rent)
-            and (job is None or r.job == job or r.launch.spec.name == job)
             and (contains is None or source.contains(r, contains))
         )
 
@@ -1475,8 +1402,6 @@ class Scheduler:
             )
         if record.launch.cancel_requested_at is not None:
             return seen.model_copy(update={"phase": "done", "outcome": "cancelled"})
-        if record.cohort is not None and self._cohort_spent(record.cohort, now):
-            return seen.model_copy(update={"phase": "done", "outcome": "over_budget"})
         left = self._remaining(record, now)
         # Under a second cannot be placed (`_limit`), so no retry can fit: say
         # what ended the last attempt beside why no other follows.
@@ -1498,9 +1423,6 @@ class Scheduler:
                     else f"retrying after {last.cause or last.outcome}"
                 }
             )
-        cohort = None if record.cohort is None else self._store.cohort(record.cohort)
-        if cohort is not None and self._cohort_live(cohort.name, now) >= cohort.parallel:
-            return seen.model_copy(update={"reason": f"cohort runs {cohort.parallel} at a time"})
         waits = [
             name + (f": {self._trouble[name]}" if name in self._trouble else "")
             for name in (record.launch.pool, record.launch.rent)
@@ -1636,7 +1558,7 @@ class Scheduler:
             for _ in range(free):
                 if not waiting:
                     return
-                planned = self._next_run(waiting, price, now, fit=left, session=held)
+                planned = self._next_run(waiting, price, now, fit=left)
                 if planned is None:
                     break
                 placed = len(self._store.attempts(session=held.id))
@@ -1675,29 +1597,7 @@ class Scheduler:
                     return
                 now = self._clock()  # the rental's window starts after the upload
                 self._store.check_lock(supply.name)
-                # The window covers the longest run it is given, within their dollars.
-                hours = max(planned.run.launch.spec.require_hours() for planned in batch)
-                cap = sum((planned.cap_usd for planned in batch), Decimal(0))
-                machines = 1
-                first = batch[0].run
-                if first.cohort is not None:
-                    cohort = self._store.cohort(first.cohort)
-                    machines = max(1, cohort.parallel - self._cohort_live(cohort.name, now))
-                    pending = [r for r in waiting if r.cohort == cohort.name]
-                    hours = max(
-                        hours,
-                        sum(r.launch.spec.require_hours() for r in pending)
-                        / (machines * supply.slots),
-                    )
-                    cap = sum((_limit_usd(r.launch.spec) for r in pending), Decimal(0))
-                    remaining = self._cohort_left(
-                        cohort, now, renting=bool(self._safeguards(supply).reservation_hours)
-                    )
-                    if remaining is not None:
-                        cap = min(cap, remaining)
-                life = hours * 3600 + supply.setup_seconds
-                if price > 0:
-                    life = min(life, self._affordable_seconds(supply, price, cap / machines))
+                life = self._life(supply, [planned.run for planned in batch], waiting, price)
                 if life < 1:
                     self._trouble[supply.name] = "budget cannot cover the provider fallback timer"
                     return
@@ -1890,29 +1790,15 @@ class Scheduler:
         price: Decimal,
         now: datetime,
         fit: int | None = None,
-        session: Session | None = None,
     ) -> PlannedRun | None:
-        """Oldest eligible run, bounded by its remaining time and shared dollars.
+        """Oldest eligible run, bounded by its remaining time and dollars.
 
         Each placement is one attempt, priced as if it had its machine alone.
         Later passes fill free slots as attempts finish, checking the limits again.
-        A cohort's machine limit does not stop a run joining `session`, a
-        machine the cohort already holds.
         """
         for run in waiting:
             budget = self._remaining(run, now)
             cap = budget.usd
-            if run.cohort is not None:
-                cohort = self._store.cohort(run.cohort)
-                holds = session is not None and any(
-                    a.session == session.id and a.outcome is None
-                    for a in self._store.cohort_attempts(cohort.name)
-                )
-                if not holds and self._cohort_live(cohort.name, now) >= cohort.parallel:
-                    continue
-                left = self._cohort_left(cohort, now)
-                if left is not None:
-                    cap = min(cap, left)
             limit = self._limit(budget.seconds, cap, price)
             if limit is None:
                 continue
@@ -2122,7 +2008,6 @@ class Scheduler:
             here=holder is not None and holder.machine == attempt.machine,
             job=run.job,
             job_name=spec.name or None,
-            cohort=run.cohort,
             experiment=spec.experiment,
             inputs=tuple(i for i in spec.inputs if holder is None or i.out is None),
             environment=spec.environment,
@@ -2259,7 +2144,7 @@ class Scheduler:
         """Keep what a running job has printed, so `etude logs`, a read, can show it.
 
         Fetches only when more of the log is stored, at most every
-        `_JOB_LOG_SECONDS`. Each stored piece is read once per controller.
+        `_JOB_LOG_SECONDS`. Each stored piece is read once per server.
         """
         size, at = self._job_logs.get(seen.attempt, (0, None))
         if seen.log_bytes == size:
@@ -2488,8 +2373,6 @@ class Scheduler:
             )
             if target is None or target.value <= reached:
                 raise LauncherError("run already finished; give --until with a later target")
-        if prior.cohort is not None and self._cohort_spent(prior.cohort, self._clock()):
-            raise LauncherError("run cohort has no remaining dollars")
         candidate = prior.model_copy(
             update={"submission": prior.launch.model_copy(update={"spec": job})}
         )
@@ -2500,12 +2383,10 @@ class Scheduler:
             )
         return prior
 
-    def _freeze(self, run: RunRequest, target: Target, cohort: str | None) -> RunRecord:
+    def _freeze(self, run: RunRequest, target: Target) -> RunRecord:
         job = run.job
         self._validate_job(job, target)
         prior = self._resumed(run) if run.resume else None
-        if prior is not None and cohort is not None:
-            raise LauncherError("a resumed run keeps its cohort; omit --cohort")
         if prior is not None and job.until is None:
             run = run.model_copy(
                 update={"job": job.model_copy(update={"until": prior.launch.spec.until})}
@@ -2545,7 +2426,6 @@ class Scheduler:
             ),
             job=job_id(job),
             seed=run.seed,
-            cohort=cohort,
         )
 
     def _latest(self, run: str) -> tuple[RunAttempt, Session]:
@@ -2631,51 +2511,3 @@ class Scheduler:
         start, end = occupied[attempt.id]
         moments = [start] + [a for a, _ in occupied.values() if start < a < end]
         return max(1, max(sum(a <= t < b for a, b in occupied.values()) for t in moments))
-
-    def _cohort_live(self, name: str, now: datetime) -> int:
-        """Sessions a cohort's runs are on or waiting on right now."""
-        held = {a.session for a in self._store.cohort_attempts(name) if a.outcome is None}
-        return sum(1 for id in held if self._live(self._store.session(id), now))
-
-    def _cohort_left(
-        self, cohort: Cohort, now: datetime, *, renting: bool = False
-    ) -> Decimal | None:
-        """Dollars a new attempt may still use: unfinished ones count at their full limit."""
-        if cohort.max_usd is None:
-            return None
-        used = Decimal(0)
-        by_session: dict[str, Decimal] = {}
-        for attempt in self._store.cohort_attempts(cohort.name):
-            amount = Decimal(0)
-            if attempt.outcome is not None:
-                amount = self._attempt_usd(attempt, now, billed=False)
-            else:
-                session = self._store.session(attempt.session)
-                if session.refused_at is None:
-                    amount = self._usd_per_hour(session) * attempt.limit_seconds / 3600
-            used += amount
-            if renting:
-                by_session[attempt.session] = by_session.get(attempt.session, Decimal(0)) + amount
-        for id, amount in by_session.items():
-            session = self._store.session(id)
-            rental = self._store.rental_for(session)
-            if rental is None or session.refused_at is not None or session.ended_at is not None:
-                continue
-            supply = self._store.ondemand(session.supply)
-            if self._safeguards(supply).reservation_hours:
-                # New rentals cannot spend a short job's fallback reserve while
-                # its machine still exists or its create remains unknown.
-                used += max(Decimal(0), rental.cap_usd - amount)
-        return cohort.max_usd - used
-
-    def _cohort_spent(self, name: str, now: datetime) -> bool:
-        """True when the cohort can never start another attempt."""
-        cohort = self._store.cohort(name)
-        left = self._cohort_left(cohort, now)
-        if left is None or any(a.outcome is None for a in self._store.cohort_attempts(name)):
-            return False
-        price = max(
-            (self._usd_per_hour(session) for session in self._store.cohort_sessions(name)),
-            default=None,
-        )
-        return left <= 0 or (price is not None and price > 0 and left / price * 3600 < 1)

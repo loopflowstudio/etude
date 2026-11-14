@@ -37,7 +37,7 @@ class Function(BaseModel):
     module: str
     name: str  # its qualified name in the module
     # The folder below the checkout its module is imported from: "" for the
-    # checkout itself, "src" for a src layout, a job file's folder for its neighbours.
+    # checkout itself, "src" for a src layout, an experiment file's folder for its neighbours.
     path: str = ""
 
     def __str__(self) -> str:

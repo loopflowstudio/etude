@@ -23,7 +23,6 @@ from pydantic import (
 
 from etude.carriage import within
 from etude.errors import LauncherError
-from etude.identity import run_address
 
 
 class Record(BaseModel):
@@ -198,12 +197,14 @@ class SmokeForm(Record):
     """
 
     command: str | None = None  # a command job's tiny command, such as "manabot train --smoke"
-    config: str | None = None  # a typed job's tiny config text (`training(..., smoke=...)`)
+    config: str | None = (
+        None  # a typed job's tiny config text (`TrainingJob(name="base", train=..., smoke=...)`)
+    )
     until: Until | None = None  # a tiny target
 
 
 class Job(Record):
-    """What to run, without a seed. Launching freezes it: `revision` becomes a commit.
+    """One function and config over seeds, or a command to run. Launching freezes it: `revision` becomes a commit.
 
     What makes a job itself is what decides the result: the command, the config, the
     source, its inputs, setup/cleanup, preparation, runtime and the target. Two launches that agree on those are the same job, so
@@ -239,6 +240,10 @@ class Job(Record):
     # changing it does not make a new job.
     smoke: SmokeForm | None = None
 
+    def plain(self) -> Job:
+        """The frozen executable form stored and sent by the scheduler."""
+        return self
+
     def require_hours(self) -> float:
         """The machine allowance; launch, queue and smoke require it."""
         if self.max_hours is None:
@@ -270,7 +275,7 @@ class Job(Record):
     def runs(self, *seeds: int, params: dict[str, Param] | None = None) -> list[RunRequest]:
         """This job once per given seed, or once per declared seed when none is given.
 
-        Declared seeds use compact addresses, omitting a sole job or seed.
+        Declared seeds use full experiment/job@seed addresses.
         Given seeds are a caller's own repetitions: they take ids at admission,
         so the same job and seed can be submitted again.
         """
@@ -282,34 +287,23 @@ class Job(Record):
 def expand_runs(
     given: Sequence[Job | RunRequest], *, params: dict[str, Param] | None = None
 ) -> list[RunRequest]:
-    """Expand declared seeds, omitting a sole job or seed from its address.
+    """Expand declared seeds with stable job@seed addresses.
 
     Explicit requests keep their ids and admission-time repetitions. Selection
     happens after expansion, so selecting one seed never changes its address.
     """
-    jobs: list[Job] = []
-    for each in given:
-        job = each if isinstance(each, Job) else each.job
-        if job not in jobs:
-            jobs.append(job)
-    sole = len(jobs) == 1
     requests: list[RunRequest] = []
     for each in given:
         if isinstance(each, RunRequest):
             requests.append(each)
             continue
-        name = each.experiment if sole and each.experiment else each.name
-        for seed in each.seeds:
+        job = each.plain()
+        for seed in job.seeds:
             address = None
-            if name:
-                local = name + (f"@{seed}" if len(each.seeds) > 1 else "")
-                # Among several jobs, one named for its experiment keeps both levels.
-                address = (
-                    run_address(local, each.experiment)
-                    if sole or not each.experiment
-                    else f"{each.experiment}/{local}"
-                )
-            requests.append(RunRequest(job=each, seed=seed, params=dict(params or {}), id=address))
+            if job.name:
+                local = f"{job.name}@{seed}"
+                address = f"{job.experiment}/{local}" if job.experiment else local
+            requests.append(RunRequest(job=job, seed=seed, params=dict(params or {}), id=address))
     return requests
 
 
@@ -319,6 +313,7 @@ def job_id(job: Job) -> str:
     Name, limits, attempts and the smoke form are left out on purpose. Order
     does not matter among environment variables, inputs or runtime packages.
     """
+    job = job.plain()
     identity: dict[str, object] = {
         "command": job.command,
         "config": job.config,
@@ -362,7 +357,7 @@ class SmokeStep(Record):
 
     step: Literal["train", "eval", "report"]
     name: str  # what ran: the job's or tournament's name, or "report"
-    # skipped: the file has no such step (no eval(state), not an experiment file).
+    # skipped: the file has no such step (no eval_jobs(state), not an experiment file).
     # not_smoked: the file has one that the smoke did not run (no smoke form, no checkpoints).
     outcome: Literal["passed", "not_smoked", "skipped"]
     seconds: float | None = None  # on the submitting machine; None when it did not run
@@ -407,8 +402,14 @@ class RunRequest(Record):
     """A job and a seed: the thing that is launched."""
 
     job: Job
+
+    @field_validator("job", mode="before")
+    @classmethod
+    def _plain_job(cls, value: object) -> object:
+        return value.plain() if isinstance(value, Job) else value
+
     seed: int | None = None
-    # The values a runs() function was called with. Kept for reading; a job's
+    # The values a training_jobs() function was called with. Kept for reading; a job's
     # identity comes from what it runs, never from these.
     params: dict[str, Param] = Field(default_factory=dict)
     source: SourcePosition | None = None

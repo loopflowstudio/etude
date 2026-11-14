@@ -136,7 +136,7 @@ class RunRecord(Record):
     job: str | None = Field(default=None, max_length=500)
     job_name: str | None = Field(default=None, max_length=500)
     seed: int | None = None
-    cohort: str | None = Field(default=None, max_length=500)
+    cohort: str | None = Field(default=None, max_length=500, exclude=True)
     kind: str | None = Field(default=None, max_length=200)
     config: str | None = Field(default=None, max_length=1024 * 1024)
     continues: Continuation | None = None

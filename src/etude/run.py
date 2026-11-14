@@ -357,7 +357,6 @@ def declare(
     run: str | None = None,
     job: str | None = None,
     seed: int | None = None,
-    cohort: str | None = None,
     kind: str | None = None,
     config: Mapping[str, object] | str | None = None,
     continues: Continuation | None = None,
@@ -369,7 +368,7 @@ def declare(
     """Claim a new run's `run.json`, or validate an explicitly resumed one.
 
     A resumed run's declaration is the stored one. Under `etude launch`, `run`,
-    `job`, `seed` and `cohort` default to what the launcher handed the process
+    `job` and `seed` default to what the launcher handed the process
     (`ETUDE_RUN`, `ETUDE_JOB`, `ETUDE_SEED`, `ETUDE_COHORT`); an argument given
     here wins. Elsewhere `run` defaults to a new random name. Re-using a name
     is refused unless `resume`; its identity must match the first declaration.
@@ -393,7 +392,6 @@ def declare(
         job=job or handed.get("ETUDE_JOB"),
         job_name=None if job else handed.get("ETUDE_JOB_NAME"),
         seed=seed,
-        cohort=cohort or handed.get("ETUDE_COHORT"),
         kind=kind,
         config=text,
         continues=continues,

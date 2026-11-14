@@ -743,6 +743,7 @@ def read_all(
     *,
     metrics: frozenset[str] | None = None,
     prefixes: tuple[str, ...] = (),
+    keys: Sequence[str] | None = None,
 ) -> list[RunData]:
     """Every run under a source, listing it once.
 
@@ -750,7 +751,7 @@ def read_all(
     immutable block once instead of the cumulative metric indexes.
     """
     storage = as_storage(source)
-    keys = sorted(storage.keys(""))
+    keys = sorted(storage.keys("") if keys is None else keys)
     data = []
     for located in located_runs(storage, keys):
         file = located.file

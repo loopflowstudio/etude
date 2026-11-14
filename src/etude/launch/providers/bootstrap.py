@@ -1,7 +1,7 @@
 """Standard-library rental bootstrap and independent deadline guardian.
 
 RunPod/Vast supply self-scoped deletion, budget facts and SSH startup; Lium uses
-a local watchdog and leaves deletion to provider timers and the controller.
+a local watchdog and leaves deletion to provider timers and the server.
 run() dispatches commands; boot() owns installation, console publication and cleanup.
 """
 
@@ -221,7 +221,7 @@ def boot(
                 "cleanup",
                 "requesting machine deletion"
                 if delete_self is not None
-                else "provider timer and controller own machine deletion",
+                else "provider timer and server own machine deletion",
             )
             write_log("bootstrap", CLOSED)
             publishing.set()

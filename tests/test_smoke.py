@@ -9,11 +9,18 @@ import pytest
 
 from etude.cli import main
 from etude.errors import LauncherError
-from etude.launch.client import default, queue_cohort
+from etude.launch.client import default, queue
 from etude.records import Clock
-from etude.spec import Job, SmokeForm
+from etude.spec import Job, Runtime, SmokeForm
 from etude.storage import default_root
 from etude.train.tracking import track
+
+
+@pytest.fixture(autouse=True)
+def _command_environment(command_python: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ETUDE_TEST_PYTHON", command_python)
+    monkeypatch.setattr("tests.launch.tasks.RUNTIME", Runtime(python=command_python))
+
 
 # Saves one checkpoint at the given number of updates; refuses a real-sized run, so a
 # passing smoke shows its smoke form ran rather than the job's own command.
@@ -38,30 +45,33 @@ from pathlib import Path
 
 from etude.eval.match import environment
 from etude.eval.records import Benchmark, Code, Inference, Seating
-from etude.experiment import ExperimentState
-from etude.jobs import evaluation
+from etude.jobs import ExperimentState
+from etude.jobs import EvalJob, TrainingJob
+from tests.launch.tasks import Command, RUNTIME, train_command
 from etude.launch.records import Job, SmokeForm
 from etude.report import Report
 from tests.eval.games import {play}
 
+
+
 TRAIN = "{python} " + str(Path(__file__).parent / "train.py")
 
 
-def runs(seeds: int = 1, tiny: str = "1", bare: bool = False) -> list:
-    smoke = SmokeForm(command=f"{{TRAIN}} {{tiny}}") if tiny else None
-    ppo = Job(command=TRAIN + " 1000", name="ppo", max_hours=0.1, smoke=smoke).runs(*range(seeds))
-    plain = Job(command=TRAIN + " 2000", name="plain", max_hours=0.1).runs(0) if bare else []
+def training_jobs(seeds: int = 1, tiny: str = "1", bare: bool = False) -> list:
+    smoke = Command(command=f"{{TRAIN}} {{tiny}}") if tiny else None
+    ppo = TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command=TRAIN + " 1000"), repo=None, name="ppo", max_hours=0.1, smoke=smoke).runs(*range(seeds))
+    plain = TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command=TRAIN + " 2000"), repo=None, name="plain", max_hours=0.1).runs(0) if bare else []
     return ppo + plain
 
 
-def eval(state: ExperimentState) -> Job:
+def eval_jobs(state: ExperimentState) -> Job:
     chosen = [saved for run in state.runs for saved in run.checkpoints]
     anchor = Code(name="heuristic", source=[__file__], config={{"strength": 0}})
     vs = Seating(name="vs heuristic", players=(Inference(config={{"search": 0}}), anchor),
                  configs=({{"deal": 0}}, {{"deal": 1}}), games=4)
     ladder = Benchmark(name="ladder", environment=environment("duel"), seatings=(vs,))
-    return evaluation(ladder, play={play}, checkpoints=chosen, max_hours=0.1,
-                      repo=None)
+    return EvalJob(tournament=ladder, play={play}, checkpoints=chosen, max_hours=0.1,
+                      repo=None, runtime=RUNTIME)
 
 
 def report() -> Report:
@@ -79,7 +89,11 @@ def experiment(folder: Path, *, play: str = "play", report: str = "return Report
 
 def _ids(out: str) -> list[str]:
     """The run ids a submission listed: its lines that are not indented."""
-    return [line.split()[0] for line in out.splitlines() if not line.startswith(" ")]
+    return [
+        line.split()[0]
+        for line in out.splitlines()
+        if not line.startswith(" ") and "  new," in line
+    ]
 
 
 @pytest.fixture(autouse=True)
@@ -92,7 +106,7 @@ def test_a_passing_smoke_queues_and_its_runs_record_it(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     file = experiment(tmp_path / "lab")
-    assert main(["queue", str(file), "--seeds", "2", "--cohort", "c", "--smoke"]) == 0
+    assert main(["queue", str(file), "--seeds", "2", "--smoke"]) == 0
     said = capsys.readouterr()
     out, err = said.out, said.err
     # Two seeds of one job are smoked once; the seating plays each deal once.
@@ -153,7 +167,7 @@ def test_a_job_without_a_smoke_form_beside_one_with_it_is_not_recorded_passed(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     file = experiment(tmp_path / "lab")
-    assert main(["queue", str(file), "--bare", "--cohort", "c", "--smoke"]) == 0
+    assert main(["queue", str(file), "--bare", "--smoke"]) == 0
     said = capsys.readouterr()
     assert "smoke train plain: not smoked (no smoke form)" in said.err
     ppo, plain = (default().record(id) for id in _ids(said.out))
@@ -236,7 +250,8 @@ def test_a_launching_eval_that_fails_its_smoke_launches_nothing(
     source = tmp_path / "bucket"
     _trained(source, tmp_path)
     file = experiment(tmp_path / "lab", **change)
-    assert main(["eval", str(file), "--source", str(source), "--pool", "local", "--smoke"]) == 1
+    file.write_text(file.read_text().replace("def training_jobs(", "def fixture_training_jobs("))
+    assert main(["launch", str(file), "--source", str(source), "--pool", "local", "--smoke"]) == 1
     assert said in capsys.readouterr().err
     assert default().runs(done=True) == ()
 
@@ -258,8 +273,9 @@ def test_a_launched_eval_run_records_its_smoke(
     source = tmp_path / "bucket"
     _trained(source, tmp_path)
     file = experiment(tmp_path / "lab", **change)
-    assert main(["eval", str(file), "--source", str(source), "--pool", "local", *flags]) == 0
-    assert ", launched " in capsys.readouterr().out
+    file.write_text(file.read_text().replace("def training_jobs(", "def fixture_training_jobs("))
+    assert main(["launch", str(file), "--source", str(source), "--pool", "local", *flags]) == 0
+    assert ", running " in capsys.readouterr().out
     (launched,) = default().runs(done=True)
     smoke = default().record(launched.id).launch.smoke
     assert smoke.outcome == outcome
@@ -269,10 +285,57 @@ def test_a_launched_eval_run_records_its_smoke(
 def test_the_python_client_smokes_when_asked(tmp_path: Path) -> None:
     broken = Job(command="true", name="broken", max_hours=0.1, smoke=SmokeForm(command="exit 3"))
     with pytest.raises(LauncherError, match="smoke train broken: .*nothing was submitted"):
-        queue_cohort("refused", broken.runs(1, 2), "local", smoke=True)
+        queue(broken.runs(1, 2), "local", smoke=True)
     assert default().runs(done=True) == ()
-    (plain,) = queue_cohort("plain", broken.runs(1), "local")
+    (plain,) = queue(broken.runs(1), "local")
     assert default().record(plain).launch.smoke.outcome == "not_smoked"
     fine = broken.model_copy(update={"smoke": SmokeForm(command="true")})
-    (smoked,) = queue_cohort("kept", fine.runs(1), "local", smoke=True)
+    (smoked,) = queue(fine.runs(1), "local", smoke=True)
     assert default().record(smoked).launch.smoke.outcome == "passed"
+
+
+@pytest.mark.parametrize("steps", [[], ["--step", "eval", "--step", "report"]])
+@pytest.mark.parametrize("source_given", [False, True])
+def test_eval_only_smoke_uses_outside_checkpoints_and_this_computers_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    steps: list[str],
+    source_given: bool,
+) -> None:
+    source = tmp_path / "source"
+    with track(experiment="producer", run="base@0", directory=source, clocks=["updates"]) as run:
+        path = run.out / "weights.pt"
+        path.write_bytes(b"outside weights")
+        run.checkpoint(path, updates=1)
+    file = tmp_path / "outside_smoke.py"
+    monkeypatch.setenv("EVAL_TEST_KEY", "local fixture credential")
+    file.write_text(f"""
+import os
+from etude.experiment import observe
+from etude.jobs import EvalJob
+from etude.eval.records import RoundRobin, Inference, Code
+from etude.eval.match import environment
+
+def play(match):
+    assert os.environ["EVAL_TEST_KEY"] == "local fixture credential"
+    model = next(p for p in match.players if hasattr(p, "checkpoint"))
+    assert model.checkpoint.path.read_bytes() == b"outside weights"
+    return {{"games": [{{"seat": 0, "won": 1}}]}}
+
+def eval_jobs(state):
+    checkpoint = observe({str(source)!r}, "producer").runs[0].final
+    return EvalJob(tournament=RoundRobin(name="outside", environment=environment("game"),
+        configs=({{}},), games=3), enter=(checkpoint.player(Inference()), Code(name="fixed")),
+        play=play, max_hours=0.1)
+""")
+    before = sorted(source.rglob("*"))
+    assert (
+        main(["smoke", str(file), *steps, *(["--source", str(source)] if source_given else [])])
+        == 0
+    )
+    error = capsys.readouterr().err
+    assert "smoke eval outside: passed" in error
+    assert "smoke report: passed" in error
+    assert sorted(source.rglob("*")) == before
+    assert not default_root().exists()

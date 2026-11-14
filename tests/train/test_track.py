@@ -439,14 +439,14 @@ def test_the_server_serves_the_experiments_page_from_the_files(
         absent.server_close()
 
 
-def test_tracking_commands_use_local_files_with_a_selected_controller(
+def test_tracking_commands_use_local_files_with_a_selected_server(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     home = tmp_path / "home"
     home.mkdir()
-    (home / "controller").write_text("unreachable.invalid")
+    (home / "server").write_text("unreachable.invalid")
     monkeypatch.setenv("ETUDE_HOME", str(home))
-    monkeypatch.delenv("ETUDE_CONTROLLER_LOCAL", raising=False)
+    monkeypatch.delenv("ETUDE_SERVER_LOCAL", raising=False)
     local = tmp_path / "local"
     destination = tmp_path / "copy"
     with track(experiment="pilot", run="one", clocks=CLOCKS, directory=local) as run:

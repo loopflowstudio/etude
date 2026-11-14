@@ -1265,7 +1265,6 @@ def track(
     run: str | None = None,
     job: str | None = None,
     seed: int | None = None,
-    cohort: str | None = None,
     kind: str | None = None,
     config: BaseModel | Mapping[str, object] | str | None = None,
     continues: Continuation | None = None,
@@ -1282,7 +1281,7 @@ def track(
     """Open a new run, or explicitly resume one. A bad declaration raises here.
 
     The experiment is the one `etude launch` started the run for
-    (`ETUDE_EXPERIMENT`, by default the job file's stem) unless named here. Naming
+    (`ETUDE_EXPERIMENT`, by default the experiment file's stem) unless named here. Naming
     another raises `EtudeError("experiment_differs_from_launch")`; naming none
     outside such a launch raises `EtudeError("experiment_not_named")`. The
     run's identity, and whether it resumes, is settled by
@@ -1339,7 +1338,6 @@ def track(
         run=run,
         job=job,
         seed=seed,
-        cohort=cohort,
         kind=kind,
         config=config.model_dump(mode="json") if isinstance(config, BaseModel) else config,
         continues=continues,

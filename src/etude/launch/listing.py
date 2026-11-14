@@ -1,9 +1,8 @@
-"""Print runs the way every command and the controller lists them."""
+"""Print runs the way every command and the server lists them."""
 
 import os
 from collections.abc import Sequence
 
-from etude.errors import LauncherError
 from etude.identity import run_address
 from etude.launch.records import Availability, Machine, Quote
 from etude.launch.scheduler import Scheduler
@@ -24,22 +23,26 @@ def show_runs(scheduler: Scheduler, ids: Sequence[str]) -> None:
 
 
 def resolve_runs(
-    scheduler: Scheduler, names: Sequence[str], *, experiment: str | None = None
+    scheduler: Scheduler,
+    names: Sequence[str],
+    *,
+    experiment: str | None = None,
+    job: str | None = None,
 ) -> list[str]:
-    """Run ids for what was typed: a cohort's name stands for all of its runs."""
-
-    ids: list[str] = []
-    for name in names:
-        try:
-            ids += [run.id for run in scheduler.cohort_runs(name)]
-        except LauncherError:
-            ids.append(run_address(name, experiment))
-    return ids
+    """Resolve addresses or select runs by their experiment and job labels."""
+    if names:
+        return [run_address(name, experiment) for name in names]
+    return [
+        r.id
+        for r in scheduler.runs(
+            done=experiment is not None or job is not None, experiment=experiment, job=job
+        )
+    ]
 
 
 def _here() -> str:
     """What to call the machine that holds the database, as its owner would read it."""
-    return "the controller" if os.environ.get("ETUDE_CONTROLLER_LOCAL") else "this computer"
+    return "the server" if os.environ.get("ETUDE_SERVER_LOCAL") else "this computer"
 
 
 def _machine_name(machine: Machine) -> str:
@@ -99,7 +102,7 @@ def show_machines(scheduler: Scheduler, *, ended: bool, images: bool = False) ->
             print(
                 machine.name,
                 each.name,
-                f"owned{where}, ${machine.cost_usd:.2f} committed, {expiry}",
+                f"{machine.state(now, off=each.off)}, owned{where}, ${machine.cost_usd:.2f} committed, {expiry}",
                 sep="  ",
             )
     for ondemand in scheduler.ondemands():
@@ -118,7 +121,12 @@ def show_machines(scheduler: Scheduler, *, ended: bool, images: bool = False) ->
             else:
                 window = f"rented until {rental.deadline:%Y-%m-%d %H:%M} UTC"
             hardware = f"{machine.hardware}, " if machine.hardware else ""
-            print(machine.name, ondemand.name, f"{hardware}{window}, {cost}", sep="  ")
+            print(
+                machine.name,
+                ondemand.name,
+                f"{machine.state(now)}, {hardware}{window}, {cost}",
+                sep="  ",
+            )
             if images and machine.image is not None:
                 image = machine.image
                 print(
@@ -144,7 +152,7 @@ def show_quote(quote: Quote) -> None:
         print(each.run, where, f"planned rental cost ${each.max_usd:.2f}", sep="  ")
     print(f"planned first-wave rental cost: ${quote.max_usd:.2f}; nothing rented")
     if quote.limit_usd is not None:
-        print(f"job/cohort rental budget: ${quote.limit_usd:.2f}")
+        print(f"job rental budget: ${quote.limit_usd:.2f}")
     print(
         "Rental costs assume deletion on time. Provider delays can exceed the budget; "
         "external storage charges are excluded."

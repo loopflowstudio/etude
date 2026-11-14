@@ -34,7 +34,7 @@ uv run etude checkpoints --source s3://my-bucket/runs
 
 Runs are written to one place per computer, `~/.etude/track` (moved by
 `ETUDE_HOME`, or named with `track(directory=...)`), each in
-`EXPERIMENT[/JOB][@SEED]/`, and `report` reads that place when given no source. So writing never chooses how it will be read.
+`EXPERIMENT/JOB@SEED/` (`EXPERIMENT/` for a plain `train(config)` file), and `report` reads that place when given no source. So writing never chooses how it will be read.
 `report` and `checkpoints` take `--source`, a directory or
 `s3://bucket/prefix` or `r2://bucket/prefix`, and find runs in it at any depth. Attempts on rented
 machines write to the same run folder; pointing `--source` at the
@@ -50,7 +50,7 @@ Install `etude-sdk[s3]` for tracking against a bucket; local tracking does not
 need boto3. `s3://` uses boto3's own configuration. `r2://` reaches Cloudflare
 R2 at `https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com` with `R2_ACCESS_KEY_ID`
 and `R2_SECRET_ACCESS_KEY`, as DuckDB's `r2://` does. Tracking commands read the paths supplied on this computer, even
-when a launcher controller is selected. Each command loads its own dependencies;
+when a launcher server is selected. Each command loads its own dependencies;
 help and the worker do not load NumPy.
 
 Under `etude train` and `etude launch` the run has already been named, so the
@@ -61,12 +61,12 @@ with track(config=config) as run:
     ...
 ```
 
-The run, job, seed and cohort come from the command (`ETUDE_RUN`,
-`ETUDE_JOB`, `ETUDE_SEED`, `ETUDE_COHORT`), and `run.seed` reads the seed.
+The run, job and seed come from the command (`ETUDE_RUN`,
+`ETUDE_JOB`, `ETUDE_SEED`), and `run.seed` reads the seed.
 The experiment is the launched file's stem (`ETUDE_EXPERIMENT`):
 `etude launch ppo.py` supplies `ppo`, including when the file defines only
-`runs()`. An explicit `--experiment` overrides the file and its job labels;
-without it a plain job file preserves an explicit `Job.experiment`. Naming another
+`training_jobs()`. An explicit `--experiment` overrides the file and its job labels;
+without it a file defining only `training_jobs()` preserves an explicit `Job.experiment`. Naming another
 experiment in `track` is refused (`experiment_differs_from_launch`), so a
 reusable training function names none. A process started by another
 scheduler sets the same variables to say which run it is.
@@ -117,7 +117,7 @@ Rules a caller can rely on:
   mean, count and a count of NaN or infinite values. A range with fewer points
   than buckets returns the points themselves.
 - **A job's runs across seeds are its seed sample.** A job is the launcher's
-  Job: a run without its seed. The report draws the mean of its seeds, banded
+  Job: one function called with one config, run once per seed. The report draws the mean of its seeds, banded
   by their range, and shows how many seeds each point has.
 - **`log` cannot hurt training by default.** It is a put on a bounded queue:
   no storage or network I/O, no waiting for delivery. It warns once about bad
@@ -125,7 +125,7 @@ Rules a caller can rely on:
   A full queue drops the row and counts it in
   `run.dropped`. `track` is strict and raises on a bad declaration.
 - **The files are the record.** Everything about a run is in one folder named
-  for its experiment and id, `EXPERIMENT[/JOB][@SEED]/`, in the runs directory and in
+  for its address, `EXPERIMENT/JOB@SEED/`, in the runs directory and in
   each storage it delivers to: `run.json` (its job, seed, config, clocks, parent and inputs),
   `outcome.json` (how its latest attempt ended), `metrics/` (row blocks and
   their indexes, from every attempt), `artifacts/` (immutable files,
@@ -263,7 +263,7 @@ transfer deadline. A supplied `S3Storage(client=...)` keeps that client's
 `botocore.config.Config` connection/read timeouts and retry settings. Transport
 failures raise `etude.storage_timeout.StorageUnavailable`; streamed reads retry
 up to three times, and background delivery retries retained files on a later
-pass. Worker/controller uploads use the [same storage timeout policy](launcher.md#timeout-ownership).
+pass. Worker and launcher uploads use the [same storage timeout policy](launcher.md#timeout-ownership).
 
 `run.finish(timeout=10)` seals the run and retries final delivery within its
 allowance. Increase `timeout` in seconds to allow longer for final delivery.
@@ -442,10 +442,10 @@ be importable with its own dependencies. Without `--source`, the report reads
 the local tracking directory described above.
 
 ```python
-# ppo.py: experiment "ppo", beside its train() and eval(state)
+# ppo.py: experiment "ppo", beside its train() and eval_jobs(state)
 from etude.report import Anchors, Curve, Matches, Matrix, Ranking, Report, Score
 
-from arena import LADDER  # the Benchmark eval(state) holds
+from arena import LADDER  # the Benchmark eval_jobs(state) holds
 
 
 def report() -> Report:
@@ -507,9 +507,9 @@ snapshot with no timer; `render(page, refresh=5)` opts into browser reloads.
 Rendering alone never rebuilds the page's data.
 
 **A folder** is every experiment file in it, at any depth outside hidden
-folders: a `.py` file defining `eval(state)` or `report()` at its top level,
-recognised without running it, so helper modules and job files are left
-alone. It is drawn as a page per experiment and an index: written as
+folders: a `.py` file defining `training_jobs()`, `eval_jobs(state)` or
+`report()` at its top level, recognised without running it, so helper modules
+are left alone. It is drawn as a page per experiment and an index: written as
 `reports/index.html` beside the pages, or served at `/` with each page at
 `/STEM`. The index has a row per experiment showing its runs (running,
 finished, failed, restarted), its latest checkpoint, each job's latest score
@@ -551,7 +551,7 @@ addresses both: `baseline="ppo"` dots both, `labels={"ppo": "PPO"}` shows
 "PPO 1a2b3c · 3 seeds", `Planned(jobs={"ppo": ...})` draws the planned values for
 each and `Aligned(job="ppo")` seats each. The full name, `"ppo 1a2b3c"`,
 names one, and a full-name label or plan wins over the launch name's.
-`TrainingRunSummary.job` in `eval(state)` is this same name. Games played on different
+`TrainingRunSummary.job` in `eval_jobs(state)` is this same name. Games played on different
 devices, compute setups or code revisions contribute to the same requested
 matches; a replay counts once, from its latest delivered result. There is no Config
 control. Ask for a setup under a config's `setup` key, which is part of no
@@ -592,7 +592,7 @@ match is newest, and the page notes the rest. `score` names an eval table's valu
 `etude.eval.query.compare` computes it, with its 95% interval over whole
 matches; without one, every numeric column is offered. Each match counts once,
 from the eval run that delivered it last (`etude.eval.tournament.played`), so at
-the version of the code that played it last. A tournament `eval(state)` returns
+the version of the code that played it last. A tournament `eval_jobs(state)` returns
 is drawn as it wants it now; one it no longer returns, or now defines otherwise
 than its eval runs were held with, as they held it.
 
@@ -608,7 +608,7 @@ than its eval runs were held with, as they held it.
 Eval panels name columns of the score's table, and count the matches the
 section's control selects (a tournament, or a tag within it) unless they name
 their own: `matches=Matches(tournament=..., seating=... or tag=...)`, by the
-names `eval(state)` gives them. A seating and a tag are alternatives; naming
+names `eval_jobs(state)` gives them. A seating and a tag are alternatives; naming
 both is refused. A curve against one anchor draws the others' scores against
 it as reference lines.
 
@@ -689,7 +689,7 @@ matches, even when the displayed count is games; with fewer than two
 matches, no interval is shown.
 
 Gaps stay visible. A checkpoint nothing played is marked not evaluated and is
-no point of a line. One `eval(state)` wants that no eval run has delivered is
+no point of a line. One `eval_jobs(state)` wants that no eval run has delivered is
 marked not yet played, and failed matches, including any stored with no
 rows, are marked and listed with their errors; both break a line rather than
 bridge it. A job's point needs every seed. A column, tournament,
@@ -718,7 +718,7 @@ experiment without `report()` gets this, since it declares nothing; for a large
 metric vocabulary, define `report()` and name the metrics to draw.
 
 **What a build reads.** Perf and ML details read the metric blocks of training
-runs only, once per build; `eval(state)` is given the runs' checkpoints without
+runs only, once per build; `eval_jobs(state)` is given the runs' checkpoints without
 reading any metric data. An eval run contributes its `run.json`, `outcome.json`
 (historically `state.json`), its tournament or environment record and each
 block's index and tables; its blobs, such as replay evidence, are never read
@@ -825,5 +825,5 @@ def report() -> Report:
 Helpers name jobs by launch name, so a job relaunched with a changed config is
 still drawn and labelled, once per config ("Width 64 1a2b3c · 3 seeds"). Edit
 `manabot/reports.py` and click **Refresh**: the page is rebuilt from the edited
-module, with no restart. Don't define `report()` or `eval(state)` at the top
+module, with no restart. Don't define `report()` or `eval_jobs(state)` at the top
 level of a helper module, or `etude report DIR` takes it for an experiment.

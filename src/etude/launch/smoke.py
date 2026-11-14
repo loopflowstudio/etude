@@ -135,7 +135,7 @@ def _train(scheduler: Scheduler, key: str, run: RunRequest) -> Trained:
             step=SmokeStep(step="train", name=name, outcome="not_smoked", detail="no smoke form"),
         )
     started = time.monotonic()
-    launched = scheduler.launch(
+    (launched,) = scheduler.launch(
         RunRequest(job=job, seed=run.seed, params=dict(run.params)), "local"
     )
     (status,) = scheduler.wait(launched, every=0.1)

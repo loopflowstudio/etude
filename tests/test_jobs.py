@@ -16,18 +16,23 @@ import pytest
 from etude.cache import Content
 from etude.checkpoints import CheckpointRecord
 from etude.cli import main
+from etude.declarations import read_training_jobs
 from etude.errors import LauncherError
 from etude.eval.match import environment
 from etude.eval.query import statsdb
-from etude.eval.records import Benchmark, Code, RoundRobin
-from etude.jobs import JobOptions, evaluation, training
-from etude.launch.job_file import read_job_file
+from etude.eval.records import Benchmark, Code, Inference, Match, RoundRobin
+from etude.experiment import observe
+from etude.jobs import EvalJob, JobOptions, TrainingJob, checkpoint_inputs
 from etude.launch.smoke import tiny
 from etude.records import ArtifactRef
-from etude.spec import Input, Job, Runtime, SmokeForm, Until, job_id
+from etude.spec import Input, Job, Preparation, Runtime, SmokeForm, Until, job_id
+from etude.storage import DirectoryStorage
 from etude.train.read import read
+from etude.train.tracking import track
+from tests.eval.games import play
 from tests.experiments import authored
 from tests.launch.counting import job_text
+from tests.launch.tasks import Command, train_command
 from tests.launch.test_runpod_machines import cloud
 from tests.launch.test_worker_attempts import local
 
@@ -49,14 +54,14 @@ def train(config: TrainConfig) -> None:
 """
 
 JOB = """
-from etude.jobs import training
+from etude.jobs import TrainingJob
 from etude.launch.records import Job, Runtime
 
 from {module} import OtherConfig, TrainConfig, train
 
 
-def runs(python: str) -> Job:
-    return training(train, config={config}, max_hours=0.1, runtime=Runtime(python=python))
+def training_jobs(python: str) -> Job:
+    return TrainingJob(name="base", train=train, config={config}, max_hours=0.1, runtime=Runtime(python=python))
 """
 
 PLAY = """
@@ -122,7 +127,7 @@ def _restore_imports(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_a_training_job_calls_its_function_with_its_typed_config(
     tmp_path: Path, job_python: str
 ) -> None:
-    # The job file sits beside its training code, below the checkout's root.
+    # The experiment file sits beside its training code, below the checkout's root.
     repo = checkout(
         tmp_path / "lab",
         {
@@ -130,10 +135,10 @@ def test_a_training_job_calls_its_function_with_its_typed_config(
             "experiments/job.py": JOB.format(module="lab_train", config="TrainConfig(lr=0.25)"),
         },
     )
-    (run,) = read_job_file(repo / "experiments" / "job.py", ["--python", job_python])
+    (run,) = read_training_jobs(repo / "experiments" / "job.py", ["--python", job_python])
     assert run.job.repo == str(repo)
     scheduler = local(tmp_path)
-    launched = scheduler.launch(run)
+    (launched,) = scheduler.launch(run)
     (status,) = scheduler.wait(launched, every=0.05, timeout=60)
     text = job_text(scheduler.logs(refresh=True, run=launched))
     assert status.outcome == "succeeded", text
@@ -168,12 +173,12 @@ def train(config: Config) -> None:
         run.checkpoint(saved, updates=1)
 """,
             "plain.py": f"""
-from etude.jobs import training
+from etude.jobs import TrainingJob
 from etude.launch.records import Job, Runtime
 from {module} import Config, train
 
-def runs(python: str) -> Job:
-    job = training(train, config=Config(), max_hours=0.01, max_attempts=1,
+def training_jobs(python: str) -> Job:
+    job = TrainingJob(name="base", train=train, config=Config(), max_hours=0.01, max_attempts=1,
                    runtime=Runtime(python=python))
     return job.model_copy(update={{"experiment": {experiment!r}}})
 """,
@@ -181,14 +186,23 @@ def runs(python: str) -> Job:
     )
     scheduler = local(tmp_path)
     monkeypatch.setattr(importlib.import_module("etude.launch.cli"), "default", lambda: scheduler)
+    monkeypatch.setattr(
+        importlib.import_module("etude.launch.client"), "default", lambda: scheduler
+    )
+    monkeypatch.setattr(
+        "etude.launch.client.standing", lambda experiment: scheduler.standing(experiment)
+    )
+    monkeypatch.setattr(
+        importlib.import_module("etude.launch.client"), "_client", lambda: scheduler
+    )
     assert main(["launch", str(repo / "plain.py"), "--python", job_python]) == 0
     (record,) = scheduler.runs()
     (status,) = scheduler.wait(record.id, every=0.05, timeout=30)
     assert status.outcome == "succeeded", job_text(scheduler.logs(refresh=True, run=record.id))
-    assert record.launch.spec.experiment == (experiment or "plain")
+    assert record.launch.spec.experiment == "plain"
     assert len(scheduler.attempts(record.id)) == 1
     tracked = tmp_path / "track"
-    data = read(tracked, experiment or "plain", record.id)
+    data = read(tracked, "plain", record.id)
     assert authored(data.reached) == {"updates": 1}
     assert len(data.checkpoints) == 1
     assert (tracked / record.id / "out/final.txt").read_text() == "7"
@@ -212,7 +226,7 @@ def test_a_config_the_function_cannot_take_is_refused_before_anything_launches(
         {f"{module}.py": TRAIN, "job.py": JOB.format(module=module, config=config)},
     )
     with pytest.raises(LauncherError, match=refusal):
-        read_job_file(repo / "job.py", ["--python", "python3.12"])
+        read_training_jobs(repo / "job.py", ["--python", "python3.12"])
 
 
 def test_a_training_jobs_smoke_form_is_its_smoke_config(tmp_path: Path) -> None:
@@ -221,7 +235,7 @@ def test_a_training_jobs_smoke_form_is_its_smoke_config(tmp_path: Path) -> None:
         tmp_path / "lab",
         {"tiny_train.py": TRAIN, "job.py": JOB.format(module="tiny_train", config=config)},
     )
-    (run,) = read_job_file(repo / "job.py", ["--python", "python3.12"])
+    (run,) = read_training_jobs(repo / "job.py", ["--python", "python3.12"])
     small = tiny(run.job)
     assert small is not None and small.smoke is None
     assert (small.command, small.config) == (run.job.command, '{"lr":0.5,"layers":[8]}')
@@ -248,11 +262,16 @@ def test_a_job_file_names_its_own_top_level_function(tmp_path: Path) -> None:
         tmp_path / "lab",
         {
             "job.py": TRAIN
-            + "\nfrom etude.jobs import training\n\n\ndef runs() -> object:\n"
-            + "    return training(train, config=TrainConfig(lr=1), max_hours=0.1)\n"
+            + r"""
+from etude.jobs import TrainingJob
+
+
+def training_jobs() -> object:
+"""
+            + "    return TrainingJob(name='base', train=train, config=TrainConfig(lr=1), max_hours=0.1)\n"
         },
     )
-    (request,) = read_job_file(repo / "job.py")
+    (request,) = read_training_jobs(repo / "job.py")
     assert "--function job:train" in request.job.command
     assert request.job.repo == str(repo)
 
@@ -262,13 +281,13 @@ PACKAGED = (
     UNPACKAGED + '[build-system]\nrequires = ["hatchling"]\nbuild-backend = "hatchling.build"\n'
 )
 TYPED = """
-from etude.jobs import training
+from etude.jobs import TrainingJob
 
 from {module} import TrainConfig, train
 
 
-def runs() -> object:
-    return training(train, config=TrainConfig(lr=1), max_hours=0.1{options})
+def training_jobs() -> object:
+    return TrainingJob(name="base", train=train, config=TrainConfig(lr=1), max_hours=0.1{options})
 """
 
 
@@ -294,7 +313,7 @@ def test_an_unpackaged_uv_project_prepares_its_environment_once_per_lock(
             "job.py": TYPED.format(module=module, options=options),
         },
     )
-    (run,) = read_job_file(repo / "job.py")
+    (run,) = read_training_jobs(repo / "job.py")
     prepare = run.job.prepare
     if derived:
         assert prepare is not None
@@ -375,9 +394,8 @@ def arena(config: ArenaConfig) -> Benchmark:
         ),
     )
     given = legacy if form == "input" else record
-    job = evaluation(
-        duel.arena,
-        config=duel.ArenaConfig(),
+    job = EvalJob(
+        tournament=duel.arena(duel.ArenaConfig()),
         experiment="ppo",
         play=duel.play,
         checkpoint=given,
@@ -386,11 +404,11 @@ def arena(config: ArenaConfig) -> Benchmark:
         max_attempts=1,
         runtime=Runtime(python=job_python),
     )
-    assert len(job.inputs) == len(members)
-    assert {each.key for each in job.inputs} == {
+    assert len(job.plain().inputs) == len(members)
+    assert {each.key for each in job.plain().inputs} == {
         "checkpoints/updates-100" + ("/" + name if name else "") for name in members
     }
-    run = c.scheduler.launch(job, rent="l4")
+    (run,) = c.scheduler.launch(job, rent="l4")
     (status,) = c.scheduler.wait(run, every=0.05, timeout=60)
     assert status.outcome == "succeeded", job_text(c.scheduler.logs(refresh=True, run=run))
     assert c.provider.creates == 1
@@ -421,8 +439,8 @@ def test_an_evaluation_holds_what_its_tournament_takes() -> None:
     progress = Benchmark(name="anchors", environment=environment("duel"))
     entrant = Code(name="fixed", source=[Path(__file__)])
     with pytest.raises(LauncherError, match="give it checkpoints, no entrants"):
-        evaluation(
-            progress,
+        EvalJob(
+            tournament=progress,
             experiment="ppo",
             play=lambda match: {},
             enter=[entrant],
@@ -430,18 +448,24 @@ def test_an_evaluation_holds_what_its_tournament_takes() -> None:
             repo=None,
         )
     weights = Input(name="w", key="w", sha256="0" * 64, size_bytes=1)
-    with pytest.raises(LauncherError, match="name the experiment"):
-        evaluation(progress, play=lambda match: {}, checkpoint=weights, max_hours=0.1, repo=None)
     with pytest.raises(
         LauncherError, match="needs max_hours: the most hours it may hold a machine"
     ):
         # The omission under test.
-        evaluation(progress, experiment="ppo", play=lambda match: {}, checkpoint=weights, repo=None)
+        EvalJob(
+            tournament=progress,
+            experiment="ppo",
+            play=lambda match: {},
+            checkpoint=weights,
+            repo=None,
+        )
     league: RoundRobin = RoundRobin(
         name="league", environment=environment("duel"), configs=({},), games=1
     )
     with pytest.raises(LauncherError, match="give it entrants"):
-        evaluation(league, experiment="ppo", play=lambda match: {}, max_hours=0.1, repo=None)
+        EvalJob(
+            tournament=league, experiment="ppo", play=lambda match: {}, max_hours=0.1, repo=None
+        )
 
 
 def test_the_job_command_starts_by_importing_no_other_part_of_etude() -> None:
@@ -461,26 +485,36 @@ def test_the_job_command_starts_by_importing_no_other_part_of_etude() -> None:
 def test_job_seeds_expand_to_named_requests_without_changing_job_identity(tmp_path: Path) -> None:
     file = tmp_path / "job.py"
     file.write_text(
-        'from etude.launch.records import Job\ndef runs():\n    return Job(command="true", max_hours=1, name="baseline", seeds=(0, 7))\n'
+        r"""from etude.jobs import TrainingJob
+from tests.launch.tasks import Command, RUNTIME, train_command
+from etude.launch.records import Job
+def training_jobs():
+    return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="true"), max_hours=1, name="baseline", seeds=(0, 7), repo=None)
+"""
     )
-    requests = read_job_file(file, experiment="chosen")
+    requests = read_training_jobs(file, experiment="chosen")
     assert [(run.id, run.seed, run.job.experiment) for run in requests] == [
-        ("chosen@0", 0, "chosen"),
-        ("chosen@7", 7, "chosen"),
+        ("chosen/baseline@0", 0, "chosen"),
+        ("chosen/baseline@7", 7, "chosen"),
     ]
     first = requests[0].job
     assert [(run.id, run.seed) for run in first.runs()] == [
-        ("chosen@0", 0),
-        ("chosen@7", 7),
+        ("chosen/baseline@0", 0),
+        ("chosen/baseline@7", 7),
     ]
     assert [(run.id, run.seed, run.params) for run in first.runs(42, params={"width": 64})] == [
         (None, 42, {"width": 64})  # a given seed is named at admission, so it can repeat
     ]
     assert job_id(first) == job_id(first.model_copy(update={"seeds": (42,)}))
     file.write_text(
-        'from etude.launch.records import Job\ndef runs():\n    return [Job(command="true", max_hours=1, name="first"), Job(command="true", max_hours=1, name="other")]\n'
+        r"""from etude.jobs import TrainingJob
+from tests.launch.tasks import Command, RUNTIME, train_command
+from etude.launch.records import Job
+def training_jobs():
+    return [TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="true"), max_hours=1, name="first", repo=None), TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="true"), max_hours=1, name="other", repo=None)]
+"""
     )
-    assert [run.id for run in read_job_file(file)] == ["job/first", "job/other"]
+    assert [run.id for run in read_training_jobs(file)] == ["job/first@0", "job/other@0"]
 
 
 def test_one_allocation_owns_many_writers_without_changing_its_limits(
@@ -511,14 +545,15 @@ def write(config: TrainConfig) -> None:
     monkeypatch.syspath_prepend(str(repo))
     author = importlib.import_module("allocation_writers")
     scheduler = local(tmp_path)
-    job = training(
-        author.write,
+    job = TrainingJob(
+        name="base",
+        train=author.write,
         config=author.TrainConfig(lr=0.1),
         max_hours=0.01,
         max_attempts=1,
         runtime=Runtime(python=job_python),
     )
-    run = scheduler.launch(job.model_copy(update={"experiment": "pilot"}))
+    (run,) = scheduler.launch(job.model_copy(update={"experiment": "pilot"}))
     (status,) = scheduler.wait(run, every=0.05, timeout=30)
     assert (status.outcome, status.attempts, status.usd) == ("succeeded", 1, Decimal(0)), str(
         scheduler.logs(refresh=True, run=run)
@@ -533,3 +568,108 @@ def write(config: TrainConfig) -> None:
     assert list(points.x) == [1, 2, 3]
     assert list(points.y) == [10, 200, 300]
     assert [writer.first_row for writer in data.writers] == [True, True, False]
+
+
+@pytest.mark.parametrize("declared", [False, True])
+def test_a_seated_artifact_wins_over_a_local_checkpoint_with_the_same_compact_key(
+    tmp_path: Path,
+    declared: bool,
+) -> None:
+    source = DirectoryStorage(tmp_path)
+    for experiment, body in (("producer", b"earlier weights"), ("review", b"local weights")):
+        with track(
+            experiment=experiment, run="base@0", directory=tmp_path, clocks=["updates"], strict=True
+        ) as run:
+            path = run.out / "weights.pt"
+            path.write_bytes(body)
+            run.checkpoint(path, updates=1)
+    checkpoint = observe(source, "producer").runs[0].final
+    assert checkpoint is not None
+    state = observe(source, "review")
+    assert state.checkpoint(checkpoint.key) is not None
+    match = Match(players=(checkpoint.player(Inference()), Code(name="fixed")), games=1)
+    saved = checkpoint_inputs([match], state, [checkpoint] if declared else [])
+    assert saved[checkpoint.key].artifact == checkpoint.artifact
+
+
+def test_typed_jobs_declare_uv_extras(tmp_path: Path) -> None:
+    module = f"extras_{tmp_path.name}".replace("-", "_")
+    repo = checkout(
+        tmp_path / "lab",
+        {
+            "pyproject.toml": UNPACKAGED,
+            "uv.lock": "version = 1\n",
+            f"{module}.py": TRAIN,
+            "job.py": TYPED.format(module=module, options=", extras=('eval',)"),
+        },
+    )
+    (run,) = read_training_jobs(repo / "job.py")
+    assert run.job.prepare is not None
+    assert "--extra eval" in run.job.prepare.command
+    assert '"$ETUDE_PYTHON" -m etude.call' in run.job.command
+    evaluation = EvalJob(
+        tournament=Benchmark(name="b", environment=environment("duel")),
+        play=play,
+        max_hours=1,
+        repo=str(repo),
+        extras=("eval",),
+    ).plain()
+    assert evaluation.prepare is not None
+    assert "--extra eval" in evaluation.prepare.command
+    other = EvalJob(
+        tournament=Benchmark(name="b", environment=environment("duel")),
+        play=play,
+        max_hours=1,
+        repo=str(repo),
+        extras=("train",),
+    ).plain()
+    assert job_id(other) != job_id(evaluation)
+    packaged = TrainingJob(
+        name="b",
+        train=train_command,
+        config=Command(command="true"),
+        max_hours=1,
+        repo=None,
+        extras=("eval",),
+    ).plain()
+    assert packaged.command.startswith("uv run --extra eval python -m etude.call")
+
+
+def test_typed_jobs_refuse_extras_a_named_preparation_would_drop() -> None:
+    prepared = Preparation(command="make env", paths=("pyproject.toml",), python=".venv/bin/python")
+    with pytest.raises(LauncherError, match="extras= is not used when prepare="):
+        TrainingJob(
+            name="base",
+            train=train_command,
+            config=Command(command="true"),
+            max_hours=1,
+            prepare=prepared,
+            extras=("eval",),
+        )
+    with pytest.raises(LauncherError, match="extras= is not used when prepare="):
+        EvalJob(
+            tournament=Benchmark(name="b", environment=environment("duel")),
+            play=play,
+            max_hours=1,
+            prepare=prepared,
+            extras=("eval",),
+        )
+
+
+@pytest.mark.parametrize("command", ["", "true"])
+def test_typed_jobs_refuse_command_overrides(command: str) -> None:
+    with pytest.raises(LauncherError, match="typed jobs derive command"):
+        TrainingJob(
+            name="base",
+            train=train_command,
+            config=Command(command="true"),
+            max_hours=1,
+            command=command,
+        )
+    with pytest.raises(LauncherError, match="typed jobs derive command"):
+        EvalJob(
+            tournament=Benchmark(name="b", environment=environment("duel")),
+            play=play,
+            max_hours=1,
+            command=command,
+        )

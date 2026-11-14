@@ -201,7 +201,7 @@ class BucketJournal:
         sources: dict[str, Download] = {}
         inputs: dict[str, Download] = {}
         for work in works:
-            # A cohort shares sources and inputs; link each only once.
+            # Runs share sources and inputs; link each only once.
             if work.repo is not None and work.commit is not None and work.commit not in sources:
                 sources[work.commit] = self._source(work.repo, work.commit)
             for given in work.inputs:
@@ -378,7 +378,7 @@ class BucketJournal:
         return None if raw is None else AttemptRecord.model_validate_json(raw)
 
     def _clear_state(self, session_id: str, run: str) -> None:
-        """Use controller keys to retire saves an upload-only courier cannot delete.
+        """Use server keys to retire saves an upload-only courier cannot delete.
 
         One conditional membership read per observed run; list state only when a
         changed membership contains a pointer. A missing acknowledgement never

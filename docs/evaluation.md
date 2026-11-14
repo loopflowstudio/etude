@@ -366,11 +366,11 @@ with evaluating(
   its config digest. Leave `job` out to mean the held checkpoint's own line.
   A job seat fills from each of that job's lines (see Seeds). A hold finds relative seats' checkpoints among
   its `lines`, the experiment's training lines (`observe(source,
-  experiment).lines`), held or not; `etude eval` passes them itself.
+  experiment).lines`), held or not; `etude eval` and `etude launch` pass them themselves.
   A seating against a fixed player and one against a relative seat are held,
   scored and drawn alike. A seating with a relative seat needs an inference
   seat to be relative to. A seating of two fixed players, such as two jobs'
-  checkpoints chosen in `eval(state)`, is drawn at its first seat's checkpoint,
+  checkpoints chosen in `eval_jobs(state)`, is drawn at its first seat's checkpoint,
   so `Curve(matches=...)` over such seatings draws each pair once.
 
   `Final` is `At` the position where the run ended: a gap until it ends,
@@ -485,95 +485,94 @@ with evaluating(
 ## Evaluation jobs
 
 ```python
-# arena.py, beside play(match: Match[Deal])
-class ArenaConfig(BaseModel):
-    games: int = 8
-
-
-def arena(config: ArenaConfig) -> Benchmark:
-    return Benchmark(
-        name="progress",
-        environment=world,
-        seatings=(
-            Seating(
-                name="vs heuristic", players=(direct, heuristic), configs=deals, games=config.games
-            ),
-        ),
-    )
-```
-
-
-```python
-# eval.py
+# ppo.py: experiment "ppo"
 from decimal import Decimal
 
-from etude.experiment import observe
-from etude.jobs import evaluation
-from etude.spec import Job
+from etude.jobs import EvalJob, ExperimentState
 
-from arena import ArenaConfig, arena, play  # arena(config) -> Benchmark; play(match) -> Tables
+from arena import play, progress  # play(match) -> Tables; progress is a Benchmark
 
 
-def runs() -> Job:
-    weights = observe("s3://my-bucket/runs", "ppo").run("ppo").final
-    return evaluation(
-        arena,
-        config=ArenaConfig(),
-        experiment="ppo",
-        play=play,
-        checkpoint=weights,
-        workers=8,
-        max_hours=0.5,
-        max_usd=Decimal(1),
-    )
+def eval_jobs(state: ExperimentState) -> list[EvalJob]:
+    finals = [run.final for run in state.runs if run.final]
+    return [
+        EvalJob(
+            play=play,
+            tournament=progress,
+            checkpoints=finals,
+            workers=8,
+            max_hours=0.5,
+            max_usd=Decimal(1),
+        )
+    ]
 ```
 
 ```sh
-etude launch eval.py --rent cpu8
+etude eval ppo.py --source s3://my-bucket/runs     # play here
+etude launch ppo.py --rent cpu8                    # get a machine to play
 ```
 
-Write `arena(config: ArenaConfig) -> Benchmark | RoundRobin` as a pure
-function: no playing, storage reads or other I/O. Its config is your Pydantic
-type, as in training. `evaluation(arena, config=ArenaConfig(), play=play)`
-validates the config and calls the function at submission. The planner sees
-the tournament before choosing pending matches and checkpoint inputs. A
-ready-made tournament also works as `evaluation(progress, play=play, ...)`.
+An eval job is one play function, one tournament and the checkpoints to play
+it for. It is the same kind of thing as a training job: one function called
+with one Pydantic value, written as a typed `Job`
+([Typed jobs](launcher.md#typed-jobs)). `eval_jobs` returns `EvalJob`s (one,
+or a list); anything else is refused with an error naming `eval_jobs` and the
+type it takes.
+
+- **It is named by its tournament.** An `EvalJob` takes no `name`: the
+  benchmark's or round robin's name is the job's.
+- **The tournament is a `Benchmark` or `RoundRobin` you have already built.**
+  Keep a function such as `arena(config: ArenaConfig) -> Benchmark` if a
+  config helps you build it, and call it yourself:
+  `tournament=arena(ArenaConfig())`. Passing the function itself is refused
+  with a `LauncherError` saying to call it.
+- **`checkpoints=` are the checkpoints a benchmark is held for**, chosen from
+  the state. `checkpoint=` names one. A round robin takes `enter=` players
+  instead.
+- **`experiment=` holds it for another experiment's runs.** Without it the
+  job belongs to the file's experiment.
 
 On the machine Etude opens `evaluating(tournament)` and calls `run.play(play)`,
 with `play` imported by name from your checkout and every checkpoint member
 delivered as an input verified by digest. The record keeps its checkpoint key,
 and its delivered folder or file is each player's `checkpoint.path`, which `play`
-opens. A single-file `Input` is also accepted. A
-round robin takes `enter=` players instead. The eval run is the launched run, so its tables reach the
+opens. A single-file `Input` is also accepted. The eval run is the launched
+run, so its tables reach the
 machine's storage with the run's other files and `statsdb` finds them there.
-Holding nothing new (batch) is refused: a launched job reads no other eval
-run; an experiment's pass decides what is new first ([Experiments](#experiments)).
+A launched eval run reads no other eval run: the pass that launched it decided
+which matches are new and gave it exactly those ([Experiments](#experiments)).
 The job's environment needs `etude-sdk[eval]`; the rest is as for any
 [typed job](launcher.md#typed-jobs).
 
 ## Experiments
 
-An experiment file says what to evaluate given what exists, and `etude eval`
-plays whatever that calls for and no eval run has delivered. Run it while
-training goes, after it ends, or with a seating added later: each pass looks
-again. The experiment is named for the file: `capacity.py` evaluates the
-training runs of experiment `capacity`, and its eval runs are that
-experiment's. Define `runs()` in it too and `etude launch capacity.py` starts
-training runs of `capacity`, so `track()` in the training code needs no
+An experiment is one file, and the experiment is named for it. The file
+declares its work in three functions with fixed names:
+
+```python
+def training_jobs() -> list[TrainingJob]: ...  # may take state: ExperimentState
+def eval_jobs(state: ExperimentState) -> list[EvalJob]: ...
+def report() -> Report: ...
+```
+
+`eval_jobs(state)` says what to evaluate given what exists. A pass over the
+file plays whatever that calls for and no eval run has delivered. Run one
+while training goes, after it ends, or with a seating added later: each pass
+looks again. `capacity.py` evaluates the training runs of experiment
+`capacity`, and its eval runs are that experiment's; its `training_jobs()`
+declares those training runs, so `track()` in the training code needs no
 `experiment`.
 
 ```python
 # capacity.py: jobs "small" and "large", a checkpoint every 200 updates
 from etude.eval.records import Aligned, Benchmark, Earlier, Final, Fraction, Seating
-from etude.experiment import ExperimentState
-from etude.jobs import evaluation
-from etude.spec import Job
+from etude.jobs import EvalJob, ExperimentState
 
 # direct is an Inference, heuristic Code, deals the configs
 from arena import deals, direct, heuristic, play, world
 
 
-def eval(state: ExperimentState) -> list[Job]:
+def eval_jobs(state: ExperimentState) -> list[EvalJob]:
     rated = [c for run in state.runs for c in run.checkpoints.every(5)]  # every 1,000 updates
     ladder = Benchmark(
         name="ladder",
@@ -618,59 +617,128 @@ def eval(state: ExperimentState) -> list[Job]:
     )
     large = [c for run in state.runs if run.job == "large" for c in run.checkpoints.every(5)]
     return [
-        evaluation(ladder, play=play, checkpoints=rated, workers=8, max_hours=1),
-        evaluation(against_small, play=play, checkpoints=large, workers=8, max_hours=1),
+        EvalJob(play=play, tournament=ladder, checkpoints=rated, workers=8, max_hours=1),
+        EvalJob(play=play, tournament=against_small, checkpoints=large, workers=8, max_hours=1),
     ]
 ```
 
 ```sh
 etude eval capacity.py --source s3://bucket/etude/launch               # play here
-etude eval capacity.py --source s3://bucket/etude/launch --rent cpu8   # launch
-etude eval capacity.py --source s3://bucket/etude/launch --rent cpu8 --watch 600
-etude eval capacity.py --source s3://bucket/etude/launch --pool lab --queue --watch 60
+etude eval capacity.py --source s3://bucket/etude/launch --watch 600   # and again every ten minutes
+etude launch capacity.py --rent cpu8                # get machines: training, then eval
+etude launch capacity.py --rent cpu8 --watch 600    # and again every ten minutes
+etude queue capacity.py --pool lab                  # record the work; it starts when a machine is free
 ```
 
-`etude smoke capacity.py` runs the file's `runs()`, `eval(state)` and `report()` in
+```text
+$ etude launch capacity.py --rent cpu8
+capacity: state from s3://bucket/etude/launch: 6 training runs, 2 eval runs
+capacity/small@0  finished
+capacity/large@0  running
+...
+eval ladder: 48 new, 120 running, 0 failed, running capacity/ladder-1a2b3c4d5e6f
+eval against small: 0 new, 0 running, 0 failed
+```
+
+The commands divide by who does the work:
+
+| | Does the work on this computer | Gets machines to do it |
+| --- | --- | --- |
+| Training | `etude train FILE` | `etude launch FILE`, `etude queue FILE` |
+| Eval | `etude eval FILE` | `etude launch FILE`, `etude queue FILE` |
+
+`etude eval` only plays here: it takes `--source`, `--watch`,
+`--retry-failed` and `--experiment`, and no pool or on-demand. `etude launch`
+and `etude queue` read both declarations and submit what has not been run for
+both stages, with the same three flags beside their own
+([One pass over the file](launcher.md#one-pass-over-the-file)). A file with
+only one of the declarations does only that stage.
+
+`etude smoke capacity.py` runs the file's `training_jobs()`, `eval_jobs(state)` and `report()` in
 smoke form on this computer first, one game per match against tiny
-checkpoints. `etude launch --smoke` and a launching `etude eval --smoke` do so
+checkpoints. `etude launch --smoke` and `etude queue --smoke` do so
 before they spend ([Smoke before you spend](launcher.md#smoke-before-you-spend)).
 
-`--queue` records evaluation jobs even when the selected pool or on-demand is
+`etude queue` records eval runs even when the selected pool or on-demand is
 busy. Queued matches stay in flight, so later passes do not submit them again.
-Keep a launcher controller or `etude wait` running to move them when capacity
-is available. A queued run that fails stops a later pass that wants its matches,
-as a launched one does, unless `--retry-failed`.
+The scheduler starts them when a machine has room, with no later pass: keep
+`etude server run` or `etude wait` running so its loop does. A queued run
+that fails stops a later pass that wants its matches, as a launched one
+does, unless `--retry-failed`.
 
-- **State.** `state.runs` is the experiment's training runs under the
-  source: each one's name, its `job` (the name the report gives it: the
+- **Where state is read.** `--source` when given. Otherwise where the work is
+  delivered: this computer's runs directory for `etude eval`, `etude train`
+  and a target without storage (the `local` pool), and the target's storage
+  for a pool or on-demand that has one. A target whose machines name
+  different storages, or a server reached over SSH, needs `--source`; the
+  error says so. Each pass prints the source it read. The machines that play
+  must deliver to that source, or a later pass reads their matches as
+  unplayed.
+- **State.** What the experiment's runs have stored, together with the
+  scheduler's records of those queued or only just started, read fresh each
+  pass and never stored itself. Summary names are local (`base@0`,
+  `ladder-1a2b3c4d5e6f`) in both cases; `state.run("capacity/base@0")` and
+  `state.run("base@0")` find the same training run. `state.eval_runs` is its eval runs, each with
+  its name and whether it is `queued`, `running`, `stopped`, `finished` or `failed`. `state.runs` is
+  its training runs under the source: each one's name, its `job` (the name the report gives it: the
   launch name, with its config digest when one name ran two configs),
-  whether it is `running`, `finished` or `failed`,
+  whether it is `queued`, `running`, `stopped`, `finished` or `failed`,
   and the checkpoints it stored, each with its ordinal, `at` (where its
   run's clocks stood), tags and `wall_ms`, when it was saved in milliseconds
   since the epoch.
+  `stopped` follows the [same state rule as training](launcher.md#one-pass-over-the-file).
+  A stopped eval is never resumed and needs no action: its undelivered matches
+  are new on the next pass and play in a new run, without `--resume`.
   `Checkpoints` is a tuple, so a slice works too; `every(n)`, `at(clock,
   *values)` and `tagged(tag)` choose by ordinal, clock value or tag, and
   `final` is the last checkpoint once a run has finished.
-- **What `eval` returns.** Evaluation jobs holding a benchmark for the
-  checkpoints it chose. A relative seat finds its checkpoint among every
+- **What `eval_jobs` returns.** Every evaluation job the experiment should
+  have run or can run by now, each holding a benchmark for the checkpoints it
+  chose: the whole list on every call, not only what is new. The pass works
+  out what is left to play. A relative seat finds its checkpoint among every
   run under the source, held or not: `Earlier(by=1_000)` above seats the
   checkpoint 1,000 updates back whether or not `every(5)` chose it. Seat a
   chosen checkpoint with `checkpoint.player(inference)` to make a seating of
   fixed players, played once rather than per checkpoint. `tags` mark
   seatings for readers, such as pairs a rating fit leaves out.
-- **A pass.** For each job, the matches exactly what `eval` returned calls
+- **Other experiments' checkpoints.** A file may define only `eval_jobs`.
+  Read a producer with `observe(source, "producer")` and give its checkpoint
+  records to a benchmark's `checkpoints=`, or use
+  `checkpoint.player(inference)` in a round robin's `enter=`.
+
+  ```python
+  def eval_jobs(state):
+      checkpoint = observe(source, "producer").run("producer/base@0").final
+      return EvalJob(tournament=ladder, play=play, checkpoints=(checkpoint,), max_hours=1)
+  ```
+
+  Import `observe` from `etude.experiment`. It lists the producer's source
+  on every pass, including each `--watch` round.
+  The evaluating experiment's state need not contain the producer. `eval`,
+  `launch` and `queue` use the checkpoint artifact's location and verify
+  its digest and byte length; folder checkpoints verify every member.
+  Two different artifacts with the same checkpoint key are refused with
+  `checkpoint_key_conflict`, naming the key and both locations, including
+  when an earlier delivered evaluation seated the other artifact.
+  Local evaluation inherits this computer's environment, including API keys;
+  it fetches the checkpoints here and rents nothing.
+- **A pass.** For each job, the matches exactly what `eval_jobs` returned calls
   for, the seatings it gave for the checkpoints it gave, that no eval run of
-  the experiment in its environment delivered. Without `--pool` or `--rent`
-  they are played here and delivered to the source. With one, a job is
-  launched to play exactly those, with each checkpoint they seat as an input
-  from its training run's folder; the machine's storage must deliver to the
-  source.
-- **Not twice.** A launched pass is named for its matches and kept in
-  `ETUDE_HOME/experiments/launched.json`, so a later pass neither launches it
-  again nor plays its matches while it runs. A pass that would launch matches
-  a failed run was given stops with `launched_pass_failed`, so a watch never
-  spends again unattended; look, then `--retry-failed`. What the failed run
-  delivered is kept, and other experiments' passes are unaffected.
+  the experiment in its environment delivered. `etude eval` plays them here
+  and delivers them to the source. `etude launch` and `etude queue` submit
+  one eval run per tournament to play exactly those, with each checkpoint
+  they seat as an input from its training run's folder.
+- **Not twice.** A pass decides from two places only: the state, and the
+  launcher's own records of the experiment's runs, the ones `etude runs` and
+  `etude status` show. A launched eval run is named for its matches
+  (`capacity/ladder-1a2b3c4d5e6f`) and its record carries them, so a later
+  pass neither launches it again nor plays its matches while it is queued or
+  running. Nothing else remembers a pass: there is no file to lose or repair.
+  A pass leaves a failed run's undelivered matches alone, hands down
+  unaffected training runs and matches, and prints every decision before
+  stopping with `launched_pass_failed`. A watch ends there; look, then
+  `--retry-failed`. What the failed run delivered is kept. `--quote` shows
+  the held run and retry flag without failing.
 - **While it runs.** `etude status RUN` gives the matches played, the recent
   pace and the time left; `etude logs --run RUN` the job's recent output.
   Sealed blocks reach storage every few minutes, so `etude report` and
@@ -691,7 +759,7 @@ as a launched one does, unless `--retry-failed`.
   reads it.
 - **Changing the design.** A new seating or benchmark is played for every
   checkpoint chosen, including those of finished runs, and a match another of
-  the experiment's tournaments already played is reused. A seating `eval`
+  the experiment's tournaments already played is reused. A seating `eval_jobs`
   stops returning is no longer played; what it played stays. Redefining a
   seating under the same name is refused (`seating_conflict`): give the new
   one a new name. A match is its seats, config and game count, so raising
@@ -705,7 +773,7 @@ as a launched one does, unless `--retry-failed`.
 checkpoint player is drawn where its latest seat says it stood, else, found by its
 checkpoint's key, where its training run stood when it saved it; a checkpoint
 no training run recorded is drawn in its line's curve. Code and checkpoints
-with no position are anchors, drawn once. A checkpoint `eval(state)` chose that no
+with no position are anchors, drawn once. A checkpoint `eval_jobs(state)` chose that no
 eval run has delivered is marked not yet played, one nothing played is marked
 not evaluated, and failed matches are listed. A seating with a relative seat
 is drawn over the checkpoints it was held for; one whose seat has no

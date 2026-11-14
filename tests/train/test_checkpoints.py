@@ -11,7 +11,7 @@ from etude.eval.match import environment, evaluate
 from etude.eval.query import statsdb
 from etude.eval.records import Code, Inference, Match
 from etude.experiment import observe
-from etude.jobs import checkpoint_inputs_for, training
+from etude.jobs import TrainingJob, checkpoint_inputs_for
 from etude.run import RunFiles
 from etude.storage import DirectoryStorage
 from etude.train.records import Step
@@ -85,7 +85,7 @@ def test_two_models_publish_one_checkpoint_and_read_the_same_record(
         assert db.sql(
             "select checkpoint from training_checkpoints join players using(checkpoint)"
         ).fetchall() == [(observed.key,)]
-    job = training(train, config=Config(), start=observed, max_hours=1)
+    job = TrainingJob(name="base", train=train, config=Config(), start=observed, max_hours=1)
     assert len(job.inputs) == 3
     for variable in job.environment:
         monkeypatch.setenv(variable.name, variable.value)

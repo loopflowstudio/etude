@@ -36,7 +36,7 @@ def test_remote_host_runs_kept_work_logs_outputs_and_stops(
     service = Executor(OwnedMachine("bench"), SSHStart(ssh), journal)
     scheduler = Scheduler(Database(tmp_path / "state.db"), {"ssh": lambda held: service})
     scheduler.add_machine("bench", "bench")
-    run = scheduler.launch(
+    (run,) = scheduler.launch(
         Job(
             command='echo weights > "$ETUDE_OUTPUT_DIR/weights"; echo hello',
             max_hours=0.01,
@@ -49,12 +49,16 @@ def test_remote_host_runs_kept_work_logs_outputs_and_stops(
     assert status.rental_ended is None and status.machine == "bench"
     assert job_text(scheduler.logs(refresh=True, run=run)) == "hello\n"
     assert scheduler.fetch(run, "weights", tmp_path / "out").read_text() == "weights\n"
-    running = scheduler.launch(Job(command="sleep 30", max_hours=0.01, max_usd=Decimal(1)), "bench")
+    (running,) = scheduler.launch(
+        Job(command="sleep 30", max_hours=0.01, max_usd=Decimal(1)), "bench"
+    )
     scheduler.cancel(running)
     (cancelled,) = scheduler.wait(running, every=0.1, timeout=20)
     assert cancelled.outcome == "cancelled"
     # An unreachable host provides no evidence of death for a live session.
-    pending = scheduler.queue(Job(command="sleep 30", max_hours=0.01, max_usd=Decimal(1)), "bench")
+    (pending,) = scheduler.queue(
+        Job(command="sleep 30", max_hours=0.01, max_usd=Decimal(1)), "bench"
+    )
     scheduler.tick()
     held = scheduler.attempts(pending)[0].session
     executable.write_text("#!/bin/sh\nexit 255\n")
@@ -82,7 +86,7 @@ def test_runs_move_between_local_and_remote_disk_including_kept_work(tmp_path: P
         'printf \'{"clocks":{"steps":%s}}\' "$ETUDE_UNTIL_VALUE"'
         ' > "$ETUDE_OUTPUT_DIR/etude-result.json"'
     )
-    ids = []
+    ids: list[str] = []
     for target, pool in (("3", None), ("7", "bench"), ("9", None)):
         job = Job(
             command=command,
@@ -90,7 +94,7 @@ def test_runs_move_between_local_and_remote_disk_including_kept_work(tmp_path: P
             max_usd=Decimal(1),
             until=Until.parse(f"steps={target}"),
         )
-        ids.append(scheduler.launch(job, pool))
+        ids.extend(scheduler.launch(job, pool))
         (status,) = scheduler.wait(ids[-1], every=0.05, timeout=10)
         assert (status.outcome, status.clocks) == ("succeeded", {"steps": float(target)})
     for run, target in zip(ids, ("3\n", "7\n", "9\n"), strict=True):
@@ -151,13 +155,13 @@ def test_continuation_moves_between_local_and_remote_disk(
         max_hours=0.1,
         max_usd=Decimal(1),
     )
-    first = scheduler.launch(RunRequest(job=job, seed=1))
+    (first,) = scheduler.launch(RunRequest(job=job, seed=1))
     assert scheduler.wait(first, every=0.05, timeout=30)[0].outcome == "succeeded"
 
     # Local to bench: the parent's file is relayed to the bench, and only that file.
     ssh.asks.clear()
     continued = continue_from(scheduler.record(first), "steps=7", source=tmp_path / "here/track")
-    second = scheduler.launch(continued, "bench")
+    (second,) = scheduler.launch(continued, "bench")
     assert scheduler.wait(second, every=0.05, timeout=30)[0].outcome == "succeeded"
     assert scheduler.fetch(second, "weights.pt", tmp_path / "2").read_text() == (
         "trained to 3\ntrained to 7\n"
@@ -172,6 +176,15 @@ def test_continuation_moves_between_local_and_remote_disk(
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("ETUDE_TRACK_DIR", str(tmp_path / "here/track"))
     monkeypatch.setattr("etude.launch.cli.default", lambda: scheduler)
+    monkeypatch.setattr("etude.launch.client.default", lambda: scheduler)
+    monkeypatch.setattr(
+        "etude.controller.source_for",
+        lambda pool, rent, source=None: source or str(tmp_path / "track"),
+    )
+    monkeypatch.setattr(
+        "etude.launch.client.standing", lambda experiment: scheduler.standing(experiment)
+    )
+    monkeypatch.setattr("etude.launch.client._client", lambda: scheduler)
     assert main(["continue", "--run", second, "--until", "steps=9"]) == 0
     third = capsys.readouterr().out.split()[0]
     assert scheduler.wait(third, every=0.05, timeout=30)[0].outcome == "succeeded"
@@ -187,7 +200,7 @@ def test_continuation_moves_between_local_and_remote_disk(
     earlier = continue_from(
         scheduler.record(second), "steps=9", source=tmp_path / "bench/track", ordinal=1
     )
-    fourth = scheduler.launch(earlier)
+    (fourth,) = scheduler.launch(earlier)
     assert scheduler.wait(fourth, every=0.05, timeout=30)[0].outcome == "succeeded"
     assert scheduler.fetch(fourth, "weights.pt", tmp_path / "4").read_text() == (
         "trained to 3\ntrained to 5\ntrained to 9\n"

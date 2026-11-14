@@ -1,30 +1,10 @@
-"""Typed jobs: work described as Python functions, so nobody writes a command.
+"""The author-facing experiment model: typed jobs and the state declarations read.
 
-    training(train, config=TrainConfig(lr=3e-4), max_hours=6, max_usd=Decimal(30))
-    evaluation(progress, experiment="ppo", play=play, checkpoint=weights, max_hours=0.5, max_usd=Decimal(1))
-    continue_from(parent, "steps=63000", source="s3://bucket/etude/launch")
-
-Each returns an `etude.launch.records.Job` whose command Etude decides: it runs
-`python -m etude.call` (`etude.call`) in the job's own environment, which
-imports the named function and calls it with the job's config. A training job
-calls the author's `train(config)`. An evaluation job calls Etude's `_hold`,
-which holds a tournament (`hold_evaluation`, as `etude eval` and `etude smoke`
-hold one here) with the author's `play` and the checkpoint the job is given as
-an input.
-
-Functions are named by import path from the job's source checkout, which is the
-git checkout their file is in unless `repo` says otherwise. Configs are
-Pydantic models, stored as the job's config text and validated back into the
-function's parameter type on the machine; a config that would not survive that
-is refused here, before anything is launched.
-
-A continuation (`continue_from`) is a new run of a parent's job and seed with
-a further target, seeded from the parent's out, or a selected
-checkpoint. This module reads the parent's tracking and hands over verified
-file inputs and lineage in `ETUDE_CONTINUES`.
-
-This module joins the launcher with evaluation and tracking, as `etude.cli`
-does, so the launcher itself never imports either.
+`TrainingJob`, `EvalJob` and `ExperimentState` are defined here. Typed jobs
+lower to `spec.Job` for storage, transport and identity, deriving their command
+and JSON config afresh after a copy. State is observed, never stored.
+The worker calls `_hold` only when executing an evaluation; worker startup
+imports neither this module nor the state reader in `etude.experiment`.
 """
 
 from __future__ import annotations
@@ -35,18 +15,19 @@ import runpy
 import shlex
 import sys
 import tomllib
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
-from typing import TypedDict, Unpack, cast
+from typing import Literal, TypedDict, cast
 
-from pydantic import BaseModel, Field, JsonValue, ValidationError
+from pydantic import BaseModel, Field, JsonValue, ValidationError, field_validator, model_validator
 
-from etude.cache import Content
+from etude.cache import Artifact, Content, ContentMismatch, Corrupt
 from etude.call import Function, changed_config, config_type
 from etude.carriage import CHECKPOINTS, OUT_PRESENT, checkpoint_file_name, checkpoint_key
-from etude.checkpoints import CheckpointRecord, CheckpointRef, checkpoint_id
+from etude.checkpoints import CheckpointId, CheckpointRecord, CheckpointRef, checkpoint_id
 from etude.errors import EtudeError, LauncherError
 from etude.eval.match import EvalResult
 from etude.eval.records import (
@@ -56,11 +37,12 @@ from etude.eval.records import (
     Match,
     Player,
     RoundRobin,
+    TournamentRun,
+    assemble,
     digest,
 )
 from etude.eval.run import Result, Tables
 from etude.eval.tournament import evaluating
-from etude.experiment import ExperimentState, checkpoint_inputs
 from etude.identity import run_address
 from etude.out import MEMBERSHIP, OutFile, OutFiles
 from etude.records import ArtifactRef, Record, RunRecord, SourceKey
@@ -76,20 +58,171 @@ from etude.spec import (
     Variable,
     number,
 )
-from etude.storage import Storage
+from etude.storage import Storage, place_artifact
 from etude.train.read import read
 from etude.train.records import ParentRun
+
+
+class Checkpoints(tuple[CheckpointRecord, ...]):
+    """A training run's checkpoints in the order it saved them; a tuple, so slices work."""
+
+    def every(self, n: int) -> Checkpoints:
+        """Every nth checkpoint by ordinal: the nth, the 2nth and so on."""
+        if n < 1:
+            raise EtudeError("every_needs_a_positive_n", 422)
+        return Checkpoints(each for each in self if each.ordinal % n == 0)
+
+    def at(self, clock: str, *values: float) -> Checkpoints:
+        """The checkpoints saved where `clock` stood at one of `values`."""
+        wanted = set(values)
+        return Checkpoints(each for each in self if each.at.get(clock) in wanted)
+
+    def tagged(self, tag: str) -> Checkpoints:
+        return Checkpoints(each for each in self if tag in each.tags)
+
+    @property
+    def last(self) -> CheckpointRecord | None:
+        return self[-1] if self else None
+
+
+@dataclass(frozen=True)
+class TrainingRunSummary:
+    name: str
+    experiment: str
+    # Its job as the report names it (`etude.train.report.job_names`): the launch name, with
+    # its config digest when that name ran several configs ("ppo 1a2b3c").
+    job: str
+    # The name it was launched under, which covers every config launched under it.
+    launch: str
+    # Its learner: the first run of the chain of continuations that led to it.
+    line: str
+    state: Literal["queued", "running", "stopped", "finished", "failed"]
+    checkpoints: Checkpoints
+    # The seed it declared, if any.
+    seed: int | None = None
+
+    @property
+    def ended(self) -> bool:
+        return self.state in {"finished", "failed"}
+
+    @property
+    def final(self) -> CheckpointRecord | None:
+        """The last checkpoint once the run finished; None while it may save more."""
+        return self.checkpoints.last if self.state == "finished" else None
+
+
+@dataclass(frozen=True)
+class EvalRunSummary:
+    name: str
+    state: Literal["queued", "running", "stopped", "finished", "failed"]
+    matches: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ExperimentState:
+    """An experiment's training runs under a source, as a pass found it. Never stored."""
+
+    experiment: str
+    runs: tuple[TrainingRunSummary, ...] = ()
+    eval_runs: tuple[EvalRunSummary, ...] = ()
+    committed_usd: Decimal = Decimal(0)
+
+    def run(self, name: str) -> TrainingRunSummary:
+        """The training run named `name`; raises `EtudeError("run_not_found")` without one."""
+        for each in self.runs:
+            if each.name == name.removeprefix(self.experiment + "/"):
+                return each
+        raise EtudeError("run_not_found", 404) from ValueError(name)
+
+    @property
+    def lines(self) -> tuple[Line, ...]:
+        """Each learner line, as relative seats find checkpoints in it: seeded as its first
+        run declared, and ended once every run of it has."""
+        found: dict[str, list[TrainingRunSummary]] = {}
+        for run in self.runs:
+            found.setdefault(run.line, []).append(run)
+        made = (
+            Line(
+                name=name,
+                seed=next((run.seed for run in runs if run.name == name), runs[0].seed),
+                job=runs[0].job,
+                launch=runs[0].launch,
+                ended=all(run.ended for run in runs),
+                checkpoints=tuple(c.ref for run in runs for c in run.checkpoints),
+            )
+            for name, runs in found.items()
+        )
+        return tuple(sorted(made, key=lambda line: line.order))
+
+    def checkpoint(self, key: CheckpointId) -> CheckpointRecord | None:
+        for each in self.runs:
+            for saved in each.checkpoints:
+                if saved.key == key:
+                    return saved
+        return None
+
+
+def checkpoint_inputs(
+    matches: Iterable[Match],
+    state: ExperimentState,
+    checkpoints: Sequence[CheckpointRecord] = (),
+) -> dict[str, CheckpointRecord | CheckpointRef]:
+    """The checkpoints seated, keeping producer records where available.
+
+    A seat's artifact locates its bytes even when another experiment saved it.
+    Missing verification metadata fails with the checkpoint's key.
+    """
+    declared = {each.key: each for each in checkpoints}
+    found: dict[str, CheckpointRecord | CheckpointRef] = {}
+    for match in matches:
+        for player in match.players:
+            if not isinstance(player, CheckpointPlayer) or player.checkpoint.key in found:
+                continue
+            ref = player.checkpoint
+            record = declared.get(ref.key) or state.checkpoint(ref.key)
+            # Compact checkpoint keys can coincide across experiments. The
+            # seated artifact, not this experiment's matching spelling, owns the bytes.
+            saved = record if record is not None and record.artifact == ref.artifact else ref
+            if saved.artifact.sha256 is None or saved.artifact.size_bytes is None:
+                raise EtudeError("checkpoint_not_stored", 404, detail=ref.key)
+            found[ref.key] = saved
+    return found
+
+
+def fetch_checkpoints(
+    matches: Sequence[Match],
+    state: ExperimentState,
+    checkpoints: Sequence[CheckpointRecord],
+    folder: Path,
+) -> dict[str, str]:
+    """Verify seated artifacts into a caller-owned folder and return their local URIs by key."""
+    here: dict[str, str] = {}
+    for key, checkpoint in checkpoint_inputs(matches, state, checkpoints).items():
+        name = digest(key)[:16]
+        for file in checkpoint_inputs_for(checkpoint, name):
+            assert file.uri is not None
+            try:
+                place_artifact(
+                    Artifact(location=file.uri, sha256=file.sha256, size_bytes=file.size_bytes),
+                    folder / file.name,
+                )
+            except FileNotFoundError:
+                raise EtudeError("checkpoint_not_stored", 404, detail=key) from None
+            except (ContentMismatch, Corrupt):
+                raise EtudeError("checkpoint_content_mismatch", 409, detail=key) from None
+        here[key] = (folder / name).as_uri()
+    return here
 
 
 class JobOptions(TypedDict, total=False):
     """How a typed job is launched: every `Job` field except those it derives.
 
     It derives the command and config, the experiment (an evaluation's own,
-    else the one `etude launch` reads from the job file's name) and the
+    else the one `etude launch` reads from the experiment file's name) and the
     smoke form: a training job's `smoke` config; an evaluation's is Etude's.
     """
 
-    max_hours: float
+    max_hours: float | None
     max_usd: Decimal | None
     name: str
     seeds: tuple[int, ...]
@@ -107,34 +240,6 @@ class JobOptions(TypedDict, total=False):
     stop_seconds: float | None
     cleanup_seconds: float | None
     max_attempts: int
-
-
-def training[C: BaseModel](
-    train: Callable[[C], None],
-    *,
-    config: C,
-    smoke: C | None = None,
-    start: CheckpointRecord | None = None,
-    **options: Unpack[JobOptions],
-) -> Job:
-    """A job that calls `train(config)` in the job's own environment.
-
-    `train` takes one parameter annotated with `config`'s Pydantic type and is
-    defined at the top of a module the job's source can import. `smoke` is the
-    config of its smoke form (`etude smoke`), checked the same way. Raises
-    `LauncherError` when it is not, or when a config is not of that type or
-    would not validate back into it.
-    """
-    if start is not None:
-        options["inputs"] = (*options.get("inputs", ()), *checkpoint_inputs_for(start, "start"))
-        options["environment"] = (
-            *options.get("environment", ()),
-            Variable(name="ETUDE_START", value=start.key),
-        )
-    job = _job(train, config, origin=train, options=options)
-    if smoke is None:
-        return job
-    return job.model_copy(update={"smoke": SmokeForm(config=_config_text(train, smoke))})
 
 
 # The job input that carries a benchmark's `CheckpointRecord`, before a member's suffix.
@@ -155,7 +260,7 @@ class Evaluation(Record):
     # A round robin's entrants.
     entrants: tuple[Player, ...] = ()
     workers: int = Field(default=1, ge=1)
-    # The matches a pass found new (`etude.experiment.advance`), and the
+    # The matches a pass found new (`etude.controller.advance`), and the
     # job input holding each checkpoint they seat, by its key encoded.
     matches: tuple[Match, ...] | None = None
     files: dict[str, str] = {}
@@ -163,78 +268,156 @@ class Evaluation(Record):
     lines: tuple[Line, ...] = ()
 
 
-def evaluation[C: BaseModel, M: BaseModel | Mapping[str, JsonValue]](
-    tournament: Benchmark | RoundRobin | Callable[[C], Benchmark | RoundRobin],
-    *,
-    play: Callable[[Match[M]], Tables | Result],
-    config: C | None = None,
-    experiment: str | None = None,
-    checkpoint: CheckpointRecord | Input | None = None,
-    checkpoints: Sequence[CheckpointRecord] = (),
-    enter: Sequence[Player] = (),
-    workers: int = 1,
-    **options: Unpack[JobOptions],
-) -> Job:
-    """Plan a pure tournament function and its config, then play it as one eval run.
+class TrainingJob[C: BaseModel](Job):
+    """One training function and config, repeated over the declared seeds."""
 
-    A ready-made Benchmark or RoundRobin is also accepted. An author function
-    takes one annotated Pydantic config and returns its tournament without I/O;
-    it is called here, before pending-match and checkpoint-input planning.
+    model_config = {"arbitrary_types_allowed": True, "frozen": True, "extra": "forbid"}
+    name: str = Field(min_length=1)
+    train: Callable[[C], None] = Field(exclude=True)
+    config: C  # type: ignore[assignment]  # Lowered to JSON text only by plain().
+    smoke: C | None = Field(default=None, exclude=True)  # type: ignore[assignment]
+    start: CheckpointRecord | None = Field(default=None, exclude=True)
+    extras: tuple[str, ...] = Field(default=(), exclude=True)
+    command: str = ""
 
-    A benchmark is held for a `CheckpointRecord` (or a released single-file
-    `Input`), whose verified members reach the machine as inputs and fill every
-    inference seat; a round robin plays every pair
-    of `enter`. Each inference seat's config is in its seating
-    (`etude.eval.records.Inference`), so the tournament is the whole of what is
-    evaluated. The eval run is the launched run, so `etude logs` and `status`
-    lead to it and a retry resumes it.
+    @model_validator(mode="before")
+    @classmethod
+    def _named(cls, value: object) -> object:
+        if isinstance(value, dict) and not value.get("name"):
+            raise LauncherError("TrainingJob requires name=")
+        return value
 
-    An experiment's `eval(state)` returns one with `checkpoints` instead, the
-    ones it chose, or none for seatings of chosen checkpoints alone, and no
-    `experiment`: `etude eval` names it for the file, finds what is new and
-    plays it here or launches a job for exactly that. Launched as given, such
-    a job is refused: a machine reads no other eval run, so cannot tell what
-    is new. Any other job names its `experiment`.
-    """
-    _require_hours(options)
-    origin: Callable[..., object] = play
-    if callable(tournament):
-        if config is None:
-            raise LauncherError("an evaluation function needs config=")
-        origin = tournament
-        # Materialize the pure tournament before match/input planning. The worker
-        # executes this exact description, never arbitrary author code again.
-        text = _config_text(tournament, config)
-        tournament = tournament(type(config).model_validate_json(text))
-        if not isinstance(tournament, (Benchmark, RoundRobin)):
-            raise LauncherError("an evaluation function must return a Benchmark or RoundRobin")
-    elif config is not None:
-        raise LauncherError("config= belongs to an evaluation function")
-    if isinstance(tournament, Benchmark) and enter:
-        raise LauncherError(f"{tournament.name} is a benchmark: give it checkpoints, no entrants")
-    if checkpoint is not None and checkpoints:
-        raise LauncherError("give one checkpoint input, or the checkpoints an experiment chose")
-    if isinstance(tournament, RoundRobin) and (checkpoint is not None or checkpoints or not enter):
-        raise LauncherError(f"{tournament.name} is a round robin: give it entrants, no checkpoint")
-    if experiment is None and (checkpoint is not None or isinstance(tournament, RoundRobin)):
-        raise LauncherError(f"name the experiment {tournament.name}'s eval run belongs to")
-    if checkpoint is not None:
-        inputs = (
-            checkpoint_inputs_for(checkpoint, _BENCHMARK_CHECKPOINT)
-            if isinstance(checkpoint, CheckpointRecord)
-            else (checkpoint,)
+    @model_validator(mode="after")
+    def _validate_training(self) -> TrainingJob[C]:
+        if "command" in self.model_fields_set:
+            raise LauncherError(
+                "typed jobs derive command; use extras, environment, runtime or prepare"
+            )
+        _refuse_unused_extras(self.extras, self.prepare)
+        self.plain()
+        return self
+
+    def plain(self) -> Job:
+        if not self.name:
+            raise LauncherError("TrainingJob requires name=")
+        options = _options(self)
+        if self.start is not None:
+            options["inputs"] = (*self.inputs, *checkpoint_inputs_for(self.start, "start"))
+            options["environment"] = (
+                *self.environment,
+                Variable(name="ETUDE_START", value=self.start.key),
+            )
+        job = _job(
+            self.train,
+            self.config,
+            origin=self.train,
+            options=options,
+            experiment=self.experiment,
+            extras=self.extras,
         )
-        options["inputs"] = (*options.get("inputs", ()), *inputs)
-    spec = Evaluation(
-        tournament=tournament,
-        experiment=experiment,
-        play=_function(play, _repo(play, options)),
-        checkpoint=checkpoint,
-        checkpoints=tuple(checkpoints),
-        entrants=tuple(enter),
-        workers=workers,
+        if self.smoke is not None:
+            job = job.model_copy(
+                update={"smoke": SmokeForm(config=_config_text(self.train, self.smoke))}
+            )
+        return job
+
+
+class EvalJob[M: BaseModel | Mapping[str, JsonValue]](Job):
+    """A play function, a tournament and the checkpoints or entrants it seats."""
+
+    model_config = {"arbitrary_types_allowed": True, "frozen": True, "extra": "forbid"}
+    play: Callable[[Match[M]], Tables | Result] = Field(exclude=True)
+    tournament: Benchmark | RoundRobin = Field(exclude=True)
+    checkpoint: CheckpointRecord | Input | None = Field(default=None, exclude=True)
+    checkpoints: Sequence[CheckpointRecord] = Field(default=(), exclude=True)
+    enter: Sequence[Player] = Field(default=(), exclude=True)
+    workers: int = Field(default=1, ge=1, exclude=True)
+    extras: tuple[str, ...] = Field(default=(), exclude=True)
+    command: str = ""
+
+    @field_validator("tournament", mode="before")
+    @classmethod
+    def _ready_tournament(cls, value: object) -> object:
+        if callable(value):
+            raise LauncherError(
+                "tournament must be a Benchmark or RoundRobin; call the function first"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _validate_evaluation(self) -> EvalJob[M]:
+        if self.name and self.name != self.tournament.name:
+            raise LauncherError("an EvalJob is named by its tournament")
+        object.__setattr__(self, "name", self.tournament.name)
+        if "command" in self.model_fields_set:
+            raise LauncherError(
+                "typed jobs derive command; use extras, environment, runtime or prepare"
+            )
+        _refuse_unused_extras(self.extras, self.prepare)
+        self.plain()
+        return self
+
+    def plain(self) -> Job:
+        options = _options(self)
+        _require_hours(options)
+        options["name"] = self.tournament.name
+        if isinstance(self.tournament, Benchmark) and self.enter:
+            raise LauncherError(
+                f"{self.tournament.name} is a benchmark: give it checkpoints, no entrants"
+            )
+        if self.checkpoint is not None and self.checkpoints:
+            raise LauncherError("give one checkpoint input, or the checkpoints an experiment chose")
+        if isinstance(self.tournament, RoundRobin) and (
+            self.checkpoint is not None or self.checkpoints or not self.enter
+        ):
+            raise LauncherError(
+                f"{self.tournament.name} is a round robin: give it entrants, no checkpoint"
+            )
+        if self.checkpoint is not None:
+            inputs = (
+                checkpoint_inputs_for(self.checkpoint, _BENCHMARK_CHECKPOINT)
+                if isinstance(self.checkpoint, CheckpointRecord)
+                else (self.checkpoint,)
+            )
+            options["inputs"] = (*self.inputs, *inputs)
+        spec = Evaluation(
+            tournament=self.tournament,
+            experiment=self.experiment,
+            play=_function(self.play, _repo(self.play, options)),
+            checkpoint=self.checkpoint,
+            checkpoints=tuple(self.checkpoints),
+            entrants=tuple(self.enter),
+            workers=self.workers,
+        )
+        assemble(
+            [
+                TournamentRun(
+                    tournament=self.tournament,
+                    checkpoints=tuple(c.ref for c in spec.checkpoints),
+                    entrants=spec.entrants,
+                )
+            ]
+        )
+        return _job(
+            _hold,
+            spec,
+            origin=self.play,
+            options=options,
+            experiment=self.experiment,
+            extras=self.extras,
+        )
+
+
+def _options(job: Job) -> JobOptions:
+    """Only authored launch fields; derived defaults are recomputed after a copy."""
+    return cast(
+        JobOptions,
+        {
+            name: getattr(job, name)
+            for name in JobOptions.__annotations__
+            if name in job.model_fields_set
+        },
     )
-    return _job(_hold, spec, origin=origin, options=options, experiment=experiment)
 
 
 def evaluation_spec(job: Job) -> Evaluation:
@@ -242,18 +425,20 @@ def evaluation_spec(job: Job) -> Evaluation:
 
     An evaluation job is one whose command calls `_hold` (`_called`).
     """
+    job = job.plain()
     if job.config is None or _called(_function(_hold, None)) not in job.command:
         raise EtudeError("not_an_evaluation_job", 422)
     return Evaluation.model_validate_json(job.config)
 
 
 def with_experiment(job: Job, experiment: str) -> Job:
-    """The evaluation job an experiment's `eval(state)` returned, as one of `experiment`.
+    """The evaluation job an experiment's `eval_jobs(state)` returned, as one of `experiment`.
 
     Raises `EtudeError("eval_job_of_another_experiment")` for a job naming
     another experiment, and `EtudeError("not_an_evaluation_job")` for one that
     is not an evaluation.
     """
+    job = job.plain()
     spec = evaluation_spec(job)
     if spec.experiment not in (None, experiment):
         raise EtudeError("eval_job_of_another_experiment", 422) from ValueError(spec.experiment)
@@ -266,18 +451,24 @@ def hold_evaluation(
     *,
     checkout: str | None = None,
     checkpoint: CheckpointRef | None = None,
+    files: Mapping[str, str] = {},
     directory: Path | str | None = None,
     storages: Sequence[Storage] = (),
 ) -> EvalResult:
     """Hold what an evaluation job's config describes (`etude.eval.tournament.hold`).
 
     `play` is imported from `checkout`, the job's source, or the working
-    directory as on the job's machine. `checkpoint` is a benchmark's one
+    directory as on the job's machine. `files` maps checkpoint keys to their
+    verified local URIs for explicit matches. `checkpoint` is a benchmark's one
     checkpoint where it lies here. Raises `EtudeError("evaluation_names_no_experiment")`
     for a config whose experiment is not yet named (`with_experiment`).
     """
     if spec.experiment is None:
         raise EtudeError("evaluation_names_no_experiment", 422)
+    if spec.matches is not None:
+        spec = spec.model_copy(
+            update={"matches": tuple(_relocated(m, files) for m in spec.matches)}
+        )
     # Loaded by import path: the function `evaluation` was given, typed there.
     play = cast(Callable[[Match], Tables | Result], spec.play.load(checkout))
     with evaluating(
@@ -303,11 +494,14 @@ def with_matches(job: Job, matches: Sequence[Match], state: ExperimentState) -> 
     fetches it from that run's bucket folder or relays it from its last
     machine, verified by digest.
     """
+    job = job.plain()
     spec = evaluation_spec(job)
-    saved = checkpoint_inputs(matches, state)
+    saved = checkpoint_inputs(matches, state, spec.checkpoints)
     # One input per checkpoint key, even where two keys hold the same bytes.
-    files = {key: f"checkpoint-{digest(key)[:16]}{PurePosixPath(each.name).suffix}"
-             for key, each in saved.items()}  # fmt: skip
+    files = {
+        key: f"checkpoint-{digest(key)[:16]}{PurePosixPath(checkpoint_file_name(each.artifact.uri)).suffix}"
+        for key, each in saved.items()
+    }
     inputs = tuple(
         given
         for key, each in sorted(saved.items())
@@ -319,18 +513,30 @@ def with_matches(job: Job, matches: Sequence[Match], state: ExperimentState) -> 
     )
 
 
-def checkpoint_inputs_for(checkpoint: CheckpointRecord, name: str) -> tuple[Input, ...]:
+def checkpoint_inputs_for(
+    checkpoint: CheckpointRecord | CheckpointRef, name: str
+) -> tuple[Input, ...]:
     """The individually verified files of one checkpoint, under one input name."""
     artifact = checkpoint.artifact
-    key = checkpoint.file or checkpoint_key(artifact.uri)
+    key = (checkpoint.file if isinstance(checkpoint, CheckpointRecord) else None) or checkpoint_key(
+        artifact.uri
+    )
     if artifact.members:
         files = {"/" + member: content for member, content in sorted(artifact.members.items())}
     elif artifact.sha256 is None or artifact.size_bytes is None:
         raise LauncherError("a checkpoint input requires its digest and byte length")
     else:
         files = {"": Content(sha256=artifact.sha256, size_bytes=artifact.size_bytes)}
-    owner = run_address(checkpoint.run, checkpoint.experiment) if checkpoint.run else None
-    if checkpoint.folder is not None and owner is not None:
+    owner = (
+        run_address(checkpoint.run, checkpoint.experiment)
+        if isinstance(checkpoint, CheckpointRecord) and checkpoint.run
+        else None
+    )
+    if (
+        isinstance(checkpoint, CheckpointRecord)
+        and checkpoint.folder is not None
+        and owner is not None
+    ):
         # Stored folders distinguish a compact sole job from an explicitly
         # qualified job bearing the experiment's name, including historical copies.
         qualified = f"{checkpoint.experiment}/{checkpoint.run}"
@@ -605,9 +811,9 @@ def _hold(evaluation: Evaluation) -> None:
         checkpoint = CheckpointRef(key=key, artifact=artifact)
     if evaluation.matches is not None:
         here = {key: (Path(str(folder)) / name).as_uri() for key, name in evaluation.files.items()}
-        matches = tuple(_relocated(match, here) for match in evaluation.matches)
-        evaluation = evaluation.model_copy(update={"matches": matches})
-    hold_evaluation(evaluation, checkpoint=checkpoint)
+    else:
+        here = {}
+    hold_evaluation(evaluation, checkpoint=checkpoint, files=here)
 
 
 def _relocated(match: Match, here: Mapping[str, str]) -> Match:
@@ -633,6 +839,15 @@ def _require_hours(options: JobOptions) -> None:
         raise LauncherError("a job needs max_hours: the most hours it may hold a machine")
 
 
+def _refuse_unused_extras(extras: tuple[str, ...], prepare: Preparation | None) -> None:
+    """A preparation naming its own interpreter owns its install, so extras would go unused."""
+    if extras and prepare is not None and prepare.python is not None:
+        raise LauncherError(
+            "extras= is not used when prepare= names its own python; "
+            "install the extras in that preparation's command"
+        )
+
+
 def _job(
     function: Callable[..., object],
     config: BaseModel,
@@ -640,6 +855,7 @@ def _job(
     origin: Callable[..., object],
     options: JobOptions,
     experiment: str | None = None,
+    extras: tuple[str, ...] = (),
 ) -> Job:
     """The job that calls `function(config)`; `origin` is the author's function it brings."""
     text = _config_text(function, config)
@@ -647,7 +863,7 @@ def _job(
     called = _function(function, repo)
     sourced: JobOptions = {**options, "repo": None if repo is None else str(repo)}
     if "prepare" not in options and options.get("runtime") is None and repo is not None:
-        derived = _uv_preparation(repo)
+        derived = _uv_preparation(repo, extras)
         if derived is not None:
             sourced["prepare"] = derived
     prepared = sourced.get("prepare")
@@ -656,6 +872,9 @@ def _job(
         prepared is not None and prepared.python is not None
     )
     python = '"$ETUDE_PYTHON"' if named else "uv run python"
+    if extras and (prepared is None or prepared.python is None):
+        flags = " ".join(f"--extra {shlex.quote(extra)}" for extra in extras)
+        python = f"uv run {flags}" + (' --python "$ETUDE_PYTHON"' if named else "") + " python"
     command = f"{python} -m etude.call {_called(called)}"
     if called.path:
         command += f" --path {shlex.quote(called.path)}"
@@ -687,7 +906,7 @@ def _config_text(function: Callable[..., object], config: BaseModel) -> str:
     return text
 
 
-def _uv_preparation(repo: Path) -> Preparation | None:
+def _uv_preparation(repo: Path, extras: tuple[str, ...]) -> Preparation | None:
     """The dependency environment of an unpackaged uv project, prepared once per lock.
 
     uv installs only the dependencies of a project it does not package (no build
@@ -714,6 +933,7 @@ def _uv_preparation(repo: Path) -> Preparation | None:
         command=(
             'UV_PROJECT_ENVIRONMENT="$ETUDE_PREPARED_DIR/.venv"'
             " uv sync --frozen --no-install-project"
+            + "".join(f" --extra {shlex.quote(extra)}" for extra in extras)
         ),
         # uv chooses the interpreter from .python-version, so it decides the result too.
         paths=("pyproject.toml", "uv.lock", *_present(repo, ".python-version")),

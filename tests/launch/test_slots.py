@@ -23,7 +23,7 @@ def _hours_usd(seconds: int, price: str = "0.59") -> Decimal:
 def test_a_machine_takes_waiting_runs_up_to_its_slots(tmp_path: Path) -> None:
     b = bench(tmp_path, max_machines=2, slots=2)
     runs = [
-        b.scheduler.queue(JOB.model_copy(update={"name": f"r{i}"}), rent="l4") for i in range(3)
+        b.scheduler.queue(JOB.model_copy(update={"name": f"r{i}"}), rent="l4")[0] for i in range(3)
     ]
     b.scheduler.tick()
     machines = [b.scheduler.read(run).machine for run in runs]
@@ -41,7 +41,7 @@ def test_a_machine_takes_waiting_runs_up_to_its_slots(tmp_path: Path) -> None:
 def test_a_full_machine_leaves_runs_waiting_and_takes_them_as_slots_free(tmp_path: Path) -> None:
     b = bench(tmp_path, max_machines=1, slots=2)
     machine = b.scheduler.rent("l4", 3)
-    runs = [b.scheduler.queue(JOB, rent="l4") for _ in range(3)]
+    runs = [b.scheduler.queue(JOB, rent="l4")[0] for _ in range(3)]
     b.scheduler.tick()
     assert [b.scheduler.read(r).machine for r in runs] == [machine, machine, None]
     assert b.scheduler.read(runs[2]).phase == "queued"
@@ -54,7 +54,7 @@ def test_a_full_machine_leaves_runs_waiting_and_takes_them_as_slots_free(tmp_pat
 
 def test_runs_sharing_a_machine_split_its_cost_and_cancel_independently(tmp_path: Path) -> None:
     b = bench(tmp_path, max_machines=1, slots=2)
-    first, second = (b.scheduler.queue(JOB, rent="l4") for _ in range(2))
+    first, second = (b.scheduler.queue(JOB, rent="l4")[0] for _ in range(2))
     b.scheduler.tick()
     b.run(300)
     b.scheduler.cancel(first)
@@ -73,7 +73,7 @@ def test_runs_sharing_a_machine_split_its_cost_and_cancel_independently(tmp_path
 
 def test_each_run_on_a_shared_machine_publishes_its_own_outputs(tmp_path: Path) -> None:
     b = bench(tmp_path, max_machines=1, slots=2)
-    runs = [b.scheduler.queue(JOB, rent="l4") for _ in range(2)]
+    runs = [b.scheduler.queue(JOB, rent="l4")[0] for _ in range(2)]
     b.scheduler.tick()
     b.run(601)
     for run in runs:
@@ -85,12 +85,12 @@ def test_each_run_on_a_shared_machine_publishes_its_own_outputs(tmp_path: Path) 
 
 def test_quote_shows_runs_sharing_one_rental(tmp_path: Path) -> None:
     b = bench(tmp_path, max_machines=2, slots=2)
-    job = JOB.model_copy(update={"experiment": "trial", "seeds": (1, 2, 3)})
-    quote = b.scheduler.quote(job.runs(), rent="l4", cohort="trial", parallel=2)
+    job = JOB.model_copy(update={"experiment": "trial", "name": "baseline", "seeds": (1, 2, 3)})
+    quote = b.scheduler.quote(job.runs(), rent="l4")
     assert [(q.run, q.alongside) for q in quote.machines] == [
-        ("trial@1", ("trial@2",)),
-        ("trial@2", ("trial@1",)),
-        ("trial@3", ()),
+        ("trial/baseline@1", ("trial/baseline@2",)),
+        ("trial/baseline@2", ("trial/baseline@1",)),
+        ("trial/baseline@3", ()),
     ]
     assert {q.slots for q in quote.machines} == {2}
     assert quote.machines[0].max_usd == quote.machines[1].max_usd
@@ -99,7 +99,7 @@ def test_quote_shows_runs_sharing_one_rental(tmp_path: Path) -> None:
 
 def test_launch_places_a_cohort_on_one_machine_when_its_slots_hold_it(tmp_path: Path) -> None:
     b = bench(tmp_path, max_machines=1, slots=2)
-    runs = b.scheduler.launch_cohort("pair", JOB.runs(1, 2), rent="l4")
+    runs = b.scheduler.launch(JOB.runs(1, 2), rent="l4")
     assert len({b.scheduler.read(r).machine for r in runs}) == 1
     b.run(601)
     assert [b.scheduler.read(r).outcome for r in runs] == ["succeeded"] * 2
@@ -109,7 +109,7 @@ def test_launch_places_a_cohort_on_one_machine_when_its_slots_hold_it(tmp_path: 
 def test_one_slot_keeps_running_runs_in_turn(tmp_path: Path) -> None:
     b = bench(tmp_path, max_machines=1)
     machine = b.scheduler.rent("l4", 3)
-    runs = [b.scheduler.queue(JOB, rent="l4") for _ in range(2)]
+    runs = [b.scheduler.queue(JOB, rent="l4")[0] for _ in range(2)]
     b.scheduler.tick()
     assert [b.scheduler.read(r).machine for r in runs] == [machine, None]
 
@@ -134,7 +134,7 @@ def test_a_real_worker_runs_two_slots_at_once_with_their_own_outputs(tmp_path: P
     scheduler.add_pool(Pool(name="local", slots=2))
     scheduler._store.add_machine(Machine(name="local", pool="local", kind="local"))
     job = Job(command=RENDEZVOUS.format(meet=meet), max_hours=0.1)
-    runs = scheduler.queue_cohort("pair", job.runs(1, 2), "local", parallel=1)
+    runs = scheduler.queue(job.runs(1, 2), "local")
     for _ in range(400):
         statuses = [scheduler.status(run) for run in runs]
         if all(status.done for status in statuses):

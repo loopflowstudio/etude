@@ -5,11 +5,14 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from functools import partial
+from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from etude.cache import Cache
 from etude.cli import main
 from etude.eval.match import environment, evaluate
 from etude.eval.records import Code, Inference, Match
@@ -18,6 +21,159 @@ from etude.storage import DirectoryStorage
 from etude.train.read import read
 from etude.train.state import read_state
 from tests.eval.games import play_checkpoint_folder
+
+
+def test_local_seeds_share_one_input_copy_per_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    # Larger-than-cache inputs must also be read and placed just once per pass.
+    monkeypatch.setattr("etude.storage.Cache", partial(Cache, max_bytes=0))
+    content = b"initial weights"
+    source = tmp_path / "weights.pt"
+    source.write_bytes(content)
+    reads: list[int] = []
+    get_range = DirectoryStorage.get_range
+
+    def measured(storage: DirectoryStorage, key: str, start: int, length: int) -> bytes:
+        body = get_range(storage, key, start, length)
+        if storage.root / key == source:
+            reads.append(len(body))
+        return body
+
+    monkeypatch.setattr(DirectoryStorage, "get_range", measured)
+    file = tmp_path / "shared_inputs.py"
+    file.write_text(f"""
+import json
+from pydantic import BaseModel
+from etude.jobs import TrainingJob
+from etude.spec import Input
+from etude.train.tracking import track
+
+class Config(BaseModel):
+    pass
+
+def train(config: Config) -> None:
+    with track(config=config) as run:
+        weights = run.input("weights")
+        alias = run.input("alias")
+        assert weights.read_bytes() == alias.read_bytes() == {content!r}
+        assert weights.is_symlink() and alias.is_symlink()
+        assert weights.samefile(alias)
+        held = weights.resolve()
+        (run.out / "input.json").write_text(json.dumps({{
+            "held": str(held), "directory": str(weights.parent),
+            "copies": len(list(held.parent.iterdir())),
+        }}))
+
+def training_jobs() -> list[TrainingJob]:
+    return [TrainingJob(name="fit", train=train, config=Config(), seeds=(0, 1), inputs=tuple(
+        Input(name=name, key="weights.pt", uri={source.as_uri()!r},
+              sha256={sha256(content).hexdigest()!r}, size_bytes={len(content)})
+        for name in ("weights", "alias")))]
+""")
+    assert main(["train", str(file)]) == 0
+    records = [
+        json.loads((tmp_path / f"home/track/shared_inputs/fit@{seed}/out/input.json").read_text())
+        for seed in (0, 1)
+    ]
+    assert reads == [len(content)]
+    assert records[0]["held"] == records[1]["held"]
+    assert records[0]["directory"] != records[1]["directory"]
+    assert all(record["copies"] == 1 for record in records)
+    assert all(not Path(record["directory"]).exists() for record in records)
+    assert not Path(records[0]["held"]).exists()
+    assert source.read_bytes() == content
+
+
+@pytest.mark.parametrize(
+    ("location", "failure"),
+    [
+        ("uri", "missing"),
+        ("run", "missing"),
+        ("uri", "digest"),
+        ("run", "digest"),
+        ("uri", "length"),
+        ("run", "length"),
+        ("bucket", "missing"),
+    ],
+)
+@pytest.mark.parametrize("two_jobs", [False, True])
+def test_local_input_refusals_leave_the_address_available(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    location: str,
+    failure: str,
+    two_jobs: bool,
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    content = b"initial weights"
+    source = tmp_path / "home/track/producer/base@0/out/weights.pt"
+    source.parent.mkdir(parents=True)
+    if failure != "missing":
+        source.write_bytes(b"changed weights" if failure == "digest" else b"short")
+    # A bucket key must never be mistaken for an existing local path.
+    key = "out/weights.pt"
+    if location == "bucket":
+        Path(key).parent.mkdir()
+        Path(key).write_bytes(content)
+    file = tmp_path / f"input_{location}_{failure}_{two_jobs}.py"
+    recipe = f"""
+from pydantic import BaseModel
+from etude.jobs import TrainingJob
+from etude.spec import Input
+from etude.train.tracking import track
+
+class Config(BaseModel):
+    needs_input: bool = True
+
+def train(config: Config) -> None:
+    with track(config=config) as run:
+        if config.needs_input:
+            assert run.input("weights").read_bytes() == {content!r}
+
+def training_jobs() -> list[TrainingJob]:
+    first = [TrainingJob(name="first", train=train, config=Config(needs_input=False))] if {two_jobs!r} else []
+    return [*first, TrainingJob(name="fit", train=train, config=Config(), inputs=(
+        Input(name="weights", key={key!r}, sha256={sha256(content).hexdigest()!r},
+              size_bytes={len(content)}, LOCATION),))]
+"""
+    locator = {
+        "uri": f"uri={source.as_uri()!r}",
+        "run": 'run="producer/base@0"',
+        "bucket": "",
+    }[location]
+    file.write_text(recipe.replace("LOCATION", locator))
+    args = ["train", str(file)]
+    assert main(args) == 1
+    error = capsys.readouterr().err
+    assert "weights" in error
+    if two_jobs:
+        assert "selection_refused" in error
+        assert f"{file.stem}/fit@0" in error
+    if location == "bucket":
+        assert "input_not_located" in error
+        assert key in error
+        assert "uri" in error and "run" in error
+    else:
+        assert "input_undelivered" in error
+        assert ("file is missing" if failure == "missing" else "bytes differ") in error
+        assert source.as_uri() in error
+    root = tmp_path / "home/track" / file.stem / "fit@0"
+    assert not (root / "run.json").exists()
+    assert not (root.parent / "first@0/run.json").exists()
+    assert observe(tmp_path / "home/track", file.stem).runs == ()
+
+    source.write_bytes(content)
+    if location == "bucket":
+        file.write_text(recipe.replace("LOCATION", f"uri={source.as_uri()!r}"))
+    assert main(args) == 0
+    state = observe(tmp_path / "home/track", file.stem)
+    assert len(state.runs) == (2 if two_jobs else 1)
+    assert all(run.state == "finished" for run in state.runs)
+
 
 RECIPE = """from pathlib import Path
 from pydantic import BaseModel
@@ -394,6 +550,50 @@ def test_resume_uses_stored_config_when_defaults_change(
     assert data.outcome is not None and data.outcome.state == "finished"
 
 
+@pytest.mark.parametrize("json_output", [False, True])
+def test_interrupted_declared_run_reports_stopped_and_can_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    json_output: bool,
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+    file = tmp_path / "interrupted.py"
+    recipe = RECIPE.replace("from pathlib import Path", "import signal\nfrom pathlib import Path")
+    recipe = recipe.replace("raise Stopped()", "signal.raise_signal(signal.SIGINT)")
+    file.write_text(
+        recipe + "\nfrom etude.jobs import TrainingJob\n"
+        "def training_jobs():\n"
+        "    return [TrainingJob(name='base', train=train, config=Config(), seeds=(1,), max_hours=1)]\n"
+    )
+    args = ["train", str(file), *(["--json"] if json_output else [])]
+    assert main(args) == 75
+    state = observe(tmp_path / "home/track", "interrupted")
+    (run,) = state.runs
+    assert run.state == "stopped"
+    assert not run.ended and run.final is None
+    before = read(tmp_path / "home/track", "interrupted", "base@1")
+    capsys.readouterr()
+    assert main(args) == 0
+    output = capsys.readouterr()
+    assert "interrupted/base@1  stopped; --job base --seed 1 --resume" in (
+        output.err if json_output else output.out
+    )
+    assert read(tmp_path / "home/track", "interrupted", "base@1").writers == before.writers
+    for command in ("queue", "launch"):
+        assert main([command, str(file), "--source", str(tmp_path / "home/track")]) == 0
+        assert (
+            "interrupted/base@1  stopped; --job base --seed 1 --resume" in capsys.readouterr().out
+        )
+        assert read(tmp_path / "home/track", "interrupted", "base@1").writers == before.writers
+    assert main([*args, "--job", "base", "--seed", "1", "--resume"]) == 0
+    resumed = read(tmp_path / "home/track", "interrupted", "base@1")
+    assert resumed.outcome is not None and resumed.outcome.state == "finished"
+    assert resumed.points("games", "updates").y.tolist() == [3, 6, 9, 12]
+    assert observe(tmp_path / "home/track", "interrupted").runs[0].state == "finished"
+
+
 def test_second_interrupt_exits_a_loop_that_has_not_observed_its_stop(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -412,3 +612,54 @@ def test_second_interrupt_exits_a_loop_that_has_not_observed_its_stop(
     assert data.outcome is not None and data.outcome.state == "failed"
     assert data.reached["updates"] == 2
     assert not (tmp_path / "home/track/train/out/phase-two").exists()
+
+
+@pytest.mark.parametrize("selected", [False, True])
+def test_declared_training_advances_stages_with_inputs_and_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    selected: bool,
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("RECIPE_SETTING", "caller")
+    file = tmp_path / "stages.py"
+    file.write_text("""
+import os
+from pydantic import BaseModel
+from etude.jobs import TrainingJob
+from etude.spec import Variable
+from etude.train.tracking import track
+
+class Config(BaseModel):
+    second: bool = False
+
+def train(config: Config) -> None:
+    with track(config=config, clocks=["updates"]) as run:
+        if config.second:
+            assert os.environ["RECIPE_SETTING"] == "job"
+            assert (run.input("start") / "weights.pt").read_bytes() == b"first stage"
+        weights = b"second stage" if config.second else b"first stage"
+        run.checkpoint(lambda folder: (folder / "weights.pt").write_bytes(weights), updates=1)
+
+def training_jobs(state):
+    jobs = [TrainingJob(name="first", train=train, config=Config())]
+    finished = [r.final for r in state.runs if r.launch == "first" and r.final]
+    if finished:
+        jobs.append(TrainingJob(name="second", train=train, config=Config(second=True),
+            start=finished[0], environment=(Variable(name="RECIPE_SETTING", value="job"),)))
+    return jobs
+""")
+    args = ["train", str(file)]
+    assert main(args) == 0
+    assert main([*args, *(["--job", "second"] if selected else [])]) == 0
+    output = capsys.readouterr().out
+    if not selected:
+        assert "stages/first@0  finished" in output
+    assert main(args) == 0
+    state = observe(tmp_path / "home/track", "stages")
+    assert {r.launch for r in state.runs} == {"first", "second"}
+    assert all(r.state == "finished" for r in state.runs)
+    assert os.environ["RECIPE_SETTING"] == "caller"
+    assert main([*args, "--job", "first"]) == 1
+    assert "run_name_taken" in capsys.readouterr().err

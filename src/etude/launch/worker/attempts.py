@@ -150,7 +150,6 @@ def _lay_out(session: Path, home: Path, work: Work) -> tuple[dict[str, str], dic
         ("ETUDE_RUN_ADDRESS", work.run),
         ("ETUDE_JOB", work.job),
         ("ETUDE_JOB_NAME", work.job_name),
-        ("ETUDE_COHORT", work.cohort),
         ("ETUDE_EXPERIMENT", work.experiment),
     ):
         if value is not None:

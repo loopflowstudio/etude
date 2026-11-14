@@ -67,7 +67,7 @@ def test_job_uses_its_own_python_path(tmp_path: Path, monkeypatch: pytest.Monkey
     )
     monkeypatch.setenv("VIRTUAL_ENV", str(Path(sys.executable).parent.parent))
     scheduler = _open(tmp_path / "launcher")
-    id = scheduler.launch(Job(command="python", max_hours=0.01))
+    (id,) = scheduler.launch(Job(command="python", max_hours=0.01))
     assert scheduler.wait(id, every=0.05, timeout=10)[0].outcome == "succeeded"
     assert job_text(scheduler.logs(refresh=True, run=id)) == "job-python\n"
 

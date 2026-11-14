@@ -7,7 +7,7 @@
     write(render_index(index(storage, pages, href=lambda stem: f"{stem}.html")), target(storage, "index"))
 
 The file defaults the experiment to its stem; an explicit name overrides it. It may define `report()`
-(`etude.report.Report`) and `eval(state)` (`etude.experiment`). Without
+(`etude.report.Report`) and `eval_jobs(state)` (`etude.experiment`). Without
 `report()` the page is `Report(other_metrics=True)`, drawing every metric its
 runs logged, and says so at its top. The experiment's
 training runs are drawn by `etude.train.report.training`; an experiment with
@@ -29,8 +29,8 @@ checkpoint seated with no `at` from outside the experiment, an etude-sdk
 0.2 digest) is fixed, and drawn once as an anchor.
 
 What each tournament has played is `etude.eval.tournament.played`: for a
-tournament `eval(state)` returns, what it wants now; for any other the
-experiment's eval runs hold, or one `eval(state)` now defines otherwise than
+tournament `eval_jobs(state)` returns, what it wants now; for any other the
+experiment's eval runs hold, or one `eval_jobs(state)` now defines otherwise than
 they were held with, everything they were held for. Each delivered
 match counts once, from the eval run `played` says delivered it last, so at
 its latest version. Matches of eval runs held for no tournament are one more
@@ -48,7 +48,7 @@ A curve of seatings draws points (`Point`): each checkpoint a seating was
 held for, where it stood, with the first seat's score against the second
 over that checkpoint's matches, or why it has none. Relative seats find
 their checkpoints among the experiment's training lines
-(`etude.experiment.ExperimentState.lines`), read once with its runs.
+(`etude.jobs.ExperimentState.lines`), read once with its runs.
 
 Gaps stay visible. A checkpoint nothing played is not evaluated; one with a
 match no eval run delivered is not yet played; one whose relative seat has
@@ -87,7 +87,7 @@ from pydantic import JsonValue
 
 from etude.errors import EtudeError
 from etude.eval.records import Gap, Scheduled, Tournament
-from etude.experiment_file import experiment_named
+from etude.experiment_file import experiment_named, refuse_renamed
 from etude.launch.logging import explain
 from etude.records import BUILT_IN_NAMES, Record
 from etude.report import Counters, Flame, Matches, Report, Score, Series
@@ -100,7 +100,7 @@ if TYPE_CHECKING:
     import duckdb
 
     from etude.eval.tournament import Played
-    from etude.experiment import ExperimentState
+    from etude.jobs import ExperimentState
 
 
 class Placement(Record):
@@ -254,7 +254,7 @@ class Coverage(Record):
     played: int
     # Failed, and not played since.
     failed: int
-    # Wanted by `eval(state)` and delivered by no eval run.
+    # Wanted by `eval_jobs(state)` and delivered by no eval run.
     unplayed: int
 
 
@@ -498,7 +498,7 @@ def build(source: Storage | Path | str, file: Path, *, experiment: str | None = 
             + (f"; it holds {', '.join(held)}" if held else "; it holds no runs")
         )
     trained = [run for run in data if run.file is None or run.file.kind != "evaluation"]
-    found = names.get("eval")
+    found = names.get("eval_jobs")
     want: Callable[..., object] | None = None
     if found is not None:
         if not callable(found):
@@ -588,6 +588,7 @@ def _run_file(file: Path) -> dict[str, object]:
         raise EtudeError("experiment_file_must_be_python", 422) from ValueError(file)
     if not file.is_file():
         raise EtudeError("experiment_file_not_found", 404) from FileNotFoundError(file)
+    refuse_renamed(file)
     folder = str(file.resolve().parent)
     if folder not in sys.path:
         sys.path.insert(0, folder)
@@ -747,9 +748,9 @@ def _held_tournaments(
 ) -> tuple[list[_HeldTournament], tuple[str, ...]]:
     """Each tournament as held so far, and a note for each one drawn otherwise than asked.
 
-    A tournament `eval(state)` returns is what it wants now; any other the
+    A tournament `eval_jobs(state)` returns is what it wants now; any other the
     experiment's eval runs hold is everything they were held for. Where
-    `eval(state)` now defines one otherwise than its eval runs were held
+    `eval_jobs(state)` now defines one otherwise than its eval runs were held
     with, such as a later revision of its file with another environment
     digest, the page draws what they recorded: reading needs no agreement,
     only scheduling new games (`etude eval`) does.
@@ -782,7 +783,7 @@ def _held_tournaments(
             except EtudeError as error:
                 refused.append(
                     f"Tournament {name} is drawn as its eval runs recorded it:"
-                    f" eval(state) now defines it otherwise ({error.code})."
+                    f" eval_jobs(state) now defines it otherwise ({error.code})."
                 )
         wanted[name] = recorded
     held_tournaments = []
@@ -807,11 +808,11 @@ def _held_tournaments(
 
 
 def _wanted(want: Callable[..., object], state: ExperimentState) -> list[Tournament]:
-    """The tournaments `eval(state)` returns, each with the checkpoints or entrants it holds."""
-    # The optional `eval` extra, imported where it is used (`_read_evals`): eval(state)
+    """The tournaments `eval_jobs(state)` returns, each with the checkpoints or entrants it holds."""
+    # The optional `eval` extra, imported where it is used (`_read_evals`): eval_jobs(state)
     # and its evaluation jobs are built on etude.eval.
+    from etude.declarations import asked  # noqa: PLC0415
     from etude.eval.records import Tournament  # noqa: PLC0415
-    from etude.experiment import asked  # noqa: PLC0415
     from etude.jobs import evaluation_spec  # noqa: PLC0415
 
     wanted = []

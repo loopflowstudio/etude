@@ -18,7 +18,7 @@ from tests.launch.fake import bench
 
 def test_bills_cover_only_their_hours_and_do_not_change_admission(tmp_path: Path) -> None:
     b = bench(tmp_path, usd_per_hour="1")
-    run = b.scheduler.queue(Job(command="train", max_hours=2, max_usd=Decimal(2)), rent="l4")
+    (run,) = b.scheduler.queue(Job(command="train", max_hours=2, max_usd=Decimal(2)), rent="l4")
     b.scheduler.tick()
     held = b.store.session(b.scheduler.attempts(run)[0].session)
     b.service.seconds = 5000
@@ -40,7 +40,7 @@ def test_bills_cover_only_their_hours_and_do_not_change_admission(tmp_path: Path
     b.scheduler.tick()
     assert not b.scheduler.read(run).estimated
     assert abs(b.scheduler.read(run).usd - Decimal("1.6") * 5000 / 5100) < Decimal("0.00001")
-    # Idle time between completion and controller cleanup belongs to the rental.
+    # Idle time between completion and server cleanup belongs to the rental.
     assert b.scheduler.rentals()[0].usd == Decimal("1.6")
     assert b.store.rental(held.machine).cap_usd == Decimal(2)
 
@@ -53,7 +53,7 @@ def test_unstarted_machine_is_deleted_after_configured_startup_allowance(tmp_pat
         alive=b.service._alive(b.service.sessions[session_id]), progress=()
     )
     b.service.started = lambda session_id: False  # type: ignore[method-assign]
-    run = b.scheduler.launch(
+    (run,) = b.scheduler.launch(
         Job(command="train", max_hours=1, max_usd=Decimal(1), max_attempts=1), rent="l4"
     )
     held = b.store.session(b.scheduler.attempts(run)[0].session)
@@ -70,7 +70,7 @@ def test_actual_create_price_replaces_quote_without_raising_cap(tmp_path: Path) 
     b.service.allocation = lambda session_id: Allocation(  # type: ignore[method-assign]
         id=session_id, address=None, usd_per_hour=Decimal("0.7"), created_at=b.clock()
     )
-    run = b.scheduler.launch(Job(command="train", max_hours=1, max_usd=Decimal(1)), rent="l4")
+    (run,) = b.scheduler.launch(Job(command="train", max_hours=1, max_usd=Decimal(1)), rent="l4")
     held = b.store.session(b.scheduler.attempts(run)[0].session)
     assert b.store.rental(held.machine).usd_per_hour == Decimal("0.7")
     assert b.store.rental(held.machine).cap_usd == Decimal("0.59")
@@ -102,7 +102,7 @@ def test_rented_machine_requires_storage_but_not_a_private_image(tmp_path: Path)
     )
     machine = b.scheduler.rent("stock-ready", hours=2)
     held = b.store.rented_session(machine).id
-    run = b.scheduler.launch(job, rent="stock-ready")
+    (run,) = b.scheduler.launch(job, rent="stock-ready")
     assert b.scheduler.attempts(run)[0].session == held
     assert b.store.session(held).autorun
 
@@ -114,8 +114,8 @@ def test_missing_autorun_setup_does_not_exclude_an_owned_host(tmp_path: Path) ->
     )
     b.scheduler.add_machine("host", "owned")
     job = Job(command="train", max_hours=1, max_usd=Decimal(1))
-    first = b.scheduler.launch(job, "host", rent="unstored")
-    second = b.scheduler.queue(job, "host", rent="unstored")
+    (first,) = b.scheduler.launch(job, "host", rent="unstored")
+    (second,) = b.scheduler.queue(job, "host", rent="unstored")
     b.scheduler.tick()
     assert not b.store.session(b.scheduler.attempts(first)[0].session).autorun
     assert "needs a storage" in str(b.scheduler.read(second))
@@ -126,7 +126,7 @@ def test_missing_autorun_setup_does_not_exclude_an_owned_host(tmp_path: Path) ->
 
 def test_unreported_start_intent_prevents_retry_after_machine_loss(tmp_path: Path) -> None:
     b = bench(tmp_path)
-    run = b.scheduler.launch(Job(command="train", max_hours=1, max_usd=Decimal(1)), rent="l4")
+    (run,) = b.scheduler.launch(Job(command="train", max_hours=1, max_usd=Decimal(1)), rent="l4")
     held = b.scheduler.attempts(run)[0].session
     observe = b.service.observe
     b.service.observe = lambda session_id: observe(session_id).model_copy(  # type: ignore[method-assign]

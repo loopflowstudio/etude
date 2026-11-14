@@ -11,9 +11,9 @@ import pytest
 from etude.cli import main
 from etude.errors import LauncherError
 from etude.launch import cli, client
-from etude.launch.controller import PythonClient, RentRequest, Request, TerminateRequest
 from etude.launch.database import Database, launcher_file
 from etude.launch.records import Machine
+from etude.launch.server import PythonClient, RentRequest, Request, TerminateRequest
 from etude.spec import Job
 from tests.launch.counting import Counting, Counts
 from tests.launch.fake import bench
@@ -43,7 +43,7 @@ def test_commands_rent_and_terminate_by_machine_name(
     assert machine.provider_id is not None and machine.address is None
     assert main(["ondemands"]) == 0
     assert "rented: " + machine.name in capsys.readouterr().out
-    run = b.scheduler.queue(Job(command="train", max_hours=1, max_usd=Decimal(1)), rent="l4")
+    (run,) = b.scheduler.queue(Job(command="train", max_hours=1, max_usd=Decimal(1)), rent="l4")
     b.scheduler.tick()
     assert b.store.machine_busy(machine.name)
     assert main(["terminate", machine.name]) == 1
@@ -57,7 +57,7 @@ def test_commands_rent_and_terminate_by_machine_name(
     assert not b.store.machine_busy(machine.name)
 
 
-def test_python_rental_calls_use_selected_controller(
+def test_python_rental_calls_use_selected_server(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     requests: list[Request] = []
@@ -68,7 +68,7 @@ def test_python_rental_calls_use_selected_controller(
         return b'"remote-pod"' if value.operation == "rent" else machine.model_dump_json().encode()
 
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path))
-    monkeypatch.setattr(client, "selected", lambda: "fixture-controller")
+    monkeypatch.setattr(client, "selected", lambda: "fixture-server")
     monkeypatch.setattr(PythonClient, "_request", request)
     assert client.rent("gpu", 1, Decimal(2)) == "remote-pod"
     assert client.terminate("remote-pod") == machine
@@ -82,7 +82,7 @@ def test_python_rental_calls_use_selected_controller(
 def test_machine_allocation_outlives_its_session(tmp_path: Path) -> None:
     b = bench(tmp_path, max_machines=1)
     machine = b.scheduler.rent("l4", 1)
-    run = b.scheduler.queue(Job(command="train", max_hours=1, max_usd=Decimal(1)), rent="l4")
+    (run,) = b.scheduler.queue(Job(command="train", max_hours=1, max_usd=Decimal(1)), rent="l4")
     b.scheduler.tick()
     attempt = b.scheduler.attempts(run)[0]
     # Retained history can hold an unfinished allocation from an older session.
@@ -104,12 +104,12 @@ def test_machine_allocation_outlives_its_session(tmp_path: Path) -> None:
 def test_added_session_reuses_capacity_without_a_paid_window(tmp_path: Path) -> None:
     b = bench(tmp_path)
     b.scheduler.add_machine("bench", "fixture")
-    first = b.scheduler.queue(Job(command="train", max_hours=1), "bench")
+    (first,) = b.scheduler.queue(Job(command="train", max_hours=1), "bench")
     b.scheduler.tick()
     attempt = b.scheduler.attempts(first)[0]
     # Recover after completion was recorded but before session cleanup happened.
     b.store.finish(attempt, b.clock.now, "succeeded")
-    second = b.scheduler.queue(Job(command="train", max_hours=1), "bench")
+    (second,) = b.scheduler.queue(Job(command="train", max_hours=1), "bench")
     with b.store.lock("bench", b.clock) as acquired:
         assert acquired
         b.scheduler._plan(b.store.pool("bench"), b.clock.now)

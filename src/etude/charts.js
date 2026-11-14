@@ -382,7 +382,7 @@ function model(D) {
     const c = held.reduce((a, b) => ({played: a.played + b.played, failed: a.failed + b.failed, unplayed: a.unplayed + b.unplayed}), {played: 0, failed: 0, unplayed: 0});
     const s = n => n > 1 ? "es" : "", played = c.played ? `, ${c.played} played` : "";
     if (c.failed) return {missing: true, gap: "failed", meta: `${c.failed} match${s(c.failed)} failed${played}`};
-    if (c.unplayed) return {missing: true, gap: "pending", meta: `not yet played: ${c.unplayed} match${s(c.unplayed)} eval(state) wants${played}`};
+    if (c.unplayed) return {missing: true, gap: "pending", meta: `not yet played: ${c.unplayed} match${s(c.unplayed)} eval_jobs(state) wants${played}`};
     if (c.played) return {skip: true, meta: "not in these matches"};
     return {skip: true, gap: "none", meta: "not evaluated"};
   }

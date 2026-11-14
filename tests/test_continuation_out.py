@@ -9,9 +9,9 @@ from pathlib import Path
 import pytest
 
 from etude.cli import main
+from etude.declarations import read_training_jobs
 from etude.errors import LauncherError
 from etude.jobs import continue_from, continued_config
-from etude.launch.job_file import read_job_file
 from etude.out import MEMBERSHIP, OutFiles
 from etude.records import RunWriter
 from etude.run import sync
@@ -61,7 +61,7 @@ def test_implicit_continuation_keeps_clock_kinds_and_can_add_clocks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     scheduler = local(tmp_path)
-    parent = scheduler.queue(Job(command="train", max_hours=1, experiment="recipe"), "local")
+    (parent,) = scheduler.queue(Job(command="train", max_hours=1, experiment="recipe"), "local")
     source = tmp_path / "track"
     with track(
         experiment="recipe",
@@ -93,7 +93,7 @@ def test_continuation_and_report_use_the_same_position_after_an_empty_attempt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, historical: bool, carried: bool
 ) -> None:
     scheduler = local(tmp_path)
-    parent = scheduler.queue(Job(command="train", max_hours=1, experiment="recipe"), "local")
+    (parent,) = scheduler.queue(Job(command="train", max_hours=1, experiment="recipe"), "local")
     source = tmp_path / "track"
     monkeypatch.setenv("ETUDE_OUT", str(source / parent / "out"))
     with track(
@@ -158,7 +158,7 @@ def test_out_carries_copied_latest_checkpoint(
     carried: bool,
 ) -> None:
     scheduler = local(tmp_path)
-    parent = scheduler.queue(Job(command="train", max_hours=1, experiment="recipe"), "local")
+    (parent,) = scheduler.queue(Job(command="train", max_hours=1, experiment="recipe"), "local")
     source = tmp_path / "track"
     monkeypatch.setenv("ETUDE_OUT", str(source / parent / "out"))
     weights = tmp_path / "weights.pt"
@@ -254,7 +254,7 @@ def test_continuation_requires_saved_out_or_its_latest_checkpoint(
     carried: bool,
 ) -> None:
     scheduler = local(tmp_path)
-    parent = scheduler.queue(Job(command="train", max_hours=1, experiment="recipe"), "local")
+    (parent,) = scheduler.queue(Job(command="train", max_hours=1, experiment="recipe"), "local")
     source = tmp_path / "track"
     monkeypatch.setenv("ETUDE_OUT", str(source / parent / "out"))
     position = 2 if removed_checkpoint else 5
@@ -302,6 +302,15 @@ def test_continuation_requires_saved_out_or_its_latest_checkpoint(
     assert not any(key.endswith(".pt") for key in storage.got)
     if not populated:
         monkeypatch.setattr(import_module("etude.launch.cli"), "default", lambda: scheduler)
+        monkeypatch.setattr(import_module("etude.launch.client"), "default", lambda: scheduler)
+        monkeypatch.setattr(
+            "etude.controller.source_for",
+            lambda pool, rent, source=None: source or str(tmp_path / "track"),
+        )
+        monkeypatch.setattr(
+            "etude.launch.client.standing", lambda experiment: scheduler.standing(experiment)
+        )
+        monkeypatch.setattr(import_module("etude.launch.client"), "_client", lambda: scheduler)
         capsys.readouterr()
         assert (
             main(
@@ -346,24 +355,24 @@ def test_typed_stop_and_continuation_restore_full_state_and_only_change_target(
         {
             "recipe_continuation.py": RECIPE,
             "job.py": """
-from etude.jobs import training
+from etude.jobs import TrainingJob
 from etude.launch.records import Job, Runtime
 from recipe_continuation import Config, train
 
-def runs(python: str) -> Job:
-    return training(train, config=Config(), repo=None, max_hours=0.1,
+def training_jobs(python: str) -> Job:
+    return TrainingJob(name="base", train=train, config=Config(), repo=None, max_hours=0.1,
                     runtime=Runtime(python=python))
 """,
         },
     )
     # The file reader imports the recipe; include its source in the launched job.
     monkeypatch.setattr(sys, "path", list(sys.path))
-    (given,) = read_job_file(repo / "job.py", ["--python", job_python])
+    (given,) = read_training_jobs(repo / "job.py", ["--python", job_python])
     spec = given.job.model_copy(
         update={"repo": str(repo), "experiment": "recipe", "until": "updates=3"}
     )
     scheduler = local(tmp_path)
-    parent = scheduler.launch(spec)
+    (parent,) = scheduler.launch(spec)
     status = scheduler.wait(parent, every=0.05, timeout=30)[0]
     assert status.outcome == "succeeded", job_text(scheduler.logs(refresh=True, run=parent))
     assert [a.outcome for a in scheduler.attempts(parent)] == ["stopped", "succeeded"]
@@ -387,7 +396,7 @@ def runs(python: str) -> Job:
     assert source.got.count(f"{parent}/out/state.json") == 1
     assert source.got.count(f"{parent}/out/model-3.pt") == 1
     assert len([i for i in next_run.job.inputs if i.out is not None]) == 2
-    child = scheduler.launch(next_run)
+    (child,) = scheduler.launch(next_run)
     status = scheduler.wait(child, every=0.05, timeout=30)[0]
     assert status.outcome == "succeeded", job_text(scheduler.logs(refresh=True, run=child))
     assert (tracked / parent / "out/state.json").read_text() == "3"
@@ -419,6 +428,15 @@ def runs(python: str) -> Job:
         assert again.job.inputs[:2] == original
         assert len({i.name for i in again.job.inputs}) == len(again.job.inputs)
     monkeypatch.setattr(import_module("etude.launch.cli"), "default", lambda: scheduler)
+    monkeypatch.setattr(import_module("etude.launch.client"), "default", lambda: scheduler)
+    monkeypatch.setattr(
+        "etude.controller.source_for",
+        lambda pool, rent, source=None: source or str(tmp_path / "track"),
+    )
+    monkeypatch.setattr(
+        "etude.launch.client.standing", lambda experiment: scheduler.standing(experiment)
+    )
+    monkeypatch.setattr(import_module("etude.launch.client"), "_client", lambda: scheduler)
     capsys.readouterr()
     assert (
         main(
@@ -446,7 +464,7 @@ def runs(python: str) -> Job:
 
 def test_an_explicit_folder_checkpoint_continuation_names_every_member(tmp_path: Path) -> None:
     scheduler = local(tmp_path)
-    parent = scheduler.queue(Job(command="train", max_hours=1, experiment="recipe"), "local")
+    (parent,) = scheduler.queue(Job(command="train", max_hours=1, experiment="recipe"), "local")
     source = tmp_path / "track"
     with track(
         experiment="recipe",

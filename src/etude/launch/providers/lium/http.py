@@ -1,4 +1,4 @@
-"""Lium controller transport. Account credentials never enter the bootstrap."""
+"""Lium server transport. Account credentials never enter the bootstrap."""
 
 from __future__ import annotations
 

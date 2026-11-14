@@ -16,8 +16,14 @@ from decimal import Decimal
 
 from etude.deadline import limit_time, remaining
 from etude.launch.errors import ProviderUnavailable
-from etude.launch.executor import Refused, check_creation
-from etude.launch.machines import Allocation, Bill, MachineRequest, Safeguards
+from etude.launch.machines import (
+    Allocation,
+    Bill,
+    MachineRequest,
+    Refused,
+    Safeguards,
+    check_creation,
+)
 from etude.launch.measurement import timed
 from etude.launch.providers.lium.api import Create, LiumAPI, LiumOffer, Pod
 from etude.launch.providers.program import Program, boot_source
@@ -69,7 +75,7 @@ def _start(pod: Pod, env: dict[str, str]) -> None:
     except (OSError, subprocess.SubprocessError):
         raise ProviderUnavailable("Lium SSH bootstrap reply unconfirmed") from None
     if result.returncode:
-        raise ProviderUnavailable("Lium SSH bootstrap failed; check controller SSH configuration")
+        raise ProviderUnavailable("Lium SSH bootstrap failed; check server SSH configuration")
 
 
 class LiumMachines:
@@ -114,7 +120,7 @@ class LiumMachines:
             not public_key.startswith(("ssh-ed25519 ", "ssh-rsa ", "ecdsa-sha2-"))
             or "\n" in public_key
         ):
-            raise Refused("LIUM_SSH_PUBLIC_KEY must contain the controller's public SSH key")
+            raise Refused("LIUM_SSH_PUBLIC_KEY must contain the server's public SSH key")
         offers = self._api.offers(self._template)  # revalidate current stock, resources and price
         if not offers:
             raise Refused("no compatible secure Lium allocation")
@@ -243,6 +249,6 @@ class LiumMachines:
         # billed_until is its explicit contiguous settlement watermark.
         self._bucket.put(self._key(session_id, "statement"), statement.model_dump_json().encode())
         # A final settled removal proves zero compute charges after removal,
-        # including the gap before the controller observed absence.
+        # including the gap before the server observed absence.
         through = now if statement.removed else statement.billed_until
         return Bill(usd=statement.total, through=through)
