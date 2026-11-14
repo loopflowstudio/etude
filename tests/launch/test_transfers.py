@@ -1373,6 +1373,9 @@ def test_storage_socket_timeout_retries_and_recovers(
     assert log.read_text().count("retrying") == 2
     assert "private" not in log.read_text()
     http.fault = ""
+    # The short allowance forces the outage; healthy recovery uses the default
+    # so counting requests does not depend on local scheduling within 100 ms.
+    monkeypatch.delenv("ETUDE_STORAGE_TIMEOUT_SECONDS")
     assert read(http.url + "/payload") == b"abcdefghijkl"
     assert http.requests == 4
 
