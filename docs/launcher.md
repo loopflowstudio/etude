@@ -2040,7 +2040,7 @@ current attempt, or its allocation time before any write is observed. Failed
 requests and successful reads do not reset it. The controller may simply have
 stopped collecting evidence; use the worker log to distinguish that from a
 storage outage. Completed and local-only attempts have no delivery-age warning.
-The launcher database schema is version 16; files from other versions are refused rather
+The launcher database schema is version 19; files from other versions are refused rather
 than modified. Preserve an old database with its matching Etude version when
 reading historical evidence.
 
@@ -2222,7 +2222,7 @@ change observed transport totals or turn them into billed amounts.
 
 Adoption requires the SDK revision containing these APIs on both controller
 and worker; generated archives include the same revision automatically. The
-controller database schema is 6 and deliberately refuses older prototype
+controller uses that same launcher schema and deliberately refuses older prototype
 files. Preserve the old database and retained journals before choosing a fresh
 controller home; this change does not migrate or modify live experiment files.
 Use a fresh `ETUDE_HOME` for offline integration proof and install the reviewed

@@ -511,9 +511,11 @@ def test_a_shared_report_module_of_the_repository_is_reread_on_refresh(
 ) -> None:
     generations: list[Path] = []
 
-    def counted(storage: Storage | Path | str, file: Path) -> Page:
+    def counted(
+        storage: Storage | Path | str, file: Path, *, experiment: str | None = None
+    ) -> Page:
         generations.append(file)
-        return build(storage, file)
+        return build(storage, file, experiment=experiment)
 
     monkeypatch.setattr("etude.page.build", counted)
     runs = tmp_path / "runs"

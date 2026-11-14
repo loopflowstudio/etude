@@ -2,7 +2,7 @@
 
 State publication, 2026-11-13: a multi-file save cannot keep its whole-save
 recovery promise through the retained mutable out carrier
-(`scratch/questions.md`, reproduced by `scratch/state-publication.py`).
+(`scratch/questions.md`; probe at `6f70baa:scratch/state-publication.py`).
 Direction given the same day: "snapshot directory + pointer published last,
 recovery follows the pointer", and on cost, Jack Heart: "local storage
 probably fine, but ideally avoid remote extra storage". Then: saves are
@@ -238,8 +238,11 @@ keep their spelling; the rename is of the names people write and read.
 - Relative seats keep resolving against declared clocks.
 - `run.checkpoints()` and evaluation read the same records.
 
-Not checked: how the playing code receives a checkpoint today beyond "one
-file as an input". EXP-56 must read that and extend it.
+Built: playing code reads `CheckpointPlayer.checkpoint.path`, whose folder
+contains `checkpoint.json` and the named files (`etude.checkpoints.CheckpointRef.path`).
+`tests/train/test_checkpoints.py::test_two_models_publish_one_checkpoint_and_read_the_same_record`
+seats both models, joins the evaluation to its training checkpoint and verifies
+the `start=` inputs. `tests/eval/games.py::play_checkpoint_folder` reads the manifest.
 
 ### Set up for Etude Cloud without building it
 
@@ -259,13 +262,10 @@ name its experiment. Launch commands take the name as an argument.
 
 ## Built cuts and review history
 
-The writer/eval, typed-match and first eight review cuts are built. Their
-exact directions, deletion lists and earlier receipts remain at
-`312928d:scratch/design-train-api.md`; current behavior is in user docs and
-`exp-56.md`. Preserve allocation-owned writers and their independent row
-cutoffs, pure eval author functions, selected checkpoint members and stable
-match keys. Warning aliases for released names end in 0.5. Schemas stay at
-launcher 19 and statsdb 14, the single unreleased changes over main.
+Earlier review directions and receipts remain at
+`312928d:scratch/design-train-api.md`; current behavior and verification are in
+user docs and `exp-56.md`. Schemas stay at launcher 19 and statsdb 14, the
+single unreleased changes over main.
 
 ## Run addresses (Hanabi demo steers, 2026-11-13)
 
@@ -393,18 +393,14 @@ checkpoint seats as a limited player and as a constructed player. Etude's
 docs should carry a multi-model example of this shape so the path is visible
 without reading Manabot.
 
-## Order of work
+## Delivery order
 
-1. **EXP-56**: the calls, the on-disk layout, PyTorch writer, `etude train`,
-   `--resume`, names, config and seed checks, folder checkpoints through
-   evaluation, `start=`; the Training page (`docs/training.md`, drafted); a
-   tiny non-Magic example. Old spellings
-   (`track(seed=)`, `local_launch`) warn and name their removal release.
-2. **MTG-329**: rebuild on an isolated override of the unreleased SDK, then
-   pin the release.
-3. **EXP-12** (launcher database migration) starts as soon as EXP-56 is done.
-4. After: README led by the league (`1666be1:scratch/etude-readme-draft.md`,
-   its recipe surface superseded), EXP-60.
+EXP-56's implementation and docs are built; `exp-56.md` separates focused
+evidence from the remaining gate acceptance below. Coin is the small example;
+Hanabi supplied the hands-on demo (`demo-hanabi.md`). MTG-329 owns Manabot's
+cutover and smoke; EXP-12 follows EXP-56 for database migration. The later
+league-led README sketch is at `1666be1:scratch/etude-readme-draft.md`;
+its recipe surface is superseded.
 
 ## Acceptance for EXP-56
 

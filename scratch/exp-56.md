@@ -26,8 +26,9 @@ Built in this cut (committed at `dbf799e`; grep finds no `etude.tracking`,
 - `etude.tracking` is deleted. `etude.run` owns shared declaration, local
   files, delivery, listing and live `Run`. `TrainingRun(Run)` lives in
   `etude.train.tracking`; `EvalRun(Run)` in `etude.eval.run`. The latter owns
-  match validation, staging, rollups and delivery; `evaluate` keeps its
-  one-call shape. Lightweight metric filenames live in `etude.block_file`.
+  match validation, staging, rollups and delivery; `evaluating` opens it and
+  `run.play` executes matches. Released `evaluate` warns until 0.5 and delegates
+  to it. Lightweight metric filenames live in `etude.block_file`.
 - `RunDeclaration`/`RunFile` and launcher `RunRecord` become the single
   `etude.records.RunRecord`. Historical nested declarations decode there.
   The record's launcher specification is absent for standalone writers;
@@ -41,7 +42,7 @@ Built in this cut (committed at `dbf799e`; grep finds no `etude.tracking`,
   `evaluate` becomes `EvalResult`. Their old names warn until 0.5.
   `etude.train.run` is a warning-only import surface until 0.5, with no
   implementation of its own.
-- Launcher references are `EXPERIMENT/RUN`, yielding that same folder and
+- Launcher references are `EXPERIMENT[/JOB][@SEED]`, yielding that same folder and
   grant prefix. Worker environment gives training its local run name and
   experiment. Local writers also use experiment folders; existing flat
   declarations still select the old folder when their experiment matches.
@@ -67,12 +68,6 @@ Launcher schema remains 19, the single unreleased schema change over main's
 stack another migration; the launcher refuses older database files.
 
 ## Remaining work and verification
-
-The first eight reviews, eval/writer and typed-match cuts are built. Their
-exact directions and receipts remain at `312928d:scratch/exp-56.md`; those
-receipts predate this pass and are not current acceptance evidence. The accepted
-surface is in user docs. Historical outcomes/records, state publication,
-planned stops, continuation, row replacement and cumulative budgets survive.
 
 Full acceptance stays with gate: fresh/stop/resume; two models in one save and
 checkpoint seated in evaluation; name/config/seed refusals; changed-source
@@ -122,10 +117,6 @@ Default RL panels retain logged keys; explicit panels still diagnose absent
 keys. Evaluation captions join their present parts. No schema, SQL or remote
 read path changed. PR #103 stays draft; full acceptance remains for gate.
 
-Focused verification: `uv run pytest tests/train/test_hours.py tests/test_page.py -q -k 'report_pace or default_rl or without_a_report'` — 4 passed;
-`node --test --test-name-pattern='evaluation captions|explicit absent|section the report|pace plots' tests/test_charts.cjs` — 4 passed.
-Touched-file mypy, ruff check/format, diff whitespace checks and `uv build --wheel` pass.
-
 ## Compression (2026-11-13)
 
 Delete — do not maintain: duplicate train/eval stop detectors and parallel
@@ -133,5 +124,24 @@ checkpoint name/record maps plus their ordinal counter. `Run.should_stop` owns
 the shared signal; one `_Kept` collection owns checkpoint records and names.
 Evaluation captions share their present-part join. Behavior and formats stay.
 
-`uv run pytest tests/train/test_checkpoints.py tests/train/test_store.py tests/train/test_lifecycle.py tests/train/test_steps.py tests/eval/test_context.py -q --disable-warnings` — 90 passed.
-`node --test tests/test_charts.cjs` — 24 passed; touched-code mypy, ruff and wheel build pass.
+Delete obsolete scratch publication/retention probes that import the removed
+`etude.tracking` package. Their code and original evidence remain at
+`6f70baa:scratch/state-publication.py`, `6f70baa:scratch/state-retention.py`
+and `6f70baa:scratch/questions.md`; current state-publication tests own coverage.
+
+## Current alignment (2026-11-13)
+
+At `b21bc8d`, folder-checkpoint evaluation and `start=` have a two-model
+integration fixture (`tests/train/test_checkpoints.py`); the design's
+investigation step was stale. Report and compression receipts above remain
+focused evidence; full acceptance stays with gate.
+
+Fetched `origin/main` remains `286e0c5`; no upstream commits await reconciliation.
+PR #103 is still draft with no submitted reviews. No Wave is attached.
+Launcher docs' obsolete schema numbers are corrected to the database's 19.
+Open 6 (resume unstarted selection members) and Open 7 (config variants as jobs)
+remain unanswered; preserve their current reversible choices for demo.
+
+The shared-report refresh test's counted wrapper now forwards build's
+`experiment` keyword; its unchanged-generation and edited-helper assertions stay.
+`uv run pytest tests/test_page.py tests/train/test_checkpoints.py tests/train/test_store.py tests/train/test_lifecycle.py tests/train/test_steps.py tests/eval/test_context.py -q --disable-warnings` — 115 passed. All 24 chart tests, wheel build, test_page mypy, touched-file ruff check/format and diff whitespace checks pass.

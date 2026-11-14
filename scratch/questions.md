@@ -32,9 +32,8 @@ repeat unchanged bytes on delivery, but saves superseded before delivery are
 skipped. Courier owns local acknowledgement/retention; controller removes old
 remote saves under upload-only grants. The docs show this behavior.
 
-Open: without a selected controller, upload-only remote cleanup runs only
-while a CLI command does. At five-minute saves, twelve replaced saves/hour
-remain until then. Accept, warn, or reduce delivery cadence?
+Upload-only cleanup without a running controller is resolved by the documented
+choice below: old remote saves remain until the next journal observation.
 
 Earlier CLI choices and unanswered questions (superseded by Decisions through
 demo below) remain at `e40e1a2:scratch/questions.md`. Experiment-scoped reads
@@ -70,7 +69,7 @@ Choices made here:
 - Keep direct calls explicit (`track(experiment=, run=)`); local runs remain
   files, launched continuation stays the branching path, ids stay qualified
   in run.json. These avoid implicit identity or a new persistence path.
-- Keep opener `evaluating`, five-minute default saves (or every= steps), and
+- Keep opener `evaluating`, five-minute default saves (or `save_every=` steps), and
   coin as the smallest introductory example. Hanabi is the optional demo.
 
 Typed match config and CLI-file imports are built. The detailed cut and
