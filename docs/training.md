@@ -622,8 +622,12 @@ are read the same way.
 
 Local training resolves an input's `uri`, or its `run` and `key` in this
 computer's runs directory. A bucket-only input needs `uri` or `run` before
-it can be used here. Missing or mismatched bytes report the input's name
-and location before training starts, leaving the run address available.
+it can be used here (`input_not_located`). Missing or mismatched bytes raise
+`input_undelivered`, naming the input, location and whether the file is
+missing or its bytes differ. Every selected run's inputs are checked before
+any training starts. A refused selection reports its conflicting addresses
+together (`selection_refused`) and leaves every selected run untouched, with
+new run addresses still available.
 
 To start from a run of another experiment, read that experiment yourself:
 `start=observe("s3://my-bucket/runs", "imitate").run("imitate/base@0").final`

@@ -33,12 +33,14 @@ from tests.eval.games import play_checkpoint_folder
         ("bucket", "missing"),
     ],
 )
+@pytest.mark.parametrize("two_jobs", [False, True])
 def test_local_input_refusals_leave_the_address_available(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     location: str,
     failure: str,
+    two_jobs: bool,
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
     monkeypatch.chdir(tmp_path)
@@ -52,7 +54,7 @@ def test_local_input_refusals_leave_the_address_available(
     if location == "bucket":
         Path(key).parent.mkdir()
         Path(key).write_bytes(content)
-    file = tmp_path / f"input_{location}_{failure}.py"
+    file = tmp_path / f"input_{location}_{failure}_{two_jobs}.py"
     recipe = f"""
 from pydantic import BaseModel
 from etude.jobs import TrainingJob
@@ -60,14 +62,16 @@ from etude.spec import Input
 from etude.train.tracking import track
 
 class Config(BaseModel):
-    pass
+    needs_input: bool = True
 
 def train(config: Config) -> None:
     with track(config=config) as run:
-        assert run.input("weights").read_bytes() == {content!r}
+        if config.needs_input:
+            assert run.input("weights").read_bytes() == {content!r}
 
 def training_jobs() -> list[TrainingJob]:
-    return [TrainingJob(name="fit", train=train, config=Config(), inputs=(
+    first = [TrainingJob(name="first", train=train, config=Config(needs_input=False))] if {two_jobs!r} else []
+    return [*first, TrainingJob(name="fit", train=train, config=Config(), inputs=(
         Input(name="weights", key={key!r}, sha256={sha256(content).hexdigest()!r},
               size_bytes={len(content)}, LOCATION),))]
 """
@@ -81,17 +85,20 @@ def training_jobs() -> list[TrainingJob]:
     assert main(args) == 1
     error = capsys.readouterr().err
     assert "weights" in error
+    if two_jobs:
+        assert "selection_refused" in error
+        assert f"{file.stem}/fit@0" in error
     if location == "bucket":
         assert "input_not_located" in error
         assert key in error
         assert "uri" in error and "run" in error
     else:
-        assert (
-            "checkpoint_not_stored" if failure == "missing" else "checkpoint_content_mismatch"
-        ) in error
+        assert "input_undelivered" in error
+        assert ("file is missing" if failure == "missing" else "bytes differ") in error
         assert source.as_uri() in error
     root = tmp_path / "home/track" / file.stem / "fit@0"
     assert not (root / "run.json").exists()
+    assert not (root.parent / "first@0/run.json").exists()
     assert observe(tmp_path / "home/track", file.stem).runs == ()
 
     source.write_bytes(content)
@@ -99,8 +106,8 @@ def training_jobs() -> list[TrainingJob]:
         file.write_text(recipe.replace("LOCATION", f"uri={source.as_uri()!r}"))
     assert main(args) == 0
     state = observe(tmp_path / "home/track", file.stem)
-    assert len(state.runs) == 1
-    assert state.runs[0].state == "finished"
+    assert len(state.runs) == (2 if two_jobs else 1)
+    assert all(run.state == "finished" for run in state.runs)
 
 
 RECIPE = """from pathlib import Path

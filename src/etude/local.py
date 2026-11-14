@@ -74,31 +74,31 @@ def train(
             job=job,
             seed=seed,
         )
-        prepared: list[_Training | _Finished] = []
-        refusals: list[str] = []
-        for request in requests:
-            try:
-                if request.id is None:
-                    raise ValueError(
-                        "local training needs an addressed request; return a Job or give RunRequest.id"
+        with TemporaryDirectory(prefix="etude-inputs-") as folder:
+            prepared: list[_Training | _Finished] = []
+            refusals: list[str] = []
+            for request in requests:
+                try:
+                    if request.id is None:
+                        raise ValueError(
+                            "local training needs an addressed request; return a Job or give RunRequest.id"
+                        )
+                    prior = next(
+                        (
+                            r
+                            for r in state.runs
+                            if r.launch == request.job.name and r.seed == request.seed
+                        ),
+                        None,
                     )
-                prior = next(
-                    (
-                        r
-                        for r in state.runs
-                        if r.launch == request.job.name and r.seed == request.seed
-                    ),
-                    None,
-                )
-                if prior is not None and job is None and seed is None and not resume:
-                    print(
-                        f"{request.id}  {prior.state}",
-                        file=sys.stderr if json_output else sys.stdout,
-                    )
-                    continue
-                identity = run_address(prior.name, label) if prior is not None else request.id
-                prepared.append(
-                    _prepare(
+                    if prior is not None and job is None and seed is None and not resume:
+                        print(
+                            f"{request.id}  {prior.state}",
+                            file=sys.stderr if json_output else sys.stdout,
+                        )
+                        continue
+                    identity = run_address(prior.name, label) if prior is not None else request.id
+                    attempt = _prepare(
                         file,
                         load_job_function(request.job, current=True),
                         label=request.job.experiment or label,  # a job may name its own
@@ -110,17 +110,20 @@ def train(
                         resume=resume,
                         until=until or request.job.until,
                         seconds=seconds,
-                        inputs=request.job.inputs,
                         environment=request.job.environment,
                     )
-                )
-            except (EtudeError, LauncherError, ValueError, TypeError) as error:
-                if len(requests) == 1:
-                    raise
-                refusals.append(f"{request.id or request.job.name}: {error}")
-        if refusals:
-            raise EtudeError("selection_refused", detail="\n".join(refusals))
-        return _train_each(prepared, json_output=json_output)
+                    if isinstance(attempt, _Training):
+                        directory = Path(folder) / request.id
+                        _place_inputs(request.job.inputs, directory)
+                        attempt.values["ETUDE_INPUTS_DIR"] = str(directory)
+                    prepared.append(attempt)
+                except (EtudeError, LauncherError, ValueError, TypeError) as error:
+                    if len(requests) == 1:
+                        raise
+                    refusals.append(f"{request.id or request.job.name}: {error}")
+            if refusals:
+                raise EtudeError("selection_refused", detail="\n".join(refusals))
+            return _train_each(prepared, json_output=json_output)
     if job not in (None, file.stem) or seed not in (None, 0):
         raise ValueError(
             "select the file's sole job and seed 0; define training_jobs() for other jobs or seeds"
@@ -165,7 +168,6 @@ def _prepare(
     resume: bool,
     until: Until | None,
     seconds: float | None,
-    inputs: tuple[Input, ...] = (),
     environment: tuple[Variable, ...] = (),
 ) -> _Training | _Finished:
     """Check one run's identity and build its attempt, touching nothing stored."""
@@ -220,7 +222,6 @@ def _prepare(
         address=run_address(identity, label),
         experiment=label,
         seconds=seconds,
-        inputs=inputs,
     )
 
 
@@ -241,7 +242,6 @@ class _Training:
     address: str
     experiment: str
     seconds: float | None
-    inputs: tuple[Input, ...]
 
 
 def _train_each(attempts: list[_Training | _Finished], *, json_output: bool) -> int:
@@ -270,30 +270,35 @@ def _train(attempt: _Training, *, json_output: bool) -> bool:
             time.time() + attempt.seconds, UTC
         ).isoformat()
     with TemporaryDirectory(prefix="etude-inputs-") as folder:
-        for given in attempt.inputs:
-            uri = given.uri
-            if uri is None:
-                if given.run is None:
-                    raise EtudeError(
-                        "input_not_located",
-                        detail=f"{given.name}: bucket key {given.key!r}; give uri or run for local training",
-                    )
-                uri = DirectoryStorage(default_root()).uri(f"{given.run}/{given.key}")
-            try:
-                place_artifact(
-                    Artifact(location=uri, sha256=given.sha256, size_bytes=given.size_bytes),
-                    Path(folder) / given.name,
-                )
-            except FileNotFoundError:
-                raise EtudeError(
-                    "checkpoint_not_stored", 404, detail=f"{given.name}: {uri}"
-                ) from None
-            except (ContentMismatch, Corrupt):
-                raise EtudeError(
-                    "checkpoint_content_mismatch", 409, detail=f"{given.name}: {uri}"
-                ) from None
-        values["ETUDE_INPUTS_DIR"] = folder
+        values.setdefault("ETUDE_INPUTS_DIR", folder)
         return _call_training(attempt, values, json_output=json_output)
+
+
+def _place_inputs(inputs: tuple[Input, ...], directory: Path) -> None:
+    """Locate and verify inputs during the pass check, retaining them for training."""
+    directory.mkdir(parents=True)
+    for given in inputs:
+        uri = given.uri
+        if uri is None:
+            if given.run is None:
+                raise EtudeError(
+                    "input_not_located",
+                    detail=f"{given.name}: bucket key {given.key!r}; give uri or run for local training",
+                )
+            uri = DirectoryStorage(default_root()).uri(f"{given.run}/{given.key}")
+        try:
+            place_artifact(
+                Artifact(location=uri, sha256=given.sha256, size_bytes=given.size_bytes),
+                directory / given.name,
+            )
+        except FileNotFoundError:
+            raise EtudeError(
+                "input_undelivered", 404, detail=f"{given.name}: {uri}: file is missing"
+            ) from None
+        except (ContentMismatch, Corrupt):
+            raise EtudeError(
+                "input_undelivered", 409, detail=f"{given.name}: {uri}: bytes differ"
+            ) from None
 
 
 def _call_training(attempt: _Training, values: dict[str, str], *, json_output: bool) -> bool:
