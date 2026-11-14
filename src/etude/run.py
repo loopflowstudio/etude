@@ -384,10 +384,7 @@ def declare(
         }:
             raise EtudeError("run_clock_conflict", 409)
         if not resume:
-            raise EtudeError(
-                "run_name_taken",
-                detail=f"{address}; use --resume; to train further give --resume --until CLOCK=TARGET",
-            )
+            raise run_name_taken(address)
         validate_resume(prior, config=text, seed=seed)
         return Declared(base, root, prior)
     root.mkdir(parents=True, exist_ok=True)
@@ -400,6 +397,14 @@ def declare(
         except FileExistsError:
             raise EtudeError("run_name_taken", detail=name) from None
     return Declared(base, root, declaration)
+
+
+def run_name_taken(address: str) -> EtudeError:
+    """The refusal of a new attempt at an existing run, naming both ways to carry on."""
+    return EtudeError(
+        "run_name_taken",
+        detail=f"{address}; use --resume; to train further give --resume --until CLOCK=TARGET",
+    )
 
 
 def declare_clock(files: RunFiles, clock: Clock) -> RunRecord:

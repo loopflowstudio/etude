@@ -116,3 +116,16 @@ continuation and smoke checks passed in this pass; full acceptance stays gate's.
 Mypy on the 19 affected source/test files, ruff check, ruff format --check and
 `git diff --check` pass. Measured discovery: 1 listing, 2 declaration reads for
 a compact training root and its nested eval root. Context under both limits.
+
+Compress after that pass: local training reads the stored record once and
+picks its config through `changed_config` alone; `run_directory` names the
+local run once and loops over the two historical folders; `run.run_name_taken`
+owns the taken-run wording for `declare` and `etude train`. No behavior change.
+`uv run pytest tests/train/test_addresses.py tests/train/test_local.py
+tests/train/test_identity.py tests/test_jobs.py tests/launch/test_resume.py
+tests/run/test_layout.py tests/test_continuation_out.py tests/eval/test_context.py
+tests/train/test_track.py -q` — passed (106, then 82 on the overlapping rerun);
+mypy and ruff clean on the touched files. Left alone: `load_job_function`'s
+`current=` re-execution (only `etude train` uses it; whether a persistent
+client needs it is a demo judgment) and the launcher's separate
+"already admitted" wording.

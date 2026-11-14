@@ -361,27 +361,25 @@ def default_root() -> Path:
 
 def run_directory(directory: Path | str | None, experiment: str, run: str) -> tuple[Path, Path]:
     """The runs directory and this run's folder in it; refuses names unsafe as paths."""
-    for name in (experiment, run.removeprefix(experiment + "/")):
+    local = run.removeprefix(experiment + "/")
+    for name in (experiment, local):
         if not SAFE_NAME.match(name):
             raise EtudeError("unsafe_run_or_experiment_name", 422)
     base = Path(directory) if directory else default_root()
-    address = os.environ.get("ETUDE_RUN_ADDRESS") if os.environ.get("ETUDE_RUN") == run else None
+    handed = os.environ.get("ETUDE_RUN")
+    address = os.environ.get("ETUDE_RUN_ADDRESS") if handed == run else None
     root = base / run_address(address or run, experiment)
-    if os.environ.get("ETUDE_ATTEMPT") and os.environ.get("ETUDE_RUN") == run.removeprefix(
-        experiment + "/"
-    ):
-        if out := os.environ.get("ETUDE_OUT"):
-            root = Path(out).parent
-    qualified = base / experiment / run.removeprefix(experiment + "/") / "run.json"
-    if not (root / "run.json").is_file() and qualified.is_file():
-        prior = RunRecord.model_validate_json(qualified.read_bytes())
-        if prior.experiment == experiment:
-            return base, qualified.parent
-    legacy = base / run / "run.json"
-    if not (root / "run.json").is_file() and legacy.is_file():
-        prior = RunRecord.model_validate_json(legacy.read_bytes())
-        if prior.experiment == experiment:
-            return base, legacy.parent
+    if os.environ.get("ETUDE_ATTEMPT") and handed == local and (out := os.environ.get("ETUDE_OUT")):
+        root = Path(out).parent
+    if not (root / "run.json").is_file():
+        # Runs stored before compact addresses: EXPERIMENT/RUN folders, then flat ones.
+        for stored in (base / experiment / local, base / run):
+            record = stored / "run.json"
+            if (
+                record.is_file()
+                and RunRecord.model_validate_json(record.read_bytes()).experiment == experiment
+            ):
+                return base, stored
     return base, root
 
 

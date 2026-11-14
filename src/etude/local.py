@@ -30,7 +30,8 @@ from etude.experiment_file import defined_functions
 from etude.identity import resume_conflicts, run_address
 from etude.jobs import load_job_function
 from etude.launch.job_file import read_job_file, select_runs
-from etude.run import RunFiles, validate_resume
+from etude.records import RunRecord
+from etude.run import RunFiles, run_name_taken, validate_resume
 from etude.spec import Until
 from etude.stopping import Stopped
 from etude.storage import DirectoryStorage, default_root, run_directory
@@ -72,7 +73,7 @@ def train(
             result = _train(
                 file,
                 recipe,
-                label=request.job.experiment or label,
+                label=request.job.experiment or label,  # a job may name its own
                 identity=request.id,
                 job=request.job.name,
                 initial=request.job.config,
@@ -134,18 +135,16 @@ def _train(
     kind = config_type(recipe)
     if resume and prior is None:
         raise EtudeError("run_not_found", 404, detail=run_address(identity, label))
-    stored = prior.config_json if resume and prior is not None else initial
-    settings = (
-        changed_config(kind, config, stored=initial)
-        if config is not None
-        else kind.model_validate_json(stored)
-        if stored is not None
-        else changed_config(kind, "{}")
-    )
+    # Given fields change the declared config; an omitted config resumes the stored one.
+    stored = prior.config_json if prior is not None and resume and config is None else initial
+    settings = changed_config(kind, "{}" if config is None else config, stored=stored)
+    # Validate the actual JSON that another machine would receive.
     text = settings.model_dump_json(round_trip=True)
     settings = kind.model_validate_json(text)
-    if resume:
-        seed, until = _resumed(base, label, identity, config=text, seed=seed, until=until)
+    if prior is not None and resume:
+        seed, until = _resumed(
+            base, root, prior, label, identity, config=text, seed=seed, until=until
+        )
     elif prior is not None:
         differences = resume_conflicts(
             config=text,
@@ -158,10 +157,7 @@ def _train(
                 "run_identity_conflict",
                 detail="; ".join(differences) + "; choose --experiment NAME",
             )
-        raise EtudeError(
-            "run_name_taken",
-            detail=f"{run_address(identity, label)}; use --resume; to train further give --resume --until CLOCK=TARGET",
-        )
+        raise run_name_taken(run_address(identity, label))
     commit = subprocess.run(
         ["git", "-C", str(file.parent), "rev-parse", "HEAD"],
         capture_output=True,
@@ -210,17 +206,21 @@ def _train(
 
 
 def _resumed(
-    base: Path, label: str, run: str, *, config: str, seed: int | None, until: Until | None
+    base: Path,
+    root: Path,
+    prior: RunRecord,
+    label: str,
+    run: str,
+    *,
+    config: str,
+    seed: int | None,
+    until: Until | None,
 ) -> tuple[int | None, Until | None]:
     """The seed and target a resumed attempt uses, or the refusal that leaves the run as it is.
 
     An omitted seed or target is the stored one. A finished run resumes only
     towards a target beyond everything it has logged, saved or published.
     """
-    root = run_directory(base, label, run)[1]
-    prior = RunFiles(root).run_file()
-    if prior is None:
-        raise EtudeError("run_not_found", 404, detail=run_address(run, label))
     if prior.experiment != label:
         raise EtudeError("run_name_belongs_to_another_experiment")
     if seed is None:

@@ -286,28 +286,24 @@ def expand_runs(
         job = each if isinstance(each, Job) else each.job
         if job not in jobs:
             jobs.append(job)
+    sole = len(jobs) == 1
     requests: list[RunRequest] = []
     for each in given:
         if isinstance(each, RunRequest):
             requests.append(each)
             continue
-        name = each.experiment if len(jobs) == 1 and each.experiment else each.name
+        name = each.experiment if sole and each.experiment else each.name
         for seed in each.seeds:
-            local = name + (f"@{seed}" if len(each.seeds) > 1 else "") if name else None
-            requests.append(
-                RunRequest(
-                    job=each,
-                    seed=seed,
-                    params=dict(params or {}),
-                    id=(
-                        f"{each.experiment}/{local}"
-                        if len(jobs) > 1 and each.experiment
-                        else run_address(local, each.experiment)
-                    )
-                    if local
-                    else None,
+            address = None
+            if name:
+                local = name + (f"@{seed}" if len(each.seeds) > 1 else "")
+                # Among several jobs, one named for its experiment keeps both levels.
+                address = (
+                    run_address(local, each.experiment)
+                    if sole or not each.experiment
+                    else f"{each.experiment}/{local}"
                 )
-            )
+            requests.append(RunRequest(job=each, seed=seed, params=dict(params or {}), id=address))
     return requests
 
 
