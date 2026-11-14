@@ -693,8 +693,8 @@ omitting it lets RunPod place the machine. `ondemand image` affects future machi
 ```sh
 etude ondemand add l4x2 --provider runpod --gpu "NVIDIA L4" --vcpus 6 --memory-gb 48 \
     --max 1 --max-usd-per-hour 0.80 --slots 2
-etude launch sweep.py --rent l4x2 --quote   # seed-1  rent ... , 2 slots with seed-2  ...
-etude status                                # running, steps 1200, shared by 2 runs, ~$0.03
+etude launch sweep.py --cohort sweep --rent l4x2 --quote   # seed-1  rent ... , 2 slots with seed-2  ...
+etude status                                               # running, steps 1200, shared by 2 runs, ~$0.03
 ```
 
 `--slots N` on `ondemand add` or `pool add` lets each of its machines run up to N
@@ -977,6 +977,10 @@ continued = queue(
     continue_from(parent, "steps=63000", source="s3://bucket/etude/launch"), pool="shed"
 )
 ```
+
+`queue_cohort` and `launch_cohort` take a Job, or a list of Jobs and
+RunRequests. Each Job expands to its declared seeds; `queue` and `launch`
+require one run and direct several-seed jobs to the cohort calls.
 
 For the command line, a Python file defines a function `runs()` that returns a
 Job or a nonempty list of Jobs. Each job is launched once per seed in its
@@ -1711,7 +1715,7 @@ A run displayed by `etude status` includes a source line, for example:
 
 `status` defaults to unfinished launched runs. `runs` lists every launched run,
 finished ones included, and replaces `status --all`. Runs started with
-`etude run` are files outside the launcher database; read them with
+`etude train` are files outside the launcher database; read them with
 `etude report FILE` or `etude checkpoints`.
 Filters combine with AND; `--job` accepts a
 job digest or display name. An unknown revision is an error.

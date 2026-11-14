@@ -152,8 +152,13 @@ def _client() -> Scheduler | PythonClient:
     return PythonClient(address) if address else default()
 
 
-def _smoked(runs: Sequence[RunRequest | Job], smoke: bool) -> list[RunRequest]:
-    each = [run if isinstance(run, RunRequest) else RunRequest(job=run) for run in runs]
+def _smoked(runs: Job | Sequence[RunRequest | Job], smoke: bool) -> list[RunRequest]:
+    given = [runs] if isinstance(runs, Job) else runs
+    each = [
+        request
+        for run in given
+        for request in ([run] if isinstance(run, RunRequest) else run.runs())
+    ]
     if not smoke:
         return each
     with smoke_home() as folder:
@@ -163,16 +168,23 @@ def _smoked(runs: Sequence[RunRequest | Job], smoke: bool) -> list[RunRequest]:
     return Smoked(train={one.job: one.step for one in trained}).stamp(each)
 
 
+def _one(run: RunRequest | Job, cohort_call: str, smoke: bool) -> RunRequest:
+    """The single run given, refusing a several-seed Job before smoke or submission."""
+    if isinstance(run, Job) and len(run.seeds) > 1:
+        raise LauncherError(f"{len(run.seeds)} runs need {cohort_call}(NAME, job)")
+    (smoked_run,) = _smoked([run], smoke)
+    return smoked_run
+
+
 def queue(
     run: RunRequest | Job, pool: str | None = None, *, rent: str | None = None, smoke: bool = False
 ) -> str:
-    (smoked_run,) = _smoked([run], smoke)
-    return _client().queue(smoked_run, pool, rent=rent)
+    return _client().queue(_one(run, "queue_cohort", smoke), pool, rent=rent)
 
 
 def queue_cohort(
     name: str,
-    runs: list[RunRequest],
+    runs: Job | Sequence[RunRequest | Job],
     pool: str | None = None,
     *,
     rent: str | None = None,
@@ -188,13 +200,12 @@ def queue_cohort(
 def launch(
     run: RunRequest | Job, pool: str | None = None, *, rent: str | None = None, smoke: bool = False
 ) -> str:
-    (smoked_run,) = _smoked([run], smoke)
-    return _client().launch(smoked_run, pool, rent=rent)
+    return _client().launch(_one(run, "launch_cohort", smoke), pool, rent=rent)
 
 
 def launch_cohort(
     name: str,
-    runs: list[RunRequest],
+    runs: Job | Sequence[RunRequest | Job],
     pool: str | None = None,
     *,
     rent: str | None = None,

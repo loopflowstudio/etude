@@ -1,6 +1,6 @@
 """Call a training recipe here, with an explicit new or resumed run identity.
 
-`run` validates identity before calling user code. Its temporary process
+`train` validates identity before calling user code. Its temporary process
 environment and signal handlers belong to this one synchronous attempt.
 """
 
@@ -35,7 +35,7 @@ from etude.train.read import read
 from etude.train.state import saved_states
 
 
-def run(
+def train(
     file: Path,
     *,
     config: str | None = None,
@@ -47,7 +47,7 @@ def run(
     seconds: float | None = None,
     json_output: bool = False,
 ) -> int:
-    """Run `train(config)` once; return 75 after a saved stop, 0 after success.
+    """Call the file's `train(config)` once; return 75 after a saved stop, 0 after success.
 
     Exceptions from the recipe propagate. Config, seed and finished-run
     refusals occur before calling it, so they cannot change a stored outcome.
@@ -64,7 +64,7 @@ def run(
         found = runpy.run_path(str(file)).get("train")
         if not callable(found):
             raise ValueError(f"{file.name}: define train(config)")
-        train = cast(Callable[[BaseModel], object], found)
+        recipe = cast(Callable[[BaseModel], object], found)
         label = experiment or file.stem
         base = default_root()
         stored_config: str | None = None
@@ -77,7 +77,7 @@ def run(
                 if stored is None:
                     raise EtudeError("run_not_found", 404, detail=run_address(resume, label))
                 stored_config = stored.config_json
-        kind = config_type(train)
+        kind = config_type(recipe)
         settings = (
             kind.model_validate_json(stored_config)
             if stored_config is not None
@@ -128,7 +128,7 @@ def run(
                 print(identity, flush=True)
             try:
                 with redirect_stdout(sys.stderr) if json_output else nullcontext():
-                    train(settings)
+                    recipe(settings)
             except Stopped:
                 result = 75
         if json_output:

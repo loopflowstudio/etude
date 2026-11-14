@@ -355,6 +355,65 @@ Walked at `c8310bc` in a fresh ETUDE_HOME; evidence is in `questions.md`
 3. A finished run's refusal says where it stands (`finished at
    updates=200`).
 
+## Corrections from the eighth concept review (2026-11-13): built
+
+Evidence is in questions.md (Eighth concept review). File and Python clients
+now share `Job.runs()`: omitted seeds select the Job's declared seeds, with
+`NAME-seed-N` ids for named Jobs. The file supplies an unnamed Job's stem.
+Cohort clients accept a Job or a list of Jobs/RunRequests. Singular launch
+and queue refuse several-seed Jobs before smoke or submission and name the
+cohort call. Explicit RunRequests keep their ids, seeds and parameters.
+
+Delete — do not maintain: the file reader's own seed-expansion loop.
+No schema, SQL or provider-count change. The focused fixture checks both
+Python clients against file-reader ids, mixed requests and singular refusals.
+Training launch examples spell `--cohort`, explain its name and default
+one-machine parallelism; refusals name the run count and remedy. README
+uses experiment `job` throughout launch/report/evaluation. The shared
+missing-run refusal offers `etude report FILE`; only `continue` appends the
+changed-config/new-name advice. Contrary evidence: fetch uses its own
+"has not reached a session" refusal, preserved here (questions.md).
+
+Open, for demo (reversible assumption taken in 2): the design says cohort
+"is not taught as a concept", and seeds on the job now make several runs the
+first thing a reader launches. Should `etude launch job.py` with a
+several-seed job need no `--cohort`? If so the launch needs a default for
+how many machines run at once (one, or one per seed, which decides how many
+are rented by the first command) and a default name that a second launch of
+the same file does not collide with (cohort names are create-only; joining
+one is EXP-61).
+
+## Run addresses (Hanabi demo steers, 2026-11-13): directed, unbuilt
+
+Words and the superseded `--run`/`--job`-naming steers are in demo-hanabi.md.
+`etude train FILE` (was `etude run`) is built. The latest steers stand:
+
+- Jack Heart: "ii think --experiment to override the overall experiment name,
+  but still enforicng hte -job-seed [but allowed to skip those if there is
+  only one of either]", then "experiment/job/seed i would say?".
+- Then: "maybe we want a differnet divider for job and seed",
+  "experiment/job:seed?", "i mean @ or :, whatever you think". The operator
+  chose `@`: a run's address is `experiment/job@seed`. Omit the job level
+  when the experiment defines one job, the seed level when the job has one
+  seed: `hanabi`, `sweep@1`, `sweep/wide@1`. One spelling everywhere:
+  commands, output, file and folder names and bucket keys.
+- The command line names only the experiment (`--experiment`, default the
+  file stem). `--job` and `--seed` select what the file defines in Python.
+  No `--run` or `--name` flag. `--resume` takes no name: it resumes the run
+  the selection addresses.
+- Operator's choice, not Jack's: a changed `--config` under an existing
+  experiment and job is refused naming the changed fields and suggesting
+  `--experiment`.
+- Same addressing in train, launch, continue, eval, status, logs. Historical
+  runs stay readable under their stored names.
+
+Not built in compress; needs design first. It replaces `EXPERIMENT/RUN`
+references and the `NAME-seed-N` ids of `Job.runs` (eighth review), and
+`etude.local.train` reads only `train(config)` today, so selecting a file's
+jobs locally is new. The reading changed five times in three minutes;
+confirm it before building. Still open from the demo: `run_name_taken`
+pointed at `--resume` without `--until`.
+
 ## Manabot (MTG-329)
 
 Separate Task; do not edit its checkout here. The full loop sketch, recipe

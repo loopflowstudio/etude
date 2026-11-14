@@ -88,6 +88,26 @@ change validation; omitted resume config still reads the stored model.
 Finished-run refusals include actual clock positions. README and training,
 launcher and evaluation docs match. No schema, SQL or new remote reads.
 
+Eighth-review corrections are built (design, "Corrections from the eighth
+concept review"): Job.runs owns seed expansion for file/Python clients;
+singular clients refuse multiple seeds; cohort clients accept Jobs and mixed
+requests. Docs teach cohort launches and one experiment; missing-run config
+advice stays on continue. The file reader's seed loop is deleted. No schema,
+SQL or provider-count change. Fetch's separate refusal is preserved; see
+questions.md for the contrary evidence. Full acceptance remains with gate.
+Compress: `_one` holds the singular refusal for queue/launch. Seeds given to
+`Job.runs(1, 2)` keep admission-time ids (ids for them broke resubmission in
+test_smoke/test_cli); only declared seeds are `NAME-seed-N`.
+
+Steer built (Jack Heart: "i feel like it should be etude traine hanabi"):
+`etude run FILE` is `etude train FILE` (`etude.local.train`), no alias; run
+stays a noun. Unbuilt: experiment/job/seed addresses (design, "Run
+addresses").
+Check: `uv run pytest tests/test_jobs.py tests/test_smoke.py
+tests/launch/test_queue.py tests/launch/test_cli.py tests/train/test_local.py
+tests/train/test_track.py tests/launch/test_lium.py` — 158 passed; mypy,
+ruff check and format pass.
+
 Compress: `_resumed` computes the reached positions once; `_hold` and
 `evaluation` share `_BENCHMARK_CHECKPOINT`; the test `play` reads weights
 through one helper. Check: `uv run pytest tests/test_jobs.py

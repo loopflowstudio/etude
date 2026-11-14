@@ -1,7 +1,7 @@
 """Learn the bias of a coin; stop and resume with the same model and optimizer.
 
-uv run --extra train etude run examples/coin.py --until updates=10
-uv run --extra train etude run examples/coin.py --resume coin-seed-0 --until updates=20
+uv run --extra train etude train examples/coin.py --until updates=10
+uv run --extra train etude train examples/coin.py --resume coin-seed-0 --until updates=20
 """
 
 import torch

@@ -512,3 +512,36 @@ def test_job_help_required_flags_mixed_order_and_collision(
     path.write_text("def runs(pool: str): return None\n")
     assert main(["queue", str(path), "--help"]) == 1
     assert "clashes" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("command", ["status", "logs", "cancel"])
+def test_missing_launcher_runs_offer_a_reading_remedy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    arguments = {
+        "status": ["coin-seed-0"],
+        "logs": ["--run", "coin-seed-0"],
+        "cancel": ["coin-seed-0"],
+    }
+    assert main([command, *arguments[command]]) == 1
+    error = capsys.readouterr().err
+    assert "the launcher has no run 'coin-seed-0'" in error
+    assert "etude report FILE" in error
+    assert "new --name" not in error
+
+
+@pytest.mark.parametrize("command", ["launch", "queue"])
+def test_several_seed_launch_refusals_name_the_count_and_cohort_remedy(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], command: str
+) -> None:
+    file = tmp_path / "job.py"
+    file.write_text(
+        "from etude.spec import Job\ndef runs() -> Job:\n"
+        '    return Job(command="true", seeds=(0, 1, 2), max_hours=1)\n'
+    )
+    assert main([command, str(file)]) == 1
+    assert "3 runs need --cohort NAME" in capsys.readouterr().err

@@ -28,9 +28,9 @@ ExperimentOption = Annotated[
 ]
 
 
-@app.command("run")
+@app.command("train")
 @kind(Kind.wait)
-def run_recipe(
+def train_recipe(
     file: Annotated[Path, typer.Argument(help="a Python file defining train(config)")],
     config: Annotated[
         str | None, typer.Option(help="JSON config fields; omitted on resume keeps stored config")
@@ -45,13 +45,13 @@ def run_recipe(
     ] = None,
     json_output: Annotated[bool, typer.Option("--json", help="print a JSON result")] = False,
 ) -> None:
-    """Run a training recipe on this computer; 0 finished, 75 stopped, other failed."""
-    from etude.local import run
+    """Train a recipe on this computer; 0 finished, 75 stopped, other failed."""
+    from etude.local import train
     from etude.spec import Until
 
     target = Until.model_validate(until) if until is not None else None
     raise typer.Exit(
-        run(
+        train(
             file,
             config=config,
             seed=seed,
@@ -126,8 +126,11 @@ def _submit(
                 update={"job": request.job.model_copy(update={"until": Until.parse(until)})}
             )
         runs = [request.model_copy(update={"id": resume, "resume": True})]
-    if cohort is None and (len(runs) > 1 or parallel != 1 or max_usd is not None):
-        raise LauncherError("several runs or cohort limits need --cohort NAME")
+    if cohort is None:
+        if len(runs) > 1:
+            raise LauncherError(f"{len(runs)} runs need --cohort NAME")
+        if parallel != 1 or max_usd is not None:
+            raise LauncherError("cohort limits need --cohort NAME")
     spec = (
         CohortSpec(name=cohort, parallel=parallel, max_usd=Decimal(max_usd) if max_usd else None)
         if cohort
@@ -579,9 +582,13 @@ def continue_run(
 
     scheduler = launch_cli.default()
     storage = storage_from_uri(source or default_root())
-    parents = [
-        scheduler.record(parent) for parent in resolve_runs(scheduler, [run], experiment=experiment)
-    ]
+    try:
+        parents = [
+            scheduler.record(parent)
+            for parent in resolve_runs(scheduler, [run], experiment=experiment)
+        ]
+    except LauncherError as error:
+        raise LauncherError(f"{error}; a changed config needs a new --name") from error
     first = parents[0]
     with tempfile.TemporaryDirectory() as relayed:
         if source is None:

@@ -5,7 +5,7 @@ files to your own directory or bucket and reads from them. There is no server
 in this path, and nothing here starts compute or holds a provider credential.
 
 A training loop Etude calls is written as [Training](training.md) describes:
-`etude run` or the launcher says which run it is, and `track` takes only
+`etude train` or the launcher says which run it is, and `track` takes only
 clocks and a config. This page covers what every tracked process shares: rows,
 tables, storage, reading and reports. A process Etude did not start, such as a
 notebook or another scheduler's job, names its run itself:
@@ -59,7 +59,7 @@ and `R2_SECRET_ACCESS_KEY`, as DuckDB's `r2://` does. Tracking commands read the
 when a launcher controller is selected. Each command loads its own dependencies;
 help and the worker do not load NumPy.
 
-Under `etude run` and `etude launch` the run has already been named, so the
+Under `etude train` and `etude launch` the run has already been named, so the
 loop gives only its clocks and config:
 
 ```python
@@ -107,7 +107,7 @@ Rules a caller can rely on:
   accepted. Historical run files remain readable.
 - **A run's name is taken once.** Declaring a name its experiment already
   holds is refused; nothing is inferred from a folder that exists. Another
-  attempt of the same run is asked for by name (`etude run FILE --resume RUN`,
+  attempt of the same run is asked for by name (`etude train FILE --resume RUN`,
   or the launcher's own retry), and must give the config and seed the run
   started with.
 - **Continuation is lineage.** A run may name a parent run, a clock and the

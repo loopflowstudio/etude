@@ -2,9 +2,9 @@
 
 ```sh
 uv sync --extra train --extra eval --extra hanabi
-.venv/bin/etude run examples/hanabi.py --name team --config '{"updates":20}'
+.venv/bin/etude train examples/hanabi.py --name team --config '{"updates":20}'
 # Ctrl-C once after a few episodes: the current episode completes and saves (exit 75).
-.venv/bin/etude run examples/hanabi.py --resume team-seed-0
+.venv/bin/etude train examples/hanabi.py --resume team-seed-0
 .venv/bin/etude eval examples/hanabi.py
 .venv/bin/etude report examples/hanabi.py
 ```

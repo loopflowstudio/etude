@@ -43,25 +43,10 @@ fixtures remain readable.
 
 ## Writer/allocation evidence
 
-At `9a762a1`, two sequential tracking contexts wrote two writers and two rows
-under `allocation-1`; a third context wrote another run under that allocation.
-No worker, network or rental was involved. The full probe and contrary early
-"1a" answer are retained at `416847a:scratch/questions.md` (Record unification).
-The later answer below chooses writers as sub-parts of the allocation.
-
-The shared `RunRecord` must own the persisted job digest. The observed
-`TrainingRun.job` is a report label derived from configs seen and can change;
-keep it separate from identity. Manual resume preserves the original digest
-while taking the current source, target and limits.
-
-Launched resume choices (built): a file returning several jobs selects by run
-id, or by the stored job name and seed for hand-built requests with no id.
-Resume keeps its existing cohort's shared limits. A resume of a queued run
-with no allocations replaces its pending specification.
-
-Report labels use job; crosstable tabs name the job and seeded learner.
-Evaluation's `Line` remains the seeded chain of continuations
-(`ExperimentState.lines`); no stored lineage spelling or grouping changed.
+Full writer probes and resume/report-label choices remain at
+`acf036f:scratch/questions.md`. The persisted job digest is identity;
+report labels are derived. Resume keeps cohort limits; queued runs without
+allocations replace their pending specification.
 
 ## Package layout: run, training run, eval run (2026-11-13)
 
@@ -110,47 +95,22 @@ replaces the earlier sketch where the author function ran the eval itself.
 
 ## Typed match conditions (2026-11-13)
 
-Jack Heart: "i do think conditions should be pydantic". Proposed shape (not
-his words): `Seating.conditions` takes the author's Pydantic models (e.g.
-`Deal(deal=7)`); stored and hashed as their JSON, so a match key and stored
-data are unchanged for the same values and historical dict conditions stay
-readable; `play` sees them validated back into its type, the way `etude.call`
-validates a config into the function's parameter type (e.g. `play(match:
-Match[Deal])`). `play(match) -> Tables` keeps `Match` as its one argument.
-Then: "and be like MatchConfig or something". Read as: the field is the
-match's config, the author's own Pydantic type, named like the training
-config (`conditions` -> `config` on Seating and Match; the author's class is
-e.g. `MatchConfig`; Etude defines no class of that name). Stored `conditions`
-stays readable.
-Then: "but only i guess similar to TrainConfig, doesnt need to be named by
-us" and "just needs to be a pydantic model". Confirms: Etude names no match
-config class; any Pydantic model of the author's.
+Built. Jack Heart: "i do think conditions should be pydantic"; "and be like
+MatchConfig or something"; "but only i guess similar to TrainConfig, doesnt
+need to be named by us"; "just needs to be a pydantic model". The proposed
+shape and readings are at `acf036f:scratch/questions.md`.
 
 ## Implementation choices for demo (2026-11-13)
 
-Built: `RunAttempt.writers` contains the tracking/eval contexts. Each keeps its
-own id and first-row cutoff; `RunData.writers` reads the contexts of one run.
-The observed old `RunData.attempts` accessor warns until 0.5. Reports label
-these as writers rather than counting them as allocations. The allocation
-still has one id, machine, number, rental share and attempt-limit charge.
-Schema 19 is edited in place; no additional migration. No new database query
-or remote read is added: metadata rides the existing progress/finished journal.
+Built: `RunAttempt.writers` holds the tracking/eval contexts, each with its
+own id and first-row cutoff; the allocation keeps one id, machine, rental
+share and attempt-limit charge. Schema 19 edited in place; no new query or
+remote read.
 
-Simpler reversible choice: authored evaluation jobs use the planner's existing
-selected matches, lines and input mapping. The low-level `evaluating` opener
-retains explicit `lines=` for relative seats outside that path; it does not
-import training or read arbitrary remote training files on a worker. Show this
-at demo alongside the pure `arena(config) -> Benchmark | RoundRobin` shape.
-Empty tournament rollups are omitted from serialization to preserve historical
-hold names. Ready-made tournament jobs remain a shortcut on the same path.
-
-Controlled checks: one real local allocation with four contexts (another run
-and a silent context included) finished with one attempt and zero dollars;
-its metric points were `[10, 200, 300]` at updates `[1, 2, 3]`. A pure eval
-function's launched pass delivered only its selected checkpoint inputs and a
-second pass launched nothing. Planned eval stop retained one match; explicit
-resume played the other, and incompatible/taken-name refusals kept the finished
-outcome bytes. Rollup resume retained one total rather than adding it twice.
+Reversible choice to show at demo: authored evaluation jobs use the planner's
+selected matches, lines and inputs; the low-level `evaluating` opener keeps
+explicit `lines=`. Detail and controlled-check receipts:
+`acf036f:scratch/questions.md` (Implementation choices for demo).
 
 ## Decisions through demo (2026-11-13)
 
@@ -191,46 +151,25 @@ on macOS arm64 and Linux amd64 (uv's Python 3.12 Debian container). PyPI wheel
 index: https://pypi.org/project/open-spiel/2.0.2/ . Native Hanabi accepted small
 colors/ranks/hands and two players. No fallback game or JAX was needed.
 
-## Sixth concept review (2026-11-13)
+## Earlier concept-review evidence
 
-Run at `67ebe7c`, ETUDE_HOME `/tmp/exp56 review6 8zKT` (removed after):
-`etude checkpoints` -> `etude: Missing option '--source'.` (exit 1);
-`etude continue --run coin-seed-0 --until updates=30` and the same with
-`coin/coin-seed-0` -> `etude: no run '...'`; `etude runs` printed nothing.
-`etude checkpoints --source "$ETUDE_HOME/track"` listed four checkpoints.
+Sixth and seventh review probes and reversible choices remain at
+`acf036f:scratch/questions.md`. Their corrections are built (exp-56.md).
+The sixth review's open prose choice remains: should "hold" / "held checkpoint"
+follow the current calls `evaluating` / `run.play`, and with which word?
 
-Assumption, reversible: `hold` the function is deprecated, but the
-evaluation and report docs keep "hold" / "held checkpoint" as prose for the
-checkpoint a benchmark's seatings are played for. Only sentences telling the
-reader to call `hold` or `evaluate` are corrected. Open for demo: should the
-prose verb follow the call (`evaluating`, `run.play`), and if so with which
-word? `etude eval` help already says "pass" for one batch run.
+## Eighth concept review (2026-11-13)
 
-## Seventh concept review (2026-11-13)
+Built (exp-56.md). What the probe showed at `acf036f`: with `seeds=(0, 1, 2)` in `job.py`, `etude queue job.py` -> `several
+runs or cohort limits need --cohort NAME`; `_smoked([job], False)` (what
+`launch(job)` sent) gave one request with seed and id `None`;
+`queue_cohort("capacity", job)` raised a pydantic `ValidationError`. `status
+coin-seed-0` appended `a changed config needs a new --name` to the missing-run
+refusal.
 
-Run at `c8310bc`, ETUDE_HOME `/tmp/exp56 review7 51152` (removed after), coin
-example with `uv run --extra train etude`:
-`run examples/coin.py --config '{"lrr":1}' --name bad2 --until updates=2` ->
-`bad2-seed-0`, exit 0; its `run.json` config is
-`{"heads": 0.7, "lr": 0.1, "updates": 20}`.
-`run ... --seconds 0.001 --name short --config '{"updates":200}' --json` ->
-`"outcome": "stopped"`, exit 75; `--resume short-seed-0` finished; then
-`--resume short-seed-0 --until updates=150` ->
-`run_already_finished: give --until with a later target`.
-`run ... --until update=5 --name typo` -> `target_clock_undeclared: update`,
-and no `typo-seed-0` folder was left, so the name stayed free.
-A `train` raising at update 4 recorded `failed`; `--resume` without the bug
-finished at 6 with its saved count intact.
+Assumption, reversible: several runs still need `--cohort`, and the docs say
+so. The run-address steer (design, "Run addresses") may replace this.
 
-Checkpoint given to a job: `observe(default_root(), "coin").run(
-"coin-seed-0").final` has members `checkpoint.json`, `policy.pt`;
-`training(..., start=final)` produced inputs `start/checkpoint.json` and
-`start/policy.pt`. `evaluation(checkpoint=)` is typed `Input | None`
-(`jobs.py`), one key with one digest. The probe passing the record to it
-stopped earlier, on the probe's own unimportable `play`, so the refusal
-itself was not observed; the finding rests on the signature and on `_hold`
-building the key from the input's file name.
-
-Assumptions, reversible: a released `Input` stays accepted without a
-warning; unknown-field refusal is top-level only, nested models keep
-Pydantic's behaviour; a config model with `extra="allow"` keeps its extras.
+Contrary evidence: `fetch coin-seed-0 weights.pt DIR` reports `run coin-seed-0
+has not reached a session`, not the shared refusal. Left alone: changing it
+would add a database read.

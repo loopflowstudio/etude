@@ -114,10 +114,7 @@ def read_job_file(
         if isinstance(each, RunRequest):
             runs.append(each)
         else:
-            runs.extend(
-                RunRequest(job=each, seed=seed, id=f"{each.name or path.stem}-seed-{seed}")
-                for seed in each.seeds
-            )
+            runs.extend(each.model_copy(update={"name": each.name or path.stem}).runs())
     params = {
         name: each for name, each in arguments.items() if isinstance(each, (str, int, float, bool))
     }

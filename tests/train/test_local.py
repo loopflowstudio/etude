@@ -57,7 +57,7 @@ def test_local_stop_resume_and_finished_refusals_preserve_one_run(
             'def train(config: Config) -> None:\n    print("recipe progress")\n',
         )
     )
-    args = ["run", str(file), "--seed", "7"]
+    args = ["train", str(file), "--seed", "7"]
     assert main([*args, "--json"]) == 75
     stopped = capsys.readouterr()
     assert "recipe progress" in stopped.err
@@ -73,7 +73,7 @@ def test_local_stop_resume_and_finished_refusals_preserve_one_run(
     assert first.outcome is not None and first.outcome.state == "stopped"
     assert first.points("games", "updates").y.tolist() == [3, 6]
     capsys.readouterr()
-    assert main(["run", str(file), "--resume", "train-seed-7", "--json"]) == 0
+    assert main(["train", str(file), "--resume", "train-seed-7", "--json"]) == 0
     output = capsys.readouterr()
     assert "recipe progress" in output.err
     assert json.loads(output.out) == {
@@ -88,18 +88,18 @@ def test_local_stop_resume_and_finished_refusals_preserve_one_run(
     outcome = (root / "outcome.json").read_bytes()
     assert main(args) == 1
     assert "run_name_taken" in capsys.readouterr().err
-    assert main(["run", str(file), "--resume", "train-seed-7"]) == 1
+    assert main(["train", str(file), "--resume", "train-seed-7"]) == 1
     assert "finished at updates=4" in capsys.readouterr().err
     for target in ("updates=3", "updates=4"):
-        assert main(["run", str(file), "--resume", "train-seed-7", "--until", target]) == 1
+        assert main(["train", str(file), "--resume", "train-seed-7", "--until", target]) == 1
         assert "finished at updates=4" in capsys.readouterr().err
-    assert main(["run", str(file), "--resume", "train-seed-7", "--config", '{"lr":0.2}']) == 1
+    assert main(["train", str(file), "--resume", "train-seed-7", "--config", '{"lr":0.2}']) == 1
     assert "lr was 0.1, is 0.2" in capsys.readouterr().err
-    assert main(["run", str(file), "--resume", "train-seed-7", "--seed", "8"]) == 1
+    assert main(["train", str(file), "--resume", "train-seed-7", "--seed", "8"]) == 1
     assert "seed was 7, is 8" in capsys.readouterr().err
     assert (root / "outcome.json").read_bytes() == outcome
     assert len(read(DirectoryStorage(base), "train", "train-seed-7").attempts) == 2
-    assert main(["run", str(file), "--resume", "train-seed-7", "--until", "updates=6"]) == 0
+    assert main(["train", str(file), "--resume", "train-seed-7", "--until", "updates=6"]) == 0
     extended = read(DirectoryStorage(base), "train", "train-seed-7")
     assert extended.points("games", "updates").y.tolist() == [3, 6, 9, 12, 15, 18]
 
@@ -131,7 +131,7 @@ def test_local_config_refusals_name_fields_before_calling_the_recipe(
     )
     root = tmp_path / "home/track/train/train-seed-0"
     outcome = None
-    args = ["run", str(file)]
+    args = ["train", str(file)]
     if resume:
         assert main(args) == 75
         outcome = (root / "outcome.json").read_bytes()
@@ -156,8 +156,8 @@ def test_local_config_keeps_explicitly_allowed_extras(
     file.write_text(
         RECIPE.replace("class Config(BaseModel):", 'class Config(BaseModel, extra="allow"):')
     )
-    assert main(["run", str(file), "--config", '{"custom":7}']) == 75
-    assert main(["run", str(file), "--resume", "train-seed-0"]) == 0
+    assert main(["train", str(file), "--config", '{"custom":7}']) == 75
+    assert main(["train", str(file), "--resume", "train-seed-0"]) == 0
     data = read(tmp_path / "home/track", "train", "train-seed-0")
     assert data.file is not None and data.file.config_json is not None
     assert json.loads(data.file.config_json)["custom"] == 7
@@ -169,7 +169,7 @@ def test_local_resume_resolves_qualified_and_explicit_experiments(
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
     file = tmp_path / "train.py"
     file.write_text(RECIPE)
-    args = ["run", str(file)]
+    args = ["train", str(file)]
     new = [*args, "--experiment", "lab", "--name", "wide", "--seed", "7"]
     assert main([*new, "--json"]) == 75
     assert json.loads(capsys.readouterr().out) == {
@@ -209,7 +209,7 @@ def test_a_new_recipe_failure_before_any_rows_is_recorded(
         )
     )
     with pytest.raises(RuntimeError, match="learner failed"):
-        main(["run", str(file)])
+        main(["train", str(file)])
     data = read(DirectoryStorage(tmp_path / "home/track/fail"), "fail", "fail-seed-0")
     assert data.outcome is not None and data.outcome.state == "failed"
     assert data.rows == 0
@@ -222,7 +222,7 @@ def test_outcome_reader_keeps_historical_state_files(
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
     file = tmp_path / "train.py"
     file.write_text(RECIPE)
-    assert main(["run", str(file)]) == 75
+    assert main(["train", str(file)]) == 75
     base = tmp_path / "home/track/train"
     root = base / "train-seed-0"
     (root / "outcome.json").rename(root / filename)
@@ -250,7 +250,7 @@ def test_signal_stops_saved_and_restores_the_callers_environment(
         + recipe[end:]
     )
     file.write_text(recipe)
-    assert main(["run", str(file)]) == 75
+    assert main(["train", str(file)]) == 75
     root = tmp_path / "home/track/signal_recipe/signal_recipe-seed-0"
     assert not (root / "out/phase-two").exists()
     pointer = json.loads((root / "out/state/current.json").read_text())["save"]
@@ -281,7 +281,7 @@ def test_changed_source_resumes_and_each_attempt_records_its_commit(
     ):
         _git(tmp_path, args)
     first = _git(tmp_path, ["rev-parse", "HEAD"])
-    assert main(["run", str(file)]) == 75
+    assert main(["train", str(file)]) == 75
     file.write_text(RECIPE + "\n# A source change does not change run identity.\n")
     for args in (
         ["add", "train.py"],
@@ -297,7 +297,7 @@ def test_changed_source_resumes_and_each_attempt_records_its_commit(
     ):
         _git(tmp_path, args)
     second = _git(tmp_path, ["rev-parse", "HEAD"])
-    assert main(["run", str(file), "--resume", "train-seed-0"]) == 0
+    assert main(["train", str(file), "--resume", "train-seed-0"]) == 0
     data = read(DirectoryStorage(tmp_path / "home/track/train"), "train", "train-seed-0")
     assert [attempt.commit for attempt in data.attempts] == [first, second]
     assert first != second
@@ -315,8 +315,8 @@ def test_a_resumed_attempt_keeps_its_launch_target(
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
     file = tmp_path / "train.py"
     file.write_text(RECIPE)
-    assert main(["run", str(file), "--until", "updates=3"]) == 75
-    assert main(["run", str(file), "--resume", "train-seed-0"]) == 0
+    assert main(["train", str(file), "--until", "updates=3"]) == 75
+    assert main(["train", str(file), "--resume", "train-seed-0"]) == 0
     data = read(DirectoryStorage(tmp_path / "home/track/train"), "train", "train-seed-0")
     assert data.reached["updates"] == 3
     assert {attempt.until for attempt in data.attempts} == {"updates=3.0"}
@@ -329,7 +329,7 @@ def test_seconds_deadline_stops_before_the_first_step_when_expired(
     monkeypatch.setattr("etude.local.time", SimpleNamespace(time=lambda: 0.0))
     file = tmp_path / "train.py"
     file.write_text(RECIPE)
-    assert main(["run", str(file), "--seconds", "1"]) == 75
+    assert main(["train", str(file), "--seconds", "1"]) == 75
     data = read(DirectoryStorage(tmp_path / "home/track/train"), "train", "train-seed-0")
     assert data.outcome is not None and data.outcome.state == "stopped"
     assert data.rows == 0
@@ -354,13 +354,13 @@ def test_two_model_cli_recipe_resumes_and_its_checkpoint_can_be_seated(
         "        run.checkpoint(policy=policy, value=value)",
     )
     file.write_text(recipe)
-    assert main(["run", str(file), "--experiment", "tiny"]) == 75
+    assert main(["train", str(file), "--experiment", "tiny"]) == 75
     base = tmp_path / "home/track/tiny"
     root = base / "models-seed-0"
     first = read_state(root / "out/state")
     assert first is not None
     weights = {name: (first.path / f"{name}.pt").read_bytes() for name in ("policy", "value")}
-    assert main(["run", str(file), "--experiment", "tiny", "--resume", "models-seed-0"]) == 0
+    assert main(["train", str(file), "--experiment", "tiny", "--resume", "models-seed-0"]) == 0
     checkpoint = observe(base, "tiny").run("models-seed-0").final
     assert checkpoint is not None and checkpoint.at["updates"] == 4
     assert {name: (checkpoint.path / f"{name}.pt").read_bytes() for name in weights} == weights
@@ -383,15 +383,24 @@ def test_resume_uses_stored_config_when_defaults_change(
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
     file = tmp_path / "train.py"
     file.write_text(RECIPE)
-    assert main(["run", str(file), "--config", '{"lr":0.2}']) == 75
+    assert main(["train", str(file), "--config", '{"lr":0.2}']) == 75
     file.write_text(RECIPE.replace("lr: float = 0.1", "lr: float = 0.9"))
-    assert main(["run", str(file), "--resume", "train-seed-0"]) == 0
+    assert main(["train", str(file), "--resume", "train-seed-0"]) == 0
     data = read(tmp_path / "home/track", "train", "train-seed-0")
     assert data.file is not None and data.file.config_json is not None
     assert json.loads(data.file.config_json)["lr"] == 0.2
     assert (
         main(
-            ["run", str(file), "--resume", "train-seed-0", "--config", "{}", "--until", "updates=6"]
+            [
+                "train",
+                str(file),
+                "--resume",
+                "train-seed-0",
+                "--config",
+                "{}",
+                "--until",
+                "updates=6",
+            ]
         )
         == 1
     )
@@ -412,7 +421,7 @@ def test_second_interrupt_exits_a_loop_that_has_not_observed_its_stop(
         "                signal.raise_signal(signal.SIGINT)\n"
         "                signal.raise_signal(signal.SIGINT)\n" + recipe[end:]
     )
-    assert main(["run", str(file)]) != 0
+    assert main(["train", str(file)]) != 0
     data = read(tmp_path / "home/track", "train", "train-seed-0")
     assert data.outcome is not None and data.outcome.state == "failed"
     assert data.reached["updates"] == 2

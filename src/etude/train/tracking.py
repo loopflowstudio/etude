@@ -217,7 +217,7 @@ def local_launch(*, out: Path | str, experiment: str) -> Iterator[None]:
     Like process environment itself, this context is not thread-local.
     """
     warnings.warn(
-        "local_launch is replaced by etude run; removed in 0.5", DeprecationWarning, stacklevel=2
+        "local_launch is replaced by etude train; removed in 0.5", DeprecationWarning, stacklevel=2
     )
     folder = Path(out).resolve()
     folder.mkdir(parents=True, exist_ok=True)
@@ -1222,14 +1222,14 @@ def track(
 
     A taken name is refused unless `resume=True` or the launcher requests a retry.
     A resumed run's first logged row sets where it supersedes earlier rows.
-    An attempt that logs nothing replaces nothing. `etude run` (`etude.local.run`)
+    An attempt that logs nothing replaces nothing. `etude train` (`etude.local.train`)
     supplies the experiment, identity and persistent `out` for a local call.
     """
     if metric_name_limit is not None and metric_name_limit < 0:
         raise ValueError("metric_name_limit must be nonnegative or None")
     if seed is not None:
         warnings.warn(
-            "track(seed=) is replaced by launch seeds or etude run --seed; removed in 0.5",
+            "track(seed=) is replaced by launch seeds or etude train --seed; removed in 0.5",
             DeprecationWarning,
             stacklevel=2,
         )
@@ -1249,7 +1249,7 @@ def track(
             "experiment_not_named",
             422,
             detail=(
-                "use etude run FILE or etude launch FILE; for a process Etude did not start, "
+                "use etude train FILE or etude launch FILE; for a process Etude did not start, "
                 "name the run with track(experiment=..., run=...)"
             ),
         )

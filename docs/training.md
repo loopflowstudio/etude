@@ -34,16 +34,16 @@ def train(config: TrainConfig) -> None:
 ```
 
 ```sh
-etude run train.py                         # a new run on this computer; prints its id
-etude run train.py --resume train-seed-0   # the same run, from its last save
-etude launch job.py --rent l4              # new runs on rented machines
+etude train train.py                             # a new run on this computer; prints its id
+etude train train.py --resume train-seed-0       # the same run, from its last save
+etude launch job.py --cohort baseline --rent l4  # new runs on rented machines
 ```
 
 ```text
-$ etude run train.py --until updates=300
+$ etude train train.py --until updates=300
 train-seed-0
 ^C                                    # finishes the pass, saves, exits 75
-$ etude run train.py --resume train-seed-0 --until updates=300
+$ etude train train.py --resume train-seed-0 --until updates=300
 train-seed-0
 $ etude report train.py --open        # one run, updates 1 to 300, three checkpoints
 ```
@@ -67,12 +67,12 @@ Etude asks three things of `train` and its config:
   required field. Its defaults are the recipe.
 - **It survives a trip through JSON**, because that is how it reaches a
   machine. Numbers, strings, lists and nested models are fine; an open file or
-  a function is not. `etude run` and `etude launch` check this before anything
+  a function is not. `etude train` and `etude launch` check this before anything
   starts or is rented.
 - **`train` takes that one parameter**, annotated with the config's type, and
   is defined at the top level of a file your project can import.
 
-`etude run FILE` or the launcher calls `train` and supplies the run's identity
+`etude train FILE` or the launcher calls `train` and supplies the run's identity
 and experiment. Calling the example's `train(config)` directly is refused
 with `experiment_not_named`. A process Etude did not start names these with
 `track(experiment=..., run=...)`, as in [Tracking's opening example](tracking.md).
@@ -82,7 +82,7 @@ Calling `train` is one attempt at the whole job. It ends in one of three ways:
 | `train` | Means | Etude then |
 | --- | --- | --- |
 | returns | the job is finished | records the run `finished` |
-| raises `Stopped` | it saved and left on purpose | under a launch, calls it again inside the run's limits; `etude run` exits 75, then `--resume RUN` carries on |
+| raises `Stopped` | it saved and left on purpose | under a launch, calls it again inside the run's limits; `etude train` exits 75, then `--resume RUN` carries on |
 | raises anything else | it failed | records the run `failed` |
 
 `run.steps` raises `Stopped` for you. A loop written as above never names it.
@@ -124,18 +124,21 @@ def runs() -> Job:
 ```
 
 One job with three seeds is three runs: `baseline-seed-0`, `baseline-seed-1`
-and `baseline-seed-2`. Without `seeds`, it is one run with seed 0. On this
-computer, `etude run train.py --seed 7` chooses it.
+and `baseline-seed-2`. Launch them with
+`etude launch job.py --cohort baseline --rent l4`. A cohort names the runs
+launched together; `--parallel` sets how many machines it uses at once (one
+unless given). Without `seeds`, it is one run with seed 0. On this
+computer, `etude train train.py --seed 7` chooses it.
 
 A run's id is its job's name and its seed. An unnamed job is named for its
-file, so `etude run train.py` starts `train-seed-0`. Choose another job name with
-`--name` (`etude run train.py --name wide --seed 7` starts `wide-seed-7`).
+file, so `etude train train.py` starts `train-seed-0`. Choose another job name with
+`--name` (`etude train train.py --name wide --seed 7` starts `wide-seed-7`).
 An id is unique within its experiment, and **a taken id is refused, never
 resumed**: starting a run and carrying one on are different commands
 ([below](#running-it)).
 
 An experiment is a label runs share. It comes from the launch, never from
-`train`: `etude launch ppo.py` and `etude run ppo.py` both record experiment
+`train`: `etude launch ppo.py` and `etude train ppo.py` both record experiment
 `ppo`, and `--experiment NAME` on either gives another.
 
 ## The run and its clocks
@@ -151,7 +154,7 @@ with track(clocks=clocks, config=config) as run:
     ...
 ```
 
-`track` opens the run this call of `train` belongs to. `etude run` or the
+`track` opens the run this call of `train` belongs to. `etude train` or the
 launcher has already said which run that is, its seed and its experiment, so
 `track` takes only what the loop knows: its clocks and its config.
 
@@ -186,7 +189,7 @@ for update in run.steps("updates", to=config.updates):
 plus one, up to the target. On a new run that is 1, 2, 3, ...; on a run
 carried on from a save at 400 it starts at 401.
 
-- **The target is the launch's when it gave one**, else `to`. `etude run
+- **The target is the launch's when it gave one**, else `to`. `etude train
   train.py --until updates=2000`, a job's `until` and `etude continue --run
   RUN --until updates=6400` (for a launched run) all set it without changing
   the config.
@@ -205,7 +208,7 @@ carried on from a save at 400 it starts at 401.
 
 "Nearly up" is measured, not configured: the attempt's deadline is nearer than
 the slowest pass so far. On this computer there is no deadline unless you give
-one (`etude run train.py --seconds 600`).
+one (`etude train train.py --seconds 600`).
 
 ## Carrying on
 
@@ -589,22 +592,22 @@ directory that happens to exist.
 
 | You want | Command | What it is |
 | --- | --- | --- |
-| a new run, here | `etude run train.py` | always a new run; prints its id |
-| a new run, on machines | `etude launch job.py --rent l4` | always new runs |
+| a new run, here | `etude train train.py` | always a new run; prints its id |
+| a new run, on machines | `etude launch job.py --cohort baseline --rent l4` | always new runs |
 | the same run, after a lost machine or `Stopped` | none: the launcher calls `train` again | another attempt of the same run |
-| the same run, after it ended unfinished | `etude run train.py --resume RUN`, `etude launch job.py --resume RUN` | another attempt of the same run, on your current code |
-| the same run, further | `etude run train.py --resume RUN --until updates=6400`, and the same on `etude launch` | another attempt of the same run, to a later target; a finished run too |
+| the same run, after it ended unfinished | `etude train train.py --resume RUN`, `etude launch job.py --resume RUN` | another attempt of the same run, on your current code |
+| the same run, further | `etude train train.py --resume RUN --until updates=6400`, and the same on `etude launch` | another attempt of the same run, to a later target; a finished run too |
 | a changed config, or a branch of a launched run | `etude continue --run RUN --until clock=value [--config ...]` | a new run that starts from a copy of the first one's state and records it as its parent |
 
 ```sh
-etude run train.py --config '{"lr": 0.001}' --seed 7 --name wide --until updates=2000
-etude run train.py --seconds 600        # stop after ten minutes: saved, exit 75
-etude run train.py --resume wide-seed-7
-etude run train.py --json               # {"run": "train-seed-0", "experiment": "train", "outcome": "finished"}
+etude train train.py --config '{"lr": 0.001}' --seed 7 --name wide --until updates=2000
+etude train train.py --seconds 600      # stop after ten minutes: saved, exit 75
+etude train train.py --resume wide-seed-7
+etude train train.py --json             # {"run": "train-seed-0", "experiment": "train", "outcome": "finished"}
 etude smoke job.py                      # the smoke config, here, spending nothing
 ```
 
-- **`etude run FILE`** calls the file's `train` on this computer with its
+- **`etude train FILE`** calls the file's `train` on this computer with its
   config's defaults, changed by `--config`, a JSON object checked against the
   config type. Unknown top-level fields are refused by name unless your model
   allows extras. Validation problems print one line per field, such as
@@ -641,13 +644,13 @@ etude smoke job.py                      # the smoke config, here, spending nothi
   a run the launcher started, optionally changing its config. It makes a new
   run, leaving the first as it is
   ([the launcher](launcher.md#progress-and-continuation)). A run started with
-  `etude run` cannot be branched with this command; choose a new `--name` for
+  `etude train` cannot be branched with this command; choose a new `--name` for
   a fresh run here.
 
 A run's hours, dollars and attempts span every attempt, whoever asked for it
 ([The run promise](launcher.md#the-run-promise)).
 
-A run started with `etude run` is files under
+A run started with `etude train` is files under
 `~/.etude/track/EXPERIMENT/` (moved by `ETUDE_HOME`), outside the launcher
 database. Read it with `etude report FILE` or
 `etude checkpoints`. `etude runs`, `etude status`,
@@ -681,7 +684,7 @@ def train(config: SearchConfig) -> None:
 | `run.out` | a directory that follows the run: the same on every attempt, carried to storage as it is written and restored before each attempt on another machine |
 | `run.until(clock, default=)` | the absolute target: the launch's for that clock, else the default |
 | `run.stopping()` | true once a stop was asked for, or once the deadline is nearer than the slowest pass so far; ask once per pass |
-| `Stopped` | raised after saving, short of the target: the attempt is recorded `stopped`; the launcher retries inside the run's limits, while `etude run` exits 75 and needs `--resume RUN` |
+| `Stopped` | raised after saving, short of the target: the attempt is recorded `stopped`; the launcher retries inside the run's limits, while `etude train` exits 75 and needs `--resume RUN` |
 
 Returning normally short of the target would read as finished. Files you
 write in `run.out` yourself are carried one at a time, so write each
@@ -710,9 +713,9 @@ under a folder whose name starts with `.` stays on the machine.
 
 | Before | Now |
 | --- | --- |
-| `seed` in the config, `track(seed=config.seed)` | `training(..., seeds=(...))` or `etude run --seed`; read `run.seed` |
+| `seed` in the config, `track(seed=config.seed)` | `training(..., seeds=(...))` or `etude train --seed`; read `run.seed` |
 | `track(config=config.model_dump())` | `track(config=config)` |
-| `with local_launch(out=DIR, experiment=NAME): train(config)` | `etude run train.py` |
+| `with local_launch(out=DIR, experiment=NAME): train(config)` | `etude train train.py` |
 | a state file in `run.out`, `while ... and not run.stopping()`, `raise Stopped` | `run.resume(...)`, `run.steps(...)`, `run.save()` |
 | `run.checkpoint(path, updates=n)` inside the loop | `run.checkpoint(policy=model)`, or `run.checkpoint(path)` |
 | `run.latest_checkpoint()` | `run.checkpoints()[-1]` |

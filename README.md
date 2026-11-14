@@ -51,13 +51,13 @@ def train(config: TrainConfig) -> None:
 ```
 
 ```sh
-etude run train.py           # one new run on this computer, without the launcher
+etude train train.py         # one new run on this computer, without the launcher
 etude smoke job.py           # one tiny update here, spending nothing
 etude launch job.py --cohort baseline   # its three runs, on this computer; --smoke smokes
                              # first, --pool P for machines you own, --rent R to rent, or both
 etude status                 # where runs stand
 etude logs --run RUN         # preparation, every attempt, cleanup
-etude report ppo.py --open   # experiment ppo's evals, perf and ML details, as one page
+etude report job.py --open   # experiment job's evals, perf and ML details, as one page
 etude report . --serve       # every experiment file here, with a live index
 ```
 
@@ -77,9 +77,9 @@ the same way, with your `play`:
 from etude.experiment import observe
 from etude.jobs import evaluation
 
-weights = observe("s3://my-bucket/runs", "ppo").run("ppo-seed-0").final
+weights = observe("s3://my-bucket/runs", "job").run("job-seed-0").final
 evaluation(
-    progress, experiment="ppo", play=play, checkpoint=weights, max_hours=0.5, max_usd=Decimal(1)
+    progress, experiment="job", play=play, checkpoint=weights, max_hours=0.5, max_usd=Decimal(1)
 )
 ```
 
@@ -100,7 +100,7 @@ uv add 'etude-sdk[s3]'             # with S3 or R2 storage
 ## Read more
 
 - [Training](docs/training.md): the `train` function, seeds, carrying a run
-  on, checkpoints, `etude run`.
+  on, checkpoints, `etude train`.
 - [Tracking](docs/tracking.md): rows, row tables, storage, reading runs back, reports.
 - [Evaluation](docs/evaluation.md): players (checkpoints and code) playing each other in parallel, benchmarks and round robins, queried with DuckDB.
 - [The launcher](docs/launcher.md): typed jobs, pools, SSH hosts, rented

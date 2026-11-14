@@ -706,8 +706,8 @@ class Database:
         row = self._db.execute(f"{_RUNS} WHERE r.id = ?", (id,)).fetchone()
         if row is None:
             raise LauncherError(
-                f"the launcher has no run {id!r}; a run started with etude run is read with "
-                "etude report FILE, and a changed config needs a new --name"
+                f"the launcher has no run {id!r}; a run started with etude train is read with "
+                "etude report FILE"
             )
         return _run_from_row(row)
 
