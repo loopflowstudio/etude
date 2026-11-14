@@ -190,8 +190,8 @@ The shared worker pool uses the largest `workers` declared by its members,
 so adding another eval job does not multiply serving concurrency. Match
 records now retain execution seconds for later machine-time estimates.
 `etude.errors.RetryRequested` means an infrastructure refusal, rather than a
-player failure: the run fails and unfinished matches remain new on the next
-pass. Serving adapters use it for infrastructure failures. Completed matches are
+player failure: the run fails and its unfinished matches are failed with
+`retry=True`, which the next pass plays again without `--retry-failed`. Serving adapters use it for infrastructure failures. Completed matches are
 sealed and offered to storage individually. Container CPU quotas set thread
 budgets, `ETUDE_SCRATCH_DIR` supplies temporary fast scratch, and
 `ETUDE_RECEIPTS_DIR` retains server receipts with the run.
