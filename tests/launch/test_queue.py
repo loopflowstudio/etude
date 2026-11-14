@@ -107,7 +107,7 @@ def test_cli_queue_records_the_choice(
     monkeypatch.setattr(import_module("etude.launch.cli"), "default", lambda: b.scheduler)
     path = tmp_path / "job.py"
     path.write_text(
-        'from etude.launch.records import Job, RunRequest\ndef runs(): return Job(command="train", max_hours=1, max_usd=1)'
+        'from etude.launch.records import Job, RunRequest\ndef training_runs(): return Job(command="train", max_hours=1, max_usd=1)'
         + (".runs(1, 2)" if cohort else "")
     )
     assert (
@@ -405,7 +405,7 @@ def test_seeded_jobs_expand_equally_for_file_and_python_clients(
     monkeypatch.setattr(import_module("etude.launch.client"), "_client", lambda: b.scheduler)
     file = tmp_path / "chosen.py"
     file.write_text(
-        "from etude.spec import Job\ndef runs() -> Job:\n"
+        "from etude.spec import Job\ndef training_runs() -> Job:\n"
         '    return Job(command="train", name="baseline", seeds=(0, 7), '
         "max_hours=1, max_usd=1)\n"
     )

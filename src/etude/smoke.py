@@ -3,7 +3,7 @@
 `smoke_file` is the whole chain, as `etude smoke` runs it and `etude launch
 --smoke` and `etude queue --smoke` run it before submitting:
 
-1. Train: each distinct job `runs()` returns, run once with its declared tiny
+1. Train: each distinct job `training_runs()` returns, run once with its declared tiny
    form on a throwaway local launcher (`etude.launch.smoke.smoke_train`).
 2. Eval: the file's `eval(state)` on what training stored, each tournament it
    returns cut to one game per match, every condition kept, and held here, through
@@ -52,7 +52,7 @@ def smoke_file(
 ) -> Smoked:
     """Smoke the experiment file's `steps`, in order, and return what each did.
 
-    `runs` are what its `runs()` returned, as `read_job_file` read them; read
+    `runs` are what its `training_runs()` returned, as `read_job_file` read them; read
     with its defaults when not given. Without the train step, `source` holds
     the checkpoints to evaluate and the runs to report on; resolve it before
     calling, since the temporary home moves the default store. Raises

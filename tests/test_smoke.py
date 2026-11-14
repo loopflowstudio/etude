@@ -47,7 +47,7 @@ from tests.eval.games import {play}
 TRAIN = "{python} " + str(Path(__file__).parent / "train.py")
 
 
-def runs(seeds: int = 1, tiny: str = "1", bare: bool = False) -> list:
+def training_runs(seeds: int = 1, tiny: str = "1", bare: bool = False) -> list:
     smoke = SmokeForm(command=f"{{TRAIN}} {{tiny}}") if tiny else None
     ppo = Job(command=TRAIN + " 1000", name="ppo", max_hours=0.1, smoke=smoke).runs(*range(seeds))
     plain = Job(command=TRAIN + " 2000", name="plain", max_hours=0.1).runs(0) if bare else []

@@ -408,7 +408,7 @@ class RunRequest(Record):
 
     job: Job
     seed: int | None = None
-    # The values a runs() function was called with. Kept for reading; a job's
+    # The values a training_runs() function was called with. Kept for reading; a job's
     # identity comes from what it runs, never from these.
     params: dict[str, Param] = Field(default_factory=dict)
     source: SourcePosition | None = None

@@ -15,10 +15,13 @@ from threading import Thread
 import pytest
 
 from etude.cli import main
+from etude.errors import LauncherError
 from etude.experiment import observe
 from etude.launch.client import default
 from etude.launch.database import launcher_file
+from etude.launch.job_file import read_job_file
 from etude.launch.schemas import Packet
+from etude.local import train
 from etude.storage import default_root
 from tests.launch.fake import bench
 
@@ -31,7 +34,7 @@ command = f"{sys.executable} {Path(__file__).parent / 'train.py'}"
 here = Path(__file__).parent
 
 
-def runs(steps: int = 26000, seeds: int = 2) -> list[Run]:
+def training_runs(steps: int = 26000, seeds: int = 2) -> list[Run]:
     return [run for arm in ("small", "large") for run in
             Job(command=command, max_hours=0.1, max_usd=Decimal(5), until=f"steps={steps}",
                       name=arm, experiment="capacity", config=(here / (arm + ".toml")).read_text()
@@ -173,7 +176,7 @@ def test_an_experiment_file_launches_runs_of_its_experiment(
         "import sys\n"
         "from pathlib import Path\n"
         "from etude.launch.records import Job\n"
-        "def runs() -> Job:\n"
+        "def training_runs() -> Job:\n"
         "    train = Path(__file__).parent / 'train.py'\n"
         "    return Job(command=f'{sys.executable} {train}', max_hours=0.1)\n"
         "def eval(state):\n"
@@ -195,7 +198,13 @@ def test_an_experiment_file_launches_runs_of_its_experiment(
 
 
 @pytest.mark.parametrize(
-    "definition", ["def runs(): return []", "def runs(): return 42", "runs = 42", "job = None"]
+    "definition",
+    [
+        "def training_runs(): return []",
+        "def training_runs(): return 42",
+        "training_runs = 42",
+        "job = None",
+    ],
 )
 def test_invalid_python_file_is_refused_before_opening_the_database(
     tmp_path: Path,
@@ -207,7 +216,7 @@ def test_invalid_python_file_is_refused_before_opening_the_database(
     path = tmp_path / "job.py"
     path.write_text(definition)
     assert main(["launch", str(path)]) == 1
-    assert "runs()" in capsys.readouterr().err
+    assert "training_runs()" in capsys.readouterr().err
     assert not launcher_file(tmp_path / "home").exists()
 
 
@@ -226,7 +235,7 @@ def test_machines_join_pools_and_this_computer_can_be_turned_off(
 
     assert run(capsys, "pool", "off", "local")[0] == "local  this computer (default) (off)"
     (tmp_path / "job.py").write_text(
-        'from etude.launch.records import Job, RunRequest\ndef runs(): return Job(command="true", max_hours=1, max_usd=1)\n'
+        'from etude.launch.records import Job, RunRequest\ndef training_runs(): return Job(command="true", max_hours=1, max_usd=1)\n'
     )
     assert main(["launch", str(tmp_path / "job.py")]) == 1
     assert "pool 'local' is turned off" in capsys.readouterr().err
@@ -249,7 +258,7 @@ def test_default_target_and_owned_status(
     assert "needs a pool, an on-demand or both" in capsys.readouterr().err
     path = tmp_path / "job.py"
     path.write_text(
-        'from etude.launch.records import Job, RunRequest\ndef runs(): return Job(command="echo hi", max_hours=0.01, max_usd=1)\n'
+        'from etude.launch.records import Job, RunRequest\ndef training_runs(): return Job(command="echo hi", max_hours=0.01, max_usd=1)\n'
     )
     (line,) = run(capsys, "launch", str(path))
     assert "machine local" in line
@@ -258,7 +267,7 @@ def test_default_target_and_owned_status(
         "local  local  owned (this computer), $0.00 committed, never expires"
     ]
     path.write_text(
-        'from etude.launch.records import Job, RunRequest\ndef runs(): return Job(command="echo free", name="free", max_hours=0.001)\n'
+        'from etude.launch.records import Job, RunRequest\ndef training_runs(): return Job(command="echo free", name="free", max_hours=0.001)\n'
     )
     assert (
         "machine local" in run(capsys, "launch", str(path), "--experiment", "free")[0]
@@ -343,7 +352,7 @@ def test_launch_makes_machines_that_start_themselves(
     monkeypatch.setattr(import_module("etude.launch.cli"), "default", lambda: b.scheduler)
     path = tmp_path / "job.py"
     path.write_text(
-        'from etude.launch.records import Job, RunRequest\ndef runs(): return Job(command="train", max_hours=1, max_usd=1)'
+        'from etude.launch.records import Job, RunRequest\ndef training_runs(): return Job(command="train", max_hours=1, max_usd=1)'
         + (".runs(1, 2)" if cohort else "")
     )
     lines = run(
@@ -464,7 +473,7 @@ def test_a_job_file_takes_parameters_and_records_them_on_each_run(
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
     path = tmp_path / "job.py"
     path.write_text(
-        "from __future__ import annotations\nfrom etude.launch.records import Job, RunRequest\ndef runs(hidden: int = 256, seeds: int = 1, lr: float = 0.1, fast: bool = False,\n         tag='x', shape: list[int] | None = None) -> list[RunRequest]:\n    assert type(hidden) is int and type(lr) is float and type(fast) is bool\n    job = Job(command=f'echo {hidden} {lr} {fast} {tag}', max_hours=0.01, max_usd=1, name=f'h{hidden}')\n    return job.runs(*range(seeds))\n"
+        "from __future__ import annotations\nfrom etude.launch.records import Job, RunRequest\ndef training_runs(hidden: int = 256, seeds: int = 1, lr: float = 0.1, fast: bool = False,\n         tag='x', shape: list[int] | None = None) -> list[RunRequest]:\n    assert type(hidden) is int and type(lr) is float and type(fast) is bool\n    job = Job(command=f'echo {hidden} {lr} {fast} {tag}', max_hours=0.01, max_usd=1, name=f'h{hidden}')\n    return job.runs(*range(seeds))\n"
     )
 
     sent = run(
@@ -496,7 +505,7 @@ def test_job_help_required_flags_mixed_order_and_collision(
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
     path = tmp_path / "job.py"
     path.write_text(
-        'from etude.launch.records import Job\ndef runs(width: int, fast: bool = False):\n    """Train a chosen width."""\n    return Job(command="true", name=f"width-{width}", max_hours=1)\n'
+        'from etude.launch.records import Job\ndef training_runs(width: int, fast: bool = False):\n    """Train a chosen width."""\n    return Job(command="true", name=f"width-{width}", max_hours=1)\n'
     )
     assert main(["launch", str(path), "--help"]) == 0
     help = capsys.readouterr().out
@@ -511,7 +520,7 @@ def test_job_help_required_flags_mixed_order_and_collision(
     id = capsys.readouterr().out.split()[0]
     assert default().record(id).launch.params == {"width": 32, "fast": True}
     assert main(["queue", str(path), "--width", "64", "--experiment", "wider"]) == 0
-    path.write_text("def runs(pool: str): return None\n")
+    path.write_text("def training_runs(pool: str): return None\n")
     assert main(["queue", str(path), "--help"]) == 1
     assert "clashes" in capsys.readouterr().err
 
@@ -542,8 +551,76 @@ def test_several_seed_launch_refusals_name_the_count_and_cohort_remedy(
 ) -> None:
     file = tmp_path / "job.py"
     file.write_text(
-        "from etude.spec import Job\ndef runs() -> Job:\n"
+        "from etude.spec import Job\ndef training_runs() -> Job:\n"
         '    return Job(command="true", seeds=(0, 1, 2), max_hours=1)\n'
     )
     assert main([command, str(file)]) == 1
     assert "3 runs need --cohort NAME" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("command", ["launch", "queue", "train", "smoke"])
+@pytest.mark.parametrize("recipe", [False, True])
+def test_legacy_declarations_refuse_before_training_or_submission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+    recipe: bool,
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("ETUDE_HOME", str(home))
+    path = tmp_path / "legacy.py"
+    path.write_text(
+        "from pathlib import Path\n"
+        "def runs() -> object:\n"
+        "    Path(__file__).with_suffix('.called').touch()\n"
+        "    raise AssertionError('legacy declaration ran')\n"
+        + (
+            "from pydantic import BaseModel\n"
+            "def train(config: BaseModel) -> None:\n"
+            "    Path(__file__).with_suffix('.called').touch()\n"
+            if recipe
+            else ""
+        )
+    )
+    assert main([command, str(path)]) == 1
+    assert "training_runs" in capsys.readouterr().err
+    assert not path.with_suffix(".called").exists()
+    assert not launcher_file(home).exists()
+    assert not (home / "track").exists()
+    with pytest.raises(LauncherError, match="training_runs"):
+        read_job_file(path)
+    with pytest.raises(LauncherError, match="training_runs"):
+        train(path)
+
+
+def test_new_declaration_takes_precedence_and_help_does_not_invoke_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("ETUDE_HOME", str(home))
+    path = tmp_path / "sweep.py"
+    path.write_text(
+        "from pathlib import Path\nfrom etude.spec import Job\n"
+        "def runs() -> Job:\n"
+        "    raise AssertionError('legacy declaration ran')\n"
+        "def training_runs(width: int = 32) -> list[Job]:\n"
+        "    Path(__file__).with_suffix('.called').touch()\n"
+        "    return [Job(command=f'echo {width}', name=name, seeds=(0, 7), max_hours=1) "
+        "for name in ('small', 'wide')]\n"
+    )
+    assert main(["launch", str(path), "--help"]) == 0
+    assert "--width" in capsys.readouterr().out
+    assert not path.with_suffix(".called").exists()
+    assert not launcher_file(home).exists()
+    requests = read_job_file(path, ["--width", "64"])
+    assert [request.id for request in requests] == [
+        "sweep/small@0",
+        "sweep/small@7",
+        "sweep/wide@0",
+        "sweep/wide@7",
+    ]
+    assert all(request.params == {"width": 64} for request in requests)
+    assert main(["queue", str(path), "--width", "64", "--job", "wide", "--seed", "7"]) == 0
+    assert capsys.readouterr().out.startswith("sweep/wide@7 ")
+    assert default().record("sweep/wide@7").launch.params == {"width": 64}

@@ -40,7 +40,7 @@ def test_file_and_python_addresses_use_the_full_declaration_before_selection(
     ]
     file = tmp_path / "sweep.py"
     file.write_text(
-        "from etude.spec import Job\ndef runs():\n    return [\n"
+        "from etude.spec import Job\ndef training_runs():\n    return [\n"
         + ",\n".join(f"        Job.model_validate_json({job.model_dump_json()!r})" for job in jobs)
         + "\n    ]\n"
     )
@@ -72,7 +72,7 @@ def train(config: Config) -> None:
             run.log({"revision": 1})
             run.save()
 
-def runs():
+def training_runs():
     return [training(train, config=Config(), name=name, seeds=(0, 7),
                      repo=str(Path(__file__).parent), max_hours=1) for name in ("small", "wide")]
 """
@@ -139,7 +139,7 @@ def test_queue_status_and_logs_use_the_selected_address(
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
     file = tmp_path / "sweep.py"
     file.write_text(
-        "from etude.spec import Job\ndef runs():\n"
+        "from etude.spec import Job\ndef training_runs():\n"
         "    return [Job(command='true', name=name, seeds=(0, 7), max_hours=1) "
         "for name in ('small', 'wide')]\n"
     )
@@ -188,7 +188,7 @@ def train(config: Config) -> None:
                 (run.out / "stopped").touch()
                 raise Stopped()
 
-def runs():
+def training_runs():
     return [training(train, config=Config(), name=name, seeds=(0, 1, 2))
             for name in ("small", "wide")]
 """
@@ -257,11 +257,11 @@ def test_local_declarations_need_no_hours_or_git_but_submission_and_smoke_do(
         package = tmp_path / "local_recipe"
         package.mkdir()
         (package / "__init__.py").touch()
-        (package / "loop.py").write_text(SELECTION.split("def runs():")[0])
+        (package / "loop.py").write_text(SELECTION.split("def training_runs():")[0])
         file.write_text(
             "from local_recipe.loop import train, Config\nfrom etude.jobs import training\n\n"
-            + "def runs():"
-            + SELECTION.split("def runs():")[1]
+            + "def training_runs():"
+            + SELECTION.split("def training_runs():")[1]
         )
     args = [str(file), "--job", "wide", "--seed", "0"]
     assert main(["train", *args]) == 0
@@ -293,3 +293,16 @@ def test_checkpoint_listing_preserves_compact_and_historical_stored_addresses(
         "old/old",
         "league/league",
     }
+
+
+def test_local_training_uses_new_declaration_when_both_names_exist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    file = tmp_path / "sweep.py"
+    file.write_text(
+        SELECTION + "\ndef runs() -> object:\n    raise AssertionError('legacy declaration ran')\n"
+    )
+    assert main(["train", str(file), "--job", "wide", "--seed", "0", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["run"] == "sweep/wide@0"
+    assert read(tmp_path / "home/track", "sweep", "wide@0").rows == 4

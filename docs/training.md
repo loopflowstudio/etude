@@ -110,7 +110,7 @@ from etude.spec import Job
 from train import TrainConfig, train
 
 
-def runs() -> Job:
+def training_runs() -> Job:
     return training(
         train,
         config=TrainConfig(),
@@ -130,11 +130,15 @@ A cohort names runs launched together; `--parallel` sets machines at once
 An address is `experiment/job@seed`. Omit the job when the file defines one
 job, and the seed when that job defines one seed: `hanabi`, `sweep@1`,
 `sweep/wide@1`. Selection never changes the spelling: `--job wide --seed 1`
-selects what `runs()` defines. On this computer, `etude train job.py` trains
+selects what `training_runs()` defines. On this computer, `etude train job.py` trains
 the declared runs in order; `--job` and `--seed` select a subset. Local training
 needs neither `max_hours` nor a git checkout; launch, queue and smoke need both.
 When git is available, local attempts record the current commit. A file with
 only `train(config)` defines one job, named for the file, with seed 0.
+
+A file still declaring `runs` must rename it to `training_runs` before training.
+Even if it also defines `train(config)`, Etude refuses it rather than selecting
+the recipe instead. See the [job-file upgrade instructions](launcher.md#cohorts-and-python).
 
 `--experiment NAME` names the experiment on train, launch, queue, eval and report;
 the file stem is its default. `--job` and `--seed` select, never rename.
@@ -513,7 +517,7 @@ from etude.experiment import observe
 imitation = observe("s3://my-bucket/runs", "imitate").run("imitate").final
 
 
-def runs() -> Job:
+def training_runs() -> Job:
     return training(
         self_play,
         config=SelfPlayConfig(),
@@ -628,7 +632,7 @@ etude train train.py --json             # {"run": "train", "experiment": "train"
 etude smoke job.py                      # the smoke config, here, spending nothing
 ```
 
-- **`etude train FILE`** trains the selected `runs()` jobs here, or calls
+- **`etude train FILE`** trains the selected `training_runs()` jobs here, or calls
   `train` when the file defines only a recipe. `--config` changes its config, a JSON object checked against the
   config type. Unknown top-level fields are refused by name unless your model
   allows extras. Validation problems print one line per field, such as

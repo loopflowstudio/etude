@@ -65,7 +65,7 @@ The run, job, seed and cohort come from the command (`ETUDE_RUN`,
 `ETUDE_JOB`, `ETUDE_SEED`, `ETUDE_COHORT`), and `run.seed` reads the seed.
 The experiment is the launched file's stem (`ETUDE_EXPERIMENT`):
 `etude launch ppo.py` supplies `ppo`, including when the file defines only
-`runs()`. An explicit `--experiment` overrides the file and its job labels;
+`training_runs()`. An explicit `--experiment` overrides the file and its job labels;
 without it a plain job file preserves an explicit `Job.experiment`. Naming another
 experiment in `track` is refused (`experiment_differs_from_launch`), so a
 reusable training function names none. A process started by another

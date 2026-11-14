@@ -514,7 +514,7 @@ from etude.spec import Job
 from arena import ArenaConfig, arena, play  # arena(config) -> Benchmark; play(match) -> Tables
 
 
-def runs() -> Job:
+def training_runs() -> Job:
     weights = observe("s3://my-bucket/runs", "ppo").run("ppo").final
     return evaluation(
         arena,
@@ -558,7 +558,7 @@ plays whatever that calls for and no eval run has delivered. Run it while
 training goes, after it ends, or with a seating added later: each pass looks
 again. The experiment is named for the file: `capacity.py` evaluates the
 training runs of experiment `capacity`, and its eval runs are that
-experiment's. Define `runs()` in it too and `etude launch capacity.py` starts
+experiment's. Define `training_runs()` in it too and `etude launch capacity.py` starts
 training runs of `capacity`, so `track()` in the training code needs no
 `experiment`.
 
@@ -630,7 +630,7 @@ etude eval capacity.py --source s3://bucket/etude/launch --rent cpu8 --watch 600
 etude eval capacity.py --source s3://bucket/etude/launch --pool lab --queue --watch 60
 ```
 
-`etude smoke capacity.py` runs the file's `runs()`, `eval(state)` and `report()` in
+`etude smoke capacity.py` runs the file's `training_runs()`, `eval(state)` and `report()` in
 smoke form on this computer first, one game per match against tiny
 checkpoints. `etude launch --smoke` and a launching `etude eval --smoke` do so
 before they spend ([Smoke before you spend](launcher.md#smoke-before-you-spend)).

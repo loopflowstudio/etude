@@ -350,7 +350,7 @@ from etude.jobs import training
 from etude.launch.records import Job, Runtime
 from recipe_continuation import Config, train
 
-def runs(python: str) -> Job:
+def training_runs(python: str) -> Job:
     return training(train, config=Config(), repo=None, max_hours=0.1,
                     runtime=Runtime(python=python))
 """,

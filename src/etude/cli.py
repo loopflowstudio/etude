@@ -36,7 +36,7 @@ def train_recipe(
         str | None, typer.Option(help="JSON config fields; omitted on resume keeps stored config")
     ] = None,
     seed: Annotated[int | None, typer.Option(help="the run's seed")] = None,
-    job: Annotated[str | None, typer.Option(help="select a job defined in runs()")] = None,
+    job: Annotated[str | None, typer.Option(help="select a job defined in training_runs()")] = None,
     experiment: ExperimentOption = None,
     resume: Annotated[
         bool, typer.Option(help="resume the selected runs on current source")
@@ -91,7 +91,7 @@ def _submit(
     if file is None:
         if help:
             return
-        raise typer.BadParameter("a Python FILE defining runs() is required")
+        raise typer.BadParameter("a Python FILE defining training_runs() is required")
     from decimal import Decimal
 
     from etude.launch import controller
@@ -152,7 +152,7 @@ def _submit(
     show_runs(scheduler, controller.submit(scheduler, submission))
 
 
-FileArgument = Annotated[Path | None, typer.Argument(help="a Python file defining runs()")]
+FileArgument = Annotated[Path | None, typer.Argument(help="a Python file defining training_runs()")]
 PoolOption = Annotated[
     str | None,
     typer.Option(help="the pool of machines you own to use; the default when neither is named"),
@@ -292,7 +292,7 @@ def smoke_experiment(
     if file is None:
         if help:
             return
-        raise typer.BadParameter("a Python FILE defining runs() is required")
+        raise typer.BadParameter("a Python FILE defining training_runs() is required")
     from typing import cast
 
     from etude.launch.job_file import read_job_file

@@ -55,15 +55,20 @@ def train(
     """Train the selected jobs' seeds here, stopping the selection after a saved stop.
 
     Files with only `train(config)` define one job with seed 0. Files with
-    `runs()` use exactly the same declarations and addresses as a launch.
+    `training_runs()` use exactly the same declarations and addresses as a launch.
     """
     if seconds is not None and (not math.isfinite(seconds) or seconds <= 0):
         raise ValueError("--seconds must be finite and positive")
     if file.suffix != ".py":
-        raise ValueError("a Python file defining train(config) or runs() is required")
+        raise ValueError("a Python file defining train(config) or training_runs() is required")
     file = file.resolve()
     label = experiment or file.stem
-    if "runs" in defined_functions(file):
+    functions = defined_functions(file)
+    if "runs" in functions and "training_runs" not in functions:
+        raise LauncherError(
+            f"{file.name}: rename runs() to training_runs() returning jobs or run requests"
+        )
+    if "training_runs" in functions:
         requests = select_runs(
             read_job_file(file, experiment=experiment, local=True), job=job, seed=seed
         )
@@ -99,7 +104,7 @@ def train(
         return _train_each(prepared, json_output=json_output)
     if job not in (None, file.stem) or seed not in (None, 0):
         raise ValueError(
-            "select the file's sole job and seed 0; define runs() for other jobs or seeds"
+            "select the file's sole job and seed 0; define training_runs() for other jobs or seeds"
         )
     sys.path.insert(0, str(file.parent))
     try:

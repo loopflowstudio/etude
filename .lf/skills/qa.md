@@ -180,7 +180,7 @@ repo, with an isolated `ETUDE_HOME`:
   `uv lock`, add `.gitignore` with `.venv/` and `__pycache__/`, and commit, or every
   run says "plus uncommitted changes".
 - `train.py` with a Pydantic config whose real size raises, so a passing smoke shows
-  its smoke form ran; `games.py` with `play(match)`; `ppo.py` with `runs()`, `eval(state)`
+  its smoke form ran; `games.py` with `play(match)`; `ppo.py` with `training_runs()`, `eval(state)`
   and `report()`. A job's `max_usd` must be more than zero or omitted.
 - `uv run etude smoke ppo.py`, `uv run etude launch ppo.py --cohort NAME`, then
   `etude status`. Nothing runs a controller here: cancel what you queued
@@ -226,7 +226,7 @@ with a `time.sleep` per step so a stop lands mid-run. Then:
   changed `--config` (`run_identity_conflict`), a target on a clock the recipe
   does not count (`until_clock_undeclared`). Never pipe a run into `head`: the
   SIGPIPE fails the run.
-- A `runs()` file with `seeds=(0, 1, 2)` trains `NAME@0..2` in order; `--job`
+- A `training_runs()` file with `seeds=(0, 1, 2)` trains `NAME@0..2` in order; `--job`
   and `--seed` select. Do not teach `--resume` as finishing a partly started
   selection (an unstarted member is refused; Open 6).
 - Read rows with `etude.train.read.read(ETUDE_HOME/track, EXPERIMENT, ADDRESS)
@@ -236,7 +236,7 @@ with a `time.sleep` per step so a stop lands mid-run. Then:
   etude` from the repo root, then `docs/hanabi.md`'s commands; 2000 updates take
   long enough to interrupt at ~5 s.
 
-Launch a plain file defining only `runs()` to check that its
+Launch a plain file defining only `training_runs()` to check that its
 stem supplies the experiment. Also check an explicit `Job.experiment`: plain
 files preserve it, while files defining `report()` or `eval(state)` require
 their own stem.

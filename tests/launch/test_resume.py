@@ -136,7 +136,7 @@ with track(clocks=[Step("steps", "training steps")], config=json.loads(Path(os.e
     file.write_text(
         "from etude.launch.records import Job\n"
         "from pathlib import Path\n"
-        "def runs() -> Job:\n"
+        "def training_runs() -> Job:\n"
         f"    return Job(command={sys.executable!r} + ' train.py', repo=str(Path(__file__).parent), "
         "max_hours=0.1, seeds=(7,), config='{\"rate\": 0.1}')\n"
     )
@@ -246,7 +246,7 @@ def test_cli_selects_the_stored_job_and_seed_from_hand_built_requests(
     file = tmp_path / "job.py"
     file.write_text(
         "from etude.launch.records import Job, RunRequest\n"
-        "def runs() -> list[RunRequest]:\n"
+        "def training_runs() -> list[RunRequest]:\n"
         f"    job = Job.model_validate_json({spec.model_dump_json()!r})\n"
         f"    return [RunRequest(job=job, seed=7, id={identity!r}), RunRequest(job=job, seed=8)]\n"
     )

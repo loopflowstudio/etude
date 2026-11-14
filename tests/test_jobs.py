@@ -55,7 +55,7 @@ from etude.launch.records import Job, Runtime
 from {module} import OtherConfig, TrainConfig, train
 
 
-def runs(python: str) -> Job:
+def training_runs(python: str) -> Job:
     return training(train, config={config}, max_hours=0.1, runtime=Runtime(python=python))
 """
 
@@ -172,7 +172,7 @@ from etude.jobs import training
 from etude.launch.records import Job, Runtime
 from {module} import Config, train
 
-def runs(python: str) -> Job:
+def training_runs(python: str) -> Job:
     job = training(train, config=Config(), max_hours=0.01, max_attempts=1,
                    runtime=Runtime(python=python))
     return job.model_copy(update={{"experiment": {experiment!r}}})
@@ -248,7 +248,7 @@ def test_a_job_file_names_its_own_top_level_function(tmp_path: Path) -> None:
         tmp_path / "lab",
         {
             "job.py": TRAIN
-            + "\nfrom etude.jobs import training\n\n\ndef runs() -> object:\n"
+            + "\nfrom etude.jobs import training\n\n\ndef training_runs() -> object:\n"
             + "    return training(train, config=TrainConfig(lr=1), max_hours=0.1)\n"
         },
     )
@@ -267,7 +267,7 @@ from etude.jobs import training
 from {module} import TrainConfig, train
 
 
-def runs() -> object:
+def training_runs() -> object:
     return training(train, config=TrainConfig(lr=1), max_hours=0.1{options})
 """
 
@@ -461,7 +461,7 @@ def test_the_job_command_starts_by_importing_no_other_part_of_etude() -> None:
 def test_job_seeds_expand_to_named_requests_without_changing_job_identity(tmp_path: Path) -> None:
     file = tmp_path / "job.py"
     file.write_text(
-        'from etude.launch.records import Job\ndef runs():\n    return Job(command="true", max_hours=1, name="baseline", seeds=(0, 7))\n'
+        'from etude.launch.records import Job\ndef training_runs():\n    return Job(command="true", max_hours=1, name="baseline", seeds=(0, 7))\n'
     )
     requests = read_job_file(file, experiment="chosen")
     assert [(run.id, run.seed, run.job.experiment) for run in requests] == [
@@ -478,7 +478,7 @@ def test_job_seeds_expand_to_named_requests_without_changing_job_identity(tmp_pa
     ]
     assert job_id(first) == job_id(first.model_copy(update={"seeds": (42,)}))
     file.write_text(
-        'from etude.launch.records import Job\ndef runs():\n    return [Job(command="true", max_hours=1, name="first"), Job(command="true", max_hours=1, name="other")]\n'
+        'from etude.launch.records import Job\ndef training_runs():\n    return [Job(command="true", max_hours=1, name="first"), Job(command="true", max_hours=1, name="other")]\n'
     )
     assert [run.id for run in read_job_file(file)] == ["job/first", "job/other"]
 

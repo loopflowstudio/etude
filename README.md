@@ -12,7 +12,7 @@ from etude.spec import Job
 from train import TrainConfig, train
 
 
-def runs() -> Job:
+def training_runs() -> Job:
     return training(
         train,
         config=TrainConfig(lr=1e-3),

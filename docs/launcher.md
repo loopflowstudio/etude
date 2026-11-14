@@ -120,7 +120,7 @@ from etude.spec import Job
 from train import TrainConfig, train  # train(config: TrainConfig) -> None
 
 
-def runs() -> Job:
+def training_runs() -> Job:
     return training(train, config=TrainConfig(lr=1e-3), max_hours=0.1)
 ```
 
@@ -288,7 +288,7 @@ from etude.report import Report
 from train import TrainConfig, train
 
 
-def runs() -> Job:
+def training_runs() -> Job:
     return training(
         train,
         config=TrainConfig(lr=3e-4),
@@ -318,7 +318,7 @@ launching `etude eval`. Nothing smokes on its own.
 A smoke runs each part of an experiment file through the same code as the real
 thing, only small, in order:
 
-1. **Train.** Each job `runs()` returns, run once on this computer with its
+1. **Train.** Each job `training_runs()` returns, run once on this computer with its
    smoke form, through the `local` pool's real path: its environment is prepared,
    a worker starts, and it writes a real tracked checkpoint. Seeds are dropped,
    so a cohort of three seeds is smoked once.
@@ -410,7 +410,8 @@ from etude.launch.job_file import read_job_file
 from etude.smoke import smoke_file
 
 path = Path("ppo.py")
-runs = read_job_file(path, ["--seeds", "2"])  # runs() with these flags; omitted, its defaults
+# Call training_runs() with these flags; omit them to use its defaults.
+runs = read_job_file(path, ["--seeds", "2"])
 result = smoke_file(path, runs)  # raises LauncherError on the first failure
 for run in result.stamp(runs):  # each run with its own job's smoke, as submitted
     print(run.job.name, run.seed, run.smoke)
@@ -982,7 +983,7 @@ continued = queue(
 RunRequests. Each Job expands to its declared seeds; `queue` and `launch`
 require one run and direct several-seed jobs to the cohort calls.
 
-For the command line, a Python file defines a function `runs()` that returns a
+For the command line, a Python file defines a function `training_runs()` that returns a
 Job or a nonempty list of Jobs. Each job is launched once per seed in its
 `seeds`, or once with seed 0. The function describes work without
 sending it. The command calls it once, on the machine the command is typed on,
@@ -998,7 +999,7 @@ from etude.spec import Job, Until
 from train import TrainConfig, train
 
 
-def runs(hidden: int = 256, seeds: int = 3) -> Job:
+def training_runs(hidden: int = 256, seeds: int = 3) -> Job:
     return training(
         train,
         config=TrainConfig(hidden=hidden),
@@ -1011,22 +1012,30 @@ def runs(hidden: int = 256, seeds: int = 3) -> Job:
 
 
 if __name__ == "__main__":
-    launch_cohort("capacity", runs(hidden=512), rent="l4", parallel=2)
+    launch_cohort("capacity", training_runs(hidden=512), rent="l4", parallel=2)
 ```
 
 ```sh
 etude queue capacity.py --rent l4 --cohort capacity --parallel 2 --max-usd 20
 etude launch capacity.py --hidden 512 --seeds 5 --pool lab --rent l4 --cohort big
-python capacity.py          # whatever its __main__ block does
+uv run python capacity.py   # whatever its __main__ block does
 ```
 
-Job parameters are ordinary flags parsed by Typer from `runs()`'s signature.
+Job parameters are ordinary flags parsed by Typer from `training_runs()`'s signature.
 Required parameters become required options; annotated types and defaults govern
 conversion. Boolean flags use `--fast` / `--no-fast`. Launcher flags and job flags
 may be mixed after FILE; a bare `--` before job flags is accepted but not needed.
 `etude launch capacity.py --help` shows launcher options, then job parameter types,
-defaults and the function's docstring, without invoking `runs()`.
+defaults and the function's docstring, without invoking `training_runs()`.
 A parameter named like a launcher option is rejected when the file loads.
+
+Rename an old `def runs(...)` declaration to `def training_runs(...)`, including
+Python calls to it. Keep its parameters and return values. When loading a job
+file, launch, queue, train and smoke refuse an old-only declaration with
+`LauncherError` naming `training_runs`; there is no alias or warning period. If both names exist, only
+`training_runs` is used. `Job.runs(...)` and the `etude runs` command keep their
+names.
+
 The old `NAME=VALUE` parameter syntax is removed; targets still use `steps=26000`
 as a single clock value. The command does not run the file's `__main__` block.
 
@@ -1049,8 +1058,8 @@ import capacity
 from etude.spec import Job
 
 
-def runs() -> list[Job]:
-    return [capacity.runs(hidden=hidden) for hidden in (64, 256, 1024)]
+def training_runs() -> list[Job]:
+    return [capacity.training_runs(hidden=hidden) for hidden in (64, 256, 1024)]
 ```
 
 Several runs require `--cohort`. Cohort limits belong to command flags, not the
@@ -1062,7 +1071,7 @@ setting is a function or class method returning one, such as
 `TrainConfig.large()`.
 
 `etude launch job.py` supplies experiment `job` to every unnamed job, even
-when the file defines only `runs()`. A `train` function calls
+when the file defines only `training_runs()`. A `train` function calls
 `track(clocks=..., config=config)` without naming an experiment. A plain job file preserves explicit `Job.experiment`
 values; a file defining `eval(state)` or `report()` requires its own stem
 and refuses jobs naming another experiment.
@@ -1549,7 +1558,7 @@ loop's last pass and prints when that was (`last loop: ...`); run `etude wait` o
 
 Controller selection mutations are asks. `worker` and `controller run` are waits
 because they deliberately execute long-lived loops; they retain their existing
-lifetime rules. Job-file `runs()` is an input function, not a launcher command.
+lifetime rules. Job-file `training_runs()` is an input function, not a launcher command.
 `smoke` is a wait on this computer alone: it runs the file tiny in a temporary
 home and touches neither the database nor another machine. `train` is the same
 kind: it calls a file's `train` here, writes the run to this computer's runs

@@ -462,7 +462,7 @@ def test_quote_prints_planned_first_wave_costs_and_rents_nothing(
     path = tmp_path / "job.py"
     path.write_text(
         "from etude.launch.records import Job\n"
-        "def runs(): return Job(command='train', max_hours=1, max_usd=2).runs(1, 2, 3)\n"
+        "def training_runs(): return Job(command='train', max_hours=1, max_usd=2).runs(1, 2, 3)\n"
     )
     counting = Counting(b.store, b.service)
     with counting.record():

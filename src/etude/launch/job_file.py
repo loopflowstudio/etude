@@ -1,4 +1,4 @@
-"""Read a Python job file and validate its runs() flags before submission.
+"""Read a Python job file and validate its training_runs() flags before submission.
 
 The file supplies the experiment's default name and expands all declarations
 before job/seed selection. An explicit experiment override wins. Explicit
@@ -30,21 +30,21 @@ def read_job_file(
     experiment: str | None = None,
     local: bool = False,
 ) -> list[RunRequest]:
-    """Let Typer validate runs()'s signature, then invoke it once with typed flags.
+    """Let Typer validate training_runs()'s signature, then invoke it once with typed flags.
 
     Default unnamed jobs to the file's stem; qualify them before expanding seeds.
     `local` reads declarations for training here, without rental or git requirements.
     """
 
     if path.suffix != ".py":
-        raise LauncherError("job files must be Python (.py), defining runs()")
+        raise LauncherError("job files must be Python (.py), defining training_runs()")
     # As `python job.py` would, so the file can import its neighbours: `from train import train`.
     folder = str(path.resolve().parent)
     if folder not in sys.path:
         sys.path.insert(0, folder)
-    function = runpy.run_path(str(path.resolve())).get("runs")
+    function = runpy.run_path(str(path.resolve())).get("training_runs")
     if not callable(function):
-        raise LauncherError(f"{path.name}: define runs() returning jobs or run requests")
+        raise LauncherError(f"{path.name}: define training_runs() returning jobs or run requests")
     signature = inspect.signature(function)
     hints = typing.get_type_hints(function)
     reserved = {
@@ -79,13 +79,15 @@ def read_job_file(
     for name, param in signature.parameters.items():
         if name in reserved or "no_" + name in reserved:
             raise LauncherError(
-                f"{path.name}: runs() parameter {name!r} clashes with launcher option --{name.replace('_', '-')}"
+                f"{path.name}: training_runs() parameter {name!r} clashes with launcher option --{name.replace('_', '-')}"
             )
         if param.kind not in (
             inspect.Parameter.POSITIONAL_OR_KEYWORD,
             inspect.Parameter.KEYWORD_ONLY,
         ):
-            raise LauncherError(f"{path.name}: runs() parameter {name!r} must be a named parameter")
+            raise LauncherError(
+                f"{path.name}: training_runs() parameter {name!r} must be a named parameter"
+            )
         kind = hints.get(
             name, str if param.default is inspect.Parameter.empty else type(param.default)
         )
@@ -115,7 +117,7 @@ def read_job_file(
     returned = values[0]
     returned = list(returned) if isinstance(returned, (list, tuple)) else [returned]
     if not returned or not all(isinstance(each, (Job, RunRequest)) for each in returned):
-        raise LauncherError(f"{path.name}: runs() must return jobs or run requests")
+        raise LauncherError(f"{path.name}: training_runs() must return jobs or run requests")
     jobs: list[Job] = []
     for each in returned:
         candidate = each if isinstance(each, Job) else each.job
@@ -172,6 +174,6 @@ def select_runs(
     ]
     if not selected:
         raise LauncherError(
-            "no runs match --job and --seed; select a job and seed defined in runs()"
+            "no runs match --job and --seed; select a job and seed defined in training_runs()"
         )
     return selected
