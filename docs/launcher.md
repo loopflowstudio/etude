@@ -1093,7 +1093,7 @@ left it, and `run.resume` loads the state `run.save()` kept there
 - **A lost machine** is the launcher's finding: the attempt ends `lost` with
   its cause.
 - **A planned stop** is the job's own: `run.steps` saw the stop, the pass in
-  progress saved, and the next raised `etude.train.tracking.Stopped`
+  progress saved, and the next raised `etude.stopping.Stopped`
   ([Training](training.md#counting)).
   The attempt ends `stopped`. A command job says the same by exiting 75
   (`EX_TEMPFAIL`, "try again later"), which is what a typed job's process

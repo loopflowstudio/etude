@@ -80,7 +80,7 @@ Initial run/record/scope acceptance checks pass.
 
 The four record/API corrections in `design-train-api.md` are built:
 optional launcher submission metadata, one run name, `RunOutcome`, and
-`Stopped` taught from `etude.stopping`. New standalone and worker run.json
+`Stopped` taught from `etude.stopping` (including `docs/launcher.md`). New standalone and worker run.json
 serialization, historical decoding and launcher/controller round trips have
 focused coverage. Gate still owns the affected suites and full acceptance.
 
