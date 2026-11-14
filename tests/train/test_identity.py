@@ -119,7 +119,7 @@ def test_reading_another_experiment_does_not_return_a_flat_runs_rows(tmp_path: P
     with track(experiment="one", run="r", clocks=[], directory=tmp_path) as run:
         run.log({"score": 10})
     data = read(tmp_path, "two", "r")
-    assert data.file is None and data.rows == 0 and data.state is None
+    assert data.file is None and data.rows == 0 and data.outcome is None
 
 
 def test_run_record_reads_historical_identity_and_round_trips_the_exact_config() -> None:

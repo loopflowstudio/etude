@@ -70,7 +70,7 @@ def test_local_stop_resume_and_finished_refusals_preserve_one_run(
     root = base / "train-seed-7"
     assert not (root / "out/phase-two").exists()
     first = read(DirectoryStorage(base), "train", "train-seed-7")
-    assert first.state is not None and first.state.state == "stopped"
+    assert first.outcome is not None and first.outcome.state == "stopped"
     assert first.points("games", "updates").y.tolist() == [3, 6]
     capsys.readouterr()
     assert main(["run", str(file), "--resume", "train-seed-7", "--json"]) == 0
@@ -115,12 +115,13 @@ def test_a_new_recipe_failure_before_any_rows_is_recorded(
     with pytest.raises(RuntimeError, match="learner failed"):
         main(["run", str(file)])
     data = read(DirectoryStorage(tmp_path / "home/track/fail"), "fail", "fail-seed-0")
-    assert data.state is not None and data.state.state == "failed"
+    assert data.outcome is not None and data.outcome.state == "failed"
     assert data.rows == 0
 
 
+@pytest.mark.parametrize("filename", ["outcome.json", "state.json"])
 def test_outcome_reader_keeps_historical_state_files(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, filename: str
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
     file = tmp_path / "train.py"
@@ -128,9 +129,14 @@ def test_outcome_reader_keeps_historical_state_files(
     assert main(["run", str(file)]) == 75
     base = tmp_path / "home/track/train"
     root = base / "train-seed-0"
-    (root / "outcome.json").rename(root / "state.json")
+    (root / "outcome.json").rename(root / filename)
     data = read(DirectoryStorage(base), "train", "train-seed-0")
-    assert data.state is not None and data.state.state == "stopped"
+    assert data.outcome is not None and data.outcome.state == "stopped"
+    with pytest.warns(DeprecationWarning, match=r"RunData.state.*RunData.outcome; removed in 0.5"):
+        assert data.state is data.outcome
+    dumped = data.model_dump(mode="json")
+    assert dumped["outcome"]["state"] == "stopped"
+    assert "state" not in dumped
 
 
 def test_signal_stops_saved_and_restores_the_callers_environment(
@@ -229,7 +235,7 @@ def test_seconds_deadline_stops_before_the_first_step_when_expired(
     file.write_text(RECIPE)
     assert main(["run", str(file), "--seconds", "1"]) == 75
     data = read(DirectoryStorage(tmp_path / "home/track/train"), "train", "train-seed-0")
-    assert data.state is not None and data.state.state == "stopped"
+    assert data.outcome is not None and data.outcome.state == "stopped"
     assert data.rows == 0
     assert not (tmp_path / "home/track/train/train-seed-0/out/phase-two").exists()
 

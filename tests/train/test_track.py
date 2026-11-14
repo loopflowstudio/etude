@@ -118,8 +118,8 @@ def test_rows_round_trip_through_files_and_a_bucket_directory(tmp_path: Path) ->
 
     # Read from the bucket's copy alone.
     data = read(bucket, "capacity-pilot", "training-3f9a")
-    assert data.state is not None and data.state.state == "finished"
-    assert data.job == "capacity-64" and data.state.counters.incomplete == 2
+    assert data.outcome is not None and data.outcome.state == "finished"
+    assert data.job == "capacity-64" and data.outcome.counters.incomplete == 2
     assert set(data.metrics()) == {"rl/loss", "rl/entropy", "ppo/losses/policy"}
     entropy = data.points("rl/entropy", "progress/training_seconds")
     assert len(entropy) == 200 and int(np.isnan(entropy.y).sum()) == 1
@@ -219,7 +219,7 @@ def test_files_alone_read_back_and_report_with_a_seed_sample(tmp_path: Path) -> 
 
     assert runs(tmp_path) == [("pilot", f"seed-{seed}") for seed in range(3)]
     data = read(tmp_path, "pilot", "seed-1")
-    assert data.rows == 121 and data.job == "arm" and data.state is not None
+    assert data.rows == 121 and data.job == "arm" and data.outcome is not None
     points = data.points("rl/loss", "progress/updates")
     assert len(points) == 120 and (points.x[5], points.y[5]) == (5.0, 101.0)
     assert (points.x[6], points.y[6]) == (6.0, 1.0)
@@ -322,7 +322,7 @@ def test_metrics_and_checkpoints_reach_an_s3_bucket_and_read_back(
 
         # Everything reads back from the bucket alone.
         data = read(bucket, "pilot", "s3")
-        assert data.rows == 50 and data.state is not None
+        assert data.rows == 50 and data.outcome is not None
         assert [c.tags for c in data.checkpoints] == [("best",), ()]
         assert data.checkpoints[0].artifact == first and authored(data.checkpoints[0].at) == AT
         pilot = experiment_file(tmp_path / "experiments", "pilot")

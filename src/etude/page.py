@@ -508,7 +508,7 @@ def build(source: Storage | Path | str, file: Path) -> Page:
         else _Evals()
     )
     # Blocks arrive as they are sealed, so a run with no recorded end shows what it played so far.
-    unended = [run.name for run in data if run not in trained and run.state is None]
+    unended = [run.name for run in data if run not in trained and run.outcome is None]
     partial = (
         (f"Partial results: no recorded end yet for {', '.join(unended)}.",) if unended else ()
     )

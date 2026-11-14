@@ -67,12 +67,7 @@ uses current or stored config defaults, upload-only cleanup without a controller
 and the second Ctrl-C behaviour (below). The default public example and save
 cadence choices remain in the design's Open list.
 
-## Merge of main at 66ffb28 (2026-11-13)
-
-Merge choices and check receipts are at `9a762a1:scratch/questions.md`.
-Invariants kept: first durable rows set attempt cutoffs; running hours resume
-from saved state, falling back to a checkpoint; hours since start include
-gaps; `RunData.reached` and `RunSummary.at` include Etude's clocks.
+Merge history and preserved clock/cutoff invariants: `394aa37:scratch/questions.md`.
 
 ## `RunRequest` name taken on main (2026-11-13, realign)
 

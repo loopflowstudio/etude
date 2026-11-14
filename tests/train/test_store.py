@@ -93,18 +93,18 @@ def test_resuming_does_not_inherit_a_previous_attempts_finished_state(
         state.pop("writer")
         path.write_text(json.dumps(state))
     assert sync(local, storages=[bucket]) == {}
-    finished = read(bucket, "e", "r").state
+    finished = read(bucket, "e", "r").outcome
     assert finished is not None and finished.state == "finished"
 
     resumed = track(resume=True, experiment="e", run="r", clocks=[], directory=local)
     try:
         assert sync(local, storages=[bucket]) == {}
-        assert read(local, "e", "r").state is None
-        assert read(bucket, "e", "r").state is None
+        assert read(local, "e", "r").outcome is None
+        assert read(bucket, "e", "r").outcome is None
     finally:
         resumed.finish("failed")
     assert sync(local, storages=[bucket]) == {}
-    failed = read(bucket, "e", "r").state
+    failed = read(bucket, "e", "r").outcome
     assert failed is not None and failed.state == "failed"
 
 

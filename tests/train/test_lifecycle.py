@@ -67,7 +67,7 @@ def test_local_recipe_stops_resumes_and_repeats_without_another_checkpoint(tmp_p
             raise Stopped
     assert dict(os.environ) == before
     stopped = read(out, "recipe", "run")
-    assert stopped.state is not None and stopped.state.state == "stopped"
+    assert stopped.outcome is not None and stopped.outcome.state == "stopped"
     assert training([stopped]).runs[0].state == "running or unfinished"
     for _ in range(2):
         with local_launch(out=out, experiment="recipe"):
@@ -79,7 +79,7 @@ def test_local_recipe_stops_resumes_and_repeats_without_another_checkpoint(tmp_p
     data = read(out, "recipe", "run")
     assert len(data.checkpoints) == 1
     assert data.points("loss", "updates").x.tolist() == [3]
-    assert data.state is not None and data.state.state == "finished"
+    assert data.outcome is not None and data.outcome.state == "finished"
     assert not list((out / "etude/run/checkpoints").glob("*.pt"))
     with local_launch(out=tmp_path / "other/run", experiment="recipe"):
         with track(clocks=CLOCKS) as other:

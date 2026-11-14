@@ -78,29 +78,19 @@ that boundary is designed; the current run/record/scope cut remains checkable.
 
 Initial run/record/scope acceptance checks pass.
 
-The four record/API corrections in `design-train-api.md` are built:
-optional launcher submission metadata, one run name, `RunOutcome`, and
-`Stopped` taught from `etude.stopping` (including `docs/launcher.md`). New standalone and worker run.json
-serialization, historical decoding and launcher/controller round trips have
-focused coverage. Gate still owns the affected suites and full acceptance.
+Record/API corrections are built: optional launcher submission metadata,
+one run name, `RunOutcome`, and `Stopped` from `etude.stopping`.
 
-Correction checks: focused `uv run pytest` filters pass for new declarations,
-historical records/outcomes, assigned/opaque names, quotes, local/remote resume,
-continuation and `Stopped`; `uv run mypy` (174 files), `uv run ruff check .`,
-`uv run ruff format --check .` and `git diff --check` pass. The stale `seed3`
-quote expectation was corrected to `seed-3` and its focused test passes.
-No queries or schema changed; the existing quote provider-count pin passes.
-Compress then removed the `launch_spec` alias (`record.launch.spec`) and
-default-valued submission arguments: 227 focused tests in the touched launch,
-identity, continuation, jobs and smoke files, mypy and ruff pass.
+Second-review corrections built: `RunData.outcome` with a warning `state`
+property until 0.5, all internal consumers moved, local planned-stop docs
+corrected, `--name` described as a job name, eval outcome filename corrected.
+Check: focused pytest filter (outcome alias/current and historical files,
+stop/resume/refusal/failure, reports) **13 passed, 126 deselected**;
+`uv run mypy` (174 files), ruff check/format and diff check pass.
+Full acceptance stays with gate. Open writer/allocation and eval planning
+choices remain in `questions.md`; PR #103 stays draft.
 
-Checks: full suite **877 passed, 6 skipped (optional PyTorch), 3 deselected**
-before the compress cut: no live `Run.source_key`/`namespace` plumbing (stored
-`RunRecord.source_key` stays), `declared` takes one folder, one `SAFE_NAME`
-(`etude.identity`), `source.freeze` addresses once, flat launcher re-exports.
-After it: 314 focused tests (run, eval, train identity/track/store/local/cli,
-launch source/resume/layout/cli, jobs, continuation, page, experiment), mypy
-(174 files), ruff check and format pass. Full suite not rerun; gate owns it.
+Earlier checks: `394aa37:scratch/exp-56.md`.
 
 The 4,096-run fixture selects 32 records plus one keyed row in 2 SQL statements;
 EXPLAIN uses `runs_experiment` and the primary key.

@@ -167,7 +167,7 @@ def state_of(every: Sequence[RunData], experiment: str) -> ExperimentState:
     ]
     line = lines(ours)
     job = job_names(ours)
-    lost = _closed_without_success([data.name for data in ours if data.state is None])
+    lost = _closed_without_success([data.name for data in ours if data.outcome is None])
     runs = []
     for data in ours:
         saved = Checkpoints(
@@ -179,10 +179,10 @@ def state_of(every: Sequence[RunData], experiment: str) -> ExperimentState:
         )
         # A planned stop is not an end: the launcher calls the recipe again.
         state: Literal["running", "finished", "failed"] = (
-            data.state.state
-            if data.state is not None and data.state.state != "stopped"
+            data.outcome.state
+            if data.outcome is not None and data.outcome.state != "stopped"
             else "failed"
-            if data.state is None and data.name in lost
+            if data.outcome is None and data.name in lost
             else "running"
         )
         runs.append(

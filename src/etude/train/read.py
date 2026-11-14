@@ -14,13 +14,14 @@ Rows are read by column (`etude.train.block`), so a chart costs two arrays.
 stretch of overlapping blocks at a time, planned from headers (`_stretches`),
 so it holds one stretch's arrays plus a few numbers per block.
 `RunData.points` is the same plan read all at once.
-A run's records (declaration, state, attempts, checkpoints) are read when it
+A run's records (declaration, outcome, attempts, checkpoints) are read when it
 is read; its metric blocks only the first time `RunData.blocks` is used, so a
 reader of checkpoints, or of an eval run, reads no metric data.
 """
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from functools import cached_property
@@ -94,12 +95,22 @@ class RunData(Arrays):
     experiment: str
     name: str
     file: RunRecord | None
-    state: RunOutcome | None
+    outcome: RunOutcome | None
     # In ordinal order, one per ordinal: a later attempt continues its run's ordinals.
     checkpoints: tuple[CheckpointRecord, ...]
     # Every process that wrote to this run, in start order.
     attempts: tuple[RunWriter, ...]
     _read_blocks: Callable[[], tuple[StoredBlock, ...]] = PrivateAttr()
+
+    @property
+    def state(self) -> RunOutcome | None:
+        """Deprecated outcome name, removed in 0.5."""
+        warnings.warn(
+            "RunData.state is now RunData.outcome; removed in 0.5",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.outcome
 
     @cached_property
     def blocks(self) -> tuple[StoredBlock, ...]:
@@ -953,7 +964,7 @@ def _read(
     present = set(keys)
     records = _records(storage, keys)
     attempts = records.attempts
-    # The state the latest attempt left, where it left one.
+    # The outcome the latest attempt left, where it left one.
     # `state.json` is the historical name; where both exist `outcome.json` wins.
     ended = {
         folder: name
@@ -963,20 +974,22 @@ def _read(
     }
     left = (records.folder_of[attempt.writer] for attempt in reversed(attempts))
     latest = next((folder for folder in left if folder in ended), None)
-    state = latest or (next(reversed(ended)) if ended else None)
-    run_state = RunOutcome.model_validate_json(storage.get(state + ended[state])) if state else None
-    if run_state is not None and attempts:
+    folder = latest or (next(reversed(ended)) if ended else None)
+    outcome = (
+        RunOutcome.model_validate_json(storage.get(folder + ended[folder])) if folder else None
+    )
+    if outcome is not None and attempts:
         # A completion belongs to one writer, not every later resume. Older
         # evidence without attribution is conclusive only for a single attempt.
-        current = run_state.writer == attempts[-1].writer
-        unattributed = run_state.writer is None and len(attempts) == 1
+        current = outcome.writer == attempts[-1].writer
+        unattributed = outcome.writer is None and len(attempts) == 1
         if not current and not unattributed:
-            run_state = None
+            outcome = None
     data = RunData(
         experiment=experiment,
         name=run,
         file=run_file,
-        state=run_state,
+        outcome=outcome,
         # A later attempt continues its run's ordinals; each is kept once.
         checkpoints=_hours(
             {r.ordinal: r for r in sorted(records.checkpoints, key=_order)}.values(),

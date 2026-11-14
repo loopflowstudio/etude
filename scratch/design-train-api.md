@@ -275,7 +275,8 @@ hand.
 | the same run, further | `--resume RUN --until ...` on either | a new attempt of the same run, finished or not (Open 2) |
 | changed, or a branch | `etude continue --run RUN --config ...` | a new run descended from the first (as built) |
 
-- A run id may be chosen (by default the job's name and seed; `--name` locally; `RunRequest(id=...)` underneath).
+- `--name` chooses the job name; the run id adds its seed (`wide-seed-7`).
+  An exact run id without that suffix is chosen with `RunRequest(id=...)`.
   It is unique within its experiment. The authority is the run's folder:
   `run.json` is created create-only, so a second claimant fails on any
   computer. The launcher also refuses early, before renting.
@@ -363,35 +364,23 @@ Keep historical decoding, remote controller record replies, planned-stop
 retries, row replacement, continuation and cumulative limits. Eval planner
 changes remain blocked on the planning boundary in `questions.md`.
 
-## Corrections from the second concept review (2026-11-13): next implement direction
+## Corrections from the second concept review (2026-11-13): built
 
-Seen at `394aa37`. Each follows from text above; none is a person's decision.
+Review evidence and the detailed direction remain at
+`394aa37:scratch/design-train-api.md` (second concept review).
 
-1. **A planned stop is called again by the launcher, not by `etude run`.**
-   `etude.local.run` calls `train` once and exits 75; the command table above
-   says "none; the launcher calls again". `docs/training.md` says otherwise in
-   two places: the three-endings table ("calls it again, here or on another
-   machine") and the pieces table ("the run is called again"). Correct both:
-   under a launch the launcher calls again inside the run's limits; here the
-   command exits 75 and `--resume RUN` carries on. No local retry loop: a
-   local stop is Ctrl-C or `--seconds`, which an immediate repeat would undo.
-2. **The stored outcome is read as `outcome`.** Record correction 3 is
-   unfinished on the read side: `RunData.state` holds a `RunOutcome`, so
-   `etude.local._resumed` tests `data.state.state == "finished"` two lines
-   above `saved_states(...)`, the other meaning of state. Rename the
-   attribute to `RunData.outcome` (`data.outcome.state`); `state` warns until
-   0.5 like the other renames. Unchanged: the stored `state` field in
-   `outcome.json`, the `runs.state` SQL column, and the summaries' `state`
-   (`TrainingRunSummary`, `RunSummary`), which is a lifecycle that includes
-   `running`. `docs/tracking.md` (What a build reads) still says an eval run
-   contributes `state.json`; it writes `outcome.json`, with `state.json`
-   read only as the historical name.
-3. **`--name` names the job.** Built and documented: `etude run train.py
-   --name wide --seed 7` starts `wide-seed-7`, as `training(name=)` does
-   under a launch. The Names line above that says `--name` chooses a run id
-   means this; an id with no seed suffix is `RunRequest(id=)` only.
+- The training docs distinguish launcher retries inside the run's limits
+  from local `etude run`: exit 75, then explicit `--resume RUN`. No local
+  retry loop, which would undo Ctrl-C or `--seconds`.
+- `RunData.outcome` holds the `RunOutcome`; `state` is a warning property
+  until 0.5. Internal readers use `outcome`. Stored `outcome.json` still
+  has its `state` field; SQL and lifecycle summaries keep `state` too.
+  Historical `state.json` outcomes remain readable. The tracking docs name
+  evaluation's current `outcome.json` file.
+- `--name` names the job: `--name wide --seed 7` starts `wide-seed-7`.
+  An exact run id without the seed suffix uses `RunRequest(id=)`.
 
-No code, schema, query or provider count changes beyond the rename in 2.
+No schema, query or provider count changes.
 
 ## Manabot (MTG-329)
 

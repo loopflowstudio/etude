@@ -248,12 +248,12 @@ def _summary(run: RunData) -> RunSummary:
         name=run.name,
         started=start,
         seed=declaration.seed if declaration else None,
-        state=run.state.state
-        if run.state and run.state.state != "stopped"
+        state=run.outcome.state
+        if run.outcome and run.outcome.state != "stopped"
         else "running or unfinished",
         rows=run.rows,
         incomplete=run.incomplete,
-        dropped=run.state.counters.dropped if run.state else None,
+        dropped=run.outcome.counters.dropped if run.outcome else None,
         attempts=tuple(
             AttemptSummary(
                 host=attempt.host,

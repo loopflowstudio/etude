@@ -151,7 +151,7 @@ def _resumed(
         until = Until.model_validate(data.attempts[-1].until)
     if until is not None and until.clock not in {clock.name for clock in prior.clocks}:
         raise ValueError(f"undeclared clock: {until.clock!r}")
-    if data.state is not None and data.state.state == "finished":
+    if data.outcome is not None and data.outcome.state == "finished":
         positions = [
             data.reached,
             *(item.at for item in saved_states(root / "out")),

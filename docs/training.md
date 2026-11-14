@@ -77,7 +77,7 @@ Calling `train` is one attempt at the whole job. It ends in one of three ways:
 | `train` | Means | Etude then |
 | --- | --- | --- |
 | returns | the job is finished | records the run `finished` |
-| raises `Stopped` | it saved and left on purpose | calls it again, here or on another machine, inside the run's limits |
+| raises `Stopped` | it saved and left on purpose | under a launch, calls it again inside the run's limits; `etude run` exits 75, then `--resume RUN` carries on |
 | raises anything else | it failed | records the run `failed` |
 
 `run.steps` raises `Stopped` for you. A loop written as above never names it.
@@ -123,7 +123,7 @@ and `baseline-seed-2`. Without `seeds`, it is one run with seed 0. On this
 computer, `etude run train.py --seed 7` chooses it.
 
 A run's id is its job's name and its seed. An unnamed job is named for its
-file, so `etude run train.py` starts `train-seed-0`. Choose another with
+file, so `etude run train.py` starts `train-seed-0`. Choose another job name with
 `--name` (`etude run train.py --name wide --seed 7` starts `wide-seed-7`).
 An id is unique within its experiment, and **a taken id is refused, never
 resumed**: starting a run and carrying one on are different commands
@@ -653,7 +653,7 @@ def train(config: SearchConfig) -> None:
 | `run.out` | a directory that follows the run: the same on every attempt, carried to storage as it is written and restored before each attempt on another machine |
 | `run.until(clock, default=)` | the absolute target: the launch's for that clock, else the default |
 | `run.stopping()` | true once a stop was asked for, or once the deadline is nearer than the slowest pass so far; ask once per pass |
-| `Stopped` | raised after saving, short of the target: the attempt is recorded `stopped` and the run is called again |
+| `Stopped` | raised after saving, short of the target: the attempt is recorded `stopped`; the launcher retries inside the run's limits, while `etude run` exits 75 and needs `--resume RUN` |
 
 Returning normally short of the target would read as finished. Files you
 write in `run.out` yourself are carried one at a time, so write each
@@ -689,10 +689,11 @@ under a folder whose name starts with `.` stays on the machine.
 | `run.checkpoint(path, updates=n)` inside the loop | `run.checkpoint(policy=model)`, or `run.checkpoint(path)` |
 | `run.latest_checkpoint()` | `run.checkpoints()[-1]` |
 | `Path(os.environ["ETUDE_INPUTS_DIR"]) / NAME` | `run.input(NAME)` |
+| `RunData.state` | `RunData.outcome` |
 | a re-used run name resumes | a taken id is refused; `--resume RUN` resumes |
 
-`track(seed=)`, `local_launch` and `run.latest_checkpoint()` still work, warn
-when used, and are removed in 0.5. Runs already stored
+`track(seed=)`, `local_launch`, `run.latest_checkpoint()` and `RunData.state`
+still work, warn when used, and are removed in 0.5. Runs already stored
 stay readable where they are, including their flat `RUN/` folders and a
 `state.json` that records an outcome; nothing in a bucket is rewritten. A
 state file an older loop kept in `run.out` is not read by `run.resume`: finish
