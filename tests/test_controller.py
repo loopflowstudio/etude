@@ -7,10 +7,11 @@ from pathlib import Path
 import pytest
 
 from etude.call import Function
+from etude.checkpoints import CheckpointRecord
 from etude.cli import main
 from etude.controller import advance
 from etude.declarations import read_experiment
-from etude.errors import LauncherError
+from etude.errors import EtudeError, LauncherError
 from etude.eval.match import environment
 from etude.eval.records import Benchmark, CheckpointPlayer
 from etude.eval.tournament import StoredRuns
@@ -18,7 +19,7 @@ from etude.experiment import observe
 from etude.jobs import EvalJob, Evaluation, ExperimentState, TrainingJob, with_experiment
 from etude.launch import client
 from etude.launch.records import Pool
-from etude.records import RunRecord
+from etude.records import ArtifactRef, RunRecord
 from etude.spec import Job, RunRequest, job_id
 from etude.storage import DirectoryStorage, default_root
 from etude.train.tracking import track
@@ -718,3 +719,22 @@ def eval_jobs(state):
     # The second pass reads delivery under experiment-qualified identities.
     advance(read_experiment(file), source=source, directory=tmp_path / "evals")
     assert "eval frontier: nothing to play" in capsys.readouterr().out
+
+
+def test_policy_key_refuses_held_run_without_experiment(tmp_path: Path) -> None:
+    # Unlabelled command jobs and historical records have no experiment provenance.
+    checkpoint = CheckpointRecord(
+        run="unlabelled",
+        ordinal=1,
+        at={},
+        artifact=ArtifactRef(uri=(tmp_path / "weights").as_uri(), sha256="a" * 64, size_bytes=1),
+    )
+    job = EvalJob(
+        tournament=Benchmark(name="held", environment=environment("duel")),
+        checkpoints=(checkpoint,),
+        play=play,
+        repo=None,
+        max_hours=1,
+    )
+    with pytest.raises(EtudeError, match="checkpoint_names_no_experiment"):
+        with_experiment(job, "league")

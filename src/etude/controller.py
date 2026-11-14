@@ -11,7 +11,6 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal
 
-from etude.checkpoints import CheckpointRecord
 from etude.declarations import (
     Experiment,
     asked,
@@ -22,18 +21,13 @@ from etude.declarations import (
 )
 from etude.errors import EtudeError, LauncherError
 from etude.eval.records import (
-    Aligned,
-    At,
-    Benchmark,
-    Earlier,
-    Final,
-    Fraction,
     Match,
+    TournamentRun,
     digest,
     folder_name,
 )
 from etude.eval.tournament import StoredRuns, played
-from etude.experiment import observe
+from etude.experiment import observe, read_tournament_lines
 from etude.jobs import (
     Evaluation,
     ExperimentState,
@@ -192,31 +186,19 @@ def advance(
         if experiment.eval is not None and evaluate
         else []
     )
-    # Discover only experiments named by a held checkpoint or a relative seat. All
-    # observations share the same declarations and listing; no declaration is read twice.
-    named: set[str] = set()
-    for executable in jobs:
-        spec = evaluation_spec(executable)
-        if not isinstance(spec.tournament, Benchmark) or not any(
-            s.relative for s in spec.tournament.seatings
-        ):
-            continue
-        named.update(
-            c.policy.experiment
-            for c in spec.checkpoints
-            if c.policy is not None and c.policy.experiment is not None
-        )
-        if isinstance(spec.tournament, Benchmark):
-            for seating in spec.tournament.seatings:
-                for seat in seating.players:
-                    if not isinstance(seat, (Aligned, At, Earlier, Final, Fraction)):
-                        continue
-                    name = seat.policy.experiment if seat.policy is not None else seat.experiment
-                    if name is not None:
-                        named.add(name)
-    policy_lines = list(state.lines)
-    for name in sorted(named - {experiment.name}):
-        policy_lines.extend(observe(source, name, keys=listed, declarations=declarations).lines)
+    policy_lines = read_tournament_lines(
+        source,
+        state,
+        [
+            TournamentRun(
+                tournament=(spec := evaluation_spec(job)).tournament,
+                checkpoints=tuple(c.ref for c in spec.checkpoints),
+            )
+            for job in jobs
+        ],
+        keys=listed,
+        declarations=declarations,
+    )
     smoke = Smoke()
     if smoke_file_first and not quote:
         assert experiment.file is not None
@@ -250,10 +232,7 @@ def advance(
         found = played(
             spec.tournament,
             experiment=experiment.name,
-            checkpoints=tuple(
-                each.ref if isinstance(each, CheckpointRecord) else each
-                for each in spec.checkpoints
-            ),
+            checkpoints=tuple(each.ref for each in spec.checkpoints),
             enter=spec.entrants,
             runs=stored,
             lines=policy_lines,

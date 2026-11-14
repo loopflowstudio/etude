@@ -7,13 +7,14 @@ import pytest
 from pydantic import BaseModel
 
 from etude.carriage import RecordMismatch, put_back, recorded_file, recorded_files, restore_set
-from etude.checkpoints import PolicyKey
+from etude.checkpoints import CheckpointRecord, PolicyKey
 from etude.errors import EtudeError
 from etude.eval.match import environment, evaluate
 from etude.eval.query import statsdb
 from etude.eval.records import Code, Inference, Match
 from etude.experiment import observe
-from etude.jobs import TrainingJob, checkpoint_inputs_for
+from etude.jobs import Checkpoints, TrainingJob, checkpoint_inputs_for
+from etude.records import Continuation, SourceKey
 from etude.run import RunFiles
 from etude.storage import DirectoryStorage
 from etude.train.records import Step
@@ -166,11 +167,17 @@ def test_policy_key_defaults_and_roles_keep_separate_checkpoint_lines(tmp_path: 
         state.policy(PolicyKey())
     line = state.policy(PolicyKey(role="exploiter"))
     assert line.policy == PolicyKey(experiment="league", job="small", seed=0, role="exploiter")
+    assert isinstance(line.checkpoints, Checkpoints)
+    assert isinstance(line.checkpoints.last, CheckpointRecord)
+    assert line.checkpoints.at("updates", 100).every(1) == line.checkpoints
+    assert line.checkpoints.tagged("missing") == ()
     assert len(line.checkpoints) == 1
     assert "exploiter.updates-00000100" in line.checkpoints[0].key
     assert line.checkpoints[0].policy == line.policy
     with pytest.raises(EtudeError, match="policy_not_found"):
         state.policy(PolicyKey(job="missing"))
+    with pytest.raises(EtudeError, match="observe"):
+        state.policy(PolicyKey(experiment="other"))
 
 
 def test_policy_key_defaults_choose_lowest_seed_and_list_ambiguous_jobs(tmp_path: Path) -> None:
@@ -223,4 +230,30 @@ def test_policy_roles_reference_one_out_file_without_sharing_identity(tmp_path: 
     assert main.checkpoints[0].artifact == exploiter.checkpoints[0].artifact
     assert main.checkpoints[0].key == "roles/small@0/out/weights.pt"
     assert exploiter.checkpoints[0].key == "roles/small@0/roles/exploiter/out/weights.pt"
-    assert main.checkpoints[0].line != exploiter.checkpoints[0].line
+    assert main.checkpoints[0].ref.line != exploiter.checkpoints[0].ref.line
+
+
+def test_policy_key_checkpoint_choosers_follow_continuation_save_order(tmp_path: Path) -> None:
+    for name, position in (("z-parent", 1), ("a-child", 2)):
+        with track(
+            experiment="chain",
+            run=name,
+            job="small",
+            directory=tmp_path,
+            clocks=["updates"],
+            continues=Continuation(
+                parent=SourceKey(namespace="local", kind="run", source_id="z-parent"),
+                clock="updates",
+                value=1,
+            )
+            if position == 2
+            else None,
+        ) as run:
+            weights = run.out / "weights.pt"
+            weights.write_bytes(name.encode())
+            run.checkpoint(weights, updates=position, tags=("chosen",))
+    policy = observe(tmp_path, "chain").policy(PolicyKey())
+    assert [c.run for c in policy.checkpoints] == ["z-parent", "a-child"]
+    assert policy.checkpoints.last is not None and policy.checkpoints.last.run == "a-child"
+    assert policy.checkpoints.tagged("chosen").at("updates", 2) == policy.checkpoints[1:]
+    assert all(c.policy == policy.policy for c in policy.checkpoints)

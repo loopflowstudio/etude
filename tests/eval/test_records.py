@@ -452,6 +452,7 @@ def test_policy_seat_key_selects_one_seed_and_parts_select_every_seed(seat: Rela
     )
     found = seating.resolve(mine.checkpoints[0], [mine, *other])
     assert isinstance(found, Seated) and [p.games for p in found.pairings] == [4, 4]
+    assert found.lines == ("frontier/small@0", "frontier/small@1", "rival/mine")
     keyed = type(seat).model_validate(
         {**seat.model_dump(), "policy": {"experiment": "frontier", "job": "small"}}
     )
@@ -472,3 +473,22 @@ def test_legacy_structured_keys_qualify_only_with_read_context() -> None:
     assert qualified.key != old.key
     with pytest.raises(ValueError, match="needs experiment="):
         checkpoint_id(run="small@0", name="updates-100")
+
+
+def test_policy_seat_counts_nondefault_role_line_once() -> None:
+    mine = _line("mine", "mine", 200, seed=0, ended=True).model_copy(update={"experiment": "rival"})
+    other = _line("small@0/roles/exploiter", "small", 100, seed=0, ended=True).model_copy(
+        update={"experiment": "frontier", "role": "exploiter"}
+    )
+    seating: Seating[dict[str, JsonValue]] = Seating(
+        name="roles",
+        players=(
+            SEARCH,
+            Final(experiment="frontier", job="small", role="exploiter", inference=SEARCH),
+        ),
+        configs=({},),
+        games=1,
+    )
+    found = seating.resolve(mine.checkpoints[0], [mine, other])
+    assert isinstance(found, Seated)
+    assert found.lines == ("frontier/small@0/roles/exploiter", "rival/mine")

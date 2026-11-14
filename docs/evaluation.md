@@ -689,6 +689,9 @@ smoke form on this computer first, one game per match against tiny
 checkpoints. `etude launch --smoke` and `etude queue --smoke` do so
 before they spend ([Smoke before you spend](launcher.md#smoke-before-you-spend)).
 
+Smoke reports a cross-experiment relative seat as `not smoked`, naming the
+experiment it needs; its temporary training store holds only this file's runs.
+
 `etude queue` records eval runs even when the selected pool or on-demand is
 busy. Queued matches stay in flight, so later passes do not submit them again.
 The scheduler starts them when a machine has room, with no later pass: keep
@@ -877,7 +880,10 @@ PolicyKey(experiment="tla-frontier", job="small")  # the same policy, by the def
   and 1, so each point's 8 games per deal are 4 against each. Give the seat
   `seed=` or `policy=` to meet one.
 - **`state.policy(key)` is the policy's line**: its complete key
-  (`line.policy`, every part filled) and its `checkpoints`. `state` is this
+  (`line.policy`, every part filled) and its `checkpoints`, a `Checkpoints`
+  of records supporting `every`, `at`, `tagged` and `last`. Give those records
+  to `EvalJob(checkpoints=...)`. Held records must name their experiment;
+  unlabelled runs are refused. `state` is this
   file's experiment; for another's, `observe(source,
   "tla-frontier").policy(PolicyKey(job="small"))`. `job` is the name a seat's
   `job=` takes: the launch name, or the full name with its config digest.

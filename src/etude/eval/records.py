@@ -647,36 +647,65 @@ class Line(Record):
         return self.seed is None, self.seed or 0, self.name
 
 
-def select_policies(
-    lines: Sequence[Line], key: PolicyKey, *, experiment: str, every_seed: bool = False
+def select_policy(lines: Sequence[Line], key: PolicyKey, *, experiment: str) -> Line:
+    """Resolve one policy, choosing the lowest available seed when omitted."""
+    experiment = key.experiment or experiment
+    candidates = _select_jobs(lines, experiment=experiment, job=key.job)
+    seed = key.seed
+    if seed is None and candidates:
+        seed = min(candidates, key=lambda line: line.order).seed
+    found = select_seat_lines(
+        candidates, experiment=experiment, job=key.job, seed=seed, role=key.role
+    )
+    if len(found) != 1:
+        raise EtudeError(
+            "policy_not_found" if not found else "ambiguous_policy", 422, detail=str(key)
+        )
+    return found[0]
+
+
+def select_seat_lines(
+    lines: Sequence[Line],
+    *,
+    experiment: str,
+    job: str | None = None,
+    seed: int | None = None,
+    role: str | None = None,
 ) -> tuple[Line, ...]:
-    """Resolve policy defaults within one experiment; absent runs remain an empty selection."""
-    candidates = [
-        line for line in lines if (line.experiment or experiment) == (key.experiment or experiment)
-    ]
-    for part in ("job", "seed", "role"):
-        given = getattr(key, part)
-        if part == "job" and given is not None:
-            candidates = [line for line in candidates if given in (line.job, line.launch)]
+    """Select a seat's policies, retaining every seed unless one is named."""
+    candidates = _select_jobs(lines, experiment=experiment, job=job)
+    for part, given in (("seed", seed), ("role", role)):
+        if part == "seed" and given is None:
             continue
         values = {getattr(line, part) for line in candidates}
         if given is None:
-            if part == "seed":
-                if every_seed:
-                    continue
-                given = (
-                    min(values, key=lambda value: (value is None, value or 0)) if values else None
-                )
-            elif len(values) > 1:
+            if len(values) > 1:
                 raise EtudeError(
                     "ambiguous_policy",
                     422,
-                    detail=f"{key}: choose {part} from {sorted(str(v) for v in values)}",
+                    detail=f"choose {part} from {sorted(str(v) for v in values)}",
                 )
-            elif values:
+            if values:
                 given = next(iter(values))
         candidates = [line for line in candidates if getattr(line, part) == given]
     return tuple(candidates)
+
+
+def _select_jobs(
+    lines: Sequence[Line],
+    *,
+    experiment: str,
+    job: str | None,
+) -> list[Line]:
+    candidates = [line for line in lines if (line.experiment or experiment) == experiment]
+    if job is not None:
+        return [line for line in candidates if job in (line.job, line.launch)]
+    jobs = {line.job for line in candidates}
+    if len(jobs) > 1:
+        raise EtudeError(
+            "ambiguous_policy", 422, detail=f"choose job from {sorted(str(j) for j in jobs)}"
+        )
+    return candidates
 
 
 class Pairing(Record):
@@ -887,28 +916,28 @@ class Seating(Record, Generic[_SeatingConfig]):
         # or a fixed player, counts as one (None).
         theirs: list[Line | None] = [None]
         if relative is not None and relative.named:
-            theirs = list(
-                select_policies(
-                    ordered,
-                    relative.policy
-                    or PolicyKey(
-                        experiment=relative.experiment,
+            context = experiment if experiment is not None else held.experiment if held else ""
+            if relative.policy is not None:
+                try:
+                    theirs = [select_policy(ordered, relative.policy, experiment=context)]
+                except EtudeError as error:
+                    if error.code != "policy_not_found":
+                        raise
+                    theirs = []
+            else:
+                theirs = list(
+                    select_seat_lines(
+                        ordered,
+                        experiment=relative.experiment or context,
                         job=relative.job,
                         seed=relative.seed,
                         role=relative.role,
-                    ),
-                    experiment=experiment
-                    if experiment is not None
-                    else held.experiment
-                    if held
-                    else "",
-                    every_seed=relative.policy is None,
+                    )
                 )
-            )
         counted = tuple(
             sorted(
                 {
-                    f"{line.experiment}/{line.name}/{line.role}" if line.experiment else line.name
+                    f"{line.experiment}/{line.name}" if line.experiment else line.name
                     for line in (*mine, *theirs)
                     if line is not None
                 }
@@ -1067,6 +1096,18 @@ class Benchmark(Record):
     environment: Environment
     rollups: tuple[Rollup, ...] = Field(default=(), exclude_if=lambda rollups: not rollups)
     seatings: tuple[Seating, ...] = ()
+
+    @property
+    def experiments(self) -> frozenset[str]:
+        """Experiments explicitly named by relative seats."""
+        return frozenset(
+            name
+            for seating in self.seatings
+            for seat in seating.players
+            if isinstance(seat, _RELATIVE)
+            if (name := seat.policy.experiment if seat.policy is not None else seat.experiment)
+            is not None
+        )
 
     @model_validator(mode="before")
     @classmethod

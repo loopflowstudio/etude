@@ -12,16 +12,17 @@ import warnings
 from collections.abc import Sequence
 from dataclasses import replace
 from decimal import Decimal
+from graphlib import TopologicalSorter
 from pathlib import Path
 from typing import Literal
 
 import etude.jobs as jobs
 from etude.checkpoints import CheckpointRecord, PolicyKey
-from etude.eval.records import Match
+from etude.eval.records import Benchmark, Line, Match, TournamentRun
 from etude.launch import client
 from etude.launch.records import Standing
 from etude.records import RunOutcome
-from etude.run import LocatedRun
+from etude.run import LocatedRun, located_runs
 from etude.storage import Storage
 from etude.train.read import RunData, lines, read_all
 from etude.train.report import job_names
@@ -47,6 +48,35 @@ def observe(
     )
 
 
+def read_tournament_lines(
+    source: Storage,
+    state: jobs.ExperimentState,
+    tournaments: Sequence[TournamentRun],
+    *,
+    keys: Sequence[str] | None = None,
+    declarations: Sequence[LocatedRun] | None = None,
+) -> tuple[Line, ...]:
+    """Read the lines reachable by these tournaments, sharing one source discovery."""
+    named: set[str] = set()
+    for tournament in tournaments:
+        benchmark = tournament.tournament
+        if not isinstance(benchmark, Benchmark) or not any(s.relative for s in benchmark.seatings):
+            continue
+        named.update(benchmark.experiments)
+        named.update(
+            c.policy.experiment
+            for c in tournament.checkpoints
+            if c.policy is not None and c.policy.experiment is not None
+        )
+    found = list(state.lines)
+    if others := named - {state.experiment}:
+        keys = source.keys("") if keys is None else keys
+        declarations = located_runs(source, keys) if declarations is None else declarations
+        for name in sorted(others):
+            found.extend(observe(source, name, keys=keys, declarations=declarations).lines)
+    return tuple(found)
+
+
 def state_of(
     every: Sequence[RunData], experiment: str, *, retained: tuple[Standing, ...] | None = None
 ) -> jobs.ExperimentState:
@@ -67,7 +97,17 @@ def state_of(
     by_name = {data.name: data for data in ours}
     retained = client.standing(experiment, local=True) if retained is None else retained
     runs = []
-    for data in ours:
+    # Parent records precede continuations even when their names sort the other way.
+    parents = {
+        data.name: (data.file.continues.parent.source_id,)
+        if data.file is not None
+        and data.file.continues is not None
+        and data.file.continues.parent.source_id in by_name
+        else ()
+        for data in ours
+    }
+    for name in TopologicalSorter(parents).static_order():
+        data = by_name[name]
         first = by_name.get(line[data.name], data)
         saved = jobs.Checkpoints(
             record.model_copy(

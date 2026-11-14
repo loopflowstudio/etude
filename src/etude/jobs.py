@@ -46,7 +46,7 @@ from etude.eval.records import (
     TournamentRun,
     assemble,
     digest,
-    select_policies,
+    select_policy,
 )
 from etude.eval.run import Result, Tables
 from etude.eval.tournament import evaluating
@@ -126,6 +126,14 @@ class EvalRunSummary:
 
 
 @dataclass(frozen=True)
+class Policy:
+    """One resolved policy and its published checkpoints in save order."""
+
+    policy: PolicyKey
+    checkpoints: Checkpoints
+
+
+@dataclass(frozen=True)
 class ExperimentState:
     """An experiment's training runs under a source, as a pass found it. Never stored."""
 
@@ -141,13 +149,24 @@ class ExperimentState:
                 return each
         raise EtudeError("run_not_found", 404) from ValueError(name)
 
-    def policy(self, key: PolicyKey) -> Line:
-        found = select_policies(self.lines, key, experiment=self.experiment)
-        if len(found) != 1:
+    def policy(self, key: PolicyKey) -> Policy:
+        if key.experiment is not None and key.experiment != self.experiment:
             raise EtudeError(
-                "policy_not_found" if not found else "ambiguous_policy", 422, detail=str(key)
+                "policy_not_found",
+                422,
+                detail=f"Use observe(source, {key.experiment!r}).policy(key) for another experiment",
             )
-        return found[0]
+        line = select_policy(self.lines, key, experiment=self.experiment)
+        keys = {checkpoint.key for checkpoint in line.checkpoints}
+        return Policy(
+            policy=line.policy,
+            checkpoints=Checkpoints(
+                checkpoint
+                for run in self.runs
+                for checkpoint in run.checkpoints
+                if checkpoint.key in keys
+            ),
+        )
 
     @property
     def lines(self) -> tuple[Line, ...]:
@@ -277,7 +296,7 @@ class Evaluation(Record):
     # A benchmark's checkpoint; released single-file inputs remain readable.
     checkpoint: CheckpointRecord | Input | None = None
     # Checkpoints an experiment's eval chose to hold the benchmark for.
-    checkpoints: tuple[CheckpointRecord | CheckpointRef, ...] = ()
+    checkpoints: tuple[CheckpointRecord, ...] = ()
     # A round robin's entrants.
     entrants: tuple[Player, ...] = ()
     workers: int = Field(default=1, ge=1)
@@ -350,7 +369,7 @@ class EvalJob[M: BaseModel | Mapping[str, JsonValue]](Job):
     play: Callable[[Match[M]], Tables | Result] = Field(exclude=True)
     tournament: Benchmark | RoundRobin = Field(exclude=True)
     checkpoint: CheckpointRecord | Input | None = Field(default=None, exclude=True)
-    checkpoints: Sequence[CheckpointRecord | CheckpointRef] = Field(default=(), exclude=True)
+    checkpoints: Sequence[CheckpointRecord] = Field(default=(), exclude=True)
     enter: Sequence[Player] = Field(default=(), exclude=True)
     workers: int = Field(default=1, ge=1, exclude=True)
     extras: tuple[str, ...] = Field(default=(), exclude=True)
@@ -418,9 +437,7 @@ class EvalJob[M: BaseModel | Mapping[str, JsonValue]](Job):
             [
                 TournamentRun(
                     tournament=self.tournament,
-                    checkpoints=tuple(
-                        c.ref if isinstance(c, CheckpointRecord) else c for c in spec.checkpoints
-                    ),
+                    checkpoints=tuple(c.ref for c in spec.checkpoints),
                     entrants=spec.entrants,
                 )
             ]
@@ -465,6 +482,12 @@ def with_experiment(job: Job, experiment: str) -> Job:
     """
     job = job.plain()
     spec = evaluation_spec(job)
+    if any(not checkpoint.experiment for checkpoint in spec.checkpoints):
+        raise EtudeError(
+            "checkpoint_names_no_experiment",
+            422,
+            detail="Hold checkpoints from an experiment; unlabelled runs have legacy identities",
+        )
     spec = spec.model_copy(update={"experiment": experiment})
     return job.model_copy(update={"config": spec.model_dump_json(), "experiment": experiment})
 
@@ -492,9 +515,7 @@ def hold_evaluation(
         spec = spec.model_copy(
             update={"matches": tuple(_relocated(m, files) for m in spec.matches)}
         )
-    checkpoints = tuple(
-        each.ref if isinstance(each, CheckpointRecord) else each for each in spec.checkpoints
-    )
+    checkpoints = tuple(each.ref for each in spec.checkpoints)
     if spec.matches is not None:
         # A queued job may predate experiment-qualified identity. Its explicit
         # matches own the spelling used by that worker and its earlier blocks.
@@ -853,7 +874,7 @@ def _hold(evaluation: Evaluation) -> None:
         # A training run's file is keyed by its run and name; any other, by where it lies.
         key = (
             checkpoint_id(
-                experiment=evaluation.experiment if "/" not in given.run else "",
+                experiment="",
                 run=given.run,
                 name=given.key if given.key.startswith("out/") else checkpoint_file_name(given.key),
             )

@@ -135,8 +135,12 @@ Every part of a key has a default: this file's experiment, the experiment's
 only training job, the job's lowest seed, the run's only role. Relative seats
 (`Final`, `At`, `Earlier`, `Aligned`, `Fraction`) take `experiment=`, `seed=`
 and `role=` beside `job=`, or `policy=` a key; with no seed a seat still fills
-from every seed. `state.policy(key)` is the policy's line of checkpoints. A
-run publishes a second policy with `run.checkpoint(..., role="exploiter")`.
+from every seed. `state.policy(key).checkpoints` is `Checkpoints` of records,
+with the same `every`, `at`, `tagged` and `last` selectors as a run.
+`EvalJob(checkpoints=...)` takes records; held records without an experiment
+are refused. Reports resolve other experiments' seats from the same source;
+smoke names those seats as not smoked. A run publishes a second policy with
+`run.checkpoint(..., role="exploiter")`.
 See [Policies](../docs/evaluation.md#policies).
 
 A checkpoint's key now includes its experiment:

@@ -339,3 +339,35 @@ def eval_jobs(state):
     assert "smoke report: passed" in error
     assert sorted(source.rglob("*")) == before
     assert not default_root().exists()
+
+
+def test_policy_key_smoke_names_cross_experiment_seat(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source = tmp_path / "source"
+    with track(
+        experiment="rival", run="small", job="small", directory=source, clocks=["updates"]
+    ) as run:
+        weights = run.out / "weights.pt"
+        weights.write_bytes(b"weights")
+        run.checkpoint(weights, updates=1)
+    file = tmp_path / "rival.py"
+    file.write_text("""
+from etude.checkpoints import PolicyKey
+from etude.eval.match import environment
+from etude.eval.records import Benchmark, Final, Inference, Seating
+from etude.jobs import EvalJob
+from tests.eval.games import play
+
+def eval_jobs(state):
+    direct = Inference()
+    return EvalJob(tournament=Benchmark(name="frontier", environment=environment("duel"),
+        seatings=(Seating(name="vs frontier", players=(direct,
+            Final(experiment="tla-frontier", inference=direct)), configs=({},), games=8),)),
+        checkpoints=state.policy(PolicyKey()).checkpoints, play=play, repo=None, max_hours=1)
+""")
+    assert main(["smoke", str(file), "--eval", "--source", str(source)]) == 0
+    error = capsys.readouterr().err
+    assert "not smoked" in error and "cross-experiment seats: tla-frontier" in error
+    assert "no checkpoints" not in error
