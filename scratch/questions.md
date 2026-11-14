@@ -206,3 +206,30 @@ Portable transcripts and before/after screenshots: `scratch/qa.html`. Raw lab
 and installed environments: `/tmp/etude-exp56-qa`. Focused final check: 120
 passed; touched Python mypy and ruff checks passed. All started processes ended.
 Open 6/7 remain unchanged; PR #103 stays draft. Full gate acceptance remains.
+
+## Publication review (2026-11-13)
+
+The current invocation says: "Publish the current change as a ready PR once it
+meets the caller's bar for publishing." This supersedes the earlier draft-only
+handoff for this publication. Open 6/7 retain their documented choices.
+
+A controlled bucket fixture reproduced qualified-address recovery retaining a
+stale out file and re-uploading all restored bytes: restore split
+`tiny/policy@2/KEY` at its first slash, treating `policy@2/KEY` as data of
+`tiny`. Match the assigned work's longest address before selecting recovery
+membership. Flat, compact and qualified cases now each use one listing and
+five object reads, remove stale out, and perform no upload on the next pass.
+
+The first full suite exposed worker startup's stale count (34 versus 35).
+The loaded modules include `etude.out` for portable membership; no training,
+NumPy, boto3 or controller runtime is loaded. Updated the pinned count.
+
+Actual coin CLI receipt with a temporary ETUDE_HOME: fresh to updates=10
+exit 0, resume to updates=20 exit 0, repeated new command exit 1 with
+run_name_taken; outcome.json bytes unchanged. The temporary home was removed.
+
+The first full suite ended with 960 passed, 6 skipped, 3 deselected and two
+failures: the import count above, and a quote fixture still expecting deleted
+`seed-N` names. The quote fixture now declares experiment `trial` with three
+seeds and checks `trial@1..3` alongside unchanged sharing and cost assertions.
+The final full suite is being run after both corrections.
