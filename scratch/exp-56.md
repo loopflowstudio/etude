@@ -129,3 +129,11 @@ mypy and ruff clean on the touched files. Left alone: `load_job_function`'s
 `current=` re-execution (only `etude train` uses it; whether a persistent
 client needs it is a demo judgment) and the launcher's separate
 "already admitted" wording.
+
+Realign after that pass: the addressing, historical-read compatibility and
+`--until` wording in `run.run_name_taken` were already built; nothing of that
+direction remains. Quote labels for id-less requests now read `JOB@SEED`
+(`Scheduler.quote`), and the launcher doc's quote example matches.
+`tests/launch/test_scheduler.py` — 42 passed; mypy and ruff clean. Still
+spelled `NAME-seed-N` by choice: explicit standalone `track(run=...)` names in
+`docs/tracking.md` and historical-id fixtures.

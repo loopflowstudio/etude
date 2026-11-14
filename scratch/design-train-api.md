@@ -291,7 +291,8 @@ Words and the superseded `--run`/`--job`-naming steers are in demo-hanabi.md.
 - Same addressing in train, launch, continue, eval, status, logs. Historical
   runs stay readable under their stored names.
 
-Implementation design, settled headlessly from the recorded choices:
+Implementation, settled headlessly from the recorded choices and built at
+`44aa394`/`6f358b3`:
 
 - Expand the full job/seed declarations before selection, in `etude.spec`;
   file and Python clients share it. Explicit `RunRequest` ids are preserved.
@@ -410,5 +411,5 @@ population reads and ratings (EXP-60); a spending limit across launches
    show an object holding pending games passed to `run.resume`.
 4. The public non-Magic example remains unanswered. Use a tiny game shipped
    with Etude, also for the two-model acceptance example.
-5. Save cadence outside a stop remains unanswered. Use wall time by default,
-   or a step count when `save_every=` is given.
+5. Save cadence: answered "1a" (`save_every=`/`save_every_seconds=` on
+   `run.steps`); built as described under Loop ergonomics.

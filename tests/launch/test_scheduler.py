@@ -473,8 +473,8 @@ def test_quote_prints_planned_first_wave_costs_and_rents_nothing(
     assert code == 0
     assert counting.snapshot().provider == 1  # one price; nothing created
     assert capsys.readouterr().out.splitlines() == [
-        "job-seed-1  machine mini  planned rental cost $0.00",
-        "job-seed-2  rent NVIDIA L4 with at least 6 vCPUs, 48 GB at $0.59/hour  planned rental cost $0.88",
+        "job@1  machine mini  planned rental cost $0.00",
+        "job@2  rent NVIDIA L4 with at least 6 vCPUs, 48 GB at $0.59/hour  planned rental cost $0.88",
         "planned first-wave rental cost: $0.88; nothing rented",
         "job/cohort rental budget: $6.00",
         "Rental costs assume deletion on time. Provider delays can exceed the budget; "
@@ -1005,7 +1005,7 @@ def test_unassigned_hand_built_requests_have_seeded_quote_labels_and_opaque_ids(
     b = bench(tmp_path)
     spec = job(name="baseline")
     quote = b.scheduler.quote([RunRequest(job=spec, seed=7)], rent="l4")
-    assert [machine.run for machine in quote.machines] == ["baseline-seed-7"]
+    assert [machine.run for machine in quote.machines] == ["baseline@7"]
     identity = b.scheduler.queue(RunRequest(job=spec, seed=7), rent="l4")
     assert b.scheduler.record(identity).name == identity
     unnamed = b.scheduler.queue(Job(command="true", max_hours=1, max_usd=Decimal(1)), rent="l4")

@@ -592,9 +592,9 @@ class Scheduler:
             records.append(
                 RunRecord(
                     id=run.id
-                    or "-".join(
+                    or "@".join(
                         ([run.job.name] if run.job.name else [])
-                        + ([f"seed-{run.seed}"] if run.seed is not None else [])
+                        + ([str(run.seed)] if run.seed is not None else [])
                     )
                     or f"run{index + 1}",
                     experiment=run.job.experiment or "",

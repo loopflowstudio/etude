@@ -693,7 +693,7 @@ omitting it lets RunPod place the machine. `ondemand image` affects future machi
 ```sh
 etude ondemand add l4x2 --provider runpod --gpu "NVIDIA L4" --vcpus 6 --memory-gb 48 \
     --max 1 --max-usd-per-hour 0.80 --slots 2
-etude launch sweep.py --cohort sweep --rent l4x2 --quote   # seed-1  rent ... , 2 slots with seed-2  ...
+etude launch sweep.py --cohort sweep --rent l4x2 --quote   # sweep@1  rent ... , 2 slots with sweep@2  ...
 etude status                                               # running, steps 1200, shared by 2 runs, ~$0.03
 ```
 
