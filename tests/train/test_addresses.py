@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from etude.cli import main
-from etude.declarations import read_job_file, select_runs
+from etude.declarations import read_training_jobs, select_runs
 from etude.jobs import checkpoint_inputs_for
 from etude.records import RunRecord
 from etude.run import RunFiles, declare, run_directories, runs, sync
@@ -44,7 +44,7 @@ def test_file_and_python_addresses_use_the_full_declaration_before_selection(
         "def training_jobs():\n"
         f"    return [TrainingJob(name=n, train=train_command, config=Command(command='true'), repo=None, seeds={seeds!r}, max_hours=1) for n in {names!r}]\n"
     )
-    requests = read_job_file(file)
+    requests = read_training_jobs(file)
     assert [run.id for run in requests] == expected
     assert [run.id for run in expand_runs(jobs)] == expected
     assert [run.id for run in select_runs(requests, job=names[-1], seed=seeds[-1])] == [

@@ -27,7 +27,7 @@ from collections.abc import Callable, Collection, Sequence
 from pathlib import Path
 from typing import Literal
 
-from etude.declarations import asked, read_experiment, read_job_file
+from etude.declarations import asked, read_experiment, read_training_jobs
 from etude.errors import EtudeError, LauncherError
 from etude.eval.records import Benchmark, RoundRobin
 from etude.experiment import observe
@@ -52,7 +52,7 @@ def smoke_file(
 ) -> Smoked:
     """Smoke the experiment file's `steps`, in order, and return what each did.
 
-    `runs` are what its `training_jobs()` returned, as `read_job_file` read them; read
+    `runs` are what its `training_jobs()` returned, as `read_training_jobs` read them; read
     with its defaults when not given. Without the train step, `source` holds
     the checkpoints to evaluate and the runs to report on; resolve it before
     calling, since the temporary home moves the default store. Raises
@@ -63,7 +63,7 @@ def smoke_file(
     if "train" not in steps and source is None and set(steps) & {"eval", "report"}:
         raise LauncherError("smoking eval or report without train needs --source")
     if "train" in steps and runs is None and "training_jobs" in defined_functions(path):
-        runs = read_job_file(path)
+        runs = read_training_jobs(path)
     experiment = experiment_named(path)
     train: dict[str, SmokeStep] = {}
     done: list[SmokeStep] = []

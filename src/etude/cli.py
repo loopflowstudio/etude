@@ -11,7 +11,7 @@ from __future__ import annotations
 import sys
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import Annotated
 
 import typer
 
@@ -19,9 +19,6 @@ from etude.errors import EtudeError, LauncherError
 from etude.launch import cli as launch_cli
 from etude.launch.commands import Kind, kind
 from etude.train.cli import checkpoints, sync
-
-if TYPE_CHECKING:
-    from etude.controller import Pass
 
 app = launch_cli.app
 
@@ -102,14 +99,14 @@ def _submit(
     from decimal import Decimal, InvalidOperation
 
     from etude.controller import advance, source_for
-    from etude.declarations import read_experiment, read_job_file
+    from etude.declarations import read_experiment, read_training_jobs
     from etude.spec import Until
     from etude.storage import storage_from_uri
 
     definition = read_experiment(file, experiment=experiment)
     if help:
         if callable(definition.training):
-            read_job_file(file, ctx.args, help=True, function=definition.training)
+            read_training_jobs(file, ctx.args, help=True, function=definition.training)
         return
     if until is not None and not resume:
         raise LauncherError("--until needs --resume")
@@ -122,7 +119,7 @@ def _submit(
     storage = storage_from_uri(source_for(pool, rent, source))
     try:
         while True:
-            results = advance(
+            advance(
                 definition,
                 source=storage,
                 pool=pool,
@@ -138,8 +135,6 @@ def _submit(
                 until=None if until is None else Until.parse(until),
                 retry_failed=retry_failed,
             )
-            for done in results:
-                _show_pass(done)
             if watch is None:
                 break
             time.sleep(watch)
@@ -147,23 +142,10 @@ def _submit(
         return
 
 
-def _show_pass(done: Pass) -> None:
-    if not (done.new or done.running or done.failed):
-        print(f"eval {done.tournament}: nothing to play")
-        return
-    line = f"eval {done.tournament}: {done.new} new, {done.running} running, {done.failed} failed"
-    if done.launched:
-        line += f", {done.state} {done.launched}"
-    elif done.played:
-        line += f", {done.played} played"
-    elif done.state:
-        line += f", {done.state}"
-        if done.reason:
-            line += f": {done.reason}"
-    print(line, flush=True)
-
-
-FileArgument = Annotated[Path | None, typer.Argument(help="a Python file defining training_jobs()")]
+FileArgument = Annotated[
+    Path | None,
+    typer.Argument(help="a Python experiment file defining training_jobs() or eval_jobs(state)"),
+]
 PoolOption = Annotated[
     str | None,
     typer.Option(help="the pool of machines you own to use; the default when neither is named"),
@@ -307,7 +289,7 @@ def smoke_experiment(
         raise typer.BadParameter("a Python FILE defining training_jobs() is required")
     from typing import cast
 
-    from etude.declarations import read_job_file
+    from etude.declarations import read_training_jobs
     from etude.smoke import STEPS, Step, smoke_file
     from etude.storage import storage_from_uri
 
@@ -315,7 +297,7 @@ def smoke_experiment(
     unknown = sorted(set(steps) - set(STEPS))
     if unknown:
         raise typer.BadParameter(f"--step is train, eval or report, not {', '.join(unknown)}")
-    runs = read_job_file(file, ctx.args, help=help) if "train" in steps else None
+    runs = read_training_jobs(file, ctx.args, help=help) if "train" in steps else None
     if help:
         return
     smoke_file(
@@ -372,10 +354,10 @@ def report(
     """Draw an experiment's evals, perf and ML details as one HTML page, from its runs' files.
 
     The page follows the file's report(), or the default report without one. Given a folder,
-    it draws every experiment file in it (a .py file defining eval(state) or report()) and an
+    it draws every experiment file in it (a .py file defining eval_jobs(state) or report()) and an
     index of them all: their runs, latest checkpoints and scores, and evaluation progress.
     """
-    # The report reads runs and, once the experiment has eval runs or eval(), evaluations.
+    # The report reads runs and, once the experiment has eval runs or eval_jobs(), evaluations.
     import time
     import webbrowser
 
@@ -480,21 +462,11 @@ def eval_experiment(
     storage = storage_from_uri(source or default_root())
     try:
         while True:
-            for done in advance(
+            advance(
                 definition,
                 source=storage,
                 retry_failed=retry_failed,
-            ):
-                line = f"{done.tournament}: {done.new} new"
-                if done.failed:
-                    line += f", {done.failed} failed (--retry-failed plays them again)"
-                if done.running:
-                    line += f", {done.running} already running"
-                if done.launched:
-                    line += f", launched {done.launched}"
-                elif done.played:
-                    line += f", {done.played} played"
-                print(line, flush=True)
+            )
             if watch is None:
                 break
             time.sleep(watch)

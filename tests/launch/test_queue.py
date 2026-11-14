@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from etude.cli import main
-from etude.declarations import read_job_file
+from etude.declarations import read_training_jobs
 from etude.errors import LauncherError
 from etude.launch.client import launch, queue, wait
 from etude.launch.database import Database, launcher_file
@@ -440,7 +440,7 @@ def training_jobs() -> Job:
     return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="train"), name="baseline", seeds=(0, 7), max_hours=1, max_usd=1, repo=None)
 """
     )
-    expected = read_job_file(file)
+    expected = read_training_jobs(file)
     job = expected[0].job
     submit = queue if queued else launch
     # An explicit request remains independent of the Job's declared repetitions.
