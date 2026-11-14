@@ -10,38 +10,30 @@ from pathlib import Path
 import pytest
 from moto import mock_aws
 
+from etude.block_file import parse
 from etude.carriage import EVAL_BLOCK_PACK, checkpoint_file
-from etude.eval.match import Result, environment, evaluate
+from etude.checkpoints import CheckpointRef, checkpoint_id
+from etude.errors import EtudeError
+from etude.eval.match import environment, evaluate
 from etude.eval.query import compare, statsdb
-from etude.eval.records import (
-    Benchmark,
-    CheckpointKey,
-    CheckpointRef,
-    Code,
-    Inference,
-    Match,
-    Model,
-    Player,
-    Seating,
-)
+from etude.eval.records import Benchmark, CheckpointPlayer, Code, Inference, Match, Player, Seating
+from etude.eval.run import Result
 from etude.eval.tournament import hold
 from etude.experiment import advance, observe, read_experiment
 from etude.page import Drawn, OutsideTournaments, Page, PanelSelection, build
+from etude.records import ArtifactRef, Clock, Continuation, SourceKey
 from etude.report import Matches
-from etude.run.block_file import parse
-from etude.run.errors import EtudeError
-from etude.run.records import ArtifactRef, Clock, Continuation, SourceKey
-from etude.run.storage import DirectoryStorage, S3Storage, Storage
-from etude.train.run import Run, track
-from tests.eval.games import play, play_failing_deal_one, play_with_evidence
+from etude.storage import DirectoryStorage, S3Storage, Storage
+from etude.train.tracking import TrainingRun, track
+from tests.eval.games import play, play_failing_deal_one, play_teams, play_with_evidence
 from tests.experiments import authored, experiment_file
 from tests.run.storage import CountedClient, MeasuredStorage
 
 LAB = """
 from etude.eval.match import environment
-from etude.eval.records import (
-    ArtifactRef, Benchmark, CheckpointKey, CheckpointRef, Code, Inference, Seating, Model,
-)
+from etude.eval.records import (Benchmark, Code, Inference, Seating, CheckpointPlayer)
+from etude.checkpoints import CheckpointId, checkpoint_id, CheckpointRef
+from etude.records import ArtifactRef
 from etude.jobs import evaluation
 from etude.report import Anchors, Curve, Matches, Report, Score
 from tests.eval.games import play, play_failing_deal_one
@@ -51,10 +43,10 @@ DIRECT = Inference(config={"search": 0})
 DEALS = ({"deal": 0}, {"deal": 1})
 WEAK = Code(name="weak", source=[__file__], config={"strength": 0})
 STRONG = Code(name="strong", source=[__file__], config={"strength": 9})
-OUTSIDE = Model(
+OUTSIDE = CheckpointPlayer(
     name="outside",
     checkpoint=CheckpointRef(
-        key=CheckpointKey(address="hf://lab/outside.pt"),
+        key=checkpoint_id(address="hf://lab/outside.pt"),
         artifact=ArtifactRef(uri="hf://lab/outside.pt", sha256="ab" * 32),
     ),
     inference=Inference(config={"strength": 5}),
@@ -62,7 +54,7 @@ OUTSIDE = Model(
 
 
 def versus(name, first, second):
-    return Seating(name=name, players=(first, second), conditions=DEALS, games=2, tags=("anchor",))
+    return Seating(name=name, players=(first, second), configs=DEALS, games=2, tags=("anchor",))
 
 
 def eval(state):
@@ -74,7 +66,7 @@ def eval(state):
         versus("outside vs weak", OUTSIDE, WEAK),
     ))
     corrupt = Benchmark(name="corrupt", environment=DUEL, seatings=(
-        Seating(name="deal 1", players=(DIRECT, WEAK), conditions=({"deal": 1},), games=3),
+        Seating(name="deal 1", players=(DIRECT, WEAK), configs=({"deal": 1},), games=3),
     ))
     return [
         evaluation(ladder, play=play, checkpoints=rated, max_hours=0.1),
@@ -97,7 +89,42 @@ def report():
 CLOCKS = [Clock(name="updates", kind="step", meaning="optimizer updates")]
 
 
-def save(run: Run, tmp_path: Path, updates: range) -> None:
+def test_report_explains_recorded_team_scores_it_cannot_draw(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    runs = tmp_path / "runs"
+    file = experiment_file(
+        tmp_path / "experiments",
+        "teams",
+        "from etude.report import Report, Score\n"
+        "def report():\n"
+        "    return Report(score=Score(table='teams', value='won'))\n",
+    )
+    evaluate(
+        experiment="teams",
+        environment=environment("team-game"),
+        matches=[
+            Match(
+                players=tuple(Code(name=f"player-{seat}") for seat in range(4)),
+                groups={"north": (0, 1), "south": (2, 3)},
+                games=4,
+            )
+        ],
+        play=play_teams,
+        directory=runs,
+    )
+    page = build(runs, file)
+    assert page.cells == ()
+    assert (
+        "Team results for teams.won are recorded, but report charts only draw individual players. "
+        "Read the team scores with etude.eval.query.statsdb or compare."
+    ) in page.notes
+    with statsdb("teams", runs) as db:
+        assert db.sql("select count(*) from teams").fetchone() == (8,)
+
+
+def save(run: TrainingRun, tmp_path: Path, updates: range) -> None:
     """Checkpoints with the same bytes in every run, as runs warm-started from one file save."""
     for update in updates:
         weights = tmp_path / "weights.pt"
@@ -122,7 +149,9 @@ def lab(tmp_path_factory: pytest.TempPathFactory) -> Iterator[tuple[Path, Path]]
         # Deal 1 of the corrupt benchmark fails, and the pass stops.
         with pytest.raises(EtudeError, match="match_failed"):
             advance(read_experiment(file), source=DirectoryStorage(runs), directory=runs)
-        resumed = track(experiment="lab", run="a", job="a", clocks=CLOCKS, directory=runs)
+        resumed = track(
+            resume=True, experiment="lab", run="a", job="a", clocks=CLOCKS, directory=runs
+        )
         save(resumed, tmp_path, range(500, 700, 100))
         resumed.finish(timeout=30)
         yield runs, file
@@ -263,7 +292,7 @@ WEAK = Code(name="weak", source=[__file__], config={"strength": 0})
 
 def eval(state):
     rated = [each for run in state.runs for each in run.checkpoints]
-    versus = Seating(name="vs weak", players=(DIRECT, WEAK), conditions=({"deal": 0},), games=2)
+    versus = Seating(name="vs weak", players=(DIRECT, WEAK), configs=({"deal": 0},), games=2)
     ladder = Benchmark(name="ladder", environment=environment("duel"), seatings=(versus,))
     return [evaluation(ladder, play=play, checkpoints=rated, max_hours=0.1)]
 """
@@ -281,7 +310,14 @@ def test_a_page_offers_each_commit_its_matches_were_played_at(
     for commit, updates in (("a" * 40, range(100, 300, 100)), ("b" * 40, range(300, 400, 100))):
         # Each pass sees exactly the checkpoints delivered before it: the run
         # finishes, as a resumed job's attempt does, before the eval advances.
-        run = track(experiment="versioned", run="a", job="a", clocks=CLOCKS, directory=runs)
+        run = track(
+            resume=updates.start > 100,
+            experiment="versioned",
+            run="a",
+            job="a",
+            clocks=CLOCKS,
+            directory=runs,
+        )
         save(run, tmp_path, updates)
         run.finish(timeout=30)
         monkeypatch.setenv("ETUDE_COMMIT", commit)
@@ -318,20 +354,22 @@ DUEL = environment("duel")
 HEURISTIC = Code(name="heuristic", source=[__file__], config={"strength": 5})
 
 
-def outside(name: str, at: dict[str, float], line: str | None = None, **config: int) -> Model:
+def outside(
+    name: str, at: dict[str, float], line: str | None = None, **config: int
+) -> CheckpointPlayer:
     """A checkpoint no Etude run recorded, keyed by its address, seated where `at` says."""
     address = f"hf://lab/{name}.pt" if line is None else f"hf://lab/{line}/{name}.pt"
     ref = CheckpointRef(
-        key=CheckpointKey(address=address),
+        key=checkpoint_id(address=address),
         artifact=ArtifactRef(uri=address, sha256="cd" * 32),
         at=at,
         line=line,
     )
-    return Model(name=name, checkpoint=ref, inference=Inference(config=config))
+    return CheckpointPlayer(name=name, checkpoint=ref, inference=Inference(config=config))
 
 
 def duel(first: Player, second: Player, deal: int = 0) -> Match:
-    return Match(players=(first, second), conditions={"deal": deal}, games=2)
+    return Match(players=(first, second), config={"deal": deal}, games=2)
 
 
 def test_mixed_execution_fills_requested_games_and_replays_count_once(
@@ -356,7 +394,7 @@ def test_mixed_execution_fills_requested_games_and_replays_count_once(
         seating = Seating(
             name="vs heuristic",
             players=(Inference(source=[file], config={"search": 0}), HEURISTIC),
-            conditions=({"deal": 0}, {"deal": 1}),
+            configs=({"deal": 0}, {"deal": 1}),
             games=2,
         )
         benchmark = Benchmark(name="mixed", environment=DUEL, seatings=(seating,))
@@ -495,8 +533,7 @@ def test_an_evaluation_only_experiment_draws_checkpoints_where_their_seats_say(
     assert at["drift"] == {"updates": 350}
     assert next(each.line for each in page.players if each.name == "drift") == "plain-b"
     assert (
-        "drift is in line plain-b, as its latest seat says; earlier seats said plain-a."
-        in page.notes
+        "drift follows plain-b, as its latest seat says; earlier seats said plain-a." in page.notes
     )
     assert (
         "drift is drawn at updates 350, as its latest seat says; earlier seats said updates 300."
@@ -647,8 +684,8 @@ def test_a_tracked_checkpoint_is_placed_by_its_seat_first_and_its_training_recor
         experiment="seated",
         environment=DUEL,
         matches=[
-            duel(Inference().model(bare), HEURISTIC),
-            duel(Inference().model(moved), HEURISTIC),
+            duel(Inference().player(bare), HEURISTIC),
+            duel(Inference().player(moved), HEURISTIC),
         ],
         play=play,
         run="plain",
@@ -723,7 +760,7 @@ def test_a_continued_run_is_one_line_with_the_run_it_continues(
     assert {(each.run, each.ref.line) for each in saved} == {("a", "a"), ("b", "a")}
     # Seated with no line, as matches recorded before seats carried one: each checkpoint's
     # line is its training run's, the first run of its chain.
-    unlined = [Inference().model(each.ref.model_copy(update={"line": None})) for each in saved]
+    unlined = [Inference().player(each.ref.model_copy(update={"line": None})) for each in saved]
     evaluate(
         experiment="seated",
         environment=DUEL,
@@ -751,10 +788,10 @@ def test_a_running_eval_runs_results_show_and_are_marked_partial(
     )
     evaluate(
         experiment="lab", environment=environment("duel"), play=play, run="killed",
-        matches=[Match(players=players, conditions={"deal": 0}, games=1)],
+        matches=[Match(players=players, config={"deal": 0}, games=1)],
         directory=runs,
     )  # fmt: skip
-    (runs / "killed" / "state.json").unlink()  # as a machine lost before it ended
+    (runs / "lab/killed" / "outcome.json").unlink()  # as a machine lost before it ended
     built = build(DirectoryStorage(runs), file)
     assert any("Partial results" in note and "killed" in note for note in built.notes)
     assert built.latest_result_ms is not None
@@ -879,6 +916,7 @@ def test_a_page_reads_metrics_from_training_runs_once_and_no_eval_blob(
         "run.json",
         "state.json",
         "environment.json",
+        "outcome.json",
         "tournament.json",
     }
     assert {k.rsplit("/", 1)[1] for k in evals if k.startswith("blocks/")} <= {
@@ -913,7 +951,7 @@ WEAK = Code(name="weak", source=[__file__], config={"strength": 0})
 def eval(state):
     held = [each for run in state.runs for each in run.checkpoints]
     ladder = Benchmark(name="ladder", environment=DUEL, seatings=(
-        Seating(name="vs weak", players=(DIRECT, WEAK), conditions=({"deal": 0},), games=2),
+        Seating(name="vs weak", players=(DIRECT, WEAK), configs=({"deal": 0},), games=2),
     ))
     return evaluation(ladder, play=play, checkpoints=held, max_hours=0.1)
 
@@ -970,7 +1008,7 @@ def ladder(name, device):
     duel = environment("duel", config={"world": "w6", "setup": {"device": device}})
     direct = Inference(config={"search": 0, "setup": {"device": device}})
     weak = Code(name="weak", config={"strength": 0, "setup": {"device": device}})
-    seating = Seating(name="vs weak", players=(direct, weak), conditions=({"deal": 0},), games=2)
+    seating = Seating(name="vs weak", players=(direct, weak), configs=({"deal": 0},), games=2)
     return Benchmark(name=name, environment=duel, seatings=(seating,))
 
 
@@ -1050,7 +1088,7 @@ def test_fixed_pairs_are_drawn_once_where_their_first_seat_stood(
                 outside(f"large-{n}", {"updates": n}, "large", strength=9),
                 outside(f"small-{n}", {"updates": n // 2}, "small"),
             ),
-            conditions=({"deal": 0},),
+            configs=({"deal": 0},),
             games=2,
         )
         for n in (100, 200)

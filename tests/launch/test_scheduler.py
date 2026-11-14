@@ -3,38 +3,39 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import timedelta
 from decimal import Decimal
 from importlib import import_module
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from etude.cli import main
+from etude.errors import LauncherError
 from etude.launch.database import Database, launcher_file
 from etude.launch.records import (
-    Job,
-    LauncherError,
     LogStream,
     MachineTemplate,
     Offer,
     OnDemand,
     Pool,
-    Run,
     Stale,
     Storage,
     Tally,
     Target,
-    Until,
 )
 from etude.launch.scheduler import Scheduler
 from etude.launch.schemas import Observation
 from etude.launch.ssh import Unreachable
 from etude.launch.storage.disk import DirectoryJournal
+from etude.records import RunRecord
+from etude.spec import Job, RunRequest, Until
 from etude.storage_timeout import StorageUnavailable
 from etude.train.records import Step
-from etude.train.run import Run as TrackedRun
-from etude.train.run import track
+from etude.train.tracking import TrainingRun as TrackedRun
+from etude.train.tracking import track
 from tests.launch.counting import Counting, job_text
 from tests.launch.fake import L4, Bench, Clock, FakeService, bench
 
@@ -228,7 +229,7 @@ def test_a_cohort_runs_one_at_a_time_and_stops_at_its_dollar_ceiling(tmp_path: P
     assert sum(s.usd for s in statuses) <= USD_PER_RUN * 2
     assert b.service.most_live == 1 and b.service.creates == 1
     with pytest.raises(LauncherError, match="already exists"):
-        b.scheduler.queue_cohort("capacity", [Run(job=job())], rent="l4")
+        b.scheduler.queue_cohort("capacity", [RunRequest(job=job())], rent="l4")
 
 
 def test_several_runs_share_one_session_and_split_its_cost(tmp_path: Path) -> None:
@@ -292,8 +293,8 @@ def test_manabot_cohort_shape(tmp_path: Path) -> None:
     for target in (63_000, 100_000):
         assert all(s.outcome == "succeeded" for s in b.scheduler.wait(*stages[-1], every=60))
         continued = [
-            Run(
-                job=b.store.run(p).spec.model_copy(
+            RunRequest(
+                job=b.store.run(p).launch.spec.model_copy(
                     update={"until": Until.parse(f"updates={target}")}
                 ),
                 seed=b.store.run(p).seed,
@@ -312,13 +313,15 @@ def test_manabot_cohort_shape(tmp_path: Path) -> None:
     assert b.service.most_live == 1 and b.service.creates == 3
     for root, middle, final in zip(*stages, strict=True):
         records = [b.store.run(r) for r in (root, middle, final)]
-        assert len({(r.spec.name, r.seed, r.spec.config) for r in records}) == 1
-        assert [str(r.spec.until) for r in records] == [
+        assert len({(r.launch.spec.name, r.seed, r.launch.spec.config) for r in records}) == 1
+        assert [str(r.launch.spec.until) for r in records] == [
             "updates=26000",
             "updates=63000",
             "updates=100000",
         ]
-        assert len(b.store.job_runs(records[0].job)) == 3  # one job, its three seeds
+        digest = records[0].job
+        assert digest is not None
+        assert len(b.store.job_runs(digest)) == 3  # one job, its three seeds
         attempt = b.scheduler.attempts(final)[0]
         work = next(
             w for w, _ in b.service.sessions[attempt.session].work() if w.attempt == attempt.id
@@ -349,7 +352,10 @@ def test_supplies_are_stored_and_a_run_names_where_it_may_go(tmp_path: Path) -> 
         b.scheduler.queue(job(), rent="shed")
     one = b.scheduler.queue(job(), rent="l4")
     b.scheduler.tick()
-    assert (b.scheduler.record(one).pool, b.scheduler.record(one).rent) == (None, "l4")
+    assert (b.scheduler.record(one).launch.pool, b.scheduler.record(one).launch.rent) == (
+        None,
+        "l4",
+    )
     held = b.store.session(b.scheduler.attempts(one)[0].session)
     rented = b.store.machine(held.machine)
     assert (held.supply, rented.ondemand, rented.pool, rented.kind, rented.provider_id) == (
@@ -467,8 +473,8 @@ def test_quote_prints_planned_first_wave_costs_and_rents_nothing(
     assert code == 0
     assert counting.snapshot().provider == 1  # one price; nothing created
     assert capsys.readouterr().out.splitlines() == [
-        "seed1  machine mini  planned rental cost $0.00",
-        "seed2  rent NVIDIA L4 with at least 6 vCPUs, 48 GB at $0.59/hour  planned rental cost $0.88",
+        "job@1  machine mini  planned rental cost $0.00",
+        "job@2  rent NVIDIA L4 with at least 6 vCPUs, 48 GB at $0.59/hour  planned rental cost $0.88",
         "planned first-wave rental cost: $0.88; nothing rented",
         "job/cohort rental budget: $6.00",
         "Rental costs assume deletion on time. Provider delays can exceed the budget; "
@@ -530,18 +536,21 @@ def test_machines_shows_an_owned_machines_cost_and_expiry(
 
 def test_a_job_is_what_decides_the_result_not_its_name_or_limits(tmp_path: Path) -> None:
     b = bench(tmp_path)
-    first = b.scheduler.queue(Run(job=job(config="hidden = 256", name="small"), seed=1), rent="l4")
+    first = b.scheduler.queue(
+        RunRequest(job=job(config="hidden = 256", name="small"), seed=1), rent="l4"
+    )
     b.scheduler.tick()
     richer = job(config="hidden = 256", name="small again", max_usd=Decimal(9), max_hours=2.0)
-    second = b.scheduler.queue(Run(job=richer, seed=2), rent="l4")
+    second = b.scheduler.queue(RunRequest(job=richer, seed=2), rent="l4")
     b.scheduler.tick()
-    other = b.scheduler.queue(Run(job=job(config="hidden = 1024"), seed=1), rent="l4")
+    other = b.scheduler.queue(RunRequest(job=job(config="hidden = 1024"), seed=1), rent="l4")
     b.scheduler.tick()
     same, also, different = (b.scheduler.record(r) for r in (first, second, other))
     assert same.job == also.job != different.job
+    assert same.job is not None
     assert [r.seed for r in b.store.job_runs(same.job)] == [1, 2]
-    assert (also.spec.max_usd, also.name) == (Decimal(9), "small again-seed2")
-    assert same.spec.max_usd == Decimal(5)
+    assert (also.launch.spec.max_usd, also.name) == (Decimal(9), also.id)
+    assert same.launch.spec.max_usd == Decimal(5)
 
 
 def test_queue_returns_its_id_even_when_the_provider_cannot_quote_a_price(tmp_path: Path) -> None:
@@ -654,10 +663,13 @@ def test_the_default_target_is_persistent_and_off_default_pool_requires_one(
     b.scheduler.set_default("shed", rent="l4")
     one = b.scheduler.queue(job())
     b.scheduler.tick()
-    assert (b.scheduler.record(one).pool, b.scheduler.record(one).rent) == ("shed", "l4")
+    assert (b.scheduler.record(one).launch.pool, b.scheduler.record(one).launch.rent) == (
+        "shed",
+        "l4",
+    )
     assert Database(launcher_file(tmp_path)).default_target() == Target(pool="shed", rent="l4")
     b.scheduler.turn_pool("shed", off=True)
-    assert b.scheduler.record(b.scheduler.queue(job())).pool is None  # rents only
+    assert b.scheduler.record(b.scheduler.queue(job())).launch.pool is None  # rents only
     b.scheduler.set_default("shed")
     with pytest.raises(LauncherError, match="name a pool"):
         b.scheduler.queue(job())
@@ -699,7 +711,10 @@ def test_a_retry_resumes_its_run_without_creating_a_parent_run(tmp_path: Path) -
     b.run(1)
     second = b.scheduler.attempts(run)[1]
     works = [b.service.sessions[a.session].packet.work[0] for a in (first, second)]
-    assert [(w.run, w.resumes) for w in works] == [(run, False), (run, True)]
+    assert [(w.run, w.resumes, w.here) for w in works] == [
+        (run, False, False),
+        (run, True, False),
+    ]
     b.run(601)
     assert b.scheduler.read(run).outcome == "succeeded"
     assert len(b.scheduler.runs(done=True)) == 1
@@ -758,7 +773,7 @@ def test_a_job_needs_dollars_only_where_money_can_be_spent(tmp_path: Path) -> No
     assert b.store.runs() == ()
     b.scheduler.add_pool(Pool(name="mine"))  # no template: nothing here can spend
     run = b.scheduler.queue(free, "mine")
-    assert b.scheduler.record(run).spec.max_usd is None
+    assert b.scheduler.record(run).launch.spec.max_usd is None
     with pytest.raises(LauncherError, match="more than zero"):
         b.scheduler.queue(Job(command="train", max_hours=1, max_usd=Decimal(0)), "mine")
 
@@ -783,10 +798,22 @@ class Host(FakeService):
         self.disk.hold(run, files)
 
 
-def _tracked(directory: Path, run: str) -> TrackedRun:
-    return track(
-        experiment="lab", clocks=[Step("steps", "training steps")], run=run, directory=directory
-    )
+def _tracked(directory: Path, run: str, *, resume: bool = False) -> TrackedRun:
+    with patch.dict(
+        os.environ,
+        {
+            "ETUDE_RUN": run,
+            "ETUDE_ATTEMPT": "fixture",
+            "ETUDE_OUT": str(directory / run / "out"),
+        },
+    ):
+        return track(
+            experiment="lab",
+            clocks=[Step("steps", "training steps")],
+            run=run,
+            directory=directory,
+            resume=resume,
+        )
 
 
 def test_a_retry_on_another_owned_host_waits_for_and_continues_the_runs_folder(
@@ -810,6 +837,10 @@ def test_a_retry_on_another_owned_host_waits_for_and_continues_the_runs_folder(
         weights.write_bytes(f"weights at {step}".encode())
         tracked.checkpoint(weights, steps=step)
     tracked.finish()
+    for host, content in (("first", b"latest state"), ("second", b"stale state")):
+        out = hosts[host].track / run / "out"
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "state.pt").write_bytes(content)
 
     hosts["first"].reachable = False
     clock.advance(200)  # the first host's window has ended: the retry goes elsewhere
@@ -827,6 +858,7 @@ def test_a_retry_on_another_owned_host_waits_for_and_continues_the_runs_folder(
     assert hosts["second"].sessions
     # Asked on each pass until the holder answered, then never again.
     assert hosts["first"].calls["ssh"] == 3 and hosts["second"].calls["ssh"] == 1
+    assert (hosts["second"].track / run / "out/state.pt").read_bytes() == b"latest state"
     relayed = hosts["second"].track / run / "checkpoints"
     assert sorted(p.name for p in relayed.iterdir()) == [
         ".stored",
@@ -835,7 +867,7 @@ def test_a_retry_on_another_owned_host_waits_for_and_continues_the_runs_folder(
         "steps-2.pt",
     ]
 
-    resumed = _tracked(hosts["second"].track, run)
+    resumed = _tracked(hosts["second"].track, run, resume=True)
     latest = resumed.latest_checkpoint()
     assert latest is not None and latest.ordinal == 2
     weights.write_bytes(b"weights at 3")
@@ -947,3 +979,35 @@ def test_a_read_shows_a_running_jobs_output_and_a_pass_fetches_it_only_as_it_gro
     _reporting(b, log_bytes=200)
     b.run(1)
     assert fetched == 2
+
+
+def test_assigned_run_name_agrees_with_quote_and_stored_record(tmp_path: Path) -> None:
+    b = bench(tmp_path)
+    spec = job(name="baseline", experiment="pilot", config='{ "lr": 0.1 }')
+    request = RunRequest(job=spec, seed=7, id="baseline-seed-7")
+    quote = b.scheduler.quote([request], rent="l4")
+    assert [machine.run for machine in quote.machines] == ["baseline-seed-7"]
+    identity = b.scheduler.queue(request, rent="l4")
+    record = b.scheduler.record(identity)
+    assert record.name == "baseline-seed-7"
+    assert record.config_json == '{ "lr": 0.1 }'
+    assert record.launch.rent == "l4"
+    assert RunRecord.model_validate_json(record.model_dump_json()) == record
+    # SQLite's flat submission columns also describe historical stored records.
+    historical = {**record.model_dump(exclude={"submission"}), **record.launch.model_dump()}
+    assert RunRecord.model_validate(historical) == record
+    assert b.service.creates == 0
+
+
+def test_unassigned_hand_built_requests_have_seeded_quote_labels_and_opaque_ids(
+    tmp_path: Path,
+) -> None:
+    b = bench(tmp_path)
+    spec = job(name="baseline")
+    quote = b.scheduler.quote([RunRequest(job=spec, seed=7)], rent="l4")
+    assert [machine.run for machine in quote.machines] == ["baseline@7"]
+    identity = b.scheduler.queue(RunRequest(job=spec, seed=7), rent="l4")
+    assert b.scheduler.record(identity).name == identity
+    unnamed = b.scheduler.queue(Job(command="true", max_hours=1, max_usd=Decimal(1)), rent="l4")
+    assert b.scheduler.record(unnamed).name == unnamed
+    assert b.service.creates == 0

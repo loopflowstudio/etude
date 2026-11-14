@@ -4,16 +4,17 @@ from __future__ import annotations
 
 import json
 from hashlib import sha256
+from pathlib import Path
 
 import pytest
 from pydantic import JsonValue, ValidationError
 
+from etude.checkpoints import CheckpointRecord, CheckpointRef, checkpoint_id
 from etude.eval.records import (
     Aligned,
     At,
     Benchmark,
-    CheckpointKey,
-    CheckpointRef,
+    CheckpointPlayer,
     Code,
     Earlier,
     Environment,
@@ -23,7 +24,6 @@ from etude.eval.records import (
     Inference,
     Line,
     Match,
-    Model,
     RoundRobin,
     Seated,
     Seating,
@@ -31,12 +31,12 @@ from etude.eval.records import (
     TournamentRun,
     assemble,
 )
-from etude.run.records import ArtifactRef
+from etude.records import ArtifactRef
 
 DIGEST = "0" * 64
 WORLD = Environment(name="world", files="1" * 64)
 U500 = CheckpointRef(
-    key=CheckpointKey(run="ppo-1", name="updates-500.pt"),
+    key=checkpoint_id(run="ppo-1", name="updates-500.pt"),
     artifact=ArtifactRef(uri="s3://b/updates-500.pt", sha256=DIGEST),
 )
 SEARCH = Inference(config={"sims": 64})
@@ -75,18 +75,18 @@ OLD_ROUND_ROBIN = (
 
 
 def test_renaming_changes_no_match_key_or_seating_definition() -> None:
-    match = Match(players=(SEARCH.model(U500), HEURISTIC), conditions={"deal": 1}, games=8)
+    match = Match(players=(SEARCH.player(U500), HEURISTIC), config={"deal": 1}, games=8)
     # Pinned at 2eb32d5: a changed key would replay every stored match.
     assert match.key == "a64354de99bed9ed3bfc72755e7af6774877e28a383306be8e512561e6c793c8"
     seating = Seating(
-        name="direct vs heuristic", players=(SEARCH, HEURISTIC), conditions=({"deal": 1},), games=8
+        name="direct vs heuristic", players=(SEARCH, HEURISTIC), configs=({"deal": 1},), games=8
     )
     assert seating.definition == "9185c1177e55b1aa269d7d099aaa4a02d2a013dc780343081b531dba66c1ea91"
 
 
 def test_a_match_stored_with_agents_loads_as_the_same_players() -> None:
     old = Match.model_validate_json(OLD_MATCH)
-    now = Match(players=(SEARCH.model(U500), HEURISTIC), conditions={"deal": 1}, games=8)
+    now = Match(players=(SEARCH.player(U500), HEURISTIC), config={"deal": 1}, games=8)
     assert old == now
     assert Match.model_validate_json(now.model_dump_json()) == now
     assert "agents" not in now.model_dump_json()
@@ -95,12 +95,12 @@ def test_a_match_stored_with_agents_loads_as_the_same_players() -> None:
 def test_tournament_files_stored_with_agents_load_as_players() -> None:
     benchmark = TournamentRun.model_validate_json(OLD_BENCHMARK)
     seating = Seating(
-        name="direct vs heuristic", players=(SEARCH, HEURISTIC), conditions=({"deal": 1},), games=8
+        name="direct vs heuristic", players=(SEARCH, HEURISTIC), configs=({"deal": 1},), games=8
     )
     assert benchmark.tournament == Benchmark(name="ladder", environment=WORLD, seatings=(seating,))
     held = TournamentRun.model_validate_json(OLD_ROUND_ROBIN)
     assert isinstance(held.tournament, RoundRobin)
-    assert held.entrants == (SEARCH.model(U500), HEURISTIC)
+    assert held.entrants == (SEARCH.player(U500), HEURISTIC)
 
 
 def test_a_share_stored_as_a_pair_reads_and_is_written_by_name() -> None:
@@ -132,12 +132,12 @@ def test_etude_sdk_0_2_players_load_and_equal_no_player_since() -> None:
         {"config": {"search": 0}, "version": {"source": DIGEST}}
     )
     assert isinstance(placeholder.players[1], Code)
-    assert isinstance(model, Model) and isinstance(code, Code)
+    assert isinstance(model, CheckpointPlayer) and isinstance(code, Code)
     assert model.inference.config == {"search": 0}
     assert model.checkpoint.artifact.uri == "s3://models/updates-100.pt"
-    now = Inference(config={"search": 0}).model(
+    now = Inference(config={"search": 0}).player(
         CheckpointRef(
-            key=CheckpointKey(run="ppo-1", name="updates-100.pt"),
+            key=checkpoint_id(run="ppo-1", name="updates-100.pt"),
             artifact=ArtifactRef(uri="s3://models/updates-100.pt", sha256=sha),
         )
     )
@@ -151,7 +151,7 @@ def test_a_model_needs_its_checkpoint_digest() -> None:
 
 def _ref(run: str, updates: float) -> CheckpointRef:
     return CheckpointRef(
-        key=CheckpointKey(run=run, name=f"updates-{updates:g}.pt"),
+        key=checkpoint_id(run=run, name=f"updates-{updates:g}.pt"),
         artifact=ArtifactRef(uri=f"file:///{run}/{updates:g}.pt", sha256=DIGEST),
         at={"updates": updates},
         line=run,
@@ -184,7 +184,7 @@ def test_a_point_splits_its_games_over_every_pair_of_seeds() -> None:
     aligned = Seating(
         name="s",
         players=(direct, Aligned(clock="updates", job="small", inference=direct)),
-        conditions=({"deal": 0},),
+        configs=({"deal": 0},),
         games=10,
     )
     # 2 × 3 pairs share 10 games: the four lowest by seed get two, the rest one.
@@ -197,10 +197,10 @@ def test_a_point_splits_its_games_over_every_pair_of_seeds() -> None:
     own = Seating(
         name="o",
         players=(direct, At(clock="updates", value=100, inference=direct)),
-        conditions=({"deal": 0},),
+        configs=({"deal": 0},),
         games=3,
     )
-    fixed = Seating(name="f", players=(direct, HEURISTIC), conditions=({"deal": 0},), games=3)
+    fixed = Seating(name="f", players=(direct, HEURISTIC), configs=({"deal": 0},), games=3)
     for seating in (own, fixed):
         held = [seating.resolve(each.checkpoints[0], lines) for each in large]
         assert [
@@ -222,7 +222,7 @@ def test_one_seed_plays_the_same_pair_at_every_point_and_hold() -> None:
     one = Seating(
         name="s",
         players=(direct, Aligned(clock="updates", job="small", inference=direct)),
-        conditions=({"deal": 0},),
+        configs=({"deal": 0},),
         games=10,
         seeds="one",
     )
@@ -248,7 +248,7 @@ def test_a_relative_seat_finds_an_exact_position_or_says_whether_one_may_still_c
     direct = Inference(config={"search": 0})
 
     def seating(seat: Earlier | Fraction | Final | Aligned) -> Seating:
-        return Seating(name="s", players=(direct, seat), conditions=({"deal": 0},), games=1)
+        return Seating(name="s", players=(direct, seat), configs=({"deal": 0},), games=1)
 
     small = _line("s1", "small", 63, 90)
     large = _line("l1", "large", 90, 180)
@@ -276,12 +276,12 @@ def test_a_relative_seat_finds_an_exact_position_or_says_whether_one_may_still_c
     done = final.resolve(large.checkpoints[0], ended)
     assert isinstance(done, Seated) and _found(done) == [(small.checkpoints[1], 1)]
     (match,) = final.matches(large.checkpoints[0], done)
-    assert match.players[1] == direct.model(small.checkpoints[1])
+    assert match.players[1] == direct.player(small.checkpoints[1])
     with pytest.raises(ValidationError, match="relative_seat_needs_an_inference_seat"):
         Seating(
             name="s",
             players=(Earlier(clock="updates", by=1, inference=direct), HEURISTIC),
-            conditions=({"deal": 0},),
+            configs=({"deal": 0},),
             games=1,
         )
 
@@ -290,7 +290,7 @@ def test_a_trained_seat_never_seats_the_lines_initial_weights() -> None:
     direct = Inference(config={"search": 0})
 
     def seating(seat: Fraction | At) -> Seating:
-        return Seating(name="s", players=(direct, seat), conditions=({"deal": 0},), games=1)
+        return Seating(name="s", players=(direct, seat), configs=({"deal": 0},), games=1)
 
     line = _line("l1", "large", 0, 100, 300, 700)
     half = Fraction(clock="updates", value=0.5, at_or_before=True, inference=direct)
@@ -330,7 +330,7 @@ def test_an_at_or_before_seat_takes_the_latest_checkpoint_once_none_nearer_can_c
     direct = Inference(config={"search": 0})
 
     def seating(seat: Fraction) -> Seating:
-        return Seating(name="s", players=(direct, seat), conditions=({"deal": 0},), games=1)
+        return Seating(name="s", players=(direct, seat), configs=({"deal": 0},), games=1)
 
     half = seating(Fraction(clock="updates", value=0.5, at_or_before=True, inference=direct))
     exact = seating(Fraction(clock="updates", value=0.5, inference=direct))
@@ -365,7 +365,7 @@ def test_setup_is_recorded_and_part_of_no_identity() -> None:
         seating = Seating(
             name="vs weak",
             players=(direct, weak),
-            conditions=({"deal": 0},),
+            configs=({"deal": 0},),
             games=2,
         )
         world = Environment(name="duel", files=DIGEST, config={"world": "w6", **setup})
@@ -388,3 +388,40 @@ def test_setup_is_recorded_and_part_of_no_identity() -> None:
     # Setup aside, a config is identity: another world is another environment.
     world = cpu.tournament.environment.model_copy(update={"config": {"world": "w7"}})
     assert world.identity != cpu.tournament.environment.identity
+
+
+def test_checkpoint_paths_decode_local_files_and_refuse_remote_addresses(tmp_path: Path) -> None:
+    path = tmp_path / "Application Support" / "policy.pt"
+    path.parent.mkdir()
+    path.write_bytes(b"weights")
+    checkpoint = CheckpointRecord(
+        run="learner", ordinal=1, artifact=ArtifactRef(uri=path.as_uri(), sha256=DIGEST), at={}
+    )
+    assert checkpoint.path == checkpoint.ref.path == path
+    assert SEARCH.player(checkpoint.ref).checkpoint.path.read_bytes() == b"weights"
+    for uri in ("s3://bucket/policy.pt", "file://other-machine/policy.pt"):
+        remote = CheckpointRecord(
+            run="learner", ordinal=1, artifact=ArtifactRef(uri=uri, sha256=DIGEST), at={}
+        )
+        with pytest.raises(ValueError, match="not on this machine"):
+            _ = remote.ref.path
+        with pytest.raises(ValueError, match="not on this machine"):
+            _ = remote.path
+
+
+def test_tournament_configs_keep_released_conditions_bytes_and_warnings() -> None:
+    seating = Seating(
+        name="pair", players=(HEURISTIC, Code(name="random")), configs=({"deal": 1},), games=2
+    )
+    league = RoundRobin(name="rr", environment=WORLD, configs=({"deal": 1},), games=2)
+    for current in (seating, league):
+        stored = current.model_dump_json()
+        assert '"conditions":[{"deal":1}]' in stored
+        assert '"configs"' not in stored
+        with pytest.warns(DeprecationWarning, match="conditions is now configs"):
+            old = type(current).model_validate(json.loads(stored))
+        assert old.model_dump_json() == stored
+        with pytest.warns(DeprecationWarning, match="conditions is now configs"):
+            assert old.conditions == current.configs
+        with pytest.raises(ValidationError):
+            type(current).model_validate({**current.model_dump(), "config": current.configs})

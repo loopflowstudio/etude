@@ -6,9 +6,9 @@ beside Etude's own tables:
 
 | table | columns |
 |---|---|
-| `runs` | run, experiment, environment (identity), environment_name, environment_config, tournament, state (`finished` or `failed` from its `state.json`; null while it has not ended, so its results are partial) |
+| `runs` | run, experiment, environment (identity), environment_name, environment_config, tournament, state (`finished` or `failed` from its `outcome.json`; null while it has not ended, so its results are partial) |
 | `players` | player (its key, encoded), name (the latest its seats give), names (every one, the latest first), kind (`model` or `code`), checkpoint (its key), artifact (digest), uri, config, seated_at, lines, and `config.KEY` per scalar config key |
-| `matches` | run, match, conditions, games, seed, state, error, wall_ms, execution (result provenance), newest (of the match's done records in its environment, 1 for the latest recorded, the one that counts; null for a failure) |
+| `matches` | run, match, config, games, seed, state, error, wall_ms, execution (result provenance), newest (of the match's done records in its environment, 1 for the latest recorded, the one that counts; null for a failure) |
 | `seats` | run, match, seat, player, name (what the record calls it), the version that played: commit, source (digest), at (where its checkpoint stood, or null) and line (the learner it belongs to, or null) |
 | `groups` | run, match, group, seat |
 | `tournaments` | tournament, format (`benchmark` or `round_robin`), environment, conflict |
@@ -73,14 +73,16 @@ import warnings
 from collections import defaultdict
 from collections.abc import Container, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import numpy as np
 import numpy.typing as npt
-from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationError
+from pydantic import JsonValue, TypeAdapter, ValidationError
 
 from etude.carriage import EVAL_BLOCK_INDEX, EVAL_BLOCK_PACK
+from etude.checkpoints import CheckpointRecord, checkpoint_id
+from etude.errors import EtudeError
 from etude.eval.block import (
     BLOCK_FILE,
     Block,
@@ -92,28 +94,29 @@ from etude.eval.block import (
     refuse_unconverted,
     stage,
 )
-from etude.eval.match import ETUDE_TABLES, KIND
+from etude.eval.match import KIND
 from etude.eval.records import (
     COLUMN_TYPES,
     IDENTIFIER,
     ROLLUP_ROWS,
     TOURNAMENT_FILE,
     Benchmark,
-    CheckpointKey,
+    CheckpointPlayer,
     ColumnType,
     Environment,
-    Model,
     Player,
     Rollup,
     Scheduled,
     TournamentRun,
+    as_config,
     assemble,
     outcomes,
 )
-from etude.run.errors import EtudeError
-from etude.run.listing import as_storage, declared, run_folders, under
-from etude.run.records import Digest, Record, RunState
-from etude.run.storage import SAFE_NAME, DirectoryStorage, Storage, default_root
+from etude.eval.run import ETUDE_TABLES
+from etude.identity import SAFE_NAME
+from etude.records import Digest, Record, RunOutcome
+from etude.run import as_storage, declared, run_folders, under
+from etude.storage import DirectoryStorage, Storage, default_root
 
 if TYPE_CHECKING:
     import duckdb
@@ -130,14 +133,14 @@ NUMERIC = ("BOOLEAN", "BIGINT", "DOUBLE")
 # Keys and coordinates of an author table's rows: never a value.
 KEYS = ("seat", "group", "game", "run", "match")
 # A kept database of another schema is deleted and read again from its store.
-SCHEMA = 13
+SCHEMA = 14
 
 # How a match's records order, newest first: by when each was recorded, then by run name.
 # `matches.newest` ranks done records so; `etude.eval.tournament.played` orders runs alike.
 _NEWEST_FIRST = "m.wall_ms desc, m.run desc"
 
 _ENVIRONMENT_FILE = "environment.json"
-_STATE_FILE = "state.json"
+_OUTCOME_FILES = ("outcome.json", "state.json")
 # mypy reports this alias as an arg-type error or not depending on its cache; pydantic accepts it.
 _PLAYER: TypeAdapter[Player] = TypeAdapter(Player)  # type: ignore[arg-type, unused-ignore]
 
@@ -207,10 +210,11 @@ def _create(db: duckdb.DuckDBPyConnection, experiment: str, storage: Storage) ->
     db.execute("create schema kept")
     db.execute("create table kept.statsdb (schema BIGINT, experiment VARCHAR, store VARCHAR)")
     db.execute("insert into kept.statsdb values (?, ?, ?)", [SCHEMA, experiment, storage.name])
-    # Every declared run of any experiment, so each `run.json` is read once; an
-    # eval run's `state.json` state as it arrives and after each resume.
+    # Each folder's experiment is retained separately: the same run name can
+    # occur in several experiments, and copied folders may sit at any depth.
+    db.execute("create table kept.declarations (folder VARCHAR PRIMARY KEY, experiment VARCHAR)")
     db.execute(
-        "create table kept.runs (run VARCHAR, experiment VARCHAR, kind VARCHAR, state VARCHAR)"
+        "create table kept.runs (run VARCHAR PRIMARY KEY, experiment VARCHAR, kind VARCHAR, state VARCHAR)"
     )
     # Files of the experiment's runs already read, by run and name within its folder.
     db.execute("create table kept.seen (run VARCHAR, name VARCHAR)")
@@ -237,7 +241,7 @@ def _create(db: duckdb.DuckDBPyConnection, experiment: str, storage: Storage) ->
     db.execute("create table kept.summed (name VARCHAR, run VARCHAR, block VARCHAR)")
     db.execute("create table blobs (run VARCHAR, match VARCHAR, sha256 VARCHAR, size_bytes BIGINT)")
     db.execute(
-        "create table matches (run VARCHAR, match VARCHAR, conditions JSON, games BIGINT,"
+        "create table matches (run VARCHAR, match VARCHAR, config JSON, games BIGINT,"
         " seed BIGINT, state VARCHAR, error VARCHAR, wall_ms BIGINT, execution JSON,"
         " newest BIGINT)"
     )
@@ -263,6 +267,7 @@ def _catch_up(
     """
     keys = sorted(storage.keys(""))
     listed = set(keys)
+    folders_by_run = run_folders(keys)
     db.execute("begin")
     try:
         created = _schema(db) is None
@@ -270,10 +275,22 @@ def _catch_up(
             _create(db, experiment, storage)
         for rollup in rollups:
             _hold(db, rollup)
+        declarations = dict(
+            db.execute(
+                "select folder, experiment from kept.declarations "
+                "where folder in (select unnest(?::VARCHAR[]))",
+                [[folder for folders in folders_by_run.values() for folder in folders]],
+            ).fetchall()
+        )
         changed = created
         with tempfile.TemporaryDirectory(prefix="etude-statsdb-") as copies:
-            for run, folders in sorted(run_folders(keys).items()):
-                if not _ours(db, storage, run, folders, listed, experiment):
+            for run, folders in sorted(folders_by_run.items()):
+                folders = [
+                    folder
+                    for folder in folders
+                    if _ours(db, storage, run, folder, listed, experiment, declarations)
+                ]
+                if not folders:
                     continue
                 eval_run = _kind(db, run) == KIND
                 if eval_run and not _environment(db, storage, run, folders):
@@ -290,8 +307,10 @@ def _catch_up(
                     for name in new:
                         changed |= _read(db, storage, run, located[name], name, Path(copies))
                     # A resumed run, such as a retry of failed matches, writes its end again.
-                    if new and _STATE_FILE in located:
-                        _ended(db, storage, run, located[_STATE_FILE])
+                    if new and (
+                        outcome := next((name for name in _OUTCOME_FILES if name in located), None)
+                    ):
+                        _ended(db, storage, run, located[outcome], outcome)
                         changed = True
                     _sum_missing(db, storage, run, located, Path(copies))
                 else:
@@ -312,31 +331,36 @@ def _ours(
     db: duckdb.DuckDBPyConnection,
     storage: Storage,
     run: str,
-    folders: Sequence[str],
+    folder: str,
     listed: Container[str],
     experiment: str,
+    declarations: Mapping[str, str],
 ) -> bool:
-    """Whether the run is the experiment's, reading its declaration the first time only."""
-    found = db.execute("select experiment from kept.runs where run = ?", [run]).fetchone()
-    if found is None:
-        declaration = declared(storage, folders, listed)
-        if declaration is None:
-            return False  # its `run.json` has not arrived yet
-        db.execute(
-            "insert into kept.runs values (?, ?, ?, null)",
-            [run, declaration.experiment, declaration.declaration.kind],
-        )
-        return declaration.experiment == experiment
-    return bool(found[0] == experiment)
+    """Select a folder by its own declaration; retain each declaration once."""
+    if folder in declarations:
+        return declarations[folder] == experiment
+    declaration = declared(storage, folder, listed)
+    if declaration is None:
+        return False
+    db.execute("insert into kept.declarations values (?, ?)", [folder, declaration.experiment])
+    if declaration.experiment != experiment:
+        return False
+    db.execute(
+        "insert into kept.runs values (?, ?, ?, null) on conflict do nothing",
+        [run, experiment, declaration.kind],
+    )
+    return True
 
 
-def _ended(db: duckdb.DuckDBPyConnection, storage: Storage, run: str, place: str) -> None:
-    """Record how the eval run last ended, from its `state.json`.
+def _ended(
+    db: duckdb.DuckDBPyConnection, storage: Storage, run: str, place: str, name: str
+) -> None:
+    """Record how the eval run last ended, from its `outcome.json`.
 
     Read when it first arrives and again whenever the run delivers new files:
     a resumed run seals new blocks before it writes its end again.
     """
-    ended = RunState.model_validate_json(storage.get(place + _STATE_FILE))
+    ended = RunOutcome.model_validate_json(storage.get(place + name))
     db.execute("update kept.runs set state = ? where run = ?", [ended.state, run])
 
 
@@ -386,10 +410,10 @@ def _training_checkpoints(
     for name in names:
         if not (name.startswith("checkpoints/") and name.endswith(".json")):
             continue
-        stored = _StoredCheckpoint.model_validate_json(storage.get(located[name] + name))
+        stored = CheckpointRecord.model_validate_json(storage.get(located[name] + name))
         rows.append(
             [run, experiment, stored.ordinal,
-             str(CheckpointKey(run=run, name=PurePosixPath(stored.artifact.uri).name)),
+             checkpoint_id(run=run, name=stored.name),
              stored.artifact.sha256, stored.wall_ms, json.dumps(stored.at)]
         )  # fmt: skip
     stage(
@@ -487,10 +511,10 @@ def _matches(db: duckdb.DuckDBPyConnection, run: str, block: Block) -> None:
     stage(
         db,
         "_arrived_matches",
-        {"record": "BIGINT", "match": "VARCHAR", "conditions": "VARCHAR", "games": "BIGINT",
+        {"record": "BIGINT", "match": "VARCHAR", "config": "VARCHAR", "games": "BIGINT",
          "seed": "BIGINT", "state": "VARCHAR", "error": "VARCHAR", "wall_ms": "BIGINT",
          "execution": "VARCHAR"},
-        [[index, record.match.key, json.dumps(record.match.conditions), record.match.games,
+        [[index, record.match.key, json.dumps(as_config(record.match.config)), record.match.games,
           record.match.seed, record.state, record.error, record.wall_ms,
           json.dumps(record.execution)]
          for index, record in enumerate(records)],
@@ -507,7 +531,7 @@ def _matches(db: duckdb.DuckDBPyConnection, run: str, block: Block) -> None:
         )
     # `newest` is ranked once everything has arrived (`_summaries`).
     db.execute(
-        "insert into matches select ?, match, conditions, games, seed, state, error, wall_ms,"
+        "insert into matches select ?, match, config, games, seed, state, error, wall_ms,"
         " execution, null from _taken order by record",
         [run],
     )
@@ -521,8 +545,8 @@ def _matches(db: duckdb.DuckDBPyConnection, run: str, block: Block) -> None:
             [index, seat, player.key, player.name, player.model_dump_json(),
              player.version.commit, player.version.source,
              _canonical(player.checkpoint.at)
-             if isinstance(player, Model) and player.checkpoint.at else None,
-             player.checkpoint.line if isinstance(player, Model) else None]
+             if isinstance(player, CheckpointPlayer) and player.checkpoint.at else None,
+             player.checkpoint.line if isinstance(player, CheckpointPlayer) else None]
             for index, record in enumerate(records)
             for seat, player in enumerate(record.match.players)
         ],
@@ -845,24 +869,6 @@ def _adjacent(members: Sequence[tuple[str, int, int]]) -> Iterator[list[tuple[st
         yield group
 
 
-class _StoredArtifact(BaseModel):
-    model_config = ConfigDict(extra="ignore", frozen=True)
-
-    uri: str
-    sha256: str | None = None
-
-
-class _StoredCheckpoint(BaseModel):
-    """What evaluation reads of a training run's `checkpoints/NAME.json`; the rest is training's."""
-
-    model_config = ConfigDict(extra="ignore", frozen=True)
-
-    ordinal: int
-    artifact: _StoredArtifact
-    at: dict[str, float]
-    wall_ms: int
-
-
 def _summaries(db: duckdb.DuckDBPyConnection) -> None:
     """Rebuild `runs`, `tournaments`, `schedule` and `players`, and rank `matches.newest`,
     from what the database holds."""
@@ -1020,7 +1026,7 @@ def _players_table(db: duckdb.DuckDBPyConnection, players: dict[str, list[Player
 
 def _checkpoint(player: Player) -> tuple[str | None, str | None, str | None]:
     """A model's checkpoint key, digest and file; nothing for code."""
-    if not isinstance(player, Model):
+    if not isinstance(player, CheckpointPlayer):
         return None, None, None
     checkpoint = player.checkpoint
     return str(checkpoint.key), checkpoint.artifact.sha256, checkpoint.artifact.uri

@@ -20,10 +20,11 @@ from etude.launch.providers import bootstrap, package
 from etude.launch.providers.package import program_archive
 from etude.launch.providers.runpod import pod
 from etude.launch.providers.vast import instance
-from etude.launch.records import Job
-from etude.launch.schemas import Packet, Result
+from etude.launch.schemas import Packet
 from etude.launch.storage.files import read_result
 from etude.launch.storage.transport import HTTPReply
+from etude.records import RunProgress as Result
+from etude.spec import Job
 from tests.launch.counting import job_text
 
 

@@ -2,14 +2,14 @@
 
 `training` turns an experiment's training runs (`etude.train.read.RunData`)
 into `Training`, everything the page draws from their files, already
-bucketed. Runs are grouped into jobs (`RunDeclaration.job`); a job with
+bucketed. Runs are grouped into jobs (`RunRecord.job`); a job with
 several seeds is drawn as the mean of its seeds' bucket means, banded by
 their range. Checkpoints are kept at their exact coordinates, with the wall
 time to each and the pace of every step clock since the previous one.
 Timers are summed from the metrics logged under a prefix (`etude.report.Flame`).
 
 Every run is drawn on its declared clocks and Etude's two in hours
-(`etude.run.records.BUILT_IN_CLOCKS`). Attempts' times and checkpoint
+(`etude.records.BUILT_IN_CLOCKS`). Attempts' times and checkpoint
 `elapsed` are seconds since the run first started: its first writer's start
 (`etude.train.read.RunData.writer_starts`).
 """
@@ -24,7 +24,8 @@ from typing import Literal
 
 import numpy as np
 
-from etude.run.records import BUILT_IN_CLOCKS, BUILT_IN_NAMES, HOURS_SINCE_START, Clock, Record
+from etude.checkpoints import CheckpointRecord
+from etude.records import BUILT_IN_CLOCKS, BUILT_IN_NAMES, HOURS_SINCE_START, Clock, Record
 from etude.train.read import Floats, RunData, lines
 
 BUCKETS = 120
@@ -43,8 +44,8 @@ class JobGroup(Record):
     runs: tuple[str, ...]
 
 
-class AttemptSummary(Record):
-    """One attempt, in seconds since its run first started."""
+class WriterSummary(Record):
+    """One writer, in seconds since its run first started."""
 
     host: str
     pod: str | None
@@ -61,8 +62,8 @@ class RunSummary(Record):
     rows: int
     incomplete: int
     dropped: int | None
-    attempts: tuple[AttemptSummary, ...]
-    # Where each clock last stood, including a continuation before its first row.
+    writers: tuple[WriterSummary, ...]
+    # Where each clock last stood across attempts (`etude.train.read.RunData.reached`).
     at: dict[str, float]
 
 
@@ -199,7 +200,7 @@ def job_names(data: Sequence[RunData]) -> dict[str, JobName]:
     """
     keys: dict[str, tuple[str, str | None]] = {}
     for run in data:
-        declaration = run.file.declaration if run.file else None
+        declaration = run.file
         named = declaration.job_name if declaration else None
         config = declaration.config_sha256 if declaration else None
         keys[run.name] = (named or run.job or run.name, config)
@@ -240,39 +241,30 @@ def _jobs(data: Sequence[RunData]) -> tuple[JobGroup, ...]:
 def _summary(run: RunData) -> RunSummary:
     start = _started(run)
     last: dict[str, int] = {}
-    # A continuation may discard a previous attempt's overrun. Its recorded
-    # `at`, including a resume before the first row, supersedes that attempt.
-    stood = {attempt.writer: dict(attempt.resumed_at) for attempt in run.attempts}
-    starts = run.writer_starts
     for block in run.blocks:
         writer = block.header.writer
         last[writer] = max(last.get(writer, 0), block.header.wall_last)
-        here = stood.setdefault(writer, {})
-        for column in block.header.clocks:
-            if column.last is not None:
-                here[column.name] = column.last
-    at: dict[str, float] = {}
-    for writer in sorted(stood, key=lambda writer: starts[writer]):
-        at.update(stood[writer])
-    declaration = run.file.declaration if run.file else None
+    declaration = run.file
     return RunSummary(
         name=run.name,
         started=start,
         seed=declaration.seed if declaration else None,
-        state=run.state.state if run.state else "running or unfinished",
+        state=run.outcome.state
+        if run.outcome and run.outcome.state != "stopped"
+        else "running or unfinished",
         rows=run.rows,
         incomplete=run.incomplete,
-        dropped=run.state.counters.dropped if run.state else None,
-        attempts=tuple(
-            AttemptSummary(
-                host=attempt.host,
-                pod=attempt.pod,
-                started=attempt.started_ms / 1000 - start,
-                last_row=last[attempt.writer] / 1000 - start if attempt.writer in last else None,
+        dropped=run.outcome.counters.dropped if run.outcome else None,
+        writers=tuple(
+            WriterSummary(
+                host=writer.host,
+                pod=writer.pod,
+                started=writer.started_ms / 1000 - start,
+                last_row=last[writer.writer] / 1000 - start if writer.writer in last else None,
             )
-            for attempt in run.attempts
+            for writer in run.writers
         ),
-        at=at,
+        at=run.reached,
     )
 
 
@@ -281,29 +273,26 @@ def _marks(run: RunData) -> list[Mark]:
     steps = [clock.name for clock in run.clocks if clock.kind == "step"]
     first = run.clocks[0].name if run.clocks else None
     marks: list[Mark] = []
-    previous = None
+    previous: CheckpointRecord | None = None
     for checkpoint in run.checkpoints:
-        began = [
-            a for a in run.attempts if (previous.wall_ms if previous else -1) < a.started_ms
-            and a.started_ms <= checkpoint.wall_ms
-        ]  # fmt: skip
-        # Pace is measured within one attempt: from the previous checkpoint, or
-        # from where the attempt that recorded this one resumed.
-        since = None if began else previous
-        resumed = began[-1] if began else None
+        if checkpoint.wall_ms is None:
+            continue
+        previous_wall = previous.wall_ms if previous is not None else None
+        restarted = any(
+            (previous_wall is None or previous_wall < writer.started_ms)
+            and writer.started_ms <= checkpoint.wall_ms
+            for writer in run.writers
+        )
+        seconds = (checkpoint.wall_ms - previous_wall) / 1000 if previous_wall is not None else 0
+        # A restart breaks the interval: resumed coordinates do not measure
+        # work across the two processes or the time spent between them.
         pace: dict[str, float | None] = {}
         for clock in steps:
             here = checkpoint.at.get(clock)
-            if since is not None:
-                there, then = since.at.get(clock), since.wall_ms
-            elif resumed is not None:
-                there, then = resumed.resumed_at.get(clock), resumed.started_ms
-            else:
-                there, then = None, 0
-            seconds = (checkpoint.wall_ms - then) / 1000
+            there = previous.at.get(clock) if previous is not None else None
             pace[clock] = (
                 _round((here - there) / seconds)
-                if here is not None and there is not None and seconds > 0
+                if not restarted and here is not None and there is not None and seconds > 0
                 else None
             )
         marks.append(

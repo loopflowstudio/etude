@@ -13,19 +13,25 @@ import numpy as np
 import pytest
 from moto import mock_aws
 
+from etude.block_file import block_key, tail_key
 from etude.cache import Cache
+from etude.carriage import listing
+from etude.errors import EtudeError
 from etude.page import Pages, build
-from etude.run.block_file import block_key, tail_key
-from etude.run.delivery import RunFiles, StorageDestination, sync
-from etude.run.errors import EtudeError
-from etude.run.listing import runs
-from etude.run.records import Attempt, RunDeclaration, RunFile, SourceKey
-from etude.run.storage import DirectoryStorage, S3Storage, Storage, run_prefix, storage_from_uri
+from etude.records import RunWriter
+from etude.run import RunFiles, StorageDestination, runs, sync
+from etude.storage import (
+    DirectoryStorage,
+    S3Storage,
+    Storage,
+    run_prefix,
+    storage_from_uri,
+)
 from etude.train.block import Builder, LoggedRow
 from etude.train.manifest import Index, Manifest
 from etude.train.read import buckets, read, read_all
 from etude.train.records import Step
-from etude.train.run import log_line, seal_runs, track, write_block
+from etude.train.tracking import log_line, seal_runs, track, write_block
 from tests.experiments import experiment_file
 from tests.run.storage import CountedClient, MeasuredStorage
 
@@ -66,7 +72,7 @@ def test_a_folder_listed_without_a_declaration_is_not_asked_for_one(tmp_path: Pa
 def test_a_run_whose_declaration_is_invalid_reads_without_one(tmp_path: Path) -> None:
     with track(experiment="e", run="r", clocks=[], directory=tmp_path):
         pass
-    (tmp_path / run_prefix("r") / "run.json").write_text("{}")
+    (tmp_path / run_prefix("e/r") / "run.json").write_text("{}")
     data = read(tmp_path, "e", "r")
     assert data.file is None
     assert len(data.attempts) == 1
@@ -82,23 +88,23 @@ def test_resuming_does_not_inherit_a_previous_attempts_finished_state(
         pass
     if not attributed:
         # Earlier evidence has no writer on its completion; retain those bytes.
-        path = local / "r/state.json"
+        path = local / "e/r/outcome.json"
         state = json.loads(path.read_text())
         state.pop("writer")
         path.write_text(json.dumps(state))
     assert sync(local, storages=[bucket]) == {}
-    finished = read(bucket, "e", "r").state
+    finished = read(bucket, "e", "r").outcome
     assert finished is not None and finished.state == "finished"
 
-    resumed = track(experiment="e", run="r", clocks=[], directory=local)
+    resumed = track(resume=True, experiment="e", run="r", clocks=[], directory=local)
     try:
         assert sync(local, storages=[bucket]) == {}
-        assert read(local, "e", "r").state is None
-        assert read(bucket, "e", "r").state is None
+        assert read(local, "e", "r").outcome is None
+        assert read(bucket, "e", "r").outcome is None
     finally:
         resumed.finish("failed")
     assert sync(local, storages=[bucket]) == {}
-    failed = read(bucket, "e", "r").state
+    failed = read(bucket, "e", "r").outcome
     assert failed is not None and failed.state == "failed"
 
 
@@ -118,11 +124,16 @@ def test_a_new_model_at_a_recorded_step_is_a_new_version(
         measured = MeasuredStorage(destination)
         extension = suffix + ".data" if suffix == ".json" else suffix
         # Each process: an attempt record and the state, then any new checkpoint and its record.
+        # Every run has an out, so the first delivery also publishes its (empty) membership.
         kept = {"": b"first", ".ordinal-2": b"other"}
-        for body, uploads, recorded in ((b"first", 5, 1), (b"other", 4, 2), (b"other", 2, 2)):
+        for body, uploads, recorded in ((b"first", 6, 1), (b"other", 4, 2), (b"other", 2, 2)):
             model.write_bytes(body)
             with track(
-                experiment="e", run="r", clocks=[Step("step", "steps")], directory=local
+                resume=recorded > 1,
+                experiment="e",
+                run="r",
+                clocks=[Step("step", "steps")],
+                directory=local,
             ) as run:
                 run.checkpoint(model, step=10)
                 model.write_bytes(b"overwritten by training")
@@ -133,7 +144,7 @@ def test_a_new_model_at_a_recorded_step_is_a_new_version(
             assert [c.ordinal for c in checkpoints] == list(range(1, recorded + 1))
             # Nothing delivered is replaced: a new model at the same step is a new version.
             for version, held in list(kept.items())[:recorded]:
-                assert destination.get(f"r/checkpoints/step-10{version}{extension}") == held
+                assert destination.get(f"e/r/checkpoints/step-10{version}{extension}") == held
             assert checkpoints[-1].artifact.size_bytes == len(body)
             before = measured.uploads
             assert sync(local, storages=[measured]) == {}
@@ -143,7 +154,7 @@ def test_a_new_model_at_a_recorded_step_is_a_new_version(
 def test_recent_blocks_compact_and_delete_covered_uploads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("etude.train.run.RECENT_BLOCKS", 2)
+    monkeypatch.setattr("etude.train.tracking.RECENT_BLOCKS", 2)
     bucket = DirectoryStorage(tmp_path / "bucket")
     run = track(
         experiment="e",
@@ -163,7 +174,7 @@ def test_recent_blocks_compact_and_delete_covered_uploads(
         else:
             pytest.fail("recent rows were not delivered")
     run.finish()
-    keys = bucket.keys(run_prefix("r"))
+    keys = bucket.keys(run_prefix("e/r"))
     assert not any(key.endswith(".tail") for key in keys)
     assert len([key for key in keys if "/metrics/2-" in key]) == 2
     assert not any("/metrics/1-" in key for key in keys)
@@ -184,9 +195,9 @@ def test_stale_tail_and_explicit_sealing(tmp_path: Path) -> None:
     builder.add(1000, {"step": 1}, {"value": 7})
     key = tail_key(0, writer)
     write_block(run.files.root, key, builder.columns(writer, 0))
-    assert key not in RunFiles(run.files.root).deliverable()
+    assert key not in listing(run.files.root, tail_seconds=60)
     os.utime(run.files.root / key, (time.time() - 61, time.time() - 61))
-    assert key in RunFiles(run.files.root).deliverable()
+    assert key in listing(run.files.root, tail_seconds=60)
     os.utime(run.files.root / key, None)
     # A dead process's unsealed log becomes the next block; stopped writers' tails go at once.
     (run.files.root / f"metrics/00000001-{writer}.open").write_text(
@@ -400,7 +411,7 @@ def test_reader_refreshes_vanished_tails_and_sequence_gaps(
     keys = storage.keys
     stale = True
 
-    def listing(prefix: str) -> list[str]:
+    def counted_keys(prefix: str) -> list[str]:
         nonlocal stale
         result = keys(prefix)
         if stale:
@@ -408,7 +419,7 @@ def test_reader_refreshes_vanished_tails_and_sequence_gaps(
             return [key for key in result if "/metrics/1-00000000-" not in key]
         return result
 
-    monkeypatch.setattr(storage, "keys", listing)
+    monkeypatch.setattr(storage, "keys", counted_keys)
     assert read(storage, "e", "r").chart("value", "step").last.tolist() == [1, 2]
 
 
@@ -478,7 +489,7 @@ def test_destination_without_delete_keeps_covered_blocks_readable(tmp_path: Path
         time.sleep(0.01)
     assert read(bucket, "e", "r").rows == 1
     run.finish()
-    keys = bucket.keys(run_prefix("r"))
+    keys = bucket.keys(run_prefix("e/r"))
     assert any("/metrics/1-" in key for key in keys)
     assert any("/metrics/2-" in key for key in keys)
     assert read(bucket, "e", "r").chart("value", "step").count.sum() == 1
@@ -488,7 +499,7 @@ def test_destination_without_delete_keeps_covered_blocks_readable(tmp_path: Path
 def test_size_threshold_promotes_before_finish(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("etude.train.run.PERMANENT_BYTES", 1)
+    monkeypatch.setattr("etude.train.tracking.PERMANENT_BYTES", 1)
     run = track(
         experiment="e",
         run="r",
@@ -525,95 +536,6 @@ def test_attempt_resume_cuts_metrics_even_when_the_new_attempt_omits_them(tmp_pa
     assert data.chart("value", "step").last[-1] == 100
 
 
-def test_a_process_restored_past_the_latest_checkpoint_says_where_it_stands(
-    tmp_path: Path,
-) -> None:
-    first = track(experiment="e", run="r", clocks=[Step("step", "steps")], directory=tmp_path)
-    for step in range(15):
-        first.log({"value": step}, step=step)
-        if step == 10:
-            (tmp_path / "model.pt").write_bytes(b"weights at 10")
-            first.checkpoint(tmp_path / "model.pt", step=10)
-    first.finish()
-
-    # Restored from its own snapshot at step 13, after the checkpoint at 10.
-    second = track(
-        experiment="e",
-        run="r",
-        clocks=[Step("step", "steps")],
-        directory=tmp_path,
-        resumed_at={"step": 13},
-    )
-    second.log({"value": 100}, step=14)
-    second.finish()
-    data = read(tmp_path, "e", "r")
-    assert data.attempts[-1].resumed_at == {"step": 13}
-    assert data.points("value", "step").x.tolist() == [*range(14), 14]
-    assert data.points("value", "step").y.tolist() == [*range(14), 100]
-
-    with pytest.raises(EtudeError, match="resumed_at_unknown_clock"):
-        track(
-            experiment="e",
-            run="r",
-            clocks=[Step("step", "steps")],
-            directory=tmp_path,
-            resumed_at={"seconds": 1},
-        )
-
-
-@pytest.mark.parametrize("backend", ["directory", "s3"])
-@pytest.mark.parametrize("logging", ["metric", "other", "none"])
-def test_checkpoint_resume_supersedes_before_first_logged_row(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, logging: str
-) -> None:
-    first = track(experiment="e", run="r", clocks=[Step("step", "steps")], directory=tmp_path)
-    for step in range(20):
-        first.log({"value": step}, step=step)
-        if step == 10:
-            (tmp_path / "model.pt").write_bytes(b"weights at 10")
-            first.checkpoint(tmp_path / "model.pt", step=10)
-    first.finish()
-    evidence = {
-        path: path.read_bytes()
-        for folder in ("attempts", "blocks")
-        for path in (first.files.root / folder).glob("*")
-    }
-
-    # The next attempt resumes from the run's latest checkpoint, which it finds recorded.
-    monkeypatch.setenv("ETUDE_ATTEMPT", "attempt-resumed")
-    second = track(experiment="e", run="r", clocks=[Step("step", "steps")], directory=tmp_path)
-    if logging != "none":
-        second.log({"other": 1}, step=12)
-    if logging == "metric":
-        second.log({"value": 100}, step=13)
-    second.finish()
-    assert all(path.read_bytes() == body for path, body in evidence.items())
-
-    with mock_aws():
-        storage: Storage = DirectoryStorage(tmp_path)
-        if backend == "s3":
-            client = boto3.client("s3", region_name="us-east-1")
-            client.create_bucket(Bucket="etude-resume")
-            storage = S3Storage("etude-resume", client=client)
-            assert sync(tmp_path, storages=[storage]) == {}
-        data = read(storage, "e", "r")
-        assert data.attempts[-1].resumed_at.get("step") == 10
-        assert data.attempts[-1].attempt == "attempt-resumed"
-        # Step 10 is the checkpoint the second attempt resumed from: still the first's.
-        expected_x = [*range(11), 13] if logging == "metric" else list(range(11))
-        expected_y = [*range(11), 100] if logging == "metric" else list(range(11))
-        assert data.points("value", "step").x.tolist() == expected_x
-        assert data.points("value", "step").y.tolist() == expected_y
-        chart = data.chart("value", "step")
-        assert chart.x_first.tolist() == expected_x
-        assert chart.last.tolist() == expected_y
-        zoom = data.chart("value", "step", span=(10, 19))
-        assert zoom.count.sum() == (2 if logging == "metric" else 1)
-        assert sum(table.rows for table in data.columns) == 20 + (
-            2 if logging == "metric" else 1 if logging == "other" else 0
-        )
-
-
 @pytest.mark.parametrize("resume", [5, 15])
 def test_multiple_attempts_apply_the_earliest_later_checkpoint(tmp_path: Path, resume: int) -> None:
     root = tmp_path / run_prefix("r")
@@ -622,7 +544,7 @@ def test_multiple_attempts_apply_the_earliest_later_checkpoint(tmp_path: Path, r
         ((None, range(20)), (10, range(12, 20)), (resume, range(17, 18)))
     ):
         writer = f"{index:012x}"
-        attempt = Attempt(
+        attempt = RunWriter(
             writer=writer,
             started_ms=index * 1000,
             host="fixture",
@@ -705,7 +627,7 @@ def test_a_resumed_run_reads_roll_ups_on_both_sides_of_the_resume_point(tmp_path
     # checkpoint at 30,000, so its first row is step 30,001.
     for index, (resumed, steps) in enumerate(((None, range(40000)), (30000, range(30001, 70001)))):
         writer = f"{index:012x}"
-        attempt = Attempt(
+        attempt = RunWriter(
             writer=writer,
             started_ms=index * 10**9,
             host="fixture",
@@ -814,17 +736,23 @@ def test_a_run_split_across_machine_folders_reads_as_one(tmp_path: Path) -> None
         root = tmp_path / f"pool/{machine}/out/track" / run_prefix("r")
         storage = DirectoryStorage(root)
         resumed = {} if machine == "s1" else {"step": 10.0}
-        attempt = Attempt(writer=writer, started_ms=start, host=machine, resumed_at=resumed)
+        attempt = RunWriter(writer=writer, started_ms=start, host=machine, resumed_at=resumed)
         storage.put(f"metrics/{writer}.json", attempt.model_dump_json().encode())
-        declared = RunFile(
-            experiment="e",
-            namespace="local",
-            declaration=RunDeclaration(
-                source_key=SourceKey(namespace="local", kind="run", source_id="r"),
-                clocks=(Step("step", "steps"),),
-            ),
+        storage.put(
+            "run.json",
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "experiment": "e",
+                    "namespace": "local",
+                    "declaration": {
+                        "schema_version": 1,
+                        "source_key": {"namespace": "local", "kind": "run", "source_id": "r"},
+                        "clocks": [Step("step", "steps").model_dump()],
+                    },
+                }
+            ).encode(),
         )
-        storage.put("run.json", declared.model_dump_json().encode())
         builder = Builder(["step"])
         for step in steps:
             builder.add(
@@ -939,7 +867,7 @@ def test_live_writer_describes_each_permanent_block_only_once(
 
     monkeypatch.setattr("etude.train.manifest.DirectoryStorage", CountedDirectory)
     # Tiny real blocks make each of these three rows a separate permanent fold.
-    monkeypatch.setattr("etude.train.run.PERMANENT_BYTES", 1)
+    monkeypatch.setattr("etude.train.tracking.PERMANENT_BYTES", 1)
     with track(
         experiment="e",
         run="r",
@@ -961,7 +889,7 @@ def test_live_writer_describes_each_permanent_block_only_once(
 def test_selective_report_reads_bound_metadata_and_preserve_absolute_coordinates(
     tmp_path: Path,
 ) -> None:
-    root = tmp_path / "r"
+    root = tmp_path / "e/r"
     with track(experiment="e", run="r", clocks=[Step("step", "steps")], directory=tmp_path):
         pass
     writer = "abcdef123456"
@@ -1009,8 +937,10 @@ def report():
 
 def test_a_selective_page_reads_each_block_once_from_a_bucket(tmp_path: Path) -> None:
     writer = "abcdef123456"
-    root = tmp_path / "runs" / "r"
-    with track(experiment="e", run="r", clocks=[Step("step", "steps")], directory=root.parent):
+    root = tmp_path / "runs" / "e/r"
+    with track(
+        experiment="e", run="r", clocks=[Step("step", "steps")], directory=root.parent.parent
+    ):
         pass
     for block in range(4):
         builder = Builder(["step"])

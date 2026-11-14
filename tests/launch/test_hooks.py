@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from etude.launch.records import Job, job_id
 from etude.launch.schemas import Finished, Packet, Work
 from etude.launch.worker.attempts import _attempt
+from etude.spec import Job, job_id
 from tests.launch.counting import job_text
 from tests.launch.test_worker_attempts import local
 

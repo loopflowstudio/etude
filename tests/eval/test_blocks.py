@@ -12,14 +12,15 @@ import pytest
 from moto import mock_aws
 
 from etude.cache import Cache
+from etude.errors import EtudeError
 from etude.eval import block
 from etude.eval.block import Block, Staging, quote
 from etude.eval.convert import convert, delete_files
-from etude.eval.match import Result, environment, evaluate
+from etude.eval.match import environment, evaluate
 from etude.eval.query import read_blobs, statsdb
 from etude.eval.records import Code, ColumnType, Match, MatchRecord, Rollup
-from etude.run.errors import EtudeError
-from etude.run.storage import DirectoryStorage, S3Storage
+from etude.eval.run import Result
+from etude.storage import DirectoryStorage, S3Storage
 from tests.eval.games import play, play_cards, play_with_evidence
 from tests.eval.per_file import write_per_file
 from tests.run.storage import CountedClient, MeasuredStorage
@@ -37,7 +38,7 @@ def pair(tmp_path: Path) -> tuple[Code, Code]:
 
 
 def deals(players: tuple[Code, Code], count: int) -> list[Match]:
-    return [Match(players=players, conditions={"deal": deal}, games=2) for deal in range(count)]
+    return [Match(players=players, config={"deal": deal}, games=2) for deal in range(count)]
 
 
 def rows(db: duckdb.DuckDBPyConnection) -> dict[str, list[tuple[object, ...]]]:
@@ -62,12 +63,12 @@ def test_an_eval_run_delivers_a_few_objects_per_block_not_one_per_match_or_blob(
              storages=[bucket])  # fmt: skip
     # run.json, environment.json and state.json; one block of its pack, two tables and index.
     assert bucket.uploads == 3 + 4
-    (index,) = (key for key in bucket.keys("a/blocks/") if key.endswith("/block.json"))
+    (index,) = (key for key in bucket.keys("cards/a/blocks/") if key.endswith("/block.json"))
     kept = Block.model_validate_json(bucket.get(index))
     assert len(kept.matches) == 40 and len(kept.blobs) == 80
     assert all(record.execution == {"device": "cpu"} for record in kept.matches)
     # Plain DuckDB reads the delivered tables without Etude.
-    games = tmp_path / "bucket" / "a" / "blocks" / "*" / "games.parquet"
+    games = tmp_path / "bucket" / "cards" / "a" / "blocks" / "*" / "games.parquet"
     assert duckdb.sql(f"select count(*) from read_parquet({quote(games)})").fetchone() == (80,)
     # Sorted by match and game, so a filtered read skips the rest.
     order = duckdb.sql(f"select match, game from read_parquet({quote(games)})").fetchall()
@@ -130,7 +131,7 @@ def per_file(
     evaluate(experiment="cards", environment=DUEL, play=play_with_evidence,
              matches=deals(players, 6), run="a", directory=made)  # fmt: skip
     root = tmp_path / "old"
-    write_per_file(made / "a", root / "a")
+    write_per_file(made / "cards/a", root / "a")
     db = statsdb("cards", made)
     expected = rows(db)
     db.close()
@@ -187,7 +188,7 @@ def test_matches_a_dead_writer_staged_are_sealed_by_the_next_writer(tmp_path: Pa
     matches = deals(players, 3)
     evaluate(experiment="cards", environment=DUEL, play=play, matches=matches[:1], run="a",
              directory=tmp_path)  # fmt: skip
-    root = tmp_path / "a"
+    root = tmp_path / "cards/a"
     # A writer stages a match and dies before sealing it.
     staging = Staging(root, "0123456789ab")
     db = duckdb.connect()
@@ -216,7 +217,7 @@ def test_a_match_an_older_run_stored_as_done_with_no_rows_is_failed_and_played_a
     evaluate(experiment="cards", environment=DUEL, play=play, matches=matches[:1], run="a",
              directory=tmp_path)  # fmt: skip
     # An older writer recorded a match whose `play` returned nothing as done.
-    staging = Staging(tmp_path / "a", "0123456789ab")
+    staging = Staging(tmp_path / "cards/a", "0123456789ab")
     staging.stage(MatchRecord(match=matches[1], state="done", wall_ms=1))
     staging.close()
     # The next writer seals what it left.
@@ -244,7 +245,7 @@ def test_a_long_eval_run_seals_a_block_whenever_its_segment_is_old_enough(
     evaluate(experiment="cards", environment=DUEL, play=play, matches=deals(pair(tmp_path), 3),
              run="a", directory=tmp_path / "a", storages=[bucket])  # fmt: skip
     # Each match is delivered in a block of its own as soon as it is stored.
-    indexes = [key for key in bucket.keys("a/blocks/") if key.endswith("/block.json")]
+    indexes = [key for key in bucket.keys("cards/a/blocks/") if key.endswith("/block.json")]
     assert len(indexes) == 3
     assert bucket.uploads == 3 + 3 * 3
 
@@ -308,7 +309,7 @@ def test_a_match_two_blocks_hold_counts_once_in_its_rollup(tmp_path: Path) -> No
     matches = deals(pair(tmp_path), 3)
     evaluate(experiment="cards", environment=DUEL, play=play, matches=matches[:2], run="a",
              directory=tmp_path, rollups=[WINS])  # fmt: skip
-    root = tmp_path / "a"
+    root = tmp_path / "cards/a"
     # A seal wrote its block and died before emptying its staging: the next writer
     # seals the same match again, in a later block.
     (sealed,) = (path for path in (root / "blocks").iterdir() if not path.name.startswith("."))
@@ -447,7 +448,7 @@ def test_a_rollup_that_cannot_sum_a_match_refuses_it(tmp_path: Path) -> None:
     assert refused.value.code == "match_failed"
     assert "rollup_sum_not_numeric" in repr(refused.value.__cause__)
     # The failed match's block keeps its record and none of its rows.
-    (sealed,) = (tmp_path / "a" / "blocks").glob("[0-9]*")
+    (sealed,) = (tmp_path / "cards/a" / "blocks").glob("[0-9]*")
     kept = Block.model_validate_json((sealed / "block.json").read_bytes())
     assert [record.state for record in kept.matches] == ["failed"]
     assert (kept.tables, kept.totals) == ((), ())
@@ -536,3 +537,26 @@ def test_a_rollup_given_to_statsdb_sums_each_block_once_as_sealing_would(
     with pytest.raises(EtudeError) as refused:
         statsdb("cards", reading, rollups=[changed])
     assert refused.value.code == "rollup_conflict"
+
+
+def test_conversion_selects_the_experiment_before_converting_or_deleting(tmp_path: Path) -> None:
+    players = pair(tmp_path)
+    source = tmp_path / "old"
+    for label in ("one", "two"):
+        evaluate(
+            experiment=label,
+            environment=DUEL,
+            play=play,
+            matches=deals(players, 1),
+            run="r",
+            directory=tmp_path / "made",
+        )
+        write_per_file(tmp_path / "made" / label / "r", source / label / "r")
+    with pytest.raises(EtudeError, match="run_experiment_ambiguous"):
+        convert("r", source)
+    with pytest.raises(EtudeError, match="run_experiment_ambiguous"):
+        delete_files("r", source)
+    assert convert("r", source, experiment="one").matches == 1
+    assert not (source / "two/r/blocks").exists()
+    assert delete_files("r", source, experiment="one") > 0
+    assert list((source / "two/r/matches").glob("*.json"))

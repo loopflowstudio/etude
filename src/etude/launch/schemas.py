@@ -10,25 +10,14 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
-from pydantic import Field, FiniteFloat
+from pydantic import Field
 
-from etude.launch.records import (
-    Cause,
-    Input,
-    Limit,
-    Outcome,
-    Output,
-    Preparation,
-    Prepared,
-    Record,
-    Runtime,
-    Tally,
-    Until,
-    Variable,
-)
+from etude.launch.records import Cause, Limit, Outcome, Output, Prepared
 from etude.launch.storage.download import Download
 from etude.launch.storage.s3 import Grant
 from etude.launch.usage import Transfer
+from etude.records import RunProgress, RunWriter, Tally
+from etude.spec import Input, Preparation, Record, Runtime, Until, Variable
 
 
 class Work(Record):
@@ -50,9 +39,12 @@ class Work(Record):
     repo: str | None
     commit: str | None
     run: str  # names the run's folder in storage, shared by all its attempts
-    # A later attempt of its run: the run's folder is restored first where the
-    # machine does not hold it (`etude.carriage.resume_file`).
+    # A retry: restore its run's records and out files before starting. When
+    # its latest attempt ran on this machine (`here`), the folder there is
+    # newer than storage and is restored only if it is gone: a wiped disk, or
+    # another machine behind the same address.
     resumes: bool = False
+    here: bool = False
     job: str | None = None
     job_name: str | None = None
     cohort: str | None = None
@@ -87,6 +79,7 @@ class Progress(Record):
     exit_code: int | None
     prepared: Prepared | None = None
     tally: Tally | None = None
+    writers: tuple[RunWriter, ...] = ()
     # False when the job's end is known but its files are not confirmed stored:
     # the launcher waits for them while the machine lives, and settles without them after.
     delivered: bool = True
@@ -116,6 +109,7 @@ class Finished(Record):
     exit_code: int | None
     prepared: Prepared | None = None
     tally: Tally | None = None
+    writers: tuple[RunWriter, ...] = ()
 
     def progress(
         self,
@@ -136,16 +130,17 @@ class Finished(Record):
             exit_code=self.exit_code,
             prepared=self.prepared,
             tally=self.tally,
+            writers=self.writers,
             delivered=delivered,
             log_bytes=log_bytes,
         )
 
 
-class Result(Record):
-    """`etude-result.json`: the progress a job reports, where each of its clocks stands."""
+class ReadLink(Record):
+    """An object to restore, checked against the length storage listed."""
 
-    clocks: dict[str, FiniteFloat] = Field(default_factory=dict)
-    tally: Tally | None = None
+    url: str = Field(repr=False)
+    size_bytes: int = Field(ge=0)
 
 
 class Fetch(Record):
@@ -165,15 +160,15 @@ class Bootstrap(Record):
     runs: dict[str, Grant] = Field(default_factory=dict)  # each run's folder, for the packet's work
     inbox_url: str
     fetch: Fetch = Field(default_factory=Fetch)
-    restore: dict[str, dict[str, str]] = Field(default_factory=dict)  # see Delivery
+    restore: dict[str, ReadLink] = Field(default_factory=dict)  # see Delivery
 
 
 class Delivery(Record):
     work: Work
     access: Grant  # the run's folder
     fetch: Fetch = Field(default_factory=Fetch)
-    # Read links to what storage holds of each resumed run's folder: run, then key in its folder.
-    restore: dict[str, dict[str, str]] = Field(default_factory=dict)
+    # Read links to what storage holds of a resumed run's folder, by RUN/KEY.
+    restore: dict[str, ReadLink] = Field(default_factory=dict)
 
 
 class AttemptRecord(Record):
@@ -190,7 +185,7 @@ class AttemptRecord(Record):
     """
 
     started_at: datetime | None = None
-    result: Result = Field(default_factory=Result)
+    result: RunProgress = Field(default_factory=RunProgress)
     exited: Finished | None = None
     delivered: bool = False
     log_ends: tuple[int, ...] | None = None

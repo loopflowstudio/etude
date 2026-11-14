@@ -11,7 +11,7 @@ from typing import Literal
 
 from pydantic import Field
 
-from etude.launch.records import Record
+from etude.spec import Record
 
 Purpose = Literal["source", "input", "runtime", "checkpoint", "result", "control", "report"]
 

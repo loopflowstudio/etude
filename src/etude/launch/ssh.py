@@ -20,13 +20,15 @@ from typing import Annotated, Literal, cast, get_args
 from pydantic import Field
 
 from etude.deadline import remaining
+from etude.errors import LauncherError
 from etude.launch.logs import snapshot_stream
 from etude.launch.machines import Allocation
 from etude.launch.measurement import timed
 from etude.launch.providers.package import program_archive
-from etude.launch.records import BootstrapLinks, LauncherError, LogProducer, LogStream, Record
+from etude.launch.records import BootstrapLinks, LogProducer, LogStream
 from etude.launch.schemas import Observation, Packet, Work
 from etude.launch.source import source_archive
+from etude.spec import Record
 from etude.storage_timeout import storage_environment
 
 # What the host is asked to do, one record per shape of request. Both ends run
@@ -141,7 +143,7 @@ with zipfile.ZipFile(io.BytesIO(code)) as archive:
     import types
     for name in ("etude", "etude.launch"):
         sys.modules.setdefault(name, types.ModuleType(name))
-    for name in ("etude.deadline", "etude.storage_timeout", "etude.launch.logging"):
+    for name in ("etude.errors", "etude.deadline", "etude.storage_timeout", "etude.launch.logging"):
         module=types.ModuleType(name)
         exec(compile(archive.read(name.replace('.', '/')+'.py'),name,'exec'),module.__dict__)
         sys.modules[name]=module

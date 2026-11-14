@@ -14,8 +14,10 @@ from typing import Literal
 from pydantic import Field
 
 from etude.deadline import limit_time, remaining
+from etude.errors import LauncherError
 from etude.launch.logging import explain
-from etude.launch.records import Image, LauncherError, Record, Runtime
+from etude.launch.records import Image
+from etude.spec import Record, Runtime
 
 
 class Platform(Record):

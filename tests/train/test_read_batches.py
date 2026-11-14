@@ -8,13 +8,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from etude.run.block_file import block_key
-from etude.run.errors import EtudeError
-from etude.run.storage import DirectoryStorage, run_prefix
+from etude.block_file import block_key
+from etude.errors import EtudeError
+from etude.storage import DirectoryStorage, run_prefix
 from etude.train.block import Builder, Columns, Series, concat, decode
 from etude.train.manifest import Index, describe
 from etude.train.read import Points, read, read_batches
-from etude.train.run import write_block
+from etude.train.tracking import write_block
 from tests.run.storage import MeasuredStorage
 
 FIRST, LATER = "abcdef123456", "abcdef123457"

@@ -19,9 +19,9 @@ function's parameter type on the machine; a config that would not survive that
 is refused here, before anything is launched.
 
 A continuation (`continue_from`) is a new run of a parent's job and seed with
-a further target, which starts from one of the parent's recorded checkpoints.
-The launcher has no checkpoints: this module reads the parent's tracked
-record and hands it to the job as an input and `ETUDE_CONTINUES`.
+a further target, seeded from the parent's out, or a selected
+checkpoint. This module reads the parent's tracking and hands over verified
+file inputs and lineage in `ETUDE_CONTINUES`.
 
 This module joins the launcher with evaluation and tracking, as `etude.cli`
 does, so the launcher itself never imports either.
@@ -31,64 +31,68 @@ from __future__ import annotations
 
 import inspect
 import os
+import runpy
 import shlex
 import sys
 import tomllib
 from collections.abc import Callable, Mapping, Sequence
 from decimal import Decimal
+from hashlib import sha256
 from pathlib import Path, PurePosixPath
-from typing import Required, TypedDict, Unpack, cast
+from typing import TypedDict, Unpack, cast
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, JsonValue, ValidationError
 
-from etude.call import Function, config_type
-from etude.carriage import CHECKPOINTS, checkpoint_file_name, checkpoint_key
-from etude.eval.match import EvalRun, Result, Tables
+from etude.cache import Content
+from etude.call import Function, changed_config, config_type
+from etude.carriage import CHECKPOINTS, OUT_PRESENT, checkpoint_file_name, checkpoint_key
+from etude.checkpoints import CheckpointRecord, CheckpointRef, checkpoint_id
+from etude.errors import EtudeError, LauncherError
+from etude.eval.match import EvalResult
 from etude.eval.records import (
     Benchmark,
-    CheckpointKey,
-    CheckpointRef,
+    CheckpointPlayer,
     Line,
     Match,
-    Model,
     Player,
     RoundRobin,
     digest,
 )
-from etude.eval.tournament import hold
-from etude.experiment import Checkpoint, ExperimentState, checkpoint_inputs
-from etude.launch.errors import LauncherError
-from etude.launch.records import (
+from etude.eval.run import Result, Tables
+from etude.eval.tournament import evaluating
+from etude.experiment import ExperimentState, checkpoint_inputs
+from etude.identity import run_address
+from etude.out import MEMBERSHIP, OutFile, OutFiles
+from etude.records import ArtifactRef, Record, RunRecord, SourceKey
+from etude.run import as_storage, located_runs
+from etude.spec import (
     Input,
     Job,
     Preparation,
-    Run,
-    RunRecord,
+    RunRequest,
     Runtime,
     SmokeForm,
     Until,
     Variable,
     number,
 )
-from etude.run.errors import EtudeError
-from etude.run.listing import as_storage, declared, run_folders
-from etude.run.records import ArtifactRef, Record, SourceKey
-from etude.run.storage import Storage
+from etude.storage import Storage
 from etude.train.read import read
-from etude.train.records import ParentCheckpoint
+from etude.train.records import ParentRun
 
 
 class JobOptions(TypedDict, total=False):
     """How a typed job is launched: every `Job` field except those it derives.
 
     It derives the command and config, the experiment (an evaluation's own,
-    else the one `etude launch` reads from an experiment file's name) and the
+    else the one `etude launch` reads from the job file's name) and the
     smoke form: a training job's `smoke` config; an evaluation's is Etude's.
     """
 
-    max_hours: Required[float]
+    max_hours: float
     max_usd: Decimal | None
     name: str
+    seeds: tuple[int, ...]
     until: Until | None
     # A local git repository; None runs in an empty directory. Omitted: the
     # checkout the function's file is in.
@@ -110,6 +114,7 @@ def training[C: BaseModel](
     *,
     config: C,
     smoke: C | None = None,
+    start: CheckpointRecord | None = None,
     **options: Unpack[JobOptions],
 ) -> Job:
     """A job that calls `train(config)` in the job's own environment.
@@ -120,11 +125,20 @@ def training[C: BaseModel](
     `LauncherError` when it is not, or when a config is not of that type or
     would not validate back into it.
     """
-    _require_hours(options)
+    if start is not None:
+        options["inputs"] = (*options.get("inputs", ()), *checkpoint_inputs_for(start, "start"))
+        options["environment"] = (
+            *options.get("environment", ()),
+            Variable(name="ETUDE_START", value=start.key),
+        )
     job = _job(train, config, origin=train, options=options)
     if smoke is None:
         return job
     return job.model_copy(update={"smoke": SmokeForm(config=_config_text(train, smoke))})
+
+
+# The job input that carries a benchmark's `CheckpointRecord`, before a member's suffix.
+_BENCHMARK_CHECKPOINT = "checkpoint"
 
 
 class Evaluation(Record):
@@ -134,10 +148,10 @@ class Evaluation(Record):
     # None in a job an experiment's eval returns: `etude eval` names it for the file.
     experiment: str | None
     play: Function
-    # A benchmark's checkpoint, as the job's input of that name.
-    checkpoint: Input | None = None
+    # A benchmark's checkpoint; released single-file inputs remain readable.
+    checkpoint: CheckpointRecord | Input | None = None
     # Checkpoints an experiment's eval chose to hold the benchmark for.
-    checkpoints: tuple[Checkpoint, ...] = ()
+    checkpoints: tuple[CheckpointRecord, ...] = ()
     # A round robin's entrants.
     entrants: tuple[Player, ...] = ()
     workers: int = Field(default=1, ge=1)
@@ -149,21 +163,27 @@ class Evaluation(Record):
     lines: tuple[Line, ...] = ()
 
 
-def evaluation(
-    tournament: Benchmark | RoundRobin,
+def evaluation[C: BaseModel, M: BaseModel | Mapping[str, JsonValue]](
+    tournament: Benchmark | RoundRobin | Callable[[C], Benchmark | RoundRobin],
     *,
-    play: Callable[[Match], Tables | Result],
+    play: Callable[[Match[M]], Tables | Result],
+    config: C | None = None,
     experiment: str | None = None,
-    checkpoint: Input | None = None,
-    checkpoints: Sequence[Checkpoint] = (),
+    checkpoint: CheckpointRecord | Input | None = None,
+    checkpoints: Sequence[CheckpointRecord] = (),
     enter: Sequence[Player] = (),
     workers: int = 1,
     **options: Unpack[JobOptions],
 ) -> Job:
-    """A job that holds `tournament` with the author's `play`, as one eval run of `experiment`.
+    """Plan a pure tournament function and its config, then play it as one eval run.
 
-    A benchmark is held for `checkpoint`, which reaches the machine as the
-    job's input and fills every inference seat; a round robin plays every pair
+    A ready-made Benchmark or RoundRobin is also accepted. An author function
+    takes one annotated Pydantic config and returns its tournament without I/O;
+    it is called here, before pending-match and checkpoint-input planning.
+
+    A benchmark is held for a `CheckpointRecord` (or a released single-file
+    `Input`), whose verified members reach the machine as inputs and fill every
+    inference seat; a round robin plays every pair
     of `enter`. Each inference seat's config is in its seating
     (`etude.eval.records.Inference`), so the tournament is the whole of what is
     evaluated. The eval run is the launched run, so `etude logs` and `status`
@@ -177,6 +197,19 @@ def evaluation(
     is new. Any other job names its `experiment`.
     """
     _require_hours(options)
+    origin: Callable[..., object] = play
+    if callable(tournament):
+        if config is None:
+            raise LauncherError("an evaluation function needs config=")
+        origin = tournament
+        # Materialize the pure tournament before match/input planning. The worker
+        # executes this exact description, never arbitrary author code again.
+        text = _config_text(tournament, config)
+        tournament = tournament(type(config).model_validate_json(text))
+        if not isinstance(tournament, (Benchmark, RoundRobin)):
+            raise LauncherError("an evaluation function must return a Benchmark or RoundRobin")
+    elif config is not None:
+        raise LauncherError("config= belongs to an evaluation function")
     if isinstance(tournament, Benchmark) and enter:
         raise LauncherError(f"{tournament.name} is a benchmark: give it checkpoints, no entrants")
     if checkpoint is not None and checkpoints:
@@ -186,7 +219,12 @@ def evaluation(
     if experiment is None and (checkpoint is not None or isinstance(tournament, RoundRobin)):
         raise LauncherError(f"name the experiment {tournament.name}'s eval run belongs to")
     if checkpoint is not None:
-        options["inputs"] = (*options.get("inputs", ()), checkpoint)
+        inputs = (
+            checkpoint_inputs_for(checkpoint, _BENCHMARK_CHECKPOINT)
+            if isinstance(checkpoint, CheckpointRecord)
+            else (checkpoint,)
+        )
+        options["inputs"] = (*options.get("inputs", ()), *inputs)
     spec = Evaluation(
         tournament=tournament,
         experiment=experiment,
@@ -196,7 +234,7 @@ def evaluation(
         entrants=tuple(enter),
         workers=workers,
     )
-    return _job(_hold, spec, origin=play, options=options, experiment=experiment)
+    return _job(_hold, spec, origin=origin, options=options, experiment=experiment)
 
 
 def evaluation_spec(job: Job) -> Evaluation:
@@ -230,7 +268,7 @@ def hold_evaluation(
     checkpoint: CheckpointRef | None = None,
     directory: Path | str | None = None,
     storages: Sequence[Storage] = (),
-) -> EvalRun:
+) -> EvalResult:
     """Hold what an evaluation job's config describes (`etude.eval.tournament.hold`).
 
     `play` is imported from `checkout`, the job's source, or the working
@@ -242,10 +280,9 @@ def hold_evaluation(
         raise EtudeError("evaluation_names_no_experiment", 422)
     # Loaded by import path: the function `evaluation` was given, typed there.
     play = cast(Callable[[Match], Tables | Result], spec.play.load(checkout))
-    return hold(
+    with evaluating(
         spec.tournament,
         experiment=spec.experiment,
-        play=play,
         checkpoint=checkpoint,
         checkpoints=tuple(each.ref for each in spec.checkpoints),
         enter=spec.entrants,
@@ -254,7 +291,9 @@ def hold_evaluation(
         directory=directory,
         storages=storages,
         lines=spec.lines,
-    )
+        resume=True,
+    ) as active:
+        return active.play(play)
 
 
 def with_matches(job: Job, matches: Sequence[Match], state: ExperimentState) -> Job:
@@ -270,18 +309,47 @@ def with_matches(job: Job, matches: Sequence[Match], state: ExperimentState) -> 
     files = {key: f"checkpoint-{digest(key)[:16]}{PurePosixPath(each.name).suffix}"
              for key, each in saved.items()}  # fmt: skip
     inputs = tuple(
-        Input(
-            name=files[key],
-            key=checkpoint_key(each.artifact.uri),
-            sha256=cast(str, each.artifact.sha256),  # observe keeps only stored files
-            size_bytes=cast(int, each.artifact.size_bytes),
-            run=each.run,
-        )
+        given
         for key, each in sorted(saved.items())
+        for given in checkpoint_inputs_for(each, files[key])
     )
     spec = spec.model_copy(update={"matches": tuple(matches), "files": files, "lines": state.lines})
     return job.model_copy(
         update={"config": spec.model_dump_json(), "inputs": (*job.inputs, *inputs)}
+    )
+
+
+def checkpoint_inputs_for(checkpoint: CheckpointRecord, name: str) -> tuple[Input, ...]:
+    """The individually verified files of one checkpoint, under one input name."""
+    artifact = checkpoint.artifact
+    key = checkpoint.file or checkpoint_key(artifact.uri)
+    if artifact.members:
+        files = {"/" + member: content for member, content in sorted(artifact.members.items())}
+    elif artifact.sha256 is None or artifact.size_bytes is None:
+        raise LauncherError("a checkpoint input requires its digest and byte length")
+    else:
+        files = {"": Content(sha256=artifact.sha256, size_bytes=artifact.size_bytes)}
+    owner = run_address(checkpoint.run, checkpoint.experiment) if checkpoint.run else None
+    if checkpoint.folder is not None and owner is not None:
+        # Stored folders distinguish a compact sole job from an explicitly
+        # qualified job bearing the experiment's name, including historical copies.
+        qualified = f"{checkpoint.experiment}/{checkpoint.run}"
+        if checkpoint.experiment and (
+            checkpoint.folder == qualified or checkpoint.folder.endswith("/" + qualified)
+        ):
+            owner = qualified
+        elif checkpoint.folder != owner and not checkpoint.folder.endswith("/" + owner):
+            owner = checkpoint.run
+    return tuple(
+        Input(
+            name=name + member,
+            key=key + member,
+            sha256=content.sha256,
+            size_bytes=content.size_bytes,
+            run=owner,
+            uri=artifact.uri + member,
+        )
+        for member, content in files.items()
     )
 
 
@@ -295,76 +363,210 @@ def continue_from(
     *,
     source: Storage | Path | str,
     ordinal: int | None = None,
-) -> Run:
-    """The parent's job and seed again, from one of its recorded checkpoints, to `until`.
+    config: BaseModel | None = None,
+) -> RunRequest:
+    """A new run seeded with out and the available latest checkpoint, or an ordinal.
 
-    `source` holds the parent's checkpoint records: the bucket its machine
-    wrote to (`s3://bucket/prefix`), or a runs directory. The checkpoint is
-    the parent's latest, or the one numbered `ordinal`. `until` is
-    "clock=value" on a clock the checkpoint recorded, beyond where it stood;
-    it is absolute. A file stored in the parent's folder reaches the machine
-    as an input of the parent run (`Input.run`), verified by digest; a
-    reference to a model elsewhere is handed as recorded. Raises
-    `LauncherError` when the parent recorded no such checkpoint or the target
-    is not beyond it.
+    File inputs freeze the bytes chosen here by digest; a parent changing them
+    before delivery is refused. Config is validated against the typed job's
+    function before queueing. The target is absolute and must advance its clock.
+    Empty out without a latest copied checkpoint is refused before queueing.
     """
     storage = as_storage(source)
     keys = storage.keys("")
-    declaration = declared(storage, run_folders(keys).get(parent.id, []), set(keys))
-    if declaration is None:
-        raise LauncherError(f"run {parent.id} has no tracked folder in {storage.name}")
-    recorded = read(storage, declaration.experiment, parent.id).checkpoints
-    record = next((r for r in reversed(recorded) if ordinal in (None, r.ordinal)), None)
-    if record is None or record.artifact.sha256 is None or record.artifact.size_bytes is None:
-        raise LauncherError(f"run {parent.id} recorded no stored checkpoint {ordinal or ''}")
+    name = parent.id.rsplit("/", 1)[-1]
+    candidates = [
+        item
+        for item in located_runs(storage, keys, run=name)
+        if not parent.experiment or item.file.experiment == parent.experiment
+    ]
+    if len(candidates) != 1:
+        raise LauncherError(f"run {parent.id} has no unambiguous tracked folder in {storage.name}")
+    declaration, folders = candidates[0].file, candidates[0].folders
+    source_run = folders[0].rstrip("/")
+    data = read(storage, declaration.experiment, name)
     target = Until.parse(until)
-    if target.clock not in record.at:
+    previous = next(
+        (v.value for v in parent.launch.spec.environment if v.name == "ETUDE_CONTINUES"), None
+    )
+    inherited_input = None if previous is None else ParentRun.model_validate_json(previous).input
+    inputs = {
+        i.name: i
+        for i in parent.launch.spec.inputs
+        if i.name != inherited_input
+        and (inherited_input is None or not i.name.startswith(inherited_input + "/"))
+        and i.out is None
+    }
+    parent_key = SourceKey(namespace=declaration.namespace, kind="run", source_id=name)
+    # An explicit checkpoint needs no out reads, even when the parent has out.
+    out = None if ordinal is not None else _parent_out(storage, folders, keys)
+    checkpoint = next((r for r in reversed(data.checkpoints) if ordinal in (None, r.ordinal)), None)
+    key = None
+    if checkpoint is not None:
+        file = PurePosixPath(checkpoint.artifact.uri)
+        key = checkpoint.file
+        if key is None and file.parent.parts[-2:] == (name, CHECKPOINTS):
+            # Addressed within the parent's folder, so where its records were
+            # read from does not make the same continuation a different job.
+            key = checkpoint_key(checkpoint.artifact.uri)
+    copied = key is not None and key.startswith(f"{CHECKPOINTS}/")
+    members = () if out is None else out.files
+    # Empty out still resumes a copied checkpoint. A removed out checkpoint
+    # must never select an older record or resurrect its retained bytes.
+    if out is not None and not members and not copied:
+        if checkpoint is None:
+            raise LauncherError(
+                f"run {parent.id} has no saved state: out is empty and no checkpoint was recorded"
+            )
         raise LauncherError(
-            f"a continuation needs a target on a clock its checkpoint recorded: "
-            f"{', '.join(sorted(record.at))}"
+            f"run {parent.id} has empty out and its latest checkpoint's out file was removed; "
+            "use --ordinal N to select a recorded checkpoint explicitly"
         )
-    if target.value <= record.at[target.clock]:
-        raise LauncherError(
-            f"the target {target} is not beyond the checkpoint's "
-            f"{target.clock}={number(record.at[target.clock])}"
-        )
-    inputs = tuple(i for i in parent.spec.inputs if not i.name.startswith(_PARENT_CHECKPOINT))
-    # Without tags: they label the parent's checkpoint after the fact and decide
-    # nothing about the continuation, so they stay out of its job identity.
-    checkpoint = record.model_copy(update={"tags": ()})
     given = None
-    file = PurePosixPath(record.artifact.uri)
-    if file.parent.parts[-2:] == (parent.id, CHECKPOINTS):
-        # Stored in the parent's folder: the launcher gives the machine that file
-        # of the run, from its bucket or relayed from the parent's last machine.
-        # Addressed within that folder, so where its records were read from does
-        # not make the same continuation a different job.
-        key = checkpoint_key(record.artifact.uri)
-        given = _PARENT_CHECKPOINT + file.suffix
-        inputs += (
-            Input(
-                name=given,
-                key=key,
-                sha256=record.artifact.sha256,
-                size_bytes=record.artifact.size_bytes,
+    if members:
+        # A recipe may save a checkpoint without logging scalar rows.
+        at = {**(checkpoint.at if checkpoint is not None else {}), **data.reached}
+        for index, member in enumerate(members):
+            name = _input_name(f"parent-out-{index}", inputs)
+            inputs[name] = Input(
+                name=name,
+                out=member.key.removeprefix("out/"),
+                key=member.key,
+                sha256=member.sha256,
+                size_bytes=member.size_bytes,
                 run=parent.id,
-            ),
+                uri=storage.uri(source_run + "/" + member.key),
+            )
+        if not copied and not any(
+            member.key == key or key is not None and member.key.startswith(key + "/")
+            for member in members
+        ):
+            checkpoint = None
+        origin = "parent"
+    else:
+        origin = "checkpoint"
+        at = checkpoint.at if checkpoint is not None else {}
+    if not members or copied:
+        if (
+            checkpoint is None
+            or checkpoint.artifact.sha256 is None
+            or checkpoint.artifact.size_bytes is None
+        ):
+            raise LauncherError(f"run {parent.id} recorded no stored checkpoint {ordinal or ''}")
+        if key is not None:
+            given = _input_name(_PARENT_CHECKPOINT + PurePosixPath(key).suffix, inputs)
+            located = checkpoint.model_copy(update={"run": name, "file": key, "folder": source_run})
+            for file_input in checkpoint_inputs_for(located, given):
+                inputs[file_input.name] = file_input.model_copy(update={"run": parent.id})
+    if target.clock not in at:
+        raise LauncherError(
+            f"a continuation needs a target on a clock its {origin} recorded: {', '.join(sorted(at))}"
         )
-        artifact = record.artifact.model_copy(update={"uri": key})
-        checkpoint = checkpoint.model_copy(update={"artifact": artifact})
-    handed = ParentCheckpoint(
-        parent=SourceKey(namespace=declaration.namespace, kind="run", source_id=parent.id),
-        checkpoint=checkpoint,
-        input=given,
+    if target.value <= at[target.clock]:
+        raise LauncherError(
+            f"the target {target} is not beyond the {origin}'s "
+            f"{target.clock}={number(at[target.clock])}"
+        )
+    if checkpoint is not None:
+        artifact = checkpoint.artifact
+        if key is not None:
+            artifact = artifact.model_copy(update={"uri": key})
+        # Mutable parent tags do not change the child's job identity.
+        checkpoint = checkpoint.model_copy(update={"artifact": artifact, "tags": ()})
+    handed = ParentRun(
+        parent=parent_key, at=at, clocks=declaration.clocks, checkpoint=checkpoint, input=given
     )
     environment = (
-        *(v for v in parent.spec.environment if v.name != "ETUDE_CONTINUES"),
+        *(v for v in parent.launch.spec.environment if v.name != "ETUDE_CONTINUES"),
         Variable(name="ETUDE_CONTINUES", value=handed.model_dump_json()),
     )
-    job = parent.spec.model_copy(
-        update={"until": target, "inputs": inputs, "environment": environment}
+    text = (
+        parent.launch.spec.config
+        if config is None
+        else _config_text(load_job_function(parent.launch.spec), config)
     )
-    return Run(job=job, seed=parent.seed, params=dict(parent.params), source=parent.source)
+    job = parent.launch.spec.model_copy(
+        update={
+            "until": target,
+            "inputs": tuple(inputs.values()),
+            "environment": environment,
+            "config": text,
+        }
+    )
+    return RunRequest(
+        job=job, seed=parent.seed, params=dict(parent.launch.params), source=parent.launch.source
+    )
+
+
+def _parent_out(storage: Storage, folders: Sequence[str], keys: Sequence[str]) -> OutFiles | None:
+    """Choose one physical out; absent membership requires reading and hashing its files.
+
+    None means no out exists. Empty membership excludes retained out bytes;
+    copied checkpoints live separately under checkpoints/.
+    """
+    for folder in folders:
+        if folder + MEMBERSHIP in keys:
+            return OutFiles.model_validate_json(storage.get(folder + MEMBERSHIP))
+        out_keys = sorted(key for key in keys if key.startswith(folder + "out/"))
+        if not out_keys and folder + OUT_PRESENT not in keys:
+            continue
+        files: list[OutFile] = []
+        for full_key in out_keys:
+            key = full_key[len(folder) :]
+            if any(part.startswith(".") for part in key.split("/")) or key.endswith(
+                (".partial", ".open")
+            ):
+                continue
+            body = storage.get(full_key)
+            files.append(OutFile(key=key, sha256=sha256(body).hexdigest(), size_bytes=len(body)))
+        return OutFiles(files=tuple(files))
+    return None
+
+
+def _input_name(name: str, inputs: Mapping[str, Input]) -> str:
+    """Choose a transport name without taking any name the job already uses."""
+    while name in inputs:
+        name += "-"
+    return name
+
+
+def load_job_function(job: Job, *, current: bool = False) -> Callable[..., object]:
+    """Load a typed job's function; `current` executes checkout source afresh.
+
+    Config inspection uses the imported model type, preserving Python class
+    identity. Local attempts execute current source even in a persistent client.
+    """
+    command = shlex.split(job.command)
+    if "etude.call" not in command or "--function" not in command:
+        raise LauncherError("config changes require a typed job")
+    function = command[command.index("--function") + 1]
+    path = command[command.index("--path") + 1] if "--path" in command else ""
+    module, _, name = function.partition(":")
+    source = Path(job.repo or ".") / path / (module.replace(".", "/") + ".py")
+    if current and source.is_file():
+        # A local attempt runs current source, even when this process imported it before.
+        folder = str((Path(job.repo or ".") / path).resolve())
+        sys.path.insert(0, folder)
+        try:
+            parts = name.split(".")
+            found: object = runpy.run_path(str(source)).get(parts[0])
+            for part in parts[1:]:
+                found = getattr(found, part)
+        finally:
+            sys.path.remove(folder)
+        if not callable(found):
+            raise LauncherError(f"{module}:{name} is not a function")
+        return found
+    return Function(module=module, name=name, path=path).load(job.repo)
+
+
+def continued_config(parent: RunRecord, changes: str) -> BaseModel:
+    """Validate a JSON object of changes against the parent's typed config."""
+    kind = config_type(load_job_function(parent.launch.spec))
+    try:
+        return changed_config(kind, changes, stored=parent.launch.spec.config or "{}")
+    except ValueError as error:
+        raise LauncherError(str(error)) from None
 
 
 def _hold(evaluation: Evaluation) -> None:
@@ -378,13 +580,22 @@ def _hold(evaluation: Evaluation) -> None:
     if (evaluation.checkpoint is not None or evaluation.files) and not folder:
         raise SystemExit("etude: an evaluation job's checkpoints arrive as inputs")
     checkpoint = None
-    if evaluation.checkpoint is not None:
-        given = evaluation.checkpoint
+    given = evaluation.checkpoint
+    if isinstance(given, CheckpointRecord):
+        # The record keeps its own key; only its bytes moved, to this input.
+        uri = (Path(str(folder)) / _BENCHMARK_CHECKPOINT).as_uri()
+        checkpoint = given.ref.model_copy(
+            update={"artifact": given.artifact.model_copy(update={"uri": uri})}
+        )
+    elif given is not None:
         # A training run's file is keyed by its run and name; any other, by where it lies.
         key = (
-            CheckpointKey(run=given.run, name=checkpoint_file_name(given.key))
+            checkpoint_id(
+                run=given.run,
+                name=given.key if given.key.startswith("out/") else checkpoint_file_name(given.key),
+            )
             if given.run is not None
-            else CheckpointKey(address=given.key)
+            else checkpoint_id(address=given.key)
         )
         artifact = ArtifactRef(
             uri=(Path(str(folder)) / given.name).as_uri(),
@@ -403,7 +614,7 @@ def _relocated(match: Match, here: Mapping[str, str]) -> Match:
     """The match with each model's checkpoint file where it lies on this machine."""
     players: list[Player] = []
     for player in match.players:
-        if not isinstance(player, Model) or str(player.checkpoint.key) not in here:
+        if not isinstance(player, CheckpointPlayer) or str(player.checkpoint.key) not in here:
             players.append(player)
             continue
         checkpoint = player.checkpoint
@@ -515,7 +726,7 @@ def _present(repo: Path, *names: str) -> tuple[str, ...]:
 
 
 def _repo(origin: Callable[..., object], options: JobOptions) -> Path | None:
-    """The job's source: `repo` when given, else the git checkout `origin`'s file is in."""
+    """The explicit source, the function's git checkout, or its local import root."""
     if "repo" in options:
         given = options["repo"]
         return None if given is None else Path(given).resolve()
@@ -523,7 +734,11 @@ def _repo(origin: Callable[..., object], options: JobOptions) -> Path | None:
     for folder in file.parents:
         if (folder / ".git").exists():
             return folder
-    raise LauncherError(f"{file} is in no git checkout; name the job's source with repo=")
+    # Without git, local training still needs the root from which Python imports it.
+    if origin.__module__ not in ("__main__", "<run_path>"):
+        parts = origin.__module__.split(".")
+        return file.parents[len(parts) if file.name == "__init__.py" else len(parts) - 1]
+    return file.parent
 
 
 def _function(function: Callable[..., object], repo: Path | None) -> Function:
@@ -533,6 +748,16 @@ def _function(function: Callable[..., object], repo: Path | None) -> Function:
     the job's; one in the checkout is imported from the folder its name starts in.
     """
     module, name = function.__module__, function.__qualname__
+    if module == "<run_path>" and "<" not in name:
+        # CLI files are executed by runpy. Their top-level functions are still
+        # importable from the source checkout under the actual file's name.
+        where = Path(inspect.getfile(function)).resolve()
+        if repo is not None and where.is_relative_to(repo) and where.stem.isidentifier():
+            return Function(
+                module=where.stem,
+                name=name,
+                path=where.parent.relative_to(repo).as_posix().removesuffix("."),
+            )
     if module in ("__main__", "<run_path>") or "<" in name:
         raise LauncherError(
             f"{name} must be defined at the top of an importable module, so the job can import it"

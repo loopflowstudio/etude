@@ -18,9 +18,10 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from etude.cli import main
+from etude.errors import LauncherError
 from etude.launch.client import _open
 from etude.launch.database import Database, launcher_file
-from etude.launch.errors import LauncherError, ProviderUnavailable
+from etude.launch.errors import ProviderUnavailable
 from etude.launch.executor import Executor, Refused
 from etude.launch.machines import MachineRequest
 from etude.launch.providers.bootstrap import guard
@@ -32,7 +33,6 @@ from etude.launch.records import (
     GPU,
     STOCK_IMAGE,
     BootstrapLinks,
-    Job,
     MachineTemplate,
     OnDemand,
     Provider,
@@ -43,6 +43,7 @@ from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.s3 import Bucket, Keys
 from etude.launch.storage.transport import HTTPReply
 from etude.launch.worker.courier import run as run_courier
+from etude.spec import Job
 from tests.launch.fake import Clock
 from tests.launch.test_runpod_machines import Storage, released, repository, until
 

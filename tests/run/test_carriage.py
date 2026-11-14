@@ -17,10 +17,10 @@ from etude.carriage import (
     resume_file,
     taken,
 )
-from etude.run.delivery import sync
-from etude.run.storage import DirectoryStorage
+from etude.run import sync
+from etude.storage import DirectoryStorage
 from etude.train.records import Step
-from etude.train.run import track
+from etude.train.tracking import track
 
 
 def _recorded(tmp_path: Path) -> Path:
@@ -33,10 +33,10 @@ def _recorded(tmp_path: Path) -> Path:
         run.checkpoint(weights, steps=step)
     run.finish()
     deadline = time.monotonic() + 10
-    while len(list((tmp_path / "r/checkpoints").glob("*.json"))) < 2:
+    while len(list((tmp_path / "pin/r/checkpoints").glob("*.json"))) < 2:
         assert time.monotonic() < deadline
         time.sleep(0.01)
-    return tmp_path / "r"
+    return tmp_path / "pin/r"
 
 
 def test_resume_file_names_the_file_of_the_tracker_s_latest_record(tmp_path: Path) -> None:
@@ -91,7 +91,7 @@ def test_an_author_s_artifacts_are_sent_once_and_never_read_again(tmp_path: Path
         experiment="e", clocks=[Step("steps", "steps")], run="r", directory=tmp_path / "src"
     )
     run.finish()
-    folder = tmp_path / "src/r"
+    folder = tmp_path / "src/e/r"
     (folder / "artifacts/evidence").mkdir(parents=True)
     (folder / "artifacts/evidence/ab.json.gz").write_bytes(b"first")
     (folder / "notes.txt").write_text("first")
@@ -101,5 +101,25 @@ def test_an_author_s_artifacts_are_sent_once_and_never_read_again(tmp_path: Path
     (folder / "artifacts/evidence/ab.json.gz").write_bytes(b"second")
     (folder / "notes.txt").write_text("second")
     assert sync(tmp_path / "src", storages=[storage]) == {}
-    assert storage.get("r/artifacts/evidence/ab.json.gz") == b"first"
-    assert storage.get("r/notes.txt") == b"second"
+    assert storage.get("e/r/artifacts/evidence/ab.json.gz") == b"first"
+    assert storage.get("e/r/notes.txt") == b"second"
+
+
+def test_full_relay_reconciles_file_directory_changes_and_keeps_private_files(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    (source / "out/nested").mkdir(parents=True)
+    (source / "out/nested/state").write_bytes(b"state")
+    (source / "out/flat").write_bytes(b"flat")
+    target = tmp_path / "target"
+    (target / "out/flat").mkdir(parents=True)
+    (target / "out/flat/old").write_bytes(b"old")
+    (target / "out/nested").write_bytes(b"old file")
+    (target / "out/.private").mkdir()
+    (target / "out/save.partial").write_bytes(b"incomplete")
+    put_back(target, restore_set(source))
+    assert (target / "out/nested/state").read_bytes() == b"state"
+    assert (target / "out/flat").read_bytes() == b"flat"
+    assert (target / "out/.private").is_dir()
+    assert (target / "out/save.partial").read_bytes() == b"incomplete"

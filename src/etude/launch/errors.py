@@ -1,5 +1,4 @@
-class LauncherError(Exception):
-    """The request cannot be carried out as asked."""
+from etude.errors import LauncherError as LauncherError
 
 
 class LaunchError(LauncherError):

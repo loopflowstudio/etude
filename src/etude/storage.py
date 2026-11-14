@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import shutil
 import time
 from collections.abc import Callable
@@ -28,14 +27,14 @@ from urllib.parse import quote, urlsplit
 from etude.cache import Artifact, Cache, Fetched
 from etude.carriage import immutable
 from etude.deadline import call, remaining
-from etude.run.errors import EtudeError
+from etude.errors import EtudeError
+from etude.identity import SAFE_NAME, run_address
+from etude.records import RunRecord
 from etude.storage_timeout import StorageUnavailable, socket_timeout
-
-SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._=-]{0,199}$")
 
 
 def run_prefix(run: str) -> str:
-    """A run's folder under a root: its name, which is unique there whatever its experiment."""
+    """A folder prefix for a run name or its qualified experiment/run address."""
     return f"{run}/"
 
 
@@ -362,11 +361,26 @@ def default_root() -> Path:
 
 def run_directory(directory: Path | str | None, experiment: str, run: str) -> tuple[Path, Path]:
     """The runs directory and this run's folder in it; refuses names unsafe as paths."""
-    for name in (experiment, run):
+    local = run.removeprefix(experiment + "/")
+    for name in (experiment, local):
         if not SAFE_NAME.match(name):
             raise EtudeError("unsafe_run_or_experiment_name", 422)
     base = Path(directory) if directory else default_root()
-    return base, base / run_prefix(run)
+    handed = os.environ.get("ETUDE_RUN")
+    address = os.environ.get("ETUDE_RUN_ADDRESS") if handed == run else None
+    root = base / run_address(address or run, experiment)
+    if os.environ.get("ETUDE_ATTEMPT") and handed == local and (out := os.environ.get("ETUDE_OUT")):
+        root = Path(out).parent
+    if not (root / "run.json").is_file():
+        # Runs stored before compact addresses: EXPERIMENT/RUN folders, then flat ones.
+        for stored in (base / experiment / local, base / run):
+            record = stored / "run.json"
+            if (
+                record.is_file()
+                and RunRecord.model_validate_json(record.read_bytes()).experiment == experiment
+            ):
+                return base, stored
+    return base, root
 
 
 def storage_from_uri(uri: str | Path) -> Storage:

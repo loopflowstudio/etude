@@ -11,14 +11,16 @@ from pathlib import Path
 import duckdb
 import pytest
 
+from etude.checkpoints import CheckpointRef, checkpoint_id
+from etude.errors import EtudeError
 from etude.eval import query
 from etude.eval.convert import convert
-from etude.eval.match import Tables, environment, evaluate
+from etude.eval.match import environment, evaluate
 from etude.eval.query import compare, statsdb
-from etude.eval.records import CheckpointKey, CheckpointRef, Code, Inference, Match, Model
-from etude.run.errors import EtudeError
-from etude.run.records import ArtifactRef
-from etude.run.storage import DirectoryStorage
+from etude.eval.records import CheckpointPlayer, Code, Inference, Match
+from etude.eval.run import Tables
+from etude.records import ArtifactRef
+from etude.storage import DirectoryStorage
 from tests.eval.games import play, play_game_seats
 from tests.eval.per_file import write_per_file
 from tests.run.storage import MeasuredStorage
@@ -36,7 +38,7 @@ def pair(tmp_path: Path) -> tuple[Code, Code]:
 
 
 def deals(players: tuple[Code, Code], *numbers: int) -> list[Match]:
-    return [Match(players=players, conditions={"deal": deal}, games=2) for deal in numbers]
+    return [Match(players=players, config={"deal": deal}, games=2) for deal in numbers]
 
 
 def held(experiment: str, bucket: DirectoryStorage) -> tuple[int, int, int]:
@@ -130,7 +132,7 @@ def test_a_run_that_has_not_ended_is_partial(tmp_path: Path) -> None:
         evaluate(experiment="cards", environment=DUEL, play=play, matches=deals(players, *numbers),
                  run=run, directory=tmp_path / run, storages=[bucket])  # fmt: skip
     # Killed mid-pass, `b` delivered its blocks but never wrote how it ended.
-    (bucket.root / "b" / "state.json").unlink()
+    (bucket.root / "cards" / "b" / "outcome.json").unlink()
     db = statsdb("cards", bucket)
     assert db.sql("select run, state from runs order by run").fetchall() == [
         ("a", "finished"),
@@ -147,7 +149,7 @@ def test_a_match_counts_once_from_the_latest_block_holding_it(tmp_path: Path) ->
     assert held("cards", bucket) == (1, 2, 2 * 2 * 2)
     # The same matches arrive again, in a later block and in an earlier one, as a
     # replayed run's may: each match's rows come from one block.
-    (index,) = (key for key in bucket.keys("a/blocks/") if key.endswith("/block.json"))
+    (index,) = (key for key in bucket.keys("cards/a/blocks/") if key.endswith("/block.json"))
     folder = bucket.root / index.removesuffix("/block.json")
     written, writer = folder.name.split(".")
     for at in (int(written) + 1, int(written) - 1):
@@ -183,15 +185,17 @@ def test_a_match_two_runs_played_counts_from_the_later_under_its_latest_name(
 ) -> None:
     bucket = DirectoryStorage(tmp_path / "bucket")
     ref = CheckpointRef(
-        key=CheckpointKey(address="hf://lab/a.pt"),
+        key=checkpoint_id(address="hf://lab/a.pt"),
         artifact=ArtifactRef(uri="hf://lab/a.pt", sha256="ab" * 32),
     )
     _, rival = pair(tmp_path)
     # One model, renamed between runs: a name is part of no key.
     for run, name in (("first", "early"), ("second", "late")):
-        model = Model(name=name, checkpoint=ref, inference=Inference(config={"strength": 3}))
+        model = CheckpointPlayer(
+            name=name, checkpoint=ref, inference=Inference(config={"strength": 3})
+        )
         evaluate(experiment="cards", environment=DUEL, play=play, run=run,
-                 matches=[Match(players=(model, rival), conditions={"deal": 0}, games=2)],
+                 matches=[Match(players=(model, rival), config={"deal": 0}, games=2)],
                  directory=tmp_path / run, storages=[bucket])  # fmt: skip
     db = statsdb("cards", bucket)
     try:
@@ -253,7 +257,7 @@ def _published(tmp_path: Path, play: Callable[[Match], Tables]) -> tuple[Path, P
     evaluate(experiment="cards", environment=DUEL, play=play, run="a",
              matches=deals(players, 0, 1, 2), directory=now)  # fmt: skip
     published = tmp_path / "published"
-    write_per_file(now / "a", published / "a")
+    write_per_file(now / "cards/a", published / "a")
     _as_published(published / "a")
     assert all(
         '"agents"' in file.read_text() for file in (published / "a" / "matches").glob("*.json")
@@ -323,3 +327,25 @@ def test_pandas_lookups_do_not_grow_with_the_matches_played_and_held(
     few, many = counted(5), counted(50)
     assert few[0] == many[0] == 0
     assert few[1] == many[1]
+
+
+def test_same_named_eval_runs_keep_each_experiments_results(tmp_path: Path) -> None:
+    source = DirectoryStorage(tmp_path / "runs")
+    players = pair(tmp_path)
+    for experiment, numbers in (("one", (0,)), ("two", (1, 2))):
+        evaluate(
+            experiment=experiment,
+            environment=DUEL,
+            play=play,
+            matches=deals(players, *numbers),
+            run="a",
+            directory=tmp_path / "runs" / experiment,
+        )
+    assert held("one", source) == (1, 1, 4)
+    assert held("two", source) == (1, 2, 8)
+    # Each database remembers folder declarations independently. Reopening
+    # either experiment reads no source objects, even with colliding names.
+    for experiment in ("one", "two"):
+        measured = MeasuredStorage(source)
+        statsdb(experiment, measured).close()
+        assert (measured.listings, measured.requests) == (1, 0)

@@ -18,9 +18,10 @@ from etude.launch.logging import Console
 from etude.launch.providers import program
 from etude.launch.providers.package import program_archive
 from etude.launch.providers.runpod import machines
-from etude.launch.records import Job, Pool
+from etude.launch.records import Pool
 from etude.launch.schemas import Observation, Packet
 from etude.launch.ssh import SSH, LogsRequest, SessionRequest, StartRequest
+from etude.spec import Job
 from tests.launch.fake import bench
 from tests.launch.test_runpod_machines import cloud
 

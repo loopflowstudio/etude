@@ -21,8 +21,9 @@ from etude.launch.machines import Allocation, Bill, MachineRequest, Safeguards
 from etude.launch.measurement import timed
 from etude.launch.providers.lium.api import Create, LiumAPI, LiumOffer, Pod
 from etude.launch.providers.program import Program, boot_source
-from etude.launch.records import STOCK_IMAGE, MachineTemplate, Offer, Record
+from etude.launch.records import STOCK_IMAGE, MachineTemplate, Offer
 from etude.launch.storage.s3 import Bucket
+from etude.spec import Record
 
 
 class Intent(Record):

@@ -17,6 +17,7 @@ from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
+from etude.errors import LauncherError
 from etude.launch.records import (
     RETRYABLE,
     Cause,
@@ -24,9 +25,7 @@ from etude.launch.records import (
     Diagnostic,
     Hardware,
     Image,
-    Job,
     Launch,
-    LauncherError,
     LogStream,
     Machine,
     OnDemand,
@@ -37,17 +36,15 @@ from etude.launch.records import (
     Provider,
     Rental,
     RunAttempt,
-    RunRecord,
     Session,
-    Smoke,
-    SourcePosition,
     Stale,
     Storage,
     Supply,
-    Tally,
     Target,
 )
 from etude.launch.usage import Transfer
+from etude.records import RunRecord, RunWriter, Tally
+from etude.spec import Job, Smoke, SourcePosition
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS transfers(id TEXT PRIMARY KEY, body TEXT NOT NULL);
@@ -96,6 +93,7 @@ CREATE TABLE IF NOT EXISTS runs(
   created_at TEXT NOT NULL,
   cancel_requested_at TEXT, version INTEGER NOT NULL DEFAULT 1,
   autorun INTEGER NOT NULL DEFAULT 0, queued INTEGER NOT NULL DEFAULT 0,
+  resume_after INTEGER NOT NULL DEFAULT 0,
   params TEXT NOT NULL DEFAULT '{}', source TEXT, smoke TEXT NOT NULL DEFAULT '{}',
   CHECK (pool IS NOT NULL OR rent IS NOT NULL));
 CREATE TABLE IF NOT EXISTS sessions(
@@ -115,15 +113,18 @@ CREATE TABLE IF NOT EXISTS attempts(
   limit_kind TEXT NOT NULL, started_at TEXT, finished_at TEXT, outcome TEXT, cause TEXT,
   clocks TEXT NOT NULL DEFAULT '{}', outputs TEXT NOT NULL DEFAULT '[]', exit_code INTEGER,
   version INTEGER NOT NULL DEFAULT 1, planned_at TEXT, added INTEGER NOT NULL DEFAULT 0,
-  prepared TEXT, tally TEXT);
+  prepared TEXT, tally TEXT, writers TEXT NOT NULL DEFAULT '[]');
 CREATE INDEX IF NOT EXISTS runs_job ON runs(job);
-CREATE INDEX IF NOT EXISTS attempts_run ON attempts(run);
+CREATE INDEX IF NOT EXISTS runs_experiment ON runs(json_extract(spec, '$.experiment'), seq);
+CREATE INDEX IF NOT EXISTS runs_pool ON runs(pool, seq);
+CREATE INDEX IF NOT EXISTS runs_rent ON runs(rent, seq);
+CREATE INDEX IF NOT EXISTS attempts_run ON attempts(run, number);
 CREATE INDEX IF NOT EXISTS attempts_session ON attempts(session);
 """
 
 Fact = str | int | None
 # Prototype databases from another schema version are refused, never migrated.
-_VERSION = 17
+_VERSION = 19
 
 
 def launcher_file(home: Path) -> Path:
@@ -145,10 +146,12 @@ _RUNS = "SELECT r.* FROM runs r"
 
 
 def _run_from_row(row: sqlite3.Row) -> RunRecord:
+    spec = Job.model_validate_json(row["spec"])
     return RunRecord.model_validate(
         {
-            **dict(row),
-            "spec": Job.model_validate_json(row["spec"]),
+            **{key: row[key] for key in row.keys() if key not in {"seq", "tries"}},
+            "spec": spec,
+            "experiment": spec.experiment or "",
             "params": json.loads(row["params"]),
             "source": SourcePosition.model_validate_json(row["source"]) if row["source"] else None,
             "smoke": Smoke.model_validate_json(row["smoke"]),
@@ -187,11 +190,18 @@ def _hardware(row: sqlite3.Row) -> object:  # validated by the record holding it
     return json.loads(row["hardware"]) if row["hardware"] else None
 
 
+def _writers_json(attempt: RunAttempt, reported: tuple[RunWriter, ...]) -> str:
+    """The allocation's writers with the latest report of each, in first-seen order."""
+    merged = {writer.writer: writer for writer in (*attempt.writers, *reported)}
+    return json.dumps([writer.model_dump(mode="json") for writer in merged.values()])
+
+
 def _attempt_from_row(row: sqlite3.Row) -> RunAttempt:
     return RunAttempt.model_validate(
         {
             **dict(row),
             "clocks": json.loads(row["clocks"]),
+            "writers": json.loads(row["writers"]),
             "outputs": json.loads(row["outputs"]),
             "prepared": None if row["prepared"] is None else json.loads(row["prepared"]),
             "tally": None if row["tally"] is None else json.loads(row["tally"]),
@@ -251,12 +261,21 @@ class Database:
     def begin_launch(self, launch: Launch) -> None:
         with self._together():
             for request in launch.requests:
-                if self._db.execute("SELECT 1 FROM runs WHERE id=?", (request.run,)).fetchone():
-                    raise LauncherError(f"run {request.run!r} already admitted")
+                if (
+                    request.resume_version is None
+                    and self._db.execute("SELECT 1 FROM runs WHERE id=?", (request.run,)).fetchone()
+                ):
+                    raise LauncherError(
+                        f"run {request.run!r} already admitted; choose --experiment NAME for a new run; "
+                        "use --resume to carry on, or --resume --until CLOCK=TARGET to train further"
+                    )
                 for previous in self.launches(request.run):
-                    if previous.state in {"preparing", "admitting"} or any(
-                        session.refused_at is None and session.ended_at is None
-                        for session in self.launch_sessions(previous.id, acquired_only=True)
+                    if previous.state in {"preparing", "admitting"} or (
+                        previous.state != "admitted"
+                        and any(
+                            session.refused_at is None and session.ended_at is None
+                            for session in self.launch_sessions(previous.id, acquired_only=True)
+                        )
                     ):
                         raise LauncherError(
                             f"run {request.run!r}: reconciling existing request {previous.id}"
@@ -628,7 +647,36 @@ class Database:
                     )
                 except sqlite3.IntegrityError as error:
                     raise LauncherError(f"cohort {cohort.name!r} already exists") from error
+            evidence = self.launch_evidence(launch) if launch is not None else None
+            resuming = (
+                {r.run for r in evidence.requests if r.resume_version is not None}
+                if evidence is not None
+                else set()
+            )
             for run in runs:
+                if run.launch.created_at is None:
+                    raise LauncherError(f"run {run.id!r} has no submission timestamp")
+                if run.id in resuming:
+                    previous = self.attempts(run=run.id)
+                    if len(previous) != run.launch.resume_after or any(
+                        a.outcome is None for a in previous
+                    ):
+                        raise Stale(f"run {run.id!r} still has an allocated attempt")
+                    self._change(
+                        "runs",
+                        run.id,
+                        run.launch.version,
+                        job=run.job,
+                        spec=run.launch.spec.model_dump_json(),
+                        source=run.launch.source.model_dump_json() if run.launch.source else None,
+                        pool=run.launch.pool,
+                        rent=run.launch.rent,
+                        cancel_requested_at=None,
+                        resume_after=run.launch.resume_after,
+                        params=json.dumps(run.launch.params),
+                        smoke=run.launch.smoke.model_dump_json(),
+                    )
+                    continue
                 self._db.execute(
                     """INSERT INTO runs(id, job, spec, seed, pool, rent, cohort,
                        created_at, autorun, queued, params, source, smoke)
@@ -636,36 +684,45 @@ class Database:
                     (
                         run.id,
                         run.job,
-                        run.spec.model_dump_json(),
+                        run.launch.spec.model_dump_json(),
                         run.seed,
-                        run.pool,
-                        run.rent,
+                        run.launch.pool,
+                        run.launch.rent,
                         run.cohort,
-                        run.created_at.isoformat(),
-                        int(run.autorun),
-                        int(run.queued),
-                        json.dumps(run.params),
-                        run.source.model_dump_json() if run.source else None,
-                        run.smoke.model_dump_json(),
+                        run.launch.created_at.isoformat(),
+                        int(run.launch.autorun),
+                        int(run.launch.queued),
+                        json.dumps(run.launch.params),
+                        run.launch.source.model_dump_json() if run.launch.source else None,
+                        run.launch.smoke.model_dump_json(),
                     ),
                 )
 
             self._place(attempts)
-            if launch is not None:
-                evidence = self.launch_evidence(launch)
+            if evidence is not None:
                 self.save_launch(evidence.model_copy(update={"state": "admitted"}))
 
     def cancel(self, run: RunRecord, at: datetime) -> None:
-        self._change("runs", run.id, run.version, cancel_requested_at=at.isoformat())
+        self._change("runs", run.id, run.launch.version, cancel_requested_at=at.isoformat())
 
     def run(self, id: str) -> RunRecord:
         row = self._db.execute(f"{_RUNS} WHERE r.id = ?", (id,)).fetchone()
         if row is None:
-            raise LauncherError(f"no run {id!r}")
+            raise LauncherError(
+                f"the launcher has no run {id!r}; a run started with etude train is read with "
+                "etude report FILE"
+            )
         return _run_from_row(row)
 
-    def runs(self) -> tuple[RunRecord, ...]:
-        return tuple(_run_from_row(row) for row in self._db.execute(f"{_RUNS} ORDER BY r.seq"))
+    def runs(self, *, experiment: str | None = None) -> tuple[RunRecord, ...]:
+        if experiment is None:
+            rows = self._db.execute(f"{_RUNS} ORDER BY r.seq")
+        else:
+            rows = self._db.execute(
+                f"{_RUNS} WHERE json_extract(r.spec, '$.experiment') = ? ORDER BY r.seq",
+                (experiment,),
+            )
+        return tuple(_run_from_row(row) for row in rows)
 
     def job_runs(self, job: str) -> tuple[RunRecord, ...]:
         """Every run of one job, oldest first: its seeds side by side."""
@@ -698,14 +755,19 @@ class Database:
         rows = self._db.execute(
             f"""SELECT r.*, (SELECT count(*) FROM attempts a WHERE a.run = r.id) AS tries
                 FROM runs r
-                WHERE (r.pool = ? OR r.rent = ?) AND r.cancel_requested_at IS NULL
-                AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.run = r.id AND (
-                  a.outcome IS NULL OR a.outcome != 'lost' OR a.cause NOT IN ({marks})))
+                WHERE r.id IN (
+                  SELECT id FROM runs WHERE pool = ? UNION SELECT id FROM runs WHERE rent = ?
+                ) AND r.cancel_requested_at IS NULL
+                AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.run = r.id AND a.number > r.resume_after AND (
+                  a.outcome IS NULL OR (a.outcome != 'stopped' AND
+                  (a.outcome != 'lost' OR a.cause NOT IN ({marks})))))
                 ORDER BY r.seq""",
             (supply, supply, *sorted(RETRYABLE)),
         ).fetchall()
         return tuple(
-            run for row in rows if (run := _run_from_row(row)).spec.max_attempts > row["tries"]
+            run
+            for row in rows
+            if (run := _run_from_row(row)).launch.spec.max_attempts > row["tries"]
         )
 
     # Sessions
@@ -947,7 +1009,11 @@ class Database:
         self._change("attempts", attempt.id, attempt.version, started_at=at.isoformat())
 
     def record_progress(
-        self, attempt: RunAttempt, clocks: dict[str, float], tally: Tally | None
+        self,
+        attempt: RunAttempt,
+        clocks: dict[str, float],
+        tally: Tally | None,
+        writers: tuple[RunWriter, ...] = (),
     ) -> None:
         """Retain where the job last said its clocks and counted work stood."""
         self._change(
@@ -956,6 +1022,7 @@ class Database:
             attempt.version,
             clocks=json.dumps(clocks),
             tally=None if tally is None else tally.model_dump_json(),
+            writers=_writers_json(attempt, writers),
         )
 
     def finish(
@@ -970,6 +1037,7 @@ class Database:
         exit_code: int | None = None,
         prepared: Prepared | None = None,
         tally: Tally | None = None,
+        writers: tuple[RunWriter, ...] = (),
     ) -> None:
         self._change(
             "attempts",
@@ -983,6 +1051,7 @@ class Database:
             exit_code=exit_code,
             prepared=None if prepared is None else prepared.model_dump_json(),
             tally=None if tally is None else tally.model_dump_json(),
+            writers=_writers_json(attempt, writers),
         )
 
     def fail_before_start(self, attempt: RunAttempt, cause: Cause, at: datetime) -> None:

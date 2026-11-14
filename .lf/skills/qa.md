@@ -59,7 +59,7 @@ publish, land or choose the next Graph step from here.
 
 Build a lab outside the repo (e.g. `/tmp/lab`) with its own `ETUDE_HOME`:
 
-1. Write training runs with `etude.train.run.track(experiment=..., run=..., job=...,
+1. Write training runs with `etude.train.tracking.track(experiment=..., run=..., job=...,
    clocks=[...], directory=RUNS)`, `run.log(...)`, `run.checkpoint(file, updates=N)`,
    `run.finish(timeout=60)`, via `uv run --project REPO python script.py`. Track the
    same run again to make a resumed attempt.
@@ -187,9 +187,9 @@ repo, with an isolated `ETUDE_HOME`:
   (`etude cancel COHORT`) and `etude wait RUN` until each says `done: cancelled`,
   so no worker is left behind. macOS has no `timeout`; use
   `perl -e 'alarm 60; exec @ARGV' uv run etude wait RUN`.
-- Client jobs built in Python need `experiment=` (`job.model_copy(update=...)`); an
-  experiment file names it from its stem, and `track()` otherwise raises
-  `experiment_not_named`.
+- Client jobs submitted directly from Python need `experiment=`
+  (`job.model_copy(update=...)`). `etude launch FILE.py` defaults unnamed jobs
+  to the file stem; recipes call `track()` without an experiment.
 - A `--keep` smoke folder's `track/` holds a tiny tournament (games=1): as an
   `etude eval --source` it gives `seating_conflict`. Copy only the training run's
   folder out for a clean source.
@@ -206,3 +206,87 @@ directory: `~/.etude/cache` holds ~200k files and each cached range read scans t
 so bucket reads take minutes there. `tests.run.storage.MeasuredStorage` counts requests
 (needs `PYTHONPATH=.`). Delete the prefix afterwards with `storage.delete` over
 `storage.keys("")`.
+
+## Etude: a recipe's out, planned stops and retries on a fresh host
+
+Local recipe path: a lab outside the repo with its own `ETUDE_HOME` and a
+wrapper script `bin/etude` that runs `exec uv run --project REPO --extra train
+etude "$@"` (zsh will not split a command held in a variable). Copy
+`examples/coin.py`, or write a recipe as `docs/training.md` shows
+(`track(config=config)`, `run.resume(...)`, `run.steps(...)`, `run.save()`),
+with a `time.sleep` per step so a stop lands mid-run. Then:
+
+- `etude train FILE [--until clock=N]` (0 finished, 75 stopped); runs land in
+  `ETUDE_HOME/track/ADDRESS/` (`run.json`, `outcome.json`, `metrics/`, `out/`).
+- Ctrl-C: a background job in a non-interactive shell ignores SIGINT, so send it
+  from a tiny Python driver (`Popen(argv)`, `sleep`, `send_signal(SIGINT)`,
+  print `wait()`). `--seconds 2` gives a deadline stop instead.
+- `etude train FILE --resume [--until ...]`; refusals to check: rerun without
+  `--resume` (`run_name_taken`), resume a finished run (`run_already_finished`),
+  changed `--config` (`run_identity_conflict`), a target on a clock the recipe
+  does not count (`until_clock_undeclared`). Never pipe a run into `head`: the
+  SIGPIPE fails the run.
+- A `runs()` file with `seeds=(0, 1, 2)` trains `NAME@0..2` in order; `--job`
+  and `--seed` select. Do not teach `--resume` as finishing a partly started
+  selection (an unstarted member is refused; Open 6).
+- Read rows with `etude.train.read.read(ETUDE_HOME/track, EXPERIMENT, ADDRESS)
+  .points(metric, clock).x`; `etude checkpoints` lists stored checkpoints;
+  `etude report FILE` writes `ETUDE_HOME/track/reports/NAME.html`.
+- Hanabi: `bin/hetude` running `uv run --extra train --extra eval --extra hanabi
+  etude` from the repo root, then `docs/hanabi.md`'s commands; 2000 updates take
+  long enough to interrupt at ~5 s.
+
+Launch a plain file defining only `runs()` to check that its
+stem supplies the experiment. Also check an explicit `Job.experiment`: plain
+files preserve it, while files defining `report()` or `eval(state)` require
+their own stem.
+
+For an installed-package check, build with `uv build --wheel --out-dir /tmp/qa-dist`,
+create an isolated Python 3.12 environment with `uv venv --python 3.12 /tmp/qa-client`,
+and install the wheel's `train,eval,hanabi` extras with `uv pip install --python
+/tmp/qa-client/bin/python '/tmp/qa-dist/etude_sdk-VERSION-py3-none-any.whl[train,eval,hanabi]'`.
+Invoke `/tmp/qa-client/bin/etude` with a separate `ETUDE_HOME`. Copy the examples
+into a temporary git repo before `etude eval`; `Seating` needs `configs=({},)`
+even when the game has no config fields. Hanabi's group scores can be queried
+with `statsdb`/`compare`; current report charts draw individuals and explain when
+team scores are omitted.
+
+To exercise automatic retries without renting, declare a job with `max_hours`,
+`max_attempts=2` and `Runtime(python=...)` pointing to a **separate job environment**
+containing the wheel. Using the client environment as the job runtime is refused.
+Have the real recipe register a counter, save at update 2, and raise `Stopped`;
+its next allocation resumes at 3. Run `etude launch FILE --pool local --cohort C`,
+then `etude wait C`, inspect `etude logs --run ADDRESS`, and require a stopped
+attempt followed by success. Check `etude continue --run ADDRESS --until updates=N`
+too: implicit recipe clocks must work across branching. When ADDRESS is also a
+cohort name, supply `--cohort CHILD` on continue. Check cleanup receipts and ensure
+no owned worker remains after waiting. A wait command's exit 0 alone does not mean
+the run succeeded; read its printed final outcome.
+
+Manabot acceptance without touching its checkout: `git ls-files -z | rsync -a
+--from0 --files-from=- . /tmp/X/` plus the in-tree `managym/_managym.*.so`; then
+`uv venv -p 3.13` and `uv pip install` manabot's dependency list (without
+managym, which would build Rust) with `-e <this checkout>`, and `--no-deps -e .`.
+Apply the cutover in `scratch/questions.md` and run `.venv/bin/manabot train
+--recipe belief --out DIR` (about 85 s; a rerun about 13 s).
+
+SSH boxes when `docker build` hangs on registry metadata: `docker run -d` the
+cached `ghcr.io/astral-sh/uv:python3.12-bookworm-slim` (amd64 here, so pass
+`--platform linux/amd64`), `apt-get install openssh-server git iptables procps`
+inside, copy the key, `docker commit --change 'CMD ["/usr/sbin/sshd","-D","-e"]'`.
+The job repo must install this branch on the box: build a wheel into
+`wheels/`, depend on `etude-sdk[s3]` with `[tool.uv.sources] etude-sdk = {path =
+"wheels/…whl"}`, and `uv lock --upgrade-package etude-sdk` after each rebuild
+(same version, new hash). Wrap Doppler in a script (`withr2 CMD…`): zsh does
+not word-split a command stored in a variable.
+
+To place a retry on a fresh host deterministically: launch, `etude pool off P`
+at once, `etude wait RUN` under `perl -e 'alarm 100'` until attempt 1 ends
+`stopped`, then `docker rm -f` and `docker run` the box again on the same port
+(`ssh-keygen -R '[127.0.0.1]:PORT' -f KNOWN_HOSTS`), `etude pool on P`, wait.
+Grep `etude logs --run RUN` for the job's own lines. Per-session bucket reads
+are in `sessions/S/out/usage.jsonl`. Destroying an owned host mid-attempt is
+never declared lost (no deadline): the run stays `running`, and cancelling
+leaves it `stopping`. Use a fresh `ETUDE_HOME` and prefix after installing an
+interim schema. Afterwards remove the containers and delete the prefixes
+(`aws s3 rm --recursive` under Doppler, as above).

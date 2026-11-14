@@ -27,17 +27,16 @@ from collections.abc import Callable, Collection, Sequence
 from pathlib import Path
 from typing import Literal
 
+from etude.errors import EtudeError, LauncherError
 from etude.eval.records import Benchmark, RoundRobin
 from etude.experiment import ExperimentState, asked, observe, read_experiment
 from etude.experiment_file import defined_functions, experiment_named
 from etude.jobs import evaluation_spec, hold_evaluation, with_experiment
-from etude.launch.errors import LauncherError
 from etude.launch.job_file import read_job_file
-from etude.launch.records import Job, Run, SmokeStep
 from etude.launch.smoke import Smoked, show, smoke_home, smoke_train
 from etude.page import build, render, write
-from etude.run.errors import EtudeError
-from etude.run.storage import DirectoryStorage, Storage
+from etude.spec import Job, RunRequest, SmokeStep
+from etude.storage import DirectoryStorage, Storage
 
 type Step = Literal["train", "eval", "report"]
 STEPS: tuple[Step, ...] = ("train", "eval", "report")
@@ -45,7 +44,7 @@ STEPS: tuple[Step, ...] = ("train", "eval", "report")
 
 def smoke_file(
     path: Path,
-    runs: Sequence[Run] | None = None,
+    runs: Sequence[RunRequest] | None = None,
     *,
     steps: Collection[Step] = STEPS,
     source: Storage | None = None,
@@ -94,7 +93,11 @@ def smoke_file(
 
 
 def _saved(store: Storage, experiment: str, run: str) -> str:
-    found = [each for each in observe(store, experiment).runs if each.name == run]
+    found = [
+        each
+        for each in observe(store, experiment).runs
+        if each.name == run.removeprefix(experiment + "/")
+    ]
     count = len(found[0].checkpoints) if found else 0
     return f"{count} checkpoint{'' if count == 1 else 's'}"
 

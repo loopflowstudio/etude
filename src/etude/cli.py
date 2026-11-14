@@ -15,13 +15,56 @@ from typing import Annotated
 
 import typer
 
+from etude.errors import EtudeError, LauncherError
 from etude.launch import cli as launch_cli
 from etude.launch.commands import Kind, kind
-from etude.launch.errors import LauncherError
-from etude.run.errors import EtudeError
 from etude.train.cli import checkpoints, sync
 
 app = launch_cli.app
+
+
+ExperimentOption = Annotated[
+    str | None, typer.Option(help="experiment label, defaulting to the file stem")
+]
+
+
+@app.command("train")
+@kind(Kind.wait)
+def train_recipe(
+    file: Annotated[Path, typer.Argument(help="a Python file defining train(config)")],
+    config: Annotated[
+        str | None, typer.Option(help="JSON config fields; omitted on resume keeps stored config")
+    ] = None,
+    seed: Annotated[int | None, typer.Option(help="the run's seed")] = None,
+    job: Annotated[str | None, typer.Option(help="select a job defined in runs()")] = None,
+    experiment: ExperimentOption = None,
+    resume: Annotated[
+        bool, typer.Option(help="resume the selected runs on current source")
+    ] = False,
+    until: Annotated[str | None, typer.Option(help="absolute target, such as updates=2000")] = None,
+    seconds: Annotated[
+        float | None, typer.Option(help="execution allowance before a saved stop")
+    ] = None,
+    json_output: Annotated[bool, typer.Option("--json", help="print a JSON result")] = False,
+) -> None:
+    """Train a recipe on this computer; 0 finished, 75 stopped, other failed."""
+    from etude.local import train
+    from etude.spec import Until
+
+    target = Until.model_validate(until) if until is not None else None
+    raise typer.Exit(
+        train(
+            file,
+            config=config,
+            seed=seed,
+            job=job,
+            experiment=experiment,
+            resume=resume,
+            until=target,
+            seconds=seconds,
+            json_output=json_output,
+        )
+    )
 
 
 def _submit(
@@ -37,6 +80,11 @@ def _submit(
     queued: bool,
     smoke: bool,
     quote: bool = False,
+    experiment: str | None = None,
+    resume: bool = False,
+    job: str | None = None,
+    seed: int | None = None,
+    until: str | None = None,
 ) -> None:
     if help:
         print(ctx.get_help())
@@ -47,15 +95,33 @@ def _submit(
     from decimal import Decimal
 
     from etude.launch import controller
-    from etude.launch.job_file import read_job_file
+    from etude.launch.job_file import read_job_file, select_runs
     from etude.launch.listing import show_runs
     from etude.launch.records import CohortSpec
+    from etude.spec import Until
 
-    runs = read_job_file(file, ctx.args, help=help)
+    runs = read_job_file(file, ctx.args, help=help, experiment=experiment)
     if help:
         return
-    if cohort is None and (len(runs) > 1 or parallel != 1 or max_usd is not None):
-        raise LauncherError("several runs or cohort limits need --cohort NAME")
+    runs = select_runs(runs, job=job, seed=seed)
+    if until is not None and not resume:
+        raise LauncherError("--until needs --resume")
+    if resume:
+        if quote or cohort is not None:
+            raise LauncherError("--resume cannot be combined with --quote or --cohort")
+        if len(runs) != 1:
+            raise LauncherError("--resume needs one run; select --job and --seed")
+        request = runs[0]
+        if until is not None:
+            request = request.model_copy(
+                update={"job": request.job.model_copy(update={"until": Until.parse(until)})}
+            )
+        runs = [request.model_copy(update={"resume": True})]
+    if cohort is None:
+        if len(runs) > 1:
+            raise LauncherError(f"{len(runs)} runs need --cohort NAME")
+        if parallel != 1 or max_usd is not None:
+            raise LauncherError("cohort limits need --cohort NAME")
     spec = (
         CohortSpec(name=cohort, parallel=parallel, max_usd=Decimal(max_usd) if max_usd else None)
         if cohort
@@ -129,6 +195,13 @@ def launch(
     ] = False,
     smoke: SmokeOption = False,
     help: FileHelp = False,
+    experiment: ExperimentOption = None,
+    job: Annotated[str | None, typer.Option(help="select a declared job")] = None,
+    seed: Annotated[int | None, typer.Option(help="select a declared seed")] = None,
+    resume: Annotated[
+        bool, typer.Option(help="resume the selected runs on current source")
+    ] = False,
+    until: Annotated[str | None, typer.Option(help="absolute target for the resumed run")] = None,
 ) -> None:
     """Queue a file's runs and get the machines to start them now, or fail and queue nothing."""
     _submit(
@@ -143,6 +216,11 @@ def launch(
         queued=False,
         smoke=smoke,
         quote=quote,
+        experiment=experiment,
+        job=job,
+        seed=seed,
+        resume=resume,
+        until=until,
     )
 
 
@@ -161,9 +239,26 @@ def queue(
     max_usd: CohortUsd = None,
     smoke: SmokeOption = False,
     help: FileHelp = False,
+    experiment: ExperimentOption = None,
+    job: Annotated[str | None, typer.Option(help="select a declared job")] = None,
+    seed: Annotated[int | None, typer.Option(help="select a declared seed")] = None,
 ) -> None:
     """Add a file's runs to the queue. They start when a machine has room or can be rented."""
-    _submit(ctx, file, pool, rent, cohort, parallel, max_usd, help, queued=True, smoke=smoke)
+    _submit(
+        ctx,
+        file,
+        pool,
+        rent,
+        cohort,
+        parallel,
+        max_usd,
+        help,
+        experiment=experiment,
+        job=job,
+        seed=seed,
+        queued=True,
+        smoke=smoke,
+    )
 
 
 @app.command(
@@ -201,8 +296,8 @@ def smoke_experiment(
     from typing import cast
 
     from etude.launch.job_file import read_job_file
-    from etude.run.storage import storage_from_uri
     from etude.smoke import STEPS, Step, smoke_file
+    from etude.storage import storage_from_uri
 
     steps = step or list(STEPS)
     unknown = sorted(set(steps) - set(STEPS))
@@ -230,6 +325,9 @@ def report(
             "experiment file in it, with an index"
         ),
     ],
+    experiment: Annotated[
+        str | None, typer.Option(help="override the file’s experiment name")
+    ] = None,
     source: Annotated[
         str | None,
         typer.Option(
@@ -270,11 +368,13 @@ def report(
     import webbrowser
 
     from etude.page import Page, Pages, Server, index, render, render_index, target, write
-    from etude.run.storage import default_root, storage_from_uri
+    from etude.storage import default_root, storage_from_uri
 
+    if experiment is not None and path.is_dir():
+        raise ValueError("--experiment needs one Python file")
     storage = storage_from_uri(source or default_root())
     if serve:
-        server = Server(storage, path, (host, port), refresh=watch)
+        server = Server(storage, path, (host, port), refresh=watch, experiment=experiment)
         address = f"http://{host}:{server.server_port}/"
         print(address, flush=True)
         if open_:
@@ -287,7 +387,8 @@ def report(
             server.server_close()
         return
     shown: object = None
-    pages = Pages(storage)  # a watched page is built again only once its files change
+    # A watched page is built again only once its files change.
+    pages = Pages(storage, experiment=experiment)
     try:
         while True:
             current: Page | dict[Path, Page | str] | None
@@ -302,7 +403,9 @@ def report(
                     current = None  # Watching waits for the experiment's first run.
             if current is not None and current != shown:
                 if isinstance(current, Page):
-                    written = write(render(current, refresh=watch), target(storage, path.stem, out))
+                    written = write(
+                        render(current, refresh=watch), target(storage, current.experiment, out)
+                    )
                 else:
                     if "index" in {file.stem for file in current}:
                         raise EtudeError("experiment_named_index", 409)
@@ -332,6 +435,7 @@ def eval_experiment(
         Path,
         typer.Argument(help="a Python file defining eval(state); the experiment is named for it"),
     ],
+    experiment: ExperimentOption = None,
     source: Annotated[
         str | None,
         typer.Option(
@@ -371,11 +475,11 @@ def eval_experiment(
     import time
 
     from etude.experiment import advance, read_experiment
-    from etude.launch.records import Smoke
-    from etude.run.storage import default_root, storage_from_uri
     from etude.smoke import smoke_file
+    from etude.spec import Smoke
+    from etude.storage import default_root, storage_from_uri
 
-    experiment = read_experiment(file)
+    definition = read_experiment(file, experiment=experiment)
     storage = storage_from_uri(source or default_root())
     before = Smoke()
     if smoke and (pool or rent):
@@ -384,7 +488,7 @@ def eval_experiment(
     try:
         while True:
             for done in advance(
-                experiment,
+                definition,
                 source=storage,
                 pool=pool,
                 rent=rent,
@@ -414,12 +518,13 @@ def eval_experiment(
 def convert_eval(
     run: Annotated[str, typer.Argument(help="the eval run, by name")],
     source: Annotated[str, typer.Option(help="s3://bucket/prefix or a runs directory")],
+    experiment: ExperimentOption = None,
 ) -> None:
     """Write blocks holding an eval run's per-file records, beside them; nothing is deleted."""
     from etude.eval.convert import convert
-    from etude.run.storage import storage_from_uri
+    from etude.storage import storage_from_uri
 
-    done = convert(run, storage_from_uri(source))
+    done = convert(run, storage_from_uri(source), experiment=experiment)
     print(
         f"{run}: {done.blocks} blocks, {done.matches} matches, {done.blobs} blobs,"
         f" replacing {done.replaced} files"
@@ -431,12 +536,15 @@ def convert_eval(
 def delete_eval_files(
     run: Annotated[str, typer.Argument(help="the eval run, by name")],
     source: Annotated[str, typer.Option(help="s3://bucket/prefix or a runs directory")],
+    experiment: ExperimentOption = None,
 ) -> None:
     """Delete an eval run's per-file records that its blocks in SOURCE replace; refuses before."""
     from etude.eval.convert import delete_files
-    from etude.run.storage import storage_from_uri
+    from etude.storage import storage_from_uri
 
-    print(f"{run}: deleted {delete_files(run, storage_from_uri(source))} files")
+    print(
+        f"{run}: deleted {delete_files(run, storage_from_uri(source), experiment=experiment)} files"
+    )
 
 
 @app.command("continue")
@@ -453,47 +561,65 @@ def continue_run(
         ),
     ] = None,
     ordinal: Annotated[
-        int | None, typer.Option(help="the parent's checkpoint to start from; default: its latest")
+        int | None,
+        typer.Option(
+            help="choose a checkpoint; default: the parent's out, or its latest copied "
+            "checkpoint when out is empty"
+        ),
     ] = None,
     cohort: Annotated[
         str | None, typer.Option(help="the new cohort's name, when continuing a cohort")
     ] = None,
+    config: Annotated[
+        str | None,
+        typer.Option(help='typed config changes as a JSON object, e.g. {"rate":0.001}'),
+    ] = None,
     max_usd: Annotated[str | None, typer.Option(help="the new cohort's dollar ceiling")] = None,
+    experiment: Annotated[
+        str | None, typer.Option(help="experiment label qualifying a bare run id")
+    ] = None,
 ) -> None:
-    """Go past a run's target from a checkpoint it recorded. This makes a new run with a parent."""
+    """Go past a run's target from its out. This makes a new run with a parent."""
     # Continuation joins the launcher's runs with tracking's checkpoints.
     import tempfile
     from decimal import Decimal
 
     from etude.carriage import put_back
-    from etude.jobs import continue_from
+    from etude.jobs import continue_from, continued_config
     from etude.launch.listing import resolve_runs, show_runs
-    from etude.run.listing import run_folders
-    from etude.run.storage import default_root, storage_from_uri
+    from etude.run import located_runs
+    from etude.storage import default_root, storage_from_uri
 
     scheduler = launch_cli.default()
     storage = storage_from_uri(source or default_root())
-    parents = resolve_runs(scheduler, [run])
-    first = scheduler.record(parents[0])
+    try:
+        parents = [
+            scheduler.record(parent)
+            for parent in resolve_runs(scheduler, [run], experiment=experiment)
+        ]
+    except LauncherError as error:
+        raise LauncherError(f"{error}; a changed config needs a new --experiment") from error
+    first = parents[0]
     with tempfile.TemporaryDirectory() as relayed:
         if source is None:
             # A parent that ran on another owned host: its records, from there.
-            here = run_folders(storage.keys(""))
+            here = {item.file.id for item in located_runs(storage, storage.keys(""))}
             for parent in parents:
-                files = None if parent in here else scheduler.held(parent)
+                files = None if parent.id in here else scheduler.held(parent.id)
                 if files is not None:
-                    put_back(Path(relayed) / parent, files)
+                    put_back(Path(relayed) / parent.id, files)
         again = [
             continue_from(
-                scheduler.record(parent),
+                parent,
                 until,
-                source=relayed if (Path(relayed) / parent).is_dir() else storage,
+                source=relayed if (Path(relayed) / parent.id).is_dir() else storage,
                 ordinal=ordinal,
+                config=None if config is None else continued_config(parent, config),
             )
             for parent in parents
         ]
     if first.cohort != run:
-        ids = [scheduler.queue(again[0], first.pool, rent=first.rent)]
+        ids = [scheduler.queue(again[0], first.launch.pool, rent=first.launch.rent)]
     elif cohort is None:
         raise LauncherError("continuing a cohort needs --cohort with the new cohort's name")
     else:
@@ -502,8 +628,8 @@ def continue_run(
             scheduler.queue_cohort(
                 cohort,
                 again,
-                first.pool,
-                rent=first.rent,
+                first.launch.pool,
+                rent=first.launch.rent,
                 parallel=old.parallel,
                 max_usd=Decimal(max_usd) if max_usd else old.max_usd,
             )

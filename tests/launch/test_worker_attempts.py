@@ -11,32 +11,24 @@ import sys
 import time
 from decimal import Decimal
 from pathlib import Path
-from urllib.parse import urlparse
 
 import pytest
 
 from etude.cache import Artifact, Cache, Fetched
-from etude.jobs import continue_from
+from etude.carriage import put_back, restore_set
+from etude.errors import LauncherError
+from etude.jobs import checkpoint_inputs_for, continue_from
 from etude.launch.database import Database, launcher_file
 from etude.launch.executor import local as local_service
-from etude.launch.records import (
-    Input,
-    Job,
-    LauncherError,
-    Machine,
-    Pool,
-    Run,
-    Status,
-    Until,
-    job_id,
-)
+from etude.launch.records import Machine, Pool, Status
 from etude.launch.scheduler import Scheduler
-from etude.run.listing import runs
-from etude.run.storage import DirectoryStorage
+from etude.run import runs
+from etude.spec import Input, Job, RunRequest, Until, job_id
+from etude.storage import DirectoryStorage
 from etude.train.read import read
 from etude.train.records import Step
 from etude.train.report import training
-from etude.train.run import track
+from etude.train.tracking import track
 from tests.experiments import authored
 from tests.launch.counting import job_text
 from tests.run.storage import MeasuredStorage
@@ -93,7 +85,7 @@ def test_a_run_from_a_commit_reports_progress_and_keeps_its_outputs(
         max_hours=0.1,
         max_usd=Decimal(1),
     )
-    first = scheduler.launch(Run(job=spec, seed=3))
+    first = scheduler.launch(RunRequest(job=spec, seed=3))
     (status,) = scheduler.wait(first, every=0.05, timeout=30)
     assert (status.outcome, status.rental_ended) == ("succeeded", None)
     assert status.clocks == {"agent_steps": 26_000, "wall_time_ms": 1500}
@@ -109,13 +101,12 @@ def test_a_run_from_a_commit_reports_progress_and_keeps_its_outputs(
 CONTINUED = """
 import os
 from pathlib import Path
-from urllib.parse import urlparse
 from etude.train.records import Step
-from etude.train.run import track
+from etude.train.tracking import track
 run = track(experiment="capacity", clocks=[Step("steps", "training steps")])
 latest = run.latest_checkpoint()
 start = 0 if latest is None else int(latest.at["steps"])
-kept = "" if latest is None else Path(urlparse(latest.artifact.uri).path).read_text()
+kept = "" if latest is None else latest.path.read_text()
 target = int(os.environ["ETUDE_UNTIL_VALUE"])
 for step in range(start + 1, target + 1):
     run.log({"loss": 1.0 / step}, steps=step)
@@ -135,7 +126,7 @@ def test_a_continuation_starts_from_its_parents_recorded_checkpoint(tmp_path: Pa
         max_hours=0.1,
         max_usd=Decimal(1),
     )
-    first = scheduler.launch(Run(job=spec, seed=3))
+    first = scheduler.launch(RunRequest(job=spec, seed=3))
     assert scheduler.wait(first, every=0.05, timeout=30)[0].outcome == "succeeded"
     tracked = tmp_path / "track"
     with pytest.raises(LauncherError, match="not beyond the checkpoint's steps=2"):
@@ -149,6 +140,8 @@ def test_a_continuation_starts_from_its_parents_recorded_checkpoint(tmp_path: Pa
     # Tagging the parent's checkpoint later does not make the continuation another job.
     identity = job_id(continue_from(scheduler.record(first), "steps=5", source=tracked).job)
     parent = track(
+        resume=True,
+        seed=3,
         experiment="capacity",
         clocks=[Step("steps", "training steps")],
         run=first,
@@ -171,11 +164,9 @@ def test_a_continuation_starts_from_its_parents_recorded_checkpoint(tmp_path: Pa
     assert (status.outcome, authored(status.clocks)) == ("succeeded", {"steps": 5})
     data = read(tracked, "capacity", second)
     (checkpoint,) = data.checkpoints
-    assert Path(urlparse(checkpoint.artifact.uri).path).read_text() == (
-        "trained to 2\ntrained to 5\n"
-    )
-    assert data.file is not None and data.file.declaration.continues is not None
-    continues = data.file.declaration.continues
+    assert checkpoint.path.read_text() == ("trained to 2\ntrained to 5\n")
+    assert data.file is not None and data.file.continues is not None
+    continues = data.file.continues
     assert (continues.parent.source_id, continues.clock, continues.value) == (first, "steps", 2)
     assert scheduler.record(second).seed == 3
 
@@ -235,7 +226,7 @@ def test_added_work_has_a_session_but_no_rental_or_session_deadline(tmp_path: Pa
 TRACKED = """
 import os
 from etude.train.records import Step
-from etude.train.run import track
+from etude.train.tracking import track
 run = track(experiment="capacity", clocks=[Step("steps", "training steps")])
 for step in range(3):
     run.log({"loss": 1.0 / (step + 1)}, steps=step)
@@ -270,7 +261,7 @@ def test_a_launched_job_tracks_as_its_run_without_naming_itself(tmp_path: Path) 
         data = read(tracked, "capacity", record.id)
         found.append(data)
         assert data.file is not None and data.rows == 3
-        declared = data.file.declaration
+        declared = data.file
         assert (declared.job, declared.job_name, declared.seed, declared.cohort) == (
             record.job,
             "hidden256",
@@ -354,3 +345,35 @@ def test_a_corrupted_held_input_is_refused_before_the_job_starts(tmp_path: Path)
     assert (status.outcome, status.cause) == ("lost", "input_undelivered")
     assert scheduler.attempts(one)[0].started_at is None
     assert not held.exists()  # the corrupt copy is discarded, not trusted again
+
+
+def test_a_folder_checkpoint_reaches_a_job_as_verified_nested_inputs(tmp_path: Path) -> None:
+    with track(
+        experiment="tiny",
+        run="r",
+        directory=tmp_path / "tracked",
+        clocks=[Step("updates", "updates")],
+        strict=True,
+    ) as run:
+
+        def export(folder: Path) -> None:
+            (folder / "nested").mkdir()
+            (folder / "nested/policy").write_text("policy weights")
+            (folder / "value").write_text("value weights")
+
+        run.checkpoint(export, updates=1)
+        (checkpoint,) = run.checkpoints()
+    scheduler = local(tmp_path)
+    inputs = checkpoint_inputs_for(checkpoint, "start")
+    # Put the parent where a machine holds tracked folders; no provider or bucket needed.
+    put_back(tmp_path / "track/tiny/r", restore_set(run.files.root))
+    one = scheduler.launch(
+        Job(
+            command='cat "$ETUDE_INPUTS_DIR/start/nested/policy" "$ETUDE_INPUTS_DIR/start/value"',
+            inputs=inputs,
+            max_hours=0.1,
+        )
+    )
+    (status,) = scheduler.wait(one, every=0.05, timeout=30)
+    assert status.outcome == "succeeded"
+    assert "policy weightsvalue weights" in job_text(scheduler.logs(refresh=True, run=one))

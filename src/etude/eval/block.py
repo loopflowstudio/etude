@@ -49,6 +49,7 @@ from pydantic import Field, JsonValue, TypeAdapter
 
 from etude.cache import Content
 from etude.carriage import EVAL_BLOCK_INDEX, EVAL_BLOCK_PACK, EVAL_BLOCKS
+from etude.errors import EtudeError
 from etude.eval.records import (
     ADDED,
     ROLLUP_ROWS,
@@ -58,9 +59,8 @@ from etude.eval.records import (
     MatchRecord,
     Rollup,
 )
-from etude.run.errors import EtudeError
-from etude.run.records import Digest, Name, Record
-from etude.run.storage import Storage
+from etude.records import Digest, Name, Record
+from etude.storage import Storage
 
 if TYPE_CHECKING:
     import duckdb

@@ -17,8 +17,11 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from uuid import uuid4
 
+from etude.errors import LauncherError
+from etude.identity import run_address
 from etude.launch.measurement import timed
-from etude.launch.records import LauncherError, Run, RunRecord, SourcePosition
+from etude.records import RunRecord
+from etude.spec import RunRequest, SourcePosition
 
 
 def home() -> Path:
@@ -217,16 +220,16 @@ def _publish(
     return source
 
 
-def freeze(run: Run) -> Run:
+def freeze(run: RunRequest) -> RunRequest:
     """Freeze at the submitting client; a controller receives this same identity."""
+    id = run_address(run.id or uuid4().hex[:12], run.job.experiment)
     if run.id is not None and (run.job.repo is None or run.source is not None):
         if run.job.repo is not None and (
             run.job.revision is None
             or (run.source is not None and run.source.commit != run.job.revision)
         ):
             raise LauncherError("prepared run source does not match its revision")
-        return run
-    id = run.id or uuid4().hex[:12]
+        return run.model_copy(update={"id": id})
     job = run.job
     source = run.source
     if job.repo is not None:
@@ -279,18 +282,18 @@ def line(source: SourcePosition | None, commit: str) -> str:
 
 def checkout(run: RunRecord, destination: Path) -> Path:
     """Fetch git objects into a new checkout, never overwrite an existing directory."""
-    if run.spec.repo is None or run.spec.revision is None:
+    if run.launch.spec.repo is None or run.launch.spec.revision is None:
         raise LauncherError(f"run {run.id} has no source repository")
-    origin = run.source.origin if run.source else _origin(run.spec.repo)
-    address = origin or run.spec.repo
+    origin = run.launch.source.origin if run.launch.source else _origin(run.launch.spec.repo)
+    address = origin or run.launch.spec.repo
     if destination.exists():
         raise LauncherError("source destination already exists; choose a new directory")
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=destination.parent) as temporary:
         _git(temporary, "init", "-q")
         _git(temporary, "remote", "add", "origin", address)
-        _git(temporary, "fetch", "--quiet", "origin", run.spec.revision)
-        _git(temporary, "checkout", "--quiet", "--detach", run.spec.revision)
+        _git(temporary, "fetch", "--quiet", "origin", run.launch.spec.revision)
+        _git(temporary, "checkout", "--quiet", "--detach", run.launch.spec.revision)
         # Rename only the finished checkout. Never use the tar cache as source truth.
         os.rename(temporary, destination)
     return destination
@@ -298,17 +301,17 @@ def checkout(run: RunRecord, destination: Path) -> Path:
 
 def contains(run: RunRecord, revision: str) -> bool:
     """Ancestry, not feature activation. Unknown revisions fail rather than mean false."""
-    if run.spec.repo is None or run.spec.revision is None:
+    if run.launch.spec.repo is None or run.launch.spec.revision is None:
         return False
-    repo = run.spec.repo
+    repo = run.launch.spec.repo
     if Path(repo).is_dir():
         ancestor = resolve(repo, revision)
-        return _ancestor(repo, ancestor, run.spec.revision)
-    if run.source is None or run.source.origin is None:
+        return _ancestor(repo, ancestor, run.launch.spec.revision)
+    if run.launch.source is None or run.launch.source.origin is None:
         raise LauncherError(f"source history for local-only run {run.id} is unavailable")
-    with _history(run.source.origin) as history:
-        _git(history, "fetch", "--quiet", "--", run.source.origin, run.spec.revision)
-        return _ancestor(history, resolve(history, revision), run.spec.revision)
+    with _history(run.launch.source.origin) as history:
+        _git(history, "fetch", "--quiet", "--", run.launch.source.origin, run.launch.spec.revision)
+        return _ancestor(history, resolve(history, revision), run.launch.spec.revision)
 
 
 @timed("git.ancestor")

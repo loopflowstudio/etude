@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from etude.run.records import BUILT_IN_NAMES
+from etude.records import BUILT_IN_NAMES
 
 
 def experiment_file(folder: Path, name: str, text: str = "") -> Path:

@@ -8,7 +8,7 @@ import hashlib
 import os
 from pathlib import Path
 
-from etude.launch.schemas import Result
+from etude.records import RunProgress
 
 RESULT = "etude-result.json"
 
@@ -36,9 +36,9 @@ def digest(path: Path) -> str:
         return hashlib.file_digest(file, "sha256").hexdigest()
 
 
-def read_result(outputs: Path) -> Result:
+def read_result(outputs: Path) -> RunProgress:
     """Validate job-owned progress once; unreadable or partial reports mean no progress."""
     try:
-        return Result.model_validate_json((outputs / RESULT).read_bytes(), strict=True)
+        return RunProgress.model_validate_json((outputs / RESULT).read_bytes(), strict=True)
     except (OSError, ValueError):
-        return Result()
+        return RunProgress()

@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from etude.cli import main
+from etude.errors import LauncherError
 from etude.launch.client import (
     _open,
     cancel,
@@ -28,7 +29,8 @@ from etude.launch.client import (
 )
 from etude.launch.controller import FetchRequest, PythonClient, forward, warning
 from etude.launch.database import launcher_file
-from etude.launch.records import Job, LauncherError, Pool, Until
+from etude.launch.records import Pool
+from etude.spec import Job, RunRequest, Until
 from tests.launch.counting import job_text
 from tests.launch.test_source import git
 from tests.launch.test_source import repository as repository
@@ -38,7 +40,7 @@ TRACKED = """
 import os
 from pathlib import Path
 from etude.train.records import Step
-from etude.train.run import track
+from etude.train.tracking import track
 run = track(experiment="capacity", clocks=[Step("steps", "training steps")])
 latest = run.latest_checkpoint()
 start = 0 if latest is None else int(latest.at["steps"])
@@ -113,7 +115,7 @@ def test_remote_launch_freezes_sources_config_and_returns_outputs(
     (tmp_path / "config.txt").write_text("frozen config\n")
     job = tmp_path / "job.py"
     job.write_text(
-        'from etude.launch.records import Job, Run\nfrom pathlib import Path\nhere = Path(__file__).parent\ndef runs(): return Job(command="sh train.sh", max_hours=0.01, max_usd=1, repo=str(here / "source with spaces"), config=(here / "config.txt").read_text(), until="steps=10").runs(1, 2)\n'
+        'from etude.launch.records import Job, RunRequest\nfrom pathlib import Path\nhere = Path(__file__).parent\ndef runs(): return Job(command="sh train.sh", experiment="capacity", max_hours=0.01, max_usd=1, repo=str(here / "source with spaces"), config=(here / "config.txt").read_text(), until="steps=10").runs(1, 2)\n'
     )
     launched = command("launch", str(job), "--cohort", "pair")
     assert launched.returncode == 0, launched.stderr
@@ -127,8 +129,8 @@ def test_remote_launch_freezes_sources_config_and_returns_outputs(
     assert not launcher_file(client).exists()
     assert len(list((remote / "sources").glob("*.tar"))) == 1
     assert [pool.name for pool in _open(remote).pools()] == ["controller"]
-    assert _open(remote).record(ids[0]).pool == "controller"
-    frozen = _open(remote).record(ids[0]).spec
+    assert _open(remote).record(ids[0]).launch.pool == "controller"
+    frozen = _open(remote).record(ids[0]).launch.spec
     assert frozen.repo == str(repo) and frozen.revision != "HEAD"
     # Continuation works without the client's repository: it uses the retained archive.
     continued = command("continue", "--run", ids[0], "--until", "steps=20")
@@ -162,7 +164,7 @@ def test_loop_survives_an_empty_queue_and_places_later_work(
             _until_while_alive(process, heartbeat.exists)
             job = tmp_path / "job.py"
             job.write_text(
-                'from etude.launch.records import Job, Run\ndef runs(): return Job(command="sleep 0.2", max_hours=0.01, max_usd=1).runs(1, 2)\n'
+                'from etude.launch.records import Job, RunRequest\ndef runs(): return Job(command="sleep 0.2", max_hours=0.01, max_usd=1).runs(1, 2)\n'
             )
             assert command("launch", str(job), "--cohort", "later").returncode == 0
             scheduler = _open(remote)
@@ -234,14 +236,14 @@ def test_remote_queue_preserves_choice_without_local_database(
     assert command("pool", "add", "waiting").returncode == 0
     path = tmp_path / "queued.py"
     path.write_text(
-        'from etude.launch.records import Job, Run\ndef runs(): return Job(command="true", max_hours=1, max_usd=1).runs(1, 2)\n'
+        'from etude.launch.records import Job, RunRequest\ndef runs(): return Job(command="true", max_hours=1, max_usd=1).runs(1, 2)\n'
     )
     result = command("queue", str(path), "--pool", "waiting", "--cohort", "queued")
     assert result.returncode == 0, result.stderr
     ids = [line.split()[0] for line in result.stdout.splitlines()]
     assert len(ids) == 2
     scheduler = _open(remote)
-    assert all(scheduler.record(id).autorun for id in ids)
+    assert all(scheduler.record(id).launch.autorun for id in ids)
     assert all(scheduler.read(id).phase == "queued" for id in ids)
     assert not launcher_file(client).exists()
 
@@ -341,16 +343,16 @@ def test_controller_keeps_source_history_and_checks_out_on_client(
     (repo / "train").write_text("client snapshot\n")
     job = repo.parent / "snapshot.py"
     job.write_text(
-        f'from etude.launch.records import Job, Run\ndef runs(): return Job(command="true", max_hours=1, repo={str(repo)!r})\n'
+        f'from etude.launch.records import Job, RunRequest\ndef runs(): return Job(command="true", max_hours=1, repo={str(repo)!r})\n'
     )
     assert command("pool", "add", "waiting").returncode == 0
     sent = command("queue", str(job), "--pool", "waiting")
     assert sent.returncode == 0, sent.stderr
     id = sent.stdout.split()[0]
     record = _open(remote).record(id)
-    assert record.source is not None and record.source.snapshot
-    assert record.source.origin == str(origin)
-    assert git(origin, "rev-parse", f"refs/etude/runs/{id}") == record.spec.revision
+    assert record.launch.source is not None and record.launch.source.snapshot
+    assert record.launch.source.origin == str(origin)
+    assert git(origin, "rev-parse", f"refs/etude/runs/{id}") == record.launch.spec.revision
     assert "uncommitted changes" in sent.stdout
     repo.rename(repo.with_name("unavailable"))
     listed = command("runs", "--contains", "v1", "--pool", "waiting")
@@ -361,3 +363,29 @@ def test_controller_keeps_source_history_and_checks_out_on_client(
     assert (destination / "train").read_text() == "client snapshot\n"
     assert not launcher_file(client).exists()
     assert _open(remote).read(id).phase == "queued"
+
+
+def test_remote_resume_keeps_one_run_and_its_previous_attempt(
+    controller: tuple[Path, Path],
+    tmp_path: Path,
+) -> None:
+    client, remote = controller
+    spec = Job(
+        command='echo "$ETUDE_UNTIL_VALUE" > "$ETUDE_OUTPUT_DIR/result"; printf \'{"clocks":{"steps":%s}}\' "$ETUDE_UNTIL_VALUE" > "$ETUDE_OUTPUT_DIR/etude-result.json"',
+        max_hours=0.01,
+        until=Until(clock="steps", value=10),
+    )
+    identity = launch(RunRequest(job=spec, seed=7))
+    assert wait(identity, every=0.02, timeout=10)[0].outcome == "succeeded"
+    resumed = RunRequest(
+        job=spec.model_copy(update={"until": Until(clock="steps", value=20)}),
+        seed=7,
+        id=identity,
+        resume=True,
+    )
+    assert launch(resumed) == identity
+    seen = wait(identity, every=0.02, timeout=10)[0]
+    assert (seen.outcome, seen.attempts, seen.clocks) == ("succeeded", 2, {"steps": 20})
+    assert fetch(identity, "result", tmp_path / "resumed").read_text() == "20\n"
+    assert not launcher_file(client).exists()
+    assert len(_open(remote).runs(done=True)) == 1

@@ -7,9 +7,11 @@ from pathlib import Path
 import pytest
 
 from etude.cli import main
+from etude.errors import LauncherError
 from etude.launch.client import _open, default
-from etude.launch.records import Job, LauncherError, Pool, SourcePosition
+from etude.launch.records import Pool
 from etude.launch.source import checkout, contains, line, retain, source_archive, stored
+from etude.spec import Job, SourcePosition
 
 
 def test_concurrent_archives_cannot_replace_frozen_source(
@@ -74,9 +76,9 @@ def test_position_snapshot_publication_and_checkout(repository: tuple[Path, Path
     first = scheduler.queue(Job(command="true", max_hours=1, repo=str(repo)), "waiting")
     second = scheduler.queue(Job(command="true", max_hours=1, repo=str(repo)), "waiting")
     run = scheduler.record(first)
-    position = run.source
+    position = run.launch.source
     assert position is not None
-    assert position.commit == scheduler.record(second).spec.revision
+    assert position.commit == scheduler.record(second).launch.spec.revision
     assert position.base_commit == head and position.base_subject == "Base training"
     assert position.base_date and position.ahead == 2 and position.release is not None
     assert position.release.startswith("v1-2-")
@@ -96,7 +98,7 @@ def test_position_snapshot_publication_and_checkout(repository: tuple[Path, Path
     with pytest.raises(LauncherError, match="already exists"):
         checkout(run, recovered)
     assert contains(run, head)
-    assert _open(repo.parent / "launcher").record(first).source == position
+    assert _open(repo.parent / "launcher").record(first).launch.source == position
 
 
 def test_explicit_revision_and_failed_push(repository: tuple[Path, Path]) -> None:
@@ -109,7 +111,11 @@ def test_explicit_revision_and_failed_push(repository: tuple[Path, Path]) -> Non
         Job(command="true", max_hours=1, repo=str(repo), revision="HEAD"), "waiting"
     )
     run = scheduler.record(id)
-    assert run.spec.revision == head and run.source is not None and not run.source.snapshot
+    assert (
+        run.launch.spec.revision == head
+        and run.launch.source is not None
+        and not run.launch.source.snapshot
+    )
     assert not git(origin, "for-each-ref", "refs/etude/runs")
     hook = origin / "hooks/pre-receive"
     hook.write_text("#!/bin/sh\nexit 1\n")
@@ -129,8 +135,8 @@ def test_local_only_snapshot(
     scheduler.add_pool(Pool(name="waiting"))
     id = scheduler.queue(Job(command="true", max_hours=1, repo=str(repo)), "waiting")
     record = scheduler.record(id)
-    assert record.source is not None and record.source.origin is None
-    assert git(repo, "rev-parse", f"refs/etude/runs/{id}") == record.spec.revision
+    assert record.launch.source is not None and record.launch.source.origin is None
+    assert git(repo, "rev-parse", f"refs/etude/runs/{id}") == record.launch.spec.revision
     assert main(["status", id]) == 0
     assert "local-only" in capsys.readouterr().out
     assert (checkout(record, repo.parent / "copy") / "new").read_text() == "retained locally\n"
@@ -168,7 +174,9 @@ def test_runs_filters_and_source_cli_are_read_only(
     assert first in output and second in output and local not in output
     assert "source:" in output and "main@" in output and "Base training" in output
     assert scheduler.read(local).phase == "queued"
-    assert main(["runs", "--job", scheduler.record(first).job]) == 0
+    digest = scheduler.record(first).job
+    assert digest is not None
+    assert main(["runs", "--job", digest]) == 0
     assert first in capsys.readouterr().out
     assert main(["runs", "--contains", "no-such-revision"]) == 1
     assert "not a commit" in capsys.readouterr().err

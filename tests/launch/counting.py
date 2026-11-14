@@ -14,7 +14,8 @@ from typing import Any, Literal
 from unittest.mock import patch
 
 from etude.launch.database import Database
-from etude.launch.records import LogSnapshot, Record
+from etude.launch.records import LogSnapshot
+from etude.spec import Record
 from tests.launch.fake import FakeService
 
 

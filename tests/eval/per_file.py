@@ -18,8 +18,9 @@ def write_per_file(made: Path, folder: Path) -> Block:
     becomes an author's file under `artifacts/evidence/`. Returns the block.
     """
     folder.mkdir(parents=True)
-    for name in ("run.json", "environment.json", "state.json"):
+    for name in ("run.json", "environment.json"):
         shutil.copy(made / name, folder / name)
+    shutil.copy(made / "outcome.json", folder / "state.json")
     (blocks,) = (made / "blocks").glob("[0-9]*")
     kept = Block.model_validate_json((blocks / "block.json").read_bytes())
     (folder / "matches").mkdir()

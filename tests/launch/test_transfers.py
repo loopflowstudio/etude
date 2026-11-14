@@ -31,7 +31,7 @@ from etude.launch import client
 from etude.launch.database import Database, launcher_file
 from etude.launch.logging import log_to
 from etude.launch.providers import bootstrap
-from etude.launch.records import Job, Output, Storage
+from etude.launch.records import Output, Storage
 from etude.launch.scheduler import Scheduler
 from etude.launch.schemas import (
     WORKER_LOG,
@@ -40,7 +40,6 @@ from etude.launch.schemas import (
     Fetch,
     Finished,
     Inbox,
-    Result,
     WorkerLog,
     attempt_log,
     log_piece,
@@ -53,8 +52,11 @@ from etude.launch.storage.s3 import Bucket, Grant, Keys, PostForm, _send, read
 from etude.launch.storage.transport import HTTPReply, attribute, observe
 from etude.launch.usage import R2, S3_US_WEST_2, Access, Transfer, Usage, reconcile
 from etude.launch.worker.courier import Courier
-from etude.run.delivery import RunFiles, StorageDestination, ship
-from etude.run.storage import S3Storage
+from etude.records import RunProgress as Result
+from etude.records import RunRecord
+from etude.run import RunFiles, StorageDestination, ship
+from etude.spec import Job
+from etude.storage import S3Storage
 from etude.storage_timeout import StorageUnavailable, socket_timeout
 from tests.launch.counting import Counting, Counts
 from tests.launch.fake import bench
@@ -225,6 +227,7 @@ def test_cold_warm_concurrent_and_new_process_retrieval(http: HTTP, tmp_path: Pa
     script = """from pathlib import Path
 import sys
 from etude.cache import Cache
+from etude.records import RunProgress as Result
 from etude.launch.storage import download as downloads
 from etude.launch.storage.download import Download, download
 download(Download.model_validate_json(sys.argv[2]), Path(sys.argv[3]), cache=Cache(Path(sys.argv[1])))
@@ -735,8 +738,10 @@ def test_completed_workload_before_and_after(
     assert control.requests > 0 and control.supplied_bytes > 0
     assert bulk.requests == 8  # runtime, failed source, source, input, 2 uploads, 2 parts
     # Worker publication (each attempt says how it ended before its files), scheduler
-    # collection, a running log and public fetches; a start receipt is read once.
-    assert control.requests == 42
+    # collection, a running log and public fetches; a start receipt is read once. Each
+    # observation of a run also asks, conditionally, whether its out membership changed
+    # (`BucketJournal._clear_state`): 8 of these.
+    assert control.requests == 50
 
     assert sum(e.operation == "GET" for e in after.events) == http.requests
     assert after.received_bytes == http.received
@@ -759,7 +764,7 @@ def test_completed_workload_before_and_after(
     assert before.received_bytes - after.received_bytes == len(
         http.objects["/source"]
     ) + 1024**2 + 3 * len(payload)
-    assert (before.requests, after.requests) == (54, 50)
+    assert (before.requests, after.requests) == (62, 58)
     saved = before.estimate(S3_US_WEST_2) - after.estimate(S3_US_WEST_2)
     assert saved == Decimal("0.00707948782")
     assert after.requests == control.requests + bulk.requests
@@ -1368,6 +1373,9 @@ def test_storage_socket_timeout_retries_and_recovers(
     assert log.read_text().count("retrying") == 2
     assert "private" not in log.read_text()
     http.fault = ""
+    # The short allowance forces the outage; healthy recovery uses the default
+    # so counting requests does not depend on local scheduling within 100 ms.
+    monkeypatch.delenv("ETUDE_STORAGE_TIMEOUT_SECONDS")
     assert read(http.url + "/payload") == b"abcdefghijkl"
     assert http.requests == 4
 
@@ -1418,17 +1426,19 @@ def test_sdk_storage_failure_retains_files_and_recovers(
     assert storage.client.meta.config.read_timeout == 0.1
     root = tmp_path / "runs/run"
     root.mkdir(parents=True)
-    (root / "run.json").write_bytes(b'{"retained":true}')
+    body = RunRecord(id="run").model_dump_json().encode()
+    (root / "run.json").write_bytes(body)
     files = RunFiles(root)
     destination = StorageDestination(storage)
     http.fault = "silent-upload"
     assert ship(files, "run", destination) == "unavailable: StorageUnavailable"
-    assert files.pending(storage.name) == [("run.json", files.fingerprint("run.json"))]
+    assert (root / "run.json").read_bytes() == body
+    assert "/bucket/run/run.json" not in http.objects
     assert http.posts == 1
     http.fault = ""
     assert ship(files, "run", destination) is None
     assert http.objects["/bucket/run/run.json"] == (root / "run.json").read_bytes()
-    assert not files.pending(storage.name)
+    assert ship(files, "run", destination) is None
     assert http.posts == 2
     http.fault = fault
     with pytest.raises(StorageUnavailable):

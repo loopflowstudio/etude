@@ -26,6 +26,7 @@ from typing import Annotated, Any, Literal
 from pydantic import Field, RootModel, TypeAdapter
 
 from etude.deadline import limit_time, remaining
+from etude.errors import LauncherError
 from etude.launch.errors import LaunchError
 from etude.launch.listing import show_runs
 from etude.launch.logging import explain
@@ -36,15 +37,10 @@ from etude.launch.records import (
     Cohort,
     CohortSpec,
     Diagnostic,
-    Job,
     Launch,
-    LauncherError,
     LogSnapshot,
     Machine,
     Quote,
-    Record,
-    Run,
-    RunRecord,
     Status,
     Target,
 )
@@ -58,6 +54,8 @@ from etude.launch.ssh import (
 )
 from etude.launch.storage.files import write
 from etude.launch.usage import Usage
+from etude.records import RunRecord
+from etude.spec import Job, Record, RunRequest
 
 
 class Source(Record):
@@ -68,7 +66,7 @@ class Source(Record):
 
 
 class LaunchInput(Record):
-    runs: tuple[Run, ...]
+    runs: tuple[RunRequest, ...]
     cohort: CohortSpec | None
     pool: str | None
     rent: str | None = None
@@ -105,7 +103,7 @@ class OutputRequest(Record):
     output: str  # the output's name below the run's output directory
 
 
-class RunRequest(Record):
+class RunOperation(Record):
     operation: Literal["record", "status", "cancel"]
     run: str
 
@@ -158,7 +156,7 @@ type Request = Annotated[
     SubmissionRequest
     | FailLaunchRequest
     | OutputRequest
-    | RunRequest
+    | RunOperation
     | WaitRequest
     | EvidenceRequest
     | LogsRequest
@@ -460,7 +458,7 @@ class PythonClient:
 
     def _submit(
         self,
-        runs: Sequence[Run],
+        runs: Sequence[RunRequest],
         cohort: CohortSpec | None,
         target: Target,
         queued: bool,
@@ -487,18 +485,22 @@ class PythonClient:
                 submission.launch, tuple(str(run.id) for run in submission.runs), explain(error)
             ) from error
 
-    def queue(self, run: Run | Job, pool: str | None = None, *, rent: str | None = None) -> str:
-        one = [Run(job=run) if isinstance(run, Job) else run]
+    def queue(
+        self, run: RunRequest | Job, pool: str | None = None, *, rent: str | None = None
+    ) -> str:
+        one = [RunRequest(job=run) if isinstance(run, Job) else run]
         return self._submit(one, None, Target(pool=pool, rent=rent), True)[0]
 
-    def launch(self, run: Run | Job, pool: str | None = None, *, rent: str | None = None) -> str:
-        one = [Run(job=run) if isinstance(run, Job) else run]
+    def launch(
+        self, run: RunRequest | Job, pool: str | None = None, *, rent: str | None = None
+    ) -> str:
+        one = [RunRequest(job=run) if isinstance(run, Job) else run]
         return self._submit(one, None, Target(pool=pool, rent=rent), False)[0]
 
     def queue_cohort(
         self,
         name: str,
-        runs: Sequence[Run],
+        runs: Sequence[RunRequest],
         pool: str | None = None,
         *,
         rent: str | None = None,
@@ -511,7 +513,7 @@ class PythonClient:
     def launch_cohort(
         self,
         name: str,
-        runs: Sequence[Run],
+        runs: Sequence[RunRequest],
         pool: str | None = None,
         *,
         rent: str | None = None,
@@ -523,7 +525,7 @@ class PythonClient:
 
     def quote(
         self,
-        runs: Sequence[Run],
+        runs: Sequence[RunRequest],
         pool: str | None = None,
         *,
         rent: str | None = None,
@@ -545,10 +547,12 @@ class PythonClient:
         )
 
     def record(self, run: str) -> RunRecord:
-        return RunRecord.model_validate_json(self._request(RunRequest(operation="record", run=run)))
+        return RunRecord.model_validate_json(
+            self._request(RunOperation(operation="record", run=run))
+        )
 
     def status(self, run: str) -> Status:
-        return Status.model_validate_json(self._request(RunRequest(operation="status", run=run)))
+        return Status.model_validate_json(self._request(RunOperation(operation="status", run=run)))
 
     def wait(self, *runs: str, every: float = 1.0, timeout: float | None = None) -> list[Status]:
         return TypeAdapter(list[Status]).validate_json(
@@ -556,7 +560,7 @@ class PythonClient:
         )
 
     def cancel(self, run: str) -> Status:
-        return Status.model_validate_json(self._request(RunRequest(operation="cancel", run=run)))
+        return Status.model_validate_json(self._request(RunOperation(operation="cancel", run=run)))
 
     def cohort_runs(self, name: str) -> tuple[RunRecord, ...]:
         return TypeAdapter(tuple[RunRecord, ...]).validate_json(
@@ -643,11 +647,11 @@ def receive(scheduler: Scheduler) -> int:
                 response = EncodedOutput(
                     body=base64.b64encode(body).decode(), sha256=hashlib.sha256(body).hexdigest()
                 )
-        case RunRequest(operation="record"):
+        case RunOperation(operation="record"):
             response = scheduler.record(request.run)
-        case RunRequest(operation="status"):
+        case RunOperation(operation="status"):
             response = scheduler.status(request.run)
-        case RunRequest(operation="cancel"):
+        case RunOperation(operation="cancel"):
             response = scheduler.cancel(request.run)
         case WaitRequest():
             response = scheduler.wait(*request.runs, every=request.every, timeout=request.timeout)

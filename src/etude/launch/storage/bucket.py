@@ -15,15 +15,19 @@ from etude.carriage import (
     CHECKPOINTS,
     checkpoint_file,
     checkpoint_file_name,
-    named_file,
     note_stored,
+    older_saves,
+    purpose,
     recorded_file,
+    recorded_files,
     restore_set,
     resume_file,
+    state_pointer,
 )
+from etude.errors import LauncherError
 from etude.launch.logging import parse_log_line
 from etude.launch.logs import snapshot_stream
-from etude.launch.records import BootstrapLinks, LauncherError, LogStream, Storage
+from etude.launch.records import BootstrapLinks, LogStream, Storage
 from etude.launch.schemas import (
     AttemptRecord,
     Bootstrap,
@@ -33,6 +37,7 @@ from etude.launch.schemas import (
     Observation,
     Packet,
     Progress,
+    ReadLink,
     Work,
     WorkerLog,
 )
@@ -41,6 +46,8 @@ from etude.launch.storage.download import Download, download
 from etude.launch.storage.s3 import Bucket, Grant, Version
 from etude.launch.storage.transport import attribute
 from etude.launch.usage import Transfer
+from etude.out import MEMBERSHIP, OutFiles, recovery
+from etude.storage_timeout import StorageUnavailable
 
 # How long a link lasts where no rental bounds it: a session on a machine you
 # own, and links the launcher reads itself. A rented session's grants last
@@ -70,9 +77,9 @@ def _attribute_session[**P, R](
 
 
 class BucketJournal:
-    """A storage's folder, laid out by run, with each machine's working files apart.
+    """A storage's folder, laid out by run, with each machine's session files apart.
 
-        PREFIX/RUN/                     everything about one run, from every attempt
+        PREFIX/EXPERIMENT/RUN/                     everything about one run, from every attempt
           attempts/ATTEMPT.log/OFFSET   what the job printed, in pieces by first byte
           attempts/ATTEMPT.json         start, progress, how it ended, and its pieces
           attempts/ATTEMPT/NAME         files the job left in its output directory
@@ -100,6 +107,7 @@ class BucketJournal:
         self._finished: dict[str, Progress] = {}
         # Staged archives by repository and commit: their key, digest and size.
         self._sources: dict[tuple[str, str], tuple[str, str, int]] = {}
+        self._state_cleaned: dict[str, dict[str, str]] = {}
 
     def _session_prefix(self, session_id: str) -> str:
         return f"{self._prefix}/sessions/{session_id}/"
@@ -199,6 +207,17 @@ class BucketJournal:
             for given in work.inputs:
                 # A run's file is where its folder was carried.
                 key = given.key if given.run is None else self._run_prefix(given.run) + given.key
+                if given.uri is not None:
+                    # Storage.uri uses literal object keys for s3/r2 locators;
+                    # percent signs, question marks and hashes belong to the key.
+                    scheme, _, address = given.uri.partition("://")
+                    bucket, _, source_key = address.partition("/")
+                    if (
+                        scheme in ("s3", "r2")
+                        and bucket == self._bucket.name
+                        and (not self._prefix or source_key.startswith(self._prefix + "/"))
+                    ):
+                        key = source_key
                 # Named by digest, so attempts given the same file share one download.
                 inputs[given.sha256] = Download(
                     url=self._bucket.get_url(key, _GRANT_SECONDS),
@@ -207,25 +226,23 @@ class BucketJournal:
                 )
         return Fetch(sources=sources, inputs=tuple(inputs.values()))
 
-    def _restore(self, works: Sequence[Work]) -> dict[str, dict[str, str]]:
-        """Read links to what storage holds of each resumed run's folder, by run then key.
-
-        The run's declaration and every object under `checkpoints/`; the
-        machine reads only what it lacks, and of the checkpoint files only the
-        one its latest record names (`etude.carriage.resume_file`). Linking
-        reads nothing: one listing per resumed run.
-        """
-        links: dict[str, dict[str, str]] = {}
+    def _restore(self, works: Sequence[Work]) -> dict[str, ReadLink]:
+        """One listing per resumed run: records, checkpoints and all out files."""
+        links: dict[str, ReadLink] = {}
         for work in works:
             if not work.resumes:
                 continue
             folder = self._run_prefix(work.run)
             with attribute(run=work.run, attempt=work.attempt, purpose="control"):
-                kept = self._bucket.list(f"{folder}{CHECKPOINTS}/")
-            links[work.run] = {
-                key[len(folder) :]: self._bucket.get_url(key, _GRANT_SECONDS)
-                for key in [folder + "run.json", *kept]
-            }
+                kept = self._bucket.objects(folder)
+            for key, size in kept.items():
+                relative = key[len(folder) :]
+                if relative in ("run.json", MEMBERSHIP) or relative.startswith(
+                    ("checkpoints/", "out/")
+                ):
+                    links[f"{work.run}/{relative}"] = ReadLink(
+                        url=self._bucket.get_url(key, _GRANT_SECONDS), size_bytes=size
+                    )
         return links
 
     def held(self, run: str, key: str | None = None) -> dict[str, bytes]:
@@ -233,16 +250,18 @@ class BucketJournal:
 
         Staged in a folder on this computer, then given as a host holding it
         gives it (`etude.carriage.restore_set`, or with `key` `recorded_file`):
-        one listing, the declaration and each checkpoint record read whole, and
-        one checkpoint file through this computer's cache, verified against its
-        record, so relaying it again reads no more of it. Raises
-        `FileNotFoundError` when no record here names `key` or its file is gone.
+        one listing, the declaration, checkpoint records and out files.
+        A copied checkpoint passes through the verified cache. With `key`,
+        only that file and the checkpoint records are read. Missing or damaged
+        out files raise `StorageUnavailable`; an absent selected checkpoint
+        raises `FileNotFoundError`.
         """
         folder = self._run_prefix(run)
         with TemporaryDirectory() as staging, attribute(run=run, purpose="control"):
             root = Path(staging)
             (root / CHECKPOINTS).mkdir()
-            listed = [name[len(folder) :] for name in self._bucket.list(f"{folder}{CHECKPOINTS}/")]
+            objects = self._bucket.objects(folder)
+            listed = {name[len(folder) :]: size for name, size in objects.items()}
             note_stored(
                 root, [checkpoint_file_name(name) for name in listed if checkpoint_file(name)]
             )
@@ -254,8 +273,33 @@ class BucketJournal:
             for name in records if key is not None else [*records, "run.json"]:
                 if (raw := self._bucket.get(folder + name)) is not None:
                     (root / name).write_bytes(raw)
-            wanted = resume_file(root) if key is None else named_file(root, key)
-            if wanted is not None and wanted.key in listed:
+            if key is None:
+                found = recovery(listed, lambda name: self._bucket.get(folder + name))
+                selected, pointers = found.keys, found.pointers
+                if found.membership is not None:
+                    (root / "out").mkdir(exist_ok=True)
+            else:
+                selected, pointers = [key], {}
+            recorded = recorded_files(root)
+            for name in selected:
+                if not name.startswith("out/"):
+                    continue
+                with attribute(purpose=purpose(name, recorded)):
+                    raw = pointers[name] if name in pointers else self._bucket.get(folder + name)
+                if raw is None or len(raw) != listed.get(name):
+                    raise StorageUnavailable(
+                        f"restored file {name} is missing or has changed length"
+                    )
+                target = root / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(raw)
+            wanted = resume_file(root) if key is None else recorded.get(key)
+            if (
+                wanted is not None
+                and wanted.key in listed
+                and not (root / wanted.key).exists()
+                and (key is not None or not wanted.key.startswith("out/"))
+            ):
                 with attribute(purpose="checkpoint"):
                     download(
                         Download(
@@ -333,11 +377,42 @@ class BucketJournal:
             raw = self._current(session_id, f"{self._run_prefix(run)}attempts/{attempt}.json")
         return None if raw is None else AttemptRecord.model_validate_json(raw)
 
+    def _clear_state(self, session_id: str, run: str) -> None:
+        """Use controller keys to retire saves an upload-only courier cannot delete.
+
+        One conditional membership read per observed run; list state only when a
+        changed membership contains a pointer. A missing acknowledgement never
+        authorizes deletion. Errors leave the next observation free to retry.
+        """
+        folder = self._run_prefix(run)
+        with attribute(run=run, purpose="control"):
+            body = self._current(session_id, folder + MEMBERSHIP)
+            if body is None:
+                return
+            membership = OutFiles.model_validate_json(body)
+            marks = {file.key: file.sha256 for file in membership.files if state_pointer(file.key)}
+            if self._state_cleaned.get(run) == marks:
+                return
+            if marks:
+                pointers: dict[str, bytes] = {}
+                for name in marks:
+                    raw = self._bucket.get(folder + name)
+                    if raw is None:
+                        raise StorageUnavailable("state pointer is missing")
+                    pointers[name] = raw
+                keys = [key[len(folder) :] for key in self._bucket.list(folder + "out/state/")]
+                for key in older_saves(keys, pointers):
+                    self._bucket.delete(folder + key)
+            self._state_cleaned[run] = marks
+
     @_attribute_session
     def observe(self, session_id: str) -> Observation:
         alive = self.ended(session_id) is None
         progress: list[Progress] = []
-        for attempt, run in sorted(self._runs(session_id).items()):
+        runs = self._runs(session_id)
+        for run in sorted(set(runs.values())):
+            self._clear_state(session_id, run)
+        for attempt, run in sorted(runs.items()):
             if attempt in self._finished:
                 progress.append(self._finished[attempt])
                 continue
@@ -366,6 +441,7 @@ class BucketJournal:
                     outputs=(),
                     exit_code=None,
                     tally=record.result.tally,
+                    writers=record.result.writers,
                     log_bytes=log_bytes,
                 )
             )

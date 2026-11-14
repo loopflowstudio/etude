@@ -96,6 +96,7 @@ function rampLegend(c, ref, found, tail) {
 }
 
 // ---------------------------------------------------------------- page
+const caption = (...parts) => parts.filter(Boolean).join(" · ");
 function card(host, title, sub, cls = "") { const c = node("div", "card " + cls), h = node("h3", null, title); if (sub) h.appendChild(node("span", null, sub)); c.appendChild(h); host.appendChild(c); return c; }
 function control(host, label, options, key, apply = render) {
   if (options.length < 2) return;
@@ -141,7 +142,7 @@ function render() {
   const jobsHost = document.getElementById("jobs"); jobsHost.replaceChildren();
   for (const j of JOBS) {
     const b = node("button", "jbtn"); b.append(swatch(j), j.label); if (j.baseline) b.appendChild(node("span", "tag", "baseline"));
-    b.setAttribute("aria-pressed", String(!hidden.has(j.key))); b.title = j.line == null ? j.runs.join(", ") : j.line ? `line ${j.line}: checkpoints no training run saved, where their seats say they stood` : "checkpoints no training run saved and seated with no line, where their seats say they stood";
+    b.setAttribute("aria-pressed", String(!hidden.has(j.key))); b.title = j.line == null ? j.runs.join(", ") : j.line ? `job ${j.label}: checkpoints no training run saved, where their seats say they stood` : "checkpoints with no job, where their seats say they stood";
     b.onclick = () => { if (!hidden.has(j.key) && vis.length === 1) return; hidden.has(j.key) ? hidden.delete(j.key) : hidden.add(j.key); S.hide = [...hidden].join("|"); render(); };
     jobsHost.appendChild(b);
   }
@@ -165,7 +166,7 @@ function render() {
   control(ec, "X axis", CLOCKS, "eclock");
   const body = document.getElementById("evals-body"); body.replaceChildren();
   const scoreName = E.info ? `${E.info.table}.${E.info.value}${E.info.per ? " per " + E.info.per : ""}` : "";
-  document.getElementById("evals-sub").textContent = !M.usesSelection ? "" : E.sel == null ? "no eval run yet" : `${selName(D.selections[E.sel])} · ${scoreName}`;
+  document.getElementById("evals-sub").textContent = !M.usesSelection ? "" : E.sel == null ? "no eval run yet" : caption(selName(D.selections[E.sel]), scoreName);
   const eOpts = {xLabel: S.eclock, yFormat: scoreFormat, ref, sync: "evals"};
   const GAPS = "○ not yet played · × failed · | not evaluated";
   // Only a job averages seeds; a line's curve is its checkpoints' own values.
@@ -178,20 +179,21 @@ function render() {
   if (!D.selections.length) card(body, "No evaluations", "", "full").appendChild(node("div", "na", `${D.file} defines no eval(state) yet. Define one and run etude eval on the file; its matches appear here.`));
   else for (const [k, panel] of R.evals.entries()) {
     const sel = M.panelSelection(k, E.sel), opp = oppFor(E, sel), versus = versusOf(sel, opp), where = sel == null ? "" : selName(D.selections[sel]);
+    const score = [scoreName, versus].filter(Boolean).join(" ");
     if (panel.kind === "curve" && !panel.split) {
-      const c = card(body, panel.title, `${where} · ${scoreName} ${versus} · ${BAND} · ${GAPS}`, "full");
+      const c = card(body, panel.title, caption(where, score, BAND, GAPS), "full");
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
       const host = node("div"); c.appendChild(host);
       later(() => line(host, series(j => curveOf(j, sel, {}, opp), vis), {...eOpts, refs: anchorLines(E, sel, opp), height: 260}));
     } else if (panel.kind === "curve") {
-      const c = card(body, panel.title, `${where} · one chart per ${panel.split} · ${versus}`, "full");
+      const c = card(body, panel.title, caption(where, `one chart per ${panel.split}`, versus), "full");
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
       const vals = values(E, sel, panel.split);
       if (!vals.length) { c.appendChild(node("div", "na", absentNote(panel.split))); continue; }
       const grid = node("div", "grid multiples"); c.appendChild(grid);
       for (const v of vals) { const m = node("div"), host = node("div"); m.append(node("div", "mini-title", `${panel.split} = ${show(v)}`), host); grid.appendChild(m); later(() => line(host, series(j => curveOf(j, sel, {[panel.split]: v}, opp), vis), {...eOpts, refs: anchorLines(E, sel, opp, {[panel.split]: v}), compact: true, height: 140})); }
     } else if (panel.kind === "matrix") {
-      const c = card(body, panel.title || `${panel.columns} × ${panel.rows}`, `${where} · ${panel.columns} across · ${panel.rows} down · ${scoreName} ${versus}`, "full");
+      const c = card(body, panel.title || `${panel.columns} × ${panel.rows}`, caption(where, `${panel.columns} across`, `${panel.rows} down`, score), "full");
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
       const both = (r, col) => ({[panel.rows]: r, [panel.columns]: col});
       const colsAt = values(E, sel, panel.columns, panel.rows), rowsAt = values(E, sel, panel.rows, panel.columns);
@@ -232,7 +234,7 @@ function render() {
       rampLegend(c, ref, found, `· at ${keyName(key)}${key === last ? " (final)" : ""}${ref != null ? " · faded where the band includes " + fmt(ref) : ""} · click a cell to filter`);
     } else if (panel.kind === "ranking") {
       const commonKey = (() => { const sets = vis.map(j => new Set(evaluated(curveOf(j, sel, {}, opp)).map(p => p.key))); const shared = sets.length ? [...sets[0]].filter(k => sets.every(s => s.has(k))) : []; return shared.length ? Math.max(...shared) : null; })();
-      const c = card(body, panel.title || `By ${panel.by}`, `${where} · ${commonKey != null ? `at ${keyName(commonKey)}, which every job evaluated` : "each job at its latest"} · ${versus}`);
+      const c = card(body, panel.title || `By ${panel.by}`, caption(where, commonKey != null ? `at ${keyName(commonKey)}, which every job evaluated` : "each job at its latest", versus));
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
       const vals = values(E, sel, panel.by);
       if (!vals.length) { c.appendChild(node("div", "na", absentNote(panel.by))); continue; }
@@ -260,9 +262,9 @@ function render() {
     } else if (panel.kind === "crosstable") {
       // One line's checkpoints against each other, both axes ordered by the clock: a tab per
       // line of the curves shown, so a job's seeds are each their own.
-      const c = card(body, panel.title, `${where} · ${scoreName} · row against column · ordered by ${S.eclock}`, "full");
+      const c = card(body, panel.title, caption(where, scoreName, "row against column", `ordered by ${S.eclock}`), "full");
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
-      const tabsOf = [...new Map(vis.flatMap(j => M.linesOf(j).map(key => [key, {job: j, key, label: key || "checkpoints with no line"}]))).values()];
+      const tabsOf = [...new Map(vis.flatMap(j => M.linesOf(j).map(key => [key, {job: j, key, label: j.line == null ? `${j.label} · ${key}` : j.label}]))).values()];
       if (!tabsOf.length) { c.appendChild(node("div", "na", "No checkpoint has a position")); continue; }
       if (!tabsOf.some(t => t.key === S.xline)) S.xline = tabsOf[0].key;
       const chosen = tabsOf.find(t => t.key === S.xline);
@@ -292,7 +294,7 @@ function render() {
       if (found.length) rampLegend(c, ref, found, `· ${chosen.label} · · not played`);
     } else if (panel.kind === "anchors") {
       // Fixed players are not a job's: drawn once, against each other.
-      const c = card(body, panel.title, `${where} · ${scoreName} · row against column · strength: over matches that seat no placed checkpoint`, "full");
+      const c = card(body, panel.title, caption(where, scoreName, "row against column", "strength: over matches that seat no placed checkpoint"), "full");
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
       const met = fixedPlayers.filter(a => D.cells.some(x => x.selection === sel && x.score === E.score && (x.subject === a || x.opponent === a) && (x.fixed || (!placed(x.subject) && x.opponent != null && !placed(x.opponent)))));
       if (!met.length) { c.appendChild(node("div", "na", "No two fixed players played each other in these matches")); continue; }
@@ -417,11 +419,11 @@ function render() {
       } else if (panel.kind === "attempts") {
         const c = card(host, panel.title, "each attempt from its start to its last row · hours since the run first started");
         const runs = T.runs.filter(r => vis.some(j => j.runs.includes(r.name)));
-        const span = Math.max(1e-9, ...runs.flatMap(r => r.attempts.map(a => a.last_row ?? a.started)));
+        const span = Math.max(1e-9, ...runs.flatMap(r => r.writers.map(a => a.last_row ?? a.started)));
         for (const r of runs) {
           const j = jobOfRun(r.name), row = node("div", "att"), lane = node("div", "lane");
-          row.append(node("span", null, `${r.name}${r.attempts.length > 1 ? ` · ${r.attempts.length} attempts` : ""}`), lane);
-          for (const a of r.attempts) {
+          row.append(node("span", null, `${r.name}${r.writers.length > 1 ? ` · ${r.writers.length} writers` : ""}`), lane);
+          for (const a of r.writers) {
             const b = node("b"); b.style.left = (a.started / span * 100) + "%"; b.style.width = (((a.last_row ?? a.started) - a.started) / span * 100) + "%"; b.style.background = color(j);
             b.onpointermove = evt => showTip(evt, [{value: dur(Math.max(0, (a.last_row ?? a.started) - a.started)), label: a.last_row == null ? "logged no row" : "to its last row"}, {value: a.host, label: a.pod ? "pod " + a.pod : ""}], `${r.name} · from ${dur(a.started)}`);
             b.onpointerleave = hideTip; lane.appendChild(b);
@@ -502,8 +504,8 @@ function flame(c, panel, vis, color, swatch) {
 function tables() {
   const t = document.getElementById("runs"); t.replaceChildren();
   document.getElementById("runs-box").hidden = !TRAINED;
-  const head = node("tr"); for (const h of ["Run", "Job", "Seed", "State", "Rows", "Attempts", "Incomplete", "Dropped"]) head.appendChild(node("th", null, h)); t.appendChild(head);
-  for (const r of T.runs) { const row = node("tr"); for (const [v, n] of [[r.name], [jobOfRun(r.name)?.label], [r.seed ?? "–", 1], [r.state], [r.rows.toLocaleString(), 1], [r.attempts.length, 1], [r.incomplete, 1], [r.dropped ?? "–", 1]]) row.appendChild(node("td", n ? "n" : "", String(v))); t.appendChild(row); }
+  const head = node("tr"); for (const h of ["Run", "Job", "Seed", "State", "Rows", "Writers", "Incomplete", "Dropped"]) head.appendChild(node("th", null, h)); t.appendChild(head);
+  for (const r of T.runs) { const row = node("tr"); for (const [v, n] of [[r.name], [jobOfRun(r.name)?.label], [r.seed ?? "–", 1], [r.state], [r.rows.toLocaleString(), 1], [r.writers.length, 1], [r.incomplete, 1], [r.dropped ?? "–", 1]]) row.appendChild(node("td", n ? "n" : "", String(v))); t.appendChild(row); }
   const q = document.getElementById("coverage"); q.replaceChildren();
   document.getElementById("coverage-box").hidden = !D.coverage.length;
   const h2 = node("tr"); for (const h of ["Training run", "Checkpoint", "Where it stood", "Tournament", "Played", "Failed", "Not yet played"]) h2.appendChild(node("th", null, h)); q.appendChild(h2);

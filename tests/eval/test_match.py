@@ -18,23 +18,15 @@ import pytest
 from moto import mock_aws
 from pydantic import BaseModel
 
+from etude.checkpoints import CheckpointRef, checkpoint_id
+from etude.errors import EtudeError
 from etude.eval import query
 from etude.eval.match import environment, evaluate
 from etude.eval.query import Estimate, compare, estimate, statsdb
-from etude.eval.records import (
-    CheckpointKey,
-    CheckpointRef,
-    Code,
-    Config,
-    Inference,
-    Match,
-    Model,
-    Player,
-)
+from etude.eval.records import CheckpointPlayer, Code, Config, Inference, Match, Player
 from etude.launch.storage.files import read_result
-from etude.run.errors import EtudeError
-from etude.run.records import ArtifactRef
-from etude.run.storage import DirectoryStorage, S3Storage
+from etude.records import ArtifactRef
+from etude.storage import DirectoryStorage, S3Storage
 from tests.eval.games import (
     play,
     play_seat_and_player,
@@ -49,14 +41,14 @@ def roster(tmp_path: Path) -> list[Player]:
     script = tmp_path / "scripted.py"
     script.write_text("def act(state): return 0\n")
     file = ArtifactRef(uri="s3://models/a.pt", sha256=sha256(b"a").hexdigest())
-    model = CheckpointRef(key=CheckpointKey(address=file.uri), artifact=file)
+    model = CheckpointRef(key=checkpoint_id(address=file.uri), artifact=file)
     return [
-        Model(
+        CheckpointPlayer(
             name="deep",
             checkpoint=model,
             inference=Inference(config={"strength": 3, "search": {"simulations": 64}}),
         ),
-        Model(
+        CheckpointPlayer(
             name="shallow",
             checkpoint=model,
             inference=Inference(config={"strength": 2, "search": {"simulations": 8}}),
@@ -66,11 +58,11 @@ def roster(tmp_path: Path) -> list[Player]:
     ]
 
 
-def seatings(players: Sequence[Player], *, conditions: Sequence[Config], games: int) -> list[Match]:
-    """Every ordered seating of two distinct players, under each condition."""
+def seatings(players: Sequence[Player], *, configs: Sequence[Config], games: int) -> list[Match]:
+    """Every ordered seating of two distinct players, with each config."""
     return [
-        Match(players=seated, conditions=given, games=games)
-        for given in conditions
+        Match(players=seated, config=given, games=games)
+        for given in configs
         for seated in permutations(players, 2)
     ]
 
@@ -82,7 +74,7 @@ def test_matches_in_two_workers_resumes_from_storage_without_replaying(
     # One checkpoint at two search budgets is two models; one script at two strengths too.
     assert len({each.key for each in players}) == 4
     world = environment("duel", config={"world": "w6"})
-    matches = seatings(players, conditions=[{"deal": 0}, {"deal": 1}], games=4)
+    matches = seatings(players, configs=[{"deal": 0}, {"deal": 1}], games=4)
     assert len(matches) == 24
     bucket = DirectoryStorage(tmp_path / "bucket")
     first = evaluate(
@@ -95,7 +87,7 @@ def test_matches_in_two_workers_resumes_from_storage_without_replaying(
     assert len(progress) == 24
     assert progress[-1].startswith("etude: league-1: 24/24 matches played, ")
     # One block: each table merged into one file, then the index; nothing per match.
-    (index,) = (key for key in bucket.keys("league-1/blocks/") if key.endswith("block.json"))
+    (index,) = (key for key in bucket.keys("league/league-1/blocks/") if key.endswith("block.json"))
     folder = index.removesuffix("block.json")
     assert sorted(bucket.keys(folder)) == [
         folder + name for name in ("block.json", "games.parquet", "plays.parquet")
@@ -121,7 +113,7 @@ def test_sql_joins_results_to_players_by_config_key(tmp_path: Path) -> None:
     players = roster(tmp_path)
     evaluate(
         experiment="league", environment=environment("duel"), play=play,
-        matches=seatings(players, conditions=[{"deal": 0}], games=6), directory=tmp_path,
+        matches=seatings(players, configs=[{"deal": 0}], games=6), directory=tmp_path,
     )  # fmt: skip
     db = statsdb("league", tmp_path)
     found = db.sql(
@@ -146,7 +138,7 @@ def test_compare_gives_a_rate_with_an_interval_that_resamples_matches(tmp_path: 
     players = roster(tmp_path)
     evaluate(
         experiment="league", environment=environment("duel"), play=play,
-        matches=seatings(players[:2], conditions=[{"deal": d} for d in range(5)], games=6),
+        matches=seatings(players[:2], configs=[{"deal": d} for d in range(5)], games=6),
         directory=tmp_path,
     )  # fmt: skip
     db = statsdb("league", tmp_path)
@@ -184,7 +176,7 @@ def test_a_row_without_seat_or_group_is_refused_and_nothing_of_its_match_is_stor
     with pytest.raises(EtudeError) as refused:
         evaluate(
             experiment="league", environment=environment("duel"), play=play_unkeyed,
-            matches=seatings(players[:2], conditions=[{}], games=1), directory=tmp_path,
+            matches=seatings(players[:2], configs=[{}], games=1), directory=tmp_path,
         )  # fmt: skip
     assert refused.value.code == "match_failed"
     cause = refused.value.__cause__
@@ -201,7 +193,7 @@ def test_a_row_naming_a_player_column_is_refused(tmp_path: Path) -> None:
     with pytest.raises(EtudeError) as refused:
         evaluate(
             experiment="league", environment=environment("duel"), play=play_seat_and_player,
-            matches=seatings(roster(tmp_path)[:2], conditions=[{}], games=1), directory=tmp_path,
+            matches=seatings(roster(tmp_path)[:2], configs=[{}], games=1), directory=tmp_path,
         )  # fmt: skip
     cause = refused.value.__cause__
     assert isinstance(cause, EtudeError) and cause.code == "column_name_refused"
@@ -210,7 +202,7 @@ def test_a_row_naming_a_player_column_is_refused(tmp_path: Path) -> None:
 def test_a_column_keeps_its_type_through_an_eval_run(tmp_path: Path) -> None:
     players = roster(tmp_path)
 
-    matches = seatings(players[:2], conditions=[{}], games=1)
+    matches = seatings(players[:2], configs=[{}], games=1)
     evaluate(experiment="league", environment=environment("duel"), play=play, matches=matches[:1],
              run="typed", directory=tmp_path)  # fmt: skip
     with pytest.raises(EtudeError) as refused:
@@ -222,7 +214,7 @@ def test_a_column_keeps_its_type_through_an_eval_run(tmp_path: Path) -> None:
 
 def test_two_environments_are_never_pooled(tmp_path: Path) -> None:
     players = roster(tmp_path)[:2]
-    matches = seatings(players, conditions=[{}], games=6)
+    matches = seatings(players, configs=[{}], games=6)
     six, seven = (
         environment("duel", config={"world": "w6"}),
         environment("duel", config={"world": "w7"}),
@@ -272,7 +264,7 @@ def test_an_eval_run_delivered_to_a_bucket_is_queried_from_it(
         bucket = S3Storage("runs", "evals", client=client)
         evaluate(
             experiment="league", environment=environment("duel"), play=play,
-            matches=seatings(roster(tmp_path), conditions=[{}], games=4),
+            matches=seatings(roster(tmp_path), configs=[{}], games=4),
             directory=tmp_path / "local", storages=[bucket],
         )  # fmt: skip
         db = statsdb("league", bucket)
@@ -305,26 +297,26 @@ def _git(repo: Path, *args: str) -> None:
 
 def test_a_models_inference_code_is_its_version_not_its_key(tmp_path: Path) -> None:
     file = ArtifactRef(uri="s3://models/updates-100.pt", sha256=sha256(b"a").hexdigest())
-    checkpoint = CheckpointRef(key=CheckpointKey(run="ppo-1", name="updates-100.pt"), artifact=file)
+    checkpoint = CheckpointRef(key=checkpoint_id(run="ppo-1", name="updates-100.pt"), artifact=file)
     inference = tmp_path / "inference.py"
     inference.write_text("def act(state): return 0\n")
-    before = Inference(source=[inference], config=Direct()).model(checkpoint)
+    before = Inference(source=[inference], config=Direct()).player(checkpoint)
     assert before.key == 'checkpoint:ppo-1/checkpoints/updates-100.pt {"search":0}'
     assert before.name == "updates-100.pt"
     inference.write_text("def act(state): return 1\n")
-    changed = Inference(source=[inference], config=Direct()).model(checkpoint)
+    changed = Inference(source=[inference], config=Direct()).player(checkpoint)
     assert changed.key == before.key
     assert changed.version.source != before.version.source
     # The same bytes under another key are another model.
-    copied = CheckpointRef(key=CheckpointKey(run="ppo-2", name="updates-100.pt"), artifact=file)
-    assert Inference(config=Direct()).model(copied).key != before.key
+    copied = CheckpointRef(key=checkpoint_id(run="ppo-2", name="updates-100.pt"), artifact=file)
+    assert Inference(config=Direct()).player(copied).key != before.key
 
 
 def test_where_a_checkpoint_stood_is_carried_by_its_seat_and_is_not_its_identity() -> None:
     file = ArtifactRef(uri="hf://lab/u600.pt", sha256=sha256(b"a").hexdigest())
-    key = CheckpointKey(address=file.uri)
-    seated = Inference().model(CheckpointRef(key=key, artifact=file, at={"updates": 600}))
-    corrected = Inference().model(
+    key = checkpoint_id(address=file.uri)
+    seated = Inference().player(CheckpointRef(key=key, artifact=file, at={"updates": 600}))
+    corrected = Inference().player(
         CheckpointRef(key=key, artifact=file, at={"updates": 612}, line="seed-2")
     )
     rival = Code(name="rival", source=[__file__])
@@ -467,7 +459,7 @@ def test_queries_reports_and_resumes_read_each_bucket_file_once_per_computer(
     with mock_aws():
         client = CountedClient(boto3.client("s3", region_name="us-east-1"))
         client.create_bucket(Bucket="runs")
-        matches = seatings(roster(tmp_path), conditions=[{}], games=4)
+        matches = seatings(roster(tmp_path), configs=[{}], games=4)
         evaluate(
             experiment="league", environment=environment("duel"), play=play, matches=matches,
             run="league-1", directory=tmp_path / "local", storages=[S3Storage("runs", client=client)],
@@ -506,7 +498,7 @@ def test_a_launched_eval_run_reports_its_tally_a_few_times_not_once_per_match(
         put(self, key, body)
 
     monkeypatch.setattr(DirectoryStorage, "put", counted)
-    matches = seatings(roster(tmp_path), conditions=[{"deal": d} for d in range(3)], games=1)
+    matches = seatings(roster(tmp_path), configs=[{"deal": d} for d in range(3)], games=1)
     evaluate(
         experiment="league", environment=environment("duel"), play=play,
         matches=matches, directory=tmp_path,
@@ -523,7 +515,7 @@ def test_a_launched_eval_run_that_fails_reports_what_it_played_and_what_failed(
     outputs = tmp_path / "outputs"
     outputs.mkdir()
     monkeypatch.setenv("ETUDE_OUTPUT_DIR", str(outputs))
-    matches = seatings(roster(tmp_path)[:2], conditions=[{}], games=1)
+    matches = seatings(roster(tmp_path)[:2], configs=[{}], games=1)
     with pytest.raises(EtudeError):
         evaluate(
             experiment="league", environment=environment("duel"), play=play_unkeyed,

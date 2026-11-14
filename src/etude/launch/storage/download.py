@@ -29,9 +29,9 @@ from pydantic import Field
 
 from etude.cache import Artifact, Cache, ContentMismatch, Corrupt, Fetched
 from etude.deadline import limit_time, remaining
-from etude.launch.records import Record
 from etude.launch.storage.s3 import TRANSIENT_STATUSES, Denied, _send
 from etude.launch.storage.transport import HTTPReply, Send, attribute, deliver, emit, observe
+from etude.spec import Record
 from etude.storage_timeout import StorageUnavailable
 
 PART_BYTES = 16 * 1024**2

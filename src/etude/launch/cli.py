@@ -85,13 +85,18 @@ def status(
         bool,
         typer.Option(help="show when each stage of a run's start happened, from saved records"),
     ] = False,
+    experiment: Annotated[
+        str | None, typer.Option(help="select this experiment; names may be unqualified")
+    ] = None,
 ) -> None:
     """Show where runs stand, as of the controller loop's last pass."""
     from etude.launch import controller
     from etude.launch.listing import resolve_runs, show_runs
 
     scheduler = default()
-    selected = resolve_runs(scheduler, runs or []) or [r.id for r in scheduler.runs()]
+    selected = resolve_runs(scheduler, runs or [], experiment=experiment) or [
+        r.id for r in scheduler.runs(experiment=experiment)
+    ]
     if phases:
         for run in selected:
             for phase in scheduler.start_phases(run):
@@ -116,8 +121,9 @@ def history(
     job: Annotated[
         str | None, typer.Option(help="only runs of this job, by digest or name")
     ] = None,
+    experiment: Annotated[str | None, typer.Option(help="only runs of this experiment")] = None,
 ) -> None:
-    """List every run, finished ones included."""
+    """List every launched run, finished ones included."""
     from etude.launch.listing import show_runs
 
     scheduler = default()
@@ -126,7 +132,13 @@ def history(
         [
             r.id
             for r in scheduler.runs(
-                done=True, contains=contains, cohort=cohort, pool=pool, rent=rent, job=job
+                done=True,
+                contains=contains,
+                cohort=cohort,
+                pool=pool,
+                rent=rent,
+                job=job,
+                experiment=experiment,
             )
         ],
     )

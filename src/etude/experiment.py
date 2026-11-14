@@ -27,35 +27,24 @@ from __future__ import annotations
 import json
 import runpy
 import sys
+import warnings
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from itertools import count
 from pathlib import Path
 from typing import Literal, cast
 
-from pydantic import Field
-
-from etude.carriage import checkpoint_file_name
-from etude.eval.records import (
-    CheckpointKey,
-    CheckpointRef,
-    Inference,
-    Line,
-    Match,
-    Model,
-    digest,
-    folder_name,
-)
+from etude.checkpoints import CheckpointId, CheckpointRecord
+from etude.errors import EtudeError, LauncherError
+from etude.eval.records import CheckpointPlayer, Line, Match, digest, folder_name
 from etude.eval.tournament import played
 from etude.launch import client
 from etude.launch.database import Database, launcher_file
-from etude.launch.errors import LauncherError
-from etude.launch.records import Job, Run, Smoke
 from etude.launch.scheduler import Scheduler
 from etude.launch.source import home
-from etude.run.errors import EtudeError
-from etude.run.records import ArtifactRef, Digest, Record
-from etude.run.storage import Storage
+from etude.records import Digest, Record
+from etude.spec import Job, RunRequest, Smoke
+from etude.storage import Storage
 from etude.train.read import RunData, lines, read_all
 from etude.train.report import job_names
 
@@ -63,43 +52,7 @@ from etude.train.report import job_names
 # What eval(state) chooses from
 
 
-class Checkpoint(Record):
-    """A checkpoint a training run recorded, with a stored file to evaluate."""
-
-    run: str
-    experiment: str
-    ordinal: int = Field(ge=1)
-    artifact: ArtifactRef
-    # Where each of the run's clocks stood when it was saved.
-    at: dict[str, float]
-    # When it was saved, in milliseconds since the epoch.
-    # None only in a checkpoint serialized before this field existed.
-    wall_ms: int | None = None
-    # The learner it belongs to: the first run of the chain of continuations that led to its run.
-    line: str
-    tags: tuple[str, ...] = ()
-
-    @property
-    def name(self) -> str:
-        """The file's name, as a model seat names it: `updates-200.pt`."""
-        return checkpoint_file_name(self.artifact.uri)
-
-    @property
-    def key(self) -> CheckpointKey:
-        """What identifies it: its run and file, never its bytes."""
-        return CheckpointKey(run=self.run, name=self.name)
-
-    @property
-    def ref(self) -> CheckpointRef:
-        """Its key, stored file, where it stood and its line, as a benchmark is held for it."""
-        return CheckpointRef(key=self.key, artifact=self.artifact, at=self.at, line=self.line)
-
-    def model(self, inference: Inference) -> Model:
-        """This checkpoint playing as `inference`, for a seating of chosen checkpoints."""
-        return inference.model(self.ref)
-
-
-class Checkpoints(tuple[Checkpoint, ...]):
+class Checkpoints(tuple[CheckpointRecord, ...]):
     """A training run's checkpoints in the order it saved them; a tuple, so slices work."""
 
     def every(self, n: int) -> Checkpoints:
@@ -117,12 +70,12 @@ class Checkpoints(tuple[Checkpoint, ...]):
         return Checkpoints(each for each in self if tag in each.tags)
 
     @property
-    def last(self) -> Checkpoint | None:
+    def last(self) -> CheckpointRecord | None:
         return self[-1] if self else None
 
 
 @dataclass(frozen=True)
-class TrainingRun:
+class TrainingRunSummary:
     name: str
     experiment: str
     # Its job as the report names it (`etude.train.report.job_names`): the launch name, with
@@ -142,7 +95,7 @@ class TrainingRun:
         return self.state != "running"
 
     @property
-    def final(self) -> Checkpoint | None:
+    def final(self) -> CheckpointRecord | None:
         """The last checkpoint once the run finished; None while it may save more."""
         return self.checkpoints.last if self.state == "finished" else None
 
@@ -152,9 +105,9 @@ class ExperimentState:
     """An experiment's training runs under a source, as a pass found it. Never stored."""
 
     experiment: str
-    runs: tuple[TrainingRun, ...] = ()
+    runs: tuple[TrainingRunSummary, ...] = ()
 
-    def run(self, name: str) -> TrainingRun:
+    def run(self, name: str) -> TrainingRunSummary:
         """The training run named `name`; raises `EtudeError("run_not_found")` without one."""
         for each in self.runs:
             if each.name == name:
@@ -165,7 +118,7 @@ class ExperimentState:
     def lines(self) -> tuple[Line, ...]:
         """Each learner line, as relative seats find checkpoints in it: seeded as its first
         run declared, and ended once every run of it has."""
-        found: dict[str, list[TrainingRun]] = {}
+        found: dict[str, list[TrainingRunSummary]] = {}
         for run in self.runs:
             found.setdefault(run.line, []).append(run)
         made = (
@@ -181,7 +134,7 @@ class ExperimentState:
         )
         return tuple(sorted(made, key=lambda line: line.order))
 
-    def checkpoint(self, key: CheckpointKey) -> Checkpoint | None:
+    def checkpoint(self, key: CheckpointId) -> CheckpointRecord | None:
         for each in self.runs:
             for saved in each.checkpoints:
                 if saved.key == key:
@@ -205,41 +158,35 @@ def state_of(every: Sequence[RunData], experiment: str) -> ExperimentState:
     A run that recorded no end has failed once this computer's launcher says
     so (`_closed_without_success`), and so ends at its last stored checkpoint.
     """
-    line = lines(every)
     ours = [
         data
         for data in every
         if data.file is not None
         and data.experiment == experiment
-        and data.file.declaration.kind != "evaluation"
+        and data.file.kind != "evaluation"
     ]
+    line = lines(ours)
     job = job_names(ours)
-    lost = _closed_without_success([data.name for data in ours if data.state is None])
+    lost = _closed_without_success([data.name for data in ours if data.outcome is None])
     runs = []
     for data in ours:
         saved = Checkpoints(
-            Checkpoint(
-                run=data.name,
-                experiment=data.experiment,
-                ordinal=record.ordinal,
-                artifact=record.artifact,
-                at=record.at,
-                wall_ms=record.wall_ms,
-                line=line[data.name],
-                tags=record.tags,
+            record.model_copy(
+                update={"run": data.name, "experiment": data.experiment, "line": line[data.name]}
             )
             for record in data.checkpoints
             if record.artifact.sha256 is not None and record.artifact.size_bytes is not None
         )
+        # A planned stop is not an end: the launcher calls the recipe again.
         state: Literal["running", "finished", "failed"] = (
-            data.state.state
-            if data.state is not None
+            data.outcome.state
+            if data.outcome is not None and data.outcome.state != "stopped"
             else "failed"
-            if data.name in lost
+            if data.outcome is None and data.name in lost
             else "running"
         )
         runs.append(
-            TrainingRun(
+            TrainingRunSummary(
                 name=data.name,
                 experiment=data.experiment,
                 job=job[data.name].name,
@@ -247,7 +194,7 @@ def state_of(every: Sequence[RunData], experiment: str) -> ExperimentState:
                 line=line[data.name],
                 state=state,
                 checkpoints=saved,
-                seed=data.file.declaration.seed if data.file else None,
+                seed=data.file.seed if data.file else None,
             )
         )
     return ExperimentState(experiment=experiment, runs=tuple(runs))
@@ -256,7 +203,7 @@ def state_of(every: Sequence[RunData], experiment: str) -> ExperimentState:
 def _closed_without_success(runs: Sequence[str]) -> set[str]:
     """Of runs that recorded no end, those this computer's launcher closed without success.
 
-    Only a run's own process writes its end (`state.json`), so one whose
+    Only a run's own process writes its end (`outcome.json`), so one whose
     machine was lost or deleted reads as running in storage for good. The
     launcher knows its last attempt is over. A run it calls succeeded is
     still delivering its end, and one it never launched stays running. The
@@ -299,7 +246,7 @@ class Experiment:
     eval: EvalFunction
 
 
-def read_experiment(path: Path) -> Experiment:
+def read_experiment(path: Path, *, experiment: str | None = None) -> Experiment:
     """The file's experiment. The file may import its neighbours, as a job file may."""
     if path.suffix != ".py":
         raise EtudeError("experiment_file_must_be_python", 422) from ValueError(path)
@@ -309,7 +256,7 @@ def read_experiment(path: Path) -> Experiment:
     found = runpy.run_path(str(path.resolve())).get("eval")
     if not callable(found):
         raise EtudeError("experiment_file_defines_no_eval", 422) from ValueError(path)
-    return Experiment(name=path.stem, eval=cast(EvalFunction, found))
+    return Experiment(name=experiment or path.stem, eval=cast(EvalFunction, found))
 
 
 def asked(function: EvalFunction, state: ExperimentState) -> list[Job]:
@@ -378,7 +325,7 @@ def advance(
     """
     if queue and pool is None and rent is None:
         raise EtudeError("queued_evals_need_a_pool_or_rent", 422)
-    # Imported here: typed jobs import this module for `Checkpoint`.
+    # Imported here: typed jobs import this module for `CheckpointRecord`.
     from etude.jobs import (  # noqa: PLC0415
         evaluation_spec,
         hold_evaluation,
@@ -434,16 +381,18 @@ def advance(
     return passes
 
 
-def checkpoint_inputs(matches: Iterable[Match], state: ExperimentState) -> dict[str, Checkpoint]:
+def checkpoint_inputs(
+    matches: Iterable[Match], state: ExperimentState
+) -> dict[str, CheckpointRecord]:
     """Each checkpoint the matches seat, by its key encoded, as `state` found it stored.
 
     Raises `EtudeError("checkpoint_not_stored")` for a seated checkpoint no
     training run of the experiment stored, such as one by an outside address.
     """
-    found: dict[str, Checkpoint] = {}
+    found: dict[str, CheckpointRecord] = {}
     for match in matches:
         for player in match.players:
-            if not isinstance(player, Model) or str(player.checkpoint.key) in found:
+            if not isinstance(player, CheckpointPlayer) or str(player.checkpoint.key) in found:
                 continue
             key = player.checkpoint.key
             saved = state.checkpoint(key)
@@ -513,7 +462,7 @@ class _Ledger:
         queue: bool,
     ) -> None:
         submit = client.queue if queue else client.launch
-        submit(Run(id=run, job=job, smoke=smoke), pool, rent=rent)
+        submit(RunRequest(id=run, job=job, smoke=smoke), pool, rent=rent)
         launched = [*self._read(), _Launched(run=run, matches=tuple(m.key for m in matches))]
         self.path.parent.mkdir(parents=True, exist_ok=True)
         staged = self.path.with_suffix(".tmp")
@@ -523,3 +472,21 @@ class _Ledger:
 
 def _ledger_root(directory: Path | str | None) -> Path:
     return (home() if directory is None else Path(directory)) / "experiments"
+
+
+def __getattr__(name: str) -> object:
+    if name == "TrainingRun":
+        warnings.warn(
+            "etude.experiment.TrainingRun is now TrainingRunSummary; removed in 0.5",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return TrainingRunSummary
+    if name == "Checkpoint":
+        warnings.warn(
+            "etude.experiment.Checkpoint is now etude.checkpoints.CheckpointRecord; removed in 0.5",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return CheckpointRecord
+    raise AttributeError(name)
